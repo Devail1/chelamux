@@ -149,6 +149,14 @@ _WORK_LINE_RE = re.compile(
     r"↑|↓|\btokens\b|esc to interrupt|(?<!\w)for \d+m|(?<!\w)for \d+s|\(\d+m\b|\(\d+s\b"
 )
 
+# Expired-auth signature (see _pane_shows_login_expired). ⚖️🔌 CMX-282: measured live
+# 2026-08-14 — an expired fleet login left the Claude Code TUI sitting at exactly this
+# banner with an otherwise-idle, empty prompt below it (`claude agents --json` reports
+# "idle", not "waiting" or "busy" — there is no dialog to dismiss and no work in flight).
+# Nothing else in this pane's vocabulary produces this string, so a substring match is
+# enough; no need for the trailing "· Please run /login" half, which is free to reword.
+_LOGIN_EXPIRED_SIGNATURE = "Login expired"
+
 _PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:[/?#]|$)")
 _PR_REPO_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/\d+")
 
@@ -1330,6 +1338,18 @@ def _pane_shows_activity(pane: str) -> bool:
         if _WORK_LINE_RE.search(s):
             return True
     return False
+
+
+def _pane_shows_login_expired(pane: str) -> bool:
+    """True when the pane shows Claude Code's expired-session banner.
+
+    ⚖️🔌 CMX-282: an expired login is not "stuck, not thinking" — it is not thinking at
+    all, and no amount of waiting or re-sending a prompt fixes it (a paste into a dead
+    auth session is not evidence of anything). Distinguishing it from a genuine stall
+    lets a caller reap it immediately instead of burning a full stuck-detection window
+    on a state that will never resolve itself.
+    """
+    return _LOGIN_EXPIRED_SIGNATURE in pane
 
 
 def _dismiss_input_block(window_id: str) -> None:
@@ -4731,11 +4751,13 @@ existing PR updates itself.
 1. **Read the PR thread yourself** — `{{pr_comments_cmd}}`. The comment is the durable
    record, and a human may have added to it since the verdict above was written.
 2. Fix every defect it names, in this worktree. If a guard SURVIVED corruption, check
-   `docs/DEFEAT_SHAPES.md` — it catalogs known ways a guard looks like it works but doesn't
+   `docs/DEFEAT_SHAPES.md` (the catalog itself lives one file per shape under
+   `docs/defeat_shapes/`) — it catalogs known ways a guard looks like it works but doesn't
    (dead-coded statements, fixtures parked on a default, source-constant checks instead of
-   the rendered value…). If the shape the verdict just found isn't listed there yet, add an
-   entry as part of this fix — it is the only durable place that knowledge can land; the
-   judge's own checkout is thrown away when it finishes and cannot commit it itself.
+   the rendered value…). If the shape the verdict just found isn't catalogued yet, add ONE
+   NEW FILE to `docs/defeat_shapes/` as part of this fix — it is the only durable place that
+   knowledge can land; the judge's own checkout is thrown away when it finishes and cannot
+   commit it itself.
 3. Re-run the SAME validation your original task told you to run (this repo's CI gates are
    not optional) — and if a REQUIRED MUTATION SET is above, your self-check experiments
    file MUST include each one **verbatim** (copy the JSON, do not retype it) alongside any
@@ -5078,10 +5100,11 @@ failures, a whole production wiring that could be REVERTED with 1112 passed.
 ## Do this, in order
 
 1. Read what this PR claims: `{{diff_cmd}}` and `{{pr_view_cmd}}`. Skim
-   `docs/DEFEAT_SHAPES.md` — a catalog of ways a guard has already been found to look like it
-   works while missing a real corruption (dead-coded statements, fixtures parked on a
-   default, source-constant checks instead of the rendered value…). Reaching for one of
-   those shapes first is faster than rediscovering it from scratch.
+   `docs/DEFEAT_SHAPES.md` and browse `docs/defeat_shapes/` — a catalog of ways a guard has
+   already been found to look like it works while missing a real corruption (dead-coded
+   statements, fixtures parked on a default, source-constant checks instead of the rendered
+   value…). Reaching for one of those shapes first is faster than rediscovering it from
+   scratch.
 2. For **each guard/invariant it adds** (each new or changed test, each "must never…"
    comment, each accessibility cue), design ONE **minimal, live, syntactically valid**
    mutation to the **production** code that a real guard MUST catch:
@@ -5317,7 +5340,15 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
             and (now - started).total_seconds() >= JUDGE_TIMEOUT_SECONDS
         )
         alive = window in live_windows
-        if alive and not timed_out:
+        # ⚖️🔌 CMX-282: an expired login burns the whole JUDGE_TIMEOUT_SECONDS (60min) wait
+        # for nothing — measured live 2026-08-14, two judges (CMX-277, CMX-279) sat at
+        # "Login expired · Please run /login" until the timeout arm finally fired. The pane
+        # is checked ONLY while `alive` (never worth a tmux call once the window is already
+        # gone) and this is a THIRD, affirmative reason to reap on top of `timed_out` — it
+        # never widens what already reaps without it: `alive and timed_out` reaped before
+        # this existed, and a dead window reaps via the lock cross-check below either way.
+        login_expired = alive and _pane_shows_login_expired(_capture_pane(window))
+        if alive and not timed_out and not login_expired:
             continue
         # ⚖️🕳️ CMX-229 Objective 2: `alive` is ONE signal (this tick's tmux snapshot) and
         # it can be wrong — measured live on CMX-227, a judge SIGKILLed (exit 137) mid-
@@ -5327,8 +5358,14 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         # before tearing anything down. ⛔ BOUNDED, not a second timeout: once `timed_out`
         # is True the lock is never consulted and this always reaps, exactly as before —
         # a live owner past JUDGE_TIMEOUT_SECONDS is "stuck, not thinking" regardless of
-        # what its own lock claims, so a hold can never outlive that bound.
-        if not timed_out and judge.judge_lock_live(judge.judge_worktree_path(wf, row["task_id"])):
+        # what its own lock claims, so a hold can never outlive that bound. `login_expired`
+        # is the SAME kind of bound as `timed_out` here, and for the same reason: the pane
+        # evidence is direct and already came from THIS live window, so a lock file saying
+        # "the process is still alive" would only be confirming a process stuck at a login
+        # prompt, never contradicting it.
+        if not timed_out and not login_expired and judge.judge_lock_live(
+            judge.judge_worktree_path(wf, row["task_id"])
+        ):
             log.info(
                 "judge watchdog: %s: window %s missing from this tick's tmux snapshot, but "
                 "the judge lock says its owner is still alive — holding teardown", row["task_id"],
@@ -5338,13 +5375,17 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         reason = (
             f"the judge did not finish in {JUDGE_TIMEOUT_SECONDS // 60}min — it is stuck, "
             "not thinking" if timed_out else
+            "the judge's session login expired mid-run (\"Login expired · Please run "
+            "/login\") — not a verdict on the PR" if login_expired else
             "the judge's window disappeared before it published a verdict"
         )
         # ⚖️🕳️ CMX-253 Objective 2: a TIMEOUT judge got a chance to run and stayed stuck —
         # that is still a counted unknown, same as CMX-81 always treated it. A judge whose
         # window just VANISHED (host reboot, tmux death) never got that chance at all, so it
         # must not spend the same bounded retry budget a real attempt would; see
-        # `judge_no_verdict`'s column comment.
+        # `judge_no_verdict`'s column comment. ⚖️🔌 CMX-282: an expired login is the same
+        # kind of never-got-a-chance environment hiccup — `int(not timed_out)` already
+        # covers it, since `login_expired` only reaps here while `timed_out` is False.
         conn.execute(
             "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=? WHERE task_id=?",
             (judge.J_CANNOT_VERIFY, reason, int(not timed_out), row["task_id"]),

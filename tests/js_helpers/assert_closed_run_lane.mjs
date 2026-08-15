@@ -8,11 +8,12 @@
 // Usage: node assert_closed_run_lane.mjs <path-to-/api/dispatcher-JSON> <closed-task-id>
 // Exit 0 + nothing on stdout when every assertion holds; exit 1 + a message otherwise.
 //
-// Same jsdom bootstrap as tests/kanban_flatten.test.mjs (module-graph import of
-// main.js so kanban.js's window.chela wiring evaluates against a real window).
+// Same jsdom bootstrap as tests/kanban_flatten.test.mjs — shared via
+// dashboard_dom.mjs (CMX-290), module-graph import of main.js so kanban.js's
+// window.chela wiring evaluates against a real window.
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
-import { JSDOM } from 'jsdom';
+import { bootDashboardDom } from './dashboard_dom.mjs';
 
 const [, , payloadPath, closedTaskId] = process.argv;
 if (!payloadPath || !closedTaskId) {
@@ -31,26 +32,9 @@ const BODY = `
   <div id="kanban-empty" class="work-empty" style="display:none;"></div>
 </div>`;
 
-const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
-    { url: 'http://localhost:5005/', pretendToBeVisual: true });
-for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
-    'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
-    'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
-    Object.defineProperty(globalThis, k, {
-        value: dom.window[k], writable: true, configurable: true,
-    });
-}
-dom.window.matchMedia = q => ({
-    media: q, matches: false,
-    addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+const { modules: { kanban: { renderKanban } } } = await bootDashboardDom({
+    body: BODY, extraModules: ['kanban.js'],
 });
-globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
-globalThis.window.chela = globalThis.window.chela || {};
-globalThis.setInterval = () => 0;
-globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = true;
-
-await import('../../chela/dashboard/static/js/main.js');
-const { renderKanban } = await import('../../chela/dashboard/static/js/kanban.js');
 
 try {
     renderKanban(payload);

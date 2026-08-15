@@ -37,7 +37,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const src = p => readFileSync(join(ROOT, p), 'utf8');
@@ -78,46 +78,26 @@ let PHONE = false;
 let nav, util;
 
 before(async () => {
-    const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
-        { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
-        'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
-        'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
-        // defineProperty, NOT assignment — see the note in tests/wall.test.mjs:
-        // `globalThis.navigator` is getter-only from node 21 and assignment THROWS.
-        Object.defineProperty(globalThis, k, {
-            value: dom.window[k], writable: true, configurable: true,
-        });
-    }
-    dom.window.matchMedia = q => ({
-        media: q, matches: PHONE && /max-width:\s*768px/.test(q),
-        addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
-    });
-    // jsdom ships no canvas, and `getContext('2d')` returns null. The tab-signal
-    // badge (util.js::_drawFavicon) paints one whenever the "needs you" count goes
-    // ABOVE ZERO — which a waiting/yellow agent row below now exercises. A no-op 2D
-    // context keeps the assertions about the SIDEBAR rather than a canvas polyfill
-    // (same stub as tests/walldock.test.mjs).
-    dom.window.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, {
-        get: (_t, k) => (k === 'canvas' ? null : () => {}),
-    });
-    dom.window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,';
-    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
-    globalThis.window.chela = globalThis.window.chela || {};
-    globalThis.setInterval = () => 0;    // main.js arms poll timers a test has no use for
-
-    // THE RESTORE HALF, ARMED BEFORE THE MODULE LOADS. nav.js reads this key at
-    // module scope (that IS the restore), so the only honest way to test it is to
-    // seed the storage a reload would have left behind and then load the module —
-    // exactly the order a browser does it in.
-    dom.window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, '1');
-
     // The dashboard's modules are a cycle (nav ↔ main), so evaluation ORDER is the
     // browser's: main.js is the entry and everything else is pulled in behind it.
-    globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = true;
-    await import('../chela/dashboard/static/js/main.js');
-    util = await import('../chela/dashboard/static/js/util.js');
-    nav = await import('../chela/dashboard/static/js/nav.js');
+    ({ modules: { util, nav } } = await bootDashboardDom({
+        body: BODY,
+        // jsdom ships no canvas, and `getContext('2d')` returns null. The tab-signal
+        // badge (util.js::_drawFavicon) paints one whenever the "needs you" count goes
+        // ABOVE ZERO — which a waiting/yellow agent row below now exercises. A no-op 2D
+        // context keeps the assertions about the SIDEBAR rather than a canvas polyfill
+        // (same stub as tests/walldock.test.mjs).
+        canvasStub: true,
+        // `PHONE` is read LIVE (not captured at boot) — tests below flip it mid-suite
+        // to move between phone/desktop mode without a re-import.
+        phone: () => PHONE,
+        // THE RESTORE HALF, ARMED BEFORE THE MODULE LOADS. nav.js reads this key at
+        // module scope (that IS the restore), so the only honest way to test it is to
+        // seed the storage a reload would have left behind and then load the module —
+        // exactly the order a browser does it in.
+        seedLocalStorage: { [SIDEBAR_COLLAPSED_KEY]: '1' },
+        extraModules: ['util.js', 'nav.js'],
+    }));
 });
 
 // --- 1. 🔴 the type cue is a GLYPH, rendered — not a colour, and not a const -----

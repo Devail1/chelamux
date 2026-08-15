@@ -29,22 +29,14 @@
 // tests/test_js_suites.py; needs `npm ci` for jsdom).
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import { JSDOM } from 'jsdom';
-
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
-const HTML = readFileSync(join(ROOT, 'templates', 'index.html'), 'utf8');
+import { bootDashboardDom, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
 // The REAL agent-detail + Work panels, sliced straight out of index.html — not
 // hand-typed — so a mutation to panel-work's pre-set `active` class (exactly
 // the mutation this round's verdict named) shows up here, not just in a
 // fixture that happens to agree with the file today.
-const CANVAS_START = HTML.indexOf('<div class="panel" id="panel-agent-detail">');
-const CANVAS_END = HTML.indexOf('<!-- /panel-work -->') + '<!-- /panel-work -->'.length;
-if (CANVAS_START < 0 || CANVAS_END < 0) throw new Error('index.html markers for panel-agent-detail/panel-work moved — update this test');
-const CANVAS_HTML = HTML.slice(CANVAS_START, CANVAS_END);
+const CANVAS_HTML = sliceTemplate(
+    '<div class="panel" id="panel-agent-detail">', '<!-- /panel-work -->');
 
 const BODY = `
 <div class="app">
@@ -64,50 +56,27 @@ const BODY = `
 
 let util, nav;
 
-function flush() {
-    return new Promise(resolve => setTimeout(resolve, 0));
-}
-
 before(async () => {
-    const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
-        { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
-        'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
-        'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
-        Object.defineProperty(globalThis, k, {
-            value: dom.window[k], writable: true, configurable: true,
-        });
-    }
-    dom.window.matchMedia = q => ({
-        media: q, matches: false,
-        addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
-    });
-    dom.window.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, {
-        get: (_t, k) => (k === 'canvas' ? null : () => {}),
-    });
-    dom.window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,';
-    // A blanket {} for everything EXCEPT /api/agents/context, which must resolve
-    // an array (checkContext's `for (const a of data)` — see sidebar.test.mjs's
-    // identical note on the same call, fired unawaited from main.js's own
-    // top-level refresh()).
-    globalThis.fetch = url => {
-        const body = String(url).includes('/api/agents/context') ? [] : {};
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
-    };
-    globalThis.window.chela = globalThis.window.chela || {};
-    globalThis.setInterval = () => 0;
-
     // The genuine terminals-off boot: EXPLICITLY false, not merely unset — see
     // util.js's own `window.TERMINALS_ENABLED !== false`, which defaults TRUE
     // when the bootstrap script is absent (index.html only ever emits `= true`,
     // never `= false`; that asymmetry is pre-existing and untouched by CMX-279,
     // out of scope here). This is the one value that actually drives TERMINALS_ON
     // to false in JS, which is the terminals-off behaviour this file guards.
-    globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = false;
-
-    await import('../chela/dashboard/static/js/main.js');
-    util = await import('../chela/dashboard/static/js/util.js');
-    nav = await import('../chela/dashboard/static/js/nav.js');
+    ({ modules: { util, nav } } = await bootDashboardDom({
+        body: BODY,
+        terminalsEnabled: false,
+        canvasStub: true,
+        // A blanket {} for everything EXCEPT /api/agents/context, which must resolve
+        // an array (checkContext's `for (const a of data)` — see sidebar.test.mjs's
+        // identical note on the same call, fired unawaited from main.js's own
+        // top-level refresh()).
+        fetchImpl: url => {
+            const body = String(url).includes('/api/agents/context') ? [] : {};
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+        },
+        extraModules: ['util.js', 'nav.js'],
+    }));
 
     // Flush pollWork()'s fetch -> json() -> render microtask chain (startWorkPoll
     // fires pollWork() immediately on boot — main.js:60) without advancing any

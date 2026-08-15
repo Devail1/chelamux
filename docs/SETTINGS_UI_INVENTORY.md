@@ -5,6 +5,14 @@ into a tabbed modal. Before picking a tab layout, this inventories every knob a 
 modal would actually have to hold, because "the drawer feels cramped" and "the drawer has
 almost nothing in it" are both true at once, and only one of them is a container problem.
 
+**CMX-287 shipped the container**: the drawer is now a tabbed modal
+(General/Timing/Dispatch/Notifications/Cost/Appearance/Collaboration —
+`chela/dashboard/static/js/nav.js`'s `SETTINGS_TABS`), and Cost (deleted as a standalone
+nav view by CMX-279 for going unopened) got a home in it as a tab rather than a sidebar
+row, per Liav's framing. The ~41-knob write-candidate gap this doc measures is still
+open — CMX-287 only replaced the container, it did not add Notifications/Telegram/
+Terminal-wall/Collaboration write controls to fill the new tabs.
+
 ## The gap, measured
 
 ```bash
