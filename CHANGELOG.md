@@ -8,6 +8,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 Tracking starts at the open-source launch (2026-07-21). Earlier development
 history lives in `git log`.
 
+## [Unreleased]
+
 ## [0.4.0] — 2026-08-14
 
 ### Added
