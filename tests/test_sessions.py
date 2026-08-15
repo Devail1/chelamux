@@ -323,14 +323,43 @@ def test_the_pin_is_refused_when_the_panes_process_start_time_is_UNKNOWN(
 def test_a_pin_whose_transcript_cannot_be_STATD_is_refused_not_believed(
         projects, monkeypatch):
     """The freshness check's own ``except OSError`` fallback (DEFEAT_SHAPES #40) — a
-    transcript that the glob found but that cannot be stat'd (vanished, or here, a broken
-    symlink) must be treated the same as a stale one: REFUSED, not believed. Nothing in the
-    other pin tests ever makes ``path.stat()`` raise, so this fallback branch was dead
-    weight no matter how the suite ran."""
-    proj = projects / transcripts.encode_cwd("/home/u/repo")
-    proj.mkdir(parents=True)
-    dangling = proj / f"{SID}.jsonl"
-    os.symlink(proj / "does-not-exist", dangling)   # resolves via glob, but stat() raises
+    transcript that the glob found but that cannot be stat'd (vanished mid-race, permission
+    denied, ...) must be treated the same as a stale one: REFUSED, not believed. Nothing in
+    the other pin tests ever makes ``path.stat()`` raise, so this fallback branch was dead
+    weight no matter how the suite ran.
+
+    A broken symlink used to stand in for "found by glob, fails on stat" here, but whether
+    ``os.path.realpath`` resolves a dangling symlink (and so whether ``transcript_for_session``
+    even returns a path to stat) is not stable across Python versions — CI was green on 3.12
+    and red on 3.11 for exactly that reason.
+
+    A class-wide ``Path.stat`` monkeypatch does not fix that: 3.11's ``pathlib.Path.glob``
+    calls ``.stat()`` on candidates internally while it resolves them (3.12's does not), so a
+    patch broad enough to break the freshness check's own ``.stat()`` call also breaks
+    ``transcript_for_session``'s glob before it ever gets there — measured, the very
+    version split this rewrite is fixing. Wrap ``transcript_for_session`` itself instead: let
+    it resolve the real, on-disk file exactly as production does, then hand the freshness
+    check a proxy over that real path whose ``.stat()`` alone raises."""
+    _transcript(projects, "/home/u/repo", SID)
+    real_transcript_for_session = sessions.transcript_for_session
+
+    class _UnstattablePath:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def stat(self, *args, **kwargs):
+            raise OSError("stat failed")
+
+    def _resolve_but_unstattable(session_id, base=None):
+        real = real_transcript_for_session(session_id, base)
+        if real is not None and session_id == SID:
+            return _UnstattablePath(real)
+        return real
+
+    monkeypatch.setattr(sessions, "transcript_for_session", _resolve_but_unstattable)
     _panes(monkeypatch,
            sessions.Pane(wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
                          launched_in="/home/u/repo", started=time.time()),
@@ -340,6 +369,9 @@ def test_a_pin_whose_transcript_cannot_be_STATD_is_refused_not_believed(
 
     res = sessions.resolve_window("@1")
     assert res.path is None and not res.ok
+    # the pin's transcript really was found (else this would be the OTHER refusal — "no
+    # {sid}.jsonl exists" — passing for the wrong reason and not exercising stat() at all)
+    assert "but no" not in res.detail
     assert "dead predecessor" in res.detail
 
 
