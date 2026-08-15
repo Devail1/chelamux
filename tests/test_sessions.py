@@ -283,6 +283,43 @@ def test_the_cwd_guess_promotes_nothing(projects, monkeypatch, pins):
     assert pins.entries() == {}
 
 
+def test_an_event_log_resolution_with_no_transcript_promotes_nothing(
+        projects, monkeypatch, pins):
+    """The event log can NAME a session for which no transcript ever exists — the tier that
+    named it did not succeed (`resolve_window` itself falls through to the next tier via
+    `tried.append`, exactly as it does when the transcript is simply missing). A promotion
+    that fires as soon as the log names a session, rather than once its transcript is
+    actually found, would durably pin a window to a session nobody ever confirmed was
+    running — the same non-identification `_promote`'s own docstring already excludes the
+    cwd guess for. DEFEAT_SHAPES #56."""
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+    # deliberately no _transcript() call: SID.jsonl never exists anywhere under `projects`
+
+    res = sessions.resolve_window("@1")
+    assert res.path is None and not res.ok
+    assert pins.session_id_for("@1") is None
+
+
+def test_a_cmdline_resolution_with_no_transcript_promotes_nothing(
+        projects, monkeypatch, pins):
+    """The tier-2 mirror of the test above: the pane's own command line can NAME a
+    `--resume`d session for which no transcript exists either — a stale or hand-typed
+    session id that was never actually born. Same non-identification, same call site
+    shape (`_promote` sits inside `if path is not None:`, not on the bare `if
+    pane.resumed:`), so it must promote nothing durably either. DEFEAT_SHAPES #56."""
+    _panes(monkeypatch, sessions.Pane(
+        wid="@2", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", resumed=SID))
+    # deliberately no _transcript() call: SID.jsonl never exists anywhere under `projects`
+
+    res = sessions.resolve_window("@2")
+    assert res.path is None and not res.ok
+    assert pins.session_id_for("@2") is None
+
+
 def test_a_promotion_failure_does_not_break_resolution(projects, monkeypatch, pins):
     """Best-effort, same contract as `chela.spawn._record_session_id`: a store write that
     fails (a bad CHELA_DIR, a read-only filesystem) must never take the resolution itself
