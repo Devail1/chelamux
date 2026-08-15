@@ -1,4 +1,15 @@
-"""Session id store — ``wid -> session_id`` for interactive windows chela spawned.
+"""Session id store — ``wid -> session_id`` for windows chela can vouch for.
+
+Two writers. :mod:`chela.spawn` (and the dashboard's resume path) record a row at the
+moment they launch a window — chela CHOSE the session id, so this is a fact from birth.
+:func:`chela.inbox._identity_of` (CMX-296) additionally PROMOTES a session id resolved by
+other means (the event log, ``--resume`` on the command line — see
+:func:`chela.sessions.session_of_window`) the first time ``chela watch``/``register``
+observes it: the orchestrator's own window is almost never spawned through
+:mod:`chela.spawn` (nobody launches their own top-level session that way), so without this
+it would never earn a durable pin at all and would stay dependent on the event log's
+fleet-wide, bounded ring for every future resolution — precisely the gap CMX-295 closed
+for spawned windows only.
 
 **Why not ``chela/telegram/bindings.py``.** ``chela-telegram`` builds ONE
 ``BindingRegistry`` at daemon start (``main.py::_build_bindings_registry``) and

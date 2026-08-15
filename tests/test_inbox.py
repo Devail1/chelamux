@@ -312,6 +312,60 @@ def test_watch_return_value_reports_a_resolved_identity_too(store_file, windows,
     assert result["session"] == "sid-123"
 
 
+# --- CMX-296: promote a resolved identity into the durable pin --------------------
+#
+# CMX-295 taught `sessions.resolve_window` to trust a session id pinned in
+# `chela.sessionids`, but that store is only ever WRITTEN by `chela.spawn.spawn_window`
+# (and the dashboard resume path) — windows chela itself launched. The orchestrator's own
+# window is almost never one of those (nobody spawns their own top-level session through
+# `chela.spawn`), so on the live fleet it never earned a durable pin and stayed dependent
+# on the event log's bounded, fleet-wide ring for every future resolution. `_identity_of`
+# now promotes whatever it resolves — by any means — into that same store the first time
+# `chela watch`/`register`/`readdress` observes it.
+
+@pytest.fixture
+def promotions(monkeypatch):
+    """Capture every session id `_identity_of` promotes into the durable pin, without
+    touching the real (module-import-time-bound) `chela.sessionids` store path."""
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(inbox.sessionids, "set_session_id",
+                        lambda wid, session_id: calls.append((wid, session_id)))
+    return calls
+
+
+def test_register_promotes_a_resolved_identity_into_the_durable_pin(
+        store_file, windows, monkeypatch, promotions):
+    monkeypatch.setattr(inbox.sessions, "session_of_window", lambda wid, pane_map=None: "sid-123")
+    inbox.register(ORCH)
+    assert promotions == [(ORCH, "sid-123")]
+
+
+def test_watch_promotes_a_resolved_identity_into_the_durable_pin(
+        store_file, windows, monkeypatch, promotions):
+    monkeypatch.setattr(inbox.sessions, "session_of_window", lambda wid, pane_map=None: "sid-123")
+    inbox.watch(AGENT, "note", by=ORCH)
+    assert promotions == [(ORCH, "sid-123")]
+
+
+def test_a_failed_identity_resolution_promotes_nothing(store_file, windows, promotions):
+    inbox.register(ORCH)
+    assert promotions == []
+
+
+def test_a_promotion_failure_does_not_break_identity_resolution(store_file, windows, monkeypatch):
+    """Best-effort, same contract as `chela.spawn._record_session_id`: a store write that
+    fails (a bad CHELA_DIR, a read-only filesystem) must never take the resolution itself
+    down with it — the caller still gets the session id it honestly resolved."""
+    monkeypatch.setattr(inbox.sessions, "session_of_window", lambda wid, pane_map=None: "sid-123")
+
+    def boom(wid, session_id):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(inbox.sessionids, "set_session_id", boom)
+    result = inbox.register(ORCH)
+    assert result["session"] == "sid-123"
+
+
 def test_unregister_clears_the_address_only_when_it_names_that_wid(store_file):
     # unregister is the inverse of register (orchestrator teardown uses it). It clears the
     # recorded address so a killed window leaves no dead address behind — but ONLY if the

@@ -119,7 +119,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from chela import agent_manager, discovery, epoch, event_log, judge, messenger, notify, sessions, transcripts
+from chela import (agent_manager, discovery, epoch, event_log, judge, messenger, notify,
+                   sessionids, sessions, transcripts)
 from chela import config
 from chela.config import INBOX_ENABLED
 from chela.tui_text import sanitize_prompt
@@ -352,15 +353,37 @@ def _identity_of(wid: str | None) -> str | None:
     self-heal is unavailable until the next ``chela watch`` — exactly the pre-CMX-82 behaviour,
     never worse. Reads tmux + /proc via :mod:`chela.sessions`, so callers run it outside the
     store lock.
+
+    **CMX-296.** A resolution here is also promoted into :mod:`chela.sessionids` — the durable
+    pin CMX-295 taught :func:`chela.sessions.resolve_window` to trust right after the event
+    log's ring. That store is written only by :func:`chela.spawn.spawn_window` and the
+    dashboard resume path, i.e. only for windows *chela itself* launched — an orchestrator
+    adopted by ``chela watch`` after being started by hand (a manual ``claude`` in a tmux pane,
+    or a ``--resume`` a human typed outside chela) never gets one no matter how many times it
+    is watched. That is exactly the orchestrator's own window on the live fleet (nobody spawns
+    their own top-level session through :mod:`chela.spawn`), so it stayed dependent on the
+    event log's fleet-wide, 2000-record ring for every future resolution — the same gap
+    CMX-295 closed for spawned windows, left open for adopted ones. Writing the id already,
+    honestly resolved here costs one read-modify-write against a small JSON file on an
+    explicit command a human runs at most a few times a session — nothing like the hook path's
+    budget — and closes it for free. Best-effort, same as :func:`chela.spawn._record_session_id`:
+    a promotion failure must never fail the resolution it is riding along with.
     """
     if not wid:
         return None
     try:
-        return sessions.session_of_window(wid)
+        session = sessions.session_of_window(wid)
     except Exception:
         log.debug("inbox: could not resolve the orchestrator's session for %s", wid,
                   exc_info=True)
         return None
+    if session:
+        try:
+            sessionids.set_session_id(wid, session)
+        except Exception:  # noqa: BLE001 — a promotion failure must never fail resolution itself
+            log.warning("inbox: failed to promote resolved session id for %s", wid,
+                        exc_info=True)
+    return session
 
 
 def address_state(store: dict, statuses: dict[str, str],
