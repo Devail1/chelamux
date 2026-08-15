@@ -408,6 +408,68 @@ def test_a_promotion_updates_a_pin_that_names_a_different_session(projects, monk
     assert pins.session_id_for("@1") == SID
 
 
+def test_a_cmdline_promotion_updates_a_pin_that_names_a_different_session(
+        projects, monkeypatch, pins):
+    """The tier-2 mirror of `test_a_promotion_updates_a_pin_that_names_a_different_session`
+    (above). Both call sites share `_promote`, but every OTHER tier-2 promotion test starts
+    from an EMPTY store, so a mutation narrowing the tier-2 call site to "skip when a pin
+    merely EXISTS" (DEFEAT_SHAPES #58, applied at the call site that isn't `_promote` itself)
+    would be invisible without this: a window recycled in place (pinned to a dead session,
+    now running `claude --resume <new>`) must have its pin overwritten, not left on the dead
+    one. DEFEAT_SHAPES #60."""
+    live = _transcript(projects, "/home/u/projects/analytics", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@2", path="/home/u/projects/analytics", command="claude",
+        claude_pid=16154, launched_in="/home/u/projects/analytics", resumed=SID))
+
+    # @2 is already pinned to a DIFFERENT, now-dead session.
+    pins.set_session_id("@2", OTHER)
+    assert pins.session_id_for("@2") == OTHER
+
+    res = sessions.resolve_window("@2")
+    assert res.path == live and res.source == "cmdline" and res.session_id == SID
+    assert pins.session_id_for("@2") == SID
+
+
+def test_a_cmdline_promotion_does_not_rewrite_an_already_pinned_session(
+        projects, monkeypatch, pins):
+    """The tier-2 mirror of `test_an_already_pinned_session_is_not_rewritten`: a caller that
+    resolves the same window via the cmdline tier on every tick (the transcript poller does)
+    must not turn into a steady stream of file writes for a session id that never changes —
+    proof this call site still goes through `_promote`'s skip check rather than a raw,
+    unconditional store write. DEFEAT_SHAPES #60."""
+    _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@2", path="/home/u/repo", command="claude",
+        claude_pid=1, launched_in="/home/u/repo", resumed=SID))
+    sessions.resolve_window("@2")
+
+    writes = []
+    monkeypatch.setattr(sessionids, "set_session_id",
+                        lambda wid, session_id: writes.append((wid, session_id)))
+    sessions.resolve_window("@2")
+    assert writes == []
+
+
+def test_a_cmdline_promotion_failure_does_not_break_resolution(projects, monkeypatch, pins):
+    """The tier-2 mirror of `test_a_promotion_failure_does_not_break_resolution`: this call
+    site must still be best-effort, same contract as `chela.spawn._record_session_id` — a
+    store-write failure (a bad CHELA_DIR, a read-only filesystem) must never take the
+    resolution itself down with it, proof this goes through `_promote`'s `try` rather than a
+    raw, unguarded write. DEFEAT_SHAPES #60."""
+    live = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@2", path="/home/u/repo", command="claude",
+        claude_pid=1, launched_in="/home/u/repo", resumed=SID))
+
+    def boom(wid, session_id):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sessionids, "set_session_id", boom)
+    res = sessions.resolve_window("@2")
+    assert res.path == live and res.session_id == SID
+
+
 def test_a_promoted_pin_survives_the_event_log_ring_wrapping_past_it(
         projects, monkeypatch, pins):
     """The failure CMX-296 exists to close. The event log is a bounded, fleet-wide ring
