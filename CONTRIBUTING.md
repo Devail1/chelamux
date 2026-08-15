@@ -83,7 +83,13 @@ The [CHANGELOG](CHANGELOG.md) is the source of a release's notes, and
 
 On `main`, after a `dev → main` promotion:
 
-1. Turn `## [Unreleased]` into `## [X.Y.Z] — YYYY-MM-DD` in `CHANGELOG.md`.
+1. Turn `## [Unreleased]` into `## [X.Y.Z] — YYYY-MM-DD` in `CHANGELOG.md`, **and
+   add a fresh, empty `## [Unreleased]` heading back above it.** Skipping this
+   silently breaks every PR merged after the release: there is no section left
+   for them to append to, so the changelog convention lapses with nothing
+   failing until the *next* release ships empty notes. (Measured 2026-08-15:
+   `0.4.0` did exactly this and cost 11 merges their changelog entries.
+   `tests/test_version.py` now guards the section's existence.)
 2. Bump `version` in `pyproject.toml` to match.
 3. Commit both together (`Release X.Y.Z — <one-line theme>`).
 4. `git tag -a vX.Y.Z -m "X.Y.Z — <one-line theme>" && git push origin vX.Y.Z`
