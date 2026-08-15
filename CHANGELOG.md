@@ -10,6 +10,82 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Dashboard: the kanban-card → task-modal click is now guarded end to end, and
+  dashboard tests share one jsdom bootstrap instead of 8+ hand-copied setups.**
+  Three same-day PRs (CMX-279, CMX-287, CMX-288) each shipped a new dashboard
+  surface with internals thoroughly tested but the actual click a user's mouse
+  makes never driven end to end — `tests/kanban_task_modal_wiring.test.mjs`
+  closes that against the real template markup, not a hand-typed fixture.
+  `tests/js_helpers/dashboard_dom.mjs` replaces 32 near-identical `new JSDOM(`
+  copies across the test suite with one shared bootstrap (JSDOM setup,
+  matchMedia/canvas/fetch stubs, browser-faithful import order); no behavior
+  change. (CMX-290, #362)
+- **The defeat-shape catalog's numbers are now enforced unique, not just
+  collision-safe on merge.** CMX-284 made the catalog's *files* mergeable, but
+  left the number itself unenforced — two concurrent branches could (and did)
+  claim the same shape number, leaving every "shape N" cross-reference
+  ambiguous. A test now fails loudly when two catalog files claim the same
+  number. (CMX-293, #365)
+- **The settings-tabpanel display guard now reads the real CSS cascade instead
+  of declaring itself "NOT GUARDED."** The prior disclaimer conflated two
+  different limits: jsdom's `getComputedStyle` genuinely cannot resolve
+  layout, but it *does* resolve cascade correctly once the real stylesheet is
+  loaded into the document. The test now loads `style.css` for real and reads
+  the cascaded `display` off the actual rendered panels. (CMX-291, #364)
+- **The Decisions modal's Esc handling is now guarded on its firing branch, not
+  just its two silent ones.** Two earlier guards pinned that Esc does nothing
+  while already closed and that a non-Escape key does nothing while open, but
+  nothing asserted the positive case — that Esc actually calls
+  `preventDefault()` while the modal is open — so deleting that call stayed
+  green. Catalogs the general shape (both silent branches of a boolean-shaped
+  property guarded, the one firing branch left open) in `DEFEAT_SHAPES.md`.
+  (CMX-292, #363)
+- **The Decisions inbox is now a centered modal instead of an anchored
+  popover.** The popover had no width cap below 92vw, so on a narrow viewport
+  it spanned the dashboard's full width and occluded the terminal Wall behind
+  it. It now reuses the same `.palette-overlay` backdrop and a new
+  `.modal-sheet` shell the command palette already uses, dropping the
+  popover's own light-dismiss handling in favor of the palette's
+  backdrop-click + Esc pattern. (CMX-288, #359)
+- **The self-check scratch-file `.gitignore` rule now matches the naming
+  convention, not one literal spelling.** Five different scratch-filename
+  spellings had reached branches or `dev` across CMX-280/284/286/288 and one
+  direct merge; the old rule only caught two of them. Two convention-shaped
+  patterns were added alongside the literal one, and the guard test now probes
+  every real spelling on record. (CMX-289, #361)
+- **The Settings drawer is now a tabbed modal, and Cost is revived as one of
+  its tabs.** The off-canvas drawer is replaced by a centered
+  `.settings-modal` with a tab rail (General/Timing/Dispatch/Notifications/
+  Cost/Appearance/Collaboration); Cost — deleted as a standalone nav view by
+  CMX-279 for going unopened, its backend route untouched — returns as a tab,
+  lazily fetched only when opened. Existing element ids and callers are
+  unchanged. (CMX-287, #358)
+- **`capabilities.live()`'s degradation behavior on a malformed row vs. a
+  malformed file is now covered by tests.** The behavior itself was already
+  correct — a bad row inside an otherwise-valid list rides through unchanged,
+  while a bad file (bad JSON, missing keys, non-list) returns `None` — but
+  nothing had proven it until now. (CMX-286, #357)
+- Removed a judge self-check scratch file (`self_check_experiments.json`, step
+  6 throwaway output, not source) that had reached `dev` via CMX-282's merge.
+- **`docs/DEFEAT_SHAPES.md` is now a pointer at `docs/defeat_shapes/`, one file
+  per shape, instead of a single growing file.** Concurrent rework agents
+  appending a numbered section to the same file's tail collided on the same
+  lines every time two reworks were in flight at once — measured four times in
+  24h. Adding a shape now means adding one new file, with no shared lines left
+  to collide on. (CMX-284, #355)
+
+### Fixed
+
+- **The judge watchdog now reaps an expired login immediately instead of
+  waiting out the full 60-minute stall timeout.** A judge whose fleet login
+  expires leaves its tmux window alive but idle at "Login expired · Please run
+  /login" — previously indistinguishable from a healthy judge until the
+  regular stall timeout finally caught it, burning up to an hour before a
+  human saw it. The watchdog now checks the pane for the login-expired banner
+  directly and reaps on sight. (CMX-282, #353)
+
 ## [0.4.0] — 2026-08-14
 
 ### Added

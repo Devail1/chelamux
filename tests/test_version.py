@@ -42,3 +42,17 @@ def test_version_matches_pyprojects_single_source_of_truth():
 
 def test_pyproject_version_matches_newest_changelog_release():
     assert _pyproject_version() == latest_released_version(_changelog_text())
+
+
+def test_changelog_always_carries_an_unreleased_section():
+    """CONTRIBUTING.md's release step turns `## [Unreleased]` into a dated
+    section but does not by itself put a fresh one back — `02c653c` (Release
+    0.4.0) followed that step literally and left 11 later merges with no
+    section to append to. Guard the invariant directly so a future release
+    that forgets the same step fails CI immediately, not a full release cycle
+    later when the notes ship empty.
+    """
+    assert re.search(r"(?m)^## \[Unreleased\]\s*$", _changelog_text()), (
+        "CHANGELOG.md must always carry a `## [Unreleased]` heading — see "
+        "CONTRIBUTING.md's 'Releasing' step 1"
+    )
