@@ -2,14 +2,23 @@
 
 Two writers. :mod:`chela.spawn` (and the dashboard's resume path) record a row at the
 moment they launch a window — chela CHOSE the session id, so this is a fact from birth.
-:func:`chela.inbox._identity_of` (CMX-296) additionally PROMOTES a session id resolved by
-other means (the event log, ``--resume`` on the command line — see
-:func:`chela.sessions.session_of_window`) the first time ``chela watch``/``register``
-observes it: the orchestrator's own window is almost never spawned through
-:mod:`chela.spawn` (nobody launches their own top-level session that way), so without this
-it would never earn a durable pin at all and would stay dependent on the event log's
-fleet-wide, bounded ring for every future resolution — precisely the gap CMX-295 closed
-for spawned windows only.
+:func:`chela.sessions.resolve_window` (CMX-296) additionally PROMOTES a session id it
+resolves by other means — the event log, or the pane's own ``claude --resume <sid>``
+command line — the first time either tier succeeds for a window.
+
+**Why `resolve_window`, not the spawn-only population it started from.** An earlier
+version of this promotion lived behind :func:`chela.inbox._identity_of`, reached only from
+`chela watch` / `register` / `readdress` acting on the *orchestrator's own* window. On the
+live fleet that window is telegram-bound and had *already* earned a pin via
+:func:`chela.spawn.spawn_window` or the dashboard resume path — so that call site promoted
+exactly one window, and it was already covered. The window CMX-296 actually exists for is
+any OTHER window chela has identified without having spawned it — an orchestrator or agent
+started by hand (a manual ``claude`` in a tmux pane, or a ``--resume`` a human typed outside
+chela) — and those are reached by `resolve_window`, not by the orchestrator-identity path:
+it runs for every window `chela doctor` and the Telegram outbound relay's transcript poller
+resolve, not just the caller's own. Without a durable pin, such a window stays dependent on
+the event log's fleet-wide, bounded ring for every future resolution — precisely the gap
+CMX-295 closed for spawned windows only.
 
 **Why not ``chela/telegram/bindings.py``.** ``chela-telegram`` builds ONE
 ``BindingRegistry`` at daemon start (``main.py::_build_bindings_registry``) and

@@ -24,7 +24,7 @@ import time
 
 import pytest
 
-from chela import agent_manager, event_log, sessions, transcripts
+from chela import agent_manager, event_log, sessionids, sessions, transcripts
 
 SID = "7f3a91c2-4b8e-4d15-9c62-1e0d5a8b3f47"       # the session of the live outage
 OTHER = "cf19ca61-ffbb-4dbf-a8c7-66b74294fa69"
@@ -37,6 +37,19 @@ def projects(tmp_path, monkeypatch):
     root.mkdir()
     monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", root)
     return root
+
+
+@pytest.fixture
+def pins(tmp_path, monkeypatch):
+    """A ``chela.sessionids`` store of our own. ``_STORE`` is bound at import time, so a
+    temp path is pointed at directly (:mod:`tests.test_sessionids` reloads the module
+    instead — either works; this one is cheaper for a fixture used on every test here).
+    ``epoch.current`` is pinned too: :func:`chela.sessionids.session_id_for` reads as None
+    whenever it disagrees with the CURRENT epoch, and the real one shells out to tmux,
+    which is not live in a unit test."""
+    monkeypatch.setattr(sessionids, "_STORE", tmp_path / "session-ids.json")
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
+    return sessionids
 
 
 def _transcript(projects, cwd: str, session_id: str, *, records: int = 1):
@@ -220,6 +233,136 @@ def test_a_window_whose_process_cannot_be_read_does_not_inherit_a_SESSION_either
     assert res.session_id != SID
     assert res.path is None and not res.ok
     assert "REFUSED" in res.detail and "start time" in res.detail
+
+
+# --- CMX-296: a real identification is promoted into the durable pin ------------------
+#
+# CMX-295 (a separate, still-in-flight PR) teaches `resolve_window` to TRUST a session id
+# pinned in `chela.sessionids` right after the event log's tier — but that store was, until
+# this, only ever written at spawn time (`chela.spawn.spawn_window`, the dashboard resume
+# path), i.e. only for windows chela itself launched. An orchestrator or agent started by
+# hand never earned a pin no matter how many times it resolved here, and stayed dependent
+# on the event log's fleet-wide, bounded ring for every future resolution. These promote
+# whatever `resolve_window` itself confirms — event log or `--resume` — into that same
+# store, for every caller (not just the window's own operator).
+
+def test_an_event_log_resolution_promotes_the_durable_pin(projects, monkeypatch, pins):
+    a = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+
+    res = sessions.resolve_window("@1")
+    assert res.path == a and res.source == "event_log"
+    assert pins.session_id_for("@1") == SID
+
+
+def test_a_cmdline_resolution_promotes_the_durable_pin(projects, monkeypatch, pins):
+    live = _transcript(projects, "/home/u/projects/analytics", SID)
+    (projects / transcripts.encode_cwd("/home/u/projects/analytics/data_prep")).mkdir()
+    _panes(monkeypatch, sessions.Pane(
+        wid="@2", path="/home/u/projects/analytics/data_prep", command="claude",
+        claude_pid=16154, launched_in="/home/u/projects/analytics/data_prep", resumed=SID))
+
+    res = sessions.resolve_window("@2")
+    assert res.path == live and res.source == "cmdline"
+    assert pins.session_id_for("@2") == SID
+
+
+def test_the_cwd_guess_promotes_nothing(projects, monkeypatch, pins):
+    """The cwd fallback is a GUESS, not an identification (CMX-70) — CMX-296 must never
+    durably pin a window to a session nobody actually confirmed it is running."""
+    _transcript(projects, "/home/u/fresh", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@4", path="/home/u/fresh", command="claude", claude_pid=1,
+        launched_in="/home/u/fresh"))
+
+    res = sessions.resolve_window("@4")
+    assert res.source == "cwd"
+    assert pins.entries() == {}
+
+
+def test_a_promotion_failure_does_not_break_resolution(projects, monkeypatch, pins):
+    """Best-effort, same contract as `chela.spawn._record_session_id`: a store write that
+    fails (a bad CHELA_DIR, a read-only filesystem) must never take the resolution itself
+    down with it."""
+    a = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+
+    def boom(wid, session_id):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sessionids, "set_session_id", boom)
+    res = sessions.resolve_window("@1")
+    assert res.path == a and res.session_id == SID
+
+
+def test_an_already_pinned_session_is_not_rewritten(projects, monkeypatch, pins):
+    """The pin is skipped, not just overwritten idempotently: a caller that resolves the
+    same window on every tick (the Telegram outbound relay's transcript poller does, once
+    per bound window) must not turn into a steady stream of file writes for a session id
+    that never changes."""
+    _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+    sessions.resolve_window("@1")
+
+    writes = []
+    monkeypatch.setattr(sessionids, "set_session_id",
+                        lambda wid, session_id: writes.append((wid, session_id)))
+    sessions.resolve_window("@1")
+    assert writes == []
+
+
+def test_a_promoted_pin_survives_the_event_log_ring_wrapping_past_it(
+        projects, monkeypatch, pins):
+    """The failure CMX-296 exists to close. The event log is a bounded, fleet-wide ring
+    (`event_log.RING_SIZE` records) — a quiet window's own SessionStart record eventually
+    ages out from under it, same as every other cwd-fallback failure mode CMX-70 already
+    covers. Once that happens, tier 1 can no longer name @1's session, and — sharing a cwd
+    with @2 — the cwd fallback correctly REFUSES both rather than guess
+    (`test_two_windows_in_one_directory_with_NO_hook_event_resolve_to_NOTHING`, above).
+
+    CMX-295 (a separate, still-in-flight PR, #368) is what will teach `resolve_window` to
+    TRUST this pin and self-heal past exactly this wrap; that consumption is not on this
+    branch. What this proves is narrower but load-bearing on its own: the pin CMX-295 will
+    need is actually DURABLE — unaffected by the very ring wrap that motivates the whole
+    change, not merely written once and never checked again. A test asserting only "a pin
+    was written" cannot tell those apart; this can, because it writes, THEN wraps the ring,
+    THEN reads the pin back."""
+    a = _transcript(projects, "/home/u/repo", SID)
+    _transcript(projects, "/home/u/repo", OTHER)
+    _panes(monkeypatch,
+           sessions.Pane(wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+                         launched_in="/home/u/repo", started=time.time() - 60),
+           sessions.Pane(wid="@2", path="/home/u/repo", command="claude", claude_pid=2,
+                         launched_in="/home/u/repo", started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+
+    res = sessions.resolve_window("@1")
+    assert res.path == a and res.source == "event_log"
+    assert pins.session_id_for("@1") == SID
+
+    # the ring wraps past @1's SessionStart: the event log no longer names @1 at all —
+    # exactly what a bounded, fleet-wide ring does to a quiet window's last event.
+    monkeypatch.setattr(event_log, "ring", lambda: [])
+
+    res2 = sessions.resolve_window("@1")
+    # unaffected by this PR alone: @1 shares its cwd with @2, so the cwd fallback still
+    # correctly REFUSES rather than guess — exactly the pre-CMX-296 behaviour, unchanged,
+    # because nothing here yet reads the pin back (that is CMX-295's diff, not this one's).
+    assert res2.path is None and not res2.ok
+    # but the durable pin itself is untouched by the wrap — it is exactly what CMX-295
+    # will read once it lands:
+    assert pins.session_id_for("@1") == SID
+    # and @2, whose own identity was never confirmed by anything, was never promoted:
+    assert pins.session_id_for("@2") is None
 
 
 # --- tier 3: the native status feed (CMX-184) -----------------------------------------
