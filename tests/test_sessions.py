@@ -20,11 +20,12 @@ has fired no hook and was not resumed has nothing else, and it resolves fine.
 from __future__ import annotations
 
 import json
+import os
 import time
 
 import pytest
 
-from chela import agent_manager, event_log, sessions, transcripts
+from chela import agent_manager, event_log, sessionids, sessions, transcripts
 
 SID = "7f3a91c2-4b8e-4d15-9c62-1e0d5a8b3f47"       # the session of the live outage
 OTHER = "cf19ca61-ffbb-4dbf-a8c7-66b74294fa69"
@@ -69,6 +70,14 @@ def _native_started(monkeypatch, mapping: dict):
     monkeypatch.setattr(agent_manager, "started_for_pid", lambda pid: mapping.get(pid))
 
 
+def _pin(monkeypatch, mapping: dict):
+    """Stub the CMX-295 session-id-pin read: ``{wid: session_id}`` — what
+    ``chela.sessionids.session_id_for`` returns once epoch-checked (that check is
+    ``sessionids``'s own job and is covered in ``test_sessionids.py``; here we assume it
+    already answered)."""
+    monkeypatch.setattr(sessionids, "session_id_for", lambda wid: mapping.get(wid))
+
+
 @pytest.fixture(autouse=True)
 def no_tmux(monkeypatch):
     """No live tmux in a unit test: a test that wants panes says so."""
@@ -84,6 +93,14 @@ def no_native_status(monkeypatch):
     :func:`_native`."""
     monkeypatch.setattr(agent_manager, "session_and_cwd_for_pid", lambda pid: (None, None))
     monkeypatch.setattr(agent_manager, "started_for_pid", lambda pid: None)
+
+
+@pytest.fixture(autouse=True)
+def no_pin(monkeypatch):
+    """No live session-id pin by default — without this every test here would depend on
+    whatever ``~/.chela/session-ids.json`` (and the real tmux epoch) happen to hold on the
+    box running the suite. A test that wants the CMX-295 pin says so via :func:`_pin`."""
+    monkeypatch.setattr(sessionids, "session_id_for", lambda wid: None)
 
 
 # --- the outage ---------------------------------------------------------------------
@@ -220,6 +237,82 @@ def test_a_window_whose_process_cannot_be_read_does_not_inherit_a_SESSION_either
     assert res.session_id != SID
     assert res.path is None and not res.ok
     assert "REFUSED" in res.detail and "start time" in res.detail
+
+
+# --- the session-id pin (CMX-295) -------------------------------------------------------
+# The event log's floor (tier 1) only ever gets ONE correctly-filed record for a same-cwd
+# window — its own SessionStart, the one hook that carries $CHELA_WID
+# (chela.hooks._explicit_wid) — because every other hook that session fires is ambiguous
+# and chela.hooks._wid_in refuses to tag it. A fleet-wide ring bounded at
+# event_log.RING_SIZE (shared across every agent, not per window) ages that single record
+# out on a busy fleet, and resolution silently drops all the way to the cwd tier, which
+# REFUSES an origin two windows share. chela.sessionids already records wid -> session_id
+# at spawn time, outside the ring entirely; this is what makes that record actually count.
+
+def test_the_session_id_pin_resolves_a_same_cwd_window_the_event_log_ring_lost(
+        projects, monkeypatch):
+    """The exact collision `test_two_windows_in_one_directory_with_NO_hook_event_resolve_to_
+    NOTHING` documents as reachable twice over — including "permanently, on a busy fleet" —
+    except this time chela pinned @1's session at spawn. The pin survives; the unpinned
+    sibling is still, correctly, refused."""
+    mine = _transcript(projects, "/home/u/repo", SID)
+    _transcript(projects, "/home/u/repo", OTHER)              # the sibling sharing the cwd
+    _panes(monkeypatch,
+           sessions.Pane(wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+                         launched_in="/home/u/repo", started=time.time() - 3600),
+           sessions.Pane(wid="@2", path="/home/u/repo", command="claude", claude_pid=2,
+                         launched_in="/home/u/repo", started=time.time() - 3600))
+    assert not [r for r in event_log.ring() if r.get("wid") in ("@1", "@2")]
+    _pin(monkeypatch, {"@1": SID})                             # only @1 was ever pinned
+
+    res1 = sessions.resolve_window("@1")
+    assert res1.path == mine
+    assert res1.session_id == SID
+    assert res1.source == "pinned"
+
+    res2 = sessions.resolve_window("@2")                       # unpinned sibling: still refused
+    assert res2.path is None and not res2.ok and res2.source == "none"
+
+
+def test_a_stale_pin_from_a_dead_predecessor_process_is_refused(projects, monkeypatch):
+    """The pin is chela's own record of what it launched — but a window can outlive the
+    process it named: a crash and a manual, non-chela relaunch land a DIFFERENT session in
+    the same wid, same tmux epoch (@N is not reissued within one server's life). The pin
+    alone cannot see that; the transcript's own mtime can — a file that stopped growing
+    before the pane's CURRENT process even started belongs to whoever chela spawned last
+    time, not to the process sitting there now."""
+    dead = _transcript(projects, "/home/u/repo", SID)
+    _transcript(projects, "/home/u/repo", OTHER)               # the live sibling sharing the cwd
+    long_ago = time.time() - 3600
+    os.utime(dead, (long_ago, long_ago))                       # the dead session's last write
+    _panes(monkeypatch,
+           sessions.Pane(wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+                         launched_in="/home/u/repo", started=time.time()),   # started AFTER
+           sessions.Pane(wid="@2", path="/home/u/repo", command="claude", claude_pid=2,
+                         launched_in="/home/u/repo", started=time.time()))
+    _pin(monkeypatch, {"@1": SID})                              # stale: still names the DEAD one
+
+    res = sessions.resolve_window("@1")
+    assert res.path is None and not res.ok
+    assert "dead predecessor" in res.detail
+
+
+def test_the_event_log_still_wins_over_a_pin_when_both_have_evidence(projects, monkeypatch):
+    """Tier 1 is consulted FIRST and is the more current signal when it has one: a fresh,
+    hook-confirmed session must not be shadowed by an older pin from the window's original
+    spawn."""
+    _transcript(projects, "/home/u/repo", SID)                 # what the (now stale) pin claims
+    fresh = _transcript(projects, "/home/u/repo", OTHER)       # the CURRENT, hook-confirmed one
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=OTHER)
+    _pin(monkeypatch, {"@1": SID})
+
+    res = sessions.resolve_window("@1")
+    assert res.path == fresh
+    assert res.session_id == OTHER
+    assert res.source == "event_log"
 
 
 # --- tier 3: the native status feed (CMX-184) -----------------------------------------
