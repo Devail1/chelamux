@@ -320,6 +320,31 @@ def test_an_already_pinned_session_is_not_rewritten(projects, monkeypatch, pins)
     assert writes == []
 
 
+def test_a_promotion_updates_a_pin_that_names_a_different_session(projects, monkeypatch, pins):
+    """`_promote` must overwrite a STALE pin, not just skip whenever one already exists.
+
+    `test_an_already_pinned_session_is_not_rewritten` (above) only proves the SAME id is
+    left alone — every other CMX-296 test starts from an empty store. Neither distinguishes
+    "skip because the pin already agrees" from "skip because a pin merely exists": a window
+    restarted in place (same tmux window id, a brand new claude session) must have its pin
+    updated to the new session, not left pointing at the dead one — the exact "a recycled
+    address inherits a dead agent's session" failure this module refuses everywhere else."""
+    a = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+
+    # @1 is already pinned to a DIFFERENT, now-dead session — e.g. left over from before the
+    # window was recycled in place.
+    pins.set_session_id("@1", OTHER)
+    assert pins.session_id_for("@1") == OTHER
+
+    res = sessions.resolve_window("@1")
+    assert res.path == a and res.source == "event_log" and res.session_id == SID
+    assert pins.session_id_for("@1") == SID
+
+
 def test_a_promoted_pin_survives_the_event_log_ring_wrapping_past_it(
         projects, monkeypatch, pins):
     """The failure CMX-296 exists to close. The event log is a bounded, fleet-wide ring
