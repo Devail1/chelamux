@@ -10,6 +10,8 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-15
+
 ### Changed
 
 - **The Settings drawer is now a tabbed modal, and Cost has a home in it.** The drawer
@@ -720,6 +722,7 @@ Add an entry under `## [Unreleased]` per user-facing PR. It becomes a numbered
 section — and a tag, and a GitHub Release built from it — the next time chelamux
 cuts one; see "Releasing" in [CONTRIBUTING.md](CONTRIBUTING.md).
 
+[0.5.0]: https://github.com/Devail1/chelamux/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Devail1/chelamux/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Devail1/chelamux/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Devail1/chelamux/releases/tag/v0.2.0
