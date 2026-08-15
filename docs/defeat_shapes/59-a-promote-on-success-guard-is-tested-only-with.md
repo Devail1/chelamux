@@ -1,4 +1,4 @@
-## 56. A "promote on success" guard is tested only with fixtures where naming and confirming happen together, so hoisting the write earlier — onto the NAMED-but-unconfirmed branch — survives
+## 59. A "promote on success" guard is tested only with fixtures where naming and confirming happen together, so hoisting the write earlier — onto the NAMED-but-unconfirmed branch — survives
 
 **Assertion form:** a resolver has two distinct facts about a candidate identity — a
 lower-tier signal *names* it (an event log record, a `--resume` on a command line), and a

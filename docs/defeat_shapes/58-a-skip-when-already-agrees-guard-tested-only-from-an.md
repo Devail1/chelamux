@@ -1,4 +1,4 @@
-## 55. A "skip when the pin already AGREES" guard is tested only from an empty store, so a mutation that widens it to "skip when a pin merely EXISTS" survives
+## 58. A "skip when the pin already AGREES" guard is tested only from an empty store, so a mutation that widens it to "skip when a pin merely EXISTS" survives
 
 **Assertion form:** a best-effort promotion helper reads the current durable value before
 writing, and skips the write when it already matches the new one — `if current_value ==
