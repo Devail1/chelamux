@@ -1,6 +1,6 @@
 [project]
 name = "chelamux"
-version = "0.4.0"
+version = "0.5.0"
 description = "A tiny control plane for a fleet of Claude Code agents on tmux — schedule long-lived ones, dispatch ephemeral ones into git worktrees that open PRs."
 readme = "README.md"
 requires-python = ">=3.11"

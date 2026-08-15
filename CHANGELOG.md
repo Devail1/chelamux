@@ -85,6 +85,56 @@ history lives in `git log`.
   regular stall timeout finally caught it, burning up to an hour before a
   human saw it. The watchdog now checks the pane for the login-expired banner
   directly and reaps on sight. (CMX-282, #353)
+## [0.5.0] — 2026-08-15
+
+### Changed
+
+- **The Settings drawer is now a tabbed modal, and Cost has a home in it.** The drawer
+  shared the screen with the terminal wall and grew past what one scroll could hold, so
+  finding a knob meant hunting a single long column. Settings now open as a centered modal
+  with a seven-entry tab rail (General, Timing, Dispatch, Notifications, Cost, Appearance,
+  Collaboration), and `cost.js` — orphaned when the Cost view was removed from the nav — is
+  revived as the Cost tab rather than left dead in the tree. The modal reuses the
+  command-palette shell instead of introducing a second bespoke overlay, so Esc, the
+  backdrop, and focus handling behave the way every other overlay in the dashboard does.
+  (CMX-287)
+
+- **The Decisions inbox is a centered modal too, instead of a full-width panel that
+  occluded the wall.** It rendered as an anchored popover spanning the whole dashboard, so
+  reading a decision meant losing sight of the agents the decision was about — transient
+  content presented as permanent furniture. It now opens on the same modal shell as the
+  palette and the settings tabs: open it, act, dismiss it. (CMX-288)
+
+- **`docs/DEFEAT_SHAPES.md` is now one file per shape under `docs/defeat_shapes/`, and the
+  monolith is a static pointer.** Every dispatched rework appends a shape it discovered, so
+  concurrent branches all edited the same append-only file and collided on every refresh —
+  five open runs were stranded on that one conflict at once, two of them until their retry
+  budgets ran out. A new shape is now a new file, which cannot conflict. The index carries
+  no list to maintain, and the shape *numbers* — which cross-references and the test suite's
+  `DEFEAT_SHAPES #N` citations actually point at — are enforced unique by a test rather than
+  assumed. (CMX-284, CMX-293)
+
+### Fixed
+
+- **An expired login no longer costs the judge a full 60-minute timeout.** When a judge's
+  Claude session hit `Login expired · Please run /login`, nothing distinguished it from a
+  judge that was simply thinking: the watchdog waited out `JUDGE_TIMEOUT_SECONDS` before
+  reaping, and the run's retry budget drained meanwhile. Measured live on 2026-08-14, two
+  judges sat at that banner for the full hour. The watchdog now reads the judge's *own*
+  window for the expired-session banner and reaps immediately — a third, affirmative reason
+  to reap alongside the timeout and the lock cross-check, checked only while the window is
+  alive so it never widens what already reaped without it. (CMX-282)
+
+- **Judge self-check scratch files can no longer reach the repository.** `chela
+  task-finished --self-check-experiments` writes a throwaway JSON at the repo root, and an
+  autonomous `git add -A` swept it in: five incidents across four different filenames in a
+  single day, two of which landed on the default branch and had to be reverted by hand, and
+  one of which blocked its own pull request's rebase as a modify/delete conflict. The ignore
+  rule now matches the naming *convention* rather than the one literal spelling that
+  happened to be reported, and the guard that proves it asks `git check-ignore` about a real
+  filename per spelling — so a pattern that stops matching fails loudly instead of sitting
+  in the file looking correct. (CMX-286, CMX-289)
+
 
 ## [0.4.0] — 2026-08-14
 
@@ -747,6 +797,7 @@ Add an entry under `## [Unreleased]` per user-facing PR. It becomes a numbered
 section — and a tag, and a GitHub Release built from it — the next time chelamux
 cuts one; see "Releasing" in [CONTRIBUTING.md](CONTRIBUTING.md).
 
+[0.5.0]: https://github.com/Devail1/chelamux/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Devail1/chelamux/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Devail1/chelamux/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Devail1/chelamux/releases/tag/v0.2.0
