@@ -10,6 +10,35 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Telegram relay no longer goes silent for one of two sessions running in the same
+  directory.** A window is matched to the transcript it is writing by session id, and the
+  event log is where that id normally comes from — but `event_log.RING_SIZE` bounds **one
+  ring shared across the whole fleet**, not one per window. For two windows in a directory,
+  exactly one record ever carries the right window id: that session's own `SessionStart`,
+  the only hook that rides the `command` transport and carries `$CHELA_WID`. Every other
+  hook arrives over plain HTTP with nothing to disambiguate it, so a single record is all a
+  session ever has — and a busy fleet wraps past it in minutes. After that, resolution falls
+  through to the cwd, which correctly *refuses* to guess between two windows sharing one
+  directory, and the topic simply stops updating. It looked intermittent because it depended
+  on how much other traffic had happened since that session started. A resolved session id
+  is now promoted into a durable pin that lives outside the ring, and consulted on later
+  resolutions — bounded so it is only trusted for a live pane whose transcript has grown
+  since that pane's current process began, so a relaunched window can never inherit a dead
+  predecessor's session. (CMX-295, CMX-296)
+
+- **A release no longer silently consumes the CHANGELOG's `## [Unreleased]` section.** The
+  documented release step said to rename that heading to the new version and stopped there,
+  so the section ceased to exist and every PR merged afterwards had nowhere to add an entry
+  — the convention lapsed with nothing failing until the *next* release shipped empty notes.
+  Measured: eleven merges after `0.4.0` carried no changelog entries at all. The runbook now
+  states the missing step and why it matters, and a test asserts the heading is always
+  present — anchored to the line, because the same string appears several times as prose
+  inside earlier entries and an unanchored check passes on those while the heading is gone.
+  (CMX-294)
+
+
 ## [0.5.0] — 2026-08-15
 
 ### Changed
