@@ -518,6 +518,68 @@ def test_a_promoted_pin_survives_the_event_log_ring_wrapping_past_it(
     assert pins.session_id_for("@1") == SID
     # and @2, whose own identity was never confirmed by anything, was never promoted:
     assert pins.session_id_for("@2") is None
+
+
+# --- round 5: a call site's promotion must not be gated on a field every OTHER fixture
+# reaching it happens to hold constant (DEFEAT_SHAPES #61) --------------------------------
+
+def test_a_cmdline_promotion_fires_for_a_LIVE_pane(projects, monkeypatch, pins):
+    """Every OTHER tier-2 fixture in this file leaves `pane.started` on its dataclass
+    default (`None`) — the /proc-unreadable state. A narrowing added at the tier-2 call
+    site that only promotes `if pane.started is None` would be invisible against a suite
+    that never reaches tier 2 with a LIVE (`/proc`-readable) pane, and would never fire for
+    a real agent. DEFEAT_SHAPES #61."""
+    live = _transcript(projects, "/home/u/projects/analytics", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@2", path="/home/u/projects/analytics", command="claude",
+        claude_pid=16154, launched_in="/home/u/projects/analytics", resumed=SID,
+        started=time.time() - 60))
+
+    res = sessions.resolve_window("@2")
+    assert res.path == live and res.source == "cmdline" and res.session_id == SID
+    assert pins.session_id_for("@2") == SID
+
+
+def test_a_cmdline_promotion_fires_even_when_the_event_log_named_ANOTHER_session(
+        projects, monkeypatch, pins):
+    """Every OTHER tier-2 fixture in this file leaves the event log empty, parking `sid`
+    on `None` for the rest of the function. A narrowing added at the tier-2 call site that
+    only promotes `if not sid` would be invisible against a suite that never reaches tier 2
+    with `sid` already truthy. Here tier 1 DOES name a session (`OTHER`), but — same shape
+    as `test_an_event_log_resolution_with_no_transcript_promotes_nothing` — its transcript
+    never exists, so tier 1 correctly falls through to tier 2, which must still promote
+    `pane.resumed`. DEFEAT_SHAPES #61."""
+    live = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", resumed=SID, started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=OTHER)
+    # deliberately no _transcript() for OTHER: it is NAMED but never resolves
+
+    res = sessions.resolve_window("@1")
+    assert res.path == live and res.source == "cmdline" and res.session_id == SID
+    assert pins.session_id_for("@1") == SID
+
+
+def test_an_event_log_promotion_fires_even_when_the_pane_ALSO_resumed(
+        projects, monkeypatch, pins):
+    """Every OTHER tier-1 fixture in this file leaves `pane.resumed` on its dataclass
+    default (`None`) — but a hand-typed `claude --resume <sid>` alongside an already-running
+    session (a human resuming into a pane a hook is still tagging) is exactly the population
+    CMX-296 exists to capture. A narrowing added at the tier-1 call site that only promotes
+    `if not pane.resumed` would be invisible against a suite that never reaches tier 1 with
+    `pane.resumed` already set. DEFEAT_SHAPES #61."""
+    a = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", resumed=OTHER, started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+
+    res = sessions.resolve_window("@1")
+    assert res.path == a and res.source == "event_log" and res.session_id == SID
+    assert pins.session_id_for("@1") == SID
+
+
 # --- the session-id pin (CMX-295) -------------------------------------------------------
 # The event log's floor (tier 1) only ever gets ONE correctly-filed record for a same-cwd
 # window — its own SessionStart, the one hook that carries $CHELA_WID
