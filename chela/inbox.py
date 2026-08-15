@@ -352,6 +352,12 @@ def _identity_of(wid: str | None) -> str | None:
     self-heal is unavailable until the next ``chela watch`` — exactly the pre-CMX-82 behaviour,
     never worse. Reads tmux + /proc via :mod:`chela.sessions`, so callers run it outside the
     store lock.
+
+    **CMX-296.** This used to also promote the resolution into the durable
+    :mod:`chela.sessionids` pin, but the only caller of this function is `chela watch` /
+    `register` / `readdress` on the *orchestrator's own* window — see
+    :func:`chela.sessions.resolve_window` (where the promotion now happens instead) for why
+    that population was the wrong one to target.
     """
     if not wid:
         return None

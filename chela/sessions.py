@@ -137,7 +137,11 @@ OWN — tier 3 only ever reads the cache :mod:`chela.agent_manager`'s background
 thread already keeps warm on its own 30s timer, elsewhere. That budget is not decorative —
 :mod:`chela.hooks` resolves through here while a live agent is BLOCKED on the hook (CMX-41
 rejected the pgrep path precisely because it takes seconds, and the native feed itself
-measures 12-18s cold — CMX-179 — which is exactly why this never spawns it inline).
+measures 12-18s cold — CMX-179 — which is exactly why this never spawns it inline). That
+budget is untouched by the CMX-296 promotion in :func:`resolve_window` (a small JSON
+read-modify-write, skipped once the pin already agrees): :mod:`chela.hooks` never calls
+:func:`resolve_window` itself, only the cheaper facts (:func:`panes`,
+:func:`transcript_for_session`, :func:`wid_claiming_session`) it needs directly.
 """
 from __future__ import annotations
 
@@ -150,7 +154,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from chela import config, event_log, transcripts
+from chela import config, event_log, sessionids, transcripts
 
 log = logging.getLogger(__name__)
 
@@ -734,6 +738,35 @@ class Resolution:
         return self.path is not None
 
 
+def _promote(wid: str, session_id: str) -> None:
+    """Durably pin a tier-1/tier-2 resolution — CMX-296.
+
+    :mod:`chela.sessionids` is written at spawn time, but only for windows chela itself
+    launched (:mod:`chela.spawn`, the dashboard resume path). An orchestrator or agent
+    started by hand — a manual ``claude`` in a tmux pane, or a ``--resume`` a human typed
+    outside chela — never earns one that way, no matter how many times it resolves here,
+    and stays dependent on the event log's fleet-wide, bounded ring for every future
+    resolution. Promoting a resolution actually made here (event log or ``--resume`` on the
+    command line — never the cwd guess, which is not an identification at all) closes that
+    for exactly the windows that need it, and does so for every caller of
+    :func:`resolve_window` — `chela doctor`'s fact check and the Telegram outbound relay's
+    transcript poller both resolve windows chela did not spawn, not just its own.
+
+    Skips the write when the pin already agrees, so a caller that resolves the same window
+    on every tick (the transcript poller does, once per bound window) does not turn into a
+    steady stream of file writes for a session id that never changes. Best-effort, same
+    contract as :func:`chela.spawn._record_session_id`: a store-write failure must never
+    fail the resolution it is riding along with.
+    """
+    try:
+        if sessionids.session_id_for(wid) == session_id:
+            return
+        sessionids.set_session_id(wid, session_id)
+    except Exception:  # noqa: BLE001 — a promotion failure must never fail resolution itself
+        log.warning("sessions: failed to promote resolved session id for %s", wid,
+                    exc_info=True)
+
+
 def resolve_window(wid: str, base: Path | None = None, pane: Pane | None = None,
                    pane_map: dict[str, Pane] | None = None) -> Resolution:
     """window id → the transcript it is really writing, by session id, cwd last.
@@ -741,6 +774,9 @@ def resolve_window(wid: str, base: Path | None = None, pane: Pane | None = None,
     Returns a :class:`Resolution` whose ``path`` is None when the window's transcript
     cannot be established — never a plausible-looking guess. ``detail`` then says what was
     tried, because this failure is otherwise completely silent.
+
+    A resolution made via the event log or ``--resume`` (never the cwd guess) is also
+    promoted into the durable :mod:`chela.sessionids` pin — see :func:`_promote`.
     """
     if not wid:
         return Resolution(wid="", detail="no window id")
@@ -764,6 +800,7 @@ def resolve_window(wid: str, base: Path | None = None, pane: Pane | None = None,
     if sid:
         path = transcript_for_session(sid, base)
         if path is not None:
+            _promote(wid, sid)
             return Resolution(wid, sid, path, "event_log",
                               f"the event log's newest session for {wid}")
         tried.append(f"the event log names session {sid} for {wid}, but no "
@@ -802,6 +839,7 @@ def resolve_window(wid: str, base: Path | None = None, pane: Pane | None = None,
     if pane and pane.resumed:
         path = transcript_for_session(pane.resumed, base)
         if path is not None:
+            _promote(wid, pane.resumed)
             return Resolution(wid, pane.resumed, path, "cmdline",
                               f"`claude --resume {pane.resumed}` in the pane")
         tried.append(f"the pane runs `claude --resume {pane.resumed}`, but no "

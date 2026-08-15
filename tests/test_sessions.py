@@ -40,6 +40,19 @@ def projects(tmp_path, monkeypatch):
     return root
 
 
+@pytest.fixture
+def pins(tmp_path, monkeypatch):
+    """A ``chela.sessionids`` store of our own. ``_STORE`` is bound at import time, so a
+    temp path is pointed at directly (:mod:`tests.test_sessionids` reloads the module
+    instead — either works; this one is cheaper for a fixture used on every test here).
+    ``epoch.current`` is pinned too: :func:`chela.sessionids.session_id_for` reads as None
+    whenever it disagrees with the CURRENT epoch, and the real one shells out to tmux,
+    which is not live in a unit test."""
+    monkeypatch.setattr(sessionids, "_STORE", tmp_path / "session-ids.json")
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
+    return sessionids
+
+
 def _transcript(projects, cwd: str, session_id: str, *, records: int = 1):
     """Write a session's transcript where Claude Code really writes it: under the project
     dir of the directory the session was BORN in."""
@@ -96,10 +109,19 @@ def no_native_status(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def no_pin(monkeypatch):
+def no_pin(request, monkeypatch):
     """No live session-id pin by default — without this every test here would depend on
     whatever ``~/.chela/session-ids.json`` (and the real tmux epoch) happen to hold on the
-    box running the suite. A test that wants the CMX-295 pin says so via :func:`_pin`."""
+    box running the suite. A test that wants the CMX-295 pin says so via :func:`_pin`.
+
+    ⛔ Yields to the :func:`pins` fixture. CMX-296's promotion tests need a REAL store they
+    can read their own writes back out of; stubbing ``session_id_for`` to a constant ``None``
+    for them would make every "the pin was written" assertion fail no matter what the
+    production code did. This fixture is autouse (it defends every test that does NOT think
+    about pins), so it has to stand down for the one that does — an autouse default that
+    cannot be opted out of is not a default, it is an override."""
+    if "pins" in request.fixturenames:
+        return
     monkeypatch.setattr(sessionids, "session_id_for", lambda wid: None)
 
 
@@ -237,6 +259,325 @@ def test_a_window_whose_process_cannot_be_read_does_not_inherit_a_SESSION_either
     assert res.session_id != SID
     assert res.path is None and not res.ok
     assert "REFUSED" in res.detail and "start time" in res.detail
+
+
+# --- CMX-296: a real identification is promoted into the durable pin ------------------
+#
+# CMX-295 (a separate, still-in-flight PR) teaches `resolve_window` to TRUST a session id
+# pinned in `chela.sessionids` right after the event log's tier — but that store was, until
+# this, only ever written at spawn time (`chela.spawn.spawn_window`, the dashboard resume
+# path), i.e. only for windows chela itself launched. An orchestrator or agent started by
+# hand never earned a pin no matter how many times it resolved here, and stayed dependent
+# on the event log's fleet-wide, bounded ring for every future resolution. These promote
+# whatever `resolve_window` itself confirms — event log or `--resume` — into that same
+# store, for every caller (not just the window's own operator).
+
+def test_an_event_log_resolution_promotes_the_durable_pin(projects, monkeypatch, pins):
+    a = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+
+    res = sessions.resolve_window("@1")
+    assert res.path == a and res.source == "event_log"
+    assert pins.session_id_for("@1") == SID
+
+
+def test_a_cmdline_resolution_promotes_the_durable_pin(projects, monkeypatch, pins):
+    live = _transcript(projects, "/home/u/projects/analytics", SID)
+    (projects / transcripts.encode_cwd("/home/u/projects/analytics/data_prep")).mkdir()
+    _panes(monkeypatch, sessions.Pane(
+        wid="@2", path="/home/u/projects/analytics/data_prep", command="claude",
+        claude_pid=16154, launched_in="/home/u/projects/analytics/data_prep", resumed=SID))
+
+    res = sessions.resolve_window("@2")
+    assert res.path == live and res.source == "cmdline"
+    assert pins.session_id_for("@2") == SID
+
+
+def test_the_cwd_guess_promotes_nothing(projects, monkeypatch, pins):
+    """The cwd fallback is a GUESS, not an identification (CMX-70) — CMX-296 must never
+    durably pin a window to a session nobody actually confirmed it is running."""
+    _transcript(projects, "/home/u/fresh", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@4", path="/home/u/fresh", command="claude", claude_pid=1,
+        launched_in="/home/u/fresh"))
+
+    res = sessions.resolve_window("@4")
+    assert res.source == "cwd"
+    assert pins.entries() == {}
+
+
+def test_an_event_log_resolution_with_no_transcript_promotes_nothing(
+        projects, monkeypatch, pins):
+    """The event log can NAME a session for which no transcript ever exists — the tier that
+    named it did not succeed (`resolve_window` itself falls through to the next tier via
+    `tried.append`, exactly as it does when the transcript is simply missing). A promotion
+    that fires as soon as the log names a session, rather than once its transcript is
+    actually found, would durably pin a window to a session nobody ever confirmed was
+    running — the same non-identification `_promote`'s own docstring already excludes the
+    cwd guess for. DEFEAT_SHAPES #56."""
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+    # deliberately no _transcript() call: SID.jsonl never exists anywhere under `projects`
+
+    res = sessions.resolve_window("@1")
+    assert res.path is None and not res.ok
+    assert pins.session_id_for("@1") is None
+
+
+def test_a_cmdline_resolution_with_no_transcript_promotes_nothing(
+        projects, monkeypatch, pins):
+    """The tier-2 mirror of the test above: the pane's own command line can NAME a
+    `--resume`d session for which no transcript exists either — a stale or hand-typed
+    session id that was never actually born. Same non-identification, same call site
+    shape (`_promote` sits inside `if path is not None:`, not on the bare `if
+    pane.resumed:`), so it must promote nothing durably either. DEFEAT_SHAPES #56."""
+    _panes(monkeypatch, sessions.Pane(
+        wid="@2", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", resumed=SID))
+    # deliberately no _transcript() call: SID.jsonl never exists anywhere under `projects`
+
+    res = sessions.resolve_window("@2")
+    assert res.path is None and not res.ok
+    assert pins.session_id_for("@2") is None
+
+
+def test_a_promotion_failure_does_not_break_resolution(projects, monkeypatch, pins):
+    """Best-effort, same contract as `chela.spawn._record_session_id`: a store write that
+    fails (a bad CHELA_DIR, a read-only filesystem) must never take the resolution itself
+    down with it."""
+    a = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+
+    def boom(wid, session_id):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sessionids, "set_session_id", boom)
+    res = sessions.resolve_window("@1")
+    assert res.path == a and res.session_id == SID
+
+
+def test_an_already_pinned_session_is_not_rewritten(projects, monkeypatch, pins):
+    """The pin is skipped, not just overwritten idempotently: a caller that resolves the
+    same window on every tick (the Telegram outbound relay's transcript poller does, once
+    per bound window) must not turn into a steady stream of file writes for a session id
+    that never changes."""
+    _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+    sessions.resolve_window("@1")
+
+    writes = []
+    monkeypatch.setattr(sessionids, "set_session_id",
+                        lambda wid, session_id: writes.append((wid, session_id)))
+    sessions.resolve_window("@1")
+    assert writes == []
+
+
+def test_a_promotion_updates_a_pin_that_names_a_different_session(projects, monkeypatch, pins):
+    """`_promote` must overwrite a STALE pin, not just skip whenever one already exists.
+
+    `test_an_already_pinned_session_is_not_rewritten` (above) only proves the SAME id is
+    left alone — every other CMX-296 test starts from an empty store. Neither distinguishes
+    "skip because the pin already agrees" from "skip because a pin merely exists": a window
+    restarted in place (same tmux window id, a brand new claude session) must have its pin
+    updated to the new session, not left pointing at the dead one — the exact "a recycled
+    address inherits a dead agent's session" failure this module refuses everywhere else."""
+    a = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+
+    # @1 is already pinned to a DIFFERENT, now-dead session — e.g. left over from before the
+    # window was recycled in place.
+    pins.set_session_id("@1", OTHER)
+    assert pins.session_id_for("@1") == OTHER
+
+    res = sessions.resolve_window("@1")
+    assert res.path == a and res.source == "event_log" and res.session_id == SID
+    assert pins.session_id_for("@1") == SID
+
+
+def test_a_cmdline_promotion_updates_a_pin_that_names_a_different_session(
+        projects, monkeypatch, pins):
+    """The tier-2 mirror of `test_a_promotion_updates_a_pin_that_names_a_different_session`
+    (above). Both call sites share `_promote`, but every OTHER tier-2 promotion test starts
+    from an EMPTY store, so a mutation narrowing the tier-2 call site to "skip when a pin
+    merely EXISTS" (DEFEAT_SHAPES #58, applied at the call site that isn't `_promote` itself)
+    would be invisible without this: a window recycled in place (pinned to a dead session,
+    now running `claude --resume <new>`) must have its pin overwritten, not left on the dead
+    one. DEFEAT_SHAPES #60."""
+    live = _transcript(projects, "/home/u/projects/analytics", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@2", path="/home/u/projects/analytics", command="claude",
+        claude_pid=16154, launched_in="/home/u/projects/analytics", resumed=SID))
+
+    # @2 is already pinned to a DIFFERENT, now-dead session.
+    pins.set_session_id("@2", OTHER)
+    assert pins.session_id_for("@2") == OTHER
+
+    res = sessions.resolve_window("@2")
+    assert res.path == live and res.source == "cmdline" and res.session_id == SID
+    assert pins.session_id_for("@2") == SID
+
+
+def test_a_cmdline_promotion_does_not_rewrite_an_already_pinned_session(
+        projects, monkeypatch, pins):
+    """The tier-2 mirror of `test_an_already_pinned_session_is_not_rewritten`: a caller that
+    resolves the same window via the cmdline tier on every tick (the transcript poller does)
+    must not turn into a steady stream of file writes for a session id that never changes —
+    proof this call site still goes through `_promote`'s skip check rather than a raw,
+    unconditional store write. DEFEAT_SHAPES #60."""
+    _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@2", path="/home/u/repo", command="claude",
+        claude_pid=1, launched_in="/home/u/repo", resumed=SID))
+    sessions.resolve_window("@2")
+
+    writes = []
+    monkeypatch.setattr(sessionids, "set_session_id",
+                        lambda wid, session_id: writes.append((wid, session_id)))
+    sessions.resolve_window("@2")
+    assert writes == []
+
+
+def test_a_cmdline_promotion_failure_does_not_break_resolution(projects, monkeypatch, pins):
+    """The tier-2 mirror of `test_a_promotion_failure_does_not_break_resolution`: this call
+    site must still be best-effort, same contract as `chela.spawn._record_session_id` — a
+    store-write failure (a bad CHELA_DIR, a read-only filesystem) must never take the
+    resolution itself down with it, proof this goes through `_promote`'s `try` rather than a
+    raw, unguarded write. DEFEAT_SHAPES #60."""
+    live = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@2", path="/home/u/repo", command="claude",
+        claude_pid=1, launched_in="/home/u/repo", resumed=SID))
+
+    def boom(wid, session_id):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sessionids, "set_session_id", boom)
+    res = sessions.resolve_window("@2")
+    assert res.path == live and res.session_id == SID
+
+
+def test_a_promoted_pin_survives_the_event_log_ring_wrapping_past_it(
+        projects, monkeypatch, pins):
+    """The failure CMX-296 exists to close. The event log is a bounded, fleet-wide ring
+    (`event_log.RING_SIZE` records) — a quiet window's own SessionStart record eventually
+    ages out from under it, same as every other cwd-fallback failure mode CMX-70 already
+    covers. Once that happens, tier 1 can no longer name @1's session, and — sharing a cwd
+    with @2 — the cwd fallback correctly REFUSES both rather than guess
+    (`test_two_windows_in_one_directory_with_NO_hook_event_resolve_to_NOTHING`, above).
+
+    CMX-295 (a separate, still-in-flight PR, #368) is what will teach `resolve_window` to
+    TRUST this pin and self-heal past exactly this wrap; that consumption is not on this
+    branch. What this proves is narrower but load-bearing on its own: the pin CMX-295 will
+    need is actually DURABLE — unaffected by the very ring wrap that motivates the whole
+    change, not merely written once and never checked again. A test asserting only "a pin
+    was written" cannot tell those apart; this can, because it writes, THEN wraps the ring,
+    THEN reads the pin back."""
+    a = _transcript(projects, "/home/u/repo", SID)
+    _transcript(projects, "/home/u/repo", OTHER)
+    _panes(monkeypatch,
+           sessions.Pane(wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+                         launched_in="/home/u/repo", started=time.time() - 60),
+           sessions.Pane(wid="@2", path="/home/u/repo", command="claude", claude_pid=2,
+                         launched_in="/home/u/repo", started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+
+    res = sessions.resolve_window("@1")
+    assert res.path == a and res.source == "event_log"
+    assert pins.session_id_for("@1") == SID
+
+    # the ring wraps past @1's SessionStart: the event log no longer names @1 at all —
+    # exactly what a bounded, fleet-wide ring does to a quiet window's last event.
+    monkeypatch.setattr(event_log, "ring", lambda: [])
+
+    res2 = sessions.resolve_window("@1")
+    # ⭐ CMX-295 has since landed on `dev` (80d866c), so the pin is now READ as well as
+    # written and the pair closes the outage end to end: @1 self-heals past the wrap via
+    # its own durable pin instead of falling to the cwd tier, which — sharing a cwd with
+    # @2 — would still correctly REFUSE to guess. This assertion was `res2.path is None`
+    # while the consumption half was still in flight; that was honest for THIS branch alone
+    # and it failed LOUDLY the moment its dependency merged, which is how a scoped test
+    # should meet the change it was waiting for.
+    assert res2.ok and res2.path == a
+    assert res2.source == "pinned"
+    # but the durable pin itself is untouched by the wrap — it is exactly what CMX-295
+    # will read once it lands:
+    assert pins.session_id_for("@1") == SID
+    # and @2, whose own identity was never confirmed by anything, was never promoted:
+    assert pins.session_id_for("@2") is None
+
+
+# --- round 5: a call site's promotion must not be gated on a field every OTHER fixture
+# reaching it happens to hold constant (DEFEAT_SHAPES #61) --------------------------------
+
+def test_a_cmdline_promotion_fires_for_a_LIVE_pane(projects, monkeypatch, pins):
+    """Every OTHER tier-2 fixture in this file leaves `pane.started` on its dataclass
+    default (`None`) — the /proc-unreadable state. A narrowing added at the tier-2 call
+    site that only promotes `if pane.started is None` would be invisible against a suite
+    that never reaches tier 2 with a LIVE (`/proc`-readable) pane, and would never fire for
+    a real agent. DEFEAT_SHAPES #61."""
+    live = _transcript(projects, "/home/u/projects/analytics", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@2", path="/home/u/projects/analytics", command="claude",
+        claude_pid=16154, launched_in="/home/u/projects/analytics", resumed=SID,
+        started=time.time() - 60))
+
+    res = sessions.resolve_window("@2")
+    assert res.path == live and res.source == "cmdline" and res.session_id == SID
+    assert pins.session_id_for("@2") == SID
+
+
+def test_a_cmdline_promotion_fires_even_when_the_event_log_named_ANOTHER_session(
+        projects, monkeypatch, pins):
+    """Every OTHER tier-2 fixture in this file leaves the event log empty, parking `sid`
+    on `None` for the rest of the function. A narrowing added at the tier-2 call site that
+    only promotes `if not sid` would be invisible against a suite that never reaches tier 2
+    with `sid` already truthy. Here tier 1 DOES name a session (`OTHER`), but — same shape
+    as `test_an_event_log_resolution_with_no_transcript_promotes_nothing` — its transcript
+    never exists, so tier 1 correctly falls through to tier 2, which must still promote
+    `pane.resumed`. DEFEAT_SHAPES #61."""
+    live = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", resumed=SID, started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=OTHER)
+    # deliberately no _transcript() for OTHER: it is NAMED but never resolves
+
+    res = sessions.resolve_window("@1")
+    assert res.path == live and res.source == "cmdline" and res.session_id == SID
+    assert pins.session_id_for("@1") == SID
+
+
+def test_an_event_log_promotion_fires_even_when_the_pane_ALSO_resumed(
+        projects, monkeypatch, pins):
+    """Every OTHER tier-1 fixture in this file leaves `pane.resumed` on its dataclass
+    default (`None`) — but a hand-typed `claude --resume <sid>` alongside an already-running
+    session (a human resuming into a pane a hook is still tagging) is exactly the population
+    CMX-296 exists to capture. A narrowing added at the tier-1 call site that only promotes
+    `if not pane.resumed` would be invisible against a suite that never reaches tier 1 with
+    `pane.resumed` already set. DEFEAT_SHAPES #61."""
+    a = _transcript(projects, "/home/u/repo", SID)
+    _panes(monkeypatch, sessions.Pane(
+        wid="@1", path="/home/u/repo", command="claude", claude_pid=1,
+        launched_in="/home/u/repo", resumed=OTHER, started=time.time() - 60))
+    event_log.append("hook.pre_tool_use", "a", wid="@1", session_id=SID)
+
+    res = sessions.resolve_window("@1")
+    assert res.path == a and res.source == "event_log" and res.session_id == SID
+    assert pins.session_id_for("@1") == SID
 
 
 # --- the session-id pin (CMX-295) -------------------------------------------------------
