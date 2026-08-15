@@ -32,6 +32,20 @@ window made by something that cannot be wrong about it:
    claude process's start time: tmux **reuses window ids after a server restart** (the
    live log has 309 events under a long-dead ``@113``), so a mapping older than the
    process now in the window is a different agent's and is refused, not inherited.
+
+   **CMX-295 — the event log's floor is per-record, but its RETENTION is fleet-wide.**
+   :data:`chela.event_log.RING_SIZE` bounds one shared ring across every agent chela is
+   running, not one per window. For two windows sharing a cwd, only ONE record ever
+   carries the right ``wid`` at all — every OTHER hook a session fires rides plain
+   ``http`` with no ``$CHELA_WID`` to disambiguate it (:func:`chela.hooks._explicit_wid`),
+   so :func:`chela.hooks._wid_in` refuses every one of them and only that session's own
+   ``SessionStart`` (a ``command`` hook, the one event that DOES carry the header) is ever
+   filed correctly. A single record has nothing to fall back to once the ring wraps past
+   it — which an active multi-agent fleet does in minutes, not hours, at
+   :data:`~chela.event_log.RING_SIZE` ``= 2000`` — and resolution silently drops to
+   whichever LATER tier still has evidence. See the pinned-session-id check right below
+   tier 1's block in :func:`resolve_window` for the durable record that closes this
+   specific gap.
 2. **the command line** — ``claude --resume <sid>`` in ``/proc/<pid>/cmdline`` of the
    pane's own claude process. It belongs to that pane by construction, so it resolves the
    exact case above even when no hook ever fired (the daemon was down, the agent predates
@@ -76,7 +90,23 @@ window made by something that cannot be wrong about it:
    :func:`chela.hooks._wid_in` does — because "newest file in the project dir wins" is
    precisely how one agent's output lands in another's topic. The event log is a bounded
    ring, so a quiet window's last hook event ages out on a busy fleet and resolution
-   *falls back here*: this is a Tuesday, not an edge case.
+   *falls back here*: this is a Tuesday, not an edge case — **unless the pin below already
+   caught it first.**
+
+**The session-id pin (CMX-295), consulted right after tier 1.** :func:`chela.spawn.spawn_window`
+already writes ``wid -> session_id`` to :mod:`chela.sessionids` the moment it launches a window
+with a chela-generated ``--session-id`` — recorded once, at spawn, outside the event log
+entirely, so it cannot age out of :data:`chela.event_log.RING_SIZE` the way the sole
+correctly-filed record for a same-cwd window can (see the CMX-295 note under tier 1 above).
+:func:`chela.sessionids.session_id_for` already refuses a row stamped with a tmux epoch other
+than the current one, so a pin only ever answers for the SAME server incarnation that wrote
+it. That alone is not enough: ``@N`` is not reissued *within* one server's life, but the pane
+sitting in it can still be replaced by a manual, non-chela relaunch after the original process
+died — same window, same epoch, different session. So this is also bounded, the same way tier
+1 is: only trusted when the pinned session's transcript has been written to **at or after**
+the pane's CURRENT claude process started (:attr:`Pane.started`) — a transcript that stopped
+growing before this process began belongs to a dead predecessor that once occupied this
+window, and is refused exactly like an event log record that predates it.
 
 Every signal that cannot be *bounded* is refused rather than believed. The event log is
 only read against the claude process's start time (tmux reuses window ids); if that start
@@ -696,7 +726,7 @@ class Resolution:
     wid: str
     session_id: str | None = None
     path: Path | None = None
-    source: str = "none"          # event_log | cmdline | native_status | cwd | none
+    source: str = "none"          # event_log | pinned | cmdline | native_status | cwd | none
     detail: str = ""
 
     @property
@@ -738,6 +768,36 @@ def resolve_window(wid: str, base: Path | None = None, pane: Pane | None = None,
                               f"the event log's newest session for {wid}")
         tried.append(f"the event log names session {sid} for {wid}, but no "
                      f"{sid}.jsonl exists under the projects dir")
+
+    # CMX-295: the durable counterpart to tier 1 above — chela's own pin from spawn time,
+    # which cannot age out of the event log's fleet-wide ring the way the sole correctly-
+    # filed record for a same-cwd window can. Only consulted for a LIVE pane (a closed
+    # window has nothing to bound the pin against), and only trusted once it clears the
+    # same kind of floor tier 1 does: the pinned session's transcript must have been
+    # written to at or after the pane's CURRENT process started, or the pin belongs to a
+    # dead predecessor that once occupied this window (a manual relaunch after a crash,
+    # never routed back through :func:`chela.spawn.spawn_window`) and is refused.
+    if pane is not None and pane.started is not None:
+        from chela import sessionids  # lazy: one JSON file read, only reached on a miss above
+        pinned = sessionids.session_id_for(wid)
+        if pinned:
+            path = transcript_for_session(pinned, base)
+            if path is not None:
+                try:
+                    fresh_enough = path.stat().st_mtime >= pane.started
+                except OSError:
+                    fresh_enough = False
+                if fresh_enough:
+                    return Resolution(wid, pinned, path, "pinned",
+                                      f"chela pinned session {pinned} for {wid} at spawn "
+                                      "(chela.sessionids) — outlives the event log's ring")
+                tried.append(
+                    f"chela pinned session {pinned} for {wid} at spawn, but its transcript "
+                    "stopped growing before the pane's CURRENT process started — REFUSED: "
+                    "the pin belongs to a dead predecessor that once occupied this window")
+            else:
+                tried.append(f"chela pinned session {pinned} for {wid} at spawn, but no "
+                             f"{pinned}.jsonl exists under the projects dir")
 
     if pane and pane.resumed:
         path = transcript_for_session(pane.resumed, base)
