@@ -40,3 +40,11 @@ title and comments, with no assertion anywhere in the suite reading `.modal-over
 cascaded `display`. Closed by mounting the sliced `#modal-task` fragment with the real
 `style.css` in a dedicated jsdom instance and asserting `getComputedStyle(modal).display`
 flips from `none` to `flex` across the class toggle.
+
+**Seen again:** CMX-298, PR #372, round 5 (2026-08-16) — same shape, a different chip.
+`tests/kanban_flatten.test.mjs`'s parked-card tests (5, 6, 8, 9) all read the `🔒`
+`.kanban-parked-reason` chip via `textContent`/`querySelector`/`getAttribute`; none loaded
+`style.css`, so a mutation adding `display: none` to that rule left every one of them green.
+Closed the same way — a fresh `pretendToBeVisual` jsdom mounting the parked card's real
+`outerHTML` under the real `style.css`, reading `getComputedStyle` for `display`, `visibility`,
+and the `overflow`/`text-overflow`/`white-space` triple that same rule also carries.

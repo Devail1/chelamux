@@ -182,7 +182,7 @@ That shape comes from a **different, newer hook event** this repo's own schema d
 (`{index, delta, final, …}`), whose `hookSpecificOutput.displayContent` response
 "replaces the delta on screen without changing the stored message" — display-only, by
 design, so it can never confuse the model the way editing `systemMessage` content would.
-Stamping `index == 0`'s `delta` with a `"🕐 HH:MM:SS "` prefix is what makes the marker
+Stamping `index == 0`'s `delta` with a `"[HH:MM] "` prefix is what makes the marker
 part of the message's own first line, verified against `zoharbabin/claude-code-message-
 timestamps`' own `hooks/scripts/timestamp-display.sh` (fetched via `gh api`), which does
 exactly this. `MessageDisplay` needs Claude Code 2.1.152+; chela's install is pinned

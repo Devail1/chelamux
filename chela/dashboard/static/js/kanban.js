@@ -177,6 +177,27 @@ function _kCard(card) {
         </div>
     </div>`;
     }
+    if (card.status === 'parked') {
+        // A PARKED TODO.md bullet (`<!-- blocked: ... -->`) — real tracked work, in
+        // the Backlog lane alongside BACKLOG.md ideas (kanbanlanemodel.js's
+        // laneOf('parked')) but never rendered as one: no Promote button (it is
+        // already in TODO.md — there is nowhere to promote it TO) and no delete
+        // button (the title here is the bare, comment-stripped text; the source-line
+        // delete endpoint matches against the file's literal bullet text, which still
+        // carries the `<!-- blocked -->` marker, so a delete-by-title here would
+        // silently fail to match, or worse, match the wrong line).
+        const reason = card.reason
+            ? `<span class="kanban-parked-reason" title="${attrEsc(card.reason)}">🔒 ${escHtml(card.reason)}</span>`
+            : `<span class="kanban-parked-reason">🔒 parked</span>`;
+        return `
+    <div class="kanban-card kanban-card-parked" data-kidx="${kidx}" onclick="chela.openTaskModalFromCard(this)">
+        <div class="kanban-card-title">${title}</div>
+        <div class="kanban-card-meta">
+            <span class="kanban-wf-chip">${wf}</span>
+            ${reason}
+        </div>
+    </div>`;
+    }
     const tid = escHtml(card.task_id);
     const displayId = escHtml(_runDisplayId(card));
     const err = card.last_error
@@ -489,14 +510,15 @@ function _kCol(key, label, cards) {
 }
 
 function _kanbanFlatten(data) {
-    // Build eight per-status buckets across all workflows: Backlog (BACKLOG.md
-    // bullets, read-only) + seven run/task statuses (`closed` — CMX-265 — is the
-    // newest). _lanesFromBuckets() below is what regroups these into the 6
-    // rendered lanes, so this function still reads the API exactly as before.
-    // workflow_path is injected onto open_tasks + backlog_items so cards in
-    // those buckets still get a workflow chip (the API exposes it only at the
-    // workflow level).
-    const buckets = { backlog: [], open: [], claimed: [], running: [], awaiting_review: [], failed: [], done: [], closed: [] };
+    // Build nine per-status buckets across all workflows: Backlog (BACKLOG.md
+    // bullets, read-only) + Parked (TODO.md's `<!-- blocked: ... -->` bullets,
+    // also read-only — the newest bucket) + seven run/task statuses (`closed` —
+    // CMX-265 — was the previous newest). _lanesFromBuckets() below is what
+    // regroups these into the 6 rendered lanes, so this function still reads the
+    // API exactly as before. workflow_path is injected onto open_tasks +
+    // backlog_items + parked_tasks so cards in those buckets still get a
+    // workflow chip (the API exposes it only at the workflow level).
+    const buckets = { backlog: [], parked: [], open: [], claimed: [], running: [], awaiting_review: [], failed: [], done: [], closed: [] };
     const wfs = [];
     for (const wf of (data.workflows || [])) {
         wfs.push(wf.path);
@@ -506,6 +528,19 @@ function _kanbanFlatten(data) {
                 title: b.text,
                 section: b.section,
                 file: b.file,
+                workflow_path: wf.path,
+                project_key: wf.project_key || null,
+            });
+        }
+        for (const t of (wf.parked_tasks || [])) {
+            buckets.parked.push({
+                status: 'parked',
+                task_id: t.id,
+                title: t.title,
+                file: t.file,
+                line_number: t.line_number,
+                raw: t.raw,
+                reason: t.reason,
                 workflow_path: wf.path,
                 project_key: wf.project_key || null,
             });
@@ -561,14 +596,15 @@ function _kanbanFlatten(data) {
 }
 
 // Bucket key order fixes the WITHIN-lane concat order for lanes that combine
-// more than one bucket — 'running' before 'claimed' (In Progress = running,
-// then claimed) and 'awaiting_review' before 'failed' (Review = the review
-// loop's cards, which already carry their own awaiting_review/
-// changes_requested/needs_human status per _kanbanFlatten's comment above,
-// followed by failed). The LANE each bucket lands in still comes from
-// laneOf() — this array only controls ordering within a lane, never which
-// lane a bucket is assigned to.
-const _KANBAN_BUCKET_ORDER = ['backlog', 'open', 'running', 'claimed', 'awaiting_review', 'failed', 'done', 'closed'];
+// more than one bucket — 'backlog' before 'parked' (Backlog = the BACKLOG.md
+// ideas first, then TODO.md's parked bullets), 'running' before 'claimed' (In
+// Progress = running, then claimed) and 'awaiting_review' before 'failed'
+// (Review = the review loop's cards, which already carry their own
+// awaiting_review/changes_requested/needs_human status per _kanbanFlatten's
+// comment above, followed by failed). The LANE each bucket lands in still
+// comes from laneOf() — this array only controls ordering within a lane,
+// never which lane a bucket is assigned to.
+const _KANBAN_BUCKET_ORDER = ['backlog', 'parked', 'open', 'running', 'claimed', 'awaiting_review', 'failed', 'done', 'closed'];
 
 // Regroups _kanbanFlatten's 8 per-status buckets into the 6 rendered lanes.
 // No card is dropped or duplicated: every bucket key above is consumed

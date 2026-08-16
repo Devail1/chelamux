@@ -19,6 +19,12 @@ history lives in `git log`.
   read-only endpoints (`/api/agents/<wid>/diff`, `/api/agents/<wid>/diff/patch`) and
   works for any git checkout a session's window is sitting in — a dispatcher worktree
   or a plain attended checkout alike, no dispatcher bookkeeping required. (CMX-299, #373)
+### Changed
+
+- **The live-terminal message timestamp is quieter.** The `MessageDisplay` marker CMX-285
+  added dropped seconds and its clock emoji — `[HH:MM]` in place of `🕐 HH:MM:SS` — since
+  the marker's job is "roughly when did this land," not a stopwatch, and a variable-width
+  glyph at the start of every message read as content rather than as a marker. (CMX-297)
 
 ## [0.6.0] — 2026-08-15
 

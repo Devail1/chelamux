@@ -223,6 +223,91 @@ test('clicking either of TWO REAL rendered BACKLOG cards — _kCard\'s OTHER ren
         `task modal title does not match backlog card B (still showing card A, or a stale card) — got: "${titleEl.innerHTML}"`);
 });
 
+test('clicking either of TWO REAL rendered PARKED cards — _kCard\'s THIRD renderer, added by CMX-298 — opens the REAL task modal wired to THAT card, with its `raw` bullet text intact through the JS flatten hop', () => {
+    // _kCard now returns from THREE places (run-backed, backlog, parked). The two tests
+    // above each cover one of the first two branches; this is the third, and it carries
+    // its own risk the other two don't: a parked task object has no `brief` and no
+    // `body`, so taskmodalmodel.js's briefSource(item) (brief -> body -> raw) has `raw`
+    // as its ONLY source for the modal's brief pane. tests/test_taskmodal_data.py pins
+    // `raw` surviving the /api/dispatcher hop (server side); nothing before this pinned
+    // it surviving _kanbanFlatten's OWN `raw: t.raw` copy (client side) — the judge
+    // proved nulling that line left every existing test green, because none of them
+    // read the flattened card object or opened the modal for a parked card.
+    //
+    // Same shape-38 counterweight as the backlog test above: two parked cards, same
+    // render, click both, assert each shows ITS OWN title AND its own raw-sourced brief
+    // text. A hardcoded index or a card missing its `raw` payload can satisfy at most
+    // one assertion below, never both for both cards.
+    renderKanban({
+        configured: true,
+        workflows: [{
+            path: '/x/WORKFLOW.md', project_key: 'CMX',
+            open_tasks: [], active_runs: [], awaiting_review_runs: [], recent_runs: [], backlog_items: [],
+            parked_tasks: [
+                {
+                    id: 'p-card-a', title: 'parked bullet A', file: 'TODO.md', line_number: 10,
+                    raw: 'the RAW body unique to parked card A', reason: 'waiting on fixtures',
+                },
+                {
+                    id: 'p-card-b', title: 'parked bullet B', file: 'TODO.md', line_number: 20,
+                    raw: 'the RAW body unique to parked card B', reason: 'waiting on review',
+                },
+            ],
+        }],
+    });
+
+    const modal = document.getElementById('modal-task');
+    modal.classList.remove('active');
+
+    const cards = document.querySelectorAll('.kanban-card-parked');
+    assert.equal(cards.length, 2,
+        'setup: expected exactly 2 rendered parked cards — check the parked_tasks fixture above');
+    const [cardA, cardB] = cards;
+    assert.match(cardA.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
+        'parked card A is not wired to chela.openTaskModalFromCard(this) — this is the THIRD _kCard ' +
+        'renderer, not covered by the run-backed or backlog click tests above');
+    assert.match(cardB.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
+        'parked card B is not wired to chela.openTaskModalFromCard(this)');
+    assert.notEqual(cardA.dataset.kidx, cardB.dataset.kidx,
+        'setup: parked card A and B claimed the SAME data-kidx — the fixture above is not rendering two ' +
+        'distinct cards');
+
+    // 🔴 CLICK A
+    clickOnclick(cardA);
+    assert.equal(modal.classList.contains('active'), true,
+        'clicking parked card A never opened the task modal — the parked branch\'s onclick wiring is broken');
+
+    let titleEl = document.querySelector('#task-modal-content .task-modal-title');
+    assert.ok(titleEl, 'the task modal opened with no .task-modal-title rendered');
+    assert.equal(titleEl.innerHTML, 'parked bullet A',
+        `task modal title does not match parked card A — got: "${titleEl.innerHTML}"`);
+
+    // 🔴 GUARD: raw must survive _kanbanFlatten's copy onto the card object. A parked
+    // task has no brief/body, so this is the ONLY way its brief pane can show anything
+    // but "No brief recorded for this task."
+    let briefEl = document.querySelector('#task-modal-content .task-modal-brief');
+    assert.ok(briefEl, 'the task modal opened with no .task-modal-brief rendered');
+    assert.match(briefEl.textContent, /the RAW body unique to parked card A/,
+        `the modal's brief pane does not show parked card A's raw bullet text — kanban.js is dropping ` +
+        `\`raw\` on the _kanbanFlatten hop — got: "${briefEl.textContent}"`);
+
+    // 🔴 CLICK B — SAME render, a DIFFERENT clicked element.
+    clickOnclick(cardB);
+    assert.equal(modal.classList.contains('active'), true,
+        'the task modal closed or never re-opened after clicking parked card B');
+
+    titleEl = document.querySelector('#task-modal-content .task-modal-title');
+    assert.ok(titleEl, 'the task modal opened with no .task-modal-title rendered');
+    assert.equal(titleEl.innerHTML, 'parked bullet B',
+        `task modal title does not match parked card B (still showing a stale/wrong card) — got: "${titleEl.innerHTML}"`);
+
+    briefEl = document.querySelector('#task-modal-content .task-modal-brief');
+    assert.ok(briefEl, 'the task modal opened with no .task-modal-brief rendered');
+    assert.match(briefEl.textContent, /the RAW body unique to parked card B/,
+        `the modal's brief pane does not show parked card B's raw bullet text (still showing card A's, ` +
+        `or dropped entirely) — got: "${briefEl.textContent}"`);
+});
+
 test('the REAL #modal-task VISIBLY appears when .active is added — .modal-overlay.active cascades to display:flex under the REAL style.css, not just a class toggling with nothing rendering it', () => {
     // The click tests above assert `modal.classList.contains('active')` —
     // that the CLASS was added. Neither one asserts the OTHER half of

@@ -663,10 +663,10 @@ def test_message_display_response_stamps_only_the_first_batch():
         "displayContent": first["hookSpecificOutput"]["displayContent"],
     }}
     content = first["hookSpecificOutput"]["displayContent"]
-    assert content.startswith("🕐 ")
+    assert content.startswith("[")
     assert content.endswith(" Sure, on it.")
-    stamp = content.removeprefix("🕐 ").removesuffix(" Sure, on it.")
-    assert len(stamp) == 8 and stamp[2] == ":" and stamp[5] == ":"  # HH:MM:SS
+    stamp = content.removesuffix(" Sure, on it.")
+    assert len(stamp) == 7 and stamp[0] == "[" and stamp[3] == ":" and stamp[6] == "]"
 
     later = hooks.message_display_response(
         {"hook_event_name": "MessageDisplay", "index": 1, "delta": " and it's done."})
@@ -674,24 +674,24 @@ def test_message_display_response_stamps_only_the_first_batch():
 
 
 def test_message_display_response_asks_the_module_clock_not_a_fixed_string(monkeypatch):
-    """A fixed string like ``"00:00:00"`` satisfies the HH:MM:SS shape check above just as
+    """A fixed string like ``"00:00"`` satisfies the HH:MM shape check above just as
     well as a real clock — that gap is exactly what let a frozen-clock mutation survive
     (docs/DEFEAT_SHAPES.md). Monkeypatching ``hooks.time.strftime`` and asserting the exact
     rendered value pins THAT the module's own clock was asked, but a stub of the form
-    ``lambda fmt: "12:34:56"`` accepts and discards ``fmt`` — so it does not pin WHAT was
-    asked for, and ``time.strftime("%d:%m:%y")`` (a date, not a time) satisfies both the
-    stub and the HH:MM:SS shape check equally well (docs/DEFEAT_SHAPES.md shape 18).
+    ``lambda fmt: "12:34"`` accepts and discards ``fmt`` — so it does not pin WHAT was
+    asked for, and ``time.strftime("%d:%m")`` (a date, not a time) satisfies both the
+    stub and the HH:MM shape check equally well (docs/DEFEAT_SHAPES.md shape 18).
     Capturing the ``fmt`` argument closes that: it pins the format string itself, not
     merely the stubbed return value."""
     captured_fmt = []
     monkeypatch.setattr(hooks.time, "strftime",
-                         lambda fmt: captured_fmt.append(fmt) or "12:34:56")
+                         lambda fmt: captured_fmt.append(fmt) or "12:34")
 
     resp = hooks.message_display_response(
         {"hook_event_name": "MessageDisplay", "index": 0, "delta": "hi"})
 
-    assert captured_fmt == ["%H:%M:%S"]
-    assert resp["hookSpecificOutput"]["displayContent"] == "🕐 12:34:56 hi"
+    assert captured_fmt == ["%H:%M"]
+    assert resp["hookSpecificOutput"]["displayContent"] == "[12:34] hi"
 
 
 def test_message_display_response_tolerates_a_missing_or_non_string_delta():
@@ -705,10 +705,10 @@ def test_message_display_response_tolerates_a_missing_or_non_string_delta():
         resp = hooks.message_display_response(
             {"hook_event_name": "MessageDisplay", "index": 0, "delta": delta})
         content = resp["hookSpecificOutput"]["displayContent"]
-        assert content.startswith("🕐 ")
-        stamp = content[len("🕐 "):-1]
-        assert len(stamp) == 8 and stamp[2] == ":" and stamp[5] == ":"  # HH:MM:SS
-        assert content == f"🕐 {stamp} "  # a trailing "None"/"42"/"['oops']" fails this
+        assert content.startswith("[")
+        stamp = content[:-1]
+        assert len(stamp) == 7 and stamp[3] == ":" and stamp[6] == "]"  # [HH:MM]
+        assert content == f"{stamp} "  # a trailing "None"/"42"/"['oops']" fails this
 
 
 # --- the endpoint ----------------------------------------------------------------
@@ -768,7 +768,7 @@ def test_endpoint_stamps_a_timestamp_on_the_message_display_hook(client, monkeyp
     body = resp.get_json()
     content = body["hookSpecificOutput"]["displayContent"]
     assert body["hookSpecificOutput"]["hookEventName"] == "MessageDisplay"
-    assert content.startswith("🕐 ")
+    assert content.startswith("[")
     assert content.endswith(" On it.")
 
     # UNLIKE every other hook: never ingested. `MessageDisplay` fires once per streamed

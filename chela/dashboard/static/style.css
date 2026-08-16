@@ -2284,6 +2284,19 @@ input[type="text"]:focus, textarea:focus, select:focus {
     font-size: 10px;
 }
 
+.kanban-parked-reason {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 10px;
+    padding: 0 8px;
+    font-size: 10px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .kanban-promote-btn {
     font-size: 9px;
     padding: 1px 6px;
@@ -2313,6 +2326,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 
 .kanban-card-backlog         { border-left-color: var(--border); opacity: 0.85; background: transparent; }
+.kanban-card-parked          { border-left-color: var(--text-dim); opacity: 0.85; background: transparent; }
 .kanban-card-open            { border-left-color: var(--text-dim); }
 .kanban-card-claimed         { border-left-color: var(--accent); }
 .kanban-card-running         { border-left-color: var(--green); }
