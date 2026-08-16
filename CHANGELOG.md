@@ -18,7 +18,7 @@ history lives in `git log`.
   counts), and a click-through unified diff for any one of them. Backed by two new
   read-only endpoints (`/api/agents/<wid>/diff`, `/api/agents/<wid>/diff/patch`) and
   works for any git checkout a session's window is sitting in — a dispatcher worktree
-  or a plain attended checkout alike, no dispatcher bookkeeping required. (CMX-299)
+  or a plain attended checkout alike, no dispatcher bookkeeping required. (CMX-299, #373)
 
 ## [0.6.0] — 2026-08-15
 
