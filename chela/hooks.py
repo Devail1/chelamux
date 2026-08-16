@@ -158,17 +158,19 @@ def message_display_response(body: dict) -> dict:
     ``displayContent`` as "display the original," so a later chunk's text renders exactly
     as it would have without this hook at all.
 
-    Local time, ``HH:MM:SS`` — the same clock and format the Feed already renders
-    timestamps in (``chela/main.py``'s event log view), and the format CMX-277's
-    ``timestamp_response`` (superseded by this) used.
+    Local time, ``[HH:MM]`` — no seconds (the marker's job is "roughly when did this
+    land," not a stopwatch) and no emoji (a variable-width glyph at the start of every
+    message; brackets are narrower, monospace-stable, and read as a marker rather than as
+    content). CMX-297; the format CMX-277's ``timestamp_response`` (superseded by this)
+    used ``HH:MM:SS``.
     """
     if body.get("index") != 0:
         return {}
     delta = body.get("delta")
     delta = delta if isinstance(delta, str) else ""
-    ts = time.strftime("%H:%M:%S")
+    ts = time.strftime("%H:%M")
     return {"hookSpecificOutput": {"hookEventName": "MessageDisplay",
-                                    "displayContent": f"🕐 {ts} {delta}"}}
+                                    "displayContent": f"[{ts}] {delta}"}}
 
 
 def recap_command(port: int | None = None, host: str = "127.0.0.1") -> str:
