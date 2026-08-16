@@ -459,10 +459,35 @@ test('renderKanban: the parked card\'s 🔒 reason chip is actually VISIBLE unde
     const cssDom = new JSDOM(
         `<!doctype html><html><head><style>${STYLE_CSS}</style></head><body>${parkedCard.outerHTML}</body></html>`,
         { pretendToBeVisual: true });
+    const cardEl = cssDom.window.document.querySelector('.kanban-card-parked');
+    assert.ok(cardEl, 'sliced parked card markup has no .kanban-card-parked element');
     const reasonEl = cssDom.window.document.querySelector('.kanban-parked-reason');
     assert.ok(reasonEl, 'sliced parked card markup has no .kanban-parked-reason element');
 
+    // The CARD itself, not just the reason chip inside it — collapsing the card's own
+    // opacity/display/visibility to invisible erases the title and workflow chip along
+    // with the 🔒 cue, and nothing that reads textContent/querySelector/classList (CSS
+    // cannot touch any of those) would ever notice.
+    const cardStyle = cssDom.window.getComputedStyle(cardEl);
+    assert.notEqual(parseFloat(cardStyle.opacity), 0,
+        'the .kanban-card-parked element itself has opacity:0 under the REAL style.css — the whole card ' +
+        '(title, workflow chip and 🔒 cue together) is invisible, not merely the reason chip');
+    assert.notEqual(cardStyle.display, 'none',
+        'the .kanban-card-parked element itself is display:none under the REAL style.css — the parked ' +
+        'card never reaches the screen at all');
+    assert.notEqual(cardStyle.visibility, 'hidden',
+        'the .kanban-card-parked element itself is visibility:hidden under the REAL style.css — the ' +
+        'parked card never reaches the screen at all');
+
     const style = cssDom.window.getComputedStyle(reasonEl);
+    // A non-zero font-size is asserted directly (rather than as one more equality in the
+    // list below) because ANY of this rule's declarations collapsing the glyph to zero
+    // size defeats the chip the same way display:none does — enumerating one property at
+    // a time is a losing game against the next single-value edit.
+    assert.notEqual(parseFloat(style.fontSize), 0,
+        'the .kanban-parked-reason chip has font-size:0 under the REAL style.css — the 🔒 glyph and the ' +
+        'reason text are collapsed to nothing on screen even though the element is present, non-display:none ' +
+        'and non-visibility:hidden');
     assert.notEqual(style.display, 'none',
         'the .kanban-parked-reason chip is display:none under the REAL style.css — the 🔒 cue is in the ' +
         'DOM but never rendered on screen, making a parked card visually indistinguishable from a plain ' +
