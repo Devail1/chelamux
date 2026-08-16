@@ -57,6 +57,23 @@ function _payload(recentRuns, overrides = {}) {
     };
 }
 
+function _multiWfPayload(workflows) {
+    return {
+        configured: true,
+        workflows: workflows.map((wf) => ({
+            path: '/x/WORKFLOW.md',
+            project_key: 'CMX',
+            open_tasks: [],
+            backlog_items: [],
+            parked_tasks: [],
+            active_runs: [],
+            awaiting_review_runs: [],
+            recent_runs: [],
+            ...wf,
+        })),
+    };
+}
+
 function _run(overrides) {
     return {
         task_id: 't1', title: 'a task', status: 'closed',
@@ -289,6 +306,50 @@ test('renderKanban: within the Backlog lane, a backlog card renders before a par
         `expected the backlog card before the parked card, got backlog at ${backlogIdx} and parked at ${parkedIdx}`);
 });
 
+// --- 7b. 🔴 GUARD (round 4, PR #372) — backlog-before-parked ordering holds across ---
+// --- WORKFLOW boundaries, not just within one workflow's own push order --------------
+//
+// _kanbanFlatten keeps 'backlog' and 'parked' as SEPARATE buckets (see the comment
+// above _KANBAN_BUCKET_ORDER); _lanesFromBuckets then concatenates the WHOLE backlog
+// bucket before the WHOLE parked bucket. Test 7 above only uses a SINGLE workflow, so
+// a mutation that routes parked_tasks into `buckets.backlog` instead of its own
+// `buckets.parked` is invisible there: with one workflow, backlog_items are pushed
+// before parked_tasks regardless of which bucket they land in, so the DOM order comes
+// out identical either way — the judge proved exactly this. This drives TWO
+// workflows, with the EARLIER workflow (in iteration order) contributing only the
+// parked task and the LATER workflow contributing only the backlog item — the real,
+// separate-bucket behaviour still renders backlog-before-parked (bucket order wins
+// over iteration order), but the collapsed-bucket mutation preserves iteration order
+// instead and renders the parked card first.
+
+test('renderKanban: a backlog card from a LATER workflow still renders before a parked card from an EARLIER one', () => {
+    renderKanban(_multiWfPayload([
+        {
+            path: '/x/WORKFLOW-A.md',
+            parked_tasks: [{
+                id: 'p1', title: 'a parked task', file: '/x/TODO.md',
+                line_number: 3, raw: '- [ ] ...', reason: null,
+            }],
+        },
+        {
+            path: '/x/WORKFLOW-B.md',
+            backlog_items: [{ text: 'a backlog idea', section: null, file: '/x/BACKLOG.md' }],
+        },
+    ]));
+
+    const cardsEl = document.querySelector('.kanban-col-backlog .kanban-cards');
+    assert.ok(cardsEl, '.kanban-col-backlog has no .kanban-cards element');
+
+    const kids = [...cardsEl.children];
+    const backlogIdx = kids.findIndex((el) => el.classList.contains('kanban-card-backlog'));
+    const parkedIdx = kids.findIndex((el) => el.classList.contains('kanban-card-parked'));
+    assert.ok(backlogIdx !== -1, 'no .kanban-card-backlog card rendered in the Backlog lane');
+    assert.ok(parkedIdx !== -1, 'no .kanban-card-parked card rendered in the Backlog lane');
+    assert.ok(backlogIdx < parkedIdx,
+        'expected the backlog card (from the LATER workflow) before the parked card (from the ' +
+        `EARLIER workflow) — bucket order should win over iteration order — got backlog at ${backlogIdx} and parked at ${parkedIdx}`);
+});
+
 // --- 8. 🔴 GUARD (CMX-298 round 3) — a parked card's blocked reason is HTML-escaped -
 //
 // BLOCKED_REASON_RE captures the `<!-- blocked: ... -->` text verbatim (repo-authored,
@@ -319,4 +380,44 @@ test('renderKanban: a parked card\'s blocked reason is HTML-escaped, not rendere
         'a parked card\'s reason rendered a live <img> element — escHtml() is missing on this interpolation');
     assert.match(reasonEl.innerHTML, /&lt;b&gt;evil&lt;\/b&gt;/,
         `the reason's markup was not escaped before reaching innerHTML — got: "${reasonEl.innerHTML}"`);
+});
+
+// --- 9. 🔴 GUARD (round 4, PR #372) — the reason is escaped on the title= ATTRIBUTE ---
+// --- hop too, not just the text hop ---------------------------------------------------
+//
+// The SAME untrusted reason string is interpolated a second time, three characters
+// earlier in the template than the escHtml() call test 8 pins, into the span's
+// `title=` attribute via attrEsc() — util.js's escHtml() PLUS a `"` -> `&quot;` step,
+// which is the only thing stopping a reason containing a double quote from closing
+// the attribute early and letting the rest of the reason land as raw markup/bogus
+// attributes on the same tag (e.g. `..." onmouseover=alert(1) x="`). Test 8's
+// fixture reason has no double quote in it, so dropping attrEsc() on THIS
+// interpolation is invisible to it: the span still parses, querySelector('b')/
+// ('img') are still null and innerHTML is unaffected.
+//
+// A naive `title.includes('"')` assertion does NOT catch this: jsdom's attribute
+// parser always DECODES entities on read, so `getAttribute('title')` returns the
+// same unescaped string `"a " b"` whether the source HTML correctly wrote
+// `&quot;` or not — the escaping only matters for where the browser's HTML
+// PARSER decides the attribute ends, not for what a later JS read reports back.
+// The observable difference is that without attrEsc(), the quote closes the
+// `title="..."` attribute right there, TRUNCATING it — so this asserts the
+// full reason text survives the round trip, not a prefix of it.
+
+test('renderKanban: a parked card\'s blocked reason is escaped on the title attribute too', () => {
+    const reason = 'stop here" then keep going <b>evil</b>';
+    renderKanban(_payload([], {
+        parked_tasks: [{
+            id: 'p1', title: 'a parked task', file: '/x/TODO.md',
+            line_number: 3, raw: '- [ ] x <!-- blocked: reason -->',
+            reason,
+        }],
+    }));
+
+    const reasonEl = document.querySelector('.kanban-card-parked .kanban-parked-reason');
+    assert.ok(reasonEl, 'the parked card has no .kanban-parked-reason element');
+    const title = reasonEl.getAttribute('title');
+    assert.equal(title, reason,
+        `the title attribute was truncated at the reason's embedded double quote — got: "${title}" — ` +
+        'attrEsc() is missing on this interpolation, letting the quote close the attribute early');
 });
