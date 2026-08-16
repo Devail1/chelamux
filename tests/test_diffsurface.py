@@ -55,6 +55,21 @@ def test_changed_files_repo_with_no_commits(tmp_path: Path):
     assert result["files"] == []
 
 
+def test_changed_files_bare_repo_is_not_a_work_tree(tmp_path: Path):
+    # 🔴 GUARD: `git rev-parse --is-inside-work-tree` EXITS 0 in a bare repo
+    # (verified: `git -C <bare.git> rev-parse --is-inside-work-tree` prints
+    # "false" and returns 0) — is_git_repo must read that printed answer, not
+    # just the exit code, or a bare repo (or any cwd inside a `.git` dir)
+    # would report is_git=True with an empty file list instead of is_git=False,
+    # which is exactly the "No changes" mis-report diffpanelmodel.js's
+    # summaryLabel comment says must never happen for a non-repo cwd.
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True)
+    assert diffsurface.is_git_repo(bare) is False
+    result = diffsurface.changed_files(bare)
+    assert result == {"is_git": False, "has_head": False, "files": [], "additions": 0, "deletions": 0}
+
+
 # --- the merged file list ----------------------------------------------------
 
 def test_changed_files_clean_worktree(repo: Path):
@@ -91,6 +106,29 @@ def test_changed_files_reports_modified_added_deleted_and_untracked(repo: Path):
     assert set(by_path) == {"tracked.txt", "to_delete.txt", "new_tracked.txt", "scratch.txt"}
     assert result["additions"] == sum(f["additions"] for f in result["files"])
     assert result["deletions"] == sum(f["deletions"] for f in result["files"])
+
+
+def test_changed_files_order_is_tracked_first_then_untracked_not_reversed(repo: Path):
+    # 🔴 GUARD: the module docstring promises the merged list comes back
+    # "ordered as git reports it (tracked changes first, then untracked)" —
+    # every assertion above collapses the result into a by-path dict or a
+    # set, which can't tell a correctly-ordered list from
+    # `list(reversed(...))`. Two tracked files (git reports diff paths in
+    # tree/lexicographic order, so "m_middle.txt" before "z_last.txt") plus
+    # one untracked path that sorts alphabetically BEFORE both of them
+    # ("a_untracked.txt") pins both halves at once: a reversal would put the
+    # untracked path first and swap the two tracked paths.
+    (repo / "m_middle.txt").write_text("m\n")
+    (repo / "z_last.txt").write_text("z\n")
+    _git(repo, "add", "m_middle.txt", "z_last.txt")
+    _git(repo, "commit", "-q", "-m", "seed more tracked files")
+    (repo / "m_middle.txt").write_text("m\nmodified\n")
+    (repo / "z_last.txt").write_text("z\nmodified\n")
+    (repo / "a_untracked.txt").write_text("new\n")
+
+    result = diffsurface.changed_files(repo)
+    paths = [f["path"] for f in result["files"]]
+    assert paths == ["m_middle.txt", "z_last.txt", "a_untracked.txt"], paths
 
 
 def test_changed_files_untracked_file_without_trailing_newline_still_counts_its_last_line(repo: Path):

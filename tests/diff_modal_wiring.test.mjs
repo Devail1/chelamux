@@ -47,7 +47,7 @@
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
-import { sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { clickOnclick, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
 // Sliced straight out of the REAL templates/index.html — not a hand-typed
 // copy — so a rename of `#modal-diff` (or the loss of `.modal-overlay`'s
@@ -176,6 +176,14 @@ test('a real click on the wall tile\'s "Files" chip opens the REAL #modal-diff, 
     assert.match(filesBtn.getAttribute('onclick') || '', /chela\.openDiffModal\('@1'\)/,
         'the Files chip is not wired to chela.openDiffModal');
 
+    // 🔴 GUARD (MUTATION #3): the chip is ICON-ONLY — its `title` attribute is
+    // its entire accessible name AND its only tooltip. An emptied title would
+    // leave the button with no visible-affordance regression the SVG-glyph
+    // check below can't catch (the icon can be present while the title is
+    // blank).
+    assert.equal(filesBtn.getAttribute('title'), 'Changed files',
+        'the Files chip lost its "Changed files" title — its only accessible name/tooltip');
+
     // 🔴 GUARD (MUTATION #4): the chip is icon-only — an emptied `git-compare`
     // glyph leaves a button with no visible affordance at all, invisible to
     // every assertion above (the onclick attribute is untouched either way).
@@ -247,6 +255,20 @@ test('a real click on the wall tile\'s "Files" chip opens the REAL #modal-diff, 
         'the patch view is missing the added line');
     assert.equal(patchView.querySelectorAll('.diff-line-del').length, 1,
         'the patch view is missing the removed line');
+
+    // 🔴 GUARD (MUTATION #5): the file list is single-select — opening a
+    // SECOND file must clear the first row's `.active` highlight. Only
+    // clicking one row (as above) can never exercise the deselect sweep
+    // (`$$('.diff-file-row.active').forEach(...remove('active'))`); a
+    // narrowed selector (e.g. `.active-never`) that never matches anything
+    // would leave both rows reading `.active` at once and stay invisible
+    // unless a SECOND row is actually clicked.
+    rows[1].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    await flush();
+    assert.equal(rows[0].classList.contains('active'), false,
+        'clicking a second file row did not clear the first row\'s .active highlight — the deselect sweep is broken');
+    assert.ok(rows[1].classList.contains('active'),
+        'clicking the second file row did not mark it active');
 
     // 🔴 GUARD (WIRING #2): closeDiffModal must close THIS #modal-diff node —
     // routing `closeModal` at the wrong id would leave the overlay `.active`
@@ -379,7 +401,14 @@ test("_loadDiffPatch's stale-flight guard: a /diff/patch response landing AFTER 
 
 test('a changed file path containing HTML metacharacters is escaped, not spliced raw, into the rendered file row', async () => {
     const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
-    const evilPath = '<img src=x onerror=alert(1)>.js';
+    // The trailing `"` is the metacharacter that matters for the
+    // data-diff-file ATTRIBUTE half of this test (below): escHtml alone
+    // does NOT escape quote characters (see util.js's own comment on it),
+    // so a path with no `"` in it can pass whether the row uses attrEsc or
+    // escHtml for that attribute — only a quote-bearing path can tell them
+    // apart. A path containing `"` is legal on Linux and can come straight
+    // out of `git ls-files --others` in an agent's worktree.
+    const evilPath = '<img src=x onerror=alert(1)>".js';
     const evilState = {
         is_git: true, has_head: true,
         files: [{ path: evilPath, status: 'modified', additions: 1, deletions: 0 }],
@@ -407,6 +436,17 @@ test('a changed file path containing HTML metacharacters is escaped, not spliced
             'the file path was parsed as real HTML — a <img> tag inside it was not escaped');
         assert.equal(pathEl.textContent, evilPath,
             'the rendered path text does not match the fetched path — escHtml is missing or mangled it');
+
+        // 🔴 GUARD (MUTATION #2): the SAME path is also spliced into the row's
+        // data-diff-file ATTRIBUTE (the value the click handler reads back and
+        // sends to /diff/patch) — that needs attrEsc, not escHtml, since
+        // escHtml leaves `"` unescaped. Using escHtml there breaks the
+        // attribute open at the `"` in evilPath, so the parsed-back
+        // dataset.diffFile comes back truncated instead of matching evilPath.
+        const row = document.querySelector('#diff-modal-content .diff-file-row');
+        assert.ok(row, 'no .diff-file-row element was rendered');
+        assert.equal(row.dataset.diffFile, evilPath,
+            'the row\'s data-diff-file attribute does not match the fetched path — it needs attrEsc (quote-safe), not escHtml, for an attribute value');
         window.chela.closeDiffModal();
     } finally {
         globalThis.fetch = originalFetch;
@@ -440,5 +480,71 @@ test('the Files chip escapes a wid containing a single quote so its onclick argu
         // restore the single-agent fixture every other test in this file depends on
         util.setAgentsCache(AGENTS);
         await terminals.renderTerminals();
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Round 4 (2026-08-16, PR #373 judge round 3) — two more surviving mutations:
+// the close button's own onclick attribute (the third dismissal route
+// index.html's own comment enumerates, after Escape and the backdrop — both
+// already covered above) was still never invoked, and _loadDiffPatch's error
+// arm (the server's own {'ok': false, 'error': ...} reason) was never armed
+// by any fixture, since every fetch stub in this file returns ok:true.
+// ---------------------------------------------------------------------------
+
+test('a real click on the #modal-diff close button (not a direct closeDiffModal() call) closes the diff modal', async () => {
+    const modal = document.getElementById('modal-diff');
+    const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
+    clickFilesChip(filesBtn);
+    await flush();
+    assert.equal(modal.classList.contains('active'), true, 'setup: the diff modal did not open');
+
+    // 🔴 GUARD: the close button's own onclick attribute is the THIRD
+    // dismissal route (after Escape and the backdrop, both proven above by
+    // a real dispatched event) — a dead-coded or detached onclick leaves it
+    // silently doing nothing while every other test in this file still
+    // passes.
+    const closeBtn = modal.querySelector('.task-modal-close');
+    assert.ok(closeBtn, 'the diff modal has no .task-modal-close button');
+    assert.match(closeBtn.getAttribute('onclick') || '', /chela\.closeDiffModal\(\)/,
+        'the close button is not wired to chela.closeDiffModal()');
+    clickOnclick(closeBtn);
+    assert.equal(modal.classList.contains('active'), false,
+        'a real click on the #modal-diff close button did not close it — its onclick is not wired (or dead-coded)');
+});
+
+test("_loadDiffPatch's error arm shows the server's own reason, not the empty-patch message", async () => {
+    const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
+    const SERVER_ERROR = 'not a changed file in this session';
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = url => {
+        const path = String(url);
+        if (path.startsWith('/api/agents/%401/diff/patch')) {
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: false, error: SERVER_ERROR }) });
+        }
+        return fakeFetch(url);
+    };
+    try {
+        clickFilesChip(filesBtn);
+        await flush();
+        const rows = document.querySelectorAll('#diff-modal-content .diff-file-row');
+        assert.equal(rows.length, 2, 'setup: the diff modal did not render the fetched file list');
+        const patchView = document.getElementById('diff-patch-view');
+
+        rows[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await flush();
+
+        // 🔴 GUARD: `if (false && (!res || res.ok === false))` dead-codes this
+        // whole branch — every OTHER fixture in this file returns ok:true, so
+        // nothing else can arm it. Dead-coded, an {ok: false, error: ...}
+        // response falls through to the success renderer and shows the
+        // generic empty-patch message instead of the server's real reason.
+        assert.match(patchView.textContent, new RegExp(SERVER_ERROR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+            "the patch view did not show the server's own error reason — _loadDiffPatch's error arm is not wired (or dead-coded)");
+        assert.doesNotMatch(patchView.textContent, /No diff text for this file\./,
+            'the patch view fell through to the empty-patch message instead of showing the server\'s error');
+        window.chela.closeDiffModal();
+    } finally {
+        globalThis.fetch = originalFetch;
     }
 });
