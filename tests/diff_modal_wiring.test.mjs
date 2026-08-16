@@ -219,6 +219,15 @@ test('a real click on the wall tile\'s "Files" chip opens the REAL #modal-diff, 
     assert.notEqual(chip(rows[0]).textContent, chip(rows[1]).textContent,
         'both rows rendered the same status label for two files with different statuses');
 
+    // 🔴 GUARD (MUTATION #3): the chip is a SINGLE LETTER (A/M/D/U/!) — its
+    // `title` is the entire expansion of that glyph and its only accessible
+    // name. Blanking it leaves a chip whose class/label assertions above stay
+    // green while the tooltip (and screen-reader name) silently disappears.
+    assert.equal(chip(rows[0]).getAttribute('title'), 'modified',
+        "a.py's status chip lost its title — its only accessible name for the glyph");
+    assert.equal(chip(rows[1]).getAttribute('title'), 'added',
+        "b.py's status chip lost its title — its only accessible name for the glyph");
+
     // 🔴 GUARD (round-3 judge finding #6): each row's own +A/−D pair must
     // reflect THAT file's own additions/deletions — the modal-level summary
     // below is a SUM across files, so it stays identical whether a per-row
@@ -242,7 +251,14 @@ test('a real click on the wall tile\'s "Files" chip opens the REAL #modal-diff, 
     // at all, since file rows have no onclick attribute of their own.
     const patchView = document.getElementById('diff-patch-view');
     assert.ok(patchView, 'no #diff-patch-view element was rendered');
-    rows[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    // 🔴 GUARD (MUTATION #2): dispatched on a CHILD span, not the <li> itself —
+    // the row is display:flex and every visible pixel a real click could land
+    // on belongs to a child (.diff-status-chip / .diff-file-path /
+    // .diff-file-stat). `e.target.matches('.diff-file-row')` only matches when
+    // e.target IS the row; `e.target.closest('.diff-file-row')` is required to
+    // resolve a click on any of its children, which is the only kind of click
+    // a real user can produce.
+    rows[0].querySelector('.diff-file-path').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     await flush();   // let _loadDiffPatch's /diff/patch fetch + _patchHtml resolve
 
     assert.ok(rows[0].classList.contains('active'),
@@ -263,7 +279,8 @@ test('a real click on the wall tile\'s "Files" chip opens the REAL #modal-diff, 
     // narrowed selector (e.g. `.active-never`) that never matches anything
     // would leave both rows reading `.active` at once and stay invisible
     // unless a SECOND row is actually clicked.
-    rows[1].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    // 🔴 GUARD (MUTATION #2): again on a child span, not the <li> — see above.
+    rows[1].querySelector('.diff-file-path').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     await flush();
     assert.equal(rows[0].classList.contains('active'), false,
         'clicking a second file row did not clear the first row\'s .active highlight — the deselect sweep is broken');
@@ -546,5 +563,165 @@ test("_loadDiffPatch's error arm shows the server's own reason, not the empty-pa
         window.chela.closeDiffModal();
     } finally {
         globalThis.fetch = originalFetch;
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Round 5 (2026-08-16, PR #373 judge round 4) — three more surviving
+// mutations: the patch view's OWN escape call (distinct from the file-list
+// escape closed above — same helper, different render site, and every
+// PATCH_TEXT fixture in this file is pure ASCII so the two are
+// indistinguishable there, see docs/defeat_shapes/29); and openDiffModal /
+// _loadDiffPatch each dead-coding the "clear the shared DOM target before the
+// new fetch resolves" reset, which the round-3/4 stale-flight tests above
+// can't catch because they only compare innerHTML BEFORE vs AFTER the late
+// response, never what that content actually IS (see docs/defeat_shapes/66).
+// ---------------------------------------------------------------------------
+
+test('a patch line containing HTML metacharacters is escaped, not spliced raw, into the rendered patch view', async () => {
+    const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
+    // Every other PATCH_TEXT fixture in this file is pure ASCII with no HTML
+    // metacharacter, so `${escHtml(line)}` and `${line}` render byte-identical
+    // output for it — this line is chosen specifically to diverge under the
+    // two.
+    const evilPatch = [
+        'diff --git a/a.py b/a.py',
+        'index abc1234..def5678 100644',
+        '--- a/a.py',
+        '+++ b/a.py',
+        '@@ -1,2 +1,2 @@',
+        ' context line',
+        '+<img src=x onerror=alert(1)>',
+    ].join('\n') + '\n';
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = url => {
+        const path = String(url);
+        if (path.startsWith('/api/agents/%401/diff/patch')) {
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, patch: evilPatch }) });
+        }
+        return fakeFetch(url);
+    };
+    try {
+        clickFilesChip(filesBtn);
+        await flush();
+        const rows = document.querySelectorAll('#diff-modal-content .diff-file-row');
+        assert.equal(rows.length, 2, 'setup: the diff modal did not render the fetched file list');
+        const patchView = document.getElementById('diff-patch-view');
+
+        rows[0].querySelector('.diff-file-path').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await flush();
+
+        // 🔴 GUARD (MUTATION #1): `${line}` instead of `${escHtml(line)}` in
+        // _patchHtml splices the raw patch line straight into the view's
+        // innerHTML — the `<img>` then parses as a REAL element instead of
+        // text.
+        assert.equal(patchView.querySelector('img'), null,
+            'a patch line was parsed as real HTML — an <img> tag inside it was not escaped');
+        const addLine = patchView.querySelector('.diff-line-add');
+        assert.ok(addLine, 'the patch view is missing the added line');
+        assert.equal(addLine.textContent, '+<img src=x onerror=alert(1)>',
+            'the rendered patch line text does not match the fetched line — escHtml is missing or mangled it on the patch half');
+        window.chela.closeDiffModal();
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('opening the diff modal for a DIFFERENT session clears the previous session\'s stale file list before the new /diff fetch resolves', async () => {
+    const modal = document.getElementById('modal-diff');
+    const content = document.getElementById('diff-modal-content');
+    const filesBtn1 = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
+
+    clickFilesChip(filesBtn1);
+    await flush();
+    assert.match(content.innerHTML, /a\.py/, "setup: session @1's file list did not render");
+
+    window.chela.closeDiffModal();
+    assert.equal(modal.classList.contains('active'), false, 'setup: the diff modal did not close');
+
+    util.setAgentsCache([...AGENTS, { name: 'w2', window_id: '@2', online: true }]);
+    await terminals.renderTerminals();
+    const filesBtn2 = document.querySelector('.term-ctx-bar[data-ctx-for="@2"] .gs-files');
+    assert.ok(filesBtn2, 'setup: no .gs-files chip rendered for session @2');
+
+    let resolveDiff2;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = url => {
+        const path = String(url);
+        if (path.endsWith('/api/agents/%402/diff')) {
+            return new Promise(resolve => {
+                resolveDiff2 = () => resolve({
+                    ok: true, status: 200,
+                    json: () => Promise.resolve({
+                        is_git: true, has_head: true,
+                        files: [{ path: 'c.py', status: 'added', additions: 1, deletions: 0 }],
+                        additions: 1, deletions: 0,
+                    }),
+                });
+            });
+        }
+        return fakeFetch(url);
+    };
+    try {
+        clickFilesChip(filesBtn2);
+        // 🔴 GUARD (MUTATION #4): `if (false && content) content.innerHTML =
+        // ...` dead-codes openDiffModal's reset — @2's /diff fetch is still IN
+        // FLIGHT here (deferred, not yet resolved), so the only way #diff-
+        // modal-content could already be clear of @1's file list is if the
+        // reset ran synchronously before the fetch was even issued.
+        assert.doesNotMatch(content.innerHTML, /a\.py/,
+            "session @1's stale file list is still showing while @2's /diff fetch is in flight — openDiffModal did not clear #diff-modal-content before fetching");
+
+        resolveDiff2();
+        await flush();
+        assert.match(content.innerHTML, /c\.py/, "session @2's own file list never rendered");
+        assert.doesNotMatch(content.innerHTML, /a\.py/, "session @1's stale file list survived into @2's rendered content");
+    } finally {
+        globalThis.fetch = originalFetch;
+        window.chela.closeDiffModal();
+        util.setAgentsCache(AGENTS);
+        await terminals.renderTerminals();
+    }
+});
+
+test('clicking a DIFFERENT file row clears the previous file\'s stale patch text before the new /diff/patch fetch resolves', async () => {
+    const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
+    clickFilesChip(filesBtn);
+    await flush();
+    const rows = document.querySelectorAll('#diff-modal-content .diff-file-row');
+    assert.equal(rows.length, 2, 'setup: the diff modal did not render the fetched file list');
+    const patchView = document.getElementById('diff-patch-view');
+
+    rows[0].querySelector('.diff-file-path').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    await flush();
+    assert.match(patchView.textContent, /old line/, "setup: a.py's patch did not render");
+
+    let resolvePatch2;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = url => {
+        const path = String(url);
+        if (path.startsWith('/api/agents/%401/diff/patch')) {
+            return new Promise(resolve => {
+                resolvePatch2 = () => resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, patch: 'diff --git a/b.py b/b.py\n+brand new line\n' }) });
+            });
+        }
+        return fakeFetch(url);
+    };
+    try {
+        rows[1].querySelector('.diff-file-path').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        // 🔴 GUARD (MUTATION #5): `if (false) view.innerHTML = ...` dead-codes
+        // _loadDiffPatch's reset — b.py's /diff/patch fetch is still IN FLIGHT
+        // here (deferred, not yet resolved), so the only way #diff-patch-view
+        // could already be clear of a.py's patch is if the reset ran
+        // synchronously before the fetch was even issued.
+        assert.doesNotMatch(patchView.textContent, /old line/,
+            "a.py's stale patch text is still showing while b.py's /diff/patch fetch is in flight — _loadDiffPatch did not clear #diff-patch-view before fetching");
+
+        resolvePatch2();
+        await flush();
+        assert.match(patchView.textContent, /brand new line/, "b.py's own patch never rendered");
+    } finally {
+        globalThis.fetch = originalFetch;
+        window.chela.closeDiffModal();
     }
 });
