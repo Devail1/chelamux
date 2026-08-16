@@ -1,4 +1,4 @@
-## 62. A pub/sub listener's effect is reproduced by hand instead of the listener producing it
+## 69. A pub/sub listener's effect is reproduced by hand instead of the listener producing it
 
 **Assertion form:** a module exposes a subscribe/publish pair — `onXChange(fn)` registers a
 listener, some async action (`_apply(data)`) fires every registered listener when state
