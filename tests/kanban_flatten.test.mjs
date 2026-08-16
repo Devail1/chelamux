@@ -191,6 +191,26 @@ test('renderKanban: a parked TODO.md bullet renders as its own card in the Backl
         'the parked card does not show the task title');
     assert.match(parkedCard.textContent, /waiting on fixtures/,
         'the parked card does not show its blocked reason as visible text');
+
+    // 🔴 GUARD (round 2, PR #372): the 🔒 cue must render on the WITH-reason branch
+    // too, not just the reason-less fallback test 6 pins below. Dropping '🔒 ' from
+    // this ternary's other arm left the reason TEXT intact (the assertion above
+    // would still pass) while erasing the one thing that marks this a read-only
+    // parked card rather than an arbitrary chip of text.
+    const reasonEl = parkedCard.querySelector('.kanban-parked-reason');
+    assert.ok(reasonEl, 'the parked card has no .kanban-parked-reason element');
+    assert.match(reasonEl.textContent, /🔒/,
+        `a parked card WITH a reason must still show the 🔒 lock cue — got: "${reasonEl.textContent}"`);
+
+    // 🔴 GUARD (round 2, PR #372): _kanbanFlatten's own header comment claims
+    // workflow_path is injected onto parked_tasks so the card still gets a workflow
+    // chip. Without that injection, _wfName(undefined) renders the '?' fallback
+    // instead of the real workflow name derived from the fixture's wf.path
+    // ('/x/WORKFLOW.md' -> 'x') — this reads the rendered chip, not the source line.
+    const wfChip = parkedCard.querySelector('.kanban-wf-chip');
+    assert.ok(wfChip, 'the parked card has no .kanban-wf-chip element');
+    assert.equal(wfChip.textContent, 'x',
+        `parked card's workflow chip did not carry workflow_path — got: "${wfChip.textContent}"`);
 });
 
 // --- 6. ⭐ COUNTERWEIGHT — a parked card carries no Promote/delete affordance --------

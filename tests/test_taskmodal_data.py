@@ -132,6 +132,15 @@ def test_parked_tasks_surface_a_blocked_todo_bullet(monkeypatch, client, tmp_pat
     assert len(parked) == 1
     assert parked[0]["title"] == "add a test"
     assert parked[0]["reason"] == "waiting on fixtures"
+    # 🔴 GUARD (round 2, PR #372): the parked bullet's SOURCE COORDINATES must
+    # survive this hop too — kanban.js carries line_number/raw onto the card for
+    # the task-detail modal (there is no run yet, so no other way to jump to the
+    # source line). tests/test_markdown_parked.py pins line_number/raw at the
+    # PARSE layer only; without this, api_dispatcher could zero out or drop
+    # line_number/raw on the way into the JSON payload and every test above would
+    # still pass.
+    assert parked[0]["line_number"] == 4
+    assert parked[0]["raw"] == "- [ ] add a test <!-- blocked: waiting on fixtures -->"
 
 
 def test_parked_tasks_is_empty_when_nothing_is_blocked(monkeypatch, client, tmp_path):
