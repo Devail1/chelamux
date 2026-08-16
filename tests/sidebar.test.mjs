@@ -37,6 +37,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
@@ -102,6 +103,16 @@ before(async () => {
         // blanket-`{}` stub (every other test in this file relies on it staying
         // a no-op) needs those two paths to actually echo back an ok:true
         // envelope, exactly like the real endpoints in app.py.
+        //
+        // wid and name are deliberately DIFFERENT values here (never the same
+        // string body.wid echoed twice) — app.py's own
+        // _orchestrator_status_payload() returns wid = inbox.orchestrator_wid(...)
+        // (the @id) and name = store['orchestrator_name'] (the window's tmux
+        // NAME), two facts about the SAME window that are never equal in
+        // production. A fixture that echoes body.wid into both fields makes
+        // `orchestratorState().wid === a.window_id` and
+        // `orchestratorState().name === a.window_id` indistinguishable — nav.js
+        // reading the wrong one (DEFEAT_SHAPES #02) would be invisible here too.
         fetchImpl: (url, opts) => {
             const u = String(url);
             if (u.includes('/api/orchestrator/subscribe')) {
@@ -109,7 +120,7 @@ before(async () => {
                 return Promise.resolve({
                     ok: true, status: 200,
                     json: () => Promise.resolve({
-                        ok: true, wid: body.wid, name: body.wid, state: 'registered', why: '', queued: 0,
+                        ok: true, wid: body.wid, name: `${body.wid}-tmux-name`, state: 'registered', why: '', queued: 0,
                     }),
                 });
             }
@@ -217,27 +228,53 @@ test('colour is the SECOND channel, and it is colourblind-safe (Okabe-Ito)', () 
 // 'plain' — a session opened by hand — renders NO badge at all: asserting its
 // absence is the guard against a badge silently degrading into "shown on every
 // row", which would be as unreadable as no cue at all.
+//
+// CMX-300 rework round 1 (PR #374, judge finding 1): the previous version of every
+// test below called `orchestratorSubscribe()` and THEN hand-called
+// `nav.renderSidebarAgents(...)` itself — which re-renders the row regardless of
+// whether `onOrchestratorChange`'s listener ever fired, so neutering that listener
+// body (DEFEAT_SHAPES #50 — a renderer proven against hand-called arguments, the
+// real caller never run) stayed invisible. Every test below now renders ONCE,
+// before subscribing, and asserts the post-subscribe/post-release state with NO
+// further renderSidebarAgents call in between — the redraw has to come from the
+// real listener nav.js registers at module load (nav.js:447), or these go red.
 test('the orchestrator window gets an Orchestrator role badge — plain windows get none', async () => {
-    await orchestrator.orchestratorSubscribe('@1');
-    nav.renderSidebarAgents([
+    const rows = [
         agent('orch', { window_id: '@1' }),
         agent('other', { window_id: '@2' }),
-    ]);
+    ];
+    util.setAgentsCache(rows);
+    nav.renderSidebarAgents(rows);
+    assert.equal(rowFor('orch').querySelector('.ar-role'), null,
+        'a window rendered a role badge before it ever held the inbox slot');
+
+    // No renderSidebarAgents call here — onOrchestratorChange must be the thing
+    // that redraws the row off the REAL subscribe round trip.
+    await orchestrator.orchestratorSubscribe('@1');
+
     const badge = rowFor('orch').querySelector('.ar-role');
-    assert.ok(badge, 'the orchestrator window rendered no .ar-role badge at all');
+    assert.ok(badge, 'the orchestrator window rendered no .ar-role badge after subscribing — ' +
+        'onOrchestratorChange did not redraw the sidebar');
     assert.equal(badge.textContent, 'Orchestrator');
     assert.ok(badge.classList.contains('orchestrator'));
     assert.equal(rowFor('other').querySelector('.ar-role'), null,
         'a plain window rendered a role badge — plain sessions must render none');
+
+    // ...and releasing (no renderSidebarAgents call here either) must clear it.
     await orchestrator.orchestratorRelease('@1');
+    assert.equal(rowFor('orch').querySelector('.ar-role'), null,
+        'the Orchestrator badge survived orchestratorRelease — onOrchestratorChange ' +
+        'did not redraw the sidebar on release either');
 });
 
 test('a dispatcher-owned window gets a Dispatched role badge, distinct from Orchestrator', async () => {
     await orchestrator.orchestratorRelease('@1');   // no window holds the inbox slot
-    nav.renderSidebarAgents([
+    const rows = [
         agent('worker', { window_id: '@3', dispatched: true }),
         agent('manual', { window_id: '@4', dispatched: false }),
-    ]);
+    ];
+    util.setAgentsCache(rows);
+    nav.renderSidebarAgents(rows);
     const badge = rowFor('worker').querySelector('.ar-role');
     assert.ok(badge, 'a dispatched window rendered no .ar-role badge at all');
     assert.equal(badge.textContent, 'Dispatched');
@@ -247,15 +284,100 @@ test('a dispatcher-owned window gets a Dispatched role badge, distinct from Orch
 });
 
 test('holding BOTH the inbox slot and the dispatched flag reads as Orchestrator, not Dispatched', async () => {
-    await orchestrator.orchestratorSubscribe('@5');
-    nav.renderSidebarAgents([agent('both', { window_id: '@5', dispatched: true })]);
+    const rows = [agent('both', { window_id: '@5', dispatched: true })];
+    util.setAgentsCache(rows);
+    nav.renderSidebarAgents(rows);
+    assert.notEqual(rowFor('both').querySelector('.ar-role').textContent, 'Orchestrator',
+        'the row already read as Orchestrator before subscribing — fixture leaked state');
+
+    await orchestrator.orchestratorSubscribe('@5');   // no renderSidebarAgents call here
     assert.equal(rowFor('both').querySelector('.ar-role').textContent, 'Orchestrator');
     await orchestrator.orchestratorRelease('@5');
 });
 
-test('role colour is colourblind-safe and distinct from the window-type palette', () => {
-    ['#CC79A7', '#0072B2'].forEach(c =>
-        assert.ok(CSS.includes(c), `the role badge dropped the Okabe-Ito colour ${c}`));
+// CMX-300 rework round 1 (PR #374, judge finding 1, WIRING): a click on any pane's
+// orchestrator toggle (terminals.js) or the decisions dropdown (decisions.js) must
+// redraw BOTH the sidebar badge AND an already-open agent-detail panel — off the
+// SAME onOrchestratorChange listener, with no /api/agents refetch. Unlike the
+// tests above (which only ever check the sidebar), this one also opens the
+// agent-detail panel first and proves it updates too — the second half of
+// nav.js:447-450's listener body, and the second thing the WIRING finding named.
+// The agent-detail half of this same listener (nav.js:449, `if (_detailAgent)
+// renderAgentDetail();`) is NOT driven here: with TERMINALS_ON (this suite's
+// boot config), `selectAgent` on any window-id'd agent always routes to the
+// wall (terminals.js's focusPaneByWid -> selectView('terminals')) and never
+// falls through to showAgentDetail — see nav.js:140-151's own comment. An
+// agent-detail panel open for a window that ALSO holds the orchestrator slot
+// is therefore only reachable in a terminals-OFF deployment, which is a real,
+// separate configuration — covered by
+// tests/sidebar_agent_detail_orchestrator_wiring.test.mjs, which boots
+// `terminalsEnabled: false` specifically so `selectAgent` falls through.
+test('WIRING: onOrchestratorChange redraws the sidebar badge off one real subscribe/release round trip — no /api/agents refetch', async () => {
+    const rows = [agent('cmx300-wired', { window_id: '@9' })];
+    util.setAgentsCache(rows);
+    nav.renderSidebarAgents(rows);
+    assert.equal(rowFor('cmx300-wired').querySelector('.ar-role'), null,
+        'the row already carried a role badge before ever holding the inbox slot');
+
+    const prevFetch = globalThis.fetch;
+    let sawAgentsFetch = false;
+    globalThis.fetch = (url, opts) => {
+        if (String(url).includes('/api/agents') && !String(url).includes('/api/agents/context')) sawAgentsFetch = true;
+        return prevFetch(url, opts);
+    };
+    try {
+        // The ONLY thing that happens next is the real subscribe round trip — no
+        // renderSidebarAgents call from the test itself. If onOrchestratorChange's
+        // listener body is neutered (dead-coded), the badge never appears.
+        await orchestrator.orchestratorSubscribe('@9');
+
+        const badge = rowFor('cmx300-wired').querySelector('.ar-role');
+        assert.ok(badge && badge.textContent === 'Orchestrator',
+            'the sidebar badge did not update off the real subscribe round trip — onOrchestratorChange is not wired to renderSidebarAgents');
+        assert.equal(sawAgentsFetch, false,
+            'the badge redraw refetched /api/agents — it must redraw off the already-cached agent list, not re-poll');
+
+        await orchestrator.orchestratorRelease('@9');
+        assert.equal(rowFor('cmx300-wired').querySelector('.ar-role'), null,
+            'the badge survived orchestratorRelease — onOrchestratorChange did not redraw on release either');
+        assert.equal(sawAgentsFetch, false,
+            'the release redraw refetched /api/agents — it must redraw off the already-cached agent list, not re-poll');
+    } finally {
+        globalThis.fetch = prevFetch;
+    }
+});
+
+test('role colour is colourblind-safe and CASCADES onto the rendered badge — not just present in source', () => {
+    // The pre-existing type-cue colour test above is honestly a source-only
+    // assertion (there is no rendered node, built from this app's own layout, to
+    // read it back from there). This one doesn't have that excuse: it loads the
+    // REAL style.css into a fresh jsdom document (the same recipe
+    // tests/wire_live_css.test.mjs uses for CMX-120) and reads the CASCADED
+    // colour off a REAL `.ar-role` node. Renaming just the selector that binds the
+    // colour to the badge (`.ar-role.orchestrator` -> `.ar-role.orchestrator-x`,
+    // leaving both hex constants untouched — DEFEAT_SHAPES #05/#54) makes this go
+    // red even though a `CSS.includes(hex)` source check stays green.
+    const dom = new JSDOM(`<!doctype html><html><head><style>${CSS}</style></head><body>
+        <span class="ar-role orchestrator">Orchestrator</span>
+        <span class="ar-role dispatched">Dispatched</span>
+    </body></html>`, { pretendToBeVisual: true });
+    const orch = dom.window.document.querySelector('.ar-role.orchestrator');
+    const disp = dom.window.document.querySelector('.ar-role.dispatched');
+    const orchColor = dom.window.getComputedStyle(orch).color;
+    const dispColor = dom.window.getComputedStyle(disp).color;
+    assert.equal(orchColor, 'rgb(204, 121, 167)',   // #CC79A7
+        'the .ar-role.orchestrator selector no longer paints the rendered badge (colour lost or selector renamed)');
+    assert.equal(dispColor, 'rgb(0, 114, 178)',   // #0072B2
+        'the .ar-role.dispatched selector no longer paints the rendered badge (colour lost or selector renamed)');
+
+    // ...and distinct from the window-TYPE palette, as this test's own title claims.
+    const hexToRgb = hex => {
+        const n = parseInt(hex.slice(1), 16);
+        return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+    };
+    const typeColors = ['#56B4E9', '#009E73', '#E69F00'].map(hexToRgb);
+    assert.ok(!typeColors.includes(orchColor) && !typeColors.includes(dispColor),
+        'a role colour collides with a window-type colour — the two palettes must stay visually distinct');
 });
 
 // --- 1c. 🔴 every nav icon is a lucide SVG — one uniform box, no stray glyph --
@@ -435,6 +557,54 @@ test('the agent-detail "← Back" link also routes to the Wall from the FOUND br
     assert.ok(back, 'no .detail-back node rendered into #agent-detail (found branch, nav.js:608)');
     assert.match(back.getAttribute('onclick'), /chela\.selectView\('terminals'\)/,
         'the "← Back" link is not wired to chela.selectView(\'terminals\') on the found branch');
+});
+
+// CMX-300 rework round 1 (PR #374, judge finding 2): renderAgentDetail (nav.js:623)
+// adds a Role row (`['Role', escHtml(_ROLE_LABEL[_agentRole(a)])]`), but nothing in
+// this suite ever asserted the string 'Role' or its VALUE anywhere in #agent-detail
+// — the two "← Back" tests above only ever read `.detail-back`, so blanking the
+// row's value (keeping the label, dropping what it reports) stayed invisible. This
+// reads the row's own `.k`/`.v` pair back off the REAL rendered `.detail-grid`, for
+// both a plain session and a dispatched one (dispatched doesn't require
+// `window_id`, so it's reachable through the same no-window_id FOUND branch the
+// test above already establishes — see nav.js:230).
+function _detailRowValue(key) {
+    const k = [...document.querySelectorAll('#agent-detail .detail-grid .k')].find(el => el.textContent === key);
+    return k ? k.nextElementSibling.textContent : undefined;
+}
+
+test('the agent-detail panel renders a Role row with the resolved role label — plain', () => {
+    nav.renderNav();
+    if (!document.getElementById('hdr-next')) document.body.appendChild(document.createElement('span')).id = 'hdr-next';
+    if (!document.getElementById('hdr-updated')) document.body.appendChild(document.createElement('span')).id = 'hdr-updated';
+    if (!document.getElementById('agent-detail')) document.body.appendChild(document.createElement('div')).id = 'agent-detail';
+    util.setAgentsCache([{ name: 'cmx300-detail-plain', online: true }]);
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
+    try {
+        window.chela.selectAgent('cmx300-detail-plain');
+    } finally {
+        globalThis.fetch = prevFetch;
+    }
+    assert.equal(_detailRowValue('Role'), 'Plain session',
+        'the Role row is missing, or does not report Plain session, for a plain agent-detail panel');
+});
+
+test('the agent-detail panel renders a Role row with the resolved role label — dispatched', () => {
+    nav.renderNav();
+    if (!document.getElementById('hdr-next')) document.body.appendChild(document.createElement('span')).id = 'hdr-next';
+    if (!document.getElementById('hdr-updated')) document.body.appendChild(document.createElement('span')).id = 'hdr-updated';
+    if (!document.getElementById('agent-detail')) document.body.appendChild(document.createElement('div')).id = 'agent-detail';
+    util.setAgentsCache([{ name: 'cmx300-detail-dispatched', online: true, dispatched: true }]);
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
+    try {
+        window.chela.selectAgent('cmx300-detail-dispatched');
+    } finally {
+        globalThis.fetch = prevFetch;
+    }
+    assert.equal(_detailRowValue('Role'), 'Dispatched',
+        'the Role row is missing, or does not report Dispatched, for a dispatched agent-detail panel');
 });
 
 
