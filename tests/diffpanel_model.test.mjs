@@ -61,6 +61,15 @@ test('statusMeta: an unrecognized status falls back rather than throwing', () =>
     assert.deepEqual(statusMeta(undefined), { label: '?', cls: 'diff-status-unknown' });
 });
 
+test('statusMeta: conflicted gets its OWN label/class, not the unknown fallback', () => {
+    // 🔴 GUARD: "conflicted" is a real status diffsurface.py's _STATUS_NAMES
+    // maps (git's "U" — unmerged) — swapping its entry for the unrecognized-
+    // status fallback values ('?' / diff-status-unknown) would be invisible
+    // to the "unrecognized status" test above, since '?'/diff-status-unknown
+    // IS a valid, deliberately-asserted value there for a DIFFERENT input.
+    assert.deepEqual(statusMeta('conflicted'), { label: '!', cls: 'diff-status-conflicted' });
+});
+
 // --- patchLineClass --------------------------------------------------------
 
 test('patchLineClass: file-header lines are meta, not add/del', () => {

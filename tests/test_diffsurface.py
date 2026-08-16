@@ -93,6 +93,46 @@ def test_changed_files_reports_modified_added_deleted_and_untracked(repo: Path):
     assert result["deletions"] == sum(f["deletions"] for f in result["files"])
 
 
+def test_changed_files_untracked_file_without_trailing_newline_still_counts_its_last_line(repo: Path):
+    # 🔴 GUARD: a file whose last line has no trailing "\n" (the common case
+    # for a file someone is still mid-edit on) must still count that line —
+    # dropping the `+ (0 if ... endswith(b"\n") else 1)` half of _count_lines
+    # silently undercounts every such file's additions estimate by exactly 1.
+    # The clean-trailing-newline case above (scratch.txt, "a\nb\n") cannot
+    # catch this: `data.count(b"\n")` alone already gives the right answer
+    # when the file DOES end in a newline.
+    (repo / "no_trailing_newline.txt").write_bytes(b"one\ntwo")
+    result = diffsurface.changed_files(repo)
+    by_path = {f["path"]: f for f in result["files"]}
+    assert by_path["no_trailing_newline.txt"]["status"] == "untracked"
+    assert by_path["no_trailing_newline.txt"]["additions"] == 2
+
+
+def test_all_git_subprocess_calls_are_bounded_by_git_timeout(repo: Path, monkeypatch):
+    # 🔴 GUARD: _GIT_TIMEOUT is what turns a wedged git process (e.g. a
+    # pane's cwd on a stalled network mount) into a bounded failure instead
+    # of a permanent hang behind /api/agents/<wid>/diff. Every call this
+    # module makes goes through the single `_run` helper — spying on
+    # `subprocess.run` itself (not `_run`) means a future call that bypasses
+    # `_run` would also show up unbound here, not just a dropped kwarg on
+    # the one call site a narrower mock would target.
+    calls = []
+    real_run = subprocess.run
+
+    def spy(cmd, **kwargs):
+        calls.append(kwargs.get("timeout"))
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(diffsurface.subprocess, "run", spy)
+
+    (repo / "tracked.txt").write_text("one\ntwo\nthree\nfour\n")
+    diffsurface.changed_files(repo)
+    diffsurface.file_patch(repo, "tracked.txt")
+
+    assert calls, "no git subprocess calls were recorded — the spy is not wired in"
+    assert all(t == diffsurface._GIT_TIMEOUT for t in calls), calls
+
+
 def test_changed_files_partially_staged_edit_sums_both_halves(repo: Path):
     # Stage one change, then make a second unstaged edit on top — `git diff HEAD`
     # (not `--cached` alone) is what makes both halves land in one row.
