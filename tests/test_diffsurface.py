@@ -175,3 +175,48 @@ def test_file_patch_not_a_git_repo(tmp_path: Path):
     plain.mkdir()
     result = diffsurface.file_patch(plain, "whatever.txt")
     assert result == {"ok": False, "error": "not a git repository"}
+
+
+# --- defensive bounds: _UNTRACKED_READ_CAP / _count_lines / numstat "-" -----
+
+def test_count_lines_is_bounded_by_untracked_read_cap(tmp_path: Path, monkeypatch):
+    # 🔴 GUARD: _UNTRACKED_READ_CAP is what keeps a stray multi-GB file dropped
+    # in the worktree from making the endpoint stall on a full read — drop the
+    # cap off the `fh.read(...)` call and the line count grows to match the
+    # file's true (uncapped) content instead of stopping at the cap.
+    monkeypatch.setattr(diffsurface, "_UNTRACKED_READ_CAP", 10)
+    big = tmp_path / "big.txt"
+    big.write_text("a\n" * 100)  # 200 bytes uncapped -> 100 lines; first 10 bytes -> 5 lines
+    assert diffsurface._count_lines(big) == 5
+
+
+def test_changed_files_survives_an_untracked_dangling_symlink(repo: Path):
+    # 🔴 GUARD: _count_lines documents "never raises" for an unreadable/vanished
+    # path — a dangling symlink's target doesn't exist, so opening it raises
+    # FileNotFoundError (an OSError). changed_files must still return normally
+    # rather than the whole per-session diff response blowing up over one
+    # broken untracked path.
+    dangling = repo / "dangling_link.txt"
+    dangling.symlink_to(repo / "does-not-exist.txt")
+    result = diffsurface.changed_files(repo)
+    by_path = {f["path"]: f for f in result["files"]}
+    assert by_path["dangling_link.txt"]["status"] == "untracked"
+    assert by_path["dangling_link.txt"]["additions"] == 0
+
+
+def test_changed_files_binary_file_numstat_sentinel_does_not_crash_int_parse(repo: Path):
+    # 🔴 GUARD: git's --numstat reports "-\t-\tpath" for a binary file (no
+    # line-level signal) — the `added_s != "-"` check exists so int(added_s)
+    # is never handed that sentinel. Narrowing the check (e.g. to `!= ""`)
+    # leaves "-" != "" true and crashes changed_files with a ValueError on any
+    # modified binary file instead of leaving it at 0/0.
+    (repo / "blob.bin").write_bytes(b"\x00\x01\x02binary")
+    _git(repo, "add", "blob.bin")
+    _git(repo, "commit", "-q", "-m", "add binary")
+    (repo / "blob.bin").write_bytes(b"\x00\x01\x02binary-changed\xffmore")
+
+    result = diffsurface.changed_files(repo)
+    by_path = {f["path"]: f for f in result["files"]}
+    assert by_path["blob.bin"]["status"] == "modified"
+    assert by_path["blob.bin"]["additions"] == 0
+    assert by_path["blob.bin"]["deletions"] == 0

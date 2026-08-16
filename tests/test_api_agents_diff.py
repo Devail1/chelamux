@@ -93,3 +93,12 @@ def test_diff_no_resolvable_cwd_degrades_to_empty(client):
     with _windows({"@9": None}):
         resp = client.get("/api/agents/@9/diff")
     assert resp.get_json() == {"is_git": False, "has_head": False, "files": [], "additions": 0, "deletions": 0}
+
+
+def test_diff_patch_no_resolvable_cwd_degrades_to_error(client):
+    # 🔴 GUARD: the sibling /diff route's identical "cwd can't be resolved"
+    # branch is covered above — this is the same race on /diff/patch, which
+    # must degrade to an error body instead of shelling out to git with cwd=None.
+    with _windows({"@9": None}):
+        resp = client.get("/api/agents/@9/diff/patch?path=x.txt")
+    assert resp.get_json() == {"ok": False, "error": "no working directory"}

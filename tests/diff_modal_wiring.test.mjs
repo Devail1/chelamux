@@ -1,5 +1,7 @@
-// PER-SESSION DIFF MODAL WIRING (CMX-299 rework round 1) — a real click on a
-// real wall tile's "Files" chip actually opens the diff modal.
+// PER-SESSION DIFF MODAL WIRING (CMX-299 rework round 1 + round 2) — a real
+// click on a real wall tile's "Files" chip actually opens the diff modal,
+// AND the patch drill-down (a real click on a rendered file row) actually
+// fills the patch view, AND closing actually closes.
 //
 // The judge's first round found THREE distinct wiring points nothing
 // exercised together, each one that would leave every other test green if
@@ -13,7 +15,19 @@
 //     `showModal('modal-diff')` toggles `.active` on; rename it and the
 //     click chain runs end to end with nothing ever appearing on screen.
 //
-// tests/diffpanel_model.test.mjs only covers the three PURE helpers in
+// Round 2 found the file-list -> patch half was still unreached: nothing
+// ever dispatched a real click on a `.diff-file-row`, so `_diffModalClick`
+// being registered on the overlay, `closeDiffModal` actually closing
+// `#modal-diff`, `_fileListHtml` passing each row its OWN status (not a
+// hardcoded one), and `summaryLabel` actually reaching the rendered header
+// were all unguarded — every one of them is provably pure/correct in
+// isolation (diffpanel_model.test.mjs) while the wire into the DOM was not.
+// This file now drives the SAME real click chain one hop further: chip click
+// -> modal open -> file rows render (two, with DIFFERENT statuses) -> a real
+// bubbling click on a row -> the patch view fills from a fetched patch ->
+// close actually closes.
+//
+// tests/diffpanel_model.test.mjs only covers the PURE helpers in
 // diffpanelmodel.js (no DOM); nothing simulated the boundary a mouse click
 // actually crosses. This mirrors tests/kanban_task_modal_wiring.test.mjs
 // (CMX-290)'s own closing of the identical shape on the kanban card -> task
@@ -58,11 +72,29 @@ ${MODAL_DIFF_HTML}`;
 
 const AGENTS = [{ name: 'w1', window_id: '@1', online: true }];
 
+// Two files with DIFFERENT statuses — a hardcoded statusMeta('modified')
+// call site would make both rows carry the same chip class/label, which a
+// single-file fixture can never catch (its one row's real status happens to
+// be 'modified' too).
 const DIFF_STATE = {
     is_git: true, has_head: true,
-    files: [{ path: 'a.py', status: 'modified', additions: 3, deletions: 1 }],
-    additions: 3, deletions: 1,
+    files: [
+        { path: 'a.py', status: 'modified', additions: 3, deletions: 1 },
+        { path: 'b.py', status: 'added', additions: 5, deletions: 0 },
+    ],
+    additions: 8, deletions: 1,
 };
+
+const PATCH_TEXT = [
+    'diff --git a/a.py b/a.py',
+    'index abc1234..def5678 100644',
+    '--- a/a.py',
+    '+++ b/a.py',
+    '@@ -1,2 +1,2 @@',
+    ' context line',
+    '-old line',
+    '+new line',
+].join('\n') + '\n';
 
 function fakeFetch(url) {
     const path = String(url);
@@ -71,6 +103,7 @@ function fakeFetch(url) {
     else if (path.endsWith('/api/agents/context')) body = [];
     else if (path.endsWith('/api/rooms')) body = { rooms: {}, pending: [] };
     else if (path.startsWith('/api/term/ready')) body = { ready: true };
+    else if (path.startsWith('/api/agents/%401/diff/patch')) body = { ok: true, patch: PATCH_TEXT };
     else if (path.endsWith('/api/agents/%401/diff')) body = DIFF_STATE;
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
 }
@@ -163,6 +196,53 @@ test('a real click on the wall tile\'s "Files" chip opens the REAL #modal-diff, 
     await flush();   // let openDiffModal's /diff fetch + _render resolve
 
     const rows = document.querySelectorAll('#diff-modal-content .diff-file-row');
-    assert.equal(rows.length, 1, 'the diff modal did not render the fetched file list');
+    assert.equal(rows.length, 2, 'the diff modal did not render the fetched file list');
     assert.equal(rows[0].dataset.diffFile, 'a.py', 'the rendered file row does not match the fetched diff state');
+    assert.equal(rows[1].dataset.diffFile, 'b.py', 'the rendered file row does not match the fetched diff state');
+
+    // 🔴 GUARD (MUTATION #4): each row must carry ITS OWN status, not a
+    // hardcoded one — a fixture with only one file (always 'modified') could
+    // never distinguish `statusMeta(f.status)` from `statusMeta('modified')`.
+    const chip = row => row.querySelector('.diff-status-chip');
+    assert.ok(chip(rows[0]).classList.contains('diff-status-modified'),
+        "a.py's chip did not carry its own ('modified') status");
+    assert.ok(chip(rows[1]).classList.contains('diff-status-added'),
+        "b.py's chip did not carry its own ('added') status — statusMeta may be hardcoded");
+    assert.notEqual(chip(rows[0]).textContent, chip(rows[1]).textContent,
+        'both rows rendered the same status label for two files with different statuses');
+
+    // 🔴 GUARD (MUTATION #5): summaryLabel's one-glance header must actually
+    // reach the modal, not just exist as a passing pure-function test.
+    const summary = document.querySelector('.diff-modal-summary');
+    assert.ok(summary, 'no .diff-modal-summary element was rendered');
+    assert.equal(summary.textContent, '2 files changed · +8 −1',
+        'the rendered summary does not match summaryLabel(state) for this diff state');
+
+    // 🔴 GUARD (WIRING #1): a real, bubbling click on a rendered file row must
+    // reach `_diffModalClick`, which is registered on the #modal-diff overlay
+    // by `_bindDiffModalDismiss` — calling the row's onclick directly (as
+    // clickFilesChip does for the chip) would not exercise that registration
+    // at all, since file rows have no onclick attribute of their own.
+    const patchView = document.getElementById('diff-patch-view');
+    assert.ok(patchView, 'no #diff-patch-view element was rendered');
+    rows[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    await flush();   // let _loadDiffPatch's /diff/patch fetch + _patchHtml resolve
+
+    assert.ok(rows[0].classList.contains('active'),
+        'clicking a file row did not mark it active — _diffModalClick never ran (overlay listener missing?)');
+    assert.equal(patchView.querySelectorAll('.diff-line-meta').length, 2,
+        'the patch view is missing the +++/--- header lines');
+    assert.equal(patchView.querySelectorAll('.diff-line-hunk').length, 1,
+        'the patch view is missing the @@ hunk line');
+    assert.equal(patchView.querySelectorAll('.diff-line-add').length, 1,
+        'the patch view is missing the added line');
+    assert.equal(patchView.querySelectorAll('.diff-line-del').length, 1,
+        'the patch view is missing the removed line');
+
+    // 🔴 GUARD (WIRING #2): closeDiffModal must close THIS #modal-diff node —
+    // routing `closeModal` at the wrong id would leave the overlay `.active`
+    // forever, with every assertion above still green.
+    window.chela.closeDiffModal();
+    assert.equal(modal.classList.contains('active'), false,
+        'chela.closeDiffModal() did not remove #modal-diff\'s .active class');
 });
