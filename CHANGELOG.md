@@ -21,6 +21,7 @@ history lives in `git log`.
   colourblind-safe convention as the window-type glyph; a plain session, the common case,
   gets no badge at all. The badge updates live off the same orchestrator-change event the
   pane toggle and decisions owner chip already listen to. (CMX-300)
+
 ### Changed
 
 - **The live-terminal message timestamp is quieter.** The `MessageDisplay` marker CMX-285
