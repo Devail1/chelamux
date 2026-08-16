@@ -117,6 +117,33 @@ def test_list_parked_tasks_returns_empty_when_the_tracker_is_missing(tmp_path):
     assert _source(tmp_path).list_parked_tasks() == []
 
 
+def test_the_blocked_reason_stops_at_its_own_marker_when_a_second_marker_follows(tmp_path):
+    # 🔴 GUARD (round 7, PR #372): every OTHER fixture in this file carries exactly one
+    # marker per bullet, so a non-greedy `(.*?)` and a greedy `(.*)` capture the SAME
+    # reason on all of them — the file's whole fixture family is a fixed point of that
+    # mutation (docs/defeat_shapes/29 names the general shape). `depends:` is the
+    # documented pairing (`_TRAILING_COMMENT_RE`'s own comment says "marker(s)", plural)
+    # and TODO.md bullets routinely carry both, so this pins the one line where greedy and
+    # non-greedy diverge: greedy would swallow the SECOND marker into the reason too.
+    text = '- [ ] a task <!-- blocked: waiting on fixtures --> <!-- depends: "other thing" -->\n'
+    parked = _source(tmp_path).parked_tasks_from_text(text)
+    assert len(parked) == 1
+    assert parked[0].body == "waiting on fixtures"
+
+
+def test_the_blocked_reason_is_captured_from_an_uppercase_marker(tmp_path):
+    # 🔴 GUARD (round 7, PR #372): BLOCKED_RE (decides parked-or-not) is IGNORECASE, and
+    # BLOCKED_REASON_RE deliberately mirrors it — but every OTHER fixture in this file
+    # writes its marker lowercase, so dropping IGNORECASE from BLOCKED_REASON_RE alone is
+    # invisible to them: the bullet stays parked (BLOCKED_RE untouched) but silently loses
+    # its reason (body degrades to None). This pins the case where the two regexes'
+    # flags would diverge.
+    text = "- [ ] a task <!-- BLOCKED: waiting on fixtures -->\n"
+    parked = _source(tmp_path).parked_tasks_from_text(text)
+    assert len(parked) == 1
+    assert parked[0].body == "waiting on fixtures"
+
+
 def test_multiple_parked_bullets_are_all_returned_in_order(tmp_path):
     text = (
         "- [ ] first <!-- blocked: a -->\n"
