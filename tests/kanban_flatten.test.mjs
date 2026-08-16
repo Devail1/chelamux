@@ -219,8 +219,17 @@ test('renderKanban: a parked TODO.md bullet renders as its own card in the Backl
 // the Backlog lane would also satisfy test 5 above (a parked card sitting right next
 // to a real BACKLOG.md one, both promotable) — which would be wrong: a parked bullet
 // is already in TODO.md, so "Promote" makes no sense for it.
+//
+// 🔴 GUARD (round 3, PR #372): the delete half of the same comment ('never rendered
+// as one: no Promote button ... and no delete button') was unpinned — this test used
+// to check only `.kanban-promote-btn`. `delBtn` is computed unconditionally at the top
+// of `_kCard` for every card, so interpolating it into the parked branch's template
+// (the way the run-backed and backlog branches both already do) parses fine and
+// renders a `.kanban-delete-btn` whose `data-del-kind="run"` names no run at all — the
+// judge proved exactly that mutation left the suite green, because nothing here read
+// `.kanban-delete-btn`.
 
-test('renderKanban: a parked card has no Promote button', () => {
+test('renderKanban: a parked card has no Promote button and no delete button', () => {
     renderKanban(_payload([], {
         parked_tasks: [{
             id: 'p1', title: 'a parked task', file: '/x/TODO.md',
@@ -232,6 +241,10 @@ test('renderKanban: a parked card has no Promote button', () => {
     assert.ok(parkedCard, 'the parked task never reached the board');
     assert.equal(parkedCard.querySelector('.kanban-promote-btn'), null,
         'a parked card must not carry a Promote button — it is already in TODO.md');
+    assert.equal(parkedCard.querySelector('.kanban-delete-btn'), null,
+        'a parked card must not carry a delete button — the source-line delete endpoint matches against ' +
+        'the file\'s literal bullet text, which still carries the `<!-- blocked -->` marker a parked ' +
+        'card\'s bare title cannot match; a delete button here would target the wrong line or silently no-op');
 
     // 🔴 GUARD: a parked bullet with no `reason` (blocked with no `<!-- blocked:
     // ... -->` text) must still fall back to a visible '🔒 parked' cue — the lock
@@ -274,4 +287,36 @@ test('renderKanban: within the Backlog lane, a backlog card renders before a par
     assert.ok(parkedIdx !== -1, 'no .kanban-card-parked card rendered in the Backlog lane');
     assert.ok(backlogIdx < parkedIdx,
         `expected the backlog card before the parked card, got backlog at ${backlogIdx} and parked at ${parkedIdx}`);
+});
+
+// --- 8. 🔴 GUARD (CMX-298 round 3) — a parked card's blocked reason is HTML-escaped -
+//
+// BLOCKED_REASON_RE captures the `<!-- blocked: ... -->` text verbatim (repo-authored,
+// arbitrary — tests/test_markdown_parked.py::test_the_blocked_reason_is_captured_verbatim
+// pins that it is passed through unmodified), so it is untrusted text landing straight in
+// the board's innerHTML. kanban.js reaches for `escHtml(card.reason)` before interpolating
+// it into the `.kanban-parked-reason` span; dropping that call lets a reason containing
+// markup render as LIVE HTML. Test 5/6 above only assert the reason's PLAIN TEXT is
+// visible — a real `<b>` element and its escaped-text equivalent both satisfy
+// `textContent === 'evil'`, so the judge proved that mutation left every test green. This
+// drives a reason carrying an actual tag and reads `.innerHTML`/child elements back,
+// which only escHtml's `&lt;`/`&gt;` output can satisfy.
+
+test('renderKanban: a parked card\'s blocked reason is HTML-escaped, not rendered as live markup', () => {
+    renderKanban(_payload([], {
+        parked_tasks: [{
+            id: 'p1', title: 'a parked task', file: '/x/TODO.md',
+            line_number: 3, raw: '- [ ] x <!-- blocked: reason -->',
+            reason: '<b>evil</b><img src=x onerror=alert(1)>',
+        }],
+    }));
+
+    const reasonEl = document.querySelector('.kanban-card-parked .kanban-parked-reason');
+    assert.ok(reasonEl, 'the parked card has no .kanban-parked-reason element');
+    assert.equal(reasonEl.querySelector('b'), null,
+        'a parked card\'s reason rendered as a live <b> element — escHtml() is missing on this interpolation');
+    assert.equal(reasonEl.querySelector('img'), null,
+        'a parked card\'s reason rendered a live <img> element — escHtml() is missing on this interpolation');
+    assert.match(reasonEl.innerHTML, /&lt;b&gt;evil&lt;\/b&gt;/,
+        `the reason's markup was not escaped before reaching innerHTML — got: "${reasonEl.innerHTML}"`);
 });
