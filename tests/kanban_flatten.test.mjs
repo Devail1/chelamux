@@ -212,4 +212,46 @@ test('renderKanban: a parked card has no Promote button', () => {
     assert.ok(parkedCard, 'the parked task never reached the board');
     assert.equal(parkedCard.querySelector('.kanban-promote-btn'), null,
         'a parked card must not carry a Promote button — it is already in TODO.md');
+
+    // 🔴 GUARD: a parked bullet with no `reason` (blocked with no `<!-- blocked:
+    // ... -->` text) must still fall back to a visible '🔒 parked' cue — the lock
+    // icon is the colourblind-safe signal that this card is read-only, distinct
+    // from a real BACKLOG.md bullet, even when there is no reason text to show.
+    // Emptying that fallback span (kanban.js's `reason ? ... : ` else-branch)
+    // left the card with no cue at all and no assertion here caught it.
+    const reasonEl = parkedCard.querySelector('.kanban-parked-reason');
+    assert.ok(reasonEl, 'the parked card has no .kanban-parked-reason element');
+    assert.match(reasonEl.textContent, /🔒\s*parked/,
+        `a reason-less parked card must still show a '🔒 parked' cue — got: "${reasonEl.textContent}"`);
+});
+
+// --- 7. 🔴 GUARD (CMX-298) — backlog cards render before parked cards, within the ---
+// --- shared Backlog lane -------------------------------------------------------------
+//
+// _KANBAN_BUCKET_ORDER puts 'backlog' before 'parked' so BACKLOG.md ideas lead and
+// TODO.md's parked bullets follow within the lane — per the comment above that
+// array in kanban.js. Swapping the two entries in that array is a silent,
+// same-membership reorder: every card still lands in the Backlog lane, so nothing
+// checking lane membership or per-card class notices. This asserts the actual DOM
+// order of the two card types inside .kanban-col-backlog .kanban-cards.
+
+test('renderKanban: within the Backlog lane, a backlog card renders before a parked card', () => {
+    renderKanban(_payload([], {
+        backlog_items: [{ text: 'a backlog idea', section: null, file: '/x/BACKLOG.md' }],
+        parked_tasks: [{
+            id: 'p1', title: 'a parked task', file: '/x/TODO.md',
+            line_number: 3, raw: '- [ ] ...', reason: null,
+        }],
+    }));
+
+    const cardsEl = document.querySelector('.kanban-col-backlog .kanban-cards');
+    assert.ok(cardsEl, '.kanban-col-backlog has no .kanban-cards element');
+
+    const kids = [...cardsEl.children];
+    const backlogIdx = kids.findIndex((el) => el.classList.contains('kanban-card-backlog'));
+    const parkedIdx = kids.findIndex((el) => el.classList.contains('kanban-card-parked'));
+    assert.ok(backlogIdx !== -1, 'no .kanban-card-backlog card rendered in the Backlog lane');
+    assert.ok(parkedIdx !== -1, 'no .kanban-card-parked card rendered in the Backlog lane');
+    assert.ok(backlogIdx < parkedIdx,
+        `expected the backlog card before the parked card, got backlog at ${backlogIdx} and parked at ${parkedIdx}`);
 });
