@@ -1,8 +1,8 @@
-## 63. A click chain's second hop looks covered because both its ends are unit-tested, but nothing dispatches the click between them
+## 71. A click chain's second hop looks covered because both its ends are unit-tested, but nothing dispatches the click between them
 
 **Assertion form:** a multi-hop UI flow — chip click opens a modal, modal renders a list,
 clicking a list row drills into a detail view — gets a wiring test for the FIRST hop (chip
-click → modal `.active`, closing [[62|shape 62]]) plus thorough pure-function unit tests for
+click → modal `.active`, closing [[70|shape 70]]) plus thorough pure-function unit tests for
 the rendering helpers on both ends of the SECOND hop: the list-row renderer (a status label, a
 CSS class) and the detail-view renderer (a line-classifier, five tests pinning its ordering).
 Both ends read as "well covered." Nothing in between — a real click on a rendered row,
@@ -26,7 +26,7 @@ hop one cannot distinguish "the whole flow works" from any of them — closing h
 confidence about the *entry point*, not about what a user reaches by continuing to interact
 past it.
 
-**Why this is distinct from shape 62:** shape 62 is the zero-guard case — no click anywhere in
+**Why this is distinct from shape 70:** shape 70 is the zero-guard case — no click anywhere in
 the chain is simulated. This shape is what a partial fix leaves behind: hop one gets simulated
 and closed, which is real progress, but a reviewer (or the fixing agent itself) can mistake
 "the chain now has a wiring test" for "the chain is wired," when the test's own assertions never
@@ -43,7 +43,7 @@ argument at any render call site produces a visibly different (and therefore wro
 instead of accidentally matching by coincidence.
 
 **Found:** CMX-299 rework round 2 (2026-08-16), PR #373. Round 1 closed the chip → modal-open
-hop (shape 62) with `tests/diff_modal_wiring.test.mjs`. Round 2's judge corrupted: the row
+hop (shape 70) with `tests/diff_modal_wiring.test.mjs`. Round 2's judge corrupted: the row
 click's delegated listener (`overlay.addEventListener('click', _diffModalClick)` commented
 out), `closeDiffModal`'s target id, `_fileListHtml`'s per-row `statusMeta(f.status)` call
 (hardcoded to `'modified'`), and `_render`'s `summaryLabel(state)` interpolation (blanked) — four

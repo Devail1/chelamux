@@ -299,7 +299,7 @@ test('a real click on the wall tile\'s "Files" chip opens the REAL #modal-diff, 
 // Round 3 (2026-08-16, PR #373 judge) — the test above proves closeDiffModal()
 // itself works by calling it DIRECTLY, which exercises none of the THREE
 // routes index.html's own comment claims lead into it (close button, Escape,
-// backdrop click) — see docs/defeat_shapes/64 (a comment enumerates N entry
+// backdrop click) — see docs/defeat_shapes/72 (a comment enumerates N entry
 // paths into one shared action; driving the action directly proves none of
 // them). Each of these dispatches a REAL DOM event down its own named route.
 // ---------------------------------------------------------------------------
@@ -425,17 +425,28 @@ test('a changed file path containing HTML metacharacters is escaped, not spliced
     // escHtml for that attribute — only a quote-bearing path can tell them
     // apart. A path containing `"` is legal on Linux and can come straight
     // out of `git ls-files --others` in an agent's worktree.
-    const evilPath = '<img src=x onerror=alert(1)>".js';
+    //
+    // `#`, `&`, and `+` are added for the click-through half below (round 6,
+    // 2026-08-16, PR #373 judge round 5, experiment 4): the clicked path is
+    // carried to /diff/patch in a QUERY STRING, and all three are legal
+    // filename characters that are NOT metacharacters in HTML but ARE in a
+    // query string — `#` truncates the URL at the fragment, `&` splits off a
+    // second param, `+` decodes server-side as a space.
+    const evilPath = '<img src=x onerror=alert(1)>"#&+.js';
     const evilState = {
         is_git: true, has_head: true,
         files: [{ path: evilPath, status: 'modified', additions: 1, deletions: 0 }],
         additions: 1, deletions: 0,
     };
     const originalFetch = globalThis.fetch;
+    let patchUrl = null;
     globalThis.fetch = url => {
         const path = String(url);
         if (path.endsWith('/api/agents/%401/diff')) {
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(evilState) });
+        }
+        if (path.startsWith('/api/agents/%401/diff/patch')) {
+            patchUrl = path;
         }
         return fakeFetch(url);
     };
@@ -464,6 +475,20 @@ test('a changed file path containing HTML metacharacters is escaped, not spliced
         assert.ok(row, 'no .diff-file-row element was rendered');
         assert.equal(row.dataset.diffFile, evilPath,
             'the row\'s data-diff-file attribute does not match the fetched path — it needs attrEsc (quote-safe), not escHtml, for an attribute value');
+
+        // 🔴 GUARD (WIRING, round 6): clicking the row must send the path to
+        // /diff/patch as a PROPERLY PERCENT-ENCODED query value. Every fixture
+        // in this file up to now matched the request by PREFIX
+        // (`startsWith('/api/agents/%401/diff/patch')`) and ignored the query
+        // entirely, so an unencoded `?path=${path}` would still return the
+        // right fixture data without the request URL itself ever being wrong
+        // by any test's own admission — asserting the captured URL is the
+        // only way to see that.
+        row.querySelector('.diff-file-path').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await flush();
+        assert.equal(patchUrl, `/api/agents/%401/diff/patch?path=${encodeURIComponent(evilPath)}`,
+            'the /diff/patch request URL does not carry the exact percent-encoded path — the query string is not properly encoded');
+
         window.chela.closeDiffModal();
     } finally {
         globalThis.fetch = originalFetch;
@@ -575,7 +600,7 @@ test("_loadDiffPatch's error arm shows the server's own reason, not the empty-pa
 // _loadDiffPatch each dead-coding the "clear the shared DOM target before the
 // new fetch resolves" reset, which the round-3/4 stale-flight tests above
 // can't catch because they only compare innerHTML BEFORE vs AFTER the late
-// response, never what that content actually IS (see docs/defeat_shapes/66).
+// response, never what that content actually IS (see docs/defeat_shapes/74).
 // ---------------------------------------------------------------------------
 
 test('a patch line containing HTML metacharacters is escaped, not spliced raw, into the rendered patch view', async () => {

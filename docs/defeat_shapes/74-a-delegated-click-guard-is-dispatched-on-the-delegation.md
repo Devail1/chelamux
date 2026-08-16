@@ -1,4 +1,4 @@
-## 66. A delegated click guard is dispatched on the delegation root itself, so `closest()` and a self-only `matches()` resolve identically
+## 74. A delegated click guard is dispatched on the delegation root itself, so `closest()` and a self-only `matches()` resolve identically
 
 **Assertion form:** a click handler is registered on a container (event delegation) and
 resolves the actual target element by walking UP from `e.target` with `closest('.the-row')` —

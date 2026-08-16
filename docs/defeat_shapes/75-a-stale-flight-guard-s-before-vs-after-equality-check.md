@@ -1,4 +1,4 @@
-## 67. A stale-flight guard's before-vs-after equality check never reads what the "before" content actually IS
+## 75. A stale-flight guard's before-vs-after equality check never reads what the "before" content actually IS
 
 **Assertion form:** an async load into a shared DOM target resets that target to a placeholder
 (`"Loading…"`) SYNCHRONOUSLY, before issuing its fetch — so a later response can never make a

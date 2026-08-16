@@ -1,4 +1,4 @@
-## 65. A security fixture omits the one metacharacter that would tell two escaping helpers apart, so the weaker one still passes
+## 73. A security fixture omits the one metacharacter that would tell two escaping helpers apart, so the weaker one still passes
 
 **Assertion form:** a value is rendered into two different HTML contexts from the same source
 string — free text between tags (`<span>${escHtml(f.path)}</span>`) and an attribute value

@@ -171,6 +171,47 @@ def test_all_git_subprocess_calls_are_bounded_by_git_timeout(repo: Path, monkeyp
     assert all(t == diffsurface._GIT_TIMEOUT for t in calls), calls
 
 
+def test_changed_files_untracked_gitignored_path_is_excluded(repo: Path):
+    # 🔴 GUARD: `--exclude-standard` is the ONLY thing keeping every
+    # .gitignore'd path (node_modules/, .venv/, *.pyc, build output) out of
+    # this list — drop the flag and `git ls-files --others` reports EVERY
+    # untracked path, ignored or not. Every other untracked-file fixture in
+    # this suite is a fresh repo with no .gitignore, so the flag sits on a
+    # default where it changes nothing; only a repo that actually HAS a
+    # gitignored path present on disk can tell the flag's effect from its
+    # own absence.
+    (repo / ".gitignore").write_text("node_modules/\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "add gitignore")
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "x.js").write_text("module.exports = 1;\n")
+    (repo / "scratch.txt").write_text("a\n")
+
+    result = diffsurface.changed_files(repo)
+    paths = {f["path"] for f in result["files"]}
+    assert "node_modules/x.js" not in paths, (
+        "a gitignored untracked path leaked into the changed-files list — "
+        "--exclude-standard is missing from the ls-files call"
+    )
+    assert "scratch.txt" in paths
+
+
+def test_changed_files_untracked_empty_file_reports_zero_additions(repo: Path):
+    # 🔴 GUARD: _count_lines' empty-file early return. Without it, a ZERO-BYTE
+    # untracked file (the everyday result of `touch newfile.py`) falls through
+    # to `data.count(b"\n") + (0 if data.endswith(b"\n") else 1)`, which for
+    # `b""` is `0 + 1 == 1` — wrong by one. The clean-trailing-newline and
+    # no-trailing-newline cases elsewhere in this suite both start from
+    # non-empty content, so neither can catch the early return being narrowed
+    # from `if not data` to `if data is None` (`b"" is not None`, so the early
+    # return would stop firing for exactly this file).
+    (repo / "empty.txt").write_bytes(b"")
+    result = diffsurface.changed_files(repo)
+    by_path = {f["path"]: f for f in result["files"]}
+    assert by_path["empty.txt"]["status"] == "untracked"
+    assert by_path["empty.txt"]["additions"] == 0
+
+
 def test_changed_files_partially_staged_edit_sums_both_halves(repo: Path):
     # Stage one change, then make a second unstaged edit on top — `git diff HEAD`
     # (not `--cached` alone) is what makes both halves land in one row.
@@ -197,6 +238,40 @@ def test_file_patch_returns_full_content_for_an_untracked_file(repo: Path):
     result = diffsurface.file_patch(repo, "scratch.txt")
     assert result["ok"] is True
     assert "+hello" in result["patch"]
+
+
+def test_file_patch_returns_the_diff_for_a_fully_staged_file(repo: Path):
+    # 🔴 GUARD: file_patch's tracked-file diff must be against HEAD, not the
+    # index — `git diff -- <path>` (no `HEAD`) compares the index to the
+    # worktree, which is EMPTY for a file that is staged and has no further
+    # unstaged edits on top. Every other file_patch test in this suite edits
+    # the worktree WITHOUT staging, so the drill-down half is only ever
+    # exercised against the unstaged case; a fully-staged edit is the sibling
+    # input that would come back with `patch == ""` under that mutation.
+    (repo / "tracked.txt").write_text("one\ntwo\nthree\nfour\n")
+    _git(repo, "add", "tracked.txt")
+    result = diffsurface.file_patch(repo, "tracked.txt")
+    assert result["ok"] is True
+    assert "+four" in result["patch"], (
+        "file_patch returned no diff text for a fully-staged file — "
+        "it is diffing the index against the worktree instead of HEAD"
+    )
+
+
+def test_file_patch_handles_a_file_containing_invalid_utf8_bytes(repo: Path):
+    # 🔴 GUARD: `errors="replace"` on `_run` is what keeps one non-UTF-8 byte
+    # in a file's diff from raising UnicodeDecodeError straight out of
+    # file_patch (and 500ing /api/agents/<wid>/diff/patch). Every other
+    # fixture in this suite is pure ASCII, so the decode policy on git's
+    # stdout is otherwise unmeasured. A latin-1 source file in an agent's
+    # worktree is ordinary, not exotic.
+    (repo / "latin.txt").write_bytes(b"cafe\n")
+    _git(repo, "add", "latin.txt")
+    _git(repo, "commit", "-q", "-m", "seed latin file")
+    (repo / "latin.txt").write_bytes(b"caf\xe9\n")  # \xe9 = 'e' with acute in latin-1, invalid utf-8
+
+    result = diffsurface.file_patch(repo, "latin.txt")
+    assert result["ok"] is True
 
 
 def test_file_patch_rejects_a_path_this_session_never_changed(repo: Path):

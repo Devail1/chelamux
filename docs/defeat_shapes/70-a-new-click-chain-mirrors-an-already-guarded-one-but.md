@@ -1,4 +1,4 @@
-## 62. A new click chain mirrors an already-guarded one but doesn't reuse the guard, so none of its hops has any test at all
+## 70. A new click chain mirrors an already-guarded one but doesn't reuse the guard, so none of its hops has any test at all
 
 **Assertion form:** none. A feature adds a multi-hop UI chain — a chip's `onclick` names a
 handler, a module registers that handler as a side effect of an `import`, the handler shows a
