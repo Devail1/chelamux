@@ -38,6 +38,20 @@ def test_a_plain_open_bullet_is_not_parked(tmp_path):
     assert tasks == []
 
 
+def test_a_done_bullet_carrying_a_blocked_marker_is_not_parked(tmp_path):
+    # 🔴 GUARD (round 5, PR #372): the OPEN axis and the BLOCKED axis are both
+    # required — a bullet must be open-AND-blocked to be parked. The sibling test
+    # above pins the open-but-unblocked negative control; this pins the other axis,
+    # blocked-but-DONE. Without this, widening the match from OPEN_RE alone to
+    # `OPEN_RE or DONE_RE` would surface an already-completed `- [x] ... <!-- blocked:
+    # ... -->` bullet as a parked card in the Backlog lane forever — a checked-off
+    # ticket has no future write that could ever move it off the board again — while
+    # every other fixture in this file (which only ever combines `[ ]` with a blocked
+    # marker) stayed green.
+    text = "- [x] a done task <!-- blocked: waiting on fixtures -->\n"
+    assert _source(tmp_path).parked_tasks_from_text(text) == []
+
+
 def test_a_blocked_bullet_is_returned_by_parked_tasks_from_text(tmp_path):
     text = "- [ ] a task <!-- blocked: waiting on fixtures -->\n"
     parked = _source(tmp_path).parked_tasks_from_text(text)

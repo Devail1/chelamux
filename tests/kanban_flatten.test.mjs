@@ -16,8 +16,16 @@
 // tests/test_js_suites.py; needs `npm ci` for jsdom.)
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
 import { KANBAN_LANE_LABELS } from '../chela/dashboard/static/js/kanbanlanemodel.js';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const STYLE_CSS = fs.readFileSync(
+    path.join(HERE, '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
 
 const BODY = `
 <div class="work-pane active" id="work-board" data-seg="board">
@@ -420,4 +428,61 @@ test('renderKanban: a parked card\'s blocked reason is escaped on the title attr
     assert.equal(title, reason,
         `the title attribute was truncated at the reason's embedded double quote — got: "${title}" — ` +
         'attrEsc() is missing on this interpolation, letting the quote close the attribute early');
+});
+
+// --- 10. 🔴 GUARD (round 5, PR #372) — the 🔒 cue is actually VISIBLE on screen, ------
+// not just present in the DOM under textContent/querySelector.
+//
+// Tests 5, 6, 8 and 9 above all read `.kanban-parked-reason` through
+// textContent/querySelector/getAttribute — none of which CSS can touch. A single
+// `display: none` added to the `.kanban-parked-reason` rule in style.css leaves every
+// one of those assertions green while erasing the chip from the screen entirely,
+// leaving a parked card rendering as a bare title + workflow chip — byte-indistinguishable
+// from a real BACKLOG.md card to anyone actually looking at it (docs/defeat_shapes/54).
+// This test takes the REAL rendered card's outerHTML (from the jsdom `document` the
+// other tests in this file already assert against) and re-mounts it under the REAL
+// style.css in a SEPARATE `pretendToBeVisual` jsdom — same recipe
+// tests/kanban_task_modal_wiring.test.mjs's last test and tests/wire_live_css.test.mjs
+// use — then reads the CASCADED `getComputedStyle`, not just the class/text.
+test('renderKanban: the parked card\'s 🔒 reason chip is actually VISIBLE under the REAL style.css, not just present in the DOM', () => {
+    renderKanban(_payload([], {
+        parked_tasks: [{
+            id: 'p1', title: 'a parked task', file: '/x/TODO.md',
+            line_number: 3, raw: '- [ ] x <!-- blocked: reason -->',
+            reason: 'a fairly long blocked reason that would need to ellipsize past the card edge',
+        }],
+    }));
+
+    const parkedCard = document.querySelector('.kanban-card-parked');
+    assert.ok(parkedCard, 'the parked task never reached the board');
+
+    const cssDom = new JSDOM(
+        `<!doctype html><html><head><style>${STYLE_CSS}</style></head><body>${parkedCard.outerHTML}</body></html>`,
+        { pretendToBeVisual: true });
+    const reasonEl = cssDom.window.document.querySelector('.kanban-parked-reason');
+    assert.ok(reasonEl, 'sliced parked card markup has no .kanban-parked-reason element');
+
+    const style = cssDom.window.getComputedStyle(reasonEl);
+    assert.notEqual(style.display, 'none',
+        'the .kanban-parked-reason chip is display:none under the REAL style.css — the 🔒 cue is in the ' +
+        'DOM but never rendered on screen, making a parked card visually indistinguishable from a plain ' +
+        'BACKLOG.md card (only .kanban-card-parked\'s border-left-color differs, and that is currently ' +
+        'identical to .kanban-card-open\'s var(--text-dim))');
+    assert.notEqual(style.visibility, 'hidden',
+        'the .kanban-parked-reason chip is visibility:hidden under the REAL style.css — same defect as ' +
+        'display:none, hidden from every textContent/querySelector assertion');
+
+    // The same rule also carries the properties that make the title= tooltip (test 9
+    // above) the ONLY way to read a long reason — overflow/text-overflow/white-space.
+    // Stripping any of these makes a long reason silently overflow the card instead of
+    // ellipsizing, with every existing textContent-based assertion still green.
+    assert.equal(style.overflow, 'hidden',
+        '.kanban-parked-reason must overflow:hidden — otherwise a long reason spills out of the card ' +
+        'instead of ellipsizing, and the title= tooltip becomes the only readable copy for no reason');
+    assert.equal(style.textOverflow, 'ellipsis',
+        '.kanban-parked-reason must text-overflow:ellipsis — otherwise a long, hidden-overflow reason is ' +
+        'silently truncated with no "…" cue that there is more to read via the title= tooltip');
+    assert.equal(style.whiteSpace, 'nowrap',
+        '.kanban-parked-reason must white-space:nowrap — otherwise a long reason wraps onto multiple ' +
+        'lines instead of triggering the overflow/ellipsis path at all');
 });
