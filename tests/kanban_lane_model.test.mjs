@@ -38,7 +38,7 @@ const STATUS_CHIP_LABELS = _extractStatusChipLabels(KANBAN_JS_SRC);
 // The whole status set the Work board currently renders — every status
 // _kanbanFlatten (kanban.js) can hand a card, across all 6 lanes.
 const ALL_STATUSES = [
-    'backlog', 'open', 'claimed', 'running',
+    'backlog', 'parked', 'open', 'claimed', 'running',
     'awaiting_review', 'changes_requested', 'needs_human', 'failed',
     'done', 'closed',
 ];
@@ -47,6 +47,15 @@ const ALL_STATUSES = [
 
 test('laneOf: backlog -> backlog', () => {
     assert.equal(laneOf('backlog'), 'backlog');
+});
+
+test('laneOf: parked -> backlog', () => {
+    // 🔴 GUARD: a PARKED TODO.md bullet (`<!-- blocked: ... -->`) used to be invisible
+    // everywhere on the board — `tasks_from_text` already excludes it from Open, and
+    // it lives in TODO.md, not BACKLOG.md, so it never reached Backlog either (Liav,
+    // 2026-08-12: "should we see parked in backlog?"). It must land in Backlog, not a
+    // lane of its own and not silently dropped to the 'review' fallback.
+    assert.equal(laneOf('parked'), 'backlog');
 });
 
 test('laneOf: open -> todo', () => {

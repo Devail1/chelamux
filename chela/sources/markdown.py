@@ -11,6 +11,14 @@ OPEN_RE = re.compile(r"^\s*-\s*\[\s\]\s*(.+?)\s*$")
 DONE_RE = re.compile(r"^\s*-\s*\[[xX]\]\s*(.+?)\s*$")
 BLOCKED_RE = re.compile(r"<!--\s*blocked", re.IGNORECASE)
 DEPENDS_RE = re.compile(r"<!--\s*depends:\s*(.+?)\s*-->", re.IGNORECASE)
+# The optional human-readable "why" a PARKED bullet carries — `<!-- blocked -->` alone,
+# with no colon, is valid too; it just has no reason text to show.
+BLOCKED_REASON_RE = re.compile(r"<!--\s*blocked\s*:\s*(.*?)\s*-->", re.IGNORECASE)
+# Strips a bullet's own trailing `<!-- ... -->` marker(s) down to its bare, human-visible
+# title — the same string a `depends: "..."` reference names (see `_resolve_depends`),
+# and what a PARKED bullet's id must hash off too (see `parked_tasks_from_text`): a
+# human writes the bare title, never the raw marker-attached line.
+_TRAILING_COMMENT_RE = re.compile(r"\s*<!--.*?-->\s*")
 
 
 class MarkdownSource:
@@ -53,6 +61,48 @@ class MarkdownSource:
                 raw=raw,
                 body=_task_body(title, lines, i),
                 depends=_resolve_depends(self.path.name, title),
+            ))
+        return tasks
+
+    def list_parked_tasks(self) -> list[Task]:
+        if not self.path.exists():
+            return []
+        return self.parked_tasks_from_text(self.path.read_text())
+
+    def parked_tasks_from_text(self, text: str) -> list[Task]:
+        """Every PARKED (`<!-- blocked: ... -->`) bullet in `text`.
+
+        `tasks_from_text` skips these outright — they are not claimable work — which
+        used to mean a parked bullet was invisible everywhere: not in Open, and (since
+        it lives in TODO.md, not BACKLOG.md) not in Backlog either. It sat in the
+        tracker with nothing on the board to show for it (Liav, 2026-08-12: "should we
+        see parked in backlog?"). This surfaces the same bullets `tasks_from_text`
+        drops, so the dashboard can render them instead of losing them.
+
+        Id and title are hashed/reported off the BARE title (comment stripped) — the
+        same treatment `chela.runtime_truth._parked_ids_from_text` gives them for
+        `depends:` identity, since a human names this task via its bare visible title,
+        never the raw bullet with its own marker attached.
+        """
+        lines = text.splitlines()
+        tasks: list[Task] = []
+        for i, raw in enumerate(lines, start=1):
+            m = OPEN_RE.match(raw)
+            if not m:
+                continue
+            title = m.group(1).strip()
+            if not BLOCKED_RE.search(title):
+                continue
+            bare = _TRAILING_COMMENT_RE.sub(" ", title).strip()
+            reason_m = BLOCKED_REASON_RE.search(title)
+            reason = reason_m.group(1).strip() if reason_m else ""
+            tasks.append(Task(
+                id=_task_id(self.path, bare),
+                title=bare,
+                file=str(self.path),
+                line_number=i,
+                raw=raw,
+                body=reason or None,
             ))
         return tasks
 

@@ -40,7 +40,7 @@ before(async () => {
     }));
 });
 
-function _payload(recentRuns) {
+function _payload(recentRuns, overrides = {}) {
     return {
         configured: true,
         workflows: [{
@@ -48,9 +48,11 @@ function _payload(recentRuns) {
             project_key: 'CMX',
             open_tasks: [],
             backlog_items: [],
+            parked_tasks: [],
             active_runs: [],
             awaiting_review_runs: [],
             recent_runs: recentRuns,
+            ...overrides,
         }],
     };
 }
@@ -155,4 +157,59 @@ test('renderKanban: a card title with a mid-string bold span renders through knI
     assert.ok(titleEl, 'the done card has no .kanban-card-title element');
     assert.equal(titleEl.innerHTML, 'ship <strong>the wall</strong> now',
         `kanban card title did not render through knInline — got: "${titleEl.innerHTML}"`);
+});
+
+// --- 5. 🔴 GUARD (CMX-298) — a parked TODO.md bullet renders in the Backlog lane -----
+//
+// Before this, `wf.parked_tasks` did not exist in the payload at all, and even if it
+// had, kanban.js had no bucket, no card branch and no lane mapping for it — a PARKED
+// bullet was invisible on the whole board (Liav, 2026-08-12: "should we see parked in
+// backlog?"). This drives the real payload shape `/api/dispatcher` now sends and reads
+// the real DOM back: the card must land under the Backlog column head, as its own
+// `.kanban-card-parked` (never `.kanban-card-backlog` — that class is reserved for
+// actual BACKLOG.md bullets), carrying its blocked reason as visible text.
+
+test('renderKanban: a parked TODO.md bullet renders as its own card in the Backlog lane', () => {
+    renderKanban(_payload([], {
+        parked_tasks: [{
+            id: 'p1', title: 'Add a unit test for the config loader',
+            file: '/x/TODO.md', line_number: 14, raw: '- [ ] ...',
+            reason: 'waiting on fixtures',
+        }],
+    }));
+
+    const backlogCol = document.querySelector('.kanban-col-backlog');
+    assert.ok(backlogCol, '#kanban-board has no .kanban-col-backlog column');
+
+    const parkedCard = backlogCol.querySelector('.kanban-card-parked');
+    assert.ok(parkedCard,
+        'the parked task never reached the Backlog column as a .kanban-card-parked card');
+    assert.equal(backlogCol.querySelectorAll('.kanban-card-backlog').length, 0,
+        'a parked task was rendered as a plain .kanban-card-backlog card, indistinguishable from a real BACKLOG.md bullet');
+
+    assert.match(parkedCard.textContent, /Add a unit test for the config loader/,
+        'the parked card does not show the task title');
+    assert.match(parkedCard.textContent, /waiting on fixtures/,
+        'the parked card does not show its blocked reason as visible text');
+});
+
+// --- 6. ⭐ COUNTERWEIGHT — a parked card carries no Promote/delete affordance --------
+//
+// Without this, always rendering the backlog branch's Promote button for ANY card in
+// the Backlog lane would also satisfy test 5 above (a parked card sitting right next
+// to a real BACKLOG.md one, both promotable) — which would be wrong: a parked bullet
+// is already in TODO.md, so "Promote" makes no sense for it.
+
+test('renderKanban: a parked card has no Promote button', () => {
+    renderKanban(_payload([], {
+        parked_tasks: [{
+            id: 'p1', title: 'a parked task', file: '/x/TODO.md',
+            line_number: 3, raw: '- [ ] ...', reason: null,
+        }],
+    }));
+
+    const parkedCard = document.querySelector('.kanban-card-parked');
+    assert.ok(parkedCard, 'the parked task never reached the board');
+    assert.equal(parkedCard.querySelector('.kanban-promote-btn'), null,
+        'a parked card must not carry a Promote button — it is already in TODO.md');
 });
