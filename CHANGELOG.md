@@ -10,6 +10,13 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Changed
+
+- **The live-terminal message timestamp is quieter.** The `MessageDisplay` marker CMX-285
+  added dropped seconds and its clock emoji — `[HH:MM]` in place of `🕐 HH:MM:SS` — since
+  the marker's job is "roughly when did this land," not a stopwatch, and a variable-width
+  glyph at the start of every message read as content rather than as a marker. (CMX-297)
+
 ## [0.6.0] — 2026-08-15
 
 ### Fixed
