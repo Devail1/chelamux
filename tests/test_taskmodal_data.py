@@ -99,6 +99,68 @@ def test_open_tasks_include_body(monkeypatch, client, tmp_path):
     assert "## Backlog" not in tasks[0]["body"]
 
 
+# --- /api/dispatcher: parked_tasks (CMX-298) ---------------------------------
+
+def test_parked_tasks_surface_a_blocked_todo_bullet(monkeypatch, client, tmp_path):
+    """🔴 GUARD: a PARKED (`<!-- blocked: ... -->`) bullet used to be invisible
+    everywhere — excluded from `open_tasks` by design, and never in
+    `backlog_items` either since it lives in TODO.md, not BACKLOG.md. Drop the
+    `entry["parked_tasks"]` wiring in api_dispatcher (or revert to an empty
+    list) and this goes RED: the board would have nothing to show for a
+    blocked ticket sitting in the tracker (Liav, 2026-08-12)."""
+    _no_repo_workflow(monkeypatch)
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    (repo / "WORKFLOW.md").write_text(
+        "---\nproject_key: XYZ\ntracker:\n  kind: markdown\n  path: TODO.md\n---\nprompt\n"
+    )
+    (repo / "TODO.md").write_text(
+        "## Open\n\n"
+        "- [ ] ship it\n"
+        "- [ ] add a test <!-- blocked: waiting on fixtures -->\n"
+    )
+    wf_path = (repo / "WORKFLOW.md").resolve()
+    monkeypatch.setattr(dash, "DISPATCH_WORKFLOWS", [wf_path])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [])
+
+    resp = client.get("/api/dispatcher")
+    entry = resp.get_json()["workflows"][0]
+    # The blocked bullet must not leak into open_tasks (unchanged, pre-existing
+    # behaviour) — only into the new parked_tasks list.
+    assert [t["title"] for t in entry["open_tasks"]] == ["ship it"]
+    parked = entry["parked_tasks"]
+    assert len(parked) == 1
+    assert parked[0]["title"] == "add a test"
+    assert parked[0]["reason"] == "waiting on fixtures"
+    # 🔴 GUARD (round 2, PR #372): the parked bullet's SOURCE COORDINATES must
+    # survive this hop too — kanban.js carries line_number/raw onto the card for
+    # the task-detail modal (there is no run yet, so no other way to jump to the
+    # source line). tests/test_markdown_parked.py pins line_number/raw at the
+    # PARSE layer only; without this, api_dispatcher could zero out or drop
+    # line_number/raw on the way into the JSON payload and every test above would
+    # still pass.
+    assert parked[0]["line_number"] == 4
+    assert parked[0]["raw"] == "- [ ] add a test <!-- blocked: waiting on fixtures -->"
+
+
+def test_parked_tasks_is_empty_when_nothing_is_blocked(monkeypatch, client, tmp_path):
+    # ⭐ COUNTERWEIGHT — without this, always returning a non-empty parked_tasks
+    # list (e.g. echoing every open task back) would also satisfy the guard above.
+    _no_repo_workflow(monkeypatch)
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    (repo / "WORKFLOW.md").write_text(
+        "---\nproject_key: XYZ\ntracker:\n  kind: markdown\n  path: TODO.md\n---\nprompt\n"
+    )
+    (repo / "TODO.md").write_text("## Open\n\n- [ ] ship it\n")
+    wf_path = (repo / "WORKFLOW.md").resolve()
+    monkeypatch.setattr(dash, "DISPATCH_WORKFLOWS", [wf_path])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [])
+
+    resp = client.get("/api/dispatcher")
+    assert resp.get_json()["workflows"][0]["parked_tasks"] == []
+
+
 # --- dispatcher._spawn: brief persisted at claim time -----------------------
 
 def _conn() -> sqlite3.Connection:

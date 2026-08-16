@@ -21,6 +21,12 @@ history lives in `git log`.
   colourblind-safe convention as the window-type glyph; a plain session, the common case,
   gets no badge at all. The badge updates live off the same orchestrator-change event the
   pane toggle and decisions owner chip already listen to. (CMX-300)
+### Changed
+
+- **The live-terminal message timestamp is quieter.** The `MessageDisplay` marker CMX-285
+  added dropped seconds and its clock emoji — `[HH:MM]` in place of `🕐 HH:MM:SS` — since
+  the marker's job is "roughly when did this land," not a stopwatch, and a variable-width
+  glyph at the start of every message read as content rather than as a marker. (CMX-297)
 
 ## [0.6.0] — 2026-08-15
 

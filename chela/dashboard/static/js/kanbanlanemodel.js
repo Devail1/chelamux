@@ -46,6 +46,12 @@ export const KANBAN_LANE_LABELS = {
 // in a lane of their own.
 const STATUS_LANE = {
     backlog: 'backlog',
+    // A PARKED (`<!-- blocked: ... -->`) TODO.md bullet — real tracked work, not a
+    // BACKLOG.md idea, but not claimable either. Rides in the Backlog lane alongside
+    // BACKLOG.md items (kanban.js's `_kCard` gives it its own 'parked' card style so
+    // the two are never visually confused) rather than vanishing off the board
+    // entirely, which is what it did before (Liav, 2026-08-12).
+    parked: 'backlog',
     open: 'todo',
     claimed: 'in_progress',
     running: 'in_progress',

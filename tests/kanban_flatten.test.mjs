@@ -16,8 +16,16 @@
 // tests/test_js_suites.py; needs `npm ci` for jsdom.)
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
 import { KANBAN_LANE_LABELS } from '../chela/dashboard/static/js/kanbanlanemodel.js';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const STYLE_CSS = fs.readFileSync(
+    path.join(HERE, '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
 
 const BODY = `
 <div class="work-pane active" id="work-board" data-seg="board">
@@ -40,7 +48,7 @@ before(async () => {
     }));
 });
 
-function _payload(recentRuns) {
+function _payload(recentRuns, overrides = {}) {
     return {
         configured: true,
         workflows: [{
@@ -48,10 +56,29 @@ function _payload(recentRuns) {
             project_key: 'CMX',
             open_tasks: [],
             backlog_items: [],
+            parked_tasks: [],
             active_runs: [],
             awaiting_review_runs: [],
             recent_runs: recentRuns,
+            ...overrides,
         }],
+    };
+}
+
+function _multiWfPayload(workflows) {
+    return {
+        configured: true,
+        workflows: workflows.map((wf) => ({
+            path: '/x/WORKFLOW.md',
+            project_key: 'CMX',
+            open_tasks: [],
+            backlog_items: [],
+            parked_tasks: [],
+            active_runs: [],
+            awaiting_review_runs: [],
+            recent_runs: [],
+            ...wf,
+        })),
     };
 }
 
@@ -156,3 +183,374 @@ test('renderKanban: a card title with a mid-string bold span renders through knI
     assert.equal(titleEl.innerHTML, 'ship <strong>the wall</strong> now',
         `kanban card title did not render through knInline — got: "${titleEl.innerHTML}"`);
 });
+
+// --- 5. 🔴 GUARD (CMX-298) — a parked TODO.md bullet renders in the Backlog lane -----
+//
+// Before this, `wf.parked_tasks` did not exist in the payload at all, and even if it
+// had, kanban.js had no bucket, no card branch and no lane mapping for it — a PARKED
+// bullet was invisible on the whole board (Liav, 2026-08-12: "should we see parked in
+// backlog?"). This drives the real payload shape `/api/dispatcher` now sends and reads
+// the real DOM back: the card must land under the Backlog column head, as its own
+// `.kanban-card-parked` (never `.kanban-card-backlog` — that class is reserved for
+// actual BACKLOG.md bullets), carrying its blocked reason as visible text.
+
+test('renderKanban: a parked TODO.md bullet renders as its own card in the Backlog lane', () => {
+    renderKanban(_payload([], {
+        parked_tasks: [{
+            id: 'p1', title: 'Add a unit test for the config loader',
+            file: '/x/TODO.md', line_number: 14, raw: '- [ ] ...',
+            reason: 'waiting on fixtures',
+        }],
+    }));
+
+    const backlogCol = document.querySelector('.kanban-col-backlog');
+    assert.ok(backlogCol, '#kanban-board has no .kanban-col-backlog column');
+
+    const parkedCard = backlogCol.querySelector('.kanban-card-parked');
+    assert.ok(parkedCard,
+        'the parked task never reached the Backlog column as a .kanban-card-parked card');
+    assert.equal(backlogCol.querySelectorAll('.kanban-card-backlog').length, 0,
+        'a parked task was rendered as a plain .kanban-card-backlog card, indistinguishable from a real BACKLOG.md bullet');
+
+    assert.match(parkedCard.textContent, /Add a unit test for the config loader/,
+        'the parked card does not show the task title');
+    assert.match(parkedCard.textContent, /waiting on fixtures/,
+        'the parked card does not show its blocked reason as visible text');
+
+    // 🔴 GUARD (round 2, PR #372): the 🔒 cue must render on the WITH-reason branch
+    // too, not just the reason-less fallback test 6 pins below. Dropping '🔒 ' from
+    // this ternary's other arm left the reason TEXT intact (the assertion above
+    // would still pass) while erasing the one thing that marks this a read-only
+    // parked card rather than an arbitrary chip of text.
+    const reasonEl = parkedCard.querySelector('.kanban-parked-reason');
+    assert.ok(reasonEl, 'the parked card has no .kanban-parked-reason element');
+    assert.match(reasonEl.textContent, /🔒/,
+        `a parked card WITH a reason must still show the 🔒 lock cue — got: "${reasonEl.textContent}"`);
+
+    // 🔴 GUARD (round 2, PR #372): _kanbanFlatten's own header comment claims
+    // workflow_path is injected onto parked_tasks so the card still gets a workflow
+    // chip. Without that injection, _wfName(undefined) renders the '?' fallback
+    // instead of the real workflow name derived from the fixture's wf.path
+    // ('/x/WORKFLOW.md' -> 'x') — this reads the rendered chip, not the source line.
+    const wfChip = parkedCard.querySelector('.kanban-wf-chip');
+    assert.ok(wfChip, 'the parked card has no .kanban-wf-chip element');
+    assert.equal(wfChip.textContent, 'x',
+        `parked card's workflow chip did not carry workflow_path — got: "${wfChip.textContent}"`);
+});
+
+// --- 6. ⭐ COUNTERWEIGHT — a parked card carries no Promote/delete affordance --------
+//
+// Without this, always rendering the backlog branch's Promote button for ANY card in
+// the Backlog lane would also satisfy test 5 above (a parked card sitting right next
+// to a real BACKLOG.md one, both promotable) — which would be wrong: a parked bullet
+// is already in TODO.md, so "Promote" makes no sense for it.
+//
+// 🔴 GUARD (round 3, PR #372): the delete half of the same comment ('never rendered
+// as one: no Promote button ... and no delete button') was unpinned — this test used
+// to check only `.kanban-promote-btn`. `delBtn` is computed unconditionally at the top
+// of `_kCard` for every card, so interpolating it into the parked branch's template
+// (the way the run-backed and backlog branches both already do) parses fine and
+// renders a `.kanban-delete-btn` whose `data-del-kind="run"` names no run at all — the
+// judge proved exactly that mutation left the suite green, because nothing here read
+// `.kanban-delete-btn`.
+
+test('renderKanban: a parked card has no Promote button and no delete button', () => {
+    renderKanban(_payload([], {
+        parked_tasks: [{
+            id: 'p1', title: 'a parked task', file: '/x/TODO.md',
+            line_number: 3, raw: '- [ ] ...', reason: null,
+        }],
+    }));
+
+    const parkedCard = document.querySelector('.kanban-card-parked');
+    assert.ok(parkedCard, 'the parked task never reached the board');
+    assert.equal(parkedCard.querySelector('.kanban-promote-btn'), null,
+        'a parked card must not carry a Promote button — it is already in TODO.md');
+    assert.equal(parkedCard.querySelector('.kanban-delete-btn'), null,
+        'a parked card must not carry a delete button — the source-line delete endpoint matches against ' +
+        'the file\'s literal bullet text, which still carries the `<!-- blocked -->` marker a parked ' +
+        'card\'s bare title cannot match; a delete button here would target the wrong line or silently no-op');
+
+    // 🔴 GUARD: a parked bullet with no `reason` (blocked with no `<!-- blocked:
+    // ... -->` text) must still fall back to a visible '🔒 parked' cue — the lock
+    // icon is the colourblind-safe signal that this card is read-only, distinct
+    // from a real BACKLOG.md bullet, even when there is no reason text to show.
+    // Emptying that fallback span (kanban.js's `reason ? ... : ` else-branch)
+    // left the card with no cue at all and no assertion here caught it.
+    const reasonEl = parkedCard.querySelector('.kanban-parked-reason');
+    assert.ok(reasonEl, 'the parked card has no .kanban-parked-reason element');
+    assert.match(reasonEl.textContent, /🔒\s*parked/,
+        `a reason-less parked card must still show a '🔒 parked' cue — got: "${reasonEl.textContent}"`);
+});
+
+// --- 7. 🔴 GUARD (CMX-298) — backlog cards render before parked cards, within the ---
+// --- shared Backlog lane -------------------------------------------------------------
+//
+// _KANBAN_BUCKET_ORDER puts 'backlog' before 'parked' so BACKLOG.md ideas lead and
+// TODO.md's parked bullets follow within the lane — per the comment above that
+// array in kanban.js. Swapping the two entries in that array is a silent,
+// same-membership reorder: every card still lands in the Backlog lane, so nothing
+// checking lane membership or per-card class notices. This asserts the actual DOM
+// order of the two card types inside .kanban-col-backlog .kanban-cards.
+
+test('renderKanban: within the Backlog lane, a backlog card renders before a parked card', () => {
+    renderKanban(_payload([], {
+        backlog_items: [{ text: 'a backlog idea', section: null, file: '/x/BACKLOG.md' }],
+        parked_tasks: [{
+            id: 'p1', title: 'a parked task', file: '/x/TODO.md',
+            line_number: 3, raw: '- [ ] ...', reason: null,
+        }],
+    }));
+
+    const cardsEl = document.querySelector('.kanban-col-backlog .kanban-cards');
+    assert.ok(cardsEl, '.kanban-col-backlog has no .kanban-cards element');
+
+    const kids = [...cardsEl.children];
+    const backlogIdx = kids.findIndex((el) => el.classList.contains('kanban-card-backlog'));
+    const parkedIdx = kids.findIndex((el) => el.classList.contains('kanban-card-parked'));
+    assert.ok(backlogIdx !== -1, 'no .kanban-card-backlog card rendered in the Backlog lane');
+    assert.ok(parkedIdx !== -1, 'no .kanban-card-parked card rendered in the Backlog lane');
+    assert.ok(backlogIdx < parkedIdx,
+        `expected the backlog card before the parked card, got backlog at ${backlogIdx} and parked at ${parkedIdx}`);
+});
+
+// --- 7b. 🔴 GUARD (round 4, PR #372) — backlog-before-parked ordering holds across ---
+// --- WORKFLOW boundaries, not just within one workflow's own push order --------------
+//
+// _kanbanFlatten keeps 'backlog' and 'parked' as SEPARATE buckets (see the comment
+// above _KANBAN_BUCKET_ORDER); _lanesFromBuckets then concatenates the WHOLE backlog
+// bucket before the WHOLE parked bucket. Test 7 above only uses a SINGLE workflow, so
+// a mutation that routes parked_tasks into `buckets.backlog` instead of its own
+// `buckets.parked` is invisible there: with one workflow, backlog_items are pushed
+// before parked_tasks regardless of which bucket they land in, so the DOM order comes
+// out identical either way — the judge proved exactly this. This drives TWO
+// workflows, with the EARLIER workflow (in iteration order) contributing only the
+// parked task and the LATER workflow contributing only the backlog item — the real,
+// separate-bucket behaviour still renders backlog-before-parked (bucket order wins
+// over iteration order), but the collapsed-bucket mutation preserves iteration order
+// instead and renders the parked card first.
+
+test('renderKanban: a backlog card from a LATER workflow still renders before a parked card from an EARLIER one', () => {
+    renderKanban(_multiWfPayload([
+        {
+            path: '/x/WORKFLOW-A.md',
+            parked_tasks: [{
+                id: 'p1', title: 'a parked task', file: '/x/TODO.md',
+                line_number: 3, raw: '- [ ] ...', reason: null,
+            }],
+        },
+        {
+            path: '/x/WORKFLOW-B.md',
+            backlog_items: [{ text: 'a backlog idea', section: null, file: '/x/BACKLOG.md' }],
+        },
+    ]));
+
+    const cardsEl = document.querySelector('.kanban-col-backlog .kanban-cards');
+    assert.ok(cardsEl, '.kanban-col-backlog has no .kanban-cards element');
+
+    const kids = [...cardsEl.children];
+    const backlogIdx = kids.findIndex((el) => el.classList.contains('kanban-card-backlog'));
+    const parkedIdx = kids.findIndex((el) => el.classList.contains('kanban-card-parked'));
+    assert.ok(backlogIdx !== -1, 'no .kanban-card-backlog card rendered in the Backlog lane');
+    assert.ok(parkedIdx !== -1, 'no .kanban-card-parked card rendered in the Backlog lane');
+    assert.ok(backlogIdx < parkedIdx,
+        'expected the backlog card (from the LATER workflow) before the parked card (from the ' +
+        `EARLIER workflow) — bucket order should win over iteration order — got backlog at ${backlogIdx} and parked at ${parkedIdx}`);
+});
+
+// --- 8. 🔴 GUARD (CMX-298 round 3) — a parked card's blocked reason is HTML-escaped -
+//
+// BLOCKED_REASON_RE captures the `<!-- blocked: ... -->` text verbatim (repo-authored,
+// arbitrary — tests/test_markdown_parked.py::test_the_blocked_reason_is_captured_verbatim
+// pins that it is passed through unmodified), so it is untrusted text landing straight in
+// the board's innerHTML. kanban.js reaches for `escHtml(card.reason)` before interpolating
+// it into the `.kanban-parked-reason` span; dropping that call lets a reason containing
+// markup render as LIVE HTML. Test 5/6 above only assert the reason's PLAIN TEXT is
+// visible — a real `<b>` element and its escaped-text equivalent both satisfy
+// `textContent === 'evil'`, so the judge proved that mutation left every test green. This
+// drives a reason carrying an actual tag and reads `.innerHTML`/child elements back,
+// which only escHtml's `&lt;`/`&gt;` output can satisfy.
+
+test('renderKanban: a parked card\'s blocked reason is HTML-escaped, not rendered as live markup', () => {
+    renderKanban(_payload([], {
+        parked_tasks: [{
+            id: 'p1', title: 'a parked task', file: '/x/TODO.md',
+            line_number: 3, raw: '- [ ] x <!-- blocked: reason -->',
+            reason: '<b>evil</b><img src=x onerror=alert(1)>',
+        }],
+    }));
+
+    const reasonEl = document.querySelector('.kanban-card-parked .kanban-parked-reason');
+    assert.ok(reasonEl, 'the parked card has no .kanban-parked-reason element');
+    assert.equal(reasonEl.querySelector('b'), null,
+        'a parked card\'s reason rendered as a live <b> element — escHtml() is missing on this interpolation');
+    assert.equal(reasonEl.querySelector('img'), null,
+        'a parked card\'s reason rendered a live <img> element — escHtml() is missing on this interpolation');
+    assert.match(reasonEl.innerHTML, /&lt;b&gt;evil&lt;\/b&gt;/,
+        `the reason's markup was not escaped before reaching innerHTML — got: "${reasonEl.innerHTML}"`);
+});
+
+// --- 9. 🔴 GUARD (round 4, PR #372) — the reason is escaped on the title= ATTRIBUTE ---
+// --- hop too, not just the text hop ---------------------------------------------------
+//
+// The SAME untrusted reason string is interpolated a second time, three characters
+// earlier in the template than the escHtml() call test 8 pins, into the span's
+// `title=` attribute via attrEsc() — util.js's escHtml() PLUS a `"` -> `&quot;` step,
+// which is the only thing stopping a reason containing a double quote from closing
+// the attribute early and letting the rest of the reason land as raw markup/bogus
+// attributes on the same tag (e.g. `..." onmouseover=alert(1) x="`). Test 8's
+// fixture reason has no double quote in it, so dropping attrEsc() on THIS
+// interpolation is invisible to it: the span still parses, querySelector('b')/
+// ('img') are still null and innerHTML is unaffected.
+//
+// A naive `title.includes('"')` assertion does NOT catch this: jsdom's attribute
+// parser always DECODES entities on read, so `getAttribute('title')` returns the
+// same unescaped string `"a " b"` whether the source HTML correctly wrote
+// `&quot;` or not — the escaping only matters for where the browser's HTML
+// PARSER decides the attribute ends, not for what a later JS read reports back.
+// The observable difference is that without attrEsc(), the quote closes the
+// `title="..."` attribute right there, TRUNCATING it — so this asserts the
+// full reason text survives the round trip, not a prefix of it.
+
+test('renderKanban: a parked card\'s blocked reason is escaped on the title attribute too', () => {
+    const reason = 'stop here" then keep going <b>evil</b>';
+    renderKanban(_payload([], {
+        parked_tasks: [{
+            id: 'p1', title: 'a parked task', file: '/x/TODO.md',
+            line_number: 3, raw: '- [ ] x <!-- blocked: reason -->',
+            reason,
+        }],
+    }));
+
+    const reasonEl = document.querySelector('.kanban-card-parked .kanban-parked-reason');
+    assert.ok(reasonEl, 'the parked card has no .kanban-parked-reason element');
+    const title = reasonEl.getAttribute('title');
+    assert.equal(title, reason,
+        `the title attribute was truncated at the reason's embedded double quote — got: "${title}" — ` +
+        'attrEsc() is missing on this interpolation, letting the quote close the attribute early');
+});
+
+// --- 10. 🔴 GUARD (round 5, PR #372) — the 🔒 cue is actually VISIBLE on screen, ------
+// not just present in the DOM under textContent/querySelector.
+//
+// Tests 5, 6, 8 and 9 above all read `.kanban-parked-reason` through
+// textContent/querySelector/getAttribute — none of which CSS can touch. A single
+// `display: none` added to the `.kanban-parked-reason` rule in style.css leaves every
+// one of those assertions green while erasing the chip from the screen entirely,
+// leaving a parked card rendering as a bare title + workflow chip — byte-indistinguishable
+// from a real BACKLOG.md card to anyone actually looking at it (docs/defeat_shapes/54).
+// This test takes the REAL rendered card's outerHTML (from the jsdom `document` the
+// other tests in this file already assert against) and re-mounts it under the REAL
+// style.css in a SEPARATE `pretendToBeVisual` jsdom — same recipe
+// tests/kanban_task_modal_wiring.test.mjs's last test and tests/wire_live_css.test.mjs
+// use — then reads the CASCADED `getComputedStyle`, not just the class/text.
+test('renderKanban: the parked card\'s 🔒 reason chip is actually VISIBLE under the REAL style.css, not just present in the DOM', () => {
+    renderKanban(_payload([], {
+        parked_tasks: [{
+            id: 'p1', title: 'a parked task', file: '/x/TODO.md',
+            line_number: 3, raw: '- [ ] x <!-- blocked: reason -->',
+            reason: 'a fairly long blocked reason that would need to ellipsize past the card edge',
+        }],
+    }));
+
+    const parkedCard = document.querySelector('.kanban-card-parked');
+    assert.ok(parkedCard, 'the parked task never reached the board');
+
+    const cssDom = new JSDOM(
+        `<!doctype html><html><head><style>${STYLE_CSS}</style></head><body>${parkedCard.outerHTML}</body></html>`,
+        { pretendToBeVisual: true });
+    const cardEl = cssDom.window.document.querySelector('.kanban-card-parked');
+    assert.ok(cardEl, 'sliced parked card markup has no .kanban-card-parked element');
+    const reasonEl = cssDom.window.document.querySelector('.kanban-parked-reason');
+    assert.ok(reasonEl, 'sliced parked card markup has no .kanban-parked-reason element');
+
+    // The CARD itself, not just the reason chip inside it — collapsing the card's own
+    // opacity/display/visibility to invisible erases the title and workflow chip along
+    // with the 🔒 cue, and nothing that reads textContent/querySelector/classList (CSS
+    // cannot touch any of those) would ever notice.
+    const cardStyle = cssDom.window.getComputedStyle(cardEl);
+    assert.notEqual(parseFloat(cardStyle.opacity), 0,
+        'the .kanban-card-parked element itself has opacity:0 under the REAL style.css — the whole card ' +
+        '(title, workflow chip and 🔒 cue together) is invisible, not merely the reason chip');
+    assert.notEqual(cardStyle.display, 'none',
+        'the .kanban-card-parked element itself is display:none under the REAL style.css — the parked ' +
+        'card never reaches the screen at all');
+    assert.notEqual(cardStyle.visibility, 'hidden',
+        'the .kanban-card-parked element itself is visibility:hidden under the REAL style.css — the ' +
+        'parked card never reaches the screen at all');
+
+    const style = cssDom.window.getComputedStyle(reasonEl);
+    // A non-zero font-size is asserted directly (rather than as one more equality in the
+    // list below) because ANY of this rule's declarations collapsing the glyph to zero
+    // size defeats the chip the same way display:none does — enumerating one property at
+    // a time is a losing game against the next single-value edit.
+    assert.notEqual(parseFloat(style.fontSize), 0,
+        'the .kanban-parked-reason chip has font-size:0 under the REAL style.css — the 🔒 glyph and the ' +
+        'reason text are collapsed to nothing on screen even though the element is present, non-display:none ' +
+        'and non-visibility:hidden');
+    assert.notEqual(style.display, 'none',
+        'the .kanban-parked-reason chip is display:none under the REAL style.css — the 🔒 cue is in the ' +
+        'DOM but never rendered on screen, making a parked card visually indistinguishable from a plain ' +
+        'BACKLOG.md card (only .kanban-card-parked\'s border-left-color differs, and that is currently ' +
+        'identical to .kanban-card-open\'s var(--text-dim))');
+    assert.notEqual(style.visibility, 'hidden',
+        'the .kanban-parked-reason chip is visibility:hidden under the REAL style.css — same defect as ' +
+        'display:none, hidden from every textContent/querySelector assertion');
+
+    // The same rule also carries the properties that make the title= tooltip (test 9
+    // above) the ONLY way to read a long reason — overflow/text-overflow/white-space.
+    // Stripping any of these makes a long reason silently overflow the card instead of
+    // ellipsizing, with every existing textContent-based assertion still green.
+    assert.equal(style.overflow, 'hidden',
+        '.kanban-parked-reason must overflow:hidden — otherwise a long reason spills out of the card ' +
+        'instead of ellipsizing, and the title= tooltip becomes the only readable copy for no reason');
+    assert.equal(style.textOverflow, 'ellipsis',
+        '.kanban-parked-reason must text-overflow:ellipsis — otherwise a long, hidden-overflow reason is ' +
+        'silently truncated with no "…" cue that there is more to read via the title= tooltip');
+    assert.equal(style.whiteSpace, 'nowrap',
+        '.kanban-parked-reason must white-space:nowrap — otherwise a long reason wraps onto multiple ' +
+        'lines instead of triggering the overflow/ellipsis path at all');
+});
+
+// --- NOT GUARDED: "the parked card is VISIBLE on screen" as an OUTCOME -------------
+//
+// The assertions above are cheap tripwires against the specific collapses that have
+// actually been proposed (opacity/display/visibility on the card, font-size/display/
+// visibility on the chip). They are deliberately NOT extended further, and the reason
+// is a settled call in this repo rather than fatigue.
+//
+// PR #372 took SEVEN judge rounds, each finding a new spelling of "this element is not
+// really on screen" that the enumerated list did not cover — the last of them naming
+// `width: 0; overflow: hidden`. docs/defeat_shapes/67 (added by this PR) states the
+// general form: a property list is closed under what today's diff touched, never under
+// what could erase the element.
+//
+// The dividing line is CASCADE vs LAYOUT, and it is the same one CMX-273 established
+// (see tests/dashboard_scale_nav_a11y.test.mjs:162 and docs/SPIKE_WALL_FILLS_STAGE.md,
+// written after three rounds of exactly this on PR #338):
+//
+//   - CASCADE collapses — display/visibility/opacity/font-size — resolve in jsdom's
+//     CSSOM, so `getComputedStyle` sees them. Those ARE guarded, above.
+//   - LAYOUT collapses — `width: 0`, `transform: scale(0)`, clip-path, off-screen
+//     positioning — need a layout engine. jsdom has none: getBoundingClientRect and
+//     offsetWidth are always zero and percentage/flex/grid never resolve against a real
+//     parent. No assertion in this harness can observe them, so writing an eighth
+//     property equality would buy one more spelling and prove nothing about the outcome.
+//
+// The outcome is therefore verified the way CMX-273 verified its own: BY CAPTURE, in a
+// real browser with a real layout engine. Done 2026-08-16 against this exact head, with
+// the real style.css and the real kanban.js, two parked cards (with and without a
+// reason) plus a real BACKLOG.md card rendered side by side:
+//
+//   card    408x52  opacity 0.85  display block  visibility visible  in .kanban-col-backlog
+//   chip    151x16 / 73x16        "🔒 waiting on fixtures" / "🔒 parked"
+//
+// — all non-zero under real layout, the 🔒 glyph present on BOTH ternary branches, and
+// the parked cards distinguishable from the BACKLOG.md card by glyph, text and the
+// ABSENCE of the Promote button. Every one of those cues is non-hue, so the distinction
+// survives greyscale (Liav is red-weak; hue as the sole encoding of state is a defect
+// in this repo, not a preference).
+//
+// ⛔ Do not "fix" this by adding an eighth property assertion. If someone wants the
+// outcome guarded for real, the honest project is a Playwright-sized one, exactly as
+// docs/SPIKE_WALL_FILLS_STAGE.md sizes it — not another line here.
