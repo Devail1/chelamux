@@ -65,3 +65,34 @@ that would still pass against a document making the *opposite* claim isn't testi
 throwaway checkout of the PR's head, stayed green against `CHELA_REQUIRE_JS_TESTS=1 uv run
 pytest -q` (3174 passed, 0 failed). Closed by pinning the exact prohibition clause and the
 exact worked-example substring instead of the paraphrased assertions above.
+
+**Round 2 — the same shape, one entry over:** round 1's fix pinned the two clauses its own
+two mutations had exploited, but left the *original* three assertions in the same test
+untouched: `assert "your own CMX task number" in text`, `assert "centrally serialized
+counter" in text`, and the "not in text" check on the bare phrase. Those three are
+presence-only checks of a phrase whose meaning is carried by the words *next to* it, not
+inside it — exactly this shape, just not yet pinned there. Three more mutations exploited
+that gap and stayed green (3175 passed):
+
+```diff
+- numbered after **your own
++ numbered after anything except **your own
+```
+```diff
+- reuse that number instead of computing a new
++ ignore that number and compute a new
+```
+```diff
+- flight at once never receive the same one
++ flight at once may receive the same one
+```
+
+Each leaves its neighboring pinned phrase (`"your own CMX task number"`,
+`"centrally serialized counter"`) standing untouched while reversing what the sentence
+actually instructs. Closed the same way as round 1: pin the literal clause that contains the
+word doing the semantic work (`after` directly before `**your own`; `reuse ... instead of
+computing a new one from a listing`; `never receive the same one`) instead of a phrase
+merely adjacent to it. No new file was added for this round — it is the identical defeat
+shape recurring in three siblings of the two clauses round 1 already fixed, not a new one;
+the lesson here is that fixing the *mutations found* is not the same as fixing every
+assertion sharing their shape in the same test.

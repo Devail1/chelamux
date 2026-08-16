@@ -705,6 +705,40 @@ def test_defeat_shapes_growth_instructions_number_by_task_id_not_current_highest
         "task number, not a 'current highest' guess. This example is the one concrete, "
         "copyable demonstration of the rule; if it doesn't follow the rule, nothing does"
     )
+    # CMX-301 rework round 2: the three presence-only assertions above ("your own CMX task
+    # number" / "centrally serialized counter" in text) are each still true of a doc that
+    # instructs the OPPOSITE of what it should, because the negation or the directive lives in
+    # the words next to the pinned phrase, not inside it — the exact shape docs/defeat_shapes
+    # already catalogs as #301. Three mutations exploited that gap and stayed green:
+    #   1. "numbered after **your own" -> "numbered after anything except **your own" — the
+    #      phrase "your own CMX task number" survives untouched inside the mutated sentence.
+    #   2. "reuse that number instead of computing a new" -> "ignore that number and compute a
+    #      new" — reinstates the decentralized guess this entry exists to abolish.
+    #   3. "flight at once never receive the same one" -> "flight at once may receive the same
+    #      one" — negates the collision-freedom property while "centrally serialized counter"
+    #      stays put a few words earlier.
+    # Pin each literal clause so the exact word carrying the semantic weight ("after"
+    # immediately before "**your own", "reuse"/"never" themselves) is inside the assertion,
+    # not merely adjacent to it.
+    assert "numbered after **your own CMX task number**" in text, (
+        "DEFEAT_SHAPES.md must say the new file is numbered AFTER your own CMX task number "
+        "— not merely mention the phrase 'your own CMX task number' somewhere nearby. "
+        "Inserting any other directive between 'numbered after' and '**your own' (e.g. "
+        "'numbered after anything except your own...') leaves the phrase-presence check green "
+        "while instructing the opposite of the rule"
+    )
+    assert "reuse that number instead of computing a new one from a listing" in text, (
+        "DEFEAT_SHAPES.md must explicitly say to REUSE the CMX task number instead of "
+        "computing a new one from a directory listing — silently flipping this to 'ignore "
+        "that number and compute a new one' reinstates the decentralized guess this entry "
+        "exists to abolish, without touching any other pinned phrase"
+    )
+    assert "in flight at once never receive the same one" in text, (
+        "DEFEAT_SHAPES.md must assert the collision-freedom PROPERTY itself — two branches in "
+        "flight at once never receive the same number — not just the word 'counter' a few "
+        "words earlier. Negating 'never' to 'may' leaves 'centrally serialized counter' "
+        "standing while reversing the guarantee the instruction rests on"
+    )
 
 
 def test_defeat_shapes_cross_references_resolve_to_shapes_that_exist():
