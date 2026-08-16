@@ -360,6 +360,9 @@ test('role colour is colourblind-safe and CASCADES onto the rendered badge — n
     const dom = new JSDOM(`<!doctype html><html><head><style>${CSS}</style></head><body>
         <span class="ar-role orchestrator">Orchestrator</span>
         <span class="ar-role dispatched">Dispatched</span>
+        <span class="ar-type claude">C</span>
+        <span class="ar-type shell">S</span>
+        <span class="ar-type server">V</span>
     </body></html>`, { pretendToBeVisual: true });
     const orch = dom.window.document.querySelector('.ar-role.orchestrator');
     const disp = dom.window.document.querySelector('.ar-role.dispatched');
@@ -371,11 +374,12 @@ test('role colour is colourblind-safe and CASCADES onto the rendered badge — n
         'the .ar-role.dispatched selector no longer paints the rendered badge (colour lost or selector renamed)');
 
     // ...and distinct from the window-TYPE palette, as this test's own title claims.
-    const hexToRgb = hex => {
-        const n = parseInt(hex.slice(1), 16);
-        return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
-    };
-    const typeColors = ['#56B4E9', '#009E73', '#E69F00'].map(hexToRgb);
+    // Read the type colours back off the SAME cascaded document rather than
+    // hardcoding their source hexes — otherwise a recoloured .ar-type glyph
+    // collides with a role colour in reality while this assertion, comparing
+    // against a stale constant, stays green (DEFEAT_SHAPES #70).
+    const typeColors = ['claude', 'shell', 'server'].map(cls =>
+        dom.window.getComputedStyle(dom.window.document.querySelector(`.ar-type.${cls}`)).color);
     assert.ok(!typeColors.includes(orchColor) && !typeColors.includes(dispColor),
         'a role colour collides with a window-type colour — the two palettes must stay visually distinct');
 });
