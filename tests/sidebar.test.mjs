@@ -75,12 +75,12 @@ const SIDEBAR_COLLAPSED_KEY = 'chela_sidebar_collapsed';
 // The phone/desktop split is `matchMedia('(max-width: 768px)')`. Make it steerable.
 let PHONE = false;
 
-let nav, util;
+let nav, util, orchestrator;
 
 before(async () => {
     // The dashboard's modules are a cycle (nav ↔ main), so evaluation ORDER is the
     // browser's: main.js is the entry and everything else is pulled in behind it.
-    ({ modules: { util, nav } } = await bootDashboardDom({
+    ({ modules: { util, nav, orchestrator } } = await bootDashboardDom({
         body: BODY,
         // jsdom ships no canvas, and `getContext('2d')` returns null. The tab-signal
         // badge (util.js::_drawFavicon) paints one whenever the "needs you" count goes
@@ -96,7 +96,32 @@ before(async () => {
         // seed the storage a reload would have left behind and then load the module —
         // exactly the order a browser does it in.
         seedLocalStorage: { [SIDEBAR_COLLAPSED_KEY]: '1' },
-        extraModules: ['util.js', 'nav.js'],
+        // CMX-300: the role badge reads orchestrator.js's live `_status`, which
+        // orchestratorSubscribe/orchestratorRelease mutate through a REAL
+        // /api/orchestrator/{subscribe,release} round trip — so the default
+        // blanket-`{}` stub (every other test in this file relies on it staying
+        // a no-op) needs those two paths to actually echo back an ok:true
+        // envelope, exactly like the real endpoints in app.py.
+        fetchImpl: (url, opts) => {
+            const u = String(url);
+            if (u.includes('/api/orchestrator/subscribe')) {
+                const body = opts && opts.body ? JSON.parse(opts.body) : {};
+                return Promise.resolve({
+                    ok: true, status: 200,
+                    json: () => Promise.resolve({
+                        ok: true, wid: body.wid, name: body.wid, state: 'registered', why: '', queued: 0,
+                    }),
+                });
+            }
+            if (u.includes('/api/orchestrator/release')) {
+                return Promise.resolve({
+                    ok: true, status: 200,
+                    json: () => Promise.resolve({ ok: true, wid: null, name: null, state: 'unregistered', why: '', queued: 0 }),
+                });
+            }
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+        },
+        extraModules: ['util.js', 'nav.js', 'orchestrator.js'],
     }));
 });
 
@@ -180,6 +205,57 @@ test('colour is the SECOND channel, and it is colourblind-safe (Okabe-Ito)', () 
     // it back from, so this one is honestly a source assertion, and says so.
     ['#56B4E9', '#009E73', '#E69F00'].forEach(c =>
         assert.ok(CSS.includes(c), `the type cue dropped the Okabe-Ito colour ${c}`));
+});
+
+// --- 1d. 🔴 CMX-300: every row's ROLE — orchestrator / dispatched / plain -------
+//
+// Three roles, mutually exclusive. 'orchestrator' is read live off orchestrator.js's
+// shared `_status` (the SAME single decisions-inbox slot terminals.js's pane toggle
+// and decisions.js's owner chip already render — driven here through the REAL
+// orchestratorSubscribe()/orchestratorRelease() round trip, not a hand-set global).
+// 'dispatched' is the API-provided `a.dispatched` flag (app.py's api_agents).
+// 'plain' — a session opened by hand — renders NO badge at all: asserting its
+// absence is the guard against a badge silently degrading into "shown on every
+// row", which would be as unreadable as no cue at all.
+test('the orchestrator window gets an Orchestrator role badge — plain windows get none', async () => {
+    await orchestrator.orchestratorSubscribe('@1');
+    nav.renderSidebarAgents([
+        agent('orch', { window_id: '@1' }),
+        agent('other', { window_id: '@2' }),
+    ]);
+    const badge = rowFor('orch').querySelector('.ar-role');
+    assert.ok(badge, 'the orchestrator window rendered no .ar-role badge at all');
+    assert.equal(badge.textContent, 'Orchestrator');
+    assert.ok(badge.classList.contains('orchestrator'));
+    assert.equal(rowFor('other').querySelector('.ar-role'), null,
+        'a plain window rendered a role badge — plain sessions must render none');
+    await orchestrator.orchestratorRelease('@1');
+});
+
+test('a dispatcher-owned window gets a Dispatched role badge, distinct from Orchestrator', async () => {
+    await orchestrator.orchestratorRelease('@1');   // no window holds the inbox slot
+    nav.renderSidebarAgents([
+        agent('worker', { window_id: '@3', dispatched: true }),
+        agent('manual', { window_id: '@4', dispatched: false }),
+    ]);
+    const badge = rowFor('worker').querySelector('.ar-role');
+    assert.ok(badge, 'a dispatched window rendered no .ar-role badge at all');
+    assert.equal(badge.textContent, 'Dispatched');
+    assert.ok(badge.classList.contains('dispatched'));
+    assert.equal(rowFor('manual').querySelector('.ar-role'), null,
+        'a manually-launched window rendered a role badge — plain sessions must render none');
+});
+
+test('holding BOTH the inbox slot and the dispatched flag reads as Orchestrator, not Dispatched', async () => {
+    await orchestrator.orchestratorSubscribe('@5');
+    nav.renderSidebarAgents([agent('both', { window_id: '@5', dispatched: true })]);
+    assert.equal(rowFor('both').querySelector('.ar-role').textContent, 'Orchestrator');
+    await orchestrator.orchestratorRelease('@5');
+});
+
+test('role colour is colourblind-safe and distinct from the window-type palette', () => {
+    ['#CC79A7', '#0072B2'].forEach(c =>
+        assert.ok(CSS.includes(c), `the role badge dropped the Okabe-Ito colour ${c}`));
 });
 
 // --- 1c. 🔴 every nav icon is a lucide SVG — one uniform box, no stray glyph --

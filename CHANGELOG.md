@@ -10,6 +10,18 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Added
+
+- **The sidebar now marks each session's role — Orchestrator, Dispatched, or plain.** The
+  fleet already carried both facts (the single decisions-inbox slot from `orchestrator.js`,
+  and the API-provided `dispatched` flag the dispatcher stamps on windows it owns) but
+  neither showed up next to the session it described, so telling a hand-opened shell apart
+  from a dispatched worker or the orchestrator meant opening its detail view. Each row (and
+  the agent-detail panel) now renders a text badge — never colour alone — reusing the same
+  colourblind-safe convention as the window-type glyph; a plain session, the common case,
+  gets no badge at all. The badge updates live off the same orchestrator-change event the
+  pane toggle and decisions owner chip already listen to. (CMX-300)
+
 ## [0.6.0] — 2026-08-15
 
 ### Fixed
