@@ -739,6 +739,38 @@ def test_defeat_shapes_growth_instructions_number_by_task_id_not_current_highest
         "words earlier. Negating 'never' to 'may' leaves 'centrally serialized counter' "
         "standing while reversing the guarantee the instruction rests on"
     )
+    # CMX-301 rework round 3: rounds 1-2 pinned every clause their own mutations had exploited,
+    # but two sibling clauses of the same paragraph — and the backstop sentence in the sibling
+    # bullet this entry also edited — were still only reachable through presence-only checks
+    # (or not checked at all). Three more mutations exploited that gap and stayed green (3175
+    # passed):
+    #   1. "to any other free one and move on" -> "to the next free one and move on" — the
+    #      collision *backstop* (what to do when the uniqueness test fires for real) silently
+    #      reverts to the "current highest" guess the whole entry exists to abolish.
+    #   2. "(Numbers only need to stay unique, not contiguous" -> "...stay contiguous, not
+    #      unique" — inverts the parenthetical that makes a 301-numbered entry legal, sending
+    #      the next reader back to renumbering it into the sequential range.
+    #   3. "is *by construction* the collision" -> "is *by construction* not the collision" —
+    #      negates the rationale itself, leaving the doc call a decentralized guess safe.
+    # Pin each literal clause, same as rounds 1-2, so the word carrying the semantic weight
+    # ("any" in "any other free one", "unique, not contiguous" in that order, "the collision"
+    # immediately after "*by construction*") sits inside the assertion instead of near it.
+    assert "to any other free one and move on" in text, (
+        "DEFEAT_SHAPES.md's collision backstop must say to bump to ANY OTHER free number, not "
+        "the next one — reverting 'any other' to 'the next' reinstates the sequential/"
+        "'current highest' guess this entry exists to abolish, in the one place the doc says "
+        "what to actually do when the uniqueness test fires"
+    )
+    assert "(Numbers only need to stay unique, not contiguous" in text, (
+        "DEFEAT_SHAPES.md must say task numbers only need to stay UNIQUE, not contiguous — "
+        "inverting this instructs the next agent to renumber a task-numbered entry down into "
+        "the sequential range, undoing the whole point of numbering off the CMX task id"
+    )
+    assert "is *by construction* the collision" in text, (
+        "DEFEAT_SHAPES.md must state that a decentralized 'current highest' guess IS the "
+        "collision by construction — negating this leaves the doc calling a practice safe "
+        "that it exists to forbid"
+    )
 
 
 def test_defeat_shapes_cross_references_resolve_to_shapes_that_exist():

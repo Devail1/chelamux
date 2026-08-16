@@ -58,6 +58,12 @@ prohibits (`'— **not** "one past the current highest"' in text`, which is fals
 the second number diverges from the first). Before trusting a prose-doc assertion, hand-apply
 the exact corruption you're worried about and confirm the assertion goes red — an assertion
 that would still pass against a document making the *opposite* claim isn't testing the claim.
+**Fixing the mutations a judge round actually found is not the same as fixing every assertion
+sharing their shape:** this entry recurred three times (see Round 2 and Round 3 below) in the
+same test, on sibling clauses of the same paragraph the fix had already touched, because each
+round patched only the clause its own round's mutations hit. When one presence-only assertion
+in a test is found to be this shape, audit every *other* assertion in that same test for the
+same defect before closing the round — not just the one(s) named in the verdict.
 
 **Found:** `docs/DEFEAT_SHAPES.md` /
 `tests/test_judge.py::test_defeat_shapes_growth_instructions_number_by_task_id_not_current_highest`
@@ -96,3 +102,37 @@ merely adjacent to it. No new file was added for this round — it is the identi
 shape recurring in three siblings of the two clauses round 1 already fixed, not a new one;
 the lesson here is that fixing the *mutations found* is not the same as fixing every
 assertion sharing their shape in the same test.
+
+**Round 3 — a third recurrence, in the sibling bullet and the two remaining clauses of the
+same paragraph:** rounds 1-2 each closed the specific clauses their own round's mutations
+exploited, but two more clauses of the same paragraph, plus the collision *backstop* sentence
+in the bullet directly below it (also edited by this PR), were still unpinned or only
+reachable indirectly. Three more mutations exploited that gap and stayed green (3175 passed):
+
+```diff
+- to any other free one and move on
++ to the next free one and move on
+```
+```diff
+- (Numbers only need to stay unique, not contiguous
++ (Numbers only need to stay contiguous, not unique
+```
+```diff
+- is *by construction* the collision
++ is *by construction* not the collision
+```
+
+The first reverts the collision *backstop* — what to actually do when the uniqueness test
+fires for real — back to the "current highest" guess the whole entry exists to abolish, in
+the one place the doc gives concrete instructions for that case. The second inverts the
+parenthetical that makes a task-numbered entry (`301-...md` sitting above the `01-`-`70-`
+legacy range) legal rather than something to "fix" by renumbering. The third negates the
+rationale itself, leaving the doc implicitly endorsing the decentralized guess as safe.
+Closed the same way as rounds 1-2: pin the literal clause each mutation targets (`to any
+other free one`; `unique, not contiguous`, in that order; `*by construction* the collision`,
+with nothing between the emphasis and "the collision") instead of a phrase merely nearby.
+Still no new file for this round, for the same reason as round 2 — same shape, third
+recurrence, not a new one. See the added note in the Guard-form field above: this recurrence
+is the direct consequence of only patching the assertions a round's own mutations named,
+instead of auditing every assertion in the same test for the same defect the first time it
+was found.
