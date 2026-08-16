@@ -27,10 +27,23 @@ sync with what's actually in it.
   "what corruption would this miss?"
 - **Reworking a `SURVIVED` verdict?** The judge names the guard and the mutation that defeated
   it (see `chela judge`'s block comment). If that shape isn't catalogued yet, add it as part
-  of the same fix: create **one new file** in `docs/defeat_shapes/`, numbered one past the
-  current highest (`NN-slug.md`, e.g. `21-your-shape-slug.md`) — the judge itself never
-  commits to this repo (its checkout is a throwaway detached copy, deleted when it finishes),
-  so the agent doing the rework is the one with a branch to put the new entry on.
+  of the same fix: create **one new file** in `docs/defeat_shapes/`, numbered after **your own
+  CMX task number** (`NNN-slug.md`, e.g. task `CMX-301` → `301-your-shape-slug.md`) — **not**
+  "one past the current highest". "Current highest" means reading `dev`'s file listing off
+  whichever checkout your branch forked from and guessing; every concurrent agent computing
+  that guess independently is *by construction* the collision, because each one's "highest"
+  is already stale the moment a sibling branch is also picking a number. Measured 2026-08-16:
+  CMX-298 merged to `dev` taking shapes 62–68 while two sibling branches were already in
+  flight — cmx-299 had independently picked `62,63,64,65,66,67` (a six-way collision) and
+  cmx-300 had picked `62` — and a human had to hand-allocate disjoint ranges from outside
+  either branch to unstick them. Your CMX task number doesn't have this problem: the
+  dispatcher hands it out from a single, centrally serialized counter, so two branches in
+  flight at once never receive the same one — reuse that number instead of computing a new
+  one from a listing. (Numbers only need to stay unique, not contiguous — see below — so
+  gaps between task-numbered entries and the legacy sequential range below them are expected
+  and fine.) The judge itself never commits to this repo (its checkout is a throwaway
+  detached copy, deleted when it finishes), so the agent doing the rework is the one with a
+  branch to put the new entry on.
   - **Why a new file, not a new section appended to one shared file:** the catalog used to be
     a single file, and every concurrent rework appended its new entry to the same tail —
     guessing the next number from whatever HEAD it happened to branch from. Two reworks in
@@ -44,9 +57,11 @@ sync with what's actually in it.
     scattered across the test suite point at a *number*, not a filename, so two files
     claiming the same one make every such reference ambiguous (measured: shape 37 landed
     twice on `dev` with no signal, CMX-293). A test asserts the numbers are unique across
-    `docs/defeat_shapes/`, so a collision fails loudly on your branch — bump your file's
-    number (and its heading) to the next free one and move on; it's a local, one-line fix,
-    same as resolving any other rebase conflict.
+    `docs/defeat_shapes/`, so a collision still fails loudly on your branch if one somehow
+    happens (e.g. one task opening two reworks) — bump your file's number (and its heading)
+    to any other free one and move on; it's a local, one-line fix, same as resolving any
+    other rebase conflict. Numbering off your CMX task number (above) means this should now
+    be a rare backstop rather than the routine merge-time renumber it used to be.
 - Each entry: the **assertion form** (how the guard was written), the **mutation that
   defeats it** (what corruption slips through), and the **guard form that survives** (how to
   write it so the same corruption goes red).

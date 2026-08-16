@@ -637,6 +637,39 @@ def test_defeat_shapes_numbers_are_unique_across_the_catalog():
     )
 
 
+def test_defeat_shapes_growth_instructions_number_by_task_id_not_current_highest():
+    """CMX-301: "numbered one past the current highest" told every agent to read `dev`'s file
+    listing off whatever checkout its branch forked from and guess — a decentralized guess
+    computed independently by concurrent branches is *by construction* the collision CMX-293's
+    uniqueness test can only catch after the fact. Measured 2026-08-16: CMX-298 merged to `dev`
+    taking shapes 62-68 while two sibling branches were already in flight — cmx-299 had
+    independently picked `62,63,64,65,66,67` (a six-way collision) and cmx-300 had picked `62`
+    — and a human had to hand-allocate disjoint ranges from outside either branch to unstick
+    them. The fix routes allocation through the CMX task number instead: the dispatcher hands
+    that out from a single, centrally serialized counter, so two branches in flight at once
+    never receive the same one.
+
+    Seen to go red: reverting the growth instructions back to "one past the current highest"
+    (or otherwise dropping the CMX-task-number guidance) silently reopens the collision this
+    entry closes.
+    """
+    root = Path(__file__).resolve().parent.parent
+    raw = (root / "docs" / "DEFEAT_SHAPES.md").read_text()
+    text = " ".join(raw.split())
+    # The doc quotes "one past the current highest" ONCE, deliberately, to explain what NOT
+    # to do — so pin the exact original instruction sentence, not the bare phrase, or this
+    # assertion would fail against the fix's own explanatory text.
+    assert "numbered one past the current highest" not in text, (
+        "DEFEAT_SHAPES.md's growth instructions regressed to numbering off 'one past the "
+        "current highest' — a decentralized guess that collides under concurrency by "
+        "construction"
+    )
+    assert "your own CMX task number" in text, (
+        "DEFEAT_SHAPES.md is missing the CMX-task-number allocation instruction"
+    )
+    assert "centrally serialized counter" in text
+
+
 def test_defeat_shapes_cross_references_resolve_to_shapes_that_exist():
     """CMX-284 rework round 1: entries cross-reference each other by number ("the render-side
     mirror of shape 13", "[[21|entry 21]]") — under the old single-file catalog, renumbering
