@@ -211,6 +211,15 @@ test('a real click on the wall tile\'s "Files" chip opens the REAL #modal-diff, 
     assert.notEqual(chip(rows[0]).textContent, chip(rows[1]).textContent,
         'both rows rendered the same status label for two files with different statuses');
 
+    // 🔴 GUARD (round-3 judge finding #6): each row's own +A/−D pair must
+    // reflect THAT file's own additions/deletions — the modal-level summary
+    // below is a SUM across files, so it stays identical whether a per-row
+    // stat swaps additions for deletions; only reading each row's own stat
+    // text can tell `−${f.deletions}` from `−${f.additions}` apart.
+    const stat = row => row.querySelector('.diff-file-stat').textContent;
+    assert.equal(stat(rows[0]), '+3 −1', "a.py's own +A/−D stat does not match its own additions/deletions");
+    assert.equal(stat(rows[1]), '+5 −0', "b.py's own +A/−D stat does not match its own additions/deletions");
+
     // 🔴 GUARD (MUTATION #5): summaryLabel's one-glance header must actually
     // reach the modal, not just exist as a passing pure-function test.
     const summary = document.querySelector('.diff-modal-summary');
@@ -245,4 +254,191 @@ test('a real click on the wall tile\'s "Files" chip opens the REAL #modal-diff, 
     window.chela.closeDiffModal();
     assert.equal(modal.classList.contains('active'), false,
         'chela.closeDiffModal() did not remove #modal-diff\'s .active class');
+});
+
+// ---------------------------------------------------------------------------
+// Round 3 (2026-08-16, PR #373 judge) — the test above proves closeDiffModal()
+// itself works by calling it DIRECTLY, which exercises none of the THREE
+// routes index.html's own comment claims lead into it (close button, Escape,
+// backdrop click) — see docs/defeat_shapes/64 (a comment enumerates N entry
+// paths into one shared action; driving the action directly proves none of
+// them). Each of these dispatches a REAL DOM event down its own named route.
+// ---------------------------------------------------------------------------
+
+test('a real Escape keydown (not a direct closeDiffModal() call) closes the diff modal', async () => {
+    const modal = document.getElementById('modal-diff');
+    const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
+    clickFilesChip(filesBtn);
+    await flush();
+    assert.equal(modal.classList.contains('active'), true, 'setup: the diff modal did not open');
+
+    // 🔴 GUARD: dead-coding _diffModalKey's `e.key === 'Escape'` check
+    // (`if (false && e.key === 'Escape') closeDiffModal();`) leaves a real
+    // Escape keypress silently doing nothing while this stays green if the
+    // suite never dispatches a real keydown.
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    assert.equal(modal.classList.contains('active'), false,
+        'a real Escape keydown did not close #modal-diff — _diffModalKey is not wired (or dead-coded)');
+});
+
+test('a real click on the #modal-diff backdrop (the overlay itself, not the dialog) closes the diff modal', async () => {
+    const modal = document.getElementById('modal-diff');
+    const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
+    clickFilesChip(filesBtn);
+    await flush();
+    assert.equal(modal.classList.contains('active'), true, 'setup: the diff modal did not open');
+
+    // 🔴 GUARD: dead-coding _diffModalBackdrop's `e.target.id === 'modal-diff'`
+    // check leaves a real backdrop click silently doing nothing. Dispatching
+    // directly on `modal` (not a descendant) makes `e.target === modal`, the
+    // exact condition the backdrop check tests — a click on the dialog body
+    // itself must NOT close it, which is exactly why this checks `.id`.
+    modal.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    assert.equal(modal.classList.contains('active'), false,
+        'a real click on the #modal-diff backdrop did not close it — _diffModalBackdrop is not wired (or dead-coded)');
+});
+
+test("openDiffModal's stale-flight guard: a /diff response landing AFTER the modal was closed must not render into it", async () => {
+    const modal = document.getElementById('modal-diff');
+    const content = document.getElementById('diff-modal-content');
+    const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
+
+    let resolveDiff;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = url => {
+        const path = String(url);
+        if (path.endsWith('/api/agents/%401/diff')) {
+            return new Promise(resolve => {
+                resolveDiff = () => resolve({ ok: true, status: 200, json: () => Promise.resolve(DIFF_STATE) });
+            });
+        }
+        return fakeFetch(url);
+    };
+    try {
+        clickFilesChip(filesBtn);
+        await flush();   // openDiffModal is now awaiting the deferred /diff fetch
+        assert.equal(modal.classList.contains('active'), true, 'setup: the diff modal did not open');
+        const contentBeforeLateResponse = content.innerHTML;
+
+        window.chela.closeDiffModal();
+        assert.equal(modal.classList.contains('active'), false, 'setup: the diff modal did not close');
+
+        // 🔴 GUARD: dead-coding `if (wid !== _openWid) return;` in openDiffModal
+        // lets this late response re-render #diff-modal-content anyway — the
+        // synchronous fakeFetch used everywhere else in this file resolves
+        // before the modal could ever be closed first, so only a DEFERRED
+        // response can reproduce the ordering this guard exists for.
+        resolveDiff();
+        await flush();
+        assert.equal(content.innerHTML, contentBeforeLateResponse,
+            'a /diff response that landed AFTER the modal closed still re-rendered #diff-modal-content — the stale-flight guard did not fire');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("_loadDiffPatch's stale-flight guard: a /diff/patch response landing AFTER the modal was closed must not overwrite the patch view", async () => {
+    const modal = document.getElementById('modal-diff');
+    const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
+    clickFilesChip(filesBtn);
+    await flush();
+    const rows = document.querySelectorAll('#diff-modal-content .diff-file-row');
+    const patchView = document.getElementById('diff-patch-view');
+    assert.equal(rows.length, 2, 'setup: the diff modal did not render the fetched file list');
+
+    let resolvePatch;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = url => {
+        const path = String(url);
+        if (path.startsWith('/api/agents/%401/diff/patch')) {
+            return new Promise(resolve => {
+                resolvePatch = () => resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, patch: PATCH_TEXT }) });
+            });
+        }
+        return fakeFetch(url);
+    };
+    try {
+        rows[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await flush();   // _loadDiffPatch is now awaiting the deferred /diff/patch fetch
+        const viewBeforeLateResponse = patchView.innerHTML;
+
+        window.chela.closeDiffModal();
+
+        // 🔴 GUARD: dead-coding `if (wid !== _openWid) return;` in
+        // _loadDiffPatch lets this late response overwrite #diff-patch-view
+        // even though the modal moved on — same ordering issue as the
+        // openDiffModal guard above, on the patch-drilldown half.
+        resolvePatch();
+        await flush();
+        assert.equal(patchView.innerHTML, viewBeforeLateResponse,
+            'a /diff/patch response that landed AFTER the modal closed still overwrote #diff-patch-view — the stale-flight guard did not fire');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('a changed file path containing HTML metacharacters is escaped, not spliced raw, into the rendered file row', async () => {
+    const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
+    const evilPath = '<img src=x onerror=alert(1)>.js';
+    const evilState = {
+        is_git: true, has_head: true,
+        files: [{ path: evilPath, status: 'modified', additions: 1, deletions: 0 }],
+        additions: 1, deletions: 0,
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = url => {
+        const path = String(url);
+        if (path.endsWith('/api/agents/%401/diff')) {
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(evilState) });
+        }
+        return fakeFetch(url);
+    };
+    try {
+        clickFilesChip(filesBtn);
+        await flush();
+        const pathEl = document.querySelector('#diff-modal-content .diff-file-path');
+        assert.ok(pathEl, 'no .diff-file-path element was rendered');
+        // 🔴 GUARD: `${f.path}` instead of `${escHtml(f.path)}` splices the
+        // path straight into the row's innerHTML — a path containing `<img>`
+        // then parses as a REAL element instead of text, which flips
+        // querySelector('img') from null to a match and truncates the
+        // visible text down to whatever trails the tag.
+        assert.equal(pathEl.querySelector('img'), null,
+            'the file path was parsed as real HTML — a <img> tag inside it was not escaped');
+        assert.equal(pathEl.textContent, evilPath,
+            'the rendered path text does not match the fetched path — escHtml is missing or mangled it');
+        window.chela.closeDiffModal();
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('the Files chip escapes a wid containing a single quote so its onclick argument cannot break out of the inline JS string literal', async () => {
+    const evilWid = "@2'x";
+    try {
+        util.setAgentsCache([{ name: 'w2', window_id: evilWid, online: true }]);
+        await terminals.renderTerminals();
+        const filesBtn2 = document.querySelector('.gs-files');
+        assert.ok(filesBtn2, 'no .gs-files chip rendered for the quote-bearing wid');
+        const onclick = filesBtn2.getAttribute('onclick');
+        assert.ok(onclick, 'the chip has no onclick attribute');
+
+        let received;
+        const spyChela = { openDiffModal(wid) { received = wid; }, closeDiffModal() {} };
+        // 🔴 GUARD (MUTATION #5): `String(wid)` instead of
+        // `escHtml(wid).replace(/'/g, "\\'")` leaves the raw `'` in place —
+        // `chela.openDiffModal('@2'x')` is then a SYNTAX ERROR (the string
+        // literal ends at the second `'`, leaving a bare `x` token), which
+        // `new Function` throws on at compile time, before the handler could
+        // ever run for real.
+        assert.doesNotThrow(() => {
+            new Function('chela', 'event', onclick).call(filesBtn2, spyChela, { stopPropagation() {} });
+        }, 'the onclick attribute is not valid JS — an unescaped quote in the wid broke out of the inline string literal');
+        assert.equal(received, evilWid,
+            "openDiffModal was not called with the wid's full, unescaped-back value");
+    } finally {
+        // restore the single-agent fixture every other test in this file depends on
+        util.setAgentsCache(AGENTS);
+        await terminals.renderTerminals();
+    }
 });

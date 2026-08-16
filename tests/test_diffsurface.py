@@ -220,3 +220,29 @@ def test_changed_files_binary_file_numstat_sentinel_does_not_crash_int_parse(rep
     assert by_path["blob.bin"]["status"] == "modified"
     assert by_path["blob.bin"]["additions"] == 0
     assert by_path["blob.bin"]["deletions"] == 0
+
+
+def test_changed_files_reports_a_rename_as_a_clean_delete_plus_add_pair(repo: Path):
+    # 🔴 GUARD: the module docstring states renames are DELIBERATELY reported
+    # as a delete+add pair (`--no-renames`) rather than one row — git's own
+    # rename detection has defaulted to ON since 2.9, so `--no-renames` is
+    # actively suppressing that default, not restating it, which makes it
+    # exactly the kind of flag a later reader mistakes for redundant and
+    # deletes (or swaps for `--find-renames`, which does the opposite).
+    # With detection on, `git diff --name-status` emits a single
+    # "R100\told\tnew" line; this module's parse does
+    # `line.split("\t", 1)`, so that ONE line comes back as a single entry
+    # whose "path" itself contains a raw tab and matches no numstat row —
+    # not two clean rows.
+    _git(repo, "mv", "tracked.txt", "renamed.txt")
+
+    result = diffsurface.changed_files(repo)
+    by_path = {f["path"]: f for f in result["files"]}
+
+    assert set(by_path) == {"tracked.txt", "renamed.txt"}
+    assert by_path["tracked.txt"]["status"] == "deleted"
+    assert by_path["renamed.txt"]["status"] == "added"
+    assert "\t" not in by_path["tracked.txt"]["path"]
+    assert "\t" not in by_path["renamed.txt"]["path"]
+    assert by_path["tracked.txt"]["deletions"] == 3
+    assert by_path["renamed.txt"]["additions"] == 3
