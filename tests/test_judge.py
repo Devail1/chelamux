@@ -652,6 +652,21 @@ def test_defeat_shapes_growth_instructions_number_by_task_id_not_current_highest
     Seen to go red: reverting the growth instructions back to "one past the current highest"
     (or otherwise dropping the CMX-task-number guidance) silently reopens the collision this
     entry closes.
+
+    CMX-301 rework round 1 (defeat shape #69 in docs/DEFEAT_SHAPES.md): the judge mutated this
+    doc two ways that left every assertion below untouched, because none of them actually
+    exercised the words the mutation changed:
+      1. flipped "— **not** \"one past the current highest\"" (a prohibition) to
+         "— **or** \"one past the current highest\"" (an endorsement) — the bare phrase
+         "numbered one past the current highest" never appeared in the doc either before or
+         after this mutation (the real sentence has "numbered after your own CMX task
+         number ... — not/or" in between), so that assertion could never have caught it.
+      2. pointed the one concrete, copyable worked example at `69-your-shape-slug.md` for task
+         `CMX-301` (69 = 68+1, "current highest" at the time of writing) instead of
+         `301-your-shape-slug.md` — teaching the exact guess the surrounding prose forbids.
+         None of the three assertions below check the worked example's number at all.
+    The two assertions added after this comment pin the literal substrings the mutations
+    changed, so each one goes red under the mutation that defeated its predecessor.
     """
     root = Path(__file__).resolve().parent.parent
     raw = (root / "docs" / "DEFEAT_SHAPES.md").read_text()
@@ -667,7 +682,29 @@ def test_defeat_shapes_growth_instructions_number_by_task_id_not_current_highest
     assert "your own CMX task number" in text, (
         "DEFEAT_SHAPES.md is missing the CMX-task-number allocation instruction"
     )
-    assert "centrally serialized counter" in text
+    assert "centrally serialized counter" in text, (
+        "DEFEAT_SHAPES.md dropped the rationale for why the CMX task number is collision-free "
+        "(a single, centrally serialized counter) — without it the instruction reads as an "
+        "arbitrary preference instead of a property that actually holds"
+    )
+    # CMX-301 rework round 1, mutation 1: "— **not** ..." (prohibition) flipped to
+    # "— **or** ..." (endorsement) survived every assertion above untouched. Pin the exact
+    # prohibition wording so flipping "not" to anything else — "or", deleting it, etc. — goes
+    # red: the doc must forbid numbering off the current highest, not merely mention it.
+    assert '— **not** "one past the current highest"' in text, (
+        "DEFEAT_SHAPES.md must PROHIBIT numbering off 'one past the current highest', not "
+        "merely mention it as an alternative — flipping the prohibition into an endorsement "
+        "silently reopens the six-way collision this entry closes"
+    )
+    # CMX-301 rework round 1, mutation 2: the worked example pointed CMX-301 at `69-...md`
+    # (a "current highest" guess) instead of `301-...md` (its own task number) and every
+    # assertion above stayed green, because none of them read the example's number. Pin the
+    # exact worked example so a future rewrite that teaches the wrong number goes red.
+    assert "e.g. task `CMX-301` → `301-your-shape-slug.md`" in text, (
+        "DEFEAT_SHAPES.md's worked example must number CMX-301's entry `301-...md` — its own "
+        "task number, not a 'current highest' guess. This example is the one concrete, "
+        "copyable demonstration of the rule; if it doesn't follow the rule, nothing does"
+    )
 
 
 def test_defeat_shapes_cross_references_resolve_to_shapes_that_exist():
