@@ -55,7 +55,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -80,7 +79,14 @@ from chela import (
     sessions,
 )
 from chela.sources import get_source
-from chela.sources.markdown import BLOCKED_RE, DEPENDS_RE, OPEN_RE, _parse_depends, _title_id
+from chela.sources.markdown import (
+    BLOCKED_RE,
+    DEPENDS_RE,
+    OPEN_RE,
+    _parse_depends,
+    _title_id,
+    _TRAILING_COMMENT_RE,
+)
 from chela.workflow import load_workflow
 
 OK = "ok"
@@ -2637,9 +2643,6 @@ def _restore_report(_declared: None, obs: Observation) -> list[Finding]:
 # forever, for a reason nobody who isn't tailing the daemon's log will ever see" into
 # something `chela doctor` reports and the daemon's `check_and_notify` pushes on the
 # transition into red — the same fix CMX-187 already gave every other red finding.
-
-_TRAILING_COMMENT_RE = re.compile(r"\s*<!--.*?-->\s*")
-
 
 def _parked_ids_from_text(text: str, filename: str) -> set[str]:
     """Ids of the tasks `text` has PARKED (`<!-- blocked: ... -->`) — for identity

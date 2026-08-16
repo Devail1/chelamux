@@ -3093,6 +3093,7 @@ def api_dispatcher():
             "project_key": None,
             "open_tasks": [],
             "backlog_items": [],
+            "parked_tasks": [],
             "active_runs": [],
             "awaiting_review_runs": [],
             "recent_runs": [],
@@ -3172,6 +3173,25 @@ def api_dispatcher():
                 entry["backlog_items"] = [
                     {"section": item.section, "text": item.text, "file": str(backlog_path)}
                     for item in parse_backlog(backlog_path)
+                ]
+
+                # PARKED (`<!-- blocked: ... -->`) bullets — `list_open_tasks` skips
+                # them outright (not claimable work), which used to make them
+                # invisible everywhere on the board: not Open, and — since they live
+                # in TODO.md, not BACKLOG.md — not Backlog either (Liav, 2026-08-12).
+                # Only the markdown source has a notion of this; gh_issues has no
+                # bullet-level marker to read.
+                list_parked_tasks = getattr(source, "list_parked_tasks", None)
+                entry["parked_tasks"] = [
+                    {
+                        "id": t.id,
+                        "title": t.title,
+                        "file": t.file,
+                        "line_number": t.line_number,
+                        "raw": t.raw,
+                        "reason": t.body,
+                    }
+                    for t in (list_parked_tasks() if list_parked_tasks is not None else [])
                 ]
             except Exception as e:
                 entry["error"] = f"{type(e).__name__}: {e}"

@@ -10,9 +10,12 @@ with recorded runs) and prove the explicit config keeps working.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from chela.dashboard import app as dash
+from chela.sources import gh_issues
 
 
 @pytest.fixture
@@ -192,6 +195,41 @@ def test_api_explicit_config_still_works(monkeypatch, client, tmp_path):
     assert wf["error"] is None
     assert wf["project_key"] == "XYZ"
     assert [t["title"] for t in wf["open_tasks"]] == ["ship it"]
+
+
+def test_api_dispatcher_survives_a_gh_issues_workflow_with_no_list_parked_tasks(monkeypatch, client, tmp_path):
+    # 🔴 GUARD (round 4, PR #372): app.py reads the parked-bullet method off the
+    # source with `getattr(source, "list_parked_tasks", None)` because — per the
+    # comment right above it — "Only the markdown source has a notion of this;
+    # gh_issues has no bullet-level marker to read." GhIssuesSource genuinely
+    # defines no `list_parked_tasks` (only MarkdownSource does), so resolving the
+    # attribute directly (`source.list_parked_tasks`) raises AttributeError inside
+    # the try/except that builds this entry, which the `except Exception` swallows
+    # into `entry["error"]` — every gh_issues workflow's dashboard entry would
+    # silently go red. tests/test_gh_issues_allowlist.py exercises GhIssuesSource
+    # directly and never notices; this drives the real /api/dispatcher endpoint
+    # with a gh_issues tracker, which none of the other tests in this module do.
+    _no_repo_workflow(monkeypatch)
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    (repo / "WORKFLOW.md").write_text(
+        "---\nproject_key: XYZ\ntracker:\n  kind: gh_issues\n  repo: acme/widgets\n"
+        "  require_label: ready-for-agent\n---\nprompt\n"
+    )
+    wf_path = (repo / "WORKFLOW.md").resolve()
+    monkeypatch.setattr(dash, "DISPATCH_WORKFLOWS", [wf_path])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [])
+    monkeypatch.setattr(
+        gh_issues.subprocess, "run",
+        lambda argv, **kwargs: SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+    )
+
+    resp = client.get("/api/dispatcher")
+    data = resp.get_json()
+    assert len(data["workflows"]) == 1
+    wf = data["workflows"][0]
+    assert wf["error"] is None, f"a gh_issues workflow's entry errored: {wf['error']!r}"
+    assert wf["parked_tasks"] == []
 
 
 def test_api_empty_when_nothing_to_show(monkeypatch, client):
