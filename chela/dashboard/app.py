@@ -27,7 +27,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, spawn, starter, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, diffsurface, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, spawn, starter, transcripts, update, userconfig
 from chela.dashboard import resources
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -2498,6 +2498,41 @@ def api_agents_context():
             "ts": s.get("ts"),
         })
     return jsonify(results)
+
+
+@app.route("/api/agents/<wid>/diff")
+@require_auth
+def api_agents_diff(wid):
+    """Per-session CHANGED-FILES surface (CMX-299): everything this window's
+    live pane cwd has changed since its last commit, staged + unstaged +
+    untracked. ``wid`` must be a currently-live window — an unknown id 404s
+    the same way the other per-window routes do, rather than shelling out to
+    git on a caller-supplied path with no window behind it at all."""
+    if wid not in discovery.get_windows_by_id():
+        abort(404)
+    cwd = discovery.get_window_cwd_by_id(wid)
+    if not cwd:
+        return jsonify({"is_git": False, "has_head": False, "files": [], "additions": 0, "deletions": 0})
+    return jsonify(diffsurface.changed_files(Path(cwd)))
+
+
+@app.route("/api/agents/<wid>/diff/patch")
+@require_auth
+def api_agents_diff_patch(wid):
+    """Unified diff text for one file this session has changed — the drill-down
+    from the file list ``/api/agents/<wid>/diff`` returns. ``path`` must be one
+    of THAT list's own entries (enforced inside diffsurface.file_patch), so an
+    unrelated or out-of-tree path just reports "not a changed file" rather than
+    reading anything outside what the session actually touched."""
+    if wid not in discovery.get_windows_by_id():
+        abort(404)
+    path = request.args.get("path", "")
+    if not path:
+        abort(400)
+    cwd = discovery.get_window_cwd_by_id(wid)
+    if not cwd:
+        return jsonify({"ok": False, "error": "no working directory"})
+    return jsonify(diffsurface.file_patch(Path(cwd), path))
 
 
 # Window keys the Cost tab's selector offers, and the lookback each implies.

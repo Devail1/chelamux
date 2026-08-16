@@ -10,6 +10,16 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Added
+
+- **A per-session changed-files / diff surface.** A wall tile's bottom bar has a new
+  "Files" chip — every file that session's live pane cwd has changed since its last
+  commit (staged, unstaged, and untracked, merged into one list with per-file +/-
+  counts), and a click-through unified diff for any one of them. Backed by two new
+  read-only endpoints (`/api/agents/<wid>/diff`, `/api/agents/<wid>/diff/patch`) and
+  works for any git checkout a session's window is sitting in — a dispatcher worktree
+  or a plain attended checkout alike, no dispatcher bookkeeping required. (CMX-299)
+
 ## [0.6.0] — 2026-08-15
 
 ### Fixed

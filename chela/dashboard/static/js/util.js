@@ -45,6 +45,10 @@ const _LUCIDE = {
     // chip's minimize icon, replacing the 🗕 window-chrome emoji (U+1F5D5) for
     // the same tofu reason as maximize-2/minimize-2 above (CMX-154).
     'minus': '<path d="M5 12h14"/>',
+    // `git-compare` — the wall tile bottom bar's "Files" chip (terminals.js
+    // _ctxBarHTML), opening the per-session changed-files/diff modal
+    // (diffpanel.js, CMX-299).
+    'git-compare': '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/>',
 };
 function lucideIcon(name, size = 16) {
     return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" `
