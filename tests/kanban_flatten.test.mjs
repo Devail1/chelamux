@@ -511,3 +511,46 @@ test('renderKanban: the parked card\'s 🔒 reason chip is actually VISIBLE unde
         '.kanban-parked-reason must white-space:nowrap — otherwise a long reason wraps onto multiple ' +
         'lines instead of triggering the overflow/ellipsis path at all');
 });
+
+// --- NOT GUARDED: "the parked card is VISIBLE on screen" as an OUTCOME -------------
+//
+// The assertions above are cheap tripwires against the specific collapses that have
+// actually been proposed (opacity/display/visibility on the card, font-size/display/
+// visibility on the chip). They are deliberately NOT extended further, and the reason
+// is a settled call in this repo rather than fatigue.
+//
+// PR #372 took SEVEN judge rounds, each finding a new spelling of "this element is not
+// really on screen" that the enumerated list did not cover — the last of them naming
+// `width: 0; overflow: hidden`. docs/defeat_shapes/67 (added by this PR) states the
+// general form: a property list is closed under what today's diff touched, never under
+// what could erase the element.
+//
+// The dividing line is CASCADE vs LAYOUT, and it is the same one CMX-273 established
+// (see tests/dashboard_scale_nav_a11y.test.mjs:162 and docs/SPIKE_WALL_FILLS_STAGE.md,
+// written after three rounds of exactly this on PR #338):
+//
+//   - CASCADE collapses — display/visibility/opacity/font-size — resolve in jsdom's
+//     CSSOM, so `getComputedStyle` sees them. Those ARE guarded, above.
+//   - LAYOUT collapses — `width: 0`, `transform: scale(0)`, clip-path, off-screen
+//     positioning — need a layout engine. jsdom has none: getBoundingClientRect and
+//     offsetWidth are always zero and percentage/flex/grid never resolve against a real
+//     parent. No assertion in this harness can observe them, so writing an eighth
+//     property equality would buy one more spelling and prove nothing about the outcome.
+//
+// The outcome is therefore verified the way CMX-273 verified its own: BY CAPTURE, in a
+// real browser with a real layout engine. Done 2026-08-16 against this exact head, with
+// the real style.css and the real kanban.js, two parked cards (with and without a
+// reason) plus a real BACKLOG.md card rendered side by side:
+//
+//   card    408x52  opacity 0.85  display block  visibility visible  in .kanban-col-backlog
+//   chip    151x16 / 73x16        "🔒 waiting on fixtures" / "🔒 parked"
+//
+// — all non-zero under real layout, the 🔒 glyph present on BOTH ternary branches, and
+// the parked cards distinguishable from the BACKLOG.md card by glyph, text and the
+// ABSENCE of the Promote button. Every one of those cues is non-hue, so the distinction
+// survives greyscale (Liav is red-weak; hue as the sole encoding of state is a defect
+// in this repo, not a preference).
+//
+// ⛔ Do not "fix" this by adding an eighth property assertion. If someone wants the
+// outcome guarded for real, the honest project is a Playwright-sized one, exactly as
+// docs/SPIKE_WALL_FILLS_STAGE.md sizes it — not another line here.
