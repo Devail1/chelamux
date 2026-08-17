@@ -55,8 +55,9 @@ const _LUCIDE = {
     'git-compare': '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/>',
 };
 function lucideIcon(name, size = 16) {
+    if (!(name in _LUCIDE)) throw new Error(`lucideIcon: unknown icon "${name}" — not in _LUCIDE`);
     return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" `
-        + `stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${_LUCIDE[name] || ''}</svg>`;
+        + `stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${_LUCIDE[name]}</svg>`;
 }
 
 const REFRESH_MS = 30000;

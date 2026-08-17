@@ -416,6 +416,20 @@ test('every nav item renders a non-empty lucide SVG — no unicode glyph survive
     }
 });
 
+// CMX-302 negative control: the guard above only proves a KNOWN icon name (like
+// 'crown') renders non-empty. It says nothing about what happens when a name is
+// NOT in _LUCIDE — and `${_LUCIDE[name] || ''}` used to answer that with a
+// silently-valid-looking `<svg></svg>` (a real <svg> element, so a bare
+// `querySelector('svg')` truthiness check — as the orchestrator-badge test above
+// does — can't tell it apart from the real icon). A typo'd or renamed lucide name
+// must fail loudly at the call site instead, so the corruption surfaces the moment
+// the row renders rather than as a blank badge nobody notices.
+test('lucideIcon FAILS LOUDLY for an unknown icon name — it never falls back to an empty <svg>', () => {
+    assert.throws(() => util.lucideIcon('not-a-real-lucide-icon'),
+        /unknown icon/,
+        'lucideIcon silently accepted an icon name that is not in _LUCIDE instead of failing');
+});
+
 // --- 1c^b. 🔴 the LABEL is real text on every rendered row --------------------
 //
 // The only prior guard pointed at the label was a WIRING test
