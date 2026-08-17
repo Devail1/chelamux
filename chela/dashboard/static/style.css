@@ -3094,17 +3094,20 @@ input[type="text"]:focus, textarea:focus, select:focus {
     flex: 0 0 auto; font-size: var(--card-font-size); font-weight: 600; line-height: 15px;
     padding: 0 5px; border-radius: 999px; background: var(--surface);
 }
-.ar-role.dispatched { color: #0072B2; background: color-mix(in srgb, #0072B2 14%, transparent); }
-/* CMX-302: orchestrator is a bare crown ICON, not a text pill — "Orchestrator"
-   was wide enough to truncate the session name next to it. One glyph for the
-   concept (the word itself moves to the title tooltip), sized/centred like the
-   lucide icons elsewhere rather than the text-pill padding above. */
-.ar-role.orchestrator {
+/* CMX-302: orchestrator (crown) and dispatched (bot, item 2, Liav 2026-08-17)
+   are both bare ICON badges, not text pills — "Orchestrator"/"Dispatched" were
+   both wide enough to truncate the session name next to them. One glyph per
+   concept (the word itself moves to the title/aria-label), sized/centred like
+   the lucide icons elsewhere rather than the .ar-role text-pill padding above
+   (kept on the base rule for any future role that DOES want a text pill). Box
+   model shared (only colour differs) — one rule, not two copies to drift apart. */
+.ar-role.dispatched, .ar-role.orchestrator {
     display: flex; align-items: center; justify-content: center;
     min-width: 18px; max-width: 18px;
     width: 18px; height: 18px; padding: 0; line-height: normal;
-    color: #CC79A7; background: color-mix(in srgb, #CC79A7 16%, transparent);
 }
+.ar-role.dispatched { color: #0072B2; background: color-mix(in srgb, #0072B2 14%, transparent); }
+.ar-role.orchestrator { color: #CC79A7; background: color-mix(in srgb, #CC79A7 16%, transparent); }
 /* CMX-146: Claude's own auto-generated session title — its own dim line, distinct
    from `.ar-recap` below (an occasional away_summary blurb, often absent). */
 .ar-title {

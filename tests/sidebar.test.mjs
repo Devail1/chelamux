@@ -341,6 +341,13 @@ test('the orchestrator window gets an Orchestrator role badge — plain windows 
         'same literal path data into a sliver of the rendered box, drawing an invisible speck ' +
         'while every path-data/stroke/size assertion above stays green');
     assert.equal(badge.getAttribute('title'), 'Orchestrator session');
+    // 🔴 GUARD (CMX-302 rework round 7, item 2): lucideIcon() hardcodes
+    // aria-hidden="true" on the <svg> itself, so the badge's accessible name has
+    // to live on the wrapping <span> — title alone gives a screen reader a name
+    // via the HTML title-as-accessible-name fallback, but aria-label is the
+    // explicit, non-fallback source. Losing it silently degrades the badge back
+    // to an unlabelled decorative icon for anyone not hovering a mouse over it.
+    assert.equal(badge.getAttribute('aria-label'), 'Orchestrator session');
     assert.ok(badge.classList.contains('orchestrator'));
     assert.equal(rowFor('other').querySelector('.ar-role'), null,
         'a plain window rendered a role badge — plain sessions must render none');
@@ -362,7 +369,49 @@ test('a dispatcher-owned window gets a Dispatched role badge, distinct from Orch
     nav.renderSidebarAgents(rows);
     const badge = rowFor('worker').querySelector('.ar-role');
     assert.ok(badge, 'a dispatched window rendered no .ar-role badge at all');
-    assert.equal(badge.textContent, 'Dispatched');
+    // CMX-302 rework round 7, item 2 (Liav, approved 2026-08-17): the dispatched
+    // badge is now a bare BOT icon, not text — same treatment as the crown above,
+    // for the same reason (the old "Dispatched" text pill was wide enough to
+    // truncate the session name next to it). Same guard set as the crown badge:
+    // present svg, literal path AND <rect> geometry (the bot glyph is the only
+    // _LUCIDE entry built from a <rect> plus <path>s, not <path>s alone — a bare
+    // `querySelectorAll('path')` deepEqual would stay green if the <rect> body
+    // vanished and left only the antenna/ear/leg strokes), stroke paint, stroke
+    // width, rendered size, viewBox, empty textContent, and the accessible name
+    // — see the crown test's own per-line comments above for why each is a
+    // separate, independently-defeatable axis (DEFEAT_SHAPES #302).
+    const svg = badge.querySelector('svg');
+    assert.ok(svg, 'the dispatched badge rendered no bot icon');
+    const pathData = [...svg.querySelectorAll('path')].map(p => p.getAttribute('d'));
+    assert.deepEqual(pathData, ['M12 8V4H8', 'M2 14h2', 'M20 14h2', 'M15 13v2', 'M9 13v2'],
+        'the dispatched badge did not render the BOT icon\'s exact path data — a present <path> ' +
+        'alone cannot tell a bot from any other lucide glyph, so this must pin the literal shape');
+    const rect = svg.querySelector('rect');
+    assert.ok(rect, 'the dispatched badge\'s bot icon lost its <rect> body — the antenna/ear/leg ' +
+        '<path> strokes alone do not read as a robot head without it, and the path-data deepEqual ' +
+        'above cannot see a missing <rect>');
+    assert.deepEqual(
+        ['width', 'height', 'x', 'y', 'rx'].map((attr) => rect.getAttribute(attr)),
+        ['16', '12', '4', '8', '2'],
+        'the dispatched badge\'s bot icon <rect> lost its exact geometry');
+    assert.equal(svg.getAttribute('stroke'), 'currentColor',
+        'the dispatched badge\'s <svg> lost its stroke paint — stroke="none" leaves every path/rect ' +
+        'node untouched while drawing nothing');
+    assert.equal(svg.getAttribute('stroke-width'), '2',
+        'the dispatched badge\'s <svg> lost its stroke width — stroke-width="0" draws a zero-ink outline');
+    assert.equal(svg.getAttribute('width'), '12',
+        'the dispatched badge\'s <svg> rendered at zero width — path/rect data and stroke paint stay ' +
+        'untouched by a 0-size call');
+    assert.equal(svg.getAttribute('height'), '12',
+        'the dispatched badge\'s <svg> rendered at zero height — see the width assertion above');
+    assert.equal(svg.getAttribute('viewBox'), '0 0 24 24',
+        'the dispatched badge\'s <svg> lost its 24x24 viewBox — a widened viewBox maps the same ' +
+        'literal path/rect data into a sliver of the rendered box');
+    assert.equal(badge.textContent, '',
+        'the dispatched badge carries visible text again — the word now lives only in the ' +
+        'title/aria-label, and reinstating it reproduces the reported truncation bug');
+    assert.equal(badge.getAttribute('title'), 'Dispatched session');
+    assert.equal(badge.getAttribute('aria-label'), 'Dispatched session');
     assert.ok(badge.classList.contains('dispatched'));
     assert.equal(rowFor('manual').querySelector('.ar-role'), null,
         'a manually-launched window rendered a role badge — plain sessions must render none');

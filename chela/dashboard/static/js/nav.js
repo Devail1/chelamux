@@ -295,17 +295,21 @@ function _agentRowHtml(a) {
     }
 
     // Role badge: one glyph per concept, not glyph-plus-label. 'orchestrator' is a
-    // crown ICON (CMX-302) — the old "Orchestrator" text pill was wide enough to
-    // truncate the session name sitting next to it on a real row; a lucide icon
-    // still reads as a colourblind-safe shape (not colour alone) at a fraction of
-    // the width, with the word itself moved to the title tooltip. 'dispatched'
-    // stays short enough as text that it never caused the same overflow. 'plain'
-    // (the common case) renders nothing at all.
+    // crown ICON (CMX-302); 'dispatched' is a bot ICON (CMX-302, item 2, Liav
+    // 2026-08-17) — the old "Orchestrator"/"Dispatched" text pills were both wide
+    // enough to truncate the session name sitting next to them on a real row. A
+    // lucide icon still reads as a colourblind-safe shape (not colour alone) at a
+    // fraction of the width, with the word itself moved to the title/aria-label
+    // (lucideIcon hardcodes aria-hidden on the <svg> itself, so the accessible
+    // name has to live on the wrapping span). 'plain' (the common case) renders
+    // nothing at all. `bot` was already vendored in _LUCIDE and referenced by
+    // nothing — claiming it here adds no new icon path and collides with no
+    // existing meaning.
     const role = _agentRole(a);
     const roleChip = role === 'orchestrator'
-        ? `<span class="ar-role orchestrator" title="Orchestrator session">${lucideIcon('crown', 12)}</span>`
+        ? `<span class="ar-role orchestrator" title="Orchestrator session" aria-label="Orchestrator session">${lucideIcon('crown', 12)}</span>`
         : role === 'dispatched'
-            ? `<span class="ar-role dispatched" title="Dispatched session">Dispatched</span>`
+            ? `<span class="ar-role dispatched" title="Dispatched session" aria-label="Dispatched session">${lucideIcon('bot', 12)}</span>`
             : '';
 
     let age = '';
