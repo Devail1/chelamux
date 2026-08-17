@@ -218,6 +218,11 @@ test('a real click on the wall tile\'s "Files" chip opens the REAL #modal-diff, 
         "b.py's chip did not carry its own ('added') status — statusMeta may be hardcoded");
     assert.notEqual(chip(rows[0]).textContent, chip(rows[1]).textContent,
         'both rows rendered the same status label for two files with different statuses');
+    // 🔴 GUARD: distinctness alone can't tell the designed A/M/D/U/! glyph
+    // from any other pair of distinct strings (e.g. each chip echoing its own
+    // CSS class name as its body text) — pin the actual rendered glyphs.
+    assert.equal(chip(rows[0]).textContent, 'M', "a.py's chip did not render the 'M' glyph for status modified");
+    assert.equal(chip(rows[1]).textContent, 'A', "b.py's chip did not render the 'A' glyph for status added");
 
     // 🔴 GUARD (MUTATION #3): the chip is a SINGLE LETTER (A/M/D/U/!) — its
     // `title` is the entire expansion of that glyph and its only accessible
@@ -251,6 +256,11 @@ test('a real click on the wall tile\'s "Files" chip opens the REAL #modal-diff, 
     // at all, since file rows have no onclick attribute of their own.
     const patchView = document.getElementById('diff-patch-view');
     assert.ok(patchView, 'no #diff-patch-view element was rendered');
+    // 🔴 GUARD: the patch pane's opening affordance — before any file row is
+    // clicked, the right-hand pane must say what it's for, not sit empty
+    // (indistinguishable from a render that failed).
+    assert.equal(patchView.textContent.trim(), 'Select a file to view its diff.',
+        'the diff modal opened with an empty patch pane instead of its "Select a file" affordance');
     // 🔴 GUARD (MUTATION #2): dispatched on a CHILD span, not the <li> itself —
     // the row is display:flex and every visible pixel a real click could land
     // on belongs to a child (.diff-status-chip / .diff-file-path /
