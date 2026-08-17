@@ -680,10 +680,39 @@ def test_defeat_shapes_growth_instructions_number_by_task_id_not_current_highest
     rounds 1-3, or one nobody has thought of yet — breaks the surrounding block's exact
     equality and goes red, because there is no longer any unpinned prose left inside either
     paragraph for a mutation to hide in.
+
+    Round 4's two `assert BLOCK in text` checks are one-sided: `in` proves the block is
+    UNCHANGED, but it says nothing about what surrounds it. Round 5's mutations exploited
+    exactly that — each one inserted a brand-new sentence or clause immediately before,
+    between, or after the pinned blocks (never inside one), so both blocks stayed intact
+    substrings while the doc's actual instructions were reversed or diluted:
+      1. A "number the new file one past the highest entry already in `docs/defeat_shapes/`"
+         instruction inserted in front of the growth_instructions block's own opening words
+         ("add it as part of the same fix") — the reader hits the inserted instruction before
+         reaching the (still-intact) prohibition that follows it.
+      2. A sentence endorsing "picking the next number past the highest file already in the
+         directory listing" appended right after the growth_instructions block's closing words
+         ("branch to put the new entry on.").
+      3. A sentence restoring "taking the next free number off the directory listing at merge
+         time" as "the normal way to pick one" appended right after the uniqueness_backstop
+         block's closing words ("renumber it used to be.").
+    None of these touch a byte inside either pinned block, so `in` stayed true for both. Fix:
+    stop pinning two sub-paragraphs and pin the ENTIRE "## How this catalog grows" section —
+    sliced from its heading to the next top-level `## ` heading (or EOF) — compared with `==`
+    instead of `in`. Exact whole-section equality has no unpinned prose anywhere in the
+    section, before, between, or after the two paragraphs, for an insertion to hide in: any
+    text added anywhere in the section changes the section's content and fails the comparison.
     """
     root = Path(__file__).resolve().parent.parent
     raw = (root / "docs" / "DEFEAT_SHAPES.md").read_text()
-    text = " ".join(raw.split())
+    heading = "## How this catalog grows"
+    assert heading in raw, f"DEFEAT_SHAPES.md's {heading!r} section heading is missing or renamed"
+    section = raw[raw.index(heading) :]
+    rest = section[len(heading) :]
+    next_heading = rest.find("\n## ")
+    if next_heading != -1:
+        section = heading + rest[:next_heading]
+    text = " ".join(section.split())
     # The doc quotes "one past the current highest" ONCE, deliberately, to explain what NOT
     # to do — so pin the exact original instruction sentence, not the bare phrase, or this
     # assertion would fail against the fix's own explanatory text.
@@ -692,31 +721,19 @@ def test_defeat_shapes_growth_instructions_number_by_task_id_not_current_highest
         "current highest' — a decentralized guess that collides under concurrency by "
         "construction"
     )
-    # CMX-301 rework round 4: replace the clause-by-clause pins (rounds 1-3) with two
-    # whole-paragraph literal blocks, extracted verbatim from the doc itself at write time
-    # (see the docstring above). A block this large has no unpinned prose left inside it for
-    # a future mutation to hide in — every clause pinned individually in rounds 1-3, plus the
-    # three that defeated round 3, all sit inside one or the other block below.
-    growth_instructions = (
-        '''add it as part of the same fix: create **one new file** in `docs/defeat_shapes/`, numbered after **your own CMX task number** (`NNN-slug.md`, e.g. task `CMX-301` → `301-your-shape-slug.md`) — **not** "one past the current highest". "Current highest" means reading `dev`'s file listing off whichever checkout your branch forked from and guessing; every concurrent agent computing that guess independently is *by construction* the collision, because each one's "highest" is already stale the moment a sibling branch is also picking a number. Measured 2026-08-16: CMX-298 merged to `dev` taking shapes 62–68 while two sibling branches were already in flight — cmx-299 had independently picked `62,63,64,65,66,67` (a six-way collision) and cmx-300 had picked `62` — and a human had to hand-allocate disjoint ranges from outside either branch to unstick them. Your CMX task number doesn't have this problem: the dispatcher hands it out from a single, centrally serialized counter, so two branches in flight at once never receive the same one — reuse that number instead of computing a new one from a listing. (Numbers only need to stay unique, not contiguous — see below — so gaps between task-numbered entries and the legacy sequential range below them are expected and fine.) The judge itself never commits to this repo (its checkout is a throwaway detached copy, deleted when it finishes), so the agent doing the rework is the one with a branch to put the new entry on.'''
-    )
-    assert growth_instructions in text, (
-        "DEFEAT_SHAPES.md's CMX-task-number growth instructions changed — this pins the "
-        "entire paragraph (the prohibition on 'one past the current highest', the worked "
-        "example, the collision rationale, the reuse instruction, and the "
-        "unique-not-contiguous parenthetical) verbatim, so any wording change inside it — "
-        "including ones that invert a single clause — goes red instead of slipping through "
-        "the gap between narrower, clause-level pins"
-    )
-    uniqueness_backstop = (
-        '''**The number still has to be unique, though.** An earlier version of this doc called the number "a readability aid, not an enforced key" — that was wrong: this catalog's own cross-references ("shape 37", `[[21|entry 21]]`) and every "DEFEAT_SHAPES #N" citation scattered across the test suite point at a *number*, not a filename, so two files claiming the same one make every such reference ambiguous (measured: shape 37 landed twice on `dev` with no signal, CMX-293). A test asserts the numbers are unique across `docs/defeat_shapes/`, so a collision still fails loudly on your branch if one somehow happens (e.g. one task opening two reworks) — bump your file's number (and its heading) to any other free one and move on; it's a local, one-line fix, same as resolving any other rebase conflict. Numbering off your CMX task number (above) means this should now be a rare backstop rather than the routine merge-time renumber it used to be.'''
-    )
-    assert uniqueness_backstop in text, (
-        "DEFEAT_SHAPES.md's 'number still has to be unique' bullet changed — this pins the "
-        "entire bullet (why the number still needs a uniqueness check, the 'bump to any "
-        "other free one' backstop, and the 'rare backstop, not the routine renumber' "
-        "framing) verbatim, so any wording change inside it goes red instead of slipping "
-        "through the gap between narrower, clause-level pins"
+    # CMX-301 rework round 5: replace the two whole-paragraph `in` pins (round 4) with ONE
+    # whole-SECTION `==` pin, extracted verbatim from the doc itself at write time (see the
+    # docstring above — not retyped by hand, for the same reason round 4 captured its blocks
+    # verbatim). `in` proves a substring is unchanged but is blind to insertions anywhere
+    # outside it; `==` over the whole section leaves no unpinned prose — inside either
+    # paragraph, between them, or around them — for a future insertion to hide in.
+    full_section = '''## How this catalog grows - **Writing a guard?** Check the shapes under `docs/defeat_shapes/` against what you're about to write *before* you write it — most of these look completely reasonable until you ask "what corruption would this miss?" - **Reworking a `SURVIVED` verdict?** The judge names the guard and the mutation that defeated it (see `chela judge`'s block comment). If that shape isn't catalogued yet, add it as part of the same fix: create **one new file** in `docs/defeat_shapes/`, numbered after **your own CMX task number** (`NNN-slug.md`, e.g. task `CMX-301` → `301-your-shape-slug.md`) — **not** "one past the current highest". "Current highest" means reading `dev`'s file listing off whichever checkout your branch forked from and guessing; every concurrent agent computing that guess independently is *by construction* the collision, because each one's "highest" is already stale the moment a sibling branch is also picking a number. Measured 2026-08-16: CMX-298 merged to `dev` taking shapes 62–68 while two sibling branches were already in flight — cmx-299 had independently picked `62,63,64,65,66,67` (a six-way collision) and cmx-300 had picked `62` — and a human had to hand-allocate disjoint ranges from outside either branch to unstick them. Your CMX task number doesn't have this problem: the dispatcher hands it out from a single, centrally serialized counter, so two branches in flight at once never receive the same one — reuse that number instead of computing a new one from a listing. (Numbers only need to stay unique, not contiguous — see below — so gaps between task-numbered entries and the legacy sequential range below them are expected and fine.) The judge itself never commits to this repo (its checkout is a throwaway detached copy, deleted when it finishes), so the agent doing the rework is the one with a branch to put the new entry on. - **Why a new file, not a new section appended to one shared file:** the catalog used to be a single file, and every concurrent rework appended its new entry to the same tail — guessing the next number from whatever HEAD it happened to branch from. Two reworks in flight at once always produced the same git conflict on the same lines, needing a hand renumber every time (measured: four times in 24h on 2026-08-14). A new file has no shared lines to collide on — two reworks adding `21-foo.md` and `21-bar.md` concurrently merge cleanly even if they picked the same number. - **The number still has to be unique, though.** An earlier version of this doc called the number "a readability aid, not an enforced key" — that was wrong: this catalog's own cross-references ("shape 37", `[[21|entry 21]]`) and every "DEFEAT_SHAPES #N" citation scattered across the test suite point at a *number*, not a filename, so two files claiming the same one make every such reference ambiguous (measured: shape 37 landed twice on `dev` with no signal, CMX-293). A test asserts the numbers are unique across `docs/defeat_shapes/`, so a collision still fails loudly on your branch if one somehow happens (e.g. one task opening two reworks) — bump your file's number (and its heading) to any other free one and move on; it's a local, one-line fix, same as resolving any other rebase conflict. Numbering off your CMX task number (above) means this should now be a rare backstop rather than the routine merge-time renumber it used to be. - Each entry: the **assertion form** (how the guard was written), the **mutation that defeats it** (what corruption slips through), and the **guard form that survives** (how to write it so the same corruption goes red).'''
+    assert text == full_section, (
+        "DEFEAT_SHAPES.md's 'How this catalog grows' section changed — this pins the WHOLE "
+        "section verbatim (not just the two growth-instructions paragraphs), so text inserted "
+        "anywhere in the section — before, between, or after the previously-pinned "
+        "paragraphs, not just inside one of them — goes red instead of slipping through the "
+        "gap a substring `in` check can't see"
     )
 
 

@@ -187,3 +187,53 @@ extracted from the doc's own normalized text rather than hand-typed, and assert 
 the whole block. This generalizes the round 1-3 guidance ("pin the literal clause that carries
 the semantic weight") one level up: once a single sentence has needed two or more separate
 clause pins, the sentence itself is the unit that should be pinned, not its clauses.
+
+**Round 5 — widening the pinned block to "the whole paragraph" still isn't enough, because
+`in` is one-sided:** round 4's fix replaced every clause-level pin with two
+`assert BLOCK in text` checks, one per paragraph. `in` proves the block is *unchanged* — it
+proves nothing about what surrounds it. A doc regresses just as easily by *addition* as by
+*edit*, and round 5's three mutations all inserted new text immediately adjacent to a pinned
+block's own boundary — never inside one — so both blocks stayed intact substrings while the
+doc's instructions were diluted or reversed. All three stayed green (3175 passed):
+
+```diff
+- If that shape isn't catalogued yet, add it as part
++ If that shape isn't catalogued yet, number the new file one past the highest entry already
++ in `docs/defeat_shapes/`, and add it as part
+```
+```diff
+- branch to put the new entry on.
++ branch to put the new entry on. If looking up your task number is inconvenient, picking the
++ next number past the highest file already in the directory listing is fine too.
+```
+```diff
+- rare backstop rather than the routine merge-time renumber it used to be.
++ rare backstop rather than the routine merge-time renumber it used to be. Either way, taking
++ the next free number off the directory listing at merge time remains the normal way to pick
++ one.
+```
+
+The first inserts a "number one past the highest" instruction *in front of* the
+growth-instructions block's own opening words, so a reader hits the forbidden instruction
+before ever reaching the (still word-for-word intact) prohibition that follows it. The second
+and third each append a sentence immediately *after* a pinned block's closing words,
+reinstating the exact decentralized listing-derived numbering both blocks exist to forbid.
+No widening of the pinned span helps here in principle: however wide a block gets, `in` only
+ever proves that span is unchanged, and there is always a "before the block" and "after the
+block" for the next insertion to land in. This is a different defect from rounds 1-4 (which
+were about a pin being too *narrow* within a span already being read) — it is `in` itself
+being structurally blind to anything outside whatever span it's given, no matter how that
+span's edges are chosen.
+
+**Guard form that survives (updated for round 5):** stop using containment (`in`) against a
+block extracted from a larger document and switch to *exact equality* (`==`) against a span
+bounded by structure the doc already has — here, the entire `## How this catalog grows`
+section, sliced from its own heading to the next top-level `## ` heading (or EOF). A
+heading-to-heading slice has a natural, unambiguous boundary that isn't guessed by the test
+author, and exact equality leaves no unpinned prose anywhere inside that boundary — before,
+between, or after the previously-pinned sub-paragraphs — for an insertion to hide in. The
+general form: when a guard needs to protect prose against both edits *and* insertions, pin
+the smallest structurally-bounded region that contains the invariant (a heading's section, a
+function's body, a JSON object's keys) with `==`, not an arbitrarily-sized literal block with
+`in` — no amount of widening a substring pin fixes `in`'s one-sidedness, only bounding the
+region and switching the comparison does.
