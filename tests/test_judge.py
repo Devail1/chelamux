@@ -637,104 +637,122 @@ def test_defeat_shapes_numbers_are_unique_across_the_catalog():
     )
 
 
-def test_defeat_shapes_growth_instructions_number_by_task_id_not_current_highest():
-    """CMX-301: "numbered one past the current highest" told every agent to read `dev`'s file
-    listing off whatever checkout its branch forked from and guess — a decentralized guess
-    computed independently by concurrent branches is *by construction* the collision CMX-293's
-    uniqueness test can only catch after the fact. Measured 2026-08-16: CMX-298 merged to `dev`
-    taking shapes 62-68 while two sibling branches were already in flight — cmx-299 had
-    independently picked `62,63,64,65,66,67` (a six-way collision) and cmx-300 had picked `62`
-    — and a human had to hand-allocate disjoint ranges from outside either branch to unstick
-    them. The fix routes allocation through the CMX task number instead: the dispatcher hands
-    that out from a single, centrally serialized counter, so two branches in flight at once
-    never receive the same one.
+def _cmx_task_number_from_branch(branch: str) -> tuple[int | None, str]:
+    """Parse a CMX task number out of a branch name like ``cmx-301`` (case-insensitive).
 
-    Seen to go red: reverting the growth instructions back to "one past the current highest"
-    (or otherwise dropping the CMX-task-number guidance) silently reopens the collision this
-    entry closes.
+    Returns ``(number, "")`` when the branch encodes one, or ``(None, reason)`` — a non-empty,
+    branch-naming reason — otherwise. A bare ``None`` with no reason is indistinguishable from
+    "didn't check"; the reason is what lets a caller skip LOUDLY instead of silently.
+    """
+    m = re.fullmatch(r"cmx-(\d+)", (branch or "").strip(), flags=re.IGNORECASE)
+    if not m:
+        return None, f"branch {branch!r} does not match the cmx-N task-branch convention"
+    return int(m.group(1)), ""
 
-    Rounds 1-3 each pinned exactly the literal substring(s) that round's own found mutation had
-    changed — a phrase, then three more phrases, then three more after that. Every round left
-    the *neighbouring* clauses of the same sentences reachable only through presence-only
-    checks (or not checked at all), so round 4's mutations again landed in the gaps between the
-    existing pins and stayed green (3175 passed) by inverting clauses immediately adjacent to
-    round 3's pins:
-      1. "are expected and fine.)" -> "are a defect to fix by renumbering.)" — one clause past
-         round 3's own "(Numbers only need to stay unique, not contiguous" pin, in the same
-         parenthetical.
-      2. "is already stale the moment a sibling branch is also picking a number" -> "is never
-         stale even when a sibling branch is also picking a number" — the *because* clause
-         explaining round 3's "is *by construction* the collision" pin, a few words later in
-         the same sentence.
-      3. "be a rare backstop rather than the routine merge-time renumber it used to be." ->
-         "be the routine merge-time renumber it has always been rather than a rare backstop."
-         — the closing sentence of the same bullet round 3 pinned via "to any other free one
-         and move on".
-    Chasing individual clauses has an unbounded surface: whatever substring the next mutation
-    picks, it can always land in whatever text sits between the pins written so far. Instead of
-    a ninth clause-level assertion, pin the ENTIRE two paragraphs this instruction lives in, as
-    two literal blocks, each captured verbatim from the doc itself (not retyped by hand — a
-    hand-retyped block risks silently "fixing" a typo and pinning text the doc doesn't
-    actually contain, which would make the assertion pass regardless of the doc's real
-    content). Any mutation anywhere inside either block — the three above, the five pinned in
-    rounds 1-3, or one nobody has thought of yet — breaks the surrounding block's exact
-    equality and goes red, because there is no longer any unpinned prose left inside either
-    paragraph for a mutation to hide in.
 
-    Round 4's two `assert BLOCK in text` checks are one-sided: `in` proves the block is
-    UNCHANGED, but it says nothing about what surrounds it. Round 5's mutations exploited
-    exactly that — each one inserted a brand-new sentence or clause immediately before,
-    between, or after the pinned blocks (never inside one), so both blocks stayed intact
-    substrings while the doc's actual instructions were reversed or diluted:
-      1. A "number the new file one past the highest entry already in `docs/defeat_shapes/`"
-         instruction inserted in front of the growth_instructions block's own opening words
-         ("add it as part of the same fix") — the reader hits the inserted instruction before
-         reaching the (still-intact) prohibition that follows it.
-      2. A sentence endorsing "picking the next number past the highest file already in the
-         directory listing" appended right after the growth_instructions block's closing words
-         ("branch to put the new entry on.").
-      3. A sentence restoring "taking the next free number off the directory listing at merge
-         time" as "the normal way to pick one" appended right after the uniqueness_backstop
-         block's closing words ("renumber it used to be.").
-    None of these touch a byte inside either pinned block, so `in` stayed true for both. Fix:
-    stop pinning two sub-paragraphs and pin the ENTIRE "## How this catalog grows" section —
-    sliced from its heading to the next top-level `## ` heading (or EOF) — compared with `==`
-    instead of `in`. Exact whole-section equality has no unpinned prose anywhere in the
-    section, before, between, or after the two paragraphs, for an insertion to hide in: any
-    text added anywhere in the section changes the section's content and fails the comparison.
+def test_cmx_task_number_from_branch_parses_or_gives_a_loud_reason():
+    """CMX-301 rework round 6 (re-scoped by a human): the mechanical check below skips outright
+    when it cannot derive a task number from the branch name (`dev`, a detached CI checkout, a
+    release branch, ...). A skip with no reason is indistinguishable from "ran and found
+    nothing" — UNKNOWN MUST NOT READ AS OK — so the parsing helper carries its own reason
+    string, and this test covers that path directly (no real git repo needed) instead of
+    relying on whatever branch happens to be checked out when the suite runs.
+
+    Seen to go red: the helper silently returning `(None, "")` (or matching a non-cmx-N branch)
+    for any of the branches below — either would make the caller either skip with a useless
+    empty reason or, worse, treat an unrelated branch as if it owned a task number.
+    """
+    assert _cmx_task_number_from_branch("cmx-301") == (301, "")
+    assert _cmx_task_number_from_branch("CMX-301") == (301, "")
+    assert _cmx_task_number_from_branch("cmx-7") == (7, "")
+
+    for branch in ("dev", "main", "HEAD", "release/1.2", "cmx-", "cmx-12a", ""):
+        number, reason = _cmx_task_number_from_branch(branch)
+        assert number is None, f"{branch!r} should not parse to a task number"
+        assert reason, f"{branch!r} produced no skip reason — a silent None reads as OK"
+        assert repr(branch) in reason, (
+            f"{branch!r}'s skip reason {reason!r} doesn't even name the branch that failed"
+        )
+
+
+def test_defeat_shapes_added_files_are_numbered_by_branch_task_id():
+    """CMX-301 rework round 6 (re-scoped by a human, superseding rounds 1-5): every prose guard
+    tried so far shares one shape — it pins WORDING (a clause, a paragraph, a whole section
+    compared with `==`) and proves only that the pinned region is unchanged. Round 5's
+    whole-section `==` pin was defeated by inserting the forbidden instruction in the
+    *neighbouring* section, and by appending a brand-new section after the pin's own EOF
+    terminator — neither touches a byte inside the pinned span, so both mutations left the pin
+    intact while reversing what the doc actually told the next agent to do. Chasing the prose
+    has no bottom: whatever the next pin misses, a mutation can always be phrased to land
+    outside it.
+
+    This test drops prose entirely and checks the invariant DEFEAT_SHAPES.md's instructions are
+    actually for: every file this branch adds under `docs/defeat_shapes/` must be numbered with
+    THIS BRANCH's own CMX task number, not a number guessed off some file listing. No amount of
+    rewording the doc can flip this — only the files actually added to the catalog can.
+
+    UNKNOWN MUST NOT READ AS OK: this can only run when the branch name encodes a CMX task
+    number, `origin/dev` is fetched, and the branch actually adds a defeat-shape file — each of
+    those missing is not "nothing wrong", so each SKIPS LOUDLY with a stated reason instead of
+    quietly passing (an empty loop that never asserts is a green PASSED result proving nothing
+    ran; that failure mode is exactly what made rounds 1-5's prose guards decoration).
+
+    Seen to go red: a defeat-shape file added on this branch numbered off "one past the current
+    highest" file in a listing instead of this branch's own CMX task number.
     """
     root = Path(__file__).resolve().parent.parent
-    raw = (root / "docs" / "DEFEAT_SHAPES.md").read_text()
-    heading = "## How this catalog grows"
-    assert heading in raw, f"DEFEAT_SHAPES.md's {heading!r} section heading is missing or renamed"
-    section = raw[raw.index(heading) :]
-    rest = section[len(heading) :]
-    next_heading = rest.find("\n## ")
-    if next_heading != -1:
-        section = heading + rest[:next_heading]
-    text = " ".join(section.split())
-    # The doc quotes "one past the current highest" ONCE, deliberately, to explain what NOT
-    # to do — so pin the exact original instruction sentence, not the bare phrase, or this
-    # assertion would fail against the fix's own explanatory text.
-    assert "numbered one past the current highest" not in text, (
-        "DEFEAT_SHAPES.md's growth instructions regressed to numbering off 'one past the "
-        "current highest' — a decentralized guess that collides under concurrency by "
-        "construction"
+
+    branch_result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=root, capture_output=True, text=True,
     )
-    # CMX-301 rework round 5: replace the two whole-paragraph `in` pins (round 4) with ONE
-    # whole-SECTION `==` pin, extracted verbatim from the doc itself at write time (see the
-    # docstring above — not retyped by hand, for the same reason round 4 captured its blocks
-    # verbatim). `in` proves a substring is unchanged but is blind to insertions anywhere
-    # outside it; `==` over the whole section leaves no unpinned prose — inside either
-    # paragraph, between them, or around them — for a future insertion to hide in.
-    full_section = '''## How this catalog grows - **Writing a guard?** Check the shapes under `docs/defeat_shapes/` against what you're about to write *before* you write it — most of these look completely reasonable until you ask "what corruption would this miss?" - **Reworking a `SURVIVED` verdict?** The judge names the guard and the mutation that defeated it (see `chela judge`'s block comment). If that shape isn't catalogued yet, add it as part of the same fix: create **one new file** in `docs/defeat_shapes/`, numbered after **your own CMX task number** (`NNN-slug.md`, e.g. task `CMX-301` → `301-your-shape-slug.md`) — **not** "one past the current highest". "Current highest" means reading `dev`'s file listing off whichever checkout your branch forked from and guessing; every concurrent agent computing that guess independently is *by construction* the collision, because each one's "highest" is already stale the moment a sibling branch is also picking a number. Measured 2026-08-16: CMX-298 merged to `dev` taking shapes 62–68 while two sibling branches were already in flight — cmx-299 had independently picked `62,63,64,65,66,67` (a six-way collision) and cmx-300 had picked `62` — and a human had to hand-allocate disjoint ranges from outside either branch to unstick them. Your CMX task number doesn't have this problem: the dispatcher hands it out from a single, centrally serialized counter, so two branches in flight at once never receive the same one — reuse that number instead of computing a new one from a listing. (Numbers only need to stay unique, not contiguous — see below — so gaps between task-numbered entries and the legacy sequential range below them are expected and fine.) The judge itself never commits to this repo (its checkout is a throwaway detached copy, deleted when it finishes), so the agent doing the rework is the one with a branch to put the new entry on. - **Why a new file, not a new section appended to one shared file:** the catalog used to be a single file, and every concurrent rework appended its new entry to the same tail — guessing the next number from whatever HEAD it happened to branch from. Two reworks in flight at once always produced the same git conflict on the same lines, needing a hand renumber every time (measured: four times in 24h on 2026-08-14). A new file has no shared lines to collide on — two reworks adding `21-foo.md` and `21-bar.md` concurrently merge cleanly even if they picked the same number. - **The number still has to be unique, though.** An earlier version of this doc called the number "a readability aid, not an enforced key" — that was wrong: this catalog's own cross-references ("shape 37", `[[21|entry 21]]`) and every "DEFEAT_SHAPES #N" citation scattered across the test suite point at a *number*, not a filename, so two files claiming the same one make every such reference ambiguous (measured: shape 37 landed twice on `dev` with no signal, CMX-293). A test asserts the numbers are unique across `docs/defeat_shapes/`, so a collision still fails loudly on your branch if one somehow happens (e.g. one task opening two reworks) — bump your file's number (and its heading) to any other free one and move on; it's a local, one-line fix, same as resolving any other rebase conflict. Numbering off your CMX task number (above) means this should now be a rare backstop rather than the routine merge-time renumber it used to be. - Each entry: the **assertion form** (how the guard was written), the **mutation that defeats it** (what corruption slips through), and the **guard form that survives** (how to write it so the same corruption goes red).'''
-    assert text == full_section, (
-        "DEFEAT_SHAPES.md's 'How this catalog grows' section changed — this pins the WHOLE "
-        "section verbatim (not just the two growth-instructions paragraphs), so text inserted "
-        "anywhere in the section — before, between, or after the previously-pinned "
-        "paragraphs, not just inside one of them — goes red instead of slipping through the "
-        "gap a substring `in` check can't see"
+    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+    task_number, reason = _cmx_task_number_from_branch(branch)
+    if task_number is None:
+        pytest.skip(f"cannot derive a CMX task number to check added files against: {reason}")
+
+    have_dev = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "origin/dev"],
+        cwd=root, capture_output=True, text=True,
     )
+    if have_dev.returncode != 0:
+        pytest.skip("origin/dev is not available in this checkout — cannot diff added files "
+                     "against it")
+
+    diff = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=A", "origin/dev...HEAD", "--",
+         "docs/defeat_shapes/"],
+        cwd=root, capture_output=True, text=True,
+    )
+    if diff.returncode != 0:
+        pytest.skip(f"git diff against origin/dev failed: {diff.stderr.strip()[:300]}")
+    added = [line.strip() for line in diff.stdout.splitlines() if line.strip()]
+    if not added:
+        pytest.skip("this branch adds no files under docs/defeat_shapes/ relative to "
+                     "origin/dev — nothing for this check to verify")
+
+    for path in added:
+        filename = Path(path).name
+        m = re.match(r"^(\d+)-", filename)
+        assert m, f"{filename} was added under docs/defeat_shapes/ with no leading NNN- number"
+        assert int(m.group(1)) == task_number, (
+            f"{filename} is numbered {m.group(1)}, not this branch's own CMX task number "
+            f"{task_number} (branch {branch!r}) — numbering off anything else (e.g. one past "
+            "the current highest file in a listing) is a decentralized guess that collides "
+            "under concurrency; see docs/DEFEAT_SHAPES.md's 'How this catalog grows'"
+        )
+        # Filename and heading are asserted to agree elsewhere (see
+        # test_defeat_shapes_file_headings_are_well_formed_and_match_their_filename), but that
+        # test says nothing about the TASK number — check the heading directly too, so a file
+        # correctly named `301-*.md` but whose own heading claims a different shape number
+        # still fails here instead of only on the (separate, filename-vs-heading-only) test.
+        first_line = (root / path).read_text().splitlines()[0]
+        heading_m = re.match(r"^## (\d+)\. ", first_line)
+        assert heading_m, f"{filename}: heading {first_line!r} does not match '## N. Title'"
+        assert int(heading_m.group(1)) == task_number, (
+            f"{filename}'s heading claims shape {heading_m.group(1)}, not this branch's own "
+            f"CMX task number {task_number} (branch {branch!r})"
+        )
 
 
 def test_defeat_shapes_cross_references_resolve_to_shapes_that_exist():
