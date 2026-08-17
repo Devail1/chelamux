@@ -54,3 +54,35 @@ hardening the per-badge assertion alongside the chokepoint: `tests/sidebar.test.
 also asserts `svg.querySelector('path')` on the rendered crown badge — content, not just
 wrapper presence — on top of (not instead of) the existing `querySelector('svg')` check and
 the round-1 `in _LUCIDE` throw.
+
+**Found a third time, two more independent mechanisms `svg.querySelector('path')` still can't
+see:** the round-2 fix still answers only "did the interpolation produce a non-empty child" —
+neither "which child" nor "is the child's own paint attribute intact" follows from that.
+`chela judge` round 3 (2026-08-17, same PR) found both:
+1. **Swap the icon name at the call site**, not the map entry — `lucideIcon('crown', 12)` →
+   `lucideIcon('minus', 12)` in `nav.js`. Every entry in `_LUCIDE` has at least one `<path>`,
+   so `svg.querySelector('path')` is exactly as true for the wrong icon as the right one — a
+   presence check can't tell a crown from a dash (the general form of this half is
+   [shape 78](78-a-distinctness-only-assertion-stands-in-for-the-designed-literal.md): a
+   distinctness/presence check standing in for the designed literal value).
+2. **Kill the paint, not the geometry** — `lucideIcon`'s `stroke="currentColor"` (these are
+   outline icons: `fill="none"`, so the stroke IS the visible ink) → `stroke="none"`. The
+   `<path>` node and its exact `d` data stay in the DOM untouched, and no CSS rule changes, so
+   neither a literal-path-data guard (closing mutation 1) nor a `getComputedStyle` check on
+   the badge's *wrapper* (`display`, `width` —
+   [shape 67](67-a-computed-style-visibility-guard-is-written-for-a.md)'s recipe, added to
+   `tests/sidebar_role_badge_css.test.mjs` in round 2) sees it, because `stroke` is an SVG
+   *presentation attribute* on the icon's own element — one layer beneath both the DOM-presence
+   check and the wrapper's CSS cascade. The badge renders a correctly-shaped, correctly-sized,
+   zero-ink outline: visually identical to the bare colour dot CMX-300 was written to forbid.
+
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3211 passed) with either mutation
+applied in isolation. Closed in `tests/sidebar.test.mjs` by asserting, independent of
+`_LUCIDE` (hardcoded, so a corrupted map entry can't satisfy its own test): the rendered
+`<path>` elements' exact `d` attributes equal the crown icon's own literal path data
+(`assert.deepEqual([...svg.querySelectorAll('path')].map(p => p.getAttribute('d')), [...])`),
+and the `<svg>`'s own `stroke` attribute equals the paint-producing value
+(`assert.equal(svg.getAttribute('stroke'), 'currentColor')`) — both alongside, not instead of,
+the existing `querySelector('path')` and CSS-cascade checks. Icon identity and icon paint are
+two axes a single presence boolean cannot separate; each needed its own literal-value
+assertion.
