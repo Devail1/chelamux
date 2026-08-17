@@ -70,3 +70,19 @@ button's own* `data-win` value (`` new RegExp(`setCostWindow\('${btn.dataset.win
 rather than a hardcoded `'7d'` literal — a hardcoded `'7d'` on the test side would still match
 a hardcoded, but WRONG, `'7d'` typo'd onto the wrong button in production, so pinning against
 the button's own data attribute is what actually catches the mismatch the mutation produced.
+
+**Found a fifth time, in Python, no DOM involved:** `tests/test_diffsurface.py`'s
+`test_all_git_subprocess_calls_are_bounded_by_git_timeout` (CMX-299 rework round 10, PR #373).
+Every earlier instance of this shape lived in rendered markup (an `onclick` attribute, a
+template string); this one has no render step at all — it's a `subprocess.run` spy asserting
+`all(t == diffsurface._GIT_TIMEOUT for t in calls)`. `diffsurface._GIT_TIMEOUT` is not a
+stand-in for the constant under test, it *is* the constant under test: the mutation
+(`_GIT_TIMEOUT = 15` → `_GIT_TIMEOUT = None`) and the assertion's expected value are the same
+attribute lookup, so they move together and the comparison is `None == None` after the
+mutation lands. The spy can still catch a *call site* dropping its own `timeout=` kwarg
+(that's the shape this test was originally written to close), but it can never catch the bound
+itself being widened or removed, which is the actual failure `_GIT_TIMEOUT` exists to prevent
+(an unbounded git subprocess on a wedged pane cwd hangs forever). The fix pins the literal on
+both sides: `assert diffsurface._GIT_TIMEOUT == 15` (catches the constant drifting) *and*
+`assert all(t == 15 for t in calls)` (catches a call site drifting off the constant) — dropping
+either half leaves one of the two mutations invisible again.

@@ -4,6 +4,9 @@ import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
 import { actionBarKind, costView, ctxLevel, focusLayout, prChip, rankOrder, recapView, tileState } from './wallmodel.js';
+// Side-effect only: registers window.chela.openDiffModal/closeDiffModal for the
+// "Files" chip below (_ctxBarHTML) and the #modal-diff close button in index.html.
+import './diffpanel.js';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -2240,11 +2243,24 @@ function _ctxBarHTML(wid, draggable) {
     const meta = draggable
         ? `<a class="gs-pr" data-pr-for="${attrEsc(wid)}" hidden target="_blank" rel="noopener noreferrer"></a>
            <span class="gs-cost" hidden></span>` : '';
+    // Files (CMX-299): opens the per-session changed-files/diff modal
+    // (diffpanel.js). Unlike every other chip in this bar it needs no poll to
+    // populate — the modal fetches fresh on open — so it's just always
+    // present, `pointer-events: auto` punched through the bar's own
+    // `pointer-events: none` the same way `.gs-pr` already does.
+    // `wid` is a tmux window id (`@<n>`, never quote-bearing) in practice, but
+    // this mirrors kanban.js's own onclick-arg escaping (escHtml then `'`→`\'`)
+    // rather than assuming that format, same as any other value spliced into a
+    // single-quoted JS string literal inside an HTML attribute.
+    const widArg = escHtml(wid).replace(/'/g, "\\'");
+    const filesChip = `<button type="button" class="gs-files" title="Changed files"
+      onclick="event.stopPropagation(); chela.openDiffModal('${widArg}')">${lucideIcon('git-compare', 12)}</button>`;
     return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —">
       ${modelChip}
       ${meta}
       <span class="gs-branch" hidden></span>
       <span class="gs-ctx" hidden></span>
+      ${filesChip}
       ${idxNum}
       <i class="term-ctx-fill"></i>
     </div>`;

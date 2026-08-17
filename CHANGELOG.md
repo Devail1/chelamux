@@ -12,6 +12,13 @@ history lives in `git log`.
 
 ### Added
 
+- **A per-session changed-files / diff surface.** A wall tile's bottom bar has a new
+  "Files" chip — every file that session's live pane cwd has changed since its last
+  commit (staged, unstaged, and untracked, merged into one list with per-file +/-
+  counts), and a click-through unified diff for any one of them. Backed by two new
+  read-only endpoints (`/api/agents/<wid>/diff`, `/api/agents/<wid>/diff/patch`) and
+  works for any git checkout a session's window is sitting in — a dispatcher worktree
+  or a plain attended checkout alike, no dispatcher bookkeeping required. (CMX-299, #373)
 - **The sidebar now marks each session's role — Orchestrator, Dispatched, or plain.** The
   fleet already carried both facts (the single decisions-inbox slot from `orchestrator.js`,
   and the API-provided `dispatched` flag the dispatcher stamps on windows it owns) but
