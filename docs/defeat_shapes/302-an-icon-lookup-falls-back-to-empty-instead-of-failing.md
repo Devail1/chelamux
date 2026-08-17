@@ -170,3 +170,44 @@ made concretely rather than in the abstract, for the single-assertion "read the 
 visual contract at once" refactor a prior round's non-blocking note already proposed: a
 guard built one named attribute at a time will keep finding exactly one more named attribute,
 because that is the shape of how it was built, not a property of this particular badge.
+
+**Found a sixth time, the two remaining CASCADE "off switches" plus one property first
+mis-classified as unguardable:** round 5's CSS guard read `display`, `width`, `paddingLeft`/
+`paddingRight`, `minWidth`, `maxWidth` — five properties, still an enumerated list. `chela
+judge` round 6 (2026-08-17, same PR) found three more, all on `.ar-role.orchestrator`:
+1. **`visibility: hidden`** and **`opacity: 0`**, independently — `display`'s two direct
+   cascade siblings on the "erase this element" spectrum ([shape 67](67-a-computed-style-visibility-guard-is-written-for-a.md)'s
+   general form). Neither touches any of the five already-pinned properties, so the badge
+   painted nothing while every prior assertion — icon content, paint, box size — stayed green.
+2. **`margin: 0 80px`** — the one box property OUTSIDE the border box, unreachable by
+   `box-sizing: border-box` and therefore invisible to `width`/`padding`/`min-width`/
+   `max-width` alike. Under the row's real flex layout this regrows the badge to ~178px,
+   reproducing the reported truncation bug in its purest form.
+
+A human directive on this PR (2026-08-17, superseding round 6's per-property framing)
+correctly closed `visibility`/`opacity` as ONE collapse-check group (reusing the trio
+CMX-298 settled on for `.kanban-card-parked`) instead of a sixth/seventh named property —
+but INITIALLY treated `margin` as belonging to the same bucket as `transform`/`clip-path`/
+off-screen positioning: properties CMX-273's spike (`docs/SPIKE_WALL_FILLS_STAGE.md`)
+established jsdom cannot observe because they need a real layout engine, and prescribed a
+NOT GUARDED note plus a one-time browser capture instead of a guard. That classification
+was wrong, and was caught by testing it rather than reasoning from the property's name:
+`getComputedStyle(el).marginLeft`/`.marginRight` in jsdom resolves the literal declared
+length exactly the same way `width`/`padding`/`min-width`/`max-width` already do — verified
+directly (`node -e` against a real jsdom instance and this repo's real `style.css`) before
+writing the NOT GUARDED note, not after. `margin` is CASCADE, not LAYOUT, and is guarded
+directly like its siblings. The genuine LAYOUT boundary — verified the same way — is
+RESOLVED GEOMETRY (`getBoundingClientRect`/`offsetWidth`, always zero in jsdom; percentage/
+`vw`/flex-distributed widths, which never resolve against a real parent), not "any property
+that sits outside the border box" or "any property that sounds like it needs layout."
+
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3211 passed) with each of the
+three mutations applied in isolation. Closed in `tests/sidebar_role_badge_css.test.mjs`:
+`display`/`visibility`/`opacity` as one assertion group (not re-narrowed to a fourth/fifth
+name later), and `marginLeft`/`marginRight === '0px'` as a direct guard — applied to BOTH
+`.ar-role.orchestrator` and the new `.ar-role.dispatched` bot-icon badge (CMX-302 item 2,
+same round), whose shared box-model declarations were deduplicated into one CSS rule so the
+two badges cannot drift apart. The meta-pattern this round adds to the five above: before
+citing a "needs real layout" precedent as the reason NOT to guard something, run the
+two-line jsdom check that precedent was originally built on — a property's category in the
+CSS spec, or its name, is not evidence of what a specific harness can or cannot observe.
