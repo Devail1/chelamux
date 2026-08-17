@@ -265,8 +265,34 @@ test('the orchestrator window gets an Orchestrator role badge — plain windows 
     // ('' instead of the real path data) still produces a present-but-EMPTY <svg> that
     // this assertion alone cannot tell apart from a real crown. Assert the actual glyph
     // content rendered inside it.
-    assert.ok(svg.querySelector('path'), 'the orchestrator badge rendered an empty <svg> — ' +
-        'no <path> content (an empty _LUCIDE entry must not read as a rendered icon)');
+    //
+    // 🔴 GUARD (CMX-302 rework round 3, DEFEAT_SHAPES literal-value-vs-presence): a bare
+    // `svg.querySelector('path')` is satisfied by ANY icon with at least one <path> —
+    // which is every entry in _LUCIDE, including `minus` (a single dash). Swapping
+    // nav.js's `lucideIcon('crown', 12)` call to `lucideIcon('minus', 12)` still renders
+    // an <svg> with a <path> and leaves title/class untouched, so it survives every
+    // assertion above. Pin the badge to the crown's own literal path data — hardcoded
+    // here, independent of util.js's _LUCIDE table, so a corrupted or swapped table
+    // entry cannot satisfy its own test.
+    const pathData = [...svg.querySelectorAll('path')].map(p => p.getAttribute('d'));
+    assert.deepEqual(pathData, [
+        'M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z',
+        'M5 21h14',
+    ], 'the orchestrator badge did not render the CROWN icon\'s exact path data — a ' +
+        'present <path> alone cannot tell a crown from any other single-path lucide glyph ' +
+        '(e.g. `minus`), so this must pin the literal shape, not merely its presence');
+    // 🔴 GUARD (CMX-302 rework round 3, DEFEAT_SHAPES enumerated-properties-vs-erasure):
+    // lucideIcon() paints every glyph with stroke="currentColor" (fill="none" — these are
+    // outline icons, so the stroke IS the visible ink). Flipping that to stroke="none"
+    // leaves every <path> node — and its `d` data above — untouched in the DOM, so
+    // neither the path-data check above nor the CSS display/width checks in
+    // tests/sidebar_role_badge_css.test.mjs can see it: the badge silently renders
+    // nothing, degrading to exactly the bare colour dot CMX-300 forbids.
+    assert.equal(svg.getAttribute('stroke'), 'currentColor',
+        'the orchestrator badge\'s <svg> lost its stroke paint — stroke="none" leaves every ' +
+        '<path> node (and its `d` data) in the DOM untouched while drawing nothing, so it is ' +
+        'invisible to both the path-data check above and the CSS cascade checks in ' +
+        'tests/sidebar_role_badge_css.test.mjs');
     assert.equal(badge.getAttribute('title'), 'Orchestrator session');
     assert.ok(badge.classList.contains('orchestrator'));
     assert.equal(rowFor('other').querySelector('.ar-role'), null,
