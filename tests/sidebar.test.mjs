@@ -255,7 +255,10 @@ test('the orchestrator window gets an Orchestrator role badge — plain windows 
     const badge = rowFor('orch').querySelector('.ar-role');
     assert.ok(badge, 'the orchestrator window rendered no .ar-role badge after subscribing — ' +
         'onOrchestratorChange did not redraw the sidebar');
-    assert.equal(badge.textContent, 'Orchestrator');
+    // CMX-302: the orchestrator badge is a bare crown ICON, not text — the word
+    // itself lives in the title tooltip so the badge stays narrow.
+    assert.ok(badge.querySelector('svg'), 'the orchestrator badge rendered no crown icon');
+    assert.equal(badge.getAttribute('title'), 'Orchestrator session');
     assert.ok(badge.classList.contains('orchestrator'));
     assert.equal(rowFor('other').querySelector('.ar-role'), null,
         'a plain window rendered a role badge — plain sessions must render none');
@@ -287,11 +290,13 @@ test('holding BOTH the inbox slot and the dispatched flag reads as Orchestrator,
     const rows = [agent('both', { window_id: '@5', dispatched: true })];
     util.setAgentsCache(rows);
     nav.renderSidebarAgents(rows);
-    assert.notEqual(rowFor('both').querySelector('.ar-role').textContent, 'Orchestrator',
+    assert.ok(!rowFor('both').querySelector('.ar-role').classList.contains('orchestrator'),
         'the row already read as Orchestrator before subscribing — fixture leaked state');
 
     await orchestrator.orchestratorSubscribe('@5');   // no renderSidebarAgents call here
-    assert.equal(rowFor('both').querySelector('.ar-role').textContent, 'Orchestrator');
+    const badge = rowFor('both').querySelector('.ar-role');
+    assert.ok(badge.classList.contains('orchestrator') && !badge.classList.contains('dispatched'),
+        'holding both the inbox slot and the dispatched flag should read as Orchestrator, not Dispatched');
     await orchestrator.orchestratorRelease('@5');
 });
 
@@ -332,7 +337,7 @@ test('WIRING: onOrchestratorChange redraws the sidebar badge off one real subscr
         await orchestrator.orchestratorSubscribe('@9');
 
         const badge = rowFor('cmx300-wired').querySelector('.ar-role');
-        assert.ok(badge && badge.textContent === 'Orchestrator',
+        assert.ok(badge && badge.classList.contains('orchestrator') && badge.querySelector('svg'),
             'the sidebar badge did not update off the real subscribe round trip — onOrchestratorChange is not wired to renderSidebarAgents');
         assert.equal(sawAgentsFetch, false,
             'the badge redraw refetched /api/agents — it must redraw off the already-cached agent list, not re-poll');

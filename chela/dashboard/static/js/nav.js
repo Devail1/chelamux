@@ -294,11 +294,19 @@ function _agentRowHtml(a) {
         ctxChip = `<span class="ar-ctx ${cls}" title="context ${p}%">${p}%</span>`;
     }
 
-    // Role badge: text, not a bare colour dot, so it reads the same in
-    // greyscale — 'plain' (the common case) renders nothing at all.
+    // Role badge: one glyph per concept, not glyph-plus-label. 'orchestrator' is a
+    // crown ICON (CMX-302) — the old "Orchestrator" text pill was wide enough to
+    // truncate the session name sitting next to it on a real row; a lucide icon
+    // still reads as a colourblind-safe shape (not colour alone) at a fraction of
+    // the width, with the word itself moved to the title tooltip. 'dispatched'
+    // stays short enough as text that it never caused the same overflow. 'plain'
+    // (the common case) renders nothing at all.
     const role = _agentRole(a);
-    const roleChip = role !== 'plain'
-        ? `<span class="ar-role ${role}" title="${_ROLE_LABEL[role]} session">${_ROLE_LABEL[role]}</span>` : '';
+    const roleChip = role === 'orchestrator'
+        ? `<span class="ar-role orchestrator" title="Orchestrator session">${lucideIcon('crown', 12)}</span>`
+        : role === 'dispatched'
+            ? `<span class="ar-role dispatched" title="Dispatched session">Dispatched</span>`
+            : '';
 
     let age = '';
     if (a.recap_ts) age = ageStr((Date.now() - new Date(a.recap_ts)) / 1000).replace(' ago', '');

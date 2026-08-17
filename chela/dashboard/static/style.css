@@ -2995,15 +2995,23 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .ar-ctx.warn { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, transparent); }
 .ar-ctx.danger { color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); }
-/* CMX-300: session role badge. Text, not a bare dot — the label itself is the
-   colourblind-safe cue; colour only reinforces it. Omitted entirely for 'plain'
-   sessions (the common case), so it never appears in markup or CSS. */
+/* CMX-300: session role badge. A shape — text pill or icon — never a bare dot,
+   so the cue is colourblind-safe; colour only reinforces it. Omitted entirely
+   for 'plain' sessions (the common case), so it never appears in markup or CSS. */
 .ar-role {
     flex: 0 0 auto; font-size: var(--card-font-size); font-weight: 600; line-height: 15px;
     padding: 0 5px; border-radius: 999px; background: var(--surface);
 }
-.ar-role.orchestrator { color: #CC79A7; background: color-mix(in srgb, #CC79A7 16%, transparent); }
 .ar-role.dispatched { color: #0072B2; background: color-mix(in srgb, #0072B2 14%, transparent); }
+/* CMX-302: orchestrator is a bare crown ICON, not a text pill — "Orchestrator"
+   was wide enough to truncate the session name next to it. One glyph for the
+   concept (the word itself moves to the title tooltip), sized/centred like the
+   lucide icons elsewhere rather than the text-pill padding above. */
+.ar-role.orchestrator {
+    display: flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; padding: 0; line-height: normal;
+    color: #CC79A7; background: color-mix(in srgb, #CC79A7 16%, transparent);
+}
 /* CMX-146: Claude's own auto-generated session title — its own dim line, distinct
    from `.ar-recap` below (an occasional away_summary blurb, often absent). */
 .ar-title {
