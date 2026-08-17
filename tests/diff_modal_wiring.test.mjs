@@ -550,6 +550,12 @@ test('a real click on the #modal-diff close button (not a direct closeDiffModal(
     assert.ok(closeBtn, 'the diff modal has no .task-modal-close button');
     assert.match(closeBtn.getAttribute('onclick') || '', /chela\.closeDiffModal\(\)/,
         'the close button is not wired to chela.closeDiffModal()');
+    // 🔴 GUARD (round 7, PR #373 judge round 6 finding #5): the button renders
+    // as a bare `&times;` glyph, so `aria-label` is its ENTIRE accessible
+    // name — nothing else here (class, onclick) proves a screen reader
+    // announces anything at all.
+    assert.equal(closeBtn.getAttribute('aria-label'), 'Close',
+        'the close button lost its "Close" aria-label — its only accessible name for the bare glyph');
     clickOnclick(closeBtn);
     assert.equal(modal.classList.contains('active'), false,
         'a real click on the #modal-diff close button did not close it — its onclick is not wired (or dead-coded)');
@@ -696,6 +702,14 @@ test('opening the diff modal for a DIFFERENT session clears the previous session
         // reset ran synchronously before the fetch was even issued.
         assert.doesNotMatch(content.innerHTML, /a\.py/,
             "session @1's stale file list is still showing while @2's /diff fetch is in flight — openDiffModal did not clear #diff-modal-content before fetching");
+        // 🔴 GUARD (round 7, PR #373 judge round 6 finding #3): the reset write
+        // must land the "Loading…" affordance, not just clear the old content
+        // — an emptied write (`content.innerHTML = ''`) passes the
+        // doesNotMatch check above exactly as well as the real string, but
+        // leaves the modal a blank white box for the whole /diff round trip.
+        // Proven by PRESENCE, not just absence (see docs/defeat_shapes/74).
+        assert.match(content.innerHTML, /Loading…/,
+            "@2's /diff fetch is in flight but #diff-modal-content shows no Loading… affordance — openDiffModal's pre-fetch write was emptied, not set");
 
         resolveDiff2();
         await flush();
@@ -741,6 +755,15 @@ test('clicking a DIFFERENT file row clears the previous file\'s stale patch text
         // synchronously before the fetch was even issued.
         assert.doesNotMatch(patchView.textContent, /old line/,
             "a.py's stale patch text is still showing while b.py's /diff/patch fetch is in flight — _loadDiffPatch did not clear #diff-patch-view before fetching");
+        // 🔴 GUARD (round 7, PR #373 judge round 6 finding #4): the reset write
+        // must land the "Loading…" affordance, not just clear the old text —
+        // an emptied write (`view.innerHTML = ''`) passes the doesNotMatch
+        // check above exactly as well as the real string, but leaves the
+        // patch pane blank — indistinguishable from "this file has no diff"
+        // — for the whole /diff/patch round trip. Proven by PRESENCE, not
+        // just absence (see docs/defeat_shapes/74).
+        assert.match(patchView.textContent, /Loading…/,
+            "b.py's /diff/patch fetch is in flight but #diff-patch-view shows no Loading… affordance — _loadDiffPatch's pre-fetch write was emptied, not set");
 
         resolvePatch2();
         await flush();
@@ -748,5 +771,49 @@ test('clicking a DIFFERENT file row clears the previous file\'s stale patch text
     } finally {
         globalThis.fetch = originalFetch;
         window.chela.closeDiffModal();
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Round 7 (2026-08-17, PR #373 judge round 6) — _fileListHtml's empty state
+// ('Nothing to show.') is what a session with a CLEAN worktree sees — the
+// single most common state any session is in — but DIFF_STATE above always
+// carries files, so no fixture in this file ever rendered it. Dead-coding
+// the branch (`if (false && !files.length) return '...';`) leaves the modal
+// drawing an empty `<ul class="diff-file-list">` with every other assertion
+// in this file still green, since none of them mount a zero-file state.
+// ---------------------------------------------------------------------------
+
+test('a session with a clean worktree (zero changed files) shows "Nothing to show." instead of an empty file list', async () => {
+    const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
+    const CLEAN_STATE = { is_git: true, has_head: true, files: [], additions: 0, deletions: 0 };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = url => {
+        const path = String(url);
+        if (path.endsWith('/api/agents/%401/diff')) {
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(CLEAN_STATE) });
+        }
+        return fakeFetch(url);
+    };
+    try {
+        clickFilesChip(filesBtn);
+        await flush();
+
+        assert.equal(document.querySelectorAll('#diff-modal-content .diff-file-row').length, 0,
+            'setup: a clean-worktree fixture rendered file rows');
+        // 🔴 GUARD: proven by PRESENCE, not just absence — an empty
+        // `<ul class="diff-file-list">` also has zero `.diff-file-row`
+        // children, so the assertion above alone cannot tell "the empty
+        // state rendered its message" from "the empty state was dead-coded
+        // into rendering nothing at all".
+        const pane = document.querySelector('.diff-file-pane');
+        assert.ok(pane, 'no .diff-file-pane element was rendered');
+        assert.match(pane.innerHTML, /diff-file-list-empty/,
+            'a clean worktree did not render the .diff-file-list-empty element — _fileListHtml\'s empty-state branch is dead-coded (or unreached)');
+        assert.match(pane.textContent, /Nothing to show\./,
+            'a clean worktree did not render "Nothing to show." — _fileListHtml\'s empty-state message is missing or dead-coded');
+        window.chela.closeDiffModal();
+    } finally {
+        globalThis.fetch = originalFetch;
     }
 });

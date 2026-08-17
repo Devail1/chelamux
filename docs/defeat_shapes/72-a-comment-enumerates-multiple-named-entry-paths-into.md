@@ -17,7 +17,7 @@ action itself, and the direct-call test, untouched. The direct call never goes t
 listener at all, so it cannot observe that the listener's own condition was gutted; the suite
 stays green while every keyboard/backdrop route into the feature goes dead.
 
-**Why this is distinct from [[47|shape 47]] and [[70|shape 70]]:** shape 47 is a single
+**Why this is distinct from [[47|shape 47]] and [[77|shape 77]]:** shape 47 is a single
 early-return filter whose one accepted input value is the only one the suite ever
 constructs — the fix is varying the input along that one axis. Shape 62 is zero coverage of a
 single *sequential* chain (chip click → modal open). This shape is a *fan-in*: several
@@ -25,7 +25,7 @@ structurally different entry points (a button's onclick, a keydown listener, a c
 converge on one shared destination, and there is no code path shared between "call the
 exported function" and "dispatch the DOM event a real user action would actually produce" — so
 exercising the destination directly proves nothing about any of the routes into it, no matter
-how many exist or how thoroughly the destination itself is tested. A guard closing shape 70 for
+how many exist or how thoroughly the destination itself is tested. A guard closing shape 77 for
 the OPENING half of a modal chain says nothing about the CLOSING half having the same fan-in gap.
 
 **Guard form that survives:** when a comment (or the code itself) names N distinct entry

@@ -108,6 +108,23 @@ def test_changed_files_reports_modified_added_deleted_and_untracked(repo: Path):
     assert result["deletions"] == sum(f["deletions"] for f in result["files"])
 
 
+def test_changed_files_type_change_reports_as_modified(repo: Path):
+    # 🔴 GUARD: `_STATUS_NAMES["T"]` maps git's type-change code (file -> symlink,
+    # or vice versa) to "modified" per its own comment — but no other fixture in
+    # this suite ever produces a real "T" row, so a mutation reassigning that
+    # entry to any other status name (e.g. "deleted") would slip through every
+    # other test unnoticed while the file, still present on disk, rendered the
+    # UI's delete chip. Verified live (git 2.43): replacing a tracked regular
+    # file with a symlink is exactly what makes
+    # `git diff HEAD --no-renames --name-status` emit a `T` row.
+    (repo / "tracked.txt").unlink()
+    (repo / "tracked.txt").symlink_to(repo / "to_delete.txt")
+
+    result = diffsurface.changed_files(repo)
+    by_path = {f["path"]: f for f in result["files"]}
+    assert by_path["tracked.txt"]["status"] == "modified"
+
+
 def test_changed_files_order_is_tracked_first_then_untracked_not_reversed(repo: Path):
     # 🔴 GUARD: the module docstring promises the merged list comes back
     # "ordered as git reports it (tracked changes first, then untracked)" —
