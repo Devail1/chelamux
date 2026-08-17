@@ -653,20 +653,33 @@ def test_defeat_shapes_growth_instructions_number_by_task_id_not_current_highest
     (or otherwise dropping the CMX-task-number guidance) silently reopens the collision this
     entry closes.
 
-    CMX-301 rework round 1 (defeat shape #69 in docs/DEFEAT_SHAPES.md): the judge mutated this
-    doc two ways that left every assertion below untouched, because none of them actually
-    exercised the words the mutation changed:
-      1. flipped "— **not** \"one past the current highest\"" (a prohibition) to
-         "— **or** \"one past the current highest\"" (an endorsement) — the bare phrase
-         "numbered one past the current highest" never appeared in the doc either before or
-         after this mutation (the real sentence has "numbered after your own CMX task
-         number ... — not/or" in between), so that assertion could never have caught it.
-      2. pointed the one concrete, copyable worked example at `69-your-shape-slug.md` for task
-         `CMX-301` (69 = 68+1, "current highest" at the time of writing) instead of
-         `301-your-shape-slug.md` — teaching the exact guess the surrounding prose forbids.
-         None of the three assertions below check the worked example's number at all.
-    The two assertions added after this comment pin the literal substrings the mutations
-    changed, so each one goes red under the mutation that defeated its predecessor.
+    Rounds 1-3 each pinned exactly the literal substring(s) that round's own found mutation had
+    changed — a phrase, then three more phrases, then three more after that. Every round left
+    the *neighbouring* clauses of the same sentences reachable only through presence-only
+    checks (or not checked at all), so round 4's mutations again landed in the gaps between the
+    existing pins and stayed green (3175 passed) by inverting clauses immediately adjacent to
+    round 3's pins:
+      1. "are expected and fine.)" -> "are a defect to fix by renumbering.)" — one clause past
+         round 3's own "(Numbers only need to stay unique, not contiguous" pin, in the same
+         parenthetical.
+      2. "is already stale the moment a sibling branch is also picking a number" -> "is never
+         stale even when a sibling branch is also picking a number" — the *because* clause
+         explaining round 3's "is *by construction* the collision" pin, a few words later in
+         the same sentence.
+      3. "be a rare backstop rather than the routine merge-time renumber it used to be." ->
+         "be the routine merge-time renumber it has always been rather than a rare backstop."
+         — the closing sentence of the same bullet round 3 pinned via "to any other free one
+         and move on".
+    Chasing individual clauses has an unbounded surface: whatever substring the next mutation
+    picks, it can always land in whatever text sits between the pins written so far. Instead of
+    a ninth clause-level assertion, pin the ENTIRE two paragraphs this instruction lives in, as
+    two literal blocks, each captured verbatim from the doc itself (not retyped by hand — a
+    hand-retyped block risks silently "fixing" a typo and pinning text the doc doesn't
+    actually contain, which would make the assertion pass regardless of the doc's real
+    content). Any mutation anywhere inside either block — the three above, the five pinned in
+    rounds 1-3, or one nobody has thought of yet — breaks the surrounding block's exact
+    equality and goes red, because there is no longer any unpinned prose left inside either
+    paragraph for a mutation to hide in.
     """
     root = Path(__file__).resolve().parent.parent
     raw = (root / "docs" / "DEFEAT_SHAPES.md").read_text()
@@ -679,97 +692,31 @@ def test_defeat_shapes_growth_instructions_number_by_task_id_not_current_highest
         "current highest' — a decentralized guess that collides under concurrency by "
         "construction"
     )
-    assert "your own CMX task number" in text, (
-        "DEFEAT_SHAPES.md is missing the CMX-task-number allocation instruction"
+    # CMX-301 rework round 4: replace the clause-by-clause pins (rounds 1-3) with two
+    # whole-paragraph literal blocks, extracted verbatim from the doc itself at write time
+    # (see the docstring above). A block this large has no unpinned prose left inside it for
+    # a future mutation to hide in — every clause pinned individually in rounds 1-3, plus the
+    # three that defeated round 3, all sit inside one or the other block below.
+    growth_instructions = (
+        '''add it as part of the same fix: create **one new file** in `docs/defeat_shapes/`, numbered after **your own CMX task number** (`NNN-slug.md`, e.g. task `CMX-301` → `301-your-shape-slug.md`) — **not** "one past the current highest". "Current highest" means reading `dev`'s file listing off whichever checkout your branch forked from and guessing; every concurrent agent computing that guess independently is *by construction* the collision, because each one's "highest" is already stale the moment a sibling branch is also picking a number. Measured 2026-08-16: CMX-298 merged to `dev` taking shapes 62–68 while two sibling branches were already in flight — cmx-299 had independently picked `62,63,64,65,66,67` (a six-way collision) and cmx-300 had picked `62` — and a human had to hand-allocate disjoint ranges from outside either branch to unstick them. Your CMX task number doesn't have this problem: the dispatcher hands it out from a single, centrally serialized counter, so two branches in flight at once never receive the same one — reuse that number instead of computing a new one from a listing. (Numbers only need to stay unique, not contiguous — see below — so gaps between task-numbered entries and the legacy sequential range below them are expected and fine.) The judge itself never commits to this repo (its checkout is a throwaway detached copy, deleted when it finishes), so the agent doing the rework is the one with a branch to put the new entry on.'''
     )
-    assert "centrally serialized counter" in text, (
-        "DEFEAT_SHAPES.md dropped the rationale for why the CMX task number is collision-free "
-        "(a single, centrally serialized counter) — without it the instruction reads as an "
-        "arbitrary preference instead of a property that actually holds"
+    assert growth_instructions in text, (
+        "DEFEAT_SHAPES.md's CMX-task-number growth instructions changed — this pins the "
+        "entire paragraph (the prohibition on 'one past the current highest', the worked "
+        "example, the collision rationale, the reuse instruction, and the "
+        "unique-not-contiguous parenthetical) verbatim, so any wording change inside it — "
+        "including ones that invert a single clause — goes red instead of slipping through "
+        "the gap between narrower, clause-level pins"
     )
-    # CMX-301 rework round 1, mutation 1: "— **not** ..." (prohibition) flipped to
-    # "— **or** ..." (endorsement) survived every assertion above untouched. Pin the exact
-    # prohibition wording so flipping "not" to anything else — "or", deleting it, etc. — goes
-    # red: the doc must forbid numbering off the current highest, not merely mention it.
-    assert '— **not** "one past the current highest"' in text, (
-        "DEFEAT_SHAPES.md must PROHIBIT numbering off 'one past the current highest', not "
-        "merely mention it as an alternative — flipping the prohibition into an endorsement "
-        "silently reopens the six-way collision this entry closes"
+    uniqueness_backstop = (
+        '''**The number still has to be unique, though.** An earlier version of this doc called the number "a readability aid, not an enforced key" — that was wrong: this catalog's own cross-references ("shape 37", `[[21|entry 21]]`) and every "DEFEAT_SHAPES #N" citation scattered across the test suite point at a *number*, not a filename, so two files claiming the same one make every such reference ambiguous (measured: shape 37 landed twice on `dev` with no signal, CMX-293). A test asserts the numbers are unique across `docs/defeat_shapes/`, so a collision still fails loudly on your branch if one somehow happens (e.g. one task opening two reworks) — bump your file's number (and its heading) to any other free one and move on; it's a local, one-line fix, same as resolving any other rebase conflict. Numbering off your CMX task number (above) means this should now be a rare backstop rather than the routine merge-time renumber it used to be.'''
     )
-    # CMX-301 rework round 1, mutation 2: the worked example pointed CMX-301 at `69-...md`
-    # (a "current highest" guess) instead of `301-...md` (its own task number) and every
-    # assertion above stayed green, because none of them read the example's number. Pin the
-    # exact worked example so a future rewrite that teaches the wrong number goes red.
-    assert "e.g. task `CMX-301` → `301-your-shape-slug.md`" in text, (
-        "DEFEAT_SHAPES.md's worked example must number CMX-301's entry `301-...md` — its own "
-        "task number, not a 'current highest' guess. This example is the one concrete, "
-        "copyable demonstration of the rule; if it doesn't follow the rule, nothing does"
-    )
-    # CMX-301 rework round 2: the three presence-only assertions above ("your own CMX task
-    # number" / "centrally serialized counter" in text) are each still true of a doc that
-    # instructs the OPPOSITE of what it should, because the negation or the directive lives in
-    # the words next to the pinned phrase, not inside it — the exact shape docs/defeat_shapes
-    # already catalogs as #301. Three mutations exploited that gap and stayed green:
-    #   1. "numbered after **your own" -> "numbered after anything except **your own" — the
-    #      phrase "your own CMX task number" survives untouched inside the mutated sentence.
-    #   2. "reuse that number instead of computing a new" -> "ignore that number and compute a
-    #      new" — reinstates the decentralized guess this entry exists to abolish.
-    #   3. "flight at once never receive the same one" -> "flight at once may receive the same
-    #      one" — negates the collision-freedom property while "centrally serialized counter"
-    #      stays put a few words earlier.
-    # Pin each literal clause so the exact word carrying the semantic weight ("after"
-    # immediately before "**your own", "reuse"/"never" themselves) is inside the assertion,
-    # not merely adjacent to it.
-    assert "numbered after **your own CMX task number**" in text, (
-        "DEFEAT_SHAPES.md must say the new file is numbered AFTER your own CMX task number "
-        "— not merely mention the phrase 'your own CMX task number' somewhere nearby. "
-        "Inserting any other directive between 'numbered after' and '**your own' (e.g. "
-        "'numbered after anything except your own...') leaves the phrase-presence check green "
-        "while instructing the opposite of the rule"
-    )
-    assert "reuse that number instead of computing a new one from a listing" in text, (
-        "DEFEAT_SHAPES.md must explicitly say to REUSE the CMX task number instead of "
-        "computing a new one from a directory listing — silently flipping this to 'ignore "
-        "that number and compute a new one' reinstates the decentralized guess this entry "
-        "exists to abolish, without touching any other pinned phrase"
-    )
-    assert "in flight at once never receive the same one" in text, (
-        "DEFEAT_SHAPES.md must assert the collision-freedom PROPERTY itself — two branches in "
-        "flight at once never receive the same number — not just the word 'counter' a few "
-        "words earlier. Negating 'never' to 'may' leaves 'centrally serialized counter' "
-        "standing while reversing the guarantee the instruction rests on"
-    )
-    # CMX-301 rework round 3: rounds 1-2 pinned every clause their own mutations had exploited,
-    # but two sibling clauses of the same paragraph — and the backstop sentence in the sibling
-    # bullet this entry also edited — were still only reachable through presence-only checks
-    # (or not checked at all). Three more mutations exploited that gap and stayed green (3175
-    # passed):
-    #   1. "to any other free one and move on" -> "to the next free one and move on" — the
-    #      collision *backstop* (what to do when the uniqueness test fires for real) silently
-    #      reverts to the "current highest" guess the whole entry exists to abolish.
-    #   2. "(Numbers only need to stay unique, not contiguous" -> "...stay contiguous, not
-    #      unique" — inverts the parenthetical that makes a 301-numbered entry legal, sending
-    #      the next reader back to renumbering it into the sequential range.
-    #   3. "is *by construction* the collision" -> "is *by construction* not the collision" —
-    #      negates the rationale itself, leaving the doc call a decentralized guess safe.
-    # Pin each literal clause, same as rounds 1-2, so the word carrying the semantic weight
-    # ("any" in "any other free one", "unique, not contiguous" in that order, "the collision"
-    # immediately after "*by construction*") sits inside the assertion instead of near it.
-    assert "to any other free one and move on" in text, (
-        "DEFEAT_SHAPES.md's collision backstop must say to bump to ANY OTHER free number, not "
-        "the next one — reverting 'any other' to 'the next' reinstates the sequential/"
-        "'current highest' guess this entry exists to abolish, in the one place the doc says "
-        "what to actually do when the uniqueness test fires"
-    )
-    assert "(Numbers only need to stay unique, not contiguous" in text, (
-        "DEFEAT_SHAPES.md must say task numbers only need to stay UNIQUE, not contiguous — "
-        "inverting this instructs the next agent to renumber a task-numbered entry down into "
-        "the sequential range, undoing the whole point of numbering off the CMX task id"
-    )
-    assert "is *by construction* the collision" in text, (
-        "DEFEAT_SHAPES.md must state that a decentralized 'current highest' guess IS the "
-        "collision by construction — negating this leaves the doc calling a practice safe "
-        "that it exists to forbid"
+    assert uniqueness_backstop in text, (
+        "DEFEAT_SHAPES.md's 'number still has to be unique' bullet changed — this pins the "
+        "entire bullet (why the number still needs a uniqueness check, the 'bump to any "
+        "other free one' backstop, and the 'rare backstop, not the routine renumber' "
+        "framing) verbatim, so any wording change inside it goes red instead of slipping "
+        "through the gap between narrower, clause-level pins"
     )
 
 

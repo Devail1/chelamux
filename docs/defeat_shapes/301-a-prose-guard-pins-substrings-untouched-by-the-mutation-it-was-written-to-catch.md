@@ -136,3 +136,54 @@ recurrence, not a new one. See the added note in the Guard-form field above: thi
 is the direct consequence of only patching the assertions a round's own mutations named,
 instead of auditing every assertion in the same test for the same defect the first time it
 was found.
+
+**Round 4 — the fourth recurrence, and a change of guard shape instead of a fourth pin:**
+rounds 1-3 each closed exactly the clause(s) their own round's mutations had exploited, which
+by construction left the clauses *neighboring* those pins — in the same sentences, the same
+parenthetical, the same bullet — reachable only through the surrounding prose being present
+at all, not through its actual claim. Round 4's three mutations landed in precisely those
+gaps and stayed green (3175 passed):
+
+```diff
+- are expected
+-   and fine.)
++ are a defect
++   to fix by renumbering.)
+```
+```diff
+- is already stale the moment a sibling branch is also picking a number
++ is never stale even when a sibling branch is also picking a number
+```
+```diff
+- be a rare backstop rather than the routine merge-time renumber it used to be.
++ be the routine merge-time renumber it has always been rather than a rare backstop.
+```
+
+The first inverts the parenthetical's own conclusion — the tail immediately past round 3's
+`(Numbers only need to stay unique, not contiguous` pin — telling the reader a task-numbered
+entry's gap is a defect to fix rather than the expected, fine state the entry exists to
+establish. The second negates the *because*-clause explaining round 3's `is *by construction*
+the collision` pin, a few words later in the same sentence, leaving the doc asserting the
+decentralized guess is safe. The third flips the closing sentence of the bullet round 3
+pinned via `to any other free one and move on`, telling the reader renumbering at merge time
+is still the routine path rather than the rare backstop this entry makes it.
+
+By round 4 the test carried eight literal substring assertions spread across one paragraph
+and its sibling bullet, and each round's mutations were drawn from the words sitting between
+the previous round's pins — a search that always has somewhere left to go, because pinning a
+clause never pins the clauses next to it. Round 4 closes the shape itself instead of adding a
+ninth clause-level pin: it replaces every clause-level assertion on this paragraph and this
+bullet with **two whole-block literal assertions**, each block captured verbatim from the doc
+at write time (not retyped by hand, which would risk silently "fixing" a typo and pinning
+text the doc doesn't actually contain). A block-literal assertion has no unpinned prose left
+inside it — there is no longer a gap between pins for the next mutation to land in, because
+there are no longer multiple pins with gaps between them, just one contiguous span that must
+match exactly or the assertion fails.
+
+**Guard form that survives (updated for round 4):** for a paragraph that has already needed
+more than one clause-level pin, stop adding clause-level pins — capture the entire paragraph
+(or the smallest enclosing block that contains every clause under test) as one literal string,
+extracted from the doc's own normalized text rather than hand-typed, and assert containment of
+the whole block. This generalizes the round 1-3 guidance ("pin the literal clause that carries
+the semantic weight") one level up: once a single sentence has needed two or more separate
+clause pins, the sentence itself is the unit that should be pinned, not its clauses.
