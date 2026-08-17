@@ -257,7 +257,16 @@ test('the orchestrator window gets an Orchestrator role badge — plain windows 
         'onOrchestratorChange did not redraw the sidebar');
     // CMX-302: the orchestrator badge is a bare crown ICON, not text — the word
     // itself lives in the title tooltip so the badge stays narrow.
-    assert.ok(badge.querySelector('svg'), 'the orchestrator badge rendered no crown icon');
+    const svg = badge.querySelector('svg');
+    assert.ok(svg, 'the orchestrator badge rendered no crown icon');
+    // 🔴 GUARD (CMX-302 rework round 2): `querySelector('svg')` alone only proves an
+    // <svg> WRAPPER exists — util.js's lucideIcon() emits the wrapper tag unconditionally
+    // and interpolates _LUCIDE[name] inside it, so an empty `_LUCIDE['crown']` entry
+    // ('' instead of the real path data) still produces a present-but-EMPTY <svg> that
+    // this assertion alone cannot tell apart from a real crown. Assert the actual glyph
+    // content rendered inside it.
+    assert.ok(svg.querySelector('path'), 'the orchestrator badge rendered an empty <svg> — ' +
+        'no <path> content (an empty _LUCIDE entry must not read as a rendered icon)');
     assert.equal(badge.getAttribute('title'), 'Orchestrator session');
     assert.ok(badge.classList.contains('orchestrator'));
     assert.equal(rowFor('other').querySelector('.ar-role'), null,

@@ -48,3 +48,25 @@ flips from `none` to `flex` across the class toggle.
 Closed the same way — a fresh `pretendToBeVisual` jsdom mounting the parked card's real
 `outerHTML` under the real `style.css`, reading `getComputedStyle` for `display`, `visibility`,
 and the `overflow`/`text-overflow`/`white-space` triple that same rule also carries.
+
+**Seen again, no toggle involved at all:** CMX-302, PR #376, round 2 (2026-08-17) — a
+still-narrower variant: `.ar-role.orchestrator` is not gated behind a class TOGGLE the way
+`.modal-overlay.active` or the parked-card chip are — it is a plain, always-applied rule on a
+class the badge either carries or doesn't, so there was no "before/after a click" pair for a
+prior author to even think to diff. `tests/sidebar.test.mjs` (the badge's only guard) proved
+the `<span class="ar-role orchestrator">` node exists, carries the right class, and holds a
+crown `<svg>` — every DOM-only signal available from `bootDashboardDom`, which (like the
+`document.body.innerHTML = fixture` mount this shape's original write-up already names) never
+loads `style.css` at all. The judge applied two independent mutations in the same round, each
+invisible to every one of those DOM assertions: `display: flex` → `display: none` (the badge
+renders in the tree but never paints — the exact class of regression this shape exists for)
+and, a second property entirely, `width: 18px` → `width: 180px` (the badge stays visible but
+regrows into the wide text-pill CMX-302 was filed to eliminate — a geometry regression this
+shape's `display`/`visibility`-focused write-up doesn't literally name, but the fix is
+identical: read the cascaded value). `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green
+(3210 passed) with either mutation applied in isolation. Closed by adding
+`tests/sidebar_role_badge_css.test.mjs`: it reuses the real `bootDashboardDom` + real
+`orchestratorSubscribe()` boot (so the badge under test is the one nav.js actually renders,
+not a hand-typed fixture that could drift from `_agentRowHtml`'s real class names) and injects
+the real `style.css` into that same `jsdom` document afterward, then asserts
+`getComputedStyle(badge).display === 'flex'` and `getComputedStyle(badge).width === '18px'`.

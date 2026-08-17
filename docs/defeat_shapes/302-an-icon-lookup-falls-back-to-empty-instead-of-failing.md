@@ -33,3 +33,24 @@ helper's own contract, checked once.
 (CMX-302, PR #376, rework round 1) — noticed while re-checking the orchestrator-badge guard
 (`badge.querySelector('svg')`) against what it would actually catch if the `crown` map entry
 went missing: nothing, because an empty `<svg>` still satisfies that assertion.
+
+**Found again, the sibling mutation the round-1 fix didn't reach:** the round-1 fix above
+guards the ABSENT-key form of this shape (`name in _LUCIDE` is `false`) — it says nothing
+about a key that is PRESENT but maps to an empty string, which is a second, independent way
+to reach the exact same downstream symptom (an empty `<svg>`). `chela judge` round 2
+(2026-08-17, same PR) mutated `'crown': '<path .../>'` → `'crown': ''` — the key is still
+`in _LUCIDE`, so the round-1 throw never fires, `lucideIcon('crown', 12)` still returns a
+syntactically valid empty `<svg>`, and `badge.querySelector('svg')` — the very check this
+shape's own write-up called "still useful for confirming an icon was requested at all" —
+still finds it. `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3210 passed) with
+this mutation applied, one round after round 1 had just finished writing a fix whose own
+description named the general danger ("presence of the wrapper vs. presence of the thing
+the wrapper is supposed to contain") without checking for every way the content can go
+missing. This is the same meta-pattern [shape 52](52-an-index-guard-s-own-prescribed-fix-still-leaves-a.md)
+found for a positional lookup: closing a guard against one degrade-to-a-constant shortcut
+(missing key) does not, by itself, rule out a sibling shortcut (present-but-blank value)
+that reaches the same observable side effect through a different mechanism. Closed by
+hardening the per-badge assertion alongside the chokepoint: `tests/sidebar.test.mjs` now
+also asserts `svg.querySelector('path')` on the rendered crown badge — content, not just
+wrapper presence — on top of (not instead of) the existing `querySelector('svg')` check and
+the round-1 `in _LUCIDE` throw.
