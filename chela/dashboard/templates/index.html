@@ -635,6 +635,18 @@
   </div>
 </div><!-- /modal-task -->
 
+<!-- Per-session changed-files / diff modal (CMX-299): a wall tile's "Files"
+     chip (terminals.js's _ctxBarHTML) opens this. diffpanel.js fills
+     #diff-modal-content and shows it (openDiffModal); close button, Escape
+     and a backdrop click all route through chela.closeDiffModal(). -->
+<div class="modal-overlay" id="modal-diff">
+  <div class="modal modal-diff">
+    <button class="task-modal-close" type="button" onclick="chela.closeDiffModal()"
+            aria-label="Close">&times;</button>
+    <div id="diff-modal-content"></div>
+  </div>
+</div><!-- /modal-diff -->
+
 <!-- Init a repo for the dispatcher -->
 <div class="modal-overlay" id="modal-init">
   <div class="modal">
