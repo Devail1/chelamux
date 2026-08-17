@@ -185,7 +185,12 @@ def test_all_git_subprocess_calls_are_bounded_by_git_timeout(repo: Path, monkeyp
     diffsurface.file_patch(repo, "tracked.txt")
 
     assert calls, "no git subprocess calls were recorded — the spy is not wired in"
-    assert all(t == diffsurface._GIT_TIMEOUT for t in calls), calls
+    # 🔴 GUARD: pin the LITERAL, not the source symbol — `diffsurface._GIT_TIMEOUT`
+    # is the same constant the mutation edits, so comparing calls against it (not
+    # against 15) lets the bound itself be widened or removed (`None`) with both
+    # sides of the comparison moving together and the assertion staying green.
+    assert diffsurface._GIT_TIMEOUT == 15, diffsurface._GIT_TIMEOUT
+    assert all(t == 15 for t in calls), calls
 
 
 def test_changed_files_untracked_gitignored_path_is_excluded(repo: Path):
