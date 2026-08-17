@@ -314,6 +314,16 @@ def test_file_patch_not_a_git_repo(tmp_path: Path):
 
 # --- defensive bounds: _UNTRACKED_READ_CAP / _count_lines / numstat "-" -----
 
+def test_untracked_read_cap_is_pinned_at_5_million(tmp_path: Path):
+    # 🔴 GUARD: the test below MONKEYPATCHES _UNTRACKED_READ_CAP to 10 to
+    # exercise the truncation mechanism cheaply — but that means it can never
+    # see the SHIPPED bound. Shrinking it (truncates every real file) or
+    # removing it (stalls the endpoint on a multi-GB read — the exact hang
+    # the cap exists to prevent) would leave that test green either way.
+    # Pin the literal here, on the unpatched module.
+    assert diffsurface._UNTRACKED_READ_CAP == 5_000_000, diffsurface._UNTRACKED_READ_CAP
+
+
 def test_count_lines_is_bounded_by_untracked_read_cap(tmp_path: Path, monkeypatch):
     # 🔴 GUARD: _UNTRACKED_READ_CAP is what keeps a stray multi-GB file dropped
     # in the worktree from making the endpoint stall on a full read — drop the
@@ -381,3 +391,33 @@ def test_changed_files_reports_a_rename_as_a_clean_delete_plus_add_pair(repo: Pa
     assert "\t" not in by_path["renamed.txt"]["path"]
     assert by_path["tracked.txt"]["deletions"] == 3
     assert by_path["renamed.txt"]["additions"] == 3
+
+
+def test_changed_files_reports_a_real_merge_conflict_as_conflicted(repo: Path):
+    # 🔴 GUARD: a REAL unmerged index entry, not a faked "U" letter — a fixture
+    # that hand-crafts the status code proves nothing about whether this
+    # module's actual git plumbing ever produces it. `git diff HEAD
+    # --name-status` (what this module reads for every OTHER status) diffs
+    # the worktree against a tree and has no notion of "unmerged"; it reports
+    # a conflicted path as plain "M", same as any other edit. Only a diff
+    # against the INDEX (no ref), filtered to unmerged, surfaces the real "U"
+    # code — confirmed below via `git status --porcelain` before ever calling
+    # into diffsurface, so the fixture's conflicted state isn't assumed.
+    _git(repo, "checkout", "-q", "-b", "other")
+    (repo / "tracked.txt").write_text("one\nTWO-OTHER\nthree\n")
+    _git(repo, "commit", "-q", "-am", "other")
+    _git(repo, "checkout", "-q", "main")
+    (repo / "tracked.txt").write_text("one\nTWO-MAIN\nthree\n")
+    _git(repo, "commit", "-q", "-am", "main-change")
+
+    merge = subprocess.run(
+        ["git", "-C", str(repo), "merge", "other", "-q", "-m", "merge"],
+        capture_output=True, text=True,
+    )
+    assert merge.returncode != 0, "merge unexpectedly succeeded — no conflict to test"
+    status = _git(repo, "status", "--porcelain=v1")
+    assert status.stdout.strip() == "UU tracked.txt", status.stdout  # really unmerged, both sides
+
+    result = diffsurface.changed_files(repo)
+    by_path = {f["path"]: f for f in result["files"]}
+    assert by_path["tracked.txt"]["status"] == "conflicted"

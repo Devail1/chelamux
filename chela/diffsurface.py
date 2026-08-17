@@ -120,6 +120,26 @@ def changed_files(cwd: Path) -> dict:
                 if deleted_s != "-":
                     entry["deletions"] = int(deleted_s)
 
+        # `git diff HEAD --name-status` never reports the "U" code — it diffs
+        # the worktree against a tree, and an in-progress merge conflict has
+        # no unmerged concept at that level, so every conflicted path already
+        # came back "M" above. The unmerged stages only show up in a diff
+        # against the INDEX (no ref), filtered to just those: recover the
+        # real "U" code from there and route it through _STATUS_NAMES too, so
+        # a conflicted path is reported as "conflicted" instead of "modified".
+        conflicted = _run(cwd, ["diff", "--no-renames", "--name-status", "--diff-filter=U"])
+        if conflicted.returncode == 0:
+            for line in conflicted.stdout.splitlines():
+                if not line.strip():
+                    continue
+                parts = line.split("\t", 1)
+                if len(parts) != 2:
+                    continue
+                code, path = parts
+                entry = entries.get(path)
+                if entry is not None:
+                    entry["status"] = _STATUS_NAMES.get(code[0], entry["status"])
+
     untracked = _run(cwd, ["ls-files", "--others", "--exclude-standard"])
     if untracked.returncode == 0:
         for path in untracked.stdout.splitlines():

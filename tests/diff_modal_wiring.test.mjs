@@ -535,6 +535,41 @@ test('the Files chip escapes a wid containing a single quote so its onclick argu
     }
 });
 
+test('the Files chip escapes a wid containing an ampersand so the onclick attribute round-trips it intact', async () => {
+    // 🔴 GUARD: the single-quote test above (MUTATION #5) only exercises the
+    // `.replace(/'/g, ...)` half of the chip's escaping — its evilWid ("@2'x")
+    // carries no character escHtml itself is responsible for, so a mutation
+    // that drops `escHtml(wid)` down to `String(wid)` (keeping the quote
+    // replace) leaves that test green. escHtml encodes a raw "&" to "&amp;";
+    // that's what stops the wid's OWN text from being misread as a second,
+    // unintended HTML entity once it's parsed back out of the onclick
+    // attribute's markup. Pick a wid whose raw text already contains the
+    // literal characters "&amp;" — with escHtml applied first, the raw "&"
+    // gets encoded, so parsing the markup back decodes exactly one entity and
+    // reproduces the original wid. Drop escHtml (`String(wid)`) and the wid's
+    // own "&amp;" text IS a well-formed entity in the emitted markup, so the
+    // HTML parser decodes it too — the wid comes back corrupted to "@3&".
+    const evilWid = '@3&amp;';
+    try {
+        util.setAgentsCache([{ name: 'w3', window_id: evilWid, online: true }]);
+        await terminals.renderTerminals();
+        const filesBtn3 = document.querySelector('.gs-files');
+        assert.ok(filesBtn3, 'no .gs-files chip rendered for the ampersand-bearing wid');
+        const onclick = filesBtn3.getAttribute('onclick');
+        assert.ok(onclick, 'the chip has no onclick attribute');
+
+        let received;
+        const spyChela = { openDiffModal(wid) { received = wid; }, closeDiffModal() {} };
+        new Function('chela', 'event', onclick).call(filesBtn3, spyChela, { stopPropagation() {} });
+        assert.equal(received, evilWid,
+            "openDiffModal was not called with the wid's full, unescaped-back value — the wid's own \"&amp;\" text was misread as an HTML entity");
+    } finally {
+        // restore the single-agent fixture every other test in this file depends on
+        util.setAgentsCache(AGENTS);
+        await terminals.renderTerminals();
+    }
+});
+
 // ---------------------------------------------------------------------------
 // Round 4 (2026-08-16, PR #373 judge round 3) — two more surviving mutations:
 // the close button's own onclick attribute (the third dismissal route
@@ -822,6 +857,53 @@ test('a session with a clean worktree (zero changed files) shows "Nothing to sho
             'a clean worktree did not render the .diff-file-list-empty element — _fileListHtml\'s empty-state branch is dead-coded (or unreached)');
         assert.match(pane.textContent, /Nothing to show\./,
             'a clean worktree did not render "Nothing to show." — _fileListHtml\'s empty-state message is missing or dead-coded');
+        window.chela.closeDiffModal();
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Round 9 (2026-08-17, PR #373 judge round 9) — the SIBLING empty state to
+// the one above: _fileListHtml's "Nothing to show." covers zero CHANGED
+// FILES; this one covers a single file whose patch text itself is empty — a
+// zero-byte untracked file (`touch newfile.py`) makes
+// `git diff --no-index -- /dev/null <path>` emit nothing, so file_patch
+// returns {ok: true, patch: ''}. Every PATCH_TEXT fixture elsewhere in this
+// file is non-empty, so nothing else in this suite ever reaches
+// _patchHtml's `if (!patchText)` branch.
+// ---------------------------------------------------------------------------
+
+test('an empty patch (a zero-byte file) shows the "No diff text" empty state, not a blank pane', async () => {
+    const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = url => {
+        const path = String(url);
+        if (path.startsWith('/api/agents/%401/diff/patch')) {
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, patch: '' }) });
+        }
+        return fakeFetch(url);
+    };
+    try {
+        clickFilesChip(filesBtn);
+        await flush();
+        const rows = document.querySelectorAll('#diff-modal-content .diff-file-row');
+        assert.equal(rows.length, 2, 'setup: the diff modal did not render the fetched file list');
+        const patchView = document.getElementById('diff-patch-view');
+
+        rows[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await flush();
+
+        // 🔴 GUARD: `if (false && !patchText) return '<div class="diff-patch-empty">...'`
+        // dead-codes this branch — every other fixture in this file returns a
+        // non-empty patch, so nothing else can arm it. Dead-coded, an empty
+        // patch string falls through to the line-by-line renderer, which
+        // produces a blank pane — visually indistinguishable from a render
+        // that silently failed — instead of the designed empty-state message.
+        assert.match(patchView.textContent, /No diff text for this file\./,
+            'an empty patch did not render the "No diff text for this file." empty state — _patchHtml\'s empty-patch branch is dead-coded (or unreached)');
+        assert.match(patchView.innerHTML, /diff-patch-empty/,
+            'an empty patch did not render the .diff-patch-empty element');
         window.chela.closeDiffModal();
     } finally {
         globalThis.fetch = originalFetch;
