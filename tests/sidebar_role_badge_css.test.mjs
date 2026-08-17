@@ -21,6 +21,12 @@
 // fixture that could drift from _agentRowHtml's real class names. Same recipe as
 // tests/decisions_modal_css.test.mjs / tests/gs_files_pointer_events_css.test.mjs.
 //
+// NOTE: jsdom performs no layout, so getComputedStyle below resolves the CASCADE (which
+// declaration wins) — not the real rendered BOX. A property this file never reads (e.g. a
+// wider `.ar-role` base-rule flex-grow, or an overflowing child) could still widen the
+// real box without changing any declaration read here. Read the declarations most likely
+// to move (width/padding/min-width/max-width on this exact rule), not layout itself.
+//
 // Run: node --test tests/sidebar_role_badge_css.test.mjs (tests/test_js_suites.py runs
 // every .test.mjs inside pytest, by discovery; needs `npm ci` for jsdom).
 import { before, test } from 'node:test';
@@ -123,4 +129,23 @@ test('🔴 GUARD (CMX-302 rework round 4): the badge stays ICON-NARROW through p
         'badge\'s box exactly like the wide `width` this ticket fixed, invisible to a width-only check');
     assert.equal(style.paddingRight, '0px',
         '.ar-role.orchestrator must render zero right padding — see the left-padding assertion above');
+});
+
+test('🔴 GUARD (CMX-302 rework round 5): the badge stays ICON-NARROW through min-width/max-width too — the properties that OVERRIDE `width` outright', () => {
+    // `width`, `padding`, `min-width` and `max-width` are four independent ways to
+    // regrow the exact same box, and this file previously read only the first two.
+    // Unlike padding, `min-width` beats a `width` declaration outright under real
+    // layout (and `max-width` would clamp a width raised the same way from the other
+    // rule in the cascade) — `min-width: 180px` reproduces the reported bug (a badge
+    // wide enough to truncate the session name beside it) in its purest form, while
+    // getComputedStyle(badge).width above keeps reporting the untouched declared
+    // value, because `width` and `min-width` are separate CSS properties that jsdom's
+    // cascade resolver reads back independently.
+    const style = dom.window.getComputedStyle(badge);
+    assert.equal(style.minWidth, '18px',
+        '.ar-role.orchestrator must render min-width:18px — a wider min-width regrows the ' +
+        'badge\'s real-layout box exactly like the reported bug, invisible to a width-only check');
+    assert.equal(style.maxWidth, '18px',
+        '.ar-role.orchestrator must render max-width:18px — the sibling clamp that keeps the ' +
+        'box from growing via any other widened declaration in the same family');
 });

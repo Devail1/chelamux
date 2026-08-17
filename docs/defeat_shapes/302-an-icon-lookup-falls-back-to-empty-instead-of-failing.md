@@ -121,3 +121,52 @@ multi-attribute mechanism (map key, paint colour, cascaded width) leaves every s
 attribute of that *same* mechanism (paint width, size argument, padding) completely unread —
 closing a shape means asking not just "what else could remove this content" but "what other
 attribute on this exact element or rule controls the same visible outcome."
+
+**Found a fifth time, one axis outside the icon entirely and one CSS declaration outside the
+width/padding pair:** every prior round pinned an attribute of the `<svg>` or `.ar-role`
+*box* — none of them ever read the badge's own **text**, and none read the two CSS
+properties (`min-width`/`max-width`) that override `width` outright rather than sitting
+beside it. `chela judge` round 5 (2026-08-17, same PR) found three:
+1. **Put the word back next to the icon** — `nav.js`'s call site changed from
+   `title="Orchestrator session">${lucideIcon('crown', 12)}</span>` to
+   `title="Orchestrator session">Orchestrator${lucideIcon('crown', 12)}</span>`. This is the
+   *inverse* of every icon-content mutation above: instead of erasing the icon, it reinstates
+   the exact pre-CMX-302 bug (a badge wide enough to truncate the session name beside it) by
+   adding a sibling text node the icon assertions never look past. `svg.querySelector('path')`,
+   the literal `d`-data deepEqual, `stroke`, `stroke-width`, `width`/`height`, `title` and
+   `classList` are all read off the `<svg>` or the badge's *attributes* — none of them read
+   the badge's `textContent`, which is the one property this mutation actually changes. The
+   original text-pill assertion (`assert.equal(badge.textContent, 'Orchestrator')`) was
+   *replaced*, not kept inverted, when CMX-302 first landed — nothing was left checking that
+   the text stayed gone.
+2. **Widen the `<svg>`'s `viewBox`, not its `width`/`height`** — `viewBox="0 0 24 24"` →
+   `viewBox="0 0 2400 2400"` in `util.js`. The crown's path data is authored in a 24×24
+   user-space box; widening the viewBox 100× maps that same, byte-identical `d` data into 1%
+   of the rendered area — a sub-pixel speck, the same "renders nothing visible" result as
+   round 3's `stroke="none"` and round 4's `stroke-width="0"`, reached through the one
+   remaining geometry attribute (the coordinate system the path is drawn *into*) rather than
+   the box attributes (`width`/`height`) round 4 already pinned.
+3. **CSS `min-width: 180px`**, appended beside round 4's already-guarded `padding: 0` on the
+   same `.ar-role.orchestrator` declaration line — `tests/sidebar_role_badge_css.test.mjs`
+   read exactly `display`, `width`, `paddingLeft`, `paddingRight`; `min-width` is a third,
+   completely unread mechanism for regrowing the same box, and — unlike `padding` under
+   `box-sizing: border-box` — it beats a `width` declaration outright in real layout, so it
+   reproduces the reported bug in its purest form while `getComputedStyle(badge).width` keeps
+   reporting the untouched `18px`.
+
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3211 passed) with each mutation
+applied in isolation. Closed by reading past the icon entirely on the first axis, and past
+`width`/`padding` on the CSS axis: `tests/sidebar.test.mjs` now also asserts
+`badge.textContent === ''` (no text node exists anywhere in the badge, not just inside the
+`<svg>`) and `svg.getAttribute('viewBox') === '0 0 24 24'`;
+`tests/sidebar_role_badge_css.test.mjs` now also asserts `getComputedStyle(badge).minWidth
+=== '18px'` and `.maxWidth === '18px'`, backed by an explicit `min-width: 18px; max-width:
+18px;` added to the `.ar-role.orchestrator` rule itself (previously only `width` constrained
+the box, so an appended `min-width` elsewhere in the same rule had nothing to lose to).
+Five rounds in, the shape has now been found on every layer the badge is built from — map
+entry, path identity, paint colour, paint width, box size, box padding, coordinate system,
+sibling text, and the two properties that override `width` outright — which is the argument,
+made concretely rather than in the abstract, for the single-assertion "read the badge's whole
+visual contract at once" refactor a prior round's non-blocking note already proposed: a
+guard built one named attribute at a time will keep finding exactly one more named attribute,
+because that is the shape of how it was built, not a property of this particular badge.

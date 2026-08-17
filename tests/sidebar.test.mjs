@@ -314,6 +314,32 @@ test('the orchestrator window gets an Orchestrator role badge — plain windows 
         'attributes themselves can catch it');
     assert.equal(svg.getAttribute('height'), '12',
         'the orchestrator badge\'s <svg> rendered at zero height — see the width assertion above');
+    // 🔴 GUARD (CMX-302 rework round 5): every check above pins the ICON's own paint,
+    // geometry and identity — none of them reads the badge's TEXT. `${lucideIcon('crown',
+    // 12)}` is interpolated directly after the opening <span> tag with no sibling text
+    // node, but nothing asserted that. Putting the word "Orchestrator" back in ahead of
+    // the icon (`>Orchestrator${lucideIcon(...)}<`) reinstates the exact wide-badge bug
+    // this ticket exists to fix — the badge widens to fit the text again — while leaving
+    // every icon-content assertion above (svg present, path data, stroke, stroke-width,
+    // width/height, title, classList) completely untouched, since none of them look past
+    // the <svg> boundary at the span's own text nodes.
+    assert.equal(badge.textContent, '',
+        'the orchestrator badge carries visible text again — CMX-302\'s whole point was ' +
+        'replacing the wide "Orchestrator" text pill with an icon-only badge (the word now ' +
+        'lives only in the title tooltip); any text content here reproduces the reported bug');
+    // 🔴 GUARD (CMX-302 rework round 5): `viewBox` is the one geometry attribute on the
+    // <svg> nothing reads. The crown's path data is authored in a 24x24 user-space box;
+    // widening viewBox to e.g. "0 0 2400 2400" maps that same, byte-identical `d` data
+    // into 1% of the rendered area, so a 12px badge paints a sub-pixel speck — the same
+    // "renders nothing visible" erasure as stroke="none" (round 3) and stroke-width="0"
+    // (round 4), one coordinate-system hop further out. The `d`-data deepEqual above still
+    // passes (the path nodes are untouched) and stroke/stroke-width/width/height all still
+    // read as before, because viewBox controls how the SAME path data maps into the SAME
+    // box, not any of those other attributes.
+    assert.equal(svg.getAttribute('viewBox'), '0 0 24 24',
+        'the orchestrator badge\'s <svg> lost its 24x24 viewBox — a widened viewBox maps the ' +
+        'same literal path data into a sliver of the rendered box, drawing an invisible speck ' +
+        'while every path-data/stroke/size assertion above stays green');
     assert.equal(badge.getAttribute('title'), 'Orchestrator session');
     assert.ok(badge.classList.contains('orchestrator'));
     assert.equal(rowFor('other').querySelector('.ar-role'), null,

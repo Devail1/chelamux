@@ -3101,6 +3101,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
    lucide icons elsewhere rather than the text-pill padding above. */
 .ar-role.orchestrator {
     display: flex; align-items: center; justify-content: center;
+    min-width: 18px; max-width: 18px;
     width: 18px; height: 18px; padding: 0; line-height: normal;
     color: #CC79A7; background: color-mix(in srgb, #CC79A7 16%, transparent);
 }
