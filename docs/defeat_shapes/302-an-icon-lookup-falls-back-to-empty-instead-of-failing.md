@@ -86,3 +86,38 @@ and the `<svg>`'s own `stroke` attribute equals the paint-producing value
 the existing `querySelector('path')` and CSS-cascade checks. Icon identity and icon paint are
 two axes a single presence boolean cannot separate; each needed its own literal-value
 assertion.
+
+**Found a fourth time, one hop further out on each of the same two axes, plus a sibling on the
+CSS side:** round 3's fix pinned `stroke="currentColor"` (the paint's *colour*) and the crown's
+own literal `d` data (its *identity*), and round 2's CSS test pinned the wrapper `<span>`'s
+cascaded `width`. Each pin left an adjacent attribute, on the same element or the same CSS
+rule, completely unread. `chela judge` round 4 (2026-08-17, same PR) found three:
+1. **`stroke-width="0"`** — the sibling paint attribute beside `stroke`. The colour assertion
+   from round 3 only checks *which* colour the stroke paints with, never *how wide* the line
+   is; zero width leaves `stroke="currentColor"`, every `<path>` node and its `d` data
+   completely untouched while drawing a zero-ink outline — same visible result as round 3's
+   `stroke="none"`, one attribute over.
+2. **`lucideIcon('crown', 0)`** — the size argument at the call site (`nav.js`), which no
+   assertion anywhere reads and no CSS rule backstops: the wrapper `<span>`'s 18px (round 2's
+   `sidebar_role_badge_css.test.mjs` guard) sizes the `.ar-role.orchestrator` box, not the
+   `<svg>` inside it — there is no `.ar-role svg { width: ... }` rule. A 0×0 `<svg>` keeps its
+   real path data, stroke paint, title and class, so every prior assertion on this icon stays
+   green while it has no area left to draw into.
+3. **CSS `padding: 0 80px`** — the sibling declaration beside round 2's `width: 18px` inside the
+   same `.ar-role.orchestrator` rule. `sidebar_role_badge_css.test.mjs` reads only the cascaded
+   `width`; `box-sizing: border-box` clamps *content* to that declared width, not padding, so
+   nonzero padding regrows the exact same box the ticket was written to shrink — a badge wide
+   enough to truncate the session name beside it — while `getComputedStyle(badge).width` keeps
+   reporting `18px`.
+
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3211 passed) with each mutation
+applied in isolation. Closed by reading the two sibling attributes/declarations directly,
+alongside (not instead of) every existing check: `tests/sidebar.test.mjs` now also asserts
+`svg.getAttribute('stroke-width') === '2'` and `svg.getAttribute('width') === svg.getAttribute('height') === '12'`
+(the exact size the call site passes); `tests/sidebar_role_badge_css.test.mjs` now also asserts
+`getComputedStyle(badge).paddingLeft === '0px'` and `paddingRight === '0px'`. The recurring
+meta-pattern across all four rounds: a guard that pins one attribute/declaration of a
+multi-attribute mechanism (map key, paint colour, cascaded width) leaves every sibling
+attribute of that *same* mechanism (paint width, size argument, padding) completely unread —
+closing a shape means asking not just "what else could remove this content" but "what other
+attribute on this exact element or rule controls the same visible outcome."

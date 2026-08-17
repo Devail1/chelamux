@@ -111,3 +111,16 @@ test('🔴 GUARD: the orchestrator role badge stays ICON-NARROW — .ar-role.orc
         'badge stop being wide enough to truncate the session name next to it — a wider computed ' +
         'width reproduces the exact bug this ticket fixed, and no DOM-only assertion can see it');
 });
+
+test('🔴 GUARD (CMX-302 rework round 4): the badge stays ICON-NARROW through padding too — .ar-role.orchestrator renders padding:0 under the REAL stylesheet', () => {
+    // `width` is only one half of the box. box-sizing:border-box clamps CONTENT to the
+    // declared width but not padding, so `padding: 0 80px` regrows the exact same
+    // box — a badge wide enough to truncate the session name beside it, this ticket's
+    // reported bug — while getComputedStyle(badge).width above still reads 18px.
+    const style = dom.window.getComputedStyle(badge);
+    assert.equal(style.paddingLeft, '0px',
+        '.ar-role.orchestrator must render zero left padding — nonzero padding regrows the ' +
+        'badge\'s box exactly like the wide `width` this ticket fixed, invisible to a width-only check');
+    assert.equal(style.paddingRight, '0px',
+        '.ar-role.orchestrator must render zero right padding — see the left-padding assertion above');
+});

@@ -38,6 +38,27 @@
       "before": "    width: 18px; height: 18px; padding: 0; line-height: normal;",
       "after": "    width: 180px; height: 18px; padding: 0; line-height: normal;",
       "kind": "mutation"
+    },
+    {
+      "guard": "NEW AXIS — the crown badge draws actual INK: the round-3 guard pins `stroke=\"currentColor\"` on the <svg>, but the stroke WIDTH is the sibling paint attribute nothing reads. `stroke-width=\"0\"` leaves the stroke paint, the <path> nodes and their exact `d` data all intact in the DOM, and touches no CSS rule the wrapper-cascade test reads — the badge renders a zero-ink outline, visually identical to the bare colour dot CMX-300 forbids (same mechanism as round 3's stroke=\"none\", one attribute over)",
+      "file": "chela/dashboard/static/js/util.js",
+      "before": "        + `stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">${_LUCIDE[name]}</svg>`;",
+      "after": "        + `stroke-width=\"0\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">${_LUCIDE[name]}</svg>`;",
+      "kind": "mutation"
+    },
+    {
+      "guard": "NEW AXIS — the crown badge has a nonzero SIZE: the call site passes the icon's rendered box (`lucideIcon('crown', 12)` -> `width=\"12\" height=\"12\"` on the <svg>). Passing 0 renders a 0x0 icon — path data, stroke paint, title, class and the wrapper's own CSS (display:flex / width:18px, which is on the <span>, not the <svg>; no `.ar-role svg` rule sizes it) are all untouched, so every existing assertion stays green while the colourblind-safe shape cue disappears",
+      "file": "chela/dashboard/static/js/nav.js",
+      "before": "${lucideIcon('crown', 12)}</span>",
+      "after": "${lucideIcon('crown', 0)}</span>",
+      "kind": "mutation"
+    },
+    {
+      "guard": "NEW AXIS — the badge stays ICON-NARROW through GEOMETRY, not just the `width` declaration: round 2's CSS guard reads only the cascaded `width` (18px). `padding` is the sibling mechanism that regrows the same box (box-sizing:border-box clamps content, not padding), reproducing exactly the ticket's bug — a badge wide enough to truncate the session name beside it — with `getComputedStyle(badge).width` still reporting 18px",
+      "file": "chela/dashboard/static/style.css",
+      "before": "    width: 18px; height: 18px; padding: 0; line-height: normal;",
+      "after": "    width: 18px; height: 18px; padding: 0 80px; line-height: normal;",
+      "kind": "mutation"
     }
   ]
 }

@@ -293,6 +293,27 @@ test('the orchestrator window gets an Orchestrator role badge — plain windows 
         '<path> node (and its `d` data) in the DOM untouched while drawing nothing, so it is ' +
         'invisible to both the path-data check above and the CSS cascade checks in ' +
         'tests/sidebar_role_badge_css.test.mjs');
+    // 🔴 GUARD (CMX-302 rework round 4): `stroke="currentColor"` alone only pins the
+    // paint's COLOUR, not whether any of it is visible. `stroke-width="0"` leaves the
+    // stroke attribute, every <path> node and its exact `d` data untouched — the assert
+    // above still passes — while the badge draws a zero-width, zero-ink outline: the
+    // same "renders nothing" defeat as stroke="none" one attribute over.
+    assert.equal(svg.getAttribute('stroke-width'), '2',
+        'the orchestrator badge\'s <svg> lost its stroke width — stroke-width="0" leaves the ' +
+        'stroke="currentColor" paint and every <path> node in the DOM untouched while drawing ' +
+        'a zero-ink outline, invisible the same way stroke="none" is');
+    // 🔴 GUARD (CMX-302 rework round 4): the call site (`lucideIcon('crown', 12)`) passes
+    // the icon's rendered box as an argument nothing else reads — no `.ar-role svg` CSS
+    // rule sizes it (the wrapper <span>'s 18px in sidebar_role_badge_css.test.mjs is a
+    // sibling property, not this one). `lucideIcon('crown', 0)` renders a 0x0 <svg> with
+    // its path data, stroke paint, title and class all untouched, so every assertion
+    // above stays green while the icon itself has no area to draw into.
+    assert.equal(svg.getAttribute('width'), '12',
+        'the orchestrator badge\'s <svg> rendered at zero width — path data, stroke paint and ' +
+        'title/class all stay untouched by a 0-size call, so only reading the width/height ' +
+        'attributes themselves can catch it');
+    assert.equal(svg.getAttribute('height'), '12',
+        'the orchestrator badge\'s <svg> rendered at zero height — see the width assertion above');
     assert.equal(badge.getAttribute('title'), 'Orchestrator session');
     assert.ok(badge.classList.contains('orchestrator'));
     assert.equal(rowFor('other').querySelector('.ar-role'), null,
