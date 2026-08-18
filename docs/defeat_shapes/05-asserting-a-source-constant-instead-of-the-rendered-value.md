@@ -70,3 +70,44 @@ button's own* `data-win` value (`` new RegExp(`setCostWindow\('${btn.dataset.win
 rather than a hardcoded `'7d'` literal — a hardcoded `'7d'` on the test side would still match
 a hardcoded, but WRONG, `'7d'` typo'd onto the wrong button in production, so pinning against
 the button's own data attribute is what actually catches the mismatch the mutation produced.
+
+**Found a fifth time, in Python, no DOM involved:** `tests/test_diffsurface.py`'s
+`test_all_git_subprocess_calls_are_bounded_by_git_timeout` (CMX-299 rework round 10, PR #373).
+Every earlier instance of this shape lived in rendered markup (an `onclick` attribute, a
+template string); this one has no render step at all — it's a `subprocess.run` spy asserting
+`all(t == diffsurface._GIT_TIMEOUT for t in calls)`. `diffsurface._GIT_TIMEOUT` is not a
+stand-in for the constant under test, it *is* the constant under test: the mutation
+(`_GIT_TIMEOUT = 15` → `_GIT_TIMEOUT = None`) and the assertion's expected value are the same
+attribute lookup, so they move together and the comparison is `None == None` after the
+mutation lands. The spy can still catch a *call site* dropping its own `timeout=` kwarg
+(that's the shape this test was originally written to close), but it can never catch the bound
+itself being widened or removed, which is the actual failure `_GIT_TIMEOUT` exists to prevent
+(an unbounded git subprocess on a wedged pane cwd hangs forever). The fix pins the literal on
+both sides: `assert diffsurface._GIT_TIMEOUT == 15` (catches the constant drifting) *and*
+`assert all(t == 15 for t in calls)` (catches a call site drifting off the constant) — dropping
+either half leaves one of the two mutations invisible again.
+
+**Found a sixth time, one round later, one constant over — then made mechanical:**
+`tests/test_diffsurface.py`'s OWN follow-up guard, `_UNTRACKED_READ_CAP` (CMX-299 rework
+round 11, same PR). Round 10 above closed `_GIT_TIMEOUT` by hand; the very next round found
+the identical shape sitting on the constant next to it, because the fix was prose — a
+comment on one test file — not something a machine checks, and prose only protects the
+constant a human happened to be looking at. CMX-304 (orchestrator, 2026-08-17) stopped
+fixing these one at a time and wrote `tests/test_constant_guards_pin_the_literal.py`: it
+statically scans every `tests/test_*.py` file for a `==`/`is` comparison whose expected side
+is a bare `module.CONST` attribute — `module` imported via `from chela import X`, `CONST` a
+NUMERIC constant (the class this shape actually bites: a timeout, a byte cap, a walk bound —
+deliberately not a string/enum identity tag like `judge.J_CLEAN`, where comparing against the
+symbol itself is the *correct* shape) — with nothing else in the same file pinning that exact
+`(module, CONST)` pair against a literal. Run once repo-wide, it immediately found the same
+live gap already sitting, unnoticed, in five OTHER files that had nothing to do with
+`diffsurface`: `tests/test_sessions.py` (`_MAX_ANCESTRY` — a fixture sized `_MAX_ANCESTRY + 5`
+and an expected call count of `_MAX_ANCESTRY` scale together, so widening the walk bound from
+6 to 6000 would have stayed green), `tests/test_sessions_proc_shim.py` (`_MAX_CHILDREN`, same
+scale-together shape), `tests/test_update.py` (`GIT_NET_TIMEOUT_SECONDS`, a `subprocess`-spy
+pin identical in shape to `_GIT_TIMEOUT`), `tests/test_dispatch_hold.py` (`MAX_TTL_SECONDS`),
+and `tests/test_hooks.py` (`RECAP_TIMEOUT`) — none of these were suspected before the scanner
+found them; the class had been quietly recurring across the suite the whole time. Each got the
+same fix (a companion `assert module.CONST == <literal>`) so the new check ships green, and
+the check itself now stands between every *future* instance of this exact shape and a
+fourteenth manual round.

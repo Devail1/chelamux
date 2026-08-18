@@ -193,6 +193,50 @@ def test_disabled_wall_still_writes_empty_map_and_idles(env, sock):
         proc.wait(timeout=10)
 
 
+@pytest.mark.skipif(shutil.which("pgrep") is None, reason="pgrep not installed")
+def test_disabled_wall_sigterm_does_not_orphan_the_idle_sleep(env):
+    """Regression for 2026-08-17: 32 orphaned `sleep 3600`s (all PPID=1) found after
+    hard teardown of this exact disabled-wall idle loop. `nap()`'s backgrounded sleep
+    made the wait interruptible, but the trap's `exit` only ends the script's own
+    shell — it never killed the still-running child, so `sleep` was reparented to
+    PID 1 and outlived the supervisor by up to an hour. Assert the child is gone too,
+    not just that the supervisor process itself exited promptly.
+    """
+    proc = _run_bg(env, {"CHELA_TERMINALS_ENABLED": "false"})
+    try:
+        map_file = Path(env["CHELA_DIR"]) / "agent_terminals.json"
+        assert _wait(lambda: map_file.exists(), timeout=10, proc=proc,
+                     msg="it exited before writing the empty map"), "no map file written"
+
+        # find the backgrounded `sleep 3600` — a direct child of the supervisor
+        sleep_pid = None
+        deadline = time.time() + 5
+        while time.time() < deadline and sleep_pid is None:
+            out = subprocess.run(["pgrep", "-P", str(proc.pid)],
+                                  capture_output=True, text=True, check=False).stdout.split()
+            for pid in out:
+                cmd = subprocess.run(["ps", "-o", "comm=", "-p", pid],
+                                      capture_output=True, text=True, check=False).stdout.strip()
+                if cmd == "sleep":
+                    sleep_pid = int(pid)
+                    break
+            if sleep_pid is None:
+                time.sleep(0.2)
+        assert sleep_pid is not None, "never observed the idle-loop's backgrounded sleep"
+
+        proc.terminate()
+        proc.wait(timeout=5)
+
+        deadline = time.time() + 5
+        while time.time() < deadline and os.path.exists(f"/proc/{sleep_pid}"):
+            time.sleep(0.1)
+        assert not os.path.exists(f"/proc/{sleep_pid}"), \
+            f"sleep pid {sleep_pid} outlived the supervisor — orphaned onto PID 1"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
 # --- half 2: a LIVE session must never be recreated (the destructive regression) ---
 
 def test_live_session_and_its_windows_are_never_recreated(env, sock):

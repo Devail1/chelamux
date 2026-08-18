@@ -1421,6 +1421,11 @@ def test_own_claude_pid_is_bounded_and_does_not_walk_forever(tmp_path, monkeypat
 
     assert sessions.own_claude_pid(1000) is None
     assert len(calls) == sessions._MAX_ANCESTRY
+    # DEFEAT_SHAPES #5: the fixture depth and the expected call count above both derive
+    # from `sessions._MAX_ANCESTRY`, so widening the bound (e.g. 6 -> 6000) scales the
+    # fixture and the expectation together and this test stays green regardless of how
+    # large the bound actually is. Pin the literal too.
+    assert sessions._MAX_ANCESTRY == 6, sessions._MAX_ANCESTRY
 
 
 def test_session_id_for_pid_prefers_the_resume_command_line(tmp_path, monkeypatch):

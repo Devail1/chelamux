@@ -37,6 +37,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
@@ -75,12 +76,12 @@ const SIDEBAR_COLLAPSED_KEY = 'chela_sidebar_collapsed';
 // The phone/desktop split is `matchMedia('(max-width: 768px)')`. Make it steerable.
 let PHONE = false;
 
-let nav, util;
+let nav, util, orchestrator;
 
 before(async () => {
     // The dashboard's modules are a cycle (nav ↔ main), so evaluation ORDER is the
     // browser's: main.js is the entry and everything else is pulled in behind it.
-    ({ modules: { util, nav } } = await bootDashboardDom({
+    ({ modules: { util, nav, orchestrator } } = await bootDashboardDom({
         body: BODY,
         // jsdom ships no canvas, and `getContext('2d')` returns null. The tab-signal
         // badge (util.js::_drawFavicon) paints one whenever the "needs you" count goes
@@ -96,7 +97,42 @@ before(async () => {
         // seed the storage a reload would have left behind and then load the module —
         // exactly the order a browser does it in.
         seedLocalStorage: { [SIDEBAR_COLLAPSED_KEY]: '1' },
-        extraModules: ['util.js', 'nav.js'],
+        // CMX-300: the role badge reads orchestrator.js's live `_status`, which
+        // orchestratorSubscribe/orchestratorRelease mutate through a REAL
+        // /api/orchestrator/{subscribe,release} round trip — so the default
+        // blanket-`{}` stub (every other test in this file relies on it staying
+        // a no-op) needs those two paths to actually echo back an ok:true
+        // envelope, exactly like the real endpoints in app.py.
+        //
+        // wid and name are deliberately DIFFERENT values here (never the same
+        // string body.wid echoed twice) — app.py's own
+        // _orchestrator_status_payload() returns wid = inbox.orchestrator_wid(...)
+        // (the @id) and name = store['orchestrator_name'] (the window's tmux
+        // NAME), two facts about the SAME window that are never equal in
+        // production. A fixture that echoes body.wid into both fields makes
+        // `orchestratorState().wid === a.window_id` and
+        // `orchestratorState().name === a.window_id` indistinguishable — nav.js
+        // reading the wrong one (DEFEAT_SHAPES #02) would be invisible here too.
+        fetchImpl: (url, opts) => {
+            const u = String(url);
+            if (u.includes('/api/orchestrator/subscribe')) {
+                const body = opts && opts.body ? JSON.parse(opts.body) : {};
+                return Promise.resolve({
+                    ok: true, status: 200,
+                    json: () => Promise.resolve({
+                        ok: true, wid: body.wid, name: `${body.wid}-tmux-name`, state: 'registered', why: '', queued: 0,
+                    }),
+                });
+            }
+            if (u.includes('/api/orchestrator/release')) {
+                return Promise.resolve({
+                    ok: true, status: 200,
+                    json: () => Promise.resolve({ ok: true, wid: null, name: null, state: 'unregistered', why: '', queued: 0 }),
+                });
+            }
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+        },
+        extraModules: ['util.js', 'nav.js', 'orchestrator.js'],
     }));
 });
 
@@ -182,6 +218,308 @@ test('colour is the SECOND channel, and it is colourblind-safe (Okabe-Ito)', () 
         assert.ok(CSS.includes(c), `the type cue dropped the Okabe-Ito colour ${c}`));
 });
 
+// --- 1d. 🔴 CMX-300: every row's ROLE — orchestrator / dispatched / plain -------
+//
+// Three roles, mutually exclusive. 'orchestrator' is read live off orchestrator.js's
+// shared `_status` (the SAME single decisions-inbox slot terminals.js's pane toggle
+// and decisions.js's owner chip already render — driven here through the REAL
+// orchestratorSubscribe()/orchestratorRelease() round trip, not a hand-set global).
+// 'dispatched' is the API-provided `a.dispatched` flag (app.py's api_agents).
+// 'plain' — a session opened by hand — renders NO badge at all: asserting its
+// absence is the guard against a badge silently degrading into "shown on every
+// row", which would be as unreadable as no cue at all.
+//
+// CMX-300 rework round 1 (PR #374, judge finding 1): the previous version of every
+// test below called `orchestratorSubscribe()` and THEN hand-called
+// `nav.renderSidebarAgents(...)` itself — which re-renders the row regardless of
+// whether `onOrchestratorChange`'s listener ever fired, so neutering that listener
+// body (DEFEAT_SHAPES #50 — a renderer proven against hand-called arguments, the
+// real caller never run) stayed invisible. Every test below now renders ONCE,
+// before subscribing, and asserts the post-subscribe/post-release state with NO
+// further renderSidebarAgents call in between — the redraw has to come from the
+// real listener nav.js registers at module load (nav.js:447), or these go red.
+test('the orchestrator window gets an Orchestrator role badge — plain windows get none', async () => {
+    const rows = [
+        agent('orch', { window_id: '@1' }),
+        agent('other', { window_id: '@2' }),
+    ];
+    util.setAgentsCache(rows);
+    nav.renderSidebarAgents(rows);
+    assert.equal(rowFor('orch').querySelector('.ar-role'), null,
+        'a window rendered a role badge before it ever held the inbox slot');
+
+    // No renderSidebarAgents call here — onOrchestratorChange must be the thing
+    // that redraws the row off the REAL subscribe round trip.
+    await orchestrator.orchestratorSubscribe('@1');
+
+    const badge = rowFor('orch').querySelector('.ar-role');
+    assert.ok(badge, 'the orchestrator window rendered no .ar-role badge after subscribing — ' +
+        'onOrchestratorChange did not redraw the sidebar');
+    // CMX-302: the orchestrator badge is a bare crown ICON, not text — the word
+    // itself lives in the title tooltip so the badge stays narrow.
+    const svg = badge.querySelector('svg');
+    assert.ok(svg, 'the orchestrator badge rendered no crown icon');
+    // 🔴 GUARD (CMX-302 rework round 2): `querySelector('svg')` alone only proves an
+    // <svg> WRAPPER exists — util.js's lucideIcon() emits the wrapper tag unconditionally
+    // and interpolates _LUCIDE[name] inside it, so an empty `_LUCIDE['crown']` entry
+    // ('' instead of the real path data) still produces a present-but-EMPTY <svg> that
+    // this assertion alone cannot tell apart from a real crown. Assert the actual glyph
+    // content rendered inside it.
+    //
+    // 🔴 GUARD (CMX-302 rework round 3, DEFEAT_SHAPES literal-value-vs-presence): a bare
+    // `svg.querySelector('path')` is satisfied by ANY icon with at least one <path> —
+    // which is every entry in _LUCIDE, including `minus` (a single dash). Swapping
+    // nav.js's `lucideIcon('crown', 12)` call to `lucideIcon('minus', 12)` still renders
+    // an <svg> with a <path> and leaves title/class untouched, so it survives every
+    // assertion above. Pin the badge to the crown's own literal path data — hardcoded
+    // here, independent of util.js's _LUCIDE table, so a corrupted or swapped table
+    // entry cannot satisfy its own test.
+    const pathData = [...svg.querySelectorAll('path')].map(p => p.getAttribute('d'));
+    assert.deepEqual(pathData, [
+        'M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z',
+        'M5 21h14',
+    ], 'the orchestrator badge did not render the CROWN icon\'s exact path data — a ' +
+        'present <path> alone cannot tell a crown from any other single-path lucide glyph ' +
+        '(e.g. `minus`), so this must pin the literal shape, not merely its presence');
+    // 🔴 GUARD (CMX-302 rework round 3, DEFEAT_SHAPES enumerated-properties-vs-erasure):
+    // lucideIcon() paints every glyph with stroke="currentColor" (fill="none" — these are
+    // outline icons, so the stroke IS the visible ink). Flipping that to stroke="none"
+    // leaves every <path> node — and its `d` data above — untouched in the DOM, so
+    // neither the path-data check above nor the CSS display/width checks in
+    // tests/sidebar_role_badge_css.test.mjs can see it: the badge silently renders
+    // nothing, degrading to exactly the bare colour dot CMX-300 forbids.
+    assert.equal(svg.getAttribute('stroke'), 'currentColor',
+        'the orchestrator badge\'s <svg> lost its stroke paint — stroke="none" leaves every ' +
+        '<path> node (and its `d` data) in the DOM untouched while drawing nothing, so it is ' +
+        'invisible to both the path-data check above and the CSS cascade checks in ' +
+        'tests/sidebar_role_badge_css.test.mjs');
+    // 🔴 GUARD (CMX-302 rework round 4): `stroke="currentColor"` alone only pins the
+    // paint's COLOUR, not whether any of it is visible. `stroke-width="0"` leaves the
+    // stroke attribute, every <path> node and its exact `d` data untouched — the assert
+    // above still passes — while the badge draws a zero-width, zero-ink outline: the
+    // same "renders nothing" defeat as stroke="none" one attribute over.
+    assert.equal(svg.getAttribute('stroke-width'), '2',
+        'the orchestrator badge\'s <svg> lost its stroke width — stroke-width="0" leaves the ' +
+        'stroke="currentColor" paint and every <path> node in the DOM untouched while drawing ' +
+        'a zero-ink outline, invisible the same way stroke="none" is');
+    // 🔴 GUARD (CMX-302 rework round 4): the call site (`lucideIcon('crown', 12)`) passes
+    // the icon's rendered box as an argument nothing else reads — no `.ar-role svg` CSS
+    // rule sizes it (the wrapper <span>'s 18px in sidebar_role_badge_css.test.mjs is a
+    // sibling property, not this one). `lucideIcon('crown', 0)` renders a 0x0 <svg> with
+    // its path data, stroke paint, title and class all untouched, so every assertion
+    // above stays green while the icon itself has no area to draw into.
+    assert.equal(svg.getAttribute('width'), '12',
+        'the orchestrator badge\'s <svg> rendered at zero width — path data, stroke paint and ' +
+        'title/class all stay untouched by a 0-size call, so only reading the width/height ' +
+        'attributes themselves can catch it');
+    assert.equal(svg.getAttribute('height'), '12',
+        'the orchestrator badge\'s <svg> rendered at zero height — see the width assertion above');
+    // 🔴 GUARD (CMX-302 rework round 5): every check above pins the ICON's own paint,
+    // geometry and identity — none of them reads the badge's TEXT. `${lucideIcon('crown',
+    // 12)}` is interpolated directly after the opening <span> tag with no sibling text
+    // node, but nothing asserted that. Putting the word "Orchestrator" back in ahead of
+    // the icon (`>Orchestrator${lucideIcon(...)}<`) reinstates the exact wide-badge bug
+    // this ticket exists to fix — the badge widens to fit the text again — while leaving
+    // every icon-content assertion above (svg present, path data, stroke, stroke-width,
+    // width/height, title, classList) completely untouched, since none of them look past
+    // the <svg> boundary at the span's own text nodes.
+    assert.equal(badge.textContent, '',
+        'the orchestrator badge carries visible text again — CMX-302\'s whole point was ' +
+        'replacing the wide "Orchestrator" text pill with an icon-only badge (the word now ' +
+        'lives only in the title tooltip); any text content here reproduces the reported bug');
+    // 🔴 GUARD (CMX-302 rework round 5): `viewBox` is the one geometry attribute on the
+    // <svg> nothing reads. The crown's path data is authored in a 24x24 user-space box;
+    // widening viewBox to e.g. "0 0 2400 2400" maps that same, byte-identical `d` data
+    // into 1% of the rendered area, so a 12px badge paints a sub-pixel speck — the same
+    // "renders nothing visible" erasure as stroke="none" (round 3) and stroke-width="0"
+    // (round 4), one coordinate-system hop further out. The `d`-data deepEqual above still
+    // passes (the path nodes are untouched) and stroke/stroke-width/width/height all still
+    // read as before, because viewBox controls how the SAME path data maps into the SAME
+    // box, not any of those other attributes.
+    assert.equal(svg.getAttribute('viewBox'), '0 0 24 24',
+        'the orchestrator badge\'s <svg> lost its 24x24 viewBox — a widened viewBox maps the ' +
+        'same literal path data into a sliver of the rendered box, drawing an invisible speck ' +
+        'while every path-data/stroke/size assertion above stays green');
+    assert.equal(badge.getAttribute('title'), 'Orchestrator session');
+    // 🔴 GUARD (CMX-302 rework round 7, item 2): lucideIcon() hardcodes
+    // aria-hidden="true" on the <svg> itself, so the badge's accessible name has
+    // to live on the wrapping <span> — title alone gives a screen reader a name
+    // via the HTML title-as-accessible-name fallback, but aria-label is the
+    // explicit, non-fallback source. Losing it silently degrades the badge back
+    // to an unlabelled decorative icon for anyone not hovering a mouse over it.
+    assert.equal(badge.getAttribute('aria-label'), 'Orchestrator session');
+    assert.ok(badge.classList.contains('orchestrator'));
+    assert.equal(rowFor('other').querySelector('.ar-role'), null,
+        'a plain window rendered a role badge — plain sessions must render none');
+
+    // ...and releasing (no renderSidebarAgents call here either) must clear it.
+    await orchestrator.orchestratorRelease('@1');
+    assert.equal(rowFor('orch').querySelector('.ar-role'), null,
+        'the Orchestrator badge survived orchestratorRelease — onOrchestratorChange ' +
+        'did not redraw the sidebar on release either');
+});
+
+test('a dispatcher-owned window gets a Dispatched role badge, distinct from Orchestrator', async () => {
+    await orchestrator.orchestratorRelease('@1');   // no window holds the inbox slot
+    const rows = [
+        agent('worker', { window_id: '@3', dispatched: true }),
+        agent('manual', { window_id: '@4', dispatched: false }),
+    ];
+    util.setAgentsCache(rows);
+    nav.renderSidebarAgents(rows);
+    const badge = rowFor('worker').querySelector('.ar-role');
+    assert.ok(badge, 'a dispatched window rendered no .ar-role badge at all');
+    // CMX-302 rework round 7, item 2 (Liav, approved 2026-08-17): the dispatched
+    // badge is now a bare BOT icon, not text — same treatment as the crown above,
+    // for the same reason (the old "Dispatched" text pill was wide enough to
+    // truncate the session name next to it). Same guard set as the crown badge:
+    // present svg, literal path AND <rect> geometry (the bot glyph is the only
+    // _LUCIDE entry built from a <rect> plus <path>s, not <path>s alone — a bare
+    // `querySelectorAll('path')` deepEqual would stay green if the <rect> body
+    // vanished and left only the antenna/ear/leg strokes), stroke paint, stroke
+    // width, rendered size, viewBox, empty textContent, and the accessible name
+    // — see the crown test's own per-line comments above for why each is a
+    // separate, independently-defeatable axis (DEFEAT_SHAPES #302).
+    const svg = badge.querySelector('svg');
+    assert.ok(svg, 'the dispatched badge rendered no bot icon');
+    const pathData = [...svg.querySelectorAll('path')].map(p => p.getAttribute('d'));
+    assert.deepEqual(pathData, ['M12 8V4H8', 'M2 14h2', 'M20 14h2', 'M15 13v2', 'M9 13v2'],
+        'the dispatched badge did not render the BOT icon\'s exact path data — a present <path> ' +
+        'alone cannot tell a bot from any other lucide glyph, so this must pin the literal shape');
+    const rect = svg.querySelector('rect');
+    assert.ok(rect, 'the dispatched badge\'s bot icon lost its <rect> body — the antenna/ear/leg ' +
+        '<path> strokes alone do not read as a robot head without it, and the path-data deepEqual ' +
+        'above cannot see a missing <rect>');
+    assert.deepEqual(
+        ['width', 'height', 'x', 'y', 'rx'].map((attr) => rect.getAttribute(attr)),
+        ['16', '12', '4', '8', '2'],
+        'the dispatched badge\'s bot icon <rect> lost its exact geometry');
+    assert.equal(svg.getAttribute('stroke'), 'currentColor',
+        'the dispatched badge\'s <svg> lost its stroke paint — stroke="none" leaves every path/rect ' +
+        'node untouched while drawing nothing');
+    assert.equal(svg.getAttribute('stroke-width'), '2',
+        'the dispatched badge\'s <svg> lost its stroke width — stroke-width="0" draws a zero-ink outline');
+    assert.equal(svg.getAttribute('width'), '12',
+        'the dispatched badge\'s <svg> rendered at zero width — path/rect data and stroke paint stay ' +
+        'untouched by a 0-size call');
+    assert.equal(svg.getAttribute('height'), '12',
+        'the dispatched badge\'s <svg> rendered at zero height — see the width assertion above');
+    assert.equal(svg.getAttribute('viewBox'), '0 0 24 24',
+        'the dispatched badge\'s <svg> lost its 24x24 viewBox — a widened viewBox maps the same ' +
+        'literal path/rect data into a sliver of the rendered box');
+    assert.equal(badge.textContent, '',
+        'the dispatched badge carries visible text again — the word now lives only in the ' +
+        'title/aria-label, and reinstating it reproduces the reported truncation bug');
+    assert.equal(badge.getAttribute('title'), 'Dispatched session');
+    assert.equal(badge.getAttribute('aria-label'), 'Dispatched session');
+    assert.ok(badge.classList.contains('dispatched'));
+    assert.equal(rowFor('manual').querySelector('.ar-role'), null,
+        'a manually-launched window rendered a role badge — plain sessions must render none');
+});
+
+test('holding BOTH the inbox slot and the dispatched flag reads as Orchestrator, not Dispatched', async () => {
+    const rows = [agent('both', { window_id: '@5', dispatched: true })];
+    util.setAgentsCache(rows);
+    nav.renderSidebarAgents(rows);
+    assert.ok(!rowFor('both').querySelector('.ar-role').classList.contains('orchestrator'),
+        'the row already read as Orchestrator before subscribing — fixture leaked state');
+
+    await orchestrator.orchestratorSubscribe('@5');   // no renderSidebarAgents call here
+    const badge = rowFor('both').querySelector('.ar-role');
+    assert.ok(badge.classList.contains('orchestrator') && !badge.classList.contains('dispatched'),
+        'holding both the inbox slot and the dispatched flag should read as Orchestrator, not Dispatched');
+    await orchestrator.orchestratorRelease('@5');
+});
+
+// CMX-300 rework round 1 (PR #374, judge finding 1, WIRING): a click on any pane's
+// orchestrator toggle (terminals.js) or the decisions dropdown (decisions.js) must
+// redraw BOTH the sidebar badge AND an already-open agent-detail panel — off the
+// SAME onOrchestratorChange listener, with no /api/agents refetch. Unlike the
+// tests above (which only ever check the sidebar), this one also opens the
+// agent-detail panel first and proves it updates too — the second half of
+// nav.js:447-450's listener body, and the second thing the WIRING finding named.
+// The agent-detail half of this same listener (nav.js:449, `if (_detailAgent)
+// renderAgentDetail();`) is NOT driven here: with TERMINALS_ON (this suite's
+// boot config), `selectAgent` on any window-id'd agent always routes to the
+// wall (terminals.js's focusPaneByWid -> selectView('terminals')) and never
+// falls through to showAgentDetail — see nav.js:140-151's own comment. An
+// agent-detail panel open for a window that ALSO holds the orchestrator slot
+// is therefore only reachable in a terminals-OFF deployment, which is a real,
+// separate configuration — covered by
+// tests/sidebar_agent_detail_orchestrator_wiring.test.mjs, which boots
+// `terminalsEnabled: false` specifically so `selectAgent` falls through.
+test('WIRING: onOrchestratorChange redraws the sidebar badge off one real subscribe/release round trip — no /api/agents refetch', async () => {
+    const rows = [agent('cmx300-wired', { window_id: '@9' })];
+    util.setAgentsCache(rows);
+    nav.renderSidebarAgents(rows);
+    assert.equal(rowFor('cmx300-wired').querySelector('.ar-role'), null,
+        'the row already carried a role badge before ever holding the inbox slot');
+
+    const prevFetch = globalThis.fetch;
+    let sawAgentsFetch = false;
+    globalThis.fetch = (url, opts) => {
+        if (String(url).includes('/api/agents') && !String(url).includes('/api/agents/context')) sawAgentsFetch = true;
+        return prevFetch(url, opts);
+    };
+    try {
+        // The ONLY thing that happens next is the real subscribe round trip — no
+        // renderSidebarAgents call from the test itself. If onOrchestratorChange's
+        // listener body is neutered (dead-coded), the badge never appears.
+        await orchestrator.orchestratorSubscribe('@9');
+
+        const badge = rowFor('cmx300-wired').querySelector('.ar-role');
+        assert.ok(badge && badge.classList.contains('orchestrator') && badge.querySelector('svg'),
+            'the sidebar badge did not update off the real subscribe round trip — onOrchestratorChange is not wired to renderSidebarAgents');
+        assert.equal(sawAgentsFetch, false,
+            'the badge redraw refetched /api/agents — it must redraw off the already-cached agent list, not re-poll');
+
+        await orchestrator.orchestratorRelease('@9');
+        assert.equal(rowFor('cmx300-wired').querySelector('.ar-role'), null,
+            'the badge survived orchestratorRelease — onOrchestratorChange did not redraw on release either');
+        assert.equal(sawAgentsFetch, false,
+            'the release redraw refetched /api/agents — it must redraw off the already-cached agent list, not re-poll');
+    } finally {
+        globalThis.fetch = prevFetch;
+    }
+});
+
+test('role colour is colourblind-safe and CASCADES onto the rendered badge — not just present in source', () => {
+    // The pre-existing type-cue colour test above is honestly a source-only
+    // assertion (there is no rendered node, built from this app's own layout, to
+    // read it back from there). This one doesn't have that excuse: it loads the
+    // REAL style.css into a fresh jsdom document (the same recipe
+    // tests/wire_live_css.test.mjs uses for CMX-120) and reads the CASCADED
+    // colour off a REAL `.ar-role` node. Renaming just the selector that binds the
+    // colour to the badge (`.ar-role.orchestrator` -> `.ar-role.orchestrator-x`,
+    // leaving both hex constants untouched — DEFEAT_SHAPES #05/#54) makes this go
+    // red even though a `CSS.includes(hex)` source check stays green.
+    const dom = new JSDOM(`<!doctype html><html><head><style>${CSS}</style></head><body>
+        <span class="ar-role orchestrator">Orchestrator</span>
+        <span class="ar-role dispatched">Dispatched</span>
+        <span class="ar-type claude">C</span>
+        <span class="ar-type shell">S</span>
+        <span class="ar-type server">V</span>
+    </body></html>`, { pretendToBeVisual: true });
+    const orch = dom.window.document.querySelector('.ar-role.orchestrator');
+    const disp = dom.window.document.querySelector('.ar-role.dispatched');
+    const orchColor = dom.window.getComputedStyle(orch).color;
+    const dispColor = dom.window.getComputedStyle(disp).color;
+    assert.equal(orchColor, 'rgb(204, 121, 167)',   // #CC79A7
+        'the .ar-role.orchestrator selector no longer paints the rendered badge (colour lost or selector renamed)');
+    assert.equal(dispColor, 'rgb(0, 114, 178)',   // #0072B2
+        'the .ar-role.dispatched selector no longer paints the rendered badge (colour lost or selector renamed)');
+
+    // ...and distinct from the window-TYPE palette, as this test's own title claims.
+    // Read the type colours back off the SAME cascaded document rather than
+    // hardcoding their source hexes — otherwise a recoloured .ar-type glyph
+    // collides with a role colour in reality while this assertion, comparing
+    // against a stale constant, stays green (DEFEAT_SHAPES #70).
+    const typeColors = ['claude', 'shell', 'server'].map(cls =>
+        dom.window.getComputedStyle(dom.window.document.querySelector(`.ar-type.${cls}`)).color);
+    assert.ok(!typeColors.includes(orchColor) && !typeColors.includes(dispColor),
+        'a role colour collides with a window-type colour — the two palettes must stay visually distinct');
+});
+
 // --- 1c. 🔴 every nav icon is a lucide SVG — one uniform box, no stray glyph --
 //
 // CMX-86/87 converted every nav icon to a lucide mark sharing the same fixed
@@ -207,6 +545,20 @@ test('every nav item renders a non-empty lucide SVG — no unicode glyph survive
         for (const g of OLD_GLYPHS)
             assert.ok(!icon.textContent.includes(g), `the old ${g} glyph is still rendered on ${id}`);
     }
+});
+
+// CMX-302 negative control: the guard above only proves a KNOWN icon name (like
+// 'crown') renders non-empty. It says nothing about what happens when a name is
+// NOT in _LUCIDE — and `${_LUCIDE[name] || ''}` used to answer that with a
+// silently-valid-looking `<svg></svg>` (a real <svg> element, so a bare
+// `querySelector('svg')` truthiness check — as the orchestrator-badge test above
+// does — can't tell it apart from the real icon). A typo'd or renamed lucide name
+// must fail loudly at the call site instead, so the corruption surfaces the moment
+// the row renders rather than as a blank badge nobody notices.
+test('lucideIcon FAILS LOUDLY for an unknown icon name — it never falls back to an empty <svg>', () => {
+    assert.throws(() => util.lucideIcon('not-a-real-lucide-icon'),
+        /unknown icon/,
+        'lucideIcon silently accepted an icon name that is not in _LUCIDE instead of failing');
 });
 
 // --- 1c^b. 🔴 the LABEL is real text on every rendered row --------------------
@@ -359,6 +711,54 @@ test('the agent-detail "← Back" link also routes to the Wall from the FOUND br
     assert.ok(back, 'no .detail-back node rendered into #agent-detail (found branch, nav.js:608)');
     assert.match(back.getAttribute('onclick'), /chela\.selectView\('terminals'\)/,
         'the "← Back" link is not wired to chela.selectView(\'terminals\') on the found branch');
+});
+
+// CMX-300 rework round 1 (PR #374, judge finding 2): renderAgentDetail (nav.js:623)
+// adds a Role row (`['Role', escHtml(_ROLE_LABEL[_agentRole(a)])]`), but nothing in
+// this suite ever asserted the string 'Role' or its VALUE anywhere in #agent-detail
+// — the two "← Back" tests above only ever read `.detail-back`, so blanking the
+// row's value (keeping the label, dropping what it reports) stayed invisible. This
+// reads the row's own `.k`/`.v` pair back off the REAL rendered `.detail-grid`, for
+// both a plain session and a dispatched one (dispatched doesn't require
+// `window_id`, so it's reachable through the same no-window_id FOUND branch the
+// test above already establishes — see nav.js:230).
+function _detailRowValue(key) {
+    const k = [...document.querySelectorAll('#agent-detail .detail-grid .k')].find(el => el.textContent === key);
+    return k ? k.nextElementSibling.textContent : undefined;
+}
+
+test('the agent-detail panel renders a Role row with the resolved role label — plain', () => {
+    nav.renderNav();
+    if (!document.getElementById('hdr-next')) document.body.appendChild(document.createElement('span')).id = 'hdr-next';
+    if (!document.getElementById('hdr-updated')) document.body.appendChild(document.createElement('span')).id = 'hdr-updated';
+    if (!document.getElementById('agent-detail')) document.body.appendChild(document.createElement('div')).id = 'agent-detail';
+    util.setAgentsCache([{ name: 'cmx300-detail-plain', online: true }]);
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
+    try {
+        window.chela.selectAgent('cmx300-detail-plain');
+    } finally {
+        globalThis.fetch = prevFetch;
+    }
+    assert.equal(_detailRowValue('Role'), 'Plain session',
+        'the Role row is missing, or does not report Plain session, for a plain agent-detail panel');
+});
+
+test('the agent-detail panel renders a Role row with the resolved role label — dispatched', () => {
+    nav.renderNav();
+    if (!document.getElementById('hdr-next')) document.body.appendChild(document.createElement('span')).id = 'hdr-next';
+    if (!document.getElementById('hdr-updated')) document.body.appendChild(document.createElement('span')).id = 'hdr-updated';
+    if (!document.getElementById('agent-detail')) document.body.appendChild(document.createElement('div')).id = 'agent-detail';
+    util.setAgentsCache([{ name: 'cmx300-detail-dispatched', online: true, dispatched: true }]);
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
+    try {
+        window.chela.selectAgent('cmx300-detail-dispatched');
+    } finally {
+        globalThis.fetch = prevFetch;
+    }
+    assert.equal(_detailRowValue('Role'), 'Dispatched',
+        'the Role row is missing, or does not report Dispatched, for a dispatched agent-detail panel');
 });
 
 

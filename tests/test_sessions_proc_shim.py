@@ -195,6 +195,10 @@ def test_sh_children_beyond_the_cap_keeps_the_most_recent(no_proc, monkeypatch):
     assert len(kids) == sessions._MAX_CHILDREN
     assert kids[-1] == last                 # most recently spawned: kept
     assert first not in kids                # oldest sibling: dropped, not the target
+    # DEFEAT_SHAPES #5: every `_MAX_CHILDREN` assertion in this file derives its fixture
+    # size and its expectation from the SAME symbol, so widening the cap moves both
+    # together and none of them would catch it drifting. Pin the literal too.
+    assert sessions._MAX_CHILDREN == 32, sessions._MAX_CHILDREN
 
 
 def test_proc_children_beyond_the_cap_keeps_the_most_recent(tmp_path, monkeypatch):

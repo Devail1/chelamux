@@ -27,7 +27,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, spawn, starter, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, diffsurface, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, spawn, starter, transcripts, update, userconfig
 from chela.dashboard import resources
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -2367,8 +2367,12 @@ def api_hooks(event):
     hand the agent something back.
 
     The plugin (``plugin/hooks/hooks.json``, rendered by :func:`chela.hooks.hooks_spec`)
-    POSTs each event here as an ``http`` hook, so there is no shell script and no process
-    spawn per tool call. Correlation to a window is off the session's origin, not the pane.
+    POSTs each event here — as an ``http`` hook for most events (no shell script, no
+    process spawn per tool call), or via a ``curl`` relaying into this SAME route for
+    ``SessionStart`` and ``MessageDisplay`` (each forced onto a ``command`` hook for its
+    own reason — see :func:`chela.hooks.recap_command` and
+    :func:`chela.hooks.message_display_command`). Correlation to a window is off the
+    session's origin, not the pane.
 
     **Only one event ever decides anything.** An agent is *blocked* on this request and
     Claude Code reads what comes back, so a ``permissionDecision`` or a
@@ -2415,8 +2419,9 @@ def api_hooks(event):
         if config.TERMINAL_TIMESTAMPS and isinstance(body, dict):
             return jsonify(hooks.message_display_response(body))
         return jsonify({})
-    # Only the SessionStart `command` hook can send this (CMX-160) — every other event
-    # rides `http`, which carries Claude Code's payload and none of the agent's own env.
+    # Only the SessionStart `command` hook can send this (CMX-160) — its curl is the one
+    # that carries an X-Chela-Wid header; MessageDisplay's own curl (CMX-303) and every
+    # `http` hook carry Claude Code's payload and none of the agent's own env.
     explicit_wid = request.headers.get("X-Chela-Wid") or None
     hooks.ingest(event, body, explicit_wid=explicit_wid)
     if event == "SessionStart" and isinstance(body, dict):
@@ -2498,6 +2503,41 @@ def api_agents_context():
             "ts": s.get("ts"),
         })
     return jsonify(results)
+
+
+@app.route("/api/agents/<wid>/diff")
+@require_auth
+def api_agents_diff(wid):
+    """Per-session CHANGED-FILES surface (CMX-299): everything this window's
+    live pane cwd has changed since its last commit, staged + unstaged +
+    untracked. ``wid`` must be a currently-live window — an unknown id 404s
+    the same way the other per-window routes do, rather than shelling out to
+    git on a caller-supplied path with no window behind it at all."""
+    if wid not in discovery.get_windows_by_id():
+        abort(404)
+    cwd = discovery.get_window_cwd_by_id(wid)
+    if not cwd:
+        return jsonify({"is_git": False, "has_head": False, "files": [], "additions": 0, "deletions": 0})
+    return jsonify(diffsurface.changed_files(Path(cwd)))
+
+
+@app.route("/api/agents/<wid>/diff/patch")
+@require_auth
+def api_agents_diff_patch(wid):
+    """Unified diff text for one file this session has changed — the drill-down
+    from the file list ``/api/agents/<wid>/diff`` returns. ``path`` must be one
+    of THAT list's own entries (enforced inside diffsurface.file_patch), so an
+    unrelated or out-of-tree path just reports "not a changed file" rather than
+    reading anything outside what the session actually touched."""
+    if wid not in discovery.get_windows_by_id():
+        abort(404)
+    path = request.args.get("path", "")
+    if not path:
+        abort(400)
+    cwd = discovery.get_window_cwd_by_id(wid)
+    if not cwd:
+        return jsonify({"ok": False, "error": "no working directory"})
+    return jsonify(diffsurface.file_patch(Path(cwd), path))
 
 
 # Window keys the Cost tab's selector offers, and the lookback each implies.
@@ -3093,6 +3133,7 @@ def api_dispatcher():
             "project_key": None,
             "open_tasks": [],
             "backlog_items": [],
+            "parked_tasks": [],
             "active_runs": [],
             "awaiting_review_runs": [],
             "recent_runs": [],
@@ -3172,6 +3213,25 @@ def api_dispatcher():
                 entry["backlog_items"] = [
                     {"section": item.section, "text": item.text, "file": str(backlog_path)}
                     for item in parse_backlog(backlog_path)
+                ]
+
+                # PARKED (`<!-- blocked: ... -->`) bullets — `list_open_tasks` skips
+                # them outright (not claimable work), which used to make them
+                # invisible everywhere on the board: not Open, and — since they live
+                # in TODO.md, not BACKLOG.md — not Backlog either (Liav, 2026-08-12).
+                # Only the markdown source has a notion of this; gh_issues has no
+                # bullet-level marker to read.
+                list_parked_tasks = getattr(source, "list_parked_tasks", None)
+                entry["parked_tasks"] = [
+                    {
+                        "id": t.id,
+                        "title": t.title,
+                        "file": t.file,
+                        "line_number": t.line_number,
+                        "raw": t.raw,
+                        "reason": t.body,
+                    }
+                    for t in (list_parked_tasks() if list_parked_tasks is not None else [])
                 ]
             except Exception as e:
                 entry["error"] = f"{type(e).__name__}: {e}"

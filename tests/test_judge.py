@@ -637,6 +637,124 @@ def test_defeat_shapes_numbers_are_unique_across_the_catalog():
     )
 
 
+def _cmx_task_number_from_branch(branch: str) -> tuple[int | None, str]:
+    """Parse a CMX task number out of a branch name like ``cmx-301`` (case-insensitive).
+
+    Returns ``(number, "")`` when the branch encodes one, or ``(None, reason)`` — a non-empty,
+    branch-naming reason — otherwise. A bare ``None`` with no reason is indistinguishable from
+    "didn't check"; the reason is what lets a caller skip LOUDLY instead of silently.
+    """
+    m = re.fullmatch(r"cmx-(\d+)", (branch or "").strip(), flags=re.IGNORECASE)
+    if not m:
+        return None, f"branch {branch!r} does not match the cmx-N task-branch convention"
+    return int(m.group(1)), ""
+
+
+def test_cmx_task_number_from_branch_parses_or_gives_a_loud_reason():
+    """CMX-301 rework round 6 (re-scoped by a human): the mechanical check below skips outright
+    when it cannot derive a task number from the branch name (`dev`, a detached CI checkout, a
+    release branch, ...). A skip with no reason is indistinguishable from "ran and found
+    nothing" — UNKNOWN MUST NOT READ AS OK — so the parsing helper carries its own reason
+    string, and this test covers that path directly (no real git repo needed) instead of
+    relying on whatever branch happens to be checked out when the suite runs.
+
+    Seen to go red: the helper silently returning `(None, "")` (or matching a non-cmx-N branch)
+    for any of the branches below — either would make the caller either skip with a useless
+    empty reason or, worse, treat an unrelated branch as if it owned a task number.
+    """
+    assert _cmx_task_number_from_branch("cmx-301") == (301, "")
+    assert _cmx_task_number_from_branch("CMX-301") == (301, "")
+    assert _cmx_task_number_from_branch("cmx-7") == (7, "")
+
+    for branch in ("dev", "main", "HEAD", "release/1.2", "cmx-", "cmx-12a", ""):
+        number, reason = _cmx_task_number_from_branch(branch)
+        assert number is None, f"{branch!r} should not parse to a task number"
+        assert reason, f"{branch!r} produced no skip reason — a silent None reads as OK"
+        assert repr(branch) in reason, (
+            f"{branch!r}'s skip reason {reason!r} doesn't even name the branch that failed"
+        )
+
+
+def test_defeat_shapes_added_files_are_numbered_by_branch_task_id():
+    """CMX-301 rework round 6 (re-scoped by a human, superseding rounds 1-5): every prose guard
+    tried so far shares one shape — it pins WORDING (a clause, a paragraph, a whole section
+    compared with `==`) and proves only that the pinned region is unchanged. Round 5's
+    whole-section `==` pin was defeated by inserting the forbidden instruction in the
+    *neighbouring* section, and by appending a brand-new section after the pin's own EOF
+    terminator — neither touches a byte inside the pinned span, so both mutations left the pin
+    intact while reversing what the doc actually told the next agent to do. Chasing the prose
+    has no bottom: whatever the next pin misses, a mutation can always be phrased to land
+    outside it.
+
+    This test drops prose entirely and checks the invariant DEFEAT_SHAPES.md's instructions are
+    actually for: every file this branch adds under `docs/defeat_shapes/` must be numbered with
+    THIS BRANCH's own CMX task number, not a number guessed off some file listing. No amount of
+    rewording the doc can flip this — only the files actually added to the catalog can.
+
+    UNKNOWN MUST NOT READ AS OK: this can only run when the branch name encodes a CMX task
+    number, `origin/dev` is fetched, and the branch actually adds a defeat-shape file — each of
+    those missing is not "nothing wrong", so each SKIPS LOUDLY with a stated reason instead of
+    quietly passing (an empty loop that never asserts is a green PASSED result proving nothing
+    ran; that failure mode is exactly what made rounds 1-5's prose guards decoration).
+
+    Seen to go red: a defeat-shape file added on this branch numbered off "one past the current
+    highest" file in a listing instead of this branch's own CMX task number.
+    """
+    root = Path(__file__).resolve().parent.parent
+
+    branch_result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=root, capture_output=True, text=True,
+    )
+    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+    task_number, reason = _cmx_task_number_from_branch(branch)
+    if task_number is None:
+        pytest.skip(f"cannot derive a CMX task number to check added files against: {reason}")
+
+    have_dev = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "origin/dev"],
+        cwd=root, capture_output=True, text=True,
+    )
+    if have_dev.returncode != 0:
+        pytest.skip("origin/dev is not available in this checkout — cannot diff added files "
+                     "against it")
+
+    diff = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=A", "origin/dev...HEAD", "--",
+         "docs/defeat_shapes/"],
+        cwd=root, capture_output=True, text=True,
+    )
+    if diff.returncode != 0:
+        pytest.skip(f"git diff against origin/dev failed: {diff.stderr.strip()[:300]}")
+    added = [line.strip() for line in diff.stdout.splitlines() if line.strip()]
+    if not added:
+        pytest.skip("this branch adds no files under docs/defeat_shapes/ relative to "
+                     "origin/dev — nothing for this check to verify")
+
+    for path in added:
+        filename = Path(path).name
+        m = re.match(r"^(\d+)-", filename)
+        assert m, f"{filename} was added under docs/defeat_shapes/ with no leading NNN- number"
+        assert int(m.group(1)) == task_number, (
+            f"{filename} is numbered {m.group(1)}, not this branch's own CMX task number "
+            f"{task_number} (branch {branch!r}) — numbering off anything else (e.g. one past "
+            "the current highest file in a listing) is a decentralized guess that collides "
+            "under concurrency; see docs/DEFEAT_SHAPES.md's 'How this catalog grows'"
+        )
+        # Filename and heading are asserted to agree elsewhere (see
+        # test_defeat_shapes_file_headings_are_well_formed_and_match_their_filename), but that
+        # test says nothing about the TASK number — check the heading directly too, so a file
+        # correctly named `301-*.md` but whose own heading claims a different shape number
+        # still fails here instead of only on the (separate, filename-vs-heading-only) test.
+        first_line = (root / path).read_text().splitlines()[0]
+        heading_m = re.match(r"^## (\d+)\. ", first_line)
+        assert heading_m, f"{filename}: heading {first_line!r} does not match '## N. Title'"
+        assert int(heading_m.group(1)) == task_number, (
+            f"{filename}'s heading claims shape {heading_m.group(1)}, not this branch's own "
+            f"CMX task number {task_number} (branch {branch!r})"
+        )
+
+
 def test_defeat_shapes_cross_references_resolve_to_shapes_that_exist():
     """CMX-284 rework round 1: entries cross-reference each other by number ("the render-side
     mirror of shape 13", "[[21|entry 21]]") — under the old single-file catalog, renumbering

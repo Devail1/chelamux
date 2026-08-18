@@ -96,8 +96,8 @@
       {
         "hooks": [
           {
-            "type": "http",
-            "url": "http://127.0.0.1:5001/hooks/MessageDisplay",
+            "type": "command",
+            "command": "curl -s --fail --max-time 1 -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:5001/hooks/MessageDisplay 2>/dev/null || true",
             "timeout": 2
           }
         ]

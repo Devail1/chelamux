@@ -413,10 +413,12 @@ def test_the_slug_is_resolved_once_and_cached(monkeypatch):
 
 # --- $CHELA_WID: the agent SAYING which window it is (CMX-160) -----------------------
 #
-# Every hook but SessionStart rides `http` — Claude Code's own client, carrying only the
-# payload, none of the agent's env. SessionStart is a `command` hook and so inherits the
-# process env, letting the agent short-circuit inference entirely via an `X-Chela-Wid`
-# header. Still not trusted blind: malformed, empty, or naming a window that is not live
+# Every hook but SessionStart and MessageDisplay rides `http` — Claude Code's own client,
+# carrying only the payload, none of the agent's env. SessionStart is a `command` hook and
+# so inherits the process env, letting the agent short-circuit inference entirely via an
+# `X-Chela-Wid` header (MessageDisplay is also `command`, CMX-303, but carries no such
+# header — nothing it returns is agent-specific). Still not trusted blind: malformed,
+# empty, or naming a window that is not live
 # right now must fall through to the SAME inference as if no header had ever been sent.
 
 def test_explicit_wid_short_circuits_correlation_that_would_otherwise_fail(monkeypatch):
@@ -643,6 +645,23 @@ def test_recap_command_carries_the_window_id_as_a_shell_expanded_header():
     assert "$CHELA_WID" not in command.replace("${CHELA_WID:-}", "")
 
 
+def test_message_display_command_relays_into_the_same_http_endpoint():
+    """CMX-303: `MessageDisplay` moved off `http` (a live fleet never rendered what the
+    daemon returned there) onto the SAME curl-relay shape as `SessionStart` — a curl into
+    the identical `/hooks/MessageDisplay` route, printing the daemon's own response as its
+    stdout, and failing open exactly like the recap command.
+
+    Port is 6001, NOT config.DEFAULT_DASHBOARD_PORT (5001): a hardcoded-5001 command would
+    satisfy a same-as-default port just as well as a real one, so pinning it at a port that
+    ISN'T the default is what makes this assert the ``port`` argument actually got plumbed
+    through, rather than merely rendering something with 5001 in it somewhere
+    (docs/DEFEAT_SHAPES.md)."""
+    command = hooks.message_display_command(port=6001)
+    assert "http://127.0.0.1:6001/hooks/MessageDisplay" in command
+    assert "--fail" in command and command.endswith("|| true")
+    assert "X-Chela-Wid" not in command
+
+
 # --- live terminal timestamps (CMX-277, mechanism swapped in CMX-285) --------------
 
 def test_timestamp_events_is_exactly_message_display():
@@ -663,10 +682,10 @@ def test_message_display_response_stamps_only_the_first_batch():
         "displayContent": first["hookSpecificOutput"]["displayContent"],
     }}
     content = first["hookSpecificOutput"]["displayContent"]
-    assert content.startswith("🕐 ")
+    assert content.startswith("[")
     assert content.endswith(" Sure, on it.")
-    stamp = content.removeprefix("🕐 ").removesuffix(" Sure, on it.")
-    assert len(stamp) == 8 and stamp[2] == ":" and stamp[5] == ":"  # HH:MM:SS
+    stamp = content.removesuffix(" Sure, on it.")
+    assert len(stamp) == 7 and stamp[0] == "[" and stamp[3] == ":" and stamp[6] == "]"
 
     later = hooks.message_display_response(
         {"hook_event_name": "MessageDisplay", "index": 1, "delta": " and it's done."})
@@ -674,24 +693,24 @@ def test_message_display_response_stamps_only_the_first_batch():
 
 
 def test_message_display_response_asks_the_module_clock_not_a_fixed_string(monkeypatch):
-    """A fixed string like ``"00:00:00"`` satisfies the HH:MM:SS shape check above just as
+    """A fixed string like ``"00:00"`` satisfies the HH:MM shape check above just as
     well as a real clock — that gap is exactly what let a frozen-clock mutation survive
     (docs/DEFEAT_SHAPES.md). Monkeypatching ``hooks.time.strftime`` and asserting the exact
     rendered value pins THAT the module's own clock was asked, but a stub of the form
-    ``lambda fmt: "12:34:56"`` accepts and discards ``fmt`` — so it does not pin WHAT was
-    asked for, and ``time.strftime("%d:%m:%y")`` (a date, not a time) satisfies both the
-    stub and the HH:MM:SS shape check equally well (docs/DEFEAT_SHAPES.md shape 18).
+    ``lambda fmt: "12:34"`` accepts and discards ``fmt`` — so it does not pin WHAT was
+    asked for, and ``time.strftime("%d:%m")`` (a date, not a time) satisfies both the
+    stub and the HH:MM shape check equally well (docs/DEFEAT_SHAPES.md shape 18).
     Capturing the ``fmt`` argument closes that: it pins the format string itself, not
     merely the stubbed return value."""
     captured_fmt = []
     monkeypatch.setattr(hooks.time, "strftime",
-                         lambda fmt: captured_fmt.append(fmt) or "12:34:56")
+                         lambda fmt: captured_fmt.append(fmt) or "12:34")
 
     resp = hooks.message_display_response(
         {"hook_event_name": "MessageDisplay", "index": 0, "delta": "hi"})
 
-    assert captured_fmt == ["%H:%M:%S"]
-    assert resp["hookSpecificOutput"]["displayContent"] == "🕐 12:34:56 hi"
+    assert captured_fmt == ["%H:%M"]
+    assert resp["hookSpecificOutput"]["displayContent"] == "[12:34] hi"
 
 
 def test_message_display_response_tolerates_a_missing_or_non_string_delta():
@@ -705,10 +724,10 @@ def test_message_display_response_tolerates_a_missing_or_non_string_delta():
         resp = hooks.message_display_response(
             {"hook_event_name": "MessageDisplay", "index": 0, "delta": delta})
         content = resp["hookSpecificOutput"]["displayContent"]
-        assert content.startswith("🕐 ")
-        stamp = content[len("🕐 "):-1]
-        assert len(stamp) == 8 and stamp[2] == ":" and stamp[5] == ":"  # HH:MM:SS
-        assert content == f"🕐 {stamp} "  # a trailing "None"/"42"/"['oops']" fails this
+        assert content.startswith("[")
+        stamp = content[:-1]
+        assert len(stamp) == 7 and stamp[3] == ":" and stamp[6] == "]"  # [HH:MM]
+        assert content == f"{stamp} "  # a trailing "None"/"42"/"['oops']" fails this
 
 
 # --- the endpoint ----------------------------------------------------------------
@@ -768,7 +787,7 @@ def test_endpoint_stamps_a_timestamp_on_the_message_display_hook(client, monkeyp
     body = resp.get_json()
     content = body["hookSpecificOutput"]["displayContent"]
     assert body["hookSpecificOutput"]["hookEventName"] == "MessageDisplay"
-    assert content.startswith("🕐 ")
+    assert content.startswith("[")
     assert content.endswith(" On it.")
 
     # UNLIKE every other hook: never ingested. `MessageDisplay` fires once per streamed
@@ -927,14 +946,14 @@ def test_endpoint_will_not_read_an_oversized_body(client):
 
 # --- the plugin ------------------------------------------------------------------
 
-def test_hooks_spec_registers_every_event_over_http():
+def test_hooks_spec_registers_every_event():
     spec = hooks.hooks_spec(port=5001)["hooks"]
     assert set(spec) == set(hooks.HOOK_EVENTS)
     for event, entries in spec.items():
         hook, = entries[0]["hooks"]
         assert ("matcher" in entries[0]) == (event in hooks.TOOL_EVENTS)
         if event == "SessionStart":
-            # The ONE command hook, because SessionStart NEVER fires over http (measured,
+            # A command hook, because SessionStart NEVER fires over http (measured,
             # CMX-41) and a command hook's stdout IS the injected context — which is how
             # the room recap reaches a restarted agent. It is a curl into the SAME endpoint
             # (not a `chela` spawn: chela is not on an agent's PATH), and it fails open —
@@ -945,6 +964,20 @@ def test_hooks_spec_registers_every_event_over_http():
             assert "http://127.0.0.1:5001/hooks/SessionStart" in hook["command"]
             assert "--fail" in hook["command"] and hook["command"].endswith("|| true")
             assert hook["timeout"] == hooks.RECAP_TIMEOUT
+            # DEFEAT_SHAPES #5: the line above reads the SAME symbol on both sides once
+            # rendered, so widening or removing the timeout moves undetected — pin the
+            # literal too.
+            assert hooks.RECAP_TIMEOUT == 5, hooks.RECAP_TIMEOUT
+            continue
+        if event == "MessageDisplay":
+            # CMX-303: the other command hook — a live fleet never rendered this event's
+            # `http` response, so it rides the identical curl-relay shape SessionStart
+            # already proved Claude Code actually acts on. Same fail-open shape, no header.
+            assert hook["type"] == "command"
+            assert "url" not in hook
+            assert "http://127.0.0.1:5001/hooks/MessageDisplay" in hook["command"]
+            assert "--fail" in hook["command"] and hook["command"].endswith("|| true")
+            assert hook["timeout"] == hooks.HOOK_TIMEOUT <= 2
             continue
         # http, not command: no shell, no process spawn per tool call, and no chatty
         # .bashrc able to corrupt the JSON contract with stray stdout.

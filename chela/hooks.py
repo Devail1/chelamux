@@ -22,7 +22,9 @@ fleet has none, and a fleet member launched without the plugin never will.
 constraint:
 
 * the transport is ``http`` — no shell script, no process spawn per tool call, no PATH
-  assumption, and no way for a chatty ``.bashrc`` to corrupt the JSON contract;
+  assumption, and no way for a chatty ``.bashrc`` to corrupt the JSON contract — except
+  ``SessionStart`` and ``MessageDisplay``, each forced onto ``command`` for its own
+  measured reason (see :func:`recap_command` and :func:`message_display_command`);
 * ``timeout`` is short (:data:`HOOK_TIMEOUT`) and the receiver appends and returns;
 * the daemon being **down** must not wedge an agent — a refused connection is a lost
   event (fail OPEN), never a stalled tool call;
@@ -116,10 +118,13 @@ GATE_TIMEOUT = 120
 # Being a `command` hook buys a second thing (CMX-160): it runs as a child of the claude
 # process itself, so it inherits that process's environment — `$CHELA_WID`, exported into
 # the pane's shell ahead of every chela-managed launch (`agent_manager.wid_env_prefix`,
-# `spawn.py`). Every OTHER hook rides `http` (Claude Code's own client, which sends the
-# payload and nothing of the agent's env), so this is the one place the agent can just SAY
-# which window it is rather than have chela infer it from `/proc` and tmux panes — and the
-# one place cross-platform, since inference needs `/proc` and this does not. See
+# `spawn.py`). Every hook but SessionStart and MessageDisplay rides `http` (Claude Code's
+# own client, which sends the payload and nothing of the agent's env); MessageDisplay is
+# also a `command` hook (CMX-303) but carries no `$CHELA_WID` header (see
+# `message_display_command`) — nothing it returns is agent-specific, so SessionStart stays
+# the one place the agent can just SAY which window it is rather than have chela infer it
+# from `/proc` and tmux panes — and the one place cross-platform, since inference needs
+# `/proc` and this does not. See
 # `recap_command` and `_explicit_wid`.
 RECAP_TIMEOUT = 5
 
@@ -158,17 +163,19 @@ def message_display_response(body: dict) -> dict:
     ``displayContent`` as "display the original," so a later chunk's text renders exactly
     as it would have without this hook at all.
 
-    Local time, ``HH:MM:SS`` — the same clock and format the Feed already renders
-    timestamps in (``chela/main.py``'s event log view), and the format CMX-277's
-    ``timestamp_response`` (superseded by this) used.
+    Local time, ``[HH:MM]`` — no seconds (the marker's job is "roughly when did this
+    land," not a stopwatch) and no emoji (a variable-width glyph at the start of every
+    message; brackets are narrower, monospace-stable, and read as a marker rather than as
+    content). CMX-297; the format CMX-277's ``timestamp_response`` (superseded by this)
+    used ``HH:MM:SS``.
     """
     if body.get("index") != 0:
         return {}
     delta = body.get("delta")
     delta = delta if isinstance(delta, str) else ""
-    ts = time.strftime("%H:%M:%S")
+    ts = time.strftime("%H:%M")
     return {"hookSpecificOutput": {"hookEventName": "MessageDisplay",
-                                    "displayContent": f"🕐 {ts} {delta}"}}
+                                    "displayContent": f"[{ts}] {delta}"}}
 
 
 def recap_command(port: int | None = None, host: str = "127.0.0.1") -> str:
@@ -184,6 +191,39 @@ def recap_command(port: int | None = None, host: str = "127.0.0.1") -> str:
             "-H \"X-Chela-Wid: ${CHELA_WID:-}\" "
             "--data-binary @- "
             f"{hook_url('SessionStart', port, host)} 2>/dev/null || true")
+
+
+# CMX-303: `MessageDisplay` shipped a correct daemon response (CMX-285/CMX-297,
+# `message_display_response` above) on the `http` transport every hook except
+# `SessionStart` rides — and on a live fleet (Claude Code 2.1.233, `TERMINAL_TIMESTAMPS`
+# on, the hook confirmed present in the loaded manifest, `curl`ing the endpoint directly
+# and getting back a correct `{"hookSpecificOutput": {..., "displayContent": "[18:01]
+# …"}}`) zero `[HH:MM]` markers appeared across 2000 lines of scrollback. Every layer
+# this repo controls was measured correct; the one layer it does not — how Claude Code's
+# own client applies an `http` hook's JSON response versus a `command` hook's stdout,
+# despite the docs describing both as sharing one schema — is the remaining suspect, and
+# `SessionStart` above is this repo's own prior, working precedent for a hook that needed
+# `command` for Claude Code to actually act on what it returns (there for a different,
+# already-diagnosed reason — CMX-41, `http` never fires it at all). Moving
+# `MessageDisplay` onto the identical curl-relay shape changes only the transport, not the
+# daemon logic: the command curls the SAME endpoint `message_display_response` already
+# answers correctly, and prints that response body verbatim as the command's own stdout
+# for Claude Code to parse.
+def message_display_command(port: int | None = None, host: str = "127.0.0.1") -> str:
+    """The ``MessageDisplay`` command hook: relay the payload to the daemon and print its
+    response, fail open — see the module comment above for why this event needs
+    ``command`` at all.
+
+    No ``$CHELA_WID`` header: unlike the room recap, nothing ``message_display_response``
+    returns is agent-specific, so there is nothing here worth the extra header.
+    ``--max-time 1``, under :data:`HOOK_TIMEOUT`\\ 's 2s: this event fires tens of times
+    per assistant reply (CMX-285's own measurement), so a hung curl must lose the race
+    against Claude Code's own hook timeout, not tie it.
+    """
+    return ("curl -s --fail --max-time 1 -X POST "
+            "-H 'Content-Type: application/json' "
+            "--data-binary @- "
+            f"{hook_url('MessageDisplay', port, host)} 2>/dev/null || true")
 
 # Event types are namespaced: `hook.pre_tool_use` says *an agent told us this*, as
 # against `run_review` / `died` / `daemon_start`, which are chela's own bookkeeping.
@@ -227,9 +267,13 @@ def hook_url(event: str, port: int | None = None, host: str = "127.0.0.1") -> st
 def hooks_spec(port: int | None = None) -> dict:
     """The plugin's ``hooks/hooks.json`` — one hook per event, POSTing to the daemon.
 
-    Every event rides ``http`` (no shell, no spawn per tool call) except ``SessionStart``,
-    which does not fire over that transport at all and whose stdout is the recap — see
-    :data:`RECAP_TIMEOUT`.
+    Every event rides ``http`` (no shell, no spawn per tool call) except two forced onto
+    ``command`` for their own measured reason: ``SessionStart`` never fires over ``http``
+    at all and its stdout is the recap (see :data:`RECAP_TIMEOUT`), and ``MessageDisplay``
+    fires over ``http`` but a live fleet never rendered what it returned there (CMX-303 —
+    see the comment above :func:`message_display_command`). Both curl the SAME endpoint
+    every other event POSTs to and print its response verbatim as their own stdout, so the
+    daemon-side logic is identical either way — only the transport differs.
 
     Generated rather than hand-written so the committed manifest and the endpoint that
     serves it cannot drift apart (``tests/test_hooks.py`` asserts the file on disk still
@@ -244,6 +288,12 @@ def hooks_spec(port: int | None = None) -> dict:
             entry["hooks"] = [{
                 "type": "command",
                 "command": recap_command(port),
+                "timeout": hook_timeout(event),
+            }]
+        elif event == "MessageDisplay":
+            entry["hooks"] = [{
+                "type": "command",
+                "command": message_display_command(port),
                 "timeout": hook_timeout(event),
             }]
         else:
@@ -287,9 +337,10 @@ def hooks_fingerprint(port: int | None = None) -> str:
 EXPECTED_HOOKS_FINGERPRINT: dict[str, str] = {
     "0.2.1": "67b4358055f8df27922da7df6bf99c740ed23c800b19a03f0e41c485b4480bc9",
     "0.2.2": "0cfd26508b63a2804c0f815437e5b5c2564e1b72427bda18754692e199e8408d",
+    "0.2.3": "80085a2e2953eed44c8006025ee4563987ad7d08e81f62499d33fe66d812e6b1",
 }
 
-PLUGIN_VERSION = "0.2.2"
+PLUGIN_VERSION = "0.2.3"
 
 
 def plugin_manifest() -> dict:
@@ -668,10 +719,12 @@ _WID_RE = re.compile(r"^@\d+$")
 
 def _explicit_wid(hint: str | None,
                   panes: dict[str, sessions.Pane] | None = None) -> str | None:
-    """A window id the AGENT ITSELF supplied, via ``$CHELA_WID`` on the one hook that runs
-    as a shell command and so inherits its process's env (:func:`recap_command`) — ground
-    truth, not inference: no pane walk, no ``/proc``, nothing that a missing kernel
-    interface can take out from under it on macOS.
+    """A window id the AGENT ITSELF supplied, via ``$CHELA_WID`` on the one hook whose
+    ``command`` string carries it — ``SessionStart``, which inherits its process's env
+    (:func:`recap_command`; :func:`message_display_command` is also a ``command`` hook,
+    for an unrelated reason, and carries no header) — ground truth, not inference: no pane
+    walk, no ``/proc``, nothing that a missing kernel interface can take out from under it
+    on macOS.
 
     Still not trusted blind. Malformed, empty (no such env var — a session chela did not
     launch) or naming a window that is not live right now all fall through to ``None``

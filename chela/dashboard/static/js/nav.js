@@ -1,5 +1,6 @@
 // --- Stage 0: ES-module imports ---
 import { $, $$, TERMINALS_ON, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, setCurrentTab, shortTime, updateTabSignal, wantsHuman } from './util.js';
+import { onOrchestratorChange, orchestratorState } from './orchestrator.js';
 import { refreshSummary } from './header.js';
 import { checkContext } from './agents.js';
 import { showAddSchedule } from './schedules.js';
@@ -213,6 +214,25 @@ function _agentType(a) {
 const _TYPE_GLYPH = { claude: 'C', shell: '$', server: '⚙' };
 function _typeGlyph(t) { return _TYPE_GLYPH[t] || (t ? t[0].toUpperCase() : '?'); }
 
+// --- Session role (per-row cue) ----------------------------------------------
+// CMX-300: three roles, mutually exclusive. 'orchestrator' = this window holds
+// the single decisions-inbox slot (orchestrator.js / chela.inbox.register — the
+// SAME fact terminals.js's pane toggle and decisions.js's owner chip already
+// render, just read here too). 'dispatched' = the dispatcher spawned and owns
+// this window (API-provided `a.dispatched`, see api_agents in app.py). Anything
+// else is 'plain' — a session a human opened by hand — and gets no badge at all,
+// since it is the common case and a badge on every row would be noise, not signal.
+// Orchestrator wins if a window is somehow both (subscribing a dispatched worker
+// is not the normal flow, but the inbox slot is a fact about the window, not
+// about how it was launched).
+function _agentRole(a) {
+    if (a && a.window_id && orchestratorState().wid === a.window_id) return 'orchestrator';
+    if (a && a.dispatched) return 'dispatched';
+    return 'plain';
+}
+
+const _ROLE_LABEL = { orchestrator: 'Orchestrator', dispatched: 'Dispatched', plain: 'Plain session' };
+
 // --- Sidebar agent list ----------------------------------------------------
 
 // Per-window context cache (used_pct etc.), fed by both the sidebar refresh and
@@ -274,6 +294,24 @@ function _agentRowHtml(a) {
         ctxChip = `<span class="ar-ctx ${cls}" title="context ${p}%">${p}%</span>`;
     }
 
+    // Role badge: one glyph per concept, not glyph-plus-label. 'orchestrator' is a
+    // crown ICON (CMX-302); 'dispatched' is a bot ICON (CMX-302, item 2, Liav
+    // 2026-08-17) — the old "Orchestrator"/"Dispatched" text pills were both wide
+    // enough to truncate the session name sitting next to them on a real row. A
+    // lucide icon still reads as a colourblind-safe shape (not colour alone) at a
+    // fraction of the width, with the word itself moved to the title/aria-label
+    // (lucideIcon hardcodes aria-hidden on the <svg> itself, so the accessible
+    // name has to live on the wrapping span). 'plain' (the common case) renders
+    // nothing at all. `bot` was already vendored in _LUCIDE and referenced by
+    // nothing — claiming it here adds no new icon path and collides with no
+    // existing meaning.
+    const role = _agentRole(a);
+    const roleChip = role === 'orchestrator'
+        ? `<span class="ar-role orchestrator" title="Orchestrator session" aria-label="Orchestrator session">${lucideIcon('crown', 12)}</span>`
+        : role === 'dispatched'
+            ? `<span class="ar-role dispatched" title="Dispatched session" aria-label="Dispatched session">${lucideIcon('bot', 12)}</span>`
+            : '';
+
     let age = '';
     if (a.recap_ts) age = ageStr((Date.now() - new Date(a.recap_ts)) / 1000).replace(' ago', '');
     const recap = a.recap ? `<span class="ar-recap" title="${attrEsc(a.recap)}">${escHtml(a.recap)}</span>` : '';
@@ -306,6 +344,7 @@ function _agentRowHtml(a) {
         <div class="ar-main">
             <div class="ar-top">
                 <span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span>
+                ${roleChip}
                 ${ctxChip}
             </div>
             ${aiTitle}
@@ -411,6 +450,16 @@ async function refreshSidebar() {
     // re-read the section — must see BOTH halves settled, not just the agent list.
     await refreshRecentSessions();
 }
+
+// The orchestrator slot (who owns the decisions inbox) changes independently of
+// the agent list poll — a click on ANY pane's toggle (terminals.js) or the
+// decisions-panel dropdown (decisions.js) fires this for every listener. Redraw
+// off the already-cached agent list; no need to refetch /api/agents just to move
+// one badge.
+onOrchestratorChange(() => {
+    renderSidebarAgents(_agentsCache || []);
+    if (_detailAgent) renderAgentDetail();
+});
 
 // The WORK badges used to be a THIRD independent poller of /api/dispatcher, right
 // here — fetching the same payload the Dispatch and Kanban views were each already
@@ -583,6 +632,7 @@ function renderAgentDetail() {
     const rows = [
         ['Window', escHtml(a.window_id || '—')],
         ['Type', escHtml(type)],
+        ['Role', escHtml(_ROLE_LABEL[_agentRole(a)])],
         ['Claude', a.claude_running ? 'running' : 'stopped'],
         ['Status', escHtml(a.session_status || (a.claude_running ? 'running' : 'offline'))],
         ['Liveness', escHtml(a.liveness || '—')],

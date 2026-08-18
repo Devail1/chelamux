@@ -98,6 +98,10 @@ def test_a_hold_missing_its_expiry_is_no_hold(chela_dir, caplog):
 def test_the_ttl_is_capped_so_no_hold_can_outlive_the_day(chela_dir):
     held = hold.take(ttl_seconds=10 * hold.MAX_TTL_SECONDS)
     assert held.remaining() <= hold.MAX_TTL_SECONDS + 1
+    # DEFEAT_SHAPES #5: both sides above are the same symbol (`10 *`/`+ 1` of
+    # hold.MAX_TTL_SECONDS), so widening or removing the cap moves the fixture and the
+    # expectation together and this stays green either way — pin the literal too.
+    assert hold.MAX_TTL_SECONDS == 14400, hold.MAX_TTL_SECONDS  # 4 * 60 * 60
 
 
 @pytest.mark.parametrize("value,expected", [
