@@ -12,7 +12,7 @@ both of those but still called `run_experiments` only with `{"experiments": []}`
 branch every fixture in the file happened to share), and pinned only two substrings living in
 the *tail* of `note["body"]`'s three concatenated string literals.
 
-**Mutation that defeats it:** five independent ones, in three rounds, each invisible to the
+**Mutation that defeats it:** six independent ones, in four rounds, each invisible to the
 suite at the time:
 
 1. *(round 1)* Broaden the exemption's identity check to a category check:
@@ -43,6 +43,25 @@ suite at the time:
    still ran on a clean worktree, so a report that bails out via the dirty-worktree branch of
    `cannot_verify` (not the empty-experiments branch) silently lost the note, invisibly to the
    suite.
+6. *(round 4)* Same shape a third time, on the three early-return gates *below* `_git_dirty`
+   in `run_experiments`, none of which round 3 enumerated: right before each of
+   `report.cannot_verify = …` for the red-baseline gate (`if not baseline.green:`), the
+   unprovisionable-worktree gate (`if env_problem:`), and the contamination gate
+   (`if contamination:`), insert `report.notes = []`. Every fixture in the file up to that
+   point seeded a *green* `test_suite.py`, a provisionable worktree, and an
+   experiment-running fixture that always restores cleanly — so none of them ever reached any
+   of these three gates, and blanking the notes right before any one of them was invisible to
+   the suite. The red-baseline gate is the load-bearing one of the three named in
+   `run_experiments`'s own docstring, and by far the most commonly reached in production.
+
+   ⭐ Rounds 2, 3, and 4 are the same bug, found piecemeal: `run_experiments` appends the note
+   ahead of **five** early returns (`_git_dirty`, `not items`, `env_problem`,
+   `not baseline.green`, `contamination`), and each round's fixture only closed the ones
+   already known to be open. A guard-form bullet that says "every early-return gate" has to
+   be checked against an actual enumeration of the gates in the function — not against
+   whichever ones the previous round happened to name — or a rework can satisfy the bullet's
+   letter (add a fixture for *a* gate) while leaving the majority of the gates it lists
+   uncovered.
 
 **Guard form that survives:**
 
@@ -66,9 +85,20 @@ suite at the time:
   dirties the worktree (an uncommitted edit to a *tracked* file — untracked files don't count,
   see `_git_dirty`'s own docstring) and asserts the note still lands on the resulting
   dirty-worktree `cannot_verify` report.
+- ⛔⛔ Do not stop at "N early returns" as an abstract count — *enumerate them by reading the
+  function*, gate by gate, top to bottom, and write one fixture per gate before calling the
+  bullet satisfied. Rounds 2 and 3 each closed exactly one gate and moved on; round 4 had to
+  close three at once (`env_problem`, `not baseline.green`, `contamination`) because nobody
+  had listed all five. The two gates that are cheap to reach with a real fixture (dirty
+  worktree, red baseline — just write a failing `test_suite.py`) should be; the two that are
+  expensive or environment-dependent to trigger for real (`provision_suite_env` failing,
+  `_apply_experiments` reporting a mutation that could not be restored) are legitimately
+  reached via `monkeypatch` instead — forcing the return value is fine, since what's under
+  test is the wiring (does the note survive this gate), not the gate's own trigger condition.
 
-**Found:** CMX-309 rework round 1 (2026-08-18), round 2 (2026-08-18), and round 3
-(2026-08-18), PR #385. Each round, the judge applied the round's mutations to `chela/judge.py`
-in a throwaway checkout; `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green under every
-one (round 1: 3226 passed; round 2: 3228 passed; round 3: 3230 passed), because the suite at
-each point had exactly the gaps the mutations exploited.
+**Found:** CMX-309 rework round 1 (2026-08-18), round 2 (2026-08-18), round 3 (2026-08-18),
+and round 4 (2026-08-18), PR #385. Each round, the judge applied the round's mutations to
+`chela/judge.py` in a throwaway checkout; `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed
+green under every one (round 1: 3226 passed; round 2: 3228 passed; round 3: 3230 passed;
+round 4: 3231 passed), because the suite at each point had exactly the gaps the mutations
+exploited.

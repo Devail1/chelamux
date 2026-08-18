@@ -269,6 +269,104 @@ def test_run_experiments_carries_the_note_on_a_dirty_worktree_cannot_verify_repo
     assert "No CHANGELOG.md entry" in titles
 
 
+def test_run_experiments_carries_the_note_on_a_red_baseline_cannot_verify_report(
+    tmp_path, repo, origin,
+):
+    """DEFEAT_SHAPES #309 round 4: the note is appended BEFORE every early return in
+    ``run_experiments``, including the ``not baseline.green`` gate — the LOAD-BEARING one,
+    and the most commonly reached in production. Every fixture above it in this file seeds a
+    GREEN ``test_suite.py``, so a mutation that resets ``report.notes`` right before this
+    ``cannot_verify`` is set would slip past all of them. Here `test_suite.py` itself fails
+    on the PR branch, so `run_experiments` bails out via the red-baseline branch — the note
+    must still be present.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    (repo / "test_suite.py").write_text("def test_ok():\n    assert False\n")
+    _git("add", "feature.py", "test_suite.py", cwd=repo)
+    _git("commit", "-m", "add a feature, no changelog entry, red baseline", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    report = judge.run_experiments(
+        wt, TEST_CMD,
+        {"experiments": [{
+            "guard": "irrelevant", "kind": "mutation", "file": "test_suite.py",
+            "before": "assert False", "after": "assert True",
+        }]},
+        timeout=60, base_branch="dev",
+    )
+
+    assert report.state == judge.J_CANNOT_VERIFY
+    assert "NOT GREEN" in report.cannot_verify
+    titles = [n.get("title") for n in report.notes]
+    assert "No CHANGELOG.md entry" in titles
+
+
+def test_run_experiments_carries_the_note_on_an_unprovisionable_worktree_cannot_verify_report(
+    tmp_path, repo, origin, monkeypatch,
+):
+    """DEFEAT_SHAPES #309 round 4: same shape, the gate one step above the baseline. No
+    fixture in this file can cheaply make ``provision_suite_env`` fail for real, so it's
+    forced via monkeypatch — the note must still be present on the report it returns.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    _git("add", "feature.py", cwd=repo)
+    _git("commit", "-m", "add a feature, no changelog entry", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+    monkeypatch.setattr(judge, "provision_suite_env", lambda worktree, timeout=600.0: "boom")
+
+    report = judge.run_experiments(
+        wt, TEST_CMD,
+        {"experiments": [{
+            "guard": "irrelevant", "kind": "mutation", "file": "test_suite.py",
+            "before": "assert True", "after": "assert False",
+        }]},
+        timeout=60, base_branch="dev",
+    )
+
+    assert report.state == judge.J_CANNOT_VERIFY
+    assert "PROVISIONED" in report.cannot_verify
+    titles = [n.get("title") for n in report.notes]
+    assert "No CHANGELOG.md entry" in titles
+
+
+def test_run_experiments_carries_the_note_on_a_contamination_cannot_verify_report(
+    tmp_path, repo, origin, monkeypatch,
+):
+    """DEFEAT_SHAPES #309 round 4: the last of the three uncovered early returns below
+    ``_git_dirty`` — a mutation that could not be restored. Rare and expensive to trigger
+    for real (the only experiment-running fixture in this file restores cleanly), so it's
+    forced via monkeypatch — the note must still be present on the report it returns.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    _git("add", "feature.py", cwd=repo)
+    _git("commit", "-m", "add a feature, no changelog entry", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+    monkeypatch.setattr(
+        judge, "_apply_experiments",
+        lambda worktree, test_cmd, items, baseline, timeout: ([], "could not restore a mutation"),
+    )
+
+    report = judge.run_experiments(
+        wt, TEST_CMD,
+        {"experiments": [{
+            "guard": "irrelevant", "kind": "mutation", "file": "test_suite.py",
+            "before": "assert True", "after": "assert False",
+        }]},
+        timeout=60, base_branch="dev",
+    )
+
+    assert report.state == judge.J_CANNOT_VERIFY
+    assert report.cannot_verify == "could not restore a mutation"
+    titles = [n.get("title") for n in report.notes]
+    assert "No CHANGELOG.md entry" in titles
+
+
 def test_run_experiments_carries_no_note_when_the_changelog_was_touched(tmp_path, repo, origin):
     _branch_from_head(repo, "pr-1")
     _git("checkout", "pr-1", cwd=repo)
