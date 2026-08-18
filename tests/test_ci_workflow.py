@@ -113,6 +113,35 @@ key in the YAML) — it is not a defense against a step writing to `$GITHUB_ENV`
 either variable at runtime for a later step, which no denylist of YAML keys can see; the
 runtime state-assertion step is what still catches that residual case, in actual CI, at the
 point of use.
+
+Round 5's own fix had three more gaps of the same shape, closed here in round 6:
+
+12. `test_pytest_step_is_unconditional` banned `continue-on-error` on the Pytest step
+    ALONE. `continue-on-error: true` on the ref-state-assertion step — round 5's own
+    design, the one thing that turns every earlier round's mutation into a red build —
+    reaches the same defanged end state by a different door: the step still runs, still
+    fails on a bad ref, but the job still reports success, and every existing assertion
+    (its exact `run:`, its `if:`-absence, its position, the git-ban exemption) stays green.
+    Enumerating one more named step is the same shape that has already cost this PR five
+    rounds and CMX-299 fourteen — the next step added would be unguarded again by
+    construction. The fix generalizes: no step in the `test` job may carry
+    `continue-on-error` at all, checked over the WHOLE step list with an explicit
+    allow-list (empty today, one-line reason required per entry) for any step that
+    legitimately needs it — and it fails loudly, not vacuously, if the job or its step list
+    can't be found.
+13. The Pytest step's `run:` was matched by substring only (`_step_running`) — the last
+    substring-only anchor in the file, after round 3 pinned the rename step's `run:` and
+    round 5 pinned the ref-state step's. `echo `-prefixing it leaves the needle
+    (`uv run pytest`), the ordering, and every `if:`/`continue-on-error` check untouched
+    while CI prints a command and executes zero tests, the CMX-301 guard included.
+14. The checkout step's `with:` block was pinned on `fetch-depth` alone
+    (`test_checkout_fetches_full_history`), leaving the rest of the mapping unconstrained.
+    `ref: dev` on that same step clones `dev` instead of the PR's merge commit; the rename
+    step then runs `git checkout -B cmx-305` on dev's tip, so both halves of the round-5
+    runtime assertion (branch name, `origin/dev` resolvability) pass — it checks ref STATE,
+    not which commit the ref points at — while CI silently tests `dev` and never the PR.
+    Pin the whole `with:` mapping, not one key, so `ref:`, `repository:`,
+    `sparse-checkout:`, or any future key are all closed by the same assertion.
 """
 from __future__ import annotations
 
@@ -177,6 +206,28 @@ def test_checkout_fetches_full_history(steps):
         f"checkout step's fetch-depth is {checkout.get('with', {}).get('fetch-depth')!r}, "
         "expected exactly 0 (full history) — anything shallower leaves origin/dev unfetched "
         "and the CMX-301 defeat-shape numbering guard skips at the gate"
+    )
+
+
+def test_checkout_step_with_block_has_no_extra_keys(steps):
+    """Round 6 — invariant 14: `test_checkout_fetches_full_history` pins `fetch-depth`
+    alone, leaving the rest of the checkout step's `with:` mapping unconstrained. Adding
+    `ref: dev` alongside the pinned `fetch-depth: 0` clones `dev` instead of the PR's own
+    merge commit — the rename step then checks out a branch named `cmx-305` on `dev`'s tip,
+    so the round-5 runtime ref-state assertion (which checks that HEAD names a `cmx-N`
+    branch and that `origin/dev` resolves, not which commit either points at) passes while
+    CI silently tests `dev` and never the PR.
+
+    Pin the WHOLE `with:` mapping to exactly `{fetch-depth: 0}`, the action's default for
+    everything else — closing `ref:`, `repository:`, `sparse-checkout:`, and any future key
+    in one assertion, the same exact-value doctrine `fetch-depth` itself already follows.
+    """
+    checkout = next(s for s in steps if s.get("uses", "").startswith("actions/checkout@"))
+    assert checkout.get("with") == {"fetch-depth": 0}, (
+        f"checkout step's `with:` is {checkout.get('with')!r}, expected exactly "
+        "{'fetch-depth': 0} — any other key (e.g. `ref:`) can point the checkout at a "
+        "different commit than the PR's own while every other assertion in this file stays "
+        "green"
     )
 
 
@@ -365,6 +416,66 @@ def test_pytest_step_is_unconditional(steps):
         "— a step whose failure is swallowed reports the same green CI as one that never "
         "ran at all"
     )
+
+
+def test_pytest_step_runs_the_exact_command(steps):
+    """Round 6 — invariant 13: the Pytest step's `run:` was matched by substring only
+    (`_step_running`, used as the ordering anchor for every test in this file) and pinned
+    nowhere — the last substring-only anchor left, after round 3 pinned the rename step's
+    `run:` exactly and round 5 did the same for the ref-state step's. Prefixing it with
+    `echo` leaves the needle (`_step_running` still finds exactly one match), the ordering,
+    and every `if:`/`continue-on-error` check untouched — CI prints a command and executes
+    zero tests, the CMX-301 guard included, while every assertion in this file stays green.
+    """
+    pytest_step = _step_running(steps, "uv run pytest")
+    assert pytest_step["run"].strip() == "uv run pytest -q", (
+        f"the Pytest step's run is {pytest_step['run']!r}, expected exactly "
+        "'uv run pytest -q' — it must actually run the suite, not merely reference or "
+        "print the command"
+    )
+
+
+_CONTINUE_ON_ERROR_ALLOWLIST: dict[str, str] = {
+    # step name -> one-line reason it's allowed to swallow its own failure.
+    # Empty by design: every step in this job is meant to fail the build on failure.
+}
+
+
+def test_no_step_in_the_test_job_swallows_its_own_failure(job, steps):
+    """Round 6 — invariant 12: `test_pytest_step_is_unconditional` banned
+    `continue-on-error` on the Pytest step ALONE. `continue-on-error: true` on the
+    ref-state-assertion step — round 5's own design, the one thing that turns every
+    earlier round's mutation into a red build — reaches the identical defanged end state
+    by a different door: the step still runs, still fails on a bad ref, but the job still
+    reports success, while its exact `run:`, its `if:`-absence, its position immediately
+    before Pytest, and its git-ban exemption all stay untouched and every existing
+    assertion in this file stays green.
+
+    Enumerating one more named step is the same shape that has already cost this PR five
+    rounds and CMX-299 fourteen — the next step added is unguarded again by construction.
+    Assert the invariant over the WHOLE job instead: no step may carry `continue-on-error`,
+    with an explicit allow-list for any step that legitimately needs it (empty today — add
+    an entry to `_CONTINUE_ON_ERROR_ALLOWLIST` with a one-line reason if one ever does). A
+    rule over the whole job survives the next step being added; a rule over two named steps
+    does not.
+
+    If the job or its step list can't even be found, this must FAIL loudly rather than
+    vacuously pass — an empty list would otherwise satisfy "no step violates X" for the
+    wrong reason: nothing was actually checked.
+    """
+    assert job, "the `test` job was not found in the workflow — cannot check its steps"
+    assert steps, "the `test` job has no steps — cannot check continue-on-error usage"
+
+    for step in steps:
+        name = step.get("name", "<unnamed step>")
+        if name in _CONTINUE_ON_ERROR_ALLOWLIST:
+            continue
+        assert "continue-on-error" not in step, (
+            f"step {name!r} has `continue-on-error: {step.get('continue-on-error')!r}` and "
+            "is not in _CONTINUE_ON_ERROR_ALLOWLIST — a step whose failure is swallowed "
+            "reports the same green CI as one that never ran at all; if this step "
+            "legitimately needs it, add it to the allow-list with a one-line reason"
+        )
 
 
 def test_ref_state_is_asserted_immediately_before_pytest(steps):

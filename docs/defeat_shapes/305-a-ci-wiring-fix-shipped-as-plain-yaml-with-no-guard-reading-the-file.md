@@ -330,3 +330,85 @@ green (3222 passed, 0 failed). Closed by broadening
 `test_nothing_between_the_rename_and_pytest_touches_head` from a three-verb denylist to a
 blanket `git`-invocation ban, and adding `test_job_is_unconditional`
 to `tests/test_ci_workflow.py`.
+
+**Round 6 — the guard that closed round 5 generalized `if:`-absence and the exact-match
+doctrine to the two steps round 5's own mutations happened to touch, but not to the third
+step either doctrine already implied, and pinned only one key of the checkout step's
+`with:` block:**
+
+```diff
+-       - name: Assert the ref state the CMX-301 guard needs
++       - name: Assert the ref state the CMX-301 guard needs
++         continue-on-error: true
+```
+
+`test_pytest_step_is_unconditional` banned `continue-on-error` on the Pytest step alone.
+The ref-state-assertion step — round 5's own design, the one thing that turns every
+earlier round's mutation into a red build — carried no equivalent ban. With
+`continue-on-error: true`, the step still runs exactly once, still has no `if:` key, still
+sits immediately before Pytest, still carries its byte-identical pinned `run:`, and is
+still exempted from the git-ban window — every existing assertion stays green, while in CI
+a detached HEAD or a missing `origin/dev` merely annotates the run and Pytest proceeds
+anyway, leaving the CMX-301 guard to skip quietly exactly as before this PR shipped.
+
+```diff
+-         run: uv run pytest -q
++         run: echo uv run pytest -q
+```
+
+The Pytest step's `run:` — the anchor `_step_running(steps, "uv run pytest")` every
+ordering assertion in the file depends on — was matched by substring only and pinned
+nowhere, unlike the rename step's (round 3) and the ref-state step's (round 5). Prefixing
+it with `echo` leaves the needle, the ordering, and every `if:`/`continue-on-error` check
+untouched, and sits outside the checkout-to-Pytest git-ban window (which is exclusive of
+the Pytest step itself) — CI prints a command and executes zero tests while every
+assertion in the file stays green.
+
+```diff
+-         with:
+-           fetch-depth: 0
++         with:
++           fetch-depth: 0
++           ref: dev
+```
+
+`test_checkout_fetches_full_history` pins exactly one key of the checkout step's `with:`
+block — `fetch-depth` — leaving the rest unconstrained. `ref: dev` on that same, single,
+pinned checkout clones `dev` instead of the PR's merge commit; the rename step then runs
+`git checkout -B cmx-305` on `dev`'s tip, so both halves of the round-5 runtime assertion
+(`HEAD` names a `cmx-N` branch, `origin/dev` resolves) pass, because that assertion checks
+ref STATE, not which commit the ref points at. Every assertion stays green while CI reports
+success having tested `dev` and never the PR.
+
+All three mutations, applied by the judge to a throwaway checkout of PR #379's round-5
+head, stayed green against `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (3227 passed, 0
+failed, 0 error(s)).
+
+**Why this slips through (round 6):** all three are
+`25-a-shape-s-own-prescribed-fix-is-applied-fully-at.md` for a fifth time running — the
+`continue-on-error` ban, the exact-`run:` match, and the pinned-`with:`-key doctrine were
+each applied, round after round, to precisely the site the *previous* round's mutation had
+just touched, and not generalized to the *other* sites the same doctrine already implied
+(the ref-state step needed the same ban the Pytest step got; the Pytest step needed the
+same exact-match treatment the rename and ref-state steps got; the checkout step's `with:`
+needed the same all-keys-pinned treatment `fetch-depth` alone doesn't provide). A human
+reading the round-5 verdict named the generalization explicitly for the
+`continue-on-error` case: enumerating one more named step is the shape that has now cost
+five rounds and CMX-299 fourteen, and the fix is to assert the invariant over the whole
+job, not one more step at a time.
+
+**Guard form that survives (round 6):** `test_no_step_in_the_test_job_swallows_its_own_failure`
+bans `continue-on-error` over every step in the `test` job at once, via an explicit,
+reason-carrying allow-list (empty today) rather than a per-step enumeration, and fails
+loudly — not vacuously — if the job or its step list can't be found at all.
+`test_pytest_step_runs_the_exact_command` pins the Pytest step's `run:` to the exact
+string `uv run pytest -q`, closing the last substring-only anchor in the file.
+`test_checkout_step_with_block_has_no_extra_keys` pins the checkout step's entire `with:`
+mapping to exactly `{fetch-depth: 0}`, closing `ref:`, `repository:`, `sparse-checkout:`,
+and any future key in one assertion instead of one more single-key check.
+
+**Found:** PR #379 (CMX-305, rework round 6) — all three mutations above, applied by the
+judge to a throwaway checkout of the round-5 fix, stayed green (3227 passed, 0 failed, 0
+error(s)). Closed by adding `test_no_step_in_the_test_job_swallows_its_own_failure`,
+`test_pytest_step_runs_the_exact_command`, and `test_checkout_step_with_block_has_no_extra_keys`
+to `tests/test_ci_workflow.py`.
