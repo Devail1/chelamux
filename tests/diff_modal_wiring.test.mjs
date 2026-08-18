@@ -926,10 +926,34 @@ test('an empty patch (a zero-byte file) shows the "No diff text" empty state, no
 
 test('the Files chip is also emitted (and wired end to end) in single-pane / mobile mode, not just the wall tile', async () => {
     const modal = document.getElementById('modal-diff');
+    const sel = document.getElementById('term-agent');
+    const originalFetch = globalThis.fetch;
     try {
+        // Two agents, and the select pinned to the SECOND one (@2), so that
+        // `sw = sel.value || wids[0]` (terminals.js:1579) actually diverges
+        // from `wids[0]` ('@1'). With only one agent in the fixture (as
+        // round 10 originally shipped this test) every possible source of
+        // `sw` collapses onto the same wid — a regression that swaps the
+        // pane's DISPLAYED/selected agent (`sw`) for the FIRST agent
+        // (`wids[0]`) in the single-pane _ctxBarHTML call site would be
+        // invisible to this guard. Judge round 1 KILLED it with exactly that
+        // mutation (docs/defeat_shapes — single-fixture blind spot).
+        util.setAgentsCache([...AGENTS, { name: 'w2', window_id: '@2', online: true }]);
+        await terminals.renderTerminals();
+        sel.value = '@2';
+
+        globalThis.fetch = url => {
+            const path = String(url);
+            if (path.endsWith('/api/agents/%402/diff')) {
+                return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(DIFF_STATE) });
+            }
+            return fakeFetch(url);
+        };
+
         // setTermMode fires renderTerminals() without awaiting it internally;
-        // @1's readiness is already cached from before()'s initial render, so
-        // its Promise.all resolves on a microtask with no real fetch/timer in
+        // @2's readiness is already cached from before()'s initial render
+        // (agents share the same fake ttyd-ready fixture), so its
+        // Promise.all resolves on a microtask with no real fetch/timer in
         // between — one flush() (a macrotask) is enough to land after it.
         terminals.setTermMode('single');
         await flush();
@@ -938,11 +962,13 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         assert.ok(stage.classList.contains('term-single'),
             'setTermMode(\'single\') did not switch #term-stage into single-pane render');
 
-        const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
+        assert.equal(document.querySelectorAll('.term-ctx-bar').length, 1,
+            'setup: single-pane mode rendered more (or fewer) than exactly one context bar');
+        const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@2"] .gs-files');
         assert.ok(filesBtn,
-            'the single-pane bottom bar has no .gs-files "Files" chip — _ctxBarHTML dropped it on the non-draggable (single/mobile) path');
-        assert.match(filesBtn.getAttribute('onclick') || '', /chela\.openDiffModal\('@1'\)/,
-            'the single-pane Files chip is not wired to chela.openDiffModal');
+            'the single-pane bottom bar has no .gs-files "Files" chip for @2, the SELECTED agent — either the chip was dropped on the non-draggable (single/mobile) path, or the pane rendered the wrong (first, not selected) agent entirely');
+        assert.match(filesBtn.getAttribute('onclick') || '', /chela\.openDiffModal\('@2'\)/,
+            'the single-pane Files chip is wired to the wrong session — it must open @2 (the DISPLAYED/selected agent), not @1 (wids[0])');
         assert.equal(filesBtn.getAttribute('title'), 'Changed files',
             'the single-pane Files chip lost its "Changed files" title');
         assert.ok(/<circle|<path/.test(filesBtn.innerHTML),
@@ -956,13 +982,16 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
 
         await flush();   // let openDiffModal's /diff fetch + _render resolve
         const rows = document.querySelectorAll('#diff-modal-content .diff-file-row');
-        assert.equal(rows.length, 2, 'the diff modal did not render the fetched file list when opened from single-pane mode');
+        assert.equal(rows.length, 2,
+            'the diff modal did not render @2\'s fetched file list when opened from single-pane mode — either the wrong session\'s /diff was requested, or none was');
 
         window.chela.closeDiffModal();
         assert.equal(modal.classList.contains('active'), false,
             'closeDiffModal() did not close the modal that was opened from single-pane mode');
     } finally {
-        // restore the wall-mode fixture every other test in this file depends on
+        globalThis.fetch = originalFetch;
+        // restore the single-agent, wall-mode fixture every other test in this file depends on
+        util.setAgentsCache(AGENTS);
         terminals.setTermMode('wall');
         await flush();
     }
