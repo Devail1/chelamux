@@ -36,6 +36,20 @@ history lives in `git log`.
   the marker's job is "roughly when did this land," not a stopwatch, and a variable-width
   glyph at the start of every message read as content rather than as a marker. (CMX-297)
 
+### Fixed
+
+- **The live-terminal message timestamp now actually appears.** CMX-285/CMX-297 shipped a
+  correct `MessageDisplay` response — measured directly, via `curl`, against the daemon's
+  own endpoint — but registered the hook over the `http` transport, and a live fleet on a
+  current Claude Code build never rendered it: zero `[HH:MM]` markers across thousands of
+  lines of scrollback despite the flag being on and the hook confirmed present in the
+  loaded manifest. `MessageDisplay` now rides the same `command`-relay shape this repo's
+  `SessionStart` hook already proved Claude Code actually acts on — a `curl` into the
+  identical endpoint, printing its response as the command's own stdout — changing only
+  the transport, not what the daemon computes. Existing installs need a plugin refresh
+  (`/plugin uninstall chela@chela` + `/plugin install chela@chela`, or `chela doctor`
+  will name the stale copy) since hooks are read at agent startup. (CMX-303)
+
 ## [0.6.0] — 2026-08-15
 
 ### Fixed
