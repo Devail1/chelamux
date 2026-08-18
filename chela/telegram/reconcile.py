@@ -604,7 +604,7 @@ def dispatched_window_ids(runs: list[dict] | None = None,
     *label*. ⛔ So this never regexes ``cmx-\\d+`` out of a window name: a human can
     rename a window, and a human window can be *called* anything.
 
-    **Two kinds of row qualify, and the second one is a bug fix.**
+    **Three kinds of row qualify, and the second and third are bug fixes.**
 
     * **In flight** (:data:`chela.dispatcher.ACTIVE_STATUSES`) — its window is supposed to
       exist *now*, so its recorded id is honoured unconditionally.
@@ -616,6 +616,15 @@ def dispatched_window_ids(runs: list[dict] | None = None,
       ACTIVE alone makes it look like a *human's* window — and the reconcile eagerly
       creates it a topic that the reap archives seconds later. That is exactly the churn
       this whole feature exists to kill, arriving through the back door.
+    * **A ``claimed`` row with no ``window_id`` yet, matched by its recorded
+      ``window_name`` against the live fleet** (CMX-308). ``dispatcher._spawn`` claims the
+      row (``window_id=NULL``) *before* it ever calls ``tmux new-window``, and only stamps
+      the returned ``@id`` back afterwards — a separate sqlite commit. A reconcile tick
+      landing in that gap sees a live, already-named window it cannot yet match by id, so
+      without this case it reads as a human's brand-new window and earns a real forum
+      topic the instant it appears — before the dispatcher itself has claimed it. The
+      row's ``window_name`` is recorded at the claim, before tmux is touched at all, so
+      matching the live fleet by that name closes the gap even with no id to check yet.
 
     The **recorded name** is what makes the second case safe, and it is not a name *guess*:
     it is the row's own ``window_name``, compared against what tmux currently calls that
@@ -677,6 +686,23 @@ def dispatched_window_ids(runs: list[dict] | None = None,
                 name = str(row.get("window_name") or "").strip()
                 if name and live.get(wid) == name:
                     owned.add(wid)
+        elif not wid and row.get("status") == "claimed":
+            # CMX-308: the spawn-time race. `_spawn` claims the row (window_id=NULL) and
+            # ONLY THEN calls `tmux new-window` — so for the gap between that window
+            # going live and `_launch_agent` stamping its @id back onto this same row (the
+            # next statement after `_new_window()` returns, but still a separate sqlite
+            # commit), the row is "claimed" (in ACTIVE_STATUSES) yet carries no window_id
+            # a reconcile tick can match. A tick landing in that gap saw an untracked live
+            # window and minted it a real topic before the dispatcher ever got to claim it
+            # — a forum topic for a worker that never once blocked on a human. The row DID
+            # record its `window_name` (the branch) at the claim, before tmux is even
+            # touched, so match the live fleet by that name instead of waiting on the id.
+            name = str(row.get("window_name") or "").strip()
+            if name:
+                for lwid, lname in live.items():
+                    if lname == name:
+                        owned.add(lwid)
+                        break
 
         jwid = str(row.get("judge_window_id") or "").strip()
         if not jwid or epoch.is_dangling(row.get("judge_window_epoch"), now_epoch):

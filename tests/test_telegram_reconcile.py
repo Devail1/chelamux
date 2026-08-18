@@ -766,6 +766,36 @@ def test_dispatched_window_ids_reads_the_run_row_not_the_name():
 
 
 # --------------------------------------------------------------------------
+# The spawn-time race (CMX-308) — `_spawn` claims the row, THEN calls
+# `tmux new-window`, THEN stamps the returned @id back onto that same row. A
+# reconcile tick landing between the window going live and that stamp lands on a
+# "claimed" row with no window_id yet — the exact gap that minted @668 a real
+# forum topic for cmx-305 before the dispatcher had claimed it as its own.
+# --------------------------------------------------------------------------
+
+def test_a_claimed_rows_window_not_yet_stamped_is_still_dispatched_by_name():
+    # window_id is still NULL (the tick landed before `_launch_agent` stamped it back),
+    # but the row recorded its window_name at the claim, before tmux was ever touched —
+    # so a live window under that exact name is this row's, even without the id yet.
+    runs = [{"status": "claimed", "window_id": None, "window_name": "cmx-305"}]
+    live = {"@668": "cmx-305"}
+    assert dispatched_window_ids(runs, live_windows=live) == {"@668"}
+
+
+def test_a_claimed_rows_name_match_does_not_fire_without_a_live_fleet():
+    # No live_windows given (the pure default {}) — nothing to match against, so no
+    # false positive; this must not silently claim every unrelated window.
+    runs = [{"status": "claimed", "window_id": None, "window_name": "cmx-305"}]
+    assert dispatched_window_ids(runs) == set()
+
+
+def test_a_claimed_rows_name_match_does_not_claim_an_unrelated_live_window():
+    runs = [{"status": "claimed", "window_id": None, "window_name": "cmx-305"}]
+    live = {"@1": "orchestrator"}                # some human's unrelated window
+    assert dispatched_window_ids(runs, live_windows=live) == set()
+
+
+# --------------------------------------------------------------------------
 # A PERMISSION gate is on the PANE ONLY — the hook log cannot see it (D1)
 # --------------------------------------------------------------------------
 #
