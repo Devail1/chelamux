@@ -507,6 +507,16 @@ def test_registry_relay_logs_permanent_drop_with_window_id_when_both_attempts_fa
     assert "permanently dropped" in errors[0].message
 
 
+def test_registry_relay_logs_nothing_extra_when_the_plain_text_fallback_recovers(caplog):
+    stub = _ThreadStubSender(fail_markdown=True)
+    relay = RegistryRelay(stub, _registry(("@1", "42")))
+    with caplog.at_level(logging.DEBUG):
+        relay.on_message("@1", Message("assistant", "text", "ok. go"))
+
+    assert len(stub.calls) == 2  # MarkdownV2 attempt, then a recovering plain-text attempt
+    assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+
+
 # --------------------------------------------------------------------------
 # show_tool_calls — hide the tool_use/tool_result firehose by default, but
 # NEVER hide interactive prompts (AskUserQuestion / ExitPlanMode) or content
