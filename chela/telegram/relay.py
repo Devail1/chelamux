@@ -365,6 +365,28 @@ def _retry_after(resp: dict) -> float | None:
     return None
 
 
+def _log_send_drop(resp: dict) -> None:
+    """Log a final ``sendMessage`` failure, naming a flood-control drop as one.
+
+    :meth:`BotSender._call` has already exhausted its 429 retries by the time
+    ``send`` gives up, so a response that is STILL a 429 here means flood
+    control never cleared in time — the message is gone, not merely rejected.
+    That is a different failure than a bad-MarkdownV2 rejection (a formatting
+    bug we can fix) and different again from the DEBUG-level "skipping
+    outbound" lines this package logs for an intentional, expected skip (no
+    topic bound, a hidden tool event). Without this split all three read
+    identically in the log — a generic WARNING with no marker saying content
+    was actually lost, which is how a dropped message hides in plain sight.
+    """
+    if _retry_after(resp) is not None:
+        log.error(
+            "telegram sendMessage DROPPED — flood control never cleared after "
+            "%d attempts: %s", _MAX_SEND_TRIES, resp,
+        )
+        return
+    log.warning("telegram sendMessage failed: %s", resp.get("description", resp))
+
+
 class BotSender:
     """Posts message bodies to one chat/topic via the direct Bot API.
 
@@ -452,8 +474,8 @@ class BotSender:
             resp = self._call("sendMessage", fields)
             if resp.get("ok"):
                 continue
-            log.warning("telegram sendMessage failed: %s", resp.get("description", resp))
             if not parse_mode:
+                _log_send_drop(resp)
                 return False
             # A rejected chunk is downgraded ON ITS OWN — one bad chunk must not
             # strip the formatting from the other five (which is what returning
@@ -464,10 +486,7 @@ class BotSender:
             fields.pop("parse_mode")
             resp = self._call("sendMessage", fields)
             if not resp.get("ok"):
-                log.warning(
-                    "telegram plain-text fallback failed: %s",
-                    resp.get("description", resp),
-                )
+                _log_send_drop(resp)
                 return False
         return True
 
@@ -609,7 +628,17 @@ class TelegramRelay:
         # MarkdownV2 was rejected — retry the same content as plain text so a
         # formatting edge case never silently drops a message (keyboard kept).
         log.debug("MarkdownV2 rejected for %s; retrying as plain text", window_id)
-        self._sender(to_plain_text(msg), None, **kw)
+        if self._sender(to_plain_text(msg), None, **kw):
+            return
+        # Both attempts are gone (``BotSender.send`` already logged why — a
+        # flood-control exhaustion or a real rejection). Nothing above this call
+        # knows which window/message that was, so without this line a dropped
+        # question and an intentionally hidden tool event are the same shape in
+        # the log: a WARNING/ERROR with no window_id. This is the one place that
+        # can name it.
+        log.error(
+            "telegram message permanently dropped for %s (%s)", window_id, msg.content_type
+        )
 
 
 class RegistryRelay:
@@ -650,4 +679,11 @@ class RegistryRelay:
         if self._sender(to_markdown_v2(msg), "MarkdownV2", thread, **kw):
             return
         log.debug("MarkdownV2 rejected for %s; retrying as plain text", window_id)
-        self._sender(to_plain_text(msg), None, thread, **kw)
+        if self._sender(to_plain_text(msg), None, thread, **kw):
+            return
+        # See the single-topic relay's matching branch above: without this line a
+        # dropped message and an intentionally hidden tool event look identical
+        # in the log.
+        log.error(
+            "telegram message permanently dropped for %s (%s)", window_id, msg.content_type
+        )

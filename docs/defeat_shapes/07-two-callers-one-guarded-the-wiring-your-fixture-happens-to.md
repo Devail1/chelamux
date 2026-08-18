@@ -57,6 +57,20 @@ each covers.
   reverting the backlog branch's `onclick` attribute left the suite green. Closed by a second
   wiring test that renders a `backlog_items` bullet and clicks it directly.
 
+- `_log_send_drop` (CMX-311 rework round 1, PR #387) has exactly two call sites inside
+  `BotSender.send` — the no-`parse_mode` branch (a rejected chunk with nothing to downgrade
+  to) and the MarkdownV2-downgrade branch (the chunk's unformatted re-send is ALSO
+  rejected). Only the first was ever driven by a flood-control fixture:
+  `test_bot_sender_logs_exhausted_flood_control_as_error_not_warning` calls
+  `send("hi")` with no `parse_mode`, so it can never reach the second `_call`. Reverting
+  the second site's `_log_send_drop(resp)` to a bare `log.warning(...)` — the exact call it
+  read before this PR — left the full 3223-test suite green, even though that second site is
+  the one every relay actually reaches in production (real Telegram traffic always sets
+  `parse_mode="MarkdownV2"`). Closed by a second flood-control test that sends with
+  `parse_mode="MarkdownV2"` against a transport returning 429 forever, so BOTH `_call`s
+  inside `send()` exhaust retries and the assertion drives the downgrade branch's own
+  `_log_send_drop`.
+
 ⭐ The judge caught the second one by proposing **a separate wiring experiment per call site
 rather than guessing which was covered** — which is also the cheapest way to write the guard.
 Two callers becomes N callers becomes "count them all, every round" — a shape doesn't stop
