@@ -625,6 +625,12 @@ def dispatched_window_ids(runs: list[dict] | None = None,
       topic the instant it appears — before the dispatcher itself has claimed it. The
       row's ``window_name`` is recorded at the claim, before tmux is touched at all, so
       matching the live fleet by that name closes the gap even with no id to check yet.
+      This case reads no epoch at all — there is nothing to check: the claim clears
+      ``window_epoch`` alongside ``window_id``, and the id being matched comes from
+      *this* epoch's live fleet by construction. It is also why ``not wid`` must stay in
+      the gate: a row that DOES carry a ``window_id`` belongs to the sibling case above,
+      and if its epoch is dangling that case drops it outright (CMX-77) — it must never
+      fall through here and get a second chance via a name match against the live fleet.
 
     The **recorded name** is what makes the second case safe, and it is not a name *guess*:
     it is the row's own ``window_name``, compared against what tmux currently calls that

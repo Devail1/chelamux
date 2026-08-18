@@ -817,6 +817,26 @@ def test_a_claimed_rows_name_match_requires_an_exact_name_not_a_substring():
     assert dispatched_window_ids(runs, live_windows=live) == set()
 
 
+def test_a_claimed_rows_stale_window_id_does_not_fall_through_to_name_match():
+    # The THIRD gating condition on the fallback: `not wid`. The fallback exists
+    # ONLY for a "claimed" row that has not been stamped an id YET (window_id is
+    # still None). A row that DOES carry a window_id, but whose window_epoch is
+    # dangling (CMX-77 — a tmux restart orphaned it, so today's `@wid` belongs to
+    # somebody else), must be dropped outright by the epoch check above — never
+    # fall through to the name-match fallback below it. Without `not wid` gating
+    # that fallback, a dangling-epoch "claimed" row would claim ANY live window
+    # merely named after its OWN recorded name — even a human's own window that
+    # happens to share it — silently stripping it of its topic.
+    from chela import epoch
+
+    OLD, NEW = "old-epoch", "new-epoch"
+    runs = [{"status": "claimed", "window_id": "@668", "window_epoch": OLD,
+             "window_name": "cmx-305"}]
+    live = {"@900": "cmx-305"}                    # a human's window, same name, different id
+    assert dispatched_window_ids(runs, live_windows=live, now_epoch=NEW) == set()
+    assert epoch.is_dangling(OLD, NEW)            # sanity: the fixture actually differs
+
+
 # --------------------------------------------------------------------------
 # A PERMISSION gate is on the PANE ONLY — the hook log cannot see it (D1)
 # --------------------------------------------------------------------------
