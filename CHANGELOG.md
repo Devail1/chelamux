@@ -38,17 +38,6 @@ history lives in `git log`.
 
 ### Fixed
 
-- **A dispatched worker could get its own Telegram topic before it had done anything.**
-  `dispatcher._spawn` claims a run's row — `window_id` still unset — before the tmux
-  window it names has been created, and a reconcile tick landing in that gap saw a live,
-  already-named window with no matching row and read it as an untracked human session,
-  minting a topic for it. Only one tick out of several dispatched windows would typically
-  land in the gap, which is why the topic showed up for just one worker at a time rather
-  than all of them. The reconcile fallback now also matches a `claimed` row with no
-  `window_id` yet by its recorded `window_name`, so the tick recognizes the window as its
-  own instead of minting a spurious one — worth it since Telegram rate-limits per chat and
-  every forum topic shares that budget, so each spurious topic spent from the same pool
-  that was dropping real messages. (CMX-308, #384)
 - **The live-terminal message timestamp now actually appears.** CMX-285/CMX-297 shipped a
   correct `MessageDisplay` response — measured directly, via `curl`, against the daemon's
   own endpoint — but registered the hook over the `http` transport, and a live fleet on a
