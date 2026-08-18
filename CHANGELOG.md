@@ -10,6 +10,8 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-18
+
 ### Added
 
 - **PARKED `TODO.md` bullets now appear on the Work board's Backlog lane.** A task marked
