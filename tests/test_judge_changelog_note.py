@@ -84,6 +84,47 @@ def test_changelog_missing_note_fires_when_code_changes_without_a_changelog_entr
     assert "CHANGELOG.md" in note["title"]
 
 
+def test_changelog_missing_note_still_fires_when_a_different_md_file_is_also_touched(
+    tmp_path, repo, origin,
+):
+    """DEFEAT_SHAPES #309: the exemption must key on CHANGELOG.md by *name*, not by
+    extension. Broadening ``Path(f).name == "CHANGELOG.md"`` to ``Path(f).suffix == ".md"``
+    would let ANY touched markdown file (README.md, a docs page, ...) silently satisfy the
+    exemption even though CHANGELOG.md itself was never touched.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    (repo / "README.md").write_text("# hello\n\nmore words about the feature.\n")
+    _git("add", "feature.py", "README.md", cwd=repo)
+    _git("commit", "-m", "add a feature and touch README, still no changelog entry", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    note = judge._changelog_missing_note(wt, "dev")
+
+    assert note is not None
+    assert "CHANGELOG.md" in note["title"]
+
+
+def test_changelog_missing_note_body_carries_the_actionable_instruction(tmp_path, repo, origin):
+    """DEFEAT_SHAPES #309: dead-coding the body (``"" and (...)``) leaves the note firing
+    (its title survives) while the entire actionable payload silently collapses to "" —
+    assert the body's real content, not just that a note exists.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    _git("add", "feature.py", cwd=repo)
+    _git("commit", "-m", "add a feature, no changelog entry", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    note = judge._changelog_missing_note(wt, "dev")
+
+    assert note is not None
+    assert "## [Unreleased]" in note["body"]
+    assert "CONTRIBUTING.md" in note["body"]
+
+
 def test_changelog_missing_note_is_none_when_the_changelog_was_touched(tmp_path, repo, origin):
     _branch_from_head(repo, "pr-1")
     _git("checkout", "pr-1", cwd=repo)
