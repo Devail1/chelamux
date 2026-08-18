@@ -807,6 +807,24 @@ def test_a_settled_row_with_no_window_id_does_not_name_match_a_live_window():
     assert dispatched_window_ids(runs, live_windows=live) == set()
 
 
+def test_a_pre_cmx69_running_row_with_no_window_id_does_not_name_match_a_live_window():
+    # The status qualifier must be pinned to exactly "claimed", not widened
+    # SIDEWAYS to the adjacent status via `dispatcher.ACTIVE_STATUSES`
+    # ("claimed" or "running"). A pre-CMX-69 row can read status="running" with
+    # window_id=None (see test_dispatched_window_ids_reads_the_run_row_not_the_name
+    # above) — that row is NOT mid-spawn, it is legacy, and the PR's own
+    # Assumptions section states it is intentionally left unmatched. Unlike
+    # test_a_settled_row_with_no_window_id_does_not_name_match_a_live_window
+    # (which pins the status axis at "needs_human", far from the ACTIVE_STATUSES
+    # boundary), this fixture pins it at "running" — the ONE status besides
+    # "claimed" a widened `in ACTIVE_STATUSES` check would wrongly admit — and
+    # gives it a live fleet with a matching name, so a status check loosened to
+    # `in dispatcher.ACTIVE_STATUSES` has something on offer to wrongly claim.
+    runs = [{"status": "running", "window_id": None, "window_name": "cmx-14"}]
+    live = {"@668": "cmx-14"}
+    assert dispatched_window_ids(runs, live_windows=live) == set()
+
+
 def test_a_claimed_rows_name_match_requires_an_exact_name_not_a_substring():
     # The recorded window_name must match the live window's name EXACTLY. A
     # live window whose name merely CONTAINS the recorded name (a near-miss,

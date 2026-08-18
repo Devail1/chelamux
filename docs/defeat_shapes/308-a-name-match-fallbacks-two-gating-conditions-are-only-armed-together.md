@@ -43,6 +43,20 @@ untouched conditions still happen to agree with the downstream signal by constru
    (`window_name="cmx-305"` recorded, `live={"@668": "cmx-30"}`) and the same near-miss
    reappears from the other side: `"cmx-30" in "cmx-305"` is `True`, so the fallback wrongly
    claims a live window that is merely a *prefix* of the row's own recorded name.
+5. `elif not wid and row.get("status") == "claimed":` → `elif not wid and row.get("status") in
+   dispatcher.ACTIVE_STATUSES:` — the status qualifier is loosened SIDEWAYS to the adjacent
+   status instead of dropped outright (that was mutation 1). `ACTIVE_STATUSES` is
+   `{"claimed", "running"}`, so this admits a `"running"` row with `window_id=None` — a
+   pre-CMX-69 legacy row (see `test_dispatched_window_ids_reads_the_run_row_not_the_name`,
+   which already fixtures exactly this shape) that the PR's own Assumptions section states is
+   *intentionally* left unmatched: it is not mid-spawn, so its live-fleet name match is a
+   coincidence, not a proof of ownership. The fixture that closed mutation 1
+   (`test_a_settled_row_with_no_window_id_does_not_name_match_a_live_window`) pins the status
+   axis at `"needs_human"` — nowhere near the `ACTIVE_STATUSES` boundary — so it can't tell a
+   dropped check from a sideways-widened one: both let `"needs_human"` through equally. A
+   fixture that pins status at `"running"` specifically (the ONE value besides `"claimed"`
+   this mutation admits) is needed to distinguish "check removed" from "check widened by
+   exactly one adjacent value."
 
 All four mutations are invisible to the same suite for the same structural reason: the
 fixtures prove the fallback fires when it *should*, and refuses when there is *nothing on
@@ -57,7 +71,13 @@ looser guard *would* have matched:
 - status: a `needs_human` row (not `"claimed"`) with `window_id=None` and
   `window_name="cmx-305"`, against `live={"@668": "cmx-305"}` — the exact live match that
   the fallback would gladly claim if the status qualifier weren't checked — asserts the
-  result is empty.
+  result is empty. This alone only proves the check exists, not its exact width — a status
+  qualifier can be defeated by dropping it OR by widening it sideways to an adjacent value,
+  and a value picked "far" from the boundary (`needs_human` vs. the real `ACTIVE_STATUSES`
+  edge) can't distinguish the two. Also pin status at the *specific* adjacent value the
+  qualifier's own alternate form would admit (here, `"running"`, the other member of
+  `ACTIVE_STATUSES`) with the same matching live window present — proves the check is closed
+  to exactly `"claimed"`, not merely closed to *something*.
 - equality: a `"claimed"` row with `window_name="cmx-30"`, against `live={"@668":
   "cmx-305"}` — a live name that *contains* the recorded name as a prefix, so a
   substring-membership check would wrongly match it — asserts the result is empty. Because
@@ -103,4 +123,11 @@ name`, was still unproven, so mutation 4 above (round 1's fixture with recorded 
 swapped) went green under the same suite (3224 tests). Closed by
 `test_a_claimed_rows_name_match_requires_an_exact_name_not_a_substring_mirrored`, the same
 near-miss fixture with which value is recorded and which is live swapped relative to round
-1's.
+1's. Round 5: closing the status mutation only ever pinned status at a value far from the
+`ACTIVE_STATUSES` boundary (`"needs_human"`), so mutation 5 above (widening `== "claimed"` to
+`in dispatcher.ACTIVE_STATUSES` instead of dropping the check) still went green under the
+same suite (3225 tests) — `"needs_human"` is excluded either way, so that fixture can't tell
+a dropped check from a sideways-widened one. Closed by
+`test_a_pre_cmx69_running_row_with_no_window_id_does_not_name_match_a_live_window`, which
+pins status at `"running"` specifically — the one other member of `ACTIVE_STATUSES` — with
+the same matching live window present.
