@@ -817,6 +817,17 @@ def test_a_claimed_rows_name_match_requires_an_exact_name_not_a_substring():
     assert dispatched_window_ids(runs, live_windows=live) == set()
 
 
+def test_a_claimed_rows_name_match_requires_an_exact_name_not_a_substring_mirrored():
+    # The mirror of the test above: a live window whose name is CONTAINED IN the
+    # recorded name (rather than the other way round) is equally a different
+    # window and must not be claimed. `==` must be checked both ways — a
+    # containment check written as `lname in name` (instead of `lname == name`)
+    # would pass this exact fixture, since "cmx-30" is a substring of "cmx-305".
+    runs = [{"status": "claimed", "window_id": None, "window_name": "cmx-305"}]
+    live = {"@668": "cmx-30"}                     # "cmx-30" in "cmx-305", but not ==
+    assert dispatched_window_ids(runs, live_windows=live) == set()
+
+
 def test_a_claimed_rows_stale_window_id_does_not_fall_through_to_name_match():
     # The THIRD gating condition on the fallback: `not wid`. The fallback exists
     # ONLY for a "claimed" row that has not been stamped an id YET (window_id is
