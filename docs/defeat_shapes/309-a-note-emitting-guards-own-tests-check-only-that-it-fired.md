@@ -12,7 +12,7 @@ both of those but still called `run_experiments` only with `{"experiments": []}`
 branch every fixture in the file happened to share), and pinned only two substrings living in
 the *tail* of `note["body"]`'s three concatenated string literals.
 
-**Mutation that defeats it:** four independent ones, in two rounds, each invisible to the
+**Mutation that defeats it:** five independent ones, in three rounds, each invisible to the
 suite at the time:
 
 1. *(round 1)* Broaden the exemption's identity check to a category check:
@@ -36,6 +36,13 @@ suite at the time:
    (`"## [Unreleased]"`, `"CONTRIBUTING.md"`), so that assertion passes even though the
    sentence stating the mechanical fact the note exists to report — that non-prose files
    changed and CHANGELOG.md did not — is gone.
+5. *(round 3)* Narrow the append's condition again, on the *other* early-return gate the same
+   guard-form bullet already named: `if changelog_note is not None:` →
+   `if changelog_note is not None and not _git_dirty(worktree):`. Round 2's fix added a
+   fixture for the `not items` gate but never one for `_git_dirty` — every fixture in the file
+   still ran on a clean worktree, so a report that bails out via the dirty-worktree branch of
+   `cannot_verify` (not the empty-experiments branch) silently lost the note, invisibly to the
+   suite.
 
 **Guard form that survives:**
 
@@ -52,9 +59,16 @@ suite at the time:
   guard's effect through the *other* branch of that gate — here, a `run_experiments` call
   with a non-empty, genuinely-executing `items` list that reaches a normal (non-cannot-verify)
   verdict — not just the one branch every other fixture in the file happens to share.
+- ⛔ That bullet has to be applied to *every* early-return gate the guard sits ahead of, not
+  just the first one found — round 2 fixed the `not items` gate and left `_git_dirty`
+  unguarded in the exact same function, one gate below. When a value is appended ahead of N
+  early returns, the fixture list needs N branches covered, not one: here, a fixture that
+  dirties the worktree (an uncommitted edit to a *tracked* file — untracked files don't count,
+  see `_git_dirty`'s own docstring) and asserts the note still lands on the resulting
+  dirty-worktree `cannot_verify` report.
 
-**Found:** CMX-309 rework round 1 (2026-08-18) and round 2 (2026-08-18), PR #385. Each round,
-the judge applied the round's mutations to `chela/judge.py` in a throwaway checkout;
-`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green under every one (round 1: 3226
-passed; round 2: 3228 passed), because the suite at each point had exactly the gaps the
-mutations exploited.
+**Found:** CMX-309 rework round 1 (2026-08-18), round 2 (2026-08-18), and round 3
+(2026-08-18), PR #385. Each round, the judge applied the round's mutations to `chela/judge.py`
+in a throwaway checkout; `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green under every
+one (round 1: 3226 passed; round 2: 3228 passed; round 3: 3230 passed), because the suite at
+each point had exactly the gaps the mutations exploited.

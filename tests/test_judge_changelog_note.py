@@ -241,6 +241,34 @@ def test_run_experiments_carries_the_note_on_a_clean_report_with_experiments(
     assert "No CHANGELOG.md entry" in titles
 
 
+def test_run_experiments_carries_the_note_on_a_dirty_worktree_cannot_verify_report(
+    tmp_path, repo, origin,
+):
+    """DEFEAT_SHAPES #309 round 3: the note is appended BEFORE the ``_git_dirty`` early
+    return specifically so it survives that path too — gating the append on
+    ``not _git_dirty(worktree)`` would let it slip past every other test in this file, since
+    none of them ever dirty the worktree. Here the worktree has an uncommitted edit to a
+    TRACKED file, so ``run_experiments`` bails out via the dirty-worktree branch of
+    ``cannot_verify`` (not the ``not items`` branch) — the note must still be present.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    _git("add", "feature.py", cwd=repo)
+    _git("commit", "-m", "add a feature, no changelog entry", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+    (wt / "test_suite.py").write_text(PASSING_TEST + "# uncommitted edit\n")
+
+    report = judge.run_experiments(
+        wt, TEST_CMD, {"experiments": []}, timeout=60, base_branch="dev",
+    )
+
+    assert report.state == judge.J_CANNOT_VERIFY
+    assert "not clean" in report.cannot_verify
+    titles = [n.get("title") for n in report.notes]
+    assert "No CHANGELOG.md entry" in titles
+
+
 def test_run_experiments_carries_no_note_when_the_changelog_was_touched(tmp_path, repo, origin):
     _branch_from_head(repo, "pr-1")
     _git("checkout", "pr-1", cwd=repo)
