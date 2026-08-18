@@ -950,6 +950,31 @@ test('an empty patch (a zero-byte file) shows the "No diff text" empty state, no
 // position or captured once — can satisfy for all three. See
 // docs/defeat_shapes/306-a-single-item-fixture-collapses-every-candidate-source.md
 // (round 3 addendum) for the general shape.
+//
+// Round 4 (judge): "(desktop, '@2'), (phone, '@2'), (phone, '@3')" never
+// actually rendered the middle variant. renderTerminals() memoizes on
+// `sig = _termMode + '|' + sel.value + '|' + wids` (terminals.js:1540) and
+// early-returns when `sig` is unchanged from the last render
+// (terminals.js:1541) — and `sig` does NOT include the viewport. Variant 2
+// kept `sel.value` at '@2' (same as variant 1) and only flipped the
+// matchMedia stub, so its `sig` was byte-identical to variant 1's: the
+// early-return fired, the stage was never rebuilt, and the assertions
+// re-checked variant 1's stale DESKTOP DOM under a new label. Only two
+// renders ever actually happened — (desktop, '@2') and (phone, '@3') —
+// because those are the only two consecutive steps where `sel.value`
+// changed. A wid source conditioned on the viewport (in either polarity)
+// produces exactly the expected value at both of those: `sw` on desktop,
+// `wids[wids.length - 1]` on phone. Closed by reordering the variants so
+// EVERY consecutive step changes `sel.value` (never re-uses the previous
+// one), which forces a real render every time regardless of viewport:
+// (desktop, '@2') -> (phone, '@3') -> (phone, '@2') -> (desktop, '@3').
+// This exercises all four (viewport, selection) combinations as genuine
+// renders, closing both the viewport-gate and positional-index families in
+// one pass, and also adds a same-node identity check so a future reordering
+// that silently re-collapses `sig` fails loudly instead of re-asserting
+// stale DOM. See
+// docs/defeat_shapes/306-a-single-item-fixture-collapses-every-candidate-source.md
+// (round 4 addendum) for the general shape.
 // ---------------------------------------------------------------------------
 
 test('the Files chip is also emitted (and wired end to end) in single-pane / mobile mode, not just the wall tile — at both desktop and phone widths, and it tracks the live selection rather than any fixed position', async () => {
@@ -987,7 +1012,19 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         // asserting the chip's identity is `expectedWid` specifically — not
         // just "a" chip, so this catches both a viewport-conditioned gate
         // and a positional (not selection-driven) wid source.
-        async function renderAndAssertSinglePane(isPhone, expectedWid, label) {
+        //
+        // renderTerminals() memoizes on `sig = _termMode|sel.value|wids`
+        // (terminals.js:1540) and no-ops when `sig` is unchanged — `sig`
+        // does NOT include the viewport. `expectRebuild` records whether
+        // THIS call's `sel.value` differs from the previous call's (i.e.
+        // whether a real rebuild is actually forced); when it does, assert
+        // the `.term-ctx-bar` node identity actually changed, so a future
+        // reordering that lets two consecutive variants share `sel.value`
+        // (silently collapsing them onto one stale render) fails loudly
+        // instead of quietly re-asserting the previous variant's DOM.
+        let previousBarNode = null;
+        async function renderAndAssertSinglePane(isPhone, expectedWid, label, { expectRebuild }) {
+            const selValueChanged = sel.value !== expectedWid;
             stubViewport(isPhone);
             sel.value = expectedWid;
             await terminals.renderTerminals();
@@ -997,6 +1034,35 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
                 `${label}: renderTerminals() did not stay in single-pane render`);
             assert.equal(document.querySelectorAll('.term-ctx-bar').length, 1,
                 `${label}: single-pane mode rendered more (or fewer) than exactly one context bar`);
+
+            const barNode = document.querySelector('.term-ctx-bar');
+            if (expectRebuild) {
+                assert.ok(selValueChanged,
+                    `${label}: test bug — expectRebuild:true requires this call's selection to differ from the previous call's, or renderTerminals()'s sig-based memoization (terminals.js:1540) will legitimately no-op`);
+                assert.notStrictEqual(barNode, previousBarNode,
+                    `${label}: renderTerminals() reused the previous variant's stale DOM node instead of rebuilding the stage — this variant's assertions would silently re-check the WRONG render (sig memoization coalesced it with the prior call)`);
+            }
+            previousBarNode = barNode;
+
+            // _ctxBarHTML(wid, draggable) has exactly two callers: the wall
+            // tile (draggable=true, terminals.js:2106) and this single-pane
+            // path (draggable=false, terminals.js:1580). Only the draggable
+            // branch emits .gs-idx/.gs-pr/.gs-cost (terminals.js:2233,2243-
+            // 2245); the Files chip itself is draggable-independent, so
+            // asserting it alone can't tell "the non-draggable branch
+            // rendered" from "the call site silently started passing
+            // draggable=true" — both leave the chip present and correctly
+            // wired. Assert the draggable-only siblings are ABSENT so a
+            // call-site regression to draggable=true (which also leaks an
+            // Alt+N tooltip and PR/cost chips into the compact mobile bar,
+            // per style.css:3764) goes red here even though the Files chip
+            // itself would look unchanged.
+            assert.equal(barNode.querySelector('.gs-idx'), null,
+                `${label}: the single-pane bar rendered .gs-idx — that element only belongs to _ctxBarHTML's DRAGGABLE (wall-tile) branch; its presence here means the single-pane call site regressed to draggable=true, silently un-rendering the non-draggable branch this guard exists to cover`);
+            assert.equal(barNode.querySelector('.gs-pr'), null,
+                `${label}: the single-pane bar rendered .gs-pr — that element only belongs to _ctxBarHTML's DRAGGABLE (wall-tile) branch; its presence here means the single-pane call site regressed to draggable=true, silently un-rendering the non-draggable branch this guard exists to cover`);
+            assert.equal(barNode.querySelector('.gs-cost'), null,
+                `${label}: the single-pane bar rendered .gs-cost — that element only belongs to _ctxBarHTML's DRAGGABLE (wall-tile) branch; its presence here means the single-pane call site regressed to draggable=true, silently un-rendering the non-draggable branch this guard exists to cover`);
 
             const filesBtn = document.querySelector(`.term-ctx-bar[data-ctx-for="${expectedWid}"] .gs-files`);
             assert.ok(filesBtn,
@@ -1028,26 +1094,33 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         // setTermMode (which fires renderTerminals() without awaiting it
         // internally — one flush() lands after its readiness Promise.all,
         // same reasoning as before()'s initial render sharing the fake
-        // ttyd-ready fixture); every later variant re-renders directly.
+        // ttyd-ready fixture); every later variant re-renders directly. This
+        // first variant's `sel.value` matches what setTermMode already
+        // established, so it does NOT force a fresh rebuild on its own
+        // (expectRebuild: false) — it's re-asserting the state setTermMode
+        // just produced, which is fine.
         stubViewport(false);
         sel.value = '@2';
         terminals.setTermMode('single');
         await flush();
-        await renderAndAssertSinglePane(false, '@2', 'desktop width, @2 selected');
+        await renderAndAssertSinglePane(false, '@2', 'desktop width, @2 selected', { expectRebuild: false });
 
-        // SAME selection, PHONE width — a mutation gating the chip behind
-        // `_isMobileTerm()` in EITHER direction (hide-on-phone or
-        // hide-on-desktop) only shows up once both viewports are exercised
-        // against the identical selection.
-        await renderAndAssertSinglePane(true, '@2', 'phone width, @2 selected');
-
-        // Change the selection to '@3' and re-render at phone width. '@3' is
-        // not `wids[1]` (that's still '@2') and not `wids[wids.length - 1]`
-        // by coincidence with the PREVIOUS selection — it's a genuinely
-        // different agent. Any fixed positional expression, or any value
-        // captured once instead of read live, produced '@2' above and
-        // cannot also produce '@3' here.
-        await renderAndAssertSinglePane(true, '@3', 'phone width, @3 selected (selection changed)');
+        // Every variant from here on changes `sel.value` from the IMMEDIATELY
+        // PRECEDING call, so each one forces a real rebuild through
+        // renderTerminals()'s sig-based memoization regardless of the
+        // viewport — a viewport-only flip (keeping the same selection, as
+        // round 3's ordering did) can no-op and silently re-assert stale
+        // DOM (round 4's finding). Walking
+        // (desktop,'@2') -> (phone,'@3') -> (phone,'@2') -> (desktop,'@3')
+        // exercises all four (viewport, selection) combinations as genuine
+        // renders: a chip gated on `_isMobileTerm()` in either polarity
+        // dies at one of the two same-viewport-different-selection pairs
+        // below, and a chip sourced from any fixed index into `wids` (not
+        // the live selection) dies the moment the selection flips back from
+        // '@3' to '@2' without a matching viewport change to hide behind.
+        await renderAndAssertSinglePane(true, '@3', 'phone width, @3 selected (selection changed)', { expectRebuild: true });
+        await renderAndAssertSinglePane(true, '@2', 'phone width, @2 selected (selection changed back)', { expectRebuild: true });
+        await renderAndAssertSinglePane(false, '@3', 'desktop width, @3 selected (selection changed)', { expectRebuild: true });
     } finally {
         globalThis.fetch = originalFetch;
         window.matchMedia = originalMatchMedia;

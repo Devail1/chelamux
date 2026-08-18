@@ -136,3 +136,53 @@ that reads the live selection on every render can. This is shape 53's fix applie
 fallback expression instead of an index formula — the same reason shape 53 gives for why no
 fixture size alone closes an unbounded family applies here once the family is "any wids[i]",
 not just "wids[0] or wids[length-1]".
+
+⚠️ **Correction (CMX-306 round 4, same PR):** round 3's fix rendered three variants —
+(desktop, `'@2'`), (phone, `'@2'`), (phone, `'@3'`) — intending the first two to prove the
+chip survives a viewport flip under the SAME selection. It didn't: `renderTerminals()`
+memoizes on `sig = _termMode + '|' + sel.value + '|' + wids.slice().sort().join(',')`
+(terminals.js:1540) and early-returns when `sig` is unchanged from the previous render
+(terminals.js:1541) — and `sig` has no viewport term. Variant 2 kept `sel.value` at `'@2'`,
+identical to variant 1, so its `sig` was byte-identical too: the early-return fired, the stage
+was never rebuilt, and variant 2's assertions silently re-checked variant 1's stale DESKTOP
+DOM under a "phone width" label. Only two renders ever actually happened —
+(desktop, `'@2'`) and (phone, `'@3'`) — because those are the only two consecutive steps
+where `sel.value` changed. A wid source conditioned on the viewport, in EITHER polarity,
+produces exactly the value each of those two renders expects (`sw` on desktop, `wids[wids.
+length - 1]` on phone), so it was invisible. `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q`
+stayed green (3217 passed) under that mutation. **Guard form that survives (updated once
+more):** when a test drives a memoized render function across a matrix of stubbed inputs
+(here: viewport × selection) and the memoization key doesn't cover every axis in that matrix,
+a variant that changes only an axis OUTSIDE the key is not a render — it's a no-op that
+re-asserts the previous variant's DOM under a new label. Order the variants so every
+CONSECUTIVE call changes at least one axis that IS in the key (here, `sel.value`, which is)
+— e.g. (desktop, `'@2'`) → (phone, `'@3'`) → (phone, `'@2'`) → (desktop, `'@3'`), where every
+step flips the selection — so a real rebuild is forced regardless of which combination of
+off-key axes also changed. Belt-and-suspenders: capture the rendered container node before
+each call and assert its identity changed after, so a future reordering that lets two
+consecutive variants share the in-key axis (silently re-collapsing onto one stale render)
+fails loudly instead of quietly re-passing. This is a distinct general shape from the rest of
+this entry — not a fixture-size or positional-index problem, but a **render memoization key
+narrower than the dimensions the guard means to exercise** — worth naming on its own:
+a test author reasons about what the *code under test* should do for each combination of
+inputs, but a memoizing render path only ever sees the *sequence of calls actually made*, and
+two calls that differ solely along an axis absent from the memo key are, to that function,
+the same call twice.
+
+The same round also found the wiring-revert gap from round 1's own header comment was still
+open: the Files chip itself is spliced into `_ctxBarHTML`'s output with no
+`draggable ? … : ''` gate (deliberately, per CMX-299 — see the production comment at
+terminals.js:2246), so flipping the single-pane call site from `_ctxBarHTML(sw, false)` to
+`_ctxBarHTML(sw, true)` still emits a present, correctly-wired Files chip — every assertion
+this guard made about the chip's identity, wiring, title, icon, click behavior, and modal
+content held bit-for-bit under the mutation. What the mutation actually does — silently
+re-route the single-pane render onto the DRAGGABLE branch, which additionally emits
+`.gs-idx`/`.gs-pr`/`.gs-cost` (terminals.js:2233, 2243–2245) that don't belong on the compact
+mobile bar — was invisible because nothing in the guard looked at any element OTHER than the
+chip it was written to cover. `pytest -q` stayed green (3217 passed) under this mutation too.
+**Guard form that survives:** when a guard exists specifically to prove a render reached one
+named branch of a two-branch function, assert on something that ONLY the other branch
+produces, not just on the artifact the branch you care about shares with its sibling — here,
+asserting `.gs-idx`, `.gs-pr`, and `.gs-cost` are ABSENT from the single-pane bar catches a
+call-site flip to the wrong branch even though the thing the guard was nominally added for
+(the Files chip) renders identically either way.
