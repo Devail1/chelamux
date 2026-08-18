@@ -12,6 +12,14 @@ history lives in `git log`.
 
 ### Added
 
+- **PARKED `TODO.md` bullets now appear on the Work board's Backlog lane.** A task marked
+  `<!-- blocked: ... -->` is deliberately not claimable, and used to be invisible
+  everywhere as a result: not in To Do, and — since it lives in `TODO.md` rather than
+  `BACKLOG.md` — not in Backlog either, so parked work sat in the tracker with nothing on
+  the board to show for it. Parked bullets now render in the Backlog lane as their own
+  card style, carrying a 🔒 cue and their blocked reason as visible text, and without the
+  Promote affordance a real `BACKLOG.md` idea gets. They remain unclaimable — only their
+  visibility changed. (CMX-298, #372)
 - **A per-session changed-files / diff surface.** A wall tile's bottom bar has a new
   "Files" chip — every file that session's live pane cwd has changed since its last
   commit (staged, unstaged, and untracked, merged into one list with per-file +/-
@@ -26,21 +34,30 @@ history lives in `git log`.
   from a dispatched worker or the orchestrator meant opening its detail view. Each row (and
   the agent-detail panel) now renders a text badge — never colour alone — reusing the same
   colourblind-safe convention as the window-type glyph; a plain session, the common case,
-  gets no badge at all. The badge updates live off the same orchestrator-change event the
-  pane toggle and decisions owner chip already listen to. (CMX-300)
+  gets no badge at all. The badge is an icon — a crown for the orchestrator, a bot for a
+  dispatched worker — carrying its own `title`/`aria-label`, so the cue is a distinct SHAPE
+  rather than colour alone and the row keeps its width for the session name. The badge
+  updates live off the same orchestrator-change event the pane toggle and decisions owner
+  chip already listen to. (CMX-300, CMX-302)
 
 ### Changed
 
-- **The judge now flags a missing CHANGELOG entry on every PR it reviews.** CONTRIBUTING.md
-  has always said "any user-facing change adds a CHANGELOG entry," but nothing checked it —
-  pure prose, and it failed twice: cutting 0.7.0 from `dev` would have shipped notes missing
-  half of it (4 of the last 8 merges since 0.6.0 carried no entry, backfilled by hand in
-  #382). Whenever a PR's diff changes non-prose files without touching `CHANGELOG.md`, the
-  judge now appends a non-blocking note — "No CHANGELOG.md entry" — to its verdict comment,
-  on every report state (including `cannot_verify`), so it is visible before merge instead
-  of only discovered after a release. It never blocks: whether a given diff is genuinely
-  user-facing stays a human call. (CMX-309)
-
+- **New defeat-shape catalog entries are numbered off their own CMX task id.** The
+  previous instruction — number one past the current highest file — was a decentralized
+  guess every concurrent branch computed independently, so a collision was inevitable
+  rather than incidental: three branches in flight on 2026-08-16 collided six ways and
+  needed disjoint ranges hand-allocated from outside them. The task number comes from a
+  single centrally serialized counter, so two branches can never draw the same one, and a
+  mechanical check now fails when an added entry is numbered any other way. Numbers only
+  ever had to be unique, not contiguous, so existing entries are untouched. (CMX-301, #375)
+- **A guard comparing a numeric constant against the module's own symbol now fails CI.**
+  `assert timeout == module._TIMEOUT` cannot see `_TIMEOUT` itself change — both sides move
+  together — so such a guard silently stops protecting its bound. A static check now flags
+  any test comparing a numeric module constant re-imported from the module under test with
+  no companion literal pin; run once repo-wide it found seven live instances that had
+  nothing to do with the bug that prompted it. Scoped to numeric constants on purpose:
+  comparing a string/enum sentinel against its symbol is the correct shape, not the defect.
+  (CMX-304, #378)
 - **The live-terminal message timestamp is quieter.** The `MessageDisplay` marker CMX-285
   added dropped seconds and its clock emoji — `[HH:MM]` in place of `🕐 HH:MM:SS` — since
   the marker's job is "roughly when did this land," not a stopwatch, and a variable-width
@@ -48,6 +65,14 @@ history lives in `git log`.
 
 ### Fixed
 
+- **`agent-terminals.sh`'s idle `nap()` no longer leaves its backgrounded `sleep` behind on
+  teardown.** A trap-driven `exit` only ends the supervisor's own shell — it never touched
+  a `sleep` still backgrounded under `nap()` at the moment the signal landed, so that child
+  was reparented to PID 1 and outlived the supervisor for up to an hour. This was cleanliness,
+  not a leak: each stranded `sleep` still expired on its own hour, bounding the pool at
+  rate × lifetime (~36) and draining it unassisted. `nap()` now publishes the backgrounded
+  sleep's pid, and `cleanup()` kills it, so a hard teardown can no longer orphan it.
+  (CMX-307, #381)
 - **The live-terminal message timestamp now actually appears.** CMX-285/CMX-297 shipped a
   correct `MessageDisplay` response — measured directly, via `curl`, against the daemon's
   own endpoint — but registered the hook over the `http` transport, and a live fleet on a
