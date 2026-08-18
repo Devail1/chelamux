@@ -17,6 +17,21 @@ The two:
 2. Exactly one step renames the checked-out HEAD to the PR's own branch (derived from
    `GITHUB_HEAD_REF`), and it runs before the Pytest step — so `git rev-parse --abbrev-ref
    HEAD` resolves to `cmx-NNN` instead of `HEAD` by the time the guard runs.
+
+Rework round 1 pinned the rename step by NAME and its position, and selected the checkout
+step with `next(...)` — the FIRST match. The judge's round-1 verdict showed both of those are
+gaps, not the invariant itself:
+
+3. The rename step must actually RUN — dead-coding it with `if: false` leaves its name, its
+   `run:`, and its position before Pytest untouched, so a presence-and-ordering check alone
+   cannot see it. Round 1's own `_step_running` docstring already argues this: "exactly one,
+   so a second copy added later can never be the one silently going unchecked" — the same
+   doctrine applies to a step that's still present but switched off.
+4. There must be EXACTLY one `actions/checkout` step. GitHub Actions hands the workspace to
+   whichever checkout ran LAST, not the first one in the file — a `next(...)` selector that
+   grabs the first match can be defeated by a second, shallow checkout added later (e.g.
+   right before "Install uv"), which re-detaches HEAD while this test keeps inspecting the
+   original, now-irrelevant, first step.
 """
 from __future__ import annotations
 
@@ -49,6 +64,21 @@ def _step_running(steps: list[dict], needle: str) -> dict:
     matches = [s for s in steps if needle in s.get("run", "")]
     assert len(matches) == 1, f"expected exactly one step running {needle!r}, found {len(matches)}"
     return matches[0]
+
+
+def test_exactly_one_checkout_step(steps):
+    """Round-1 rework's `next(...)` selector grabs the FIRST `actions/checkout` step, but
+    GitHub Actions gives the workspace to whichever checkout ran LAST. A second, shallow
+    checkout added later (e.g. right before "Install uv") would re-detach HEAD and go
+    completely unseen by a first-match selector. Pin the count to exactly one so a later
+    addition is a visible, asserted diff rather than a silent second copy.
+    """
+    checkouts = [s for s in steps if s.get("uses", "").startswith("actions/checkout@")]
+    assert len(checkouts) == 1, (
+        f"expected exactly one actions/checkout step, found {len(checkouts)} — a second "
+        "checkout re-clones the workspace and can silently re-detach HEAD or shorten "
+        "history, even though the first checkout still looks correct"
+    )
 
 
 def test_checkout_fetches_full_history(steps):
@@ -84,4 +114,21 @@ def test_head_is_renamed_to_the_pr_branch_before_pytest(steps):
     assert steps.index(rename) < steps.index(pytest_step), (
         "the HEAD-renaming step must run before Pytest, or the CMX-301 guard still sees "
         "the detached checkout when it runs"
+    )
+
+
+def test_head_rename_step_is_unconditional(steps):
+    """Round-1 rework pinned the rename step's name, its `run:` contents, and its position —
+    but never that it actually EXECUTES. Dead-coding it with `if: false` leaves the name,
+    the `run:` string, and the ordering all untouched, so every assertion above still
+    passes while the rename never runs and the CMX-301 guard keeps seeing a detached HEAD.
+
+    The invariant is that the step is unconditional: no `if:` key at all. Any future
+    condition on this step should be a deliberate, visible diff here, not a silent skip.
+    """
+    rename = _step_running(steps, "GITHUB_HEAD_REF")
+    assert "if" not in rename, (
+        f"the GITHUB_HEAD_REF rename step has an `if: {rename.get('if')!r}` condition — it "
+        "must run unconditionally on every pull_request build, or it can be switched off "
+        "while its name, run:, and position all still look correct"
     )
