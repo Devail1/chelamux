@@ -923,103 +923,131 @@ test('an empty patch (a zero-byte file) shows the "No diff text" empty state, no
 // that gated filesChip behind `draggable` (or dropped it from the
 // non-draggable path entirely) would leave every test above this line green.
 //
-// Round 2 (judge, same day): the round-10 test used a two-agent fixture with
-// the select pinned to the SECOND agent, which is also the LAST agent — a
+// Round 2 (judge): the round-10 test used a two-agent fixture with the
+// select pinned to the SECOND agent, which is also the LAST agent — a
 // mutation swapping the selected wid (`sw`) for `wids[wids.length - 1]` was
 // indistinguishable from correct. It also never stubbed matchMedia to a
-// phone width, so a mutation gating the chip behind `_isMobileTerm()` (this
-// test's own title notwithstanding) went unnoticed. Closed with a THIRD
-// agent (so neither positional default equals the selection) and a real
-// mobile-width matchMedia stub for the duration of the test.
+// phone width, so a mutation gating the chip behind `_isMobileTerm()` went
+// unnoticed. Closed with a THIRD agent (so neither positional default
+// equals the selection) and a mobile-width matchMedia stub for the whole
+// test.
+//
+// Round 3 (judge): closing the mobile blind spot by stubbing matchMedia to
+// PHONE for the *entire* test just traded it for the mirror desktop blind
+// spot — a mutation gating the chip behind `!draggable && !_isMobileTerm()`
+// (hides on DESKTOP, shows on phone) went unnoticed, because nothing here
+// ever rendered the single pane at desktop width. And the three-agent
+// fixture only proved the chip wasn't `wids[0]` or `wids[wids.length - 1]`
+// — it never proved the chip TRACKS the selection, so a mutation that reads
+// ANY fixed index into `wids` that happens to alias the selection's slot
+// (`wids[1]`, since '@2' sits at index 1) was still indistinguishable from
+// correct. Closed by rendering the single pane through THREE variants —
+// (desktop, '@2'), (phone, '@2'), (phone, '@3') — asserting the chip's
+// identity each time: the first two prove the chip survives a viewport flip
+// in either direction with the SAME selection, and the third changes the
+// selection (to a wid that is not `wids[1]`) and re-renders, which only a
+// chip that reads the LIVE selection on every render — not a value fixed by
+// position or captured once — can satisfy for all three. See
+// docs/defeat_shapes/306-a-single-item-fixture-collapses-every-candidate-source.md
+// (round 3 addendum) for the general shape.
 // ---------------------------------------------------------------------------
 
-test('the Files chip is also emitted (and wired end to end) in single-pane / mobile mode, not just the wall tile', async () => {
+test('the Files chip is also emitted (and wired end to end) in single-pane / mobile mode, not just the wall tile — at both desktop and phone widths, and it tracks the live selection rather than any fixed position', async () => {
     const modal = document.getElementById('modal-diff');
     const sel = document.getElementById('term-agent');
     const originalFetch = globalThis.fetch;
     const originalMatchMedia = window.matchMedia;
     try {
-        // THREE agents, with the select pinned to the MIDDLE one (@2), so
-        // that `sw = sel.value || wids[0]` (terminals.js:1579) diverges from
-        // BOTH positional defaults a fallback expression can degrade to:
-        // `wids[0]` ('@1', first-registered) AND `wids[wids.length - 1]`
-        // ('@3', last-registered). Round 1 shipped a single extra agent
-        // ('@2' as both "selected" and "last") and judge round 2 killed it
-        // by swapping `sw` for `wids[wids.length - 1]` — with only two
-        // agents that's the same value '@2' the selection would have
-        // produced. Neither positional default can equal '@2' with a THIRD
-        // agent ('@3') registered after it. See
-        // docs/defeat_shapes/306-a-single-item-fixture-collapses-every-candidate-source.md
-        // (round 2 addendum) for the general shape.
+        // THREE agents. '@2' (the initial selection) sits at index 1, so it
+        // is neither `wids[0]` nor `wids[wids.length - 1]` — and '@3' (the
+        // selection this test switches to below) is neither `wids[1]` nor
+        // any OTHER fixed index that could have coincidentally matched '@2'
+        // above, since it is a different agent at a different render.
         util.setAgentsCache([...AGENTS,
             { name: 'w2', window_id: '@2', online: true },
             { name: 'w3', window_id: '@3', online: true }]);
-        await terminals.renderTerminals();
-        sel.value = '@2';
-
-        // This file's before() stubs matchMedia to report a DESKTOP width for
-        // every test, so `_isMobileTerm()` is unconditionally false here —
-        // this test's own title claims the chip renders on "single-pane /
-        // mobile mode", but until now nothing ever made that actually true.
-        // A regression that hides the chip behind `!draggable &&
-        // _isMobileTerm()` (the CMX-133 gate shape terminals.js:842 already
-        // uses for the kill button) would leave every assertion below green
-        // regardless, because `_isMobileTerm()` could never flip to true.
-        // Stub matchMedia to report a PHONE width for the rest of this test
-        // so the single-pane render this test performs actually happens
-        // under a real mobile match, same idiom as wallnav.test.mjs's
-        // CMX-133 wiring guard.
-        window.matchMedia = q => ({
-            media: q, matches: true, addEventListener() {}, removeEventListener() {},
-            addListener() {}, removeListener() {},
-        });
 
         globalThis.fetch = url => {
             const path = String(url);
-            if (path.endsWith('/api/agents/%402/diff')) {
+            if (path.endsWith('/api/agents/%402/diff') || path.endsWith('/api/agents/%403/diff')) {
                 return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(DIFF_STATE) });
             }
             return fakeFetch(url);
         };
 
-        // setTermMode fires renderTerminals() without awaiting it internally;
-        // @2's readiness is already cached from before()'s initial render
-        // (agents share the same fake ttyd-ready fixture), so its
-        // Promise.all resolves on a microtask with no real fetch/timer in
-        // between — one flush() (a macrotask) is enough to land after it.
+        const stubViewport = isPhone => {
+            window.matchMedia = q => ({
+                media: q, matches: isPhone, addEventListener() {}, removeEventListener() {},
+                addListener() {}, removeListener() {},
+            });
+        };
+
+        // Render the single pane for one (viewport, selected wid) variant
+        // and drive the FULL click -> modal -> file-list -> close chain,
+        // asserting the chip's identity is `expectedWid` specifically — not
+        // just "a" chip, so this catches both a viewport-conditioned gate
+        // and a positional (not selection-driven) wid source.
+        async function renderAndAssertSinglePane(isPhone, expectedWid, label) {
+            stubViewport(isPhone);
+            sel.value = expectedWid;
+            await terminals.renderTerminals();
+
+            const stage = document.getElementById('term-stage');
+            assert.ok(stage.classList.contains('term-single'),
+                `${label}: renderTerminals() did not stay in single-pane render`);
+            assert.equal(document.querySelectorAll('.term-ctx-bar').length, 1,
+                `${label}: single-pane mode rendered more (or fewer) than exactly one context bar`);
+
+            const filesBtn = document.querySelector(`.term-ctx-bar[data-ctx-for="${expectedWid}"] .gs-files`);
+            assert.ok(filesBtn,
+                `${label}: the single-pane bottom bar has no .gs-files "Files" chip for ${expectedWid}, the SELECTED agent — either the chip was dropped on the non-draggable (single/mobile) path at this viewport, or the pane rendered a positional (not selected) agent`);
+            assert.match(filesBtn.getAttribute('onclick') || '', new RegExp(`chela\\.openDiffModal\\('${expectedWid}'\\)`),
+                `${label}: the single-pane Files chip is wired to the wrong session — it must open ${expectedWid} (the DISPLAYED/selected agent), not a positional default`);
+            assert.equal(filesBtn.getAttribute('title'), 'Changed files',
+                `${label}: the single-pane Files chip lost its "Changed files" title`);
+            assert.ok(/<circle|<path/.test(filesBtn.innerHTML),
+                `${label}: the single-pane Files chip rendered no SVG glyph content — the git-compare icon is empty`);
+
+            assert.equal(modal.classList.contains('active'), false,
+                `${label}: the diff modal starts open — the click assertion below could not tell a real open from a no-op`);
+            clickFilesChip(filesBtn);
+            assert.equal(modal.classList.contains('active'), true,
+                `${label}: clicking the single-pane Files chip never made #modal-diff visible — the non-draggable path's chip is present but dead`);
+
+            await flush();   // let openDiffModal's /diff fetch + _render resolve
+            const rows = document.querySelectorAll('#diff-modal-content .diff-file-row');
+            assert.equal(rows.length, 2,
+                `${label}: the diff modal did not render ${expectedWid}'s fetched file list when opened from single-pane mode — either the wrong session's /diff was requested, or none was`);
+
+            window.chela.closeDiffModal();
+            assert.equal(modal.classList.contains('active'), false,
+                `${label}: closeDiffModal() did not close the modal that was opened from single-pane mode`);
+        }
+
+        // Desktop width, selection = '@2'. Establishes single-pane mode via
+        // setTermMode (which fires renderTerminals() without awaiting it
+        // internally — one flush() lands after its readiness Promise.all,
+        // same reasoning as before()'s initial render sharing the fake
+        // ttyd-ready fixture); every later variant re-renders directly.
+        stubViewport(false);
+        sel.value = '@2';
         terminals.setTermMode('single');
         await flush();
+        await renderAndAssertSinglePane(false, '@2', 'desktop width, @2 selected');
 
-        const stage = document.getElementById('term-stage');
-        assert.ok(stage.classList.contains('term-single'),
-            'setTermMode(\'single\') did not switch #term-stage into single-pane render');
+        // SAME selection, PHONE width — a mutation gating the chip behind
+        // `_isMobileTerm()` in EITHER direction (hide-on-phone or
+        // hide-on-desktop) only shows up once both viewports are exercised
+        // against the identical selection.
+        await renderAndAssertSinglePane(true, '@2', 'phone width, @2 selected');
 
-        assert.equal(document.querySelectorAll('.term-ctx-bar').length, 1,
-            'setup: single-pane mode rendered more (or fewer) than exactly one context bar');
-        const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@2"] .gs-files');
-        assert.ok(filesBtn,
-            'the single-pane bottom bar has no .gs-files "Files" chip for @2, the SELECTED agent — either the chip was dropped on the non-draggable (single/mobile) path, or the pane rendered the wrong (first, not selected) agent entirely');
-        assert.match(filesBtn.getAttribute('onclick') || '', /chela\.openDiffModal\('@2'\)/,
-            'the single-pane Files chip is wired to the wrong session — it must open @2 (the DISPLAYED/selected agent), not @1 (wids[0])');
-        assert.equal(filesBtn.getAttribute('title'), 'Changed files',
-            'the single-pane Files chip lost its "Changed files" title');
-        assert.ok(/<circle|<path/.test(filesBtn.innerHTML),
-            'the single-pane Files chip rendered no SVG glyph content — the git-compare icon is empty');
-
-        assert.equal(modal.classList.contains('active'), false,
-            'the diff modal starts open — the click assertion below could not tell a real open from a no-op');
-        clickFilesChip(filesBtn);
-        assert.equal(modal.classList.contains('active'), true,
-            'clicking the single-pane Files chip never made #modal-diff visible — the non-draggable path\'s chip is present but dead');
-
-        await flush();   // let openDiffModal's /diff fetch + _render resolve
-        const rows = document.querySelectorAll('#diff-modal-content .diff-file-row');
-        assert.equal(rows.length, 2,
-            'the diff modal did not render @2\'s fetched file list when opened from single-pane mode — either the wrong session\'s /diff was requested, or none was');
-
-        window.chela.closeDiffModal();
-        assert.equal(modal.classList.contains('active'), false,
-            'closeDiffModal() did not close the modal that was opened from single-pane mode');
+        // Change the selection to '@3' and re-render at phone width. '@3' is
+        // not `wids[1]` (that's still '@2') and not `wids[wids.length - 1]`
+        // by coincidence with the PREVIOUS selection — it's a genuinely
+        // different agent. Any fixed positional expression, or any value
+        // captured once instead of read live, produced '@2' above and
+        // cannot also produce '@3' here.
+        await renderAndAssertSinglePane(true, '@3', 'phone width, @3 selected (selection changed)');
     } finally {
         globalThis.fetch = originalFetch;
         window.matchMedia = originalMatchMedia;

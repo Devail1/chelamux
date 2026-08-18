@@ -89,3 +89,50 @@ query to one fixed value for every test, override `window.matchMedia` to the OTH
 (phone width, `matches: true`) for the duration of that one test — restoring the original stub
 in a `finally` — rather than trusting the file-wide default to exercise it. A title naming a
 condition is not evidence the harness ever makes that condition true.
+
+⚠️ **Correction (CMX-306 round 3, same PR):** round 2's two fixes were each a one-directional
+close that traded its own blind spot for the mirror of the one it had just closed — the exact
+family shape 52/53 name for positional defaults, showing up again here in two OTHER
+dimensions (viewport, and "any index" rather than "the two named indices").
+
+*Viewport half:* round 2 stopped hard-stubbing `matchMedia` to DESKTOP for the *whole test*
+and instead stubbed it to PHONE for the whole test, to make `_isMobileTerm()` observably
+`true` at least once. But a guard that renders ONLY at phone width can prove a
+`_isMobileTerm()`-gated mutation *that hides the chip on phone* (round 2's own finding) — it
+cannot see the mirror mutation that hides the chip on **desktop**:
+`${filesChip}` → `${(!draggable && !_isMobileTerm()) ? '' : filesChip}`. Under an
+all-phone-stubbed test, `_isMobileTerm()` is unconditionally `true`, so `!_isMobileTerm()` is
+unconditionally `false`, and `!draggable && false` never gates anything — the mutated chip
+renders every time the guard checks, for the same structural reason the all-desktop stub
+missed the opposite mutation one round earlier. `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q`
+stayed green (3217 passed) under this mutation, phone-only stub in place. **Guard form that
+survives (updated):** a viewport-gated code path needs the guard's assertions repeated at
+**both** matchMedia values within the same test — not a single stub picked to make the
+target condition true once — so a gate written in either polarity (`… && _isMobileTerm()` or
+`… && !_isMobileTerm()`) fails one of the two renders and goes red either way.
+
+*Positional half:* round 2's fixture reasoning ("the fallback expression only has two
+non-selected operands, `wids[0]` and `wids[wids.length - 1]`, so a third fixture item rules
+out both") was true of the two operands actually *written in source* — but the guard doesn't
+observe source text, only the rendered value, and any `wids[i]` a mutation names is
+indistinguishable to it as long as that `i` happens to land on the selected agent's index.
+With the selection pinned to the middle of `['@1','@2','@3']` (index 1), the mutation
+`${_ctxBarHTML(sw, false)}` → `${_ctxBarHTML(wids[1], false)}` produces `'@2'` — bit-for-bit
+the same value `sw` would have — because `wids[1]` and "the selected agent" alias for this
+one static fixture, exactly as `wids[0]` aliased `sw` in round 1 before a second agent was
+added. Growing the fixture further does not close this the way it closed rounds 1–2: whatever
+index the selection sits at, some fixed `wids[i]` expression always equals it for a fixture
+that never changes selection mid-test — this is precisely the unbounded-family case shape 53
+already prescribes a differential assertion for, which the original entry above incorrectly
+reasoned this call site was exempt from (the exemption held only for the two *named* fallback
+operands, not for an arbitrary constant index a mutation is free to pick). `pytest -q` stayed
+green (3217 passed) under this mutation too, three-agent fixture in place, selection pinned to
+`'@2'` for the test's whole duration. **Guard form that survives (updated again):** don't stop
+at proving the chip matches the selection ONCE — change `sel.value` to a DIFFERENT agent
+(here, `'@3'`, chosen so it is not `wids[1]` either) and re-render within the same test,
+asserting the chip now carries the NEW selection. A constant, or any fixed-index expression,
+produces the same value across both renders and cannot satisfy both assertions; only a chip
+that reads the live selection on every render can. This is shape 53's fix applied to a
+fallback expression instead of an index formula — the same reason shape 53 gives for why no
+fixture size alone closes an unbounded family applies here once the family is "any wids[i]",
+not just "wids[0] or wids[length-1]".
