@@ -45,14 +45,19 @@ const _LUCIDE = {
     // chip's minimize icon, replacing the 🗕 window-chrome emoji (U+1F5D5) for
     // the same tofu reason as maximize-2/minimize-2 above (CMX-154).
     'minus': '<path d="M5 12h14"/>',
+    // `crown` — the sidebar's orchestrator role badge (nav.js _agentRowHtml,
+    // CMX-302), replacing the old "Orchestrator" text pill: that word was wide
+    // enough to truncate the session name sitting next to it on a real row.
+    'crown': '<path d="M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z"/><path d="M5 21h14"/>',
     // `git-compare` — the wall tile bottom bar's "Files" chip (terminals.js
     // _ctxBarHTML), opening the per-session changed-files/diff modal
     // (diffpanel.js, CMX-299).
     'git-compare': '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/>',
 };
 function lucideIcon(name, size = 16) {
+    if (!(name in _LUCIDE)) throw new Error(`lucideIcon: unknown icon "${name}" — not in _LUCIDE`);
     return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" `
-        + `stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${_LUCIDE[name] || ''}</svg>`;
+        + `stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${_LUCIDE[name]}</svg>`;
 }
 
 const REFRESH_MS = 30000;

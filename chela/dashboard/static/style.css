@@ -3087,15 +3087,27 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .ar-ctx.warn { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, transparent); }
 .ar-ctx.danger { color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); }
-/* CMX-300: session role badge. Text, not a bare dot — the label itself is the
-   colourblind-safe cue; colour only reinforces it. Omitted entirely for 'plain'
-   sessions (the common case), so it never appears in markup or CSS. */
+/* CMX-300: session role badge. A shape — text pill or icon — never a bare dot,
+   so the cue is colourblind-safe; colour only reinforces it. Omitted entirely
+   for 'plain' sessions (the common case), so it never appears in markup or CSS. */
 .ar-role {
     flex: 0 0 auto; font-size: var(--card-font-size); font-weight: 600; line-height: 15px;
     padding: 0 5px; border-radius: 999px; background: var(--surface);
 }
-.ar-role.orchestrator { color: #CC79A7; background: color-mix(in srgb, #CC79A7 16%, transparent); }
+/* CMX-302: orchestrator (crown) and dispatched (bot, item 2, Liav 2026-08-17)
+   are both bare ICON badges, not text pills — "Orchestrator"/"Dispatched" were
+   both wide enough to truncate the session name next to them. One glyph per
+   concept (the word itself moves to the title/aria-label), sized/centred like
+   the lucide icons elsewhere rather than the .ar-role text-pill padding above
+   (kept on the base rule for any future role that DOES want a text pill). Box
+   model shared (only colour differs) — one rule, not two copies to drift apart. */
+.ar-role.dispatched, .ar-role.orchestrator {
+    display: flex; align-items: center; justify-content: center;
+    min-width: 18px; max-width: 18px;
+    width: 18px; height: 18px; padding: 0; line-height: normal;
+}
 .ar-role.dispatched { color: #0072B2; background: color-mix(in srgb, #0072B2 14%, transparent); }
+.ar-role.orchestrator { color: #CC79A7; background: color-mix(in srgb, #CC79A7 16%, transparent); }
 /* CMX-146: Claude's own auto-generated session title — its own dim line, distinct
    from `.ar-recap` below (an occasional away_summary blurb, often absent). */
 .ar-title {

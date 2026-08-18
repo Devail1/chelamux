@@ -255,7 +255,99 @@ test('the orchestrator window gets an Orchestrator role badge — plain windows 
     const badge = rowFor('orch').querySelector('.ar-role');
     assert.ok(badge, 'the orchestrator window rendered no .ar-role badge after subscribing — ' +
         'onOrchestratorChange did not redraw the sidebar');
-    assert.equal(badge.textContent, 'Orchestrator');
+    // CMX-302: the orchestrator badge is a bare crown ICON, not text — the word
+    // itself lives in the title tooltip so the badge stays narrow.
+    const svg = badge.querySelector('svg');
+    assert.ok(svg, 'the orchestrator badge rendered no crown icon');
+    // 🔴 GUARD (CMX-302 rework round 2): `querySelector('svg')` alone only proves an
+    // <svg> WRAPPER exists — util.js's lucideIcon() emits the wrapper tag unconditionally
+    // and interpolates _LUCIDE[name] inside it, so an empty `_LUCIDE['crown']` entry
+    // ('' instead of the real path data) still produces a present-but-EMPTY <svg> that
+    // this assertion alone cannot tell apart from a real crown. Assert the actual glyph
+    // content rendered inside it.
+    //
+    // 🔴 GUARD (CMX-302 rework round 3, DEFEAT_SHAPES literal-value-vs-presence): a bare
+    // `svg.querySelector('path')` is satisfied by ANY icon with at least one <path> —
+    // which is every entry in _LUCIDE, including `minus` (a single dash). Swapping
+    // nav.js's `lucideIcon('crown', 12)` call to `lucideIcon('minus', 12)` still renders
+    // an <svg> with a <path> and leaves title/class untouched, so it survives every
+    // assertion above. Pin the badge to the crown's own literal path data — hardcoded
+    // here, independent of util.js's _LUCIDE table, so a corrupted or swapped table
+    // entry cannot satisfy its own test.
+    const pathData = [...svg.querySelectorAll('path')].map(p => p.getAttribute('d'));
+    assert.deepEqual(pathData, [
+        'M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z',
+        'M5 21h14',
+    ], 'the orchestrator badge did not render the CROWN icon\'s exact path data — a ' +
+        'present <path> alone cannot tell a crown from any other single-path lucide glyph ' +
+        '(e.g. `minus`), so this must pin the literal shape, not merely its presence');
+    // 🔴 GUARD (CMX-302 rework round 3, DEFEAT_SHAPES enumerated-properties-vs-erasure):
+    // lucideIcon() paints every glyph with stroke="currentColor" (fill="none" — these are
+    // outline icons, so the stroke IS the visible ink). Flipping that to stroke="none"
+    // leaves every <path> node — and its `d` data above — untouched in the DOM, so
+    // neither the path-data check above nor the CSS display/width checks in
+    // tests/sidebar_role_badge_css.test.mjs can see it: the badge silently renders
+    // nothing, degrading to exactly the bare colour dot CMX-300 forbids.
+    assert.equal(svg.getAttribute('stroke'), 'currentColor',
+        'the orchestrator badge\'s <svg> lost its stroke paint — stroke="none" leaves every ' +
+        '<path> node (and its `d` data) in the DOM untouched while drawing nothing, so it is ' +
+        'invisible to both the path-data check above and the CSS cascade checks in ' +
+        'tests/sidebar_role_badge_css.test.mjs');
+    // 🔴 GUARD (CMX-302 rework round 4): `stroke="currentColor"` alone only pins the
+    // paint's COLOUR, not whether any of it is visible. `stroke-width="0"` leaves the
+    // stroke attribute, every <path> node and its exact `d` data untouched — the assert
+    // above still passes — while the badge draws a zero-width, zero-ink outline: the
+    // same "renders nothing" defeat as stroke="none" one attribute over.
+    assert.equal(svg.getAttribute('stroke-width'), '2',
+        'the orchestrator badge\'s <svg> lost its stroke width — stroke-width="0" leaves the ' +
+        'stroke="currentColor" paint and every <path> node in the DOM untouched while drawing ' +
+        'a zero-ink outline, invisible the same way stroke="none" is');
+    // 🔴 GUARD (CMX-302 rework round 4): the call site (`lucideIcon('crown', 12)`) passes
+    // the icon's rendered box as an argument nothing else reads — no `.ar-role svg` CSS
+    // rule sizes it (the wrapper <span>'s 18px in sidebar_role_badge_css.test.mjs is a
+    // sibling property, not this one). `lucideIcon('crown', 0)` renders a 0x0 <svg> with
+    // its path data, stroke paint, title and class all untouched, so every assertion
+    // above stays green while the icon itself has no area to draw into.
+    assert.equal(svg.getAttribute('width'), '12',
+        'the orchestrator badge\'s <svg> rendered at zero width — path data, stroke paint and ' +
+        'title/class all stay untouched by a 0-size call, so only reading the width/height ' +
+        'attributes themselves can catch it');
+    assert.equal(svg.getAttribute('height'), '12',
+        'the orchestrator badge\'s <svg> rendered at zero height — see the width assertion above');
+    // 🔴 GUARD (CMX-302 rework round 5): every check above pins the ICON's own paint,
+    // geometry and identity — none of them reads the badge's TEXT. `${lucideIcon('crown',
+    // 12)}` is interpolated directly after the opening <span> tag with no sibling text
+    // node, but nothing asserted that. Putting the word "Orchestrator" back in ahead of
+    // the icon (`>Orchestrator${lucideIcon(...)}<`) reinstates the exact wide-badge bug
+    // this ticket exists to fix — the badge widens to fit the text again — while leaving
+    // every icon-content assertion above (svg present, path data, stroke, stroke-width,
+    // width/height, title, classList) completely untouched, since none of them look past
+    // the <svg> boundary at the span's own text nodes.
+    assert.equal(badge.textContent, '',
+        'the orchestrator badge carries visible text again — CMX-302\'s whole point was ' +
+        'replacing the wide "Orchestrator" text pill with an icon-only badge (the word now ' +
+        'lives only in the title tooltip); any text content here reproduces the reported bug');
+    // 🔴 GUARD (CMX-302 rework round 5): `viewBox` is the one geometry attribute on the
+    // <svg> nothing reads. The crown's path data is authored in a 24x24 user-space box;
+    // widening viewBox to e.g. "0 0 2400 2400" maps that same, byte-identical `d` data
+    // into 1% of the rendered area, so a 12px badge paints a sub-pixel speck — the same
+    // "renders nothing visible" erasure as stroke="none" (round 3) and stroke-width="0"
+    // (round 4), one coordinate-system hop further out. The `d`-data deepEqual above still
+    // passes (the path nodes are untouched) and stroke/stroke-width/width/height all still
+    // read as before, because viewBox controls how the SAME path data maps into the SAME
+    // box, not any of those other attributes.
+    assert.equal(svg.getAttribute('viewBox'), '0 0 24 24',
+        'the orchestrator badge\'s <svg> lost its 24x24 viewBox — a widened viewBox maps the ' +
+        'same literal path data into a sliver of the rendered box, drawing an invisible speck ' +
+        'while every path-data/stroke/size assertion above stays green');
+    assert.equal(badge.getAttribute('title'), 'Orchestrator session');
+    // 🔴 GUARD (CMX-302 rework round 7, item 2): lucideIcon() hardcodes
+    // aria-hidden="true" on the <svg> itself, so the badge's accessible name has
+    // to live on the wrapping <span> — title alone gives a screen reader a name
+    // via the HTML title-as-accessible-name fallback, but aria-label is the
+    // explicit, non-fallback source. Losing it silently degrades the badge back
+    // to an unlabelled decorative icon for anyone not hovering a mouse over it.
+    assert.equal(badge.getAttribute('aria-label'), 'Orchestrator session');
     assert.ok(badge.classList.contains('orchestrator'));
     assert.equal(rowFor('other').querySelector('.ar-role'), null,
         'a plain window rendered a role badge — plain sessions must render none');
@@ -277,7 +369,49 @@ test('a dispatcher-owned window gets a Dispatched role badge, distinct from Orch
     nav.renderSidebarAgents(rows);
     const badge = rowFor('worker').querySelector('.ar-role');
     assert.ok(badge, 'a dispatched window rendered no .ar-role badge at all');
-    assert.equal(badge.textContent, 'Dispatched');
+    // CMX-302 rework round 7, item 2 (Liav, approved 2026-08-17): the dispatched
+    // badge is now a bare BOT icon, not text — same treatment as the crown above,
+    // for the same reason (the old "Dispatched" text pill was wide enough to
+    // truncate the session name next to it). Same guard set as the crown badge:
+    // present svg, literal path AND <rect> geometry (the bot glyph is the only
+    // _LUCIDE entry built from a <rect> plus <path>s, not <path>s alone — a bare
+    // `querySelectorAll('path')` deepEqual would stay green if the <rect> body
+    // vanished and left only the antenna/ear/leg strokes), stroke paint, stroke
+    // width, rendered size, viewBox, empty textContent, and the accessible name
+    // — see the crown test's own per-line comments above for why each is a
+    // separate, independently-defeatable axis (DEFEAT_SHAPES #302).
+    const svg = badge.querySelector('svg');
+    assert.ok(svg, 'the dispatched badge rendered no bot icon');
+    const pathData = [...svg.querySelectorAll('path')].map(p => p.getAttribute('d'));
+    assert.deepEqual(pathData, ['M12 8V4H8', 'M2 14h2', 'M20 14h2', 'M15 13v2', 'M9 13v2'],
+        'the dispatched badge did not render the BOT icon\'s exact path data — a present <path> ' +
+        'alone cannot tell a bot from any other lucide glyph, so this must pin the literal shape');
+    const rect = svg.querySelector('rect');
+    assert.ok(rect, 'the dispatched badge\'s bot icon lost its <rect> body — the antenna/ear/leg ' +
+        '<path> strokes alone do not read as a robot head without it, and the path-data deepEqual ' +
+        'above cannot see a missing <rect>');
+    assert.deepEqual(
+        ['width', 'height', 'x', 'y', 'rx'].map((attr) => rect.getAttribute(attr)),
+        ['16', '12', '4', '8', '2'],
+        'the dispatched badge\'s bot icon <rect> lost its exact geometry');
+    assert.equal(svg.getAttribute('stroke'), 'currentColor',
+        'the dispatched badge\'s <svg> lost its stroke paint — stroke="none" leaves every path/rect ' +
+        'node untouched while drawing nothing');
+    assert.equal(svg.getAttribute('stroke-width'), '2',
+        'the dispatched badge\'s <svg> lost its stroke width — stroke-width="0" draws a zero-ink outline');
+    assert.equal(svg.getAttribute('width'), '12',
+        'the dispatched badge\'s <svg> rendered at zero width — path/rect data and stroke paint stay ' +
+        'untouched by a 0-size call');
+    assert.equal(svg.getAttribute('height'), '12',
+        'the dispatched badge\'s <svg> rendered at zero height — see the width assertion above');
+    assert.equal(svg.getAttribute('viewBox'), '0 0 24 24',
+        'the dispatched badge\'s <svg> lost its 24x24 viewBox — a widened viewBox maps the same ' +
+        'literal path/rect data into a sliver of the rendered box');
+    assert.equal(badge.textContent, '',
+        'the dispatched badge carries visible text again — the word now lives only in the ' +
+        'title/aria-label, and reinstating it reproduces the reported truncation bug');
+    assert.equal(badge.getAttribute('title'), 'Dispatched session');
+    assert.equal(badge.getAttribute('aria-label'), 'Dispatched session');
     assert.ok(badge.classList.contains('dispatched'));
     assert.equal(rowFor('manual').querySelector('.ar-role'), null,
         'a manually-launched window rendered a role badge — plain sessions must render none');
@@ -287,11 +421,13 @@ test('holding BOTH the inbox slot and the dispatched flag reads as Orchestrator,
     const rows = [agent('both', { window_id: '@5', dispatched: true })];
     util.setAgentsCache(rows);
     nav.renderSidebarAgents(rows);
-    assert.notEqual(rowFor('both').querySelector('.ar-role').textContent, 'Orchestrator',
+    assert.ok(!rowFor('both').querySelector('.ar-role').classList.contains('orchestrator'),
         'the row already read as Orchestrator before subscribing — fixture leaked state');
 
     await orchestrator.orchestratorSubscribe('@5');   // no renderSidebarAgents call here
-    assert.equal(rowFor('both').querySelector('.ar-role').textContent, 'Orchestrator');
+    const badge = rowFor('both').querySelector('.ar-role');
+    assert.ok(badge.classList.contains('orchestrator') && !badge.classList.contains('dispatched'),
+        'holding both the inbox slot and the dispatched flag should read as Orchestrator, not Dispatched');
     await orchestrator.orchestratorRelease('@5');
 });
 
@@ -332,7 +468,7 @@ test('WIRING: onOrchestratorChange redraws the sidebar badge off one real subscr
         await orchestrator.orchestratorSubscribe('@9');
 
         const badge = rowFor('cmx300-wired').querySelector('.ar-role');
-        assert.ok(badge && badge.textContent === 'Orchestrator',
+        assert.ok(badge && badge.classList.contains('orchestrator') && badge.querySelector('svg'),
             'the sidebar badge did not update off the real subscribe round trip — onOrchestratorChange is not wired to renderSidebarAgents');
         assert.equal(sawAgentsFetch, false,
             'the badge redraw refetched /api/agents — it must redraw off the already-cached agent list, not re-poll');
@@ -409,6 +545,20 @@ test('every nav item renders a non-empty lucide SVG — no unicode glyph survive
         for (const g of OLD_GLYPHS)
             assert.ok(!icon.textContent.includes(g), `the old ${g} glyph is still rendered on ${id}`);
     }
+});
+
+// CMX-302 negative control: the guard above only proves a KNOWN icon name (like
+// 'crown') renders non-empty. It says nothing about what happens when a name is
+// NOT in _LUCIDE — and `${_LUCIDE[name] || ''}` used to answer that with a
+// silently-valid-looking `<svg></svg>` (a real <svg> element, so a bare
+// `querySelector('svg')` truthiness check — as the orchestrator-badge test above
+// does — can't tell it apart from the real icon). A typo'd or renamed lucide name
+// must fail loudly at the call site instead, so the corruption surfaces the moment
+// the row renders rather than as a blank badge nobody notices.
+test('lucideIcon FAILS LOUDLY for an unknown icon name — it never falls back to an empty <svg>', () => {
+    assert.throws(() => util.lucideIcon('not-a-real-lucide-icon'),
+        /unknown icon/,
+        'lucideIcon silently accepted an icon name that is not in _LUCIDE instead of failing');
 });
 
 // --- 1c^b. 🔴 the LABEL is real text on every rendered row --------------------
