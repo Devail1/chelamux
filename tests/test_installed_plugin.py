@@ -239,6 +239,11 @@ def test_chela_plugin_names_the_cache_path_when_the_install_is_stale(env, capsys
     assert "/plugin uninstall" not in out
     # the rationale the by-hand fallback exists for: chela never touches the cache itself
     assert "chela will not write into Claude Code's plugin cache directly" in out
+    # the sentence that CREDITS `chela update` with doing the refresh, not just the line
+    # an operator copy-pastes — round 5's mutation renamed this to `chela plugin` (the
+    # command already running when this message prints, which does NOT refresh the cache)
+    # and the tightened assertion below did not notice because it only pins the action line
+    assert "chela update` already refreshes it" in out
     assert "\n    chela update\n" in out          # the action line itself, not just the prose
     assert "claude plugin marketplace update <marketplace>" in out   # the real CLI verb...
     assert "claude plugin update chela@<marketplace>" in out         # ...both of them

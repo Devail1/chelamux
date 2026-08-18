@@ -251,3 +251,54 @@ compound `Fix:` clause misses it indefinitely.
 (`test_doctor_ERRORs_when_the_installed_manifest_disagrees`), and `"chela will not write
 into Claude Code's plugin cache directly" in out` to the `chela plugin` test
 (`test_chela_plugin_names_the_cache_path_when_the_install_is_stale`).
+
+**Round 5 — round 2 TIGHTENED an assertion into a more specific one instead of ADDING it,
+so the occurrence the broad assertion used to cover went from pinned to unpinned in the same
+edit.** Round 2's diff replaced `assert "chela update" in out` with `assert "\n    chela
+update\n" in out` in the `chela plugin` test, to anchor the standalone copy-paste action line
+on its own line (closing shape [33](33-a-guarded-fragment-appears-twice-decorative-and-load-bearing.md)
+for that renderer). But `chela update` also appears a second time in the same printout — in
+the prose sentence that CREDITS `chela update` with doing the refresh (`chela/main.py:959`:
+`` ...but `chela update` already refreshes it for you...``). Round 2's replacement, rather
+than addition, of the broad substring check meant that second occurrence lost its only
+assertion. `chela doctor`'s sibling test still has the broad form
+(`assert "chela update" in body`, unaffected by round 2 because round 2 only edited the
+`chela plugin` test) — so the doctor-side prose sentence stayed pinned throughout, and only
+the `chela plugin` side went dark, invisibly, three rounds before this one caught it.
+
+```diff
+# chela/main.py — the sentence that names WHICH command fixes the drift, one line above the
+# copy-paste action line round 2 pinned on its own — never independently pinned since
+- copy is Claude Code's to manage) — but `chela update` already refreshes it
++ copy is Claude Code's to manage) — but `chela plugin` already refreshes it
+```
+
+This mutation, applied by the judge to a throwaway checkout of round 4's fix, still parsed
+and left `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green (3227 passed, 0 failed) — because
+`assert "\n    chela update\n" in out` does not match text with no leading newline+indent
+(the prose sentence has `` `chela update` `` inline, not on its own line), so it is silent
+about the swap, and nothing else in the test names that sentence.
+
+**Why round 2's fix didn't already cover this:** round 2's own stated guard form was "when a
+phrase appears more than once in the same output..., pin the specific occurrence that is
+actually meant to be acted on" — correct advice for adding a *second*, more specific
+assertion, but the diff round 2 shipped *replaced* the original broad assertion with the new
+specific one instead of keeping both. Tightening a broad assertion into a narrower one
+silently un-pins whatever the broad form used to cover that the narrow form doesn't — here,
+the prose sentence — and nothing about a green suite distinguishes "this occurrence is still
+covered by something else" from "this occurrence was covered by the assertion I just deleted
+and now covered by nothing."
+
+**Guard form that survives (updated again):** when the same fact-bearing phrase appears more
+than once in one renderer's output (a prose sentence explaining *why*, plus a standalone
+action line meant to be copy-pasted), each occurrence needs its OWN assertion, and a new,
+more specific assertion for one occurrence must be ADDED alongside the existing broad one,
+never substituted for it — unless every occurrence the broad assertion covered has first been
+enumerated and each given its own replacement. Before deleting or narrowing any assertion,
+enumerate every place in the actual printed output the string it matches occurs, and confirm
+a replacement assertion still covers each one.
+
+**Round 5 found:** (CMX-310, PR #386, rework round 5) — closed by adding
+`` "chela update` already refreshes it" in out `` to the `chela plugin` test
+(`test_chela_plugin_names_the_cache_path_when_the_install_is_stale`), alongside — not instead
+of — the existing `"\n    chela update\n" in out` action-line assertion.
