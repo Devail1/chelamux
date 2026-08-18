@@ -163,3 +163,72 @@ a throwaway checkout of the round-2 fix, stayed green (3221 passed, 0 failed). C
 tightening `test_head_is_renamed_to_the_pr_branch_before_pytest` to an exact-match assertion
 and adding `test_nothing_between_the_rename_and_pytest_touches_head` to
 `tests/test_ci_workflow.py`.
+
+**Round 4 — the guard that closed round 3 named the state-at-point-of-use invariant it
+wanted but implemented it as an enumerated denylist, and never checked the job's own `if:`:**
+
+```diff
+-       - name: Install uv
++       - name: Record the exact ref under test
++         run: git branch -m ci-head
++
++       - name: Install uv
+```
+
+```diff
+-       - name: Install uv
++       - name: Drop the fetch remote (self-contained build)
++         run: git remote remove origin
++
++       - name: Install uv
+```
+
+`test_nothing_between_the_rename_and_pytest_touches_head` (round 3's fix) rejected three
+literal ref-mutating verbs — `git checkout`, `git switch`, `git reset` — in the window
+between the rename and Pytest. `git branch -m ci-head` renames the current branch without
+detaching HEAD; `git rev-parse --abbrev-ref HEAD` afterward returns `ci-head`, not a `cmx-NNN`
+name, so `test_defeat_shapes_added_files_are_numbered_by_branch_task_id` skips at its gate
+again — and the command matches none of the three denylisted strings. `git remote remove
+origin` deletes `refs/remotes/origin/*`, so the CMX-301 guard's `origin/dev` diff fails to
+resolve — the exact half of the original defect this PR exists to fix — and it, too, matches
+none of the three.
+
+```diff
+   test:
++    if: false
+     runs-on: ubuntu-latest
+```
+
+`test_head_rename_step_is_unconditional` (round 2's fix) pins the rename STEP's `if:` —
+but the job carries the identical switch one level up. `jobs.test.if: false` means no step
+in the file runs at all, the rename included, while the step itself keeps its exact `run:`,
+no `if:` key, and its position before Pytest — every step-level assertion in the file stays
+green. A skipped job doesn't fail the workflow run, so CI reports success with the CMX-301
+guard never having executed at all.
+
+All three mutations, applied by the judge to a throwaway checkout of PR #379's round-3 head,
+stayed green against `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (3222 passed, 0 failed).
+
+**Why this slips through (round 4):** the first two are
+`25-a-shape-s-own-prescribed-fix-is-applied-fully-at.md` again, on a new axis — round 3's own
+docstring stated the invariant as "HEAD names the PR branch when Pytest starts," then
+implemented it as a denylist of the three verbs the round-3 mutation happened to use, rather
+than a ban on the underlying tool. A denylist of verbs is only as complete as its
+enumeration; naming the invariant in prose does not make the assertion enforce that invariant
+in general. The third is `01-presence-substring-assertion-defeated-by-dead-coding.md` hoisted
+one level: a presence-and-wording check on a step is blind to a dead-coding switch placed on
+its *parent* rather than on itself, the same gap round 2 closed at the step level without
+generalizing to every level a step lives inside.
+
+**Guard form that survives (round 4):** ban the tool, not the verb — no step positioned
+between the rename and Pytest may invoke `git` at all (`re.compile(r"(?<![\w.-])git(?![\w.-
+])")` against each `run:` in that window), so a future command needs no prediction of which
+subcommand it'll use. And check `if:`-absence at every level a dead-coding switch could sit,
+not only the step: `test_job_is_unconditional` asserts `"if" not in job`, the same doctrine
+`test_head_rename_step_is_unconditional` already applies one level down.
+
+**Found:** PR #379 (CMX-305, rework round 4) — all three mutations above, applied by the
+judge to a throwaway checkout of the round-3 fix, stayed green (3222 passed, 0 failed).
+Closed by broadening `test_nothing_between_the_rename_and_pytest_touches_head` from a
+three-verb denylist to a blanket `git`-invocation ban, and adding `test_job_is_unconditional`
+to `tests/test_ci_workflow.py`.

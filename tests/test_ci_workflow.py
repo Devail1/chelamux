@@ -45,9 +45,29 @@ Round 2's own fixes had two more gaps of the same shape, both closed in round 3:
    count stays 1), doesn't mention `GITHUB_HEAD_REF` (rename count stays 1), and doesn't
    mention `uv run pytest` (ordering unchanged) — so it re-detaches HEAD invisibly to every
    assertion that existed before round 3.
+
+Round 3's own fix had two more gaps of the same shape, both closed in round 4:
+
+7. "No ref-mutating command" was written as a three-item denylist (`git checkout`, `git
+   switch`, `git reset`) instead of the state-at-point-of-use invariant its own docstring
+   named. `git branch -m ci-head` renames the current branch without matching any of the
+   three — HEAD stops naming `cmx-NNN` without ever being detached. `git remote remove
+   origin` deletes the remote-tracking refs the CMX-301 guard's `origin/dev` diff needs,
+   also without matching any of the three. Both are `git` invocations in the window between
+   the rename and Pytest; neither is one of the three enumerated verbs. The fix generalizes
+   from a denylist of verbs to a ban on `git` itself: nothing between the rename and Pytest
+   may invoke `git` at all, so a future command needs no prediction of *which* verb it'll
+   use.
+8. The rename step's own `if:`-absence (`test_head_rename_step_is_unconditional`) was never
+   checked at the level above it. `jobs.test.if: false` dead-codes every step in the file —
+   the rename included — while the step itself keeps its exact `run:`, no `if:` key, and its
+   position before Pytest; every existing assertion stays green. A skipped job doesn't fail
+   the workflow run, so CI reports green with the CMX-301 guard never having executed at
+   all.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -139,6 +159,9 @@ def test_head_is_renamed_to_the_pr_branch_before_pytest(steps):
     )
 
 
+_GIT_INVOCATION = re.compile(r"(?<![\w.-])git(?![\w.-])")
+
+
 def test_nothing_between_the_rename_and_pytest_touches_head(steps):
     """Round 3: round 2's `test_exactly_one_checkout_step` closed the "second `actions/
     checkout` step" shape, but only for steps that `uses: actions/checkout@...` — a plain
@@ -150,22 +173,28 @@ def test_nothing_between_the_rename_and_pytest_touches_head(steps):
 
     The invariant CMX-305 actually needs is "HEAD names the PR branch when Pytest starts",
     not merely "a step earlier in the file once renamed it" — so assert the state at the
-    point of use: no step between the rename and Pytest may run a ref-mutating git command.
+    point of use.
+
+    Round 4: round 3's own fix wrote that as a three-item denylist (`git checkout`, `git
+    switch`, `git reset`). `git branch -m ci-head` renames the current branch without
+    detaching HEAD — HEAD just stops naming `cmx-NNN` — and matches none of the three.
+    `git remote remove origin` deletes the remote-tracking refs the CMX-301 guard's
+    `origin/dev` diff needs, and also matches none of the three. Both are `git` invocations;
+    neither is an enumerated verb. Ban `git` itself in this window, not a guessed list of
+    its subcommands, so no future verb needs to be predicted in advance.
     """
     rename = _step_running(steps, "GITHUB_HEAD_REF")
     pytest_step = _step_running(steps, "uv run pytest")
     between = steps[steps.index(rename) + 1 : steps.index(pytest_step)]
 
-    ref_mutating = ("git checkout", "git switch", "git reset")
     for step in between:
         run = step.get("run", "")
-        for cmd in ref_mutating:
-            assert cmd not in run, (
-                f"step {step.get('name')!r} between the HEAD rename and Pytest runs "
-                f"{run!r}, which contains {cmd!r} — it can silently re-detach HEAD after "
-                "the rename and before the CMX-301 guard reads it, even though the rename "
-                "step itself still looks correct"
-            )
+        assert not _GIT_INVOCATION.search(run), (
+            f"step {step.get('name')!r} between the HEAD rename and Pytest runs {run!r}, "
+            "which invokes `git` — no step in that window may touch git at all, or it can "
+            "silently rename, re-detach, or unfetch HEAD after the rename and before the "
+            "CMX-301 guard reads it, even though the rename step itself still looks correct"
+        )
 
 
 def test_head_rename_step_is_unconditional(steps):
@@ -182,4 +211,22 @@ def test_head_rename_step_is_unconditional(steps):
         f"the GITHUB_HEAD_REF rename step has an `if: {rename.get('if')!r}` condition — it "
         "must run unconditionally on every pull_request build, or it can be switched off "
         "while its name, run:, and position all still look correct"
+    )
+
+
+def test_job_is_unconditional(job):
+    """Round 4: `test_head_rename_step_is_unconditional` pins the rename STEP's `if:` —
+    but `jobs.test.if: false` dead-codes every step in the file, the rename included, one
+    level above where that test looks. The step keeps no `if:` key, its exact `run:`, and
+    its position before Pytest; every step-level assertion in this file stays green. A
+    skipped job doesn't fail the workflow run, so CI reports green with the CMX-301 guard
+    never having executed at all.
+
+    The invariant is that the job itself is unconditional: no `if:` key at all, the same
+    doctrine `test_head_rename_step_is_unconditional` already applies one level down.
+    """
+    assert "if" not in job, (
+        f"the `test` job has an `if: {job.get('if')!r}` condition — it must run "
+        "unconditionally on every pull_request build, or the entire job (rename step "
+        "included) can be switched off while every step-level assertion still passes"
     )
