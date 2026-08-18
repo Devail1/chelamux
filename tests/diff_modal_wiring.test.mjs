@@ -1005,6 +1005,38 @@ test('an empty patch (a zero-byte file) shows the "No diff text" empty state, no
 // the draggable-only siblings. See
 // docs/defeat_shapes/306-a-single-item-fixture-collapses-every-candidate-source.md
 // (round 5 addendum) for the general shape.
+//
+// Round 6 (judge): three more gaps.
+//
+// [WIRING] The fifth (production force-single) variant added in round 5
+// proves the force-single branch is ALIVE, but `stubViewport` answered the
+// SAME captured boolean to every query string it was handed — it never
+// looked at `q` at all. So the variant could not tell WHICH media query the
+// branch asked: inverting `(max-width: 768px)` to `(min-width: 769px)` (the
+// exact complement) was a no-op under the old stub, because both predicates
+// got back whatever boolean the test happened to pass in. Closed by making
+// `stubViewport` take a WIDTH and actually evaluate `max-width`/`min-width`
+// against it, the way a real browser does — so an inverted predicate or a
+// moved breakpoint both change the answer, not just the one query the code
+// happens to use today. Same shape as
+// docs/defeat_shapes/306-a-single-item-fixture-collapses-every-candidate-source.md
+// — a single captured stand-in erasing the distinction between candidates a
+// mutation is free to pick from — just showing up in the test's own stub
+// rather than in its data fixture.
+//
+// [MUTATION, absence-only mirror, part 2] Round 5's presence pair only
+// covered TWO of the four shared (non-draggable-gated) elements — .gs-model
+// and .term-ctx-fill — leaving .gs-branch and .gs-ctx unasserted. .gs-ctx is
+// the bar's headline "N% · used/total" TEXT field, the non-hue cue
+// dashboard_scale_nav_a11y.test.mjs's GUARD 5 exists to keep; gating it
+// behind `draggable` leaves the mobile single pane with a coloured fill
+// strip and no number. Closed by extending the presence pair to all four.
+//
+// [MUTATION] Every assertion on the Files chip proved it EXISTS and is
+// wired, never that it is VISIBLE — a `hidden` attribute gated on
+// `draggable` left every check green while the mobile/single pane, the
+// exact surface this guard exists to cover, lost its only entry point into
+// the diff modal. Closed with `filesBtn.hasAttribute('hidden') === false`.
 // ---------------------------------------------------------------------------
 
 test('the Files chip is also emitted (and wired end to end) in single-pane / mobile mode, not just the wall tile — at both desktop and phone widths, and it tracks the live selection rather than any fixed position', async () => {
@@ -1030,11 +1062,24 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
             return fakeFetch(url);
         };
 
-        const stubViewport = isPhone => {
-            window.matchMedia = q => ({
-                media: q, matches: isPhone, addEventListener() {}, removeEventListener() {},
-                addListener() {}, removeListener() {},
-            });
+        // Round 6 (judge): stubViewport now takes a WIDTH and actually
+        // evaluates the query it's handed, instead of a boolean captured
+        // independently of `q` — see the round-6 note in the file header
+        // comment above.
+        const PHONE_WIDTH = 375;
+        const DESKTOP_WIDTH = 1400;
+        const stubViewport = width => {
+            window.matchMedia = q => {
+                const max = /max-width:\s*(\d+)/.exec(q);
+                const min = /min-width:\s*(\d+)/.exec(q);
+                const matches = max ? width <= Number(max[1])
+                    : min ? width >= Number(min[1])
+                        : false;
+                return {
+                    media: q, matches, addEventListener() {}, removeEventListener() {},
+                    addListener() {}, removeListener() {},
+                };
+            };
         };
 
         // Render the single pane for one (viewport, selected wid) variant
@@ -1055,7 +1100,7 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         let previousBarNode = null;
         async function renderAndAssertSinglePane(isPhone, expectedWid, label, { expectRebuild }) {
             const selValueChanged = sel.value !== expectedWid;
-            stubViewport(isPhone);
+            stubViewport(isPhone ? PHONE_WIDTH : DESKTOP_WIDTH);
             sel.value = expectedWid;
             await terminals.renderTerminals();
 
@@ -1094,15 +1139,27 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
             assert.equal(barNode.querySelector('.gs-cost'), null,
                 `${label}: the single-pane bar rendered .gs-cost — that element only belongs to _ctxBarHTML's DRAGGABLE (wall-tile) branch; its presence here means the single-pane call site regressed to draggable=true, silently un-rendering the non-draggable branch this guard exists to cover`);
 
-            // Mirror of the three absence checks above: .gs-model and
-            // .term-ctx-fill are NOT draggable-gated in source (they belong
-            // on every surface — terminals.js:2234-2237 for the model chip;
-            // the fill is unconditional), so a regression that adds a
-            // `draggable ? … : ''` gate to either one leaves the absence
-            // checks above untouched (they only watch the DRAGGABLE-only
-            // siblings) and would ship silently without this pair.
+            // Mirror of the three absence checks above: .gs-model,
+            // .gs-branch, .gs-ctx and .term-ctx-fill are NONE of them
+            // draggable-gated in source (_ctxBarHTML splices all four with
+            // no `draggable ? … : ''` gate) — they belong on every surface —
+            // so a regression that adds such a gate to any one of them
+            // leaves the absence checks above untouched (they only watch
+            // the DRAGGABLE-only siblings) and would ship silently without
+            // this group. Round 6 (judge): the round-5 fix only asserted
+            // .gs-model and .term-ctx-fill present, leaving .gs-branch and
+            // .gs-ctx — the bar's headline "N% · used/total" text field,
+            // the non-hue cue dashboard_scale_nav_a11y.test.mjs's GUARD 5
+            // exists to keep — unasserted; gating either behind `draggable`
+            // silently disables `_applyTermContext`'s writes to that chip
+            // (terminals.js:1357/1393, `if (ctxChip) …` — a missing chip is
+            // skipped, never thrown) with nothing here to catch it.
             assert.ok(barNode.querySelector('.gs-model'),
                 `${label}: the single-pane bar has no .gs-model chip — it must ride on every surface, wall tiles AND the single/mobile pane (terminals.js:2234-2237, Liav 2026-07-25); its absence means a draggable-only gate crept onto a chip that's supposed to be shared`);
+            assert.ok(barNode.querySelector('.gs-branch'),
+                `${label}: the single-pane bar has no .gs-branch chip — it is not draggable-gated in source and must ride on every surface; its absence means a draggable-only gate crept onto a chip that's supposed to be shared`);
+            assert.ok(barNode.querySelector('.gs-ctx'),
+                `${label}: the single-pane bar has no .gs-ctx chip — it is the bar's headline context-percentage field and the non-hue cue dashboard_scale_nav_a11y.test.mjs's GUARD 5 relies on ("class is reinforcement only"); its absence means a draggable-only gate crept onto a chip that's supposed to be shared, leaving the mobile single pane with a coloured fill strip and no number`);
             const fillEl = barNode.querySelector('.term-ctx-fill');
             assert.ok(fillEl,
                 `${label}: the single-pane bar has no .term-ctx-fill element — _applyTermContext hard-requires it before painting ANYTHING into the bar (terminals.js:1348-1350: "const fill = bar.querySelector('.term-ctx-fill'); if (!fill) return;"), so its absence silently kills this bar's entire context repaint (branch chip, context %, model chip, tooltip) forever, not just a 2px fill`);
@@ -1110,6 +1167,15 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
             const filesBtn = document.querySelector(`.term-ctx-bar[data-ctx-for="${expectedWid}"] .gs-files`);
             assert.ok(filesBtn,
                 `${label}: the single-pane bottom bar has no .gs-files "Files" chip for ${expectedWid}, the SELECTED agent — either the chip was dropped on the non-draggable (single/mobile) path at this viewport, or the pane rendered a positional (not selected) agent`);
+            // Round 6 (judge): every assertion here proved the chip EXISTS
+            // and is wired, never that it is VISIBLE — a `hidden` attribute
+            // gated on `draggable` would leave all of those green while a
+            // phone user loses the pane's only entry point into the diff
+            // modal. `hasAttribute` reads the element directly (unlike
+            // clickFilesChip below, which invokes the onclick handler via
+            // `new Function(...)` and would fire on a hidden button too).
+            assert.equal(filesBtn.hasAttribute('hidden'), false,
+                `${label}: the single-pane Files chip is present but has a "hidden" attribute — a phone/single-pane user cannot see or reach it, even though every wiring assertion below would still pass`);
             assert.match(filesBtn.getAttribute('onclick') || '', new RegExp(`chela\\.openDiffModal\\('${expectedWid}'\\)`),
                 `${label}: the single-pane Files chip is wired to the wrong session — it must open ${expectedWid} (the DISPLAYED/selected agent), not a positional default`);
             assert.equal(filesBtn.getAttribute('title'), 'Changed files',
@@ -1142,7 +1208,7 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         // established, so it does NOT force a fresh rebuild on its own
         // (expectRebuild: false) — it's re-asserting the state setTermMode
         // just produced, which is fine.
-        stubViewport(false);
+        stubViewport(DESKTOP_WIDTH);
         sel.value = '@2';
         terminals.setTermMode('single');
         await flush();
@@ -1177,7 +1243,7 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         // viewport produce. Only the forcing branch itself (not any test
         // helper) can turn that into the single-pane render this whole guard
         // is about.
-        stubViewport(false);
+        stubViewport(DESKTOP_WIDTH);
         terminals.setTermMode('wall');
         await flush();
         assert.equal(document.getElementById('term-stage').classList.contains('term-single'), false,
