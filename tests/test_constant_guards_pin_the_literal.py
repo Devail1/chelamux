@@ -174,15 +174,28 @@ def test_no_test_file_asserts_a_numeric_constant_against_its_own_symbol_unpinned
     and this test is what notices instead of needing a fourteenth round to find it by hand.
     """
     violations = []
+    scanned = 0
     for path in sorted(TESTS_DIR.glob("test_*.py")):
         if path.name == Path(__file__).name:
             continue
+        scanned += 1
         found = find_self_referential_constant_comparisons(
             path.read_text(), filename=str(path)
         )
         for mod, attr, lineno in found:
             violations.append(f"{path.name}:{lineno}: `{mod}.{attr}` compared with no "
                                f"literal pin for that constant anywhere else in the file")
+
+    # As of this writing tests/ holds 142 test_*.py files; 100 is comfortably below that
+    # (room for the suite to shrink) while still being far above what a stray one-or-two-file
+    # match (an empty dir, a moved TESTS_DIR, a `test_*.py` rename that stops matching) could
+    # ever produce — so a drop below it means the glob broke, not that the suite shrank.
+    assert scanned > 100, (
+        f"the repo-wide sweep only examined {scanned} test file(s) under {TESTS_DIR} — "
+        "either tests/ has shrunk far below its historical size or TESTS_DIR / the "
+        "`test_*.py` glob has stopped matching the real test files; either way this check "
+        "is inert and a green result here proves nothing was scanned"
+    )
 
     assert not violations, (
         "found comparison(s) against a numeric constant re-imported from the module under "
