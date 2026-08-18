@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from datetime import date as _date
 from pathlib import Path
 
 # `## [X.Y.Z] — YYYY-MM-DD` or `## [Unreleased]` — see CHANGELOG.md. The suffix
@@ -166,6 +167,76 @@ def coalesce_unreleased_section(changelog_text: str) -> str:
     return changelog_text[:body_start] + merged.rstrip("\n") + trailing_ws + changelog_text[body_end:]
 
 
+def _fragment_paths(changelog_d: Path) -> list[Path]:
+    """Every changelog fragment under `changelog_d`, in filename order.
+
+    Filename order (not mtime, not directory-listing order) is what makes the
+    merged output a pure function of what's on disk — the same set of fragment
+    files always collects into the same text, regardless of the order they were
+    created or checked out in. `README.md` documents the convention; it is not
+    itself a fragment.
+    """
+    if not changelog_d.is_dir():
+        return []
+    return sorted(
+        p for p in changelog_d.iterdir()
+        if p.is_file() and p.suffix.lower() == ".md" and p.name != "README.md"
+    )
+
+
+def collect_fragments(changelog_d: Path) -> str:
+    """Concatenate every fragment file under `changelog_d` into one release body.
+
+    Each fragment is exactly what a PR used to hand-append under `## [Unreleased]`
+    — one or more `### <Category>` blocks. Concatenating them and running the same
+    `_merge_duplicate_subheadings` that already collapses duplicate categories
+    across concurrent `## [Unreleased]` edits collapses duplicate categories across
+    fragments too, in the same canonical order. Returns `""` when there are no
+    fragments to collect.
+    """
+    paths = _fragment_paths(changelog_d)
+    if not paths:
+        return ""
+    body = "\n\n".join(p.read_text().strip("\n") for p in paths)
+    return _merge_duplicate_subheadings(body.strip("\n") + "\n")
+
+
+def promote_unreleased(changelog_text: str, version: str, date: str, changelog_d: Path) -> str:
+    """Return `changelog_text` with the CURRENT `## [Unreleased]` body, plus every
+    fragment under `changelog_d`, promoted into a new `## [version] — date` section
+    inserted directly below it — and `## [Unreleased]` itself reset to empty.
+
+    This mechanises "Releasing" step 1 in CONTRIBUTING.md: turning `## [Unreleased]`
+    into a dated heading and putting a fresh empty one back used to be two
+    hand-typed edits, and skipping the second one is exactly what silently broke
+    the changelog convention after `0.4.0` (see `tests/test_version.py`). Doing
+    both atomically here closes that gap by construction — the heading this
+    function writes is always present, never a step a maintainer can forget.
+
+    Does not touch the filesystem: the caller (the CLI below) writes the result
+    back and deletes the consumed fragment files, so this stays a pure function
+    like every other reader in this module.
+    """
+    headings = list(_iter_headings(changelog_text))
+    start = next((m for m in headings if m.group("version") == "Unreleased"), None)
+    if start is None:
+        raise ReleaseNotFoundError("no '## [Unreleased]' section in this changelog")
+
+    body_start = start.end()
+    later_heading_starts = [m.start() for m in headings if m.start() > start.start()]
+    footer = changelog_text.find("\n---\n", body_start)
+    candidates = later_heading_starts + ([footer] if footer != -1 else [])
+    body_end = min(candidates) if candidates else len(changelog_text)
+
+    existing_body = changelog_text[body_start:body_end].strip("\n")
+    fragments_body = collect_fragments(changelog_d).strip("\n")
+    combined = "\n\n".join(part for part in (existing_body, fragments_body) if part)
+    merged = _merge_duplicate_subheadings(combined + "\n").strip("\n") if combined else ""
+
+    new_section = f"## [{version}] — {date}\n\n{merged}\n" if merged else f"## [{version}] — {date}\n"
+    return changelog_text[:body_start] + "\n\n" + new_section + "\n" + changelog_text[body_end:]
+
+
 def latest_released_version(changelog_text: str) -> str:
     """Return the version of the newest dated (non-`Unreleased`) heading.
 
@@ -183,6 +254,10 @@ def _default_changelog_path() -> Path:
     return Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 
 
+def _default_changelog_d_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "changelog.d"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Print a release's CHANGELOG.md section body, for "
@@ -191,7 +266,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "version",
         nargs="?",
-        help="release version, e.g. 0.3.0 (a leading 'v' is stripped); ignored with --write",
+        help="release version, e.g. 0.3.0 (a leading 'v' is stripped); ignored with "
+        "--write, required (without a leading 'v') with --release",
     )
     parser.add_argument(
         "--changelog",
@@ -200,10 +276,29 @@ def main(argv: list[str] | None = None) -> int:
         help="path to CHANGELOG.md (default: repo root)",
     )
     parser.add_argument(
+        "--changelog-d",
+        type=Path,
+        default=_default_changelog_d_path(),
+        help="path to the changelog fragments directory (default: repo root)",
+    )
+    parser.add_argument(
         "--write",
         action="store_true",
         help="coalesce duplicate ### headings in --changelog's ## [Unreleased] "
         "section in place, instead of printing one release's notes",
+    )
+    parser.add_argument(
+        "--release",
+        action="store_true",
+        help="promote --changelog's ## [Unreleased] section plus every fragment "
+        "in --changelog-d into a new dated ## [version] section, reset "
+        "## [Unreleased] to empty, and delete the consumed fragment files — "
+        "'Releasing' step 1 in CONTRIBUTING.md, mechanised",
+    )
+    parser.add_argument(
+        "--date",
+        default=None,
+        help="release date, YYYY-MM-DD (default: today) — only used with --release",
     )
     args = parser.parse_args(argv)
 
@@ -212,6 +307,23 @@ def main(argv: list[str] | None = None) -> int:
         rewritten = coalesce_unreleased_section(original)
         if rewritten != original:
             args.changelog.write_text(rewritten)
+        return 0
+
+    if args.release:
+        if not args.version:
+            parser.error("version is required with --release")
+        version = args.version[1:] if args.version.startswith("v") else args.version
+        date = args.date or _date.today().isoformat()
+        try:
+            rewritten = promote_unreleased(
+                args.changelog.read_text(), version, date, args.changelog_d,
+            )
+        except ReleaseNotFoundError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        args.changelog.write_text(rewritten)
+        for fragment in _fragment_paths(args.changelog_d):
+            fragment.unlink()
         return 0
 
     if not args.version:

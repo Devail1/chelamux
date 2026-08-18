@@ -15,8 +15,10 @@ import pytest
 from chela.release_notes import (
     ReleaseNotFoundError,
     UnrecognisedHeadingError,
+    collect_fragments,
     extract_release_notes,
     latest_released_version,
+    promote_unreleased,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -356,3 +358,129 @@ def test_cli_requires_version_unless_write_is_given():
     assert result.returncode == 2
     assert "Traceback" not in result.stderr
     assert "version is required unless --write is given" in result.stderr
+
+
+# --- changelog.d fragments: CMX-312, "move to per-PR fragment files" ----------------------
+#
+# CMX-308 and CMX-309 both went `CONFLICTING` on `CHANGELOG.md`'s shared `## [Unreleased]`
+# section — GitHub's own mergeability check doesn't run `.gitattributes`' `merge=union`
+# driver (CMX-241 only smooths over a *local* merge), so two open PRs each appending there
+# get no CI at all until a human drops one side's entry. Fragment files under `changelog.d/`
+# never collide because every PR writes a differently-named file.
+
+
+def test_collect_fragments_is_empty_for_a_directory_with_no_fragments(tmp_path):
+    assert collect_fragments(tmp_path / "changelog.d") == ""
+
+
+def test_collect_fragments_ignores_readme(tmp_path):
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "README.md").write_text("### Added\n\n- this must never be collected\n")
+
+    assert collect_fragments(d) == ""
+
+
+def test_collect_fragments_concatenates_in_filename_order(tmp_path):
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    # Written out of order on disk; filename order must still win.
+    (d / "CMX-320.md").write_text("### Added\n\n- second fragment\n")
+    (d / "CMX-310.md").write_text("### Added\n\n- first fragment\n")
+
+    notes = collect_fragments(d)
+
+    assert notes.count("### Added") == 1
+    assert notes.index("first fragment") < notes.index("second fragment")
+
+
+def test_collect_fragments_merges_duplicate_categories_across_files(tmp_path):
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "CMX-311.md").write_text("### Fixed\n\n- a fix\n")
+    (d / "CMX-312.md").write_text("### Added\n\n- an addition\n")
+    (d / "CMX-313.md").write_text("### Fixed\n\n- another fix\n")
+
+    notes = collect_fragments(d)
+    headings = re.findall(r"^### (.+)$", notes, re.MULTILINE)
+
+    assert headings == ["Added", "Fixed"]  # canonical order, one heading each
+    assert "a fix" in notes
+    assert "another fix" in notes
+
+
+def test_promote_unreleased_combines_existing_body_and_fragments(tmp_path):
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- already there\n\n"
+        "## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- old release\n"
+    )
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "CMX-312.md").write_text("### Fixed\n\n- from a fragment\n")
+
+    rewritten = promote_unreleased(changelog, "0.7.0", "2026-08-18", d)
+
+    new_release = extract_release_notes(rewritten, "0.7.0")
+    assert "already there" in new_release
+    assert "from a fragment" in new_release
+    # the historical section is untouched
+    assert extract_release_notes(rewritten, "0.6.0") == "### Fixed\n\n- old release\n"
+    # ⛔ CMX-214/tests/test_version.py: a promotion that drops the heading entirely
+    # silently breaks every PR merged afterwards, the exact `0.4.0` incident.
+    assert re.search(r"(?m)^## \[Unreleased\]\s*$", rewritten)
+    assert extract_release_notes(rewritten, "Unreleased") == "\n"
+
+
+def test_promote_unreleased_works_with_only_fragments_and_no_existing_body(tmp_path):
+    changelog = "# Changelog\n\n## [Unreleased]\n\n## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- x\n"
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "CMX-312.md").write_text("### Added\n\n- fragment only\n")
+
+    rewritten = promote_unreleased(changelog, "0.7.0", "2026-08-18", d)
+
+    assert "fragment only" in extract_release_notes(rewritten, "0.7.0")
+
+
+def test_promote_unreleased_works_with_no_fragments_at_all(tmp_path):
+    changelog = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- already there\n"
+    rewritten = promote_unreleased(changelog, "0.7.0", "2026-08-18", tmp_path / "changelog.d")
+
+    assert "already there" in extract_release_notes(rewritten, "0.7.0")
+    assert extract_release_notes(rewritten, "Unreleased") == "\n"
+
+
+def test_promote_unreleased_raises_without_an_unreleased_heading():
+    changelog = "# Changelog\n\n## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- x\n"
+    with pytest.raises(ReleaseNotFoundError):
+        promote_unreleased(changelog, "0.7.0", "2026-08-18", Path("does-not-matter"))
+
+
+def test_cli_release_writes_the_changelog_and_deletes_consumed_fragments(tmp_path):
+    changelog_path = tmp_path / "CHANGELOG.md"
+    changelog_path.write_text(
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- already there\n\n"
+        "## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- old release\n"
+    )
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "CMX-312.md").write_text("### Fixed\n\n- from a fragment\n")
+    (d / "README.md").write_text("convention doc — must survive")
+
+    result = _run_cli(
+        "--release", "0.7.0", "--date", "2026-08-18",
+        "--changelog", str(changelog_path), "--changelog-d", str(d),
+    )
+
+    assert result.returncode == 0, result.stderr
+    written = changelog_path.read_text()
+    assert "from a fragment" in extract_release_notes(written, "0.7.0")
+    # the fragment is consumed and gone, the README convention doc survives
+    assert not (d / "CMX-312.md").exists()
+    assert (d / "README.md").exists()
+
+
+def test_cli_release_requires_version():
+    result = _run_cli("--release")
+    assert result.returncode == 2
+    assert "version is required with --release" in result.stderr
