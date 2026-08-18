@@ -58,11 +58,31 @@ untouched conditions still happen to agree with the downstream signal by constru
    this mutation admits) is needed to distinguish "check removed" from "check widened by
    exactly one adjacent value."
 
-All four mutations are invisible to the same suite for the same structural reason: the
+6. `owned.add(lwid)` → `owned.add(next(iter(live)))` — once the loop decides to fire, it
+   claims an ARBITRARY live window instead of the one it just matched. Paired with mutation 7
+   below, this is a different axis entirely from 1-5: those are all about *whether* the
+   fallback should fire (WHICH gating condition lets it through); this is about *what it does*
+   once it has decided to fire (WHICH window it claims). Every positive fixture for the
+   fallback hands it a `live` dict with exactly ONE entry, so "the window whose name matched"
+   and "the first (only) window in the fleet" are the same object — a fallback that claims an
+   arbitrary live id instead of the matched one is indistinguishable from a correct one as
+   long as there is nothing else in `live` to tell them apart.
+7. `for lwid, lname in live.items():` → `for lwid, lname in list(live.items())[:1]:` — the
+   loop is truncated to inspect only the first entry tmux happens to report. Production is the
+   opposite of every fixture's shape: `live_agent_windows()` returns the *entire* tmux
+   session, tmux lists windows by index, and the fallback's target was just spawned — so the
+   matching entry is normally near the END of the fleet, not the first. With a one-window
+   fixture, "scan the whole fleet" and "look only at the first entry" are the same loop.
+
+All six mutations are invisible to the same suite for the same structural reason: the
 fixtures prove the fallback fires when it *should*, and refuses when there is *nothing on
 offer to wrongly fire on* — but never refuses while something wrong is on offer, and never
 hold every OTHER condition (including ones not obviously "the one under test", like the id
-itself) fixed at its firing value while flipping only the condition being proven.
+itself) fixed at its firing value while flipping only the condition being proven. Mutations 6
+and 7 add a further wrinkle on top of that: even a fixture that *does* put a matching name in
+`live` never puts anything else ALONGSIDE it, so selecting the right entry out of several and
+scanning past the first are both unproven regardless of how carefully the matching condition
+itself is pinned.
 
 **Guard form that survives:** for each gating condition, hold every OTHER condition and the
 downstream signal fixed at the value that would make the fallback fire, and flip only the
@@ -93,6 +113,12 @@ looser guard *would* have matched:
   checked — asserts the result is empty. The epoch has to actually differ (assert
   `epoch.is_dangling(...)` as a fixture sanity check), or the row would be honoured by the
   sibling `if` branch instead and the fallback's own `elif` would never even be reached.
+- selection and traversal: a `"claimed"` row with `window_name="cmx-305"`, against a
+  MULTI-entry `live` fleet where the match is NOT first (`live={"@1": "orchestrator", "@667":
+  "cmx-304", "@668": "cmx-305"}`) — asserting the result is exactly `{"@668"}`, not merely
+  non-empty. A one-window fixture can't distinguish "claimed the window whose name matched"
+  from "claimed some window", nor "scanned the whole fleet" from "looked only at the first
+  entry"; a multi-window fleet with the match placed last forces both.
 
 **Why this is distinct from [[55|shape 55]]:** shape 55 is one compound `and` gate where the
 downstream tier, if reached, resolves identically whether or not the clause is checked (no
@@ -130,4 +156,11 @@ same suite (3225 tests) — `"needs_human"` is excluded either way, so that fixt
 a dropped check from a sideways-widened one. Closed by
 `test_a_pre_cmx69_running_row_with_no_window_id_does_not_name_match_a_live_window`, which
 pins status at `"running"` specifically — the one other member of `ACTIVE_STATUSES` — with
-the same matching live window present.
+the same matching live window present. Round 6: closing all five gating-condition mutations
+still left the loop body itself unproven — every fixture's `live` fleet had at most one
+entry, so mutations 6 and 7 above (claim an arbitrary live id; scan only the first fleet
+entry) both still went green under the same suite (3226 tests). Closed by
+`test_a_claimed_rows_name_match_finds_its_own_window_in_a_multi_window_fleet`, which gives
+the fallback a three-window fleet with the match placed last and asserts the exact id
+claimed — the same fixture kills both mutations at once, since both are only observable once
+`live` holds more than the one entry every earlier fixture happened to use.
