@@ -106,3 +106,60 @@ now-irrelevant one still looking correct.
 a throwaway checkout of the round-1 fix, stayed green (3214 passed, 0 failed). Closed by
 adding `test_head_rename_step_is_unconditional` and `test_exactly_one_checkout_step` to
 `tests/test_ci_workflow.py`.
+
+**Round 3 — the guard that closed round 2 still checked wording and step-identity, not the
+command's exact text or the state at the point of use:**
+
+```diff
+-         run: git checkout -B "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
++         run: echo git checkout -B "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+```
+
+`test_head_is_renamed_to_the_pr_branch_before_pytest` asserted `"git checkout -B" in
+rename["run"]` — a substring. Prefixing the command with `echo` leaves the needle
+(`GITHUB_HEAD_REF`), the substring (`git checkout -B`), the unconditional `if`, and the
+ordering all untouched, while the step only *prints* the command instead of running it. HEAD
+stays detached and the CMX-301 guard keeps skipping at the gate.
+
+```diff
+-       - name: Install uv
++       - name: Pin the exact commit under test
++         run: git checkout --detach HEAD
++
++       - name: Install uv
+```
+
+Round 2's `test_exactly_one_checkout_step` generalized the "exactly one" doctrine, but only
+to steps with `uses: actions/checkout@...`. A later plain `run:` step re-detaching HEAD is a
+different mechanism: it has no `uses:` (checkout count stays 1), doesn't mention
+`GITHUB_HEAD_REF` (rename count stays 1), and doesn't mention `uv run pytest` (ordering
+unchanged) — so every assertion round 2 wrote stays green while HEAD is detached again by
+the time the CMX-301 guard runs.
+
+Both mutations, applied by the judge to a throwaway checkout of PR #379's round-2 head,
+stayed green against `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (3221 passed, 0 failed).
+
+**Why this slips through (round 3):** the first mutation is the same root shape as
+`01-presence-substring-assertion-defeated-by-dead-coding.md` and
+`32-a-substring-assertion-pins-text-unchanged-by-the-revert.md` — a substring match pins
+that certain text occurs somewhere in the string, not that the string *is* that text, so
+wrapping it in another command satisfies the assertion while changing what actually
+executes. The second mutation is `25-a-shape-s-own-prescribed-fix-is-applied-fully-at.md`:
+round 2's own prescribed fix — "pin exactly one of a kind, so a second copy added later
+can't go unchecked" — was applied only at the one call site (`actions/checkout` steps) it
+was written for, rather than generalized to the invariant it was actually protecting: the
+ref must still name the PR branch at the moment Pytest runs, and *anything* that touches the
+ref after the rename can violate that, not only a second `actions/checkout`.
+
+**Guard form that survives (round 3):** pin the rename step's `run:` to the exact expected
+command (`rename["run"].strip() == 'git checkout -B "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"'`),
+not a substring of it — the same treatment `fetch-depth` already gets. And assert the state
+at the point of use rather than the step in isolation: no step positioned between the rename
+and Pytest may run a ref-mutating git command (`git checkout`, `git switch`, `git reset`)
+(`test_nothing_between_the_rename_and_pytest_touches_head`).
+
+**Found:** PR #379 (CMX-305, rework round 3) — both mutations above, applied by the judge to
+a throwaway checkout of the round-2 fix, stayed green (3221 passed, 0 failed). Closed by
+tightening `test_head_is_renamed_to_the_pr_branch_before_pytest` to an exact-match assertion
+and adding `test_nothing_between_the_rename_and_pytest_touches_head` to
+`tests/test_ci_workflow.py`.
