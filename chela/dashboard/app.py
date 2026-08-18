@@ -2367,8 +2367,12 @@ def api_hooks(event):
     hand the agent something back.
 
     The plugin (``plugin/hooks/hooks.json``, rendered by :func:`chela.hooks.hooks_spec`)
-    POSTs each event here as an ``http`` hook, so there is no shell script and no process
-    spawn per tool call. Correlation to a window is off the session's origin, not the pane.
+    POSTs each event here — as an ``http`` hook for most events (no shell script, no
+    process spawn per tool call), or via a ``curl`` relaying into this SAME route for
+    ``SessionStart`` and ``MessageDisplay`` (each forced onto a ``command`` hook for its
+    own reason — see :func:`chela.hooks.recap_command` and
+    :func:`chela.hooks.message_display_command`). Correlation to a window is off the
+    session's origin, not the pane.
 
     **Only one event ever decides anything.** An agent is *blocked* on this request and
     Claude Code reads what comes back, so a ``permissionDecision`` or a
@@ -2415,8 +2419,9 @@ def api_hooks(event):
         if config.TERMINAL_TIMESTAMPS and isinstance(body, dict):
             return jsonify(hooks.message_display_response(body))
         return jsonify({})
-    # Only the SessionStart `command` hook can send this (CMX-160) — every other event
-    # rides `http`, which carries Claude Code's payload and none of the agent's own env.
+    # Only the SessionStart `command` hook can send this (CMX-160) — its curl is the one
+    # that carries an X-Chela-Wid header; MessageDisplay's own curl (CMX-303) and every
+    # `http` hook carry Claude Code's payload and none of the agent's own env.
     explicit_wid = request.headers.get("X-Chela-Wid") or None
     hooks.ingest(event, body, explicit_wid=explicit_wid)
     if event == "SessionStart" and isinstance(body, dict):

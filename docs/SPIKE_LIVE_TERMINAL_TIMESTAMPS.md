@@ -250,3 +250,32 @@ a different design. Side note for future spikes here: the *first* MessageDisplay
 each run only landed 3-5s after `Enter` was actually submitted, not the network round-trip —
 that gap is Claude Code's own first-token latency before streaming starts, unrelated to this
 hook.
+
+## ⛔ Correction (CMX-303) — `http` does not stay: it is the reason nothing ever rendered
+
+The verdict directly above answered "is `http` fast enough" and got a clean yes. It never
+asked "does `http` paint at all" — that question wasn't on the table yet, because nothing
+up to that point had reason to suspect the transport itself, only its latency.
+
+**Measured, on a live fleet, 2026-08-17:** `config.TERMINAL_TIMESTAMPS` was `True`
+(`~/.chela/chela.env`), `MessageDisplay` was present in the loaded plugin manifest, the
+pinned Claude Code build was 2.1.233 (far past the 2.1.152 floor), and `curl`ing
+`/hooks/MessageDisplay` directly returned the correct
+`{"hookSpecificOutput": {"displayContent": "[18:01] hello world", "hookEventName":
+"MessageDisplay"}}`, HTTP 200. Every layer this repo controls was independently confirmed
+correct. And yet zero `[HH:MM]` markers appeared across 2000 lines of live scrollback.
+
+That isolates the fault to the one layer nothing above had tested: how Claude Code's own
+client treats an `http` hook's JSON response for `MessageDisplay` specifically, versus a
+`command` hook's stdout — despite the docs describing both transports as sharing one
+output schema. This repo already has a working counter-example that rules out "hooks
+just can't paint over `http`" as too broad a claim (`PermissionRequest` answers rides
+`http` and is read, `additionalContext` on `SessionStart`'s sibling events works too) —
+but `SessionStart` itself is the one event this repo already had to move off `http`
+entirely for Claude Code to act on what it returns (CMX-41, a different symptom: it never
+fired over `http` at all). `MessageDisplay` did fire — the daemon's access log confirms
+requests arriving — it just never painted. The fix (CMX-303) moves `MessageDisplay` onto
+the identical `command`-relay shape `SessionStart` already uses: a `curl` into the SAME
+`/hooks/MessageDisplay` endpoint, printing its response verbatim as the command's own
+stdout. Nothing about `message_display_response`'s logic changed — only the transport
+Claude Code receives that response over.
