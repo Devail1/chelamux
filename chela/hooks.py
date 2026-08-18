@@ -118,10 +118,13 @@ GATE_TIMEOUT = 120
 # Being a `command` hook buys a second thing (CMX-160): it runs as a child of the claude
 # process itself, so it inherits that process's environment — `$CHELA_WID`, exported into
 # the pane's shell ahead of every chela-managed launch (`agent_manager.wid_env_prefix`,
-# `spawn.py`). Every OTHER hook rides `http` (Claude Code's own client, which sends the
-# payload and nothing of the agent's env), so this is the one place the agent can just SAY
-# which window it is rather than have chela infer it from `/proc` and tmux panes — and the
-# one place cross-platform, since inference needs `/proc` and this does not. See
+# `spawn.py`). Every hook but SessionStart and MessageDisplay rides `http` (Claude Code's
+# own client, which sends the payload and nothing of the agent's env); MessageDisplay is
+# also a `command` hook (CMX-303) but carries no `$CHELA_WID` header (see
+# `message_display_command`) — nothing it returns is agent-specific, so SessionStart stays
+# the one place the agent can just SAY which window it is rather than have chela infer it
+# from `/proc` and tmux panes — and the one place cross-platform, since inference needs
+# `/proc` and this does not. See
 # `recap_command` and `_explicit_wid`.
 RECAP_TIMEOUT = 5
 

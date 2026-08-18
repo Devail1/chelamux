@@ -200,11 +200,15 @@ def test_an_explicit_port_still_renders(chela_dir):
     config.publish_dashboard_port(5005)
     spec = hooks.hooks_spec(port=6001)["hooks"]
     assert spec["Stop"][0]["hooks"][0]["url"] == "http://127.0.0.1:6001/hooks/Stop"
-    # SessionStart is the one COMMAND hook (it never fires over http) — the port is baked
-    # into the curl it shells, and a manifest whose recap posts to a dead port is CMX-41
-    # again, one transport over.
+    # SessionStart and MessageDisplay are the two COMMAND hooks (neither renders what the
+    # daemon returns over http — SessionStart never fires there at all, MessageDisplay's
+    # response never got applied on a live fleet, CMX-303) — the port is baked into the
+    # curl each shells, and a manifest whose command posts to a dead port is CMX-41 again,
+    # one transport over.
     assert ("http://127.0.0.1:6001/hooks/SessionStart"
             in spec["SessionStart"][0]["hooks"][0]["command"])
+    assert ("http://127.0.0.1:6001/hooks/MessageDisplay"
+            in spec["MessageDisplay"][0]["hooks"][0]["command"])
 
     rendered = hooks.render_plugin(chela_dir / "plugin", port=6001)
     manifest = json.loads((rendered / "hooks" / "hooks.json").read_text())

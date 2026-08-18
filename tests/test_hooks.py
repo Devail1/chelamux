@@ -413,10 +413,12 @@ def test_the_slug_is_resolved_once_and_cached(monkeypatch):
 
 # --- $CHELA_WID: the agent SAYING which window it is (CMX-160) -----------------------
 #
-# Every hook but SessionStart rides `http` — Claude Code's own client, carrying only the
-# payload, none of the agent's env. SessionStart is a `command` hook and so inherits the
-# process env, letting the agent short-circuit inference entirely via an `X-Chela-Wid`
-# header. Still not trusted blind: malformed, empty, or naming a window that is not live
+# Every hook but SessionStart and MessageDisplay rides `http` — Claude Code's own client,
+# carrying only the payload, none of the agent's env. SessionStart is a `command` hook and
+# so inherits the process env, letting the agent short-circuit inference entirely via an
+# `X-Chela-Wid` header (MessageDisplay is also `command`, CMX-303, but carries no such
+# header — nothing it returns is agent-specific). Still not trusted blind: malformed,
+# empty, or naming a window that is not live
 # right now must fall through to the SAME inference as if no header had ever been sent.
 
 def test_explicit_wid_short_circuits_correlation_that_would_otherwise_fail(monkeypatch):
@@ -647,9 +649,15 @@ def test_message_display_command_relays_into_the_same_http_endpoint():
     """CMX-303: `MessageDisplay` moved off `http` (a live fleet never rendered what the
     daemon returned there) onto the SAME curl-relay shape as `SessionStart` — a curl into
     the identical `/hooks/MessageDisplay` route, printing the daemon's own response as its
-    stdout, and failing open exactly like the recap command."""
-    command = hooks.message_display_command(port=5001)
-    assert "http://127.0.0.1:5001/hooks/MessageDisplay" in command
+    stdout, and failing open exactly like the recap command.
+
+    Port is 6001, NOT config.DEFAULT_DASHBOARD_PORT (5001): a hardcoded-5001 command would
+    satisfy a same-as-default port just as well as a real one, so pinning it at a port that
+    ISN'T the default is what makes this assert the ``port`` argument actually got plumbed
+    through, rather than merely rendering something with 5001 in it somewhere
+    (docs/DEFEAT_SHAPES.md)."""
+    command = hooks.message_display_command(port=6001)
+    assert "http://127.0.0.1:6001/hooks/MessageDisplay" in command
     assert "--fail" in command and command.endswith("|| true")
     assert "X-Chela-Wid" not in command
 
