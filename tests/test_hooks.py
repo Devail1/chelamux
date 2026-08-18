@@ -643,6 +643,17 @@ def test_recap_command_carries_the_window_id_as_a_shell_expanded_header():
     assert "$CHELA_WID" not in command.replace("${CHELA_WID:-}", "")
 
 
+def test_message_display_command_relays_into_the_same_http_endpoint():
+    """CMX-303: `MessageDisplay` moved off `http` (a live fleet never rendered what the
+    daemon returned there) onto the SAME curl-relay shape as `SessionStart` — a curl into
+    the identical `/hooks/MessageDisplay` route, printing the daemon's own response as its
+    stdout, and failing open exactly like the recap command."""
+    command = hooks.message_display_command(port=5001)
+    assert "http://127.0.0.1:5001/hooks/MessageDisplay" in command
+    assert "--fail" in command and command.endswith("|| true")
+    assert "X-Chela-Wid" not in command
+
+
 # --- live terminal timestamps (CMX-277, mechanism swapped in CMX-285) --------------
 
 def test_timestamp_events_is_exactly_message_display():
@@ -927,14 +938,14 @@ def test_endpoint_will_not_read_an_oversized_body(client):
 
 # --- the plugin ------------------------------------------------------------------
 
-def test_hooks_spec_registers_every_event_over_http():
+def test_hooks_spec_registers_every_event():
     spec = hooks.hooks_spec(port=5001)["hooks"]
     assert set(spec) == set(hooks.HOOK_EVENTS)
     for event, entries in spec.items():
         hook, = entries[0]["hooks"]
         assert ("matcher" in entries[0]) == (event in hooks.TOOL_EVENTS)
         if event == "SessionStart":
-            # The ONE command hook, because SessionStart NEVER fires over http (measured,
+            # A command hook, because SessionStart NEVER fires over http (measured,
             # CMX-41) and a command hook's stdout IS the injected context — which is how
             # the room recap reaches a restarted agent. It is a curl into the SAME endpoint
             # (not a `chela` spawn: chela is not on an agent's PATH), and it fails open —
@@ -945,6 +956,16 @@ def test_hooks_spec_registers_every_event_over_http():
             assert "http://127.0.0.1:5001/hooks/SessionStart" in hook["command"]
             assert "--fail" in hook["command"] and hook["command"].endswith("|| true")
             assert hook["timeout"] == hooks.RECAP_TIMEOUT
+            continue
+        if event == "MessageDisplay":
+            # CMX-303: the other command hook — a live fleet never rendered this event's
+            # `http` response, so it rides the identical curl-relay shape SessionStart
+            # already proved Claude Code actually acts on. Same fail-open shape, no header.
+            assert hook["type"] == "command"
+            assert "url" not in hook
+            assert "http://127.0.0.1:5001/hooks/MessageDisplay" in hook["command"]
+            assert "--fail" in hook["command"] and hook["command"].endswith("|| true")
+            assert hook["timeout"] == hooks.HOOK_TIMEOUT <= 2
             continue
         # http, not command: no shell, no process spawn per tool call, and no chatty
         # .bashrc able to corrupt the JSON contract with stray stdout.
