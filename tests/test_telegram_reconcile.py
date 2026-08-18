@@ -846,6 +846,23 @@ def test_a_claimed_rows_name_match_requires_an_exact_name_not_a_substring_mirror
     assert dispatched_window_ids(runs, live_windows=live) == set()
 
 
+def test_a_claimed_rows_name_match_finds_its_own_window_in_a_multi_window_fleet():
+    # Every other name-match fixture in this file hands the fallback a live fleet
+    # with AT MOST ONE entry, so "the window whose name matched" and "the first
+    # window in the fleet" are indistinguishable, and "scan the whole fleet" and
+    # "look only at the first entry" are the same loop. Production is never that
+    # shape: `live_agent_windows()` returns the ENTIRE tmux session, tmux lists
+    # windows by index, and the fallback's target was just spawned — so the
+    # matching entry is normally near the END of `live`, not the first. This
+    # fixture puts three windows in the fleet with the match LAST, and pins the
+    # exact id claimed — not just that some id was — so a fallback that grabs an
+    # arbitrary/first live window instead of the one whose name actually matched
+    # fails this even though it "claims something".
+    runs = [{"status": "claimed", "window_id": None, "window_name": "cmx-305"}]
+    live = {"@1": "orchestrator", "@667": "cmx-304", "@668": "cmx-305"}
+    assert dispatched_window_ids(runs, live_windows=live) == {"@668"}
+
+
 def test_a_claimed_rows_stale_window_id_does_not_fall_through_to_name_match():
     # The THIRD gating condition on the fallback: `not wid`. The fallback exists
     # ONLY for a "claimed" row that has not been stamped an id YET (window_id is
