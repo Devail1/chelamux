@@ -13,7 +13,22 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
+      # CMX-305: tests/test_judge.py's added-defeat-shape-file numbering guard derives the
+      # CMX task number from `git rev-parse --abbrev-ref HEAD` and diffs against
+      # `origin/dev`. The default checkout (depth 1, single ref) leaves HEAD detached on a
+      # pull_request event (abbrev-ref -> "HEAD") and origin/dev unfetched, so the guard
+      # SKIPS instead of running — a hand-opened PR carrying a mis-numbered entry would
+      # sail straight past it. fetch-depth 0 pulls full history, origin/dev included.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Name the checked-out ref
+        # pull_request events check out a detached merge commit. Rename HEAD to the PR's
+        # own branch (from the event payload, not a remote fetch — works for fork PRs too,
+        # since it only relabels the commit already checked out) so branch-name-derived
+        # guards see the real branch instead of "HEAD".
+        run: git checkout -B "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
