@@ -194,3 +194,60 @@ suite red.
 **Round 3 found:** (CMX-310, PR #386, rework round 3) — closed by adding
 `"non-interactively" in out` and `"no uninstall/reinstall needed" in out` to the `chela
 plugin` test, and `"confirmed-installed copy" in body` to the doctor test.
+
+**Round 4 — round 3 closed the mode word in `chela plugin`'s test but not in `chela
+doctor`'s, and left the sentence that MOTIVATES the by-hand fallback completely unpinned.**
+Round 3's own closing note named the exact gap it was leaving open — "`chela doctor`'s test
+pinned `"no uninstall/reinstall needed" in body`... but never `"non-interactively"`" — and
+then closed that gap only in `chela plugin`'s test, not in `chela doctor`'s, even though
+`chela/runtime_truth.py:1099` renders the identical claim. Separately, `chela plugin`'s
+message opens with a sentence no round had touched: `chela will not write into Claude Code's
+plugin cache directly (that copy is Claude Code's to manage) — but \`chela update\` already
+refreshes it...`. That sentence is not decorative — it is the entire reason the by-hand
+fallback (`claude plugin marketplace update` + `claude plugin update`) exists instead of
+chela writing the cache file directly, and it names a real behavioral invariant (`chela
+update` only ever shells out to `claude plugin ...`; it never touches the cache itself).
+
+```diff
+# chela/runtime_truth.py — the doctor Finding's OWN copy of the mode-word claim round 3
+# pinned in the SIBLING renderer (chela/main.py) but not here, even though this file renders
+# the identical clause
+- "non-interactively — no uninstall/reinstall needed (it runs `claude "
++ "interactively — no uninstall/reinstall needed (it runs `claude "
+```
+
+```diff
+# chela/main.py — the rationale sentence this PR wrote for the STALE-INSTALL message,
+# never pinned in any round even though it explains why the by-hand fallback below it exists
+- chela will not write into Claude Code's plugin cache directly (that "
++ chela may write into Claude Code's plugin cache directly (that "
+```
+
+Both mutations, applied by the judge to a throwaway checkout of round 3's fix, still parsed
+and left `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green (3227 passed, 0 failed).
+
+**Why round 3's fix didn't already cover this:** round 3 diagnosed the gap correctly in
+prose (its own closing note names the doctor-side `"non-interactively"` omission) but the
+diff it shipped closed only the renderer the round-3 mutation had itself hit
+(`chela/main.py`), not the sibling the note said was still open. This is the same failure
+mode shape 310 exists to name — one renderer's test gets the fix, the sibling repeating the
+identical clause does not — recurring a fourth time *inside the entry that already documents
+it*, this time against the round's own stated diagnosis rather than against an unexamined
+clause. A second, independent gap (the cache-ownership rationale sentence) had never been
+named by any prior round at all: it sits one sentence above the compound `Fix:` clause every
+prior round mined for sub-claims, in a part of the message none of them read as a
+"falsifiable claim" because it reads as scene-setting rather than as an instruction.
+
+**Guard form that survives (updated again):** when a prior round's own closing note names a
+sibling renderer as still-open, treat that as a required assertion for THIS round, not
+optional cleanup — the note is the guard spec. And re-read the entire message being fixed,
+not just the clause the last few mutations have concentrated in: a rationale sentence
+("why this fallback exists, and what chela promises never to touch") is exactly as
+falsifiable as a CLI verb or a mode word, and mutation-hunting that only revisits the
+compound `Fix:` clause misses it indefinitely.
+
+**Round 4 found:** (CMX-310, PR #386, rework round 4) — closed by adding
+`"non-interactively" in body` to the doctor test
+(`test_doctor_ERRORs_when_the_installed_manifest_disagrees`), and `"chela will not write
+into Claude Code's plugin cache directly" in out` to the `chela plugin` test
+(`test_chela_plugin_names_the_cache_path_when_the_install_is_stale`).

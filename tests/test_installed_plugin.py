@@ -155,6 +155,7 @@ def test_doctor_ERRORs_when_the_installed_manifest_disagrees(env):
     assert str(hooks.plugins_dir()) in body     # it NAMES the file it read
     assert "STARTUP" in body                    # a running fleet keeps the stale hooks
     assert "chela update" in body                # points at the automatic fix...
+    assert "non-interactively" in body            # ...the refresh needs no operator input...
     assert "no uninstall/reinstall needed" in body
     assert "/plugin uninstall" not in body        # ...not a manual uninstall/reinstall
     # the two real CLI calls `chela update` actually runs — both verbs, not just one
@@ -236,6 +237,8 @@ def test_chela_plugin_names_the_cache_path_when_the_install_is_stale(env, capsys
     assert "STALE INSTALL" in out
     assert str(hooks.installed_plugins()[0].manifest) in out
     assert "/plugin uninstall" not in out
+    # the rationale the by-hand fallback exists for: chela never touches the cache itself
+    assert "chela will not write into Claude Code's plugin cache directly" in out
     assert "\n    chela update\n" in out          # the action line itself, not just the prose
     assert "claude plugin marketplace update <marketplace>" in out   # the real CLI verb...
     assert "claude plugin update chela@<marketplace>" in out         # ...both of them
