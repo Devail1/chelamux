@@ -34,8 +34,17 @@ untouched conditions still happen to agree with the downstream signal by constru
    at all. Every existing positive fixture for the fallback has `window_id=None`, so dropping
    the `not wid` clause changes nothing they observe — the row still reaches the same `elif`
    by the same `status == "claimed"` path, just now also for rows that carry a stale id.
+4. `if lname == name:` → `if lname in name:` — the MIRROR of mutation 2's containment
+   loosening, operands swapped. `in` is directional: `name in lname` and `lname in name` are
+   two different tests, so closing one does not close the other. The fixture that closed
+   mutation 2 (`window_name="cmx-30"` recorded, `live={"@668": "cmx-305"}`) only ever puts the
+   *recorded* value on the left of `in` — it stays green under this mutation too, because
+   `"cmx-305" in "cmx-30"` is `False`. Swap which value is recorded and which is live
+   (`window_name="cmx-305"` recorded, `live={"@668": "cmx-30"}`) and the same near-miss
+   reappears from the other side: `"cmx-30" in "cmx-305"` is `True`, so the fallback wrongly
+   claims a live window that is merely a *prefix* of the row's own recorded name.
 
-All three mutations are invisible to the same suite for the same structural reason: the
+All four mutations are invisible to the same suite for the same structural reason: the
 fixtures prove the fallback fires when it *should*, and refuses when there is *nothing on
 offer to wrongly fire on* — but never refuses while something wrong is on offer, and never
 hold every OTHER condition (including ones not obviously "the one under test", like the id
@@ -51,7 +60,12 @@ looser guard *would* have matched:
   result is empty.
 - equality: a `"claimed"` row with `window_name="cmx-30"`, against `live={"@668":
   "cmx-305"}` — a live name that *contains* the recorded name as a prefix, so a
-  substring-membership check would wrongly match it — asserts the result is empty.
+  substring-membership check would wrongly match it — asserts the result is empty. Because
+  `in` is directional, this must be checked in BOTH operand orders: also a `"claimed"` row
+  with `window_name="cmx-305"`, against `live={"@668": "cmx-30"}` — the recorded name now
+  containing the live one — asserts the result is empty too. Proving `==` means proving `in`
+  fails to substitute for it from either side, not just the side the first fixture happened
+  to phrase.
 - id-absence: a `"claimed"` row that DOES carry `window_id="@668"` with a dangling
   `window_epoch` (an old epoch against a `now_epoch` that differs), and a recorded
   `window_name` that matches some OTHER live window exactly (`live={"@900": "cmx-305"}`) —
@@ -83,4 +97,10 @@ still left the THIRD condition (`not wid`) exercised at only one value — every
 "claimed"` in place) still went green under the same suite (3223 tests). Closed by
 `test_a_claimed_rows_stale_window_id_does_not_fall_through_to_name_match` (id-absence flipped
 off via a dangling-epoch row that DOES carry a `window_id`, matching live window under a
-DIFFERENT id still present).
+DIFFERENT id still present). Round 4: closing the equality mutation only ever exercised `in`
+with the recorded value on the left (`name in lname`) — the mirror operand order, `lname in
+name`, was still unproven, so mutation 4 above (round 1's fixture with recorded and live
+swapped) went green under the same suite (3224 tests). Closed by
+`test_a_claimed_rows_name_match_requires_an_exact_name_not_a_substring_mirrored`, the same
+near-miss fixture with which value is recorded and which is live swapped relative to round
+1's.
