@@ -58,6 +58,19 @@ jobs:
       - name: Ruff
         run: uv run ruff check chela tests
 
+      - name: Assert the ref state the CMX-301 guard needs
+        # Rounds 1-4 each closed a mutation that disturbed a DIFFERENT property of this
+        # YAML — a verb, a spelling, a step vs its parent job, a window boundary — and each
+        # round the next mutation just moved to a property the previous assertion didn't
+        # enumerate. A denylist over a config language doesn't converge. This step asserts
+        # the STATE ITSELF, immediately before Pytest reads it: whatever spelling the next
+        # mutation arrives in (a renamed branch, a dropped remote, an env override that
+        # changes what the rename step's command expands to, ...), a bad ref here is a red
+        # build, not a silent skip three steps later.
+        run: |
+          git rev-parse --abbrev-ref HEAD | grep -qiE '^cmx-[0-9]+$'
+          git rev-parse --verify --quiet origin/dev
+
       - name: Pytest
         # The JS suites (every *.test.mjs) run inside pytest via tests/test_js_suites.py and
         # need `node`. It is preinstalled on the runner — and CHELA_REQUIRE_JS_TESTS makes a

@@ -64,6 +64,55 @@ Round 3's own fix had two more gaps of the same shape, both closed in round 4:
    position before Pytest; every existing assertion stays green. A skipped job doesn't fail
    the workflow run, so CI reports green with the CMX-301 guard never having executed at
    all.
+
+Round 4's own fix had three more gaps of the same shape, all closed in round 5:
+
+9. Every `if:`-absence check landed on the rename step and the job, never on the step whose
+   EXECUTION is the entire point of this file: Pytest itself. `if: false` on the Pytest step
+   leaves the needle (`uv run pytest`), the `run:`, and the ordering (`index(rename) <
+   index(pytest)`) byte-identical — a skipped step doesn't fail a workflow run, so CI reports
+   green having executed zero tests, the CMX-301 guard included.
+10. `test_head_is_renamed_to_the_pr_branch_before_pytest` pins the rename command's TEXT
+    exactly, but never its INPUT. A step-level `env: GITHUB_HEAD_REF: "${{ github.ref_name
+    }}"` leaves the `run:` byte-identical (GITHUB_-prefixed env keys do take effect —
+    `GITHUB_TOKEN` is the ubiquitous precedent), so the exact-match assertion, the ordering,
+    the git-ban window, and every `if:`-absence check all stay green — while on a
+    `pull_request` event `github.ref_name` is `379/merge`, not `cmx-305`, so the rename
+    checks out the WRONG branch and the CMX-301 guard's own branch-number parse fails.
+11. The git-ban window started at the rename step, but the fetch-depth invariant's exposure
+    starts at the CHECKOUT — the segment between checkout and rename was unguarded. `git
+    remote remove origin`, moved a few lines earlier (before the rename instead of after),
+    deletes `refs/remotes/origin/*` outside the banned window entirely; nothing between
+    checkout and rename was ever scanned.
+
+No amount of enumerating one more property closes this class — verb, spelling, level,
+window boundary, and now environment have each, in turn, been the property the previous
+round's assertion didn't cover. Round 5 stops chasing properties of the YAML and instead
+asserts the STATE the CMX-301 guard actually needs, AT THE POINT PYTEST RUNS: a new step,
+"Assert the ref state the CMX-301 guard needs", runs `git rev-parse --abbrev-ref HEAD | grep
+-qiE '^cmx-[0-9]+$'` and `git rev-parse --verify --quiet origin/dev` immediately before
+Pytest — the same `cmx-N` pattern `tests/test_judge.py::_cmx_task_number_from_branch` itself
+parses. Whatever mutation disturbs the ref (a rename, a dropped remote, a re-detach, a
+second checkout, ...) now fails IN CI, at the point of use, rather than leaving the CMX-301
+guard to skip quietly three steps later. This is asserted here as: the step exists exactly
+once, is unconditional, sits immediately before Pytest, and its `run:` is pinned exactly —
+plus the git-ban window is widened to start at the checkout (a superset of the
+rename-to-Pytest window), exempting only the rename step and this new assertion step, both
+of which are independently pinned exactly elsewhere in this file.
+
+The env-override mutation (10) is the one gap the runtime state-assertion step does not
+close on its own for THIS suite — it turns the env override into a red build in actual CI,
+but a suite that only parses the YAML locally never executes the workflow, so a step that
+merely runs unmodified `git checkout -B "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"` still looks
+identical whether or not a sibling `env:` key would have changed what it expands to.
+Closing that locally needs a direct structural check instead: no `env:` block anywhere in
+the file — workflow-level, job-level, or on any step — may define `GITHUB_HEAD_REF` or
+`GITHUB_REF_NAME`, the two variables the rename command's own `${GITHUB_HEAD_REF:-
+$GITHUB_REF_NAME}` reads. That is provably complete against THIS shape of attack (an `env:`
+key in the YAML) — it is not a defense against a step writing to `$GITHUB_ENV` to redefine
+either variable at runtime for a later step, which no denylist of YAML keys can see; the
+runtime state-assertion step is what still catches that residual case, in actual CI, at the
+point of use.
 """
 from __future__ import annotations
 
@@ -159,10 +208,58 @@ def test_head_is_renamed_to_the_pr_branch_before_pytest(steps):
     )
 
 
+_REF_ENV_VARS = ("GITHUB_HEAD_REF", "GITHUB_REF_NAME")
+
+
+def test_nothing_redefines_the_rename_steps_env_vars(workflow, job, steps):
+    """Round 5: `test_head_is_renamed_to_the_pr_branch_before_pytest` pins the rename
+    step's `run:` TEXT exactly (round 3) — but never what that text expands to. A
+    step-level `env: {GITHUB_HEAD_REF: "${{ github.ref_name }}"}` on the rename step leaves
+    the `run:` byte-identical (so the exact-match assertion is untouched), adds no `if:`
+    key, no `uses:`, doesn't invoke `git` itself (so it isn't caught by the git-ban window,
+    and wouldn't be inside it anyway — it sits ON the rename step, which that window
+    already exempts), and doesn't change step order. On a `pull_request` event
+    `github.ref_name` is `379/merge`, not the PR's own branch, so the rename would check
+    out the wrong ref while every assertion above stays green.
+
+    `GITHUB_`-prefixed env keys do take effect in a step's process — `env: GITHUB_TOKEN:
+    ...` is the standard way to hand a token to a step — so this is a real expansion, not a
+    hypothetical one. Ban either variable from being (re)defined by an `env:` block at
+    ANY level — workflow, job, or step — since a workflow- or job-level override reaches
+    the rename step exactly as a step-level one does, without adding an `env:` key to the
+    step itself.
+    """
+    def _env_keys(node: dict) -> set[str]:
+        env = node.get("env") if isinstance(node, dict) else None
+        return set(env) if isinstance(env, dict) else set()
+
+    offenders = _env_keys(workflow) & set(_REF_ENV_VARS)
+    assert not offenders, (
+        f"workflow-level `env:` redefines {sorted(offenders)} — this changes what the "
+        "rename step's ${GITHUB_HEAD_REF:-$GITHUB_REF_NAME} expands to without touching "
+        "its run: text at all"
+    )
+
+    offenders = _env_keys(job) & set(_REF_ENV_VARS)
+    assert not offenders, (
+        f"the `test` job's `env:` redefines {sorted(offenders)} — this changes what the "
+        "rename step's ${GITHUB_HEAD_REF:-$GITHUB_REF_NAME} expands to without touching "
+        "its run: text at all"
+    )
+
+    for step in steps:
+        offenders = _env_keys(step) & set(_REF_ENV_VARS)
+        assert not offenders, (
+            f"step {step.get('name')!r} redefines {sorted(offenders)} in its own `env:` — "
+            "this changes what the rename step's ${GITHUB_HEAD_REF:-$GITHUB_REF_NAME} "
+            "expands to without touching its run: text at all"
+        )
+
+
 _GIT_INVOCATION = re.compile(r"(?<![\w.-])git(?![\w.-])")
 
 
-def test_nothing_between_the_rename_and_pytest_touches_head(steps):
+def test_nothing_between_the_checkout_and_pytest_touches_git_except_the_pinned_steps(steps):
     """Round 3: round 2's `test_exactly_one_checkout_step` closed the "second `actions/
     checkout` step" shape, but only for steps that `uses: actions/checkout@...` — a plain
     `run:` step re-detaching HEAD between the rename and Pytest is invisible to it. Such a
@@ -182,18 +279,32 @@ def test_nothing_between_the_rename_and_pytest_touches_head(steps):
     `origin/dev` diff needs, and also matches none of the three. Both are `git` invocations;
     neither is an enumerated verb. Ban `git` itself in this window, not a guessed list of
     its subcommands, so no future verb needs to be predicted in advance.
+
+    Round 5: the window started at the rename step, but the fetch-depth invariant's own
+    exposure starts at the CHECKOUT — `git remote remove origin`, moved a few lines earlier
+    (before the rename instead of after), sat entirely outside the old window and went
+    unscanned. Widen the window to `[checkout+1 : pytest)`, a strict superset of the old
+    one. The rename step and the new ref-state-assertion step both legitimately invoke
+    `git` inside that wider window — each is pinned to its exact `run:` text by its own
+    test elsewhere in this file, so exempting the two of them here doesn't reopen any gap;
+    every OTHER step in the window still may not touch `git` at all.
     """
+    checkout = next(s for s in steps if s.get("uses", "").startswith("actions/checkout@"))
     rename = _step_running(steps, "GITHUB_HEAD_REF")
+    ref_assert = _step_running(steps, "origin/dev")
     pytest_step = _step_running(steps, "uv run pytest")
-    between = steps[steps.index(rename) + 1 : steps.index(pytest_step)]
+    between = steps[steps.index(checkout) + 1 : steps.index(pytest_step)]
+    pinned_elsewhere = {id(rename), id(ref_assert)}
 
     for step in between:
+        if id(step) in pinned_elsewhere:
+            continue
         run = step.get("run", "")
         assert not _GIT_INVOCATION.search(run), (
-            f"step {step.get('name')!r} between the HEAD rename and Pytest runs {run!r}, "
-            "which invokes `git` — no step in that window may touch git at all, or it can "
-            "silently rename, re-detach, or unfetch HEAD after the rename and before the "
-            "CMX-301 guard reads it, even though the rename step itself still looks correct"
+            f"step {step.get('name')!r} between the checkout and Pytest runs {run!r}, "
+            "which invokes `git` — no unpinned step in that window may touch git at all, "
+            "or it can silently rename, re-detach, or unfetch HEAD before the CMX-301 "
+            "guard reads it, even though the rename step itself still looks correct"
         )
 
 
@@ -229,4 +340,66 @@ def test_job_is_unconditional(job):
         f"the `test` job has an `if: {job.get('if')!r}` condition — it must run "
         "unconditionally on every pull_request build, or the entire job (rename step "
         "included) can be switched off while every step-level assertion still passes"
+    )
+
+
+def test_pytest_step_is_unconditional(steps):
+    """Round 5: rounds 2 and 4 checked `if:`-absence on the rename step and on the job, but
+    never on Pytest itself — the one step whose EXECUTION is the entire point of this file,
+    and the one `_step_running(steps, "uv run pytest")` already uses as an ordering anchor.
+
+    `if: false` on the Pytest step leaves the needle (`uv run pytest`), the `run:`, and the
+    ordering (`index(rename) < index(pytest)`) byte-identical to every assertion above — a
+    skipped step doesn't fail a workflow run, so CI would report green having executed zero
+    tests, the CMX-301 guard included. `continue-on-error: true` reaches the same end state
+    by a different door: the step runs, fails, and the job still reports success — so that
+    is banned here too.
+    """
+    pytest_step = _step_running(steps, "uv run pytest")
+    assert "if" not in pytest_step, (
+        f"the Pytest step has an `if: {pytest_step.get('if')!r}` condition — it must run "
+        "unconditionally, or CI can report green having executed zero tests"
+    )
+    assert "continue-on-error" not in pytest_step, (
+        f"the Pytest step has `continue-on-error: {pytest_step.get('continue-on-error')!r}` "
+        "— a step whose failure is swallowed reports the same green CI as one that never "
+        "ran at all"
+    )
+
+
+def test_ref_state_is_asserted_immediately_before_pytest(steps):
+    """Round 5: rounds 1-4 each closed a mutation that disturbed a different PROPERTY of
+    this YAML — a verb, a spelling, a step vs its parent job, a window boundary — and each
+    round the next mutation simply moved to a property the previous assertion didn't
+    enumerate. Chasing properties has no bottom.
+
+    Instead of predicting the next way to disturb the ref, assert the STATE the CMX-301
+    guard actually needs, at the exact point it needs it: a step immediately before Pytest
+    must confirm HEAD names a `cmx-N` branch (the same pattern
+    `tests/test_judge.py::_cmx_task_number_from_branch` parses) and that `origin/dev` is
+    resolvable. Whatever mutation disturbs either — a rename, a dropped remote, an
+    overridden `GITHUB_HEAD_REF`, a re-detach, a second checkout, a switched-off rename —
+    now fails IN CI at the point of use, rather than leaving the CMX-301 guard to skip
+    quietly three steps later.
+    """
+    ref_assert = _step_running(steps, "origin/dev")
+    pytest_step = _step_running(steps, "uv run pytest")
+
+    expected_run = (
+        "git rev-parse --abbrev-ref HEAD | grep -qiE '^cmx-[0-9]+$'\n"
+        "git rev-parse --verify --quiet origin/dev"
+    )
+    assert ref_assert["run"].strip() == expected_run, (
+        f"the ref-state-assertion step's run is {ref_assert['run']!r}, expected exactly "
+        f"{expected_run!r} — it must actually assert both the branch name AND that "
+        "origin/dev resolves, not merely reference either"
+    )
+    assert "if" not in ref_assert, (
+        f"the ref-state-assertion step has an `if: {ref_assert.get('if')!r}` condition — "
+        "it must run unconditionally, or it can be switched off while its run: and "
+        "position still look correct"
+    )
+    assert steps.index(ref_assert) == steps.index(pytest_step) - 1, (
+        "the ref-state-assertion step must sit IMMEDIATELY before Pytest — anything "
+        "positioned between the two could disturb the ref again after it was checked"
     )

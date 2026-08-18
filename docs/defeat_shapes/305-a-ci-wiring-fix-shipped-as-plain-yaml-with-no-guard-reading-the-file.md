@@ -232,3 +232,101 @@ judge to a throwaway checkout of the round-3 fix, stayed green (3222 passed, 0 f
 Closed by broadening `test_nothing_between_the_rename_and_pytest_touches_head` from a
 three-verb denylist to a blanket `git`-invocation ban, and adding `test_job_is_unconditional`
 to `tests/test_ci_workflow.py`.
+
+**Round 5 — the guard that closed round 4 generalized "no `if:`" and "no `git`" as far as
+rounds 1-4's own mutations reached, but not one step further, and pinned a command's text
+without ever pinning what that text expands to:**
+
+```diff
+-       - name: Pytest
++       - name: Pytest
++         if: false
+```
+
+Rounds 2 and 4 added `if:`-absence checks for the rename step and for the job — but never
+for Pytest itself, the one step whose EXECUTION is the entire point of this file, and the
+one step `_step_running(steps, "uv run pytest")` already anchors on. `if: false` here
+leaves the needle, the `run:`, and the ordering all untouched; a skipped step doesn't fail
+a workflow run, so CI reports green having executed zero tests, the CMX-301 guard included.
+
+```diff
++         env:
++           GITHUB_HEAD_REF: "${{ github.ref_name }}"
+          run: git checkout -B "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+```
+
+Round 3's exact-match assertion pins the rename command's TEXT, not its INPUT. A step-level
+`env:` overriding `GITHUB_HEAD_REF` leaves that text byte-identical — so the exact-match
+assertion, the ordering, the git-ban window, and every `if:`-absence check all stay green —
+while on a `pull_request` event `github.ref_name` is `379/merge`, not the PR's own branch,
+so the rename checks out the WRONG ref and the CMX-301 guard's own branch-number parse
+fails downstream.
+
+```diff
+-       - name: Name the checked-out ref
++       - name: Prune the fetch remote (keep the build self-contained)
++         run: git remote remove origin
++
++       - name: Name the checked-out ref
+```
+
+Round 4's git-ban window starts at the rename step, but the fetch-depth invariant's own
+exposure starts at the CHECKOUT — the segment between checkout and rename was never
+scanned. The identical `git remote remove origin` that round 4's ban already catches
+*after* the rename, moved a few lines *earlier*, sits entirely outside the banned window
+and goes unnoticed.
+
+All three mutations, applied by the judge to a throwaway checkout of PR #379's round-4
+head, stayed green against `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (3223 passed, 0
+failed).
+
+**Why this slips through (round 5):** the first and third are
+`25-a-shape-s-own-prescribed-fix-is-applied-fully-at.md` for a fourth time running — each
+round's own doctrine ("no `if:` at any level a switch could sit", "the window an invariant
+needs, not the window a previous mutation happened to use") was applied to every site the
+*previous* mutation touched, but not generalized to the *next* site the same doctrine
+already implied. The second is `05-asserting-a-source-constant-instead-of-the-rendered-
+value.md`: pinning a command's source text is not the same as pinning what it resolves to
+at runtime, and `env:`, `working-directory:`, `shell:` and the runner's own defaults all
+sit outside any string comparison written against the `run:` field.
+
+**Guard form that survives (round 5):** `test_pytest_step_is_unconditional` extends the
+`if:`-absence doctrine to the Pytest step itself (plus `continue-on-error`, which reaches
+the same silently-swallowed-failure end state through a different key).
+`test_nothing_between_the_checkout_and_pytest_touches_git_except_the_pinned_steps` widens
+the git-ban window to `[checkout+1 : pytest)` — a strict superset of the old
+rename-to-Pytest window — exempting only the rename step and a new ref-state-assertion
+step, both pinned exactly elsewhere. For the env-override mutation, two guards close it
+from different angles: `test_nothing_redefines_the_rename_steps_env_vars` bans an `env:`
+key defining `GITHUB_HEAD_REF` or `GITHUB_REF_NAME` at the workflow, job, OR step level
+(closing this shape completely at the YAML-structure level, since a workflow- or job-level
+override reaches the rename step exactly as a step-level one would); and a new CI step,
+"Assert the ref state the CMX-301 guard needs", runs `git rev-parse --abbrev-ref HEAD |
+grep -qiE '^cmx-[0-9]+$'` and `git rev-parse --verify --quiet origin/dev` immediately
+before Pytest — asserting the STATE the CMX-301 guard actually needs at the point it needs
+it, rather than one more property of the YAML that predicts how a future mutation might
+disturb that state. That step is what stops this shape's four-round drift (verb → spelling
+→ level → window boundary → environment): whatever the next mutation's spelling, a bad ref
+at the point of use is a red CI build, not a silent skip three steps later — though it can
+only observe that at actual CI runtime, not in this local suite, which is why the
+YAML-structural `env:` ban above still carries the local, self-check-verifiable half of the
+fix. (Even the state-assertion step is not unconditionally complete: a step that writes to
+`$GITHUB_ENV` to redefine either variable for a later step, rather than setting `env:`
+directly, matches no YAML-level denylist — the runtime assertion is the backstop for
+exactly that residual case, and no known guard closes it at the YAML level.)
+
+**Found:** PR #379 (CMX-305, rework round 5) — all three mutations above, applied by the
+judge to a throwaway checkout of the round-4 fix, stayed green (3223 passed, 0 failed).
+Closed by adding `test_pytest_step_is_unconditional`,
+`test_nothing_redefines_the_rename_steps_env_vars`, and a "ref state" CI step verified by
+`test_ref_state_is_asserted_immediately_before_pytest`, and by widening
+`test_nothing_between_the_rename_and_pytest_touches_head` (renamed
+`test_nothing_between_the_checkout_and_pytest_touches_git_except_the_pinned_steps`) to the
+checkout-to-Pytest window, in `tests/test_ci_workflow.py`.
+
+**Found (round 4, unchanged text below):** PR #379 (CMX-305, rework round 4) — all three
+mutations above, applied by the judge to a throwaway checkout of the round-3 fix, stayed
+green (3222 passed, 0 failed). Closed by broadening
+`test_nothing_between_the_rename_and_pytest_touches_head` from a three-verb denylist to a
+blanket `git`-invocation ban, and adding `test_job_is_unconditional`
+to `tests/test_ci_workflow.py`.
