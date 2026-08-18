@@ -909,3 +909,61 @@ test('an empty patch (a zero-byte file) shows the "No diff text" empty state, no
         globalThis.fetch = originalFetch;
     }
 });
+
+// ---------------------------------------------------------------------------
+// Round 10 (2026-08-18, CMX-306) — _ctxBarHTML has exactly TWO call sites in
+// terminals.js: the wall tile (draggable=true, line ~2106 — every assertion
+// above renders ONLY this one, since the fixture never leaves the default
+// wall mode) and the single-pane / mobile pane (draggable=false, line
+// ~1580 — desktop's Single-mode toggle and the forced-mobile render both
+// funnel through this exact same branch). CMX-299 built the Files chip to be
+// draggable-independent (it's spliced into the returned template with no
+// `draggable ? … : ''` gate, unlike every other chip in that function), but
+// nothing ever rendered the non-draggable branch to prove it — a regression
+// that gated filesChip behind `draggable` (or dropped it from the
+// non-draggable path entirely) would leave every test above this line green.
+// ---------------------------------------------------------------------------
+
+test('the Files chip is also emitted (and wired end to end) in single-pane / mobile mode, not just the wall tile', async () => {
+    const modal = document.getElementById('modal-diff');
+    try {
+        // setTermMode fires renderTerminals() without awaiting it internally;
+        // @1's readiness is already cached from before()'s initial render, so
+        // its Promise.all resolves on a microtask with no real fetch/timer in
+        // between — one flush() (a macrotask) is enough to land after it.
+        terminals.setTermMode('single');
+        await flush();
+
+        const stage = document.getElementById('term-stage');
+        assert.ok(stage.classList.contains('term-single'),
+            'setTermMode(\'single\') did not switch #term-stage into single-pane render');
+
+        const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
+        assert.ok(filesBtn,
+            'the single-pane bottom bar has no .gs-files "Files" chip — _ctxBarHTML dropped it on the non-draggable (single/mobile) path');
+        assert.match(filesBtn.getAttribute('onclick') || '', /chela\.openDiffModal\('@1'\)/,
+            'the single-pane Files chip is not wired to chela.openDiffModal');
+        assert.equal(filesBtn.getAttribute('title'), 'Changed files',
+            'the single-pane Files chip lost its "Changed files" title');
+        assert.ok(/<circle|<path/.test(filesBtn.innerHTML),
+            'the single-pane Files chip rendered no SVG glyph content — the git-compare icon is empty');
+
+        assert.equal(modal.classList.contains('active'), false,
+            'the diff modal starts open — the click assertion below could not tell a real open from a no-op');
+        clickFilesChip(filesBtn);
+        assert.equal(modal.classList.contains('active'), true,
+            'clicking the single-pane Files chip never made #modal-diff visible — the non-draggable path\'s chip is present but dead');
+
+        await flush();   // let openDiffModal's /diff fetch + _render resolve
+        const rows = document.querySelectorAll('#diff-modal-content .diff-file-row');
+        assert.equal(rows.length, 2, 'the diff modal did not render the fetched file list when opened from single-pane mode');
+
+        window.chela.closeDiffModal();
+        assert.equal(modal.classList.contains('active'), false,
+            'closeDiffModal() did not close the modal that was opened from single-pane mode');
+    } finally {
+        // restore the wall-mode fixture every other test in this file depends on
+        terminals.setTermMode('wall');
+        await flush();
+    }
+});
