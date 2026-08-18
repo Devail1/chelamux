@@ -154,6 +154,9 @@ def test_doctor_ERRORs_when_the_installed_manifest_disagrees(env):
     assert "PermissionRequest" in body and "timeout" in body
     assert str(hooks.plugins_dir()) in body     # it NAMES the file it read
     assert "STARTUP" in body                    # a running fleet keeps the stale hooks
+    assert "chela update" in body                # points at the automatic fix...
+    assert "no uninstall/reinstall needed" in body
+    assert "/plugin uninstall" not in body        # ...not a manual uninstall/reinstall
 
 
 def test_doctor_ERRORs_when_a_port_drift_reaches_the_installed_copy(env):
@@ -227,6 +230,7 @@ def test_chela_plugin_names_the_cache_path_when_the_install_is_stale(env, capsys
     assert str(hooks.installed_plugins()[0].manifest) in out
     assert "chela update" in out
     assert "/plugin uninstall" not in out
+    assert "claude plugin marketplace update <marketplace>" in out   # the real CLI verb
 
 
 def test_chela_plugin_says_so_when_nothing_is_installed(env, capsys):
