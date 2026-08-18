@@ -75,3 +75,73 @@ against `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (3218 passed, 0 failed). Clo
 `"chela update" in body`, `"no uninstall/reinstall needed" in body`, and `"/plugin uninstall"
 not in body` to the doctor test, and `"claude plugin marketplace update <marketplace>" in
 out` to the `chela plugin` test.
+
+**Round 2 — the fix for round 1 was itself narrow in the same way:** closing the clause round
+1 named left three more one-word swaps sitting right next to it, all in files round 1 had
+*just* edited:
+
+1. **A compound clause names two independent facts; only one got pinned.** The `Fix:` text
+   says `it runs `claude plugin marketplace update <marketplace>` + `claude plugin update
+   chela@<marketplace>` for every confirmed-installed copy` — two separate CLI verb calls
+   joined by `+`. Round 1 added `"claude plugin marketplace update <marketplace>" in out` to
+   the `chela plugin` renderer's test, closing the *first* verb there — but never added the
+   matching assertion to `chela doctor`'s own test for the *same compound clause* in the
+   sibling renderer, and never pinned the *second* verb
+   (`claude plugin update chela@<marketplace>`) in either renderer.
+2. **The message's load-bearing line duplicates its own decorative prose (see shape
+   [33](33-a-guarded-fragment-appears-twice-decorative-and-load-bearing.md)), one hop
+   downstream of the clause round 1 pinned.** `_report_installed_plugin` says `chela update`
+   twice: once in the sentence explaining *why* to run it, once as the standalone
+   `print("    chela update")` action line meant to be copy-pasted. Round 1's `"chela update"
+   in out"` assertion is satisfied by the prose alone — the actual command line an operator
+   runs was never independently pinned.
+
+Round 2's mutations, all applied by the judge to a throwaway checkout of round 1's own fix,
+still parsed and left `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green (3218 passed, 0
+failed):
+
+```diff
+# chela/runtime_truth.py — the doctor Finding's OWN copy of the compound clause, never
+# pinned in test_doctor_ERRORs_when_the_installed_manifest_disagrees
+- "plugin marketplace update <marketplace>` + `claude plugin update "
++ "plugin marketplace refresh <marketplace>` + `claude plugin update "
+```
+
+```diff
+# chela/main.py — the SECOND verb in the by-hand fallback, never pinned even though the
+# first verb was pinned by round 1
+-               "`claude plugin update chela@<marketplace>`)")
++               "`claude plugin refresh chela@<marketplace>`)")
+```
+
+```diff
+# chela/main.py — the action line itself, distinct from the prose sentence that also
+# contains the phrase "chela update"
+-         print("    chela update")
++         print("    chela self-update")
+```
+
+**Why round 1's fix didn't already cover this:** closing shape 310 felt like closing "the
+stale-install message" as a topic, because the diff touched the exact clause the round-1
+mutation named. But that clause is not atomic — it is a compound sentence naming two CLI
+calls, rendered independently in two sibling functions, with a load-bearing action line
+duplicating one of its own sub-phrases three lines below. Pinning the substring the last
+mutation swapped does not imply the neighboring substrings in the same sentence, or that same
+sentence's second appearance in a sibling renderer, are pinned too.
+
+**Guard form that survives (updated):** when a clause names N independent facts (here: two
+CLI verb calls), assert each fact's literal text separately, in EVERY renderer that repeats
+the clause — not just the one the last mutation happened to hit. When a phrase appears more
+than once in the same output (prose explanation + standalone action line), pin the specific
+occurrence that is actually meant to be acted on (e.g. `"\n    chela update\n" in out`,
+anchored to its own line), not just the phrase anywhere in the blob. Before trusting either
+assertion, hand-swap one word in each sub-claim and each occurrence independently and confirm
+the test goes red for each swap on its own — not just for the one your fix round happens to be
+reacting to.
+
+**Round 2 found:** (CMX-310, PR #386, rework round 2) — closed by adding
+`"claude plugin marketplace update <marketplace>" in body` and
+`"claude plugin update chela@<marketplace>" in body` to the doctor test, adding
+`"claude plugin update chela@<marketplace>" in out` to the `chela plugin` test, and replacing
+that test's `"chela update" in out` with `"\n    chela update\n" in out` so the action line is
+pinned on its own line, not via the surrounding prose.
