@@ -31,6 +31,16 @@ history lives in `git log`.
 
 ### Changed
 
+- **The judge now flags a missing CHANGELOG entry on every PR it reviews.** CONTRIBUTING.md
+  has always said "any user-facing change adds a CHANGELOG entry," but nothing checked it —
+  pure prose, and it failed twice: cutting 0.7.0 from `dev` would have shipped notes missing
+  half of it (4 of the last 8 merges since 0.6.0 carried no entry, backfilled by hand in
+  #382). Whenever a PR's diff changes non-prose files without touching `CHANGELOG.md`, the
+  judge now appends a non-blocking note — "No CHANGELOG.md entry" — to its verdict comment,
+  on every report state (including `cannot_verify`), so it is visible before merge instead
+  of only discovered after a release. It never blocks: whether a given diff is genuinely
+  user-facing stays a human call. (CMX-309)
+
 - **The live-terminal message timestamp is quieter.** The `MessageDisplay` marker CMX-285
   added dropped seconds and its clock emoji — `[HH:MM]` in place of `🕐 HH:MM:SS` — since
   the marker's job is "roughly when did this land," not a stopwatch, and a variable-width

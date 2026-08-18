@@ -57,7 +57,11 @@ its own corruption. Write guards that would catch you.
   maintainer promotes `dev → main`.
 - **Keep PRs focused** — one concern per PR is easier to review and to revert.
 - **Update the [CHANGELOG](CHANGELOG.md).** Any user-facing change adds an entry under
-  `## [Unreleased]` (Added / Changed / Fixed), with the PR number.
+  `## [Unreleased]` (Added / Changed / Fixed), with the PR number. The judge cross-checks
+  this mechanically (CMX-309): a diff that changes non-prose files without touching
+  `CHANGELOG.md` gets a non-blocking "No CHANGELOG.md entry" note on the verdict comment —
+  it never blocks a merge, since "is this actually user-facing" stays a human call, but a
+  PR that skips the entry no longer does so silently.
 - **Update docs** when you change a `CHELA_*` knob, a command, or a hook — the README
   config table and `docs/` are adopter-facing and drift is user-visible.
 - **If your PR ships what a design doc in `docs/` proposed, update that doc's status line
