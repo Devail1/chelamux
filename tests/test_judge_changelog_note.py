@@ -125,6 +125,28 @@ def test_changelog_missing_note_body_carries_the_actionable_instruction(tmp_path
     assert "CONTRIBUTING.md" in note["body"]
 
 
+def test_changelog_missing_note_body_states_the_mechanical_fact_it_found(
+    tmp_path, repo, origin,
+):
+    """DEFEAT_SHAPES #309 round 2: blanking just the FIRST half of the body (the sentence
+    stating what was actually observed — non-prose files changed, CHANGELOG.md did not)
+    leaves ``"## [Unreleased]"`` and ``"CONTRIBUTING.md"`` intact in what remains, so a test
+    that only checks for those two substrings does not notice the mechanical-fact sentence
+    is gone. Pin that sentence too.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    _git("add", "feature.py", cwd=repo)
+    _git("commit", "-m", "add a feature, no changelog entry", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    note = judge._changelog_missing_note(wt, "dev")
+
+    assert note is not None
+    assert "changes non-prose files but never touches CHANGELOG.md" in note["body"]
+
+
 def test_changelog_missing_note_is_none_when_the_changelog_was_touched(tmp_path, repo, origin):
     _branch_from_head(repo, "pr-1")
     _git("checkout", "pr-1", cwd=repo)
@@ -185,6 +207,36 @@ def test_run_experiments_carries_the_note_even_on_a_cannot_verify_report(
     )
 
     assert report.state == judge.J_CANNOT_VERIFY
+    titles = [n.get("title") for n in report.notes]
+    assert "No CHANGELOG.md entry" in titles
+
+
+def test_run_experiments_carries_the_note_on_a_clean_report_with_experiments(
+    tmp_path, repo, origin,
+):
+    """DEFEAT_SHAPES #309 round 2: gating the append on ``not items`` (so it only fires on
+    the no-experiments / cannot-verify path) would let it slip past every other test in this
+    file, since they only exercise ``{"experiments": []}``. Here ``items`` is non-empty and
+    the report reaches a real (non-cannot-verify) verdict — the note must still be present.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    _git("add", "feature.py", cwd=repo)
+    _git("commit", "-m", "add a feature, no changelog entry, with a real experiment", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    report = judge.run_experiments(
+        wt, TEST_CMD,
+        {"experiments": [{
+            "guard": "irrelevant", "kind": "mutation", "file": "test_suite.py",
+            "before": "assert True", "after": "assert False",
+        }]},
+        timeout=60, base_branch="dev",
+    )
+
+    assert report.state == judge.J_CLEAN
+    assert report.outcomes and report.outcomes[0].verdict == judge.KILLED
     titles = [n.get("title") for n in report.notes]
     assert "No CHANGELOG.md entry" in titles
 
