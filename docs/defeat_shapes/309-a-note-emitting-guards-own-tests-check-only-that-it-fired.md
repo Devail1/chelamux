@@ -1,4 +1,4 @@
-## 309. A note-emitting guard's own tests check only that it fired, never the specificity of its exemption predicate, the content of its own body, or the wiring that reaches every report state
+## 309. A note-emitting guard's own tests check only that it fired, never the specificity of its exemption predicate, the content of its own body, the wiring that reaches every report state, or that it survives coexistence and rendering
 
 **Assertion form:** `judge._changelog_missing_note` returns `None` when an exemption applies
 (CHANGELOG.md itself was touched, or the whole diff is prose) and otherwise returns a dict
@@ -62,6 +62,31 @@ suite at the time:
    whichever ones the previous round happened to name — or a rework can satisfy the bullet's
    letter (add a fixture for *a* gate) while leaving the majority of the gates it lists
    uncovered.
+7. *(round 5)* Substitute instead of append: `report.notes.append(changelog_note)` →
+   `report.notes = [changelog_note]`. Rounds 1-4 closed every *gate* the append sits ahead of,
+   but no fixture in the suite ever called `run_experiments` with agent-authored notes
+   *already present* on a report where the changelog note also fires — the one fixture that
+   passes `notes=` (`tests/test_judge.py::test_notes_are_posted_and_can_never_block`, via the
+   `_run` helper) calls `run_experiments` with the default `base_branch=""`, so
+   `_changelog_missing_note` returns `None` there and the append line never executes at all.
+   The assignment silently discards every note the judge agent itself wrote, on exactly the
+   PRs where this feature fires, while the whole suite stays green.
+8. *(round 5)* Blank the notes section in one renderer but not the other:
+   `return "\n".join(parts) + _notes_section(report.notes)` →
+   `return "\n".join(parts) + _notes_section([])` inside `block_body` — the comment a
+   `SURVIVED` verdict writes, and the one a rework agent actually reads. Rounds 1-4 all
+   proved the note reaches `report.notes` on every report state; none of them ever rendered
+   that report through `block_body`. `comment_body`'s notes section was covered indirectly
+   (`test_notes_are_posted_and_can_never_block` reads a note body back out of it), which made
+   it easy to assume the sibling renderer was covered the same way — it was not.
+9. *(round 5)* Dead-code the rendered title to a fixed fallback:
+   `title = str(note.get("title") or "note").strip()` → `title = "note"` inside
+   `_notes_section`. Every title assertion added across rounds 1-4 —
+   seven of them in this file — reads `note["title"]`, the in-memory dict `_changelog_missing_note`
+   returns; none of them reads a *rendered* comment. The literal string `"No CHANGELOG.md
+   entry"` that CONTRIBUTING.md and the CHANGELOG entry both promise appears on the posted
+   comment can vanish from every comment the judge ever posts while every existing assertion
+   in the file stays green, because none of them look at the string the human actually sees.
 
 **Guard form that survives:**
 
@@ -95,10 +120,22 @@ suite at the time:
   `_apply_experiments` reporting a mutation that could not be restored) are legitimately
   reached via `monkeypatch` instead — forcing the return value is fine, since what's under
   test is the wiring (does the note survive this gate), not the gate's own trigger condition.
+- ⛔⛔⛔ "The value reaches the collection", "the value survives coexisting in the
+  collection", and "the value renders correctly out of the collection" are three separate
+  claims, each defeatable independently of the other two — closing the gate-enumeration
+  bullets above says nothing about the other two. Concretely: add a fixture that calls the
+  code under test with *other* entries already occupying the same list/collection the guard
+  appends to, and assert both the pre-existing entries AND the new one survive (catches
+  substitution masquerading as append); and for every distinct *renderer* that reads the
+  collection (here, `comment_body` for the clean/cannot-verify path and `block_body` for the
+  blocked path — two call sites over the same shared `_notes_section` helper), render through
+  each one independently and assert the rendered *string*, not the in-memory field, contains
+  the value's identifying content. Covering one renderer is not evidence the sibling renderer
+  is covered — they are separate call sites and a mutation can target either independently.
 
 **Found:** CMX-309 rework round 1 (2026-08-18), round 2 (2026-08-18), round 3 (2026-08-18),
-and round 4 (2026-08-18), PR #385. Each round, the judge applied the round's mutations to
-`chela/judge.py` in a throwaway checkout; `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed
-green under every one (round 1: 3226 passed; round 2: 3228 passed; round 3: 3230 passed;
-round 4: 3231 passed), because the suite at each point had exactly the gaps the mutations
-exploited.
+round 4 (2026-08-18), and round 5 (2026-08-18), PR #385. Each round, the judge applied the
+round's mutations to `chela/judge.py` in a throwaway checkout;
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green under every one (round 1: 3226
+passed; round 2: 3228 passed; round 3: 3230 passed; round 4: 3231 passed; round 5: 3234
+passed), because the suite at each point had exactly the gaps the mutations exploited.

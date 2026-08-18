@@ -384,3 +384,87 @@ def test_run_experiments_carries_no_note_when_the_changelog_was_touched(tmp_path
 
     titles = [n.get("title") for n in report.notes]
     assert "No CHANGELOG.md entry" not in titles
+
+
+# --- round 5: the append must coexist with agent notes, and both must survive rendering -----
+
+def test_run_experiments_keeps_agent_notes_alongside_the_changelog_note(
+    tmp_path, repo, origin,
+):
+    """DEFEAT_SHAPES #309 round 5: the changelog note is APPENDED to whatever notes the judge
+    agent already wrote — it must never REPLACE them. No other fixture in this file ever
+    passes agent notes alongside a firing changelog note, so a mutation that assigns
+    ``report.notes = [changelog_note]`` instead of appending would silently eat every agent
+    note on exactly the PRs this feature fires on, and every test above would stay green.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    _git("add", "feature.py", cwd=repo)
+    _git("commit", "-m", "add a feature, no changelog entry, with agent notes", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    report = judge.run_experiments(
+        wt, TEST_CMD,
+        {"experiments": [], "notes": [{"title": "naming", "body": "call it `cue`"}]},
+        timeout=60, base_branch="dev",
+    )
+
+    titles = [n.get("title") for n in report.notes]
+    assert "naming" in titles                       # the agent's own note survived
+    assert "No CHANGELOG.md entry" in titles         # ...alongside the mechanical one
+
+
+def test_comment_body_renders_the_changelog_note_title_and_body(tmp_path, repo, origin):
+    """DEFEAT_SHAPES #309 round 5: the note's TITLE — the literal string 'No CHANGELOG.md
+    entry' that CONTRIBUTING.md and the CHANGELOG entry both promise — must survive
+    rendering, not just live in the in-memory note dict. Every title assertion above this
+    one reads ``report.notes[i]['title']`` directly; none reads a rendered comment, so a
+    mutation that dead-codes the rendered title to a fallback would slip past all of them.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    _git("add", "feature.py", cwd=repo)
+    _git("commit", "-m", "add a feature, no changelog entry, nothing to mutate", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    report = judge.run_experiments(
+        wt, TEST_CMD, {"experiments": []}, timeout=60, base_branch="dev",
+    )
+
+    assert report.state == judge.J_CANNOT_VERIFY
+    body = judge.comment_body(report, "https://github.com/o/r/pull/9", TEST_CMD)
+    assert "No CHANGELOG.md entry" in body
+    assert "add an entry under `## [Unreleased]`" in body
+
+
+def test_block_body_renders_the_changelog_note_on_a_survived_verdict(tmp_path, repo, origin):
+    """DEFEAT_SHAPES #309 round 5: the note must reach the verdict COMMENT on every report
+    state, including BLOCKED — the comment a SURVIVED verdict writes, and the one a rework
+    agent actually reads. ``comment_body``'s notes section is exercised above; ``block_body``
+    was never exercised with a note at all, so a mutation that drops its notes section (or
+    renders an empty list instead of ``report.notes``) would slip past this whole file.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    _git("add", "feature.py", cwd=repo)
+    _git("commit", "-m", "add a feature with an unguarded mutation, no changelog entry", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    report = judge.run_experiments(
+        wt, TEST_CMD,
+        {"experiments": [{
+            "guard": "add really adds", "kind": "mutation", "file": "feature.py",
+            "before": "return a + b", "after": "return a - b",
+        }]},
+        timeout=60, base_branch="dev",
+    )
+
+    assert report.state == judge.J_BLOCKED
+    assert report.blocking
+
+    body = judge.block_body(report, "https://github.com/o/r/pull/9", TEST_CMD)
+    assert "No CHANGELOG.md entry" in body
+    assert "add an entry under `## [Unreleased]`" in body
