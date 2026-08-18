@@ -65,6 +65,14 @@ history lives in `git log`.
 
 ### Fixed
 
+- **`agent-terminals.sh`'s idle `nap()` no longer leaves its backgrounded `sleep` behind on
+  teardown.** A trap-driven `exit` only ends the supervisor's own shell — it never touched
+  a `sleep` still backgrounded under `nap()` at the moment the signal landed, so that child
+  was reparented to PID 1 and outlived the supervisor for up to an hour. This was cleanliness,
+  not a leak: each stranded `sleep` still expired on its own hour, bounding the pool at
+  rate × lifetime (~36) and draining it unassisted. `nap()` now publishes the backgrounded
+  sleep's pid, and `cleanup()` kills it, so a hard teardown can no longer orphan it.
+  (CMX-307, #381)
 - **The live-terminal message timestamp now actually appears.** CMX-285/CMX-297 shipped a
   correct `MessageDisplay` response — measured directly, via `curl`, against the daemon's
   own endpoint — but registered the hook over the `http` transport, and a live fleet on a
