@@ -795,6 +795,28 @@ def test_a_claimed_rows_name_match_does_not_claim_an_unrelated_live_window():
     assert dispatched_window_ids(runs, live_windows=live) == set()
 
 
+def test_a_settled_row_with_no_window_id_does_not_name_match_a_live_window():
+    # The name-match fallback exists ONLY for the spawn-time race on a "claimed"
+    # row. A row that settled (failed/done/needs_human) with no window_id was
+    # never mid-spawn — its window is long gone — so a live window that merely
+    # happens to share its recorded name is somebody else's window entirely
+    # (tmux hands out fresh @N ids after a restart; names are not unique across
+    # boots) and must NOT be claimed.
+    runs = [{"status": "needs_human", "window_id": None, "window_name": "cmx-305"}]
+    live = {"@668": "cmx-305"}
+    assert dispatched_window_ids(runs, live_windows=live) == set()
+
+
+def test_a_claimed_rows_name_match_requires_an_exact_name_not_a_substring():
+    # The recorded window_name must match the live window's name EXACTLY. A
+    # live window whose name merely CONTAINS the recorded name (a near-miss,
+    # e.g. a differently-numbered run sharing a prefix) is a different window
+    # and must not be claimed by it.
+    runs = [{"status": "claimed", "window_id": None, "window_name": "cmx-30"}]
+    live = {"@668": "cmx-305"}                   # "cmx-30" in "cmx-305", but not ==
+    assert dispatched_window_ids(runs, live_windows=live) == set()
+
+
 # --------------------------------------------------------------------------
 # A PERMISSION gate is on the PANE ONLY — the hook log cannot see it (D1)
 # --------------------------------------------------------------------------
