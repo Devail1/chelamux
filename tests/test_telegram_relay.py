@@ -9,6 +9,8 @@ No live Telegram: :class:`BotSender` is driven through an injected transport and
 """
 from __future__ import annotations
 
+import logging
+
 from chela.telegram.bindings import BindingRegistry
 from chela.telegram import format as fmt
 from chela.telegram.format import (
@@ -368,8 +370,9 @@ def test_bot_sender_edit_reports_other_failures():
 class _StubSender:
     """A ``send(text, parse_mode)`` sink that records and can fail MarkdownV2."""
 
-    def __init__(self, fail_markdown=False):
+    def __init__(self, fail_markdown=False, fail_all=False):
         self.fail_markdown = fail_markdown
+        self.fail_all = fail_all
         self.calls: list[tuple[str, str | None]] = []
 
     def __call__(self, text: str, parse_mode: str | None, reply_markup=None) -> bool:
@@ -378,6 +381,8 @@ class _StubSender:
         # prompts moved to the pane), but it's not part of the recorded tuple:
         # count/text assertions here stay 2-element.
         self.calls.append((text, parse_mode))
+        if self.fail_all:
+            return False
         if parse_mode == "MarkdownV2" and self.fail_markdown:
             return False
         return True
@@ -402,6 +407,26 @@ def test_relay_falls_back_to_plain_text_when_markdown_rejected():
     assert stub.calls[1] == ("ok. go", None)         # then plain, unescaped
 
 
+def test_relay_logs_permanent_drop_with_window_id_when_both_attempts_fail(caplog):
+    stub = _StubSender(fail_all=True)
+    with caplog.at_level(logging.DEBUG):
+        TelegramRelay(stub).on_message("@1", Message("assistant", "text", "ok. go"))
+
+    assert len(stub.calls) == 2  # MarkdownV2 attempt, then plain-text attempt
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "@1" in errors[0].message
+    assert "permanently dropped" in errors[0].message
+
+
+def test_relay_logs_nothing_extra_when_the_plain_text_fallback_recovers(caplog):
+    stub = _StubSender(fail_markdown=True)
+    with caplog.at_level(logging.DEBUG):
+        TelegramRelay(stub).on_message("@1", Message("assistant", "text", "ok. go"))
+
+    assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+
+
 def test_relay_is_a_valid_monitor_on_message_sink():
     """The relay plugs straight into TranscriptMonitor's callback signature."""
     from chela.telegram.monitor import TranscriptMonitor
@@ -419,12 +444,15 @@ def test_relay_is_a_valid_monitor_on_message_sink():
 class _ThreadStubSender:
     """A ``send(text, parse_mode, message_thread_id)`` sink for the registry relay."""
 
-    def __init__(self, fail_markdown=False):
+    def __init__(self, fail_markdown=False, fail_all=False):
         self.fail_markdown = fail_markdown
+        self.fail_all = fail_all
         self.calls: list[tuple[str, str | None, str | int | None]] = []
 
     def __call__(self, text, parse_mode, message_thread_id=None) -> bool:
         self.calls.append((text, parse_mode, message_thread_id))
+        if self.fail_all:
+            return False
         if parse_mode == "MarkdownV2" and self.fail_markdown:
             return False
         return True
@@ -464,6 +492,19 @@ def test_registry_relay_falls_back_to_plain_text_with_thread_preserved():
     assert len(stub.calls) == 2
     assert stub.calls[0] == ("ok\\. go", "MarkdownV2", "42")
     assert stub.calls[1] == ("ok. go", None, "42")  # thread kept on retry
+
+
+def test_registry_relay_logs_permanent_drop_with_window_id_when_both_attempts_fail(caplog):
+    stub = _ThreadStubSender(fail_all=True)
+    relay = RegistryRelay(stub, _registry(("@1", "42")))
+    with caplog.at_level(logging.DEBUG):
+        relay.on_message("@1", Message("assistant", "text", "ok. go"))
+
+    assert len(stub.calls) == 2
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "@1" in errors[0].message
+    assert "permanently dropped" in errors[0].message
 
 
 # --------------------------------------------------------------------------
@@ -877,6 +918,41 @@ def test_bot_sender_gives_up_after_bounded_retries_on_persistent_429():
     assert sender.send("hi") is False
     assert len(tr.calls) == 3                  # _MAX_SEND_TRIES attempts total
     assert len(slept) == 2                     # slept between the three attempts
+
+
+def test_bot_sender_logs_exhausted_flood_control_as_error_not_warning(caplog):
+    # A message dropped after flood control never cleared must be findable in
+    # the log AS a drop — a generic WARNING is what a routine rejection also
+    # gets, so grepping for it can't tell the two apart.
+    tr = _ScriptedTransport([_FLOOD])         # 429 forever
+    sender = BotSender("tok", "c", None, transport=tr, sleep=lambda _: None)
+
+    with caplog.at_level(logging.DEBUG):
+        assert sender.send("hi") is False
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "DROPPED" in errors[0].message
+    assert "flood control" in errors[0].message
+    # The retry loop's own "flood-controlled; retrying" progress lines still
+    # fire at WARNING — only the old, ambiguous final-failure line is gone.
+    assert not [r for r in caplog.records
+                if r.levelno == logging.WARNING and "sendMessage failed" in r.message]
+
+
+def test_bot_sender_logs_non_flood_rejection_as_warning_not_error(caplog):
+    # A real rejection (not flood control) is the routine case — it stays a
+    # WARNING, not the flood-control ERROR.
+    tr = _ScriptedTransport([{"ok": False, "description": "chat not found"}])
+    sender = BotSender("tok", "c", None, transport=tr, sleep=lambda _: None)
+
+    with caplog.at_level(logging.DEBUG):
+        assert sender.send("hi") is False
+
+    assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "chat not found" in warnings[0].message
 
 
 def test_bot_sender_does_not_retry_a_non_429_rejection():
