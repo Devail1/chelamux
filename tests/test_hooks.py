@@ -945,6 +945,10 @@ def test_hooks_spec_registers_every_event_over_http():
             assert "http://127.0.0.1:5001/hooks/SessionStart" in hook["command"]
             assert "--fail" in hook["command"] and hook["command"].endswith("|| true")
             assert hook["timeout"] == hooks.RECAP_TIMEOUT
+            # DEFEAT_SHAPES #5: the line above reads the SAME symbol on both sides once
+            # rendered, so widening or removing the timeout moves undetected — pin the
+            # literal too.
+            assert hooks.RECAP_TIMEOUT == 5, hooks.RECAP_TIMEOUT
             continue
         # http, not command: no shell, no process spawn per tool call, and no chatty
         # .bashrc able to corrupt the JSON contract with stray stdout.

@@ -86,6 +86,10 @@ def test_missing_file_falls_back_to_defaults(chela_dir, monkeypatch):
     assert config.parse_env_file(chela_dir / "chela.env") == {}
     assert config.load_env_file(chela_dir / "chela.env") == {}
     assert config.dashboard_port() == config.DEFAULT_DASHBOARD_PORT
+    # DEFEAT_SHAPES #5: pin the literal too — `== config.DEFAULT_DASHBOARD_PORT` alone
+    # moves together with the constant it's supposed to check, so a mutation to the
+    # default itself (not just to the fallback logic) would leave this line green.
+    assert config.DEFAULT_DASHBOARD_PORT == 5001, config.DEFAULT_DASHBOARD_PORT
     assert config.current_session() == "chela"
 
 
