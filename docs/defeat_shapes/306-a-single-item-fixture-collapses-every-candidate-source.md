@@ -52,3 +52,40 @@ rather than the *first* one. Closed by extending the fixture with a second agent
 mirroring the precedent at line ~709 of the same file), pinning `sel.value = '@2'` before
 rendering so `sw` (`'@2'`) and `wids[0]` (`'@1'`) provably diverge, and asserting the chip
 carries `'@2'` — which fails red the instant the call site reverts to `wids[0]`.
+
+⚠️ **Correction (CMX-306 round 2, same PR):** round 1's fix above steered `sel.value` away
+from `wids[0]`, but a two-item fixture only ever rules out the FIRST positional default —
+with exactly two agents, "not first" and "last" are the same agent, so `sel.value = '@2'` is
+*also* `wids[wids.length - 1]`. The judge swapped `sw` for `wids[wids.length - 1]` instead of
+`wids[0]` and the suite stayed green again, for the identical reason shape 52 documents for
+index lookups: closing one enumerated positional default (first) silently leaves its sibling
+(last) open. Unlike shape 53's conclusion for `f(length)` index formulas, this fallback
+expression only has two possible non-selected operands (`wids[0]` and
+`wids[wids.length - 1]`) rather than an unbounded family, so — unlike shape 53's prescribed
+differential-assertion fix — a third, non-enumerable fixture item is sufficient here, not just
+a narrowing step: with THREE agents and the selection pinned to the MIDDLE one (`'@2'` in
+`['@1', '@2', '@3']`), `sel.value` no longer equals `wids[0]` OR `wids[wids.length - 1]`, so
+no positional fallback can produce the expected value by accident.
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3217 passed) under this second
+mutation too, before the fix. **Guard form that survives (updated):** render at least THREE
+candidates and steer the guarded value's real source to the ONE that sits in neither
+positional-default slot (`wids[0]` nor `wids[wids.length - 1]`) — a two-item fixture pinned
+away from `wids[0]` is not enough; it always leaves `wids[wids.length - 1]` unexercised (or,
+symmetrically, the reverse).
+
+The same round also found a second, unrelated hole in the same guard: this test file's
+`before()` (shared by every test in it) hard-stubs `window.matchMedia` to report a DESKTOP
+width for the life of the whole file, so `_isMobileTerm()` (terminals.js:3179) is
+unconditionally `false` everywhere in it — including this test, whose own title claims
+"single-pane / **mobile** mode." A mutation gating the chip behind
+`(!draggable && _isMobileTerm()) ? '' : filesChip}` (the same shape wallnav.test.mjs's
+CMX-133 kill-button guard already had to defeat, at terminals.js:842's `mobileFull` idiom) is
+invisible to any assertion made under a matchMedia stub that can never report a phone width —
+`_isMobileTerm()` simply never returns `true`, so the gate's `!draggable && _isMobileTerm()`
+branch is never taken either way and the chip renders regardless of whether the gate exists.
+**Guard form that survives:** when a guard's own title (or stated purpose) claims to cover a
+`matchMedia`/viewport-gated code path, and the suite's shared setup hard-stubs that same media
+query to one fixed value for every test, override `window.matchMedia` to the OTHER value
+(phone width, `matches: true`) for the duration of that one test — restoring the original stub
+in a `finally` — rather than trusting the file-wide default to exercise it. A title naming a
+condition is not evidence the harness ever makes that condition true.

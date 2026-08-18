@@ -922,25 +922,57 @@ test('an empty patch (a zero-byte file) shows the "No diff text" empty state, no
 // nothing ever rendered the non-draggable branch to prove it — a regression
 // that gated filesChip behind `draggable` (or dropped it from the
 // non-draggable path entirely) would leave every test above this line green.
+//
+// Round 2 (judge, same day): the round-10 test used a two-agent fixture with
+// the select pinned to the SECOND agent, which is also the LAST agent — a
+// mutation swapping the selected wid (`sw`) for `wids[wids.length - 1]` was
+// indistinguishable from correct. It also never stubbed matchMedia to a
+// phone width, so a mutation gating the chip behind `_isMobileTerm()` (this
+// test's own title notwithstanding) went unnoticed. Closed with a THIRD
+// agent (so neither positional default equals the selection) and a real
+// mobile-width matchMedia stub for the duration of the test.
 // ---------------------------------------------------------------------------
 
 test('the Files chip is also emitted (and wired end to end) in single-pane / mobile mode, not just the wall tile', async () => {
     const modal = document.getElementById('modal-diff');
     const sel = document.getElementById('term-agent');
     const originalFetch = globalThis.fetch;
+    const originalMatchMedia = window.matchMedia;
     try {
-        // Two agents, and the select pinned to the SECOND one (@2), so that
-        // `sw = sel.value || wids[0]` (terminals.js:1579) actually diverges
-        // from `wids[0]` ('@1'). With only one agent in the fixture (as
-        // round 10 originally shipped this test) every possible source of
-        // `sw` collapses onto the same wid — a regression that swaps the
-        // pane's DISPLAYED/selected agent (`sw`) for the FIRST agent
-        // (`wids[0]`) in the single-pane _ctxBarHTML call site would be
-        // invisible to this guard. Judge round 1 KILLED it with exactly that
-        // mutation (docs/defeat_shapes — single-fixture blind spot).
-        util.setAgentsCache([...AGENTS, { name: 'w2', window_id: '@2', online: true }]);
+        // THREE agents, with the select pinned to the MIDDLE one (@2), so
+        // that `sw = sel.value || wids[0]` (terminals.js:1579) diverges from
+        // BOTH positional defaults a fallback expression can degrade to:
+        // `wids[0]` ('@1', first-registered) AND `wids[wids.length - 1]`
+        // ('@3', last-registered). Round 1 shipped a single extra agent
+        // ('@2' as both "selected" and "last") and judge round 2 killed it
+        // by swapping `sw` for `wids[wids.length - 1]` — with only two
+        // agents that's the same value '@2' the selection would have
+        // produced. Neither positional default can equal '@2' with a THIRD
+        // agent ('@3') registered after it. See
+        // docs/defeat_shapes/306-a-single-item-fixture-collapses-every-candidate-source.md
+        // (round 2 addendum) for the general shape.
+        util.setAgentsCache([...AGENTS,
+            { name: 'w2', window_id: '@2', online: true },
+            { name: 'w3', window_id: '@3', online: true }]);
         await terminals.renderTerminals();
         sel.value = '@2';
+
+        // This file's before() stubs matchMedia to report a DESKTOP width for
+        // every test, so `_isMobileTerm()` is unconditionally false here —
+        // this test's own title claims the chip renders on "single-pane /
+        // mobile mode", but until now nothing ever made that actually true.
+        // A regression that hides the chip behind `!draggable &&
+        // _isMobileTerm()` (the CMX-133 gate shape terminals.js:842 already
+        // uses for the kill button) would leave every assertion below green
+        // regardless, because `_isMobileTerm()` could never flip to true.
+        // Stub matchMedia to report a PHONE width for the rest of this test
+        // so the single-pane render this test performs actually happens
+        // under a real mobile match, same idiom as wallnav.test.mjs's
+        // CMX-133 wiring guard.
+        window.matchMedia = q => ({
+            media: q, matches: true, addEventListener() {}, removeEventListener() {},
+            addListener() {}, removeListener() {},
+        });
 
         globalThis.fetch = url => {
             const path = String(url);
@@ -990,6 +1022,7 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
             'closeDiffModal() did not close the modal that was opened from single-pane mode');
     } finally {
         globalThis.fetch = originalFetch;
+        window.matchMedia = originalMatchMedia;
         // restore the single-agent, wall-mode fixture every other test in this file depends on
         util.setAgentsCache(AGENTS);
         terminals.setTermMode('wall');
