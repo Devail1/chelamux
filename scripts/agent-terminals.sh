@@ -211,6 +211,11 @@ write_map() {
 }
 
 cleanup() {
+    # A trap-driven `exit` (see TERM/INT below) only ends THIS shell — it does not
+    # touch a `nap()` sleep still backgrounded at the moment the signal landed. Left
+    # alone that sleep is reparented to PID 1 and outlives us for up to an hour (measured:
+    # 32 orphaned `sleep 3600`s from the disabled-wall idle loop after hard teardown).
+    [[ -n "${NAP_PID:-}" ]] && kill "${NAP_PID}" 2>/dev/null
     if (( ${#PID_OF[@]} )); then
         for wid in "${!PID_OF[@]}"; do kill "${PID_OF[$wid]}" 2>/dev/null; done
     fi
@@ -235,9 +240,12 @@ trap 'exit 130' INT    # 128+2
 # that meant pm2's stop hung until its kill-timeout and then SIGKILLed us, so the
 # EXIT trap never ran and cleanup() never reaped the ttyds or the webterm_* mirror
 # sessions. Backgrounding the sleep and `wait`-ing on it makes the signal land at
-# once: `wait` is interruptible, the trap fires, cleanup runs. Every sleep in this
+# once: `wait` is interruptible, the trap fires, cleanup runs. Exiting the trap
+# handler does NOT kill an already-backgrounded child on its own, though — that
+# orphans the `sleep` itself (reparented to PID 1, alive for up to $1 seconds), so
+# NAP_PID is published for cleanup() to kill on the way out. Every sleep in this
 # script must go through here.
-nap() { sleep "$1" & wait $!; }
+nap() { sleep "$1" & NAP_PID=$!; wait "$NAP_PID"; NAP_PID=""; }
 
 # Feature flag (mirrors chela/config.py TERMINALS_ENABLED). When disabled we
 # spawn NO ttyds: write one empty map so the dashboard sees "no terminals",
