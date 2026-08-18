@@ -940,6 +940,27 @@ def test_bot_sender_logs_exhausted_flood_control_as_error_not_warning(caplog):
                 if r.levelno == logging.WARNING and "sendMessage failed" in r.message]
 
 
+def test_bot_sender_logs_exhausted_flood_control_after_markdown_downgrade(caplog):
+    # send()'s SECOND _log_send_drop call site — reached after a MarkdownV2
+    # chunk is rejected and the unformatted re-send ALSO exhausts flood
+    # control — must log the same DROPPED/ERROR line as the first call site.
+    # Every relay actually calls send() with parse_mode set, so this is the
+    # site production traffic reaches; a plain `send("hi")` with no
+    # parse_mode (as in the sibling test above) can never drive it.
+    tr = _ScriptedTransport([_FLOOD])         # 429 forever, both attempts
+    sender = BotSender("tok", "c", None, transport=tr, sleep=lambda _: None)
+
+    with caplog.at_level(logging.DEBUG):
+        assert sender.send("hi", "MarkdownV2") is False
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "DROPPED" in errors[0].message
+    assert "flood control" in errors[0].message
+    assert not [r for r in caplog.records
+                if r.levelno == logging.WARNING and "sendMessage failed" in r.message]
+
+
 def test_bot_sender_logs_non_flood_rejection_as_warning_not_error(caplog):
     # A real rejection (not flood control) is the routine case — it stays a
     # WARNING, not the flood-control ERROR.
