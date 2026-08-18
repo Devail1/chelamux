@@ -401,6 +401,11 @@ def test_fetch_and_pull_use_the_network_timeout_not_the_local_one(
     result = update.apply(checkout)
 
     assert result.ok is True
+    # DEFEAT_SHAPES #5: the two lines above read the SAME symbol the spy is meant to
+    # check against — widening or dropping the constant (e.g. `GIT_NET_TIMEOUT_SECONDS =
+    # None`) moves both the call site's kwarg and this expectation together and stays
+    # green. Pin the literal too.
+    assert update.GIT_NET_TIMEOUT_SECONDS == 60, update.GIT_NET_TIMEOUT_SECONDS
     assert seen_timeouts["fetch"] == update.GIT_NET_TIMEOUT_SECONDS
     assert seen_timeouts["pull"] == update.GIT_NET_TIMEOUT_SECONDS
 

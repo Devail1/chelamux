@@ -52,6 +52,21 @@ PLAINTEXTS = [
     (e2e.T_CTL, json.dumps({"t": "hello", "cols": 137, "rows": 39}).encode()),
 ]
 
+def test_wire_type_tags_are_pinned_to_the_literals_e2e_js_hardcodes():
+    # DEFEAT_SHAPES #5: every `typ == e2e.T_*` assertion below reads the SAME symbol on
+    # both sides once rendered — a mutation to the tag's VALUE (not just to the
+    # seal/open wiring) moves the constructed fixture and the expectation together and
+    # stays green. `chela/collab-relay/public/e2e.js` hardcodes these five values
+    # independently (`T_OUTPUT=1, T_INPUT=2, T_META=3, T_PRESENCE=4, T_CTL=5`) for wire
+    # compatibility; pin the Python side to the same literals so a drift is caught here
+    # too, not only by the (Node-optional, skippable) interop vectors.
+    assert e2e.T_OUTPUT == 1, e2e.T_OUTPUT
+    assert e2e.T_INPUT == 2, e2e.T_INPUT
+    assert e2e.T_META == 3, e2e.T_META
+    assert e2e.T_PRESENCE == 4, e2e.T_PRESENCE
+    assert e2e.T_CTL == 5, e2e.T_CTL
+
+
 _HERE = Path(__file__).resolve().parent
 _INTEROP = _HERE / "e2e_interop.mjs"
 
