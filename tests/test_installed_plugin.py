@@ -225,7 +225,8 @@ def test_chela_plugin_names_the_cache_path_when_the_install_is_stale(env, capsys
     out = capsys.readouterr().out
     assert "STALE INSTALL" in out
     assert str(hooks.installed_plugins()[0].manifest) in out
-    assert "/plugin install chela@chela" in out
+    assert "chela update" in out
+    assert "/plugin uninstall" not in out
 
 
 def test_chela_plugin_says_so_when_nothing_is_installed(env, capsys):
