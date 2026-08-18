@@ -975,6 +975,36 @@ test('an empty patch (a zero-byte file) shows the "No diff text" empty state, no
 // stale DOM. See
 // docs/defeat_shapes/306-a-single-item-fixture-collapses-every-candidate-source.md
 // (round 4 addendum) for the general shape.
+//
+// Round 5 (judge): two more gaps, neither about the fixture.
+//
+// [WIRING] All four variants above reach single-pane mode by hand-calling
+// terminals.setTermMode('single') — none of them let PRODUCTION decide to
+// enter single mode the way a real phone does. A real phone's persisted mode
+// is 'wall' (the default, terminals.js:1519); renderTerminals()'s own
+// force-single-below-768px branch (terminals.js:1512) is what flips
+// _termMode to 'single' on that user's behalf. Dead-coding that branch
+// (`if (false && matches...)`) was invisible to variants 1-4 because
+// _termMode was ALREADY 'single' by the time any of them stubbed a phone
+// viewport — the forcing branch is skipped either way, whether it's alive or
+// dead. Closed with a fifth variant that puts the pane into a legitimate
+// WALL render first (desktop width, so the forcing branch does NOT fire —
+// proving that step is an unforced wall render), then stubs the viewport to
+// phone and calls renderTerminals() with _termMode still 'wall' — the exact
+// input state a real phone user's persisted mode + viewport produce. Only
+// the production branch itself can turn that into a single-pane render.
+//
+// [MUTATION, absence-only mirror] Round 4's fix asserts .gs-idx/.gs-pr/
+// .gs-cost are ABSENT to prove the non-draggable branch rendered — but never
+// asserted the mirror: that elements which belong on BOTH branches (the
+// model chip, the context-fill bar) are actually PRESENT here. Those two are
+// spliced with no `draggable ? … : ''` gate in source today, but nothing
+// re-renders if one gets gated later — this is the ONLY place in the suite
+// that renders _ctxBarHTML(wid, false) at all. Closed by asserting .gs-model
+// and .term-ctx-fill are present on every variant's bar, not just absent on
+// the draggable-only siblings. See
+// docs/defeat_shapes/306-a-single-item-fixture-collapses-every-candidate-source.md
+// (round 5 addendum) for the general shape.
 // ---------------------------------------------------------------------------
 
 test('the Files chip is also emitted (and wired end to end) in single-pane / mobile mode, not just the wall tile — at both desktop and phone widths, and it tracks the live selection rather than any fixed position', async () => {
@@ -1064,6 +1094,19 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
             assert.equal(barNode.querySelector('.gs-cost'), null,
                 `${label}: the single-pane bar rendered .gs-cost — that element only belongs to _ctxBarHTML's DRAGGABLE (wall-tile) branch; its presence here means the single-pane call site regressed to draggable=true, silently un-rendering the non-draggable branch this guard exists to cover`);
 
+            // Mirror of the three absence checks above: .gs-model and
+            // .term-ctx-fill are NOT draggable-gated in source (they belong
+            // on every surface — terminals.js:2234-2237 for the model chip;
+            // the fill is unconditional), so a regression that adds a
+            // `draggable ? … : ''` gate to either one leaves the absence
+            // checks above untouched (they only watch the DRAGGABLE-only
+            // siblings) and would ship silently without this pair.
+            assert.ok(barNode.querySelector('.gs-model'),
+                `${label}: the single-pane bar has no .gs-model chip — it must ride on every surface, wall tiles AND the single/mobile pane (terminals.js:2234-2237, Liav 2026-07-25); its absence means a draggable-only gate crept onto a chip that's supposed to be shared`);
+            const fillEl = barNode.querySelector('.term-ctx-fill');
+            assert.ok(fillEl,
+                `${label}: the single-pane bar has no .term-ctx-fill element — _applyTermContext hard-requires it before painting ANYTHING into the bar (terminals.js:1348-1350: "const fill = bar.querySelector('.term-ctx-fill'); if (!fill) return;"), so its absence silently kills this bar's entire context repaint (branch chip, context %, model chip, tooltip) forever, not just a 2px fill`);
+
             const filesBtn = document.querySelector(`.term-ctx-bar[data-ctx-for="${expectedWid}"] .gs-files`);
             assert.ok(filesBtn,
                 `${label}: the single-pane bottom bar has no .gs-files "Files" chip for ${expectedWid}, the SELECTED agent — either the chip was dropped on the non-draggable (single/mobile) path at this viewport, or the pane rendered a positional (not selected) agent`);
@@ -1121,6 +1164,28 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         await renderAndAssertSinglePane(true, '@3', 'phone width, @3 selected (selection changed)', { expectRebuild: true });
         await renderAndAssertSinglePane(true, '@2', 'phone width, @2 selected (selection changed back)', { expectRebuild: true });
         await renderAndAssertSinglePane(false, '@3', 'desktop width, @3 selected (selection changed)', { expectRebuild: true });
+
+        // Round 5 (judge): every variant above REACHES single-pane mode via a
+        // direct terminals.setTermMode('single') call — none of them let
+        // PRODUCTION decide. A real phone's persisted mode is 'wall' (the
+        // default); renderTerminals()'s own force-single-below-768px branch
+        // (terminals.js:1512) is what puts that user's viewport into single
+        // mode. First put the pane into a LEGITIMATE wall render at desktop
+        // width — proving this step doesn't itself trip the forcing branch —
+        // then flip to a phone viewport and re-render with _termMode still
+        // 'wall', the exact input state a real phone user's persisted mode +
+        // viewport produce. Only the forcing branch itself (not any test
+        // helper) can turn that into the single-pane render this whole guard
+        // is about.
+        stubViewport(false);
+        terminals.setTermMode('wall');
+        await flush();
+        assert.equal(document.getElementById('term-stage').classList.contains('term-single'), false,
+            'setup for the production force-single variant: desktop width did not stay in wall mode — the test fixture itself is broken, not the branch under test');
+
+        await renderAndAssertSinglePane(true, '@2',
+            "production force-single path: renderTerminals() itself must flip persisted 'wall' mode to single below 768px — not a direct setTermMode('single') call",
+            { expectRebuild: true });
     } finally {
         globalThis.fetch = originalFetch;
         window.matchMedia = originalMatchMedia;

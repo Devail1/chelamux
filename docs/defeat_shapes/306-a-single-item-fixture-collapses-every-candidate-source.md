@@ -186,3 +186,48 @@ produces, not just on the artifact the branch you care about shares with its sib
 asserting `.gs-idx`, `.gs-pr`, and `.gs-cost` are ABSENT from the single-pane bar catches a
 call-site flip to the wrong branch even though the thing the guard was nominally added for
 (the Files chip) renders identically either way.
+
+⚠️ **Correction (CMX-306 round 5, same PR):** round 4 closed the whole-branch-swap case, but
+two narrower gaps in the same guard survived a fifth deliberate-corruption pass. Neither is a
+fixture-size problem — the earlier corrections above are all "the fixture can't distinguish
+two values"; these two are "the guard drives the code into a state it manufactured itself,
+instead of the state production would actually put it in" and "checking a branch didn't
+render X's siblings is not the same as checking the branch's own X rendered."
+
+*Wiring half — the guard sets the state under test instead of triggering it.* Every one of
+the guard's variants reaches single-pane mode by calling `terminals.setTermMode('single')`
+directly. Nothing exercises the actual production trigger for a phone user landing on that
+branch: `renderTerminals()`'s own force-single-below-768px check
+(`if (window.matchMedia('(max-width: 768px)').matches && _termMode === 'wall') { _termMode =
+'single'; … }`, terminals.js:1512) — which matters because a phone user's PERSISTED mode is
+`'wall'` (the default, terminals.js:1519), not `'single'`; production has to actively flip it
+for them. Dead-coding that check (`if (false && matches...)`) leaves every existing variant's
+assertions unaffected, because by the time any of them stubs a phone viewport, `_termMode` is
+already `'single'` from the direct `setTermMode('single')` call earlier in the test — the
+forcing branch is a no-op either way, alive or dead. `CHELA_REQUIRE_JS_TESTS=1 uv run
+pytest -q` stayed green (3218 passed) under this mutation. **Guard form that survives:** when
+the guard's whole reason for existing is a state transition production performs
+conditionally (a media-query gate, a feature flag, a permission check), drive the code into
+the PRE-transition state through the normal path (here: a legitimate wall-mode render, at a
+desktop width so the trigger provably does *not* fire) and then flip only the input the
+trigger actually reads (the viewport) — letting the production branch itself perform the
+transition — rather than jumping straight to the post-transition state by calling the same
+setter production would have called internally. Calling the internal setter directly proves
+the setter works; it proves nothing about whether anything still calls it.
+
+*Mutation half — an absence check on branch X's siblings doesn't cover branch X's own
+required output.* Round 4's `.gs-idx`/`.gs-pr`/`.gs-cost` absence checks prove the render
+didn't take the DRAGGABLE branch. They say nothing about whether elements that belong on
+BOTH branches — `.gs-model` and `.term-ctx-fill`, neither gated by `draggable` in source —
+are actually present on the non-draggable one. Gating either behind `draggable ? … : ''` (in
+the template, not at the call site) leaves the absence checks bit-for-bit unaffected — those
+elements were never draggable-only to begin with — while `.gs-model` silently disappears from
+every phone/single-pane bar, and gating `.term-ctx-fill` is worse: `_applyTermContext` hard-
+requires that element before painting anything into the bar
+(`const fill = bar.querySelector('.term-ctx-fill'); if (!fill) return;`, terminals.js:1348-
+1350), so its absence doesn't just drop a 2px fill — it silently kills that bar's entire
+context repaint (branch chip, context %, model chip, tooltip) forever. `pytest -q` stayed
+green (3218 passed) under both mutations. **Guard form that survives:** absence checks that
+prove "not the OTHER branch" and presence checks that prove "THIS branch's own required
+output" are not substitutes for each other — a two-branch guard needs both, one per element
+that's supposed to be shared, not just one per element that's supposed to be exclusive.
