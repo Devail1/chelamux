@@ -160,6 +160,10 @@ def test_doctor_ERRORs_when_the_installed_manifest_disagrees(env):
     # the two real CLI calls `chela update` actually runs — both verbs, not just one
     assert "claude plugin marketplace update <marketplace>" in body
     assert "claude plugin update chela@<marketplace>" in body
+    # `_plugin_marketplaces()` only ever returns CONFIRMED-installed copies (it skips
+    # cache-scan-only hits) — the Fix clause must not promise a refresh scope the code
+    # doesn't deliver.
+    assert "confirmed-installed copy" in body
 
 
 def test_doctor_ERRORs_when_a_port_drift_reaches_the_installed_copy(env):
@@ -235,6 +239,9 @@ def test_chela_plugin_names_the_cache_path_when_the_install_is_stale(env, capsys
     assert "\n    chela update\n" in out          # the action line itself, not just the prose
     assert "claude plugin marketplace update <marketplace>" in out   # the real CLI verb...
     assert "claude plugin update chela@<marketplace>" in out         # ...both of them
+    # the claim the verbs above are evidence FOR: no manual round-trip is needed
+    assert "non-interactively" in out
+    assert "no uninstall/reinstall needed" in out
 
 
 def test_chela_plugin_says_so_when_nothing_is_installed(env, capsys):

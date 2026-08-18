@@ -145,3 +145,52 @@ reacting to.
 `"claude plugin update chela@<marketplace>" in out` to the `chela plugin` test, and replacing
 that test's `"chela update" in out` with `"\n    chela update\n" in out` so the action line is
 pinned on its own line, not via the surrounding prose.
+
+**Round 3 — the two CLI verbs were pinned; the sentence claiming they need no manual
+round-trip was not.** Rounds 1 and 2 closed every literal CLI-verb substring in the compound
+`Fix:` clause, in both renderers. What neither round touched is the *other* half of the same
+sentence — the claim that `chela update` running those verbs makes the fix `non-interactively
+... with no uninstall/reinstall needed`. `chela doctor`'s test pinned `"no uninstall/reinstall
+needed" in body` back in round 1, but never `"non-interactively"`. `chela plugin`'s printout
+repeats *both* phrases (`chela/main.py:960`), and its test asserted neither — only the two
+verbs, the action line, and the absence of `/plugin uninstall`.
+
+```diff
+# chela/main.py — the `chela plugin` renderer's own copy of the same claim, never pinned by
+# either round 1 or round 2 even though the verbs one line below it were
+- "for you, non-interactively, with no uninstall/reinstall needed:")
++ "for you, interactively, with an uninstall/reinstall needed:")
+```
+
+```diff
+# chela/runtime_truth.py — a second, independent claim in the SAME Fix clause: the refresh
+# is scoped to CONFIRMED-installed copies, because `_plugin_marketplaces()` deliberately
+# skips copies found only by the cache scan. Never pinned in any round.
+- for every confirmed-installed copy). Run it, or do
++ for every installed copy chela can find). Run it, or do
+```
+
+Both mutations, applied by the judge to a throwaway checkout of round 2's fix, still parsed
+and left `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green (3227 passed, 0 failed).
+
+**Why round 2's fix didn't already cover this:** the compound `Fix:` clause names more than
+just "two CLI verbs" — it also names *how confidently* those verbs can be trusted (automatic,
+no manual undo) and *how broad* their effect is (only confirmed-installed copies, not every
+copy chela merely suspects). Round 2's guard form ("assert each fact's literal text
+separately, in EVERY renderer that repeats the clause") was correct, but round 2 only applied
+it to the facts the round-2 mutation itself had just hit — the CLI verbs — not to every
+independent fact still living in the same sentence. A clause can have more independently
+falsifiable sub-claims than the mutations seen so far have exercised; closing the ones a judge
+round names is not the same as closing the clause.
+
+**Guard form that survives (updated again):** before trusting a clause is fully pinned,
+enumerate every independently-falsifiable claim in it — not just every CLI verb, every claim
+of any kind (a scope qualifier, a manual-effort claim, a mode word like
+interactive/non-interactive) — and assert each one's literal text on its own, in every
+renderer that repeats it. A clause is not closed because the mutations you have seen so far
+are all dead; it is closed when hand-swapping any single word in it, one at a time, turns the
+suite red.
+
+**Round 3 found:** (CMX-310, PR #386, rework round 3) — closed by adding
+`"non-interactively" in out` and `"no uninstall/reinstall needed" in out` to the `chela
+plugin` test, and `"confirmed-installed copy" in body` to the doctor test.
