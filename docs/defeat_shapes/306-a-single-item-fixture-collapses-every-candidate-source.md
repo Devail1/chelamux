@@ -231,3 +231,60 @@ green (3218 passed) under both mutations. **Guard form that survives:** absence 
 prove "not the OTHER branch" and presence checks that prove "THIS branch's own required
 output" are not substitutes for each other — a two-branch guard needs both, one per element
 that's supposed to be shared, not just one per element that's supposed to be exclusive.
+
+⚠️ **Correction (CMX-306 round 6, same PR):** round 5's production-force variant proved the
+force-single branch is ALIVE, but `stubViewport` answered a captured boolean to every query
+string it was handed — it never looked at `q` at all. Inverting `(max-width: 768px)` to its
+exact complement, `(min-width: 769px)`, was a no-op: both predicates got back whatever boolean
+the test happened to pass in, so a completely inverted media-query predicate was
+indistinguishable from the correct one to this guard. `CHELA_REQUIRE_JS_TESTS=1 uv run
+pytest -q` stayed green (3218 passed) under that mutation. This is the SAME shape as the rest
+of this entry — a captured stand-in erasing the distinction between candidates a mutation is
+free to pick from — just showing up in the test's own stub rather than in its data fixture.
+**Guard form that survives:** make `stubViewport` take a WIDTH and actually evaluate the
+`max-width`/`min-width` query it's handed against it, the way a real browser does, so an
+inverted predicate changes the answer instead of just the one query the code happens to use
+today. The same round also closed the `.gs-ctx`/`.gs-branch` half of the absence-only-mirror
+gap two paragraphs above (round 5 had only closed `.gs-model`/`.term-ctx-fill`), and added a
+`filesBtn.hasAttribute('hidden') === false` check — see the round-7 correction immediately
+below for why that check pins a mechanism rather than the property it claims to prove.
+
+⚠️ **Correction (CMX-306 round 7, same PR):** round 6's fix made `stubViewport` genuinely
+query-aware, closing the PREDICATE half of the media-query gap — but `stubViewport` is only
+ever called with two widths, `PHONE_WIDTH = 375` and `DESKTOP_WIDTH = 1400`, and
+`width <= N` returns the *same pair of answers* for every candidate breakpoint `N` strictly
+between them. Moving the real breakpoint from `768` to `1200` in production code kept
+`375 <= 1200` true and `1400 <= 1200` false — byte-identical to the correct `768` breakpoint
+under both fixture widths — so the BREAKPOINT NUMBER itself remained exactly as unpinned as
+the predicate was before round 6's fix, just one level down: two sample points a long way
+apart can confirm a predicate's *direction* without confirming *where* it flips. This is the
+same shape the rest of this entry names — "a fixture of N distinguishable inputs can't
+separate more than N candidates" — applied to a continuous numeric axis instead of a discrete
+identity/polarity choice: no number of widths chosen far from the real threshold closes it,
+only a pair that STRADDLES the threshold does. `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q`
+stayed green (3218 passed) with the breakpoint moved to `1200`. **Guard form that survives:**
+render the production-force variant at the real breakpoint itself (`MOBILE_BREAKPOINT = 768`,
+tied by comment to style.css's own `@media (max-width: 768px)` block so the next person who
+moves one moves both) — asserting it still forces single, since `max-width` is inclusive —
+and add a negative-control render one pixel above it (`769`) asserting it must NOT force
+single. That pair is the one no moved breakpoint can satisfy: a lower breakpoint fails the
+`768` case, a higher one fails the `769` case, and neither can hide behind sample points
+chosen deep inside either side of the real value.
+
+The same round also closed a second, independent gap in the same guard: round 6's
+`filesBtn.hasAttribute('hidden') === false` check proves the Files chip carries no `hidden`
+CONTENT ATTRIBUTE — one specific hiding MECHANISM — not that it is actually rendered visible.
+Hiding the same chip with an inline `style="display:none"` instead (the identical
+`draggable ? … : ''` idiom `_ctxBarHTML` already uses for `idxNum`/`meta` a few lines away)
+left `hasAttribute('hidden')` false, `hasAttribute` on any other name false, `title`/`onclick`
+intact, and the SVG glyph non-empty — every assertion the guard makes stayed green while a
+phone/single-pane user lost the chip on screen. `pytest -q` stayed green (3218 passed) under
+this mutation too. Naming a second attribute (or a third, `aria-hidden`) closes only THAT
+mechanism and leaves the next one in the same open family — `visibility: hidden`,
+`opacity: 0`, `width: 0` all follow, and enumerating them never terminates. **Guard form that
+survives:** read the PROPERTY, not a named mechanism — `getComputedStyle(filesBtn).display
+!== 'none'` (jsdom cascades inline styles AND its own UA `[hidden] { display: none }` rule
+into `getComputedStyle`, so this one read subsumes the `hidden`-attribute check for every
+mechanism that sets `display`) — the same fix shape [[54|shape 54]] and [[67|shape 67]] give
+for a CSS-class-gated element, applied here to a plain inline-style/attribute pair with no
+stylesheet involved at all.
