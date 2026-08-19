@@ -418,13 +418,26 @@ def test_promote_unreleased_combines_existing_body_and_fragments(tmp_path):
     )
     d = tmp_path / "changelog.d"
     d.mkdir()
-    (d / "CMX-312.md").write_text("### Fixed\n\n- from a fragment\n")
+    (d / "CMX-312.md").write_text("### Added\n\n- from a fragment\n")
 
     rewritten = promote_unreleased(changelog, "0.7.0", "2026-08-18", d)
 
     new_release = extract_release_notes(rewritten, "0.7.0")
     assert "already there" in new_release
     assert "from a fragment" in new_release
+    # MUTATION (DEFEAT_SHAPES #312 round 4): the existing `## [Unreleased]` body
+    # and the collected fragments share a `### Added` heading here — this is the
+    # merge call site `_merge_duplicate_subheadings` guards at the boundary
+    # between them, not the cross-fragment merge `collect_fragments` already
+    # covers on its own. A pass-through that skips the merge still concatenates
+    # both bullets under two separate `### Added` headings. Asserting through
+    # `new_release` (i.e. `extract_release_notes`) can't catch that: it runs
+    # `_merge_duplicate_subheadings` itself on the way out (see its own body,
+    # line 129), silently re-merging what `promote_unreleased` failed to merge
+    # and masking the very mutation this assertion exists to catch. Slice the
+    # raw `rewritten` text instead, before it passes through any second merge.
+    promoted_section = rewritten[rewritten.index("## [0.7.0]"):rewritten.index("## [0.6.0]")]
+    assert re.findall(r"(?m)^### (.+)$", promoted_section) == ["Added"]
     # the historical section is untouched
     assert extract_release_notes(rewritten, "0.6.0") == "### Fixed\n\n- old release\n"
     # ⛔ CMX-214/tests/test_version.py: a promotion that drops the heading entirely

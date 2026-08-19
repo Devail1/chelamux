@@ -115,3 +115,46 @@ the suite stayed green (3247 passed) because no assertion depended on order. Clo
 a heading by content is blind to a search that depends on the heading being *first*; when an
 invariant is about position/order, assert through the function that actually depends on that
 position, not through one that searches past it.
+
+**Round 4 — the read-side helper used to inspect the result independently re-applies the
+exact transform the write-side mutation removed, so the corruption never reaches the
+assertion:** `promote_unreleased` merges duplicate `### <Category>` headings across the
+boundary between the existing `## [Unreleased]` body and the collected `changelog.d/`
+fragments by calling `_merge_duplicate_subheadings(combined + "\n")`. The only test that
+reaches this call site read the result back through `extract_release_notes(rewritten,
+"0.7.0")` — but `extract_release_notes` *itself* calls `_merge_duplicate_subheadings` on
+whatever body it slices out (line 129), so any two `### <Category>` blocks it returns get
+silently re-collapsed into one on the way out, independent of whether `promote_unreleased`
+merged them on the way in. Judge mutation: `merged = _merge_duplicate_subheadings(combined +
+"\n").strip("\n")` → `merged = (combined + "\n").strip("\n")` — i.e. skip the merge entirely
+inside `promote_unreleased`. The raw `rewritten` text now genuinely contains two adjacent
+`### Added` headings (verified by slicing the text directly, before it passes through any
+reader), but every existing assertion routed the same text through
+`extract_release_notes` first, which merged them right back into one — so `"already there"
+in new_release` and `"from a fragment" in new_release` both still held, and the whole suite
+stayed green (3248 passed).
+
+**Why this is distinct from round 3's shape above:** round 3 was blind because the assertion
+searched for content *anywhere* in the text, never checking position. This is a different
+blindness: the assertion's own read path performs the *same normalization* the write path was
+supposed to perform and didn't — two independent call sites of `_merge_duplicate_subheadings`
+(one on write, one on read) mean a broken write call is invisible unless the read call is
+bypassed. It also isn't shape 46 (idempotent gated action) — the gate here isn't a no-op by
+construction, it's a no-op *because a second, independent application of the same idempotent
+transform runs downstream of it and cleans up after it*.
+
+**Guard form that survives:** when the only way to inspect a write-side transform's output is
+through a reader that performs its own version of the same transform, that reader cannot be
+used to prove the write side ran — slice and assert on the raw output directly instead. Fixed
+here: `promoted_section = rewritten[rewritten.index("## [0.7.0]"):rewritten.index("## [0.6.0]")]`
+followed by `assert re.findall(r"(?m)^### (.+)$", promoted_section) == ["Added"]`, reading the
+un-normalized text `promote_unreleased` actually returned instead of routing it back through
+`extract_release_notes` first.
+
+**Found:** `chela/release_notes.py`'s `promote_unreleased` (CMX-312 rework round 4, PR #388)
+— judge mutation `_merge_duplicate_subheadings(combined + "\n").strip("\n")` →
+`(combined + "\n").strip("\n")`, suite stayed green (3248 passed) because
+`extract_release_notes`'s own internal merge call absorbed the corruption before any
+assertion could see it. Closed by asserting on the raw `rewritten` slice in
+`test_promote_unreleased_combines_existing_body_and_fragments` instead of the
+`extract_release_notes`-filtered `new_release`.
