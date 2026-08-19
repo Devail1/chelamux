@@ -8,15 +8,19 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+from datetime import date as _date
 from pathlib import Path
 
 import pytest
 
+from chela import release_notes
 from chela.release_notes import (
     ReleaseNotFoundError,
     UnrecognisedHeadingError,
+    collect_fragments,
     extract_release_notes,
     latest_released_version,
+    promote_unreleased,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -356,3 +360,289 @@ def test_cli_requires_version_unless_write_is_given():
     assert result.returncode == 2
     assert "Traceback" not in result.stderr
     assert "version is required unless --write is given" in result.stderr
+
+
+# --- changelog.d fragments: CMX-312, "move to per-PR fragment files" ----------------------
+#
+# CMX-308 and CMX-309 both went `CONFLICTING` on `CHANGELOG.md`'s shared `## [Unreleased]`
+# section — GitHub's own mergeability check doesn't run `.gitattributes`' `merge=union`
+# driver (CMX-241 only smooths over a *local* merge), so two open PRs each appending there
+# get no CI at all until a human drops one side's entry. Fragment files under `changelog.d/`
+# never collide because every PR writes a differently-named file.
+
+
+def test_collect_fragments_is_empty_for_a_directory_with_no_fragments(tmp_path):
+    assert collect_fragments(tmp_path / "changelog.d") == ""
+
+
+def test_collect_fragments_ignores_readme(tmp_path):
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "README.md").write_text("### Added\n\n- this must never be collected\n")
+
+    assert collect_fragments(d) == ""
+
+
+def test_collect_fragments_concatenates_in_filename_order(tmp_path):
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    # Written out of order on disk; filename order must still win.
+    (d / "CMX-320.md").write_text("### Added\n\n- second fragment\n")
+    (d / "CMX-310.md").write_text("### Added\n\n- first fragment\n")
+
+    notes = collect_fragments(d)
+
+    assert notes.count("### Added") == 1
+    assert notes.index("first fragment") < notes.index("second fragment")
+
+
+def test_collect_fragments_merges_duplicate_categories_across_files(tmp_path):
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "CMX-311.md").write_text("### Fixed\n\n- a fix\n")
+    (d / "CMX-312.md").write_text("### Added\n\n- an addition\n")
+    (d / "CMX-313.md").write_text("### Fixed\n\n- another fix\n")
+
+    notes = collect_fragments(d)
+    headings = re.findall(r"^### (.+)$", notes, re.MULTILINE)
+
+    assert headings == ["Added", "Fixed"]  # canonical order, one heading each
+    assert "a fix" in notes
+    assert "another fix" in notes
+
+
+def test_promote_unreleased_combines_existing_body_and_fragments(tmp_path):
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- already there\n\n"
+        "## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- old release\n"
+    )
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "CMX-312.md").write_text("### Added\n\n- from a fragment\n")
+
+    rewritten = promote_unreleased(changelog, "0.7.0", "2026-08-18", d)
+
+    new_release = extract_release_notes(rewritten, "0.7.0")
+    assert "already there" in new_release
+    assert "from a fragment" in new_release
+    # MUTATION (DEFEAT_SHAPES #312 round 4): the existing `## [Unreleased]` body
+    # and the collected fragments share a `### Added` heading here — this is the
+    # merge call site `_merge_duplicate_subheadings` guards at the boundary
+    # between them, not the cross-fragment merge `collect_fragments` already
+    # covers on its own. A pass-through that skips the merge still concatenates
+    # both bullets under two separate `### Added` headings. Asserting through
+    # `new_release` (i.e. `extract_release_notes`) can't catch that: it runs
+    # `_merge_duplicate_subheadings` itself on the way out (see its own body,
+    # line 129), silently re-merging what `promote_unreleased` failed to merge
+    # and masking the very mutation this assertion exists to catch. Slice the
+    # raw `rewritten` text instead, before it passes through any second merge.
+    promoted_section = rewritten[rewritten.index("## [0.7.0]"):rewritten.index("## [0.6.0]")]
+    assert re.findall(r"(?m)^### (.+)$", promoted_section) == ["Added"]
+    # the historical section is untouched
+    assert extract_release_notes(rewritten, "0.6.0") == "### Fixed\n\n- old release\n"
+    # ⛔ CMX-214/tests/test_version.py: a promotion that drops the heading entirely
+    # silently breaks every PR merged afterwards, the exact `0.4.0` incident.
+    assert re.search(r"(?m)^## \[Unreleased\]\s*$", rewritten)
+    assert extract_release_notes(rewritten, "Unreleased") == "\n"
+    # WIRING (DEFEAT_SHAPES #312 round 3): `extract_release_notes` finds a
+    # `## [version]` heading anywhere in the text, so it can't tell newest-first
+    # from appended-at-the-bottom. `latest_released_version` (which
+    # tests/test_version.py's own invariant relies on) can, and a promotion that
+    # appended instead of inserting directly below `## [Unreleased]` would make
+    # this return the wrong version on the very next release.
+    assert latest_released_version(rewritten) == "0.7.0"
+
+
+def test_promote_unreleased_works_with_only_fragments_and_no_existing_body(tmp_path):
+    changelog = "# Changelog\n\n## [Unreleased]\n\n## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- x\n"
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "CMX-312.md").write_text("### Added\n\n- fragment only\n")
+
+    rewritten = promote_unreleased(changelog, "0.7.0", "2026-08-18", d)
+
+    assert "fragment only" in extract_release_notes(rewritten, "0.7.0")
+
+
+def test_promote_unreleased_works_with_no_fragments_at_all(tmp_path):
+    changelog = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- already there\n"
+    rewritten = promote_unreleased(changelog, "0.7.0", "2026-08-18", tmp_path / "changelog.d")
+
+    assert "already there" in extract_release_notes(rewritten, "0.7.0")
+    assert extract_release_notes(rewritten, "Unreleased") == "\n"
+
+
+def test_promote_unreleased_writes_the_bare_heading_when_theres_nothing_to_promote(tmp_path):
+    # MUTATION (DEFEAT_SHAPES #312 round 5): every other promote_unreleased fixture gives
+    # `merged` truthy content, so the ternary's `else` arm — the bare `## [version] — date`
+    # heading with nothing under it — never runs. That arm is what the docstring's central
+    # claim ("the heading this function writes is always present, never a step a maintainer
+    # can forget") is actually about: an empty `## [Unreleased]` with no changelog.d
+    # fragments is the NORMAL steady state this PR creates between releases. Assert on the
+    # raw `rewritten` text with a plain substring check first — routing through
+    # `extract_release_notes`/`latest_released_version` would raise `ReleaseNotFoundError`
+    # if the heading were silently dropped, masking the actual defect behind an exception.
+    changelog = "# Changelog\n\n## [Unreleased]\n\n## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- x\n"
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+
+    rewritten = promote_unreleased(changelog, "0.7.0", "2026-08-18", d)
+
+    assert "## [0.7.0] — 2026-08-18" in rewritten
+    assert latest_released_version(rewritten) == "0.7.0"
+    assert extract_release_notes(rewritten, "0.7.0") == "\n"
+
+
+def test_promote_unreleased_stops_at_a_footer_rule_that_precedes_the_next_heading(tmp_path):
+    # MUTATION (DEFEAT_SHAPES #312 round 6): `promote_unreleased` takes
+    # `body_end = min(candidates)` over `later_heading_starts + [footer]` — "whichever
+    # comes FIRST". Every fixture above puts the next `## [...]` heading immediately
+    # after `## [Unreleased]`'s body with no `\n---\n` rule anywhere before it, so
+    # `min` and `max` pick the exact same candidate (the only one there is) and the
+    # rule is never actually exercised in the direction where the footer is the
+    # nearer delimiter. Here a `\n---\n` rule sits BETWEEN the Unreleased body and the
+    # next dated heading — `min` must stop at the footer; the survived mutation
+    # (`min` -> `max`) would swallow the footer, the stray note below it, and the
+    # `## [0.6.0]` heading itself into the promoted 0.7.0 body.
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n### Changed\n\n- new work\n\n"
+        "---\n\nStray divider before the next heading (edge case).\n\n"
+        "## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- old release\n"
+    )
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "CMX-312.md").write_text("### Added\n\n- from a fragment\n")
+
+    rewritten = promote_unreleased(changelog, "0.7.0", "2026-08-18", d)
+
+    # `extract_release_notes` re-derives its own boundary on the raw output, so this
+    # is not a case of the round-3/4 pitfall (a reader silently undoing the write
+    # side's corruption): a `min`-vs-`max` boundary mistake in `promote_unreleased`
+    # changes what's embedded in the promoted body, which extract's own (unmutated,
+    # correct) boundary detection then reads back differently.
+    assert "from a fragment" in extract_release_notes(rewritten, "0.7.0")
+    assert "Stray divider" not in extract_release_notes(rewritten, "0.7.0")
+    assert extract_release_notes(rewritten, "0.6.0") == "### Fixed\n\n- old release\n"
+    # Direct, position-based confirmation on the raw text: the fragment (appended
+    # after `existing_body` inside `promote_unreleased`) only lands ahead of the
+    # stray footer note when the boundary correctly stopped at the footer instead of
+    # swallowing past it.
+    assert rewritten.index("from a fragment") < rewritten.index("Stray divider")
+
+
+def test_promote_unreleased_stops_at_the_next_heading_that_precedes_a_footer_rule(tmp_path):
+    # MUTATION (DEFEAT_SHAPES #312 round 6): the mirror image of the fixture above —
+    # here the next `## [...]` heading comes BEFORE the trailing `\n---\n` rule, the
+    # realistic shape of this repo's own CHANGELOG.md (multiple dated sections, then
+    # a footer at the very bottom). `min` must stop at the heading; the survived
+    # mutation (`min` -> `max`) would swallow the entire `## [0.6.0]` section AND the
+    # footer note into the promoted 0.7.0 body — a strictly worse version of the
+    # 0.4.0 incident this module exists to close.
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n### Changed\n\n- new work\n\n"
+        "## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- old release\n\n"
+        "---\n\nFooter note, not part of any release.\n"
+    )
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "CMX-312.md").write_text("### Added\n\n- from a fragment\n")
+
+    rewritten = promote_unreleased(changelog, "0.7.0", "2026-08-18", d)
+
+    # Slice the raw output directly (DEFEAT_SHAPES #312 round 4's lesson): the
+    # fragment is appended right after `existing_body`, so whether it lands before
+    # or after the reappearing `## [0.6.0]` heading is a direct read of where the
+    # boundary actually landed.
+    promoted_section = rewritten[rewritten.index("## [0.7.0]") : rewritten.index("## [0.6.0]")]
+    assert "from a fragment" in promoted_section
+    assert "old release" not in promoted_section
+    assert extract_release_notes(rewritten, "0.6.0") == "### Fixed\n\n- old release\n"
+    assert latest_released_version(rewritten) == "0.7.0"
+
+
+def test_promote_unreleased_raises_without_an_unreleased_heading():
+    changelog = "# Changelog\n\n## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- x\n"
+    with pytest.raises(ReleaseNotFoundError):
+        promote_unreleased(changelog, "0.7.0", "2026-08-18", Path("does-not-matter"))
+
+
+def test_cli_release_writes_the_changelog_and_deletes_consumed_fragments(tmp_path):
+    changelog_path = tmp_path / "CHANGELOG.md"
+    changelog_path.write_text(
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- already there\n\n"
+        "## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- old release\n"
+    )
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "CMX-312.md").write_text("### Fixed\n\n- from a fragment\n")
+    (d / "README.md").write_text("convention doc — must survive")
+
+    result = _run_cli(
+        "--release", "0.7.0", "--date", "2026-08-18",
+        "--changelog", str(changelog_path), "--changelog-d", str(d),
+    )
+
+    assert result.returncode == 0, result.stderr
+    written = changelog_path.read_text()
+    assert "from a fragment" in extract_release_notes(written, "0.7.0")
+    # the fragment is consumed and gone, the README convention doc survives
+    assert not (d / "CMX-312.md").exists()
+    assert (d / "README.md").exists()
+
+
+def test_cli_release_defaults_date_to_today(tmp_path):
+    # WIRING: every other --release test above passes --date explicitly, so nothing
+    # exercises `date = args.date or _date.today().isoformat()` in main() — unlike
+    # `_default_changelog_d_path()` (DEFEAT_SHAPES #312), this default's consumer
+    # (--release) is NOT destructive to run end-to-end here: the test above already
+    # invokes it safely against a tmp_path CHANGELOG.md/changelog.d, it just always
+    # supplies --date. Reuse that exact shape with --date omitted instead.
+    changelog_path = tmp_path / "CHANGELOG.md"
+    changelog_path.write_text("# Changelog\n\n## [Unreleased]\n\n### Added\n\n- already there\n")
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+
+    result = _run_cli(
+        "--release", "0.7.0",
+        "--changelog", str(changelog_path), "--changelog-d", str(d),
+    )
+
+    assert result.returncode == 0, result.stderr
+    written = changelog_path.read_text()
+    today = _date.today().isoformat()
+    assert f"## [0.7.0] — {today}" in written
+
+
+def test_cli_release_requires_version():
+    result = _run_cli("--release")
+    assert result.returncode == 2
+    assert "version is required with --release" in result.stderr
+
+
+def test_default_changelog_d_path_points_at_the_repos_own_changelog_d():
+    # WIRING: every test above that exercises --changelog-d passes it explicitly, so
+    # nothing else pins what `--changelog-d` defaults to. `_default_changelog_path()`
+    # (CHANGELOG.md's default) has a sibling guard — `test_cli_prints_notes_for_a_real_version`
+    # runs the CLI with no --changelog and asserts real repo content — but that test can't
+    # be mirrored for --changelog-d as-is: --release is destructive (it writes CHANGELOG.md
+    # and deletes consumed fragments), so running it against this repo's real files isn't
+    # safe to do from a test. Pin the function's actual return value instead: this directly
+    # exercises the code the documented no-flags invocation
+    # (`python -m chela.release_notes --release X.Y.Z`) relies on, so a default silently
+    # repointed at a directory that also happens to exist (e.g. a typo, or a renamed/moved
+    # fragments dir) goes red here instead of shipping a release that silently collects zero
+    # fragments.
+    assert release_notes._default_changelog_d_path() == _REPO_ROOT / "changelog.d"
+
+
+def test_changelog_d_argument_default_is_wired_to_the_resolver():
+    # WIRING (DEFEAT_SHAPES #312 round 3): the test above pins what
+    # `_default_changelog_d_path()` returns, but says nothing about whether
+    # argparse's `--changelog-d` option actually USES it as its default — a
+    # corruption that repoints only the `default=` kwarg (leaving the helper
+    # itself untouched) reproduces the exact same silent-zero-fragments failure
+    # and this suite would stay green without this. Build the real parser and
+    # parse zero args, so both the helper and the wiring that consumes it are
+    # pinned by one assertion.
+    args = release_notes._build_parser().parse_args([])
+    assert args.changelog_d == _REPO_ROOT / "changelog.d"
