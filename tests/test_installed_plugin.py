@@ -162,6 +162,10 @@ def test_doctor_ERRORs_when_the_installed_manifest_disagrees(env):
     assert "non-interactively" in body            # ...the refresh needs no operator input...
     assert "no uninstall/reinstall needed" in body
     assert "/plugin uninstall" not in body        # ...not a manual uninstall/reinstall
+    # this PR removed BOTH slash-command lines from the doctor Fix clause too — bar both,
+    # not just the uninstall half, or the interactive reinstall this ticket exists to
+    # remove can come straight back in the other line (mirrors the `chela plugin` test)
+    assert "/plugin install" not in body
     # the two real CLI calls `chela update` actually runs — both verbs, not just one
     assert "claude plugin marketplace update <marketplace>" in body
     assert "claude plugin update chela@<marketplace>" in body

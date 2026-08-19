@@ -374,3 +374,54 @@ red; reinstating only the line the assertion already names is not evidence about
 out` to the `chela plugin` test
 (`test_chela_plugin_names_the_cache_path_when_the_install_is_stale`), alongside the existing
 `"/plugin uninstall" not in out`.
+
+**Round 7 — 6b's own guard form ("one `not in` assertion per removed line") was applied to
+only one of the two sibling renderers 6b names in the same breath.** Round 6's 6b diagnosed
+the paired-removal gap in `chela/main.py`'s `_report_installed_plugin` and closed it there —
+but the same PR removed the identical pair (`/plugin uninstall chela@chela` and `/plugin
+install chela@chela`) from `chela/runtime_truth.py`'s `_installed_report` Finding body, in
+the same commit. Round 6's own fix left the doctor test
+(`test_doctor_ERRORs_when_the_installed_manifest_disagrees`) with only
+`"/plugin uninstall" not in body` — the pre-existing uninstall-half assertion — and never
+added the install-half sibling, even though 6b's closing note ("write one `not in` assertion
+per removed line ... in every renderer that repeats it") already says why it should have.
+This is 310's own recurring failure mode (rounds 1, 3, 4, 5, 6a) landing a fifth time: a
+round's fix closes the renderer its own mutation happened to hit and leaves the sibling's
+matching gap exactly as open as it found it.
+
+```diff
+# chela/runtime_truth.py — the doctor Finding's OWN copy of the paired removal 6b closed in
+# the sibling renderer (chela/main.py) but not here, even though this file renders the
+# identical Fix clause
+-                "those two calls by hand. Hooks are read at agent STARTUP — a running "
++                "those two calls by hand, or `/plugin install chela@chela` from "
++                "Claude Code. Hooks are read at agent STARTUP — a running "
+```
+
+This mutation, applied by the judge to a throwaway checkout of round 6's fix, still parsed
+and left `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green (3247 passed, 0 failed, 0
+error(s)) — the doctor test has no assertion at all naming `/plugin install`, only the
+uninstall half.
+
+**Why round 6's fix didn't already cover this:** 6b's guard form was correct and general
+("enumerate the actual lines the diff deleted ... in every renderer that repeats it"), but
+the diff round 6 shipped only exercised it against the renderer the round-6 mutation had
+itself landed in (`chela/main.py`). The doctor-side sibling removes the same two lines from
+the same conceptual Fix clause, one file over, and 6a — the finding immediately above 6b in
+round 6's own writeup — already established that this exact clause is duplicated between the
+two renderers. Reading 6a and 6b as two independent, already-closed findings rather than as
+"this clause, wherever it repeats, needs the same treatment" is what let the second half of
+6b's own fix go unmirrored.
+
+**Guard form that survives (updated again):** when a round's fix closes a paired-removal gap
+(6b) in one renderer, immediately check whether that same round, or an earlier one, already
+established (as 6a did) that the renderer has a sibling repeating the identical clause — if
+so, apply the paired-removal fix to the sibling in the same commit, not as a future round's
+finding. A `not in` fix that only reacts to the file path named in the mutation diff, without
+checking `git grep` for the same literal fragment elsewhere in the module, will keep landing
+one renderer at a time forever.
+
+**Round 7 found:** (CMX-310, PR #386, rework round 7) — closed by adding
+`"/plugin install" not in body` to the doctor test
+(`test_doctor_ERRORs_when_the_installed_manifest_disagrees`), alongside the existing
+`"/plugin uninstall" not in body`.
