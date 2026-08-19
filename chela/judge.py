@@ -821,6 +821,18 @@ def _is_prose_path(name: str) -> bool:
     return p.suffix.lower() in _PROSE_SUFFIXES or p.name in _PROSE_BASENAMES
 
 
+def _touches_changelog_entry(path: str) -> bool:
+    """Whether ``path`` is a changelog entry a PR could have written: the legacy
+    ``CHANGELOG.md`` edit, or (CMX-312) a fragment file added under ``changelog.d/`` —
+    any file there except the directory's own ``README.md``, which documents the
+    convention rather than recording a change.
+    """
+    p = Path(path)
+    if p.name == "CHANGELOG.md":
+        return True
+    return p.parent.name == "changelog.d" and p.name != "README.md"
+
+
 def _docs_only_diff(worktree: Path, base_branch: str) -> bool | None:
     """Whether EVERY file this PR touches (vs ``base_branch``) is prose, not code.
 
@@ -910,13 +922,15 @@ def _changelog_missing_note(worktree: Path, base_branch: str) -> dict | None:
 
     Returns ``None`` when it cannot tell (no ``base_branch``, unresolvable ref, git failure,
     empty diff), when the diff is prose-only (nothing user-facing to log — mirrors
-    :func:`_docs_only_diff`), or when CHANGELOG.md is already among the touched files.
+    :func:`_docs_only_diff`), or when a changelog entry is already among the touched files —
+    either the legacy ``CHANGELOG.md`` edit, or (CMX-312) a ``changelog.d/CMX-<id>.md``
+    fragment other than the directory's own ``README.md``.
     """
     rows = _diff_numstat(worktree, base_branch)
     if not rows:
         return None
     files = [p for _, _, p in rows]
-    if any(Path(f).name == "CHANGELOG.md" for f in files):
+    if any(_touches_changelog_entry(f) for f in files):
         return None
     if all(_is_prose_path(f) for f in files):
         return None

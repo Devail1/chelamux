@@ -106,6 +106,132 @@ def test_changelog_missing_note_still_fires_when_a_different_md_file_is_also_tou
     assert "CHANGELOG.md" in note["title"]
 
 
+def test_changelog_missing_note_exemption_fires_regardless_of_where_changelog_md_sorts(
+    tmp_path, repo, origin,
+):
+    """DEFEAT_SHAPES #309 round 8: ``git diff --numstat`` emits paths byte-sorted, and every
+    prior fixture that pins the CHANGELOG.md exemption stages exactly ``CHANGELOG.md`` +
+    ``feature.py`` — where CHANGELOG.md (``C``) always sorts before a lowercase path, so it is
+    ALWAYS ``files[0]``. That leaves a membership check (``any(... for f in files)``)
+    indistinguishable from a check that only inspects the first path (``files[:1]``). Add a
+    file that sorts BEFORE CHANGELOG.md by byte order — a dot-prefixed path, as a real CI
+    workflow edit would be — so the exemption is proven against membership, not position.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / ".github").mkdir(exist_ok=True)
+    (repo / ".github" / "workflow.yml").write_text("name: ci\n")
+    (repo / "CHANGELOG.md").write_text(
+        "## [Unreleased]\n\n### Added\n\n- A feature. (#1)\n"
+    )
+    _git("add", ".github/workflow.yml", "CHANGELOG.md", cwd=repo)
+    _git("commit", "-m", "touch a dot-prefixed path and the changelog", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    files = [p for _, _, p in judge._diff_numstat(wt, "dev")]
+    assert files[0] != "CHANGELOG.md"                # the fixture's whole point
+    assert judge._changelog_missing_note(wt, "dev") is None
+
+
+def test_changelog_missing_note_prose_only_check_considers_every_touched_file(
+    tmp_path, repo, origin,
+):
+    """DEFEAT_SHAPES #309 round 8: the only fixture mixing prose with code
+    (``..._still_fires_when_a_different_md_file_is_also_touched``, above) stages README.md +
+    feature.py, and README.md (``R``) always sorts before the lowercase code file — so the
+    non-prose file is ALWAYS last there. That leaves a full scan (``all(... for f in files)``)
+    indistinguishable from one that only inspects the last path (``files[-1:]``). Stage a
+    non-prose file that sorts BEFORE the prose one, so the prose-only exemption is proven
+    against every file, not just the last.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    (repo / "notes.md").write_text("# notes\n\nsome prose that sorts after feature.py.\n")
+    _git("add", "feature.py", "notes.md", cwd=repo)
+    _git("commit", "-m", "add a feature and a trailing prose file, no changelog entry", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    files = [p for _, _, p in judge._diff_numstat(wt, "dev")]
+    assert not judge._is_prose_path(files[0])
+    assert judge._is_prose_path(files[-1])            # the fixture's whole point
+
+    note = judge._changelog_missing_note(wt, "dev")
+
+    assert note is not None
+    assert "CHANGELOG.md" in note["title"]
+
+
+def test_changelog_missing_note_still_fires_when_only_a_different_named_prose_file_is_touched(
+    tmp_path, repo, origin,
+):
+    """DEFEAT_SHAPES #309 round 8: round 1 closed the category-broadening
+    (``.name == "CHANGELOG.md"`` -> ``.suffix == ".md"``) with a single witness, README.md,
+    used only *alongside* a real CHANGELOG.md touch in the other fixtures. Widening the
+    identity check to an explicit allow-list naming a *different* specific prose file (e.g.
+    CONTRIBUTING.md) would satisfy this fixture too if it only ever exercised README.md. Use a
+    second, distinct prose name — CONTRIBUTING.md — with no CHANGELOG.md and no changelog.d/
+    fragment touched at all, and assert the exemption does NOT fire.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    (repo / "CONTRIBUTING.md").write_text("# Contributing\n\nsome updated prose.\n")
+    _git("add", "feature.py", "CONTRIBUTING.md", cwd=repo)
+    _git("commit", "-m", "add a feature and touch CONTRIBUTING, still no changelog entry", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    note = judge._changelog_missing_note(wt, "dev")
+
+    assert note is not None
+    assert "CHANGELOG.md" in note["title"]
+
+
+def test_changelog_missing_note_is_none_when_a_changelog_d_fragment_was_added(
+    tmp_path, repo, origin,
+):
+    """CMX-312 moved changelog entries to per-PR fragment files under ``changelog.d/`` so
+    concurrent branches stop colliding on ``CHANGELOG.md``'s shared ``## [Unreleased]``
+    section — CONTRIBUTING.md now tells authors to add a fragment instead of editing
+    CHANGELOG.md directly. The exemption must recognise that convention too, or it demands
+    exactly what the new convention tells authors NOT to do.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    (repo / "changelog.d").mkdir(exist_ok=True)
+    (repo / "changelog.d" / "CMX-999.md").write_text(
+        "### Added\n\n- A feature. (CMX-999, #1)\n"
+    )
+    _git("add", "feature.py", "changelog.d/CMX-999.md", cwd=repo)
+    _git("commit", "-m", "add a feature with a changelog.d fragment", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    assert judge._changelog_missing_note(wt, "dev") is None
+
+
+def test_changelog_missing_note_still_fires_when_only_the_changelog_d_readme_is_touched(
+    tmp_path, repo, origin,
+):
+    """``changelog.d/README.md`` documents the fragment convention — it is never itself a
+    fragment, so touching only it (no ``CMX-<id>.md`` fragment, no ``CHANGELOG.md``) must not
+    satisfy the exemption.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    (repo / "changelog.d").mkdir(exist_ok=True)
+    (repo / "changelog.d" / "README.md").write_text("# Changelog fragments\n\nupdated wording.\n")
+    _git("add", "feature.py", "changelog.d/README.md", cwd=repo)
+    _git("commit", "-m", "add a feature and edit the changelog.d README, no fragment", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    note = judge._changelog_missing_note(wt, "dev")
+
+    assert note is not None
+    assert "CHANGELOG.md" in note["title"]
+
+
 def test_changelog_missing_note_body_carries_the_actionable_instruction(tmp_path, repo, origin):
     """DEFEAT_SHAPES #309: dead-coding the body (``"" and (...)``) leaves the note firing
     (its title survives) while the entire actionable payload silently collapses to "" —

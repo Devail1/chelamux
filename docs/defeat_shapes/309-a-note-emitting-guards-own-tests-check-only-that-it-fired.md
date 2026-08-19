@@ -173,11 +173,57 @@ suite at the time:
   are all the statements that can set this field on this report, anywhere in the function?"),
   not by the syntax the previously-found instances happened to share — a shared syntax is a
   hint about where to look, not proof the list is complete.
+12. *(round 8)* Truncate a full-collection scan to a fixed position:
+    `any(Path(f).name == "CHANGELOG.md" for f in files)` → `any(... for f in files[:1])`, and
+    the mirror mutation on the prose-only check, `all(_is_prose_path(f) for f in files)` →
+    `all(... for f in files[-1:])`. Both fixtures that pin the CHANGELOG.md exemption
+    (`test_changelog_missing_note_is_none_when_the_changelog_was_touched`,
+    `test_run_experiments_carries_no_note_when_the_changelog_was_touched`) stage exactly
+    `CHANGELOG.md` + `feature.py`; `git diff --numstat` emits paths byte-sorted, and `C` < `f`,
+    so CHANGELOG.md is ALWAYS `files[0]` in every fixture in the file — a membership scan and
+    a first-position scan are indistinguishable to the suite. The one fixture mixing prose
+    with code (`..._still_fires_when_a_different_md_file_is_also_touched`) stages README.md +
+    feature.py, and `R` < `f` too, so the non-prose file is ALWAYS *last* there — a full scan
+    and a last-position scan are equally indistinguishable. In production, any PR whose diff
+    carries a path sorting before `CHANGELOG.md` (`.github/workflows/ci.yml`, a dotfile, any
+    all-caps name earlier in the alphabet) loses the exemption despite having written the
+    entry — a real trigger, not a theoretical one: CMX-305 touched exactly `.github/…/ci.yml`
+    alongside its changelog entry.
+13. *(round 8)* Widen an identity check to an allow-list naming a second, specific alternative:
+    `Path(f).name == "CHANGELOG.md"` → `Path(f).name in ("CHANGELOG.md", "CONTRIBUTING.md")`.
+    Round 1 (mutation 1 above) closed the *category* broadening (`.name ==` → `.suffix ==`)
+    with a single witness, README.md — but every fixture that uses README.md pairs it with a
+    genuine CHANGELOG.md touch, so it only proves README.md alone doesn't satisfy the
+    exemption when CHANGELOG.md is *also* present, never that a *different* named file could
+    stand in for CHANGELOG.md on its own. A PR that edits CONTRIBUTING.md alongside code —
+    routine, and the literal shape of this PR before this round — silently loses the note
+    although CHANGELOG.md was never touched.
+
+**Guard form that survives (round 8 addendum):**
+
+- ⛔⛔⛔⛔⛔⛔ *(round 8)* A membership predicate (`any(...)` / `all(...)` over a collection)
+  proven only with fixtures where the deciding element happens to occupy the same position in
+  every one (always first, always last) is proving position, not membership — regardless of
+  how many fixtures there are. Add at least one fixture per predicate where the deciding
+  element sits somewhere else in the sort order: a file that sorts *before* the exempting
+  path (kills a `[:1]`-shaped truncation) and, separately, a prose file that sorts *after* a
+  non-prose one (kills a `[-1:]`-shaped truncation). `git diff --numstat`'s byte-sort order is
+  deterministic and known ahead of time (`.` and digits before uppercase, uppercase before
+  lowercase) — a fixture can be built to land the deciding file at a specific, non-default
+  position on purpose, and should assert that position (`files[0] != "CHANGELOG.md"`) so the
+  fixture's own precondition can't silently drift back to the default.
+- ⛔⛔⛔⛔⛔⛔⛔ *(round 8)* A single "different alternative" witness (here, README.md) proves
+  exclusivity against exactly the one name it uses — not against the identity check in
+  general. Widening an `==` to an `in (...)` allow-list that names a *different* alternative
+  the existing witness never exercised slips past it. When a guard's whole job is "this exact
+  value, no other", prove it against more than one plausible-but-wrong alternative, especially
+  ones with the shape of a routine, expected diff (here, a second prose/doc file a real PR is
+  likely to touch alongside code).
 
 **Found:** CMX-309 rework round 1 (2026-08-18), round 2 (2026-08-18), round 3 (2026-08-18),
-round 4 (2026-08-18), round 5 (2026-08-18), and round 7 (2026-08-19), PR #385. Each round, the
-judge applied the round's mutations to `chela/judge.py` in a throwaway checkout;
-`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green under every one (round 1: 3226
-passed; round 2: 3228 passed; round 3: 3230 passed; round 4: 3231 passed; round 5: 3234
-passed; round 7: 3246 passed), because the suite at each point had exactly the gaps the
-mutations exploited.
+round 4 (2026-08-18), round 5 (2026-08-18), round 7 (2026-08-19), and round 8 (2026-08-19),
+PR #385. Each round, the judge applied the round's mutations to `chela/judge.py` in a
+throwaway checkout; `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green under every one
+(round 1: 3226 passed; round 2: 3228 passed; round 3: 3230 passed; round 4: 3231 passed;
+round 5: 3234 passed; round 7: 3246 passed; round 8: 3268 passed), because the suite at each
+point had exactly the gaps the mutations exploited.
