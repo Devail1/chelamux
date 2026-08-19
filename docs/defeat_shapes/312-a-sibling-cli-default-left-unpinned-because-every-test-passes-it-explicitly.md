@@ -40,6 +40,34 @@ check whether the *other* option's consumer is destructive (writes files, delete
 side effects beyond stdout) before reusing the same end-to-end shape. If it is, pin the
 default-resolver function directly instead of skipping the sibling default entirely.
 
+**Round 2 — the same excuse, borrowed by a THIRD sibling default it didn't actually apply
+to:** round 1's fix above landed with a stated reason for why `--changelog-d`'s default
+needed the indirect resolver-pin instead of an end-to-end test: `--release` is destructive,
+so running it with the flag omitted against the real repo isn't safe. `--release` has a
+*third* structurally identical default in the same function — `--date` (`date = args.date or
+_date.today().isoformat()`) — and it was left just as unpinned as `--changelog-d` had been:
+every `--release` test in the file supplies `--date` explicitly. But `--date`'s consumer has
+no destructiveness problem at all — `test_cli_release_writes_the_changelog_and_deletes_consumed_fragments`
+already runs `--release` end-to-end against a synthetic `tmp_path` `CHANGELOG.md` /
+`changelog.d`, not the real repo, so omitting `--date` from that exact same call is exactly
+as safe as the ones already in the file. Judge mutation:
+`date = args.date or _date.today().isoformat()` → `date = args.date or "1970-01-01"`; the
+whole suite stayed green (3246 passed) because nothing exercised the `or` branch. The
+indirect fix that was *correct* for `--changelog-d` (because that consumer really is
+destructive against the real repo) made the *unpinned* `--date` look like it needed — or
+already had — the same treatment; it didn't need indirection at all, just the missing
+end-to-end test case in a pattern that already existed. **The generalized lesson:** when a
+shape's fix goes indirect for a stated reason, re-verify that reason against every sibling
+individually before leaving the others unfixed — check whether the sibling's own consumer is
+*already* exercised end-to-end through a safe fixture (like `tmp_path`) elsewhere in the
+suite. If it is, the direct fix (add the omitted-flag case to that existing pattern) is both
+available and cheaper than reaching for the indirect one.
+
 **Found:** `chela/release_notes.py`'s `_default_changelog_d_path()` (CMX-312 rework round 1,
 PR #388) — judge mutation `changelog.d` → `changelog.d.disabled`, suite stayed green (3245
-passed) because nothing called the function with the mutation in place.
+passed) because nothing called the function with the mutation in place. Round 2 (same PR):
+`--date`'s default in `main()`, judge mutation above, suite stayed green (3246 passed) for
+the same underlying reason — closed by
+`test_cli_release_defaults_date_to_today` (`tests/test_release_notes.py`), which reuses the
+existing `tmp_path` end-to-end pattern with `--date` omitted instead of pinning a resolver
+function in isolation.
