@@ -431,6 +431,13 @@ def test_promote_unreleased_combines_existing_body_and_fragments(tmp_path):
     # silently breaks every PR merged afterwards, the exact `0.4.0` incident.
     assert re.search(r"(?m)^## \[Unreleased\]\s*$", rewritten)
     assert extract_release_notes(rewritten, "Unreleased") == "\n"
+    # WIRING (DEFEAT_SHAPES #312 round 3): `extract_release_notes` finds a
+    # `## [version]` heading anywhere in the text, so it can't tell newest-first
+    # from appended-at-the-bottom. `latest_released_version` (which
+    # tests/test_version.py's own invariant relies on) can, and a promotion that
+    # appended instead of inserting directly below `## [Unreleased]` would make
+    # this return the wrong version on the very next release.
+    assert latest_released_version(rewritten) == "0.7.0"
 
 
 def test_promote_unreleased_works_with_only_fragments_and_no_existing_body(tmp_path):
@@ -525,3 +532,16 @@ def test_default_changelog_d_path_points_at_the_repos_own_changelog_d():
     # fragments dir) goes red here instead of shipping a release that silently collects zero
     # fragments.
     assert release_notes._default_changelog_d_path() == _REPO_ROOT / "changelog.d"
+
+
+def test_changelog_d_argument_default_is_wired_to_the_resolver():
+    # WIRING (DEFEAT_SHAPES #312 round 3): the test above pins what
+    # `_default_changelog_d_path()` returns, but says nothing about whether
+    # argparse's `--changelog-d` option actually USES it as its default — a
+    # corruption that repoints only the `default=` kwarg (leaving the helper
+    # itself untouched) reproduces the exact same silent-zero-fragments failure
+    # and this suite would stay green without this. Build the real parser and
+    # parse zero args, so both the helper and the wiring that consumes it are
+    # pinned by one assertion.
+    args = release_notes._build_parser().parse_args([])
+    assert args.changelog_d == _REPO_ROOT / "changelog.d"

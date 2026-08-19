@@ -258,7 +258,7 @@ def _default_changelog_d_path() -> Path:
     return Path(__file__).resolve().parent.parent / "changelog.d"
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Print a release's CHANGELOG.md section body, for "
         "`gh release create --notes-file`.",
@@ -300,6 +300,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="release date, YYYY-MM-DD (default: today) — only used with --release",
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
     if args.write:

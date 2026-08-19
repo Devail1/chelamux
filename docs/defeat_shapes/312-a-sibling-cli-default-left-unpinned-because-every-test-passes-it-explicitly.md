@@ -71,3 +71,47 @@ the same underlying reason — closed by
 `test_cli_release_defaults_date_to_today` (`tests/test_release_notes.py`), which reuses the
 existing `tmp_path` end-to-end pattern with `--date` omitted instead of pinning a resolver
 function in isolation.
+
+**Round 3 — the resolver-pin itself became the new unguarded gap:** round 1's fix
+(`test_default_changelog_d_path_points_at_the_repos_own_changelog_d`) calls
+`_default_changelog_d_path()` directly and asserts its return value — that pins the *helper*,
+but says nothing about whether `argparse`'s `--changelog-d` option still uses that helper as
+its `default=`. A corruption that repoints only the argument's `default=` kwarg (leaving the
+helper function itself untouched and therefore still returning the right path when called
+directly) reproduces the exact same silent-zero-fragments failure round 1 existed to close,
+and the round-1 test can't see it — it never touches `main()`'s parser at all. Judge mutation:
+`default=_default_changelog_d_path()` → `default=Path("changelog.d.disabled")` in the
+`--changelog-d` `add_argument(...)` call; the whole suite stayed green (3247 passed) because
+nothing ever built the real parser and read back what `--changelog-d` actually defaults to.
+Closed by extracting parser construction out of `main()` into a standalone `_build_parser()`
+function, then adding `test_changelog_d_argument_default_is_wired_to_the_resolver`, which
+calls `release_notes._build_parser().parse_args([])` and asserts
+`args.changelog_d == _REPO_ROOT / "changelog.d"` — this reads the value argparse actually
+resolves the option to, pinning the helper and the wiring that consumes it in one assertion,
+instead of asserting on the helper in isolation.
+
+**The generalized lesson, restated:** a test that calls a default-producing helper function
+directly and asserts on its return value pins the *function*, not the *option* — an
+indirect fix like round 1's is a trap disguised as a fix unless a companion assertion also
+drives the actual consumer (the built parser, or the CLI end-to-end) with the flag omitted.
+When a sibling option's consumer is safe to run end-to-end (see round 2), prefer that
+directly; when it isn't (as here — `--release` is destructive against the real repo), pin the
+*wiring point* (the parser's resolved default) rather than stopping at the helper it calls,
+so a mutation that only touches the `default=` kwarg — not the helper — still goes red.
+
+**A second, unrelated shape survived the same round:** `promote_unreleased`'s docstring
+claims the newly promoted `## [version] — date` section is inserted directly below
+`## [Unreleased]` (newest-first) — this is load-bearing because `latest_released_version`
+returns the first non-`Unreleased` heading it finds, and `tests/test_version.py` asserts
+`_pyproject_version() == latest_released_version(_changelog_text())`. Every assertion in
+`test_promote_unreleased_combines_existing_body_and_fragments` reached the promoted content
+through `extract_release_notes(rewritten, "0.7.0")`, which finds a `## [0.7.0]` heading
+*anywhere* in the text via regex search — so the test can prove the content is present
+without ever proving *where*. Judge mutation: swap the concatenation order in
+`promote_unreleased`'s `return` statement so the new section is appended after the old body
+instead of inserted directly below `## [Unreleased]` (content unchanged, position reversed);
+the suite stayed green (3247 passed) because no assertion depended on order. Closed by adding
+`assert latest_released_version(rewritten) == "0.7.0"` to the same test — a search that finds
+a heading by content is blind to a search that depends on the heading being *first*; when an
+invariant is about position/order, assert through the function that actually depends on that
+position, not through one that searches past it.
