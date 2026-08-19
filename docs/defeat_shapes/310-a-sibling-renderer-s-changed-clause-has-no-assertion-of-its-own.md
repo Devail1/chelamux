@@ -302,3 +302,75 @@ a replacement assertion still covers each one.
 `` "chela update` already refreshes it" in out `` to the `chela plugin` test
 (`test_chela_plugin_names_the_cache_path_when_the_install_is_stale`), alongside — not instead
 of — the existing `"\n    chela update\n" in out` action-line assertion.
+
+**Round 6 — two more gaps, one a mirror of round 5 in the sibling renderer, one a new shape:
+a paired removal where the absence check only bars one of the two things removed.**
+
+**6a. Round 5 pinned the credit sentence in `chela plugin`'s test; `chela doctor`'s sibling
+test still only has the bare token check round 1 left behind.** Round 5's own "why round 2's
+fix didn't already cover this" note diagnosed the general failure mode — a broad substring
+check silently stops covering an occurrence once a narrower one is added elsewhere — but
+round 5's diff, like round 4's, only touched the renderer the round's own mutation had hit.
+`chela/runtime_truth.py:1098` renders the identical credit sentence (`` `chela update`
+already refreshes this copy for you, `` vs `chela plugin`'s `` `chela update` already
+refreshes it ``), and `tests/test_installed_plugin.py:157` still only asserts the bare
+`"chela update" in body` — true of a sentence that *credits* `chela update` and equally true
+of one that says `chela update` does *not* help.
+
+```diff
+# chela/runtime_truth.py — the doctor Finding's OWN copy of the credit sentence round 5
+# pinned in the SIBLING renderer (chela/main.py) but not here
+- + "\n    Fix: `chela update` already refreshes this copy for you, "
++ + "\n    Fix: `chela update` does not refresh this copy for you, "
+```
+
+**6b. A new shape: the diff removed TWO slash-command lines from `_report_installed_plugin`,
+and the test's absence check only bars one of them.** The pre-PR STALE-INSTALL branch printed
+both `/plugin uninstall chela@chela` and `/plugin install chela@chela` as a manual
+uninstall-then-reinstall pair; the fix deletes both lines, since `chela update` replaces the
+whole round-trip. `test_chela_plugin_names_the_cache_path_when_the_install_is_stale` asserts
+only `"/plugin uninstall" not in out` — a holdover from when round 1 first pinned the removal
+of the *uninstall* half. Nothing ever asserted the *install* half stays gone too, so it can
+come straight back without the suite noticing, in the exact function this ticket exists to
+change.
+
+```diff
+# chela/main.py — re-adds only the SECOND of the two removed lines; the existing
+# "/plugin uninstall" not in out assertion never fires because that line is still absent
+  print("\n  chela will not write into Claude Code's plugin cache directly (that "
+        "copy is Claude Code's to manage) — but `chela update` already refreshes it "
+        "for you, non-interactively, with no uninstall/reinstall needed:")
+- print("    chela update")
++ print("    chela update\n    /plugin install chela@chela")
+```
+
+Both mutations, applied by the judge to a throwaway checkout of round 5's fix, still parsed
+and left `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green (3234 passed, 0 failed, 0
+error(s)).
+
+**Why round 5's fix didn't already cover this:** 6a is the same failure mode shape 310 has
+now recurred with four separate times (rounds 1, 3, 4, 5) — a fix closes the renderer its own
+mutation happened to land in and leaves the sibling's matching clause on the older, weaker
+assertion form. 6b is different in kind: it is not a missing assertion on a clause that was
+never pinned at all, it is an *absence* assertion (`not in out`) that was written for a
+single line and never revisited when the diff it was guarding turned out to remove a *pair*
+of lines. A `not in` check reads as "the whole bad thing is gone" to whoever writes it, but it
+only proves the literal substring it names is gone — a second, textually unrelated line that
+is part of the same removed instruction is invisible to it.
+
+**Guard form that survives (updated again):** for 6a, the standing rule holds — every
+occurrence of a fact-bearing clause, in every renderer that repeats it, needs its own
+assertion on the literal claim, not the bare token. For 6b: when a diff's hunk removes more
+than one line as a single conceptual unit (a paired uninstall+reinstall instruction, a
+before+after pair, two flags gating the same feature), write one `not in` assertion **per
+removed line**, not one for the unit — enumerate the actual lines the diff deleted from the
+hunk, not the sentence describing what was deleted. Before trusting an absence assertion,
+reinstate each removed line *individually* and confirm each one, on its own, turns the test
+red; reinstating only the line the assertion already names is not evidence about the others.
+
+**Round 6 found:** (CMX-310, PR #386, rework round 6) — closed by adding
+`` "chela update` already refreshes this copy for you" in body `` to the doctor test
+(`test_doctor_ERRORs_when_the_installed_manifest_disagrees`), and `"/plugin install" not in
+out` to the `chela plugin` test
+(`test_chela_plugin_names_the_cache_path_when_the_install_is_stale`), alongside the existing
+`"/plugin uninstall" not in out`.

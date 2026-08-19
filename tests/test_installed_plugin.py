@@ -155,6 +155,10 @@ def test_doctor_ERRORs_when_the_installed_manifest_disagrees(env):
     assert str(hooks.plugins_dir()) in body     # it NAMES the file it read
     assert "STARTUP" in body                    # a running fleet keeps the stale hooks
     assert "chela update" in body                # points at the automatic fix...
+    # the sentence that CREDITS `chela update` with doing the refresh, not just the token
+    # appearing somewhere — a bare "chela update" in body substring also passes if the
+    # sentence instead says `chela update` does NOT help, run something else
+    assert "chela update` already refreshes this copy for you" in body
     assert "non-interactively" in body            # ...the refresh needs no operator input...
     assert "no uninstall/reinstall needed" in body
     assert "/plugin uninstall" not in body        # ...not a manual uninstall/reinstall
@@ -237,6 +241,10 @@ def test_chela_plugin_names_the_cache_path_when_the_install_is_stale(env, capsys
     assert "STALE INSTALL" in out
     assert str(hooks.installed_plugins()[0].manifest) in out
     assert "/plugin uninstall" not in out
+    # this PR removed BOTH slash-command lines from the STALE-INSTALL branch — bar both,
+    # not just the uninstall half, or the interactive reinstall this ticket exists to
+    # remove can come straight back in the other line
+    assert "/plugin install" not in out
     # the rationale the by-hand fallback exists for: chela never touches the cache itself
     assert "chela will not write into Claude Code's plugin cache directly" in out
     # the sentence that CREDITS `chela update` with doing the refresh, not just the line
