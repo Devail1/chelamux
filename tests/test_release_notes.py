@@ -472,6 +472,27 @@ def test_promote_unreleased_works_with_no_fragments_at_all(tmp_path):
     assert extract_release_notes(rewritten, "Unreleased") == "\n"
 
 
+def test_promote_unreleased_writes_the_bare_heading_when_theres_nothing_to_promote(tmp_path):
+    # MUTATION (DEFEAT_SHAPES #312 round 5): every other promote_unreleased fixture gives
+    # `merged` truthy content, so the ternary's `else` arm — the bare `## [version] — date`
+    # heading with nothing under it — never runs. That arm is what the docstring's central
+    # claim ("the heading this function writes is always present, never a step a maintainer
+    # can forget") is actually about: an empty `## [Unreleased]` with no changelog.d
+    # fragments is the NORMAL steady state this PR creates between releases. Assert on the
+    # raw `rewritten` text with a plain substring check first — routing through
+    # `extract_release_notes`/`latest_released_version` would raise `ReleaseNotFoundError`
+    # if the heading were silently dropped, masking the actual defect behind an exception.
+    changelog = "# Changelog\n\n## [Unreleased]\n\n## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- x\n"
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+
+    rewritten = promote_unreleased(changelog, "0.7.0", "2026-08-18", d)
+
+    assert "## [0.7.0] — 2026-08-18" in rewritten
+    assert latest_released_version(rewritten) == "0.7.0"
+    assert extract_release_notes(rewritten, "0.7.0") == "\n"
+
+
 def test_promote_unreleased_raises_without_an_unreleased_heading():
     changelog = "# Changelog\n\n## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- x\n"
     with pytest.raises(ReleaseNotFoundError):

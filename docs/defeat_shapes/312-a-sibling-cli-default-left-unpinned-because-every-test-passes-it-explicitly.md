@@ -158,3 +158,49 @@ un-normalized text `promote_unreleased` actually returned instead of routing it 
 assertion could see it. Closed by asserting on the raw `rewritten` slice in
 `test_promote_unreleased_combines_existing_body_and_fragments` instead of the
 `extract_release_notes`-filtered `new_release`.
+
+**Round 5 — every fixture happened to make the function's central claim true anyway, so the
+one arm that makes it a *claim* (rather than an observation) was never run:**
+`promote_unreleased`'s last two lines are a ternary on `merged`: content to promote gives
+`## [X.Y.Z] — DATE\n\n<body>\n`; nothing to promote gives the bare heading `## [X.Y.Z] —
+DATE\n`. That second arm is what the docstring's central sentence is actually about — "the
+heading this function writes is always present, never a step a maintainer can forget" — and
+it is the one arm no existing fixture reached: every test that calls `promote_unreleased` or
+drives `--release` gives it either an existing `## [Unreleased]` body, a fragment, or both, so
+`merged` was truthy in all six of them (the sixth raises before reaching the line at all).
+Judge mutation: `f"## [{version}] — {date}\n\n{merged}\n" if merged else f"## [{version}] —
+{date}\n"` → `f"## [{version}] — {date}\n\n{merged}\n" if merged else ""` — i.e. write
+*nothing* when there's nothing to promote. The suite stayed green (3248 passed) because no
+fixture ever exercised an empty `## [Unreleased]` with an empty `changelog.d/` — which is not
+an edge case; it is the NORMAL steady state this PR creates *between* releases, since its
+whole point is that fragments get deleted and `## [Unreleased]` stays empty until the next one
+lands. Under the mutation, the documented `python -m chela.release_notes --release X.Y.Z` run
+at exactly that moment would write no `## [X.Y.Z]` section at all, and a later `git tag` would
+push a release whose `release.yml` extraction step then fails on a tag already live.
+
+**Why this is distinct from rounds 3/4's shapes above:** those were blind *reads* — an
+assertion that found real content through a search or a normalizing reader that couldn't see a
+positional or duplication defect. This is a blind *fixture set* — every test that reaches the
+line takes the same branch of a two-branch conditional, so the other branch has zero coverage
+regardless of how the result is read back afterward. The tell is the same shape as catalogued
+shape 40 (a defensive fallback branch is never hit), but inverted: the untested arm here isn't
+defensive belt-and-braces sitting behind the "real" logic, it's the arm the surrounding
+docstring's headline claim is actually about — the "always present" guarantee is exactly the
+`else` branch, so leaving it untested left the function's one stated purpose unverified while
+every other behaviour around it was covered in detail.
+
+**Guard form that survives:** when a function's docstring makes an "X is always true, even
+when Y" claim, check that some fixture actually constructs the Y case — a claim about a branch
+that's never taken by any test is unverified regardless of how much the taken branch is
+covered. Closed by `test_promote_unreleased_writes_the_bare_heading_when_theres_nothing_to_promote`:
+an empty `## [Unreleased]` section with an empty `changelog.d/`, asserting the bare heading is
+present via a plain substring check on the raw `rewritten` text (not through
+`extract_release_notes`/`latest_released_version`, which would raise `ReleaseNotFoundError` —
+an exception rather than a targeted assertion failure — if the heading were silently dropped).
+
+**Found:** `chela/release_notes.py`'s `promote_unreleased` (CMX-312 rework round 5, PR #388) —
+judge mutation `f"## [{version}] — {date}\n\n{merged}\n" if merged else f"## [{version}] —
+{date}\n"` → `... if merged else ""`, suite stayed green (3248 passed) because no fixture ever
+gave the function nothing to promote. Closed by
+`test_promote_unreleased_writes_the_bare_heading_when_theres_nothing_to_promote` in
+`tests/test_release_notes.py`.
