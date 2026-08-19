@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from chela import release_notes
 from chela.release_notes import (
     ReleaseNotFoundError,
     UnrecognisedHeadingError,
@@ -484,3 +485,19 @@ def test_cli_release_requires_version():
     result = _run_cli("--release")
     assert result.returncode == 2
     assert "version is required with --release" in result.stderr
+
+
+def test_default_changelog_d_path_points_at_the_repos_own_changelog_d():
+    # WIRING: every test above that exercises --changelog-d passes it explicitly, so
+    # nothing else pins what `--changelog-d` defaults to. `_default_changelog_path()`
+    # (CHANGELOG.md's default) has a sibling guard — `test_cli_prints_notes_for_a_real_version`
+    # runs the CLI with no --changelog and asserts real repo content — but that test can't
+    # be mirrored for --changelog-d as-is: --release is destructive (it writes CHANGELOG.md
+    # and deletes consumed fragments), so running it against this repo's real files isn't
+    # safe to do from a test. Pin the function's actual return value instead: this directly
+    # exercises the code the documented no-flags invocation
+    # (`python -m chela.release_notes --release X.Y.Z`) relies on, so a default silently
+    # repointed at a directory that also happens to exist (e.g. a typo, or a renamed/moved
+    # fragments dir) goes red here instead of shipping a release that silently collects zero
+    # fragments.
+    assert release_notes._default_changelog_d_path() == _REPO_ROOT / "changelog.d"
