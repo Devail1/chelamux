@@ -204,3 +204,53 @@ judge mutation `f"## [{version}] — {date}\n\n{merged}\n" if merged else f"## [
 gave the function nothing to promote. Closed by
 `test_promote_unreleased_writes_the_bare_heading_when_theres_nothing_to_promote` in
 `tests/test_release_notes.py`.
+
+**Round 6 — a two-element boundary list where every fixture happens to have only one
+element, or the two happen to coincide, so `min` and `max` pick the same candidate:**
+`promote_unreleased`'s body boundary is `body_end = min(candidates)` over
+`candidates = later_heading_starts + ([footer] if footer != -1 else [])` — "whichever comes
+FIRST: the next `## [...]` heading, or the `---` footer rule". `min` only differs from `max`
+when `candidates` holds *more than one* element with *different* positions — i.e. the
+changelog has both a later dated heading **and** a `\n---\n` rule below the `## [Unreleased]`
+section being promoted. Every fixture through round 5 gave the function either zero
+candidates (`candidates` empty) or exactly one (a later heading, no footer anywhere in the
+fixture text) — `grep -n '\n---\n' tests/test_release_notes.py` matched no `promote_unreleased`
+fixture. With a single-element (or empty) `candidates` list, `min` and `max` are the same
+value, so the "whichever comes first" rule was never actually exercised in either direction.
+Judge mutation: `body_end = min(candidates)` → `body_end = max(candidates)`. This is not
+hypothetical: this repo's own `CHANGELOG.md` has exactly this shape (`## [Unreleased]`, one or
+more dated sections, then a trailing `\n---\n` process note), and CONTRIBUTING.md's Releasing
+step 1 now tells a maintainer to run `--release` against that exact file — under `max`,
+`existing_body` would swallow every dated release section below `## [Unreleased]` into the
+newest one, a strictly worse version of the `0.4.0` incident this module exists to close.
+`latest_released_version` and `extract_release_notes(text, version)` both stay green through
+the mutation for any fixture that never puts two differently-positioned candidates in the same
+changelog, which is exactly what left it unpinned for five rounds.
+
+**Why this is distinct from rounds 3/4/5's shapes above:** those were a blind *read* (an
+assertion that searched past a positional/duplication defect) and a blind *fixture set* (every
+fixture took the same branch of a two-way conditional). This is a blind *cardinality*: the
+conditional here isn't binary, it's a `min`/`max` chosen from a list, and the two functions
+are indistinguishable whenever every fixture's list has cardinality ≤ 1. The fix isn't "add
+the missing branch" (round 5) or "add the missing category" (round 4) — it's "construct a
+`candidates` list with two elements in each possible relative order."
+
+**Guard form that survives:** when an invariant is phrased as "whichever comes first" (or
+"last", "smallest", "closest") over a set of candidates, check how many fixtures actually
+construct a set with more than one member — a `min`/`max` swap, or any other selection-order
+bug, is invisible to every fixture whose candidate set never has more than one element,
+regardless of how many such fixtures exist. Fixed here with two new fixtures, one for each
+relative ordering of the two delimiters (footer-before-heading and heading-before-footer),
+each asserting through a raw slice of the output (per round 4's lesson: `extract_release_notes`
+re-derives its own — correct, unmutated — boundary on the result, so it's a valid oracle here,
+but a plain substring/position check on the raw `rewritten` text is the more direct proof) that
+the promoted body stops at the delimiter that's actually first in the source text, not at
+whichever one the code happens to reach last.
+
+**Found:** `chela/release_notes.py`'s `promote_unreleased` (CMX-312 rework round 6, PR #388) —
+judge mutation `body_end = min(candidates)` → `body_end = max(candidates)`, suite stayed green
+(3249 passed) because no fixture ever gave the function a changelog with both a later heading
+and a footer rule at different positions. Closed by
+`test_promote_unreleased_stops_at_a_footer_rule_that_precedes_the_next_heading` and
+`test_promote_unreleased_stops_at_the_next_heading_that_precedes_a_footer_rule` in
+`tests/test_release_notes.py`.

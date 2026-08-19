@@ -493,6 +493,73 @@ def test_promote_unreleased_writes_the_bare_heading_when_theres_nothing_to_promo
     assert extract_release_notes(rewritten, "0.7.0") == "\n"
 
 
+def test_promote_unreleased_stops_at_a_footer_rule_that_precedes_the_next_heading(tmp_path):
+    # MUTATION (DEFEAT_SHAPES #312 round 6): `promote_unreleased` takes
+    # `body_end = min(candidates)` over `later_heading_starts + [footer]` — "whichever
+    # comes FIRST". Every fixture above puts the next `## [...]` heading immediately
+    # after `## [Unreleased]`'s body with no `\n---\n` rule anywhere before it, so
+    # `min` and `max` pick the exact same candidate (the only one there is) and the
+    # rule is never actually exercised in the direction where the footer is the
+    # nearer delimiter. Here a `\n---\n` rule sits BETWEEN the Unreleased body and the
+    # next dated heading — `min` must stop at the footer; the survived mutation
+    # (`min` -> `max`) would swallow the footer, the stray note below it, and the
+    # `## [0.6.0]` heading itself into the promoted 0.7.0 body.
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n### Changed\n\n- new work\n\n"
+        "---\n\nStray divider before the next heading (edge case).\n\n"
+        "## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- old release\n"
+    )
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "CMX-312.md").write_text("### Added\n\n- from a fragment\n")
+
+    rewritten = promote_unreleased(changelog, "0.7.0", "2026-08-18", d)
+
+    # `extract_release_notes` re-derives its own boundary on the raw output, so this
+    # is not a case of the round-3/4 pitfall (a reader silently undoing the write
+    # side's corruption): a `min`-vs-`max` boundary mistake in `promote_unreleased`
+    # changes what's embedded in the promoted body, which extract's own (unmutated,
+    # correct) boundary detection then reads back differently.
+    assert "from a fragment" in extract_release_notes(rewritten, "0.7.0")
+    assert "Stray divider" not in extract_release_notes(rewritten, "0.7.0")
+    assert extract_release_notes(rewritten, "0.6.0") == "### Fixed\n\n- old release\n"
+    # Direct, position-based confirmation on the raw text: the fragment (appended
+    # after `existing_body` inside `promote_unreleased`) only lands ahead of the
+    # stray footer note when the boundary correctly stopped at the footer instead of
+    # swallowing past it.
+    assert rewritten.index("from a fragment") < rewritten.index("Stray divider")
+
+
+def test_promote_unreleased_stops_at_the_next_heading_that_precedes_a_footer_rule(tmp_path):
+    # MUTATION (DEFEAT_SHAPES #312 round 6): the mirror image of the fixture above —
+    # here the next `## [...]` heading comes BEFORE the trailing `\n---\n` rule, the
+    # realistic shape of this repo's own CHANGELOG.md (multiple dated sections, then
+    # a footer at the very bottom). `min` must stop at the heading; the survived
+    # mutation (`min` -> `max`) would swallow the entire `## [0.6.0]` section AND the
+    # footer note into the promoted 0.7.0 body — a strictly worse version of the
+    # 0.4.0 incident this module exists to close.
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n### Changed\n\n- new work\n\n"
+        "## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- old release\n\n"
+        "---\n\nFooter note, not part of any release.\n"
+    )
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "CMX-312.md").write_text("### Added\n\n- from a fragment\n")
+
+    rewritten = promote_unreleased(changelog, "0.7.0", "2026-08-18", d)
+
+    # Slice the raw output directly (DEFEAT_SHAPES #312 round 4's lesson): the
+    # fragment is appended right after `existing_body`, so whether it lands before
+    # or after the reappearing `## [0.6.0]` heading is a direct read of where the
+    # boundary actually landed.
+    promoted_section = rewritten[rewritten.index("## [0.7.0]") : rewritten.index("## [0.6.0]")]
+    assert "from a fragment" in promoted_section
+    assert "old release" not in promoted_section
+    assert extract_release_notes(rewritten, "0.6.0") == "### Fixed\n\n- old release\n"
+    assert latest_released_version(rewritten) == "0.7.0"
+
+
 def test_promote_unreleased_raises_without_an_unreleased_heading():
     changelog = "# Changelog\n\n## [0.6.0] — 2026-08-15\n\n### Fixed\n\n- x\n"
     with pytest.raises(ReleaseNotFoundError):
