@@ -199,6 +199,35 @@ suite at the time:
     routine, and the literal shape of this PR before this round — silently loses the note
     although CHANGELOG.md was never touched.
 
+14. *(round 9)* Narrow a directory-membership predicate to a filename-prefix predicate:
+    `p.parent.name == "changelog.d" and p.name != "README.md"` →
+    `p.parent.name == "changelog.d" and p.name.startswith("CMX-")`. Round 8 taught the
+    exemption to recognise CMX-312 fragment files under `changelog.d/`, but the test added for
+    it (`test_changelog_missing_note_is_none_when_a_changelog_d_fragment_was_added`) stages
+    exactly one fragment ever, `changelog.d/CMX-999.md`, and the file's only other
+    `changelog.d/` fixture stages `README.md` — which the mutation also rejects, for the same
+    reason the real predicate does. A single fragment witness whose name happens to start with
+    `CMX-` cannot tell "any file here except README.md" (what
+    `release_notes.collect_fragments`, chela/release_notes.py:181-183, actually publishes)
+    apart from "a file here whose name starts with `CMX-`" — the same single-item-collapses-
+    every-candidate shape [[306|shape 306]] names, here on a filename predicate instead of a
+    fallback expression. In production, a fragment that doesn't follow the `CMX-<id>.md`
+    convention — a hotfix, a contributor's own naming, any future convention change —
+    `release_notes` WILL collect and publish, while the mutated exemption still tells the
+    author "No CHANGELOG.md entry," contradicting the predicate's own docstring ("any file
+    there except the directory's own `README.md`"). `CHELA_REQUIRE_JS_TESTS=1 uv run
+    pytest -q` stayed green (3299 passed) under this mutation.
+
+**Guard form that survives (round 9 addendum):**
+
+- ⛔⛔⛔⛔⛔⛔⛔⛔ *(round 9)* When a predicate's real contract is "any member of a set minus one
+  named exception" (directory membership minus `README.md`), a fixture that only ever supplies
+  ONE example of "a member that isn't the exception" can't distinguish that contract from any
+  narrower one a mutation could substitute (a filename prefix, a specific extension, an
+  allow-list of one) — the single example satisfies all of them at once. Add a second member
+  that satisfies the true contract but NOT the narrower substitute (here: a `changelog.d/`
+  fragment named without the `CMX-` prefix) and assert the exemption still fires for it.
+
 **Guard form that survives (round 8 addendum):**
 
 - ⛔⛔⛔⛔⛔⛔ *(round 8)* A membership predicate (`any(...)` / `all(...)` over a collection)
@@ -221,9 +250,10 @@ suite at the time:
   likely to touch alongside code).
 
 **Found:** CMX-309 rework round 1 (2026-08-18), round 2 (2026-08-18), round 3 (2026-08-18),
-round 4 (2026-08-18), round 5 (2026-08-18), round 7 (2026-08-19), and round 8 (2026-08-19),
-PR #385. Each round, the judge applied the round's mutations to `chela/judge.py` in a
-throwaway checkout; `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green under every one
-(round 1: 3226 passed; round 2: 3228 passed; round 3: 3230 passed; round 4: 3231 passed;
-round 5: 3234 passed; round 7: 3246 passed; round 8: 3268 passed), because the suite at each
-point had exactly the gaps the mutations exploited.
+round 4 (2026-08-18), round 5 (2026-08-18), round 7 (2026-08-19), round 8 (2026-08-19), and
+round 9 (2026-08-19), PR #385. Each round, the judge applied the round's mutations to
+`chela/judge.py` in a throwaway checkout; `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed
+green under every one (round 1: 3226 passed; round 2: 3228 passed; round 3: 3230 passed;
+round 4: 3231 passed; round 5: 3234 passed; round 7: 3246 passed; round 8: 3268 passed;
+round 9: 3299 passed), because the suite at each point had exactly the gaps the mutations
+exploited.

@@ -210,6 +210,30 @@ def test_changelog_missing_note_is_none_when_a_changelog_d_fragment_was_added(
     assert judge._changelog_missing_note(wt, "dev") is None
 
 
+def test_changelog_missing_note_is_none_for_a_changelog_d_fragment_without_the_cmx_prefix(
+    tmp_path, repo, origin,
+):
+    """The exemption must recognise a fragment by DIRECTORY MEMBERSHIP MINUS README.md — the
+    same set ``release_notes.collect_fragments`` actually publishes — not by the ``CMX-``
+    filename prefix the other fixture happens to use. A fixture that only ever stages a
+    ``CMX-999.md`` fragment cannot tell ``p.name != "README.md"`` apart from
+    ``p.name.startswith("CMX-")``; a fragment named anything else must exercise the
+    difference, or a prefix-matching regression would slip through green.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    (repo / "changelog.d").mkdir(exist_ok=True)
+    (repo / "changelog.d" / "hotfix.md").write_text(
+        "### Fixed\n\n- A hotfix. (#1)\n"
+    )
+    _git("add", "feature.py", "changelog.d/hotfix.md", cwd=repo)
+    _git("commit", "-m", "add a feature with a non-CMX-prefixed changelog.d fragment", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    assert judge._changelog_missing_note(wt, "dev") is None
+
+
 def test_changelog_missing_note_still_fires_when_only_the_changelog_d_readme_is_touched(
     tmp_path, repo, origin,
 ):
