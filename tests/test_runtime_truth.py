@@ -53,6 +53,12 @@ PORT = 5005
 SESSION = "7f3a91c2-4b8e-4d15-9c62-1e0d5a8b3f47"
 EPOCH = "786-1784045825"          # the tmux server that issued every `@N` in this fleet
 
+# Captured at import time, before any test's `fleet` fixture monkeypatches the module
+# attribute to `lambda: True` — the CMX-313 gate tests restore THIS, the real
+# implementation, so they exercise the actual production code instead of a lambda that
+# merely repeats its logic and would stay green under a mutation of the real one.
+_REAL_PROCESS_NODE_IPC_ENV_APPLIES = runtime_truth._process_node_ipc_env_applies
+
 
 @pytest.fixture
 def fleet(tmp_path, monkeypatch, request):
@@ -111,6 +117,11 @@ def fleet(tmp_path, monkeypatch, request):
     # not assumed: a leak here would make every other test in this file's baseline lie.
     monkeypatch.delenv("NODE_CHANNEL_FD", raising=False)
     monkeypatch.delenv("NODE_CHANNEL_SERIALIZATION_MODE", raising=False)
+    # CMX-313: the fact only applies inside a tmux pane (see _process_node_ipc_env_applies)
+    # — force it on here, same as _collector_applies above, so the fleet baseline exercises
+    # it deterministically instead of depending on whether the suite happens to be run from
+    # inside a real tmux pane.
+    monkeypatch.setattr(runtime_truth, "_process_node_ipc_env_applies", lambda: True)
     monkeypatch.setattr(epoch, "current", lambda: EPOCH)
     monkeypatch.setattr(runtime_truth, "_in_flight_runs",
                         lambda: {"CMX-66": {"wid": "@1", "epoch": EPOCH}})
@@ -838,6 +849,143 @@ def test_process_node_ipc_env_detects_serialization_mode_when_the_fd_is_absent(
     # bare name that the static advice prose also contains verbatim.
     assert "NODE_CHANNEL_SERIALIZATION_MODE='json'" in findings[0].detail
     assert "NODE_CHANNEL_FD='" not in findings[0].detail
+
+
+def test_process_node_ipc_env_is_silent_outside_a_tmux_pane(fleet, monkeypatch):
+    """🐺📟 CMX-313: pm2 forks EVERY process it manages (Node or not) through Node's
+    `child_process.fork`, IPC channel included — so `chela-daemon`'s own `os.environ`
+    legitimately carries `NODE_CHANNEL_FD` for as long as pm2 keeps it alive, on a
+    completely healthy fleet, on every tick `check_and_notify` runs. Before this fact
+    gated on `$TMUX_PANE`, that live pm2 control channel was misread as CMX-281's leak —
+    Liav saw the resulting ERROR notification twice on a healthy fleet and asked about it
+    both times. Reproduce exactly the pm2-service shape: process env poisoned (as pm2
+    fork legitimately leaves it) but NOT running inside a tmux pane — must report nothing
+    at all, not even OK, because the fact does not apply here."""
+    monkeypatch.setattr(runtime_truth, "_process_node_ipc_env_applies",
+                        _REAL_PROCESS_NODE_IPC_ENV_APPLIES)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.setenv("NODE_CHANNEL_FD", "3")
+    findings = [f for f in doctor.check() if f.fact == "process.node_ipc_env"]
+    assert findings == [], (
+        f"outside a tmux pane, process.node_ipc_env must not fire at all (not even OK) — "
+        f"a pm2-managed service's own live IPC channel is not this fact's business, got "
+        f"{findings}")
+
+
+def test_process_node_ipc_env_still_fires_inside_a_tmux_pane(fleet, monkeypatch):
+    """The other half of the CMX-313 gate: a real agent pane — `$TMUX_PANE` set, exactly
+    what `dispatcher._new_window` spawns into — must still catch a poisoned process env.
+    Without this, the fix above could have been satisfied by disabling the fact outright.
+    `_pm2_manages_this_process` is pinned to False so this stays deterministic regardless
+    of whether pm2 happens to be a live ancestor of whatever host actually runs this suite
+    (it is, of THIS agent's own pane, on the dev box the CMX-313 round-2 bug was found on —
+    see the round-2 tests below, which exercise that exact shape directly instead)."""
+    monkeypatch.setattr(runtime_truth, "_process_node_ipc_env_applies",
+                        _REAL_PROCESS_NODE_IPC_ENV_APPLIES)
+    monkeypatch.setattr(runtime_truth, "_pm2_manages_this_process", lambda: False)
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    monkeypatch.setenv("NODE_CHANNEL_FD", "3")
+    findings = [f for f in doctor.check() if f.fact == "process.node_ipc_env"]
+    assert findings and all(f.level == doctor.ERROR for f in findings), (
+        f"inside a real tmux pane, a poisoned process env must still be reported, got "
+        f"{findings}")
+
+
+def test_process_node_ipc_env_is_silent_when_pm2_is_a_live_ancestor_even_inside_a_tmux_pane(
+    fleet, monkeypatch,
+):
+    """⚖️🔎 CMX-313 round 2 — the negative control the reviewer measured against the live
+    fleet: `chela-dashboard` genuinely has `$TMUX_PANE` set (pm2 restarted it from inside a
+    tmux pane, and the var rode along) *and* is a real pm2-managed service. Before this
+    round, `_process_node_ipc_env_applies` only ever checked `$TMUX_PANE`, so this exact
+    shape still fired the fault on a healthy service — this must FAIL against pre-round-2
+    `chela/runtime_truth.py` and pass only with the pm2-ancestor gate in place."""
+    monkeypatch.setattr(runtime_truth, "_process_node_ipc_env_applies",
+                        _REAL_PROCESS_NODE_IPC_ENV_APPLIES)
+    monkeypatch.setattr(runtime_truth, "_pm2_manages_this_process", lambda: True)
+    monkeypatch.setenv("TMUX_PANE", "%2")
+    monkeypatch.setenv("NODE_CHANNEL_FD", "3")
+    findings = [f for f in doctor.check() if f.fact == "process.node_ipc_env"]
+    assert findings == [], (
+        f"a process pm2 is CURRENTLY managing must stay silent even with $TMUX_PANE set — "
+        f"this is chela-dashboard's exact real shape, got {findings}")
+
+
+def test_process_node_ipc_env_still_fires_for_a_genuine_pane_carrying_stale_pm2_env_vars(
+    fleet, monkeypatch,
+):
+    """⚖️🔎 CMX-313 round 2 — the false-negative half, written first because it is the far
+    worse failure (CMX-281 is why `process.node_ipc_env` exists at all). `chela-agent-
+    terminals` (a pm2 service) is what spawns the `chela` tmux server every real agent pane
+    lives in, so a genuine agent pane's `os.environ` ALSO carries `PM2_HOME`/`pm_id` — the
+    exact markers a naive "pane set AND no pm2 markers in env" fix would have checked for —
+    even though pm2 has not been a LIVE ancestor of that pane in a long time (see
+    docs/defeat_shapes/313-*.md). Set those stale markers in the env directly and pin
+    `_pm2_manages_this_process` to False (the true answer for this shape, since ancestry —
+    not env content — is what the fix actually reads): the fact must still ERROR."""
+    monkeypatch.setattr(runtime_truth, "_process_node_ipc_env_applies",
+                        _REAL_PROCESS_NODE_IPC_ENV_APPLIES)
+    monkeypatch.setattr(runtime_truth, "_pm2_manages_this_process", lambda: False)
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    monkeypatch.setenv("PM2_HOME", "/home/liavedunix/.pm2")
+    monkeypatch.setenv("pm_id", "10")
+    monkeypatch.setenv("NODE_CHANNEL_FD", "3")
+    findings = [f for f in doctor.check() if f.fact == "process.node_ipc_env"]
+    assert findings and all(f.level == doctor.ERROR for f in findings), (
+        f"a genuine agent pane must still be reported even while its environment carries "
+        f"stale pm2 markers inherited from the tmux server's own origin, got {findings}")
+
+
+def test_pm2_manages_this_process_true_when_the_god_daemon_is_a_live_ancestor(monkeypatch):
+    """The ancestor walk itself, isolated from the fact — a synthetic 3-hop chain
+    (this-process -> some wrapper -> the pm2 God Daemon) so the assertion is about the walk
+    reaching the daemon, not about any real host's process tree."""
+    chain = {4242: 300, 300: 100}   # 100 is the daemon
+    monkeypatch.setattr(runtime_truth, "_pm2_daemon_pid", lambda: 100)
+    monkeypatch.setattr(runtime_truth.os, "getpid", lambda: 4242)
+    monkeypatch.setattr(runtime_truth.sessions, "_ppid", lambda pid: chain.get(pid))
+    assert runtime_truth._pm2_manages_this_process() is True
+
+
+def test_pm2_manages_this_process_false_when_ancestry_reaches_init_without_the_daemon(
+    monkeypatch,
+):
+    """A process whose lineage bottoms out at pid 1 (init) without ever passing through
+    the daemon — exactly this agent's own pane's shape on the box CMX-313 round 2 was
+    found on (the `chela` tmux server was reparented to init long ago)."""
+    chain = {4242: 300, 300: 1}
+    monkeypatch.setattr(runtime_truth, "_pm2_daemon_pid", lambda: 100)
+    monkeypatch.setattr(runtime_truth.os, "getpid", lambda: 4242)
+    monkeypatch.setattr(runtime_truth.sessions, "_ppid", lambda pid: chain.get(pid))
+    assert runtime_truth._pm2_manages_this_process() is False
+
+
+def test_pm2_manages_this_process_false_when_pm2_has_never_run_on_this_host(monkeypatch):
+    """No lock file at all (`_pm2_daemon_pid` returns `None`) must mean "cannot confirm
+    pm2 involvement," not "confirmed absent" turned into a green light — the ancestor walk
+    must never even start, whatever `os.getpid`/`sessions._ppid` would have said."""
+    monkeypatch.setattr(runtime_truth, "_pm2_daemon_pid", lambda: None)
+    monkeypatch.setattr(runtime_truth.os, "getpid",
+                        lambda: (_ for _ in ()).throw(AssertionError(
+                            "must short-circuit on daemon_pid is None, never call getpid")))
+    assert runtime_truth._pm2_manages_this_process() is False
+
+
+def test_pm2_daemon_pid_reads_pm2s_own_lock_file(tmp_path, monkeypatch):
+    """`$PM2_HOME/pm2.pid` — pm2's own live record of its daemon's pid, exactly the file
+    `pm2 status`/`pm2 kill` themselves trust — not an environment variable a descendant
+    merely inherited."""
+    (tmp_path / "pm2.pid").write_text("693\n")
+    monkeypatch.setenv("PM2_HOME", str(tmp_path))
+    assert runtime_truth._pm2_daemon_pid() == 693
+
+
+def test_pm2_daemon_pid_is_none_when_the_lock_file_is_absent(tmp_path, monkeypatch):
+    """pm2 never having run on this host (no lock file yet, or never installed) must read
+    back as `None` — "unknown," which the caller above keeps as a reason to never suppress,
+    not as `0` or any other value that could be mistaken for a real pid."""
+    monkeypatch.setenv("PM2_HOME", str(tmp_path))          # empty dir, no pm2.pid in it
+    assert runtime_truth._pm2_daemon_pid() is None
 
 
 def test_tmux_global_env_reader_is_none_not_empty_when_tmux_cannot_be_asked(monkeypatch):
