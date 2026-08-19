@@ -425,3 +425,80 @@ one renderer at a time forever.
 `"/plugin install" not in body` to the doctor test
 (`test_doctor_ERRORs_when_the_installed_manifest_disagrees`), alongside the existing
 `"/plugin uninstall" not in body`.
+
+**Round 8 — every prior round pinned substrings, none of which can express ORDER or a
+BANNED ACTION as opposed to a BANNED SPELLING; `in` membership is structurally blind to
+both.** Rounds 1-7 closed every literal fragment of the compound `Fix:`/by-hand clause as an
+`X in body` / `X not in body` check. Two things in that clause were never expressible that
+way:
+
+1. **The two CLI verbs' ORDER.** `_update_plugin` (`chela/update.py:376-388`) runs `claude
+   plugin marketplace update <marketplace>` first, then `claude plugin update
+   chela@<marketplace>` — reversed, the plugin update resolves against marketplace metadata
+   that hasn't been refreshed yet, so it silently no-ops and the by-hand instructions leave
+   an operator who followed them correctly exactly as stale. Both renderers' tests asserted
+   each verb's presence independently (`"claude plugin marketplace update <marketplace>" in
+   body` and `"claude plugin update chela@<marketplace>" in body`), which is satisfied
+   identically whichever order the two substrings appear in the output.
+2. **A banned ACTION, only ever guarded as a banned SPELLING.** Round 6/7 barred the literal
+   strings `/plugin uninstall` and `/plugin install` — the Claude Code slash-command spelling
+   of the uninstall+reinstall CMX-310 exists to remove. `claude plugin uninstall chela@chela`
+   followed by `claude plugin install chela@chela` is the identical instruction in the
+   non-slash CLI spelling: it contains neither barred literal, leaves the standalone `chela
+   update` action line and every previously-pinned sentence intact, and still tells the
+   operator to do exactly the manual round-trip the message two lines above it says is `no
+   ... needed`.
+
+```diff
+# chela/main.py — verbs reversed; both "in body" checks stay true, order is unchecked
+-         print("  (or by hand: `claude plugin marketplace update <marketplace>` then "
+-               "`claude plugin update chela@<marketplace>`)")
++         print("  (or by hand: `claude plugin update chela@<marketplace>` then "
++               "`claude plugin marketplace update <marketplace>`)")
+```
+
+```diff
+# chela/runtime_truth.py — the doctor Finding's own copy of the same reversal
+-                 "plugin marketplace update <marketplace>` + `claude plugin update "
+-                 "chela@<marketplace>` for every confirmed-installed copy). Run it, or do "
++                 "plugin update chela@<marketplace>` + `claude plugin marketplace update "
++                 "<marketplace>` for every confirmed-installed copy). Run it, or do "
+```
+
+```diff
+# chela/main.py — the banned ACTION, spelled without either barred slash-command literal
+-         print("    chela update")
++         print("    chela update\n    (or: claude plugin uninstall chela@chela then claude plugin install chela@chela)")
+```
+
+All three mutations, applied by the judge to a throwaway checkout of round 7's fix, still
+parsed and left `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green (3273 passed, 0 failed, 0
+error(s)).
+
+**Why round 7's fix didn't already cover this:** every prior round's guard form was "assert
+the literal text of each independent fact, in every renderer" — correct for facts that are
+themselves *substrings*, but the clause also carries a fact that is a *relationship between*
+two already-pinned substrings (which one comes first) and a fact that is a *category* of
+forbidden instruction (any way of saying "uninstall then reinstall") rather than one
+forbidden string. Enumerating "every independently-falsifiable claim" as flat substrings, the
+way rounds 3-7 did, has no representation for either shape — an order fact and a banned-
+category fact both look, to a substring-only mindset, like they're already covered once
+their pieces are individually present/absent.
+
+**Guard form that survives (updated again):** membership (`in` / `not in`) only proves a
+fragment is present or absent — it is blind to the sequence two present fragments appear in,
+and to the possibility of a variant that carries the same forbidden meaning through
+different words. Where order matters, assert it directly (`out.index(a) < out.index(b)`, or
+pin the two verbs as one joined phrase rather than two independent checks). Where an entire
+*action* is banned rather than one spelling of it, strip the one sentence that legitimately
+contains the trigger words (here: `"no uninstall/reinstall needed"`) out of the text first,
+then assert the trigger words are absent from what remains — that catches every spelling of
+the banned action, not just the one spelling a mutation happened to use last round.
+
+**Round 8 found:** (CMX-310, PR #386, rework round 8) — closed by adding an
+`out.index(...) < out.index(...)` / `body.index(...) < body.index(...)` ordering assertion
+on the two CLI verbs to both `test_doctor_ERRORs_when_the_installed_manifest_disagrees` and
+`test_chela_plugin_names_the_cache_path_when_the_install_is_stale`, and by adding — to both
+of the same tests — a check that strips the legitimate `"no uninstall/reinstall needed"`
+sentence out of the rendered text and then asserts neither `"uninstall"` nor `"reinstall"`
+remains anywhere in what's left.

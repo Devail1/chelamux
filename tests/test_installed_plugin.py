@@ -169,10 +169,27 @@ def test_doctor_ERRORs_when_the_installed_manifest_disagrees(env):
     # the two real CLI calls `chela update` actually runs — both verbs, not just one
     assert "claude plugin marketplace update <marketplace>" in body
     assert "claude plugin update chela@<marketplace>" in body
+    # `_update_plugin` (chela/update.py) runs the marketplace refresh FIRST, then the
+    # plugin update — reversed, the plugin update resolves against marketplace metadata
+    # that hasn't been refreshed yet, so it's a no-op and the operator stays stale despite
+    # following the instructions correctly. `in` membership is order-blind; pin the order.
+    marketplace_pos = body.index("claude plugin marketplace update <marketplace>")
+    plugin_pos = body.index("claude plugin update chela@<marketplace>")
+    assert marketplace_pos < plugin_pos, (
+        "marketplace update must be named FIRST — that's the order `_update_plugin` "
+        "actually runs them in"
+    )
     # `_plugin_marketplaces()` only ever returns CONFIRMED-installed copies (it skips
     # cache-scan-only hits) — the Fix clause must not promise a refresh scope the code
     # doesn't deliver.
     assert "confirmed-installed copy" in body
+    # bans the ACTION (uninstall+reinstall the plugin by hand), not just one spelling of
+    # it — "no uninstall/reinstall needed" is the only place those two words may appear
+    without_credit = body.replace("no uninstall/reinstall needed", "")
+    assert "uninstall" not in without_credit and "reinstall" not in without_credit, (
+        "the Fix clause must never instruct an uninstall+reinstall, in ANY spelling — "
+        "not only the /plugin slash-command one"
+    )
 
 
 def test_doctor_ERRORs_when_a_port_drift_reaches_the_installed_copy(env):
@@ -259,9 +276,25 @@ def test_chela_plugin_names_the_cache_path_when_the_install_is_stale(env, capsys
     assert "\n    chela update\n" in out          # the action line itself, not just the prose
     assert "claude plugin marketplace update <marketplace>" in out   # the real CLI verb...
     assert "claude plugin update chela@<marketplace>" in out         # ...both of them
+    # `_update_plugin` (chela/update.py) runs the marketplace refresh FIRST, then the
+    # plugin update — reversed, the by-hand fallback resolves against stale marketplace
+    # metadata and leaves the operator exactly as stale. `in` membership is order-blind.
+    marketplace_pos = out.index("claude plugin marketplace update <marketplace>")
+    plugin_pos = out.index("claude plugin update chela@<marketplace>")
+    assert marketplace_pos < plugin_pos, (
+        "marketplace update must be named FIRST — that's the order `_update_plugin` "
+        "actually runs them in"
+    )
     # the claim the verbs above are evidence FOR: no manual round-trip is needed
     assert "non-interactively" in out
     assert "no uninstall/reinstall needed" in out
+    # bans the ACTION (uninstall+reinstall the plugin by hand), not just one spelling of
+    # it — "no uninstall/reinstall needed" is the only place those two words may appear
+    without_credit = out.replace("no uninstall/reinstall needed", "")
+    assert "uninstall" not in without_credit and "reinstall" not in without_credit, (
+        "the STALE-INSTALL block must never instruct an uninstall+reinstall, in ANY "
+        "spelling — not only the /plugin slash-command one"
+    )
 
 
 def test_chela_plugin_says_so_when_nothing_is_installed(env, capsys):
