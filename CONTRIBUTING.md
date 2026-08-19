@@ -64,7 +64,12 @@ its own corruption. Write guards that would catch you.
   section, which collided on that exact spot the moment two branches were open at once —
   GitHub's own PR-mergeability check doesn't run `.gitattributes`' `merge=union` driver, so
   the PRs went `CONFLICTING` and got no CI at all until a human dropped one side's entry
-  (CMX-308, CMX-309). A fragment file is unique per PR, so it never collides.
+  (CMX-308, CMX-309). A fragment file is unique per PR, so it never collides. The judge
+  cross-checks this mechanically (CMX-309): a diff that changes non-prose files without
+  adding a `changelog.d/` fragment (or, for the pre-fragment convention, touching
+  `CHANGELOG.md`) gets a non-blocking "No CHANGELOG.md entry" note on the verdict comment —
+  it never blocks a merge, since "is this actually user-facing" stays a human call, but a
+  PR that skips the entry no longer does so silently.
 - **Update docs** when you change a `CHELA_*` knob, a command, or a hook — the README
   config table and `docs/` are adopter-facing and drift is user-visible.
 - **If your PR ships what a design doc in `docs/` proposed, update that doc's status line
