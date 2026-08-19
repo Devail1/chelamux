@@ -428,6 +428,27 @@ def _node_ipc_env_report(_declared: None, obs: Observation) -> list[Finding]:
 # into a PR body. The global table was telling the truth about the SERVER; it was never the
 # question. The question is what THIS process — the one about to write that claim — actually
 # inherited, and only `os.environ` answers that.
+#
+# CMX-313: that question only makes sense for a window a tmux spawn actually born — an
+# agent's pane, the one about to run `node --test`. `chela doctor` is also audited from
+# INSIDE every pm2-managed service (`check_and_notify`, called every daemon tick, CMX-187),
+# and pm2 forks EVERY process it manages — Node or not — through Node's own
+# `child_process.fork`, IPC channel included (the same fact `tmux.node_ipc_env`'s own
+# comment, above, names as CMX-252's leak source). So `chela-daemon`'s own `os.environ`
+# legitimately carries `NODE_CHANNEL_FD` for as long as it is alive under pm2 — that fd is
+# pm2's live control channel to THIS process, not a stale leftover a window inherited from a
+# poisoned tmux table, and it will still be there on the next tick, and the one after, on a
+# completely healthy fleet: the daemon never runs `node --test` and never will. Liav saw the
+# resulting ERROR notification twice on a healthy fleet (2026-08-19) and asked about it both
+# times — a fact that fires on the normal case trains its reader to skip the notification,
+# which is exactly the failure mode CMX-281 exists to prevent one level up. Gate on
+# `$TMUX_PANE` (tmux sets it in every pane it owns, and only there; `config.current_session`
+# and `orchestrator.py` already lean on the same signal to tell an interactive agent pane
+# from a pm2-managed service) so this fact only fires for what it was built to catch.
+def _process_node_ipc_env_applies() -> bool:
+    return bool(os.environ.get("TMUX_PANE"))
+
+
 def _process_node_ipc_env_read() -> Observation:
     return observed({var: os.environ[var] for var in _NODE_IPC_ENV_VARS if var in os.environ})
 
@@ -2810,6 +2831,10 @@ def facts() -> list[Fact]:
             declare=lambda: None,
             read_back=_process_node_ipc_env_read,
             report=_process_node_ipc_env_report,
+            # CMX-313: only a fact of a tmux pane (see _process_node_ipc_env_applies) —
+            # not of a pm2-managed service, which legitimately carries its own live
+            # NODE_CHANNEL_FD and never runs `node --test`.
+            applies=_process_node_ipc_env_applies,
         ),
         Fact(
             name="dashboard.port",

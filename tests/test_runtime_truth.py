@@ -53,6 +53,12 @@ PORT = 5005
 SESSION = "7f3a91c2-4b8e-4d15-9c62-1e0d5a8b3f47"
 EPOCH = "786-1784045825"          # the tmux server that issued every `@N` in this fleet
 
+# Captured at import time, before any test's `fleet` fixture monkeypatches the module
+# attribute to `lambda: True` — the CMX-313 gate tests restore THIS, the real
+# implementation, so they exercise the actual production code instead of a lambda that
+# merely repeats its logic and would stay green under a mutation of the real one.
+_REAL_PROCESS_NODE_IPC_ENV_APPLIES = runtime_truth._process_node_ipc_env_applies
+
 
 @pytest.fixture
 def fleet(tmp_path, monkeypatch, request):
@@ -111,6 +117,11 @@ def fleet(tmp_path, monkeypatch, request):
     # not assumed: a leak here would make every other test in this file's baseline lie.
     monkeypatch.delenv("NODE_CHANNEL_FD", raising=False)
     monkeypatch.delenv("NODE_CHANNEL_SERIALIZATION_MODE", raising=False)
+    # CMX-313: the fact only applies inside a tmux pane (see _process_node_ipc_env_applies)
+    # — force it on here, same as _collector_applies above, so the fleet baseline exercises
+    # it deterministically instead of depending on whether the suite happens to be run from
+    # inside a real tmux pane.
+    monkeypatch.setattr(runtime_truth, "_process_node_ipc_env_applies", lambda: True)
     monkeypatch.setattr(epoch, "current", lambda: EPOCH)
     monkeypatch.setattr(runtime_truth, "_in_flight_runs",
                         lambda: {"CMX-66": {"wid": "@1", "epoch": EPOCH}})
@@ -838,6 +849,41 @@ def test_process_node_ipc_env_detects_serialization_mode_when_the_fd_is_absent(
     # bare name that the static advice prose also contains verbatim.
     assert "NODE_CHANNEL_SERIALIZATION_MODE='json'" in findings[0].detail
     assert "NODE_CHANNEL_FD='" not in findings[0].detail
+
+
+def test_process_node_ipc_env_is_silent_outside_a_tmux_pane(fleet, monkeypatch):
+    """🐺📟 CMX-313: pm2 forks EVERY process it manages (Node or not) through Node's
+    `child_process.fork`, IPC channel included — so `chela-daemon`'s own `os.environ`
+    legitimately carries `NODE_CHANNEL_FD` for as long as pm2 keeps it alive, on a
+    completely healthy fleet, on every tick `check_and_notify` runs. Before this fact
+    gated on `$TMUX_PANE`, that live pm2 control channel was misread as CMX-281's leak —
+    Liav saw the resulting ERROR notification twice on a healthy fleet and asked about it
+    both times. Reproduce exactly the pm2-service shape: process env poisoned (as pm2
+    fork legitimately leaves it) but NOT running inside a tmux pane — must report nothing
+    at all, not even OK, because the fact does not apply here."""
+    monkeypatch.setattr(runtime_truth, "_process_node_ipc_env_applies",
+                        _REAL_PROCESS_NODE_IPC_ENV_APPLIES)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.setenv("NODE_CHANNEL_FD", "3")
+    findings = [f for f in doctor.check() if f.fact == "process.node_ipc_env"]
+    assert findings == [], (
+        f"outside a tmux pane, process.node_ipc_env must not fire at all (not even OK) — "
+        f"a pm2-managed service's own live IPC channel is not this fact's business, got "
+        f"{findings}")
+
+
+def test_process_node_ipc_env_still_fires_inside_a_tmux_pane(fleet, monkeypatch):
+    """The other half of the CMX-313 gate: a real agent pane — `$TMUX_PANE` set, exactly
+    what `dispatcher._new_window` spawns into — must still catch a poisoned process env.
+    Without this, the fix above could have been satisfied by disabling the fact outright."""
+    monkeypatch.setattr(runtime_truth, "_process_node_ipc_env_applies",
+                        _REAL_PROCESS_NODE_IPC_ENV_APPLIES)
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    monkeypatch.setenv("NODE_CHANNEL_FD", "3")
+    findings = [f for f in doctor.check() if f.fact == "process.node_ipc_env"]
+    assert findings and all(f.level == doctor.ERROR for f in findings), (
+        f"inside a real tmux pane, a poisoned process env must still be reported, got "
+        f"{findings}")
 
 
 def test_tmux_global_env_reader_is_none_not_empty_when_tmux_cannot_be_asked(monkeypatch):
