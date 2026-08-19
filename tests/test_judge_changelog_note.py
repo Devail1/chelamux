@@ -468,3 +468,70 @@ def test_block_body_renders_the_changelog_note_on_a_survived_verdict(tmp_path, r
     body = judge.block_body(report, "https://github.com/o/r/pull/9", TEST_CMD)
     assert "No CHANGELOG.md entry" in body
     assert "add an entry under `## [Unreleased]`" in body
+
+
+def test_comment_body_renders_agent_notes_alongside_the_changelog_note(tmp_path, repo, origin):
+    """DEFEAT_SHAPES #309 round 7: 'notes survive coexistence in report.notes' (round 5's
+    ``test_run_experiments_keeps_agent_notes_alongside_the_changelog_note``) and 'the
+    rendered title reads the real value' (round 5's two rendering fixtures above) were each
+    proven with a single-witness fixture — the coexistence fixture never renders, and the
+    rendering fixtures each build a notes list with exactly ONE entry. Their CONJUNCTION — a
+    rendered comment built from a notes list holding two or more entries — was never tested,
+    so `_notes_section` iterating `notes[:1]` instead of `notes` stayed green: the changelog
+    note is APPENDED (always last), so slicing to the first entry silently drops it from
+    every comment on every PR that also carries an agent note — the normal case.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    _git("add", "feature.py", cwd=repo)
+    _git("commit", "-m", "add a feature, no changelog entry, with agent notes", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    report = judge.run_experiments(
+        wt, TEST_CMD,
+        {"experiments": [], "notes": [{"title": "naming", "body": "call it `cue`"}]},
+        timeout=60, base_branch="dev",
+    )
+
+    assert report.state == judge.J_CANNOT_VERIFY
+    body = judge.comment_body(report, "https://github.com/o/r/pull/9", TEST_CMD)
+    assert "naming" in body
+    assert "call it `cue`" in body
+    assert "No CHANGELOG.md entry" in body
+    assert "add an entry under `## [Unreleased]`" in body
+
+
+def test_block_body_renders_agent_notes_alongside_the_changelog_note(tmp_path, repo, origin):
+    """Same conjunction gap as above, through the OTHER renderer: `block_body` is the comment
+    a SURVIVED verdict writes, and the one a rework agent actually reads first. Round 5's
+    block_body fixture never passed agent notes either, so `notes[:1]` reaches the more
+    commonly-read renderer just as invisibly.
+    """
+    _branch_from_head(repo, "pr-1")
+    _git("checkout", "pr-1", cwd=repo)
+    (repo / "feature.py").write_text("def add(a, b):\n    return a + b\n")
+    _git("add", "feature.py", cwd=repo)
+    _git("commit", "-m", "add a feature with an unguarded mutation, no changelog entry", cwd=repo)
+    wt = _prep_worktree(repo, "pr-1", tmp_path)
+
+    report = judge.run_experiments(
+        wt, TEST_CMD,
+        {
+            "experiments": [{
+                "guard": "add really adds", "kind": "mutation", "file": "feature.py",
+                "before": "return a + b", "after": "return a - b",
+            }],
+            "notes": [{"title": "naming", "body": "call it `cue`"}],
+        },
+        timeout=60, base_branch="dev",
+    )
+
+    assert report.state == judge.J_BLOCKED
+    assert report.blocking
+
+    body = judge.block_body(report, "https://github.com/o/r/pull/9", TEST_CMD)
+    assert "naming" in body
+    assert "call it `cue`" in body
+    assert "No CHANGELOG.md entry" in body
+    assert "add an entry under `## [Unreleased]`" in body

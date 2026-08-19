@@ -87,6 +87,27 @@ suite at the time:
    entry"` that CONTRIBUTING.md and the CHANGELOG entry both promise appears on the posted
    comment can vanish from every comment the judge ever posts while every existing assertion
    in the file stays green, because none of them look at the string the human actually sees.
+10. *(round 7)* Truncate the render loop instead of dead-coding a title:
+    `for note in notes:` → `for note in notes[:1]` inside `_notes_section`. Round 5 closed
+    "coexistence in the collection" (mutation 7, a fixture with two notes that reads
+    `report.notes`) and "the rendered title is real" (mutations 8-9, fixtures that render but
+    each build a notes list with exactly ONE entry) as two *separate* fixtures — but never
+    combined them. Since the changelog note is APPENDED (always last), slicing the render
+    loop to `notes[:1]` silently drops it from every rendered comment on every PR that also
+    carries an agent note — the normal case, every round of this PR carried 3-5 — while the
+    coexistence fixture (never renders) and both rendering fixtures (never carry a second
+    note) all stayed green.
+11. *(round 7)* Blank the notes right before a non-`return` cannot_verify assignment:
+    `_, added, deleted, files = heavy\n report.cannot_verify = (...)` →
+    `_, added, deleted, files = heavy\n report.notes = []\n report.cannot_verify = (...)` in
+    the CMX-271 deletion-heavy downgrade. Rounds 2-4's enumeration was keyed on the word
+    `return` — five early `return report` statements — and closed all five. This site sets
+    `report.cannot_verify` and *falls through* to the shared `return report` at the bottom of
+    the function; it is a sixth cannot_verify-setting site that an enumeration keyed on
+    `return` cannot find. No fixture in `tests/test_judge_changelog_note.py` produces a
+    deletion-heavy diff, and `tests/test_judge_deletion_heavy.py`'s own fixture that reaches
+    this branch asserted nothing about `report.notes`, so blanking it right before the verdict
+    was invisible to the suite.
 
 **Guard form that survives:**
 
@@ -132,10 +153,31 @@ suite at the time:
   each one independently and assert the rendered *string*, not the in-memory field, contains
   the value's identifying content. Covering one renderer is not evidence the sibling renderer
   is covered — they are separate call sites and a mutation can target either independently.
+- ⛔⛔⛔⛔ *(round 7)* Two guard-form bullets satisfied SEPARATELY, each with its own
+  single-witness fixture, do not prove their CONJUNCTION. The bullet above says to prove
+  coexistence-in-the-collection and prove rendering-reads-the-real-value; round 5 did both —
+  but the coexistence fixture never called a renderer, and both rendering fixtures built a
+  notes list with exactly one entry, so neither witness ever exercised "a rendered comment
+  built from 2+ notes" at the same time. A mutation that needs BOTH conditions at once
+  (`notes[:1]` only differs from `notes` when the list has more than one entry, *and* only
+  shows up in output when that sliced list is actually rendered) slips through any suite where
+  the two properties were each proven true in isolation. When a catalog entry lists N
+  guard-form bullets for the *same* underlying value, add at least one fixture that satisfies
+  all of them AT ONCE, not just one fixture per bullet — the AND of two green tests is not the
+  same claim as one green test on the AND of their conditions.
+- ⛔⛔⛔⛔⛔ *(round 7)* An enumeration of "every gate that sets X" keyed on a syntactic marker
+  (here, the keyword `return`) only finds the sites that use that marker. `run_experiments`
+  has a sixth site that sets `report.cannot_verify` — the CMX-271 deletion-heavy downgrade —
+  which assigns and falls through instead of returning early, so a search for `return
+  report` inside the function does not find it. Enumerate by the *semantic* question ("what
+  are all the statements that can set this field on this report, anywhere in the function?"),
+  not by the syntax the previously-found instances happened to share — a shared syntax is a
+  hint about where to look, not proof the list is complete.
 
 **Found:** CMX-309 rework round 1 (2026-08-18), round 2 (2026-08-18), round 3 (2026-08-18),
-round 4 (2026-08-18), and round 5 (2026-08-18), PR #385. Each round, the judge applied the
-round's mutations to `chela/judge.py` in a throwaway checkout;
+round 4 (2026-08-18), round 5 (2026-08-18), and round 7 (2026-08-19), PR #385. Each round, the
+judge applied the round's mutations to `chela/judge.py` in a throwaway checkout;
 `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green under every one (round 1: 3226
 passed; round 2: 3228 passed; round 3: 3230 passed; round 4: 3231 passed; round 5: 3234
-passed), because the suite at each point had exactly the gaps the mutations exploited.
+passed; round 7: 3246 passed), because the suite at each point had exactly the gaps the
+mutations exploited.

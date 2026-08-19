@@ -195,6 +195,14 @@ def test_deletion_heavy_diff_is_none_without_a_base_branch(tmp_path, repo):
 
 
 def test_deletion_heavy_pr_with_only_killed_experiments_is_cannot_verify_not_clean(tmp_path, repo, origin):
+    """DEFEAT_SHAPES #309 round 7: the CMX-271 deletion-heavy downgrade is a SIXTH
+    cannot_verify-setting site in `run_experiments`, on top of the five early `return`s
+    rounds 2-4 enumerated — and unlike them it does not `return`, it assigns
+    `report.cannot_verify` and falls through. The changelog note fires on this diff (only
+    `test_feature.py` changes, never CHANGELOG.md) and lands in `report.notes` well before
+    this branch runs; nothing below asserted it was still there, so blanking `report.notes`
+    right before this verdict was invisible to the suite.
+    """
     _branch_from_head(repo, "pr-1")
     _git("checkout", "pr-1", cwd=repo)
     _delete_padding_tests(repo)
@@ -214,6 +222,7 @@ def test_deletion_heavy_pr_with_only_killed_experiments_is_cannot_verify_not_cle
     assert "DELETION-HEAVY" in report.cannot_verify
     assert "cmx-268" in report.cannot_verify
     assert report.blocking == []
+    assert any(n.get("title") == "No CHANGELOG.md entry" for n in report.notes)
 
 
 def test_deletion_heavy_pr_with_a_survived_experiment_still_blocks(tmp_path, repo, origin):
