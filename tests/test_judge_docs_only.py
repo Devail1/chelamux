@@ -76,6 +76,7 @@ def _prep_worktree(repo: Path, branch: str, tmp_path: Path) -> Path:
     "docs/LICENSE",
     "README.md",
     "CHANGELOG.md",
+    "changelog.d/CMX-312.md",
     "notes.mdx",
     "notes.rst",
     "notes.txt",

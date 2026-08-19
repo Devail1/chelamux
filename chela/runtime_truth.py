@@ -428,6 +428,79 @@ def _node_ipc_env_report(_declared: None, obs: Observation) -> list[Finding]:
 # into a PR body. The global table was telling the truth about the SERVER; it was never the
 # question. The question is what THIS process — the one about to write that claim — actually
 # inherited, and only `os.environ` answers that.
+#
+# CMX-313: that question only makes sense for a window a tmux spawn actually born — an
+# agent's pane, the one about to run `node --test`. `chela doctor` is also audited from
+# INSIDE every pm2-managed service (`check_and_notify`, called every daemon tick, CMX-187),
+# and pm2 forks EVERY process it manages — Node or not — through Node's own
+# `child_process.fork`, IPC channel included (the same fact `tmux.node_ipc_env`'s own
+# comment, above, names as CMX-252's leak source). So `chela-daemon`'s own `os.environ`
+# legitimately carries `NODE_CHANNEL_FD` for as long as it is alive under pm2 — that fd is
+# pm2's live control channel to THIS process, not a stale leftover a window inherited from a
+# poisoned tmux table, and it will still be there on the next tick, and the one after, on a
+# completely healthy fleet: the daemon never runs `node --test` and never will. Liav saw the
+# resulting ERROR notification twice on a healthy fleet (2026-08-19) and asked about it both
+# times — a fact that fires on the normal case trains its reader to skip the notification,
+# which is exactly the failure mode CMX-281 exists to prevent one level up. Gate on
+# `$TMUX_PANE` (tmux sets it in every pane it owns, and only there; `config.current_session`
+# and `orchestrator.py` already lean on the same signal to tell an interactive agent pane
+# from a pm2-managed service) so this fact only fires for what it was built to catch.
+#
+# CMX-313 round 2: `$TMUX_PANE` alone still misfires on `chela-dashboard`, measured live —
+# it carries a genuine `TMUX_PANE` (pm2 restarted it from inside a tmux pane, and the var
+# rode along) on top of its legitimate pm2 IPC fd, so the gate above reads "tmux pane" and
+# reports the fault anyway, on the service most likely to surface a doctor notification to
+# a human. Pairing the pane check with "is a pm2 marker present in os.environ" (`PM2_HOME`,
+# `pm_id`, …) looks like the fix but ISN'T: on THIS fleet, `chela-agent-terminals` (a pm2
+# service) is what spawns the `chela` tmux SERVER every agent pane lives in, so those same
+# pm2 env vars are inherited into every agent pane too, the instant the server is created —
+# and, like `$TMUX_PANE` itself, they never get cleared by the tmux server's later
+# reparenting to init. An agent pane and the pm2-managed dashboard are indistinguishable by
+# environment alone; see docs/defeat_shapes/313-*.md. The only thing that still tells them
+# apart is LIVE process ancestry, not an inherited variable: is pm2's own God Daemon a
+# CURRENT ancestor of this process (`_pm2_manages_this_process`), not "did a pm2 process
+# touch this lineage at some point in the past."
+def _process_node_ipc_env_applies() -> bool:
+    return bool(os.environ.get("TMUX_PANE")) and not _pm2_manages_this_process()
+
+
+def _pm2_daemon_pid() -> int | None:
+    """pm2's own God Daemon pid, from its lock file (``$PM2_HOME/pm2.pid``, pm2's own live
+    record of itself) — never from an environment variable a descendant merely inherited.
+    ``None`` when pm2 has never run on this host at all (no lock file), which the caller
+    below must treat as "cannot confirm pm2 involvement," not "confirmed absent" — the
+    fact must keep firing on a pane it cannot rule out, never turn itself off everywhere
+    just because this one host never installed pm2.
+    """
+    home = Path(os.environ.get("PM2_HOME") or (Path.home() / ".pm2"))
+    try:
+        text = (home / "pm2.pid").read_text().strip()
+    except OSError:
+        return None
+    return int(text) if text.isdigit() else None
+
+
+def _pm2_manages_this_process() -> bool:
+    """True iff pm2's God Daemon is a LIVE ancestor of this process right now — walked via
+    ``/proc``, not read off an inherited env var (see the CMX-313 round-2 comment above).
+    Bounded so a `/proc` cycle or a broken read can never spin: real ancestry chains on
+    this host are a handful of hops deep."""
+    daemon_pid = _pm2_daemon_pid()
+    if daemon_pid is None:
+        return False
+    pid = os.getpid()
+    for _ in range(32):
+        if pid == daemon_pid:
+            return True
+        if pid <= 1:
+            return False
+        parent = sessions._ppid(pid)
+        if parent is None or parent == pid:
+            return False
+        pid = parent
+    return False
+
+
 def _process_node_ipc_env_read() -> Observation:
     return observed({var: os.environ[var] for var in _NODE_IPC_ENV_VARS if var in os.environ})
 
@@ -2810,6 +2883,10 @@ def facts() -> list[Fact]:
             declare=lambda: None,
             read_back=_process_node_ipc_env_read,
             report=_process_node_ipc_env_report,
+            # CMX-313: only a fact of a tmux pane (see _process_node_ipc_env_applies) —
+            # not of a pm2-managed service, which legitimately carries its own live
+            # NODE_CHANNEL_FD and never runs `node --test`.
+            applies=_process_node_ipc_env_applies,
         ),
         Fact(
             name="dashboard.port",

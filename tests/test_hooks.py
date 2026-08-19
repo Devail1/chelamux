@@ -682,10 +682,13 @@ def test_message_display_response_stamps_only_the_first_batch():
         "displayContent": first["hookSpecificOutput"]["displayContent"],
     }}
     content = first["hookSpecificOutput"]["displayContent"]
-    assert content.startswith("[")
+    assert content.startswith("**[")
     assert content.endswith(" Sure, on it.")
     stamp = content.removesuffix(" Sure, on it.")
-    assert len(stamp) == 7 and stamp[0] == "[" and stamp[3] == ":" and stamp[6] == "]"
+    # ``**[HH:MM]**`` — 11 chars. The ``**`` pair is markdown emphasis Claude Code
+    # renders as SGR-1 bold; losing it silently downgrades the marker to plain text.
+    assert len(stamp) == 11 and stamp.startswith("**[") and stamp.endswith("]**")
+    assert stamp[5] == ":"
 
     later = hooks.message_display_response(
         {"hook_event_name": "MessageDisplay", "index": 1, "delta": " and it's done."})
@@ -710,7 +713,34 @@ def test_message_display_response_asks_the_module_clock_not_a_fixed_string(monke
         {"hook_event_name": "MessageDisplay", "index": 0, "delta": "hi"})
 
     assert captured_fmt == ["%H:%M"]
-    assert resp["hookSpecificOutput"]["displayContent"] == "[12:34] hi"
+    assert resp["hookSpecificOutput"]["displayContent"] == "**[12:34]** hi"
+
+
+def test_the_bold_marker_survives_a_delta_that_opens_with_markdown():
+    """🔴 GUARD (2026-08-19): the marker is prepended to the assistant's OWN text, so its
+    closing ``**`` sits directly against whatever that message starts with. A reply opening
+    with markdown of its own — a heading, a list bullet, a code fence, or more emphasis — is
+    the case where the two could interact and the bold run could be swallowed or extended.
+
+    ⭐ Measured, not assumed: Claude Code markdown-renders ``displayContent`` (probed on
+    2.1.233 — ``**x**`` arrives as a real SGR-1 run), which is exactly why the marker's own
+    delimiters have to stay intact and adjacent to the timestamp rather than merging into
+    the delta's syntax.
+
+    Seen to go red: dropping either ``**`` from the emitter, or separating the marker from
+    its stamp — both leave the timestamp rendering as plain text with stray asterisks.
+    """
+    for opener in ("# A heading", "- a list item", "```python", "**already bold**",
+                   "*emphasis*", "> a quote", "|table|"):
+        resp = hooks.message_display_response(
+            {"hook_event_name": "MessageDisplay", "index": 0, "delta": opener})
+        content = resp["hookSpecificOutput"]["displayContent"]
+        marker, _, rest = content.partition(" ")
+        assert marker.startswith("**[") and marker.endswith("]**"), (
+            f"delta {opener!r} broke the marker's own delimiters: {content!r}")
+        assert len(marker) == 11, f"marker is not **[HH:MM]** for delta {opener!r}: {marker!r}"
+        # ⛔ The delta must arrive UNCHANGED — the marker may not eat or reflow it.
+        assert rest == opener, f"delta {opener!r} was altered to {rest!r}"
 
 
 def test_message_display_response_tolerates_a_missing_or_non_string_delta():
@@ -724,9 +754,9 @@ def test_message_display_response_tolerates_a_missing_or_non_string_delta():
         resp = hooks.message_display_response(
             {"hook_event_name": "MessageDisplay", "index": 0, "delta": delta})
         content = resp["hookSpecificOutput"]["displayContent"]
-        assert content.startswith("[")
+        assert content.startswith("**[")
         stamp = content[:-1]
-        assert len(stamp) == 7 and stamp[3] == ":" and stamp[6] == "]"  # [HH:MM]
+        assert len(stamp) == 11 and stamp[5] == ":" and stamp.endswith("]**")
         assert content == f"{stamp} "  # a trailing "None"/"42"/"['oops']" fails this
 
 
@@ -787,7 +817,7 @@ def test_endpoint_stamps_a_timestamp_on_the_message_display_hook(client, monkeyp
     body = resp.get_json()
     content = body["hookSpecificOutput"]["displayContent"]
     assert body["hookSpecificOutput"]["hookEventName"] == "MessageDisplay"
-    assert content.startswith("[")
+    assert content.startswith("**[")
     assert content.endswith(" On it.")
 
     # UNLIKE every other hook: never ingested. `MessageDisplay` fires once per streamed

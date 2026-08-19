@@ -10,7 +10,8 @@
 - [ ] `uv run ruff check chela tests` passes
 - [ ] `uv run pytest -q` passes
 - [ ] **Guards go RED under corruption** — new/changed guards fail when the invariant they protect is broken (the judge enforces this)
-- [ ] **CHANGELOG.md** updated under `## [Unreleased]` for any user-facing change
+- [ ] **A `changelog.d/CMX-<task-id>.md` fragment** added for any user-facing change
+      (never edit `CHANGELOG.md` directly — see `changelog.d/README.md`)
 - [ ] Docs updated if a `CHELA_*` knob, command, or hook changed
 
 ## Notes for the reviewer

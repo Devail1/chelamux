@@ -12,6 +12,36 @@ history lives in `git log`.
 
 ### Added
 
+- **Dispatched agent windows no longer get their own Telegram forum topic.** `dispatcher._spawn`
+  claims a run row with `window_id=NULL` *before* calling `tmux new-window` and stamps the id in
+  a separate commit; an auto-topics reconcile tick landing in that gap saw a live, already-named
+  window with no id it could match and read it as an untracked human session — minting a real
+  topic, pinned title and relay for a worker that had never blocked on a human. Dispatcher
+  ownership is now also matched by the row's `window_name`, which is recorded at the claim before
+  tmux is touched at all. (CMX-308, #384)
+
+### Changed
+
+- **The live-terminal message timestamp is bold.** `**[HH:MM]**` rather than `[HH:MM]`, so the
+  marker separates from the message's own first words at a glance. The emphasis is markdown, not
+  ANSI, and deliberately so: Claude Code markdown-renders `displayContent`, while raw escapes are
+  filtered selectively — measured on 2.1.233, ANSI bold and italic survived but ANSI *dim* was
+  stripped. Asking the renderer for emphasis does not depend on which escapes are permitted today.
+  ⛔ Colour remains impossible on this path; `systemMessage` preserves full SGR but renders on its
+  own line prefixed `<Event> says:`, which is the presentation CMX-285 moved away from to get the
+  marker inline.
+
+### Fixed
+
+- **A Telegram message lost to flood control now says so, instead of hiding among identical
+  warnings.** Once `_call` exhausts its 429 retries the content is gone, but that logged the same
+  generic warning as a recoverable formatting rejection and as an intentional, expected skip — so
+  a dropped question and ordinary noise were indistinguishable, and the only way to be sure was a
+  screenshot. A genuine drop is now an `error` naming it as flood control, and the relay logs the
+  window id and content type that no lower layer knows. (CMX-311, #387)
+
+### Added
+
 - **PARKED `TODO.md` bullets now appear on the Work board's Backlog lane.** A task marked
   `<!-- blocked: ... -->` is deliberately not claimable, and used to be invisible
   everywhere as a result: not in To Do, and — since it lives in `TODO.md` rather than

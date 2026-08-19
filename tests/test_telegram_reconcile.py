@@ -766,6 +766,124 @@ def test_dispatched_window_ids_reads_the_run_row_not_the_name():
 
 
 # --------------------------------------------------------------------------
+# The spawn-time race (CMX-308) — `_spawn` claims the row, THEN calls
+# `tmux new-window`, THEN stamps the returned @id back onto that same row. A
+# reconcile tick landing between the window going live and that stamp lands on a
+# "claimed" row with no window_id yet — the exact gap that minted @668 a real
+# forum topic for cmx-305 before the dispatcher had claimed it as its own.
+# --------------------------------------------------------------------------
+
+def test_a_claimed_rows_window_not_yet_stamped_is_still_dispatched_by_name():
+    # window_id is still NULL (the tick landed before `_launch_agent` stamped it back),
+    # but the row recorded its window_name at the claim, before tmux was ever touched —
+    # so a live window under that exact name is this row's, even without the id yet.
+    runs = [{"status": "claimed", "window_id": None, "window_name": "cmx-305"}]
+    live = {"@668": "cmx-305"}
+    assert dispatched_window_ids(runs, live_windows=live) == {"@668"}
+
+
+def test_a_claimed_rows_name_match_does_not_fire_without_a_live_fleet():
+    # No live_windows given (the pure default {}) — nothing to match against, so no
+    # false positive; this must not silently claim every unrelated window.
+    runs = [{"status": "claimed", "window_id": None, "window_name": "cmx-305"}]
+    assert dispatched_window_ids(runs) == set()
+
+
+def test_a_claimed_rows_name_match_does_not_claim_an_unrelated_live_window():
+    runs = [{"status": "claimed", "window_id": None, "window_name": "cmx-305"}]
+    live = {"@1": "orchestrator"}                # some human's unrelated window
+    assert dispatched_window_ids(runs, live_windows=live) == set()
+
+
+def test_a_settled_row_with_no_window_id_does_not_name_match_a_live_window():
+    # The name-match fallback exists ONLY for the spawn-time race on a "claimed"
+    # row. A row that settled (failed/done/needs_human) with no window_id was
+    # never mid-spawn — its window is long gone — so a live window that merely
+    # happens to share its recorded name is somebody else's window entirely
+    # (tmux hands out fresh @N ids after a restart; names are not unique across
+    # boots) and must NOT be claimed.
+    runs = [{"status": "needs_human", "window_id": None, "window_name": "cmx-305"}]
+    live = {"@668": "cmx-305"}
+    assert dispatched_window_ids(runs, live_windows=live) == set()
+
+
+def test_a_pre_cmx69_running_row_with_no_window_id_does_not_name_match_a_live_window():
+    # The status qualifier must be pinned to exactly "claimed", not widened
+    # SIDEWAYS to the adjacent status via `dispatcher.ACTIVE_STATUSES`
+    # ("claimed" or "running"). A pre-CMX-69 row can read status="running" with
+    # window_id=None (see test_dispatched_window_ids_reads_the_run_row_not_the_name
+    # above) — that row is NOT mid-spawn, it is legacy, and the PR's own
+    # Assumptions section states it is intentionally left unmatched. Unlike
+    # test_a_settled_row_with_no_window_id_does_not_name_match_a_live_window
+    # (which pins the status axis at "needs_human", far from the ACTIVE_STATUSES
+    # boundary), this fixture pins it at "running" — the ONE status besides
+    # "claimed" a widened `in ACTIVE_STATUSES` check would wrongly admit — and
+    # gives it a live fleet with a matching name, so a status check loosened to
+    # `in dispatcher.ACTIVE_STATUSES` has something on offer to wrongly claim.
+    runs = [{"status": "running", "window_id": None, "window_name": "cmx-14"}]
+    live = {"@668": "cmx-14"}
+    assert dispatched_window_ids(runs, live_windows=live) == set()
+
+
+def test_a_claimed_rows_name_match_requires_an_exact_name_not_a_substring():
+    # The recorded window_name must match the live window's name EXACTLY. A
+    # live window whose name merely CONTAINS the recorded name (a near-miss,
+    # e.g. a differently-numbered run sharing a prefix) is a different window
+    # and must not be claimed by it.
+    runs = [{"status": "claimed", "window_id": None, "window_name": "cmx-30"}]
+    live = {"@668": "cmx-305"}                   # "cmx-30" in "cmx-305", but not ==
+    assert dispatched_window_ids(runs, live_windows=live) == set()
+
+
+def test_a_claimed_rows_name_match_requires_an_exact_name_not_a_substring_mirrored():
+    # The mirror of the test above: a live window whose name is CONTAINED IN the
+    # recorded name (rather than the other way round) is equally a different
+    # window and must not be claimed. `==` must be checked both ways — a
+    # containment check written as `lname in name` (instead of `lname == name`)
+    # would pass this exact fixture, since "cmx-30" is a substring of "cmx-305".
+    runs = [{"status": "claimed", "window_id": None, "window_name": "cmx-305"}]
+    live = {"@668": "cmx-30"}                     # "cmx-30" in "cmx-305", but not ==
+    assert dispatched_window_ids(runs, live_windows=live) == set()
+
+
+def test_a_claimed_rows_name_match_finds_its_own_window_in_a_multi_window_fleet():
+    # Every other name-match fixture in this file hands the fallback a live fleet
+    # with AT MOST ONE entry, so "the window whose name matched" and "the first
+    # window in the fleet" are indistinguishable, and "scan the whole fleet" and
+    # "look only at the first entry" are the same loop. Production is never that
+    # shape: `live_agent_windows()` returns the ENTIRE tmux session, tmux lists
+    # windows by index, and the fallback's target was just spawned — so the
+    # matching entry is normally near the END of `live`, not the first. This
+    # fixture puts three windows in the fleet with the match LAST, and pins the
+    # exact id claimed — not just that some id was — so a fallback that grabs an
+    # arbitrary/first live window instead of the one whose name actually matched
+    # fails this even though it "claims something".
+    runs = [{"status": "claimed", "window_id": None, "window_name": "cmx-305"}]
+    live = {"@1": "orchestrator", "@667": "cmx-304", "@668": "cmx-305"}
+    assert dispatched_window_ids(runs, live_windows=live) == {"@668"}
+
+
+def test_a_claimed_rows_stale_window_id_does_not_fall_through_to_name_match():
+    # The THIRD gating condition on the fallback: `not wid`. The fallback exists
+    # ONLY for a "claimed" row that has not been stamped an id YET (window_id is
+    # still None). A row that DOES carry a window_id, but whose window_epoch is
+    # dangling (CMX-77 — a tmux restart orphaned it, so today's `@wid` belongs to
+    # somebody else), must be dropped outright by the epoch check above — never
+    # fall through to the name-match fallback below it. Without `not wid` gating
+    # that fallback, a dangling-epoch "claimed" row would claim ANY live window
+    # merely named after its OWN recorded name — even a human's own window that
+    # happens to share it — silently stripping it of its topic.
+    from chela import epoch
+
+    OLD, NEW = "old-epoch", "new-epoch"
+    runs = [{"status": "claimed", "window_id": "@668", "window_epoch": OLD,
+             "window_name": "cmx-305"}]
+    live = {"@900": "cmx-305"}                    # a human's window, same name, different id
+    assert dispatched_window_ids(runs, live_windows=live, now_epoch=NEW) == set()
+    assert epoch.is_dangling(OLD, NEW)            # sanity: the fixture actually differs
+
+
+# --------------------------------------------------------------------------
 # A PERMISSION gate is on the PANE ONLY — the hook log cannot see it (D1)
 # --------------------------------------------------------------------------
 #
