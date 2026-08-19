@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+from datetime import date as _date
 from pathlib import Path
 
 import pytest
@@ -479,6 +480,29 @@ def test_cli_release_writes_the_changelog_and_deletes_consumed_fragments(tmp_pat
     # the fragment is consumed and gone, the README convention doc survives
     assert not (d / "CMX-312.md").exists()
     assert (d / "README.md").exists()
+
+
+def test_cli_release_defaults_date_to_today(tmp_path):
+    # WIRING: every other --release test above passes --date explicitly, so nothing
+    # exercises `date = args.date or _date.today().isoformat()` in main() — unlike
+    # `_default_changelog_d_path()` (DEFEAT_SHAPES #312), this default's consumer
+    # (--release) is NOT destructive to run end-to-end here: the test above already
+    # invokes it safely against a tmp_path CHANGELOG.md/changelog.d, it just always
+    # supplies --date. Reuse that exact shape with --date omitted instead.
+    changelog_path = tmp_path / "CHANGELOG.md"
+    changelog_path.write_text("# Changelog\n\n## [Unreleased]\n\n### Added\n\n- already there\n")
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+
+    result = _run_cli(
+        "--release", "0.7.0",
+        "--changelog", str(changelog_path), "--changelog-d", str(d),
+    )
+
+    assert result.returncode == 0, result.stderr
+    written = changelog_path.read_text()
+    today = _date.today().isoformat()
+    assert f"## [0.7.0] — {today}" in written
 
 
 def test_cli_release_requires_version():
