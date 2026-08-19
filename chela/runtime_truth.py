@@ -1168,10 +1168,12 @@ def _installed_report(expected: dict, obs: Observation) -> list[Finding]:
                 f"    (found via {copy.found_via}; plugin version "
                 f"{copy.version or 'unknown'})\n"
                 + _lines(drift)
-                + "\n    Fix: `chela plugin`, then in Claude Code `/plugin uninstall "
-                "chela@chela` + `/plugin install chela@chela` to refresh that copy. "
-                "Hooks are read at agent STARTUP — a running agent keeps the stale ones "
-                "until it is restarted.",
+                + "\n    Fix: `chela update` already refreshes this copy for you, "
+                "non-interactively — no uninstall/reinstall needed (it runs `claude "
+                "plugin marketplace update <marketplace>` + `claude plugin update "
+                "chela@<marketplace>` for every confirmed-installed copy). Run it, or do "
+                "those two calls by hand. Hooks are read at agent STARTUP — a running "
+                "agent keeps the stale ones until it is restarted.",
             ))
         else:
             out.append(Finding(
