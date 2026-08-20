@@ -64,11 +64,20 @@ jobs:
         # round the next mutation just moved to a property the previous assertion didn't
         # enumerate. A denylist over a config language doesn't converge. This step asserts
         # the STATE ITSELF, immediately before Pytest reads it: whatever spelling the next
-        # mutation arrives in (a renamed branch, a dropped remote, an env override that
-        # changes what the rename step's command expands to, ...), a bad ref here is a red
-        # build, not a silent skip three steps later.
+        # mutation arrives in (a dropped remote, an env override that changes what the
+        # rename step's command expands to, ...), a bad ref here is a red build, not a
+        # silent skip three steps later.
+        #
+        # CMX-314: this used to also require the branch name to match `cmx-[0-9]+`, which
+        # made it fail on every PR whose CMX-301 skip is legitimate by design — `dev`,
+        # `main`, `release/*`, docs branches — exactly the branches
+        # test_cmx_task_number_from_branch_parses_or_gives_a_loud_reason asserts SHOULD skip,
+        # not fail (tests/test_judge.py:669). That took down the 0.8.0 dev->main promotion PR.
+        # What CMX-305 actually needed fixed was a DETACHED checkout (abbrev-ref -> "HEAD"),
+        # not a branch-naming convention, so only that is asserted here.
         run: |
-          git rev-parse --abbrev-ref HEAD | grep -qiE '^cmx-[0-9]+$'
+          ref="$(git rev-parse --abbrev-ref HEAD)"
+          [ -n "$ref" ] && [ "$ref" != "HEAD" ]
           git rev-parse --verify --quiet origin/dev
 
       - name: Pytest

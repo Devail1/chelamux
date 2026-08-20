@@ -100,6 +100,17 @@ plus the git-ban window is widened to start at the checkout (a superset of the
 rename-to-Pytest window), exempting only the rename step and this new assertion step, both
 of which are independently pinned exactly elsewhere in this file.
 
+Round 7 (CMX-314): round 5's own `run:` was itself wrong, not defeated — the `^cmx-[0-9]+$`
+half of the assertion enforced a branch-NAMING convention, but `_cmx_task_number_from_branch`
+treats every non-`cmx-N` branch (`dev`, `main`, `release/*`, a docs branch, ...) as a
+legitimate skip, by design and by its own test
+(`test_cmx_task_number_from_branch_parses_or_gives_a_loud_reason`). Asserting the branch name
+here turned that designed skip into a hard CI failure for every PR not opened from a `cmx-N`
+branch — including the `dev` -> `main` release-promotion PR, which this exact step broke in
+production. The fix drops the naming check and keeps only what CMX-305 actually needed: HEAD
+attached to a real branch (not the detached default of a `pull_request` checkout) and
+`origin/dev` resolvable.
+
 The env-override mutation (10) is the one gap the runtime state-assertion step does not
 close on its own for THIS suite — it turns the env override into a red build in actual CI,
 but a suite that only parses the YAML locally never executes the workflow, so a step that
@@ -486,24 +497,34 @@ def test_ref_state_is_asserted_immediately_before_pytest(steps):
 
     Instead of predicting the next way to disturb the ref, assert the STATE the CMX-301
     guard actually needs, at the exact point it needs it: a step immediately before Pytest
-    must confirm HEAD names a `cmx-N` branch (the same pattern
-    `tests/test_judge.py::_cmx_task_number_from_branch` parses) and that `origin/dev` is
-    resolvable. Whatever mutation disturbs either — a rename, a dropped remote, an
-    overridden `GITHUB_HEAD_REF`, a re-detach, a second checkout, a switched-off rename —
-    now fails IN CI at the point of use, rather than leaving the CMX-301 guard to skip
-    quietly three steps later.
+    must confirm HEAD is attached to a real branch (not the detached-merge-commit default
+    of a `pull_request` checkout) and that `origin/dev` is resolvable. Whatever mutation
+    disturbs either — a dropped remote, an overridden `GITHUB_HEAD_REF`, a re-detach, a
+    second checkout, a switched-off rename — now fails IN CI at the point of use, rather
+    than leaving the CMX-301 guard to skip quietly three steps later.
+
+    Round 7 (CMX-314): round 5's own assertion also demanded HEAD's name match `cmx-[0-9]+`
+    exactly. `tests/test_judge.py::_cmx_task_number_from_branch` treats a non-`cmx-N` branch
+    (`dev`, `main`, `release/*`, ...) as a LEGITIMATE, tested skip — not a fault —
+    (`test_cmx_task_number_from_branch_parses_or_gives_a_loud_reason` asserts exactly that).
+    Demanding the branch-name shape here turned that designed skip into a hard CI failure on
+    every PR not opened from a `cmx-N` branch, including the `dev` -> `main` release
+    promotion PR itself. What CMX-305 actually needed was a non-detached HEAD, not a naming
+    convention, so only that is asserted now.
     """
     ref_assert = _step_running(steps, "origin/dev")
     pytest_step = _step_running(steps, "uv run pytest")
 
     expected_run = (
-        "git rev-parse --abbrev-ref HEAD | grep -qiE '^cmx-[0-9]+$'\n"
+        'ref="$(git rev-parse --abbrev-ref HEAD)"\n'
+        '[ -n "$ref" ] && [ "$ref" != "HEAD" ]\n'
         "git rev-parse --verify --quiet origin/dev"
     )
     assert ref_assert["run"].strip() == expected_run, (
         f"the ref-state-assertion step's run is {ref_assert['run']!r}, expected exactly "
-        f"{expected_run!r} — it must actually assert both the branch name AND that "
-        "origin/dev resolves, not merely reference either"
+        f"{expected_run!r} — it must actually assert both that HEAD is attached AND that "
+        "origin/dev resolves, not merely reference either, and must not reintroduce a "
+        "branch-naming requirement that fails legitimate non-cmx-N branches"
     )
     assert "if" not in ref_assert, (
         f"the ref-state-assertion step has an `if: {ref_assert.get('if')!r}` condition — "
