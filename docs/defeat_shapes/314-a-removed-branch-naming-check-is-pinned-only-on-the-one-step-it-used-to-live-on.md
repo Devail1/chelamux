@@ -219,9 +219,66 @@ name via a custom shell template, without touching any step's own keys, remains 
 unconfirmed, non-blocking residual — recorded in the PR thread, not filed as an experiment,
 because how the runner tokenizes a quoted multi-word custom shell string couldn't be
 verified from a read-only review. A future full-job-mapping pin (matching `job == {...}`
-the same way steps are now pinned, rather than the `runs-on`/`strategy`/`steps` keys pinned
-individually today) would close it for free, the same way the full-step-mapping pin above
-closed `if:`/`env:`/`continue-on-error:` on a step without enumerating them one by one.
+the same way steps are now pinned) would close it for free, the same way the
+full-step-mapping pin above closed `if:`/`env:`/`continue-on-error:` on a step without
+enumerating them one by one. **Correction (round 5): only `steps:` is pinned individually
+today — `runs-on`/`strategy` are NOT already covered by anything in this file** (`grep -n
+'strategy\|runs-on' tests/test_ci_workflow.py` returns nothing outside a docstring's
+illustrative YAML). The sentence above, as originally written, read as "those three are
+already covered, the gap is only the residual keys" — that was backwards, and round 5 (next
+section) is exactly what walking through `strategy` unpinned looks like in practice.
+
+**Round 4's own fix had two more gaps, both closed in round 5 — one level out again, from
+"the job's `steps:` and job SET" to "the job's OWN remaining keys, and the workflow's own
+triggers":**
+
+```diff
+-         python-version: ["3.11", "3.12"]
++         python-version: ${{ startsWith(github.head_ref, 'cmx-') && fromJSON('["3.11", "3.12"]') || fromJSON('["3.99"]') }}
+```
+
+```diff
+-   pull_request:
+- 
+- jobs:
++   pull_request:
++     branches: [no-such-base-branch]
++ 
++ jobs:
+```
+
+The first mutation gates the Python-version matrix on the branch name: `jobs.test.strategy`
+is read by nothing in the repo, so on `cmx-N` the matrix is `["3.11", "3.12"]` (green, as
+today) while on `dev`/`main`/`release/*`/a docs branch it collapses to `["3.99"]`, the
+pinned "Set up Python" step installs a version that doesn't exist, and every non-`cmx-N` PR
+goes red again — while `jobs.test.steps` stays byte-for-byte identical to `_EXPECTED_STEPS`,
+so `test_the_step_list_is_pinned_exactly` never sees it.
+
+The second mutation is one level out again: it narrows `on: pull_request:` to a base-branch
+filter that matches nothing. Every fixture in `tests/test_ci_workflow.py` resolves through
+`workflow["jobs"]` — the trigger block is never inspected, and under PyYAML it isn't even
+reachable as `workflow["on"]` (the bare `on` key parses to the boolean `True`). With the
+filter narrowed, the `test` job never runs on any pull request at all: the pinned step list,
+the ref-state assertion, Pytest itself — none of it executes on a PR ever again, and GitHub
+reports the PR as having no required CI rather than a red one. That is the "CI reports green
+having executed zero tests" end state the module docstring's own rounds 6, 9, and 13 were
+each written to close, reached one level above where any of those assertions look.
+
+Both mutations, applied by the judge to a throwaway checkout of PR #392's head, kept
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` green (3302 passed, 0 failed, 0 error(s)).
+
+**Guard form that survives (round 5):** widen both boundaries one more level out, the same
+move that closed round 4. `tests/test_ci_workflow.py::test_the_job_mapping_is_pinned_exactly`
+pins the `test` job's COMPLETE mapping (`runs-on`, `strategy`, `steps`) with `==` against a
+literal table, not `steps:` and `if:` individually — so `strategy`, and any future key
+(`defaults:`, `continue-on-error:`, `env:`, ...), are closed by construction instead of
+needing their own named test.
+`tests/test_ci_workflow.py::test_the_workflows_triggers_are_pinned_exactly` pins the
+workflow's trigger block (`workflow[True]`, not `workflow["on"]`) the same way. Under this
+pair, gating the matrix on the branch name changes the job's pinned mapping (red), and
+narrowing the PR trigger changes the pinned trigger block (red) — no future job key or
+workflow-level key needs to be predicted in advance, because nothing may be added anywhere
+in the workflow this file reads without a visible diff here.
 
 **Found:** PR #392 (CMX-314). Round 1: the two step-relocation mutations above the fold,
 applied by the judge to a throwaway checkout of the PR's head, stayed green against
@@ -237,4 +294,9 @@ second-job and step-`if:` mutations above, applied the same way, stayed green (3
 0 failed, 0 error(s)) through a guard that its own round-3 writeup didn't yet cover either
 boundary; closed by adding `test_the_workflow_has_exactly_one_job` and widening
 `test_the_step_list_is_pinned_exactly` from a `(name, uses, run)` projection to a full-
-mapping `==` comparison, both described above.
+mapping `==` comparison, both described above. Round 5: the matrix-`strategy` and
+trigger-narrowing mutations above, applied the same way, stayed green (3302 passed, 0
+failed, 0 error(s)) through a guard that pinned the job's `steps:` and the workflow's job
+SET but never the job's own remaining keys or the workflow's own trigger block; closed by
+adding `test_the_job_mapping_is_pinned_exactly` and `test_the_workflows_triggers_are_
+pinned_exactly`, both described above.

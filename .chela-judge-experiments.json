@@ -1,0 +1,32 @@
+{
+  "experiments": [
+    {
+      "guard": "Invariant 16/17 / test_the_step_list_is_pinned_exactly + test_the_workflow_has_exactly_one_job — 'nothing may be added anywhere in the workflow this file reads without a visible diff here', i.e. no step and no job may hard-fail a legitimately-named non-cmx-N branch. Round 11 widened the boundary twice (step keys -> whole step mapping; one job -> the job SET) but never pinned the JOB's own keys other than `if:` and `steps:`. `jobs.test.strategy` is read by nothing in the repo. Gating the matrix on the branch name reintroduces the EXACT CMX-314 production regression through a key no assertion in the file touches: on `cmx-N` the matrix is [3.11, 3.12] and CI is green; on `dev`, `main`, `release/*` or a docs branch it becomes [3.99], the pinned `Set up Python` step runs `uv python install 3.99`, and every non-cmx-N PR — including the dev->main promotion PR this PR was written to unbreak — goes red again. Verified against the file's sibling assertions on the mutated YAML: it parses, `jobs.test.steps` is byte-for-byte identical to `_EXPECTED_STEPS` (so the full-mapping pin, the exact `run:` pins, the git-ban window, the `with:` pin, and every `if:`/`continue-on-error` check are untouched), `set(workflow['jobs']) == {'test'}`, the three `_step_running` needles each still resolve to exactly one step, and no `env:` at any level names GITHUB_HEAD_REF/GITHUB_REF_NAME. The PR's own catalog entry asserts this key is already covered — 'rather than the `runs-on`/`strategy`/`steps` keys pinned individually today' — but no test in the repo reads `strategy` or `runs-on` at all.",
+      "file": ".github/workflows/ci.yml",
+      "before": "        python-version: [\"3.11\", \"3.12\"]",
+      "after": "        python-version: ${{ startsWith(github.head_ref, 'cmx-') && fromJSON('[\"3.11\", \"3.12\"]') || fromJSON('[\"3.99\"]') }}",
+      "kind": "mutation"
+    },
+    {
+      "guard": "WIRING — the entire delivery vehicle for every invariant in tests/test_ci_workflow.py is `on: pull_request:`, and nothing in the repo reads the workflow's triggers. Every test in the file resolves through `workflow['jobs']`; the `on:` block is never inspected (and under PyYAML it isn't even reachable as `workflow['on']` — the bare `on` key parses to the boolean True, so a check written the obvious way would KeyError). Narrowing `pull_request` to a base-branch filter that matches nothing makes the `test` job never run on any pull request at all: the CMX-301 defeat-shape numbering guard, the ref-state assertion, the pinned step list, Pytest itself — none of it executes on a PR ever again, and GitHub reports the PR as having no required CI rather than a red one. This is the same end state rounds 6, 9 and 13 were each written to close ('CI reports green having executed zero tests'), reached one level above where any assertion looks. Verified on the mutated YAML: it parses, `set(workflow['jobs']) == {'test'}`, `jobs.test.steps` is byte-for-byte identical to `_EXPECTED_STEPS`, the job carries no `if:` and no `continue-on-error`, and no `env:` at any level names GITHUB_HEAD_REF/GITHUB_REF_NAME — so every assertion in the file is untouched.",
+      "file": ".github/workflows/ci.yml",
+      "before": "  pull_request:\n\njobs:",
+      "after": "  pull_request:\n    branches: [no-such-base-branch]\n\njobs:",
+      "kind": "wiring"
+    },
+    {
+      "guard": "test_the_job_mapping_is_pinned_exactly (new this round) — asserts job == _EXPECTED_JOB (runs-on + strategy + steps as one literal table), so a job-level key mutation is caught by a single assertion instead of needing one named test per key.",
+      "file": ".github/workflows/ci.yml",
+      "before": "    strategy:\n      fail-fast: false\n      matrix:\n        python-version: [\"3.11\", \"3.12\"]",
+      "after": "    strategy:\n      fail-fast: false\n      matrix:\n        python-version: [\"3.11\", \"3.12\"]\n    defaults:\n      run:\n        shell: bash",
+      "kind": "mutation"
+    },
+    {
+      "guard": "test_the_workflows_triggers_are_pinned_exactly (new this round) — asserts workflow[True] == _EXPECTED_TRIGGERS, so an added trigger event (not just a narrowed pull_request filter) is also caught.",
+      "file": ".github/workflows/ci.yml",
+      "before": "on:\n  push:\n    branches: [main]\n  pull_request:",
+      "after": "on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:",
+      "kind": "mutation"
+    }
+  ]
+}
