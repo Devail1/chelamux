@@ -529,28 +529,79 @@ def test_no_step_in_the_test_job_swallows_its_own_failure(job, steps):
         )
 
 
-# (name, uses, run) for every step in the `test` job's steps list, in order. `run` is
-# `.strip()`ped to match how every other test in this file compares `run:` text. This is
-# the literal table invariant 16 pins the whole job against — see
-# test_the_step_list_is_pinned_exactly.
-_EXPECTED_STEPS: list[tuple[str | None, str | None, str | None]] = [
-    (None, "actions/checkout@v4", None),
-    ("Name the checked-out ref", None,
-     'git checkout -B "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"'),
-    ("Install uv", "astral-sh/setup-uv@v5", None),
-    ("Set up Python ${{ matrix.python-version }}", None,
-     "uv python install ${{ matrix.python-version }}"),
-    ("Sync (with dev + dashboard extras)", None,
-     "uv sync --extra dev --extra dashboard --python ${{ matrix.python-version }}"),
-    (None, "actions/setup-node@v4", None),
-    ("Install jsdom (DOM test suites)", None, "npm ci"),
-    ("Ruff", None, "uv run ruff check chela tests"),
-    ("Assert the ref state the CMX-301 guard needs", None,
-     'ref="$(git rev-parse --abbrev-ref HEAD)"\n'
-     '[ -n "$ref" ] && [ "$ref" != "HEAD" ]\n'
-     "git rev-parse --verify --quiet origin/dev"),
-    ("Pytest", None, "uv run pytest -q"),
+# Every step in the `test` job's steps list, in order, as the COMPLETE parsed mapping —
+# not a (name, uses, run) projection of it. This is the literal table invariant 16 pins the
+# whole job against — see test_the_step_list_is_pinned_exactly. Copied verbatim from
+# `yaml.safe_load(ci.yml)["jobs"]["test"]["steps"]` — do not hand-simplify a step's `run:`
+# text (e.g. by stripping it): an unpinned key on any step (`if:`, `env:`,
+# `continue-on-error:`, `with:`, ...) must change this table, or it changes nothing this
+# test can see.
+_EXPECTED_STEPS: list[dict] = [
+    {"uses": "actions/checkout@v4", "with": {"fetch-depth": 0}},
+    {
+        "name": "Name the checked-out ref",
+        "run": 'git checkout -B "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"',
+    },
+    {"name": "Install uv", "uses": "astral-sh/setup-uv@v5"},
+    {
+        "name": "Set up Python ${{ matrix.python-version }}",
+        "run": "uv python install ${{ matrix.python-version }}",
+    },
+    {
+        "name": "Sync (with dev + dashboard extras)",
+        "run": "uv sync --extra dev --extra dashboard --python ${{ matrix.python-version }}",
+    },
+    {"uses": "actions/setup-node@v4", "with": {"node-version": "20"}},
+    {"name": "Install jsdom (DOM test suites)", "run": "npm ci"},
+    {"name": "Ruff", "run": "uv run ruff check chela tests"},
+    {
+        "name": "Assert the ref state the CMX-301 guard needs",
+        "run": (
+            'ref="$(git rev-parse --abbrev-ref HEAD)"\n'
+            '[ -n "$ref" ] && [ "$ref" != "HEAD" ]\n'
+            "git rev-parse --verify --quiet origin/dev\n"
+        ),
+    },
+    {
+        "name": "Pytest",
+        "env": {"CHELA_REQUIRE_JS_TESTS": "1"},
+        "run": "uv run pytest -q",
+    },
 ]
+
+
+def test_the_workflow_has_exactly_one_job(workflow):
+    """Round 11 — invariant 17: `test_the_step_list_is_pinned_exactly` (16) and every other
+    test in this file resolve through `workflow["jobs"]["test"]` — nothing in the repo
+    enumerates the workflow's JOBS themselves (`ci.yml` is read by no other test module).
+    The judge proved this is exploitable: a SECOND job, added alongside `test`, carries the
+    identical `cmx-N` branch-naming gate CMX-314 exists to remove —
+
+        branch-name:
+          runs-on: ubuntu-latest
+          steps:
+            - name: Assert the branch is a task branch
+              run: |
+                echo "${{ github.head_ref }}" | grep -qiE '^cmx-[0-9]+$'
+
+    — and reproduces the exact production regression (every PR from `dev`, `main`, or
+    `release/*` goes red again) while `jobs.test.steps` stays byte-for-byte identical and
+    every assertion in this file — the pinned step table, the ref-state step's exact
+    `run:`, the git-ban window, every `if:`/`continue-on-error` check — is untouched,
+    because none of them ever look outside `jobs["test"]`.
+
+    A rule over one job's contents is only as good as the assumption that no OTHER job in
+    the same workflow can carry the same gate. Pin the set of job ids itself: a second job
+    changes `set(workflow["jobs"])`, so it is a visible, asserted diff here rather than an
+    invisible addition three keys up from everything else this file checks.
+    """
+    assert set(workflow["jobs"]) == {"test"}, (
+        f"the workflow defines jobs {sorted(workflow['jobs'])!r}, expected exactly "
+        "{'test'} — a second job runs independently of the `test` job's steps and can "
+        "carry its own gate (e.g. a branch-naming check) that fails the workflow run "
+        "while jobs.test.steps stays completely untouched, invisible to every other "
+        "assertion in this file"
+    )
 
 
 def test_the_step_list_is_pinned_exactly(steps):
@@ -596,23 +647,27 @@ def test_the_step_list_is_pinned_exactly(steps):
     without a visible diff here. This subsumes `_CMX_LITERAL_ALLOWLIST` and round 9's guard
     entirely — any step whose `run:` mentions "cmx" is, by construction, a step whose entry
     in `_EXPECTED_STEPS` doesn't match, the same way any other unpinned edit wouldn't.
+
+    Round 11: this test used to project each step down to a `(name, uses, run)` tuple
+    before comparing — so `if:`, `env:`, `continue-on-error:`, and any other key on a
+    PINNED step were invisible to it, the same generalization gap invariant 17 named for
+    the workflow's job SET. `if: ${{ startsWith(github.head_ref, 'cmx-') }}` added to the
+    checkout step (index 0, `uses`/`with` untouched) reproduces the CMX-314 regression for
+    every non-`cmx-N` branch — checkout is skipped, the very next step's `git checkout -B`
+    then runs in an empty workspace and the build goes red — while the old tuple projection
+    only ever read `name`/`uses`/`run` and could never see the added `if:` key. Comparing
+    each step's COMPLETE mapping with `==`, not a projection of three chosen keys, closes
+    that: any key on any step — present, absent, or renamed — that doesn't match
+    `_EXPECTED_STEPS` exactly is now a visible diff here.
     """
-    actual = [
-        (
-            step.get("name"),
-            step.get("uses"),
-            step["run"].strip() if step.get("run") is not None else None,
-        )
-        for step in steps
-    ]
-    assert actual == _EXPECTED_STEPS, (
+    assert steps == _EXPECTED_STEPS, (
         f"the `test` job's step list no longer matches the pinned list exactly.\n"
-        f"actual:   {actual!r}\n"
+        f"actual:   {steps!r}\n"
         f"expected: {_EXPECTED_STEPS!r}\n"
-        "— every step's name/uses/run is pinned, in order; adding, removing, reordering, "
-        "or editing ANY step (even one whose behavior no other test in this file covers) "
-        "changes this list and must be a deliberate, visible diff here, not a silent "
-        "addition"
+        "— every step's COMPLETE mapping (every key, not just name/uses/run) is pinned, "
+        "in order; adding, removing, reordering, or editing ANY step or ANY key on a step "
+        "(even one whose behavior no other test in this file covers) changes this list "
+        "and must be a deliberate, visible diff here, not a silent addition"
     )
 
 
