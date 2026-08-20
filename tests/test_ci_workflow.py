@@ -85,6 +85,37 @@ Round 4's own fix had three more gaps of the same shape, all closed in round 5:
     deletes `refs/remotes/origin/*` outside the banned window entirely; nothing between
     checkout and rename was ever scanned.
 
+Round 11's own fix had two more gaps, closed here in round 12: it widened the boundary from
+one pinned STEP to the job's STEP LIST (16) and from one job to the JOB SET (17), but never
+pinned the job's OWN keys other than `if:` and `steps:` — `jobs.test.strategy` is read by
+nothing in the repo, and neither is `jobs.test.runs-on`.
+
+17. Gating the Python version matrix on the branch name reproduces the exact CMX-314
+    production regression through a key no assertion in this file touches: on a `cmx-N`
+    branch the matrix is `["3.11", "3.12"]` and CI is green; on `dev`, `main`, `release/*`,
+    or a docs branch it collapses to a single bogus version, the pinned "Set up Python" step
+    installs it, and every non-`cmx-N` PR goes red again — while `jobs.test.steps` stays
+    byte-for-byte identical to `_EXPECTED_STEPS`, so `test_the_step_list_is_pinned_exactly`
+    never sees it.
+18. `on: pull_request:` is the entire delivery vehicle for every invariant in this file, and
+    nothing here inspects the workflow's triggers — every fixture resolves through
+    `workflow["jobs"]`. Narrowing `pull_request` to a base-branch filter that matches nothing
+    makes the `test` job never run on any pull request at all: every guard in this file
+    (the pinned step list, the ref-state assertion, Pytest itself) stops executing on PRs
+    entirely, and GitHub reports the PR as having no required CI rather than a red one — the
+    same "CI reports green having executed zero tests" end state rounds 6, 9, and 13 (module
+    history) were each written to close, reached one level above where any assertion looks.
+
+Both gaps are the same shape as every round before them: an allowlist is only as complete as
+the boundary drawn around it, and pinning `steps:` alone (or the job set alone) still leaves
+whatever sits one level further out — the rest of the job's keys, or the workflow's own
+trigger block — unenumerated. The fix widens both boundaries the same way round 11 widened
+the last two: pin the job's COMPLETE mapping (`runs-on`, `strategy`, `steps`, and nothing
+else) with `==` against a literal table, and pin the workflow's trigger block the same way.
+Note the PyYAML trap on the second one — the bare `on:` key parses to the boolean `True`, not
+the string `"on"`, so the trigger block lives at `workflow[True]`, not `workflow["on"]` (which
+raises `KeyError`).
+
 No amount of enumerating one more property closes this class — verb, spelling, level,
 window boundary, and now environment have each, in turn, been the property the previous
 round's assertion didn't cover. Round 5 stops chasing properties of the YAML and instead
@@ -100,6 +131,57 @@ plus the git-ban window is widened to start at the checkout (a superset of the
 rename-to-Pytest window), exempting only the rename step and this new assertion step, both
 of which are independently pinned exactly elsewhere in this file.
 
+Round 7 (CMX-314): round 5's own `run:` was itself wrong, not defeated — the `^cmx-[0-9]+$`
+half of the assertion enforced a branch-NAMING convention, but `_cmx_task_number_from_branch`
+treats every non-`cmx-N` branch (`dev`, `main`, `release/*`, a docs branch, ...) as a
+legitimate skip, by design and by its own test
+(`test_cmx_task_number_from_branch_parses_or_gives_a_loud_reason`). Asserting the branch name
+here turned that designed skip into a hard CI failure for every PR not opened from a `cmx-N`
+branch — including the `dev` -> `main` release-promotion PR, which this exact step broke in
+production. The fix drops the naming check and keeps only what CMX-305 actually needed: HEAD
+attached to a real branch (not the detached default of a `pull_request` checkout) and
+`origin/dev` resolvable.
+
+Round 7's own fix had one more gap, closed here in round 8: it removed the `cmx-[0-9]+`
+naming check from the ONE step round 5 pinned (`test_ref_state_is_asserted_immediately_
+before_pytest`'s `expected_run`), but nothing stops the identical check from being
+reintroduced in a DIFFERENT step — either a brand-new one, or folded into an existing,
+unpinned step's `run:` (e.g. appended to Ruff's). Either place reproduces the exact
+production regression this PR exists to fix (every non-`cmx-N` PR — `dev`, `main`,
+`release/*` — goes red again) while the pinned ref-state step's `run:` stays byte-for-byte
+untouched, so every assertion in this file that looks at that one step stays green.
+
+15. No step anywhere in the job's `run:` text may assert a `cmx-N` branch-naming
+    convention at all — not just the one step round 5 happened to pin. This is the same
+    generalization round 6 already applied to `continue-on-error` (one named step's ban ->
+    the whole job's ban): the invariant CMX-314 actually needs is "nothing in this job
+    hard-fails a legitimately-named non-`cmx-N` branch," which a single pinned step's exact
+    `run:` text can never guarantee once a second, unpinned step can carry the same check.
+
+Round 9's own fix had one more gap, closed here in round 10: banning the literal substring
+"cmx" is still a denylist over shell TEXT, and a config language doesn't need the literal
+string to express the same gate. `grep -qE '^ref: refs/heads/[a-z]+-[0-9]+$' .git/HEAD`
+folded into Ruff's `run:`, or a brand-new step keyed on `if:
+${{ !startsWith(github.head_ref, 'cmx-') }}` with `run: exit 1`, both reproduce the exact
+CMX-314 production regression — every PR opened from a legitimately-named non-`cmx-N` branch
+goes red again — while containing no "cmx" substring at all (the first spells the prefix as
+a character class; the second spells it in an `if:` expression the guard never reads, since
+`test_no_step_reasserts_a_cmx_branch_naming_convention` only looked at `step["run"]`).
+
+16. No amount of enumerating what a step's `run:` (or `if:`) TEXT may contain converges,
+    because the space of ways to spell "reject this branch" is unbounded — a regex, a
+    literal ban, a wider literal ban, each just moves the goalposts to a spelling the
+    previous round didn't enumerate. The fix stops denylisting step CONTENT and starts
+    allowlisting what the job's STEPS ARE: pin the whole ordered step list — every step's
+    `name`, `uses`, and exact `run:` text, compared with `==` against a literal table — the
+    same exact-value doctrine invariant 14 already applies to the checkout step's `with:`
+    block and invariant 13 to Pytest's command, generalized to the entire job at once. Under
+    this rule, folding a check into Ruff's `run:` changes Ruff's pinned entry (red), and a
+    brand-new step — regardless of what its `if:` says, since the step is present in the
+    parsed step list whether or not it ever executes — changes the list's length and order
+    (red). No future spelling, key, or step position needs to be predicted in advance,
+    because nothing may be added, removed, or edited without a visible diff here.
+
 The env-override mutation (10) is the one gap the runtime state-assertion step does not
 close on its own for THIS suite — it turns the env override into a red build in actual CI,
 but a suite that only parses the YAML locally never executes the workflow, so a step that
@@ -110,9 +192,16 @@ the file — workflow-level, job-level, or on any step — may define `GITHUB_HE
 `GITHUB_REF_NAME`, the two variables the rename command's own `${GITHUB_HEAD_REF:-
 $GITHUB_REF_NAME}` reads. That is provably complete against THIS shape of attack (an `env:`
 key in the YAML) — it is not a defense against a step writing to `$GITHUB_ENV` to redefine
-either variable at runtime for a later step, which no denylist of YAML keys can see; the
-runtime state-assertion step is what still catches that residual case, in actual CI, at the
-point of use.
+either variable at runtime for a later step, which no denylist of YAML keys can see. At the
+time this paragraph was written the runtime ref-state-assertion step still caught that
+residual case in actual CI, because it demanded HEAD's name match `cmx-[0-9]+` exactly — a
+`$GITHUB_ENV` override was one more way to produce a HEAD that failed that match. Round 7
+(CMX-314) removed the naming half of that assertion (see below): the step now only checks
+that HEAD is attached to *some* branch and that `origin/dev` resolves, neither of which a
+`$GITHUB_ENV` override to, say, the PR's merge-ref name would violate — `origin/dev` still
+resolves and HEAD is still non-empty and `!= "HEAD"`. So this residual is open again as of
+round 7, and nothing in this file or in CI closes it; it is left as a known, non-blocking gap
+(recorded on the PR thread) rather than claimed as covered here.
 
 Round 5's own fix had three more gaps of the same shape, closed here in round 6:
 
@@ -478,6 +567,148 @@ def test_no_step_in_the_test_job_swallows_its_own_failure(job, steps):
         )
 
 
+# Every step in the `test` job's steps list, in order, as the COMPLETE parsed mapping —
+# not a (name, uses, run) projection of it. This is the literal table invariant 16 pins the
+# whole job against — see test_the_step_list_is_pinned_exactly. Copied verbatim from
+# `yaml.safe_load(ci.yml)["jobs"]["test"]["steps"]` — do not hand-simplify a step's `run:`
+# text (e.g. by stripping it): an unpinned key on any step (`if:`, `env:`,
+# `continue-on-error:`, `with:`, ...) must change this table, or it changes nothing this
+# test can see.
+_EXPECTED_STEPS: list[dict] = [
+    {"uses": "actions/checkout@v4", "with": {"fetch-depth": 0}},
+    {
+        "name": "Name the checked-out ref",
+        "run": 'git checkout -B "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"',
+    },
+    {"name": "Install uv", "uses": "astral-sh/setup-uv@v5"},
+    {
+        "name": "Set up Python ${{ matrix.python-version }}",
+        "run": "uv python install ${{ matrix.python-version }}",
+    },
+    {
+        "name": "Sync (with dev + dashboard extras)",
+        "run": "uv sync --extra dev --extra dashboard --python ${{ matrix.python-version }}",
+    },
+    {"uses": "actions/setup-node@v4", "with": {"node-version": "20"}},
+    {"name": "Install jsdom (DOM test suites)", "run": "npm ci"},
+    {"name": "Ruff", "run": "uv run ruff check chela tests"},
+    {
+        "name": "Assert the ref state the CMX-301 guard needs",
+        "run": (
+            'ref="$(git rev-parse --abbrev-ref HEAD)"\n'
+            '[ -n "$ref" ] && [ "$ref" != "HEAD" ]\n'
+            "git rev-parse --verify --quiet origin/dev\n"
+        ),
+    },
+    {
+        "name": "Pytest",
+        "env": {"CHELA_REQUIRE_JS_TESTS": "1"},
+        "run": "uv run pytest -q",
+    },
+]
+
+
+def test_the_workflow_has_exactly_one_job(workflow):
+    """Round 11 — invariant 17: `test_the_step_list_is_pinned_exactly` (16) and every other
+    test in this file resolve through `workflow["jobs"]["test"]` — nothing in the repo
+    enumerates the workflow's JOBS themselves (`ci.yml` is read by no other test module).
+    The judge proved this is exploitable: a SECOND job, added alongside `test`, carries the
+    identical `cmx-N` branch-naming gate CMX-314 exists to remove —
+
+        branch-name:
+          runs-on: ubuntu-latest
+          steps:
+            - name: Assert the branch is a task branch
+              run: |
+                echo "${{ github.head_ref }}" | grep -qiE '^cmx-[0-9]+$'
+
+    — and reproduces the exact production regression (every PR from `dev`, `main`, or
+    `release/*` goes red again) while `jobs.test.steps` stays byte-for-byte identical and
+    every assertion in this file — the pinned step table, the ref-state step's exact
+    `run:`, the git-ban window, every `if:`/`continue-on-error` check — is untouched,
+    because none of them ever look outside `jobs["test"]`.
+
+    A rule over one job's contents is only as good as the assumption that no OTHER job in
+    the same workflow can carry the same gate. Pin the set of job ids itself: a second job
+    changes `set(workflow["jobs"])`, so it is a visible, asserted diff here rather than an
+    invisible addition three keys up from everything else this file checks.
+    """
+    assert set(workflow["jobs"]) == {"test"}, (
+        f"the workflow defines jobs {sorted(workflow['jobs'])!r}, expected exactly "
+        "{'test'} — a second job runs independently of the `test` job's steps and can "
+        "carry its own gate (e.g. a branch-naming check) that fails the workflow run "
+        "while jobs.test.steps stays completely untouched, invisible to every other "
+        "assertion in this file"
+    )
+
+
+def test_the_step_list_is_pinned_exactly(steps):
+    """Round 10 — invariant 16: round 9's guard banned the literal substring "cmx" in every
+    step's `run:` text, and its own catalog entry (`docs/defeat_shapes/314-*.md`) called
+    that "a strict superset [of the old regex] ... because all of them still have to name
+    the branch prefix they're checking for." They don't — the judge defeated it twice in
+    the same round, both times without the string "cmx" appearing anywhere in the mutation:
+
+        # folded into the existing, unpinned Ruff step's run: — no "cmx" substring, no new
+        # step name in the diff, and the naming gate is spelled as a generic task-branch
+        # shape instead:
+        - name: Ruff
+          run: |
+            uv run ruff check chela tests
+            grep -qE '^ref: refs/heads/[a-z]+-[0-9]+$' .git/HEAD
+
+        # a brand-new step keyed on `if:`, which test_no_step_reasserts_a_cmx_branch_naming_
+        # convention never read (it only looked at step["run"]) — and `run: exit 1` needs no
+        # "cmx" substring at all, since the branch check lives entirely in the condition:
+        - name: Assert the branch is a task branch
+          if: ${{ !startsWith(github.head_ref, 'cmx-') }}
+          run: exit 1
+
+    Both reproduce the exact CMX-314 production regression (every PR opened from a
+    legitimately-named non-`cmx-N` branch goes red again) while every existing assertion in
+    this file — the pinned ref-state step's exact `run:`, its `if:`-absence, its position
+    immediately before Pytest, the git-ban window, every `continue-on-error` check — stays
+    byte-for-byte untouched. A denylist over step CONTENT has no bottom: a regex, a wider
+    regex, a literal-substring ban, each just relocates the enumeration to a spelling or a
+    YAML key the previous round didn't cover.
+
+    The fix stops denylisting what a step's `run:` may CONTAIN and starts allowlisting what
+    the job's STEPS ARE, generalizing the exact-value doctrine `test_checkout_step_with_
+    block_has_no_extra_keys` (14) already applies to `with:` and `test_pytest_step_runs_
+    the_exact_command` (13) already applies to Pytest's command, to the WHOLE step list at
+    once: every step's `name`, `uses`, and `run:` are compared with `==` against a literal
+    table, in order. Folding a check into Ruff's `run:` changes Ruff's pinned entry — red.
+    A brand-new step changes the list's length and every subsequent step's position — red,
+    regardless of what that step's `if:` says, since the parsed step list contains it
+    whether or not it ever executes. No future spelling, YAML key, or step position needs
+    to be predicted in advance, because nothing may be added, removed, reordered, or edited
+    without a visible diff here. This subsumes `_CMX_LITERAL_ALLOWLIST` and round 9's guard
+    entirely — any step whose `run:` mentions "cmx" is, by construction, a step whose entry
+    in `_EXPECTED_STEPS` doesn't match, the same way any other unpinned edit wouldn't.
+
+    Round 11: this test used to project each step down to a `(name, uses, run)` tuple
+    before comparing — so `if:`, `env:`, `continue-on-error:`, and any other key on a
+    PINNED step were invisible to it, the same generalization gap invariant 17 named for
+    the workflow's job SET. `if: ${{ startsWith(github.head_ref, 'cmx-') }}` added to the
+    checkout step (index 0, `uses`/`with` untouched) reproduces the CMX-314 regression for
+    every non-`cmx-N` branch — checkout is skipped, the very next step's `git checkout -B`
+    then runs in an empty workspace and the build goes red — while the old tuple projection
+    only ever read `name`/`uses`/`run` and could never see the added `if:` key. Comparing
+    each step's COMPLETE mapping with `==`, not a projection of three chosen keys, closes
+    that: any key on any step — present, absent, or renamed — that doesn't match
+    `_EXPECTED_STEPS` exactly is now a visible diff here.
+    """
+    assert steps == _EXPECTED_STEPS, (
+        f"the `test` job's step list no longer matches the pinned list exactly.\n"
+        f"actual:   {steps!r}\n"
+        f"expected: {_EXPECTED_STEPS!r}\n"
+        "— every step's COMPLETE mapping (every key, not just name/uses/run) is pinned, "
+        "in order; adding, removing, reordering, or editing ANY step or ANY key on a step "
+        "(even one whose behavior no other test in this file covers) changes this list "
+        "and must be a deliberate, visible diff here, not a silent addition"
+    )
+
+
 def test_ref_state_is_asserted_immediately_before_pytest(steps):
     """Round 5: rounds 1-4 each closed a mutation that disturbed a different PROPERTY of
     this YAML — a verb, a spelling, a step vs its parent job, a window boundary — and each
@@ -486,24 +717,38 @@ def test_ref_state_is_asserted_immediately_before_pytest(steps):
 
     Instead of predicting the next way to disturb the ref, assert the STATE the CMX-301
     guard actually needs, at the exact point it needs it: a step immediately before Pytest
-    must confirm HEAD names a `cmx-N` branch (the same pattern
-    `tests/test_judge.py::_cmx_task_number_from_branch` parses) and that `origin/dev` is
-    resolvable. Whatever mutation disturbs either — a rename, a dropped remote, an
-    overridden `GITHUB_HEAD_REF`, a re-detach, a second checkout, a switched-off rename —
-    now fails IN CI at the point of use, rather than leaving the CMX-301 guard to skip
-    quietly three steps later.
+    must confirm HEAD is attached to a real branch (not the detached-merge-commit default
+    of a `pull_request` checkout) and that `origin/dev` is resolvable. Whatever mutation
+    disturbs either — a dropped remote, a re-detach, a second checkout, a switched-off
+    rename — now fails IN CI at the point of use, rather than leaving the CMX-301 guard to
+    skip quietly three steps later. (This step, as originally designed, also caught a
+    `$GITHUB_ENV`-written override of `GITHUB_HEAD_REF`, because it demanded HEAD's name
+    match `cmx-[0-9]+` exactly — an overridden ref that didn't match that shape failed here.
+    Round 7 below removes that naming half, and with it this particular case; see the module
+    docstring's "env-override mutation (10)" paragraph for the residual that leaves open.)
+
+    Round 7 (CMX-314): round 5's own assertion also demanded HEAD's name match `cmx-[0-9]+`
+    exactly. `tests/test_judge.py::_cmx_task_number_from_branch` treats a non-`cmx-N` branch
+    (`dev`, `main`, `release/*`, ...) as a LEGITIMATE, tested skip — not a fault —
+    (`test_cmx_task_number_from_branch_parses_or_gives_a_loud_reason` asserts exactly that).
+    Demanding the branch-name shape here turned that designed skip into a hard CI failure on
+    every PR not opened from a `cmx-N` branch, including the `dev` -> `main` release
+    promotion PR itself. What CMX-305 actually needed was a non-detached HEAD, not a naming
+    convention, so only that is asserted now.
     """
     ref_assert = _step_running(steps, "origin/dev")
     pytest_step = _step_running(steps, "uv run pytest")
 
     expected_run = (
-        "git rev-parse --abbrev-ref HEAD | grep -qiE '^cmx-[0-9]+$'\n"
+        'ref="$(git rev-parse --abbrev-ref HEAD)"\n'
+        '[ -n "$ref" ] && [ "$ref" != "HEAD" ]\n'
         "git rev-parse --verify --quiet origin/dev"
     )
     assert ref_assert["run"].strip() == expected_run, (
         f"the ref-state-assertion step's run is {ref_assert['run']!r}, expected exactly "
-        f"{expected_run!r} — it must actually assert both the branch name AND that "
-        "origin/dev resolves, not merely reference either"
+        f"{expected_run!r} — it must actually assert both that HEAD is attached AND that "
+        "origin/dev resolves, not merely reference either, and must not reintroduce a "
+        "branch-naming requirement that fails legitimate non-cmx-N branches"
     )
     assert "if" not in ref_assert, (
         f"the ref-state-assertion step has an `if: {ref_assert.get('if')!r}` condition — "
@@ -513,4 +758,106 @@ def test_ref_state_is_asserted_immediately_before_pytest(steps):
     assert steps.index(ref_assert) == steps.index(pytest_step) - 1, (
         "the ref-state-assertion step must sit IMMEDIATELY before Pytest — anything "
         "positioned between the two could disturb the ref again after it was checked"
+    )
+
+
+# The `test` job's COMPLETE parsed mapping — every key, not just `if:`/`steps:` (round 11)
+# or `runs-on:`/`strategy:`/`steps:` (this file's own catalog entry claimed those three were
+# "pinned individually today"; they weren't — nothing in this file read `strategy` or
+# `runs-on` before invariant 18 below). Copied verbatim from
+# `yaml.safe_load(ci.yml)["jobs"]["test"]`, `steps` aside (that key reuses `_EXPECTED_STEPS`
+# so the two literal tables can't drift apart) — do not hand-simplify any value here.
+_EXPECTED_JOB: dict = {
+    "runs-on": "ubuntu-latest",
+    "strategy": {"fail-fast": False, "matrix": {"python-version": ["3.11", "3.12"]}},
+    "steps": _EXPECTED_STEPS,
+}
+
+
+def test_the_job_mapping_is_pinned_exactly(job):
+    """Round 12 — invariant 18: `test_the_step_list_is_pinned_exactly` (16) pins `steps:`
+    and `test_the_workflow_has_exactly_one_job` (17) pins the job SET, but neither pins the
+    `test` job's OWN keys other than `if:` (checked separately by `test_job_is_unconditional`)
+    and `steps:`. `jobs.test.strategy` is read by nothing else in this file or the repo.
+
+    The judge proved this is exploitable: gating the Python-version matrix on the branch name
+    reproduces the exact CMX-314 production regression through a key no assertion here
+    touched —
+
+        strategy:
+          matrix:
+            python-version: ${{ startsWith(github.head_ref, 'cmx-') && fromJSON('["3.11",
+              "3.12"]') || fromJSON('["3.99"]') }}
+
+    — on a `cmx-N` branch the matrix is `["3.11", "3.12"]` and CI is green exactly as today;
+    on `dev`, `main`, `release/*`, or a docs branch it collapses to `["3.99"]`, the pinned
+    "Set up Python ${{ matrix.python-version }}" step installs a version that doesn't exist,
+    and every non-`cmx-N` PR — including the `dev` -> `main` promotion PR this whole file
+    exists to unbreak — goes red again. `jobs.test.steps` stays byte-for-byte identical to
+    `_EXPECTED_STEPS` throughout, so `test_the_step_list_is_pinned_exactly` never sees it.
+
+    Pin the job's COMPLETE mapping with `==` against a literal table, the same exact-value
+    doctrine invariant 16 already applies to the step list one level down — `strategy:` and
+    `runs-on:` are closed by construction, and so is any future key (`defaults:`,
+    `continue-on-error:`, `env:`, ...) without needing its own named test: an added, removed,
+    or edited key anywhere in the job's mapping is a visible diff here, not a silent gap
+    three keys sideways from `steps:`.
+    """
+    assert job == _EXPECTED_JOB, (
+        f"the `test` job's mapping no longer matches the pinned mapping exactly.\n"
+        f"actual:   {job!r}\n"
+        f"expected: {_EXPECTED_JOB!r}\n"
+        "— every key on the job (runs-on, strategy, steps, and any other key that might be "
+        "added later) is pinned as a whole; adding, removing, or editing ANY of them "
+        "(e.g. gating `strategy.matrix.python-version` on the branch name) changes this "
+        "mapping and must be a deliberate, visible diff here, not a silent addition"
+    )
+
+
+# The workflow's trigger block, as PyYAML actually parses it. The bare `on:` key is a YAML
+# 1.1 boolean literal, so it parses to the key `True`, not the string `"on"` —
+# `workflow["on"]` raises `KeyError`; `workflow[True]` is the real key. Verified directly:
+# `yaml.safe_load(open("ci.yml"))` prints `[..., True, ...]` for `list(workflow)`.
+_EXPECTED_TRIGGERS: dict = {
+    "push": {"branches": ["main"]},
+    "pull_request": None,
+}
+
+
+def test_the_workflows_triggers_are_pinned_exactly(workflow):
+    """Round 12 — invariant 19 (WIRING): every test in this file resolves through
+    `workflow["jobs"]` — nothing here, or anywhere else in the repo (`ci.yml` is read by no
+    other test module), ever inspects `on:`, the trigger block that is the entire delivery
+    vehicle for every invariant this file asserts.
+
+    The judge proved this is exploitable: narrowing `pull_request:` to a base-branch filter
+    that matches nothing makes the `test` job never run on any pull request at all —
+
+        on:
+          push:
+            branches: [main]
+          pull_request:
+            branches: [no-such-base-branch]
+
+    — the pinned step list, the ref-state assertion, Pytest itself: none of it executes on a
+    PR ever again, and GitHub reports the PR as having no required CI rather than a red one.
+    That is the same "CI reports green having executed zero tests" end state the module
+    docstring's rounds 6, 9, and 13 were each written to close, reached one level above where
+    any of those assertions look — `jobs.test.steps` stays byte-for-byte identical to
+    `_EXPECTED_STEPS` throughout, because the job whose steps are pinned never runs at all.
+
+    Pin the trigger block with `==` against a literal table, mirroring the same doctrine
+    invariant 18 applies to the job one level down. Note the PyYAML trap: the bare `on:` key
+    parses to the boolean `True`, so the block lives at `workflow[True]`, not
+    `workflow["on"]` — a pin written the obvious way would raise `KeyError` rather than pass,
+    which is a fragile way to find out.
+    """
+    assert workflow[True] == _EXPECTED_TRIGGERS, (
+        f"the workflow's trigger block no longer matches the pinned mapping exactly.\n"
+        f"actual:   {workflow[True]!r}\n"
+        f"expected: {_EXPECTED_TRIGGERS!r}\n"
+        "— narrowing `pull_request:` to a branch filter that never matches (or removing it, "
+        "or adding an unrelated event) stops every job in this workflow from ever running "
+        "on a pull request, while every step- and job-level assertion in this file stays "
+        "green because the job they inspect simply never executes"
     )
