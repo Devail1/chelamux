@@ -111,6 +111,22 @@ production. The fix drops the naming check and keeps only what CMX-305 actually 
 attached to a real branch (not the detached default of a `pull_request` checkout) and
 `origin/dev` resolvable.
 
+Round 7's own fix had one more gap, closed here in round 8: it removed the `cmx-[0-9]+`
+naming check from the ONE step round 5 pinned (`test_ref_state_is_asserted_immediately_
+before_pytest`'s `expected_run`), but nothing stops the identical check from being
+reintroduced in a DIFFERENT step — either a brand-new one, or folded into an existing,
+unpinned step's `run:` (e.g. appended to Ruff's). Either place reproduces the exact
+production regression this PR exists to fix (every non-`cmx-N` PR — `dev`, `main`,
+`release/*` — goes red again) while the pinned ref-state step's `run:` stays byte-for-byte
+untouched, so every assertion in this file that looks at that one step stays green.
+
+15. No step anywhere in the job's `run:` text may assert a `cmx-N` branch-naming
+    convention at all — not just the one step round 5 happened to pin. This is the same
+    generalization round 6 already applied to `continue-on-error` (one named step's ban ->
+    the whole job's ban): the invariant CMX-314 actually needs is "nothing in this job
+    hard-fails a legitimately-named non-`cmx-N` branch," which a single pinned step's exact
+    `run:` text can never guarantee once a second, unpinned step can carry the same check.
+
 The env-override mutation (10) is the one gap the runtime state-assertion step does not
 close on its own for THIS suite — it turns the env override into a red build in actual CI,
 but a suite that only parses the YAML locally never executes the workflow, so a step that
@@ -486,6 +502,46 @@ def test_no_step_in_the_test_job_swallows_its_own_failure(job, steps):
             "is not in _CONTINUE_ON_ERROR_ALLOWLIST — a step whose failure is swallowed "
             "reports the same green CI as one that never ran at all; if this step "
             "legitimately needs it, add it to the allow-list with a one-line reason"
+        )
+
+
+_CMX_NAMING_ASSERTION = re.compile(r"cmx.{0,6}(\[0-9\]|\\d|0-9)", re.IGNORECASE)
+
+
+def test_no_step_reasserts_a_cmx_branch_naming_convention(steps):
+    """Round 8 — invariant 15: `test_ref_state_is_asserted_immediately_before_pytest` pins
+    the ref-state step's `run:` to NOT contain a `cmx-[0-9]+` naming check — but it only
+    reads that one, pinned step. A second, unpinned step reintroducing the identical check
+    is invisible to it:
+
+        - name: Assert the branch is a task branch
+          run: |
+            grep -qiE 'refs/heads/cmx-[0-9]+$' .git/HEAD
+
+    or folded into an existing step's `run:` (e.g. appended to Ruff's), so no new step name
+    appears at all:
+
+        - name: Ruff
+          run: |
+            uv run ruff check chela tests
+            grep -qiE 'refs/heads/cmx-[0-9]+$' .git/HEAD
+
+    Either reproduces the exact regression CMX-314 fixed — every PR opened from a
+    legitimately-named non-`cmx-N` branch (`dev`, `main`, `release/*`, a docs branch, ...)
+    goes red in CI again — while the pinned ref-state step's own `run:` stays byte-for-byte
+    untouched, so `test_ref_state_is_asserted_immediately_before_pytest` alone can never
+    catch it. Scan every step's `run:` text, not just the one round 5 pinned, the same
+    single-step -> whole-job generalization `test_no_step_in_the_test_job_swallows_its_own_
+    failure` already applies to `continue-on-error`.
+    """
+    for step in steps:
+        run = step.get("run", "")
+        match = _CMX_NAMING_ASSERTION.search(run)
+        assert not match, (
+            f"step {step.get('name')!r} run: text reasserts a cmx-N branch-naming "
+            f"convention ({match.group(0)!r} in {run!r}) — CMX-314 removed that check "
+            "because it hard-fails CI on every legitimate non-cmx-N branch (dev, main, "
+            "release/*, ...); no step in this job may reintroduce it under any name"
         )
 
 
