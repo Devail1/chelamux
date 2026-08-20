@@ -58,3 +58,10 @@ TODO.md
 .chela-self-check-*.json
 *self[-_]check*.json
 *scratch*experiment*.json
+
+# `chela judge` scratch file — `chela.judge.experiments_path()` always writes this exact
+# literal name inside the judge's own throwaway worktree, so unlike the self-check files
+# above there's no spelling variance to glob for. Reached a branch on cmx-314/PR #392
+# (same class as the self-check leak fixed in d77c2c4 via CMX-282): a tracked copy makes
+# the judge's worktree dirty the moment it starts, so it refuses to run at all.
+.chela-judge-experiments.json
