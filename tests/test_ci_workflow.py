@@ -505,43 +505,54 @@ def test_no_step_in_the_test_job_swallows_its_own_failure(job, steps):
         )
 
 
-_CMX_NAMING_ASSERTION = re.compile(r"cmx.{0,6}(\[0-9\]|\\d|0-9)", re.IGNORECASE)
+_CMX_LITERAL_ALLOWLIST: dict[str, str] = {
+    # step name -> one-line reason it's allowed to mention "cmx" in its run: text.
+    # Empty by design: no step in this job has a legitimate reason to reference a
+    # cmx-N branch-naming convention at all today.
+}
 
 
 def test_no_step_reasserts_a_cmx_branch_naming_convention(steps):
-    """Round 8 — invariant 15: `test_ref_state_is_asserted_immediately_before_pytest` pins
-    the ref-state step's `run:` to NOT contain a `cmx-[0-9]+` naming check — but it only
-    reads that one, pinned step. A second, unpinned step reintroducing the identical check
-    is invisible to it:
+    """Round 9 — invariant 15, take 2: round 8's guard (`_CMX_NAMING_ASSERTION`) was a
+    three-item denylist of digit-class token spellings — `cmx` followed within six
+    characters by `[0-9]`, `\\d`, or `0-9` — the exact "guessed list" shape round 4's own
+    fix already ruled out one section up, for `git` verbs: "Ban `git` itself in this
+    window, not a guessed list of its subcommands, so no future verb needs to be predicted
+    in advance." Round 8 reached for the guessed-list form anyway, one level down, and the
+    judge defeated it twice in the same round — once with the POSIX class `[[:digit:]]`,
+    and once with a bare `case */cmx-*)` shell glob carrying no digit-class token at all:
 
-        - name: Assert the branch is a task branch
-          run: |
-            grep -qiE 'refs/heads/cmx-[0-9]+$' .git/HEAD
+        grep -qE '^ref: refs/heads/cmx-[[:digit:]]+$' .git/HEAD
+        case "$(cat .git/HEAD)" in */cmx-*) ;; *) exit 1 ;; esac
 
-    or folded into an existing step's `run:` (e.g. appended to Ruff's), so no new step name
-    appears at all:
-
-        - name: Ruff
-          run: |
-            uv run ruff check chela tests
-            grep -qiE 'refs/heads/cmx-[0-9]+$' .git/HEAD
-
-    Either reproduces the exact regression CMX-314 fixed — every PR opened from a
+    Both reproduce the exact CMX-314 production regression — every PR opened from a
     legitimately-named non-`cmx-N` branch (`dev`, `main`, `release/*`, a docs branch, ...)
-    goes red in CI again — while the pinned ref-state step's own `run:` stays byte-for-byte
-    untouched, so `test_ref_state_is_asserted_immediately_before_pytest` alone can never
-    catch it. Scan every step's `run:` text, not just the one round 5 pinned, the same
-    single-step -> whole-job generalization `test_no_step_in_the_test_job_swallows_its_own_
-    failure` already applies to `continue-on-error`.
+    goes red again — while dodging every digit-class token the old regex enumerated.
+    `[1-9]`, `[[:alnum:]]`, or (as the `case` glob shows) no digit-class token whatsoever
+    are all just as available to the next round; a denylist of spellings never converges.
+
+    No step's `run:` in this job has any legitimate reason to mention the string "cmx" at
+    all today — the genuine ref-state check CMX-305/CMX-314 need is expressed without it
+    (`git rev-parse --abbrev-ref HEAD` compared against `HEAD`, not against a naming
+    convention). So instead of enumerating how a naming check might be SPELLED, ban the
+    literal substring itself, the same allowlist-of-zero shape
+    `test_no_step_in_the_test_job_swallows_its_own_failure` already uses for
+    `continue-on-error`: it is a strict superset of the old regex, so it closes both
+    experiments above and every other spelling of the same check in one line, because all
+    of them still have to name the branch prefix they're checking for.
     """
     for step in steps:
+        name = step.get("name", "<unnamed step>")
+        if name in _CMX_LITERAL_ALLOWLIST:
+            continue
         run = step.get("run", "")
-        match = _CMX_NAMING_ASSERTION.search(run)
-        assert not match, (
-            f"step {step.get('name')!r} run: text reasserts a cmx-N branch-naming "
-            f"convention ({match.group(0)!r} in {run!r}) — CMX-314 removed that check "
-            "because it hard-fails CI on every legitimate non-cmx-N branch (dev, main, "
-            "release/*, ...); no step in this job may reintroduce it under any name"
+        assert "cmx" not in run.lower(), (
+            f"step {name!r} run: text mentions 'cmx' ({run!r}) — CMX-314 removed the "
+            "cmx-N branch-naming check because it hard-fails CI on every legitimate "
+            "non-cmx-N branch (dev, main, release/*, ...); no step in this job may "
+            "reference a cmx-N naming convention under any spelling, and none has a "
+            "legitimate reason to mention 'cmx' at all today — if one ever does, add it "
+            "to _CMX_LITERAL_ALLOWLIST with a one-line reason"
         )
 
 

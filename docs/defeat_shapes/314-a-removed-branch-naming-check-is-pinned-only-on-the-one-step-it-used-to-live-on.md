@@ -50,15 +50,64 @@ already named for `continue-on-error`: a check scoped to one named step is only 
 the assumption that no other step in the job could carry the same behavior — an assumption
 that a config file with a dozen `run:` blocks in one job never actually guarantees.
 
-**Guard form that survives:** scan every step's `run:` text for the removed invariant, not
-just the one step it used to live on — the same single-step -> whole-job generalization
-`test_no_step_in_the_test_job_swallows_its_own_failure` already applies to
-`continue-on-error`. `tests/test_ci_workflow.py::test_no_step_reasserts_a_cmx_branch_naming_
-convention` regex-matches every step's `run:` for a `cmx-N`-shaped naming assertion
-(`cmx` followed within a few characters by a digit-class token — `[0-9]`, `\d`, or `0-9`),
-independent of which step name or position carries it, and fails loudly if any step does.
+**Round 1's own fix had a second gap, closed in round 2:** scanning every step's `run:` for
+the removed invariant still has to recognize the invariant when it sees it, and round 1's
+first cut (`_CMX_NAMING_ASSERTION = re.compile(r"cmx.{0,6}(\[0-9\]|\\d|0-9)", re.IGNORECASE)`)
+did that by enumerating three digit-class token spellings — `[0-9]`, `\d`, `0-9` — the exact
+"guessed list of subcommands" shape this same file's own `test_nothing_between_the_checkout_
+and_pytest_touches_git_except_the_pinned_steps` (round 4) already ruled out for `git` verbs:
+"Ban `git` itself in this window, not a guessed list of its subcommands, so no future verb
+needs to be predicted in advance." Round 1 reached for the guessed-list form anyway, one
+level down. The judge defeated it twice in the same round, with the POSIX class
+`[[:digit:]]` and with a bare `case */cmx-*)` shell glob carrying no digit-class token at
+all:
 
-**Found:** PR #392 (CMX-314, rework round 1) — both mutations above, applied by the judge to
-a throwaway checkout of the PR's head, stayed green against `CHELA_REQUIRE_JS_TESTS=1 uv run
-pytest -q` (3300 passed, 0 failed, 0 error(s)). Closed by adding
-`test_no_step_reasserts_a_cmx_branch_naming_convention` to `tests/test_ci_workflow.py`.
+```diff
+       - name: Ruff
+         run: uv run ruff check chela tests
++        run: |
++          uv run ruff check chela tests
++          grep -qE '^ref: refs/heads/cmx-[[:digit:]]+$' .git/HEAD
+```
+
+```diff
+       - name: Ruff
+         run: uv run ruff check chela tests
++
++      - name: Assert the branch is a task branch
++        run: |
++          case "$(cat .git/HEAD)" in */cmx-*) ;; *) exit 1 ;; esac
+```
+
+Both dodge every digit-class token the regex enumerated while reproducing the identical
+CMX-314 regression; `[1-9]`, `[[:alnum:]]`, or no digit-class token whatsoever were all just
+as available to the round after this one. A denylist of spellings — even a whole-job one —
+never converges; it just moves the enumeration from "which step" to "which spelling."
+
+**Guard form that survives:** don't enumerate how the naming check might be SPELLED — ban
+the literal substring it can't be written without. No step's `run:` in this job has any
+legitimate reason to mention the string "cmx" at all: the genuine ref-state check
+CMX-305/CMX-314 need is expressed without it (`git rev-parse --abbrev-ref HEAD` compared
+against `HEAD`, not against a naming convention). `tests/test_ci_workflow.py::test_no_step_
+reasserts_a_cmx_branch_naming_convention` now asserts `"cmx" not in step["run"].lower()` for
+every step, with an explicit `_CMX_LITERAL_ALLOWLIST` (empty today, one-line reason per
+entry — the same shape `_CONTINUE_ON_ERROR_ALLOWLIST` already uses) for the day a step gets
+a legitimate reason to say it. This is a strict superset of the old regex: it closes both
+round-1 mutations above and every other digit-class spelling in one line, because all of
+them still have to name the branch prefix they're checking for. The residual it does NOT
+close — a naming check written without the literal string, e.g. `grep -qE '^ref: refs/
+heads/[a-z]+-[0-9]+$' .git/HEAD` — is a text-rule-over-a-config-language gap that no `run:`
+substring ban can close; the durable fix is asserting the ref-state step's BEHAVIOUR (run
+its `run:` block, read out of the YAML, against throwaway repos on `cmx-999`/`dev`/`main`/
+`release/*`/a detached HEAD and check the exit codes) rather than its text at all — see
+`05-asserting-a-source-constant-instead-of-the-rendered-value.md`. Left as a non-blocking
+follow-up rather than required here, since no mutation exercising that residual has been
+found yet.
+
+**Found:** PR #392 (CMX-314). Round 1: the two step-relocation mutations above the fold,
+applied by the judge to a throwaway checkout of the PR's head, stayed green against
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` (3300 passed, 0 failed, 0 error(s)); closed by
+adding `test_no_step_reasserts_a_cmx_branch_naming_convention`. Round 2: the two
+digit-spelling mutations above, applied the same way, also stayed green (3301 passed, 0
+failed, 0 error(s)); closed by replacing the digit-class denylist with the literal-substring
+ban described above.
