@@ -127,6 +127,30 @@ untouched, so every assertion in this file that looks at that one step stays gre
     hard-fails a legitimately-named non-`cmx-N` branch," which a single pinned step's exact
     `run:` text can never guarantee once a second, unpinned step can carry the same check.
 
+Round 9's own fix had one more gap, closed here in round 10: banning the literal substring
+"cmx" is still a denylist over shell TEXT, and a config language doesn't need the literal
+string to express the same gate. `grep -qE '^ref: refs/heads/[a-z]+-[0-9]+$' .git/HEAD`
+folded into Ruff's `run:`, or a brand-new step keyed on `if:
+${{ !startsWith(github.head_ref, 'cmx-') }}` with `run: exit 1`, both reproduce the exact
+CMX-314 production regression — every PR opened from a legitimately-named non-`cmx-N` branch
+goes red again — while containing no "cmx" substring at all (the first spells the prefix as
+a character class; the second spells it in an `if:` expression the guard never reads, since
+`test_no_step_reasserts_a_cmx_branch_naming_convention` only looked at `step["run"]`).
+
+16. No amount of enumerating what a step's `run:` (or `if:`) TEXT may contain converges,
+    because the space of ways to spell "reject this branch" is unbounded — a regex, a
+    literal ban, a wider literal ban, each just moves the goalposts to a spelling the
+    previous round didn't enumerate. The fix stops denylisting step CONTENT and starts
+    allowlisting what the job's STEPS ARE: pin the whole ordered step list — every step's
+    `name`, `uses`, and exact `run:` text, compared with `==` against a literal table — the
+    same exact-value doctrine invariant 14 already applies to the checkout step's `with:`
+    block and invariant 13 to Pytest's command, generalized to the entire job at once. Under
+    this rule, folding a check into Ruff's `run:` changes Ruff's pinned entry (red), and a
+    brand-new step — regardless of what its `if:` says, since the step is present in the
+    parsed step list whether or not it ever executes — changes the list's length and order
+    (red). No future spelling, key, or step position needs to be predicted in advance,
+    because nothing may be added, removed, or edited without a visible diff here.
+
 The env-override mutation (10) is the one gap the runtime state-assertion step does not
 close on its own for THIS suite — it turns the env override into a red build in actual CI,
 but a suite that only parses the YAML locally never executes the workflow, so a step that
@@ -505,55 +529,91 @@ def test_no_step_in_the_test_job_swallows_its_own_failure(job, steps):
         )
 
 
-_CMX_LITERAL_ALLOWLIST: dict[str, str] = {
-    # step name -> one-line reason it's allowed to mention "cmx" in its run: text.
-    # Empty by design: no step in this job has a legitimate reason to reference a
-    # cmx-N branch-naming convention at all today.
-}
+# (name, uses, run) for every step in the `test` job's steps list, in order. `run` is
+# `.strip()`ped to match how every other test in this file compares `run:` text. This is
+# the literal table invariant 16 pins the whole job against — see
+# test_the_step_list_is_pinned_exactly.
+_EXPECTED_STEPS: list[tuple[str | None, str | None, str | None]] = [
+    (None, "actions/checkout@v4", None),
+    ("Name the checked-out ref", None,
+     'git checkout -B "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"'),
+    ("Install uv", "astral-sh/setup-uv@v5", None),
+    ("Set up Python ${{ matrix.python-version }}", None,
+     "uv python install ${{ matrix.python-version }}"),
+    ("Sync (with dev + dashboard extras)", None,
+     "uv sync --extra dev --extra dashboard --python ${{ matrix.python-version }}"),
+    (None, "actions/setup-node@v4", None),
+    ("Install jsdom (DOM test suites)", None, "npm ci"),
+    ("Ruff", None, "uv run ruff check chela tests"),
+    ("Assert the ref state the CMX-301 guard needs", None,
+     'ref="$(git rev-parse --abbrev-ref HEAD)"\n'
+     '[ -n "$ref" ] && [ "$ref" != "HEAD" ]\n'
+     "git rev-parse --verify --quiet origin/dev"),
+    ("Pytest", None, "uv run pytest -q"),
+]
 
 
-def test_no_step_reasserts_a_cmx_branch_naming_convention(steps):
-    """Round 9 — invariant 15, take 2: round 8's guard (`_CMX_NAMING_ASSERTION`) was a
-    three-item denylist of digit-class token spellings — `cmx` followed within six
-    characters by `[0-9]`, `\\d`, or `0-9` — the exact "guessed list" shape round 4's own
-    fix already ruled out one section up, for `git` verbs: "Ban `git` itself in this
-    window, not a guessed list of its subcommands, so no future verb needs to be predicted
-    in advance." Round 8 reached for the guessed-list form anyway, one level down, and the
-    judge defeated it twice in the same round — once with the POSIX class `[[:digit:]]`,
-    and once with a bare `case */cmx-*)` shell glob carrying no digit-class token at all:
+def test_the_step_list_is_pinned_exactly(steps):
+    """Round 10 — invariant 16: round 9's guard banned the literal substring "cmx" in every
+    step's `run:` text, and its own catalog entry (`docs/defeat_shapes/314-*.md`) called
+    that "a strict superset [of the old regex] ... because all of them still have to name
+    the branch prefix they're checking for." They don't — the judge defeated it twice in
+    the same round, both times without the string "cmx" appearing anywhere in the mutation:
 
-        grep -qE '^ref: refs/heads/cmx-[[:digit:]]+$' .git/HEAD
-        case "$(cat .git/HEAD)" in */cmx-*) ;; *) exit 1 ;; esac
+        # folded into the existing, unpinned Ruff step's run: — no "cmx" substring, no new
+        # step name in the diff, and the naming gate is spelled as a generic task-branch
+        # shape instead:
+        - name: Ruff
+          run: |
+            uv run ruff check chela tests
+            grep -qE '^ref: refs/heads/[a-z]+-[0-9]+$' .git/HEAD
 
-    Both reproduce the exact CMX-314 production regression — every PR opened from a
-    legitimately-named non-`cmx-N` branch (`dev`, `main`, `release/*`, a docs branch, ...)
-    goes red again — while dodging every digit-class token the old regex enumerated.
-    `[1-9]`, `[[:alnum:]]`, or (as the `case` glob shows) no digit-class token whatsoever
-    are all just as available to the next round; a denylist of spellings never converges.
+        # a brand-new step keyed on `if:`, which test_no_step_reasserts_a_cmx_branch_naming_
+        # convention never read (it only looked at step["run"]) — and `run: exit 1` needs no
+        # "cmx" substring at all, since the branch check lives entirely in the condition:
+        - name: Assert the branch is a task branch
+          if: ${{ !startsWith(github.head_ref, 'cmx-') }}
+          run: exit 1
 
-    No step's `run:` in this job has any legitimate reason to mention the string "cmx" at
-    all today — the genuine ref-state check CMX-305/CMX-314 need is expressed without it
-    (`git rev-parse --abbrev-ref HEAD` compared against `HEAD`, not against a naming
-    convention). So instead of enumerating how a naming check might be SPELLED, ban the
-    literal substring itself, the same allowlist-of-zero shape
-    `test_no_step_in_the_test_job_swallows_its_own_failure` already uses for
-    `continue-on-error`: it is a strict superset of the old regex, so it closes both
-    experiments above and every other spelling of the same check in one line, because all
-    of them still have to name the branch prefix they're checking for.
+    Both reproduce the exact CMX-314 production regression (every PR opened from a
+    legitimately-named non-`cmx-N` branch goes red again) while every existing assertion in
+    this file — the pinned ref-state step's exact `run:`, its `if:`-absence, its position
+    immediately before Pytest, the git-ban window, every `continue-on-error` check — stays
+    byte-for-byte untouched. A denylist over step CONTENT has no bottom: a regex, a wider
+    regex, a literal-substring ban, each just relocates the enumeration to a spelling or a
+    YAML key the previous round didn't cover.
+
+    The fix stops denylisting what a step's `run:` may CONTAIN and starts allowlisting what
+    the job's STEPS ARE, generalizing the exact-value doctrine `test_checkout_step_with_
+    block_has_no_extra_keys` (14) already applies to `with:` and `test_pytest_step_runs_
+    the_exact_command` (13) already applies to Pytest's command, to the WHOLE step list at
+    once: every step's `name`, `uses`, and `run:` are compared with `==` against a literal
+    table, in order. Folding a check into Ruff's `run:` changes Ruff's pinned entry — red.
+    A brand-new step changes the list's length and every subsequent step's position — red,
+    regardless of what that step's `if:` says, since the parsed step list contains it
+    whether or not it ever executes. No future spelling, YAML key, or step position needs
+    to be predicted in advance, because nothing may be added, removed, reordered, or edited
+    without a visible diff here. This subsumes `_CMX_LITERAL_ALLOWLIST` and round 9's guard
+    entirely — any step whose `run:` mentions "cmx" is, by construction, a step whose entry
+    in `_EXPECTED_STEPS` doesn't match, the same way any other unpinned edit wouldn't.
     """
-    for step in steps:
-        name = step.get("name", "<unnamed step>")
-        if name in _CMX_LITERAL_ALLOWLIST:
-            continue
-        run = step.get("run", "")
-        assert "cmx" not in run.lower(), (
-            f"step {name!r} run: text mentions 'cmx' ({run!r}) — CMX-314 removed the "
-            "cmx-N branch-naming check because it hard-fails CI on every legitimate "
-            "non-cmx-N branch (dev, main, release/*, ...); no step in this job may "
-            "reference a cmx-N naming convention under any spelling, and none has a "
-            "legitimate reason to mention 'cmx' at all today — if one ever does, add it "
-            "to _CMX_LITERAL_ALLOWLIST with a one-line reason"
+    actual = [
+        (
+            step.get("name"),
+            step.get("uses"),
+            step["run"].strip() if step.get("run") is not None else None,
         )
+        for step in steps
+    ]
+    assert actual == _EXPECTED_STEPS, (
+        f"the `test` job's step list no longer matches the pinned list exactly.\n"
+        f"actual:   {actual!r}\n"
+        f"expected: {_EXPECTED_STEPS!r}\n"
+        "— every step's name/uses/run is pinned, in order; adding, removing, reordering, "
+        "or editing ANY step (even one whose behavior no other test in this file covers) "
+        "changes this list and must be a deliberate, visible diff here, not a silent "
+        "addition"
+    )
 
 
 def test_ref_state_is_asserted_immediately_before_pytest(steps):

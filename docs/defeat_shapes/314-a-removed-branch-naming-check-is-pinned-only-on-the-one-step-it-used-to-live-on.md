@@ -84,25 +84,64 @@ CMX-314 regression; `[1-9]`, `[[:alnum:]]`, or no digit-class token whatsoever w
 as available to the round after this one. A denylist of spellings — even a whole-job one —
 never converges; it just moves the enumeration from "which step" to "which spelling."
 
-**Guard form that survives:** don't enumerate how the naming check might be SPELLED — ban
-the literal substring it can't be written without. No step's `run:` in this job has any
-legitimate reason to mention the string "cmx" at all: the genuine ref-state check
-CMX-305/CMX-314 need is expressed without it (`git rev-parse --abbrev-ref HEAD` compared
-against `HEAD`, not against a naming convention). `tests/test_ci_workflow.py::test_no_step_
-reasserts_a_cmx_branch_naming_convention` now asserts `"cmx" not in step["run"].lower()` for
-every step, with an explicit `_CMX_LITERAL_ALLOWLIST` (empty today, one-line reason per
-entry — the same shape `_CONTINUE_ON_ERROR_ALLOWLIST` already uses) for the day a step gets
-a legitimate reason to say it. This is a strict superset of the old regex: it closes both
-round-1 mutations above and every other digit-class spelling in one line, because all of
-them still have to name the branch prefix they're checking for. The residual it does NOT
-close — a naming check written without the literal string, e.g. `grep -qE '^ref: refs/
-heads/[a-z]+-[0-9]+$' .git/HEAD` — is a text-rule-over-a-config-language gap that no `run:`
-substring ban can close; the durable fix is asserting the ref-state step's BEHAVIOUR (run
-its `run:` block, read out of the YAML, against throwaway repos on `cmx-999`/`dev`/`main`/
-`release/*`/a detached HEAD and check the exit codes) rather than its text at all — see
-`05-asserting-a-source-constant-instead-of-the-rendered-value.md`. Left as a non-blocking
-follow-up rather than required here, since no mutation exercising that residual has been
-found yet.
+**Round 2's own fix had two more gaps, both closed in round 3 — and this time neither
+mutation contains the string "cmx" at all:**
+
+```diff
+       - name: Ruff
+-        run: uv run ruff check chela tests
++        run: |
++          uv run ruff check chela tests
++          grep -qE '^ref: refs/heads/[a-z]+-[0-9]+$' .git/HEAD
+```
+
+```diff
+       - name: Ruff
+         run: uv run ruff check chela tests
++
++      - name: Assert the branch is a task branch
++        if: ${{ !startsWith(github.head_ref, 'cmx-') }}
++        run: exit 1
+```
+
+The first spells the branch-prefix check as a generic task-branch shape (`[a-z]+-[0-9]+`)
+folded into the existing, unpinned Ruff step — no "cmx" substring, no new step name in the
+diff. The second moves the check entirely into a new step's `if:` expression, which
+`test_no_step_reasserts_a_cmx_branch_naming_convention` never read (it only looked at
+`step["run"]`); `run: exit 1` needs no "cmx" substring because the branch match already
+happened in the condition. Both reproduce the identical CMX-314 production regression while
+every existing assertion — the pinned ref-state step's exact `run:`, its `if:`-absence, its
+position immediately before Pytest, the git-ban window, every `continue-on-error` check —
+stays byte-for-byte untouched. The round-2 catalog text above called the literal-"cmx" ban "a
+strict superset of the old regex ... because all of them still have to name the branch
+prefix they're checking for" — that was wrong; a config language has more surface than a
+`run:` string, and the branch prefix can be named as a character class or hidden in a key
+the guard doesn't read at all.
+
+**Guard form that survives:** (round 3 — the round-2 form below no longer does) stop
+denylisting what a step's `run:` (or any other
+key) may CONTAIN, and allowlist what the job's STEPS ARE. `tests/test_ci_workflow.py::
+test_the_step_list_is_pinned_exactly` now pins the WHOLE ordered step list — every step's
+`name`, `uses`, and exact `run:` text, compared with `==` against a literal table
+(`_EXPECTED_STEPS`) — generalizing the exact-value doctrine invariant 14 already applies to
+the checkout step's `with:` block and invariant 13 to Pytest's command, one level up, to the
+entire job at once. Folding a check into Ruff's `run:` changes Ruff's pinned entry (red). A
+brand-new step changes the list's length and every later step's position (red) — regardless
+of what its `if:` says, since the parsed step list contains the step whether or not it ever
+executes. No future spelling, YAML key, or step position needs to be predicted in advance,
+because nothing may be added, removed, reordered, or edited without a visible diff here. This
+subsumes the literal-"cmx" ban (and its `_CMX_LITERAL_ALLOWLIST`) entirely: any step whose
+`run:` mentions "cmx" is, by construction, a step whose entry in `_EXPECTED_STEPS` no longer
+matches, the same as any other unpinned edit wouldn't.
+
+The one thing a full step-list pin still doesn't reach — the same residual round 2's entry
+already named — is a mutation to the PINNED ref-state step's own `run:` text that keeps its
+character count and shape but changes what it does when the shell actually runs it (e.g. an
+off-by-one in the comparison operator). That is a source-constant-vs-rendered-value gap
+(`05-asserting-a-source-constant-instead-of-the-rendered-value.md`), not a step-identity gap,
+and remains a non-blocking follow-up: run the ref-state step's `run:` block, read out of the
+YAML, against throwaway repos on `cmx-999`/`dev`/`main`/`release/*`/a detached HEAD and check
+the exit codes, rather than comparing its text at all.
 
 **Found:** PR #392 (CMX-314). Round 1: the two step-relocation mutations above the fold,
 applied by the judge to a throwaway checkout of the PR's head, stayed green against
@@ -110,4 +149,7 @@ applied by the judge to a throwaway checkout of the PR's head, stayed green agai
 adding `test_no_step_reasserts_a_cmx_branch_naming_convention`. Round 2: the two
 digit-spelling mutations above, applied the same way, also stayed green (3301 passed, 0
 failed, 0 error(s)); closed by replacing the digit-class denylist with the literal-substring
-ban described above.
+ban described above. Round 3: the two no-"cmx"-substring mutations above, applied the same
+way, stayed green (3301 passed, 0 failed, 0 error(s)) through a guard that its own round-2
+writeup mistakenly called complete; closed by replacing the literal-substring ban with the
+full step-list pin (`test_the_step_list_is_pinned_exactly`) described above.
