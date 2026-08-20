@@ -1,0 +1,166 @@
+## 308. A name-match fallback's gating conditions are only ever exercised together, never independently, while a matching live window sits ready to be wrongly claimed
+
+**Assertion form:** a fallback matcher is guarded by several independent conditions that
+must ALL hold before it may fire: an *id-absence* check (`not wid`) that scopes the fallback
+to a row that has not been stamped an id yet, a *status qualifier*
+(`row.get("status") == "claimed"`) that scopes it to one specific race window, and an
+*exact-equality* name check (`lname == name`) that scopes it to the one live window that is
+actually this row's. Every fixture that exercises the fallback's positive case sets ALL
+conditions to their true value at once (`window_id=None`, `status="claimed"`,
+`live[wid] == name` exactly) and every fixture that exercises its negative case removes the
+*downstream signal entirely* (no live fleet, or a live fleet with no name anywhere close to
+a match) rather than holding the signal present and flipping just one gating condition. So no
+single condition is ever proven to be doing anything on its own: a test that drops one check
+can't tell, because either the only live window on offer already fails to exist, or the other
+untouched conditions still happen to agree with the downstream signal by construction.
+
+**Mutation that defeats it:**
+1. `elif not wid and row.get("status") == "claimed":` → `elif not wid:` — the status
+   qualifier is dropped. A `needs_human`/`done`/`failed` row with no `window_id` (long
+   settled, its window gone) now matches ANY live window sharing its old recorded name — a
+   name tmux is free to hand to an unrelated human window after the row's own is reaped.
+   Every existing fixture for the fallback's positive case has `status="claimed"`, so
+   dropping the check changes nothing they observe.
+2. `if lname == name:` → `if name in lname:` — equality is loosened to substring
+   containment. A recorded name that is a *prefix* of some unrelated live window's name
+   (`"cmx-30"` inside `"cmx-305"`) now claims that window too. Every existing fixture either
+   has `lname == name` exactly or `lname` sharing no substring with `name` at all — nothing
+   exercises a near-miss.
+3. `elif not wid and row.get("status") == "claimed":` → `elif row.get("status") == "claimed":`
+   — the id-absence qualifier is dropped instead of the status one. A row that DOES carry a
+   `window_id`, but whose `window_epoch` is dangling (CMX-77 — a tmux restart orphaned it, so
+   today's live window under that `@id` belongs to somebody else), is meant to be dropped
+   outright by the epoch check in the sibling `if` branch above and never reach this `elif`
+   at all. Every existing positive fixture for the fallback has `window_id=None`, so dropping
+   the `not wid` clause changes nothing they observe — the row still reaches the same `elif`
+   by the same `status == "claimed"` path, just now also for rows that carry a stale id.
+4. `if lname == name:` → `if lname in name:` — the MIRROR of mutation 2's containment
+   loosening, operands swapped. `in` is directional: `name in lname` and `lname in name` are
+   two different tests, so closing one does not close the other. The fixture that closed
+   mutation 2 (`window_name="cmx-30"` recorded, `live={"@668": "cmx-305"}`) only ever puts the
+   *recorded* value on the left of `in` — it stays green under this mutation too, because
+   `"cmx-305" in "cmx-30"` is `False`. Swap which value is recorded and which is live
+   (`window_name="cmx-305"` recorded, `live={"@668": "cmx-30"}`) and the same near-miss
+   reappears from the other side: `"cmx-30" in "cmx-305"` is `True`, so the fallback wrongly
+   claims a live window that is merely a *prefix* of the row's own recorded name.
+5. `elif not wid and row.get("status") == "claimed":` → `elif not wid and row.get("status") in
+   dispatcher.ACTIVE_STATUSES:` — the status qualifier is loosened SIDEWAYS to the adjacent
+   status instead of dropped outright (that was mutation 1). `ACTIVE_STATUSES` is
+   `{"claimed", "running"}`, so this admits a `"running"` row with `window_id=None` — a
+   pre-CMX-69 legacy row (see `test_dispatched_window_ids_reads_the_run_row_not_the_name`,
+   which already fixtures exactly this shape) that the PR's own Assumptions section states is
+   *intentionally* left unmatched: it is not mid-spawn, so its live-fleet name match is a
+   coincidence, not a proof of ownership. The fixture that closed mutation 1
+   (`test_a_settled_row_with_no_window_id_does_not_name_match_a_live_window`) pins the status
+   axis at `"needs_human"` — nowhere near the `ACTIVE_STATUSES` boundary — so it can't tell a
+   dropped check from a sideways-widened one: both let `"needs_human"` through equally. A
+   fixture that pins status at `"running"` specifically (the ONE value besides `"claimed"`
+   this mutation admits) is needed to distinguish "check removed" from "check widened by
+   exactly one adjacent value."
+
+6. `owned.add(lwid)` → `owned.add(next(iter(live)))` — once the loop decides to fire, it
+   claims an ARBITRARY live window instead of the one it just matched. Paired with mutation 7
+   below, this is a different axis entirely from 1-5: those are all about *whether* the
+   fallback should fire (WHICH gating condition lets it through); this is about *what it does*
+   once it has decided to fire (WHICH window it claims). Every positive fixture for the
+   fallback hands it a `live` dict with exactly ONE entry, so "the window whose name matched"
+   and "the first (only) window in the fleet" are the same object — a fallback that claims an
+   arbitrary live id instead of the matched one is indistinguishable from a correct one as
+   long as there is nothing else in `live` to tell them apart.
+7. `for lwid, lname in live.items():` → `for lwid, lname in list(live.items())[:1]:` — the
+   loop is truncated to inspect only the first entry tmux happens to report. Production is the
+   opposite of every fixture's shape: `live_agent_windows()` returns the *entire* tmux
+   session, tmux lists windows by index, and the fallback's target was just spawned — so the
+   matching entry is normally near the END of the fleet, not the first. With a one-window
+   fixture, "scan the whole fleet" and "look only at the first entry" are the same loop.
+
+All six mutations are invisible to the same suite for the same structural reason: the
+fixtures prove the fallback fires when it *should*, and refuses when there is *nothing on
+offer to wrongly fire on* — but never refuses while something wrong is on offer, and never
+hold every OTHER condition (including ones not obviously "the one under test", like the id
+itself) fixed at its firing value while flipping only the condition being proven. Mutations 6
+and 7 add a further wrinkle on top of that: even a fixture that *does* put a matching name in
+`live` never puts anything else ALONGSIDE it, so selecting the right entry out of several and
+scanning past the first are both unproven regardless of how carefully the matching condition
+itself is pinned.
+
+**Guard form that survives:** for each gating condition, hold every OTHER condition and the
+downstream signal fixed at the value that would make the fallback fire, and flip only the
+one condition under test to its refusing value — with a live window still present that a
+looser guard *would* have matched:
+- status: a `needs_human` row (not `"claimed"`) with `window_id=None` and
+  `window_name="cmx-305"`, against `live={"@668": "cmx-305"}` — the exact live match that
+  the fallback would gladly claim if the status qualifier weren't checked — asserts the
+  result is empty. This alone only proves the check exists, not its exact width — a status
+  qualifier can be defeated by dropping it OR by widening it sideways to an adjacent value,
+  and a value picked "far" from the boundary (`needs_human` vs. the real `ACTIVE_STATUSES`
+  edge) can't distinguish the two. Also pin status at the *specific* adjacent value the
+  qualifier's own alternate form would admit (here, `"running"`, the other member of
+  `ACTIVE_STATUSES`) with the same matching live window present — proves the check is closed
+  to exactly `"claimed"`, not merely closed to *something*.
+- equality: a `"claimed"` row with `window_name="cmx-30"`, against `live={"@668":
+  "cmx-305"}` — a live name that *contains* the recorded name as a prefix, so a
+  substring-membership check would wrongly match it — asserts the result is empty. Because
+  `in` is directional, this must be checked in BOTH operand orders: also a `"claimed"` row
+  with `window_name="cmx-305"`, against `live={"@668": "cmx-30"}` — the recorded name now
+  containing the live one — asserts the result is empty too. Proving `==` means proving `in`
+  fails to substitute for it from either side, not just the side the first fixture happened
+  to phrase.
+- id-absence: a `"claimed"` row that DOES carry `window_id="@668"` with a dangling
+  `window_epoch` (an old epoch against a `now_epoch` that differs), and a recorded
+  `window_name` that matches some OTHER live window exactly (`live={"@900": "cmx-305"}`) —
+  the exact live match the fallback would gladly claim if the id-absence qualifier weren't
+  checked — asserts the result is empty. The epoch has to actually differ (assert
+  `epoch.is_dangling(...)` as a fixture sanity check), or the row would be honoured by the
+  sibling `if` branch instead and the fallback's own `elif` would never even be reached.
+- selection and traversal: a `"claimed"` row with `window_name="cmx-305"`, against a
+  MULTI-entry `live` fleet where the match is NOT first (`live={"@1": "orchestrator", "@667":
+  "cmx-304", "@668": "cmx-305"}`) — asserting the result is exactly `{"@668"}`, not merely
+  non-empty. A one-window fixture can't distinguish "claimed the window whose name matched"
+  from "claimed some window", nor "scanned the whole fleet" from "looked only at the first
+  entry"; a multi-window fleet with the match placed last forces both.
+
+**Why this is distinct from [[55|shape 55]]:** shape 55 is one compound `and` gate where the
+downstream tier, if reached, resolves identically whether or not the clause is checked (no
+signal either way). Here there IS a downstream signal on offer in the negative fixtures for
+each condition individually — the point is that no single fixture combines "signal present"
+with "exactly one gating condition at its refusing value"; the conditions are always toggled
+in lockstep with the signal's own presence/absence instead of independently against a
+constant signal.
+
+**Found:** `chela/telegram/reconcile.py`'s `dispatched_window_ids`, CMX-308's spawn-time-race
+fallback (PR #384). Round 1: `test_a_claimed_rows_name_match_does_not_fire_without_a_live_fleet`
+and `test_a_claimed_rows_name_match_does_not_claim_an_unrelated_live_window` both proved the
+negative case with no matching name anywhere in `live`; nothing held a matching name present
+while varying `status` or loosening the comparison. The judge applied mutations 1 and 2 above
+in a throwaway checkout and the suite (3220 tests) stayed green under each. Closed round 1 by
+`test_a_settled_row_with_no_window_id_does_not_name_match_a_live_window` (status flipped off,
+matching live window still present) and
+`test_a_claimed_rows_name_match_requires_an_exact_name_not_a_substring` (equality flipped to
+a near-miss, matching-by-containment live window still present). Round 2/3: closing those two
+still left the THIRD condition (`not wid`) exercised at only one value — every fixture set
+`window_id=None` — so mutation 3 above (dropping `not wid` while leaving `status ==
+"claimed"` in place) still went green under the same suite (3223 tests). Closed by
+`test_a_claimed_rows_stale_window_id_does_not_fall_through_to_name_match` (id-absence flipped
+off via a dangling-epoch row that DOES carry a `window_id`, matching live window under a
+DIFFERENT id still present). Round 4: closing the equality mutation only ever exercised `in`
+with the recorded value on the left (`name in lname`) — the mirror operand order, `lname in
+name`, was still unproven, so mutation 4 above (round 1's fixture with recorded and live
+swapped) went green under the same suite (3224 tests). Closed by
+`test_a_claimed_rows_name_match_requires_an_exact_name_not_a_substring_mirrored`, the same
+near-miss fixture with which value is recorded and which is live swapped relative to round
+1's. Round 5: closing the status mutation only ever pinned status at a value far from the
+`ACTIVE_STATUSES` boundary (`"needs_human"`), so mutation 5 above (widening `== "claimed"` to
+`in dispatcher.ACTIVE_STATUSES` instead of dropping the check) still went green under the
+same suite (3225 tests) — `"needs_human"` is excluded either way, so that fixture can't tell
+a dropped check from a sideways-widened one. Closed by
+`test_a_pre_cmx69_running_row_with_no_window_id_does_not_name_match_a_live_window`, which
+pins status at `"running"` specifically — the one other member of `ACTIVE_STATUSES` — with
+the same matching live window present. Round 6: closing all five gating-condition mutations
+still left the loop body itself unproven — every fixture's `live` fleet had at most one
+entry, so mutations 6 and 7 above (claim an arbitrary live id; scan only the first fleet
+entry) both still went green under the same suite (3226 tests). Closed by
+`test_a_claimed_rows_name_match_finds_its_own_window_in_a_multi_window_fleet`, which gives
+the fallback a three-window fleet with the match placed last and asserts the exact id
+claimed — the same fixture kills both mutations at once, since both are only observable once
+`live` holds more than the one entry every earlier fixture happened to use.

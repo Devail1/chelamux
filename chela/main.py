@@ -955,11 +955,12 @@ def _report_installed_plugin(directory: Path, port: int) -> None:
         print("  and it disagrees with what was just rendered:")
         for line in drift:
             print(f"    - {line}")
-        print("\n  Refresh it from Claude Code (chela will not write into Claude Code's "
-              "plugin cache — that copy is Claude Code's to manage, and a reinstall would "
-              "overwrite anything chela put there):")
-        print("    /plugin uninstall chela@chela")
-        print("    /plugin install chela@chela")
+        print("\n  chela will not write into Claude Code's plugin cache directly (that "
+              "copy is Claude Code's to manage) — but `chela update` already refreshes it "
+              "for you, non-interactively, with no uninstall/reinstall needed:")
+        print("    chela update")
+        print("  (or by hand: `claude plugin marketplace update <marketplace>` then "
+              "`claude plugin update chela@<marketplace>`)")
 
 
 def cmd_whoami(args) -> None:

@@ -56,8 +56,20 @@ its own corruption. Write guards that would catch you.
   sacrosanct — never PR straight to it. Changes land `feature-branch → dev`, then a
   maintainer promotes `dev → main`.
 - **Keep PRs focused** — one concern per PR is easier to review and to revert.
-- **Update the [CHANGELOG](CHANGELOG.md).** Any user-facing change adds an entry under
-  `## [Unreleased]` (Added / Changed / Fixed), with the PR number.
+- **Add a changelog fragment.** Any user-facing change adds a new file under
+  [`changelog.d/`](changelog.d/README.md), named `CMX-<your-task-id>.md`, with a Keep a
+  Changelog category heading (Added / Changed / Fixed) and the PR number — see that
+  directory's README for the exact format. **Never edit [CHANGELOG.md](CHANGELOG.md)
+  directly**: every dispatched branch used to append to the same `## [Unreleased]`
+  section, which collided on that exact spot the moment two branches were open at once —
+  GitHub's own PR-mergeability check doesn't run `.gitattributes`' `merge=union` driver, so
+  the PRs went `CONFLICTING` and got no CI at all until a human dropped one side's entry
+  (CMX-308, CMX-309). A fragment file is unique per PR, so it never collides. The judge
+  cross-checks this mechanically (CMX-309): a diff that changes non-prose files without
+  adding a `changelog.d/` fragment (or, for the pre-fragment convention, touching
+  `CHANGELOG.md`) gets a non-blocking "No CHANGELOG.md entry" note on the verdict comment —
+  it never blocks a merge, since "is this actually user-facing" stays a human call, but a
+  PR that skips the entry no longer does so silently.
 - **Update docs** when you change a `CHELA_*` knob, a command, or a hook — the README
   config table and `docs/` are adopter-facing and drift is user-visible.
 - **If your PR ships what a design doc in `docs/` proposed, update that doc's status line
@@ -83,15 +95,18 @@ The [CHANGELOG](CHANGELOG.md) is the source of a release's notes, and
 
 On `main`, after a `dev → main` promotion:
 
-1. Turn `## [Unreleased]` into `## [X.Y.Z] — YYYY-MM-DD` in `CHANGELOG.md`, **and
-   add a fresh, empty `## [Unreleased]` heading back above it.** Skipping this
-   silently breaks every PR merged after the release: there is no section left
-   for them to append to, so the changelog convention lapses with nothing
-   failing until the *next* release ships empty notes. (Measured 2026-08-15:
-   `0.4.0` did exactly this and cost 11 merges their changelog entries.
-   `tests/test_version.py` now guards the section's existence.)
+1. Run `uv run python -m chela.release_notes --release X.Y.Z`. This collects every
+   fragment under [`changelog.d/`](changelog.d/README.md) (in filename order), combines
+   them with whatever is still directly under `## [Unreleased]`, promotes the result into
+   a new `## [X.Y.Z] — YYYY-MM-DD` section in `CHANGELOG.md`, resets `## [Unreleased]` to
+   empty, and deletes the fragment files it consumed. Doing this as one command — instead
+   of hand-renaming the heading and remembering to add a fresh empty one back — closes the
+   gap that used to let the changelog convention lapse silently: `0.4.0` skipped the
+   "add a fresh heading back" half by hand and cost 11 merges their entries before anyone
+   noticed (`tests/test_version.py` guards the heading's existence either way).
 2. Bump `version` in `pyproject.toml` to match.
-3. Commit both together (`Release X.Y.Z — <one-line theme>`).
+3. Commit everything together (`Release X.Y.Z — <one-line theme>`) — `CHANGELOG.md`,
+   `pyproject.toml`, and the fragment deletions under `changelog.d/`.
 4. `git tag -a vX.Y.Z -m "X.Y.Z — <one-line theme>" && git push origin vX.Y.Z`
 
 Pushing the tag is the whole release: CI builds the GitHub Release from that

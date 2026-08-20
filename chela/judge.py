@@ -821,6 +821,18 @@ def _is_prose_path(name: str) -> bool:
     return p.suffix.lower() in _PROSE_SUFFIXES or p.name in _PROSE_BASENAMES
 
 
+def _touches_changelog_entry(path: str) -> bool:
+    """Whether ``path`` is a changelog entry a PR could have written: the legacy
+    ``CHANGELOG.md`` edit, or (CMX-312) a fragment file added under ``changelog.d/`` —
+    any file there except the directory's own ``README.md``, which documents the
+    convention rather than recording a change.
+    """
+    p = Path(path)
+    if p.name == "CHANGELOG.md":
+        return True
+    return p.parent.name == "changelog.d" and p.name != "README.md"
+
+
 def _docs_only_diff(worktree: Path, base_branch: str) -> bool | None:
     """Whether EVERY file this PR touches (vs ``base_branch``) is prose, not code.
 
@@ -894,6 +906,42 @@ def _deletion_heavy_diff(
     deleted = sum(d for _, d, _ in files)
     heavy = deleted >= MIN_DELETION_HEAVY_LINES and added <= deleted * DELETION_HEAVY_ADD_RATIO
     return heavy, added, deleted, sorted({p for _, d, p in files if d > 0})
+
+
+def _changelog_missing_note(worktree: Path, base_branch: str) -> dict | None:
+    """⚖️📝 CMX-309: CONTRIBUTING.md says "any user-facing change adds a CHANGELOG entry ...
+    under `## [Unreleased]`" — prose nobody checks, and it has already failed TWICE: cutting
+    0.7.0 from `dev` would have shipped notes missing half of it (4 of the last 8 merges —
+    CMX-298, CMX-301, CMX-302, CMX-304 — carried no entry, backfilled by hand in #382).
+
+    A NOTE, not a blocking finding, on purpose: whether a given diff is "user-facing" is
+    exactly the kind of judgment call this module's own header reserves for a human — a
+    wrong ``SURVIVED``-grade block here would be the class of mistake the judge is not
+    allowed to make. This only states the mechanical fact — non-prose files changed, and
+    CHANGELOG.md did not — so it is visible on every verdict instead of nowhere at all.
+
+    Returns ``None`` when it cannot tell (no ``base_branch``, unresolvable ref, git failure,
+    empty diff), when the diff is prose-only (nothing user-facing to log — mirrors
+    :func:`_docs_only_diff`), or when a changelog entry is already among the touched files —
+    either the legacy ``CHANGELOG.md`` edit, or (CMX-312) a ``changelog.d/CMX-<id>.md``
+    fragment other than the directory's own ``README.md``.
+    """
+    rows = _diff_numstat(worktree, base_branch)
+    if not rows:
+        return None
+    files = [p for _, _, p in rows]
+    if any(_touches_changelog_entry(f) for f in files):
+        return None
+    if all(_is_prose_path(f) for f in files):
+        return None
+    return {
+        "title": "No CHANGELOG.md entry",
+        "body": (
+            "This diff changes non-prose files but never touches CHANGELOG.md. If any of "
+            "it is user-facing, add an entry under `## [Unreleased]` before merging — see "
+            "CONTRIBUTING.md."
+        ),
+    }
 
 
 def _diff_numstat(worktree: Path, base_branch: str) -> list[tuple[int, int, str]] | None:
@@ -982,6 +1030,9 @@ def run_experiments(
     items = raw.get("experiments") if isinstance(raw, dict) else None
     notes = raw.get("notes") if isinstance(raw, dict) else None
     report.notes = [n for n in notes if isinstance(n, dict)] if isinstance(notes, list) else []
+    changelog_note = _changelog_missing_note(worktree, base_branch)
+    if changelog_note is not None:
+        report.notes.append(changelog_note)
 
     if _git_dirty(worktree):
         report.cannot_verify = (

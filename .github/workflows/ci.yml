@@ -13,7 +13,22 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
+      # CMX-305: tests/test_judge.py's added-defeat-shape-file numbering guard derives the
+      # CMX task number from `git rev-parse --abbrev-ref HEAD` and diffs against
+      # `origin/dev`. The default checkout (depth 1, single ref) leaves HEAD detached on a
+      # pull_request event (abbrev-ref -> "HEAD") and origin/dev unfetched, so the guard
+      # SKIPS instead of running — a hand-opened PR carrying a mis-numbered entry would
+      # sail straight past it. fetch-depth 0 pulls full history, origin/dev included.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Name the checked-out ref
+        # pull_request events check out a detached merge commit. Rename HEAD to the PR's
+        # own branch (from the event payload, not a remote fetch — works for fork PRs too,
+        # since it only relabels the commit already checked out) so branch-name-derived
+        # guards see the real branch instead of "HEAD".
+        run: git checkout -B "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -42,6 +57,28 @@ jobs:
 
       - name: Ruff
         run: uv run ruff check chela tests
+
+      - name: Assert the ref state the CMX-301 guard needs
+        # Rounds 1-4 each closed a mutation that disturbed a DIFFERENT property of this
+        # YAML — a verb, a spelling, a step vs its parent job, a window boundary — and each
+        # round the next mutation just moved to a property the previous assertion didn't
+        # enumerate. A denylist over a config language doesn't converge. This step asserts
+        # the STATE ITSELF, immediately before Pytest reads it: whatever spelling the next
+        # mutation arrives in (a dropped remote, an env override that changes what the
+        # rename step's command expands to, ...), a bad ref here is a red build, not a
+        # silent skip three steps later.
+        #
+        # CMX-314: this used to also require the branch name to match `cmx-[0-9]+`, which
+        # made it fail on every PR whose CMX-301 skip is legitimate by design — `dev`,
+        # `main`, `release/*`, docs branches — exactly the branches
+        # test_cmx_task_number_from_branch_parses_or_gives_a_loud_reason asserts SHOULD skip,
+        # not fail (tests/test_judge.py:669). That took down the 0.8.0 dev->main promotion PR.
+        # What CMX-305 actually needed fixed was a DETACHED checkout (abbrev-ref -> "HEAD"),
+        # not a branch-naming convention, so only that is asserted here.
+        run: |
+          ref="$(git rev-parse --abbrev-ref HEAD)"
+          [ -n "$ref" ] && [ "$ref" != "HEAD" ]
+          git rev-parse --verify --quiet origin/dev
 
       - name: Pytest
         # The JS suites (every *.test.mjs) run inside pytest via tests/test_js_suites.py and

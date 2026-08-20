@@ -163,11 +163,22 @@ def message_display_response(body: dict) -> dict:
     ``displayContent`` as "display the original," so a later chunk's text renders exactly
     as it would have without this hook at all.
 
-    Local time, ``[HH:MM]`` — no seconds (the marker's job is "roughly when did this
+    Local time, ``**[HH:MM]**`` — no seconds (the marker's job is "roughly when did this
     land," not a stopwatch) and no emoji (a variable-width glyph at the start of every
     message; brackets are narrower, monospace-stable, and read as a marker rather than as
     content). CMX-297; the format CMX-277's ``timestamp_response`` (superseded by this)
     used ``HH:MM:SS``.
+
+    ⭐ The ``**`` is MARKDOWN, not ANSI, and that choice is measured rather than stylistic.
+    Claude Code markdown-renders ``displayContent``, so ``**[HH:MM]**`` arrives as a real
+    SGR-1 bold run. Raw escapes are NOT a reliable alternative: probing this build, ANSI
+    bold (SGR 1) and italic (SGR 3) survived but ANSI *dim* (SGR 2) was stripped — the
+    sanitizer has an allowlist, and an allowlist can change under us. Asking the renderer
+    for emphasis does not depend on which escapes happen to be permitted today.
+
+    ⛔ Bold, not colour: colour is impossible on this path at all. ``systemMessage`` does
+    preserve full SGR, but renders on its own line prefixed ``<Event> says:`` — the
+    presentation CMX-285 moved away from precisely to get the marker INLINE.
     """
     if body.get("index") != 0:
         return {}
@@ -175,7 +186,7 @@ def message_display_response(body: dict) -> dict:
     delta = delta if isinstance(delta, str) else ""
     ts = time.strftime("%H:%M")
     return {"hookSpecificOutput": {"hookEventName": "MessageDisplay",
-                                    "displayContent": f"[{ts}] {delta}"}}
+                                    "displayContent": f"**[{ts}]** {delta}"}}
 
 
 def recap_command(port: int | None = None, host: str = "127.0.0.1") -> str:
