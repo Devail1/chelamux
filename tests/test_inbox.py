@@ -3409,3 +3409,45 @@ def test_a_shell_metacharacter_sign_off_is_neutralised(
     text = sends[0][1]
     assert "$(" not in text, f"a command substitution survived into the prompt: {text!r}"
 
+
+def test_final_message_refuses_to_quote_a_sibling_rather_than_this_window(
+        tmp_path, monkeypatch, no_native_status):
+    """The CMX-191 hazard `final_message`'s own docstring warns about, given a real
+    negative control (defeat shape 311): every OTHER CMX-318 test stubs
+    `transcripts.last_assistant_text` to a constant, so none of them can tell one
+    window's transcript from another's — a `final_message` that silently resolved by
+    the wrong window would still pass all of them. This one drives REAL transcript
+    files through the REAL `sessions.transcript_for_window`, exactly like
+    `test_did_work_since_refuses_a_shared_cwd_rather_than_crediting_a_sibling` does for
+    the structurally identical hazard in `did_work_since`.
+
+    @7 and @8 are two DISTINCT (unshared) working directories, each with its own real
+    transcript recording distinct closing words. `final_message("@7")` must return @7's
+    own words — never @8's, and never anything resolved via a wrong or hardcoded id.
+    """
+    cwd7, cwd8 = "/home/x/proj7", "/home/x/proj8"
+    proj7 = tmp_path / transcripts.encode_cwd(cwd7)
+    proj8 = tmp_path / transcripts.encode_cwd(cwd8)
+    proj7.mkdir(parents=True)
+    proj8.mkdir(parents=True)
+    (proj7 / "mine.jsonl").write_text(json.dumps(
+        {"type": "assistant", "message": {"content": "SEVEN's own closing words"}}) + "\n")
+    (proj8 / "sibling.jsonl").write_text(json.dumps(
+        {"type": "assistant", "message": {"content": "EIGHT's own closing words"}}) + "\n")
+
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window", _REAL_TRANSCRIPT_FOR_WINDOW)
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", tmp_path)
+    pane_map = {
+        "@7": sessions.Pane(wid="@7", launched_in=cwd7, claude_pid=101),
+        "@8": sessions.Pane(wid="@8", launched_in=cwd8, claude_pid=102),
+    }
+    monkeypatch.setattr(inbox.sessions, "panes", lambda force=False: pane_map)
+    # Same reasoning as the did_work_since guards above: reinstated so a wrongly-resolving
+    # `final_message` exercises the real cwd path instead of failing on an unstubbed tmux
+    # call that returns nothing for a synthetic wid in a test environment.
+    monkeypatch.setattr(inbox.discovery, "get_window_cwd_by_id",
+                        lambda wid: {"@7": cwd7, "@8": cwd8}.get(wid))
+
+    assert inbox.final_message("@7") == "SEVEN's own closing words"
+    assert inbox.final_message("@8") == "EIGHT's own closing words"
+
