@@ -10,6 +10,8 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-20
+
 ### Added
 
 - **Dispatched agent windows no longer get their own Telegram forum topic.** `dispatcher._spawn`
@@ -19,6 +21,15 @@ history lives in `git log`.
   topic, pinned title and relay for a worker that had never blocked on a human. Dispatcher
   ownership is now also matched by the row's `window_name`, which is recorded at the claim before
   tmux is touched at all. (CMX-308, #384)
+
+- **The judge now flags a missing CHANGELOG entry as a non-blocking note on every verdict
+  comment.** CONTRIBUTING.md said "any user-facing change adds a CHANGELOG entry" — prose
+  nobody checked, and it had already failed twice (4 of the last 8 merges before 0.7.0 carried
+  no entry, backfilled by hand in #382). A diff that changes non-prose files without touching
+  `CHANGELOG.md` (or, per CMX-312, without adding a `changelog.d/CMX-<id>.md` fragment) now
+  gets a "No CHANGELOG.md entry" note — it never blocks a merge, since "is this actually
+  user-facing" stays a human call, but a PR that skips the entry no longer does so silently.
+  (CMX-309, #385)
 
 ### Changed
 
@@ -31,6 +42,21 @@ history lives in `git log`.
   own line prefixed `<Event> says:`, which is the presentation CMX-285 moved away from to get the
   marker inline.
 
+- **Changelog entries are now per-PR fragment files under `changelog.d/`, not shared edits
+  to `CHANGELOG.md`'s `## [Unreleased]` section.** Every dispatched branch used to append
+  its own entry to that one section, and two branches open at once collided on that exact
+  spot — `.gitattributes`' `merge=union` driver (CMX-241) only smooths over a *local* git
+  merge, so GitHub's own PR-mergeability check still reported `CONFLICTING`, with **no CI
+  checks at all** (GitHub can't compute a merge commit), until a human dropped one side's
+  entry. Measured on CMX-308 and CMX-309 (2026-08-18); CMX-309 alone spent five rounds
+  stuck there. A PR now adds `changelog.d/CMX-<task-id>.md` instead — a file unique per
+  task can never collide with a sibling's. `python -m chela.release_notes --release X.Y.Z`
+  collects every fragment (in filename order), merges duplicate categories the same way
+  concurrent `## [Unreleased]` entries always were, promotes the combined body into the new
+  dated section, resets `## [Unreleased]` to empty, and deletes the consumed fragments — one
+  command in place of the two hand-typed "Releasing" edits step 1 used to require. See
+  `changelog.d/README.md` and "Releasing" in `CONTRIBUTING.md`. (CMX-312)
+
 ### Fixed
 
 - **A Telegram message lost to flood control now says so, instead of hiding among identical
@@ -40,6 +66,17 @@ history lives in `git log`.
   screenshot. A genuine drop is now an `error` naming it as flood control, and the relay logs the
   window id and content type that no lower layer knows. (CMX-311, #387)
 
+- **CI's ref-state assertion no longer fails every PR opened from a non-`cmx-N` branch.**
+  CMX-305 rework round 5 added a "Assert the ref state the CMX-301 guard needs" step that
+  hard-failed unless `git rev-parse --abbrev-ref HEAD` matched `cmx-[0-9]+` — but
+  `tests/test_judge.py`'s own CMX-301 guard treats a non-`cmx-N` branch (`dev`, `main`,
+  `release/*`, ...) as a legitimate, tested skip, not a fault. The step turned that designed
+  skip into a red build for every such PR, including the `dev` -> `main` release-promotion
+  PR itself. The assertion now only checks what CMX-305 actually needed: HEAD attached to a
+  real branch (not the detached default of a `pull_request` checkout) and `origin/dev`
+  resolvable. (CMX-314)
+
+## [0.7.0] — 2026-08-18
 ### Added
 
 - **PARKED `TODO.md` bullets now appear on the Work board's Backlog lane.** A task marked
