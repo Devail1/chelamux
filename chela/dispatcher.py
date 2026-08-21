@@ -38,6 +38,7 @@ from chela.workflow import (
 from chela.worktree import (
     BranchGone,
     attach_worktree,
+    NotAWorktree,
     detached_worktree,
     disk_usage_bytes,
     ensure_worktree,
@@ -3293,7 +3294,15 @@ def _cleanup_worktree_on_done(repo_path: Path, row: sqlite3.Row) -> None:
     the state it already expects to see for a finished run.
 
     Best-effort and silent on an already-gone worktree (hand-cleaned, or this task never
-    got past `claimed`): `remove_worktree` itself only warns on failure, it never raises.
+    got past `claimed`): `remove_worktree` only warns on an ordinary failure.
+
+    ⛔ CMX-320: it DOES raise `NotAWorktree` when the recorded path is a real repository
+    rather than a worktree — the corruption that deleted this project's own checkout twice
+    (issue #398). That is caught and logged at ERROR here rather than propagated, because a
+    poisoned row must not take the daemon down with it; the path is simply left alone, which
+    is the safe outcome. It is NOT folded into `remove_worktree`'s False return: that value
+    already means "an ordinary removal failed, carry on", and a corrupt instruction must
+    never be indistinguishable from a routine no-op.
     """
     worktree_path = row["worktree_path"]
     if not worktree_path:
@@ -3301,7 +3310,12 @@ def _cleanup_worktree_on_done(repo_path: Path, row: sqlite3.Row) -> None:
     wt_path = Path(worktree_path)
     if not wt_path.is_dir():
         return
-    remove_worktree(repo_path, wt_path)
+    try:
+        remove_worktree(repo_path, wt_path)
+    except NotAWorktree as e:
+        log.error("task %s: REFUSED to clean up its worktree — %s. Clear the row's "
+                  "worktree_path (it is not a worktree) before this task completes again.",
+                  row["task_id"], e)
 
 
 def _prune_done_rows(
@@ -5393,7 +5407,10 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         conn.commit()
         if alive:
             _kill_windows_named(window)
-        remove_worktree(wf.path.parent, judge.judge_worktree_path(wf, row["task_id"]))
+        try:
+            remove_worktree(wf.path.parent, judge.judge_worktree_path(wf, row["task_id"]))
+        except NotAWorktree as e:                      # CMX-320 — never crash the reaper
+            log.error("judge reap for %s: REFUSED to remove %s", row["task_id"], e)
         handed_over += 1
         # ⛔ Loud. The run stays exactly where it was (`awaiting_review`), which is the ONLY
         # safe answer — but a judge that silently never ran is indistinguishable from a judge
