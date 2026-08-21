@@ -1979,7 +1979,7 @@ def _cleanup(wf, task_id: str, branch: str, judge_epoch: str | None) -> None:
     """
     from chela import dispatcher as _dispatcher
     from chela.dispatcher import _kill_windows_named
-    from chela.worktree import remove_worktree
+    from chela.worktree import NotAWorktree, remove_worktree
 
     current = _dispatcher.resolve_run(task_id)
     still_owns = current is not None and current.get("judge_window_epoch") == judge_epoch
@@ -1990,7 +1990,10 @@ def _cleanup(wf, task_id: str, branch: str, judge_epoch: str | None) -> None:
         )
         return
     try:
-        remove_worktree(wf.path.parent, judge_worktree_path(wf, task_id))
+        try:
+            remove_worktree(wf.path.parent, judge_worktree_path(wf, task_id))
+        except NotAWorktree as e:                      # CMX-320 — never crash cleanup
+            log.error("judge cleanup for %s: REFUSED to remove %s", task_id, e)
     except Exception:
         log.warning("judge: could not remove the judge worktree for %s", task_id, exc_info=True)
     if branch:
