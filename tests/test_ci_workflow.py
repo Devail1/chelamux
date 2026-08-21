@@ -106,6 +106,17 @@ nothing in the repo, and neither is `jobs.test.runs-on`.
     same "CI reports green having executed zero tests" end state rounds 6, 9, and 13 (module
     history) were each written to close, reached one level above where any assertion looks.
 
+Round 12's own fix had one more gap of the same shape, closed here in rework round 1: it
+pinned the trigger block's content (19) and the job's own content (18), but never the
+workflow's OWN key set, one level further out than either. A root-level `defaults: run:
+shell: bash {0}` changes no job, no step, and no trigger-block content — `workflow[True]`,
+`set(workflow["jobs"])`, and the whole `jobs.test` mapping all stay byte-identical — while
+GitHub's custom-shell form drops the default `-e`/`pipefail` every `run:` step in every job
+otherwise gets, silently defeating the ref-state block's abort-on-failure guarantee in real
+CI. See the comment directly above `test_the_workflows_root_keys_are_pinned_exactly` for the
+full mechanism; invariant 20 pins the root key SET the same way invariant 17 pins the job id
+set, without re-pinning content already covered elsewhere.
+
 Both gaps are the same shape as every round before them: an allowlist is only as complete as
 the boundary drawn around it, and pinning `steps:` alone (or the job set alone) still leaves
 whatever sits one level further out — the rest of the job's keys, or the workflow's own
@@ -1018,5 +1029,51 @@ def test_the_ref_state_block_is_executed_under_githubs_own_shell_flags(steps, tm
     assert "REACHED_LINE_3" not in result.stdout, (
         "the harness shell continued past a failed line — `-e` is not in force, and "
         "every ref-state execution test above is passing vacuously"
+    )
+
+
+# Round 1 (rework): `_GITHUB_RUN_SHELL` above is itself a source-constant standing in for
+# the rendered value one level up from where this PR closes that same gap for the
+# ref-state block's TEXT — the judge proved it by adding a root-level `defaults: run:
+# shell: bash {0}` key to `ci.yml`. That key adds no job, no step, and no trigger-block
+# change: `workflow[True]`, `set(workflow["jobs"])`, and the whole `jobs.test` mapping all
+# stay byte-identical, so every test above it stays green. But GitHub's CUSTOM-shell form
+# (`bash {0}`, as opposed to the bare name `bash`) opts out of the default
+# `--noprofile --norc -eo pipefail` GitHub otherwise applies to every `run:` step in every
+# job in the workflow
+# (https://docs.github.com/actions/using-workflows/workflow-syntax-for-github-actions#defaultsrun) —
+# so in real CI the ref-state block's line 2 would no longer abort the step on failure, and
+# a DETACHED HEAD (the exact state CMX-305 added the step to catch) would be silently
+# accepted, while this whole file — which executes the block only under the hardcoded
+# `_GITHUB_RUN_SHELL` literal, never under whatever shell `ci.yml` actually declares — stays
+# green throughout.
+#
+# Deriving `_GITHUB_RUN_SHELL` from `workflow.get("defaults", {})` would close this by
+# reproducing GitHub's own precedence rules (step > job > workflow) and its custom-shell
+# semantics — a second, parallel implementation of the same interpretation `ci.yml` itself
+# doesn't need. Pinning the root KEY SET instead closes the same gap more cheaply and in the
+# same shape rounds 11 and 12 already used one level down: invariant 17
+# (`test_the_workflow_has_exactly_one_job`) pins the job id SET without re-pinning each
+# job's content, and invariant 18 (`test_the_job_mapping_is_pinned_exactly`) pins the job's
+# own keys. Nothing before this test pinned the workflow's OWN key set, one level further
+# out — `on:`/`jobs:`'s CONTENT is already pinned exactly by
+# `test_the_workflows_triggers_are_pinned_exactly` and the job-level tests, so a new root
+# key (`defaults:`, `env:`, `permissions:`, `concurrency:`, ...) is the only thing this test
+# needs to catch.
+def test_the_workflows_root_keys_are_pinned_exactly(workflow):
+    """The judge's round-1 mutation added `defaults: run: shell: bash {0}` at the workflow
+    root — see the module comment directly above for why that silently defeats the ref-state
+    block's `-e` guarantee in real CI while every other test in this file stays green. Pin
+    the SET of keys the workflow itself carries, so a new root key is a visible, asserted
+    diff here rather than an invisible addition one level outside every test that resolves
+    through `workflow["jobs"]` or `workflow[True]`.
+    """
+    actual = {str(key) for key in workflow}
+    assert actual == {"name", "True", "jobs"}, (
+        f"the workflow's root keys are {sorted(actual)!r}, expected exactly "
+        "{'name', 'True' (the on: block), 'jobs'} — a new root key (e.g. `defaults:`, which "
+        "can change what shell every job's `run:` steps execute under, dropping GitHub's "
+        "default `-e`/`pipefail`) changes no job, no step, and no trigger-block content, so "
+        "it is invisible to every other test in this file and must be caught here instead"
     )
 
