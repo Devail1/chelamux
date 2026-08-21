@@ -574,6 +574,29 @@ def test_no_step_in_the_test_job_swallows_its_own_failure(job, steps):
 # text (e.g. by stripping it): an unpinned key on any step (`if:`, `env:`,
 # `continue-on-error:`, `with:`, ...) must change this table, or it changes nothing this
 # test can see.
+# The ref-state assertion's exact shell text, written ONCE. CMX-316: this block used to
+# be typed out twice — inline in `_EXPECTED_STEPS` below, and again as a local
+# `expected_run` inside `test_ref_state_is_asserted_immediately_before_pytest`. Two copies
+# of the same pinned literal is a guard that can silently half-apply: editing `ci.yml` and
+# only ONE copy leaves the other test red for a change that was actually intended, and the
+# natural way to clear a red pin is to make it agree — at which point the pin has been
+# taught the mutation rather than catching it. One constant, both readers.
+#
+# ⚠️ Deduplicating does NOT make the pin stronger, and it is worth being precise about why:
+# both readers now derive from the same source, so a mutation that edits `ci.yml` AND this
+# constant consistently passes both, exactly as it passed both copies before. That is the
+# source-constant-vs-rendered-value residual `docs/defeat_shapes/314-*.md` already names
+# ("an off-by-one in the comparison operator ... run the ref-state step's `run:` block,
+# read out of the YAML"). CMX-317 closes it by EXECUTING the block instead of comparing its
+# text. This change only removes the drift-between-two-copies failure, which is a different
+# one, and neither closes the other.
+_REF_STATE_RUN = (
+    'ref="$(git rev-parse --abbrev-ref HEAD)"\n'
+    '[ -n "$ref" ] && [ "$ref" != "HEAD" ]\n'
+    "git rev-parse --verify --quiet origin/dev\n"
+)
+
+
 _EXPECTED_STEPS: list[dict] = [
     {"uses": "actions/checkout@v4", "with": {"fetch-depth": 0}},
     {
@@ -594,11 +617,7 @@ _EXPECTED_STEPS: list[dict] = [
     {"name": "Ruff", "run": "uv run ruff check chela tests"},
     {
         "name": "Assert the ref state the CMX-301 guard needs",
-        "run": (
-            'ref="$(git rev-parse --abbrev-ref HEAD)"\n'
-            '[ -n "$ref" ] && [ "$ref" != "HEAD" ]\n'
-            "git rev-parse --verify --quiet origin/dev\n"
-        ),
+        "run": _REF_STATE_RUN,
     },
     {
         "name": "Pytest",
@@ -739,11 +758,7 @@ def test_ref_state_is_asserted_immediately_before_pytest(steps):
     ref_assert = _step_running(steps, "origin/dev")
     pytest_step = _step_running(steps, "uv run pytest")
 
-    expected_run = (
-        'ref="$(git rev-parse --abbrev-ref HEAD)"\n'
-        '[ -n "$ref" ] && [ "$ref" != "HEAD" ]\n'
-        "git rev-parse --verify --quiet origin/dev"
-    )
+    expected_run = _REF_STATE_RUN.strip()
     assert ref_assert["run"].strip() == expected_run, (
         f"the ref-state-assertion step's run is {ref_assert['run']!r}, expected exactly "
         f"{expected_run!r} — it must actually assert both that HEAD is attached AND that "
