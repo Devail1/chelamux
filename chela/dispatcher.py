@@ -1731,6 +1731,50 @@ def _read_pr_checks(pr_url: str | None, repo_dir: str | None) -> CIStatus:
     return CIStatus(state, sha, failing, run_ids, infra=infra, plain_failures=plain_failures)
 
 
+def pr_live_head_sha(pr_url: str | None, repo_dir: str | None) -> str | None:
+    """Ask GITHUB for this PR's head sha right now — or None if it cannot be known.
+
+    ⛔ CMX-319. The judge's staleness check (:mod:`chela.judge`) used to read its reference
+    head out of the run row's own ``pr_head_sha`` — THE SAME COLUMN the judge checked the
+    worktree out from. When that column is itself stale, the check compares a value against
+    itself, `verified_sha != live_head` is False by construction, and a verdict about a
+    commit that no longer exists is published as a confirmed finding. Measured 2026-08-21 on
+    `adopt-393`: the row sat at ``9b34bfe`` (status ``done``, so nothing refreshed it after
+    the rework pushed ``50675b6``), the judge re-checked-out ``9b34bfe``, found the three
+    guards the REWORK had added to be missing — they were, on that dead commit — and posted
+    three ``SURVIVED`` findings to the PR, which the decisions inbox then escalated as
+    "needs a human look NOW". Every one of them was false.
+
+    A staleness guard whose reference comes from the same place as the value it is checking
+    cannot ever fire. This asks the one authority that is independent of the row.
+
+    ⛔ None on every failure path — gh missing, unauthenticated, timed out, rate-limited, a
+    PR url that will not parse, JSON of the wrong shape. None means UNKNOWN, never "not
+    stale": the caller keeps the existing "both sides must be KNOWN to count as a mismatch"
+    conservatism, so an unreachable GitHub degrades to exactly the behaviour that shipped
+    before this existed rather than inventing staleness (or silently asserting freshness).
+    """
+    number = _pr_number(pr_url)
+    if not number or not repo_dir:
+        return None
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "view", number, "--json", "headRefOid"],
+            cwd=repo_dir, capture_output=True, text=True, errors="replace", timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        data = json.loads(out.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return (data.get("headRefOid") or "").strip() or None
+
+
 def _failing_log_tail(repo_dir: str | None, run_ids: tuple[str, ...]) -> str:
     """The tail of the failing CI log — fetched ONCE, on the transition into red.
 

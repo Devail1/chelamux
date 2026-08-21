@@ -3359,3 +3359,111 @@ def test_cmd_judge_self_check_cli_exits_zero_when_every_guard_is_killed(tmp_path
                                      str(exp_path), "--test-cmd", TEST_CMD, "--cwd", str(root)]):
         main.main()      # the clean path never calls sys.exit — falling through IS exit 0
     assert "safe to commit" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# CMX-319 — the staleness check must not read its reference from the row it checks
+# ---------------------------------------------------------------------------
+
+def _blocking_run_with_heads(tmp_path, *, row_head, judged_head="oldsha000001",
+                             task_id="abc123"):
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha=judged_head, pr_head_sha=row_head)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    return exp_file
+
+
+def test_a_STALE_pr_head_sha_column_no_longer_hides_a_dead_head(tmp_path):
+    """⛔ CMX-319, the live incident. The row's `pr_head_sha` is ITSELF stale — frozen at the
+    commit the judge is judging, because the run went `done` and nothing refreshed it after a
+    rework pushed. The old check read its reference straight out of that column, so it
+    compared `oldsha000001 != oldsha000001` — False by construction — concluded the head was
+    fresh, and published a verdict about a commit that no longer exists as a CONFIRMED
+    finding. On 2026-08-21 that put three false `SURVIVED` findings on PR #393 and had the
+    decisions inbox escalate them as "needs a human look NOW".
+
+    GitHub says the head is `newsha000002`, so this IS stale and must be reported as such.
+
+    Revert `live_head` to `(live_run or {}).get("pr_head_sha")` and this goes red: the row
+    agrees with the judged sha, staleness is never detected, and the run takes a rework round
+    for a dead commit.
+    """
+    exp_file = _blocking_run_with_heads(tmp_path, row_head="oldsha000001")
+    posted: list[str] = []
+    with patch.object(dispatcher, "pr_live_head_sha", return_value="newsha000002"), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run("abc123", exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_STALE_HEAD, (
+        f"a verdict about a dead commit was published as {result['state']!r} — the row's "
+        "own pr_head_sha agreed with the judged sha, which is exactly the case the old "
+        "self-referential check could never see"
+    )
+    run = dispatcher.resolve_run("abc123")
+    assert (run["rework_count"] or 0) == 0, "a round was spent on a dead commit"
+    assert run["judge_state"] != judge.J_BLOCKED_RACE, (
+        "a superseded verdict was recorded as a confirmed race finding — that is what the "
+        "inbox escalates at full severity"
+    )
+    assert posted and "newsha000002" in posted[0], (
+        "the posted comment must name the newer commit that superseded this verdict"
+    )
+
+
+def test_a_genuinely_current_head_still_blocks_normally(tmp_path):
+    """MUST BE ACCEPTED. The guard is worthless if it calls everything stale: when GitHub
+    agrees the judged commit IS the head, a surviving guard is a real, current finding and
+    must take its rework round exactly as before.
+
+    This is the control for the test above — without it, `stale_head = True` unconditionally
+    would pass that one while silently disabling every blocking verdict in the system.
+    """
+    exp_file = _blocking_run_with_heads(tmp_path, row_head="oldsha000001")
+    with patch.object(dispatcher, "pr_live_head_sha", return_value="oldsha000001"), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (True, "")):
+        result = judge.judge_run("abc123", exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_BLOCKED, (
+        f"a current, confirmed finding was downgraded to {result['state']!r}"
+    )
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "changes_requested"
+
+
+def test_an_unreachable_github_degrades_to_the_row_never_to_a_false_freshness(tmp_path):
+    """`pr_live_head_sha` returns None for every failure — gh missing, unauthenticated,
+    timed out. That is UNKNOWN, and the caller must fall back to the row's column, i.e. to
+    exactly the behaviour that shipped before CMX-319, rather than inventing staleness or
+    asserting freshness. Here the row still carries the real mismatch, so it is detected.
+    """
+    exp_file = _blocking_run_with_heads(tmp_path, row_head="newsha000002")
+    posted: list[str] = []
+    with patch.object(dispatcher, "pr_live_head_sha", return_value=None), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run("abc123", exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_STALE_HEAD
+    assert dispatcher.resolve_run("abc123")["rework_count"] == 0
+
+
+def test_the_live_head_OVERRIDES_a_row_that_disagrees_with_github(tmp_path):
+    """Precedence, pinned: GitHub is the authority and the row is only the fallback. A row
+    that wrongly claims a DIFFERENT head must not manufacture staleness when GitHub says the
+    judged commit is still current — otherwise a lagging column turns every real finding
+    into a discarded one, which is the same failure inverted.
+    """
+    exp_file = _blocking_run_with_heads(tmp_path, row_head="rowsha000003")
+    with patch.object(dispatcher, "pr_live_head_sha", return_value="oldsha000001"), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (True, "")):
+        result = judge.judge_run("abc123", exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_BLOCKED, (
+        "the row's stale disagreement overrode GitHub's answer — the live head must win"
+    )
+

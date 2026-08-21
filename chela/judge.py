@@ -1682,7 +1682,18 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
         # be KNOWN to count as a mismatch (an unset sha is not positive staleness evidence —
         # same conservatism as `contract.merge`'s CMX-238 staleness gate).
         live_run = dispatcher.resolve_run(task_id)
-        live_head = (live_run or {}).get("pr_head_sha")
+        # ⛔ CMX-319: ask GITHUB for the head, and fall back to the row only when it cannot
+        # be reached. Reading the reference out of `pr_head_sha` — the same column
+        # `_spawn_judge` checked this worktree out from — makes the comparison below
+        # `verified_sha != verified_sha` whenever that column is ITSELF stale, so the one
+        # case this guard exists to catch is the one case it structurally cannot see. That
+        # is not hypothetical: on 2026-08-21 `adopt-393` sat at `done` with `pr_head_sha`
+        # frozen at the pre-rework commit, the judge re-judged that dead commit, and three
+        # FALSE `SURVIVED` findings were published to the PR and escalated by the inbox as
+        # urgent. A staleness check must not take its reference from the thing it is
+        # checking.
+        row_head = (live_run or {}).get("pr_head_sha")
+        live_head = dispatcher.pr_live_head_sha(pr_url, repo_dir) or row_head
         stale_head = bool(verified_sha and live_head and verified_sha != live_head)
 
         if stale_head:
