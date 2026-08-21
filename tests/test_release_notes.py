@@ -16,11 +16,14 @@ import pytest
 from chela import release_notes
 from chela.release_notes import (
     ReleaseNotFoundError,
+    StaleFragmentError,
     UnrecognisedHeadingError,
     collect_fragments,
     extract_release_notes,
     latest_released_version,
     promote_unreleased,
+    released_task_ids,
+    stale_fragments,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -646,3 +649,120 @@ def test_changelog_d_argument_default_is_wired_to_the_resolver():
     # pinned by one assertion.
     args = release_notes._build_parser().parse_args([])
     assert args.changelog_d == _REPO_ROOT / "changelog.d"
+
+
+# ---------------------------------------------------------------------------
+# CMX-315 — a fragment that already shipped must never be collected twice
+# ---------------------------------------------------------------------------
+
+_RELEASED_SAMPLE = """\
+# Changelog
+
+## [Unreleased]
+
+### Added
+
+- pending, not published (CMX-400)
+
+## [0.8.0] — 2026-08-20
+
+### Fixed
+
+- something that shipped (CMX-309, #385)
+"""
+
+
+def _fragment_dir(tmp_path, **files):
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "README.md").write_text("convention doc — never a fragment")
+    for name, body in files.items():
+        (d / name).write_text(body)
+    return d
+
+
+def test_released_task_ids_reads_dated_sections_only():
+    ids = released_task_ids(_RELEASED_SAMPLE)
+    assert "309" in ids, "a marker in the dated 0.8.0 section is published"
+    # MUST BE ACCEPTED: `## [Unreleased]` is pending, not published. Counting it would
+    # call a fragment stale for duplicating an entry it is allowed to duplicate —
+    # `_merge_duplicate_subheadings` exists precisely to merge those.
+    assert "400" not in ids, "an Unreleased marker has not shipped and is not released"
+
+
+def test_stale_fragments_flags_one_already_published_in_a_dated_section(tmp_path):
+    d = _fragment_dir(tmp_path, **{"CMX-309.md": "### Fixed\n\n- shipped (CMX-309, #385)\n"})
+    assert [p.name for p in stale_fragments(_RELEASED_SAMPLE, d)] == ["CMX-309.md"]
+
+
+def test_stale_fragments_accepts_a_fresh_fragment(tmp_path):
+    """MUST BE ACCEPTED — the guard is worthless if it cannot pass the normal case."""
+    d = _fragment_dir(tmp_path, **{"CMX-999.md": "### Added\n\n- brand new (CMX-999)\n"})
+    assert stale_fragments(_RELEASED_SAMPLE, d) == []
+
+
+def test_stale_fragments_judges_by_filename_not_by_cited_prose(tmp_path):
+    """A fragment routinely cites sibling task ids in its body — CMX-315's own cites
+    CMX-312. Matching on prose would call every such fragment stale the moment any
+    task it mentions shipped, which is the guard firing on correct work.
+    """
+    d = _fragment_dir(tmp_path, **{
+        "CMX-999.md": "### Changed\n\n- follows up on CMX-309 (CMX-309 shipped) (CMX-999)\n",
+    })
+    assert stale_fragments(_RELEASED_SAMPLE, d) == []
+
+
+def test_stale_fragments_ignores_the_readme(tmp_path):
+    d = _fragment_dir(tmp_path)
+    (d / "README.md").write_text("mentions (CMX-309) in prose")
+    assert stale_fragments(_RELEASED_SAMPLE, d) == []
+
+
+def test_promote_unreleased_refuses_a_stale_fragment(tmp_path):
+    d = _fragment_dir(tmp_path, **{"CMX-309.md": "### Fixed\n\n- shipped (CMX-309, #385)\n"})
+    with pytest.raises(StaleFragmentError) as exc:
+        promote_unreleased(_RELEASED_SAMPLE, "0.9.0", "2026-08-21", d)
+    assert "CMX-309.md" in str(exc.value)
+    assert "back-merge" in str(exc.value).lower(), (
+        "the error must name the cause (a skipped main -> dev back-merge), not just "
+        "the symptom — the maintainer reading it has to know what to DO"
+    )
+
+
+def test_cli_release_refuses_a_stale_fragment_without_touching_anything(tmp_path):
+    """The refusal must be TOTAL. `main()` writes the changelog and then unlinks every
+    fragment; a guard that raised after the write would leave a half-released tree.
+    """
+    changelog_path = tmp_path / "CHANGELOG.md"
+    changelog_path.write_text(_RELEASED_SAMPLE)
+    d = _fragment_dir(tmp_path, **{"CMX-309.md": "### Fixed\n\n- shipped (CMX-309, #385)\n"})
+
+    result = _run_cli(
+        "--release", "0.9.0", "--date", "2026-08-21",
+        "--changelog", str(changelog_path), "--changelog-d", str(d),
+    )
+
+    assert result.returncode == 1, result.stdout
+    assert "CMX-309.md" in result.stderr
+    assert changelog_path.read_text() == _RELEASED_SAMPLE, "the changelog was modified"
+    assert (d / "CMX-309.md").exists(), "the fragment was consumed despite the refusal"
+
+
+def test_this_repo_carries_no_already_released_fragment():
+    """Repo hygiene, and the reason this guard is not merely theoretical.
+
+    On 2026-08-21 — one day after 0.8.0 — `dev` still carried `CMX-309.md`,
+    `CMX-312.md` and `CMX-314.md`, whose entries were already published in
+    `## [0.8.0]` on `main`. The release deletes fragments on `main`; nothing carried
+    those deletions back to `dev`; the next release would have republished all three.
+    Checked against THIS branch's own CHANGELOG.md, so it fires the moment a
+    promotion merge brings a released section and a surviving fragment together.
+    """
+    d = release_notes._default_changelog_d_path()
+    stale = stale_fragments(_CHANGELOG.read_text(), d)
+    assert stale == [], (
+        f"{[p.name for p in stale]} already appear in a dated CHANGELOG.md section — "
+        "back-merge `main` into `dev` so the release's fragment deletions reach this "
+        "branch, or delete them by hand if you are certain they shipped"
+    )
+
