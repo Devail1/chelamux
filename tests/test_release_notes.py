@@ -690,6 +690,34 @@ def test_released_task_ids_reads_dated_sections_only():
     assert "400" not in ids, "an Unreleased marker has not shipped and is not released"
 
 
+def test_released_task_ids_ignores_a_bare_mention_in_dated_prose():
+    """A dated entry routinely cites a sibling task id in prose — CMX-315's own
+    fragment cites CMX-312 this way. Matching any bare `CMX-N` (instead of only the
+    parenthesised `(CMX-N)` trailer that actually marks what shipped) would mark
+    that cited sibling as released too, even though it never got its own entry.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- follows up on CMX-309, but only this ships (CMX-999)\n"
+    )
+    ids = released_task_ids(changelog)
+    assert "999" in ids, "the parenthesised trailer marks CMX-999 as published"
+    assert "309" not in ids, "a bare CMX-309 mention in prose is not a published marker"
+
+
+def test_stale_fragments_ignores_a_bare_mention_in_dated_prose(tmp_path):
+    """Mirrors test_released_task_ids_ignores_a_bare_mention_in_dated_prose at the
+    fragment-matching level: a fresh CMX-309 fragment must not be called stale just
+    because some other dated entry mentions CMX-309 in prose without shipping it.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- follows up on CMX-309, but only this ships (CMX-999)\n"
+    )
+    d = _fragment_dir(tmp_path, **{"CMX-309.md": "### Added\n\n- brand new (CMX-309)\n"})
+    assert stale_fragments(changelog, d) == []
+
+
 def test_stale_fragments_flags_one_already_published_in_a_dated_section(tmp_path):
     d = _fragment_dir(tmp_path, **{"CMX-309.md": "### Fixed\n\n- shipped (CMX-309, #385)\n"})
     assert [p.name for p in stale_fragments(_RELEASED_SAMPLE, d)] == ["CMX-309.md"]
@@ -699,6 +727,27 @@ def test_stale_fragments_accepts_a_fresh_fragment(tmp_path):
     """MUST BE ACCEPTED — the guard is worthless if it cannot pass the normal case."""
     d = _fragment_dir(tmp_path, **{"CMX-999.md": "### Added\n\n- brand new (CMX-999)\n"})
     assert stale_fragments(_RELEASED_SAMPLE, d) == []
+
+
+def test_stale_fragments_flags_every_already_published_fragment_not_just_the_first(tmp_path):
+    """The motivating incident had THREE stale fragments surviving a skipped
+    back-merge at once — CMX-309, CMX-312 and CMX-314, all still on `dev` with
+    their text already published in `## [0.8.0]`. A guard that reports only the
+    first would send a maintainer through repeated failed --release runs, fixing
+    one at a time, never told how many are actually sitting in the tree.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- one (CMX-309)\n- two (CMX-312)\n- three (CMX-314)\n"
+    )
+    d = _fragment_dir(tmp_path, **{
+        "CMX-309.md": "### Fixed\n\n- one (CMX-309)\n",
+        "CMX-312.md": "### Fixed\n\n- two (CMX-312)\n",
+        "CMX-314.md": "### Fixed\n\n- three (CMX-314)\n",
+    })
+    assert [p.name for p in stale_fragments(changelog, d)] == [
+        "CMX-309.md", "CMX-312.md", "CMX-314.md",
+    ]
 
 
 def test_stale_fragments_judges_by_filename_not_by_cited_prose(tmp_path):
@@ -743,6 +792,12 @@ def test_cli_release_refuses_a_stale_fragment_without_touching_anything(tmp_path
     )
 
     assert result.returncode == 1, result.stdout
+    # A crash (e.g. the refusal's except clause silently dropping StaleFragmentError
+    # so it propagates as an uncaught exception) also exits 1 and also puts the
+    # fragment's name in stderr via the traceback — pin the absence of a traceback
+    # too, the same way test_cli_requires_version_unless_write_is_given does, so a
+    # crash can't be mistaken for a clean refusal.
+    assert "Traceback" not in result.stderr
     assert "CMX-309.md" in result.stderr
     assert changelog_path.read_text() == _RELEASED_SAMPLE, "the changelog was modified"
     assert (d / "CMX-309.md").exists(), "the fragment was consumed despite the refusal"
