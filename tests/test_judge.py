@@ -3467,3 +3467,157 @@ def test_the_live_head_OVERRIDES_a_row_that_disagrees_with_github(tmp_path):
         "the row's stale disagreement overrode GitHub's answer — the live head must win"
     )
 
+
+# ⚖️ CMX-319 round 1 rework. Every test above patches `dispatcher.pr_live_head_sha` itself
+# via `patch.object`, so none of them ever executes the function's body or looks at what it
+# was called with — a mutation that guts the body's `return` (or a wiring mutation that
+# hands it `None, None` at the call site) is invisible to all of them. These call the real
+# function against a faked `subprocess.run`, the same discipline `test_fetch_ci_jobs_*` in
+# `tests/test_dispatcher_ci.py` uses for `_read_pr_checks`'s sibling reader.
+class _GhResult:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_pr_live_head_sha_asks_gh_for_exactly_this_pr_in_this_repo():
+    """The call-site arguments are what make the answer real: this must run
+    ``gh pr view <number> --json headRefOid`` with ``cwd`` set to the repo it was handed —
+    not some other PR, not some other checkout. A wiring mutation that hands the function
+    ``None, None`` regardless of the real ``pr_url``/``repo_dir`` short-circuits before ever
+    reaching this call, which is exactly what this pins."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return _GhResult(stdout=json.dumps({"headRefOid": "livesha000009"}))
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
+        sha = dispatcher.pr_live_head_sha(
+            "https://github.com/o/r/pull/91", "/some/repo/dir"
+        )
+
+    assert sha == "livesha000009"
+    assert captured["cmd"] == ["gh", "pr", "view", "91", "--json", "headRefOid"], (
+        f"wrong argv: {captured['cmd']!r}"
+    )
+    assert captured["kwargs"].get("cwd") == "/some/repo/dir"
+
+
+def test_pr_live_head_sha_reads_headRefOid_specifically_not_headRefName():
+    """Pins the JSON key, not just that *something* came back. Swapping ``headRefOid`` for
+    ``headRefName`` would make this return a branch name — every verdict's sha comparison
+    would then compare unequal, and the caller's staleness guard would discard every
+    blocking finding as stale. A payload that carries ONLY ``headRefOid`` (no
+    ``headRefName`` at all) proves the value returned came from that key."""
+    with patch.object(
+        dispatcher.subprocess, "run",
+        return_value=_GhResult(stdout=json.dumps({"headRefOid": "onlythiskey0001"})),
+    ):
+        sha = dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo")
+
+    assert sha == "onlythiskey0001"
+
+
+def test_pr_live_head_sha_is_None_with_no_pr_url_or_repo_dir():
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=AssertionError("must not shell out with nothing to ask about"),
+    ):
+        assert dispatcher.pr_live_head_sha(None, "/repo") is None
+        assert dispatcher.pr_live_head_sha("not a pr url", "/repo") is None
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", None) is None
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "") is None
+
+
+def test_pr_live_head_sha_is_None_when_gh_cannot_be_executed():
+    with patch.object(dispatcher.subprocess, "run", side_effect=OSError("no gh on PATH")):
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
+
+
+def test_pr_live_head_sha_is_None_when_gh_times_out():
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=20),
+    ):
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
+
+
+def test_pr_live_head_sha_is_None_on_a_non_zero_exit():
+    with patch.object(
+        dispatcher.subprocess, "run",
+        return_value=_GhResult(returncode=1, stderr="gh: rate limited"),
+    ):
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
+
+
+def test_pr_live_head_sha_is_None_on_unparseable_json():
+    with patch.object(
+        dispatcher.subprocess, "run", return_value=_GhResult(stdout="not json{{{"),
+    ):
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
+
+
+def test_pr_live_head_sha_is_None_when_json_is_not_an_object():
+    """Valid JSON, wrong shape (a bare list) — ``.get`` on it would raise, and this
+    function's whole contract is that it never raises."""
+    with patch.object(
+        dispatcher.subprocess, "run", return_value=_GhResult(stdout=json.dumps([1, 2, 3])),
+    ):
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
+
+
+def test_pr_live_head_sha_is_None_when_headRefOid_is_missing_or_blank():
+    with patch.object(
+        dispatcher.subprocess, "run", return_value=_GhResult(stdout=json.dumps({})),
+    ):
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
+    with patch.object(
+        dispatcher.subprocess, "run",
+        return_value=_GhResult(stdout=json.dumps({"headRefOid": "   "})),
+    ):
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
+
+
+def test_judge_run_calls_pr_live_head_sha_with_THIS_runs_real_pr_url_and_repo_dir(tmp_path):
+    """The [WIRING] shape: a call site that hands `pr_live_head_sha` `None, None` instead of
+    `pr_url, repo_dir` makes the function short-circuit on `if not number or not repo_dir`
+    and return `None` — falling back to the row, which is exactly the pre-CMX-319 hole this
+    PR closes, while every existing test still passes because they all stub
+    `pr_live_head_sha` wholesale via `patch.object` and never look at what it was called
+    with. This does not stub the function at all: it fakes `subprocess.run` underneath the
+    REAL `pr_live_head_sha` and asserts the argv it built names THIS run's actual PR number
+    (91, parsed from the row's `https://github.com/o/r/pull/91`) and THIS run's actual repo
+    dir — not a call that could never look anything real up.
+
+    The row's `pr_head_sha` ("oldsha000001") matches the judged sha, so if the call site
+    ever degrades to `None, None` (real `pr_live_head_sha` returns `None` on that input,
+    caller falls back to the row) this goes GREEN (`J_BLOCKED`, not `J_STALE_HEAD`) instead
+    of red — a genuine wiring regression must flip the observed state, not just the argv.
+    """
+    exp_file = _blocking_run_with_heads(tmp_path, row_head="oldsha000001")
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return _GhResult(stdout=json.dumps({"headRefOid": "newsha000002"}))
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=fake_run), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (True, "")):
+        result = judge.judge_run("abc123", exp_file, cleanup=False)
+
+    assert captured.get("cmd") == ["gh", "pr", "view", "91", "--json", "headRefOid"], (
+        f"pr_live_head_sha was not reached with this run's real PR — got {captured!r}"
+    )
+    repo = dispatcher.resolve_run("abc123")["worktree_path"]
+    assert captured["kwargs"].get("cwd") == repo
+    assert result["state"] == judge.J_STALE_HEAD, (
+        f"got {result['state']!r} — GitHub's live head (newsha000002) disagrees with the "
+        "judged commit (oldsha000001), which the row alone agrees with; a call site "
+        "degraded to None, None would fall back to the row and wrongly report this current"
+    )
+
