@@ -40,7 +40,7 @@ from unittest.mock import patch
 
 import pytest
 
-from chela import dispatcher, event_log, hold, judge
+from chela import dispatcher, event_log, hold, judge, worktree
 
 TEST_CMD = f'"{sys.executable}" -m pytest -q'
 
@@ -917,8 +917,19 @@ def _own_runs_db(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
 
 
-def _workflow_repo(tmp_path: Path, task_id: str, guard_test: str) -> Path:
-    """A repo with a WORKFLOW.md, plus the judge's throwaway worktree already checked out."""
+def _workflow_repo(tmp_path: Path, task_id: str, guard_test: str, *,
+                   linked: bool = False) -> Path:
+    """A repo with a WORKFLOW.md, plus the judge's throwaway worktree already checked out.
+
+    ``linked=True`` builds that worktree the way PRODUCTION does — `git worktree add
+    --detach` off a real repo, so its ``.git`` is a FILE — instead of the standalone
+    `git init` the default takes. CMX-320: those two differ in exactly the dimension
+    `remove_worktree`'s new guard reads (a `.git` DIRECTORY means "real repository, never
+    delete"), so any test that actually REAPS the worktree must use the faithful shape or
+    it is asserting about a fixture artifact rather than about production. The 26 tests
+    that only mutate files inside the directory are unaffected either way and keep the
+    cheaper default.
+    """
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "WORKFLOW.md").write_text(
@@ -930,7 +941,20 @@ def _workflow_repo(tmp_path: Path, task_id: str, guard_test: str) -> Path:
         "---\n\ndo the thing: {{task_title}}\n"
     )
     (repo / "TODO.md").write_text("- [ ] do a thing\n")
-    _project(tmp_path / ".chela" / "wts" / f"judge-{task_id}", guard_test=guard_test)
+    wt = tmp_path / ".chela" / "wts" / f"judge-{task_id}"
+    if linked:
+        # Production's shape: the guard files live in the REPO, and the judge's worktree is
+        # a linked checkout of it (`.git` is a file). See this function's docstring.
+        (repo / "guard.py").write_text(GUARD_PY)
+        (repo / "test_guard.py").write_text(guard_test)
+        _git(repo, "init", "-q", "-b", "main")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "the feature and its proof")
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        worktree.detached_worktree(repo, "main", wt)
+        assert (wt / ".git").is_file(), "fixture must model a LINKED worktree"
+    else:
+        _project(wt, guard_test=guard_test)
     return repo
 
 
@@ -1535,7 +1559,7 @@ def test_a_judge_run_that_FINISHES_reaps_its_own_worktree(tmp_path, monkeypatch)
     clean-verdict path."""
     monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
     task_id = "abc123"
-    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST, linked=True)
     with dispatcher._db() as conn:
         _run_row(conn, repo, task_id)
     exp_file = tmp_path / "experiments.json"
@@ -1556,7 +1580,7 @@ def test_a_judge_run_that_RAISES_still_reaps_its_worktree(tmp_path, monkeypatch)
     whether `judge_run` finishes OR blows up."""
     monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
     task_id = "abc123"
-    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST, linked=True)
     with dispatcher._db() as conn:
         _run_row(conn, repo, task_id)
     exp_file = tmp_path / "experiments.json"
@@ -1631,7 +1655,7 @@ def test_a_second_judge_for_the_same_task_refuses_while_the_first_is_still_runni
     pytest is single-threaded, so this is the only way to get one call genuinely mid-flight
     while a second one starts."""
     task_id = "abc123"
-    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST, linked=True)
     with dispatcher._db() as conn:
         _run_row(conn, repo, task_id, judge_window_epoch="epoch-A")  # dispatcher-launched
     exp_file = tmp_path / "experiments.json"
