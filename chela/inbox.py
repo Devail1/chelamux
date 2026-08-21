@@ -177,6 +177,15 @@ IDLE_CONFIRM_SECONDS = 30
 # much of it; the payload carries all of it.
 SUMMARY_TITLE_CHARS = 60
 
+# The agent's closing words, cut for the one-line notice. Longer than a tracker title
+# (that is a label; this is a sentence someone wrote to be read) but still one line —
+# `_line`'s output is pushed into a prompt, and an essay there is the thing `_event`'s
+# docstring rules out. The untruncated text lives in the payload.
+FINAL_MESSAGE_CHARS = 220
+# The payload copy is a record, not a notification, so it is capped only to keep
+# `inbox.json` from growing without bound if an agent signs off with a wall of text.
+FINAL_MESSAGE_PAYLOAD_CHARS = 4000
+
 _PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:[/?#]|$)")
 # `*` and backticks only. NOT `_` or `~`: a tracker title is full of snake_case
 # identifiers and approximations ("~4096 chars", "pr_state"), and stripping those
@@ -785,6 +794,25 @@ def did_work_since(wid: str, since: float) -> bool:
     return last is not None and last > since
 
 
+def final_message(wid: str) -> str | None:
+    """What the agent last SAID, for the completion notice — or None.
+
+    ⛔ Resolved by ``wid``, never by cwd — the identical CMX-191 hazard
+    :func:`did_work_since` documents at length. A cwd-keyed lookup in a shared directory
+    hands back a SIBLING's transcript, and here that is worse than a wrong timestamp: it
+    would quote one agent's words as another agent's completion summary, which reads as
+    authoritative and is unfalsifiable to whoever receives it.
+
+    Best-effort by construction: an unresolvable window, an unreadable transcript, or a
+    final turn that is pure tool traffic all yield None, and the caller falls back to the
+    template notice that shipped before this existed.
+    """
+    path = sessions.transcript_for_window(wid)
+    if path is None:
+        return None
+    return transcripts.last_assistant_text(path)
+
+
 def run_for_window(name: str | None, runs: list[dict]) -> dict | None:
     """The dispatcher run that owns the window called ``name`` (newest first), if any.
 
@@ -1042,12 +1070,21 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
         # caught in the gap between two tool calls — is never called done.
         finished_evidence = confirmed_idle and did_work_since(wid, since)
         if finished_edge or finished_evidence:
-            out.append(_event("finished",
-                              _line(wid, name, "finished the task you dispatched — "
-                                               "verify + commit.", note),
-                              _window_payload(wid, name, note,
-                                              run_for_window(name, runs)),
-                              wid=wid, clear_watch=True))
+            # CMX-318: carry the agent's OWN closing words, not just the template. The
+            # notice used to say only that a window finished, so the orchestrator's next
+            # move was always `chela read @N` — the completion told it an event happened
+            # and nothing about what happened. The excerpt goes in the summary (the one
+            # line that is actually pushed); the untruncated text goes in the payload,
+            # which is read rather than typed.
+            said = final_message(wid)
+            body = "finished the task you dispatched — verify + commit."
+            if said:
+                body += f" Said: “{_short_title(said, FINAL_MESSAGE_CHARS)}”"
+            payload = _window_payload(wid, name, note, run_for_window(name, runs))
+            if said:
+                payload["final_message"] = said[:FINAL_MESSAGE_PAYLOAD_CHARS]
+            out.append(_event("finished", _line(wid, name, body, note),
+                              payload, wid=wid, clear_watch=True))
             continue
         if was is None:
             continue                      # no baseline — the transition below needs one

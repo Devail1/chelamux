@@ -3283,3 +3283,129 @@ def test_watching_does_not_call_the_peer_fallback_only_when_the_wid_address_cann
     out = capsys.readouterr().out
     assert "windowless orchestrator: pid 4242" in out
     assert "(fallback only" not in out
+
+
+# ---------------------------------------------------------------------------
+# CMX-318 — the completion notice carries the agent's own closing words
+# ---------------------------------------------------------------------------
+#
+# Before this, "finished" was a fixed template: the orchestrator learned that an event
+# had happened and nothing about WHAT happened, so its next move was always to go and
+# read the transcript by hand. The excerpt rides the summary (the only thing pushed);
+# the untruncated text rides the payload (a record, read rather than typed).
+
+def _finished_with_transcript(monkeypatch, said):
+    """Drive the evidence path to a completion, with `said` as the agent's last words."""
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_text", lambda path: said)
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+
+def test_the_finished_notice_quotes_the_agents_last_message(
+        store_file, windows, sends, monkeypatch):
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, "Fixed the parser and added 3 tests, all green")
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    assert len(sends) == 1
+    text = sends[0][1]
+    assert "finished the task you dispatched" in text
+    assert "Fixed the parser and added 3 tests, all green" in text, (
+        f"the completion notice did not carry the agent's own words: {text!r}"
+    )
+
+
+def test_the_finished_notice_stays_one_line(store_file, windows, sends, monkeypatch):
+    """`_event`'s contract: the summary is the ONE line pushed into a prompt. A multi-line
+    sign-off must not turn a notification into an essay typed at someone's terminal."""
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, "line one\nline two\nline three")
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    assert "\n" not in sends[0][1], f"the notice spans multiple lines: {sends[0][1]!r}"
+
+
+def test_a_very_long_sign_off_is_truncated_in_the_notice(
+        store_file, windows, sends, monkeypatch):
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, "w" * 5000)
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    assert len(sends[0][1]) < 500, f"the notice is {len(sends[0][1])} chars — unbounded"
+
+
+def test_the_notice_falls_back_to_the_template_when_the_agent_said_nothing(
+        store_file, windows, sends, monkeypatch):
+    """MUST BE ACCEPTED — a tool-only final turn, an unreadable transcript, or a window
+    that cannot be resolved must still produce the completion notice that shipped before
+    this feature existed. Losing the event would be far worse than losing the excerpt.
+    """
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, None)
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    assert len(sends) == 1
+    assert "finished the task you dispatched" in sends[0][1]
+    assert "Said:" not in sends[0][1], (
+        "an agent that said nothing must not be quoted as having said nothing — "
+        f"got {sends[0][1]!r}"
+    )
+
+
+def test_the_untruncated_message_is_kept_in_the_payload(
+        store_file, windows, sends, monkeypatch):
+    """The excerpt is for reading at a glance; the record is what a UI or a log works
+    with. `_event`'s docstring: the payload keeps the raw text, a record is read."""
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    long_text = "detail " * 40
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_text", lambda path: long_text)
+    # BUSY orchestrator → the event QUEUES instead of being pushed, so the record is
+    # readable off the store (the idiom the judge-payload tests above use).
+    _statuses(monkeypatch, {ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    inbox.tick({ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    finished = [e for e in inbox.load()["queue"] if e["kind"] == "finished"]
+    assert finished, "no finished event queued"
+    assert finished[0]["payload"]["final_message"] == long_text, (
+        "the payload must keep the agent's text untruncated by the SUMMARY's limit — "
+        f"got {finished[0]['payload']['final_message']!r}"
+    )
+    assert "…" in finished[0]["summary"], (
+        "the summary carried the whole 280-char sign-off instead of an excerpt — the "
+        f"one line pushed at a prompt must be cut: {finished[0]['summary']!r}"
+    )
+
+
+def test_a_shell_metacharacter_sign_off_is_neutralised(
+        store_file, windows, sends, monkeypatch):
+    """CMX-79: the summary is TYPED AT A PROMPT, and this feature makes it carry text an
+    agent wrote freely. `$(...)` in a sign-off must not survive into the pushed line.
+    """
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, "done $(rm -rf /) and `whoami`")
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    text = sends[0][1]
+    assert "$(" not in text, f"a command substitution survived into the prompt: {text!r}"
+
