@@ -235,6 +235,7 @@ Round 5's own fix had three more gaps of the same shape, closed here in round 6:
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -876,3 +877,146 @@ def test_the_workflows_triggers_are_pinned_exactly(workflow):
         "on a pull request, while every step- and job-level assertion in this file stays "
         "green because the job they inspect simply never executes"
     )
+
+
+# ---------------------------------------------------------------------------
+# CMX-317 — RUN the ref-state block instead of only comparing its text
+# ---------------------------------------------------------------------------
+#
+# `docs/defeat_shapes/314-*.md` names this exact residual and leaves it open:
+#
+#   "a mutation to the PINNED ref-state step's own `run:` text that keeps its character
+#    count and shape but changes what it does when the shell actually runs it (e.g. an
+#    off-by-one in the comparison operator). That is a source-constant-vs-rendered-value
+#    gap (`05-asserting-a-source-constant-instead-of-the-rendered-value.md`) ... run the
+#    ref-state step's `run:` block, read out of the YAML, against throwaway repos on
+#    `cmx-999`/`dev`/`main`/`release/*`/a detached HEAD and check the exit codes, rather
+#    than comparing its text at all."
+#
+# Every other assertion in this module reads `ci.yml` as TEXT. That is why CMX-316's
+# deduplication explicitly did not claim to close this: one constant compared against
+# itself is still a comparison, and `[ "$ref" = "HEAD" ]` (one character removed from
+# `!=`) is byte-different from the pin, so the pin catches it — but `[ -n "$ref" ]` alone
+# would pass a pin that had been "fixed" to agree, and NOTHING in this file has ever
+# executed the block to find out what it does. These tests are the first thing here that
+# runs the shell.
+#
+# GitHub Actions runs a `run:` step under `bash --noprofile --norc -eo pipefail {0}`
+# (https://docs.github.com/actions/using-workflows/workflow-syntax-for-github-actions
+# #jobsjob_idstepsshell). `-e` is what makes lines 2 and 3 of this block assertions at
+# all rather than statements whose exit codes are discarded, so the harness below MUST
+# reproduce it — running the block under a plain `bash script` would report success no
+# matter what the middle line decided, which is precisely the "unknown reads as OK"
+# failure the block exists to prevent.
+_GITHUB_RUN_SHELL = ["bash", "--noprofile", "--norc", "-eo", "pipefail"]
+
+_GIT_IDENTITY = [
+    "-c", "user.email=test@example.invalid",
+    "-c", "user.name=CI Workflow Test",
+    "-c", "commit.gpgsign=false",
+    "-c", "init.defaultBranch=main",
+]
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    result = subprocess.run(
+        ["git", *_GIT_IDENTITY, *args],
+        cwd=repo, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"git {args} failed in {repo}: {result.stderr}"
+    return result
+
+
+def _throwaway_repo(tmp_path: Path, name: str, *, origin_dev: bool = True) -> Path:
+    """A real git repo with one commit, optionally carrying a local `origin/dev` ref.
+
+    `origin/dev` is written with `update-ref` rather than by configuring and fetching a
+    real remote: the block under test resolves `origin/dev` and does not care how the ref
+    got there, and a test that needed a reachable remote would be a network test.
+    """
+    repo = tmp_path / name
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    (repo / "f.txt").write_text("x\n")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "--quiet", "-m", "initial")
+    if origin_dev:
+        head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        _git(repo, "update-ref", "refs/remotes/origin/dev", head)
+    return repo
+
+
+def _run_ref_state_block(steps, repo: Path, tmp_path: Path) -> subprocess.CompletedProcess:
+    """Execute the ref-state step's `run:`, READ OUT OF ci.yml, in `repo`."""
+    step = _step_running(steps, "origin/dev")
+    script = tmp_path / "ref_state.sh"
+    script.write_text(step["run"])
+    return subprocess.run(
+        [*_GITHUB_RUN_SHELL, str(script)],
+        cwd=repo, capture_output=True, text=True,
+    )
+
+
+@pytest.mark.parametrize("branch", ["cmx-999", "dev", "main", "release/1.2", "docs-only"])
+def test_the_ref_state_block_ACCEPTS_any_attached_branch(steps, tmp_path, branch):
+    """MUST BE ACCEPTED — and this is the CMX-314 production regression, executed.
+
+    CMX-305 shipped a version of this block that hard-failed unless the branch matched
+    `cmx-[0-9]+`, which reddened every PR from `dev`/`main`/`release/*`, including the
+    `dev` -> `main` release-promotion PR. That regression was found by a human on a live
+    PR, not by this suite, because nothing here ran the block. Now a reintroduced naming
+    requirement fails HERE, on the `dev` case, whatever spelling it is written in — a
+    grep, a `case` glob, a POSIX class, or a form nobody has thought of yet — because the
+    test asserts the block's BEHAVIOUR on a non-`cmx-N` branch, not its text.
+    """
+    repo = _throwaway_repo(tmp_path, "repo")
+    _git(repo, "checkout", "--quiet", "-B", branch)
+    result = _run_ref_state_block(steps, repo, tmp_path)
+    assert result.returncode == 0, (
+        f"the ref-state block rejected the legitimate branch {branch!r} "
+        f"(exit {result.returncode}): {result.stderr or result.stdout!r} — a non-cmx-N "
+        "branch is a tested, designed skip for the CMX-301 guard, never a CI failure"
+    )
+
+
+def test_the_ref_state_block_REJECTS_a_detached_head(steps, tmp_path):
+    """The whole point: a `pull_request` checkout leaves HEAD detached by default."""
+    repo = _throwaway_repo(tmp_path, "repo")
+    _git(repo, "checkout", "--quiet", "--detach")
+    result = _run_ref_state_block(steps, repo, tmp_path)
+    assert result.returncode != 0, (
+        "the ref-state block accepted a DETACHED HEAD — that is the exact state CMX-305 "
+        "added it to catch, and accepting it lets the CMX-301 guard skip silently in CI"
+    )
+
+
+def test_the_ref_state_block_REJECTS_a_missing_origin_dev(steps, tmp_path):
+    repo = _throwaway_repo(tmp_path, "repo", origin_dev=False)
+    _git(repo, "checkout", "--quiet", "-B", "cmx-999")
+    result = _run_ref_state_block(steps, repo, tmp_path)
+    assert result.returncode != 0, (
+        "the ref-state block accepted a repo with no `origin/dev` — the CMX-301 guard "
+        "needs that ref to resolve, and a dropped remote must fail here, at the point "
+        "of use, not silently three steps later"
+    )
+
+
+def test_the_ref_state_block_is_executed_under_githubs_own_shell_flags(steps, tmp_path):
+    """Guard the harness itself: without `-e`, every assertion above passes vacuously.
+
+    A block whose middle line decides nothing still exits 0 if the shell keeps going, so
+    the three tests above would ALL stay green against a completely broken block. Prove
+    `-e` is really in force by running a script that fails on line 2 and checking that
+    line 3 never ran.
+    """
+    probe = tmp_path / "probe.sh"
+    probe.write_text("true\nfalse\necho REACHED_LINE_3\n")
+    result = subprocess.run(
+        [*_GITHUB_RUN_SHELL, str(probe)], capture_output=True, text=True,
+    )
+    assert result.returncode != 0, "the harness shell is not failing on a false line"
+    assert "REACHED_LINE_3" not in result.stdout, (
+        "the harness shell continued past a failed line — `-e` is not in force, and "
+        "every ref-state execution test above is passing vacuously"
+    )
+
