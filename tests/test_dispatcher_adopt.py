@@ -455,25 +455,76 @@ def test_a_dispatched_row_is_not_marked_adopted(tmp_path, repo):
     assert dispatcher._is_adopted(dispatcher.resolve_run("cmx-9")) is False
 
 
-def test_rows_adopted_before_the_column_existed_are_backfilled(tmp_path, repo):
-    """A row written by an older chela reads 0 and would be struck exactly as before the
-    fix. The one-time backfill in the schema migration repairs them by `adopt-<n>` task_id
-    — `adopt_pr` is that shape's only writer.
+def test_rows_adopted_before_the_column_existed_are_backfilled(tmp_path):
+    """The one-time repair, exercised in the ONLY situation it exists for: a database that
+    genuinely predates the `adopted` column.
+
+    ⛔ Modelled by building the table WITHOUT the column and then running `ensure_schema`
+    over it — not by inserting `adopted=0` into an already-migrated table. Those are
+    different scenarios, and conflating them is what the ungated backfill did: it could not
+    tell a legacy row from a row `adopt_pr` had just written wrong, so it repaired both and
+    laundered the bug (the judge proved it by flipping the insert to 0 and watching the suite
+    stay green).
     """
-    wf = _wf(repo, tmp_path)
-    with dispatcher._db() as conn:
-        conn.execute(
-            "INSERT INTO runs (task_id, workflow_path, title, status, adopted) "
-            "VALUES ('adopt-4242', ?, 'legacy adopted row', 'awaiting_review', 0)",
-            (str(wf.path),),
-        )
-        conn.commit()
+    db = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(str(db))
+    legacy.execute(
+        "CREATE TABLE runs (task_id TEXT PRIMARY KEY, workflow_path TEXT NOT NULL, "
+        "title TEXT NOT NULL, status TEXT NOT NULL)"
+    )
+    legacy.execute(
+        "INSERT INTO runs (task_id, workflow_path, title, status) "
+        "VALUES ('adopt-4242', '/w', 'adopted before the column existed', 'awaiting_review')"
+    )
+    legacy.execute(
+        "INSERT INTO runs (task_id, workflow_path, title, status) "
+        "VALUES ('cmx-4242', '/w', 'a dispatched row of the same vintage', 'awaiting_review')"
+    )
+    legacy.commit()
 
-    with dispatcher._db() as conn:            # reopening re-runs the migration + backfill
-        row = conn.execute(
-            "SELECT adopted FROM runs WHERE task_id='adopt-4242'").fetchone()
+    dispatcher.ensure_schema(legacy)        # the upgrade: adds the column, repairs once
 
-    assert row["adopted"] == 1, "a legacy adopted row was not backfilled"
+    legacy.row_factory = sqlite3.Row
+    rows = {r["task_id"]: r["adopted"]
+            for r in legacy.execute("SELECT task_id, adopted FROM runs")}
+    legacy.close()
+
+    assert rows["adopt-4242"] == 1, "a legacy adopted row was not repaired by the upgrade"
+    assert rows["cmx-4242"] == 0, (
+        "the repair marked a DISPATCHED row as adopted — it must key on the adopt- shape, "
+        "not blanket every row"
+    )
+
+
+def test_the_backfill_does_NOT_re_run_on_later_connections(tmp_path):
+    """⛔ The repair must fire ONCE per database, on the upgrade tick — never again.
+
+    `ensure_schema` runs on EVERY `_db()` open. An ungated backfill there makes
+    `task_id LIKE 'adopt-%'` a LIVE discriminator re-evaluated on every connection — exactly
+    the proxy CMX-321 exists to remove, reintroduced one layer down — and it silently repairs
+    a broken `adopt_pr` insert before any test can observe it.
+
+    Re-running `ensure_schema` on an already-migrated DB must leave a deliberately-0 row
+    alone.
+    """
+    db = tmp_path / "already.db"
+    conn = sqlite3.connect(str(db))
+    dispatcher.ensure_schema(conn)          # first open: column created, repair runs
+    conn.execute(
+        "INSERT INTO runs (task_id, workflow_path, title, status, adopted) "
+        "VALUES ('adopt-777', '/w', 'written with adopted=0 by a BUG', 'awaiting_review', 0)"
+    )
+    conn.commit()
+
+    dispatcher.ensure_schema(conn)          # a later open must NOT launder it
+
+    conn.row_factory = sqlite3.Row
+    got = conn.execute("SELECT adopted FROM runs WHERE task_id='adopt-777'").fetchone()
+    conn.close()
+    assert got["adopted"] == 0, (
+        "a later connection re-ran the backfill and repaired a row that adopt_pr wrote "
+        "wrong — the bug is now invisible to every test that reads through _db()"
+    )
 
 
 def test_is_adopted_tolerates_a_row_without_the_column(tmp_path):

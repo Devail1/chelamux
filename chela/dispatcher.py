@@ -1081,6 +1081,7 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
     """)
     # Idempotent migrations for pre-existing DBs. A row written before a column
     # existed simply reads NULL there — never a crash: this runs unattended.
+    added: set[str] = set()
     for _column, ddl in (
         ("pr_url", "ALTER TABLE runs ADD COLUMN pr_url TEXT"),
         ("pr_state", "ALTER TABLE runs ADD COLUMN pr_state TEXT"),
@@ -1248,15 +1249,24 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
     ):
         try:
             conn.execute(ddl)
+            added.add(_column)          # the column did NOT exist until just now
         except sqlite3.OperationalError:
             pass  # column already exists
     # ⚖️🚪 CMX-321 backfill: rows adopted BEFORE the column existed read 0 and would be
     # struck `done` on the next reconcile exactly as they were before this fix. `adopt_pr`
-    # is the only writer of the `adopt-<pr_number>` task_id shape, so it identifies them
-    # exactly. ⛔ Used ONCE, here, as a bounded one-time repair — never as the runtime
-    # discriminator: `_is_adopted` reads the recorded column, because a task_id prefix is
-    # another proxy, and swapping one proxy for another is not what this ticket is for.
-    conn.execute("UPDATE runs SET adopted=1 WHERE adopted=0 AND task_id LIKE 'adopt-%'")
+    # is the only writer of the `adopt-<pr_number>` task_id shape, so it identifies them.
+    #
+    # ⛔ GATED ON `added` SO IT RUNS EXACTLY ONCE PER DATABASE — on the tick that creates the
+    # column, never again. `ensure_schema` runs on EVERY `_db()` open, and an ungated
+    # backfill here would make `task_id LIKE 'adopt-%'` a LIVE discriminator re-evaluated on
+    # every connection: precisely the proxy this ticket exists to remove, reintroduced one
+    # layer down. It also laundered a broken write — the judge proved it by flipping
+    # `adopt_pr`'s insert to `adopted=0` and watching the suite stay green, because the next
+    # connection repaired the row before any assertion could see it. A repair that cannot
+    # tell a legacy row from a bug it is hiding will hide the bug. `_is_adopted` reads the
+    # recorded column and nothing else.
+    if "adopted" in added:
+        conn.execute("UPDATE runs SET adopted=1 WHERE task_id LIKE 'adopt-%'")
     conn.commit()
     return conn
 
