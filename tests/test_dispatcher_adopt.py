@@ -20,6 +20,7 @@ that an adopted PR actually gets a judge spawned on the next tick.
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -414,14 +415,31 @@ def test_a_DISPATCHED_row_that_leaves_the_tracker_is_still_struck_done(
 
 
 def test_adopt_records_the_origin_as_a_FACT_on_the_row(tmp_path, repo):
-    """The column is written at adoption, so nothing downstream has to infer it."""
+    """The column is written at adoption, so nothing downstream has to infer it.
+
+    ⛔ Reads the row with a RAW sqlite connection, bypassing `dispatcher._db()` /
+    `resolve_run`. Every `_db()` open re-runs the CMX-321 backfill migration
+    (`UPDATE runs SET adopted=1 WHERE adopted=0 AND task_id LIKE 'adopt-%'`) — it exists to
+    repair rows from BEFORE the column existed, but it cannot tell that apart from a row
+    `adopt_pr` itself just got wrong: both are `adopted=0` with an `adopt-<n>` task_id. Going
+    through `resolve_run` here would silently launder a broken `adopt_pr` insert back to 1
+    before the assertion ever saw it — which is exactly how this went unnoticed before.
+    """
     sha = _branch_from_head(repo, "hand-opened-1")
     wf = _wf(repo, tmp_path)
     with patch.object(dispatcher.subprocess, "run", side_effect=_router(sha, "hand-opened-1")):
         assert dispatcher.adopt_pr("1", wf.path)["ok"] is True
 
+    raw = sqlite3.connect(str(dispatcher.DB_PATH))
+    raw.row_factory = sqlite3.Row
+    try:
+        row = raw.execute("SELECT adopted FROM runs WHERE task_id='adopt-1'").fetchone()
+    finally:
+        raw.close()
+    assert row["adopted"] == 1, "adopt_pr must write adopted=1 itself, not rely on a " \
+        "later backfill to repair it"
+
     run = dispatcher.resolve_run("adopt-1")
-    assert run["adopted"] == 1
     assert dispatcher._is_adopted(run) is True
 
 
