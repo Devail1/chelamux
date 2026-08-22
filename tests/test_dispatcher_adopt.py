@@ -20,6 +20,7 @@ that an adopted PR actually gets a judge spawned on the next tick.
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -326,3 +327,246 @@ def test_chela_adopt_reaches_the_dispatcher_end_to_end(tmp_path, repo):
         main.main()
     run = dispatcher.resolve_run("adopt-1")
     assert run is not None and run["status"] == "awaiting_review"
+
+
+# ---------------------------------------------------------------------------
+# CMX-321 — an adopted row survives reconcile even after it has been REWORKED
+# ---------------------------------------------------------------------------
+#
+# CMX-276 stopped reconcile striking a freshly-adopted row `done` for "leaving the tracker"
+# (it was never IN the tracker, so `task_id not in open_ids` is vacuously true and carries
+# no completion evidence). It did that by testing `worktree_path IS NOT NULL` as a stand-in
+# for "adopted" — which holds only until the row's FIRST REWORK. A rework gets a worktree,
+# the proxy flips, and the next tick strikes the run.
+#
+# Measured 2026-08-21 on adopt-393/-396/-397: all three returned to `done` within one tick
+# of being repaired by hand, which is what proved a hand-repair could not hold.
+
+def _tick_with_empty_tracker(wf, monkeypatch, sha, branch):
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda *a, **k: None)
+    monkeypatch.setattr(dispatcher, "_wait_for_ready", lambda *a, **k: True)
+    monkeypatch.setattr(dispatcher, "_send_seed", lambda *a, **k: True)
+    monkeypatch.setattr(
+        dispatcher, "load_workflow_cached",
+        lambda *a, **k: WorkflowStatus(path=wf.path, workflow=wf, error=None),
+    )
+    monkeypatch.setattr(dispatcher, "get_source", lambda *a, **k: _EmptySource())
+    monkeypatch.setattr(dispatcher, "_claim_order", lambda *a, **k: [])
+    monkeypatch.setattr(dispatcher, "_cleanup_worktree_on_done", lambda *a, **k: None)
+
+
+def test_an_adopted_row_that_has_been_REWORKED_is_not_struck_done(
+        tmp_path, repo, monkeypatch):
+    """🔴 The incident. Adopt a PR, give its row a worktree (what a rework round does), then
+    run an ordinary tick against an EMPTY tracker. The row must stay under review.
+
+    Revert `_is_adopted(row)` to `row["worktree_path"] is not None` and this goes red: the
+    row is struck `done` and drops out of the judge loop for good.
+    """
+    sha = _branch_from_head(repo, "hand-opened-1")
+    wf = _wf(repo, tmp_path)
+    _tick_with_empty_tracker(wf, monkeypatch, sha, "hand-opened-1")
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_router(sha, "hand-opened-1")):
+        assert dispatcher.adopt_pr("1", wf.path)["ok"] is True
+        # A rework round gives the adopted row a worktree — the moment CMX-276's proxy flips.
+        with dispatcher._db() as conn:
+            conn.execute("UPDATE runs SET worktree_path=?, rework_count=1 WHERE task_id=?",
+                         (str(tmp_path / "wt" / "adopt-1"), "adopt-1"))
+            conn.commit()
+        dispatcher.tick(wf.path)
+
+    run = dispatcher.resolve_run("adopt-1")
+    assert run["status"] == "awaiting_review", (
+        f"a reworked ADOPTED row was struck {run['status']!r} for leaving a tracker it was "
+        "never in — it is now outside the judge loop with its PR still open"
+    )
+
+
+def test_a_DISPATCHED_row_that_leaves_the_tracker_is_still_struck_done(
+        tmp_path, repo, monkeypatch):
+    """⭐ MUST BE ACCEPTED — the legitimate behaviour this guard must not break. A row that
+    really was claimed off the tracker, reached review, and then had its line struck (a
+    human merged it) SHOULD reconcile to `done`. A fix that simply stopped striking rows
+    would pass the test above while disabling reconcile entirely.
+    """
+    sha = _branch_from_head(repo, "hand-opened-1")
+    wf = _wf(repo, tmp_path)
+    _tick_with_empty_tracker(wf, monkeypatch, sha, "hand-opened-1")
+
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, branch_name, "
+            "worktree_path, started_at, attempt, pr_url, pr_state) "
+            "VALUES (?, ?, ?, 'awaiting_review', ?, ?, ?, 1, ?, 'open')",
+            ("cmx-777", str(wf.path), "a real dispatched task", "cmx-777",
+             str(tmp_path / "wt" / "cmx-777"), "2026-08-21T10:00:00+00:00",
+             "https://github.com/o/r/pull/777"),
+        )
+        conn.commit()
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_router(sha, "hand-opened-1")):
+        dispatcher.tick(wf.path)
+
+    assert dispatcher.resolve_run("cmx-777")["status"] == "done", (
+        "a dispatched row that left the tracker from a review state must still reconcile "
+        "to done — otherwise reconcile has simply been switched off"
+    )
+
+
+def test_adopt_records_the_origin_as_a_FACT_on_the_row(tmp_path, repo):
+    """The column is written at adoption, so nothing downstream has to infer it.
+
+    ⛔ Reads the row with a RAW sqlite connection, bypassing `dispatcher._db()` /
+    `resolve_run`. Every `_db()` open re-runs the CMX-321 backfill migration
+    (`UPDATE runs SET adopted=1 WHERE adopted=0 AND task_id LIKE 'adopt-%'`) — it exists to
+    repair rows from BEFORE the column existed, but it cannot tell that apart from a row
+    `adopt_pr` itself just got wrong: both are `adopted=0` with an `adopt-<n>` task_id. Going
+    through `resolve_run` here would silently launder a broken `adopt_pr` insert back to 1
+    before the assertion ever saw it — which is exactly how this went unnoticed before.
+    """
+    sha = _branch_from_head(repo, "hand-opened-1")
+    wf = _wf(repo, tmp_path)
+    with patch.object(dispatcher.subprocess, "run", side_effect=_router(sha, "hand-opened-1")):
+        assert dispatcher.adopt_pr("1", wf.path)["ok"] is True
+
+    raw = sqlite3.connect(str(dispatcher.DB_PATH))
+    raw.row_factory = sqlite3.Row
+    try:
+        row = raw.execute("SELECT adopted FROM runs WHERE task_id='adopt-1'").fetchone()
+    finally:
+        raw.close()
+    assert row["adopted"] == 1, "adopt_pr must write adopted=1 itself, not rely on a " \
+        "later backfill to repair it"
+
+    run = dispatcher.resolve_run("adopt-1")
+    assert dispatcher._is_adopted(run) is True
+
+
+def test_a_dispatched_row_is_not_marked_adopted(tmp_path, repo):
+    """MUST BE ACCEPTED — the flag must discriminate, not simply be set everywhere."""
+    wf = _wf(repo, tmp_path)
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status) "
+            "VALUES ('cmx-9', ?, 'dispatched', 'running')", (str(wf.path),),
+        )
+        conn.commit()
+    assert dispatcher._is_adopted(dispatcher.resolve_run("cmx-9")) is False
+
+
+def test_rows_adopted_before_the_column_existed_are_backfilled(tmp_path):
+    """The one-time repair, exercised in the ONLY situation it exists for: a database that
+    genuinely predates the `adopted` column.
+
+    ⛔ Modelled by building the table WITHOUT the column and then running `ensure_schema`
+    over it — not by inserting `adopted=0` into an already-migrated table. Those are
+    different scenarios, and conflating them is what the ungated backfill did: it could not
+    tell a legacy row from a row `adopt_pr` had just written wrong, so it repaired both and
+    laundered the bug (the judge proved it by flipping the insert to 0 and watching the suite
+    stay green).
+    """
+    db = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(str(db))
+    legacy.execute(
+        "CREATE TABLE runs (task_id TEXT PRIMARY KEY, workflow_path TEXT NOT NULL, "
+        "title TEXT NOT NULL, status TEXT NOT NULL)"
+    )
+    legacy.execute(
+        "INSERT INTO runs (task_id, workflow_path, title, status) "
+        "VALUES ('adopt-4242', '/w', 'adopted before the column existed', 'awaiting_review')"
+    )
+    legacy.execute(
+        "INSERT INTO runs (task_id, workflow_path, title, status) "
+        "VALUES ('cmx-4242', '/w', 'a dispatched row of the same vintage', 'awaiting_review')"
+    )
+    legacy.commit()
+
+    dispatcher.ensure_schema(legacy)        # the upgrade: adds the column, repairs once
+
+    legacy.row_factory = sqlite3.Row
+    rows = {r["task_id"]: r["adopted"]
+            for r in legacy.execute("SELECT task_id, adopted FROM runs")}
+    legacy.close()
+
+    assert rows["adopt-4242"] == 1, "a legacy adopted row was not repaired by the upgrade"
+    assert rows["cmx-4242"] == 0, (
+        "the repair marked a DISPATCHED row as adopted — it must key on the adopt- shape, "
+        "not blanket every row"
+    )
+
+
+def test_the_backfill_does_NOT_re_run_on_later_connections(tmp_path):
+    """⛔ The repair must fire ONCE per database, on the upgrade tick — never again.
+
+    `ensure_schema` runs on EVERY `_db()` open. An ungated backfill there makes
+    `task_id LIKE 'adopt-%'` a LIVE discriminator re-evaluated on every connection — exactly
+    the proxy CMX-321 exists to remove, reintroduced one layer down — and it silently repairs
+    a broken `adopt_pr` insert before any test can observe it.
+
+    Re-running `ensure_schema` on an already-migrated DB must leave a deliberately-0 row
+    alone.
+    """
+    db = tmp_path / "already.db"
+    conn = sqlite3.connect(str(db))
+    dispatcher.ensure_schema(conn)          # first open: column created, repair runs
+    conn.execute(
+        "INSERT INTO runs (task_id, workflow_path, title, status, adopted) "
+        "VALUES ('adopt-777', '/w', 'written with adopted=0 by a BUG', 'awaiting_review', 0)"
+    )
+    conn.commit()
+
+    dispatcher.ensure_schema(conn)          # a later open must NOT launder it
+
+    conn.row_factory = sqlite3.Row
+    got = conn.execute("SELECT adopted FROM runs WHERE task_id='adopt-777'").fetchone()
+    conn.close()
+    assert got["adopted"] == 0, (
+        "a later connection re-ran the backfill and repaired a row that adopt_pr wrote "
+        "wrong — the bug is now invisible to every test that reads through _db()"
+    )
+
+
+def test_backfill_does_not_rearm_on_a_later_unrelated_migration(tmp_path, repo):
+    """MUST BE ACCEPTED — the backfill is gated on THIS column's creation tick, never on
+    "some migration ran". The sibling test above proves it does not re-fire on the SAME
+    already-migrated DB when nothing new is added; it can't tell that apart from "gated on
+    `if added:`", because on that DB's second `ensure_schema()` call `added` is empty either
+    way. This test creates the case where `added` is genuinely non-empty on a later call —
+    a DIFFERENT, unrelated column gets added — so a mature DB where `adopted` was added long
+    ago must not have the task_id-prefix backfill fire again just because some later,
+    unrelated migration lands on a future chela version — that would silently launder any
+    stray `adopted=0` row with an `adopt-` task_id forever, exactly the proxy this column
+    replaced.
+
+    Kills the mutation `if "adopted" in added:` -> `if added:`.
+    """
+    wf = _wf(repo, tmp_path)
+    with dispatcher._db():
+        pass  # `adopted` already exists after this — its backfill tick is over
+
+    with sqlite3.connect(str(dispatcher.DB_PATH)) as raw:
+        # simulate a DB one migration behind on some unrelated later column
+        raw.execute("ALTER TABLE runs DROP COLUMN ci_infra_streak")
+        # a stray adopted=0 row with an adopt- task_id that is NOT a legacy row —
+        # it must never be silently repaired by re-running the backfill.
+        raw.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, adopted) "
+            "VALUES ('adopt-9999', ?, 'not actually adopted', 'awaiting_review', 0)",
+            (str(wf.path),),
+        )
+        raw.commit()
+
+    with dispatcher._db() as conn:  # re-adds ci_infra_streak; `adopted` is untouched
+        row = conn.execute(
+            "SELECT adopted FROM runs WHERE task_id='adopt-9999'").fetchone()
+
+    assert row["adopted"] == 0, \
+        "the backfill re-ran on an unrelated migration, not just adopted's own creation"
+
+
+def test_is_adopted_tolerates_a_row_without_the_column(tmp_path):
+    """Runs unattended: a row read before the migration (or a hand-built dict in a test)
+    must degrade to the pre-CMX-321 answer, never raise."""
+    assert dispatcher._is_adopted({"task_id": "adopt-1"}) is False
+
