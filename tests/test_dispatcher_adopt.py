@@ -527,6 +527,44 @@ def test_the_backfill_does_NOT_re_run_on_later_connections(tmp_path):
     )
 
 
+def test_backfill_does_not_rearm_on_a_later_unrelated_migration(tmp_path, repo):
+    """MUST BE ACCEPTED — the backfill is gated on THIS column's creation tick, never on
+    "some migration ran". The sibling test above proves it does not re-fire on the SAME
+    already-migrated DB when nothing new is added; it can't tell that apart from "gated on
+    `if added:`", because on that DB's second `ensure_schema()` call `added` is empty either
+    way. This test creates the case where `added` is genuinely non-empty on a later call —
+    a DIFFERENT, unrelated column gets added — so a mature DB where `adopted` was added long
+    ago must not have the task_id-prefix backfill fire again just because some later,
+    unrelated migration lands on a future chela version — that would silently launder any
+    stray `adopted=0` row with an `adopt-` task_id forever, exactly the proxy this column
+    replaced.
+
+    Kills the mutation `if "adopted" in added:` -> `if added:`.
+    """
+    wf = _wf(repo, tmp_path)
+    with dispatcher._db():
+        pass  # `adopted` already exists after this — its backfill tick is over
+
+    with sqlite3.connect(str(dispatcher.DB_PATH)) as raw:
+        # simulate a DB one migration behind on some unrelated later column
+        raw.execute("ALTER TABLE runs DROP COLUMN ci_infra_streak")
+        # a stray adopted=0 row with an adopt- task_id that is NOT a legacy row —
+        # it must never be silently repaired by re-running the backfill.
+        raw.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, adopted) "
+            "VALUES ('adopt-9999', ?, 'not actually adopted', 'awaiting_review', 0)",
+            (str(wf.path),),
+        )
+        raw.commit()
+
+    with dispatcher._db() as conn:  # re-adds ci_infra_streak; `adopted` is untouched
+        row = conn.execute(
+            "SELECT adopted FROM runs WHERE task_id='adopt-9999'").fetchone()
+
+    assert row["adopted"] == 0, \
+        "the backfill re-ran on an unrelated migration, not just adopted's own creation"
+
+
 def test_is_adopted_tolerates_a_row_without_the_column(tmp_path):
     """Runs unattended: a row read before the migration (or a hand-built dict in a test)
     must degrade to the pre-CMX-321 answer, never raise."""

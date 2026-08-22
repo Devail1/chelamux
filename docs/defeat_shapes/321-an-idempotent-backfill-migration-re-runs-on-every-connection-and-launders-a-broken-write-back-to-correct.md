@@ -55,3 +55,60 @@ throwaway checkout of the PR's head, stayed green through
 `tests/test_dispatcher_adopt.py::test_adopt_records_the_origin_as_a_FACT_on_the_row`; closed
 by reading the row with a raw `sqlite3` connection instead of `resolve_run`, confirmed to go
 red under the same mutation before the fix was pushed.
+
+**Round 2 — same class of "re-runs on every connection", one turn earlier in the pipeline:**
+round 1's fix stopped the backfill from laundering a bad *read*, but left the backfill's own
+*trigger* unbounded. `ensure_schema()`'s migration loop applies every `(column, ddl)` pair on
+every open and swallows `OperationalError` for a column that already exists; nothing recorded
+which columns THIS call actually added versus which already existed, so the backfill had no
+way to gate on "the tick that creates `adopted`" — it could only run unconditionally, forever.
+
+**Mutation that defeats it:** once that trigger is tightened to a set of `added` columns
+this call actually ALTERed in, the natural next mistake is gating on "some column was added
+this tick" instead of "*this* column was added this tick":
+
+```diff
+-    if "adopted" in added:
+-        conn.execute("UPDATE runs SET adopted=1 WHERE task_id LIKE 'adopt-%'")
++    if added:
++        conn.execute("UPDATE runs SET adopted=1 WHERE task_id LIKE 'adopt-%'")
+```
+
+(the query itself drops the `adopted=0 AND` clause that round 1 carried — once gated on
+`"adopted" in added`, the branch only ever runs on the instant the column's own `ALTER TABLE
+... ADD COLUMN` succeeds, at which point every existing row reads the column's fresh DEFAULT
+of `0` anyway; nothing has had the chance to write `1` yet.)
+
+On a mature DB — `adopted` added long ago, its one legitimate backfill tick long past — this
+still passes every existing test, because every existing test either never adds an unrelated
+column on a later open, or never plants a stray `adopted=0`/`adopt-`-prefixed row for the
+backfill to wrongly "repair". The moment some future, wholly unrelated migration lands (a new
+column with its own `ALTER TABLE`), `added` goes non-empty on that tick too — re-arming the
+task_id-prefix backfill on a DB where it was supposed to have fired exactly once, and silently
+overwriting any row that is merely `adopted=0` with an `adopt-` task_id, legacy or not.
+
+**Guard form that survives:** a DB built from a genuine pre-`adopted` schema (via
+`ALTER TABLE runs DROP COLUMN adopted`, not a hand-set `adopted=0` on an already-migrated
+one) proves the backfill fires on `adopted`'s own creation tick; a second DB where `adopted`
+already exists but a *different*, unrelated column gets dropped and re-added proves the
+backfill does NOT fire again on that later, unrelated tick — a stray `adopted=0`/`adopt-*`
+row planted between the two opens must still read `0` afterward:
+
+```python
+with sqlite3.connect(str(dispatcher.DB_PATH)) as raw:
+    raw.execute("ALTER TABLE runs DROP COLUMN ci_infra_streak")  # unrelated later column
+    raw.execute("INSERT INTO runs (task_id, ..., adopted) VALUES ('adopt-9999', ..., 0)")
+with dispatcher._db() as conn:  # re-adds ci_infra_streak; `adopted` untouched
+    row = conn.execute("SELECT adopted FROM runs WHERE task_id='adopt-9999'").fetchone()
+assert row["adopted"] == 0
+```
+
+Same root cause as round 1, one layer earlier: a repair that is supposed to run exactly once
+needs its OWN "have I already run" bookkeeping, keyed to the one tick that is actually true —
+not a nearby proxy ("some `_db()` open", "some column got added") that is true far more often
+than the tick it stands in for.
+
+Found: PR #400 (CMX-321), round 2. The mutation above, applied by the judge to a throwaway
+checkout of the PR's head, stayed green through the full suite; closed by tracking `added`
+columns per `ensure_schema()` call and gating the backfill on `"adopted" in added` rather than
+on `added` alone, confirmed to go red under the same mutation before the fix was pushed.
