@@ -690,6 +690,31 @@ def test_released_task_ids_reads_dated_sections_only():
     assert "400" not in ids, "an Unreleased marker has not shipped and is not released"
 
 
+def test_released_task_ids_treats_no_dated_section_as_nothing_released():
+    """A repo before its first release has ONLY `## [Unreleased]` — no dated section
+    exists at all. `released_task_ids`'s `dated is None` branch handles that case
+    through code that never runs when a dated section exists, so the branch above
+    it (exercised by every other test in this file, all of which mount a dated
+    `## [0.8.0]`) never reaches it. Nothing but this test exercises it.
+    """
+    changelog = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- brand new (CMX-1)\n"
+    assert released_task_ids(changelog) == set(), (
+        "with no dated section, nothing has shipped yet — an Unreleased marker "
+        "must not be counted as released"
+    )
+
+
+def test_stale_fragments_accepts_everything_before_the_first_release(tmp_path):
+    """Mirrors test_released_task_ids_treats_no_dated_section_as_nothing_released at
+    the fragment-matching level: a repo with no dated section yet (no release has
+    ever happened) cannot possibly have a stale fragment, no matter what task ids
+    sit under `## [Unreleased]`.
+    """
+    changelog = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- brand new (CMX-1)\n"
+    d = _fragment_dir(tmp_path, **{"CMX-1.md": "### Added\n\n- brand new (CMX-1)\n"})
+    assert stale_fragments(changelog, d) == []
+
+
 def test_released_task_ids_ignores_a_bare_mention_in_dated_prose():
     """A dated entry routinely cites a sibling task id in prose — CMX-315's own
     fragment cites CMX-312 this way. Matching any bare `CMX-N` (instead of only the
@@ -768,13 +793,40 @@ def test_stale_fragments_ignores_the_readme(tmp_path):
 
 
 def test_promote_unreleased_refuses_a_stale_fragment(tmp_path):
-    d = _fragment_dir(tmp_path, **{"CMX-309.md": "### Fixed\n\n- shipped (CMX-309, #385)\n"})
+    """Mounts THREE stale fragments — the motivating incident's own count (CMX-309,
+    CMX-312, CMX-314) — because the claim this guard makes ('a guard that reports
+    only the first would send a maintainer through repeated failed --release runs')
+    is about what the RAISED ERROR tells the maintainer, not just what
+    stale_fragments()'s return list contains. A guard that named only the first
+    stale fragment here would still pass a test mounting just one.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- one (CMX-309)\n- two (CMX-312)\n- three (CMX-314)\n"
+    )
+    d = _fragment_dir(tmp_path, **{
+        "CMX-309.md": "### Fixed\n\n- one (CMX-309)\n",
+        "CMX-312.md": "### Fixed\n\n- two (CMX-312)\n",
+        "CMX-314.md": "### Fixed\n\n- three (CMX-314)\n",
+    })
     with pytest.raises(StaleFragmentError) as exc:
-        promote_unreleased(_RELEASED_SAMPLE, "0.9.0", "2026-08-21", d)
-    assert "CMX-309.md" in str(exc.value)
-    assert "back-merge" in str(exc.value).lower(), (
+        promote_unreleased(changelog, "0.9.0", "2026-08-21", d)
+    message = str(exc.value)
+    assert "CMX-309.md" in message, "the first stale fragment must be named"
+    assert "CMX-312.md" in message, "the second stale fragment must be named too"
+    assert "CMX-314.md" in message, "and the third — not just the first of three"
+    assert "back-merge" in message.lower(), (
         "the error must name the cause (a skipped main -> dev back-merge), not just "
         "the symptom — the maintainer reading it has to know what to DO"
+    )
+    # MUST BE ACCEPTED: the word "back-merge" also appears in the DIAGNOSIS sentence
+    # ("this is what a skipped `main` -> `dev` back-merge looks like"), so the assert
+    # above alone is satisfied even if the ACTIONABLE instruction below it is deleted
+    # whole. Pin the instruction text itself so that half can't be dropped silently.
+    assert "or delete them if you are sure they shipped" in message, (
+        "the error must also tell the maintainer what to DO about it, not just "
+        "diagnose the cause — this is the actionable half, distinct from the "
+        "diagnostic 'back-merge' sentence checked above"
     )
 
 
