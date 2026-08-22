@@ -26,7 +26,8 @@ from pathlib import Path
 
 import pytest
 
-from chela import agent_manager, dispatcher, event_log, inbox, judge, main, sessions, transcripts
+from chela import (agent_manager, dispatcher, event_log, inbox, judge, main, sessionids,
+                   sessions, transcripts)
 
 # Captured at collection time, before the `no_transcript_evidence` autouse fixture
 # (below) overwrites `sessions.transcript_for_window` on every test — the CMX-191
@@ -3344,6 +3345,34 @@ def test_a_very_long_sign_off_is_truncated_in_the_notice(
     assert len(sends[0][1]) < 500, f"the notice is {len(sends[0][1])} chars — unbounded"
 
 
+def test_a_mid_length_sign_off_is_not_cut_to_the_tracker_title_width(
+        store_file, windows, sends, monkeypatch):
+    """Pins `FINAL_MESSAGE_CHARS` (220) apart from `SUMMARY_TITLE_CHARS` (60) — every other
+    CMX-318 fixture is either well under 60 (so it survives either limit unchanged) or far
+    over both (5000 chars, only asserted as "some bound applies"), so nothing distinguishes
+    the two constants. A 166-char sign-off sits strictly between them: it must reach the
+    notice WHOLE if the limit really is 220, and would be cut with a trailing "…" if
+    `FINAL_MESSAGE_CHARS` ever quietly collapsed to the tracker-title width.
+    """
+    said = ("Refactored the dispatcher retry queue to use exponential backoff, added "
+            "coverage for the timeout edge case, and updated the docs to match the new "
+            "behavior end to end.")
+    assert inbox.SUMMARY_TITLE_CHARS < len(said) < inbox.FINAL_MESSAGE_CHARS, (
+        "fixture no longer sits strictly between the two limits — it can't tell them apart"
+    )
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, said)
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    text = sends[0][1]
+    assert said in text, (
+        f"a 166-char sign-off (under FINAL_MESSAGE_CHARS) was cut short: {text!r}"
+    )
+    assert "…" not in text, f"the sign-off was truncated even though it fits: {text!r}"
+
+
 def test_the_notice_falls_back_to_the_template_when_the_agent_said_nothing(
         store_file, windows, sends, monkeypatch):
     """MUST BE ACCEPTED — a tool-only final turn, an unreadable transcript, or a window
@@ -3410,8 +3439,16 @@ def test_a_shell_metacharacter_sign_off_is_neutralised(
     assert "$(" not in text, f"a command substitution survived into the prompt: {text!r}"
 
 
+# Two session ids sharing one project directory below — chosen so that sorting the
+# directory's filenames ALPHABETICALLY (as a buggy "just glob the dir" resolution would)
+# puts SIBLING_SID last, regardless of which window is actually asking. A resolution that
+# trusts the path it was actually given must not care about this ordering at all.
+_MINE_SID = "11111111-1111-4111-8111-111111111117"
+_SIBLING_SID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+
+
 def test_final_message_refuses_to_quote_a_sibling_rather_than_this_window(
-        tmp_path, monkeypatch, no_native_status):
+        tmp_path, monkeypatch):
     """The CMX-191 hazard `final_message`'s own docstring warns about, given a real
     negative control (defeat shape 311): every OTHER CMX-318 test stubs
     `transcripts.last_assistant_text` to a constant, so none of them can tell one
@@ -3421,32 +3458,36 @@ def test_final_message_refuses_to_quote_a_sibling_rather_than_this_window(
     `test_did_work_since_refuses_a_shared_cwd_rather_than_crediting_a_sibling` does for
     the structurally identical hazard in `did_work_since`.
 
-    @7 and @8 are two DISTINCT (unshared) working directories, each with its own real
-    transcript recording distinct closing words. `final_message("@7")` must return @7's
-    own words — never @8's, and never anything resolved via a wrong or hardcoded id.
+    Unlike an earlier version of this test, @7 and @8 share ONE cwd — the same fixture
+    shape as the `did_work_since` guard — because the hazard is specifically a lookup
+    that keys on the SHARED PROJECT DIRECTORY rather than on the window's own resolved
+    session. Two distinct cwds cannot see that: each directory would then hold only one
+    file, so even a cwd-keyed (or dir-keyed) lookup resolves "correctly" by accident.
+    Here both `@7.jsonl`-equivalent transcripts live under the SAME project dir (real
+    Claude Code behaviour for two agents launched in one cwd), resolved via each pane's
+    own `--resume <sid>` (the "cmdline" tier), so `final_message("@7")` must return @7's
+    own words even though @8's transcript sits right next to it in the same directory.
     """
-    cwd7, cwd8 = "/home/x/proj7", "/home/x/proj8"
-    proj7 = tmp_path / transcripts.encode_cwd(cwd7)
-    proj8 = tmp_path / transcripts.encode_cwd(cwd8)
-    proj7.mkdir(parents=True)
-    proj8.mkdir(parents=True)
-    (proj7 / "mine.jsonl").write_text(json.dumps(
+    cwd = "/home/x/proj"
+    proj = tmp_path / transcripts.encode_cwd(cwd)
+    proj.mkdir(parents=True)
+    (proj / f"{_MINE_SID}.jsonl").write_text(json.dumps(
         {"type": "assistant", "message": {"content": "SEVEN's own closing words"}}) + "\n")
-    (proj8 / "sibling.jsonl").write_text(json.dumps(
+    (proj / f"{_SIBLING_SID}.jsonl").write_text(json.dumps(
         {"type": "assistant", "message": {"content": "EIGHT's own closing words"}}) + "\n")
 
     monkeypatch.setattr(inbox.sessions, "transcript_for_window", _REAL_TRANSCRIPT_FOR_WINDOW)
     monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", tmp_path)
+    # `resolve_window`'s cmdline tier promotes what it resolves into the durable
+    # `sessionids` pin — point that store at a scratch file so the test never touches the
+    # real one, mirroring `tests/test_sessions.py`'s `pins` fixture.
+    monkeypatch.setattr(sessionids, "_STORE", tmp_path / "session-ids.json")
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
     pane_map = {
-        "@7": sessions.Pane(wid="@7", launched_in=cwd7, claude_pid=101),
-        "@8": sessions.Pane(wid="@8", launched_in=cwd8, claude_pid=102),
+        "@7": sessions.Pane(wid="@7", launched_in=cwd, resumed=_MINE_SID),
+        "@8": sessions.Pane(wid="@8", launched_in=cwd, resumed=_SIBLING_SID),
     }
     monkeypatch.setattr(inbox.sessions, "panes", lambda force=False: pane_map)
-    # Same reasoning as the did_work_since guards above: reinstated so a wrongly-resolving
-    # `final_message` exercises the real cwd path instead of failing on an unstubbed tmux
-    # call that returns nothing for a synthetic wid in a test environment.
-    monkeypatch.setattr(inbox.discovery, "get_window_cwd_by_id",
-                        lambda wid: {"@7": cwd7, "@8": cwd8}.get(wid))
 
     assert inbox.final_message("@7") == "SEVEN's own closing words"
     assert inbox.final_message("@8") == "EIGHT's own closing words"
