@@ -1111,6 +1111,17 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # last thing anyone said.
         ("rework_count", "ALTER TABLE runs ADD COLUMN rework_count INTEGER DEFAULT 0"),
         ("review_history", "ALTER TABLE runs ADD COLUMN review_history TEXT"),
+        # ⚖️🚪 CMX-321. `adopted` records the FACT that a row entered via `adopt_pr` — a
+        # hand-opened PR enrolled into the gate — rather than through `_spawn`'s claim off
+        # the tracker. CMX-276 needed that fact and inferred it from `worktree_path IS NULL`,
+        # which is true of an adopted row only until its FIRST REWORK: the rework gets a
+        # worktree, the proxy flips, and the next reconcile tick strikes the run `done`
+        # ("removed from source") for having left a tracker it was never in. Measured
+        # 2026-08-21 on adopt-393/-396/-397 — all three bounced back to `done` within one
+        # tick of being repaired by hand, which is what proves a hand-repair can't hold.
+        # A row the tracker never owned is a property of its ORIGIN and never changes;
+        # anything derived from mutable state is a proxy that will eventually disagree.
+        ("adopted", "ALTER TABLE runs ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0"),
         # CI (CMX-69). `pr_checks` is our CACHE of GitHub's rollup (one of CI_*), refreshed
         # from `gh` every tick — the UI and the merge gate read it. `pr_head_sha` is the
         # commit that state belongs to. `ci_failed_sha` is the commit whose red CI has
@@ -1239,6 +1250,13 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
             conn.execute(ddl)
         except sqlite3.OperationalError:
             pass  # column already exists
+    # ⚖️🚪 CMX-321 backfill: rows adopted BEFORE the column existed read 0 and would be
+    # struck `done` on the next reconcile exactly as they were before this fix. `adopt_pr`
+    # is the only writer of the `adopt-<pr_number>` task_id shape, so it identifies them
+    # exactly. ⛔ Used ONCE, here, as a bounded one-time repair — never as the runtime
+    # discriminator: `_is_adopted` reads the recorded column, because a task_id prefix is
+    # another proxy, and swapping one proxy for another is not what this ticket is for.
+    conn.execute("UPDATE runs SET adopted=1 WHERE adopted=0 AND task_id LIKE 'adopt-%'")
     conn.commit()
     return conn
 
@@ -2805,8 +2823,8 @@ def adopt_pr(pr_ident: str, workflow_path: str | Path, *, reason: str = "") -> d
                     "or `chela judge run` if it needs a fresh pass"}
         conn.execute(
             """INSERT INTO runs (task_id, workflow_path, title, status, branch_name,
-               started_at, attempt, pr_url, pr_state, pr_head_sha, brief)
-               VALUES (?, ?, ?, 'awaiting_review', ?, ?, 1, ?, 'open', ?, ?)""",
+               started_at, attempt, pr_url, pr_state, pr_head_sha, brief, adopted)
+               VALUES (?, ?, ?, 'awaiting_review', ?, ?, 1, ?, 'open', ?, ?, 1)""",
             (task_id, str(wf.path), title, branch, _now(), pr_url, head_sha, brief),
         )
     log.info("adopt: %s (%s) brought under the judge/merge gate", task_id, pr_url)
@@ -3680,7 +3698,7 @@ def tick(workflow_path: str | Path) -> dict:
             # row the tracker never owned; it just deletes the row before the judge trigger
             # a few lines below ever gets a look at it, silently recreating the exact bug
             # this feature exists to close, just with an extra row in the table.
-            if (row["task_id"] not in open_ids and row["worktree_path"] is not None
+            if (row["task_id"] not in open_ids and not _is_adopted(row)
                     and row["status"] in REVIEW_STATUSES):
                 # Read the agent's transcript *before* killing the window —
                 # transcript resolution maps window_name → cwd → transcript via
@@ -5184,6 +5202,28 @@ def _judge_vars(wf: WorkflowDef, row: sqlite3.Row, worktree: Path, sha: str) -> 
         "pr_view_cmd": (f"gh pr view {number} --comments" if number
                         else "gh pr view --comments   # no PR url on the run row"),
     }
+
+
+def _is_adopted(row) -> bool:
+    """Did this row enter via :func:`adopt_pr` rather than a claim off the tracker?
+
+    ⚖️🚪 CMX-321. Reconcile must never strike an adopted row `done` for "leaving the
+    tracker": it was never IN the tracker, so `task_id not in open_ids` is vacuously true
+    for it and carries no completion evidence at all.
+
+    ⛔ Reads the recorded FACT (`adopted`), not a proxy. CMX-276 inferred it from
+    `worktree_path IS NULL`, which is true of an adopted row only until its first rework —
+    the rework gets a worktree, the proxy flips, and the row is struck on the next tick.
+
+    Tolerates a row read before the migration added the column (an old `sqlite3.Row`, a
+    hand-built dict in a test): absent means "not known to be adopted", which is the
+    pre-CMX-321 behaviour rather than a crash in a loop that runs unattended.
+    """
+    try:
+        keys = row.keys()
+    except AttributeError:
+        keys = row
+    return bool(row["adopted"]) if "adopted" in keys else False
 
 
 def _refresh_judge_worktree(repo: Path, worktree: Path, base: str) -> str:
