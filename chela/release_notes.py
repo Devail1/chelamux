@@ -45,6 +45,23 @@ class UnrecognisedHeadingError(ValueError):
     """A `## [version]` heading's suffix uses a separator this parser doesn't know."""
 
 
+class StaleFragmentError(ValueError):
+    """A fragment under `changelog.d/` was already published in a dated release."""
+
+
+# `(CMX-312)` / `(CMX-308, #384)` — the task marker every fragment ends its entry
+# with, and the only durable link between a fragment FILE and the entry it became
+# once a release consumed it. Matched on the id alone: the `#PR` half is optional
+# and a retry can change it, while the task id is what the filename is built from.
+_TASK_MARKER = re.compile(r"\(CMX-(?P<id>\d+)\b", re.IGNORECASE)
+
+# `CMX-312.md` -> `312`. The FILENAME is the authority for which task a fragment
+# belongs to, never its prose: a fragment routinely cites sibling task ids in its
+# body (this one cites CMX-312), and matching on those would call every such
+# fragment stale the moment any cited task shipped.
+_FRAGMENT_NAME = re.compile(r"^CMX-(?P<id>\d+)\.md$", re.IGNORECASE)
+
+
 def _merge_duplicate_subheadings(body: str) -> str:
     """Collapse repeated `### <Category>` headings in a release body into one
     block per category, content concatenated in the order it appeared, and
@@ -201,6 +218,52 @@ def collect_fragments(changelog_d: Path) -> str:
     return _merge_duplicate_subheadings(body.strip("\n") + "\n")
 
 
+def released_task_ids(changelog_text: str) -> set[str]:
+    """Every `CMX-<id>` marker that already appears in a DATED release section.
+
+    "Dated" means everything from the first non-`Unreleased` heading down — entries
+    that have shipped under a version number and can never legitimately ship again.
+    `## [Unreleased]` itself is deliberately excluded: an entry sitting there is
+    pending, not published, and a fragment for the same task is a duplicate to be
+    merged by `_merge_duplicate_subheadings`, not an error.
+    """
+    dated = next((m for m in _iter_headings(changelog_text)
+                  if m.group("version") != "Unreleased"), None)
+    if dated is None:
+        return set()
+    return {m.group("id") for m in _TASK_MARKER.finditer(changelog_text[dated.start():])}
+
+
+def stale_fragments(changelog_text: str, changelog_d: Path) -> list[Path]:
+    """Fragments whose task already shipped in a dated section — in filename order.
+
+    ⛔ THE FAILURE THIS EXISTS FOR IS NOT HYPOTHETICAL; IT WAS SITTING IN THE TREE.
+    A release runs on `main` and deletes the fragments it consumed, but `dev` is a
+    different branch: nothing carries those deletions back, so every fragment the
+    release ate stays on `dev`, alive. The next release collects them a second time
+    and republishes entries readers already saw under the previous version. Measured
+    on 2026-08-21, one day after 0.8.0: `CMX-309.md`, `CMX-312.md` and `CMX-314.md`
+    were still on `dev` with their text already published in `## [0.8.0]`, primed to
+    appear again in 0.9.0 (CMX-315).
+
+    The back-merge in CONTRIBUTING's "Releasing" is the fix; this is the guard for
+    when it is skipped, because a skipped back-merge is invisible — `dev` looks
+    completely normal, and the duplicate only surfaces in published release notes,
+    after the tag is pushed and the damage is public.
+
+    ⚠️ A task id that legitimately ships twice (a follow-up filed under the SAME id
+    as an already-released one) trips this too. That is intended: the fragment
+    should be renamed to its own id, which is what the filename convention means.
+    """
+    released = released_task_ids(changelog_text)
+    stale = []
+    for path in _fragment_paths(changelog_d):
+        m = _FRAGMENT_NAME.match(path.name)
+        if m and m.group("id") in released:
+            stale.append(path)
+    return stale
+
+
 def promote_unreleased(changelog_text: str, version: str, date: str, changelog_d: Path) -> str:
     """Return `changelog_text` with the CURRENT `## [Unreleased]` body, plus every
     fragment under `changelog_d`, promoted into a new `## [version] — date` section
@@ -221,6 +284,20 @@ def promote_unreleased(changelog_text: str, version: str, date: str, changelog_d
     start = next((m for m in headings if m.group("version") == "Unreleased"), None)
     if start is None:
         raise ReleaseNotFoundError("no '## [Unreleased]' section in this changelog")
+
+    # Refuse BEFORE collecting anything: a stale fragment is a republished entry, and
+    # by the time the notes are written, tagged and pushed, the duplicate is public.
+    stale = stale_fragments(changelog_text, changelog_d)
+    if stale:
+        names = ", ".join(path.name for path in stale)
+        raise StaleFragmentError(
+            f"{names} — already published in a dated release section, so collecting "
+            "them would print those entries a second time under the new version. This "
+            "is what a skipped `main` -> `dev` back-merge looks like: the release "
+            "deleted these on `main`, `dev` never got the deletions, and the merge "
+            "brought the files back. Back-merge `main` into `dev` (see 'Releasing' in "
+            "CONTRIBUTING.md), or delete them if you are sure they shipped."
+        )
 
     body_start = start.end()
     later_heading_starts = [m.start() for m in headings if m.start() > start.start()]
@@ -323,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
             rewritten = promote_unreleased(
                 args.changelog.read_text(), version, date, args.changelog_d,
             )
-        except ReleaseNotFoundError as exc:
+        except (ReleaseNotFoundError, StaleFragmentError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         args.changelog.write_text(rewritten)
