@@ -176,3 +176,79 @@ arm (CMX-318 rework round 4, PR #396). `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -
 (3346 passed) under both mutations above, applied independently, in a throwaway checkout of the
 PR head. Closed by `test_the_finished_notice_resolves_final_message_against_this_windows_own_wid`
 and `test_final_message_returns_none_when_the_window_itself_is_unresolvable`.
+
+---
+
+### Round 5, same task: every fixture satisfies an OR of two completion conditions jointly, so a call site that silently narrows the OR to one arm is invisible; and a guarded write's own test never checks the guard's negative side
+
+A fourth and fifth, distinct shape surfaced on the same CMX-318 branch two rounds later —
+reusing this file's number again, per docs/DEFEAT_SHAPES.md's "reuse that number instead of
+computing a new one."
+
+**Assertion form (the OR-narrowing half):** `agent_events` calls a completion "finished" when
+`finished_edge OR finished_evidence` — two independently-computed booleans that mean different
+things (`finished_edge` is the ordinary busy→idle transition; `finished_evidence` is the
+fallback for a transition the poller missed, proven instead via `did_work_since`). Every test
+that drives a "finished" event builds a fixture that happens to satisfy BOTH at once:
+`_finished_with_transcript` registers a fresh watch (so `since` predates the stub) and stubs
+`last_assistant_activity_at` to a timestamp after it, making `finished_evidence` true, while the
+watch's own idle-confirm bookkeeping (with `IDLE_CONFIRM_SECONDS` collapsed to 0) makes
+`finished_edge` true too on the very same tick. No fixture ever isolates one arm from the other,
+so nothing distinguishes "the excerpt is wired to `finished_edge OR finished_evidence`, as the
+code reads" from "the excerpt is wired to `finished_evidence` alone" — a call site that quietly
+re-gates on just the fallback arm produces byte-identical output under every existing fixture.
+
+**Assertion form (the guarded-write half, unrelated shape found in the same round):**
+`payload["final_message"]` is written only `if said:` — the guard exists specifically so an
+agent that said nothing (a tool-only final turn, an unreadable transcript, an unresolvable
+window) does not get a fabricated value persisted. The one test covering the said-nothing path
+(`test_the_notice_falls_back_to_the_template_when_the_agent_said_nothing`) asserts only that the
+pushed *summary* omits "Said: …" — it never inspects the *payload* at all, so nothing proves the
+`final_message` key is ABSENT from the persisted record on that path. A test can prove a guarded
+write produces the right value when the guard is true without ever proving the write is skipped
+entirely when the guard is false.
+
+**Mutation that defeats it:**
+- OR-narrowing: `said = final_message(wid)` → `said = final_message(wid) if finished_evidence
+  else None` at the `agent_events` call site. An agent whose completion is caught by the
+  ordinary busy→idle edge (`finished_edge`) alone — the common case — now gets the pre-CMX-318
+  template with no excerpt, and nothing sees it: `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q`
+  stayed green (3348 passed) with this applied.
+- Guarded-write: `if said: payload["final_message"] = said[:FINAL_MESSAGE_PAYLOAD_CHARS]` →
+  `if True: payload["final_message"] = (said or "")[:FINAL_MESSAGE_PAYLOAD_CHARS]`. Every
+  said-nothing completion now persists `final_message: ""` — the exact value
+  `last_assistant_text`'s own docstring calls out as indistinguishable from a bug ("None means
+  'no text found', never ''"). Also stayed green (3348 passed) with this applied, independently.
+
+**Why this is distinct from the shapes above:** [[318|shape 318 round 4]] is about a callee's
+argument never being independently checked against context; this OR-narrowing gap is about
+*which of two disjunctive conditions* a piece of code downstream of both actually depends on —
+the conditions themselves are computed correctly and independently, but no fixture ever makes
+them disagree, so a consumer that silently drops from "either" to "only one" is unreachable by
+any assertion. The guarded-write gap is a different, ordinary-looking absence: nearly every test
+in this file (and the wider suite) proves a conditional write's *value* when the condition holds;
+almost none prove the write is *skipped* when it doesn't, because "nothing happened" leaves
+nothing obvious to assert on unless the test goes and looks for the key's absence on purpose.
+
+**Guard form that survives:**
+- For a consumer gated on `A OR B`, write a fixture that makes exactly one of them true and the
+  other false, and assert the consumer's output still reflects the OR — not just a fixture where
+  both happen to be true together. Here: drive `finished_edge` true (a `was == BUSY, now ==
+  IDLE` transition in one tick, with `IDLE_CONFIRM_SECONDS` collapsed) while forcing
+  `finished_evidence` false (`last_assistant_activity_at` stubbed to `None`, so `did_work_since`
+  cannot be true regardless of `since`), and assert the excerpt still appears.
+- For a conditional write (`if guard: obj[key] = value`), pair the existing "value is correct
+  when guard holds" test with one that drives the guard to be false and asserts `key not in obj`
+  — not just that some other, unrelated field (like the summary line) looks right. A value
+  computed from `x or default` inside the write can make the guard's `if` vacuously always take
+  the branch, and only an explicit membership check on the *object*, not the value, catches that.
+
+**Found:** `chela/inbox.py`'s `agent_events` call site (`said = final_message(wid)`) and its
+payload write (`if said: payload["final_message"] = ...`) (CMX-318 rework round 5, PR #396).
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3348 passed) under both mutations
+above, applied independently, in a throwaway checkout of the PR head. Closed by
+`test_the_finished_notice_quotes_the_agent_on_the_ordinary_edge_path_alone` (drives
+`finished_edge` true with `finished_evidence` forced false, in one tick) and
+`test_no_final_message_key_is_written_when_the_agent_said_nothing` (asserts `"final_message" not
+in payload` on the said-nothing fallback, via the queued/busy-orchestrator path so the payload is
+inspectable).

@@ -3601,3 +3601,74 @@ def test_the_finished_notice_resolves_final_message_against_this_windows_own_wid
         f"the notice did not carry {AGENT}'s own resolved words: {sends[0][1]!r}"
     )
 
+
+def test_the_finished_notice_quotes_the_agent_on_the_ordinary_edge_path_alone(
+        store_file, windows, sends, monkeypatch):
+    """Defeat shape 318, round 5, finding 1: `finished_edge` (saw_busy + confirmed_idle)
+    is the ORDINARY completion path; `finished_evidence` (`did_work_since`) is documented
+    as the fallback for a busy->idle transition the poller missed. Every other CMX-318
+    fixture drives BOTH true at once — `_finished_with_transcript` stubs `last_assistant_
+    activity_at` to `watched_since + 5` (so `did_work_since` is true) on top of an
+    already-registered watch — so no fixture can tell which branch the excerpt is wired
+    to. `said = final_message(wid) if finished_evidence else None` sailed through the
+    whole suite as a result. This drives `finished_edge` true WITHOUT `finished_evidence`:
+    the transcript resolves and has words, but shows no assistant activity after the
+    watch's `since` at all, so `did_work_since` is False and only the edge can be firing.
+    """
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    # No assistant activity at all after `since` -> did_work_since (finished_evidence)
+    # is False no matter what `since` turns out to be.
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at", lambda path: None)
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_text",
+                        lambda path: "Fixed the parser and added 3 tests, all green")
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    # prev=BUSY, cur=IDLE for AGENT in this one tick: `was == BUSY` stamps `saw_busy`,
+    # and with the idle-confirm window collapsed to 0, idle confirms in the same pass —
+    # finished_edge fires alone, with finished_evidence false throughout.
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+
+    assert len(sends) == 1
+    text = sends[0][1]
+    assert "finished the task you dispatched" in text
+    assert "Fixed the parser and added 3 tests, all green" in text, (
+        "the ordinary edge-triggered completion did not carry the agent's own words — "
+        f"the excerpt is wired to the evidence fallback only: {text!r}"
+    )
+
+
+def test_no_final_message_key_is_written_when_the_agent_said_nothing(
+        store_file, windows, sends, monkeypatch):
+    """Defeat shape 318, round 5, finding 2: `payload["final_message"]` is set only `if
+    said:`, but no test proved the key is ABSENT on the fallback path —
+    `test_the_notice_falls_back_to_the_template_when_the_agent_said_nothing` only checks
+    the pushed summary, never the persisted record. `if True: payload["final_message"] =
+    (said or "")[:FINAL_MESSAGE_PAYLOAD_CHARS]` sailed through as a result, writing
+    `final_message: ""` into every fallback record — the exact string `last_assistant_
+    text`'s own docstring calls out as indistinguishable from a bug ('None means "no text
+    found", never ""'). Drives the same said-nothing fallback through the QUEUED
+    (busy-orchestrator) path so the payload is inspectable, and asserts the key itself,
+    not just its value, is missing.
+    """
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_text", lambda path: None)
+    _statuses(monkeypatch, {ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    inbox.tick({ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    finished = [e for e in inbox.load()["queue"] if e["kind"] == "finished"]
+    assert finished, "no finished event queued"
+    assert "final_message" not in finished[0]["payload"], (
+        "an agent that said nothing must not have a final_message key written into the "
+        f"persisted record at all — got {finished[0]['payload']!r}"
+    )
+
