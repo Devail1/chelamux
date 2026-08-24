@@ -3504,6 +3504,12 @@ def test_pr_live_head_sha_asks_gh_for_exactly_this_pr_in_this_repo():
         f"wrong argv: {captured['cmd']!r}"
     )
     assert captured["kwargs"].get("cwd") == "/some/repo/dir"
+    # capture_output=False leaves out.stdout as None; json.loads(None) raises an uncaught
+    # TypeError (not in the (JSONDecodeError, ValueError) catch), breaking the documented
+    # "None on every failure path" contract on every real judge run.
+    assert captured["kwargs"].get("capture_output") is True
+    assert captured["kwargs"].get("timeout") == 20
+    assert captured["kwargs"].get("errors") == "replace"
 
 
 def test_pr_live_head_sha_reads_headRefOid_specifically_not_headRefName():
