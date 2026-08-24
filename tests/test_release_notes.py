@@ -793,6 +793,20 @@ def test_stale_fragments_accepts_a_fresh_fragment(tmp_path):
     assert stale_fragments(_RELEASED_SAMPLE, d) == []
 
 
+def test_stale_fragments_accepts_a_fragment_still_pending_under_unreleased(tmp_path):
+    """Mirrors test_released_task_ids_reads_dated_sections_only at the fragment-matching
+    level. `_RELEASED_SAMPLE` carries CMX-400 only under `## [Unreleased]` — pending, not
+    published — alongside a dated section where CMX-309 genuinely shipped. Every other
+    stale_fragments fixture in this file stages a fragment whose id is either genuinely
+    published in a dated section or absent from the changelog altogether; none stages one
+    that is mentioned ONLY under Unreleased while a dated section (with something else
+    published) also exists — so nothing here catches `stale_fragments` comparing against
+    every marker in the whole document instead of only the dated ones.
+    """
+    d = _fragment_dir(tmp_path, **{"CMX-400.md": "### Added\n\n- pending, not published (CMX-400)\n"})
+    assert stale_fragments(_RELEASED_SAMPLE, d) == []
+
+
 def test_stale_fragments_flags_every_already_published_fragment_not_just_the_first(tmp_path):
     """The motivating incident had THREE stale fragments surviving a skipped
     back-merge at once — CMX-309, CMX-312 and CMX-314, all still on `dev` with
@@ -883,6 +897,23 @@ def test_promote_unreleased_refuses_a_stale_fragment(tmp_path):
         "diagnose the cause — this is the actionable half, distinct from the "
         "diagnostic 'back-merge' sentence checked above"
     )
+
+
+def test_promote_unreleased_succeeds_with_a_fresh_fragment_after_something_shipped(tmp_path):
+    """`stale_fragments` itself is proven not to flag a fresh fragment against a non-empty
+    released set (test_stale_fragments_accepts_a_fresh_fragment), but `promote_unreleased`'s
+    OWN refusal — the code that actually decides whether a release is blocked — has never
+    been driven with a non-empty released set in the ACCEPT direction. Every promote/--release
+    fixture with fresh fragments elsewhere in this file mounts a changelog with ZERO
+    `(CMX-N)` trailers, so `released_task_ids` is empty in every one of them; the only
+    fixtures with something already shipped are the ones that expect a refusal. Use
+    `_RELEASED_SAMPLE` (CMX-309 already published) with a brand-new fragment and assert the
+    release actually goes through instead of being wrongly refused.
+    """
+    d = _fragment_dir(tmp_path, **{"CMX-999.md": "### Added\n\n- brand new (CMX-999)\n"})
+    result = promote_unreleased(_RELEASED_SAMPLE, "0.9.0", "2026-08-21", d)
+    assert "## [0.9.0] — 2026-08-21" in result
+    assert "brand new (CMX-999)" in result
 
 
 def test_cli_release_refuses_a_stale_fragment_without_touching_anything(tmp_path):

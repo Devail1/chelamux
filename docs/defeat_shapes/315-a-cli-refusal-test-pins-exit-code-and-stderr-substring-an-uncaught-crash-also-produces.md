@@ -175,3 +175,75 @@ the filename never paired with a non-empty released set.
 instance is the `m is None` fall-through specifically, mirrored from the sibling guard in
 `tests/test_judge_changelog_note.py` that documents the same contract for an unprefixed
 `changelog.d/` fragment name.
+
+---
+
+### Also found on this task (round 4, same file): a negative control mirrored onto three of four structurally identical sites was never mirrored onto the fourth
+
+**Assertion form:** `released_task_ids` has four documented negative controls — "no dated
+section", "a bare mention in prose", "every dated section, not just the newest", and "an
+`## [Unreleased]` marker is never released." `stale_fragments` re-derives its own `released`
+set from the same function and had been given a mirror of the first three
+(`test_stale_fragments_accepts_everything_before_the_first_release`,
+`test_stale_fragments_ignores_a_bare_mention_in_dated_prose`,
+`test_stale_fragments_flags_a_fragment_published_in_an_older_dated_section`) — but not the
+fourth. Three-out-of-four mirrored reads, at a glance, as "this pair is kept in sync"; the one
+gap is easy to miss precisely because the pattern looks complete.
+
+**Mutation that defeats it:** widen `stale_fragments`'s own `released` set to scan the WHOLE
+changelog text (not just the dated portion `released_task_ids` reads) whenever anything has
+shipped at all — `released = released_task_ids(changelog_text)` becomes `released =
+({m.group("id") for m in _TASK_MARKER.finditer(changelog_text)} if released_task_ids(...)
+else set())`. This reaches past `released_task_ids`'s own Unreleased-exclusion entirely
+(the function itself is untouched — the caller stops using its return value once it's
+non-empty), so a fragment whose entry is still pending under `## [Unreleased]` gets refused
+as if it had already shipped, while every fixture that only ever paired a dated-only
+`released` set with a dated-only fragment set stays green.
+
+**Guard form that survives:** stage a fragment whose id appears ONLY under `## [Unreleased]`
+in a changelog that ALSO has a dated section with something else genuinely published, and
+assert `stale_fragments` still accepts it — not just that `released_task_ids` alone excludes
+it.
+
+**Found:** `chela/release_notes.py`'s `stale_fragments` (CMX-315 rework round 4, PR #393).
+Closed by `test_stale_fragments_accepts_a_fragment_still_pending_under_unreleased`, staging a
+`CMX-400.md` fragment against `_RELEASED_SAMPLE` (which has CMX-400 pending under Unreleased
+and CMX-309 published in `## [0.8.0]`).
+
+**See also:** [[311|shape 311]] — the general form; this is the same "mirror three of four,
+miss the fourth" gap one layer below the `stale_fragments`-vs-`released_task_ids` pairing this
+file's earlier rounds already mirrored.
+
+---
+
+### Also found on this task (round 4, same file): a refusal's own ACCEPT direction is never driven with the off-state's precondition already true
+
+**Assertion form:** `promote_unreleased` refuses a release when `stale_fragments` returns
+anything. `stale_fragments` itself has a MUST-BE-ACCEPTED fixture against a non-empty
+released set (`test_stale_fragments_accepts_a_fresh_fragment` on `_RELEASED_SAMPLE`), but
+every promote/`--release` fixture that expects SUCCESS mounts a changelog with zero
+`(CMX-N)` trailers — `released_task_ids` is empty in all of them. The only fixtures where
+something has already shipped are the two that expect a refusal. `promote_unreleased`'s own
+accept path, with the "something has already shipped" precondition true, is never driven.
+
+**Mutation that defeats it:** widen the refusal to fire on every fragment whenever anything
+has ever shipped, even when `stale_fragments` itself found nothing stale — `stale =
+stale_fragments(...)` becomes `stale = stale_fragments(...) or (_fragment_paths(changelog_d)
+if released_task_ids(changelog_text) else [])`. Every accept-path promote/`--release` fixture
+has an empty released set, so the `or (...)` clause is never the operative branch for them;
+every fixture with a non-empty released set already expects the refusal to fire, so the
+widened refusal firing MORE often than it should looks identical to firing correctly.
+
+**Guard form that survives:** call `promote_unreleased` directly with a changelog that has
+something already shipped in a dated section AND a brand-new, unrelated fragment, and assert
+the call succeeds and the fragment's content lands in the output — not just that
+`stale_fragments` alone returns `[]` for the same inputs.
+
+**Found:** `chela/release_notes.py`'s `promote_unreleased` (CMX-315 rework round 4, PR #393).
+Closed by `test_promote_unreleased_succeeds_with_a_fresh_fragment_after_something_shipped`,
+calling `promote_unreleased` on `_RELEASED_SAMPLE` (CMX-309 already published) with a fresh
+`CMX-999.md` fragment and asserting the new dated section is produced.
+
+**See also:** [[03|shape 3]] and [[07|shape 7]], cited in the verdict that found this — the
+guard's off-state (accept) was proven at the `stale_fragments` layer but never re-proven at
+the `promote_unreleased` caller that actually decides whether a release is blocked.
