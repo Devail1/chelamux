@@ -1125,3 +1125,46 @@ def test_a_case_blind_marker_would_republish_the_stale_fragment(tmp_path):
         "it would be collected and republished under the next version"
     )
 
+
+def test_the_refusal_names_ONLY_the_stale_fragments_never_a_fresh_one(tmp_path):
+    """⛔ The refusal message's NEGATIVE half. The positive half is pinned hard — all three
+    of CMX-309/312/314 must appear — but every refusal fixture in this file stages ONLY
+    stale fragments, so `stale` and `_fragment_paths(changelog_d)` are the same list
+    everywhere the raise is ever reached. The rendered name list can therefore be widened
+    from the stale set to EVERY collected fragment with nothing to catch it.
+
+    That is not a cosmetic slip. The message asserts, of each name it lists, that it is
+    "already published in a dated release section" and offers "delete them if you are sure
+    they shipped". Widened, on this repo's own tree it would name CMX-316/317/319/320/321
+    beside a genuinely stale one — telling a maintainer to delete five changelog entries
+    that never shipped.
+
+    This is the exact inverse of the false-refusal hazard guarded everywhere else here
+    (`..._accepts_a_fresh_fragment`, `..._succeeds_with_a_fresh_fragment_after_something_
+    shipped`, `..._would_falsely_refuse_an_unshipped_fragment`) — all of which assert on the
+    RETURN LIST or the accept path, never on what the refusal SAYS about a fragment that is
+    fine. So: mount a MIX, and pin both halves of the sentence.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- shipped (CMX-309, #385)\n- also shipped (CMX-312)\n"
+    )
+    d = _fragment_dir(tmp_path, **{
+        "CMX-309.md": "### Fixed\n\n- already shipped (CMX-309, #385)\n",
+        "CMX-312.md": "### Changed\n\n- already shipped (CMX-312)\n",
+        "CMX-777.md": "### Added\n\n- brand new, never shipped (CMX-777)\n",
+        "CMX-888.md": "### Fixed\n\n- brand new, never shipped (CMX-888)\n",
+    })
+
+    with pytest.raises(StaleFragmentError) as exc:
+        promote_unreleased(changelog, "0.9.0", "2026-08-21", d)
+    message = str(exc.value)
+
+    assert "CMX-309.md" in message and "CMX-312.md" in message, (
+        f"the refusal did not name every stale fragment: {message!r}"
+    )
+    assert "CMX-777.md" not in message and "CMX-888.md" not in message, (
+        "the refusal accused a FRESH fragment of having already shipped — the message "
+        f"tells the maintainer to delete an entry that never published: {message!r}"
+    )
+
