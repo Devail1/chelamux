@@ -3439,6 +3439,61 @@ def test_a_shell_metacharacter_sign_off_is_neutralised(
     assert "$(" not in text, f"a command substitution survived into the prompt: {text!r}"
 
 
+def test_the_said_excerpt_stays_curly_quoted_through_sanitization(
+        store_file, windows, sends, monkeypatch):
+    """`_line`'s docstring: the frame around the excerpt is curly quotes, NOT ``"``,
+    because every summary is neutralised by ``sanitize_prompt`` before it reaches a
+    prompt, and ``"`` is in ``SHELL_META_RE`` — a straight-quoted frame has its own
+    delimiters stripped to spaces, so the excerpt would merge seamlessly into chela's
+    own instruction text with nothing marking where the agent's free-form words start
+    and end. Curly quotes (``“``/``”``) are not shell metacharacters, so they survive
+    the sanitizer untouched and the frame stays intact end to end.
+    """
+    said = "Fixed the parser and added 3 tests, all green"
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, said)
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    text = sends[0][1]
+    assert f"“{said}”" in text, (
+        "the excerpt lost its curly-quote delimiters on the way to the prompt — a "
+        f"straight-quoted frame would be stripped by sanitize_prompt: {text!r}"
+    )
+
+
+def test_the_payload_final_message_is_capped_at_the_payload_limit(
+        store_file, windows, sends, monkeypatch):
+    """`FINAL_MESSAGE_PAYLOAD_CHARS` exists so the payload copy — a record, not a
+    notification — cannot grow `inbox.json` without bound if an agent signs off with a
+    wall of text. Only a fixture that actually crosses the 4000-char cap can tell a
+    capped payload apart from an uncapped one; `test_the_untruncated_message_is_kept_in_
+    the_payload`'s 280-char fixture sits well under it either way.
+    """
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    wall_of_text = "detail " * 1000  # 7000 chars, well past the 4000-char payload cap
+    assert len(wall_of_text) > inbox.FINAL_MESSAGE_PAYLOAD_CHARS
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_text", lambda path: wall_of_text)
+    _statuses(monkeypatch, {ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    inbox.tick({ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    finished = [e for e in inbox.load()["queue"] if e["kind"] == "finished"]
+    assert finished, "no finished event queued"
+    stored = finished[0]["payload"]["final_message"]
+    assert stored == wall_of_text[:inbox.FINAL_MESSAGE_PAYLOAD_CHARS], (
+        "the payload's final_message must be capped at FINAL_MESSAGE_PAYLOAD_CHARS — "
+        f"got {len(stored)} chars"
+    )
+
+
 # Two session ids sharing one project directory below — chosen so that sorting the
 # directory's filenames ALPHABETICALLY (as a buggy "just glob the dir" resolution would)
 # puts SIBLING_SID last, regardless of which window is actually asking. A resolution that
