@@ -1010,3 +1010,79 @@ def test_this_repo_carries_no_already_released_fragment():
         "branch, or delete them by hand if you are certain they shipped"
     )
 
+
+# ---------------------------------------------------------------------------
+# CMX-315 round 6 — the CHANGELOG-side mirrors of the filename id-length controls
+# ---------------------------------------------------------------------------
+
+def test_released_task_ids_does_not_truncate_a_four_digit_marker():
+    """`_TASK_MARKER`'s `\\d+` must capture the WHOLE id, any length — the changelog-marker
+    mirror of `test_stale_fragments_does_not_truncate_a_four_digit_filename_id`.
+
+    Its id-length was pinned in ONE direction only: a three-digit MINIMUM goes red (via
+    `test_stale_fragments_matches_a_filename_id_shorter_than_three_digits`, which forces a
+    match on `(CMX-9)`), but nothing anywhere staged a 4+ digit `(CMX-N)` trailer in a DATED
+    section — the only four-digit id in this file appears solely as a fragment FILENAME and
+    in a fragment BODY, neither of which `released_task_ids` ever reads, and the repo's own
+    CHANGELOG.md is all three-digit. So `\\d{1,3}\\d*` truncates the captured id to its
+    first three digits with nothing to catch it.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- a four-digit task shipped here (CMX-3155)\n"
+    )
+    ids = released_task_ids(changelog)
+    assert "3155" in ids, "the four-digit marker was not captured whole"
+    assert "315" not in ids, (
+        "the captured id was truncated to its first three digits — a dated (CMX-3155) "
+        "entry now registers as released id 315"
+    )
+
+
+def test_a_truncated_marker_would_republish_the_stale_four_digit_fragment(tmp_path):
+    """Consequence (a) of the truncation, asserted at the guard rather than the regex: with
+    the id cut to `315`, the genuinely stale `CMX-3155.md` drops out of the released set and
+    is republished — the exact double-publish CMX-315 exists to prevent.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- a four-digit task shipped here (CMX-3155)\n"
+    )
+    d = _fragment_dir(tmp_path, **{"CMX-3155.md": "### Fixed\n\n- already shipped (CMX-3155)\n"})
+    assert [p.name for p in stale_fragments(changelog, d)] == ["CMX-3155.md"], (
+        "a fragment whose task IS published in a dated section was not flagged — it would "
+        "be collected and republished under the next version"
+    )
+
+
+def test_a_truncated_marker_would_falsely_refuse_an_unshipped_fragment(tmp_path):
+    """Consequence (b), the other direction: with the id cut to `315`, a fragment for task
+    315 — which never shipped — is refused for a release it was never in. MUST BE ACCEPTED.
+
+    This is CMX-315's own fragment number, so the truncation would block the very release
+    carrying this fix.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- a four-digit task shipped here (CMX-3155)\n"
+    )
+    d = _fragment_dir(tmp_path, **{"CMX-315.md": "### Fixed\n\n- never shipped (CMX-315)\n"})
+    assert stale_fragments(changelog, d) == [], (
+        "a fragment whose task never shipped was refused — the truncated marker aliased "
+        "CMX-3155 onto CMX-315"
+    )
+
+
+def test_stale_fragments_matches_a_fragment_filename_case_insensitively(tmp_path):
+    """`_FRAGMENT_NAME` carries `re.IGNORECASE`; nothing exercised it. Every fragment
+    fixture in this file — and every real file under `changelog.d/` — spells the prefix
+    upper-case `CMX-`, so dropping the flag changes nothing observable while silently
+    dropping any off-case fragment out of the guard entirely: a stale `cmx-309.md` would
+    republish with no refusal.
+    """
+    d = _fragment_dir(tmp_path, **{"cmx-309.md": "### Fixed\n\n- shipped (CMX-309, #385)\n"})
+    assert [p.name for p in stale_fragments(_RELEASED_SAMPLE, d)] == ["cmx-309.md"], (
+        "a lower-case fragment filename was not recognised — _FRAGMENT_NAME's IGNORECASE "
+        "is unexercised, so removing it would go unnoticed"
+    )
+
