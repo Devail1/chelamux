@@ -3672,3 +3672,108 @@ def test_no_final_message_key_is_written_when_the_agent_said_nothing(
         f"persisted record at all — got {finished[0]['payload']!r}"
     )
 
+
+# ---------------------------------------------------------------------------
+# CMX-318 round 6 — TWO watched agents: each notice must quote its OWN window
+# ---------------------------------------------------------------------------
+
+AGENT2 = "@3"    # a SECOND delegated window, finishing in the same tick
+
+
+def test_two_agents_finishing_together_each_quote_their_own_words(
+        store_file, monkeypatch, sends):
+    """⛔ Every other fixture in this module watches EXACTLY ONE agent, so inside
+    `agent_events`' loop `wid`, `min(store["watches"])` and "the only watched window that
+    exists" are three descriptions of one value (defeat shape 306). The round-4 spy test
+    asserts `seen_wids == [AGENT]` and is satisfied BIT-FOR-BIT by
+    `final_message(min(store["watches"]))`.
+
+    In production the moment two watched agents finish in the same tick, BOTH notices — and
+    both persisted `final_message` payloads — carry the FIRST watched window's words: the
+    "quote one agent's words as another agent's completion summary" that `final_message`'s
+    own docstring calls unfalsifiable to whoever receives it.
+
+    ⛔ Asserts on the QUEUE, not on `sends`: `MAX_DELIVERIES_PER_TICK` caps how many events
+    leave the queue per tick, so a busy orchestrator (which queues everything) is the only
+    way to see BOTH events produced by one pass. It is also the stronger surface — the
+    persisted payload is what a log, a UI or a replay reads back.
+    """
+    live = {ORCH: "orchestrator", AGENT: "chelamux", AGENT2: "sibling"}
+    monkeypatch.setattr(inbox.discovery, "get_windows_by_id", lambda: dict(live))
+    _confirm_idle_immediately(monkeypatch)
+    inbox.watch(AGENT, "fix the parser", by=ORCH)
+    inbox.watch(AGENT2, "fix the loader", by=ORCH)
+
+    watched_since = min(w["since"] for w in inbox.watches().values())
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    # Keyed BY WINDOW — the whole point. A call site that resolves the wrong wid gets the
+    # wrong agent's words, and that is what must go red.
+    said = {AGENT: "TWO finished the parser", AGENT2: "THREE finished the loader"}
+    monkeypatch.setattr(inbox, "final_message", lambda wid: said.get(wid))
+    # BUSY orchestrator → both events QUEUE instead of racing the per-tick delivery cap.
+    _statuses(monkeypatch, {ORCH: inbox.BUSY, AGENT: inbox.IDLE, AGENT2: inbox.IDLE})
+
+    inbox.tick({ORCH: inbox.BUSY, AGENT: inbox.IDLE, AGENT2: inbox.IDLE})
+
+    finished = [e for e in inbox.load()["queue"] if e["kind"] == "finished"]
+    assert len(finished) == 2, f"expected one finished event per agent, got {len(finished)}"
+    by_wid = {e["wid"]: e for e in finished}
+    assert set(by_wid) == {AGENT, AGENT2}, f"events named {sorted(by_wid)}"
+
+    assert "TWO finished the parser" in by_wid[AGENT]["summary"], (
+        f"{AGENT}'s notice did not quote its own agent: {by_wid[AGENT]['summary']!r}"
+    )
+    assert "THREE finished the loader" in by_wid[AGENT2]["summary"], (
+        f"{AGENT2}'s notice quoted another agent's words — the CMX-191 misattribution "
+        f"final_message exists to prevent: {by_wid[AGENT2]['summary']!r}"
+    )
+    # ...and the persisted record, which outlives the one-line notice.
+    assert by_wid[AGENT]["payload"]["final_message"] == "TWO finished the parser"
+    assert by_wid[AGENT2]["payload"]["final_message"] == "THREE finished the loader", (
+        "the payload carried another agent's words — this is what a UI or a replay reads"
+    )
+
+
+def test_the_payload_cap_actually_truncates_at_its_own_limit(
+        store_file, windows, sends, monkeypatch):
+    """`FINAL_MESSAGE_PAYLOAD_CHARS` (4000) was provably unexercised: the only payload
+    fixture was 280 chars, comfortably under it, so slicing at 4000 and not slicing at all
+    produced byte-identical output — and the cap could be changed to ANY value, or removed,
+    with the suite green.
+
+    Stage a sign-off LONGER than the cap so the slice is the only thing that can produce
+    the observed length, and assert the cap's own value rather than merely "shorter than
+    the input".
+    """
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    # ⛔ LITERALS, not `inbox.FINAL_MESSAGE_PAYLOAD_CHARS`. Deriving both the input length
+    # and the expected output from the constant makes them move together, so changing the
+    # cap changes nothing observable — the judge proved that by flipping 4000 -> 280 with
+    # the suite green. The cap's VALUE is the contract here, so it is pinned as a literal.
+    long_text = "z" * 4500
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_text", lambda path: long_text)
+    _statuses(monkeypatch, {ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    inbox.tick({ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    finished = [e for e in inbox.load()["queue"] if e["kind"] == "finished"]
+    assert finished, "no finished event queued"
+    got = finished[0]["payload"]["final_message"]
+    assert len(got) == 4000, (
+        f"the payload is {len(got)} chars, not the documented 4000-char cap — either the "
+        "slice is not truncating, or the cap was changed without updating its contract"
+    )
+    assert inbox.FINAL_MESSAGE_PAYLOAD_CHARS == 4000, (
+        "the constant no longer matches the cap this test pins; change both deliberately "
+        "or not at all"
+    )
+
