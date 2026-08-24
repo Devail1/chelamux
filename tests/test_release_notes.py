@@ -1086,3 +1086,42 @@ def test_stale_fragments_matches_a_fragment_filename_case_insensitively(tmp_path
         "is unexercised, so removing it would go unnoticed"
     )
 
+
+def test_released_task_ids_matches_a_dated_marker_case_insensitively():
+    """`_TASK_MARKER` carries `re.IGNORECASE`; nothing exercised it — the CHANGELOG-side
+    mirror of `test_stale_fragments_matches_a_fragment_filename_case_insensitively`, which
+    closed this same shape on the FILENAME side one round earlier. Round 6 mirrored the
+    id-length controls onto `_TASK_MARKER` but not the case flag, so three of the four
+    structurally identical sites were guarded and the fourth was not.
+
+    Every dated `(CMX-N)` trailer in this suite is upper-case, and the repo's CHANGELOG.md
+    carries zero `(cmx-` occurrences, so every fixture is a fixed point of the flag.
+
+    ⛔ The lower-case form is NOT hypothetical: this codebase's own prose already writes it
+    (`chela/inbox.py` — "(cmx-195, cmx-196)"). Consequence is the same double-publish this
+    ticket exists to prevent, from the other end: a dated `(cmx-309)` entry does not register
+    as released, so the genuinely stale CMX-309.md is collected and republished with no
+    refusal.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- shipped, written lower-case (cmx-309)\n"
+    )
+    assert "309" in released_task_ids(changelog), (
+        "a lower-case dated (cmx-N) trailer did not register as released — _TASK_MARKER's "
+        "IGNORECASE is unexercised, so removing it would go unnoticed"
+    )
+
+
+def test_a_case_blind_marker_would_republish_the_stale_fragment(tmp_path):
+    """The consequence of the above, asserted at the guard rather than the regex."""
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- shipped, written lower-case (cmx-309)\n"
+    )
+    d = _fragment_dir(tmp_path, **{"CMX-309.md": "### Fixed\n\n- already shipped (CMX-309)\n"})
+    assert [p.name for p in stale_fragments(changelog, d)] == ["CMX-309.md"], (
+        "a fragment whose task IS published — in a lower-case trailer — was not flagged; "
+        "it would be collected and republished under the next version"
+    )
+
