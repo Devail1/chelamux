@@ -3547,3 +3547,57 @@ def test_final_message_refuses_to_quote_a_sibling_rather_than_this_window(
     assert inbox.final_message("@7") == "SEVEN's own closing words"
     assert inbox.final_message("@8") == "EIGHT's own closing words"
 
+
+def test_final_message_returns_none_when_the_window_itself_is_unresolvable(monkeypatch):
+    """The OTHER arm of `final_message`'s None contract (defeat shape 318, round 4):
+    ``test_the_notice_falls_back_to_the_template_when_the_agent_said_nothing`` only ever
+    exercises the tool-only arm — it stubs ``transcript_for_window`` to still return a path
+    and ``last_assistant_text`` to return None. It never leaves the window itself
+    unresolvable, so a mutation that swaps ``if path is None: return None`` for
+    ``if path is None: return "finished the task"`` sails through every existing test: no
+    fixture ever makes ``transcript_for_window`` return None. This one does, directly, with
+    nothing else stubbed to a constant that could mask the branch.
+    """
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window", lambda wid: None)
+
+    assert inbox.final_message("@99") is None
+
+
+def test_the_finished_notice_resolves_final_message_against_this_windows_own_wid(
+        store_file, windows, sends, monkeypatch):
+    """Pins the CALL SITE in `agent_events`, not just `final_message` itself (defeat shape
+    318, round 4): every other CMX-318 test stubs `transcript_for_window` and
+    `last_assistant_text` to constants that ignore whatever `wid` they are given, so a call
+    site that hardcoded a fixed/foreign wid — `final_message(wid)` mutated to
+    `final_message("@1")`, i.e. ORCH's own window — would still make every one of them pass:
+    the stubs cannot tell which wid was actually asked for. This stubs `final_message`
+    itself, records every wid it is called with, and asserts it is AGENT's own wid — not
+    ORCH's, and not any other fixed value.
+    """
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    seen_wids = []
+
+    def _spy(wid):
+        seen_wids.append(wid)
+        return f"words from {wid}"
+
+    monkeypatch.setattr(inbox, "final_message", _spy)
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    assert seen_wids == [AGENT], (
+        "agent_events must resolve final_message against the window it is actually "
+        f"reporting on ({AGENT!r}), never a fixed/foreign wid — got {seen_wids!r}"
+    )
+    assert f"words from {AGENT}" in sends[0][1], (
+        f"the notice did not carry {AGENT}'s own resolved words: {sends[0][1]!r}"
+    )
+

@@ -116,3 +116,63 @@ the real pushed line, so a straight-quoted frame goes red the moment `SHELL_META
 delimiters) and `test_the_payload_final_message_is_capped_at_the_payload_limit` (a 7000-char
 fixture, asserting the stored payload equals the input sliced at `FINAL_MESSAGE_PAYLOAD_CHARS`,
 so dropping the slice goes red).
+
+---
+
+### Round 4, same task: every test at a seam stubs BOTH sides of it to constants, so neither side's own value is ever checked
+
+A third, distinct shape surfaced on the same CMX-318 branch one round later — reusing this
+file's number again, per docs/DEFEAT_SHAPES.md's "reuse that number instead of computing a
+new one."
+
+**Assertion form:** a function `g(x)` is called from a call site `f()` that computes `x` itself
+(here, `agent_events` computes `wid` — the window it is currently processing — and passes it to
+`final_message(wid)`). Every test exercising `f()` stubs `g`'s OWN internal dependencies
+(`sessions.transcript_for_window`, `transcripts.last_assistant_text`) to constants that ignore
+whatever argument they are called with — `lambda wid: Path(f"/proj/{wid}/session.jsonl")` looks
+parametric but every window in the fixture produces the same downstream text regardless, and
+`lambda path: said` ignores its argument outright. So the tests exercise "does `f()`'s output
+reflect *some* call to `g`" but never "did `f()` pass `g` **its own** `x`, as opposed to a
+different value entirely." A call site that hardcodes `g`'s argument — `final_message(wid)` →
+`final_message("@1")`, i.e. always the orchestrator's own window instead of whichever window
+`agent_events` is actually reporting on — produces identical output under every existing
+fixture, because none of them ever puts a DIFFERENT expected value behind a different wid.
+
+**Mutation that defeats it:** `said = final_message(wid)` → `said = final_message("@1")` at the
+`agent_events` call site. `ORCH = "@1"` in the test fixtures, so this silently substitutes the
+orchestrator's own window for whichever agent window actually finished — the exact CMX-191
+misattribution `final_message`'s own docstring warns about, now reintroduced one call frame
+outside the function that was hardened against it directly.
+
+**Why testing `final_message` alone doesn't close this:**
+[[318|shape 318 round 2]] (the sibling-fixture drift, closed by
+`test_final_message_refuses_to_quote_a_sibling_rather_than_this_window`) proves `final_message`
+resolves correctly **when called directly with a given wid**. It says nothing about whether the
+*caller* passes the right wid in the first place — that is a property of `agent_events`, not of
+`final_message`, and no amount of hardening inside `final_message` can catch a mutation at its
+call site.
+
+**Guard form that survives:** for a call site that computes its own argument from context, stub
+the CALLEE itself as a spy that records what it was called with, and assert the argument
+against the context the test set up — independent of what the callee's own internals would do
+with it. `test_the_finished_notice_resolves_final_message_against_this_windows_own_wid`
+monkeypatches `inbox.final_message` (not its dependencies) to a function that records every
+`wid` it is called with and returns a value keyed off that `wid` (`f"words from {wid}"`), then
+asserts both that the recorded wid is exactly the watched AGENT window and that the notice
+carries the AGENT-keyed value — so a hardcoded `"@1"` call site is caught two ways: the wrong
+wid is recorded, and the wrong (ORCH-keyed) text would appear in the notice.
+
+The companion gap closed in the same round: `final_message`'s docstring promises "an
+unresolvable window … yields None," but `test_the_notice_falls_back_to_the_template_when_the_
+agent_said_nothing` only ever left the transcript ITSELF empty (`last_assistant_text` stubbed
+to `None`) while `transcript_for_window` kept returning a path — so `if path is None: return
+None` could be swapped for `if path is None: return "finished the task"` with nothing going
+red. `test_final_message_returns_none_when_the_window_itself_is_unresolvable` stubs
+`transcript_for_window` alone to return `None` and asserts `final_message(...)` is `None` — the
+arm the tool-only test structurally cannot reach.
+
+**Found:** `chela/inbox.py`'s `agent_events` call site and `final_message`'s unresolvable-window
+arm (CMX-318 rework round 4, PR #396). `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green
+(3346 passed) under both mutations above, applied independently, in a throwaway checkout of the
+PR head. Closed by `test_the_finished_notice_resolves_final_message_against_this_windows_own_wid`
+and `test_final_message_returns_none_when_the_window_itself_is_unresolvable`.
