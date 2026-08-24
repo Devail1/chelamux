@@ -95,3 +95,83 @@ exists at all. Closed by `test_released_task_ids_treats_no_dated_section_as_noth
 `test_stale_fragments_accepts_everything_before_the_first_release`), both built from a
 changelog that is nothing but `## [Unreleased]` plus a task marker, asserting the marker does
 NOT come back as released/stale.
+
+---
+
+### Also found on this task (round 3, same file): a "from X down" scan window is only ever exercised where "from X down" and "just X" are the same string
+
+**Assertion form:** a reader function locates one heading (`dated = next(... first non-Unreleased
+heading ...)`) and then scans from that heading's start to the END of the text, on the
+documented theory that its docstring states outright: everything from the first dated heading
+down, not just the section under it. Every fixture in the test file happens to mount exactly
+ONE dated section, so the slice `changelog_text[dated.start():]` and a narrower slice
+`changelog_text[dated.start():next_heading.start()]` produce byte-identical results on every
+one of them — including the fixture that reads the real, multi-section `CHANGELOG.md` and
+asserts the vacuous `== []`, which can't distinguish the two either. The "read to end of text"
+behavior the docstring promises is never independently exercised by anything that would come
+out *different* under the narrower reading.
+
+**Mutation that defeats it:** bound the scan to the section immediately under the first dated
+heading instead of everything below it — `changelog_text[dated.start():]` →
+`changelog_text[dated.start():_end]` where `_end` is the next heading's start (or end of text).
+A task id published two releases back (the documented incident: "two promotions' worth of
+drift", a fragment surviving TWO skipped back-merges) becomes invisible to `released_task_ids`
+and therefore to `stale_fragments`, silently re-publishing it — with every existing fixture,
+single-dated-section by construction, staying green.
+
+**Guard form that survives:** mount a fixture with TWO dated sections and put the marker under
+test in the OLDER (second, non-newest) one. Any reader that stops at the first heading
+boundary loses that marker; the full "down to end of text" reader keeps it.
+
+**Found:** `chela/release_notes.py`'s `released_task_ids` (CMX-315 rework round 3, PR #393).
+Closed by `test_released_task_ids_reads_every_dated_section_not_just_the_newest` and its
+mirror `test_stale_fragments_flags_a_fragment_published_in_an_older_dated_section`, both
+built from a changelog with a newest `## [0.9.0]` and an older `## [0.8.0]`, with the marker
+under test only in the older section.
+
+**See also:** [[62|shape 62]] — the general form of "a fixture mounts the exact branch or
+order an invariant [needs to distinguish]"; this is that gap specifically between "the first
+matching section" and "every section from the first match down," which look identical under
+any fixture with only one such section.
+
+---
+
+### Also found on this task (round 3, same file): a filter's "can't identify this input, so let it through" branch is never independently armed when every fixture only stages inputs the filter CAN identify
+
+**Assertion form:** a guard walks candidate files and applies `name_pattern.match(path.name)`
+before comparing an extracted id against a "these are forbidden" set — `if m and m.group("id")
+in forbidden: flag(path)`. The `m` truthiness check exists specifically so that a file whose
+name the pattern can't parse (no id to extract) is left alone rather than flagged — the
+guard's own sibling module documents this exact contract for a same-shaped, unprefixed
+filename. But every fixture that stages a non-empty `forbidden`/`released` set ALSO only ever
+stages filenames the pattern matches (`CMX-<id>.md`); the one fixture that stages an
+unmatched name (a `README.md`) does so only against contexts where the comparison set is a
+detail nobody varies. The `m is None` fall-through — the branch that decides an unidentifiable
+name is *not* flagged — is therefore never exercised in the one condition that would actually
+distinguish "fall through to accepted" from "fall through to flagged": a NON-EMPTY forbidden
+set sitting right next to it.
+
+**Mutation that defeats it:** invert the fall-through so an unidentifiable name is treated as
+guilty whenever the forbidden set is non-empty, instead of innocent unconditionally —
+`if m and m.group("id") in forbidden:` → `if forbidden and (m is None or m.group("id") in
+forbidden):`. Every fixture that stages an unmatched filename does so with an empty forbidden
+set (so `forbidden and ...` is falsy either way) or doesn't stage one at all; every fixture
+with a non-empty forbidden set stages only matched filenames (so `m is None` never becomes the
+operative branch). The suite can't tell "correctly accepted because unidentifiable" from
+"incorrectly flagged because unidentifiable," because it never puts a non-empty forbidden set
+in the same fixture as an unidentifiable name.
+
+**Guard form that survives:** stage a filename the pattern does NOT match, in a fixture whose
+comparison set is already non-empty (something real has already been "published"/"forbidden"),
+and assert the unmatched file is accepted anyway.
+
+**Found:** `chela/release_notes.py`'s `stale_fragments` (CMX-315 rework round 3, PR #393).
+Closed by `test_stale_fragments_accepts_an_unidentifiable_fragment_name_even_when_something_shipped`,
+which stages `hotfix.md` (no `CMX-<id>` in the name) against `_RELEASED_SAMPLE`, a changelog
+that already has `CMX-309` published — the fixture every prior test in the file that varied
+the filename never paired with a non-empty released set.
+
+**See also:** [[03|shape 3]] and [[40|shape 40]], cited in the verdict that found this; this
+instance is the `m is None` fall-through specifically, mirrored from the sibling guard in
+`tests/test_judge_changelog_note.py` that documents the same contract for an unprefixed
+`changelog.d/` fragment name.

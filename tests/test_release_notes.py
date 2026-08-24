@@ -743,6 +743,45 @@ def test_stale_fragments_ignores_a_bare_mention_in_dated_prose(tmp_path):
     assert stale_fragments(changelog, d) == []
 
 
+def test_released_task_ids_reads_every_dated_section_not_just_the_newest():
+    """The docstring is explicit: "Dated" means everything from the first non-`Unreleased`
+    heading down. Every other fixture in this file mounts exactly one dated section, so
+    "from the first dated heading down" and "only the first dated section" are the same
+    string for all of them — a reader that stopped at the next heading would pass every
+    other test here too. This fixture mounts TWO dated sections and puts its marker in the
+    OLDER (second) one, the case that actually distinguishes the two readings: the incident
+    this guard exists for is a fragment that survived TWO skipped back-merges (CONTRIBUTING's
+    "two promotions' worth of drift"), so it shipped under an old version, not the newest one.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.9.0] — 2026-08-22\n\n"
+        "### Fixed\n\n- newest release, unrelated (CMX-500)\n\n"
+        "## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- older release (CMX-309, #385)\n"
+    )
+    ids = released_task_ids(changelog)
+    assert "500" in ids, "a marker in the newest dated section is published"
+    assert "309" in ids, (
+        "a marker in an OLDER dated section (not the newest) is published too — "
+        "'dated' means every dated section, not just the first one found"
+    )
+
+
+def test_stale_fragments_flags_a_fragment_published_in_an_older_dated_section(tmp_path):
+    """Mirrors test_released_task_ids_reads_every_dated_section_not_just_the_newest at the
+    fragment-matching level: a fragment that shipped under an OLD version, two releases back,
+    must still be caught — not just one that shipped in the newest dated section.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.9.0] — 2026-08-22\n\n"
+        "### Fixed\n\n- newest release, unrelated (CMX-500)\n\n"
+        "## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- older release (CMX-309, #385)\n"
+    )
+    d = _fragment_dir(tmp_path, **{"CMX-309.md": "### Fixed\n\n- older release (CMX-309, #385)\n"})
+    assert [p.name for p in stale_fragments(changelog, d)] == ["CMX-309.md"]
+
+
 def test_stale_fragments_flags_one_already_published_in_a_dated_section(tmp_path):
     d = _fragment_dir(tmp_path, **{"CMX-309.md": "### Fixed\n\n- shipped (CMX-309, #385)\n"})
     assert [p.name for p in stale_fragments(_RELEASED_SAMPLE, d)] == ["CMX-309.md"]
@@ -789,6 +828,22 @@ def test_stale_fragments_judges_by_filename_not_by_cited_prose(tmp_path):
 def test_stale_fragments_ignores_the_readme(tmp_path):
     d = _fragment_dir(tmp_path)
     (d / "README.md").write_text("mentions (CMX-309) in prose")
+    assert stale_fragments(_RELEASED_SAMPLE, d) == []
+
+
+def test_stale_fragments_accepts_an_unidentifiable_fragment_name_even_when_something_shipped(tmp_path):
+    """`_FRAGMENT_NAME` exists so that only `CMX-<id>.md` is judged — a fragment whose name
+    carries no task id has nothing to compare against `released` and must fall through as
+    fresh, exactly as tests/test_judge_changelog_note.py stages `changelog.d/hotfix.md` as a
+    legitimate fragment for the sibling guard. Every other stale_fragments fixture in this
+    file stages only `CMX-<id>.md` names (plus the README, which `_fragment_paths` drops
+    before this function ever sees it) alongside a NON-EMPTY released set, so the `m is None`
+    fall-through — the branch that keeps an unidentifiable name out of the refusal — is never
+    independently exercised. `_RELEASED_SAMPLE` already has CMX-309 published, which is the
+    case that matters here: an unidentifiable name must be accepted even though `released` is
+    non-empty, not just when there is nothing to compare it to.
+    """
+    d = _fragment_dir(tmp_path, **{"hotfix.md": "### Fixed\n\n- no CMX id in this filename\n"})
     assert stale_fragments(_RELEASED_SAMPLE, d) == []
 
 
