@@ -247,3 +247,88 @@ calling `promote_unreleased` on `_RELEASED_SAMPLE` (CMX-309 already published) w
 **See also:** [[03|shape 3]] and [[07|shape 7]], cited in the verdict that found this — the
 guard's off-state (accept) was proven at the `stale_fragments` layer but never re-proven at
 the `promote_unreleased` caller that actually decides whether a release is blocked.
+
+---
+
+### Also found on this task (round 5, same file): a captured value is only ever proven at one shape (here, digit length) because every fixture that exercises the comparison happens to use the same shape
+
+**Assertion form:** `_FRAGMENT_NAME`'s `\d+` extracts a task id of unbounded length from a
+filename, and its docstring is explicit that the FILENAME is the authority "any length." But
+every fixture in the test file that ever compares the extracted id against a NON-EMPTY
+released/forbidden set stages a THREE-DIGIT id (309, 312, 314, 400, 999) — and this repo's
+own `changelog.d/` is coincidentally also all three-digit (315/316/317/320/321). The one
+fixture with a different-length id (`CMX-1.md`, in the "before the first release" test) is
+mounted only where the released set is empty, so it asserts `[]` whether or not the id was
+parsed at all — it exercises the guard clause, not the digit-length claim. `\d+` is therefore
+only ever proven at exactly one shape (id length 3); nothing in the suite would notice if it
+were narrowed to that shape specifically.
+
+**Mutation that defeats it:** narrow the capture to a fixed length with a permissive tail —
+`\d+` → `\d{3}\d*`. Every existing fixture still matches (three digits satisfies `\d{3}`, and
+the extra digits — none, here — are absorbed by `\d*`), but the captured `id` group is now
+always exactly the first three digits: a filename shorter than three digits (`CMX-9.md`)
+fails to match at all and falls through the `m is None` branch as unidentifiable (a stale
+2-digit-or-shorter fragment silently republishes, no refusal), and a filename longer than
+three digits (`CMX-3155.md`) still matches but its captured id is truncated to `315` — the
+wrong task entirely, and in this repo's own case, this very CMX task number, so a fragment
+for task 3155 gets refused as if task 315 (already shipped) were the one at issue.
+
+**Guard form that survives:** stage the comparison at MORE than one length on both sides of
+the boundary a length-pinned mutation would introduce — a released set with a SHORTER id than
+the pinned length (proving `\d+` doesn't have an implicit minimum), and a released set with a
+LONGER id than the pinned length where a shorter PREFIX of that id is a distinct, different
+released task (proving the capture isn't silently truncated to the pinned length's own
+digit-count). A fixture that only varies length without that prefix-collision on the long
+side would still pass a truncating mutation by accident whenever no shorter released id
+happens to coincide with the truncated capture.
+
+**Found:** `chela/release_notes.py`'s `_FRAGMENT_NAME` (CMX-315 rework round 5, PR #393).
+Closed by `test_stale_fragments_matches_a_filename_id_shorter_than_three_digits` (a released,
+single-digit `CMX-9`, asserting the same-id fragment is still flagged stale) and
+`test_stale_fragments_does_not_truncate_a_four_digit_filename_id` (a released `CMX-315`
+alongside an unreleased `CMX-3155` fragment, asserting the four-digit fragment is NOT flagged
+stale merely because its first three digits match a released id).
+
+**See also:** [[15|shape 15]] — the general form of "a captured/rendered value is only ever
+proven at one shape because every fixture happens to share that shape"; this is that gap
+specifically in digit-length, on the id-extraction side rather than the list-truncation side.
+
+---
+
+### Also found on this task (round 5, same file): the ONE fixture that reaches an `m is None` fall-through is also the only fixture where a prose-fallback and a filename-only match are indistinguishable
+
+**Assertion form:** `stale_fragments`'s docstring and `_FRAGMENT_NAME`'s docstring both state
+the guard is filename-only, "never its prose" — because a fragment routinely cites a sibling
+task id in its own body, and matching prose would call that fragment stale the moment the
+cited sibling ships. The one fixture that reaches the `m is None` branch (an unidentifiable
+filename, `hotfix.md`) stages a body with NO `(CMX-N)` marker in it at all. That closed shape
+14/15's "`m is None` is never independently armed against a non-empty released set" gap
+(round 3), but left a narrower one behind: because that fixture's body has no marker to find,
+a prose fallback silently added behind the filename match (`m = _FRAGMENT_NAME.match(...) or
+_TASK_MARKER.search(path.read_text())`) produces the exact same result on it as filename-only
+matching — the fixture built to prove "never prose" cannot see a prose fallback because it
+never gives prose anything to match.
+
+**Mutation that defeats it:** fall back to scanning the fragment's own body for a `(CMX-N)`
+marker when the filename doesn't parse — `m = _FRAGMENT_NAME.match(path.name)` becomes `m =
+(_FRAGMENT_NAME.match(path.name) or _TASK_MARKER.search(path.read_text()))`. The existing
+`m is None` fixture (`hotfix.md`, no marker in the body) still falls through exactly as
+before, since there is nothing for the fallback to find. But a real off-convention fragment
+that cites an already-shipped sibling task in prose — the same shape CMX-315's own fragment
+uses when it cites CMX-312 — is now refused for a release that task never shipped in.
+
+**Guard form that survives:** stage the SAME unidentifiable filename the existing fixture
+uses, but give its body an actual `(CMX-N)` marker for an already-published task, and assert
+the fragment is still accepted. Reusing an already-armed released set (rather than a fresh
+empty one) is what makes this fixture differ from the pre-existing one instead of duplicating
+it.
+
+**Found:** `chela/release_notes.py`'s `stale_fragments` (CMX-315 rework round 5, PR #393).
+Closed by
+`test_stale_fragments_accepts_an_unidentifiable_fragment_that_cites_a_shipped_id_in_prose`,
+staging `hotfix.md` with a body citing the already-published `CMX-309` against
+`_RELEASED_SAMPLE`, and asserting it is still accepted.
+
+**See also:** the round-3 entry above (`m is None` never armed against a non-empty released
+set) — this is the same fall-through branch, one layer further in: not just "is it armed,"
+but "is what arms it actually distinct from what a prose fallback would also satisfy."

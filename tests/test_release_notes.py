@@ -839,6 +839,57 @@ def test_stale_fragments_judges_by_filename_not_by_cited_prose(tmp_path):
     assert stale_fragments(_RELEASED_SAMPLE, d) == []
 
 
+def test_stale_fragments_matches_a_filename_id_shorter_than_three_digits(tmp_path):
+    """`_FRAGMENT_NAME`'s `\\d+` must match a task id of ANY length. Every other
+    stale_fragments fixture in this file that compares against a non-empty released set
+    uses a three-digit id (309, 312, 314, 400, 999) — this repo's own changelog.d/ is also
+    all three-digit (315/316/317/320/321) — so a regex narrowed to exactly three digits
+    (e.g. `\\d{3}\\d*`) would pass every one of them while silently dropping shorter ids
+    from the guard entirely: a stale `CMX-9.md` would republish, no refusal. Use a
+    single-digit id here, the case that actually distinguishes `\\d+` from a
+    three-digit-minimum pattern.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- short id (CMX-9, #385)\n"
+    )
+    d = _fragment_dir(tmp_path, **{"CMX-9.md": "### Fixed\n\n- short id (CMX-9, #385)\n"})
+    assert [p.name for p in stale_fragments(changelog, d)] == ["CMX-9.md"]
+
+
+def test_stale_fragments_does_not_truncate_a_four_digit_filename_id(tmp_path):
+    """Mirrors the short-id case above from the other end: a filename regex pinned to
+    exactly three digits with a trailing `\\d*` (`\\d{3}\\d*`) still MATCHES a four-digit
+    filename — it just truncates the captured id to its first three digits, so
+    `CMX-3155.md` is judged as task `315`. Stage a released set that ships `315` but NOT
+    `3155`: a fragment for the genuinely unreleased task `3155` must be accepted, not
+    refused for a release it never shipped in.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- unrelated task (CMX-315, #385)\n"
+    )
+    d = _fragment_dir(tmp_path, **{"CMX-3155.md": "### Fixed\n\n- distinct task (CMX-3155)\n"})
+    assert stale_fragments(changelog, d) == []
+
+
+def test_stale_fragments_accepts_an_unidentifiable_fragment_that_cites_a_shipped_id_in_prose(tmp_path):
+    """Sibling to test_stale_fragments_accepts_an_unidentifiable_fragment_name_even_when_something_shipped,
+    which stages a body with NO `(CMX-N)` marker at all — so on that fixture, a prose
+    fallback added behind the filename match and filename-only matching are
+    indistinguishable; the fallback would never be exercised. This fragment's name still
+    doesn't parse (`hotfix.md`, the exact off-convention name
+    tests/test_judge_changelog_note.py stages as legitimate), but its BODY cites an
+    already-shipped task in the trailing `(CMX-N)` form — exactly what CMX-315's own
+    fragment does when it cites CMX-312 in prose. `_FRAGMENT_NAME`'s docstring is explicit:
+    a fragment is judged by filename, NEVER by prose. Must stay accepted.
+    """
+    d = _fragment_dir(tmp_path, **{
+        "hotfix.md": "### Fixed\n\n- follow-up on already-shipped work (CMX-309)\n",
+    })
+    assert stale_fragments(_RELEASED_SAMPLE, d) == []
+
+
 def test_stale_fragments_ignores_the_readme(tmp_path):
     d = _fragment_dir(tmp_path)
     (d / "README.md").write_text("mentions (CMX-309) in prose")
