@@ -3546,9 +3546,19 @@ def test_pr_live_head_sha_is_None_when_gh_times_out():
 
 
 def test_pr_live_head_sha_is_None_on_a_non_zero_exit():
+    """``stdout`` here is a WELL-FORMED payload that would happily parse to a sha — gh can
+    print a stale/partial body alongside a non-zero exit. If the returncode check is
+    dead-coded (e.g. ``if False and out.returncode != 0``), this must NOT stay None by
+    accident of ``json.loads("")`` raising on an empty default; it would instead return
+    ``"shouldnotbeused"``, which is what makes this pin the returncode check itself rather
+    than merely reproducing the empty-stdout case a dead-coded check also happens to catch."""
     with patch.object(
         dispatcher.subprocess, "run",
-        return_value=_GhResult(returncode=1, stderr="gh: rate limited"),
+        return_value=_GhResult(
+            returncode=1,
+            stdout=json.dumps({"headRefOid": "shouldnotbeused"}),
+            stderr="gh: rate limited",
+        ),
     ):
         assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
 
