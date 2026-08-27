@@ -273,6 +273,12 @@ def message_display_command(port: int | None = None, host: str = "127.0.0.1") ->
 # `PermissionRequest` — both are rare, but a hook a headless caller can still trip is not a
 # hook that is gated.
 #
+# What this costs (CMX-322, measured — see "What the gate costs" in docs/HOOKS.md): `http`
+# spawned nothing, so this trades a shell fork/exec on EVERY tool call, gated or not
+# (~0.5ms when the gate closes and skips `curl` entirely), for the noise this fixes — and a
+# gate that's OPEN (a real chela session) also forks/execs `curl` (~3.6ms total), TWICE per
+# tool call, where the old transport spawned nothing at all.
+#
 # The other 10 events (`UserPromptSubmit`, `SessionEnd`, `Stop`, `SubagentStart`,
 # `SubagentStop`, `Notification`, `PreCompact`, `PostCompact`, `Elicitation`) stay on
 # `http`: each fires at most a handful of times per session rather than per tool call, and
