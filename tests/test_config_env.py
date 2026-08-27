@@ -216,7 +216,10 @@ def test_an_explicit_port_still_renders(chela_dir):
 
     rendered = hooks.render_plugin(chela_dir / "plugin", port=6001)
     manifest = json.loads((rendered / "hooks" / "hooks.json").read_text())
-    assert manifest["hooks"]["PreToolUse"][0]["hooks"][0]["url"].endswith(":6001/hooks/PreToolUse")
+    # PreToolUse is a gated `command` hook (CMX-319): the port lives in its `command`
+    # string, not a top-level `url` key.
+    assert manifest["hooks"]["PreToolUse"][0]["hooks"][0]["command"].endswith(
+        "|| true") and ":6001/hooks/PreToolUse" in manifest["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
 
 
 # --- doctor: the drift has to be loud ----------------------------------------------
