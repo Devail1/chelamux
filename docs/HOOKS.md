@@ -258,6 +258,27 @@ noise is far smaller, and the fix here targets the two shapes actually measured 
 the ~78% of hook volume that is `PreToolUse`/`PostToolUse`, and the hook that can hold a
 live agent open for a human.
 
+**What the gate costs, on the hottest path there is.** CMX-319 asserted "no socket, no
+daemon call, nothing to fail open FROM" for a session it blocks, but never measured the
+side that matters more: `PreToolUse`/`PostToolUse` fired zero extra processes before this
+change (`http` is Claude Code's own in-process client) and now fork/exec a shell for
+**every tool call, in every session, gated or not** — the plugin has no cheaper way to read
+`$CHELA_WID` than `command`. Measured (`sh -c` timed with `time.perf_counter()`, 200
+iterations, this repo's dev container):
+
+| path | adds over a bare `sh -c true` (~0.52ms) | total |
+|---|---|---|
+| gate **closed** (`$CHELA_WID` unset, `curl` never runs) | ~0ms — the `[ -n ... ]` test itself is free | ~0.5ms |
+| gate **open** (`$CHELA_WID` set, `curl` forks/execs) | ~3.1ms — the `curl` process itself | ~3.6ms |
+
+So a session chela did **not** launch now pays a shell fork/exec (~0.5ms) it never paid
+before, per `PreToolUse`/`PostToolUse` — that is the cost of closing the gate. A session
+chela **did** launch pays that same shell plus a `curl` fork/exec (~3.6ms total) on every
+tool call, TWICE per call (`PreToolUse` and `PostToolUse` each fire it) — a cost the old
+in-process `http` transport never had at all, since the request happened without spawning
+anything. Absolute numbers will differ by machine; the shape won't: an `http` hook is
+"free" in process-spawn terms, and any `command` hook — gated or not — is not.
+
 **A hook runs synchronously inside a live agent**, so every choice here is made against
 one constraint: *a slow or crashing hook stalls or breaks somebody's session.*
 

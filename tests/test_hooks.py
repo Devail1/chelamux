@@ -26,6 +26,9 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
+import stat
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -705,6 +708,73 @@ def test_tool_event_command_leaves_headroom_under_its_declared_timeout():
         assert 0 < max_time < hooks.hook_timeout(event)
     assert hooks.tool_event_command("PermissionRequest", port=5001).split(
         "--max-time ", 1)[1].split(" ", 1)[0] == "118"
+
+
+# --- CMX-322: proving the $CHELA_WID gate by BEHAVIOUR, not by command-string shape -----
+#
+# Every assertion above this line reads the generated STRING and checks it *starts with*
+# the gate — that proves the gate is present, not that it actually stops anything. CMX-319
+# verified the real thing by hand before merging (a stubbed `curl` on `PATH`: unset
+# `$CHELA_WID` produced 0 invocations, a set one produced 1) but never committed that as a
+# test. These do: they run the exact command string through a real shell — the same way
+# Claude Code invokes a `command`-type hook — against a `curl` stub on `PATH` that records
+# each call instead of touching the network, and count invocations rather than trust the
+# string.
+
+_GATED_COMMANDS: dict[str, str] = {
+    "SessionStart": hooks.recap_command(port=5001),
+    "MessageDisplay": hooks.message_display_command(port=5001),
+    **{event: hooks.tool_event_command(event, port=5001)
+       for event in hooks.TOOL_EVENTS},
+}
+
+
+@pytest.fixture
+def curl_stub(tmp_path):
+    """A `curl` on `PATH` that records each invocation to a log file instead of making a
+    network call — proves how many times the gate LET `curl` run, with no daemon needed."""
+    log = tmp_path / "curl_calls.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "curl"
+    stub.write_text(f"#!/bin/sh\necho called >> '{log}'\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    return log, env
+
+
+def _run_gated_command(command, env):
+    """Run a hook's `command` string through a real shell. `input=b"{}"` so a curl that
+    DOES fire (its `--data-binary @-` reads the request body from stdin) never blocks on
+    an inherited stdin; `timeout=5` turns a gate that fails to short-circuit into a loud
+    test failure instead of a hung suite."""
+    subprocess.run(["sh", "-c", command], env=env, input=b"{}",
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+
+
+def _curl_invocations(log_path):
+    return log_path.read_text().count("called\n") if log_path.exists() else 0
+
+
+@pytest.mark.parametrize("event,command", sorted(_GATED_COMMANDS.items()))
+def test_gate_blocks_every_curl_when_chela_wid_is_unset(event, command, curl_stub):
+    """A session chela did not launch must produce ZERO curl invocations for every gated
+    event — not an empty header, not one call out of several: none."""
+    log, env = curl_stub
+    env.pop("CHELA_WID", None)
+    _run_gated_command(command, env)
+    assert _curl_invocations(log) == 0
+
+
+@pytest.mark.parametrize("event,command", sorted(_GATED_COMMANDS.items()))
+def test_gate_lets_exactly_one_curl_through_when_chela_wid_is_set(event, command, curl_stub):
+    """The gate must not swallow the real case while blocking the headless one: a
+    chela-managed session (`$CHELA_WID` set) still gets its one curl per event."""
+    log, env = curl_stub
+    env["CHELA_WID"] = "@3"
+    _run_gated_command(command, env)
+    assert _curl_invocations(log) == 1
 
 
 # --- live terminal timestamps (CMX-277, mechanism swapped in CMX-285) --------------
