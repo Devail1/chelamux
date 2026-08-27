@@ -1,6 +1,6 @@
 {
   "name": "chela",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Feed a chela fleet's event log from Claude Code hooks, and answer an AskUserQuestion from Telegram with no keystrokes.",
   "author": {
     "name": "chela"
