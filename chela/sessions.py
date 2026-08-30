@@ -220,8 +220,6 @@ def _pgrep_ancestor_flag(platform: str) -> list[str]:
     return ["-a"] if platform == "darwin" else []
 
 
-_PGREP_INCLUDE_ANCESTORS = _pgrep_ancestor_flag(sys.platform)
-
 # The claude process is normally the pane shell's direct child, but a wrapper (a `sg`, an
 # `env`, a launcher script) can sit in between. Walk a couple of generations, not the
 # whole tree — this runs on the hook path.
@@ -380,7 +378,7 @@ def _sh_children(pid: int) -> list[int]:
     test that stubs `subprocess.run` wholesale hands back, and inheriting a pid from it
     would be a fact invented out of another command's stdout.
     """
-    out = _sh(["pgrep", *_PGREP_INCLUDE_ANCESTORS, "-P", str(pid)])
+    out = _sh(["pgrep", *_pgrep_ancestor_flag(sys.platform), "-P", str(pid)])
     kids: list[int] = []
     for line in (out or "").splitlines():
         token = line.strip()

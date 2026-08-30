@@ -314,10 +314,20 @@ def test_the_ancestor_flag_is_platform_gated_in_both_directions():
     assert sessions._pgrep_ancestor_flag("freebsd14") == []
 
 
-def test_sh_children_passes_the_ancestor_flag_into_the_argv(monkeypatch):
-    """The flag must reach the actual argv: gating it correctly is worthless if the call
-    site never splices it in. Reverting that one line is a silent, total disabling of the
-    fix that the platform test above cannot see."""
+def test_sh_children_emits_the_ancestor_flag_on_darwin_and_never_on_linux(monkeypatch):
+    """One assertion over the WHOLE path: platform read -> flag choice -> argv.
+
+    The flag is computed from ``sys.platform`` at the point of use rather than bound to a
+    module constant at import, because a constant is a third place the fix can die that no
+    test on Linux can see: ``_pgrep_ancestor_flag`` correct, ``_sh_children`` splicing
+    correctly, and the constant bound from a hardcoded ``"linux"`` all coexist happily
+    while macOS silently loses the flag. There is no binding to get wrong now, and driving
+    the real ``sys.platform`` means Linux CI executes the darwin branch for real.
+
+    GNU procps spells ``-a`` as ``--list-full``, which prepends the command and would break
+    the all-digits parse below — so the linux case asserting NO flag is as load-bearing as
+    the darwin case asserting one.
+    """
     seen = []
 
     def fake_sh(argv, **kw):
@@ -325,6 +335,15 @@ def test_sh_children_passes_the_ancestor_flag_into_the_argv(monkeypatch):
         return ""
 
     monkeypatch.setattr(sessions, "_sh", fake_sh)
-    monkeypatch.setattr(sessions, "_PGREP_INCLUDE_ANCESTORS", ["-a"])
+
+    monkeypatch.setattr(sys, "platform", "darwin")
     sessions._sh_children(4321)
     assert seen[-1] == ["pgrep", "-a", "-P", "4321"]
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    sessions._sh_children(4321)
+    assert seen[-1] == ["pgrep", "-P", "4321"]
+
+    monkeypatch.setattr(sys, "platform", "freebsd14")
+    sessions._sh_children(4321)
+    assert seen[-1] == ["pgrep", "-P", "4321"]
