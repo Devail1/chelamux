@@ -39,14 +39,40 @@ def enabled() -> bool:
     return config.AUTO_MERGE_ENABLED
 
 
+def _judge_verdict_is_stale(run: dict) -> bool:
+    """Is ``run``'s ``clean`` verdict recorded against a commit other than its own known head?
+
+    ``judge_sha`` is the commit a judge actually verified (stamped at judge launch); the run
+    row also carries ``pr_head_sha`` (CI's cached head, refreshed on the dispatcher's own poll
+    loop — see ``dispatcher.py``'s ``pr_checks``/``pr_head_sha`` columns). When BOTH are known
+    and disagree, this row's ``clean`` was earned by a commit that is no longer the PR's head —
+    a promotion conflict resolved on the branch, a rebase, anything pushed after judgement — and
+    a verdict about a superseded commit is not a verdict about the one that would actually be
+    merged.
+
+    Mirrors :func:`chela.contract.merge`'s own live ``judge_sha != ci.head_sha`` refusal
+    (CMX-238) at the CHEAPER, cached-data layer this filter already reads — it does not widen
+    or replace that live check (``contract.merge`` still re-reads GitHub at merge time and is
+    what actually stops the merge; this exists so the filter's own claim of "candidate" is not
+    already wrong before ``contract.merge`` ever sees the row). Same conservatism as that check:
+    either sha missing is NOT treated as staleness — an older row or a judge that never stamped
+    one is not positive evidence of anything, so it is left to ``contract.merge``'s live read.
+    """
+    judge_sha = run.get("judge_sha")
+    head_sha = run.get("pr_head_sha")
+    return bool(judge_sha and head_sha and judge_sha != head_sha)
+
+
 def candidates() -> list[dict]:
-    """``awaiting_review`` runs the judge itself cleared — the ONLY subset auto-merge ever
-    touches. Everything else (``blocked``/``cannot_verify``/never-judged, any other status) is
-    left exactly where it already sits, for a human or the lease-gated orchestrator to handle;
-    this sweep does not widen who may act on them, only who may act on the judge-clean ones."""
+    """``awaiting_review`` runs the judge itself cleared, FOR THE COMMIT STILL AT THEIR HEAD —
+    the ONLY subset auto-merge ever touches. Everything else (``blocked``/``cannot_verify``/
+    never-judged/stale-verdict, any other status) is left exactly where it already sits, for a
+    human or the lease-gated orchestrator to handle; this sweep does not widen who may act on
+    them, only who may act on the judge-clean, judge-current ones."""
     return [
         run for run in dispatcher.list_runs()
         if run.get("status") == "awaiting_review" and run.get("judge_state") == J_CLEAN
+        and not _judge_verdict_is_stale(run)
     ]
 
 
