@@ -279,3 +279,22 @@ def test_a_missing_tool_is_just_an_unknown_fact(no_proc, monkeypatch):
     assert sessions._resumed_session(1) is None
     assert sessions.proc_started(1) is None
     assert sessions._proc_cwd(1) is None
+
+
+def test_sh_children_lists_the_callers_own_ancestors(no_proc):
+    """A parent's child list must include THIS process — which is an ancestor of the
+    ``pgrep`` that answers.
+
+    macOS ``pgrep`` omits the caller and all of its ancestors unless ``-a`` is passed
+    (pgrep(1)). chela reaches this path from inside agent windows, where the window's own
+    ``claude`` IS an ancestor of every command it runs: without ``-a``, ``_claude_pid``
+    returns None for the very window the caller sits in, and every population keyed on
+    ``claude_pid`` silently loses it — ``chela doctor``'s peer-messaging check included,
+    which then under-reports by exactly that window.
+
+    Asserting on ``getppid() -> getpid()`` rather than a spawned child is the point: only
+    an ANCESTOR reproduces the exclusion, and a descendant (what every other test here
+    uses) is listed either way. Green on Linux with or without the fix — procps excludes
+    only ``pgrep`` itself — which is exactly why this regression hides in CI.
+    """
+    assert os.getpid() in sessions._sh_children(os.getppid())

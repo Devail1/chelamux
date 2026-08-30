@@ -149,6 +149,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -194,6 +195,22 @@ _PROC_HOST = Path("/proc").is_dir()
 # The fallback queries are single, read-only process lookups. Bounded because this runs on
 # the hook path, with an agent BLOCKED on it.
 _SHIM_TIMEOUT = 2.0
+
+# BSD `pgrep` (macOS) excludes the CALLER AND ALL OF ITS ANCESTORS from the match list
+# unless `-a` is passed — see pgrep(1). That default is silent, and here it is exactly
+# wrong: any chela CLI run from INSIDE an agent window (`chela status`, `chela peek`,
+# `chela doctor` — the calls an agent makes ABOUT ITSELF) has that window's own `claude`
+# as an ancestor, so `pgrep -P <pane_pid>` returns nothing and the window resolves to
+# `claude_pid=None`. It then drops out of every population keyed on `claude_pid`,
+# including `doctor`'s peer-messaging check — which therefore under-reports by exactly
+# the window the operator is sitting in. The daemon never sees this (it descends from no
+# agent), so the blind spot appears only in self-diagnosis, which is where it hurts most.
+#
+# GNU procps spells `-a` as `--list-full`, which prepends the command to every line and
+# would break `_sh_children`'s all-digits parse. Only the BSD flavour is ever reached
+# here — `_sh` returns None on a /proc host before any of this runs — but the flag is
+# gated on the platform rather than on that invariant holding forever.
+_PGREP_INCLUDE_ANCESTORS = ["-a"] if sys.platform == "darwin" else []
 
 # The claude process is normally the pane shell's direct child, but a wrapper (a `sg`, an
 # `env`, a launcher script) can sit in between. Walk a couple of generations, not the
@@ -353,7 +370,7 @@ def _sh_children(pid: int) -> list[int]:
     test that stubs `subprocess.run` wholesale hands back, and inheriting a pid from it
     would be a fact invented out of another command's stdout.
     """
-    out = _sh(["pgrep", "-P", str(pid)])
+    out = _sh(["pgrep", *_PGREP_INCLUDE_ANCESTORS, "-P", str(pid)])
     kids: list[int] = []
     for line in (out or "").splitlines():
         token = line.strip()
