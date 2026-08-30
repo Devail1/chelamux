@@ -367,6 +367,16 @@ def test_registered_marketplaces_reads_the_keys(env):
     assert hooks.registered_marketplaces() == {"anthropic-agent-skills", "chela"}
 
 
+def test_registered_marketplaces_is_none_when_the_file_is_not_a_dict(env):
+    """Present but malformed (a JSON list, here) must land on the same "cannot verify"
+    branch as a missing file — never an empty set, which would read as EVERY installed
+    copy's marketplace being gone (a false ERROR from doctor, a false ⛔ from `chela
+    update`) on any machine where this registry happens to be malformed."""
+    path = hooks.plugins_dir() / "known_marketplaces.json"
+    path.write_text("[]", encoding="utf-8")
+    assert hooks.registered_marketplaces() is None
+
+
 def test_marketplace_missing_is_false_when_the_registry_cannot_be_read(env):
     """Never guess "gone" from an absent file — that would false-positive on every
     environment where this registry happens not to exist for unrelated reasons."""
@@ -453,12 +463,25 @@ def test_doctor_reports_the_gone_marketplace_instead_of_stale_when_both_are_true
 
 
 def test_chela_plugin_names_a_gone_marketplace_distinctly_from_a_stale_install(env, capsys):
+    """Mirrors the doctor-side guards (`test_doctor_ERRORs_when_the_marketplace_is_gone`,
+    `test_doctor_reports_the_gone_marketplace_instead_of_stale_when_both_are_true`): a
+    ZERO-drift install can never exercise the `continue` that pre-empts the drift report,
+    and "chela" is not a safe marketplace name to pin a slug with — it appears in this
+    message for reasons that have nothing to do with the slug (`chela@...`, "chela does
+    not know where it came from"). Stale + "acme" makes both branches live at once, so a
+    mutated `continue` (which lets the drift report ALSO fire) and a blanked slug (which
+    "STALE" or "chela" alone can never catch) both go red.
+    """
     directory = _render()
-    _install(hooks.hooks_spec(PORT))
+    _install(_stale(), marketplace="acme")
     _register_marketplaces("anthropic-agent-skills")
     main._report_installed_plugin(directory, PORT)
     out = capsys.readouterr().out
     assert "GONE" in out
     assert "will not load" in out.lower()
     assert "STALE INSTALL" not in out
+    # the gone-marketplace branch must PRE-EMPT the drift report for the same copy — a
+    # `continue` mutated away lets this line also print, since `_stale()` really does drift
+    assert "agrees with what was just rendered" not in out
+    assert "marketplace 'acme' is GONE" in out    # names the vanished marketplace slug
     assert "claude plugin marketplace add" in out
