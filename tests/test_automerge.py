@@ -121,6 +121,19 @@ def test_candidates_includes_a_clean_verdict_with_no_head_sha_recorded_yet(repo)
     assert ids == {"nohead1"}
 
 
+def test_candidates_includes_a_clean_verdict_with_no_judge_sha_stamped(repo):
+    """Mirror of the test above, on the OTHER unset-sha clause: an unstamped ``judge_sha`` (a
+    judge that ran before this column existed) is likewise NOT positive evidence of staleness,
+    even though ``pr_head_sha`` is known — same conservatism, other half of the ``and``.
+
+    Corrupt ``_judge_verdict_is_stale`` to drop the ``judge_sha and`` clause (leaving only
+    ``head_sha and judge_sha != head_sha``) and this goes red: ``None != "deadbeef0001"`` is
+    ``True``, so the row would wrongly read as stale and vanish from the candidate set."""
+    _seed_run(repo, "nojudgesha1", judge_sha=None, pr_head_sha="deadbeef0001")
+    ids = {run["task_id"] for run in automerge.candidates()}
+    assert ids == {"nojudgesha1"}
+
+
 # --- sweep(): merges through contract.merge, UNATTENDED (no lease needed) ------------
 
 def test_sweep_merges_a_judge_clean_run_with_no_lease_at_all(repo):
