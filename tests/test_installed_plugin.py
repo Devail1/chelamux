@@ -61,6 +61,14 @@ def _install(spec: dict, version: str = "0.1.0", marketplace: str = "chela",
     return root
 
 
+def _register_marketplaces(*names: str) -> None:
+    """Claude Code's own registry of marketplaces it currently knows about — the file
+    `claude plugin marketplace remove` (or a cache sweep) can drop an entry from without
+    touching `installed_plugins.json` or the cached manifest at all."""
+    path = hooks.plugins_dir() / "known_marketplaces.json"
+    path.write_text(json.dumps({name: {} for name in names}), encoding="utf-8")
+
+
 def _stale(port: int = PORT) -> dict:
     """The manifest that hid all day: PermissionRequest killed after 2 seconds."""
     spec = hooks.hooks_spec(port)
@@ -343,3 +351,107 @@ def test_drift_sees_a_hook_dropped_from_an_entry_that_declares_two(env):
                                                   "timeout": 1})
     drift = hooks.manifest_drift(hooks.hooks_spec(PORT), expected)
     assert any("Stop" in d and "1 hook(s)" in d for d in drift)
+
+
+# --- CMX-321: installed and byte-identical is not the same claim as LOADS -------------
+
+def test_registered_marketplaces_is_none_when_the_registry_is_missing(env):
+    """No `known_marketplaces.json` at all is "cannot verify", never "empty registry" —
+    a plugin can only ever be installed FROM a marketplace, so an unreadable registry is
+    chela's blind spot, not proof every marketplace vanished."""
+    assert hooks.registered_marketplaces() is None
+
+
+def test_registered_marketplaces_reads_the_keys(env):
+    _register_marketplaces("anthropic-agent-skills", "chela")
+    assert hooks.registered_marketplaces() == {"anthropic-agent-skills", "chela"}
+
+
+def test_marketplace_missing_is_false_when_the_registry_cannot_be_read(env):
+    """Never guess "gone" from an absent file — that would false-positive on every
+    environment where this registry happens not to exist for unrelated reasons."""
+    _install(hooks.hooks_spec(PORT))
+    copy = hooks.installed_plugins()[0]
+    assert hooks.marketplace_missing(copy) is False
+
+
+def test_marketplace_missing_is_false_when_the_marketplace_is_present(env):
+    _install(hooks.hooks_spec(PORT))
+    _register_marketplaces("anthropic-agent-skills", "chela")
+    copy = hooks.installed_plugins()[0]
+    assert hooks.marketplace_missing(copy) is False
+
+
+def test_marketplace_missing_is_true_when_the_registry_no_longer_has_it(env):
+    """The exact shape found 2026-08-30: `installed_plugins.json` still lists the plugin,
+    the cached manifest is perfectly readable, but Claude Code's marketplace registry no
+    longer has the marketplace it was installed under."""
+    _install(hooks.hooks_spec(PORT))
+    _register_marketplaces("anthropic-agent-skills", "superpowers-marketplace")
+    copy = hooks.installed_plugins()[0]
+    assert hooks.marketplace_missing(copy) is True
+
+
+def test_marketplace_missing_is_false_when_the_marketplace_could_not_be_determined(env):
+    """A registry entry keyed with no `@marketplace` suffix at all leaves `marketplace`
+    `None` — a different, already-handled gap than a confirmed-but-vanished marketplace,
+    and not something this check should also flag."""
+    root = _install(hooks.hooks_spec(PORT), register=False)
+    registry = hooks.plugins_dir() / "installed_plugins.json"
+    registry.write_text(json.dumps({"version": 2, "plugins": {
+        "chela": [{"scope": "user", "installPath": str(root), "version": "0.1.0"}],
+    }}), encoding="utf-8")
+    _register_marketplaces("anthropic-agent-skills")   # a real registry — just no match
+    copy = hooks.installed_plugins()[0]
+    assert copy.marketplace is None
+    assert hooks.marketplace_missing(copy) is False
+
+
+def test_doctor_ERRORs_when_the_marketplace_is_gone(env):
+    """This must read as a LOAD failure, not a staleness one — `claude plugin list` calls
+    it "failed to load", and a manifest comparison alone can never see it."""
+    _render()
+    _install(hooks.hooks_spec(PORT))
+    _register_marketplaces("anthropic-agent-skills")
+    body = _text(_levels(_check(), doctor.ERROR))
+    assert "GONE" in body
+    assert "CANNOT LOAD IT AT ALL" in body
+    assert "chela" in body                        # names the vanished marketplace slug
+    assert "failed to load" in body
+    assert "STALE" not in body                    # never conflated with the drift wording
+    assert "claude plugin marketplace add" in body
+
+
+def test_doctor_reports_the_gone_marketplace_even_with_zero_manifest_drift(env):
+    """The manifest can be byte-for-byte current and this must still fire — it is not a
+    drift check at all."""
+    _render()
+    _install(hooks.hooks_spec(PORT))          # matches the rendered manifest exactly
+    _register_marketplaces("anthropic-agent-skills")
+    findings = _check()
+    assert _levels(findings, doctor.ERROR)
+    assert "installed plugin matches" not in _text(findings)
+
+
+def test_doctor_reports_the_gone_marketplace_instead_of_stale_when_both_are_true(env):
+    """A copy can be BOTH stale AND unloadable at once — report the load failure (the more
+    severe, more specific claim) and skip the now-moot drift comparison, so an operator is
+    never told to fix hook content that will not matter until the marketplace is back."""
+    _render()
+    _install(_stale())
+    _register_marketplaces("anthropic-agent-skills")
+    body = _text(_levels(_check(), doctor.ERROR))
+    assert "CANNOT LOAD IT AT ALL" in body
+    assert "THE HOOKS THAT RUN ARE STALE" not in body
+
+
+def test_chela_plugin_names_a_gone_marketplace_distinctly_from_a_stale_install(env, capsys):
+    directory = _render()
+    _install(hooks.hooks_spec(PORT))
+    _register_marketplaces("anthropic-agent-skills")
+    main._report_installed_plugin(directory, PORT)
+    out = capsys.readouterr().out
+    assert "GONE" in out
+    assert "will not load" in out.lower()
+    assert "STALE INSTALL" not in out
+    assert "claude plugin marketplace add" in out
