@@ -411,12 +411,19 @@ def test_doctor_ERRORs_when_the_marketplace_is_gone(env):
     """This must read as a LOAD failure, not a staleness one — `claude plugin list` calls
     it "failed to load", and a manifest comparison alone can never see it."""
     _render()
-    _install(hooks.hooks_spec(PORT))
+    # "acme" (not "chela") on purpose — "chela" appears in this message for reasons that
+    # have nothing to do with the slug (`chela@...`, "chela does not know..."), so pinning
+    # the slug with the tool's own name can never fail when the slug is rendered blank.
+    _install(hooks.hooks_spec(PORT), marketplace="acme")
     _register_marketplaces("anthropic-agent-skills")
     body = _text(_levels(_check(), doctor.ERROR))
     assert "GONE" in body
     assert "CANNOT LOAD IT AT ALL" in body
-    assert "chela" in body                        # names the vanished marketplace slug
+    # a bare "acme" also shows up in the installed copy's cache PATH regardless of whether
+    # the slug is actually interpolated — pin the two spots that render `copy.marketplace`
+    # through an f-string, which a blanked slug cannot satisfy.
+    assert "marketplace 'acme' is GONE" in body   # names the vanished marketplace slug
+    assert "chela@acme" in body
     assert "failed to load" in body
     assert "STALE" not in body                    # never conflated with the drift wording
     assert "claude plugin marketplace add" in body

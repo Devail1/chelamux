@@ -556,6 +556,7 @@ def test_plugin_refresh_needed_when_marketplace_gone(checkout):
     _register_marketplaces("some-other-marketplace")
     copies = hooks.installed_plugins()
     assert copies[0].hooks is not None            # manifest reads clean...
+    assert main.doctor.installed_hooks_stale() is False  # ...and it's not the drift arm...
     assert hooks.marketplace_missing(copies[0])   # ...but the marketplace itself is gone
     assert update._plugin_refresh_needed(copies) is True
 
@@ -1113,19 +1114,29 @@ def test_update_still_prints_a_success_line_without_a_plugin_error(checkout, mon
 def test_update_names_a_gone_marketplace_distinctly_from_stale_hooks(checkout, monkeypatch, capsys):
     """The product fix half of CMX-321: this must not be discoverable only via `chela
     doctor` after the fact — `chela update` itself has to say the plugin will not load,
-    in wording that is not "stale" (stale means old-but-working; this is not working)."""
+    in wording that is not "stale" (stale means old-but-working; this is not working).
+
+    `installed_hooks_stale` is pinned True (not False) on purpose: the gone-marketplace
+    report and the stale-hooks report are mutually exclusive by an `elif` in
+    `chela/main.py` — with both arms true, only the load-failure message may print. A
+    `False` pin here would pass whether that branch were `if` or `elif`, since the stale
+    arm would never fire either way.
+    """
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
     monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
         ok=True, step="done", behind_before=0))
-    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
-    _install_plugin(marketplace="chela")
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: True)
+    # "acme" (not "chela") on purpose — "chela" appears in this message for reasons that
+    # have nothing to do with the slug (`chela update`, "chela cannot..."), so pinning the
+    # slug with the tool's own name can never fail when the slug is rendered blank.
+    _install_plugin(marketplace="acme")
     _register_marketplaces("anthropic-agent-skills")
 
     main.cmd_update(argparse.Namespace(check=False))
 
     out = capsys.readouterr().out
     assert "will NOT LOAD" in out
-    assert "chela" in out
+    assert "acme" in out
     assert "claude plugin marketplace add" in out
     assert "hooks still look stale" not in out
 
