@@ -452,6 +452,10 @@ def test_doctor_ERRORs_when_the_marketplace_is_gone(env):
     # marketplace add" substring survives a blanked slug just as easily as the two above did
     # before they were pinned (docs/defeat_shapes/79); pin the interpolated phrase instead.
     assert "path-or-url-to-the-acme-marketplace" in body
+    # a fourth render site: the one piece of evidence in this message is WHICH registry
+    # file the verdict was read from — a blanked path is indistinguishable from a correct
+    # one to every assertion above (docs/defeat_shapes/79, at a fourth site).
+    assert str(hooks.plugins_dir() / "known_marketplaces.json") in body
 
 
 def test_doctor_reports_the_gone_marketplace_even_with_zero_manifest_drift(env):
@@ -488,7 +492,7 @@ def test_chela_plugin_names_a_gone_marketplace_distinctly_from_a_stale_install(e
     "STALE" or "chela" alone can never catch) both go red.
     """
     directory = _render()
-    _install(_stale(), marketplace="acme")
+    root = _install(_stale(), marketplace="acme")
     _register_marketplaces("anthropic-agent-skills")
     main._report_installed_plugin(directory, PORT)
     out = capsys.readouterr().out
@@ -500,3 +504,6 @@ def test_chela_plugin_names_a_gone_marketplace_distinctly_from_a_stale_install(e
     assert "agrees with what was just rendered" not in out
     assert "marketplace 'acme' is GONE" in out    # names the vanished marketplace slug
     assert "claude plugin marketplace add" in out
+    # WHICH installed manifest will not load — a blanked path satisfies every assertion
+    # above just as well as a correct one (docs/defeat_shapes/79, at a fourth site).
+    assert str(root / "hooks" / "hooks.json") in out

@@ -40,3 +40,24 @@ site (`{copy.marketplace}` → `{''}`) and the suite stayed green. Closed by ass
 exercises a *different* message built independently in `chela/main.py` that never
 interpolates the slug into this instruction at all — `` `claude plugin marketplace add
 <path-or-url>` `` — so it was not a third render site and needed no change here.)
+
+**Found a third time, at sibling sites in the same two messages — a different value each
+time, so pinning the slug did not close it:** CMX-321 rework round 5, PR #409. Round 4's fix
+above pinned `copy.marketplace` at its fourth render site in `_installed_report`'s message,
+but two OTHER f-string interpolations in the very same two "gone marketplace" messages were
+never pinned by any round: `chela/main.py::_report_installed_plugin`'s ⛔ line names WHICH
+manifest will not load (`f"Claude Code will not load {copy.manifest} AT ALL"`), and
+`chela/runtime_truth.py::_installed_report`'s detail names the registry file the verdict was
+read from (`f"own registry ({hooks.plugins_dir() / 'known_marketplaces.json'})"`). Both are
+sibling interpolations to ones already pinned in the same message — exactly this shape, just
+a different variable each time — so a reviewer checking "is the shape 79 spot closed" for
+`copy.marketplace` walked right past two more unrelated blank-able values sitting in the
+same sentence. The judge's required-mutation-set verdict blanked both (`{copy.manifest}` →
+`{''}`, `{hooks.plugins_dir() / 'known_marketplaces.json'}` → `{''}`) and the suite stayed
+green on both. Closed by asserting the manifest path (`str(root / "hooks" / "hooks.json")`)
+in `test_chela_plugin_names_a_gone_marketplace_distinctly_from_a_stale_install` and the
+registry path (`str(hooks.plugins_dir() / "known_marketplaces.json")`) in
+`test_doctor_ERRORs_when_the_marketplace_is_gone`, both in `tests/test_installed_plugin.py`.
+**Lesson:** closing shape 79 for one interpolated value in a message does not mean the
+message is closed — every distinct `{...}` render site in that message needs its own
+assertion, not just the one the current round happened to name.
