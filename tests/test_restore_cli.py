@@ -1195,6 +1195,23 @@ def test_a_dry_run_still_makes_the_read_only_claim(live_stores, capsys):
     assert "were re-stamped at their new address" not in out
 
 
+def test_a_dry_run_points_the_operator_at_retire_empty_for_a_no_op_MANUAL_row(
+        live_stores, capsys):
+    """🔴 GUARD (CMX-323, DEFEAT_SHAPES #323): the dry run's read-only contract must name
+    `chela restore --retire-empty` as the way to clear a MANUAL row with nothing on record —
+    that pointer IS the discoverability half of the fix; before it, the only documented way to
+    clear one was hand-editing a store. Dropping just this clause still leaves the read-only
+    claim itself intact (see the guard above), so it needs its own assertion.
+    """
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+
+    out = " ".join(capsys.readouterr().out.split())
+    assert "chela restore --retire-empty` for a MANUAL row with nothing on record" in out, (
+        f"the dry run must point the operator at --retire-empty. Got:\n{out}"
+    )
+
+
 def test_apply_prints_each_rows_DETAIL_not_just_its_outcome(live_stores, capsys):
     """🔴 GUARD (CMX-196 round 5): `ApplyResult.detail` is the per-row explanation `--apply`
     prints beside each outcome, and it is the only place the report says WHY.
@@ -1321,6 +1338,29 @@ def test_chela_restore_retire_empty_clears_ONLY_the_row_with_nothing_on_record(
     archived = json.loads((chela_dir / "roster-archive.json").read_text())["archived"]
     assert [(a["store"], a["wid"]) for a in archived] == [("session-ids", "@8")], (
         "only the empty row may land in the archive"
+    )
+
+
+def test_retire_empty_must_not_repeat_the_READ_ONLY_claim_it_just_broke(live_stores, capsys):
+    """🔴 GUARD (CMX-323, DEFEAT_SHAPES #323): `--retire-empty` writes too, so it must NOT
+    print the dry run's "report only — chela restore never writes to a store" claim either.
+    CMX-196 round 4 guarded exactly this contradiction for `--apply`
+    (`test_apply_must_not_repeat_the_READ_ONLY_claim_it_just_broke`), but the guard was never
+    mirrored onto `--retire-empty` when this ticket added it as a third branch of the same
+    `if apply_flag: ... elif retire_flag: ... else:` chain. Neutralise the `elif retire_flag:`
+    branch (`elif False and retire_flag:`) and `--retire-empty` archives-then-removes the
+    no-op MANUAL row and then tells the operator it never writes — the report contradicting
+    what the command just did.
+    """
+    with pytest.raises(SystemExit):
+        _drive(["restore", "--retire-empty"])
+
+    out = capsys.readouterr().out
+    assert "never writes to a store" not in out, (
+        f"--retire-empty claimed to be read-only AFTER writing. Got:\n{out}"
+    )
+    assert "only the MANUAL rows with nothing on record" in out, (
+        "the --retire-empty summary must state what it actually did, not the dry-run claim"
     )
 
 
