@@ -1388,9 +1388,21 @@ def test_retire_empty_must_not_repeat_the_READ_ONLY_claim_it_just_broke(live_sto
     assert "never writes to a store" not in out, (
         f"--retire-empty claimed to be read-only AFTER writing. Got:\n{out}"
     )
-    assert "only the MANUAL rows with nothing on record" in out, (
-        "the --retire-empty summary must state what it actually did, not the dry-run claim"
-    )
+    # 🔴 GUARD (judge round 4): every clause, mirroring the --apply guard above
+    # (`test_apply_must_not_repeat_the_READ_ONLY_claim_it_just_broke`). This summary is the
+    # only record the operator gets of a write that already happened, and it covers TWO
+    # dispositions — what was retired, and what was deliberately left alone. The KEPT clause
+    # covers the MAJORITY of rows on a narrower flag, so it is not optional: drop it and every
+    # REVIVABLE/still-actionable-MANUAL row's fate goes unstated, silently. Asserted per clause
+    # rather than on the first sentence, since a mutation that blanks the KEPT clause alone
+    # leaves the retired-rows clause (asserted below) untouched and green.
+    for clause in ("only the MANUAL rows with nothing on record",
+                   "was left untouched",
+                   "re-run with --apply once you are ready to write ALL of them"):
+        assert clause in out, (
+            f"--retire-empty's summary lost the {clause!r} clause — that disposition goes "
+            f"unstated. Got:\n{out}"
+        )
 
 
 def test_chela_restore_retire_empty_and_apply_are_mutually_exclusive(live_stores, capsys):
