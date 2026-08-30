@@ -104,7 +104,15 @@ On `main`, after a `dev → main` promotion:
    gap that used to let the changelog convention lapse silently: `0.4.0` skipped the
    "add a fresh heading back" half by hand and cost 11 merges their entries before anyone
    noticed (`tests/test_version.py` guards the heading's existence either way).
-2. Bump `version` in `pyproject.toml` to match.
+2. Bump `version` in `pyproject.toml` to match, then run `uv lock` and stage the result.
+   ⛔ The lockfile records the project's own version, so bumping `pyproject.toml` without
+   re-locking leaves `uv.lock` naming the PREVIOUS release. Every later `uv run` then
+   rewrites it, which dirties the tree — and the judge refuses a dirty worktree
+   (`a mutation applied on top of unknown edits is not a controlled experiment`), so
+   **every judge after the release returns `cannot_verify` instead of a verdict**. That is
+   a silent, terminal state: at `judge_max_unknown_retries` no respawn fires. Measured on
+   2026-08-30, when 0.9.0 shipped without this step and the next adopted PR's judge died
+   on it twice.
 3. Commit everything together (`Release X.Y.Z — <one-line theme>`) — `CHANGELOG.md`,
    `pyproject.toml`, and the fragment deletions under `changelog.d/`.
 4. `git tag -a vX.Y.Z -m "X.Y.Z — <one-line theme>" && git push origin vX.Y.Z`
