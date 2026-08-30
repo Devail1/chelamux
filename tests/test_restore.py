@@ -828,18 +828,35 @@ def test_retire_empty_still_reports_telegram_bindings_as_LEFT_TO_DAEMON_never_wr
 
 
 def test_retire_empty_preserves_order_one_result_per_verdict_mixed_batch():
-    calls, kit = _writers()
+    """🔴 GUARD: needs >= 2 *retirable* targets, each with a DIFFERENT outcome, or a
+    reversed/shuffled `results` list is invisible — a single target can't show a mismatch,
+    and two targets with the SAME action can't show one either (see docs/defeat_shapes).
+    `empty_orch` (@1) is forced RACED via `unregister_orchestrator`; `empty_sess` (@9) takes
+    the default ARCHIVED path. If retire_empty ever zips a target's own result to the WRONG
+    verdict, this comes back either mis-ordered (`r.verdict is not verdicts[i]`) or with
+    ARCHIVED/RACED swapped onto the other row's line.
+    """
+    calls, kit = _writers(unregister_orchestrator=lambda wid, stamped: (
+        calls.append(("unregister", wid, stamped)), {"ok": False})[1])
     revivable = _revivable("session-ids", wid="@7", new_wid="@42")
     informative = _manual("session-ids", wid="@5")
-    empty = _empty_manual("inbox.orchestrator", wid="@1")
-    verdicts = [revivable, informative, empty]
+    empty_orch = _empty_manual("inbox.orchestrator", wid="@1")
+    empty_sess = _empty_manual("session-ids", wid="@9")
+    verdicts = [revivable, informative, empty_orch, empty_sess]
 
     results = retire_empty(verdicts, **kit)
 
     assert [r.verdict for r in results] == verdicts, "results must line up with input order"
-    assert [r.action for r in results] == [KEPT, KEPT, ARCHIVED]
-    assert [c[0] for c in calls] == ["archive", "unregister"], (
-        "only the empty row may write anything, and only through archive-then-remove"
+    assert results[2] == ApplyResult(
+        empty_orch, RACED, "archived, but the row moved on before it could be removed"
+    ), "the @1 row's own (RACED) outcome must land on the @1 row, not @9's"
+    assert results[3] == ApplyResult(empty_sess, ARCHIVED, ""), (
+        "the @9 row's own (ARCHIVED) outcome must land on the @9 row, not @1's"
+    )
+    assert [r.action for r in results] == [KEPT, KEPT, RACED, ARCHIVED]
+    assert [c[0] for c in calls] == ["archive", "unregister", "archive", "remove"], (
+        "only the two empty rows may write anything, and only through archive-then-remove, "
+        "in input order"
     )
 
 
