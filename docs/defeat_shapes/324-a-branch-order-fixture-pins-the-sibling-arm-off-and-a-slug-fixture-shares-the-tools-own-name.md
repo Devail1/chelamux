@@ -1,4 +1,4 @@
-## 322. A branch-order fixture pins the sibling arm's signal off instead of on, and a slug/name assertion's fixture value collides with text the message already contains for unrelated reasons
+## 324. A branch-order fixture pins the sibling arm's signal off instead of on, and a slug/name assertion's fixture value collides with text the message already contains for unrelated reasons
 
 **Assertion form:** two related gaps found in the same round. (1) Two mutually-exclusive
 reports share one `if condition_a: ... elif condition_b: ...` — condition_a (a load
@@ -47,11 +47,18 @@ satisfies, so blanking the interpolated field changes nothing the assertion can 
   template-shaped, e.g. `f"chela@{slug}"` → `"chela@acme"`), not a bare substring that an
   incidental path segment or other field could also satisfy.
 
-**Found:** CMX-321 rework round 1, PR #409. Numbered 322, not 321, because task number
-321 was already claimed on `origin/dev` by an unrelated, earlier shape (`321-an-idempotent
--backfill-migration-...md`, from a different PR also filed under CMX-321) before this
-branch existed — the documented rare backstop in `docs/DEFEAT_SHAPES.md`'s "How this
-catalog grows": bump to the next free number rather than collide. The judge's
+**Found:** CMX-321 rework round 1, PR #409. Filed as 322 (321 was already claimed on
+`origin/dev` by an unrelated, earlier shape, `321-an-idempotent-backfill-migration-...md`,
+from a different PR also filed under CMX-321) — but by the time this PR's CI ran, an
+independent PR (CMX-322, #408) had *also* landed on `origin/dev` and claimed 322 for an
+unrelated shape (`322-a-formatted-log-messages-interpolated-argument-...md`). Two branches
+picking the same "next free" number off diverged snapshots of `dev` is exactly the race the
+picked-at-file-time number can't see — CI (which checks out the PR merged into `dev`'s
+current head) is what actually catches it, not a local run against either branch alone.
+Bumped to 324 (323 was already taken by this same PR's other new shape) per the same
+backstop in `docs/DEFEAT_SHAPES.md`'s "How this catalog grows": bump to the next free
+number rather than collide, re-checking `origin/dev` at push time rather than trusting the
+number picked when the branch was created. The judge's
 required-mutation-set verdict
 named all three mutations above against `chela/main.py` (`cmd_update`'s `elif`) and
 `chela/runtime_truth.py` (`_installed_report`'s gone-marketplace `Finding`). Closed by
