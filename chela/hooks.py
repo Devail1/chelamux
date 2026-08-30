@@ -21,10 +21,16 @@ fleet has none, and a fleet member launched without the plugin never will.
 **A hook runs synchronously inside a live agent.** Everything here is written to that
 constraint:
 
-* the transport is ``http`` — no shell script, no process spawn per tool call, no PATH
-  assumption, and no way for a chatty ``.bashrc`` to corrupt the JSON contract — except
-  ``SessionStart`` and ``MessageDisplay``, each forced onto ``command`` for its own
-  measured reason (see :func:`recap_command` and :func:`message_display_command`);
+* the transport is ``http`` for most events — no shell script, no process spawn per tool
+  call, no PATH assumption, and no way for a chatty ``.bashrc`` to corrupt the JSON
+  contract — except ``SessionStart`` and ``MessageDisplay``, each forced onto ``command``
+  for its own measured reason (see :func:`recap_command` and
+  :func:`message_display_command`), and :data:`TOOL_EVENTS`, forced onto ``command`` so
+  they can be gated on ``$CHELA_WID`` (CMX-319, see :func:`tool_event_command`) — the
+  plugin is enabled user-wide in ``~/.claude/settings.json``, so without this a headless
+  ``claude -p`` call from some unrelated tool would post into the fleet's event log with
+  no window to attribute it to, and could open ``PermissionRequest``'s 120s gate wait for a
+  human no chela daemon is watching for;
 * ``timeout`` is short (:data:`HOOK_TIMEOUT`) and the receiver appends and returns;
 * the daemon being **down** must not wedge an agent — a refused connection is a lost
   event (fail OPEN), never a stalled tool call;
@@ -189,15 +195,33 @@ def message_display_response(body: dict) -> dict:
                                     "displayContent": f"**[{ts}]** {delta}"}}
 
 
+# CMX-319: `enabledPlugins` in `~/.claude/settings.json` is USER-WIDE — every `claude`
+# process on the machine loads chela's plugin, including a headless `claude -p` call made
+# by some other tool entirely, in some other directory, that chela never launched and no
+# daemon will ever watch. Gated on the one signal that is true if and only if chela did the
+# launching: `$CHELA_WID`, exported into a session's shell ahead of every chela-managed
+# launch (`agent_manager.wid_env_prefix`, `spawn.py`) and never present otherwise. A
+# `command` hook inherits that env; an `http` hook's payload does not carry it at all, and
+# Claude Code does not expand env vars into an `http` hook's `url` (measured — see
+# `hook_url`'s note in docs/HOOKS.md), so gating on it requires the `command` transport —
+# the same reason `SessionStart` already uses it (:func:`recap_command`).
+#
+# `[ -n "${CHELA_WID:-}" ] && curl ... || true`: when unset, the `&&` short-circuits and
+# `curl` never runs at all — no socket, no daemon call, nothing to fail open FROM. A session
+# chela did not launch now leaves no trace in the event log, and never opens the
+# `PermissionRequest` hook's 120s window for an answer no chela daemon is watching for.
+_WID_GATE = '[ -n "${CHELA_WID:-}" ]'
+
+
 def recap_command(port: int | None = None, host: str = "127.0.0.1") -> str:
     """The ``SessionStart`` command hook: POST the payload, print the recap, fail open.
 
     Carries ``$CHELA_WID`` as a header — expanded by the agent's own shell at hook time,
-    not baked in here (this string is one manifest shared by the whole fleet). Empty for a
-    session chela did not launch (no such env var); the receiver treats an empty or
-    unrecognised header exactly like a missing one (:func:`_explicit_wid`).
+    not baked in here (this string is one manifest shared by the whole fleet). Gated on
+    :data:`_WID_GATE` (CMX-319): unset means a session chela did not launch, and the curl
+    never runs at all rather than reaching the daemon with an empty header.
     """
-    return ("curl -s --fail --max-time 3 -X POST "
+    return (f"{_WID_GATE} && curl -s --fail --max-time 3 -X POST "
             "-H 'Content-Type: application/json' "
             "-H \"X-Chela-Wid: ${CHELA_WID:-}\" "
             "--data-binary @- "
@@ -229,12 +253,52 @@ def message_display_command(port: int | None = None, host: str = "127.0.0.1") ->
     returns is agent-specific, so there is nothing here worth the extra header.
     ``--max-time 1``, under :data:`HOOK_TIMEOUT`\\ 's 2s: this event fires tens of times
     per assistant reply (CMX-285's own measurement), so a hung curl must lose the race
-    against Claude Code's own hook timeout, not tie it.
+    against Claude Code's own hook timeout, not tie it. Gated on :data:`_WID_GATE`
+    (CMX-319): a session chela did not launch fires this tens of times per reply too, and
+    none of them should reach the daemon.
     """
-    return ("curl -s --fail --max-time 1 -X POST "
+    return (f"{_WID_GATE} && curl -s --fail --max-time 1 -X POST "
             "-H 'Content-Type: application/json' "
             "--data-binary @- "
             f"{hook_url('MessageDisplay', port, host)} 2>/dev/null || true")
+
+
+# CMX-319: `PreToolUse`/`PostToolUse` alone are ~78% of the log's volume (see the module
+# docstring), and `PermissionRequest` is the hook that can hold a live agent for up to
+# :data:`GATE_TIMEOUT` seconds — the two shapes named in the bug report this fixes. Moved
+# off `http` onto the same gated-`command` shape as :func:`recap_command` and
+# :func:`message_display_command`: the daemon-side logic is unchanged (still the SAME
+# route, still ingest-then-maybe-answer), only the transport gains the `$CHELA_WID` check
+# an `http` hook cannot express. `PermissionDenied` rides along for symmetry with
+# `PermissionRequest` — both are rare, but a hook a headless caller can still trip is not a
+# hook that is gated.
+#
+# What this costs (CMX-322, measured — see "What the gate costs" in docs/HOOKS.md): `http`
+# spawned nothing, so this trades a shell fork/exec on EVERY tool call, gated or not
+# (~0.5ms when the gate closes and skips `curl` entirely), for the noise this fixes — and a
+# gate that's OPEN (a real chela session) also forks/execs `curl` (~3.6ms total), TWICE per
+# tool call, where the old transport spawned nothing at all.
+#
+# The other 10 events (`UserPromptSubmit`, `SessionEnd`, `Stop`, `SubagentStart`,
+# `SubagentStop`, `Notification`, `PreCompact`, `PostCompact`, `Elicitation`) stay on
+# `http`: each fires at most a handful of times per session rather than per tool call, and
+# converting them buys the same protection at a much smaller measured cost — left as-is
+# rather than folded into this fix silently.
+def tool_event_command(event: str, port: int | None = None, host: str = "127.0.0.1") -> str:
+    """The ``command`` hook for one of :data:`TOOL_EVENTS` — gated on :data:`_WID_GATE`,
+    curling the SAME route the ``http`` transport used to POST to directly.
+
+    ``--max-time`` stays under this event's declared ``timeout`` (:func:`hook_timeout`) by
+    the same ~2s margin :func:`recap_command` leaves under :data:`RECAP_TIMEOUT` — enough
+    that curl loses the race against Claude Code's own hook timeout rather than tying it,
+    and, for ``PermissionRequest``, still wide enough to hold the connection for the whole
+    of :func:`chela.gateanswer.wait_budget` while a human is asked.
+    """
+    max_time = max(1, hook_timeout(event) - 2)
+    return (f"{_WID_GATE} && curl -s --fail --max-time {max_time} -X POST "
+            "-H 'Content-Type: application/json' "
+            "--data-binary @- "
+            f"{hook_url(event, port, host)} 2>/dev/null || true")
 
 # Event types are namespaced: `hook.pre_tool_use` says *an agent told us this*, as
 # against `run_review` / `died` / `daemon_start`, which are chela's own bookkeeping.
@@ -278,13 +342,17 @@ def hook_url(event: str, port: int | None = None, host: str = "127.0.0.1") -> st
 def hooks_spec(port: int | None = None) -> dict:
     """The plugin's ``hooks/hooks.json`` — one hook per event, POSTing to the daemon.
 
-    Every event rides ``http`` (no shell, no spawn per tool call) except two forced onto
-    ``command`` for their own measured reason: ``SessionStart`` never fires over ``http``
-    at all and its stdout is the recap (see :data:`RECAP_TIMEOUT`), and ``MessageDisplay``
-    fires over ``http`` but a live fleet never rendered what it returned there (CMX-303 —
-    see the comment above :func:`message_display_command`). Both curl the SAME endpoint
-    every other event POSTs to and print its response verbatim as their own stdout, so the
-    daemon-side logic is identical either way — only the transport differs.
+    Most events ride ``http`` (no shell, no spawn per tool call). Four exceptions:
+    ``SessionStart`` never fires over ``http`` at all and its stdout is the recap (see
+    :data:`RECAP_TIMEOUT`); ``MessageDisplay`` fires over ``http`` but a live fleet never
+    rendered what it returned there (CMX-303 — see the comment above
+    :func:`message_display_command`); and :data:`TOOL_EVENTS` (``PreToolUse``,
+    ``PostToolUse``, ``PermissionRequest``, ``PermissionDenied``) are gated on
+    ``$CHELA_WID`` so a session chela did not launch — a headless ``claude -p`` call by
+    some other tool, say — never reaches the daemon at all (CMX-319, see
+    :func:`tool_event_command`). All four curl the SAME endpoint every other event POSTs to
+    and print its response verbatim as their own stdout, so the daemon-side logic is
+    identical either way — only the transport differs.
 
     Generated rather than hand-written so the committed manifest and the endpoint that
     serves it cannot drift apart (``tests/test_hooks.py`` asserts the file on disk still
@@ -305,6 +373,12 @@ def hooks_spec(port: int | None = None) -> dict:
             entry["hooks"] = [{
                 "type": "command",
                 "command": message_display_command(port),
+                "timeout": hook_timeout(event),
+            }]
+        elif event in TOOL_EVENTS:
+            entry["hooks"] = [{
+                "type": "command",
+                "command": tool_event_command(event, port),
                 "timeout": hook_timeout(event),
             }]
         else:
@@ -349,9 +423,10 @@ EXPECTED_HOOKS_FINGERPRINT: dict[str, str] = {
     "0.2.1": "67b4358055f8df27922da7df6bf99c740ed23c800b19a03f0e41c485b4480bc9",
     "0.2.2": "0cfd26508b63a2804c0f815437e5b5c2564e1b72427bda18754692e199e8408d",
     "0.2.3": "80085a2e2953eed44c8006025ee4563987ad7d08e81f62499d33fe66d812e6b1",
+    "0.2.4": "410f7597eb1ec54e59f0ebcd5d26a947ac923989a3a40a258248e9a4018b53ec",
 }
 
-PLUGIN_VERSION = "0.2.3"
+PLUGIN_VERSION = "0.2.4"
 
 
 def plugin_manifest() -> dict:

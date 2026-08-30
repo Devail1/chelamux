@@ -307,6 +307,54 @@ def last_assistant_activity_at(path: Path) -> float | None:
         return None
 
 
+def last_assistant_text(path: Path) -> str | None:
+    """The TEXT of the newest main-chain assistant turn in ``path`` — what the agent
+    actually said last — or None if it never said anything in words.
+
+    The companion to :func:`last_assistant_activity_at`, which answers *when* the agent
+    last acted. The decisions inbox has always been able to say an agent finished and
+    never what it finished WITH: the completion notice was a fixed template, so the one
+    thing the orchestrator wanted — the agent's own closing summary — was the one thing
+    it had to go and fetch by hand (CMX-318).
+
+    ⛔ Skips tool-only turns. An agent's last record is very often an assistant turn whose
+    content is a single ``tool_use`` block and no text at all; returning "" for those would
+    report "the agent said nothing" for an agent that said plenty two records earlier.
+    Scanning back to the newest turn that HAS text is what makes this the closing summary
+    rather than whatever happened to be last on disk.
+
+    ⚠️ Best-effort and bounded, like every other reader here: ``latest_record`` stops after
+    ``DEFAULT_MAX_SCAN_BYTES``, so an agent whose final words are buried under more than
+    that much tool traffic yields None. None means "no text found", never "" — a caller
+    must be able to tell "said nothing" from "said the empty string" (they render
+    differently, and one of them is a bug).
+    """
+    rec = latest_record(path, lambda o: (
+        o.get("type") == "assistant"
+        and not o.get("isSidechain")
+        and not o.get("isMeta")
+        and _assistant_text(o)
+    ))
+    return _assistant_text(rec) if rec else None
+
+
+def _assistant_text(rec: dict | None) -> str | None:
+    """Join an assistant record's ``text`` blocks — the same projection
+    :func:`iter_turns` applies, factored out so both read a turn identically.
+    """
+    if not rec:
+        return None
+    content = (rec.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content.strip() or None
+    if not isinstance(content, list):
+        return None
+    texts = [b["text"] for b in content
+             if isinstance(b, dict) and b.get("type") == "text" and b.get("text")]
+    joined = "\n".join(t.strip() for t in texts if t.strip()).strip()
+    return joined or None
+
+
 def last_assistant_activity(cwd: str | None, base: Path | None = None) -> float | None:
     """:func:`last_assistant_activity_at`, resolved from a cwd — the LAST RESORT.
 

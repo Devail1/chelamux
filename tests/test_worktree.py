@@ -177,3 +177,105 @@ def test_disk_usage_bytes_sums_file_sizes_recursively(tmp_path: Path):
 
 def test_disk_usage_bytes_on_a_missing_root_is_zero_not_a_crash(tmp_path: Path):
     assert worktree.disk_usage_bytes(tmp_path / "does-not-exist") == 0
+
+
+# ---------------------------------------------------------------------------
+# CMX-320 — never delete a real repository (issue #398)
+# ---------------------------------------------------------------------------
+
+def test_remove_worktree_REFUSES_the_repository_itself(repo, tmp_path):
+    """🔴 The incident, reproduced. `adopt-397`'s row recorded `worktree_path` as the MAIN
+    REPO; task cleanup removed "its worktree" and the checkout was gone, taking a gitignored
+    ~614KB TODO.md with it — twice, because the poisoned column re-arms on every daemon
+    start.
+
+    `git worktree remove` alone does NOT save you here: it fails on a real repo, and the
+    `shutil.rmtree` fallback below it then runs precisely because git has no record of the
+    path. That fallback is what did the damage.
+    """
+    ignored = repo / "TODO.md"
+    ignored.write_text("the gitignored tracker that no clone can restore\n")
+
+    with pytest.raises(worktree.NotAWorktree) as exc:
+        worktree.remove_worktree(repo, repo)
+
+    assert repo.is_dir(), "the repository was deleted"
+    assert ignored.exists(), "the gitignored file was destroyed"
+    assert "is the repository" in str(exc.value).lower() or "IS the repository" in str(exc.value)
+
+
+def test_remove_worktree_REFUSES_a_directory_containing_the_repository(repo):
+    """A path that is an ANCESTOR of the repo can never be a worktree, and deleting it takes
+    the repo with it."""
+    with pytest.raises(worktree.NotAWorktree):
+        worktree.remove_worktree(repo, repo.parent)
+    assert repo.is_dir()
+
+
+def test_remove_worktree_REFUSES_an_unrelated_clone(repo, tmp_path):
+    """The structural test, independent of any configured workspace root: a real clone's
+    `.git` is a DIRECTORY, a linked worktree's `.git` is a FILE. Anything with a `.git`
+    directory is a repository and must never be deleted as a worktree — even one this repo
+    has never heard of.
+    """
+    other = tmp_path / "someone-elses-repo"
+    subprocess.run(["git", "init", "-q", str(other)], check=True, capture_output=True)
+    precious = other / "notes.txt"
+    precious.write_text("not chela's to delete\n")
+
+    with pytest.raises(worktree.NotAWorktree) as exc:
+        worktree.remove_worktree(repo, other)
+
+    assert precious.exists()
+    assert ".git is a DIRECTORY" in str(exc.value)
+
+
+def test_remove_worktree_STILL_REMOVES_a_real_worktree(repo, tmp_path):
+    """⭐ MUST BE ACCEPTED — the guard is worthless if it refuses the normal case. A guard
+    that raises on everything would pass all three tests above while breaking every cleanup
+    in the system.
+    """
+    wt = tmp_path / "wt"
+    worktree.detached_worktree(repo, "main", wt)
+    assert wt.is_dir()
+    assert (wt / ".git").is_file(), "a linked worktree's .git must be a file, not a dir"
+
+    assert worktree.remove_worktree(repo, wt) is True
+    assert not wt.exists(), "a genuine worktree was left behind"
+
+
+def test_remove_worktree_STILL_REMOVES_an_unregistered_leftover(repo, tmp_path):
+    """MUST BE ACCEPTED — the rmtree fallback's real purpose: a directory git has no record
+    of (crash mid-create, hand-copied). It has no `.git` at all, so it is not a repository
+    and the guard must let it through.
+    """
+    orphan = tmp_path / "orphan"
+    orphan.mkdir()
+    (orphan / "junk.txt").write_text("leftover\n")
+
+    assert worktree.remove_worktree(repo, orphan) is True
+    assert not orphan.exists()
+
+
+def test_remove_worktree_is_silent_on_a_path_that_does_not_exist(repo, tmp_path):
+    """MUST BE ACCEPTED — nothing to delete is not an error, and must not raise."""
+    worktree.refuse_if_not_a_worktree(repo, tmp_path / "never-existed")
+
+
+def test_the_guard_runs_BEFORE_any_deletion_path(repo, monkeypatch):
+    """Ordering, pinned: the refusal must precede both `git worktree remove` AND the
+    `shutil.rmtree` fallback. A guard placed after either is a guard that fires once the
+    damage is done.
+    """
+    called: list[str] = []
+    monkeypatch.setattr(worktree.shutil, "rmtree",
+                        lambda *a, **k: called.append("rmtree"))
+    monkeypatch.setattr(worktree.subprocess, "run",
+                        lambda *a, **k: called.append("git") or (_ for _ in ()).throw(
+                            AssertionError("git ran despite the refusal")))
+
+    with pytest.raises(worktree.NotAWorktree):
+        worktree.remove_worktree(repo, repo)
+
+    assert called == [], f"a deletion path ran before the guard refused: {called}"
+

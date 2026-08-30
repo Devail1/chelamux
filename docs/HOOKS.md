@@ -217,10 +217,11 @@ it booted with.
 
 ## How an event gets in
 
-Each hook is an **`http`** hook posting to the daemon the dashboard is already running:
+Most events are an **`http`** hook posting straight to the daemon the dashboard is already
+running:
 
 ```json
-{"type": "http", "url": "http://127.0.0.1:5001/hooks/PreToolUse", "timeout": 2}
+{"type": "http", "url": "http://127.0.0.1:5001/hooks/UserPromptSubmit", "timeout": 2}
 ```
 
 (5001 is chela's default port; the rendered manifest carries whatever yours is on.)
@@ -228,6 +229,55 @@ Each hook is an **`http`** hook posting to the daemon the dashboard is already r
 No shell script, no process spawn per tool call, no PATH assumption — and no way for a
 chatty `.bashrc` to put stray stdout into the JSON contract a `command` hook has to
 honour. The endpoint appends via [the event log](EVENTS.md) and returns.
+
+**`PreToolUse`, `PostToolUse`, `PermissionRequest` and `PermissionDenied` are the exception**
+(CMX-319) — they ride `command`, gated on `$CHELA_WID`:
+
+```json
+{"type": "command",
+ "command": "[ -n \"${CHELA_WID:-}\" ] && curl -s --fail --max-time 1 -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:5001/hooks/PreToolUse 2>/dev/null || true",
+ "timeout": 2}
+```
+
+`enabledPlugins` in `~/.claude/settings.json` is **user-wide** — every `claude` process on
+the machine loads chela's plugin, including a headless `claude -p` call some unrelated tool
+makes, in some unrelated directory, that no chela daemon will ever watch. `$CHELA_WID` is
+the one signal that is true if and only if chela did the launching (exported into a
+session's shell ahead of every chela-managed launch — `agent_manager.wid_env_prefix`,
+`spawn.py`) — and an `http` hook cannot check it at all: its payload carries none of the
+agent's own environment, and Claude Code does not expand env vars into a hook's `url`
+(measured). Gating therefore needs the `command` transport, the same reason `SessionStart`
+already uses it.
+
+When `$CHELA_WID` is unset the `&&` short-circuits and `curl` never runs — no socket opens,
+nothing reaches the daemon, and the event log gains no entry with no window to attribute it
+to. It also means `PermissionRequest`'s 120s gate wait (below) is never opened for a session
+no chela daemon is bound to answer for. The other ten events stay on `http`: each fires at
+most a handful of times per session rather than per tool call, so the same headless-caller
+noise is far smaller, and the fix here targets the two shapes actually measured to matter —
+the ~78% of hook volume that is `PreToolUse`/`PostToolUse`, and the hook that can hold a
+live agent open for a human.
+
+**What the gate costs, on the hottest path there is.** CMX-319 asserted "no socket, no
+daemon call, nothing to fail open FROM" for a session it blocks, but never measured the
+side that matters more: `PreToolUse`/`PostToolUse` fired zero extra processes before this
+change (`http` is Claude Code's own in-process client) and now fork/exec a shell for
+**every tool call, in every session, gated or not** — the plugin has no cheaper way to read
+`$CHELA_WID` than `command`. Measured (`sh -c` timed with `time.perf_counter()`, 200
+iterations, this repo's dev container):
+
+| path | adds over a bare `sh -c true` (~0.52ms) | total |
+|---|---|---|
+| gate **closed** (`$CHELA_WID` unset, `curl` never runs) | ~0ms — the `[ -n ... ]` test itself is free | ~0.5ms |
+| gate **open** (`$CHELA_WID` set, `curl` forks/execs) | ~3.1ms — the `curl` process itself | ~3.6ms |
+
+So a session chela did **not** launch now pays a shell fork/exec (~0.5ms) it never paid
+before, per `PreToolUse`/`PostToolUse` — that is the cost of closing the gate. A session
+chela **did** launch pays that same shell plus a `curl` fork/exec (~3.6ms total) on every
+tool call, TWICE per call (`PreToolUse` and `PostToolUse` each fire it) — a cost the old
+in-process `http` transport never had at all, since the request happened without spawning
+anything. Absolute numbers will differ by machine; the shape won't: an `http` hook is
+"free" in process-spawn terms, and any `command` hook — gated or not — is not.
 
 **A hook runs synchronously inside a live agent**, so every choice here is made against
 one constraint: *a slow or crashing hook stalls or breaks somebody's session.*

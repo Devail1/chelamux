@@ -26,6 +26,9 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
+import stat
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -662,6 +665,118 @@ def test_message_display_command_relays_into_the_same_http_endpoint():
     assert "X-Chela-Wid" not in command
 
 
+# --- CMX-319: gating a hook's command on $CHELA_WID --------------------------------
+#
+# The plugin is enabled user-wide (`~/.claude/settings.json`'s `enabledPlugins`), so a
+# headless `claude -p` call from some unrelated tool loads it too. `$CHELA_WID` is the one
+# signal that is set if and only if chela did the launching (`agent_manager.wid_env_prefix`
+# exports it ahead of every chela-managed launch) — an `http` hook cannot check it (no
+# access to the agent's env, and Claude Code does not expand env vars into a hook `url`),
+# so every gated hook here rides `command` instead.
+
+def test_recap_command_is_gated_on_chela_wid():
+    """SessionStart's own curl must not fire at all for a session chela did not launch —
+    not merely send an empty header."""
+    command = hooks.recap_command(port=5001)
+    assert command.startswith('[ -n "${CHELA_WID:-}" ] && curl')
+
+
+def test_message_display_command_is_gated_on_chela_wid():
+    command = hooks.message_display_command(port=5001)
+    assert command.startswith('[ -n "${CHELA_WID:-}" ] && curl')
+
+
+@pytest.mark.parametrize("event", sorted(hooks.TOOL_EVENTS))
+def test_tool_event_command_is_gated_and_relays_into_the_same_http_endpoint(event):
+    """Every `TOOL_EVENTS` command must no-op with no curl at all when `$CHELA_WID` is
+    unset (CMX-319) — a headless session must leave no trace, not merely an empty header —
+    and otherwise curl the identical route the `http` hook used to POST to."""
+    command = hooks.tool_event_command(event, port=6001)
+    assert command.startswith('[ -n "${CHELA_WID:-}" ] && curl')
+    assert f"http://127.0.0.1:6001/hooks/{event}" in command
+    assert "--fail" in command and command.endswith("|| true")
+
+
+def test_tool_event_command_leaves_headroom_under_its_declared_timeout():
+    """`--max-time` must stay under the event's declared ``timeout`` so curl loses the
+    race against Claude Code's own hook timeout rather than tying it — including for
+    ``PermissionRequest``'s 120s gate wait, which still needs most of that room to hold a
+    connection open for a human to answer."""
+    for event in hooks.TOOL_EVENTS:
+        command = hooks.tool_event_command(event, port=5001)
+        max_time = int(command.split("--max-time ", 1)[1].split(" ", 1)[0])
+        assert 0 < max_time < hooks.hook_timeout(event)
+    assert hooks.tool_event_command("PermissionRequest", port=5001).split(
+        "--max-time ", 1)[1].split(" ", 1)[0] == "118"
+
+
+# --- CMX-322: proving the $CHELA_WID gate by BEHAVIOUR, not by command-string shape -----
+#
+# Every assertion above this line reads the generated STRING and checks it *starts with*
+# the gate — that proves the gate is present, not that it actually stops anything. CMX-319
+# verified the real thing by hand before merging (a stubbed `curl` on `PATH`: unset
+# `$CHELA_WID` produced 0 invocations, a set one produced 1) but never committed that as a
+# test. These do: they run the exact command string through a real shell — the same way
+# Claude Code invokes a `command`-type hook — against a `curl` stub on `PATH` that records
+# each call instead of touching the network, and count invocations rather than trust the
+# string.
+
+_GATED_COMMANDS: dict[str, str] = {
+    "SessionStart": hooks.recap_command(port=5001),
+    "MessageDisplay": hooks.message_display_command(port=5001),
+    **{event: hooks.tool_event_command(event, port=5001)
+       for event in hooks.TOOL_EVENTS},
+}
+
+
+@pytest.fixture
+def curl_stub(tmp_path):
+    """A `curl` on `PATH` that records each invocation to a log file instead of making a
+    network call — proves how many times the gate LET `curl` run, with no daemon needed."""
+    log = tmp_path / "curl_calls.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "curl"
+    stub.write_text(f"#!/bin/sh\necho called >> '{log}'\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    return log, env
+
+
+def _run_gated_command(command, env):
+    """Run a hook's `command` string through a real shell. `input=b"{}"` so a curl that
+    DOES fire (its `--data-binary @-` reads the request body from stdin) never blocks on
+    an inherited stdin; `timeout=5` turns a gate that fails to short-circuit into a loud
+    test failure instead of a hung suite."""
+    subprocess.run(["sh", "-c", command], env=env, input=b"{}",
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+
+
+def _curl_invocations(log_path):
+    return log_path.read_text().count("called\n") if log_path.exists() else 0
+
+
+@pytest.mark.parametrize("event,command", sorted(_GATED_COMMANDS.items()))
+def test_gate_blocks_every_curl_when_chela_wid_is_unset(event, command, curl_stub):
+    """A session chela did not launch must produce ZERO curl invocations for every gated
+    event — not an empty header, not one call out of several: none."""
+    log, env = curl_stub
+    env.pop("CHELA_WID", None)
+    _run_gated_command(command, env)
+    assert _curl_invocations(log) == 0
+
+
+@pytest.mark.parametrize("event,command", sorted(_GATED_COMMANDS.items()))
+def test_gate_lets_exactly_one_curl_through_when_chela_wid_is_set(event, command, curl_stub):
+    """The gate must not swallow the real case while blocking the headless one: a
+    chela-managed session (`$CHELA_WID` set) still gets its one curl per event."""
+    log, env = curl_stub
+    env["CHELA_WID"] = "@3"
+    _run_gated_command(command, env)
+    assert _curl_invocations(log) == 1
+
+
 # --- live terminal timestamps (CMX-277, mechanism swapped in CMX-285) --------------
 
 def test_timestamp_events_is_exactly_message_display():
@@ -1009,20 +1124,32 @@ def test_hooks_spec_registers_every_event():
             assert "--fail" in hook["command"] and hook["command"].endswith("|| true")
             assert hook["timeout"] == hooks.HOOK_TIMEOUT <= 2
             continue
+        if event in hooks.TOOL_EVENTS:
+            # CMX-319: gated on $CHELA_WID so a session chela did not launch (a headless
+            # `claude -p` call from some other tool) never even opens a socket — an `http`
+            # hook cannot check the agent's env, so this rides `command` instead.
+            assert hook["type"] == "command"
+            assert "url" not in hook
+            assert hook["command"].startswith('[ -n "${CHELA_WID:-}" ] && curl')
+            assert f"http://127.0.0.1:5001/hooks/{event}" in hook["command"]
+            if event == "PermissionRequest":
+                # The ONE event allowed to take its time: it is where a gate is answered
+                # from a phone, and an answer needs a human to look at it (CMX-50).
+                # MEASURED, not assumed: Claude Code honours a declared hook timeout
+                # verbatim (10s -> 10.2s blocked, 65 -> 66, 130 -> 133 - no 60s clamp) and
+                # fails open on expiry.
+                assert hook["timeout"] == hooks.GATE_TIMEOUT > 60
+            else:
+                # Everything else appends and returns. The agent BLOCKS on this request,
+                # and PreToolUse/PostToolUse alone are ~78% of the log's volume.
+                assert hook["timeout"] == hooks.HOOK_TIMEOUT <= 2
+            continue
         # http, not command: no shell, no process spawn per tool call, and no chatty
         # .bashrc able to corrupt the JSON contract with stray stdout.
         assert hook["type"] == "http"
         assert hook["url"] == f"http://127.0.0.1:5001/hooks/{event}"
-        if event == "PermissionRequest":
-            # The ONE event allowed to take its time: it is where a gate is answered from
-            # a phone, and an answer needs a human to look at it (CMX-50). MEASURED, not
-            # assumed: Claude Code honours a declared http-hook timeout verbatim (10s →
-            # 10.2s blocked, 65 → 66, 130 → 133 — no 60s clamp) and fails open on expiry.
-            assert hook["timeout"] == hooks.GATE_TIMEOUT > 60
-        else:
-            # Everything else appends and returns. The agent BLOCKS on this request, and
-            # PreToolUse/PostToolUse alone are ~78% of the log's volume.
-            assert hook["timeout"] == hooks.HOOK_TIMEOUT <= 2
+        # Everything else appends and returns. The agent BLOCKS on this request.
+        assert hook["timeout"] == hooks.HOOK_TIMEOUT <= 2
 
 
 def test_the_committed_plugin_still_matches_the_code():
@@ -1042,8 +1169,12 @@ def test_render_plugin_bakes_in_a_nondefault_port(tmp_path):
     """The port is a literal in the manifest: Claude Code does not expand env vars in it."""
     directory = hooks.render_plugin(tmp_path / "p", port=5099)
     spec = json.loads((directory / "hooks" / "hooks.json").read_text())
-    url = spec["hooks"]["PreToolUse"][0]["hooks"][0]["url"]
-    assert url == "http://127.0.0.1:5099/hooks/PreToolUse"
+    # PreToolUse is a gated `command` hook (CMX-319), so the port lives in its `command`
+    # string rather than a top-level `url` key.
+    command = spec["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert "http://127.0.0.1:5099/hooks/PreToolUse" in command
+    url = spec["hooks"]["UserPromptSubmit"][0]["hooks"][0]["url"]
+    assert url == "http://127.0.0.1:5099/hooks/UserPromptSubmit"
 
     # It is self-contained: a plugin AND a one-plugin marketplace, so it installs
     # either with --plugin-dir or with /plugin marketplace add.

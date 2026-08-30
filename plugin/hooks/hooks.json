@@ -5,8 +5,8 @@
         "matcher": "*",
         "hooks": [
           {
-            "type": "http",
-            "url": "http://127.0.0.1:5001/hooks/PreToolUse",
+            "type": "command",
+            "command": "[ -n \"${CHELA_WID:-}\" ] && curl -s --fail --max-time 1 -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:5001/hooks/PreToolUse 2>/dev/null || true",
             "timeout": 2
           }
         ]
@@ -17,8 +17,8 @@
         "matcher": "*",
         "hooks": [
           {
-            "type": "http",
-            "url": "http://127.0.0.1:5001/hooks/PostToolUse",
+            "type": "command",
+            "command": "[ -n \"${CHELA_WID:-}\" ] && curl -s --fail --max-time 1 -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:5001/hooks/PostToolUse 2>/dev/null || true",
             "timeout": 2
           }
         ]
@@ -29,8 +29,8 @@
         "matcher": "*",
         "hooks": [
           {
-            "type": "http",
-            "url": "http://127.0.0.1:5001/hooks/PermissionRequest",
+            "type": "command",
+            "command": "[ -n \"${CHELA_WID:-}\" ] && curl -s --fail --max-time 118 -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:5001/hooks/PermissionRequest 2>/dev/null || true",
             "timeout": 120
           }
         ]
@@ -41,8 +41,8 @@
         "matcher": "*",
         "hooks": [
           {
-            "type": "http",
-            "url": "http://127.0.0.1:5001/hooks/PermissionDenied",
+            "type": "command",
+            "command": "[ -n \"${CHELA_WID:-}\" ] && curl -s --fail --max-time 1 -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:5001/hooks/PermissionDenied 2>/dev/null || true",
             "timeout": 2
           }
         ]
@@ -64,7 +64,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "curl -s --fail --max-time 3 -X POST -H 'Content-Type: application/json' -H \"X-Chela-Wid: ${CHELA_WID:-}\" --data-binary @- http://127.0.0.1:5001/hooks/SessionStart 2>/dev/null || true",
+            "command": "[ -n \"${CHELA_WID:-}\" ] && curl -s --fail --max-time 3 -X POST -H 'Content-Type: application/json' -H \"X-Chela-Wid: ${CHELA_WID:-}\" --data-binary @- http://127.0.0.1:5001/hooks/SessionStart 2>/dev/null || true",
             "timeout": 5
           }
         ]
@@ -97,7 +97,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "curl -s --fail --max-time 1 -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:5001/hooks/MessageDisplay 2>/dev/null || true",
+            "command": "[ -n \"${CHELA_WID:-}\" ] && curl -s --fail --max-time 1 -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:5001/hooks/MessageDisplay 2>/dev/null || true",
             "timeout": 2
           }
         ]

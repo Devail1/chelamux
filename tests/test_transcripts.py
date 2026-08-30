@@ -274,3 +274,85 @@ def test_hooks_claude_config_dir_delegates_to_transcripts(monkeypatch, tmp_path)
     custom = tmp_path / "elsewhere"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
     assert hooks.claude_config_dir() == custom == transcripts.claude_config_dir()
+
+
+# ---------------------------------------------------------------------------
+# CMX-318 — last_assistant_text: what the agent SAID, not just when it acted
+# ---------------------------------------------------------------------------
+
+def _assistant(text_blocks, **extra):
+    return {"type": "assistant", "timestamp": "2026-08-21T10:00:00Z",
+            "message": {"role": "assistant", "content": text_blocks}, **extra}
+
+
+def test_last_assistant_text_returns_the_newest_text_turn(tmp_path):
+    path = tmp_path / "s.jsonl"
+    _write(path, [
+        _assistant([{"type": "text", "text": "first"}]),
+        _assistant([{"type": "text", "text": "the closing summary"}]),
+    ])
+    assert transcripts.last_assistant_text(path) == "the closing summary"
+
+
+def test_last_assistant_text_skips_a_tool_only_final_turn(tmp_path):
+    """An agent's LAST record is very often a tool_use with no text. Returning nothing
+    for those would report 'said nothing' for an agent that said plenty one turn back.
+    """
+    path = tmp_path / "s.jsonl"
+    _write(path, [
+        _assistant([{"type": "text", "text": "here is what I did"}]),
+        _assistant([{"type": "tool_use", "name": "Bash", "input": {}}]),
+    ])
+    assert transcripts.last_assistant_text(path) == "here is what I did"
+
+
+def test_last_assistant_text_ignores_sidechains_and_meta(tmp_path):
+    """A sub-agent's turn is not this agent's closing word."""
+    path = tmp_path / "s.jsonl"
+    _write(path, [
+        _assistant([{"type": "text", "text": "the real answer"}]),
+        _assistant([{"type": "text", "text": "subagent chatter"}], isSidechain=True),
+        _assistant([{"type": "text", "text": "meta noise"}], isMeta=True),
+    ])
+    assert transcripts.last_assistant_text(path) == "the real answer"
+
+
+def test_last_assistant_text_ignores_user_turns(tmp_path):
+    """The dispatched prompt lands as a USER record — quoting it back would report the
+    orchestrator's own instruction as the agent's completion summary."""
+    path = tmp_path / "s.jsonl"
+    _write(path, [
+        _assistant([{"type": "text", "text": "agent output"}]),
+        {"type": "user", "timestamp": "2026-08-21T10:01:00Z",
+         "message": {"role": "user", "content": "go do the thing"}},
+    ])
+    assert transcripts.last_assistant_text(path) == "agent output"
+
+
+def test_last_assistant_text_joins_multiple_text_blocks(tmp_path):
+    path = tmp_path / "s.jsonl"
+    _write(path, [_assistant([{"type": "text", "text": "line one"},
+                              {"type": "tool_use", "name": "Bash", "input": {}},
+                              {"type": "text", "text": "line two"}])])
+    assert transcripts.last_assistant_text(path) == "line one\nline two"
+
+
+def test_last_assistant_text_is_none_not_empty_when_there_is_no_text(tmp_path):
+    """None means 'no text found'; "" would be a value a caller renders as quoted
+    emptiness. A caller must be able to tell them apart."""
+    path = tmp_path / "s.jsonl"
+    _write(path, [_assistant([{"type": "tool_use", "name": "Bash", "input": {}}])])
+    assert transcripts.last_assistant_text(path) is None
+
+
+def test_last_assistant_text_is_none_for_a_missing_file(tmp_path):
+    assert transcripts.last_assistant_text(tmp_path / "nope.jsonl") is None
+
+
+def test_last_assistant_text_survives_a_truncated_line(tmp_path):
+    """A mid-write record is normal in a live transcript."""
+    path = tmp_path / "s.jsonl"
+    path.write_text(json.dumps(_assistant([{"type": "text", "text": "good"}]))
+                    + "\n{\"type\": \"assist\n")
+    assert transcripts.last_assistant_text(path) == "good"
+

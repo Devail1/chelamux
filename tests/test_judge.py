@@ -40,7 +40,7 @@ from unittest.mock import patch
 
 import pytest
 
-from chela import dispatcher, event_log, hold, judge
+from chela import dispatcher, event_log, hold, judge, worktree
 
 TEST_CMD = f'"{sys.executable}" -m pytest -q'
 
@@ -917,8 +917,19 @@ def _own_runs_db(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
 
 
-def _workflow_repo(tmp_path: Path, task_id: str, guard_test: str) -> Path:
-    """A repo with a WORKFLOW.md, plus the judge's throwaway worktree already checked out."""
+def _workflow_repo(tmp_path: Path, task_id: str, guard_test: str, *,
+                   linked: bool = False) -> Path:
+    """A repo with a WORKFLOW.md, plus the judge's throwaway worktree already checked out.
+
+    ``linked=True`` builds that worktree the way PRODUCTION does — `git worktree add
+    --detach` off a real repo, so its ``.git`` is a FILE — instead of the standalone
+    `git init` the default takes. CMX-320: those two differ in exactly the dimension
+    `remove_worktree`'s new guard reads (a `.git` DIRECTORY means "real repository, never
+    delete"), so any test that actually REAPS the worktree must use the faithful shape or
+    it is asserting about a fixture artifact rather than about production. The 26 tests
+    that only mutate files inside the directory are unaffected either way and keep the
+    cheaper default.
+    """
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "WORKFLOW.md").write_text(
@@ -930,7 +941,20 @@ def _workflow_repo(tmp_path: Path, task_id: str, guard_test: str) -> Path:
         "---\n\ndo the thing: {{task_title}}\n"
     )
     (repo / "TODO.md").write_text("- [ ] do a thing\n")
-    _project(tmp_path / ".chela" / "wts" / f"judge-{task_id}", guard_test=guard_test)
+    wt = tmp_path / ".chela" / "wts" / f"judge-{task_id}"
+    if linked:
+        # Production's shape: the guard files live in the REPO, and the judge's worktree is
+        # a linked checkout of it (`.git` is a file). See this function's docstring.
+        (repo / "guard.py").write_text(GUARD_PY)
+        (repo / "test_guard.py").write_text(guard_test)
+        _git(repo, "init", "-q", "-b", "main")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "the feature and its proof")
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        worktree.detached_worktree(repo, "main", wt)
+        assert (wt / ".git").is_file(), "fixture must model a LINKED worktree"
+    else:
+        _project(wt, guard_test=guard_test)
     return repo
 
 
@@ -1535,7 +1559,7 @@ def test_a_judge_run_that_FINISHES_reaps_its_own_worktree(tmp_path, monkeypatch)
     clean-verdict path."""
     monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
     task_id = "abc123"
-    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST, linked=True)
     with dispatcher._db() as conn:
         _run_row(conn, repo, task_id)
     exp_file = tmp_path / "experiments.json"
@@ -1556,7 +1580,7 @@ def test_a_judge_run_that_RAISES_still_reaps_its_worktree(tmp_path, monkeypatch)
     whether `judge_run` finishes OR blows up."""
     monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
     task_id = "abc123"
-    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST, linked=True)
     with dispatcher._db() as conn:
         _run_row(conn, repo, task_id)
     exp_file = tmp_path / "experiments.json"
@@ -1631,7 +1655,7 @@ def test_a_second_judge_for_the_same_task_refuses_while_the_first_is_still_runni
     pytest is single-threaded, so this is the only way to get one call genuinely mid-flight
     while a second one starts."""
     task_id = "abc123"
-    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST, linked=True)
     with dispatcher._db() as conn:
         _run_row(conn, repo, task_id, judge_window_epoch="epoch-A")  # dispatcher-launched
     exp_file = tmp_path / "experiments.json"
@@ -3359,3 +3383,281 @@ def test_cmd_judge_self_check_cli_exits_zero_when_every_guard_is_killed(tmp_path
                                      str(exp_path), "--test-cmd", TEST_CMD, "--cwd", str(root)]):
         main.main()      # the clean path never calls sys.exit — falling through IS exit 0
     assert "safe to commit" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# CMX-319 — the staleness check must not read its reference from the row it checks
+# ---------------------------------------------------------------------------
+
+def _blocking_run_with_heads(tmp_path, *, row_head, judged_head="oldsha000001",
+                             task_id="abc123"):
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha=judged_head, pr_head_sha=row_head)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    return exp_file
+
+
+def test_a_STALE_pr_head_sha_column_no_longer_hides_a_dead_head(tmp_path):
+    """⛔ CMX-319, the live incident. The row's `pr_head_sha` is ITSELF stale — frozen at the
+    commit the judge is judging, because the run went `done` and nothing refreshed it after a
+    rework pushed. The old check read its reference straight out of that column, so it
+    compared `oldsha000001 != oldsha000001` — False by construction — concluded the head was
+    fresh, and published a verdict about a commit that no longer exists as a CONFIRMED
+    finding. On 2026-08-21 that put three false `SURVIVED` findings on PR #393 and had the
+    decisions inbox escalate them as "needs a human look NOW".
+
+    GitHub says the head is `newsha000002`, so this IS stale and must be reported as such.
+
+    Revert `live_head` to `(live_run or {}).get("pr_head_sha")` and this goes red: the row
+    agrees with the judged sha, staleness is never detected, and the run takes a rework round
+    for a dead commit.
+    """
+    exp_file = _blocking_run_with_heads(tmp_path, row_head="oldsha000001")
+    posted: list[str] = []
+    with patch.object(dispatcher, "pr_live_head_sha", return_value="newsha000002"), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run("abc123", exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_STALE_HEAD, (
+        f"a verdict about a dead commit was published as {result['state']!r} — the row's "
+        "own pr_head_sha agreed with the judged sha, which is exactly the case the old "
+        "self-referential check could never see"
+    )
+    run = dispatcher.resolve_run("abc123")
+    assert (run["rework_count"] or 0) == 0, "a round was spent on a dead commit"
+    assert run["judge_state"] != judge.J_BLOCKED_RACE, (
+        "a superseded verdict was recorded as a confirmed race finding — that is what the "
+        "inbox escalates at full severity"
+    )
+    assert posted and "newsha000002" in posted[0], (
+        "the posted comment must name the newer commit that superseded this verdict"
+    )
+
+
+def test_a_genuinely_current_head_still_blocks_normally(tmp_path):
+    """MUST BE ACCEPTED. The guard is worthless if it calls everything stale: when GitHub
+    agrees the judged commit IS the head, a surviving guard is a real, current finding and
+    must take its rework round exactly as before.
+
+    This is the control for the test above — without it, `stale_head = True` unconditionally
+    would pass that one while silently disabling every blocking verdict in the system.
+    """
+    exp_file = _blocking_run_with_heads(tmp_path, row_head="oldsha000001")
+    with patch.object(dispatcher, "pr_live_head_sha", return_value="oldsha000001"), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (True, "")):
+        result = judge.judge_run("abc123", exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_BLOCKED, (
+        f"a current, confirmed finding was downgraded to {result['state']!r}"
+    )
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "changes_requested"
+
+
+def test_an_unreachable_github_degrades_to_the_row_never_to_a_false_freshness(tmp_path):
+    """`pr_live_head_sha` returns None for every failure — gh missing, unauthenticated,
+    timed out. That is UNKNOWN, and the caller must fall back to the row's column, i.e. to
+    exactly the behaviour that shipped before CMX-319, rather than inventing staleness or
+    asserting freshness. Here the row still carries the real mismatch, so it is detected.
+    """
+    exp_file = _blocking_run_with_heads(tmp_path, row_head="newsha000002")
+    posted: list[str] = []
+    with patch.object(dispatcher, "pr_live_head_sha", return_value=None), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run("abc123", exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_STALE_HEAD
+    assert dispatcher.resolve_run("abc123")["rework_count"] == 0
+
+
+def test_the_live_head_OVERRIDES_a_row_that_disagrees_with_github(tmp_path):
+    """Precedence, pinned: GitHub is the authority and the row is only the fallback. A row
+    that wrongly claims a DIFFERENT head must not manufacture staleness when GitHub says the
+    judged commit is still current — otherwise a lagging column turns every real finding
+    into a discarded one, which is the same failure inverted.
+    """
+    exp_file = _blocking_run_with_heads(tmp_path, row_head="rowsha000003")
+    with patch.object(dispatcher, "pr_live_head_sha", return_value="oldsha000001"), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (True, "")):
+        result = judge.judge_run("abc123", exp_file, cleanup=False)
+
+    assert result["state"] == judge.J_BLOCKED, (
+        "the row's stale disagreement overrode GitHub's answer — the live head must win"
+    )
+
+
+# ⚖️ CMX-319 round 1 rework. Every test above patches `dispatcher.pr_live_head_sha` itself
+# via `patch.object`, so none of them ever executes the function's body or looks at what it
+# was called with — a mutation that guts the body's `return` (or a wiring mutation that
+# hands it `None, None` at the call site) is invisible to all of them. These call the real
+# function against a faked `subprocess.run`, the same discipline `test_fetch_ci_jobs_*` in
+# `tests/test_dispatcher_ci.py` uses for `_read_pr_checks`'s sibling reader.
+class _GhResult:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_pr_live_head_sha_asks_gh_for_exactly_this_pr_in_this_repo():
+    """The call-site arguments are what make the answer real: this must run
+    ``gh pr view <number> --json headRefOid`` with ``cwd`` set to the repo it was handed —
+    not some other PR, not some other checkout. A wiring mutation that hands the function
+    ``None, None`` regardless of the real ``pr_url``/``repo_dir`` short-circuits before ever
+    reaching this call, which is exactly what this pins."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return _GhResult(stdout=json.dumps({"headRefOid": "livesha000009"}))
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
+        sha = dispatcher.pr_live_head_sha(
+            "https://github.com/o/r/pull/91", "/some/repo/dir"
+        )
+
+    assert sha == "livesha000009"
+    assert captured["cmd"] == ["gh", "pr", "view", "91", "--json", "headRefOid"], (
+        f"wrong argv: {captured['cmd']!r}"
+    )
+    assert captured["kwargs"].get("cwd") == "/some/repo/dir"
+    # capture_output=False leaves out.stdout as None; json.loads(None) raises an uncaught
+    # TypeError (not in the (JSONDecodeError, ValueError) catch), breaking the documented
+    # "None on every failure path" contract on every real judge run.
+    assert captured["kwargs"].get("capture_output") is True
+    assert captured["kwargs"].get("timeout") == 20
+    assert captured["kwargs"].get("errors") == "replace"
+
+
+def test_pr_live_head_sha_reads_headRefOid_specifically_not_headRefName():
+    """Pins the JSON key, not just that *something* came back. Swapping ``headRefOid`` for
+    ``headRefName`` would make this return a branch name — every verdict's sha comparison
+    would then compare unequal, and the caller's staleness guard would discard every
+    blocking finding as stale. A payload that carries ONLY ``headRefOid`` (no
+    ``headRefName`` at all) proves the value returned came from that key."""
+    with patch.object(
+        dispatcher.subprocess, "run",
+        return_value=_GhResult(stdout=json.dumps({"headRefOid": "onlythiskey0001"})),
+    ):
+        sha = dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo")
+
+    assert sha == "onlythiskey0001"
+
+
+def test_pr_live_head_sha_is_None_with_no_pr_url_or_repo_dir():
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=AssertionError("must not shell out with nothing to ask about"),
+    ):
+        assert dispatcher.pr_live_head_sha(None, "/repo") is None
+        assert dispatcher.pr_live_head_sha("not a pr url", "/repo") is None
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", None) is None
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "") is None
+
+
+def test_pr_live_head_sha_is_None_when_gh_cannot_be_executed():
+    with patch.object(dispatcher.subprocess, "run", side_effect=OSError("no gh on PATH")):
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
+
+
+def test_pr_live_head_sha_is_None_when_gh_times_out():
+    with patch.object(
+        dispatcher.subprocess, "run",
+        side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=20),
+    ):
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
+
+
+def test_pr_live_head_sha_is_None_on_a_non_zero_exit():
+    """``stdout`` here is a WELL-FORMED payload that would happily parse to a sha — gh can
+    print a stale/partial body alongside a non-zero exit. If the returncode check is
+    dead-coded (e.g. ``if False and out.returncode != 0``), this must NOT stay None by
+    accident of ``json.loads("")`` raising on an empty default; it would instead return
+    ``"shouldnotbeused"``, which is what makes this pin the returncode check itself rather
+    than merely reproducing the empty-stdout case a dead-coded check also happens to catch."""
+    with patch.object(
+        dispatcher.subprocess, "run",
+        return_value=_GhResult(
+            returncode=1,
+            stdout=json.dumps({"headRefOid": "shouldnotbeused"}),
+            stderr="gh: rate limited",
+        ),
+    ):
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
+
+
+def test_pr_live_head_sha_is_None_on_unparseable_json():
+    with patch.object(
+        dispatcher.subprocess, "run", return_value=_GhResult(stdout="not json{{{"),
+    ):
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
+
+
+def test_pr_live_head_sha_is_None_when_json_is_not_an_object():
+    """Valid JSON, wrong shape (a bare list) — ``.get`` on it would raise, and this
+    function's whole contract is that it never raises."""
+    with patch.object(
+        dispatcher.subprocess, "run", return_value=_GhResult(stdout=json.dumps([1, 2, 3])),
+    ):
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
+
+
+def test_pr_live_head_sha_is_None_when_headRefOid_is_missing_or_blank():
+    with patch.object(
+        dispatcher.subprocess, "run", return_value=_GhResult(stdout=json.dumps({})),
+    ):
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
+    with patch.object(
+        dispatcher.subprocess, "run",
+        return_value=_GhResult(stdout=json.dumps({"headRefOid": "   "})),
+    ):
+        assert dispatcher.pr_live_head_sha("https://github.com/o/r/pull/1", "/repo") is None
+
+
+def test_judge_run_calls_pr_live_head_sha_with_THIS_runs_real_pr_url_and_repo_dir(tmp_path):
+    """The [WIRING] shape: a call site that hands `pr_live_head_sha` `None, None` instead of
+    `pr_url, repo_dir` makes the function short-circuit on `if not number or not repo_dir`
+    and return `None` — falling back to the row, which is exactly the pre-CMX-319 hole this
+    PR closes, while every existing test still passes because they all stub
+    `pr_live_head_sha` wholesale via `patch.object` and never look at what it was called
+    with. This does not stub the function at all: it fakes `subprocess.run` underneath the
+    REAL `pr_live_head_sha` and asserts the argv it built names THIS run's actual PR number
+    (91, parsed from the row's `https://github.com/o/r/pull/91`) and THIS run's actual repo
+    dir — not a call that could never look anything real up.
+
+    The row's `pr_head_sha` ("oldsha000001") matches the judged sha, so if the call site
+    ever degrades to `None, None` (real `pr_live_head_sha` returns `None` on that input,
+    caller falls back to the row) this goes GREEN (`J_BLOCKED`, not `J_STALE_HEAD`) instead
+    of red — a genuine wiring regression must flip the observed state, not just the argv.
+    """
+    exp_file = _blocking_run_with_heads(tmp_path, row_head="oldsha000001")
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return _GhResult(stdout=json.dumps({"headRefOid": "newsha000002"}))
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=fake_run), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (True, "")):
+        result = judge.judge_run("abc123", exp_file, cleanup=False)
+
+    assert captured.get("cmd") == ["gh", "pr", "view", "91", "--json", "headRefOid"], (
+        f"pr_live_head_sha was not reached with this run's real PR — got {captured!r}"
+    )
+    repo = dispatcher.resolve_run("abc123")["worktree_path"]
+    assert captured["kwargs"].get("cwd") == repo
+    assert result["state"] == judge.J_STALE_HEAD, (
+        f"got {result['state']!r} — GitHub's live head (newsha000002) disagrees with the "
+        "judged commit (oldsha000001), which the row alone agrees with; a call site "
+        "degraded to None, None would fall back to the row and wrongly report this current"
+    )
+

@@ -38,6 +38,7 @@ from chela.workflow import (
 from chela.worktree import (
     BranchGone,
     attach_worktree,
+    NotAWorktree,
     detached_worktree,
     disk_usage_bytes,
     ensure_worktree,
@@ -1080,6 +1081,7 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
     """)
     # Idempotent migrations for pre-existing DBs. A row written before a column
     # existed simply reads NULL there — never a crash: this runs unattended.
+    added: set[str] = set()
     for _column, ddl in (
         ("pr_url", "ALTER TABLE runs ADD COLUMN pr_url TEXT"),
         ("pr_state", "ALTER TABLE runs ADD COLUMN pr_state TEXT"),
@@ -1110,6 +1112,17 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # last thing anyone said.
         ("rework_count", "ALTER TABLE runs ADD COLUMN rework_count INTEGER DEFAULT 0"),
         ("review_history", "ALTER TABLE runs ADD COLUMN review_history TEXT"),
+        # ⚖️🚪 CMX-321. `adopted` records the FACT that a row entered via `adopt_pr` — a
+        # hand-opened PR enrolled into the gate — rather than through `_spawn`'s claim off
+        # the tracker. CMX-276 needed that fact and inferred it from `worktree_path IS NULL`,
+        # which is true of an adopted row only until its FIRST REWORK: the rework gets a
+        # worktree, the proxy flips, and the next reconcile tick strikes the run `done`
+        # ("removed from source") for having left a tracker it was never in. Measured
+        # 2026-08-21 on adopt-393/-396/-397 — all three bounced back to `done` within one
+        # tick of being repaired by hand, which is what proves a hand-repair can't hold.
+        # A row the tracker never owned is a property of its ORIGIN and never changes;
+        # anything derived from mutable state is a proxy that will eventually disagree.
+        ("adopted", "ALTER TABLE runs ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0"),
         # CI (CMX-69). `pr_checks` is our CACHE of GitHub's rollup (one of CI_*), refreshed
         # from `gh` every tick — the UI and the merge gate read it. `pr_head_sha` is the
         # commit that state belongs to. `ci_failed_sha` is the commit whose red CI has
@@ -1236,8 +1249,24 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
     ):
         try:
             conn.execute(ddl)
+            added.add(_column)          # the column did NOT exist until just now
         except sqlite3.OperationalError:
             pass  # column already exists
+    # ⚖️🚪 CMX-321 backfill: rows adopted BEFORE the column existed read 0 and would be
+    # struck `done` on the next reconcile exactly as they were before this fix. `adopt_pr`
+    # is the only writer of the `adopt-<pr_number>` task_id shape, so it identifies them.
+    #
+    # ⛔ GATED ON `added` SO IT RUNS EXACTLY ONCE PER DATABASE — on the tick that creates the
+    # column, never again. `ensure_schema` runs on EVERY `_db()` open, and an ungated
+    # backfill here would make `task_id LIKE 'adopt-%'` a LIVE discriminator re-evaluated on
+    # every connection: precisely the proxy this ticket exists to remove, reintroduced one
+    # layer down. It also laundered a broken write — the judge proved it by flipping
+    # `adopt_pr`'s insert to `adopted=0` and watching the suite stay green, because the next
+    # connection repaired the row before any assertion could see it. A repair that cannot
+    # tell a legacy row from a bug it is hiding will hide the bug. `_is_adopted` reads the
+    # recorded column and nothing else.
+    if "adopted" in added:
+        conn.execute("UPDATE runs SET adopted=1 WHERE task_id LIKE 'adopt-%'")
     conn.commit()
     return conn
 
@@ -1729,6 +1758,50 @@ def _read_pr_checks(pr_url: str | None, repo_dir: str | None) -> CIStatus:
         rollup if isinstance(rollup, list) else []
     )
     return CIStatus(state, sha, failing, run_ids, infra=infra, plain_failures=plain_failures)
+
+
+def pr_live_head_sha(pr_url: str | None, repo_dir: str | None) -> str | None:
+    """Ask GITHUB for this PR's head sha right now — or None if it cannot be known.
+
+    ⛔ CMX-319. The judge's staleness check (:mod:`chela.judge`) used to read its reference
+    head out of the run row's own ``pr_head_sha`` — THE SAME COLUMN the judge checked the
+    worktree out from. When that column is itself stale, the check compares a value against
+    itself, `verified_sha != live_head` is False by construction, and a verdict about a
+    commit that no longer exists is published as a confirmed finding. Measured 2026-08-21 on
+    `adopt-393`: the row sat at ``9b34bfe`` (status ``done``, so nothing refreshed it after
+    the rework pushed ``50675b6``), the judge re-checked-out ``9b34bfe``, found the three
+    guards the REWORK had added to be missing — they were, on that dead commit — and posted
+    three ``SURVIVED`` findings to the PR, which the decisions inbox then escalated as
+    "needs a human look NOW". Every one of them was false.
+
+    A staleness guard whose reference comes from the same place as the value it is checking
+    cannot ever fire. This asks the one authority that is independent of the row.
+
+    ⛔ None on every failure path — gh missing, unauthenticated, timed out, rate-limited, a
+    PR url that will not parse, JSON of the wrong shape. None means UNKNOWN, never "not
+    stale": the caller keeps the existing "both sides must be KNOWN to count as a mismatch"
+    conservatism, so an unreachable GitHub degrades to exactly the behaviour that shipped
+    before this existed rather than inventing staleness (or silently asserting freshness).
+    """
+    number = _pr_number(pr_url)
+    if not number or not repo_dir:
+        return None
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "view", number, "--json", "headRefOid"],
+            cwd=repo_dir, capture_output=True, text=True, errors="replace", timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        data = json.loads(out.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return (data.get("headRefOid") or "").strip() or None
 
 
 def _failing_log_tail(repo_dir: str | None, run_ids: tuple[str, ...]) -> str:
@@ -2804,8 +2877,8 @@ def adopt_pr(pr_ident: str, workflow_path: str | Path, *, reason: str = "") -> d
                     "or `chela judge run` if it needs a fresh pass"}
         conn.execute(
             """INSERT INTO runs (task_id, workflow_path, title, status, branch_name,
-               started_at, attempt, pr_url, pr_state, pr_head_sha, brief)
-               VALUES (?, ?, ?, 'awaiting_review', ?, ?, 1, ?, 'open', ?, ?)""",
+               started_at, attempt, pr_url, pr_state, pr_head_sha, brief, adopted)
+               VALUES (?, ?, ?, 'awaiting_review', ?, ?, 1, ?, 'open', ?, ?, 1)""",
             (task_id, str(wf.path), title, branch, _now(), pr_url, head_sha, brief),
         )
     log.info("adopt: %s (%s) brought under the judge/merge gate", task_id, pr_url)
@@ -3293,7 +3366,15 @@ def _cleanup_worktree_on_done(repo_path: Path, row: sqlite3.Row) -> None:
     the state it already expects to see for a finished run.
 
     Best-effort and silent on an already-gone worktree (hand-cleaned, or this task never
-    got past `claimed`): `remove_worktree` itself only warns on failure, it never raises.
+    got past `claimed`): `remove_worktree` only warns on an ordinary failure.
+
+    ⛔ CMX-320: it DOES raise `NotAWorktree` when the recorded path is a real repository
+    rather than a worktree — the corruption that deleted this project's own checkout twice
+    (issue #398). That is caught and logged at ERROR here rather than propagated, because a
+    poisoned row must not take the daemon down with it; the path is simply left alone, which
+    is the safe outcome. It is NOT folded into `remove_worktree`'s False return: that value
+    already means "an ordinary removal failed, carry on", and a corrupt instruction must
+    never be indistinguishable from a routine no-op.
     """
     worktree_path = row["worktree_path"]
     if not worktree_path:
@@ -3301,7 +3382,12 @@ def _cleanup_worktree_on_done(repo_path: Path, row: sqlite3.Row) -> None:
     wt_path = Path(worktree_path)
     if not wt_path.is_dir():
         return
-    remove_worktree(repo_path, wt_path)
+    try:
+        remove_worktree(repo_path, wt_path)
+    except NotAWorktree as e:
+        log.error("task %s: REFUSED to clean up its worktree — %s. Clear the row's "
+                  "worktree_path (it is not a worktree) before this task completes again.",
+                  row["task_id"], e)
 
 
 def _prune_done_rows(
@@ -3666,7 +3752,7 @@ def tick(workflow_path: str | Path) -> dict:
             # row the tracker never owned; it just deletes the row before the judge trigger
             # a few lines below ever gets a look at it, silently recreating the exact bug
             # this feature exists to close, just with an extra row in the table.
-            if (row["task_id"] not in open_ids and row["worktree_path"] is not None
+            if (row["task_id"] not in open_ids and not _is_adopted(row)
                     and row["status"] in REVIEW_STATUSES):
                 # Read the agent's transcript *before* killing the window —
                 # transcript resolution maps window_name → cwd → transcript via
@@ -5172,6 +5258,28 @@ def _judge_vars(wf: WorkflowDef, row: sqlite3.Row, worktree: Path, sha: str) -> 
     }
 
 
+def _is_adopted(row) -> bool:
+    """Did this row enter via :func:`adopt_pr` rather than a claim off the tracker?
+
+    ⚖️🚪 CMX-321. Reconcile must never strike an adopted row `done` for "leaving the
+    tracker": it was never IN the tracker, so `task_id not in open_ids` is vacuously true
+    for it and carries no completion evidence at all.
+
+    ⛔ Reads the recorded FACT (`adopted`), not a proxy. CMX-276 inferred it from
+    `worktree_path IS NULL`, which is true of an adopted row only until its first rework —
+    the rework gets a worktree, the proxy flips, and the row is struck on the next tick.
+
+    Tolerates a row read before the migration added the column (an old `sqlite3.Row`, a
+    hand-built dict in a test): absent means "not known to be adopted", which is the
+    pre-CMX-321 behaviour rather than a crash in a loop that runs unattended.
+    """
+    try:
+        keys = row.keys()
+    except AttributeError:
+        keys = row
+    return bool(row["adopted"]) if "adopted" in keys else False
+
+
 def _refresh_judge_worktree(repo: Path, worktree: Path, base: str) -> str:
     """Merge fresh ``origin/<base>`` into the judge's throwaway worktree before it is judged.
 
@@ -5393,7 +5501,10 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         conn.commit()
         if alive:
             _kill_windows_named(window)
-        remove_worktree(wf.path.parent, judge.judge_worktree_path(wf, row["task_id"]))
+        try:
+            remove_worktree(wf.path.parent, judge.judge_worktree_path(wf, row["task_id"]))
+        except NotAWorktree as e:                      # CMX-320 — never crash the reaper
+            log.error("judge reap for %s: REFUSED to remove %s", row["task_id"], e)
         handed_over += 1
         # ⛔ Loud. The run stays exactly where it was (`awaiting_review`), which is the ONLY
         # safe answer — but a judge that silently never ran is indistinguishable from a judge

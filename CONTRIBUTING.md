@@ -108,6 +108,18 @@ On `main`, after a `dev → main` promotion:
 3. Commit everything together (`Release X.Y.Z — <one-line theme>`) — `CHANGELOG.md`,
    `pyproject.toml`, and the fragment deletions under `changelog.d/`.
 4. `git tag -a vX.Y.Z -m "X.Y.Z — <one-line theme>" && git push origin vX.Y.Z`
+5. **Back-merge `main` into `dev`** (`git checkout dev && git merge main && git push`).
+   Steps 1–3 happen on `main` only, so without this `dev` never receives the dated
+   `## [X.Y.Z]` section *or the fragment deletions* — every fragment the release just
+   consumed is still sitting on `dev`, and the next release collects and republishes
+   entries readers already saw under the previous version. This is not hypothetical:
+   on 2026-08-21, one day after 0.8.0, `dev` still carried `CMX-309.md`, `CMX-312.md`
+   and `CMX-314.md` with their text already published in `## [0.8.0]`, and `dev`'s
+   CHANGELOG still showed `0.6.0` as the newest release — two promotions' worth of
+   drift. `release_notes` now refuses to collect an already-published fragment
+   (`StaleFragmentError`, CMX-315), and `tests/test_release_notes.py` fails on one in
+   the tree, but the back-merge is the actual fix — the guard only tells you it was
+   skipped.
 
 Pushing the tag is the whole release: CI builds the GitHub Release from that
 version's CHANGELOG section. **CI never creates a tag** — step 4 is yours.

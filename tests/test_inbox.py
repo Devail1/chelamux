@@ -26,7 +26,8 @@ from pathlib import Path
 
 import pytest
 
-from chela import agent_manager, dispatcher, event_log, inbox, judge, main, sessions, transcripts
+from chela import (agent_manager, dispatcher, event_log, inbox, judge, main, sessionids,
+                   sessions, transcripts)
 
 # Captured at collection time, before the `no_transcript_evidence` autouse fixture
 # (below) overwrites `sessions.transcript_for_window` on every test — the CMX-191
@@ -3283,3 +3284,496 @@ def test_watching_does_not_call_the_peer_fallback_only_when_the_wid_address_cann
     out = capsys.readouterr().out
     assert "windowless orchestrator: pid 4242" in out
     assert "(fallback only" not in out
+
+
+# ---------------------------------------------------------------------------
+# CMX-318 — the completion notice carries the agent's own closing words
+# ---------------------------------------------------------------------------
+#
+# Before this, "finished" was a fixed template: the orchestrator learned that an event
+# had happened and nothing about WHAT happened, so its next move was always to go and
+# read the transcript by hand. The excerpt rides the summary (the only thing pushed);
+# the untruncated text rides the payload (a record, read rather than typed).
+
+def _finished_with_transcript(monkeypatch, said):
+    """Drive the evidence path to a completion, with `said` as the agent's last words."""
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_text", lambda path: said)
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+
+def test_the_finished_notice_quotes_the_agents_last_message(
+        store_file, windows, sends, monkeypatch):
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, "Fixed the parser and added 3 tests, all green")
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    assert len(sends) == 1
+    text = sends[0][1]
+    assert "finished the task you dispatched" in text
+    assert "Fixed the parser and added 3 tests, all green" in text, (
+        f"the completion notice did not carry the agent's own words: {text!r}"
+    )
+
+
+def test_the_finished_notice_stays_one_line(store_file, windows, sends, monkeypatch):
+    """`_event`'s contract: the summary is the ONE line pushed into a prompt. A multi-line
+    sign-off must not turn a notification into an essay typed at someone's terminal."""
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, "line one\nline two\nline three")
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    assert "\n" not in sends[0][1], f"the notice spans multiple lines: {sends[0][1]!r}"
+
+
+def test_a_very_long_sign_off_is_truncated_in_the_notice(
+        store_file, windows, sends, monkeypatch):
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, "w" * 5000)
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    assert len(sends[0][1]) < 500, f"the notice is {len(sends[0][1])} chars — unbounded"
+
+
+def test_a_mid_length_sign_off_is_not_cut_to_the_tracker_title_width(
+        store_file, windows, sends, monkeypatch):
+    """Pins `FINAL_MESSAGE_CHARS` (220) apart from `SUMMARY_TITLE_CHARS` (60) — every other
+    CMX-318 fixture is either well under 60 (so it survives either limit unchanged) or far
+    over both (5000 chars, only asserted as "some bound applies"), so nothing distinguishes
+    the two constants. A 166-char sign-off sits strictly between them: it must reach the
+    notice WHOLE if the limit really is 220, and would be cut with a trailing "…" if
+    `FINAL_MESSAGE_CHARS` ever quietly collapsed to the tracker-title width.
+    """
+    said = ("Refactored the dispatcher retry queue to use exponential backoff, added "
+            "coverage for the timeout edge case, and updated the docs to match the new "
+            "behavior end to end.")
+    assert inbox.SUMMARY_TITLE_CHARS < len(said) < inbox.FINAL_MESSAGE_CHARS, (
+        "fixture no longer sits strictly between the two limits — it can't tell them apart"
+    )
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, said)
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    text = sends[0][1]
+    assert said in text, (
+        f"a 166-char sign-off (under FINAL_MESSAGE_CHARS) was cut short: {text!r}"
+    )
+    assert "…" not in text, f"the sign-off was truncated even though it fits: {text!r}"
+
+
+def test_the_notice_falls_back_to_the_template_when_the_agent_said_nothing(
+        store_file, windows, sends, monkeypatch):
+    """MUST BE ACCEPTED — a tool-only final turn, an unreadable transcript, or a window
+    that cannot be resolved must still produce the completion notice that shipped before
+    this feature existed. Losing the event would be far worse than losing the excerpt.
+    """
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, None)
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    assert len(sends) == 1
+    assert "finished the task you dispatched" in sends[0][1]
+    assert "Said:" not in sends[0][1], (
+        "an agent that said nothing must not be quoted as having said nothing — "
+        f"got {sends[0][1]!r}"
+    )
+
+
+def test_the_untruncated_message_is_kept_in_the_payload(
+        store_file, windows, sends, monkeypatch):
+    """The excerpt is for reading at a glance; the record is what a UI or a log works
+    with. `_event`'s docstring: the payload keeps the raw text, a record is read."""
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    long_text = "detail " * 40
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_text", lambda path: long_text)
+    # BUSY orchestrator → the event QUEUES instead of being pushed, so the record is
+    # readable off the store (the idiom the judge-payload tests above use).
+    _statuses(monkeypatch, {ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    inbox.tick({ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    finished = [e for e in inbox.load()["queue"] if e["kind"] == "finished"]
+    assert finished, "no finished event queued"
+    assert finished[0]["payload"]["final_message"] == long_text, (
+        "the payload must keep the agent's text untruncated by the SUMMARY's limit — "
+        f"got {finished[0]['payload']['final_message']!r}"
+    )
+    assert "…" in finished[0]["summary"], (
+        "the summary carried the whole 280-char sign-off instead of an excerpt — the "
+        f"one line pushed at a prompt must be cut: {finished[0]['summary']!r}"
+    )
+
+
+def test_a_shell_metacharacter_sign_off_is_neutralised(
+        store_file, windows, sends, monkeypatch):
+    """CMX-79: the summary is TYPED AT A PROMPT, and this feature makes it carry text an
+    agent wrote freely. `$(...)` in a sign-off must not survive into the pushed line.
+    """
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, "done $(rm -rf /) and `whoami`")
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    text = sends[0][1]
+    assert "$(" not in text, f"a command substitution survived into the prompt: {text!r}"
+
+
+def test_the_said_excerpt_stays_curly_quoted_through_sanitization(
+        store_file, windows, sends, monkeypatch):
+    """`_line`'s docstring: the frame around the excerpt is curly quotes, NOT ``"``,
+    because every summary is neutralised by ``sanitize_prompt`` before it reaches a
+    prompt, and ``"`` is in ``SHELL_META_RE`` — a straight-quoted frame has its own
+    delimiters stripped to spaces, so the excerpt would merge seamlessly into chela's
+    own instruction text with nothing marking where the agent's free-form words start
+    and end. Curly quotes (``“``/``”``) are not shell metacharacters, so they survive
+    the sanitizer untouched and the frame stays intact end to end.
+    """
+    said = "Fixed the parser and added 3 tests, all green"
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, said)
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    text = sends[0][1]
+    assert f"“{said}”" in text, (
+        "the excerpt lost its curly-quote delimiters on the way to the prompt — a "
+        f"straight-quoted frame would be stripped by sanitize_prompt: {text!r}"
+    )
+
+
+def test_the_payload_final_message_is_capped_at_the_payload_limit(
+        store_file, windows, sends, monkeypatch):
+    """`FINAL_MESSAGE_PAYLOAD_CHARS` exists so the payload copy — a record, not a
+    notification — cannot grow `inbox.json` without bound if an agent signs off with a
+    wall of text. Only a fixture that actually crosses the 4000-char cap can tell a
+    capped payload apart from an uncapped one; `test_the_untruncated_message_is_kept_in_
+    the_payload`'s 280-char fixture sits well under it either way.
+    """
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    wall_of_text = "detail " * 1000  # 7000 chars, well past the 4000-char payload cap
+    assert len(wall_of_text) > inbox.FINAL_MESSAGE_PAYLOAD_CHARS
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_text", lambda path: wall_of_text)
+    _statuses(monkeypatch, {ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    inbox.tick({ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    finished = [e for e in inbox.load()["queue"] if e["kind"] == "finished"]
+    assert finished, "no finished event queued"
+    stored = finished[0]["payload"]["final_message"]
+    assert stored == wall_of_text[:inbox.FINAL_MESSAGE_PAYLOAD_CHARS], (
+        "the payload's final_message must be capped at FINAL_MESSAGE_PAYLOAD_CHARS — "
+        f"got {len(stored)} chars"
+    )
+
+
+# Two session ids sharing one project directory below — chosen so that sorting the
+# directory's filenames ALPHABETICALLY (as a buggy "just glob the dir" resolution would)
+# puts SIBLING_SID last, regardless of which window is actually asking. A resolution that
+# trusts the path it was actually given must not care about this ordering at all.
+_MINE_SID = "11111111-1111-4111-8111-111111111117"
+_SIBLING_SID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+
+
+def test_final_message_refuses_to_quote_a_sibling_rather_than_this_window(
+        tmp_path, monkeypatch):
+    """The CMX-191 hazard `final_message`'s own docstring warns about, given a real
+    negative control (defeat shape 311): every OTHER CMX-318 test stubs
+    `transcripts.last_assistant_text` to a constant, so none of them can tell one
+    window's transcript from another's — a `final_message` that silently resolved by
+    the wrong window would still pass all of them. This one drives REAL transcript
+    files through the REAL `sessions.transcript_for_window`, exactly like
+    `test_did_work_since_refuses_a_shared_cwd_rather_than_crediting_a_sibling` does for
+    the structurally identical hazard in `did_work_since`.
+
+    Unlike an earlier version of this test, @7 and @8 share ONE cwd — the same fixture
+    shape as the `did_work_since` guard — because the hazard is specifically a lookup
+    that keys on the SHARED PROJECT DIRECTORY rather than on the window's own resolved
+    session. Two distinct cwds cannot see that: each directory would then hold only one
+    file, so even a cwd-keyed (or dir-keyed) lookup resolves "correctly" by accident.
+    Here both `@7.jsonl`-equivalent transcripts live under the SAME project dir (real
+    Claude Code behaviour for two agents launched in one cwd), resolved via each pane's
+    own `--resume <sid>` (the "cmdline" tier), so `final_message("@7")` must return @7's
+    own words even though @8's transcript sits right next to it in the same directory.
+    """
+    cwd = "/home/x/proj"
+    proj = tmp_path / transcripts.encode_cwd(cwd)
+    proj.mkdir(parents=True)
+    (proj / f"{_MINE_SID}.jsonl").write_text(json.dumps(
+        {"type": "assistant", "message": {"content": "SEVEN's own closing words"}}) + "\n")
+    (proj / f"{_SIBLING_SID}.jsonl").write_text(json.dumps(
+        {"type": "assistant", "message": {"content": "EIGHT's own closing words"}}) + "\n")
+
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window", _REAL_TRANSCRIPT_FOR_WINDOW)
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", tmp_path)
+    # `resolve_window`'s cmdline tier promotes what it resolves into the durable
+    # `sessionids` pin — point that store at a scratch file so the test never touches the
+    # real one, mirroring `tests/test_sessions.py`'s `pins` fixture.
+    monkeypatch.setattr(sessionids, "_STORE", tmp_path / "session-ids.json")
+    monkeypatch.setattr(sessionids.epoch, "current", lambda: "111-222")
+    pane_map = {
+        "@7": sessions.Pane(wid="@7", launched_in=cwd, resumed=_MINE_SID),
+        "@8": sessions.Pane(wid="@8", launched_in=cwd, resumed=_SIBLING_SID),
+    }
+    monkeypatch.setattr(inbox.sessions, "panes", lambda force=False: pane_map)
+
+    assert inbox.final_message("@7") == "SEVEN's own closing words"
+    assert inbox.final_message("@8") == "EIGHT's own closing words"
+
+
+def test_final_message_returns_none_when_the_window_itself_is_unresolvable(monkeypatch):
+    """The OTHER arm of `final_message`'s None contract (defeat shape 318, round 4):
+    ``test_the_notice_falls_back_to_the_template_when_the_agent_said_nothing`` only ever
+    exercises the tool-only arm — it stubs ``transcript_for_window`` to still return a path
+    and ``last_assistant_text`` to return None. It never leaves the window itself
+    unresolvable, so a mutation that swaps ``if path is None: return None`` for
+    ``if path is None: return "finished the task"`` sails through every existing test: no
+    fixture ever makes ``transcript_for_window`` return None. This one does, directly, with
+    nothing else stubbed to a constant that could mask the branch.
+    """
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window", lambda wid: None)
+
+    assert inbox.final_message("@99") is None
+
+
+def test_the_finished_notice_resolves_final_message_against_this_windows_own_wid(
+        store_file, windows, sends, monkeypatch):
+    """Pins the CALL SITE in `agent_events`, not just `final_message` itself (defeat shape
+    318, round 4): every other CMX-318 test stubs `transcript_for_window` and
+    `last_assistant_text` to constants that ignore whatever `wid` they are given, so a call
+    site that hardcoded a fixed/foreign wid — `final_message(wid)` mutated to
+    `final_message("@1")`, i.e. ORCH's own window — would still make every one of them pass:
+    the stubs cannot tell which wid was actually asked for. This stubs `final_message`
+    itself, records every wid it is called with, and asserts it is AGENT's own wid — not
+    ORCH's, and not any other fixed value.
+    """
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    seen_wids = []
+
+    def _spy(wid):
+        seen_wids.append(wid)
+        return f"words from {wid}"
+
+    monkeypatch.setattr(inbox, "final_message", _spy)
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    assert seen_wids == [AGENT], (
+        "agent_events must resolve final_message against the window it is actually "
+        f"reporting on ({AGENT!r}), never a fixed/foreign wid — got {seen_wids!r}"
+    )
+    assert f"words from {AGENT}" in sends[0][1], (
+        f"the notice did not carry {AGENT}'s own resolved words: {sends[0][1]!r}"
+    )
+
+
+def test_the_finished_notice_quotes_the_agent_on_the_ordinary_edge_path_alone(
+        store_file, windows, sends, monkeypatch):
+    """Defeat shape 318, round 5, finding 1: `finished_edge` (saw_busy + confirmed_idle)
+    is the ORDINARY completion path; `finished_evidence` (`did_work_since`) is documented
+    as the fallback for a busy->idle transition the poller missed. Every other CMX-318
+    fixture drives BOTH true at once — `_finished_with_transcript` stubs `last_assistant_
+    activity_at` to `watched_since + 5` (so `did_work_since` is true) on top of an
+    already-registered watch — so no fixture can tell which branch the excerpt is wired
+    to. `said = final_message(wid) if finished_evidence else None` sailed through the
+    whole suite as a result. This drives `finished_edge` true WITHOUT `finished_evidence`:
+    the transcript resolves and has words, but shows no assistant activity after the
+    watch's `since` at all, so `did_work_since` is False and only the edge can be firing.
+    """
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    # No assistant activity at all after `since` -> did_work_since (finished_evidence)
+    # is False no matter what `since` turns out to be.
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at", lambda path: None)
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_text",
+                        lambda path: "Fixed the parser and added 3 tests, all green")
+    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    # prev=BUSY, cur=IDLE for AGENT in this one tick: `was == BUSY` stamps `saw_busy`,
+    # and with the idle-confirm window collapsed to 0, idle confirms in the same pass —
+    # finished_edge fires alone, with finished_evidence false throughout.
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+
+    assert len(sends) == 1
+    text = sends[0][1]
+    assert "finished the task you dispatched" in text
+    assert "Fixed the parser and added 3 tests, all green" in text, (
+        "the ordinary edge-triggered completion did not carry the agent's own words — "
+        f"the excerpt is wired to the evidence fallback only: {text!r}"
+    )
+
+
+def test_no_final_message_key_is_written_when_the_agent_said_nothing(
+        store_file, windows, sends, monkeypatch):
+    """Defeat shape 318, round 5, finding 2: `payload["final_message"]` is set only `if
+    said:`, but no test proved the key is ABSENT on the fallback path —
+    `test_the_notice_falls_back_to_the_template_when_the_agent_said_nothing` only checks
+    the pushed summary, never the persisted record. `if True: payload["final_message"] =
+    (said or "")[:FINAL_MESSAGE_PAYLOAD_CHARS]` sailed through as a result, writing
+    `final_message: ""` into every fallback record — the exact string `last_assistant_
+    text`'s own docstring calls out as indistinguishable from a bug ('None means "no text
+    found", never ""'). Drives the same said-nothing fallback through the QUEUED
+    (busy-orchestrator) path so the payload is inspectable, and asserts the key itself,
+    not just its value, is missing.
+    """
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_text", lambda path: None)
+    _statuses(monkeypatch, {ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    inbox.tick({ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    finished = [e for e in inbox.load()["queue"] if e["kind"] == "finished"]
+    assert finished, "no finished event queued"
+    assert "final_message" not in finished[0]["payload"], (
+        "an agent that said nothing must not have a final_message key written into the "
+        f"persisted record at all — got {finished[0]['payload']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CMX-318 round 6 — TWO watched agents: each notice must quote its OWN window
+# ---------------------------------------------------------------------------
+
+AGENT2 = "@3"    # a SECOND delegated window, finishing in the same tick
+
+
+def test_two_agents_finishing_together_each_quote_their_own_words(
+        store_file, monkeypatch, sends):
+    """⛔ Every other fixture in this module watches EXACTLY ONE agent, so inside
+    `agent_events`' loop `wid`, `min(store["watches"])` and "the only watched window that
+    exists" are three descriptions of one value (defeat shape 306). The round-4 spy test
+    asserts `seen_wids == [AGENT]` and is satisfied BIT-FOR-BIT by
+    `final_message(min(store["watches"]))`.
+
+    In production the moment two watched agents finish in the same tick, BOTH notices — and
+    both persisted `final_message` payloads — carry the FIRST watched window's words: the
+    "quote one agent's words as another agent's completion summary" that `final_message`'s
+    own docstring calls unfalsifiable to whoever receives it.
+
+    ⛔ Asserts on the QUEUE, not on `sends`: `MAX_DELIVERIES_PER_TICK` caps how many events
+    leave the queue per tick, so a busy orchestrator (which queues everything) is the only
+    way to see BOTH events produced by one pass. It is also the stronger surface — the
+    persisted payload is what a log, a UI or a replay reads back.
+    """
+    live = {ORCH: "orchestrator", AGENT: "chelamux", AGENT2: "sibling"}
+    monkeypatch.setattr(inbox.discovery, "get_windows_by_id", lambda: dict(live))
+    _confirm_idle_immediately(monkeypatch)
+    inbox.watch(AGENT, "fix the parser", by=ORCH)
+    inbox.watch(AGENT2, "fix the loader", by=ORCH)
+
+    watched_since = min(w["since"] for w in inbox.watches().values())
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    # Keyed BY WINDOW — the whole point. A call site that resolves the wrong wid gets the
+    # wrong agent's words, and that is what must go red.
+    said = {AGENT: "TWO finished the parser", AGENT2: "THREE finished the loader"}
+    monkeypatch.setattr(inbox, "final_message", lambda wid: said.get(wid))
+    # BUSY orchestrator → both events QUEUE instead of racing the per-tick delivery cap.
+    _statuses(monkeypatch, {ORCH: inbox.BUSY, AGENT: inbox.IDLE, AGENT2: inbox.IDLE})
+
+    inbox.tick({ORCH: inbox.BUSY, AGENT: inbox.IDLE, AGENT2: inbox.IDLE})
+
+    finished = [e for e in inbox.load()["queue"] if e["kind"] == "finished"]
+    assert len(finished) == 2, f"expected one finished event per agent, got {len(finished)}"
+    by_wid = {e["wid"]: e for e in finished}
+    assert set(by_wid) == {AGENT, AGENT2}, f"events named {sorted(by_wid)}"
+
+    assert "TWO finished the parser" in by_wid[AGENT]["summary"], (
+        f"{AGENT}'s notice did not quote its own agent: {by_wid[AGENT]['summary']!r}"
+    )
+    assert "THREE finished the loader" in by_wid[AGENT2]["summary"], (
+        f"{AGENT2}'s notice quoted another agent's words — the CMX-191 misattribution "
+        f"final_message exists to prevent: {by_wid[AGENT2]['summary']!r}"
+    )
+    # ...and the persisted record, which outlives the one-line notice.
+    assert by_wid[AGENT]["payload"]["final_message"] == "TWO finished the parser"
+    assert by_wid[AGENT2]["payload"]["final_message"] == "THREE finished the loader", (
+        "the payload carried another agent's words — this is what a UI or a replay reads"
+    )
+
+
+def test_the_payload_cap_actually_truncates_at_its_own_limit(
+        store_file, windows, sends, monkeypatch):
+    """`FINAL_MESSAGE_PAYLOAD_CHARS` (4000) was provably unexercised: the only payload
+    fixture was 280 chars, comfortably under it, so slicing at 4000 and not slicing at all
+    produced byte-identical output — and the cap could be changed to ANY value, or removed,
+    with the suite green.
+
+    Stage a sign-off LONGER than the cap so the slice is the only thing that can produce
+    the observed length, and assert the cap's own value rather than merely "shorter than
+    the input".
+    """
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    # ⛔ LITERALS, not `inbox.FINAL_MESSAGE_PAYLOAD_CHARS`. Deriving both the input length
+    # and the expected output from the constant makes them move together, so changing the
+    # cap changes nothing observable — the judge proved that by flipping 4000 -> 280 with
+    # the suite green. The cap's VALUE is the contract here, so it is pinned as a literal.
+    long_text = "z" * 4500
+    watched_since = inbox.watches()[AGENT]["since"]
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window",
+                        lambda wid: Path(f"/proj/{wid}/session.jsonl"))
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_activity_at",
+                        lambda path: watched_since + 5)
+    monkeypatch.setattr(inbox.transcripts, "last_assistant_text", lambda path: long_text)
+    _statuses(monkeypatch, {ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    inbox.tick({ORCH: inbox.BUSY, AGENT: inbox.IDLE})
+
+    finished = [e for e in inbox.load()["queue"] if e["kind"] == "finished"]
+    assert finished, "no finished event queued"
+    got = finished[0]["payload"]["final_message"]
+    assert len(got) == 4000, (
+        f"the payload is {len(got)} chars, not the documented 4000-char cap — either the "
+        "slice is not truncating, or the cap was changed without updating its contract"
+    )
+    assert inbox.FINAL_MESSAGE_PAYLOAD_CHARS == 4000, (
+        "the constant no longer matches the cap this test pins; change both deliberately "
+        "or not at all"
+    )
+

@@ -16,11 +16,14 @@ import pytest
 from chela import release_notes
 from chela.release_notes import (
     ReleaseNotFoundError,
+    StaleFragmentError,
     UnrecognisedHeadingError,
     collect_fragments,
     extract_release_notes,
     latest_released_version,
     promote_unreleased,
+    released_task_ids,
+    stale_fragments,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -646,3 +649,522 @@ def test_changelog_d_argument_default_is_wired_to_the_resolver():
     # pinned by one assertion.
     args = release_notes._build_parser().parse_args([])
     assert args.changelog_d == _REPO_ROOT / "changelog.d"
+
+
+# ---------------------------------------------------------------------------
+# CMX-315 — a fragment that already shipped must never be collected twice
+# ---------------------------------------------------------------------------
+
+_RELEASED_SAMPLE = """\
+# Changelog
+
+## [Unreleased]
+
+### Added
+
+- pending, not published (CMX-400)
+
+## [0.8.0] — 2026-08-20
+
+### Fixed
+
+- something that shipped (CMX-309, #385)
+"""
+
+
+def _fragment_dir(tmp_path, **files):
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "README.md").write_text("convention doc — never a fragment")
+    for name, body in files.items():
+        (d / name).write_text(body)
+    return d
+
+
+def test_released_task_ids_reads_dated_sections_only():
+    ids = released_task_ids(_RELEASED_SAMPLE)
+    assert "309" in ids, "a marker in the dated 0.8.0 section is published"
+    # MUST BE ACCEPTED: `## [Unreleased]` is pending, not published. Counting it would
+    # call a fragment stale for duplicating an entry it is allowed to duplicate —
+    # `_merge_duplicate_subheadings` exists precisely to merge those.
+    assert "400" not in ids, "an Unreleased marker has not shipped and is not released"
+
+
+def test_released_task_ids_treats_no_dated_section_as_nothing_released():
+    """A repo before its first release has ONLY `## [Unreleased]` — no dated section
+    exists at all. `released_task_ids`'s `dated is None` branch handles that case
+    through code that never runs when a dated section exists, so the branch above
+    it (exercised by every other test in this file, all of which mount a dated
+    `## [0.8.0]`) never reaches it. Nothing but this test exercises it.
+    """
+    changelog = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- brand new (CMX-1)\n"
+    assert released_task_ids(changelog) == set(), (
+        "with no dated section, nothing has shipped yet — an Unreleased marker "
+        "must not be counted as released"
+    )
+
+
+def test_stale_fragments_accepts_everything_before_the_first_release(tmp_path):
+    """Mirrors test_released_task_ids_treats_no_dated_section_as_nothing_released at
+    the fragment-matching level: a repo with no dated section yet (no release has
+    ever happened) cannot possibly have a stale fragment, no matter what task ids
+    sit under `## [Unreleased]`.
+    """
+    changelog = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- brand new (CMX-1)\n"
+    d = _fragment_dir(tmp_path, **{"CMX-1.md": "### Added\n\n- brand new (CMX-1)\n"})
+    assert stale_fragments(changelog, d) == []
+
+
+def test_released_task_ids_ignores_a_bare_mention_in_dated_prose():
+    """A dated entry routinely cites a sibling task id in prose — CMX-315's own
+    fragment cites CMX-312 this way. Matching any bare `CMX-N` (instead of only the
+    parenthesised `(CMX-N)` trailer that actually marks what shipped) would mark
+    that cited sibling as released too, even though it never got its own entry.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- follows up on CMX-309, but only this ships (CMX-999)\n"
+    )
+    ids = released_task_ids(changelog)
+    assert "999" in ids, "the parenthesised trailer marks CMX-999 as published"
+    assert "309" not in ids, "a bare CMX-309 mention in prose is not a published marker"
+
+
+def test_stale_fragments_ignores_a_bare_mention_in_dated_prose(tmp_path):
+    """Mirrors test_released_task_ids_ignores_a_bare_mention_in_dated_prose at the
+    fragment-matching level: a fresh CMX-309 fragment must not be called stale just
+    because some other dated entry mentions CMX-309 in prose without shipping it.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- follows up on CMX-309, but only this ships (CMX-999)\n"
+    )
+    d = _fragment_dir(tmp_path, **{"CMX-309.md": "### Added\n\n- brand new (CMX-309)\n"})
+    assert stale_fragments(changelog, d) == []
+
+
+def test_released_task_ids_reads_every_dated_section_not_just_the_newest():
+    """The docstring is explicit: "Dated" means everything from the first non-`Unreleased`
+    heading down. Every other fixture in this file mounts exactly one dated section, so
+    "from the first dated heading down" and "only the first dated section" are the same
+    string for all of them — a reader that stopped at the next heading would pass every
+    other test here too. This fixture mounts TWO dated sections and puts its marker in the
+    OLDER (second) one, the case that actually distinguishes the two readings: the incident
+    this guard exists for is a fragment that survived TWO skipped back-merges (CONTRIBUTING's
+    "two promotions' worth of drift"), so it shipped under an old version, not the newest one.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.9.0] — 2026-08-22\n\n"
+        "### Fixed\n\n- newest release, unrelated (CMX-500)\n\n"
+        "## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- older release (CMX-309, #385)\n"
+    )
+    ids = released_task_ids(changelog)
+    assert "500" in ids, "a marker in the newest dated section is published"
+    assert "309" in ids, (
+        "a marker in an OLDER dated section (not the newest) is published too — "
+        "'dated' means every dated section, not just the first one found"
+    )
+
+
+def test_stale_fragments_flags_a_fragment_published_in_an_older_dated_section(tmp_path):
+    """Mirrors test_released_task_ids_reads_every_dated_section_not_just_the_newest at the
+    fragment-matching level: a fragment that shipped under an OLD version, two releases back,
+    must still be caught — not just one that shipped in the newest dated section.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.9.0] — 2026-08-22\n\n"
+        "### Fixed\n\n- newest release, unrelated (CMX-500)\n\n"
+        "## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- older release (CMX-309, #385)\n"
+    )
+    d = _fragment_dir(tmp_path, **{"CMX-309.md": "### Fixed\n\n- older release (CMX-309, #385)\n"})
+    assert [p.name for p in stale_fragments(changelog, d)] == ["CMX-309.md"]
+
+
+def test_stale_fragments_flags_one_already_published_in_a_dated_section(tmp_path):
+    d = _fragment_dir(tmp_path, **{"CMX-309.md": "### Fixed\n\n- shipped (CMX-309, #385)\n"})
+    assert [p.name for p in stale_fragments(_RELEASED_SAMPLE, d)] == ["CMX-309.md"]
+
+
+def test_stale_fragments_accepts_a_fresh_fragment(tmp_path):
+    """MUST BE ACCEPTED — the guard is worthless if it cannot pass the normal case."""
+    d = _fragment_dir(tmp_path, **{"CMX-999.md": "### Added\n\n- brand new (CMX-999)\n"})
+    assert stale_fragments(_RELEASED_SAMPLE, d) == []
+
+
+def test_stale_fragments_accepts_a_fragment_still_pending_under_unreleased(tmp_path):
+    """Mirrors test_released_task_ids_reads_dated_sections_only at the fragment-matching
+    level. `_RELEASED_SAMPLE` carries CMX-400 only under `## [Unreleased]` — pending, not
+    published — alongside a dated section where CMX-309 genuinely shipped. Every other
+    stale_fragments fixture in this file stages a fragment whose id is either genuinely
+    published in a dated section or absent from the changelog altogether; none stages one
+    that is mentioned ONLY under Unreleased while a dated section (with something else
+    published) also exists — so nothing here catches `stale_fragments` comparing against
+    every marker in the whole document instead of only the dated ones.
+    """
+    d = _fragment_dir(tmp_path, **{"CMX-400.md": "### Added\n\n- pending, not published (CMX-400)\n"})
+    assert stale_fragments(_RELEASED_SAMPLE, d) == []
+
+
+def test_stale_fragments_flags_every_already_published_fragment_not_just_the_first(tmp_path):
+    """The motivating incident had THREE stale fragments surviving a skipped
+    back-merge at once — CMX-309, CMX-312 and CMX-314, all still on `dev` with
+    their text already published in `## [0.8.0]`. A guard that reports only the
+    first would send a maintainer through repeated failed --release runs, fixing
+    one at a time, never told how many are actually sitting in the tree.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- one (CMX-309)\n- two (CMX-312)\n- three (CMX-314)\n"
+    )
+    d = _fragment_dir(tmp_path, **{
+        "CMX-309.md": "### Fixed\n\n- one (CMX-309)\n",
+        "CMX-312.md": "### Fixed\n\n- two (CMX-312)\n",
+        "CMX-314.md": "### Fixed\n\n- three (CMX-314)\n",
+    })
+    assert [p.name for p in stale_fragments(changelog, d)] == [
+        "CMX-309.md", "CMX-312.md", "CMX-314.md",
+    ]
+
+
+def test_stale_fragments_judges_by_filename_not_by_cited_prose(tmp_path):
+    """A fragment routinely cites sibling task ids in its body — CMX-315's own cites
+    CMX-312. Matching on prose would call every such fragment stale the moment any
+    task it mentions shipped, which is the guard firing on correct work.
+    """
+    d = _fragment_dir(tmp_path, **{
+        "CMX-999.md": "### Changed\n\n- follows up on CMX-309 (CMX-309 shipped) (CMX-999)\n",
+    })
+    assert stale_fragments(_RELEASED_SAMPLE, d) == []
+
+
+def test_stale_fragments_matches_a_filename_id_shorter_than_three_digits(tmp_path):
+    """`_FRAGMENT_NAME`'s `\\d+` must match a task id of ANY length. Every other
+    stale_fragments fixture in this file that compares against a non-empty released set
+    uses a three-digit id (309, 312, 314, 400, 999) — this repo's own changelog.d/ is also
+    all three-digit (315/316/317/320/321) — so a regex narrowed to exactly three digits
+    (e.g. `\\d{3}\\d*`) would pass every one of them while silently dropping shorter ids
+    from the guard entirely: a stale `CMX-9.md` would republish, no refusal. Use a
+    single-digit id here, the case that actually distinguishes `\\d+` from a
+    three-digit-minimum pattern.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- short id (CMX-9, #385)\n"
+    )
+    d = _fragment_dir(tmp_path, **{"CMX-9.md": "### Fixed\n\n- short id (CMX-9, #385)\n"})
+    assert [p.name for p in stale_fragments(changelog, d)] == ["CMX-9.md"]
+
+
+def test_stale_fragments_does_not_truncate_a_four_digit_filename_id(tmp_path):
+    """Mirrors the short-id case above from the other end: a filename regex pinned to
+    exactly three digits with a trailing `\\d*` (`\\d{3}\\d*`) still MATCHES a four-digit
+    filename — it just truncates the captured id to its first three digits, so
+    `CMX-3155.md` is judged as task `315`. Stage a released set that ships `315` but NOT
+    `3155`: a fragment for the genuinely unreleased task `3155` must be accepted, not
+    refused for a release it never shipped in.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- unrelated task (CMX-315, #385)\n"
+    )
+    d = _fragment_dir(tmp_path, **{"CMX-3155.md": "### Fixed\n\n- distinct task (CMX-3155)\n"})
+    assert stale_fragments(changelog, d) == []
+
+
+def test_stale_fragments_accepts_an_unidentifiable_fragment_that_cites_a_shipped_id_in_prose(tmp_path):
+    """Sibling to test_stale_fragments_accepts_an_unidentifiable_fragment_name_even_when_something_shipped,
+    which stages a body with NO `(CMX-N)` marker at all — so on that fixture, a prose
+    fallback added behind the filename match and filename-only matching are
+    indistinguishable; the fallback would never be exercised. This fragment's name still
+    doesn't parse (`hotfix.md`, the exact off-convention name
+    tests/test_judge_changelog_note.py stages as legitimate), but its BODY cites an
+    already-shipped task in the trailing `(CMX-N)` form — exactly what CMX-315's own
+    fragment does when it cites CMX-312 in prose. `_FRAGMENT_NAME`'s docstring is explicit:
+    a fragment is judged by filename, NEVER by prose. Must stay accepted.
+    """
+    d = _fragment_dir(tmp_path, **{
+        "hotfix.md": "### Fixed\n\n- follow-up on already-shipped work (CMX-309)\n",
+    })
+    assert stale_fragments(_RELEASED_SAMPLE, d) == []
+
+
+def test_stale_fragments_ignores_the_readme(tmp_path):
+    d = _fragment_dir(tmp_path)
+    (d / "README.md").write_text("mentions (CMX-309) in prose")
+    assert stale_fragments(_RELEASED_SAMPLE, d) == []
+
+
+def test_stale_fragments_accepts_an_unidentifiable_fragment_name_even_when_something_shipped(tmp_path):
+    """`_FRAGMENT_NAME` exists so that only `CMX-<id>.md` is judged — a fragment whose name
+    carries no task id has nothing to compare against `released` and must fall through as
+    fresh, exactly as tests/test_judge_changelog_note.py stages `changelog.d/hotfix.md` as a
+    legitimate fragment for the sibling guard. Every other stale_fragments fixture in this
+    file stages only `CMX-<id>.md` names (plus the README, which `_fragment_paths` drops
+    before this function ever sees it) alongside a NON-EMPTY released set, so the `m is None`
+    fall-through — the branch that keeps an unidentifiable name out of the refusal — is never
+    independently exercised. `_RELEASED_SAMPLE` already has CMX-309 published, which is the
+    case that matters here: an unidentifiable name must be accepted even though `released` is
+    non-empty, not just when there is nothing to compare it to.
+    """
+    d = _fragment_dir(tmp_path, **{"hotfix.md": "### Fixed\n\n- no CMX id in this filename\n"})
+    assert stale_fragments(_RELEASED_SAMPLE, d) == []
+
+
+def test_promote_unreleased_refuses_a_stale_fragment(tmp_path):
+    """Mounts THREE stale fragments — the motivating incident's own count (CMX-309,
+    CMX-312, CMX-314) — because the claim this guard makes ('a guard that reports
+    only the first would send a maintainer through repeated failed --release runs')
+    is about what the RAISED ERROR tells the maintainer, not just what
+    stale_fragments()'s return list contains. A guard that named only the first
+    stale fragment here would still pass a test mounting just one.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- one (CMX-309)\n- two (CMX-312)\n- three (CMX-314)\n"
+    )
+    d = _fragment_dir(tmp_path, **{
+        "CMX-309.md": "### Fixed\n\n- one (CMX-309)\n",
+        "CMX-312.md": "### Fixed\n\n- two (CMX-312)\n",
+        "CMX-314.md": "### Fixed\n\n- three (CMX-314)\n",
+    })
+    with pytest.raises(StaleFragmentError) as exc:
+        promote_unreleased(changelog, "0.9.0", "2026-08-21", d)
+    message = str(exc.value)
+    assert "CMX-309.md" in message, "the first stale fragment must be named"
+    assert "CMX-312.md" in message, "the second stale fragment must be named too"
+    assert "CMX-314.md" in message, "and the third — not just the first of three"
+    assert "back-merge" in message.lower(), (
+        "the error must name the cause (a skipped main -> dev back-merge), not just "
+        "the symptom — the maintainer reading it has to know what to DO"
+    )
+    # MUST BE ACCEPTED: the word "back-merge" also appears in the DIAGNOSIS sentence
+    # ("this is what a skipped `main` -> `dev` back-merge looks like"), so the assert
+    # above alone is satisfied even if the ACTIONABLE instruction below it is deleted
+    # whole. Pin the instruction text itself so that half can't be dropped silently.
+    assert "or delete them if you are sure they shipped" in message, (
+        "the error must also tell the maintainer what to DO about it, not just "
+        "diagnose the cause — this is the actionable half, distinct from the "
+        "diagnostic 'back-merge' sentence checked above"
+    )
+
+
+def test_promote_unreleased_succeeds_with_a_fresh_fragment_after_something_shipped(tmp_path):
+    """`stale_fragments` itself is proven not to flag a fresh fragment against a non-empty
+    released set (test_stale_fragments_accepts_a_fresh_fragment), but `promote_unreleased`'s
+    OWN refusal — the code that actually decides whether a release is blocked — has never
+    been driven with a non-empty released set in the ACCEPT direction. Every promote/--release
+    fixture with fresh fragments elsewhere in this file mounts a changelog with ZERO
+    `(CMX-N)` trailers, so `released_task_ids` is empty in every one of them; the only
+    fixtures with something already shipped are the ones that expect a refusal. Use
+    `_RELEASED_SAMPLE` (CMX-309 already published) with a brand-new fragment and assert the
+    release actually goes through instead of being wrongly refused.
+    """
+    d = _fragment_dir(tmp_path, **{"CMX-999.md": "### Added\n\n- brand new (CMX-999)\n"})
+    result = promote_unreleased(_RELEASED_SAMPLE, "0.9.0", "2026-08-21", d)
+    assert "## [0.9.0] — 2026-08-21" in result
+    assert "brand new (CMX-999)" in result
+
+
+def test_cli_release_refuses_a_stale_fragment_without_touching_anything(tmp_path):
+    """The refusal must be TOTAL. `main()` writes the changelog and then unlinks every
+    fragment; a guard that raised after the write would leave a half-released tree.
+    """
+    changelog_path = tmp_path / "CHANGELOG.md"
+    changelog_path.write_text(_RELEASED_SAMPLE)
+    d = _fragment_dir(tmp_path, **{"CMX-309.md": "### Fixed\n\n- shipped (CMX-309, #385)\n"})
+
+    result = _run_cli(
+        "--release", "0.9.0", "--date", "2026-08-21",
+        "--changelog", str(changelog_path), "--changelog-d", str(d),
+    )
+
+    assert result.returncode == 1, result.stdout
+    # A crash (e.g. the refusal's except clause silently dropping StaleFragmentError
+    # so it propagates as an uncaught exception) also exits 1 and also puts the
+    # fragment's name in stderr via the traceback — pin the absence of a traceback
+    # too, the same way test_cli_requires_version_unless_write_is_given does, so a
+    # crash can't be mistaken for a clean refusal.
+    assert "Traceback" not in result.stderr
+    assert "CMX-309.md" in result.stderr
+    assert changelog_path.read_text() == _RELEASED_SAMPLE, "the changelog was modified"
+    assert (d / "CMX-309.md").exists(), "the fragment was consumed despite the refusal"
+
+
+def test_this_repo_carries_no_already_released_fragment():
+    """Repo hygiene, and the reason this guard is not merely theoretical.
+
+    On 2026-08-21 — one day after 0.8.0 — `dev` still carried `CMX-309.md`,
+    `CMX-312.md` and `CMX-314.md`, whose entries were already published in
+    `## [0.8.0]` on `main`. The release deletes fragments on `main`; nothing carried
+    those deletions back to `dev`; the next release would have republished all three.
+    Checked against THIS branch's own CHANGELOG.md, so it fires the moment a
+    promotion merge brings a released section and a surviving fragment together.
+    """
+    d = release_notes._default_changelog_d_path()
+    stale = stale_fragments(_CHANGELOG.read_text(), d)
+    assert stale == [], (
+        f"{[p.name for p in stale]} already appear in a dated CHANGELOG.md section — "
+        "back-merge `main` into `dev` so the release's fragment deletions reach this "
+        "branch, or delete them by hand if you are certain they shipped"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CMX-315 round 6 — the CHANGELOG-side mirrors of the filename id-length controls
+# ---------------------------------------------------------------------------
+
+def test_released_task_ids_does_not_truncate_a_four_digit_marker():
+    """`_TASK_MARKER`'s `\\d+` must capture the WHOLE id, any length — the changelog-marker
+    mirror of `test_stale_fragments_does_not_truncate_a_four_digit_filename_id`.
+
+    Its id-length was pinned in ONE direction only: a three-digit MINIMUM goes red (via
+    `test_stale_fragments_matches_a_filename_id_shorter_than_three_digits`, which forces a
+    match on `(CMX-9)`), but nothing anywhere staged a 4+ digit `(CMX-N)` trailer in a DATED
+    section — the only four-digit id in this file appears solely as a fragment FILENAME and
+    in a fragment BODY, neither of which `released_task_ids` ever reads, and the repo's own
+    CHANGELOG.md is all three-digit. So `\\d{1,3}\\d*` truncates the captured id to its
+    first three digits with nothing to catch it.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- a four-digit task shipped here (CMX-3155)\n"
+    )
+    ids = released_task_ids(changelog)
+    assert "3155" in ids, "the four-digit marker was not captured whole"
+    assert "315" not in ids, (
+        "the captured id was truncated to its first three digits — a dated (CMX-3155) "
+        "entry now registers as released id 315"
+    )
+
+
+def test_a_truncated_marker_would_republish_the_stale_four_digit_fragment(tmp_path):
+    """Consequence (a) of the truncation, asserted at the guard rather than the regex: with
+    the id cut to `315`, the genuinely stale `CMX-3155.md` drops out of the released set and
+    is republished — the exact double-publish CMX-315 exists to prevent.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- a four-digit task shipped here (CMX-3155)\n"
+    )
+    d = _fragment_dir(tmp_path, **{"CMX-3155.md": "### Fixed\n\n- already shipped (CMX-3155)\n"})
+    assert [p.name for p in stale_fragments(changelog, d)] == ["CMX-3155.md"], (
+        "a fragment whose task IS published in a dated section was not flagged — it would "
+        "be collected and republished under the next version"
+    )
+
+
+def test_a_truncated_marker_would_falsely_refuse_an_unshipped_fragment(tmp_path):
+    """Consequence (b), the other direction: with the id cut to `315`, a fragment for task
+    315 — which never shipped — is refused for a release it was never in. MUST BE ACCEPTED.
+
+    This is CMX-315's own fragment number, so the truncation would block the very release
+    carrying this fix.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- a four-digit task shipped here (CMX-3155)\n"
+    )
+    d = _fragment_dir(tmp_path, **{"CMX-315.md": "### Fixed\n\n- never shipped (CMX-315)\n"})
+    assert stale_fragments(changelog, d) == [], (
+        "a fragment whose task never shipped was refused — the truncated marker aliased "
+        "CMX-3155 onto CMX-315"
+    )
+
+
+def test_stale_fragments_matches_a_fragment_filename_case_insensitively(tmp_path):
+    """`_FRAGMENT_NAME` carries `re.IGNORECASE`; nothing exercised it. Every fragment
+    fixture in this file — and every real file under `changelog.d/` — spells the prefix
+    upper-case `CMX-`, so dropping the flag changes nothing observable while silently
+    dropping any off-case fragment out of the guard entirely: a stale `cmx-309.md` would
+    republish with no refusal.
+    """
+    d = _fragment_dir(tmp_path, **{"cmx-309.md": "### Fixed\n\n- shipped (CMX-309, #385)\n"})
+    assert [p.name for p in stale_fragments(_RELEASED_SAMPLE, d)] == ["cmx-309.md"], (
+        "a lower-case fragment filename was not recognised — _FRAGMENT_NAME's IGNORECASE "
+        "is unexercised, so removing it would go unnoticed"
+    )
+
+
+def test_released_task_ids_matches_a_dated_marker_case_insensitively():
+    """`_TASK_MARKER` carries `re.IGNORECASE`; nothing exercised it — the CHANGELOG-side
+    mirror of `test_stale_fragments_matches_a_fragment_filename_case_insensitively`, which
+    closed this same shape on the FILENAME side one round earlier. Round 6 mirrored the
+    id-length controls onto `_TASK_MARKER` but not the case flag, so three of the four
+    structurally identical sites were guarded and the fourth was not.
+
+    Every dated `(CMX-N)` trailer in this suite is upper-case, and the repo's CHANGELOG.md
+    carries zero `(cmx-` occurrences, so every fixture is a fixed point of the flag.
+
+    ⛔ The lower-case form is NOT hypothetical: this codebase's own prose already writes it
+    (`chela/inbox.py` — "(cmx-195, cmx-196)"). Consequence is the same double-publish this
+    ticket exists to prevent, from the other end: a dated `(cmx-309)` entry does not register
+    as released, so the genuinely stale CMX-309.md is collected and republished with no
+    refusal.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- shipped, written lower-case (cmx-309)\n"
+    )
+    assert "309" in released_task_ids(changelog), (
+        "a lower-case dated (cmx-N) trailer did not register as released — _TASK_MARKER's "
+        "IGNORECASE is unexercised, so removing it would go unnoticed"
+    )
+
+
+def test_a_case_blind_marker_would_republish_the_stale_fragment(tmp_path):
+    """The consequence of the above, asserted at the guard rather than the regex."""
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- shipped, written lower-case (cmx-309)\n"
+    )
+    d = _fragment_dir(tmp_path, **{"CMX-309.md": "### Fixed\n\n- already shipped (CMX-309)\n"})
+    assert [p.name for p in stale_fragments(changelog, d)] == ["CMX-309.md"], (
+        "a fragment whose task IS published — in a lower-case trailer — was not flagged; "
+        "it would be collected and republished under the next version"
+    )
+
+
+def test_the_refusal_names_ONLY_the_stale_fragments_never_a_fresh_one(tmp_path):
+    """⛔ The refusal message's NEGATIVE half. The positive half is pinned hard — all three
+    of CMX-309/312/314 must appear — but every refusal fixture in this file stages ONLY
+    stale fragments, so `stale` and `_fragment_paths(changelog_d)` are the same list
+    everywhere the raise is ever reached. The rendered name list can therefore be widened
+    from the stale set to EVERY collected fragment with nothing to catch it.
+
+    That is not a cosmetic slip. The message asserts, of each name it lists, that it is
+    "already published in a dated release section" and offers "delete them if you are sure
+    they shipped". Widened, on this repo's own tree it would name CMX-316/317/319/320/321
+    beside a genuinely stale one — telling a maintainer to delete five changelog entries
+    that never shipped.
+
+    This is the exact inverse of the false-refusal hazard guarded everywhere else here
+    (`..._accepts_a_fresh_fragment`, `..._succeeds_with_a_fresh_fragment_after_something_
+    shipped`, `..._would_falsely_refuse_an_unshipped_fragment`) — all of which assert on the
+    RETURN LIST or the accept path, never on what the refusal SAYS about a fragment that is
+    fine. So: mount a MIX, and pin both halves of the sentence.
+    """
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.8.0] — 2026-08-20\n\n"
+        "### Fixed\n\n- shipped (CMX-309, #385)\n- also shipped (CMX-312)\n"
+    )
+    d = _fragment_dir(tmp_path, **{
+        "CMX-309.md": "### Fixed\n\n- already shipped (CMX-309, #385)\n",
+        "CMX-312.md": "### Changed\n\n- already shipped (CMX-312)\n",
+        "CMX-777.md": "### Added\n\n- brand new, never shipped (CMX-777)\n",
+        "CMX-888.md": "### Fixed\n\n- brand new, never shipped (CMX-888)\n",
+    })
+
+    with pytest.raises(StaleFragmentError) as exc:
+        promote_unreleased(changelog, "0.9.0", "2026-08-21", d)
+    message = str(exc.value)
+
+    assert "CMX-309.md" in message and "CMX-312.md" in message, (
+        f"the refusal did not name every stale fragment: {message!r}"
+    )
+    assert "CMX-777.md" not in message and "CMX-888.md" not in message, (
+        "the refusal accused a FRESH fragment of having already shipped — the message "
+        f"tells the maintainer to delete an entry that never published: {message!r}"
+    )
+
