@@ -81,3 +81,71 @@ pointer sentence verbatim).
 doesn't transfer to a structurally identical sibling" gap, but 311's siblings are two separate
 classes each implementing the same method; this shape's siblings are branches of one function's
 own dispatch, added to that function by two different tickets months apart.
+
+---
+
+### Also found on this task (round 3, same file): an order invariant proven at a helper's boundary is unguarded at the positional consumer one layer up
+
+**Assertion form:** `restore.retire_empty`'s own docstring promises "one ApplyResult per input
+verdict, same order... callers that zip verdicts against results do not need to know which
+write path produced them," and round 2's rework closed exactly that at the helper's own
+boundary: `test_retire_empty_preserves_order_one_result_per_verdict_mixed_batch` drives a
+multi-target batch and asserts `results[2]`/`results[3]` individually, so reversing the list
+*inside* `retire_empty` now goes red. But the helper's only consumer, `cmd_restore` in
+`chela/main.py`, reads that contract positionally one layer up —
+`for v, r in zip(verdicts, results ...)`, appending `=> {r.action}` to row `v`'s printed line.
+Nothing independently proved that zip is fed results in the order it expects. The one
+end-to-end test that exercises the CLI seam
+(`test_chela_restore_retire_empty_clears_ONLY_the_row_with_nothing_on_record`) asserted three
+outcome words as bare substrings of the whole report — `'=> archived' in out and '=> kept' in
+out and '=> left-to-daemon' in out` — never which LINE each word landed on.
+
+**Mutation that defeats it:** reverse the list at the CALL SITE, one layer above the helper
+whose own order guard round 2 just closed:
+
+```diff
+-         results = restore.retire_empty(verdicts)
++         results = restore.retire_empty(verdicts[::-1])
+```
+
+`retire_empty`'s own contract is untouched — it is never invoked with a reversed argument by
+*its* unit test, so that guard stays green — and every store/archive/byte-level assertion in
+the e2e is unaffected, because `apply()`'s writes act on the `Verdict` objects themselves, not
+on list position or on `results`. Only the OPERATOR-VISIBLE report changes: in the e2e's
+two-target fixture the REVIVABLE row's line now reads `=> archived` and the retired row's line
+reads `=> kept`. The multiset of outcome words printed is identical, only which row each word
+sits beside is wrong — a bare `'=> archived' in out` substring check cannot see a permutation.
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3430 passed) with this mutation
+applied to a throwaway checkout of the PR's head.
+
+**Why the helper's own guard doesn't transfer:** proving "f(x) preserves order" and proving
+"the caller of f(x) preserves order too" are two different facts. A mutation that never
+touches `f` at all — it edits only the one line that calls it — leaves every test pinned to
+`f`'s internals green, because none of them execute the caller's code. The bug is a wiring
+fact about the SEAM (does the call site pass what it received, in the order it received it, to
+the thing that consumes it positionally), not a logic fact about the helper — the same
+distinction [[60|shape 60]] draws for a shared-helper contract, except here there is only one
+call site and the miss is *above* it rather than at a sibling that bypasses it.
+
+**Guard form that survives:** when a helper's contract is "N in, N out, same order" AND a
+caller consumes the result positionally (zip, index, unzip), the caller's own test needs a
+fixture with two or more items that produce genuinely DIFFERENT, distinguishable outcomes (a
+permutation of two items sharing the same outcome word is just as invisible to a substring
+check), and the assertion must be scoped to one line per item — e.g. this file's own
+`_line_with(out, "[store]", "@id")` helper, checking that specific line's suffix — never a bare
+`phrase in whole_output` check when POSITION is what is actually being proven.
+
+**Found:** `chela/main.py`'s `cmd_restore`, the `elif retire_flag and verdicts:` branch
+(CMX-323 rework round 3, PR #410). Closed by rewriting
+`test_chela_restore_retire_empty_clears_ONLY_the_row_with_nothing_on_record` to assert each
+row's outcome on its own `_line_with`-scoped line (`[session-ids] @8` → `=> archived`,
+`[telegram.bindings] @2` → `=> left-to-daemon`, `[session-ids] @5` → `=> kept`,
+`[session-ids] @7` → `=> kept`, `[inbox.orchestrator] @1` → `=> kept`) instead of the three
+bare substring checks.
+
+**See also:** [[60|shape 60]] — the same "a boundary guard doesn't cover the seam that calls
+it" family, but shape 60 is about a sibling call site skipping a shared helper entirely; this
+is a single call site consuming an already-guarded helper's output out of order. [[15|shape
+15]] and [[306|shape 306]] — order/identity collapsing when a fixture cannot distinguish
+positions, the same root cause this shape's fix (a two-DIFFERENT-outcome, per-line fixture)
+addresses directly.

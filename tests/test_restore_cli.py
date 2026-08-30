@@ -1314,7 +1314,36 @@ def test_chela_restore_retire_empty_clears_ONLY_the_row_with_nothing_on_record(
         "command must still fail loudly"
     )
     out = capsys.readouterr().out
-    assert "=> archived" in out and "=> kept" in out and "=> left-to-daemon" in out
+    # ⛔ NOT bare substrings of the whole report (`'=> archived' in out`) — that shape passed
+    # even when `restore.retire_empty(verdicts)` was called with the verdicts REVERSED at the
+    # `cmd_restore` call site (judge round 3, CMX-323): the multiset of outcome words is
+    # unchanged by a reversal, only which ROW each word lands beside. Pin each row's own line.
+    # ⚠️ `@5`/`@7`/`@8` each appear TWICE (once in the orphan list, once in the verdict
+    # block) — the "MANUAL"/"REVIVABLE" marker scopes `_line_with` to the verdict line.
+    archived_line = _line_with(out, "[session-ids]", "@8", "MANUAL")
+    assert "=> archived" in archived_line, (
+        f"the nothing-on-record row must be reported archived on ITS OWN line. "
+        f"Got: {archived_line!r}"
+    )
+    bindings_line = _line_with(out, "[telegram.bindings]", "@2")
+    assert "=> left-to-daemon" in bindings_line, (
+        f"the bindings row must be reported left-to-daemon on ITS OWN line. "
+        f"Got: {bindings_line!r}"
+    )
+    kept_manual_line = _line_with(out, "[session-ids]", "@5", "MANUAL")
+    assert "=> kept" in kept_manual_line, (
+        f"the MANUAL row that still carries a cwd/session must be reported kept on ITS OWN "
+        f"line. Got: {kept_manual_line!r}"
+    )
+    revivable_line = _line_with(out, "[session-ids]", "@7", "REVIVABLE")
+    assert "=> kept" in revivable_line, (
+        f"the REVIVABLE row must be reported kept on ITS OWN line. Got: {revivable_line!r}"
+    )
+    orchestrator_line = _line_with(out, "[inbox.orchestrator]", "@1")
+    assert "=> kept" in orchestrator_line, (
+        f"the orchestrator row (has a cwd/session) must be reported kept on ITS OWN line. "
+        f"Got: {orchestrator_line!r}"
+    )
 
     session_ids = json.loads((chela_dir / "session-ids.json").read_text())
     assert "@8" not in session_ids, "the empty row must be retired"
@@ -1379,3 +1408,30 @@ def test_restores_help_documents_retire_empty(capsys):
 
     assert "--retire-empty" in out, "the new flag must be discoverable from --help"
     assert "NOTHING on record" in out, "...and say what it does, not just that it exists"
+
+
+def test_retire_emptys_help_states_the_permanent_bindings_exclusion(capsys):
+    """🔴 GUARD (CMX-323, DEFEAT_SHAPES #323/#311's own shape, mirrored back onto itself):
+    `test_applys_help_states_the_permanent_bindings_exclusion` proves --apply's help states
+    the exclusion, and `--retire-empty` makes the IDENTICAL contract claim in its own help
+    string. But the only test that reads `--retire-empty`'s help
+    (`test_restores_help_documents_retire_empty`) greps the WHOLE `restore --help` output for
+    unrelated phrases — and --apply's help supplies "telegram-bindings.json is still never
+    written" regardless, so blanking that clause from --retire-empty's own help text would
+    satisfy every existing test while an operator reading `--retire-empty`'s help alone
+    (`--help` output for one flag can be filtered by tools/pagers) loses the promise.
+
+    Scoped past argparse's line-wrapping by matching only within the `--retire-empty` block:
+    the text AFTER its own marker (it is the last option in the group, so nothing else's
+    text could satisfy the assertion in its place).
+    """
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--help"])
+    assert exc.value.code == 0
+    out = " ".join(capsys.readouterr().out.split())
+
+    retire_empty_block = out.split("--retire-empty", 1)[1]
+    assert "telegram-bindings.json is still never written" in retire_empty_block, (
+        f"--retire-empty's OWN help text must state the permanent bindings exclusion, not "
+        f"rely on --apply's copy of the same sentence. Got:\n{retire_empty_block}"
+    )
