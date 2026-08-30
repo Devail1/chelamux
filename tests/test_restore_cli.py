@@ -1397,6 +1397,7 @@ def test_retire_empty_must_not_repeat_the_READ_ONLY_claim_it_just_broke(live_sto
     # rather than on the first sentence, since a mutation that blanks the KEPT clause alone
     # leaves the retired-rows clause (asserted below) untouched and green.
     for clause in ("only the MANUAL rows with nothing on record",
+                   "archived to roster-archive.json, then removed",
                    "was left untouched",
                    "re-run with --apply once you are ready to write ALL of them"):
         assert clause in out, (
@@ -1433,17 +1434,34 @@ def test_retire_emptys_help_states_the_permanent_bindings_exclusion(capsys):
     satisfy every existing test while an operator reading `--retire-empty`'s help alone
     (`--help` output for one flag can be filtered by tools/pagers) loses the promise.
 
+    Also pins the NARROWNESS promise itself — that every REVIVABLE row and every MANUAL row
+    still carrying a cwd/session is left untouched (judge round 5): that promise is the
+    entire reason the flag exists, and the pre-flight help is the surface an operator reads
+    BEFORE running a flag that writes, not just the post-write summary.
+
     Scoped past argparse's line-wrapping by matching only within the `--retire-empty` block:
-    the text AFTER its own marker (it is the last option in the group, so nothing else's
-    text could satisfy the assertion in its place).
+    ⛔ NOT `out.split("--retire-empty", 1)[1]` — the FIRST occurrence of "--retire-empty" is
+    the usage line (`usage: chela restore [-h] [--apply | --retire-empty]`), so that split's
+    "block" actually contains --apply's own help text too, and --apply supplies both asserted
+    phrases regardless of what --retire-empty's own text says (judge round 5 finding). Split
+    on the LAST occurrence instead — it is the option's own marker and the last option in the
+    group, so the text after it is --retire-empty's help and nothing else's.
     """
     with pytest.raises(SystemExit) as exc:
         _drive(["restore", "--help"])
     assert exc.value.code == 0
     out = " ".join(capsys.readouterr().out.split())
 
-    retire_empty_block = out.split("--retire-empty", 1)[1]
+    retire_empty_block = out.rsplit("--retire-empty", 1)[1]
     assert "telegram-bindings.json is still never written" in retire_empty_block, (
         f"--retire-empty's OWN help text must state the permanent bindings exclusion, not "
         f"rely on --apply's copy of the same sentence. Got:\n{retire_empty_block}"
+    )
+    assert "Every REVIVABLE row and every MANUAL row" in retire_empty_block, (
+        f"--retire-empty's help must state the narrowness promise BEFORE the write happens, "
+        f"not just in the post-write summary. Got:\n{retire_empty_block}"
+    )
+    assert "is left untouched" in retire_empty_block, (
+        f"...and that the untouched rows are left untouched, not just named. "
+        f"Got:\n{retire_empty_block}"
     )

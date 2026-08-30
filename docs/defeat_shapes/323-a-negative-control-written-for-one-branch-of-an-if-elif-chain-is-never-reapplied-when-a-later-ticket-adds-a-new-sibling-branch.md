@@ -219,3 +219,91 @@ tests, but shape 311 is a control missing *entirely* from one sibling; this shap
 present on both siblings that was only partially re-derived, so it looks fully mirrored at a
 glance. [[310|shape 310]] — a changed clause with no assertion anywhere, the same underlying
 gap but arising from a doc-string edit rather than a partially-copied test.
+
+---
+
+### Also found on this task (round 5, same file): fixing a partial per-clause loop by re-checking the wrong sibling's clause list, and a promise mirrored onto one surface (the summary) but not the other (the help) it also appears on
+
+**Assertion form:** round 4 (above) diagnosed the per-clause loop as "only partially
+re-derived" and fixed it by porting `--apply`'s per-clause loop shape onto `--retire-empty`
+— but the clause LIST it wrote was still wrong. `--apply`'s three clauses are "were
+re-stamped at their new address", "archived to roster-archive.json, then removed", and "left
+for chela-telegram"; the round-4 fix enumerated `--retire-empty`'s two *narrowness* clauses
+("only the MANUAL rows with nothing on record", "was left untouched",
+"re-run with --apply...") but dropped the one clause that actually carries over verbatim
+between the two summaries — "archived to roster-archive.json, then removed", the only clause
+on either summary that tells an operator a retired row is RECOVERABLE. The fix ported the
+sibling's *loop shape* faithfully while silently re-deriving a different clause list instead
+of diffing the two summaries' prose against each other clause-by-clause.
+
+Separately, and independently: the SAME narrowness promise ("every REVIVABLE row and every
+MANUAL row that still carries a cwd/session is left untouched") appears on TWO operator-facing
+surfaces of `--retire-empty` — the post-write summary and the pre-flight `--help` text — because
+the feature's safety property is one an operator needs to know both before running the flag
+(help) and after (summary). Round 4 put a per-clause guard on the summary's copy. Nobody asked
+whether the identical promise, living in a *different* string literal for a *different* surface,
+also needed its own guard — it is not a branch of the same if/elif/else chain this shape's
+title describes, so `git grep`-ing the chain's siblings (round 4's own guard-form advice) does
+not surface it; the two copies of the promise are two separate string literals in two
+unconnected functions (`cmd_restore`'s print vs. `argparse.add_argument(help=...)`) that happen
+to say almost the same sentence.
+
+**Mutation that defeats it:**
+
+```diff
+-               "(no cwd, no session) were archived to roster-archive.json, then removed. "
++               "(no cwd, no session) were handled. "
+```
+
+```diff
+-              "Every REVIVABLE row and every MANUAL row that still carries a cwd/session "
+-              "is left untouched. telegram-bindings.json is still never written.",
++              "telegram-bindings.json is still never written.",
+```
+
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3431 passed) with either corruption
+in place: the first because round 4's loop never listed the archive-then-removed clause; the
+second because neither test reading `--retire-empty`'s help
+(`test_restores_help_documents_retire_empty`, `test_retire_emptys_help_states_the_permanent_bindings_exclusion`)
+asserted the narrowness sentence — the latter test asserted only the bindings-exclusion
+sentence that sits right next to it in the same help string.
+
+**Why round 4's own fix didn't close this:** a per-clause loop is only as complete as the list
+of clauses fed into it. Modeling the LOOP SHAPE on a sibling test (as round 4's guard-form
+advice recommends) proves the mechanism is right, but the clause list itself has to be
+re-derived from THIS summary's own prose, not assumed to be "the other two clauses this
+summary makes that aren't the read-only contradiction." A reviewer who sees a three-item
+`for clause in (...)` loop that visibly mirrors a sibling's three-item loop reasonably reads it
+as complete; nothing about the shape signals that one specific clause — the one that happens to
+be prose-identical to a clause already guarded on the sibling — was dropped from the list. And
+for the help/summary duplication: two string literals expressing the same safety promise, on
+two surfaces read at two different moments (before the write vs. after it), are not linked by
+any shared code path a `git grep` on "the chain's siblings" would find — the only way to catch
+the second copy going stale is to ask, for every promise a guard newly pins, "does this exact
+sentence, or a close paraphrase of it, appear anywhere else in the diff," not just "is this
+branch's sibling in the same dispatch already guarded."
+
+**Guard form that survives:** when porting a per-clause loop from a sibling test, diff the two
+summaries' PROSE side by side first and list every clause that is either (a) present in both,
+verbatim or near-verbatim, or (b) unique to the one under test — don't reconstruct the list from
+memory of "what this summary is roughly about." Separately, when a PR states a safety/narrowness
+promise, `grep` the whole diff for that promise's key phrase (not just its home function) to find
+every surface it was written onto, and confirm each surface has its own assertion — a promise
+appearing in both `--help` and a post-write summary needs a guard on each, because an operator
+can read either one without the other (a MANUAL row's outcome is decided by the help before the
+flag is ever run, not just by the summary after).
+
+**Found:** `chela/main.py`'s `cmd_restore` print block and `--retire-empty`'s
+`add_argument(help=...)` (CMX-323 rework round 5, PR #410). Closed by adding the missing
+"archived to roster-archive.json, then removed" clause to
+`test_retire_empty_must_not_repeat_the_READ_ONLY_claim_it_just_broke`'s existing loop, and by
+extending `test_retire_emptys_help_states_the_permanent_bindings_exclusion` to also assert the
+narrowness-promise sentence within the `--retire-empty`-scoped help block (which itself was
+re-scoped from `out.split("--retire-empty", 1)[1]`, which resolves to the USAGE line's first
+occurrence and therefore also contains `--apply`'s help text, to `out.rsplit("--retire-empty",
+1)[1]`, the text after the option's own — and last — marker).
+
+**See also:** [[311|shape 311]] and the round-1/round-4 entries above — the same "a control
+written for one sibling is never mirrored onto a structurally identical second" family, applied
+here one level down (a clause within an already-mirrored loop, and a promise duplicated across
+two unrelated functions rather than across branches of one dispatch).
