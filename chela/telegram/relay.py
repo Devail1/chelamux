@@ -601,6 +601,35 @@ class BotSender:
         return False
 
 
+# Posted in place of a message that could not be delivered by either attempt
+# (MarkdownV2 then plain text) — see :func:`_notify_drop`.
+_DROP_MARKER = "⚠️ message dropped — see transcript"
+
+
+def _notify_drop(sender: Sender, window_id: str, msg: Message, thread=None) -> None:
+    """Post a short marker for an undeliverable message, then log the drop.
+
+    Both send attempts are already gone by the time this runs — :meth:`BotSender.send`
+    has exhausted its flood-control retries on each of them, so retrying the full
+    body a third time would just feed the same storm. This marker is short
+    enough to usually clear even mid-flood, and it is the fix for the actual
+    failure mode: a dropped message and an agent that said nothing look
+    IDENTICAL in the topic (the completion notice still posts, since status
+    lines opt out of the retry loop entirely — see :meth:`BotSender._call`), so
+    without a visible flag here the operator has no reason to suspect anything
+    is missing. The marker's own delivery is best-effort — if it also fails
+    (an extended outage, not just a burst) the ERROR log below is what's left.
+    """
+    args = (thread,) if thread is not None else ()
+    delivered = sender(_DROP_MARKER, None, *args)
+    log.error(
+        "telegram message permanently dropped for %s (%s)%s",
+        window_id,
+        msg.content_type,
+        "" if delivered else " (marker also failed to send)",
+    )
+
+
 class TelegramRelay:
     """Renders each new message to MarkdownV2 and posts it, plain-text on failure.
 
@@ -630,15 +659,7 @@ class TelegramRelay:
         log.debug("MarkdownV2 rejected for %s; retrying as plain text", window_id)
         if self._sender(to_plain_text(msg), None, **kw):
             return
-        # Both attempts are gone (``BotSender.send`` already logged why — a
-        # flood-control exhaustion or a real rejection). Nothing above this call
-        # knows which window/message that was, so without this line a dropped
-        # question and an intentionally hidden tool event are the same shape in
-        # the log: a WARNING/ERROR with no window_id. This is the one place that
-        # can name it.
-        log.error(
-            "telegram message permanently dropped for %s (%s)", window_id, msg.content_type
-        )
+        _notify_drop(self._sender, window_id, msg)
 
 
 class RegistryRelay:
@@ -681,9 +702,4 @@ class RegistryRelay:
         log.debug("MarkdownV2 rejected for %s; retrying as plain text", window_id)
         if self._sender(to_plain_text(msg), None, thread, **kw):
             return
-        # See the single-topic relay's matching branch above: without this line a
-        # dropped message and an intentionally hidden tool event look identical
-        # in the log.
-        log.error(
-            "telegram message permanently dropped for %s (%s)", window_id, msg.content_type
-        )
+        _notify_drop(self._sender, window_id, msg, thread)
