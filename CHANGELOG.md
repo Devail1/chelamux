@@ -10,6 +10,120 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-08-30
+
+### Added
+
+- **The CI ref-state assertion is now EXECUTED by the test suite, not just string-matched.**
+  Every assertion in `tests/test_ci_workflow.py` read `ci.yml` as text, so a change that
+  edited the workflow and its pin consistently passed every one of them — the
+  source-constant-vs-rendered-value residual `docs/defeat_shapes/314-*.md` named and left
+  open. The block is now read out of the parsed YAML and run under GitHub's own shell flags
+  (`bash --noprofile --norc -eo pipefail`) against throwaway git repos: it must ACCEPT
+  `cmx-999`, `dev`, `main`, `release/1.2` and `docs-only`, and must REJECT a detached HEAD
+  and a missing `origin/dev`. A reintroduced `cmx-N` branch-naming requirement — the CMX-314
+  production regression — now fails on behaviour whatever spelling it uses, including the
+  `case` glob that defeated three successive text-based guards. (CMX-317)
+
+- **A watched agent's completion notice now carries the agent's own closing words.**
+  `chela watch` reported only that a window finished — a fixed template — so the
+  orchestrator learned that an event had happened and nothing about what happened, and its
+  next move was always `chela read @N` by hand. The notice now quotes the agent's last
+  message: an excerpt in the one line that is pushed, and the untruncated text in the
+  event payload as `final_message`. Tool-only final turns, unreadable transcripts and
+  unresolvable windows all fall back to the previous template — losing the event would be
+  worse than losing the excerpt. Resolved by window id, never by cwd, so a sibling agent in
+  a shared directory can never have its words quoted as another agent's summary (CMX-191).
+  (CMX-318)
+
+- **The `$CHELA_WID` gate CMX-319 shipped is now proven by behaviour, not just by the
+  shape of the generated command string.** Every existing test asserted the command
+  *starts with* the `[ -n "${CHELA_WID:-}" ] &&` check; none of them actually ran it. New
+  tests execute each gated hook's real command through a shell against a `curl` stub on
+  `PATH` and count invocations: an unset `$CHELA_WID` now proves zero `curl` calls for
+  every gated event, and a set one proves exactly one. Also measured and documented what
+  the gate costs: `PreToolUse`/`PostToolUse` moved off `http` (zero process spawns) onto a
+  `command` hook that now fork/execs a shell on every tool call regardless of gate state
+  (~0.5ms) and, when the gate is open, a `curl` process too (~3.6ms total) — twice per
+  tool call, a cost the old transport never had. (CMX-322)
+
+### Changed
+
+- **The CI ref-state assertion's shell text is pinned in one place instead of two.**
+  `tests/test_ci_workflow.py` typed the same three-line block out twice — inline in the
+  `_EXPECTED_STEPS` table and again as a local `expected_run` — so editing `ci.yml` and only
+  one copy left the other test red for an intended change, and the natural way to clear that
+  red is to make the pin agree, which teaches it the mutation instead of catching it. Both
+  readers now derive from a single `_REF_STATE_RUN` constant. This removes drift between two
+  copies only; it does not close the source-constant-vs-rendered-value residual named in
+  `docs/defeat_shapes/314-*.md`, which CMX-317 closes by executing the block. (CMX-316)
+
+### Fixed
+
+- **A release's changelog fragments can no longer be published twice.** Steps 1–3 of
+  "Releasing" run on `main` and delete the `changelog.d/` fragments they consume, but
+  nothing carried those deletions back to `dev` — so every fragment a release ate stayed
+  alive on `dev`, and the next release collected and republished entries readers had
+  already seen under the previous version. Found in the tree on 2026-08-21, one day after
+  0.8.0: `CMX-309.md`, `CMX-312.md` and `CMX-314.md` were still on `dev` with their text
+  already in `## [0.8.0]`, primed to appear again in 0.9.0, while `dev`'s own CHANGELOG
+  still showed `0.6.0` as newest. `python -m chela.release_notes --release` now refuses
+  before writing anything (`StaleFragmentError`) when a fragment's task id already appears
+  in a dated section, naming the skipped `main` -> `dev` back-merge as the cause; a test
+  fails on any such fragment in the tree; and CONTRIBUTING's "Releasing" gains the
+  back-merge as an explicit step 5. (CMX-315)
+
+- **The judge's staleness check no longer takes its reference from the row it is checking.**
+  It read the PR's "current" head out of the run row's own `pr_head_sha` — the same column
+  `_spawn_judge` checks the worktree out from — so whenever that column was itself stale the
+  comparison was `verified_sha != verified_sha`, False by construction, and a verdict about a
+  commit that no longer exists was published as a **confirmed** finding. Measured 2026-08-21
+  on `adopt-393`: the run had gone `done`, so nothing refreshed the column after a rework
+  pushed; the judge re-checked-out the dead commit, found the guards the rework had added to
+  be missing (they were, on that commit), posted three false `SURVIVED` findings to the PR,
+  and the decisions inbox escalated them as "needs a human look NOW". The reference now comes
+  from GitHub (`pr_live_head_sha`), with the row as fallback only; an unreachable GitHub
+  returns `None` — UNKNOWN, never "not stale" — degrading to exactly the previous behaviour
+  rather than inventing staleness or asserting freshness. (CMX-319)
+- **`PreToolUse`/`PostToolUse`/`PermissionRequest`/`PermissionDenied` no longer fire for a
+  session chela did not launch.** `enabledPlugins` in `~/.claude/settings.json` is
+  user-wide, so every `claude` process on the machine loaded chela's plugin — including a
+  headless `claude -p` call some unrelated tool makes, in some unrelated directory. Those
+  calls posted `PreToolUse`/`PostToolUse` into the fleet's event log with no window to
+  attribute them to, and opened a `PermissionRequest` hook with a 120s wait for a human no
+  chela daemon was ever bound to. These four events now ride a `command` hook gated on
+  `$CHELA_WID` — the one signal a chela-managed launch always exports and an unrelated
+  `claude` process never has — instead of `http`: an `http` hook cannot see the agent's own
+  environment, so gating it needed the transport `SessionStart` already uses for the same
+  reason. When `$CHELA_WID` is unset the hook's own curl never runs at all: no socket, no
+  event logged, no gate opened. Plugin bumped to 0.2.4; the other ten events stay on
+  `http`, which fires far less often and was not the shape measured to matter. (CMX-319)
+
+- **chela can no longer delete a real repository as if it were a worktree.** On 2026-08-21 it
+  deleted its own main working copy — twice — as ordinary task-completion cleanup: a run row
+  recorded `worktree_path` as the main repo (the task's branch was checked out there when its
+  rework spawned, so worktree resolution fell back to the existing checkout), and cleanup
+  removed "its worktree". `TODO.md` is gitignored, so ~614KB of tracker history existed in no
+  clone, worktree or branch and was unrecoverable; the second deletion took the fresh clone,
+  because the poisoned column persists in the database and re-arms on every daemon start
+  (issue #398). `remove_worktree` now refuses, before any deletion path runs, to touch the
+  repository itself, any directory containing it, or anything whose `.git` is a **directory**
+  rather than a file — the structural difference between a real clone and a linked worktree,
+  which needs no configuration to check. The refusal raises rather than returning `False`:
+  that value already means "an ordinary removal failed, carry on", and a corrupt instruction
+  must never be indistinguishable from a routine no-op. Cleanup call sites catch it, log at
+  ERROR and leave the path alone, so a poisoned row cannot take the daemon down. (CMX-320)
+
+- **An adopted PR no longer drops out of the judge loop after its first rework.** Reconcile
+  must not strike a row `done` for "leaving the tracker" when the tracker never owned it —
+  CMX-276 fixed that, but inferred "adopted" from `worktree_path IS NULL`, which holds only
+  until the row's first rework round: the rework gets a worktree, the inference flips, and
+  the next tick strikes the run. Its PR stays open while nothing judges it, and repairing the
+  row by hand does not survive one tick. Measured 2026-08-21 on three adopted PRs at once.
+  The origin is now recorded as a fact on the row (`adopted`, written by `adopt_pr`) rather
+  than derived from mutable state, with a one-time backfill for rows adopted before the
+  column existed. (CMX-321)
+
 ## [0.8.0] — 2026-08-20
 
 ### Added
