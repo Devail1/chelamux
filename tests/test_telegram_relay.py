@@ -27,6 +27,7 @@ from chela.telegram.relay import (
     BotSender,
     RegistryRelay,
     TelegramRelay,
+    _DROP_MARKER,
     _scan,
     _truncate_utf16,
     _utf16_len,
@@ -412,11 +413,54 @@ def test_relay_logs_permanent_drop_with_window_id_when_both_attempts_fail(caplog
     with caplog.at_level(logging.DEBUG):
         TelegramRelay(stub).on_message("@1", Message("assistant", "text", "ok. go"))
 
-    assert len(stub.calls) == 2  # MarkdownV2 attempt, then plain-text attempt
+    # MarkdownV2 attempt, then plain-text attempt, then the best-effort drop marker.
+    assert len(stub.calls) == 3
+    assert stub.calls[2] == (_DROP_MARKER, None)
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
     assert "@1" in errors[0].message
     assert "permanently dropped" in errors[0].message
+
+
+def test_relay_posts_a_drop_marker_when_both_attempts_fail():
+    """The actual fix: a flood-controlled drop must be VISIBLE in the topic, not
+    just logged — see CMX-322. ``_StubSender`` fails every call, including the
+    marker's own send, so this only proves the marker was attempted."""
+    stub = _StubSender(fail_all=True)
+    TelegramRelay(stub).on_message("@1", Message("assistant", "text", "ok. go"))
+
+    assert stub.calls[-1] == (_DROP_MARKER, None)
+
+
+def test_relay_notes_when_the_marker_itself_also_fails(caplog):
+    stub = _StubSender(fail_all=True)
+    with caplog.at_level(logging.DEBUG):
+        TelegramRelay(stub).on_message("@1", Message("assistant", "text", "ok. go"))
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert "marker also failed" in errors[0].message
+
+
+def test_relay_marker_delivery_suppresses_the_marker_failed_note(caplog):
+    """The marker send recovers (only the real message was flood-controlled) —
+    the ERROR line must not claim the marker failed too."""
+
+    class _RecoverOnMarkerSender:
+        def __init__(self):
+            self.calls: list[tuple[str, str | None]] = []
+
+        def __call__(self, text, parse_mode, reply_markup=None):
+            self.calls.append((text, parse_mode))
+            return text == _DROP_MARKER
+
+    stub = _RecoverOnMarkerSender()
+    with caplog.at_level(logging.DEBUG):
+        TelegramRelay(stub).on_message("@1", Message("assistant", "text", "ok. go"))
+
+    assert stub.calls[-1] == (_DROP_MARKER, None)
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "marker also failed" not in errors[0].message
 
 
 def test_relay_logs_nothing_extra_when_the_plain_text_fallback_recovers(caplog):
@@ -500,11 +544,21 @@ def test_registry_relay_logs_permanent_drop_with_window_id_when_both_attempts_fa
     with caplog.at_level(logging.DEBUG):
         relay.on_message("@1", Message("assistant", "text", "ok. go"))
 
-    assert len(stub.calls) == 2
+    # MarkdownV2 attempt, then plain-text attempt, then the best-effort drop marker.
+    assert len(stub.calls) == 3
+    assert stub.calls[2] == (_DROP_MARKER, None, "42")
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
     assert "@1" in errors[0].message
     assert "permanently dropped" in errors[0].message
+
+
+def test_registry_relay_posts_a_drop_marker_with_thread_preserved():
+    stub = _ThreadStubSender(fail_all=True)
+    relay = RegistryRelay(stub, _registry(("@1", "42")))
+    relay.on_message("@1", Message("assistant", "text", "ok. go"))
+
+    assert stub.calls[-1] == (_DROP_MARKER, None, "42")
 
 
 def test_registry_relay_logs_nothing_extra_when_the_plain_text_fallback_recovers(caplog):
