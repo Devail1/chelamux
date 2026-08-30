@@ -298,3 +298,33 @@ def test_sh_children_lists_the_callers_own_ancestors(no_proc):
     only ``pgrep`` itself — which is exactly why this regression hides in CI.
     """
     assert os.getpid() in sessions._sh_children(os.getppid())
+
+
+def test_the_ancestor_flag_is_platform_gated_in_both_directions():
+    """The darwin branch is the one Linux CI never executes, so assert it by ARGUMENT.
+
+    GNU procps spells ``-a`` as ``--list-full``, which prepends the command to every line
+    and would break ``_sh_children``'s all-digits parse — so the non-darwin answer being
+    EMPTY is as load-bearing as the darwin answer being ``-a``. freebsd is asserted too:
+    it ships BSD pgrep with the same ancestor exclusion but is deliberately out of scope,
+    and pinning it here makes that a decision rather than an oversight.
+    """
+    assert sessions._pgrep_ancestor_flag("darwin") == ["-a"]
+    assert sessions._pgrep_ancestor_flag("linux") == []
+    assert sessions._pgrep_ancestor_flag("freebsd14") == []
+
+
+def test_sh_children_passes_the_ancestor_flag_into_the_argv(monkeypatch):
+    """The flag must reach the actual argv: gating it correctly is worthless if the call
+    site never splices it in. Reverting that one line is a silent, total disabling of the
+    fix that the platform test above cannot see."""
+    seen = []
+
+    def fake_sh(argv, **kw):
+        seen.append(list(argv))
+        return ""
+
+    monkeypatch.setattr(sessions, "_sh", fake_sh)
+    monkeypatch.setattr(sessions, "_PGREP_INCLUDE_ANCESTORS", ["-a"])
+    sessions._sh_children(4321)
+    assert seen[-1] == ["pgrep", "-a", "-P", "4321"]

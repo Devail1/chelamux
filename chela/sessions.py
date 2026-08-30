@@ -210,7 +210,17 @@ _SHIM_TIMEOUT = 2.0
 # would break `_sh_children`'s all-digits parse. Only the BSD flavour is ever reached
 # here — `_sh` returns None on a /proc host before any of this runs — but the flag is
 # gated on the platform rather than on that invariant holding forever.
-_PGREP_INCLUDE_ANCESTORS = ["-a"] if sys.platform == "darwin" else []
+def _pgrep_ancestor_flag(platform: str) -> list[str]:
+    """The pgrep flags needed to include the caller's ancestors, for `platform`.
+
+    A pure function of the platform string rather than an import-time constant: the branch
+    that matters is the one CI never takes, so it has to be reachable by an argument
+    instead of only by running on a Mac.
+    """
+    return ["-a"] if platform == "darwin" else []
+
+
+_PGREP_INCLUDE_ANCESTORS = _pgrep_ancestor_flag(sys.platform)
 
 # The claude process is normally the pane shell's direct child, but a wrapper (a `sg`, an
 # `env`, a launcher script) can sit in between. Walk a couple of generations, not the
