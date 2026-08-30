@@ -201,7 +201,7 @@ class _FakeGh:
 
 def _tick(wf, fake, source=None, worktree=None):
     """One dispatcher pass with gh + tmux stubbed and the re-spawn's worktree stood in for."""
-    wt = worktree or (wf.path.parent / "wts" / "abc123")
+    wt = worktree or (wf.path.parent / ".chela" / "wts" / "abc123")
     wt.mkdir(parents=True, exist_ok=True)
     with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
          patch.object(dispatcher, "get_source", return_value=source or _Source("abc123")), \

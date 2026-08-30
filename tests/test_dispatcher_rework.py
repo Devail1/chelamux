@@ -429,6 +429,44 @@ def test_a_worktree_attach_failure_escalates_with_a_recommendation_too(tmp_path)
     _assert_actionable_escalation(run["last_error"])
 
 
+def test_a_worktree_outside_the_configured_root_escalates_instead_of_being_recorded(tmp_path):
+    """🔴 CMX-324 (issue #398 round 2): `attach_worktree`'s reuse path can hand back the
+    MAIN REPO (or anywhere else outside the configured worktrees root) when the branch
+    happens to be checked out there — exactly what poisoned `adopt-397`'s `worktree_path`
+    and led to task cleanup deleting it. Refuse to write it, and escalate the same way any
+    other unrecoverable rework failure does — never a silently-recorded bad path.
+
+    Seen to go red: removing the `refuse_worktree_path_outside_root` guard from
+    `_respawn_rework` lets this overwrite `worktree_path` with the bad path and launch an
+    agent into it.
+    """
+    wf = _wf(tmp_path)
+    source = _Source("abc123")
+    outside_root = tmp_path / "not-the-worktrees-root"
+    outside_root.mkdir()
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="changes_requested",
+             worktree_path="/wt/abc123")
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "attach_worktree", return_value=(outside_root, False)), \
+         patch.object(dispatcher, "ensure_worktree") as fresh_fork, \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+        dispatcher.tick(wf.path)
+
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
+    assert fresh_fork.call_count == 0
+    assert run["worktree_path"] == "/wt/abc123"        # the bad path was NEVER recorded
+    assert "OUTSIDE" in run["last_error"]
+    assert "Recommendation:" in run["last_error"]
+    assert "Options:\n  - " in run["last_error"]
+    _assert_actionable_escalation(run["last_error"])
+
+
 # --- (c) the cap: bounded, then it SURFACES — it never spins ---------------------------
 
 def test_round_three_escalates_to_needs_human_with_every_verdict_and_a_free_slot(tmp_path, monkeypatch):

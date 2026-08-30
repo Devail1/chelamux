@@ -244,6 +244,103 @@ def test_remove_worktree_STILL_REMOVES_a_real_worktree(repo, tmp_path):
     assert not wt.exists(), "a genuine worktree was left behind"
 
 
+def test_remove_worktree_REFUSES_a_linked_worktree_outside_the_configured_root(repo, tmp_path):
+    """The structural CMX-320 checks alone do NOT catch this: a real, linked worktree (its
+    `.git` genuinely IS a file, so every check above waves it through) sitting outside the
+    workflow's configured worktrees root. Deleting it is just as unrecoverable as deleting
+    the main repo was — the invariant that actually matters is the workspace root, not "is
+    this specifically the main repo" (CMX-324, issue #398 round 2).
+    """
+    root = tmp_path / "worktrees"
+    outside = tmp_path / "elsewhere" / "a-worktree"
+    worktree.detached_worktree(repo, "main", outside)
+    assert (outside / ".git").is_file()  # a genuine linked worktree, not a repo
+    precious = outside / "precious.txt"
+    precious.write_text("not chela's to delete\n")
+
+    with pytest.raises(worktree.NotAWorktree) as exc:
+        worktree.remove_worktree(repo, outside, root=root)
+
+    assert outside.is_dir(), "the worktree was deleted despite being outside root"
+    assert precious.exists(), "the file inside it was destroyed"
+    assert "OUTSIDE" in str(exc.value)
+
+
+def test_remove_worktree_STILL_REMOVES_a_worktree_INSIDE_the_configured_root(repo, tmp_path):
+    """⭐ MUST BE ACCEPTED — a `root` check that refuses everything, including the normal
+    case, is worthless."""
+    root = tmp_path / "worktrees"
+    wt = root / "task-1"
+    worktree.detached_worktree(repo, "main", wt)
+
+    assert worktree.remove_worktree(repo, wt, root=root) is True
+    assert not wt.exists()
+
+
+def test_refuse_worktree_path_outside_root_passes_a_path_inside_root(tmp_path):
+    root = tmp_path / "worktrees"
+    candidate = root / "task-1"
+    candidate.mkdir(parents=True)
+    worktree.refuse_worktree_path_outside_root(candidate, root)  # must not raise
+
+
+def test_refuse_worktree_path_outside_root_REFUSES_a_path_outside_root(tmp_path):
+    """🔴 CMX-324 (issue #398 round 2): `_find_existing_worktree` can hand back the MAIN
+    REPO as a "found" worktree when the run's branch happens to be checked out there — the
+    caller (`_respawn_rework`) would otherwise write that straight into `runs.worktree_path`.
+    This is the guard on the RECORDING side; `refuse_if_not_a_worktree` above is its
+    DELETION-side twin.
+    """
+    root = tmp_path / "worktrees"
+    outside = tmp_path / "not-the-worktrees-root"
+    outside.mkdir()
+
+    with pytest.raises(worktree.NotAWorktree) as exc:
+        worktree.refuse_worktree_path_outside_root(outside, root)
+
+    assert "OUTSIDE" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# CMX-324 (issue #398, round 2) — `git worktree list` always lists the MAIN working tree;
+# `_find_existing_worktree` must never hand it back as a reusable worktree.
+# ---------------------------------------------------------------------------
+
+def test_find_existing_worktree_never_returns_the_main_repo(repo):
+    """The root cause behind `adopt-397`: a human (or a stray script) checks the run's
+    branch out in the MAIN repo. `git worktree list` reports it exactly like a real linked
+    worktree, and this is the ONE function standing between that and every caller believing
+    it found a legitimate throwaway checkout.
+    """
+    subprocess.run(["git", "-C", str(repo), "checkout", "-b", "proj-1"],
+                    check=True, capture_output=True)
+
+    assert worktree._find_existing_worktree(repo, "proj-1") is None
+
+
+def test_ensure_worktree_never_reuses_the_main_repo_as_an_existing_worktree(repo, tmp_path):
+    """Seen to go red without the `_find_existing_worktree` fix: it returns `(repo, False)`
+    instead of raising — silently handing the caller the main repository as though it were a
+    disposable worktree."""
+    root = tmp_path / "worktrees"
+    subprocess.run(["git", "-C", str(repo), "checkout", "-b", "proj-1"],
+                    check=True, capture_output=True)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        worktree.ensure_worktree(repo, "task-1", "main", "PROJ", 1, root)
+
+
+def test_attach_worktree_never_reuses_the_main_repo_as_an_existing_worktree(repo, tmp_path):
+    """Same root cause, the rework path: `attach_worktree` must never hand back the main
+    repo either — it must fail loudly (git refusing a branch already checked out elsewhere)
+    rather than resolve `(attached, False)` onto the main checkout."""
+    subprocess.run(["git", "-C", str(repo), "checkout", "-b", "proj-1"],
+                    check=True, capture_output=True)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        worktree.attach_worktree(repo, "proj-1", tmp_path / "worktrees" / "task-1")
+
+
 def test_remove_worktree_STILL_REMOVES_an_unregistered_leftover(repo, tmp_path):
     """MUST BE ACCEPTED — the rmtree fallback's real purpose: a directory git has no record
     of (crash mid-create, hand-copied). It has no `.git` at all, so it is not a repository

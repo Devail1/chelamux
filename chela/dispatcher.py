@@ -42,6 +42,7 @@ from chela.worktree import (
     detached_worktree,
     disk_usage_bytes,
     ensure_worktree,
+    refuse_worktree_path_outside_root,
     remove_worktree,
 )
 
@@ -3349,7 +3350,7 @@ def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | No
         conn.commit()
 
 
-def _cleanup_worktree_on_done(repo_path: Path, row: sqlite3.Row) -> None:
+def _cleanup_worktree_on_done(wf: WorkflowDef, row: sqlite3.Row) -> None:
     """Free a finished run's worktree the moment its row goes `done` — not later.
 
     `done` is terminal and NOT_CLAIMABLE: nothing ever reworks a `done` row, so nothing
@@ -3368,13 +3369,14 @@ def _cleanup_worktree_on_done(repo_path: Path, row: sqlite3.Row) -> None:
     Best-effort and silent on an already-gone worktree (hand-cleaned, or this task never
     got past `claimed`): `remove_worktree` only warns on an ordinary failure.
 
-    ⛔ CMX-320: it DOES raise `NotAWorktree` when the recorded path is a real repository
-    rather than a worktree — the corruption that deleted this project's own checkout twice
-    (issue #398). That is caught and logged at ERROR here rather than propagated, because a
-    poisoned row must not take the daemon down with it; the path is simply left alone, which
-    is the safe outcome. It is NOT folded into `remove_worktree`'s False return: that value
-    already means "an ordinary removal failed, carry on", and a corrupt instruction must
-    never be indistinguishable from a routine no-op.
+    ⛔ CMX-320/CMX-324: it DOES raise `NotAWorktree` when the recorded path is a real
+    repository, or falls outside this workflow's configured worktrees root — either shape of
+    the corruption that deleted this project's own checkout twice (issue #398). That is caught
+    and logged at ERROR here rather than propagated, because a poisoned row must not take the
+    daemon down with it; the path is simply left alone, which is the safe outcome. It is NOT
+    folded into `remove_worktree`'s False return: that value already means "an ordinary
+    removal failed, carry on", and a corrupt instruction must never be indistinguishable from
+    a routine no-op.
     """
     worktree_path = row["worktree_path"]
     if not worktree_path:
@@ -3383,7 +3385,7 @@ def _cleanup_worktree_on_done(repo_path: Path, row: sqlite3.Row) -> None:
     if not wt_path.is_dir():
         return
     try:
-        remove_worktree(repo_path, wt_path)
+        remove_worktree(wf.path.parent, wt_path, root=resolve_workspace_root(wf))
     except NotAWorktree as e:
         log.error("task %s: REFUSED to clean up its worktree — %s. Clear the row's "
                   "worktree_path (it is not a worktree) before this task completes again.",
@@ -3695,7 +3697,7 @@ def tick(workflow_path: str | Path) -> dict:
                     "UPDATE runs SET status='done' WHERE task_id=?", (row["task_id"],)
                 )
                 conn.commit()
-                _cleanup_worktree_on_done(wf.path.parent, row)
+                _cleanup_worktree_on_done(wf, row)
                 merged_in_tick += 1
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (PR merged)", row["task_id"])
@@ -3739,7 +3741,7 @@ def tick(workflow_path: str | Path) -> dict:
                     "UPDATE runs SET status='closed' WHERE task_id=?", (row["task_id"],)
                 )
                 conn.commit()
-                _cleanup_worktree_on_done(wf.path.parent, row)
+                _cleanup_worktree_on_done(wf, row)
                 summary["reconciled_closed"] += 1
                 log.info("Task %s closed (PR closed without merging)", row["task_id"])
                 continue
@@ -3775,7 +3777,7 @@ def tick(workflow_path: str | Path) -> dict:
                     (pr_url, row["task_id"]),
                 )
                 conn.commit()
-                _cleanup_worktree_on_done(wf.path.parent, row)
+                _cleanup_worktree_on_done(wf, row)
                 merged_in_tick += 1
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (removed from source, window killed)", row["task_id"])
@@ -3806,7 +3808,7 @@ def tick(workflow_path: str | Path) -> dict:
                         (_now(), pr_url, pr_state, row["task_id"]),
                     )
                     conn.commit()
-                    _cleanup_worktree_on_done(wf.path.parent, row)
+                    _cleanup_worktree_on_done(wf, row)
                     summary["reconciled_done"] += 1
                     log.info("Task %s done (removed from source, merged PR found)", row["task_id"])
                     continue
@@ -5112,6 +5114,30 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
             ],
         )
         return False
+
+    # ⭐ CMX-324 (issue #398, round 2): `attach_worktree`'s reuse path scans `git worktree
+    # list`, which always includes the MAIN working tree. If this branch happens to be
+    # checked out there — exactly what happened to `adopt-397` — git refuses to check the
+    # same branch out twice, so `attach_worktree` falls back to that existing checkout and
+    # hands it back as though it were a legitimate worktree, no questions asked. Refuse to
+    # write it into `worktree_path` and escalate instead of silently poisoning the row: a
+    # human can resolve the underlying git state, a corrupted DB column cannot.
+    try:
+        refuse_worktree_path_outside_root(worktree, root)
+    except NotAWorktree as e:
+        _escalate(
+            conn, row, f"rework: {e}",
+            recommendation=f"Check that branch {branch!r} isn't checked out elsewhere, then "
+                            "`chela reopen` — a worktree could not be safely re-attached "
+                            f"because branch {branch!r} is currently checked out somewhere "
+                            "outside the configured worktrees root, often the main repo.",
+            options=[
+                f"Check that branch {branch!r} isn't checked out elsewhere, then `chela reopen`",
+                "Manually attach a worktree for the branch and continue outside chela",
+                "Abandon the task",
+            ],
+        )
+        return False
     if attached:
         log.info("Task %s: worktree was gone; re-attached %s from branch %s",
                  task_id, worktree, branch)
@@ -5502,8 +5528,9 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         if alive:
             _kill_windows_named(window)
         try:
-            remove_worktree(wf.path.parent, judge.judge_worktree_path(wf, row["task_id"]))
-        except NotAWorktree as e:                      # CMX-320 — never crash the reaper
+            remove_worktree(wf.path.parent, judge.judge_worktree_path(wf, row["task_id"]),
+                             root=resolve_workspace_root(wf))
+        except NotAWorktree as e:                      # CMX-320/CMX-324 — never crash the reaper
             log.error("judge reap for %s: REFUSED to remove %s", row["task_id"], e)
         handed_over += 1
         # ⛔ Loud. The run stays exactly where it was (`awaiting_review`), which is the ONLY
