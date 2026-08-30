@@ -61,7 +61,7 @@ def ensure_worktree(
         ["git", "-C", str(repo_path), "worktree", "prune"], check=False, capture_output=True,
     )
 
-    existing = _find_existing_worktree(repo_path, branch)
+    existing = _find_existing_worktree(repo_path, branch, root)
     if existing is not None and existing.is_dir():
         return existing, False
 
@@ -100,7 +100,7 @@ class BranchGone(RuntimeError):
     """
 
 
-def attach_worktree(repo_path: Path, branch: str, wt_path: Path) -> tuple[Path, bool]:
+def attach_worktree(repo_path: Path, branch: str, wt_path: Path, root: Path) -> tuple[Path, bool]:
     """The worktree for an EXISTING branch — reused if it is there, re-created if not.
 
     This is the rework loop's half of :func:`ensure_worktree`, and the difference is the
@@ -108,12 +108,19 @@ def attach_worktree(repo_path: Path, branch: str, wt_path: Path) -> tuple[Path, 
     branch, which is exactly the wrong thing for a run that already has history, a
     pushed branch and an open PR. Here the branch is the input, not the output.
 
+    ⛔ CMX-325: ``root`` is the configured worktrees root, passed straight through to
+    :func:`_find_existing_worktree` — see its docstring for why a match outside ``root``
+    (the incident: a branch checked out in the MAIN REPO, which ``git worktree list``
+    reports exactly like any other worktree) must never be treated as reusable here. This
+    is the write side of issue #398: without it, this function is exactly how the main
+    repo's path was recorded as a run's ``worktree_path`` and then deleted as cleanup.
+
     Returns ``(path, attached)`` — ``attached`` is True when git had no worktree for the
     branch and one was checked out again (the original directory was cleaned up), False
     when the existing worktree was reused. Raises :class:`BranchGone` when the branch
     itself is gone: there is nothing to attach to, and inventing one would lose the work.
     """
-    existing = _find_existing_worktree(repo_path, branch)
+    existing = _find_existing_worktree(repo_path, branch, root)
     if existing is not None and existing.is_dir():
         return existing, False
 
@@ -136,7 +143,7 @@ def attach_worktree(repo_path: Path, branch: str, wt_path: Path) -> tuple[Path, 
     return wt_path, True
 
 
-def detached_worktree(repo_path: Path, ref: str, wt_path: Path) -> tuple[Path, bool]:
+def detached_worktree(repo_path: Path, ref: str, wt_path: Path, root: Path) -> tuple[Path, bool]:
     """A THROWAWAY checkout of `ref`, DETACHED — for a reader that must not own the branch.
 
     The judge (see :mod:`chela.judge`) applies deliberate corruptions to files and re-runs
@@ -150,6 +157,9 @@ def detached_worktree(repo_path: Path, ref: str, wt_path: Path) -> tuple[Path, b
     judge re-runs on a new head sha), and a git record whose directory was deleted is pruned
     first. Returns ``(path, created)``. Raises :class:`BranchGone` when ``ref`` does not
     resolve — there is nothing to check out, and inventing something would be a lie.
+
+    ``root`` (the configured worktrees root) is threaded through to :func:`remove_worktree`
+    on the reset-failed/recreate path — see CMX-325.
     """
     if not _ref_exists(repo_path, ref):
         raise BranchGone(f"ref {ref!r} does not exist in {repo_path}")
@@ -169,7 +179,7 @@ def detached_worktree(repo_path: Path, ref: str, wt_path: Path) -> tuple[Path, b
             return wt_path, False
         log.warning("judge worktree %s could not be reset to %s (%s); re-creating it",
                     wt_path, ref, (reset.stderr or "").strip())
-        remove_worktree(repo_path, wt_path)
+        remove_worktree(repo_path, wt_path, root)
 
     subprocess.run(
         ["git", "-C", str(repo_path), "worktree", "prune"], check=False, capture_output=True,
@@ -186,7 +196,7 @@ class NotAWorktree(Exception):
     """`wt_path` is a real repository (or contains one) — refusing to delete it."""
 
 
-def refuse_if_not_a_worktree(repo_path: Path, wt_path: Path) -> None:
+def refuse_if_not_a_worktree(repo_path: Path, wt_path: Path, root: Path) -> None:
     """Raise :class:`NotAWorktree` unless ``wt_path`` really is a throwaway worktree.
 
     🔴 CMX-320. On 2026-08-21 chela deleted its OWN main working copy,
@@ -199,10 +209,23 @@ def refuse_if_not_a_worktree(repo_path: Path, wt_path: Path) -> None:
     unrecoverable. The second deletion took the fresh clone, because the poisoned column
     persists in the DB and re-arms on every daemon start (issue #398).
 
-    ⛔ This does NOT try to work out how a bad path got into the row, and it deliberately
-    does not depend on the configured workspace root (``workspace.root`` is per-workflow, and
-    this function is not given the workflow). It asserts a STRUCTURAL fact about the target,
-    immediately before an irreversible operation:
+    ⛔ CMX-325: the FIRST check below is ``root`` membership — ``wt_path`` must resolve to
+    ``root`` itself or somewhere under it. This is the invariant that actually matters:
+    "the path equals the main repo" was only the ONE instance observed, not the whole
+    hazard — a checkout of some OTHER repo, or this repo cloned somewhere unexpected, is
+    just as unsafe a deletion target and is caught the same way. It runs on WHATEVER is
+    stored in the row, regardless of how it got there (a rework write that predates this
+    fix, a hand-edited DB, a future bug in a caller this function has never heard of) —
+    that is what stops the poisoned-row-re-arms-on-restart half of issue #398, which a
+    write-side guard alone cannot: the write-side fix (see :func:`_find_existing_worktree`)
+    stops a NEW bad path from being recorded, but does nothing for a row already holding
+    one when the daemon restarts and re-runs its completion cleanup.
+
+    The structural checks below it are additional, independent signal — kept because they
+    catch a case root-membership cannot: a real repository that somehow ended up recorded
+    UNDER ``root`` (e.g. a clone, not a `git worktree add`, dropped directly into the
+    worktrees directory by hand). It asserts a STRUCTURAL fact about the target, immediately
+    before an irreversible operation:
 
     * a linked git worktree's ``.git`` is a FILE — a pointer into the parent repo's admin
       directory (``gitdir: /path/to/repo/.git/worktrees/<name>``);
@@ -223,8 +246,16 @@ def refuse_if_not_a_worktree(repo_path: Path, wt_path: Path) -> None:
     try:
         target = wt_path.resolve()
         repo = repo_path.resolve()
+        worktrees_root = root.resolve()
     except OSError:                             # unreadable path — treat as unsafe
         raise NotAWorktree(f"{wt_path} could not be resolved — refusing to delete it")
+
+    if not target.is_relative_to(worktrees_root):
+        raise NotAWorktree(
+            f"refusing to delete {target}: it is OUTSIDE the worktrees root "
+            f"({worktrees_root}) — a cleanup target must live under it, whatever is "
+            "recorded in the run row — see issue #398"
+        )
 
     if target == repo:
         raise NotAWorktree(
@@ -242,7 +273,7 @@ def refuse_if_not_a_worktree(repo_path: Path, wt_path: Path) -> None:
         )
 
 
-def remove_worktree(repo_path: Path, wt_path: Path) -> bool:
+def remove_worktree(repo_path: Path, wt_path: Path, root: Path) -> bool:
     """Drop a worktree and its directory — survives every way it can go stale.
 
     Tries ``git worktree remove --force`` first — the normal case, a live worktree git
@@ -258,12 +289,17 @@ def remove_worktree(repo_path: Path, wt_path: Path) -> bool:
 
     Always ``git worktree prune``s afterward, so a directory that WAS removed doesn't
     linger as a dangling administrative record blocking the next ``worktree add``.
+
+    ``root`` is the configured worktrees root (:func:`chela.workflow.resolve_workspace_root`)
+    — REQUIRED, not optional, because :func:`refuse_if_not_a_worktree` uses it as the
+    primary guard (CMX-325 / issue #398): a caller that cannot name its worktrees root has
+    no business deleting anything on its behalf.
     """
-    # ⛔ CMX-320: before ANY deletion path runs. `git worktree remove` would refuse a real
-    # repository on its own, but the `shutil.rmtree` fallback below would not — and that
-    # fallback exists precisely for paths git has no record of, which is exactly what a
-    # wrongly-recorded main checkout looks like from here.
-    refuse_if_not_a_worktree(repo_path, wt_path)
+    # ⛔ CMX-320/CMX-325: before ANY deletion path runs. `git worktree remove` would refuse
+    # a real repository on its own, but the `shutil.rmtree` fallback below would not — and
+    # that fallback exists precisely for paths git has no record of, which is exactly what
+    # a wrongly-recorded main checkout (or any other out-of-root path) looks like from here.
+    refuse_if_not_a_worktree(repo_path, wt_path, root)
     out = subprocess.run(
         ["git", "-C", str(repo_path), "worktree", "remove", "--force", str(wt_path)],
         capture_output=True, text=True,
@@ -342,7 +378,42 @@ def _branch_exists(repo_path: Path, branch: str) -> bool:
     return out.returncode == 0
 
 
-def _find_existing_worktree(repo_path: Path, branch: str) -> Path | None:
+def is_inside_root(path: Path, root: Path) -> bool:
+    """Is ``path`` ``root`` itself or somewhere under it, after resolving both?
+
+    Unresolved comparison is exactly how a symlinked ``~/.chela`` or a relative
+    ``root`` would slip past this — resolve both sides before comparing. Public: used
+    both internally (see :func:`_find_existing_worktree`, :func:`refuse_if_not_a_worktree`)
+    and by callers that must decide whether a STORED ``worktree_path`` is trustworthy
+    before ever handing it to :func:`attach_worktree` (CMX-325, issue #398).
+    """
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
+
+
+def _find_existing_worktree(repo_path: Path, branch: str, root: Path) -> Path | None:
+    """The live worktree checked out for ``branch``, if any — but only inside ``root``.
+
+    ⛔ CMX-325 (issue #398, second half): ``git worktree list`` reports the repo's own
+    MAIN working tree exactly like any linked worktree — it is simply the first entry,
+    with no marker distinguishing it. `cmx-319`'s rework was checked out in the main
+    repo when it respawned; git refuses the same branch in two worktrees, so this
+    function (before this fix) happily returned the main repo's path as "the existing
+    worktree for this branch", and callers (:func:`ensure_worktree`, :func:`attach_worktree`)
+    trusted it enough to record it as a run's ``worktree_path``. Task-completion cleanup
+    then deleted it — the main working copy, gone, twice (90 minutes apart, because the
+    poisoned DB row re-armed on the next daemon restart).
+
+    A match outside ``root`` is therefore never returned as reusable: it is logged and
+    treated as if no worktree exists for the branch, which sends the caller down the
+    "create fresh" path — and since the branch really is checked out elsewhere, `git
+    worktree add` refuses it there too, surfacing as a loud error instead of a silent
+    bad path. The invariant enforced is "inside the worktrees root", not "is not the
+    main repo": a checkout anywhere else — another clone, another project's worktree —
+    is caught by the same check, not just the one instance actually observed.
+    """
     out = subprocess.run(
         ["git", "-C", str(repo_path), "worktree", "list", "--porcelain"],
         check=True, capture_output=True, text=True,
@@ -355,5 +426,13 @@ def _find_existing_worktree(repo_path: Path, branch: str) -> Path | None:
         elif line.startswith("branch "):
             ref = line[len("branch "):]
             if ref == f"refs/heads/{branch}" and cur_path:
-                return Path(cur_path)
+                found = Path(cur_path)
+                if not is_inside_root(found, root):
+                    log.warning(
+                        "branch %s is checked out at %s, which is OUTSIDE the worktrees "
+                        "root %s (likely the main repo or another checkout) — refusing to "
+                        "treat it as a reusable worktree", branch, found, root,
+                    )
+                    return None
+                return found
     return None

@@ -974,7 +974,7 @@ def _workflow_repo(tmp_path: Path, task_id: str, guard_test: str, *,
         _git(repo, "add", "-A")
         _git(repo, "commit", "-qm", "the feature and its proof")
         wt.parent.mkdir(parents=True, exist_ok=True)
-        worktree.detached_worktree(repo, "main", wt)
+        worktree.detached_worktree(repo, "main", wt, wt.parent)
         assert (wt / ".git").is_file(), "fixture must model a LINKED worktree"
     else:
         _project(wt, guard_test=guard_test)
@@ -3077,7 +3077,7 @@ def test_a_missing_judge_window_is_HELD_not_reaped_while_its_lock_is_live(tmp_pa
     lock_path = _write_live_judge_lock(wf, "abc123")
 
     removed: list[Path] = []
-    with patch.object(dispatcher, "remove_worktree", side_effect=lambda repo, p: removed.append(p) or True):
+    with patch.object(dispatcher, "remove_worktree", side_effect=lambda repo, p, root: removed.append(p) or True):
         summary = _tick(wf, lambda *a: True, windows=())   # window missing from THIS snapshot
 
     assert summary["judge_lost"] == 0

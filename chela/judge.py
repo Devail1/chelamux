@@ -1553,13 +1553,14 @@ def _reprovision_worktree(wf, worktree: Path, sha: str, base_branch: str) -> str
     ever sees the tree (CMX-176) — so a re-run measures the PR exactly as a fresh judge would.
     """
     from chela import dispatcher
+    from chela.workflow import resolve_workspace_root
     from chela.worktree import BranchGone
 
     if not sha:
         return f"the judge worktree {worktree} is gone and this run has no pr_head_sha to " \
                "re-check it out from"
     try:
-        dispatcher.detached_worktree(wf.path.parent, sha, worktree)
+        dispatcher.detached_worktree(wf.path.parent, sha, worktree, resolve_workspace_root(wf))
     except (BranchGone, subprocess.CalledProcessError, OSError) as e:
         detail = getattr(e, "stderr", None) or str(e)
         if isinstance(detail, bytes):
@@ -1990,6 +1991,7 @@ def _cleanup(wf, task_id: str, branch: str, judge_epoch: str | None) -> None:
     """
     from chela import dispatcher as _dispatcher
     from chela.dispatcher import _kill_windows_named
+    from chela.workflow import resolve_workspace_root
     from chela.worktree import NotAWorktree, remove_worktree
 
     current = _dispatcher.resolve_run(task_id)
@@ -2002,7 +2004,9 @@ def _cleanup(wf, task_id: str, branch: str, judge_epoch: str | None) -> None:
         return
     try:
         try:
-            remove_worktree(wf.path.parent, judge_worktree_path(wf, task_id))
+            remove_worktree(
+                wf.path.parent, judge_worktree_path(wf, task_id), resolve_workspace_root(wf),
+            )
         except NotAWorktree as e:                      # CMX-320 — never crash cleanup
             log.error("judge cleanup for %s: REFUSED to remove %s", task_id, e)
     except Exception:
