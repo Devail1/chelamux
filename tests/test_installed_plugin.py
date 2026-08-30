@@ -377,6 +377,18 @@ def test_registered_marketplaces_is_none_when_the_file_is_not_a_dict(env):
     assert hooks.registered_marketplaces() is None
 
 
+def test_registered_marketplaces_is_none_when_the_json_is_unparseable(env):
+    """The third of three documented reachability paths for "missing or unreadable":
+    missing (tested above) and present-but-not-a-dict (tested above) both land on `None`,
+    but so must present-and-not-even-JSON — the `ValueError` half of
+    `except (OSError, ValueError)`. Getting this arm wrong is not quiet: an uncaught
+    `json.JSONDecodeError` would propagate out of this function into `chela doctor`,
+    `chela update` and `chela plugin`, the three surfaces that call it."""
+    path = hooks.plugins_dir() / "known_marketplaces.json"
+    path.write_text("not json", encoding="utf-8")
+    assert hooks.registered_marketplaces() is None
+
+
 def test_marketplace_missing_is_false_when_the_registry_cannot_be_read(env):
     """Never guess "gone" from an absent file — that would false-positive on every
     environment where this registry happens not to exist for unrelated reasons."""
@@ -436,7 +448,10 @@ def test_doctor_ERRORs_when_the_marketplace_is_gone(env):
     assert "chela@acme" in body
     assert "failed to load" in body
     assert "STALE" not in body                    # never conflated with the drift wording
-    assert "claude plugin marketplace add" in body
+    # a third f-string render site, in the fix instruction itself — a bare "claude plugin
+    # marketplace add" substring survives a blanked slug just as easily as the two above did
+    # before they were pinned (docs/defeat_shapes/79); pin the interpolated phrase instead.
+    assert "path-or-url-to-the-acme-marketplace" in body
 
 
 def test_doctor_reports_the_gone_marketplace_even_with_zero_manifest_drift(env):

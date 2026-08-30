@@ -31,14 +31,18 @@ untested by a suite that only ever exercises "missing" and "well-formed."
 
 **Guard form that survives:** enumerate every way the function's own `try`/`isinstance`
 guards can be reached, one test per branch, not just the branches an existing test happened
-to already need. For a `path.read_text()` → `json.loads()` → `isinstance(data, dict)`
-chain that collapses onto one sentinel, that means: file absent (already tested here),
-file present with unparseable text (already tested here — covered indirectly by
-`OSError, ValueError`), and file present with *parseable but wrong-shaped* JSON — write a
-real file containing `"[]"` or `"null"` and assert the sentinel, not the happy-path value.
-Do not assume a `try/except` and an `isinstance` guard share one failure mode just because
-they return the same sentinel; each is a distinct input shape that a mutation can flip
-independently.
+to already need — and do not credit a branch as "tested" because a *different* except-arm
+sharing the same handler happens to be exercised. For a `path.read_text()` →
+`json.loads()` → `isinstance(data, dict)` chain that collapses onto one sentinel, that
+means: file absent (`OSError`, already tested here), file present but not valid JSON
+(`ValueError`, tested here only from round 4 on — see **Found**), and file present with
+*parseable but wrong-shaped* JSON (the `isinstance` check, already tested here) — write a
+real file for each and assert the sentinel, not the happy-path value. A single `except
+(OSError, ValueError):` line is not one tested branch just because one of the two
+exceptions it catches has a test; each exception, and each `isinstance` outcome, is a
+distinct input shape a mutation can flip independently, and a test suite that narrows an
+`except (A, B)` down to only `A` (or the reverse) is exactly this shape's mutation, just
+applied by hand instead of by the judge.
 
 **Found:** CMX-321 rework round 2, PR #409. The judge's required-mutation-set verdict
 mutated `chela/hooks.py::registered_marketplaces`'s `else None` to `else set()` on the
@@ -46,3 +50,16 @@ mutated `chela/hooks.py::registered_marketplaces`'s `else None` to `else set()` 
 green because neither exercises "present but not a dict." Closed by adding
 `test_registered_marketplaces_is_none_when_the_file_is_not_a_dict`, which writes `"[]"` to
 `known_marketplaces.json` and asserts `registered_marketplaces() is None`.
+
+**Found again, same function, the other half:** CMX-321 rework round 4, PR #409. This
+file's own round-2 write-up (above) claimed the `ValueError` arm was "already tested here —
+covered indirectly by `OSError, ValueError`," which was false: no test ever wrote
+unparseable JSON to the registry, only a missing file (`OSError`) and a well-formed-but-
+wrong-shape one (the `isinstance` branch). The judge narrowed `except (OSError, ValueError):`
+to `except (OSError,):` — a plain `json.JSONDecodeError` (a `ValueError` subclass) then
+propagates uncaught out of `registered_marketplaces` into `chela doctor`, `chela update`
+and `chela plugin`, the three surfaces that call it — and every existing test, including
+323's own, stayed green. Closed by adding
+`test_registered_marketplaces_is_none_when_the_json_is_unparseable`, which writes the
+literal string `"not json"` to `known_marketplaces.json` and asserts
+`registered_marketplaces() is None`.
