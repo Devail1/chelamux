@@ -17,14 +17,17 @@ from __future__ import annotations
 
 from chela.restore import (
     ARCHIVED,
+    KEPT,
     LEFT_TO_DAEMON,
     RACED,
     REVIVED,
+    ApplyResult,
     Orphan,
     Verdict,
     _classify,
     apply,
     plan,
+    retire_empty,
     scan_all,
     scan_runs,
     scan_session_ids,
@@ -749,3 +752,125 @@ def test_the_four_outcome_words_are_the_operators_vocabulary():
         "the four outcomes must stay DISTINGUISHABLE — two that render the same word are "
         "one word as far as the operator is concerned"
     )
+
+
+# --------------------------------------------------------------------------
+# retire_empty — the narrow write half (CMX-323): MANUAL-with-nothing-on-record ONLY
+# --------------------------------------------------------------------------
+
+def _empty_manual(store, wid="@1"):
+    """A MANUAL row `manual_command()` cannot build anything from — no cwd, no session."""
+    return Verdict(store=store, wid=wid, stamped_epoch=OLD, verdict="MANUAL",
+                   session_id=None, new_wid=None, cwd=None, label="l")
+
+
+def test_retire_empty_archives_and_removes_a_session_ids_row_with_nothing_on_record():
+    calls, kit = _writers()
+    v = _empty_manual("session-ids", wid="@5")
+
+    results = retire_empty([v], **kit)
+
+    assert [c[0] for c in calls] == ["archive", "remove"], (
+        "an empty MANUAL row must be retired through the exact same archive-then-remove "
+        "path --apply uses"
+    )
+    assert results == [ApplyResult(v, ARCHIVED, "")]
+
+
+def test_retire_empty_archives_and_unregisters_an_orchestrator_row_with_nothing_on_record():
+    calls, kit = _writers()
+    v = _empty_manual("inbox.orchestrator", wid="@1")
+
+    results = retire_empty([v], **kit)
+
+    assert [c[0] for c in calls] == ["archive", "unregister"]
+    assert results == [ApplyResult(v, ARCHIVED, "")]
+
+
+def test_retire_empty_never_writes_a_REVIVABLE_row_reports_it_KEPT():
+    calls, kit = _writers()
+    v = _revivable("session-ids", wid="@7", new_wid="@42")
+
+    results = retire_empty([v], **kit)
+
+    assert calls == [], (
+        "a REVIVABLE row must never be re-stamped by retire_empty — that is --apply's job"
+    )
+    assert results == [ApplyResult(v, KEPT)]
+
+
+def test_retire_empty_never_writes_a_MANUAL_row_that_still_carries_a_cwd_and_session():
+    """The counterweight to the empty-row test: a MANUAL row with SOMETHING on record — a
+    relaunch command a human could still read and act on — must be left completely alone,
+    not silently swept up because it is also MANUAL."""
+    calls, kit = _writers()
+    v = _manual("session-ids", wid="@5")   # cwd="/home/x", session_id="sid-dead" — has a command
+    assert v.manual_command() is not None, "fixture sanity: this row must carry a command"
+
+    results = retire_empty([v], **kit)
+
+    assert calls == [], "a MANUAL row with a cwd/session must never be archived or removed"
+    assert results == [ApplyResult(v, KEPT)]
+
+
+def test_retire_empty_still_reports_telegram_bindings_as_LEFT_TO_DAEMON_never_writes():
+    """Even an empty telegram.bindings row is not this feature's to clear — it routes
+    through apply()'s own permanent exclusion, unconditionally."""
+    calls, kit = _writers()
+    v = _empty_manual("telegram.bindings", wid="@2")
+
+    results = retire_empty([v], **kit)
+
+    assert calls == []
+    assert results == [ApplyResult(v, LEFT_TO_DAEMON,
+                                    "chela-telegram owns telegram-bindings.json; its own "
+                                    "reconcile tick reaps this row")]
+
+
+def test_retire_empty_preserves_order_one_result_per_verdict_mixed_batch():
+    calls, kit = _writers()
+    revivable = _revivable("session-ids", wid="@7", new_wid="@42")
+    informative = _manual("session-ids", wid="@5")
+    empty = _empty_manual("inbox.orchestrator", wid="@1")
+    verdicts = [revivable, informative, empty]
+
+    results = retire_empty(verdicts, **kit)
+
+    assert [r.verdict for r in results] == verdicts, "results must line up with input order"
+    assert [r.action for r in results] == [KEPT, KEPT, ARCHIVED]
+    assert [c[0] for c in calls] == ["archive", "unregister"], (
+        "only the empty row may write anything, and only through archive-then-remove"
+    )
+
+
+def test_retire_empty_still_reports_RACED_when_the_removal_writer_declines():
+    """The RACED guard must survive being reached through retire_empty, not just apply()."""
+    calls, kit = _writers()
+    kit["remove_session"] = lambda wid, sid, stamped: (
+        calls.append(("remove", wid, sid, stamped)), False)[1]
+    v = _empty_manual("session-ids", wid="@5")
+
+    results = retire_empty([v], **kit)
+
+    assert results == [ApplyResult(
+        v, RACED, "archived, but the row moved on before it could be removed")]
+
+
+def test_retire_empty_defaults_wire_to_apply(monkeypatch):
+    """🔴 GUARD: retire_empty must delegate its writers to the real apply() defaults, not a
+    private reimplementation — flip it to call some other function and every write path
+    (and the telegram-bindings exclusion) silently stops being shared with --apply."""
+    import chela.restore as restore_mod
+
+    called = []
+
+    def fake_apply(targets, **kw):
+        called.append(targets)
+        return [ApplyResult(t, KEPT) for t in targets]
+
+    monkeypatch.setattr(restore_mod, "apply", fake_apply)
+
+    v = _empty_manual("session-ids", wid="@5")
+    restore_mod.retire_empty([v])
+
+    assert called == [[v]], "retire_empty must call chela.restore.apply() with the filtered subset"

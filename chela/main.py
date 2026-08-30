@@ -1759,11 +1759,17 @@ def cmd_restore(args) -> None:
     ``--apply`` (CMX-196) acts on the classification instead of merely printing it: a
     REVIVABLE row is re-stamped at its new address (``chela.restore.apply`` ->
     ``chela.inbox.readdress`` / ``chela.sessionids.rekey``); a MANUAL row is archived
-    (``chela.roster.archive``) and only then removed from its live store. Without the flag
-    nothing is written and no agent is relaunched, spawned, resumed or killed — the operator
-    acts by hand: ``chela watch``/``register``, re-dispatch, or clear a row themselves.
-    ``telegram-bindings.json`` is never written either way: that store belongs to
-    ``chela-telegram``'s own in-memory registry, and its own reconcile tick reaps it.
+    (``chela.roster.archive``) and only then removed from its live store. Without either
+    write flag nothing is written and no agent is relaunched, spawned, resumed or killed —
+    the operator acts by hand: ``chela watch``/``register``, re-dispatch, or clear a row
+    themselves. ``telegram-bindings.json`` is never written either way: that store belongs
+    to ``chela-telegram``'s own in-memory registry, and its own reconcile tick reaps it.
+
+    ``--retire-empty`` (CMX-323) is the narrower complement: it archives-then-removes ONLY
+    the MANUAL rows with nothing on record at all (no cwd, no session — bookkeeping residue
+    a hard death left behind, not work a human could act on). Every REVIVABLE row and every
+    MANUAL row that still carries a relaunch command is left completely untouched — see
+    ``chela.restore.retire_empty``. Mutually exclusive with ``--apply``.
 
     ⚠️ The roster only helps starting from the NEXT reboot — there is no snapshot of an
     epoch chela was never running to observe. A run today still reports the stale rows
@@ -1772,6 +1778,7 @@ def cmd_restore(args) -> None:
     from chela.telegram.bindings import BindingRegistry
 
     apply_flag = bool(getattr(args, "apply", False))
+    retire_flag = bool(getattr(args, "retire_empty", False))
 
     now_epoch = epoch.current()
     store = inbox.load()
@@ -1802,8 +1809,13 @@ def cmd_restore(args) -> None:
     manual = [v for v in verdicts if v.verdict == "MANUAL"]
 
     # Applied BEFORE the verdict block prints, so each row's line can carry the outcome —
-    # one per verdict, same order, per restore.apply()'s contract.
-    results = restore.apply(verdicts) if apply_flag and verdicts else []
+    # one per verdict, same order, per restore.apply()'s / restore.retire_empty()'s contract.
+    if apply_flag and verdicts:
+        results = restore.apply(verdicts)
+    elif retire_flag and verdicts:
+        results = restore.retire_empty(verdicts)
+    else:
+        results = []
 
     if verdicts:
         print(f"{len(verdicts)} classified row(s) (three session-stamped stores: "
@@ -1825,9 +1837,16 @@ def cmd_restore(args) -> None:
               "address; MANUAL rows were archived to roster-archive.json, then removed. "
               "telegram-bindings.json rows are left for chela-telegram's own reconcile tick "
               "to reap — see each row's outcome above.")
+    elif retire_flag:
+        print("\nchela restore --retire-empty: only the MANUAL rows with nothing on record "
+              "(no cwd, no session) were archived to roster-archive.json, then removed. "
+              "Every REVIVABLE row and every MANUAL row that still carries a relaunch "
+              "command was left untouched — see each row's outcome above. Act on those by "
+              "hand, or re-run with --apply once you are ready to write ALL of them.")
     else:
         print("\nreport only — chela restore never writes to a store. Act by hand: "
-              "chela watch/register for a REVIVABLE row, re-dispatch, or clear a row "
+              "chela watch/register for a REVIVABLE row, re-dispatch, `chela restore "
+              "--retire-empty` for a MANUAL row with nothing on record, or clear a row "
               "yourself once you have decided what happened to it.")
 
     # Nonzero while anything is MANUAL — the agent behind such a row is orphaned and needs
@@ -2763,11 +2782,19 @@ def main() -> None:
         help="Report epoch-dangling rows left by a hard tmux death "
              "(inbox/telegram-bindings/session-ids/dispatcher runs). Read-only by default.",
     )
-    p_restore.add_argument(
+    p_restore_write = p_restore.add_mutually_exclusive_group()
+    p_restore_write.add_argument(
         "--apply", action="store_true",
         help="Act on the classification: re-stamp REVIVABLE rows at their new address, "
              "archive-then-remove MANUAL ones. telegram-bindings.json is still never "
              "written — chela-telegram's own reconcile tick reaps it.",
+    )
+    p_restore_write.add_argument(
+        "--retire-empty", action="store_true",
+        help="Narrower than --apply: archive-then-remove only the MANUAL rows with "
+             "NOTHING on record (no cwd, no session — no relaunch command to offer). "
+             "Every REVIVABLE row and every MANUAL row that still carries a cwd/session "
+             "is left untouched. telegram-bindings.json is still never written.",
     )
 
     # task-finished — final step in the dispatcher work-item lifecycle

@@ -1266,3 +1266,76 @@ def test_applys_help_states_the_permanent_bindings_exclusion(capsys):
         f"--apply's help must state the permanent bindings exclusion. Got:\n{out}"
     )
     assert "reconcile tick reaps it" in out, "...and that the daemon handles it instead"
+
+
+# --- END-TO-END, `--retire-empty` (CMX-323: the narrow write half) ------------------------
+
+@pytest.fixture()
+def live_stores_with_empty_manual(live_stores, tmp_path):
+    """`live_stores` plus one MORE session-ids row with NOTHING on record at all: no roster
+    join (unlike `@5`, which the roster resolves to `CWD_FIVE`/`SID_DEAD` and therefore
+    still carries a relaunch command). `@8` is exactly the row `--retire-empty` exists to
+    clear — see `chela.restore.retire_empty`.
+    """
+    chela_dir = tmp_path / "chela"
+    session_ids = json.loads((chela_dir / "session-ids.json").read_text())
+    session_ids["@8"] = {"session_id": "dddddddd-9999-8888-7777-666666666666", "epoch": OLD}
+    (chela_dir / "session-ids.json").write_text(json.dumps(session_ids))
+    return live_stores
+
+
+def test_chela_restore_retire_empty_clears_ONLY_the_row_with_nothing_on_record(
+        live_stores_with_empty_manual, tmp_path, capsys):
+    chela_dir = tmp_path / "chela"
+    bindings_before = (chela_dir / "telegram-bindings.json").read_bytes()
+
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--retire-empty"])
+
+    assert exc.value.code == 1, (
+        "MANUAL rows with a cwd/session are still unresolved after --retire-empty — the "
+        "command must still fail loudly"
+    )
+    out = capsys.readouterr().out
+    assert "=> archived" in out and "=> kept" in out and "=> left-to-daemon" in out
+
+    session_ids = json.loads((chela_dir / "session-ids.json").read_text())
+    assert "@8" not in session_ids, "the empty row must be retired"
+    assert "@5" in session_ids, (
+        "a MANUAL row that still carries a cwd/session must survive --retire-empty untouched"
+    )
+    assert "@7" in session_ids, "a REVIVABLE row must never be re-stamped by --retire-empty"
+    assert session_ids["@7"]["session_id"] == SID_LIVE and session_ids["@7"]["epoch"] == OLD, (
+        "--retire-empty must not touch a REVIVABLE row's bytes at all"
+    )
+
+    inbox_store = json.loads((chela_dir / "inbox.json").read_text())
+    assert inbox_store["orchestrator"] == "@1", (
+        "the orchestrator row still carries a cwd/session (roster join) and must be KEPT"
+    )
+
+    assert (chela_dir / "telegram-bindings.json").read_bytes() == bindings_before, (
+        "--retire-empty must never write telegram-bindings.json, empty row or not"
+    )
+
+    archived = json.loads((chela_dir / "roster-archive.json").read_text())["archived"]
+    assert [(a["store"], a["wid"]) for a in archived] == [("session-ids", "@8")], (
+        "only the empty row may land in the archive"
+    )
+
+
+def test_chela_restore_retire_empty_and_apply_are_mutually_exclusive(live_stores, capsys):
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--apply", "--retire-empty"])
+
+    assert exc.value.code == 2, "argparse must refuse both write flags at once"
+
+
+def test_restores_help_documents_retire_empty(capsys):
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--help"])
+    assert exc.value.code == 0
+    out = " ".join(capsys.readouterr().out.split())
+
+    assert "--retire-empty" in out, "the new flag must be discoverable from --help"
+    assert "NOTHING on record" in out, "...and say what it does, not just that it exists"

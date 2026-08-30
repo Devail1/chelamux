@@ -71,6 +71,35 @@ saved from that same object every reconcile tick), so a second load-mutate-save 
 and silently erase whichever side wrote last. Its rows are classified and reported here;
 :func:`apply` reports them too, but never writes to that store — the daemon's own reconcile
 tick is what reaps them.
+
+**The narrow write half — :func:`retire_empty` (CMX-323).** ``--apply`` is all-or-nothing:
+it re-stamps every REVIVABLE row AND archives-then-removes every MANUAL one, whether or not
+that MANUAL row still carries a ``cd ... && claude --resume ...`` one-liner a human might
+still act on. After a hard-enough death (two WSL distro teardowns in one day, live 2026-08-29)
+the roster join comes up empty for almost every row — no cwd, no session, nothing
+:func:`Verdict.manual_command` can build a command from — and that "nothing on record" case
+is a DIFFERENT thing from a MANUAL row with a relaunch command sitting unread: it is not work
+anyone can act on, it is bookkeeping residue that a hard death left behind. :func:`retire_empty`
+is the reviewed, narrower complement: it retires ONLY the rows :func:`plan` already classified
+MANUAL *and* for which ``manual_command()`` is ``None`` — never a REVIVABLE row, and never a
+MANUAL row that still carries a cwd or a session, which is left completely alone for a human to
+read and decide on (or for a later ``--apply``). It reuses :func:`apply`'s own per-store
+writers verbatim — same archive-before-remove ordering, same RACED guard, same permanent
+``telegram-bindings.json`` exclusion — so a retired row is retired by the EXACT path
+``--apply`` already uses, never a second reimplementation of it.
+
+⚖️ **Why this does not also reach ``inbox.watches`` or the dispatcher's ``runs`` table.**
+Both are scanned (:func:`scan_watches` / :func:`scan_runs`) but neither is ever classified
+into a :class:`Verdict` by :func:`plan` — they carry no session identity of their own to join
+against the roster, only a note or a task id. :func:`retire_empty`, like :func:`apply` before
+it, operates on :class:`Verdict` objects, so it cannot reach either store even in principle;
+extending classification to them is a bigger, separate decision, not folded in here. And for
+``runs`` specifically the standing rule is ARCHIVE-never-DELETE for a different reason: a
+run row is a task's history, kept even once its window is long gone (see
+:func:`scan_runs`'s own docstring on why a *terminal* row's dangling stamp is excluded, not
+retired) — where a session-ids or inbox-orchestrator row is pure address bookkeeping with no
+history value once nothing live claims it. That asymmetry is why the same "nothing on record"
+shape gets a retire path here but must not be read as license to bulk-delete a run row too.
 """
 from __future__ import annotations
 
@@ -249,6 +278,7 @@ LEFT_TO_DAEMON = "left-to-daemon"   # telegram.bindings — never written here, 
 REVIVED = "revived"                 # REVIVABLE, re-stamped at its new address
 ARCHIVED = "archived"               # MANUAL, archived then removed from its live store
 RACED = "raced"                     # the row moved on between plan() and apply() — skipped
+KEPT = "kept"                       # retire_empty() only — see below
 
 
 @dataclass(frozen=True)
@@ -320,3 +350,28 @@ def apply(verdicts: list[Verdict], *,
                                 "" if ok else
                                 "archived, but the row moved on before it could be removed"))
     return out
+
+
+def retire_empty(verdicts: list[Verdict], **apply_kwargs) -> list[ApplyResult]:
+    """The narrow write half (CMX-323): archive-then-remove ONLY the MANUAL rows with
+    NOTHING on record — no cwd, no session, so :func:`Verdict.manual_command` cannot even
+    offer a relaunch one-liner. Every other row (REVIVABLE, or MANUAL with a cwd/session
+    still attached) is reported back with outcome :data:`KEPT` and left byte-for-byte
+    untouched — this never re-stamps a REVIVABLE row and never removes a MANUAL row a human
+    could still act on. See the module docstring for why this stays scoped to what
+    :func:`plan` classifies (never ``inbox.watches`` or the dispatcher's ``runs`` table).
+
+    Retiring itself is delegated to :func:`apply` — called with ONLY the filtered subset —
+    so a retired row is archived/removed by the exact same writers, same ordering, same
+    RACED guard, and same permanent ``telegram-bindings.json`` exclusion ``--apply`` uses.
+    ``**apply_kwargs`` forwards straight to it (the same DI seam, for the same reason).
+
+    Returns one :class:`ApplyResult` per input verdict, same order, exactly like
+    :func:`apply` — callers that zip verdicts against results do not need to know which
+    write path produced them.
+    """
+    targets = [v for v in verdicts
+               if v.verdict == "MANUAL" and v.manual_command() is None]
+    target_ids = {id(v) for v in targets}
+    results = iter(apply(targets, **apply_kwargs))
+    return [next(results) if id(v) in target_ids else ApplyResult(v, KEPT) for v in verdicts]
