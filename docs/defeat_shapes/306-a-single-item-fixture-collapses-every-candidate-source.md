@@ -288,3 +288,23 @@ into `getComputedStyle`, so this one read subsumes the `hidden`-attribute check 
 mechanism that sets `display`) — the same fix shape [[54|shape 54]] and [[67|shape 67]] give
 for a CSS-class-gated element, applied here to a plain inline-style/attribute pair with no
 stylesheet involved at all.
+
+**Also found (CMX-323, PR #410, rework round 2, unrelated ticket — same underlying shape):**
+`chela.restore.retire_empty` zips a subset of results back onto the full input list
+positionally — `results = iter(apply(targets, **apply_kwargs)); [next(results) if
+id(v) in target_ids else ApplyResult(v, KEPT) for v in verdicts]` — relying on `apply(targets)`
+returning its `ApplyResult`s in the same order as `targets`. The judge mutated the delegation
+to `apply(targets, **apply_kwargs)[::-1]`: every existing test of `retire_empty` (the two
+archive tests, the RACED test, the telegram-bindings test, and the "mixed batch" order test)
+filtered down to **at most one** row that actually reaches `apply()` — `_writers()`'s recorded
+calls and the single returned `ApplyResult` are identical whether that one-element list is
+reversed or not, exactly as a one-agent fixture makes `sel.value` and `wids[0]` indistinguishable
+above. `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3430 passed, 0 failed) with the
+reversal in place. **Guard form that survives:** give the fixture **two** rows that both reach
+`apply()` (not just two rows total — REVIVABLE/already-has-a-command rows never reach it) and
+make their outcomes DIFFER (e.g. one forced `RACED` via a failing writer, the other the default
+`ARCHIVED`) so a reversed/misassigned result list attaches the wrong row's outcome to the wrong
+row's `Verdict` object, provably diverging from `[r.verdict for r in results] == verdicts` and
+from the expected per-row action list — not just "the same set of outcomes occurred somewhere."
+Closed by extending `test_retire_empty_preserves_order_one_result_per_verdict_mixed_batch` with
+a second retirable target in a different store, each given a distinct forced outcome.
