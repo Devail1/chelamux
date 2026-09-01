@@ -33,6 +33,11 @@ CWD = "/home/liav/projects/five"
 JUDGE_CWD = "/home/liav/.chela/worktrees/chelamux/judge-cmx-206"
 JUDGE_SID = "cccccccc-1111-2222-3333-444444444444"
 
+# Captured at import time, before any per-test monkeypatch replaces
+# ``dash._cwd_is_live`` with a stub — the real function under test in
+# ``test_cwd_is_live_*`` and the "unpatched" resume tests below.
+_REAL_CWD_IS_LIVE = dash._cwd_is_live
+
 
 @pytest.fixture
 def client():
@@ -64,6 +69,15 @@ def no_dispatcher_runs(monkeypatch):
     seeing an all-resumable, un-filtered list. Tests of the dispatcher-owned guard
     override this explicitly."""
     monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [])
+
+
+@pytest.fixture(autouse=True)
+def cwd_alive_by_default(monkeypatch):
+    """Every pre-CMX-330 test uses a fake cwd path (``/home/liav/projects/five`` etc.)
+    that doesn't exist on the test runner's real filesystem — stub liveness True by
+    default so those tests keep exercising only the wiring under test. Tests of the
+    dead-cwd guard override this explicitly."""
+    monkeypatch.setattr(dash, "_cwd_is_live", lambda cwd: True)
 
 
 def _manual(store="session-ids", wid="@5", session_id=SID_DEAD, cwd=CWD, label="five",
@@ -228,6 +242,73 @@ def test_a_dispatcher_row_at_a_different_epoch_no_longer_owns_the_wid(client, mo
 
 
 # --------------------------------------------------------------------------
+# GET /api/restore — dead-cwd rows (CMX-330: a tmux restart renumbers every window,
+# `@889`/`@891`/`@897` -> `@9`/`@11`/`@13`, desyncing the ownership join above from
+# the runs table even though the worktree it pointed at is long gone. cwd existence
+# must be checked directly, never inferred from whether the ownership join matched.)
+# --------------------------------------------------------------------------
+
+def test_a_row_whose_cwd_no_longer_exists_is_hidden_not_resumable(client, monkeypatch):
+    """🔴 GUARD: a reaped worktree / deleted branch leaves a MANUAL row with a real
+    session id but nowhere to relaunch into — this must be excluded from `rows` even
+    though nothing in `dispatcher.list_runs()` claims its (wid, epoch)."""
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual(wid="@9", cwd="/gone")])
+    monkeypatch.setattr(dash, "_cwd_is_live", lambda cwd: cwd != "/gone")
+
+    data = client.get("/api/restore").get_json()
+
+    assert data["rows"] == []
+    assert data["hidden"] == 1
+    assert data["dispatcher_rows"] == [{"store": "session-ids", "wid": "@9", "cwd": "/gone",
+                                        "label": "five", "stamped_epoch": OLD}]
+    assert "session_id" not in data["dispatcher_rows"][0], (
+        "a dead-cwd row has no resume affordance — it must not even carry the "
+        "session id a resume request would need"
+    )
+
+
+def test_a_row_whose_cwd_still_exists_stays_resumable(client, monkeypatch):
+    """The counterweight: a live cwd must stay resumable — the check is a real
+    filesystem fact, not a blanket hide."""
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual()])
+    monkeypatch.setattr(dash, "_cwd_is_live", lambda cwd: cwd == CWD)
+
+    data = client.get("/api/restore").get_json()
+
+    assert len(data["rows"]) == 1
+    assert data["dispatcher_rows"] == []
+
+
+# --------------------------------------------------------------------------
+# _cwd_is_live — the real function, unpatched (DEFEAT_SHAPES #319: every test
+# above stubs this name, so none of them exercise its own body — see
+# docs/defeat_shapes/330-*.md). These call it directly against a real
+# filesystem so a corruption of its logic (e.g. ``and`` -> ``or``) goes red.
+# --------------------------------------------------------------------------
+
+def test_cwd_is_live_is_true_for_a_real_existing_directory(tmp_path):
+    assert _REAL_CWD_IS_LIVE(str(tmp_path)) is True
+
+
+def test_cwd_is_live_is_false_for_a_path_that_does_not_exist(tmp_path):
+    """🔴 GUARD: ``bool(cwd) and os.path.isdir(cwd)`` corrupted to
+    ``bool(cwd) or os.path.isdir(cwd)`` reports a non-existent-but-non-empty
+    path as live — the exact inversion this function exists to prevent."""
+    assert _REAL_CWD_IS_LIVE(str(tmp_path / "does-not-exist")) is False
+
+
+def test_cwd_is_live_is_false_for_a_path_that_is_a_file_not_a_directory(tmp_path):
+    not_a_dir = tmp_path / "a-file"
+    not_a_dir.write_text("x")
+    assert _REAL_CWD_IS_LIVE(str(not_a_dir)) is False
+
+
+def test_cwd_is_live_is_false_for_none_or_empty_string():
+    assert _REAL_CWD_IS_LIVE(None) is False
+    assert _REAL_CWD_IS_LIVE("") is False
+
+
+# --------------------------------------------------------------------------
 # POST /api/restore/resume
 # --------------------------------------------------------------------------
 
@@ -295,6 +376,70 @@ def test_resume_refuses_a_dispatcher_owned_row(client, monkeypatch):
     assert body["ok"] is False
     assert "dispatcher" in body["error"].lower()
     assert spawned == [], "a dispatcher-owned row must never reach spawn_window"
+
+
+def test_resume_refuses_a_row_whose_cwd_no_longer_exists(client, monkeypatch):
+    """🔴 GUARD: even if a dead-cwd row's identity somehow reaches the client (a stale
+    cache), the resume route must independently refuse it — spawn_window must never be
+    called against a directory that isn't there."""
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual()])
+    monkeypatch.setattr(dash, "_cwd_is_live", lambda cwd: False)
+    spawned = []
+    monkeypatch.setattr(dash.spawn, "spawn_window", lambda *a, **k: spawned.append(1))
+
+    resp = _resume(client, store="session-ids", wid="@5", session_id=SID_DEAD,
+                   stamped_epoch=OLD)
+
+    assert resp.status_code == 409
+    assert resp.get_json()["ok"] is False
+    assert spawned == [], "a dead-cwd row must never reach spawn_window"
+
+
+def test_resume_asks_cwd_is_live_about_this_verdicts_own_cwd_not_a_fixed_path(
+        client, monkeypatch, tmp_path):
+    """🔴 GUARD (DEFEAT_SHAPES #330): the resume route's liveness check must be asked
+    about THIS row's real ``cwd``, not a call site degraded to a hardcoded always-live
+    path (e.g. ``_cwd_is_live("/")``). ``_cwd_is_live`` is left UNPATCHED here — a real
+    dead directory under ``tmp_path`` is used so the argument the route actually passes
+    is observable rather than assumed from a stub's return value."""
+    dead_cwd = str(tmp_path / "reaped-worktree")  # never created — must not exist
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual(cwd=dead_cwd)])
+    calls = []
+    real = _REAL_CWD_IS_LIVE
+    monkeypatch.setattr(dash, "_cwd_is_live", lambda cwd: (calls.append(cwd), real(cwd))[1])
+    spawned = []
+    monkeypatch.setattr(dash.spawn, "spawn_window", lambda *a, **k: spawned.append(1))
+
+    resp = _resume(client, store="session-ids", wid="@5", session_id=SID_DEAD,
+                   stamped_epoch=OLD)
+
+    assert calls == [dead_cwd], (
+        "the route must ask _cwd_is_live about the verdict's own cwd, not a fixed path"
+    )
+    assert resp.status_code == 409
+    assert spawned == [], "a dead-cwd row must never reach spawn_window"
+
+
+def test_resume_proceeds_past_the_liveness_check_for_a_real_live_cwd(
+        client, monkeypatch, tmp_path):
+    """The counterweight, also unpatched: a row whose cwd is a REAL existing
+    directory must clear the liveness check and reach spawn_window — proves the
+    check isn't a blanket refusal either."""
+    monkeypatch.setattr(dash, "_cwd_is_live", _REAL_CWD_IS_LIVE)
+    live_cwd = str(tmp_path)
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual(cwd=live_cwd)])
+    spawn_calls = []
+    monkeypatch.setattr(dash.spawn, "spawn_window",
+                        lambda cwd, **k: (spawn_calls.append(cwd),
+                                          spawn_mod.SpawnResult(ok=True, name="shell-9",
+                                                                 wid="@99", cwd=cwd))[1])
+    monkeypatch.setattr(restore_mod, "apply", lambda verdicts: None)
+
+    resp = _resume(client, store="session-ids", wid="@5", session_id=SID_DEAD,
+                   stamped_epoch=OLD)
+
+    assert resp.status_code == 200
+    assert spawn_calls == [live_cwd]
 
 
 def test_resume_happy_path_spawns_records_and_cleans_up(client, monkeypatch):
