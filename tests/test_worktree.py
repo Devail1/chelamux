@@ -361,3 +361,59 @@ def test_attach_worktree_refuses_to_reuse_the_main_repo_as_the_worktree(repo, tm
     with pytest.raises(subprocess.CalledProcessError):
         worktree.attach_worktree(repo, "proj-1", root / "task-1", root)
 
+
+
+def test_is_inside_root_resolves_BOTH_sides_so_a_symlinked_root_still_matches(tmp_path):
+    """⭐ MUST BE ACCEPTED. `is_inside_root`'s docstring makes resolution an explicit
+    promise — "a symlinked ``~/.chela`` or a relative ``root`` would slip past this" — and
+    that promise is what makes the guard safe to put in front of a deletion: a root reached
+    through a symlink must still recognise its OWN contents. Drop either `.resolve()` and
+    the comparison is done on unresolved paths, `run-1` stops being "inside" the very root
+    it lives under, and every caller downstream treats a legitimate worktree as foreign.
+    """
+    real_root = tmp_path / "real" / "worktrees"
+    real_root.mkdir(parents=True)
+    link_root = tmp_path / "linked-worktrees"
+    link_root.symlink_to(real_root, target_is_directory=True)
+    inside = real_root / "run-1"
+    inside.mkdir()
+
+    assert worktree.is_inside_root(inside, link_root) is True, (
+        "a worktree under a SYMLINKED root read as outside it — both sides must be "
+        "resolved before comparing, or the guard refuses the ordinary case"
+    )
+    # ⛔ and the negative direction must survive the same resolution, or the test above
+    # would pass just as well on a function that returned True unconditionally.
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    assert worktree.is_inside_root(outside, link_root) is False
+
+
+def test_is_inside_root_treats_an_UNRESOLVABLE_path_as_OUTSIDE(tmp_path, monkeypatch):
+    """A path that cannot be resolved is UNKNOWN, and unknown must fail CLOSED here.
+
+    `False` from this function is what REFUSES a deletion, so the `except OSError` arm is
+    not error handling — it is the safe answer. Flip it to `True` and a dangling symlink, a
+    permission wall or an ELOOP on the stored `worktree_path` reads as a legitimate
+    deletion target, which is the whole shape of issue #398 arriving through a different
+    door.
+    """
+    root = tmp_path / "worktrees"
+    root.mkdir()
+    victim = root / "run-1"
+    victim.mkdir()
+    assert worktree.is_inside_root(victim, root) is True  # sanity: inside, while resolvable
+
+    real_resolve = Path.resolve
+
+    def exploding_resolve(self, *args, **kwargs):
+        if self == victim:
+            raise OSError(40, "Too many levels of symbolic links")
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", exploding_resolve)
+
+    assert worktree.is_inside_root(victim, root) is False, (
+        "an UNRESOLVABLE path read as INSIDE the worktrees root — the OSError arm must "
+        "fail closed, because False is what refuses the deletion"
+    )
