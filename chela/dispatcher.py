@@ -3390,6 +3390,61 @@ def _cleanup_worktree_on_done(repo_path: Path, row: sqlite3.Row) -> None:
                   row["task_id"], e)
 
 
+def _reap_terminal_windows(conn: sqlite3.Connection, workflow_path: str) -> int:
+    """🧟 CMX-329 (issue #403). Kill a straggler tmux window left behind by a run that has
+    already gone TERMINAL — ``done`` or ``closed``, and ONLY those two.
+
+    Every terminal transition already fires a single best-effort ``tmux kill-window`` at the
+    moment it happens (``mark_awaiting_review``, the reconcile branches above) — but each of
+    those is fire-and-forget: `_kill_window` never checks its own exit code, and nothing ever
+    revisits a call that silently failed (a transient tmux hiccup, or the self-kill race of an
+    agent's own `chela task-finished` tearing down the very window that command is running
+    in). The worktree still gets freed on schedule (`_cleanup_worktree_on_done` runs
+    regardless), so the run itself looks perfectly done — it is only the window that lingers,
+    now sitting in a directory that no longer exists (`(deleted)` in `chela status` and the
+    dashboard wall, then "agent status unavailable" once the cached cwd expires). Observed
+    three times on 2026-08-24 with no special trigger: three ordinary merges, three survivors.
+
+    This is the self-healing second chance: called every tick, it re-checks EVERY terminal row
+    of THIS workflow, not just the ones that just transitioned, so a straggler from a PRIOR
+    tick (or one this daemon didn't even see transition, e.g. `chela merge`'s own worktree
+    removal happening between ticks) still gets caught on the next pass.
+
+    ⛔ Terminal-only, no exceptions — a run still `needs_human` or `awaiting_review` may yet
+    matter: a human can still act on its window, and a rework can still re-spawn into it.
+    Nothing here ever touches a non-terminal row; the WHERE clause is the whole guard.
+
+    ⛔ Ownership, not coincidence — a window is only ever killed when BOTH its `window_id` is
+    on record AND the row's `window_epoch` matches the tmux server running RIGHT NOW
+    (:mod:`chela.epoch`). tmux hands out `@N` per SERVER and never recycles one within a
+    server's life, but a restart renumbers from `@0` again — so an id stamped under a dead
+    epoch naming something live now is a coincidence, not this run's window, and killing it
+    would take out an unrelated agent that happens to hold that number today (CMX-48: a wrong
+    wid is worse than no wid). An unreadable current epoch (no tmux, no server) verifies
+    NOTHING, so nothing is killed — the same fail-closed shape as `epoch.is_dangling`.
+    """
+    now_epoch = epoch.current()
+    if not now_epoch:
+        return 0
+    rows = conn.execute(
+        "SELECT window_id FROM runs WHERE workflow_path=? AND status IN ('done', 'closed') "
+        "AND window_id IS NOT NULL AND window_epoch=?",
+        (workflow_path, now_epoch),
+    ).fetchall()
+    if not rows:
+        return 0
+    live_ids = _tmux_window_ids()
+    reaped = 0
+    for row in rows:
+        window_id = row["window_id"]
+        if window_id in live_ids:
+            _kill_window(window_id)
+            reaped += 1
+            log.info("Reaped straggler window %s — its run is terminal but its tmux "
+                      "window was still alive", window_id)
+    return reaped
+
+
 def _prune_done_rows(
     conn: sqlite3.Connection,
     workflow_path: str,
@@ -3441,6 +3496,21 @@ def _tmux_windows() -> set[str]:
     return set(line.strip() for line in out.stdout.splitlines() if line.strip())
 
 
+def _tmux_window_ids() -> set[str]:
+    """Live tmux window ``@N`` addresses in ``TMUX_SESSION`` — companion to
+    :func:`_tmux_windows`, which returns NAMES. :func:`_reap_terminal_windows` needs ids:
+    a name is not a safe kill target across two rows that (however rarely) share one, and
+    it carries no epoch to verify against.
+    """
+    out = subprocess.run(
+        ["tmux", "list-windows", "-t", TMUX_SESSION, "-F", "#{window_id}"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        return set()
+    return set(line.strip() for line in out.stdout.splitlines() if line.strip())
+
+
 def poll_interval(workflow_path: str | Path, default: float | None = None) -> float:
     """The effective seconds between ticks for this workflow.
 
@@ -3469,7 +3539,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
         "judged": 0, "judge_lost": 0, "judge_stranded": 0,
-        "trial_ledger": 0, "disk_budget_exceeded": False,
+        "trial_ledger": 0, "disk_budget_exceeded": False, "window_reaped": 0,
         "blocked": True, "error": error, "held": False, "hold_expired": False,
         "refused": refused,
     }
@@ -3550,6 +3620,7 @@ def tick(workflow_path: str | Path) -> dict:
         "judge_stranded": 0,
         "trial_ledger": 0,
         "disk_budget_exceeded": False,
+        "window_reaped": 0,
         "blocked": blocked,
         "error": status.error,
         "held": False,
@@ -3948,6 +4019,14 @@ def tick(workflow_path: str | Path) -> dict:
                         "Task %s idle at empty prompt; re-sent prompt to %s",
                         row["task_id"], window,
                     )
+
+        # 1a2. 🧟 Reap any straggler window left behind by a run that is ALREADY terminal —
+        # this tick's own done/closed transitions above, and any from a prior tick whose
+        # in-line kill silently failed (see _reap_terminal_windows). Commit first, same
+        # reason as 1b below: the transitions just made must be durable before this reads
+        # them back.
+        conn.commit()
+        summary["window_reaped"] = _reap_terminal_windows(conn, str(wf.path))
 
         # 1b. Strike the merged tasks in the tracker — we are its only writer.
         # Commit the reconcile first so the `done` rows are durable: if the
