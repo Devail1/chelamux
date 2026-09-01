@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -305,8 +306,16 @@ def test_cmd_watch_windowless_registration_is_END_TO_END_real(tmp_path, monkeypa
 # is never called ... or a reverted dispatch merges silently."
 
 def _drive(argv):
-    """Run ``main.main()`` with ``argv`` as process args (argparse reads ``sys.argv``)."""
-    with patch.object(sys, "argv", ["chela", *argv]):
+    """Run ``main.main()`` with ``argv`` as process args (argparse reads ``sys.argv``).
+
+    ⚠️ Pins ``COLUMNS`` wide enough that argparse never wraps a help line. Left to the
+    ambient terminal, a narrow width (COLUMNS=70 reproduces it) makes textwrap break on the
+    hyphen in ``telegram-bindings.json``, splitting it into ``telegram-`` / ``bindings.json``
+    across two lines — collapsing whitespace then re-inserts a space at the hyphen, turning
+    one word into two and breaking any assertion that expects it contiguous. CI happened to
+    pass at its own ≥80 width, which hid this for reasons unrelated to what the guard checks.
+    """
+    with patch.object(sys, "argv", ["chela", *argv]), patch.dict(os.environ, {"COLUMNS": "200"}):
         main.main()
 
 
@@ -1388,17 +1397,23 @@ def test_retire_empty_must_not_repeat_the_READ_ONLY_claim_it_just_broke(live_sto
     assert "never writes to a store" not in out, (
         f"--retire-empty claimed to be read-only AFTER writing. Got:\n{out}"
     )
-    # 🔴 GUARD (judge round 4): every clause, mirroring the --apply guard above
-    # (`test_apply_must_not_repeat_the_READ_ONLY_claim_it_just_broke`). This summary is the
-    # only record the operator gets of a write that already happened, and it covers TWO
+    # 🔴 GUARD (judge round 4, tightened round 6): every clause, mirroring the --apply guard
+    # above (`test_apply_must_not_repeat_the_READ_ONLY_claim_it_just_broke`). This summary is
+    # the only record the operator gets of a write that already happened, and it covers TWO
     # dispositions — what was retired, and what was deliberately left alone. The KEPT clause
     # covers the MAJORITY of rows on a narrower flag, so it is not optional: drop it and every
     # REVIVABLE/still-actionable-MANUAL row's fate goes unstated, silently. Asserted per clause
     # rather than on the first sentence, since a mutation that blanks the KEPT clause alone
     # leaves the retired-rows clause (asserted below) untouched and green.
+    #
+    # ⛔ Round 6 found the bare fragment "was left untouched" true of a DIFFERENT, WRONG
+    # sentence too: "Every REVIVABLE row and every MANUAL row was left untouched" (dropping
+    # "that still carries a relaunch command") — which flatly contradicts the retired-rows
+    # clause printed one sentence earlier and still contains the fragment. Assert the whole
+    # contiguous sentence instead, so dropping the qualifier breaks the match.
     for clause in ("only the MANUAL rows with nothing on record",
                    "archived to roster-archive.json, then removed",
-                   "was left untouched",
+                   "MANUAL row that still carries a relaunch command was left untouched",
                    "re-run with --apply once you are ready to write ALL of them"):
         assert clause in out, (
             f"--retire-empty's summary lost the {clause!r} clause — that disposition goes "
@@ -1457,11 +1472,16 @@ def test_retire_emptys_help_states_the_permanent_bindings_exclusion(capsys):
         f"--retire-empty's OWN help text must state the permanent bindings exclusion, not "
         f"rely on --apply's copy of the same sentence. Got:\n{retire_empty_block}"
     )
-    assert "Every REVIVABLE row and every MANUAL row" in retire_empty_block, (
-        f"--retire-empty's help must state the narrowness promise BEFORE the write happens, "
-        f"not just in the post-write summary. Got:\n{retire_empty_block}"
+    # ⛔ Round 6 found the split fragments ("Every REVIVABLE row and every MANUAL row" +
+    # "is left untouched") true of the OPPOSITE promise too: dropping "that still carries a
+    # cwd/session" makes the help claim every MANUAL row — not just the empty ones — is left
+    # untouched, which is the exact inverse of what --retire-empty does. Assert the whole
+    # contiguous sentence, plus a negative counterweight for the dropped-qualifier phrasing.
+    assert "every MANUAL row that still carries a cwd/session is left untouched" in retire_empty_block, (
+        f"--retire-empty's help must state the FULL narrowness promise BEFORE the write "
+        f"happens, not just fragments of it. Got:\n{retire_empty_block}"
     )
-    assert "is left untouched" in retire_empty_block, (
-        f"...and that the untouched rows are left untouched, not just named. "
-        f"Got:\n{retire_empty_block}"
+    assert "every MANUAL row is left untouched" not in retire_empty_block, (
+        f"--retire-empty's help must not drop the qualifier — that claims the OPPOSITE of "
+        f"what the flag does. Got:\n{retire_empty_block}"
     )
