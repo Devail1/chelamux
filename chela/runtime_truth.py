@@ -1149,6 +1149,23 @@ def _installed_report(expected: dict, obs: Observation) -> list[Finding]:
         )]
     out: list[Finding] = []
     for copy in copies:
+        if hooks.marketplace_missing(copy):
+            out.append(Finding(
+                ERROR,
+                f"the installed plugin's marketplace {copy.marketplace!r} is GONE — "
+                "Claude Code CANNOT LOAD IT AT ALL",
+                f"{copy.manifest} still reads fine (and may even match the rendered "
+                "manifest byte-for-byte) — this is not a stale-hooks problem, it is a "
+                f"load failure: `claude plugin list` reports `chela@{copy.marketplace}` "
+                "as failed to load because its marketplace is no longer in Claude Code's "
+                f"own registry ({hooks.plugins_dir() / 'known_marketplaces.json'}). No "
+                "hook from this copy runs until the marketplace is re-added by hand — "
+                f"`claude plugin marketplace add <path-or-url-to-the-{copy.marketplace}-"
+                "marketplace>` — chela does not know where it came from, so it cannot "
+                "guess. Then `chela update` (to refresh the plugin under it) and restart "
+                "your agent windows.",
+            ))
+            continue
         if copy.hooks is None:
             out.append(Finding(
                 ERROR, f"cannot verify the INSTALLED plugin at {copy.manifest}",

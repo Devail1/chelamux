@@ -48,14 +48,16 @@ def repo(tmp_path: Path) -> Path:
 
 def _seed_run(repo: Path, task_id: str, *, status: str = "awaiting_review",
               judge_state: str | None = "clean",
-              pr_url: str = "https://github.com/o/r/pull/1") -> None:
+              pr_url: str = "https://github.com/o/r/pull/1",
+              judge_sha: str | None = None, pr_head_sha: str | None = None) -> None:
     with dispatcher._db() as conn:
         conn.execute(
             "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
-            "started_at, attempt, pr_url, pr_state, judge_state, branch_name, worktree_path) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "started_at, attempt, pr_url, pr_state, judge_state, judge_sha, pr_head_sha, "
+            "branch_name, worktree_path) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (task_id, str(repo / "WORKFLOW.md"), "t", status, "@9", dispatcher._now(), 1,
-             pr_url, "open", judge_state, "cmx-1", None),
+             pr_url, "open", judge_state, judge_sha, pr_head_sha, "cmx-1", None),
         )
         conn.commit()
 
@@ -84,6 +86,52 @@ def test_candidates_is_exactly_awaiting_review_and_judge_clean(repo):
 
     ids = {run["task_id"] for run in automerge.candidates()}
     assert ids == {"clean1"}
+
+
+# --- candidates(): a clean verdict on a SUPERSEDED commit is never a candidate --------
+
+def test_candidates_excludes_a_clean_verdict_on_a_stale_sha(repo):
+    """🔴 CMX-326. Mirrors ``cmx_321`` live 2026-08-30: ``judge_state=clean`` recorded against
+    ``judge_sha`` while the PR's real head (``pr_head_sha``, refreshed by the dispatcher's own
+    CI poll) has since moved past it — e.g. a promotion conflict resolved on the branch AFTER
+    the judge cleared it. The filter must not treat that verdict as being about the current
+    commit.
+
+    Corrupt ``_judge_verdict_is_stale`` to always return ``False`` and this goes red."""
+    _seed_run(repo, "stale1", judge_sha="888f9d6a1", pr_head_sha="5b1c708dd")
+    ids = {run["task_id"] for run in automerge.candidates()}
+    assert ids == set()
+
+
+def test_candidates_includes_a_clean_verdict_matching_the_live_head(repo):
+    """The sibling of the staleness exclusion above: when ``judge_sha`` DOES match the row's
+    own ``pr_head_sha``, the row is still a candidate — this filter must not reject everything
+    with a stamped sha, only a genuine mismatch."""
+    _seed_run(repo, "current1", judge_sha="deadbeef0001", pr_head_sha="deadbeef0001")
+    ids = {run["task_id"] for run in automerge.candidates()}
+    assert ids == {"current1"}
+
+
+def test_candidates_includes_a_clean_verdict_with_no_head_sha_recorded_yet(repo):
+    """An unset ``pr_head_sha`` (an older row, or one the CI poll hasn't touched yet) is NOT
+    positive evidence of staleness — same conservatism as ``contract.merge``'s own live check.
+    ``contract.merge``'s live read is still the authority that actually gates the merge."""
+    _seed_run(repo, "nohead1", judge_sha="deadbeef0001", pr_head_sha=None)
+    ids = {run["task_id"] for run in automerge.candidates()}
+    assert ids == {"nohead1"}
+
+
+def test_candidates_includes_a_clean_verdict_with_no_judge_sha_stamped(repo):
+    """Mirror of the test above, on the OTHER unset-sha clause: an unstamped ``judge_sha`` (a
+    judge that ran before this column existed) is likewise NOT positive evidence of staleness,
+    even though ``pr_head_sha`` is known — same conservatism, other half of the ``and``.
+
+    Corrupt ``_judge_verdict_is_stale`` to drop the ``judge_sha and`` clause (leaving only
+    ``head_sha and judge_sha != head_sha``) and this goes red: ``None != "deadbeef0001"`` is
+    ``True``, so the row would wrongly read as stale and vanish from the candidate set."""
+    _seed_run(repo, "nojudgesha1", judge_sha=None, pr_head_sha="deadbeef0001")
+    ids = {run["task_id"] for run in automerge.candidates()}
+    assert ids == {"nojudgesha1"}
 
 
 # --- sweep(): merges through contract.merge, UNATTENDED (no lease needed) ------------
