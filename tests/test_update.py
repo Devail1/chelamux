@@ -1316,6 +1316,25 @@ def test_notifier_warns_once_on_transition_to_unknown_state(checkout, monkeypatc
     assert "no upstream" in unknown_records[0].getMessage()
 
 
+def test_notifier_respects_disabled_notify_on_transition_to_unknown_state(checkout, monkeypatch, caplog):
+    """CMX-328 rework round 2: the unknown-state branch's `notify.send` call is gated on
+    `notify.enabled()` in the source, but every existing test of this branch constructs
+    `_StubNotify(enabled=True)` — none of them would notice if that gate were deleted. Mirror
+    `test_notifier_never_pulls`, which proves the pre-existing `behind` branch respects a
+    disabled notifier, for the new unknown branch: the log line is unconditional (an operator
+    reading the log still learns about it), but the push must not fire when disabled."""
+    _git(checkout, "checkout", "-q", "-b", "scratch", "--no-track")
+    stub = _StubNotify(enabled=False)
+    monkeypatch.setattr(update, "notify", stub)
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        behind = _tick(checkout, 0, monkeypatch)
+
+    assert behind == update.UNKNOWN_BEHIND
+    assert stub.sent == []                              # disabled notifier must not push
+    assert any("update status unknown" in r.getMessage() for r in caplog.records)
+
+
 def test_notifier_fires_when_a_checkout_that_was_unknown_later_falls_genuinely_behind(
     checkout, upstream, monkeypatch, caplog,
 ):
