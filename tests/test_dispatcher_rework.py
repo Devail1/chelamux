@@ -333,7 +333,7 @@ def test_a_missing_worktree_is_recreated_from_the_branch(tmp_path):
     gone = tmp_path / ".chela" / "wts" / "abc123"
     assert not gone.exists()
 
-    path, attached = worktree.attach_worktree(repo, "test-1", gone)
+    path, attached = worktree.attach_worktree(repo, "test-1", gone, gone.parent)
 
     assert attached is True
     assert path == gone and (gone / ".git").exists()
@@ -348,7 +348,7 @@ def test_a_missing_branch_is_a_hard_error(tmp_path):
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base", "--allow-empty"],
                    check=True, env=_git_env())
     with pytest.raises(worktree.BranchGone):
-        worktree.attach_worktree(repo, "test-1", tmp_path / "wt")
+        worktree.attach_worktree(repo, "test-1", tmp_path / "wt", tmp_path)
 
 
 def test_a_run_with_no_branch_at_all_escalates_with_a_recommendation_too(tmp_path):
@@ -427,6 +427,46 @@ def test_a_worktree_attach_failure_escalates_with_a_recommendation_too(tmp_path)
     assert "Recommendation:" in run["last_error"]
     assert "Options:\n  - " in run["last_error"]
     _assert_actionable_escalation(run["last_error"])
+
+
+def test_a_poisoned_worktree_path_outside_root_is_never_handed_to_attach_worktree(tmp_path):
+    """🔴 CMX-325 (issue #398, write side): a run row's ``worktree_path`` can be poisoned —
+    written before this fix existed, or hand-repaired without also clearing a bad path. The
+    respawn must never hand such a path to `attach_worktree` as the CREATE target: it falls
+    back to the configured `root / task_id` instead. `_row`'s own default
+    (`worktree_path="/wt/abc123"`) is exactly this shape — genuinely outside `_wf`'s
+    configured root — so this needs no override to reproduce.
+    """
+    wf = _wf(tmp_path)
+    source = _Source("abc123")
+    fake = _FakeTmux()
+    root = tmp_path / ".chela" / "wts"
+    fresh = root / "abc123"
+
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="changes_requested", branch_name="test-1",
+             review_history=json.dumps([{"round": 1, "at": "t", "body": "the wire is loose"}]))
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run), \
+         patch.object(dispatcher, "ensure_worktree") as fresh_fork, \
+         patch.object(dispatcher, "attach_worktree", return_value=(fresh, True)) as attach, \
+         patch.object(dispatcher, "send_tmux", return_value=True), \
+         patch.object(dispatcher, "_wait_for_ready", return_value=True), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")):
+        summary = dispatcher.tick(wf.path)
+
+    assert summary["reworked"] == 1
+    assert fresh_fork.call_count == 0        # still a REWORK, not a fresh fork off base
+    # The poisoned "/wt/abc123" was never handed to attach_worktree as the create target —
+    # it was replaced with root/task_id before the call.
+    assert attach.call_args[0][2] == fresh
+    assert attach.call_args[0][2] != Path("/wt/abc123")
+
+    run = dispatcher.resolve_run("abc123")
+    assert run["worktree_path"] == str(fresh)
 
 
 # --- (c) the cap: bounded, then it SURFACES — it never spins ---------------------------

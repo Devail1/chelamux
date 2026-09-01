@@ -431,3 +431,69 @@ def test_tick_removes_the_worktree_when_the_tracker_line_is_struck_by_hand(ticki
 
     assert summary["reconciled_done"] == 1
     assert not wt_path.exists()
+
+
+def test_cleanup_on_done_passes_the_CONFIGURED_root_not_a_permissive_one(ticking, monkeypatch, tmp_path):
+    """⛔ WIRING. `worktree.py`'s root-membership guard can be present, live and fully
+    unit-tested, and still protect nothing if the CALL SITE hands it a root under which
+    everything qualifies. Hand `_cleanup_worktree_on_done` `Path("/")` instead of
+    `resolve_workspace_root(wf)` and every guard in `worktree.py` keeps passing its own
+    tests while the one deletion path that actually ran on 2026-08-21 goes back to
+    deleting whatever the row happens to name.
+
+    The poisoned directory here is deliberately NOT a repository and NOT a registered
+    worktree: it has no `.git` at all, so it sails straight through the CMX-320 structural
+    checks and reaches the `shutil.rmtree` fallback. Root membership is the ONLY thing
+    standing between it and deletion — which is exactly the property this test exists to
+    pin, and exactly what the CMX-320-era tests could not measure.
+    """
+    repo = ticking
+    wf_path = repo / "WORKFLOW.md"
+    alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
+
+    poisoned = tmp_path / "elsewhere" / "definitely-not-a-worktree"
+    poisoned.mkdir(parents=True)
+    (poisoned / "precious.txt").write_text("614KB of tracker history, morally\n")
+    assert not poisoned.is_relative_to(tmp_path / ".chela" / "worktrees")  # the premise
+
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
+            "worktree_path, branch_name, started_at, attempt, pr_url, pr_state) "
+            "VALUES (?,?,?,'awaiting_review',?,?,?,?,?,?,?)",
+            (alpha, str(wf_path), "t", "@9", str(poisoned), "cmx-1",
+             dispatcher._now(), 1, "https://github.com/o/r/pull/1", "open"),
+        )
+        conn.commit()
+    monkeypatch.setattr(dispatcher, "_read_pr_status", lambda url, d: ("merged", "MERGEABLE"))
+
+    dispatcher.tick(wf_path)
+
+    assert poisoned.exists(), (
+        "task cleanup deleted a worktree_path OUTSIDE the configured worktrees root — the "
+        "call site is not passing the configured root, so worktree.py's guard never fires"
+    )
+    assert (poisoned / "precious.txt").exists()
+
+
+def test_cleanup_on_done_STILL_REMOVES_a_worktree_inside_the_configured_root(ticking, monkeypatch):
+    """⭐ MUST BE ACCEPTED — the counterweight to the test above.
+
+    Without this, passing a root that matches NOTHING (say `Path("/nonexistent")`) would
+    satisfy the refusal test perfectly while breaking every ordinary cleanup. A guard that
+    can only ever say no is not a guard either.
+    """
+    repo = ticking
+    wf_path = repo / "WORKFLOW.md"
+    alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
+    worktrees_root = repo.parent / ".chela" / "worktrees"
+    wt_path = _seed_run_with_worktree(repo, wf_path, alpha, worktrees_root)
+    assert wt_path.is_dir()
+    monkeypatch.setattr(dispatcher, "_read_pr_status", lambda url, d: ("merged", "MERGEABLE"))
+
+    dispatcher.tick(wf_path)
+
+    assert not wt_path.exists(), (
+        "an ordinary worktree INSIDE the configured root was not cleaned up — the root "
+        "being passed does not actually contain the worktrees it is supposed to"
+    )

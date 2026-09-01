@@ -42,6 +42,7 @@ from chela.worktree import (
     detached_worktree,
     disk_usage_bytes,
     ensure_worktree,
+    is_inside_root,
     remove_worktree,
 )
 
@@ -675,7 +676,7 @@ def _base_write_worktree(repo: Path, base: str, root: Path, what: str) -> Path |
 
     wt_path = (root / BASE_WRITE_DIRNAME).resolve()
     try:
-        wt_path, _ = detached_worktree(repo, sha, wt_path)
+        wt_path, _ = detached_worktree(repo, sha, wt_path, root)
     except BranchGone:
         log.warning("%s skipped: origin/%s did not resolve after fetch", what, base)
         return None
@@ -3349,7 +3350,7 @@ def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | No
         conn.commit()
 
 
-def _cleanup_worktree_on_done(repo_path: Path, row: sqlite3.Row) -> None:
+def _cleanup_worktree_on_done(wf: WorkflowDef, row: sqlite3.Row) -> None:
     """Free a finished run's worktree the moment its row goes `done` — not later.
 
     `done` is terminal and NOT_CLAIMABLE: nothing ever reworks a `done` row, so nothing
@@ -3383,7 +3384,7 @@ def _cleanup_worktree_on_done(repo_path: Path, row: sqlite3.Row) -> None:
     if not wt_path.is_dir():
         return
     try:
-        remove_worktree(repo_path, wt_path)
+        remove_worktree(wf.path.parent, wt_path, resolve_workspace_root(wf))
     except NotAWorktree as e:
         log.error("task %s: REFUSED to clean up its worktree — %s. Clear the row's "
                   "worktree_path (it is not a worktree) before this task completes again.",
@@ -3695,7 +3696,7 @@ def tick(workflow_path: str | Path) -> dict:
                     "UPDATE runs SET status='done' WHERE task_id=?", (row["task_id"],)
                 )
                 conn.commit()
-                _cleanup_worktree_on_done(wf.path.parent, row)
+                _cleanup_worktree_on_done(wf, row)
                 merged_in_tick += 1
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (PR merged)", row["task_id"])
@@ -3739,7 +3740,7 @@ def tick(workflow_path: str | Path) -> dict:
                     "UPDATE runs SET status='closed' WHERE task_id=?", (row["task_id"],)
                 )
                 conn.commit()
-                _cleanup_worktree_on_done(wf.path.parent, row)
+                _cleanup_worktree_on_done(wf, row)
                 summary["reconciled_closed"] += 1
                 log.info("Task %s closed (PR closed without merging)", row["task_id"])
                 continue
@@ -3775,7 +3776,7 @@ def tick(workflow_path: str | Path) -> dict:
                     (pr_url, row["task_id"]),
                 )
                 conn.commit()
-                _cleanup_worktree_on_done(wf.path.parent, row)
+                _cleanup_worktree_on_done(wf, row)
                 merged_in_tick += 1
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (removed from source, window killed)", row["task_id"])
@@ -3806,7 +3807,7 @@ def tick(workflow_path: str | Path) -> dict:
                         (_now(), pr_url, pr_state, row["task_id"]),
                     )
                     conn.commit()
-                    _cleanup_worktree_on_done(wf.path.parent, row)
+                    _cleanup_worktree_on_done(wf, row)
                     summary["reconciled_done"] += 1
                     log.info("Task %s done (removed from source, merged PR found)", row["task_id"])
                     continue
@@ -5081,8 +5082,20 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
 
     root = resolve_workspace_root(wf)
     want = Path(row["worktree_path"]) if row["worktree_path"] else (root / task_id)
+    # ⛔ CMX-325 (issue #398): `want` came straight off the DB row here — including a row
+    # written before this fix existed, or one hand-repaired without also clearing a bad
+    # `worktree_path`. Never hand a path outside the worktrees root to `attach_worktree`
+    # as the CREATE target: `_find_existing_worktree` refuses to REUSE such a path, but a
+    # poisoned `want` would still be where a fresh `git worktree add` gets pointed. Fall
+    # back to the normal `root / task_id` location instead of trusting the stored value.
+    if not is_inside_root(want, root):
+        log.warning(
+            "Task %s: recorded worktree_path %s is OUTSIDE the worktrees root %s — "
+            "ignoring it and using %s instead", task_id, want, root, root / task_id,
+        )
+        want = root / task_id
     try:
-        worktree, attached = attach_worktree(repo_path, branch, want)
+        worktree, attached = attach_worktree(repo_path, branch, want, root)
     except BranchGone as e:
         _escalate(
             conn, row, f"rework: {e} — the work it points at is unreachable",
@@ -5370,7 +5383,7 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
     conn.commit()
 
     try:
-        created = detached_worktree(wf.path.parent, sha, worktree)[1]
+        created = detached_worktree(wf.path.parent, sha, worktree, resolve_workspace_root(wf))[1]
     except (BranchGone, subprocess.CalledProcessError) as e:
         detail = getattr(e, "stderr", None) or str(e)
         if isinstance(detail, bytes):
@@ -5502,7 +5515,10 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         if alive:
             _kill_windows_named(window)
         try:
-            remove_worktree(wf.path.parent, judge.judge_worktree_path(wf, row["task_id"]))
+            remove_worktree(
+                wf.path.parent, judge.judge_worktree_path(wf, row["task_id"]),
+                resolve_workspace_root(wf),
+            )
         except NotAWorktree as e:                      # CMX-320 — never crash the reaper
             log.error("judge reap for %s: REFUSED to remove %s", row["task_id"], e)
         handed_over += 1
