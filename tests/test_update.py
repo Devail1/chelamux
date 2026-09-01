@@ -1305,7 +1305,48 @@ def test_notifier_warns_once_on_transition_to_unknown_state(checkout, monkeypatc
     assert update.UNKNOWN_BEHIND < 0     # pin: a real behind-count is never negative
     assert behind == update.UNKNOWN_BEHIND
     assert len(stub.sent) == 1                          # not one per tick
-    assert sum(1 for r in caplog.records if "update status unknown" in r.getMessage()) == 1
+    # DEFEAT_SHAPES #322 / #328: the literal title/prefix alone survives a mutation that
+    # blanks the INTERPOLATED reason — assert the actual reason text made it into both the
+    # push body and the log line, not just that a send/log happened at all.
+    message, title = stub.sent[0]
+    assert "no upstream" in message
+    assert title == "chela: update status unknown"
+    unknown_records = [r for r in caplog.records if "update status unknown" in r.getMessage()]
+    assert len(unknown_records) == 1
+    assert "no upstream" in unknown_records[0].getMessage()
+
+
+def test_notifier_fires_when_a_checkout_that_was_unknown_later_falls_genuinely_behind(
+    checkout, upstream, monkeypatch, caplog,
+):
+    """CMX-328 rework: `check_and_notify`'s real-update edge was widened from
+    `previously_behind == 0` to `previously_behind <= 0` specifically so a checkout latched
+    at `UNKNOWN_BEHIND` (-1) — e.g. one with no upstream configured yet — can still notify
+    once it gains an upstream and that upstream moves ahead. Narrowing the edge back to
+    `== 0` makes this exact sequence go permanently silent: -1 never equals 0, so the
+    daemon would never announce this checkout's very first real update. Every OTHER
+    notifier test enters `previously_behind` already at 0, so none of them would notice
+    that regression."""
+    _git(checkout, "checkout", "-q", "-b", "scratch", "--no-track")   # starts with no upstream
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        behind = _tick(checkout, 0, monkeypatch)              # tick 1: unknown -> UNKNOWN_BEHIND
+        assert behind == update.UNKNOWN_BEHIND
+
+        _git(checkout, "branch", "--set-upstream-to=origin/main", "scratch")  # `upstream` fixture is `-b main`
+        _commit(upstream, "new.txt", "new\n")
+        behind = _tick(checkout, behind, monkeypatch)          # tick 2: -1 -> genuinely behind
+
+    assert behind == 1
+    titles = [title for _, title in stub.sent]
+    assert titles == ["chela: update status unknown", "chela: update available"], (
+        "a checkout that transitions straight from UNKNOWN to genuinely behind must still "
+        "get the real-update notification — narrowing `previously_behind <= 0` back to "
+        "`== 0` silences it forever since -1 never equals 0"
+    )
+    assert any("update available" in r.getMessage() for r in caplog.records)
 
 
 # --- auto_apply_sweep (CMX-148 part 2): the fully-UNATTENDED half, opt-in ------------
@@ -1496,6 +1537,67 @@ def test_the_daemon_loop_still_only_informs_when_auto_update_is_off(monkeypatch)
     assert calls == [0], (
         "cmd_run did NOT call update.check_and_notify on the loop pass with auto-update "
         "off — the default informer path is unwired"
+    )
+
+
+def _run_two_daemon_ticks(monkeypatch) -> None:
+    """Like `_run_one_daemon_tick`, but drives exactly two iterations and forces the
+    update-check branch due on BOTH — `UPDATE_CHECK_INTERVAL_SECONDS` pinned to 0 so tick
+    2's real-clock gap (however small) still satisfies `now - last_update_check >= 0`."""
+    monkeypatch.setattr(main.GracefulShutdown, "install", lambda self: self)
+
+    remaining = 2
+
+    def stop_after_two(self, _seconds):
+        nonlocal remaining
+        remaining -= 1
+        if remaining <= 0:
+            self._event.set()
+            return True
+        return False
+
+    monkeypatch.setattr(main.GracefulShutdown, "wait", stop_after_two)
+    monkeypatch.setattr(main, "UPDATE_CHECK_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(main.scheduler, "init", lambda: None)
+    monkeypatch.setattr(main.scheduler, "tick", lambda: 0)
+    monkeypatch.setattr(main.agent_manager, "reconcile_window_names", lambda: [])
+    monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", [])
+    monkeypatch.setattr(main.notify, "enabled", lambda: False)
+    monkeypatch.setattr(main.rooms, "has_pending", lambda: False)
+    monkeypatch.setattr(main.inbox, "enabled", lambda: False)
+    monkeypatch.setattr(main.capabilities, "effective", lambda: [])
+    monkeypatch.setattr(main.capabilities, "announce", lambda caps, log: None)
+    monkeypatch.setattr(main.capabilities, "publish", lambda caps, boot_id: None)
+    monkeypatch.setattr(main.agent_manager, "start_background_refresh", lambda *a, **kw: None)
+    monkeypatch.setattr(main.update, "auto_apply_enabled", lambda: False)
+
+
+def test_the_daemon_loop_carries_check_and_notifys_return_value_into_the_next_tick(monkeypatch):
+    """🔴 WIRING (production call-site): `check_and_notify`'s whole edge-triggered contract
+    depends on the daemon actually remembering what it returned — `update_behind_seen =
+    update.check_and_notify(update_behind_seen)`. Dropping the assignment (calling it as a
+    bare statement) makes `cmd_run` re-derive from the stale initial value every tick
+    instead of threading the real return forward. Every unit test of `check_and_notify`
+    itself stays green under that mutation because none of them drive `cmd_run` across more
+    than one tick — this one does, and asserts tick 2 is handed exactly what tick 1
+    returned, not the loop's original seed value."""
+    _run_two_daemon_ticks(monkeypatch)
+    seen_values = []
+
+    def fake_check_and_notify(previously_behind):
+        seen_values.append(previously_behind)
+        # first call returns something OTHER than the loop's initial seed (0), so a dropped
+        # assignment is distinguishable from "tick 2 happened to see 0 anyway".
+        return 7 if previously_behind == 0 else previously_behind
+
+    monkeypatch.setattr(main.update, "check_and_notify", fake_check_and_notify)
+
+    main.cmd_run(SimpleNamespace())
+
+    assert seen_values == [0, 7], (
+        f"tick 2 must be called with tick 1's RETURN value (7), not the loop's initial seed "
+        f"(0) — got {seen_values}; the daemon is not threading check_and_notify's sentinel "
+        "across ticks, so the once-per-transition edge is dead in production"
     )
 
 
