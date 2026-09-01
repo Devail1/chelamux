@@ -57,3 +57,38 @@ the real seam through an unknown-then-behind sequence and asserts both notificat
 `main.cmd_run` for two real ticks with `UPDATE_CHECK_INTERVAL_SECONDS` pinned to 0 and asserts
 tick 2 receives tick 1's stubbed return value rather than the loop's initial `0` seed); both
 verified to fail when each mutation above is re-applied by hand.
+
+### Round 2 addendum: a new branch's `notify.enabled()` gate went untested because every fixture for it hardcoded the notifier as enabled
+
+**Assertion form:** the same sentinel branch has an existing, correctly-written
+`if notify.enabled(): notify.send(...)` gate, copied from a sibling branch (the ordinary
+"behind" branch) that already has a dedicated disabled-notifier test
+(`test_notifier_never_pulls`, constructing `_StubNotify(enabled=False)`). Every test written
+for the *new* sentinel branch — including the round-1 test added specifically to close the
+payload-assertion gap above — constructs `_StubNotify(enabled=True)`, because those tests
+were designed to prove the branch's content (log line, push payload, edge-triggering), not to
+re-prove the gate on a second call site that only looks like it inherited proof from its
+sibling.
+
+**Mutation that defeats it:** replace `if notify.enabled():` with `if True:` immediately
+before the sentinel branch's `notify.send(...)` call. Every test for that branch still
+constructs an enabled stub, so nothing ever observes `stub.sent` while disabled — full suite
+(3470 tests) stays green.
+
+**Why this is the same family as the mutations above, not a coincidence:** all three
+mutations exploit the same gap — a new branch reuses a shape (a boundary check, an
+accumulator round-trip, a notifier gate) that already has a proof *somewhere else in the
+file*, and every test written for the new branch inherits that shape's apparent coverage
+without re-deriving it at the new call site. "The sibling branch tests this" is not evidence
+that the new branch does.
+
+**Guard form that survives:** construct `_StubNotify(enabled=False)`, drive the sentinel
+branch specifically, and assert `stub.sent == []` — mirroring the disabled-notifier proof
+already used for the sibling branch, rather than assuming it transfers.
+
+**Found:** CMX-328 rework round 2, PR #420. The judge's required-mutation-set verdict found
+`chela/update.py`'s sentinel-branch `if notify.enabled():` reducible to `if True:`, with the
+full suite (3470 tests) staying green — every prior test of that branch used an enabled stub.
+Closed by adding `test_notifier_respects_disabled_notify_on_transition_to_unknown_state`
+(mirrors `test_notifier_never_pulls` for the sentinel branch, asserting `stub.sent == []` when
+disabled); verified to fail when the mutation above is re-applied by hand.
