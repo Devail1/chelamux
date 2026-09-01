@@ -138,3 +138,70 @@ catalog's round-2 addendum prose (above) and
 `test_notifier_respects_disabled_notify_on_transition_to_unknown_state`'s docstring, which had
 repeated the same unverified claim; verified to fail when the mutation above is re-applied by
 hand.
+
+### Round 4 addendum: the round-1 payload fix covered the sentinel branch, and the sibling branch's payload — the thing the round-1 test's own title claims to prove — was never re-checked; plus a brand-new untested pass-through path
+
+**Assertion form, mutations 1-2 — recurrence of [[322|shape 322]] at the one call site round
+1 didn't reach:** round 1 added
+`test_notifier_fires_when_a_checkout_that_was_unknown_later_falls_genuinely_behind`
+specifically to prove that a checkout latched at `UNKNOWN_BEHIND` still gets "the ordinary
+'update available' notice" on the sibling ("behind") branch once it crosses the widened edge.
+The test proved the notice *fires* (`titles == [...]`) but — exactly shape 322's pattern —
+never read the interpolated body or the log's `%d` argument back, on either the push or the
+log line. Two other tests of that same sibling branch
+(`test_notifier_logs_and_notifies_exactly_once_across_repeated_ticks`,
+`test_notifier_never_pulls`) have the identical gap. So the branch's *log line* and *push
+body* — not just whether a send/log call happened — were unexercised for three straight
+rounds, hiding behind a test whose own docstring already claimed to be about "the ordinary
+update-available notice."
+
+**Mutation that defeats it:** blank the interpolated `f"{status.behind} commit(s)
+behind..."` argument to `notify.send` (`-> ""`), or blank the log line's `%d` argument
+(`status.behind -> 0`), on the sibling branch. Both independently green under the full suite
+(3491 tests): the round-1 test's `titles == [...]` assertion reads only the `title=` kwarg,
+never `message`; the log assertions across the file grep for the literal prefix
+`"update available"`, never the interpolated count.
+
+**Assertion form, mutation 3 — a caller-supplied accumulator's untested pass-through path
+is a hardcoded-sentinel mutation waiting to happen:** `check_and_notify`'s `if not
+status.ok: return previously_behind` is the transient-failure path — the one that must hand
+the caller's own value back unchanged so a blip can never move the sentinel state machine.
+Every test of this function (rounds 1-3 included) drives it through a *working* fixture repo,
+so `status.ok` is always `True`; nothing in `tests/test_update.py` ever constructs a
+`status.ok is False` outcome. An untested branch whose entire job is "return the argument you
+were given, unchanged" is indistinguishable, to the suite, from a branch hardcoded to return
+any single fixed value — including the sentinel this whole boundary exists to make rare.
+
+**Mutation that defeats it:** replace `return previously_behind` with `return
+UNKNOWN_BEHIND` in that branch. Full suite (3491 tests) stays green, because no test ever
+reaches the branch at all, let alone with a `previously_behind` other than what
+`UNKNOWN_BEHIND` would coincidentally equal.
+
+**Why mutation 3 is a distinct shape from the round-1/2/3 family above, not a fourth
+instance of it:** those three are all "a shape that already has a proof somewhere in the
+file is reused at a new call site, and the new site's tests inherit the shape's apparent
+coverage without re-deriving it." Mutation 3 has no sibling proof anywhere to inherit from —
+the branch it targets was never exercised by ANY test, working or not, at any round. It is
+the plainer, more familiar gap of an entirely uncovered code path, but it is worth recording
+here rather than under a generic "untested branch" heading because of *why* the branch went
+uncovered for three rework rounds despite three rounds of focused attention on this exact
+function: every fixture in the file is built around a real git checkout with a real
+upstream, so producing `status.ok is False` requires either a broken git binary or
+monkeypatching `commits_behind` itself — neither of which any existing test needed for its
+own purpose, so nobody had a reason to reach for it until a mutation was pointed at the line.
+
+**Guard form that survives:** for mutations 1-2, unpack the actual message and assert the
+interpolated count is present (`"N commit(s) behind" in message`), and assert the same on the
+matching log record — mirroring the round-1 test's own sentinel-branch payload assertions
+(`"no upstream" in message`), applied at last to the sibling. For mutation 3, monkeypatch
+`commits_behind` directly to return `UpdateStatus(ok=False, ...)`, call `check_and_notify`
+with a `previously_behind` that is neither `0` nor `UNKNOWN_BEHIND` would make it, and assert
+the return value equals the input unchanged and no log/notify happened at all.
+
+**Found:** CMX-328 rework round 4, PR #420. The judge's required-mutation-set verdict found
+all three mutations above, with the full suite (3491 tests) staying green under each. Closed
+by extending
+`test_notifier_fires_when_a_checkout_that_was_unknown_later_falls_genuinely_behind` to assert
+the sibling branch's interpolated body and log record, and by adding
+`test_notifier_blip_does_not_latch_the_unknown_sentinel`; both verified to fail when their
+respective mutation is re-applied by hand.

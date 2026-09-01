@@ -1368,7 +1368,47 @@ def test_notifier_fires_when_a_checkout_that_was_unknown_later_falls_genuinely_b
         "get the real-update notification — narrowing `previously_behind <= 0` back to "
         "`== 0` silences it forever since -1 never equals 0"
     )
-    assert any("update available" in r.getMessage() for r in caplog.records)
+    # DEFEAT_SHAPES #322/#328 (round 4): the title alone survives a mutation that blanks
+    # the INTERPOLATED body/log-arg on the real-update branch — assert the actual
+    # behind-count made it into both the push body and the log line, not just the title.
+    real_update_message = stub.sent[1][0]
+    assert "1 commit(s) behind" in real_update_message
+    available_records = [r for r in caplog.records if "update available" in r.getMessage()]
+    assert len(available_records) == 1
+    assert "1 commit(s) behind" in available_records[0].getMessage()
+
+
+def test_notifier_blip_does_not_latch_the_unknown_sentinel(checkout, monkeypatch, caplog):
+    """CMX-328 rework round 4: a transient ``git fetch`` failure (``status.ok is False``)
+    must return the caller's OWN ``previously_behind`` unchanged, never the
+    ``UNKNOWN_BEHIND`` sentinel. Before this PR, that return value was always a real,
+    non-negative behind-count, so mis-returning there cost at most one duplicate/missing
+    notice. The sentinel makes it load-bearing: if a blip ever returns
+    ``UNKNOWN_BEHIND`` while the checkout is actually fine (``previously_behind == 0``),
+    the very next tick sees ``previously_behind == UNKNOWN_BEHIND`` already and the
+    ``!= UNKNOWN_BEHIND`` edge in the unknown-state branch never fires again — a single
+    blip permanently mutes the unknown-state warning this PR exists to add."""
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(
+        update, "commits_behind",
+        lambda *a, **k: update.UpdateStatus(ok=False, error="git fetch timed out"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        behind = update.check_and_notify(0)   # a genuinely fine checkout hits a blip
+
+    assert behind == 0, (
+        "a blip must return the caller's own previously_behind (0), not the "
+        "UNKNOWN_BEHIND sentinel — latching here would permanently silence the "
+        "unknown-state warning on every later tick"
+    )
+    assert stub.sent == []
+    assert not any(
+        "update status unknown" in r.getMessage() or "update available" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 # --- auto_apply_sweep (CMX-148 part 2): the fully-UNATTENDED half, opt-in ------------
