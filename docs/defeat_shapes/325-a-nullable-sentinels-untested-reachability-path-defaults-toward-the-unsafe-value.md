@@ -1,4 +1,4 @@
-## 323. A nullable sentinel's untested reachability path defaults toward the unsafe value under mutation
+## 325. A nullable sentinel's untested reachability path defaults toward the unsafe value under mutation
 
 **Assertion form:** a function's docstring commits to a two-value contract — "``None``,
 never an empty set" — and a caller relies on that exact distinction (``None`` means
