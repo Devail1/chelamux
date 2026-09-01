@@ -3373,19 +3373,21 @@ def test_a_mid_length_sign_off_is_not_cut_to_the_tracker_title_width(
     assert "…" not in text, f"the sign-off was truncated even though it fits: {text!r}"
 
 
-def test_a_sign_off_at_219_chars_is_kept_whole(
+def test_a_sign_off_at_exactly_220_chars_is_kept_whole(
         store_file, windows, sends, monkeypatch):
     """Brackets `FINAL_MESSAGE_CHARS` (220) from BELOW on a literal length, instead of
     reading the constant back into the assertion the way the 166-char fixture above does
     (``... < len(said) < inbox.FINAL_MESSAGE_CHARS``) — that comparison passes for ANY
     value `FINAL_MESSAGE_CHARS` happens to hold, so it can't tell 220 apart from a limit
-    that quietly shrank. A 219-char sign-off — one character short of the limit — must
-    still reach the notice whole.
+    that quietly shrank. The 220-char sign-off below sits EXACTLY AT the limit — it is
+    the one length that distinguishes `<= limit` (kept whole) from `< limit` (which would
+    truncate it): a 219-char fixture stays green under either comparison, so it cannot
+    catch the boundary flipping from `<=` to `<`. This one must.
     """
     said = ('alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike '
             'november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee '
-            'zulu alpha bravo charlie delta echo foxtrot golf hotel india')
-    assert len(said) == 219, "fixture drifted off the exact bracket this test relies on"
+            'zulu alpha bravo charlie delta echo foxtrot golf hotel indiaa')
+    assert len(said) == 220, "fixture drifted off the exact bracket this test relies on"
     _confirm_idle_immediately(monkeypatch)
     _registered()
     _finished_with_transcript(monkeypatch, said)
@@ -3393,7 +3395,7 @@ def test_a_sign_off_at_219_chars_is_kept_whole(
     inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
 
     text = sends[0][1]
-    assert said in text, f"a 219-char sign-off (just under 220) was cut short: {text!r}"
+    assert said in text, f"a 220-char sign-off (exactly at the limit) was cut short: {text!r}"
     assert "…" not in text, f"the sign-off was truncated even though it fits: {text!r}"
 
 
