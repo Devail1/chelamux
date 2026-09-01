@@ -1,8 +1,13 @@
 name: CI
 
 on:
+  # CMX-327 (issue #404): `dev` is the branch every PR merges into, but a `pull_request`
+  # check only tests a merge PREVIEW against `dev` as it was at check time — once several
+  # PRs land in sequence, later merges reach a `dev` no earlier check ever saw, and GitHub
+  # never re-runs them. Triggering on push to `dev` too means every merge gets its own real
+  # CI run against the actual integrated tree, not just a stale preview of one.
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
 
 jobs:
