@@ -1774,7 +1774,7 @@ def cmd_restore(args) -> None:
     to ``chela-telegram``'s own in-memory registry, and its own reconcile tick reaps it.
 
     ``--retire-empty`` (CMX-323) is the narrower complement: it archives-then-removes ONLY
-    the MANUAL rows with nothing on record at all (no cwd, no session — bookkeeping residue
+    the MANUAL rows with nothing on record at all (no cwd, or no session — bookkeeping residue
     a hard death left behind, not work a human could act on). Every REVIVABLE row and every
     MANUAL row that still carries a relaunch command is left completely untouched — see
     ``chela.restore.retire_empty``. Mutually exclusive with ``--apply``.
@@ -1847,7 +1847,7 @@ def cmd_restore(args) -> None:
               "to reap — see each row's outcome above.")
     elif retire_flag:
         print("\nchela restore --retire-empty: only the MANUAL rows with nothing on record "
-              "(no cwd, no session) were archived to roster-archive.json, then removed. "
+              "(no cwd, or no session) were archived to roster-archive.json, then removed. "
               "Every REVIVABLE row and every MANUAL row that still carries a relaunch "
               "command was left untouched — see each row's outcome above. Act on those by "
               "hand, or re-run with --apply once you are ready to write ALL of them.")
@@ -2826,7 +2826,7 @@ def main() -> None:
     p_restore_write.add_argument(
         "--retire-empty", action="store_true",
         help="Narrower than --apply: archive-then-remove only the MANUAL rows with "
-             "NOTHING on record (no cwd, no session — no relaunch command to offer). "
+             "NOTHING on record (no cwd, or no session — no relaunch command to offer). "
              "Every REVIVABLE row and every MANUAL row that still carries a cwd/session "
              "is left untouched. telegram-bindings.json is still never written.",
     )
