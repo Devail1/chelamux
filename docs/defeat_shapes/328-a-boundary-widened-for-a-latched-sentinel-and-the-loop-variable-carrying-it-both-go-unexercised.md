@@ -92,3 +92,49 @@ full suite (3470 tests) staying green — every prior test of that branch used a
 Closed by adding `test_notifier_respects_disabled_notify_on_transition_to_unknown_state`
 (mirrors `test_notifier_never_pulls` for the sentinel branch, asserting `stub.sent == []` when
 disabled); verified to fail when the mutation above is re-applied by hand.
+
+### Round 3 addendum: the round-2 fix cited a sibling test as prior proof without checking the sibling test actually asserted anything
+
+**Assertion form:** round 2's fix (above) justified itself by pointing at
+`test_notifier_never_pulls` as an existing, working proof that the *sibling* ("behind")
+branch's `if notify.enabled():` gate was already guarded — both in this file's round-2
+addendum ("a dedicated disabled-notifier test... constructing `_StubNotify(enabled=False)`")
+and in the new test's own docstring ("proves the pre-existing `behind` branch respects a
+disabled notifier"). Neither claim was checked against what the cited test actually asserts:
+`test_notifier_never_pulls` constructed `_StubNotify(enabled=False)` and passed it straight
+into `monkeypatch.setattr` **without binding it to a name**, so the test had no handle to
+read `.sent` off of — it asserted `behind == 1`, that no `pull`/`merge` git call happened, and
+that HEAD never moved, but never that the notifier stayed silent. The disabled notifier was
+scenery in that test, not the thing under test. A citation ("X already proves Y") was taken as
+fact by two separate pieces of prose without either one re-deriving it, so the false claim
+propagated from the test docstring into the catalog entry itself — the catalog became a
+second, durable place carrying the same wrong belief.
+
+**Mutation that defeats it:** identical to round 2's mutation, replayed against the *sibling*
+branch instead of the new one — replace the pre-existing `if notify.enabled():` guarding
+`notify.send(f"{status.behind} commit(s) behind...")` in the ordinary "behind" branch with
+`if True:`. Full suite (3471 tests) stays green, because the only disabled-notifier test that
+exercises that branch never reads `stub.sent`.
+
+**Why this is a distinct pattern from the round-1/round-2 family above:** those shapes are
+about a *new* branch silently inheriting a *real* sibling proof it never re-derived. This one
+is about a proof that was never real in the first place — a test built the right fixture
+(`_StubNotify(enabled=False)`) but discarded the handle needed to assert on it, and two
+independent pieces of prose (a docstring, a catalog entry) both cited it as settled fact
+without opening the cited test to check. Trusting a citation is cheaper than re-deriving the
+proof, which is exactly why it is dangerous: the next reader has even less reason to doubt it,
+since now *two* sources agree.
+
+**Guard form that survives:** never cite a test as proof of an invariant without opening it
+and confirming it asserts that invariant on a bound value. For a disabled-notifier fixture
+specifically: always bind it to a name and assert `stub.sent == []` — a constructed-but-unbound
+stub proves nothing.
+
+**Found:** CMX-328 rework round 3, PR #420. The judge's required-mutation-set verdict applied
+the round-2 mutation shape to the sibling branch the round-2 fix claimed was already covered,
+with the full suite (3471 tests) staying green. Closed by binding the stub in
+`test_notifier_never_pulls` and adding `assert stub.sent == []`, and correcting both the
+catalog's round-2 addendum prose (above) and
+`test_notifier_respects_disabled_notify_on_transition_to_unknown_state`'s docstring, which had
+repeated the same unverified claim; verified to fail when the mutation above is re-applied by
+hand.

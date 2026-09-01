@@ -1249,7 +1249,8 @@ def _tick(repo, previously_behind, monkeypatch):
 
 def test_notifier_never_pulls(checkout, upstream, git_calls, monkeypatch):
     _commit(upstream, "new.txt", "new\n")
-    monkeypatch.setattr(update, "notify", _StubNotify(enabled=False))
+    stub = _StubNotify(enabled=False)
+    monkeypatch.setattr(update, "notify", stub)
     before_head = subprocess.run(
         ["git", "-C", str(checkout), "rev-parse", "HEAD"],
         check=True, capture_output=True, text=True,
@@ -1259,6 +1260,7 @@ def test_notifier_never_pulls(checkout, upstream, git_calls, monkeypatch):
 
     assert behind == 1
     assert not any(args and args[0] in ("pull", "merge") for args in git_calls)
+    assert stub.sent == []                             # disabled notifier must not push
     after_head = subprocess.run(
         ["git", "-C", str(checkout), "rev-parse", "HEAD"],
         check=True, capture_output=True, text=True,
@@ -1320,9 +1322,10 @@ def test_notifier_respects_disabled_notify_on_transition_to_unknown_state(checko
     """CMX-328 rework round 2: the unknown-state branch's `notify.send` call is gated on
     `notify.enabled()` in the source, but every existing test of this branch constructs
     `_StubNotify(enabled=True)` — none of them would notice if that gate were deleted. Mirror
-    `test_notifier_never_pulls`, which proves the pre-existing `behind` branch respects a
-    disabled notifier, for the new unknown branch: the log line is unconditional (an operator
-    reading the log still learns about it), but the push must not fire when disabled."""
+    `test_notifier_never_pulls` for the new unknown branch (round 3: that test now also binds
+    its stub and asserts `.sent == []`, so both branches' gates are actually proven, not just
+    scenery): the log line is unconditional (an operator reading the log still learns about
+    it), but the push must not fire when disabled."""
     _git(checkout, "checkout", "-q", "-b", "scratch", "--no-track")
     stub = _StubNotify(enabled=False)
     monkeypatch.setattr(update, "notify", stub)
