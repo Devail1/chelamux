@@ -1411,8 +1411,16 @@ def test_retire_empty_must_not_repeat_the_READ_ONLY_claim_it_just_broke(live_sto
     # "that still carries a relaunch command") — which flatly contradicts the retired-rows
     # clause printed one sentence earlier and still contains the fragment. Assert the whole
     # contiguous sentence instead, so dropping the qualifier breaks the match.
-    for clause in ("only the MANUAL rows with nothing on record",
-                   "archived to roster-archive.json, then removed",
+    #
+    # ⛔ Round 1 (rework) found the first two clauses split exactly either side of the
+    # RETIREMENT CRITERION's parenthetical ("(no cwd, or no session)") without ever
+    # asserting it — so a mutation flipping OR to AND there (silently narrowing which rows
+    # --retire-empty is willing to touch) left both fragments true and the suite green.
+    # Merged into one contiguous clause spanning the parenthetical so that mutation breaks
+    # the match. (docs/defeat_shapes/301: a prose guard pins substrings untouched by the
+    # mutation it was written to catch.)
+    for clause in ("only the MANUAL rows with nothing on record (no cwd, or no session) "
+                   "were archived to roster-archive.json, then removed",
                    "MANUAL row that still carries a relaunch command was left untouched",
                    "re-run with --apply once you are ready to write ALL of them"):
         assert clause in out, (
@@ -1484,4 +1492,21 @@ def test_retire_emptys_help_states_the_permanent_bindings_exclusion(capsys):
     assert "every MANUAL row is left untouched" not in retire_empty_block, (
         f"--retire-empty's help must not drop the qualifier — that claims the OPPOSITE of "
         f"what the flag does. Got:\n{retire_empty_block}"
+    )
+    # 🔴 GUARD (judge round 1 rework): `test_restores_help_documents_retire_empty` only
+    # greps for "NOTHING on record" in isolation, and the sibling assertions above stop at
+    # "telegram-bindings.json is still never written" / the narrowness-promise sentence —
+    # neither one touches the RETIREMENT CRITERION's own parenthetical. A mutation flipping
+    # its OR to AND ("no cwd and no session") narrows what an operator believes the flag
+    # will touch, and left every existing assertion here true. Assert the whole contiguous
+    # sentence, parenthetical included, so that mutation breaks the match.
+    # (docs/defeat_shapes/301: a prose guard pins substrings untouched by the mutation it
+    # was written to catch.)
+    assert (
+        "NOTHING on record (no cwd, or no session — no relaunch command to offer)"
+        in retire_empty_block
+    ), (
+        f"--retire-empty's help must state the RETIREMENT CRITERION correctly — either a "
+        f"missing cwd OR a missing session qualifies, not only both at once. "
+        f"Got:\n{retire_empty_block}"
     )
