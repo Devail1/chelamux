@@ -56,6 +56,14 @@ its own corruption. Write guards that would catch you.
   sacrosanct — never PR straight to it. Changes land `feature-branch → dev`, then a
   maintainer promotes `dev → main`.
 - **Keep PRs focused** — one concern per PR is easier to review and to revert.
+- **No session links anywhere they get published.** This repo is public and its git
+  history is permanent, so a `Claude-Session: https://claude.ai/code/session_…`
+  trailer is both irreversible and useless to every reader who cannot open it. Keep it
+  out of commit messages, PR bodies, issues and changelog fragments. If you work through
+  an agent harness that appends one automatically, drop that line and keep
+  `Co-Authored-By: …` — attribution without a session identity. Maintainers: the squash
+  message is composed from the branch's commit messages, so strip it at merge time
+  (`gh pr merge --squash --body …`) if a branch carries one.
 - **Add a changelog fragment.** Any user-facing change adds a new file under
   [`changelog.d/`](changelog.d/README.md), named `CMX-<your-task-id>.md`, with a Keep a
   Changelog category heading (Added / Changed / Fixed) and the PR number — see that
