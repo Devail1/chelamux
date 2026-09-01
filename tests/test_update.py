@@ -1359,35 +1359,42 @@ def test_notifier_fires_when_a_checkout_that_was_unknown_later_falls_genuinely_b
 
         _git(checkout, "branch", "--set-upstream-to=origin/main", "scratch")  # `upstream` fixture is `-b main`
         _commit(upstream, "new.txt", "new\n")
+        _commit(upstream, "new2.txt", "new2\n")
         behind = _tick(checkout, behind, monkeypatch)          # tick 2: -1 -> genuinely behind
 
-    assert behind == 1
+    assert behind == 2
     titles = [title for _, title in stub.sent]
     assert titles == ["chela: update status unknown", "chela: update available"], (
         "a checkout that transitions straight from UNKNOWN to genuinely behind must still "
         "get the real-update notification — narrowing `previously_behind <= 0` back to "
         "`== 0` silences it forever since -1 never equals 0"
     )
-    # DEFEAT_SHAPES #322/#328 (round 4): the title alone survives a mutation that blanks
-    # the INTERPOLATED body/log-arg on the real-update branch — assert the actual
-    # behind-count made it into both the push body and the log line, not just the title.
+    # DEFEAT_SHAPES #322/#328 (round 4, tightened round 5): the title alone survives a
+    # mutation that blanks the INTERPOLATED body/log-arg on the real-update branch — assert
+    # the actual behind-count made it into both the push body and the log line, not just the
+    # title. Two upstream commits (behind == 2) so a mutant hardcoding the count to the
+    # fixture's old single-commit value (1) is distinguishable from the real, passed-through
+    # `status.behind`.
     real_update_message = stub.sent[1][0]
-    assert "1 commit(s) behind" in real_update_message
+    assert "2 commit(s) behind" in real_update_message
     available_records = [r for r in caplog.records if "update available" in r.getMessage()]
     assert len(available_records) == 1
-    assert "1 commit(s) behind" in available_records[0].getMessage()
+    assert "2 commit(s) behind" in available_records[0].getMessage()
 
 
 def test_notifier_blip_does_not_latch_the_unknown_sentinel(checkout, monkeypatch, caplog):
-    """CMX-328 rework round 4: a transient ``git fetch`` failure (``status.ok is False``)
-    must return the caller's OWN ``previously_behind`` unchanged, never the
-    ``UNKNOWN_BEHIND`` sentinel. Before this PR, that return value was always a real,
-    non-negative behind-count, so mis-returning there cost at most one duplicate/missing
-    notice. The sentinel makes it load-bearing: if a blip ever returns
-    ``UNKNOWN_BEHIND`` while the checkout is actually fine (``previously_behind == 0``),
-    the very next tick sees ``previously_behind == UNKNOWN_BEHIND`` already and the
-    ``!= UNKNOWN_BEHIND`` edge in the unknown-state branch never fires again — a single
-    blip permanently mutes the unknown-state warning this PR exists to add."""
+    """CMX-328 rework round 4 (tightened round 5): a transient ``git fetch`` failure
+    (``status.ok is False``) must return the caller's OWN ``previously_behind`` unchanged,
+    never the ``UNKNOWN_BEHIND`` sentinel. Before this PR, that return value was always a
+    real, non-negative behind-count, so mis-returning there cost at most one
+    duplicate/missing notice. The sentinel makes it load-bearing: if a blip ever returns
+    ``UNKNOWN_BEHIND`` while the checkout is actually fine, the very next tick sees
+    ``previously_behind == UNKNOWN_BEHIND`` already and the ``!= UNKNOWN_BEHIND`` edge in
+    the unknown-state branch never fires again — a single blip permanently mutes the
+    unknown-state warning this PR exists to add. Driven with ``previously_behind=5`` — a
+    value that is neither 0 nor ``UNKNOWN_BEHIND`` (-1) — so a branch hardcoded to return 0
+    (round 4's own uncovered case) is distinguishable from one that passes the caller's
+    argument straight through."""
     stub = _StubNotify(enabled=True)
     monkeypatch.setattr(update, "notify", stub)
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
@@ -1397,12 +1404,12 @@ def test_notifier_blip_does_not_latch_the_unknown_sentinel(checkout, monkeypatch
     )
 
     with caplog.at_level(logging.WARNING, logger=update.log.name):
-        behind = update.check_and_notify(0)   # a genuinely fine checkout hits a blip
+        behind = update.check_and_notify(5)   # a checkout 5 commits behind hits a blip
 
-    assert behind == 0, (
-        "a blip must return the caller's own previously_behind (0), not the "
-        "UNKNOWN_BEHIND sentinel — latching here would permanently silence the "
-        "unknown-state warning on every later tick"
+    assert behind == 5, (
+        "a blip must return the caller's own previously_behind (5), not the "
+        "UNKNOWN_BEHIND sentinel and not any other fixed value — latching here would "
+        "permanently silence the unknown-state warning on every later tick"
     )
     assert stub.sent == []
     assert not any(

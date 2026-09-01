@@ -205,3 +205,44 @@ by extending
 the sibling branch's interpolated body and log record, and by adding
 `test_notifier_blip_does_not_latch_the_unknown_sentinel`; both verified to fail when their
 respective mutation is re-applied by hand.
+
+### Round 5 addendum: round 4's two payload assertions were both instances of [[303|shape 303]] — the fixture's own value coincided with the digits a hardcoded mutant would print
+
+**Assertion form:** round 4 closed the payload gap by asserting `"1 commit(s) behind" in
+message` (and the matching log record) on the sibling branch, and `previously_behind == 0
+-> 0` on the blip path. Neither test chose that value on purpose — `checkout`/`upstream`
+commit exactly one file, so `status.behind == 1` for every notifier fixture in the file, and
+every existing call to `check_and_notify` happens to enter (or re-enter, post-notify) at `0`.
+This is shape 303 exactly: a mutant that hardcodes the sibling-branch push/log argument to
+the literal `1`, or hardcodes the blip return to `0`, reads back identical to the real,
+passed-through value, because the test's chosen input and the hardcode's output are the same
+digits by construction of the shared fixtures — not because either mutant was caught honoring
+the real value.
+
+**Mutation that defeats it:** `notify.send(f"{1} commit(s) behind...")` and
+`log.warning(..., 1)` in place of `status.behind`; `return 0` in place of `return
+previously_behind` on the blip path. All three independently green under the full suite
+(3492 passed) before this fix — see the required-mutation-set at the top of this entry.
+
+**Why this recurred here specifically:** the same coincidence that shape 303 names
+elsewhere in this repo is close to unavoidable by default in this file, because nearly every
+notifier fixture in `tests/test_update.py` commits exactly one upstream commit and drives
+`check_and_notify` starting from `previously_behind=0` — those are the natural, boring
+defaults for "a checkout that's one commit behind" and "a checkout that's never been behind
+before." Writing a payload assertion against whichever fixture is already in scope, without
+separately checking whether that fixture's value happens to equal a plausible hardcode,
+reproduces shape 303 for free.
+
+**Guard form that survives:** choose a test value that a hardcoded fallback could not
+produce by accident. Fixed here by committing a SECOND upstream commit in
+`test_notifier_fires_when_a_checkout_that_was_unknown_later_falls_genuinely_behind` (so
+`status.behind == 2` and the asserted substring is `"2 commit(s) behind"`, distinguishable
+from a mutant hardcoded to the file's otherwise-universal `1`), and by driving
+`test_notifier_blip_does_not_latch_the_unknown_sentinel` with `previously_behind=5` instead
+of `0` (neither `0` nor `UNKNOWN_BEHIND`, so a mutant hardcoded to either sentinel-adjacent
+constant is distinguishable from the real pass-through).
+
+**Found:** CMX-328 rework round 5, PR #420. The judge's required-mutation-set verdict found
+all three mutations above, with the full suite (3492 tests) staying green under each. Closed
+by changing the fixture inputs described above; all three verified to fail when their
+respective mutation is re-applied by hand.
