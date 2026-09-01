@@ -394,15 +394,21 @@ def _update_plugin(repo: Path) -> tuple[list[str], str]:
 def _plugin_refresh_needed(copies: list[hooks.InstalledPlugin]) -> bool:
     """Whether at least one installed copy warrants running ``claude plugin ...`` at all.
 
-    Two DIFFERENT conditions, both real, neither a substitute for the other:
+    THREE different conditions, none a substitute for the others:
 
     - drift (:func:`chela.runtime_truth.installed_hooks_stale`) — a readable manifest that
       disagrees with what would render now (the CMX-41 port-drift class). Requires
       ``copy.hooks is not None``, so it is blind to the next case.
-    - unreadable (``copy.hooks is None``) — the outage this ticket exists for: an installed
+    - unreadable (``copy.hooks is None``) — the outage CMX-186 exists for: an installed
       copy Claude Code still points at, but whose ``hooks/hooks.json`` a sweep or a failed
       install left missing or broken. Drift can't see this; only checking ``hooks is None``
       directly does.
+    - marketplace gone (:func:`chela.hooks.marketplace_missing`) — the outage CMX-321
+      exists for: a manifest that reads PERFECTLY, with zero drift, from a copy Claude Code
+      will still refuse to load because its marketplace vanished from its own registry.
+      Neither of the above two conditions can see this — it is not about the manifest at
+      all — so without this arm, a marketplace disappearing with no drift and no cache
+      damage would never even trigger an attempt, let alone surface an error.
 
     Without this gate, every hourly ``auto_apply_sweep`` tick would run two
     network-touching ``claude`` invocations forever, even when nothing needs it.
@@ -412,6 +418,7 @@ def _plugin_refresh_needed(copies: list[hooks.InstalledPlugin]) -> bool:
     return bool(copies) and (
         runtime_truth.installed_hooks_stale()
         or any(copy.hooks is None for copy in copies)
+        or any(hooks.marketplace_missing(copy) for copy in copies)
     )
 
 

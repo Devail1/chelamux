@@ -699,6 +699,15 @@ def test_defeat_shapes_added_files_are_numbered_by_branch_task_id():
 
     Seen to go red: a defeat-shape file added on this branch numbered off "one past the current
     highest" file in a listing instead of this branch's own CMX task number.
+
+    The one sanctioned exception (see "How this catalog grows"'s own text: "the number still
+    has to be unique... bump your file's number... to any other free one") is a task number
+    that is ALREADY claimed by a file that predates this branch on `origin/dev` — e.g. a CMX
+    ticket that spans two PRs, or a genuine historical task-number collision. That is not a
+    guess off a listing (a real, already-committed file settles it, not a race against a
+    sibling branch's own guess), so an added file numbered off the next free slot instead is
+    allowed — but ONLY when `origin/dev` already has a `{task_number}-*.md` file that predates
+    this branch; anything else still has to match the task number exactly.
     """
     root = Path(__file__).resolve().parent.parent
 
@@ -731,16 +740,30 @@ def test_defeat_shapes_added_files_are_numbered_by_branch_task_id():
         pytest.skip("this branch adds no files under docs/defeat_shapes/ relative to "
                      "origin/dev — nothing for this check to verify")
 
+    preexisting = subprocess.run(
+        ["git", "ls-tree", "--name-only", "origin/dev", "--", "docs/defeat_shapes/"],
+        cwd=root, capture_output=True, text=True,
+    )
+    task_number_already_claimed_on_dev = any(
+        Path(p).name.startswith(f"{task_number}-")
+        for p in preexisting.stdout.splitlines() if p.strip()
+    )
+
     for path in added:
         filename = Path(path).name
         m = re.match(r"^(\d+)-", filename)
         assert m, f"{filename} was added under docs/defeat_shapes/ with no leading NNN- number"
-        assert int(m.group(1)) == task_number, (
-            f"{filename} is numbered {m.group(1)}, not this branch's own CMX task number "
-            f"{task_number} (branch {branch!r}) — numbering off anything else (e.g. one past "
-            "the current highest file in a listing) is a decentralized guess that collides "
-            "under concurrency; see docs/DEFEAT_SHAPES.md's 'How this catalog grows'"
-        )
+        file_number = int(m.group(1))
+        if file_number != task_number:
+            assert task_number_already_claimed_on_dev, (
+                f"{filename} is numbered {file_number}, not this branch's own CMX task number "
+                f"{task_number} (branch {branch!r}) — numbering off anything else (e.g. one "
+                "past the current highest file in a listing) is a decentralized guess that "
+                "collides under concurrency; see docs/DEFEAT_SHAPES.md's 'How this catalog "
+                "grows'. (The sanctioned exception — task number already claimed by a "
+                "pre-existing file on origin/dev — does not apply here: no such file exists.)"
+            )
+            continue
         # Filename and heading are asserted to agree elsewhere (see
         # test_defeat_shapes_file_headings_are_well_formed_and_match_their_filename), but that
         # test says nothing about the TASK number — check the heading directly too, so a file

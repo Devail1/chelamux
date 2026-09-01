@@ -110,6 +110,13 @@ def _install_plugin(
     return root
 
 
+def _register_marketplaces(*names: str) -> None:
+    """Claude Code's own registry of marketplaces it currently knows about (CMX-321) —
+    dropping an entry here is independent of `installed_plugins.json` and the cache."""
+    path = hooks.plugins_dir() / "known_marketplaces.json"
+    path.write_text(json.dumps({name: {} for name in names}), encoding="utf-8")
+
+
 # --- apply_stuck_after_seconds: the ceiling must be DERIVED, not an independent literal -
 
 def test_stuck_after_ceiling_is_derived_from_the_timeout_constants():
@@ -538,6 +545,41 @@ def test_plugin_refresh_needed_when_unreadable(checkout):
 
 def test_plugin_refresh_not_needed_when_nothing_is_installed(checkout):
     assert update._plugin_refresh_needed([]) is False
+
+
+def test_plugin_refresh_needed_when_marketplace_gone(checkout):
+    """🔴 THE LOAD-BEARING GUARD for CMX-321: a manifest with ZERO drift still needs a
+    refresh attempt when its marketplace has vanished from Claude Code's own registry —
+    `installed_hooks_stale()` and `copy.hooks is None` are both blind to this, since it is
+    not a manifest problem at all."""
+    _install_plugin(marketplace="acme")
+    _register_marketplaces("some-other-marketplace")
+    copies = hooks.installed_plugins()
+    assert copies[0].hooks is not None            # manifest reads clean...
+    assert main.doctor.installed_hooks_stale() is False  # ...and it's not the drift arm...
+    assert hooks.marketplace_missing(copies[0])   # ...but the marketplace itself is gone
+    assert update._plugin_refresh_needed(copies) is True
+
+
+def test_refresh_plugin_if_needed_runs_when_marketplace_gone(checkout, monkeypatch):
+    """The attempt must actually fire (and therefore surface a `plugin_error`) even with
+    no drift — silently skipping it here is exactly how CMX-321 stayed invisible until
+    something else happened to trigger a refresh."""
+    _install_plugin(marketplace="acme")
+    _register_marketplaces("some-other-marketplace")
+    calls = []
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        calls.append(args)
+        return _FakeCP(returncode=1, stderr="Marketplace acme not found")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    updated, error = update._refresh_plugin_if_needed(checkout)
+
+    assert calls, "the marketplace-gone gate must have actually driven claude, not skipped"
+    assert updated == []
+    assert "not found" in error
 
 
 def test_refresh_plugin_if_needed_skips_quietly_when_matching(checkout, monkeypatch):
@@ -1031,6 +1073,72 @@ def test_update_prints_the_plugin_refresh_failure(checkout, monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "could not refresh the installed plugin" in out
     assert "boom" in out
+
+
+def test_update_does_not_print_a_bare_success_line_when_the_plugin_refresh_failed(
+    checkout, monkeypatch, capsys,
+):
+    """CMX-321: the git/deps/services half genuinely succeeded here (`behind_before=4`,
+    four services restarted) — but a `plugin_error` means the whole POINT of the command
+    (agents running current hooks) did not happen, and a bare ✅ read as unqualified
+    success while that failure sat in an easy-to-miss ⚠️ line underneath it, in the wild."""
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=4,
+        restarted=["chela-daemon", "chela-dashboard", "chela-telegram", "chela-agent-terminals"],
+        plugin_error="marketplace update (chela): Marketplace chela not found"))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    out = capsys.readouterr().out
+    assert "✅" not in out
+    assert "4 commit(s)" in out                    # the real outcome is still reported...
+    assert "did NOT succeed" in out                # ...but not as an unqualified success
+    assert "could not refresh the installed plugin" in out
+
+
+def test_update_still_prints_a_success_line_without_a_plugin_error(checkout, monkeypatch, capsys):
+    """The downgrade above must be conditional on `plugin_error` — an ordinary successful
+    pull with a healthy plugin keeps its ✅."""
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=1, restarted=["chela-daemon"]))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    assert "✅" in capsys.readouterr().out
+
+
+def test_update_names_a_gone_marketplace_distinctly_from_stale_hooks(checkout, monkeypatch, capsys):
+    """The product fix half of CMX-321: this must not be discoverable only via `chela
+    doctor` after the fact — `chela update` itself has to say the plugin will not load,
+    in wording that is not "stale" (stale means old-but-working; this is not working).
+
+    `installed_hooks_stale` is pinned True (not False) on purpose: the gone-marketplace
+    report and the stale-hooks report are mutually exclusive by an `elif` in
+    `chela/main.py` — with both arms true, only the load-failure message may print. A
+    `False` pin here would pass whether that branch were `if` or `elif`, since the stale
+    arm would never fire either way.
+    """
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=0))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: True)
+    # "acme" (not "chela") on purpose — "chela" appears in this message for reasons that
+    # have nothing to do with the slug (`chela update`, "chela cannot..."), so pinning the
+    # slug with the tool's own name can never fail when the slug is rendered blank.
+    _install_plugin(marketplace="acme")
+    _register_marketplaces("anthropic-agent-skills")
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    out = capsys.readouterr().out
+    assert "will NOT LOAD" in out
+    assert "acme" in out
+    assert "claude plugin marketplace add" in out
+    assert "hooks still look stale" not in out
 
 
 def test_update_reports_the_plugin_refresh_even_when_already_up_to_date(

@@ -940,6 +940,14 @@ def _report_installed_plugin(directory: Path, port: int) -> None:
         return
     expected = hooks.hooks_spec(port)
     for copy in copies:
+        if hooks.marketplace_missing(copy):
+            print(f"\n⛔ the installed copy's marketplace {copy.marketplace!r} is GONE — "
+                  f"Claude Code will not load {copy.manifest} AT ALL, no matter what it "
+                  "contains (this is not a stale-hooks problem — rendering or reinstalling "
+                  "does nothing until the marketplace itself is back). Re-add it by hand: "
+                  "`claude plugin marketplace add <path-or-url>`, then restart your agent "
+                  "windows.")
+            continue
         if copy.hooks is None:
             print(f"\n⚠️  the installed copy at {copy.manifest} cannot be read "
                   f"({copy.error}) — so chela cannot tell you whether the hooks agents "
@@ -2161,17 +2169,29 @@ def cmd_update(args) -> None:
         if result.backup_ref:
             print(f"(pre-rewrite HEAD is safe at {result.backup_ref})")
         sys.exit(1)
+    # CMX-321: a pull/sync/restart that genuinely succeeded is still NOT a success worth a
+    # ✅ when the plugin refresh below failed — the whole point of `chela update` is that
+    # agents end up running current hooks, and a plugin that cannot load makes that false
+    # no matter how clean the git/deps/services half went. Downgrade the headline itself
+    # rather than letting a bare ✅ read as "you're done" with the real failure buried in
+    # an easy-to-miss ⚠️ line underneath it (the exact shape that hid CMX-321 in the wild).
     if result.behind_before == 0:
-        print("up to date — nothing to do")
+        headline = "up to date — nothing to do"
     else:
         action = (f"⛑️ recovered from an upstream history rewrite (old HEAD backed up at "
                   f"{result.backup_ref}), reset onto" if result.rewrite_recovered else "pulled")
         if result.restarted:
-            print(f"✅ {action} {result.behind_before} commit(s), re-synced deps, restarted: "
-                  f"{', '.join(result.restarted)}")
+            headline = (f"{action} {result.behind_before} commit(s), re-synced deps, "
+                        f"restarted: {', '.join(result.restarted)}")
         else:
-            print(f"✅ {action} {result.behind_before} commit(s), re-synced deps "
-                  "(no running chela-* PM2 services to restart)")
+            headline = (f"{action} {result.behind_before} commit(s), re-synced deps "
+                        "(no running chela-* PM2 services to restart)")
+    if result.plugin_error:
+        print(f"⚠️  {headline} — but the plugin refresh below did NOT succeed")
+    elif result.behind_before == 0:
+        print(headline)
+    else:
+        print(f"✅ {headline}")
     # The plugin refresh (chela.update._refresh_plugin_if_needed) runs on EVERY apply()
     # outcome, not just after a pull — a stale/unreadable install is a separate problem
     # from the checkout being behind — so this reports independently of behind_before too.
@@ -2184,7 +2204,21 @@ def cmd_update(args) -> None:
         print("   run by hand: `claude plugin marketplace update <marketplace>` then "
               "`claude plugin update chela@<marketplace>`, then restart your agent "
               "windows.")
-    if doctor.installed_hooks_stale():
+    # Two DIFFERENT residual problems the refresh above can still leave behind — reported
+    # with different wording on purpose (CMX-321): stale hooks are OLD but the plugin still
+    # loads; a gone marketplace means the plugin does not load AT ALL, and no amount of
+    # `claude plugin update` fixes that without `marketplace add` first.
+    missing_marketplaces = sorted({
+        copy.marketplace for copy in hooks.installed_plugins()
+        if hooks.marketplace_missing(copy)
+    })
+    if missing_marketplaces:
+        print(f"⛔ the installed plugin will NOT LOAD — its marketplace "
+              f"({', '.join(missing_marketplaces)}) is gone from Claude Code's own "
+              "registry. `chela update` cannot fix this by itself: re-add it by hand — "
+              "`claude plugin marketplace add <path-or-url>` — then run `chela update` "
+              "again, then restart your agent windows.")
+    elif doctor.installed_hooks_stale():
         # The refresh above (chela.update._refresh_plugin_if_needed) already ran `claude
         # plugin marketplace update` + `claude plugin update` for every confirmed-installed
         # copy — this is the safety net for when that still didn't converge (see
