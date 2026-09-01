@@ -1280,6 +1280,16 @@ def test_notifier_logs_and_notifies_exactly_once_across_repeated_ticks(checkout,
     assert behind == 1
     assert len(stub.sent) == 1                          # not one per tick
     assert sum(1 for r in caplog.records if "update available" in r.getMessage()) == 1
+    # ⭐ The COUNT, pinned here at 1 — `test_notifier_fires_when_a_checkout_that_was_unknown
+    # _later_falls_genuinely_behind` pins it at 2. Two different behind-values in the same
+    # suite is what makes `status.behind` unhardcodeable: rounds 4-6 each pinned a single
+    # value and the judge hardcoded a mutant to exactly it, three times running.
+    assert "1 commit(s) behind" in stub.sent[0][0], (
+        f"the push must carry the ACTUAL behind-count, not a fixed one: {stub.sent[0][0]!r}"
+    )
+    assert any("1 commit(s) behind" in r.getMessage() for r in caplog.records), (
+        "the log line must carry the ACTUAL behind-count, not a fixed one"
+    )
 
 
 def test_notifier_stays_quiet_when_nothing_is_behind(checkout, monkeypatch):
@@ -1382,7 +1392,8 @@ def test_notifier_fires_when_a_checkout_that_was_unknown_later_falls_genuinely_b
     assert "2 commit(s) behind" in available_records[0].getMessage()
 
 
-def test_notifier_blip_does_not_latch_the_unknown_sentinel(checkout, monkeypatch, caplog):
+@pytest.mark.parametrize("seed", [5, 12])
+def test_notifier_blip_does_not_latch_the_unknown_sentinel(seed, checkout, monkeypatch, caplog):
     """CMX-328 rework round 4 (tightened round 5): a transient ``git fetch`` failure
     (``status.ok is False``) must return the caller's OWN ``previously_behind`` unchanged,
     never the ``UNKNOWN_BEHIND`` sentinel. Before this PR, that return value was always a
@@ -1391,10 +1402,11 @@ def test_notifier_blip_does_not_latch_the_unknown_sentinel(checkout, monkeypatch
     ``UNKNOWN_BEHIND`` while the checkout is actually fine, the very next tick sees
     ``previously_behind == UNKNOWN_BEHIND`` already and the ``!= UNKNOWN_BEHIND`` edge in
     the unknown-state branch never fires again — a single blip permanently mutes the
-    unknown-state warning this PR exists to add. Driven with ``previously_behind=5`` — a
-    value that is neither 0 nor ``UNKNOWN_BEHIND`` (-1) — so a branch hardcoded to return 0
-    (round 4's own uncovered case) is distinguishable from one that passes the caller's
-    argument straight through."""
+    unknown-state warning this PR exists to add. Driven with TWO seeds (5 and 12), and that
+    is the point: rounds 4, 5 and 6 each re-picked a single fixture value, and each time the
+    judge hardcoded a mutant to exactly that value and stayed green. Whatever ONE constant
+    the suite pins, ``return <that constant>`` is indistinguishable from a real pass-through.
+    Two distinct inputs end the regress permanently — no fixed return can be both 5 and 12."""
     stub = _StubNotify(enabled=True)
     monkeypatch.setattr(update, "notify", stub)
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
@@ -1404,10 +1416,10 @@ def test_notifier_blip_does_not_latch_the_unknown_sentinel(checkout, monkeypatch
     )
 
     with caplog.at_level(logging.WARNING, logger=update.log.name):
-        behind = update.check_and_notify(5)   # a checkout 5 commits behind hits a blip
+        behind = update.check_and_notify(seed)   # a checkout `seed` commits behind hits a blip
 
-    assert behind == 5, (
-        "a blip must return the caller's own previously_behind (5), not the "
+    assert behind == seed, (
+        f"a blip must return the caller's own previously_behind ({seed}), not the "
         "UNKNOWN_BEHIND sentinel and not any other fixed value — latching here would "
         "permanently silence the unknown-state warning on every later tick"
     )
