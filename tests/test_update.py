@@ -1012,6 +1012,33 @@ def test_cli_check_flag_never_calls_apply(checkout, upstream, monkeypatch):
     main.cmd_update(argparse.Namespace(check=True))
 
 
+def test_cli_check_flag_reports_up_to_date_with_upstream_and_no_drift(checkout, monkeypatch, capsys):
+    """The positive half of the CMX-328 guards below: a branch WITH an upstream and
+    nothing behind must still say `up to date` — proving the new no-upstream handling
+    didn't turn `--check` into a blanket complainer."""
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+
+    main.cmd_update(argparse.Namespace(check=True))
+
+    assert capsys.readouterr().out.strip() == "up to date"
+
+
+def test_cli_check_flag_reports_unknown_when_no_upstream_is_configured(checkout, monkeypatch, capsys):
+    """CMX-328 (issue #412): `commits_behind()` already answers `ok=True, error="no
+    upstream configured..."` for a branch with no upstream — unknowable, not a pass.
+    `--check` must say so and exit nonzero, never print `up to date`."""
+    _git(checkout, "checkout", "-q", "-b", "scratch", "--no-track")
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+
+    with pytest.raises(SystemExit) as exc:
+        main.cmd_update(argparse.Namespace(check=True))
+
+    assert exc.value.code != 0
+    out = capsys.readouterr().out
+    assert "up to date" not in out
+    assert "no upstream" in out
+
+
 def test_cli_without_check_does_call_apply(checkout, monkeypatch):
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
     called = []
@@ -1261,6 +1288,24 @@ def test_notifier_stays_quiet_when_nothing_is_behind(checkout, monkeypatch):
 
     assert behind == 0
     assert stub.sent == []
+
+
+def test_notifier_warns_once_on_transition_to_unknown_state(checkout, monkeypatch, caplog):
+    """CMX-328 (issue #412): a branch with no upstream is UNKNOWABLE, not silence — the
+    daemon must say so once (edge-triggered like a real update), or it never notifies at
+    all, forever, on a checkout that will never be able to answer."""
+    _git(checkout, "checkout", "-q", "-b", "scratch", "--no-track")
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        behind = _tick(checkout, 0, monkeypatch)
+        behind = _tick(checkout, behind, monkeypatch)   # a second tick, still unknown
+
+    assert update.UNKNOWN_BEHIND < 0     # pin: a real behind-count is never negative
+    assert behind == update.UNKNOWN_BEHIND
+    assert len(stub.sent) == 1                          # not one per tick
+    assert sum(1 for r in caplog.records if "update status unknown" in r.getMessage()) == 1
 
 
 # --- auto_apply_sweep (CMX-148 part 2): the fully-UNATTENDED half, opt-in ------------

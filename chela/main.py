@@ -2173,7 +2173,9 @@ def cmd_update(args) -> None:
 
     if getattr(args, "check", False):
         status = update.commits_behind(repo)
-        if not status.ok:
+        if not status.ok or status.error:
+            # ``ok=True`` with a populated ``error`` (e.g. no upstream configured) is
+            # unknowable, not a pass — "up to date" would be a guess dressed as an answer.
             print(f"update --check: {status.error}")
             sys.exit(1)
         if status.behind:
