@@ -3373,6 +3373,51 @@ def test_a_mid_length_sign_off_is_not_cut_to_the_tracker_title_width(
     assert "…" not in text, f"the sign-off was truncated even though it fits: {text!r}"
 
 
+def test_a_sign_off_at_219_chars_is_kept_whole(
+        store_file, windows, sends, monkeypatch):
+    """Brackets `FINAL_MESSAGE_CHARS` (220) from BELOW on a literal length, instead of
+    reading the constant back into the assertion the way the 166-char fixture above does
+    (``... < len(said) < inbox.FINAL_MESSAGE_CHARS``) — that comparison passes for ANY
+    value `FINAL_MESSAGE_CHARS` happens to hold, so it can't tell 220 apart from a limit
+    that quietly shrank. A 219-char sign-off — one character short of the limit — must
+    still reach the notice whole.
+    """
+    said = ('alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike '
+            'november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee '
+            'zulu alpha bravo charlie delta echo foxtrot golf hotel india')
+    assert len(said) == 219, "fixture drifted off the exact bracket this test relies on"
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, said)
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    text = sends[0][1]
+    assert said in text, f"a 219-char sign-off (just under 220) was cut short: {text!r}"
+    assert "…" not in text, f"the sign-off was truncated even though it fits: {text!r}"
+
+
+def test_a_sign_off_at_221_chars_is_truncated(
+        store_file, windows, sends, monkeypatch):
+    """Mirrors the 219-char fixture above, bracketing 220 from ABOVE: a 221-char sign-off
+    — one character over the limit — must be cut. If `FINAL_MESSAGE_CHARS` ever quietly
+    grew (e.g. to 240), this exact fixture would pass through untruncated.
+    """
+    said = ('alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike '
+            'november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee '
+            'zulu alpha bravo charlie delta echo foxtrot golf hotel india a')
+    assert len(said) == 221, "fixture drifted off the exact bracket this test relies on"
+    _confirm_idle_immediately(monkeypatch)
+    _registered()
+    _finished_with_transcript(monkeypatch, said)
+
+    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    text = sends[0][1]
+    assert said not in text, f"a 221-char sign-off (just over 220) was not truncated: {text!r}"
+    assert "…" in text, f"the over-limit sign-off has no truncation marker: {text!r}"
+
+
 def test_the_notice_falls_back_to_the_template_when_the_agent_said_nothing(
         store_file, windows, sends, monkeypatch):
     """MUST BE ACCEPTED — a tool-only final turn, an unreadable transcript, or a window
