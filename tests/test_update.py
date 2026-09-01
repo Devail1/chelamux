@@ -1141,6 +1141,27 @@ def test_update_names_a_gone_marketplace_distinctly_from_stale_hooks(checkout, m
     assert "hooks still look stale" not in out
 
 
+def test_update_does_not_warn_about_a_healthy_registered_plugin(checkout, monkeypatch, capsys):
+    """Issue #416, the follow-up half of the CMX-321 `[MUTATION]` verdict on #409: a copy
+    that is both installed AND still registered in `known_marketplaces.json` is healthy —
+    `hooks.marketplace_missing` is False for it — and must never be told it will not load.
+    A widened comprehension (`if copy.marketplace or hooks.marketplace_missing(copy)`)
+    would fire on every registered copy's truthy `marketplace` alone; this is the case
+    every existing `cmd_update` test skips, since only one of them installs a plugin at
+    all and that one's marketplace is genuinely gone."""
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=0))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
+    _install_plugin(marketplace="acme")
+    _register_marketplaces("acme")
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    out = capsys.readouterr().out
+    assert "will NOT LOAD" not in out
+
+
 def test_update_reports_the_plugin_refresh_even_when_already_up_to_date(
     checkout, monkeypatch, capsys,
 ):
