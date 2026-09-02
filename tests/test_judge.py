@@ -500,7 +500,7 @@ def test_defeat_shapes_catalog_documents_every_seeded_shape():
     sections = []
     for f in files:
         text = f.read_text()
-        parts = re.split(r"^## \d+[a-z]?\. ", text, flags=re.MULTILINE)[1:]
+        parts = re.split(_SHAPE_HEADING_RE, text, flags=re.MULTILINE)[1:]
         sections.extend(parts)
 
     headings = (
@@ -555,7 +555,7 @@ def test_defeat_shapes_index_carries_no_numbered_sections_of_its_own():
     """
     root = Path(__file__).resolve().parent.parent
     text = (root / "docs" / "DEFEAT_SHAPES.md").read_text()
-    assert not re.search(r"^## \d+[a-z]?\. ", text, flags=re.MULTILINE), (
+    assert not re.search(_SHAPE_HEADING_RE, text, flags=re.MULTILINE), (
         "docs/DEFEAT_SHAPES.md picked up a numbered defeat-shape section — new shapes belong "
         "in their own file under docs/defeat_shapes/, not appended here"
     )
@@ -692,6 +692,33 @@ def test_cmx_task_number_from_branch_parses_or_gives_a_loud_reason():
         )
 
 
+# CMX-334 rework round 2: the single source of truth for "what does a numbered defeat-shape
+# section heading look like" — every scanner below that only needs to find/count/split on a
+# heading (not extract its token) shares this ONE literal, instead of each carrying its own
+# copy of `^## \d+[a-z]?\. `. Before this, three inline copies of that pattern (the index
+# guard, the catalog splitter, and the one-section-per-file counter) were each independently
+# narrowable back to `^## \d+\. ` with the suite still green, because every file currently in
+# `docs/defeat_shapes/` is unsuffixed — see `test_shape_heading_re_matches_a_suffixed_heading`
+# below, which pins this literal directly against a suffixed heading instead of relying on
+# what happens to be on disk.
+_SHAPE_HEADING_RE = r"^## \d+[a-z]?\. "
+
+
+def test_shape_heading_re_matches_a_suffixed_heading():
+    """CMX-334 rework round 2: pins `_SHAPE_HEADING_RE` — the pattern shared by the index
+    guard, the catalog splitter, and the one-section-per-file counter — directly against a
+    literal suffixed heading, independent of whether any real file under
+    `docs/defeat_shapes/` uses the suffix yet (none currently do).
+
+    Seen to survive: `^## \\d+[a-z]?\\. ` narrowed to `^## \\d+\\. ` — `3508 passed, 0 failed`
+    (chela judge, PR #427 round 2), because every on-disk file is unsuffixed so none of the
+    three real scan sites ever exercised the dropped branch.
+    """
+    assert re.search(_SHAPE_HEADING_RE, "## 328b. Title", flags=re.MULTILINE)
+    assert re.search(_SHAPE_HEADING_RE, "## 328. Title", flags=re.MULTILINE)
+    assert not re.search(_SHAPE_HEADING_RE, "## 328 Title (no period)", flags=re.MULTILINE)
+
+
 def _shape_token_from_filename(filename: str) -> str | None:
     """Extract a defeat-shape's identifying token from its filename: the leading digit run
     (normalized as an int, so the legacy zero-padded `01-...` reads the same as `1`) plus an
@@ -795,6 +822,20 @@ def test_validate_added_defeat_shape_filenames_accepts_the_ordinary_and_suffixed
     assert _validate_added_defeat_shape_filenames(
         ["328-first.md", "328b-second.md"], task_number=328
     ) == []
+
+
+def test_validate_added_defeat_shape_filenames_rejects_a_filename_with_no_leading_number():
+    """CMX-334 rework round 2: every existing test above feeds
+    `_validate_added_defeat_shape_filenames` a filename that DOES start with a digit run, so
+    the `if not m:` branch — the function's own docstring calls this its first error path,
+    "no leading NNN- or NNNx- number" — was never once exercised and could be dead-coded
+    (`if not m:` -> `if False and not m:`) with the whole suite still green.
+
+    Seen to survive: `if not m:` mutated to `if False and not m:` — `3508 passed, 0 failed`
+    (chela judge, PR #427 round 2).
+    """
+    errors = _validate_added_defeat_shape_filenames(["my-new-shape.md"], task_number=334)
+    assert errors, "a filename with no leading NNN- or NNNx- number must be refused"
 
 
 def test_duplicate_shape_tokens_treats_the_suffix_as_part_of_the_identifier():
@@ -958,6 +999,29 @@ def test_defeat_shape_numbering_check_flags_a_heading_that_disagrees_with_the_ta
     )
 
 
+def test_defeat_shape_numbering_check_flags_a_malformed_heading(tmp_path):
+    """CMX-334 rework round 2: every existing test above gives `_defeat_shape_numbering_check`
+    a file whose first line DOES match `## N. Title` (possibly with the wrong N), so the
+    `if not heading_m:` branch — the malformed-heading error path, "does not match '## N.
+    Title'" — was never exercised and could be dead-coded (`if not heading_m:` -> `if False
+    and not heading_m:`) with the whole suite still green; nothing forced the code past that
+    point to run against a real `None` and crash.
+
+    Seen to survive: `if not heading_m:` mutated to `if False and not heading_m:` — `3508
+    passed, 0 failed` (chela judge, PR #427 round 2).
+    """
+    shape_file = tmp_path / "docs" / "defeat_shapes" / "334-ok-name.md"
+    shape_file.parent.mkdir(parents=True)
+    shape_file.write_text("334 no hash, no period, not a heading at all\n")
+    errors = _defeat_shape_numbering_check(
+        tmp_path, task_number=334, branch="cmx-334",
+        added_paths=["docs/defeat_shapes/334-ok-name.md"],
+    )
+    assert errors, (
+        "a file whose first line is not a '## N. Title' heading at all must be flagged"
+    )
+
+
 def test_defeat_shape_numbering_check_accepts_a_correctly_numbered_file(tmp_path):
     """CMX-334 rework round 1: a guard that flags everything would pass both tests above too —
     pin the legal path so a false positive on an ordinary, correctly-numbered addition also
@@ -1053,7 +1117,7 @@ def test_defeat_shapes_each_file_carries_exactly_one_numbered_section():
     files = sorted(shapes_dir.glob("*.md"))
     assert files, f"no shape files found under {shapes_dir}"
     for f in files:
-        headings = re.findall(r"^## \d+[a-z]?\. ", f.read_text(), flags=re.MULTILINE)
+        headings = re.findall(_SHAPE_HEADING_RE, f.read_text(), flags=re.MULTILINE)
         assert len(headings) == 1, (
             f"{f.name} carries {len(headings)} numbered sections — one file per shape means "
             "exactly one; a growing catalog adds a new file, not a second section here"
