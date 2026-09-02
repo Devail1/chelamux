@@ -164,3 +164,38 @@ and `at`, named back in round 1's own "Found" section) do not stop being live fi
 because a later round's judge happened to mutate a different field first — read this file's
 own "Found"/lesson sections for the CURRENT task before declaring a round complete, not just
 the specific diff the round's verdict quoted.
+
+**Round 4 — a writer/reader pair, each independently guarded, was never chained end-to-end:**
+a structurally different shape from rounds 1-3 (no field is silently dropped, no CAS column
+goes unchecked) — a value class crosses a module boundary between a WRITER and a READER, each
+tested against its own module's fixtures, and the two test files independently happen to pick
+different defaults for the same field, so the interaction is never exercised by either.
+
+1. `dispatcher.acknowledge_blocked_race` (the writer) deliberately supports acknowledging a
+   row whose `judge_sha` is `NULL` — round 3 closed that with
+   `test_acknowledge_matches_a_row_whose_judge_sha_is_null`, which asserts the CAS matches and
+   the ack columns get stamped (`blocked_race_ack_sha=None`). `_blocked_race_resolved` (the
+   reader, `chela/runtime_truth.py`) is what has to actually honor that stamp — with
+   `judge_sha` NULL, `row.get("blocked_race_ack_sha") == sha` reduces to `None == None`.
+   Every fixture in `tests/test_runtime_truth.py` that reaches this line (`_blocked_race_row`)
+   defaults `judge_sha` to `"deadbeef"`, a non-NULL value chosen independently of round 3's
+   writer-side fixture — so the writer's NULL-sha test and the reader's suite never overlap on
+   the one value that matters. Judge mutation: `row.get("blocked_race_ack_sha") == sha` →
+   `row.get("blocked_race_ack_sha") == (sha or "")`; suite stayed green (3532 passed) because
+   no test drove a NULL-sha row through the READER at all, only through the writer in
+   isolation. Closed by
+   `test_acknowledging_a_null_judge_sha_row_actually_clears_it_from_the_scan`
+   (`tests/test_dispatcher_blocked_race_ack.py`), an end-to-end fixture that calls the REAL
+   `acknowledge_blocked_race` on a `judge_sha=None` row and then asserts the REAL
+   `_blocked_race_scan` returns `{}` — chaining writer and reader through the actual DB row
+   instead of proving either one against a fixture the other side never sees.
+
+**Round 4 lesson — and the general shape:** when one invariant spans a writer and a reader in
+different files, a test suite can look complete (each side has a fixture for the same value
+class — here, NULL) while the interaction between them is never checked, because each file's
+fixture defaults are chosen independently and nothing forces them to agree on which value
+class they exercise. **Guard form that generalizes:** for any invariant enforced by matching a
+value written in one function against a value read by another, at least one fixture must go
+through BOTH real functions in sequence (write, then read) rather than asserting each one's
+own output shape against a hand-built row — a hand-built "already acknowledged" row is not
+proof the writer would ever produce that row for the reader to consume.

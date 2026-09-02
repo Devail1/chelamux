@@ -219,6 +219,29 @@ def test_acknowledge_matches_a_row_whose_judge_sha_is_null(tmp_path):
     assert row["judge_state"] == judge.J_BLOCKED_RACE
 
 
+def test_acknowledging_a_null_judge_sha_row_actually_clears_it_from_the_scan(tmp_path):
+    """CMX-336 rework round 4: round 3 proved the CAS above *matches* a NULL-``judge_sha``
+    row and stamps ``blocked_race_ack_sha=None`` on it, but that stamp is only worth
+    anything if ``runtime_truth._blocked_race_resolved`` actually honors it — with
+    ``judge_sha`` NULL, honoring it depends entirely on ``None == None``. Every fixture in
+    tests/test_runtime_truth.py hands `_blocked_race_resolved` a non-NULL ``judge_sha``, so
+    that comparison is never exercised for the NULL case; this end-to-end fixture goes
+    through the REAL ``acknowledge_blocked_race`` and then the REAL ``_blocked_race_scan``
+    so the two halves are pinned together, not proven separately. Weaken the comparison to
+    ``== (sha or "")`` and this goes red: an acknowledged NULL-sha row would keep reporting
+    forever, which is the exact bug CMX-336 exists to fix."""
+    from chela import runtime_truth
+
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha=None, pr_head_sha=None)
+
+    result = dispatcher.acknowledge_blocked_race("abc123", by="liav")
+    assert result["ok"] is True
+
+    scanned = runtime_truth._blocked_race_scan()
+    assert scanned == {}, "an acknowledged NULL-judge_sha row must clear, not keep reporting"
+
+
 # --- (b) refuses when there is nothing to acknowledge ------------------------------------
 
 def test_acknowledge_refuses_a_run_that_is_not_blocked_race(tmp_path):
