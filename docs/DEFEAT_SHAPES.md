@@ -57,11 +57,20 @@ sync with what's actually in it.
     scattered across the test suite point at a *number*, not a filename, so two files
     claiming the same one make every such reference ambiguous (measured: shape 37 landed
     twice on `dev` with no signal, CMX-293). A test asserts the numbers are unique across
-    `docs/defeat_shapes/`, so a collision still fails loudly on your branch if one somehow
-    happens (e.g. one task opening two reworks) — bump your file's number (and its heading)
-    to any other free one and move on; it's a local, one-line fix, same as resolving any
-    other rebase conflict. Numbering off your CMX task number (above) means this should now
-    be a rare backstop rather than the routine merge-time renumber it used to be.
+    `docs/defeat_shapes/`.
+  - **Need a second (or third) shape on the same branch?** ⛔ Do **not** bump to a different
+    number — "any other free one" used to be the instruction here, and it was the one legal
+    way a decentralized guess could still enter: `cmx-321`'s second shape found `321` already
+    taken, "bumped to any other free one" per this doc's own old wording, and landed on `323`
+    — a number that belonged to `cmx-323`, a different branch in flight at the same time. `dev`
+    only went red once both merged; each PR alone looked clean. Suffix a lowercase letter onto
+    your OWN number instead: `328-first-slug.md`, then `328b-second-slug.md`, then
+    `328c-third-slug.md`. The `328` namespace belongs exclusively to `cmx-328` — a sibling
+    branch can never collide with a suffixed file in it, because it has no reason to ever touch
+    `328*` at all — so this needs no listing read and no coordination with anyone, the same
+    property the plain task-number rule already has. A test enforces this too: every file this
+    branch adds must be numbered `{your task number}` or `{your task number}` + a single
+    lowercase letter — no exception, for any reason.
 - Each entry: the **assertion form** (how the guard was written), the **mutation that
   defeats it** (what corruption slips through), and the **guard form that survives** (how to
   write it so the same corruption goes red).
