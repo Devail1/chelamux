@@ -1358,6 +1358,40 @@ def test_notifier_warns_once_on_transition_to_unknown_state(checkout, monkeypatc
     assert len(unknown_records) == 1
 
 
+def test_notifier_warns_about_unknown_even_when_it_was_ALREADY_behind(
+    checkout, monkeypatch, caplog,
+):
+    """The unknown-state edge must fire on the transition into unknown FROM ANY prior
+    state, not only from 0 (round 8).
+
+    Every other test reaching this branch enters with ``previously_behind == 0``, so the
+    edge was pinned at exactly one input and could be narrowed from ``!= UNKNOWN_BEHIND``
+    to ``== 0`` while staying green. The failure that hides behind that narrowing is the
+    exact one this PR exists to remove: a daemon that has already announced a real
+    behind-count (here 2) and then LOSES its upstream — a rebase onto a deleted remote
+    branch, a renamed default — would get nothing at all and latch silent forever, which
+    is worse than the original bug, because now the operator has seen it working.
+    """
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(
+        update, "commits_behind",
+        lambda *a, **k: update.UpdateStatus(
+            ok=True, behind=0, error="no upstream configured for this branch"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        behind = update.check_and_notify(2)   # ⭐ NOT 0 — it had already notified a real update
+
+    assert behind == update.UNKNOWN_BEHIND
+    assert len(stub.sent) == 1, (
+        "a checkout that was already behind and then lost its upstream got NO warning — "
+        "the unknown edge only fires from 0, so the daemon latches silent forever"
+    )
+    assert any("update status unknown" in r.getMessage() for r in caplog.records)
+
+
 def test_notifier_unknown_state_carries_the_ACTUAL_reason_not_a_fixed_string(
     checkout, monkeypatch, caplog,
 ):
@@ -1457,7 +1491,7 @@ def test_notifier_fires_when_a_checkout_that_was_unknown_later_falls_genuinely_b
     assert "2 commit(s) behind" in available_records[0].getMessage()
 
 
-@pytest.mark.parametrize("seed", [5, 12])
+@pytest.mark.parametrize("seed", [5, 12, update.UNKNOWN_BEHIND])
 def test_notifier_blip_does_not_latch_the_unknown_sentinel(seed, checkout, monkeypatch, caplog):
     """CMX-328 rework round 4 (tightened round 5): a transient ``git fetch`` failure
     (``status.ok is False``) must return the caller's OWN ``previously_behind`` unchanged,
@@ -1471,7 +1505,13 @@ def test_notifier_blip_does_not_latch_the_unknown_sentinel(seed, checkout, monke
     is the point: rounds 4, 5 and 6 each re-picked a single fixture value, and each time the
     judge hardcoded a mutant to exactly that value and stayed green. Whatever ONE constant
     the suite pins, ``return <that constant>`` is indistinguishable from a real pass-through.
-    Two distinct inputs end the regress permanently — no fixed return can be both 5 and 12."""
+    Two distinct inputs end the regress permanently — no fixed return can be both 5 and 12.
+
+    ``UNKNOWN_BEHIND`` (-1) is the third seed and it is not decoration: this branch exists
+    so a blip can never move the sentinel state machine, and a clamp like
+    ``max(previously_behind, 0)`` reads back unchanged for 5 and 12 while silently resetting
+    a latched checkout to 0 — after which the next unknown-state tick sees ``!= UNKNOWN_BEHIND``
+    and re-warns, restoring the once-per-tick drumbeat the edge-trigger exists to prevent."""
     stub = _StubNotify(enabled=True)
     monkeypatch.setattr(update, "notify", stub)
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
