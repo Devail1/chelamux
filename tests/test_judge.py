@@ -708,6 +708,25 @@ def _shape_token_from_heading(first_line: str) -> str | None:
     return (str(int(m.group(1))) + m.group(2)) if m else None
 
 
+def test_shape_token_from_filename_and_heading_carry_the_suffix():
+    """CMX-334 rework round 1: `_shape_token_from_filename` and `_shape_token_from_heading`
+    are the REAL functions every on-disk-scanning test above calls, but every file currently
+    in `docs/defeat_shapes/` is unsuffixed — so a mutation that drops the suffix from either
+    function's return (`+ m.group(2)` deleted) never disagrees with what's on disk today, and
+    the suite stays green. Pin the suffix directly against a literal input, independent of
+    what the catalog happens to contain right now.
+
+    Seen to survive: `return (str(int(m.group(1))) + m.group(2)) if m else None` mutated to
+    `return (str(int(m.group(1)))) if m else None` in either function — `3503 passed, 0
+    failed` (chela judge, PR #427 round 1), because no test called either function with a
+    suffixed argument.
+    """
+    assert _shape_token_from_filename("328-first-shape.md") == "328"
+    assert _shape_token_from_filename("328b-second-shape.md") == "328b"
+    assert _shape_token_from_heading("## 328. Title") == "328"
+    assert _shape_token_from_heading("## 328b. Title") == "328b"
+
+
 def _duplicate_shape_tokens(tokens: list[str]) -> list[str]:
     """Which tokens in ``tokens`` appear more than once, sorted for a stable message.
 
@@ -820,6 +839,13 @@ def test_defeat_shapes_added_files_are_numbered_by_branch_task_id():
     proved it). The actual filename check now lives in that pure function so it can be
     unit-tested directly; this test wires it to the real branch/diff and adds the
     heading-agrees-with-the-task-number check on top.
+
+    CMX-334 rework round 1: the actual error-computing logic below now lives in
+    `_defeat_shape_numbering_check`, a pure function this test wires to real branch/git
+    state. This wiring can only ever hand that function THIS branch's own (valid) diff — a
+    call site reverted to a no-op has nothing here to disagree about, which is exactly how it
+    survived a mutation battery (see `test_defeat_shape_numbering_check_flags_*` below, which
+    exercises the same function against an injected bad file instead).
     """
     root = Path(__file__).resolve().parent.parent
 
@@ -852,11 +878,23 @@ def test_defeat_shapes_added_files_are_numbered_by_branch_task_id():
         pytest.skip("this branch adds no files under docs/defeat_shapes/ relative to "
                      "origin/dev — nothing for this check to verify")
 
-    filenames = [Path(path).name for path in added]
-    errors = _validate_added_defeat_shape_filenames(filenames, task_number)
+    errors = _defeat_shape_numbering_check(root, task_number, branch, added)
     assert not errors, "; ".join(errors)
 
-    for path in added:
+
+def _defeat_shape_numbering_check(
+    root: Path, task_number: int, branch: str, added_paths: list[str]
+) -> list[str]:
+    """The full numbering check `test_defeat_shapes_added_files_are_numbered_by_branch_task_id`
+    wires to real branch/git state: given the branch's own CMX task number and the paths of
+    defeat-shape files newly added on it, return every numbering error — both the
+    filename-vs-branch-namespace check (`_validate_added_defeat_shape_filenames`) and the
+    heading-vs-task-number check. Empty means everything passed.
+    """
+    filenames = [Path(path).name for path in added_paths]
+    errors = _validate_added_defeat_shape_filenames(filenames, task_number)
+
+    for path in added_paths:
         filename = Path(path).name
         # Filename and heading are asserted to agree elsewhere (see
         # test_defeat_shapes_file_headings_are_well_formed_and_match_their_filename), but that
@@ -865,11 +903,74 @@ def test_defeat_shapes_added_files_are_numbered_by_branch_task_id():
         # still fails here instead of only on the (separate, filename-vs-heading-only) test.
         first_line = (root / path).read_text().splitlines()[0]
         heading_m = re.match(r"^## (\d+)([a-z]?)\. ", first_line)
-        assert heading_m, f"{filename}: heading {first_line!r} does not match '## N. Title'"
-        assert int(heading_m.group(1)) == task_number, (
-            f"{filename}'s heading claims shape {heading_m.group(1)}, not this branch's own "
-            f"CMX task number {task_number} (branch {branch!r})"
-        )
+        if not heading_m:
+            errors.append(f"{filename}: heading {first_line!r} does not match '## N. Title'")
+            continue
+        if int(heading_m.group(1)) != task_number:
+            errors.append(
+                f"{filename}'s heading claims shape {heading_m.group(1)}, not this branch's "
+                f"own CMX task number {task_number} (branch {branch!r})"
+            )
+    return errors
+
+
+def test_defeat_shape_numbering_check_flags_a_filename_outside_the_branch_namespace(tmp_path):
+    """CMX-334 rework round 1: isolates the `_validate_added_defeat_shape_filenames` call
+    site inside `_defeat_shape_numbering_check`. The injected file's HEADING already matches
+    the branch's task number (so the separate heading-vs-task-number check has nothing to
+    flag on its own) — only its FILENAME claims a different task number, so only the validate
+    call site can catch this. A call site reverted to `errors = []` (chela judge round 1
+    finding #1, PR #427) produces zero errors here, where the real wiring produces one.
+    """
+    shape_file = tmp_path / "docs" / "defeat_shapes" / "999-guessed.md"
+    shape_file.parent.mkdir(parents=True)
+    shape_file.write_text("## 334. Heading matches the task number, filename does not\n")
+    errors = _defeat_shape_numbering_check(
+        tmp_path, task_number=334, branch="cmx-334",
+        added_paths=["docs/defeat_shapes/999-guessed.md"],
+    )
+    assert errors, (
+        "a file whose FILENAME number disagrees with the branch's task number must be "
+        "flagged, even when its heading happens to agree"
+    )
+
+
+def test_defeat_shape_numbering_check_flags_a_heading_that_disagrees_with_the_task_number(
+    tmp_path,
+):
+    """CMX-334 rework round 1: the mirror of the test above — the FILENAME already matches the
+    branch's task number (so `_validate_added_defeat_shape_filenames` has nothing to flag on
+    its own), but the HEADING claims a different task number. Only the heading-vs-task-number
+    half of `_defeat_shape_numbering_check` can catch this; nothing before this round pinned
+    that half against real branch state at all, since it only ever ran on this branch's own
+    (previously nonexistent) added files.
+    """
+    shape_file = tmp_path / "docs" / "defeat_shapes" / "334-ok-name.md"
+    shape_file.parent.mkdir(parents=True)
+    shape_file.write_text("## 335. Filename matches the task number, heading does not\n")
+    errors = _defeat_shape_numbering_check(
+        tmp_path, task_number=334, branch="cmx-334",
+        added_paths=["docs/defeat_shapes/334-ok-name.md"],
+    )
+    assert errors, (
+        "a file whose HEADING number disagrees with the branch's task number must be "
+        "flagged, even when its filename happens to agree"
+    )
+
+
+def test_defeat_shape_numbering_check_accepts_a_correctly_numbered_file(tmp_path):
+    """CMX-334 rework round 1: a guard that flags everything would pass both tests above too —
+    pin the legal path so a false positive on an ordinary, correctly-numbered addition also
+    fails loudly.
+    """
+    shape_file = tmp_path / "docs" / "defeat_shapes" / "334-ok.md"
+    shape_file.parent.mkdir(parents=True)
+    shape_file.write_text("## 334. Correctly numbered\n")
+    errors = _defeat_shape_numbering_check(
+        tmp_path, task_number=334, branch="cmx-334",
+        added_paths=["docs/defeat_shapes/334-ok.md"],
+    )
+    assert errors == []
 
 
 def test_defeat_shapes_cross_references_resolve_to_shapes_that_exist():
@@ -894,16 +995,45 @@ def test_defeat_shapes_cross_references_resolve_to_shapes_that_exist():
     assert files, f"no shape files found under {shapes_dir}"
     existing = {_shape_token_from_filename(f.name) for f in files}
 
-    ref_pattern = re.compile(r"\bshapes? (\d+)([a-z]?)\b|\[\[(\d+)([a-z]?)\|")
     for f in files:
-        text = f.read_text()
-        for m in ref_pattern.finditer(text):
-            digits, suffix = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
-            token = str(int(digits)) + suffix
+        for token in _shape_tokens_referenced(f.read_text()):
             assert token in existing, (
                 f"{f.name} references shape {token}, which has no "
                 f"docs/defeat_shapes/{token}-*.md file"
             )
+
+
+def _shape_tokens_referenced(text: str) -> list[str]:
+    """Every defeat-shape token `text` references, either as prose ("shape 328b", "shapes
+    21") or a `[[328b|...]]` wiki-style link — in the order they appear.
+
+    CMX-334 rework round 1: split out of the cross-reference test above so the real reference
+    pattern — the exact code every mutation battery targets — can be unit-tested directly
+    against a literal string, independent of what `docs/defeat_shapes/` happens to contain on
+    disk right now (every file there is still unsuffixed, so the on-disk-scanning test above
+    can never exercise a suffixed reference).
+    """
+    ref_pattern = re.compile(r"\bshapes? (\d+)([a-z]?)\b|\[\[(\d+)([a-z]?)\|")
+    tokens = []
+    for m in ref_pattern.finditer(text):
+        digits, suffix = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+        tokens.append(str(int(digits)) + suffix)
+    return tokens
+
+
+def test_shape_tokens_referenced_captures_the_suffix_in_prose_and_wiki_links():
+    """CMX-334 rework round 1: pins the reference pattern's suffix capture directly, so a
+    mutation that blanks the suffix group (`([a-z]?)` -> `()`) turns this red regardless of
+    what's on disk in `docs/defeat_shapes/` today.
+
+    Seen to survive: `\\bshapes? (\\d+)([a-z]?)\\b|\\[\\[(\\d+)([a-z]?)\\|` mutated to
+    `\\bshapes? (\\d+)()\\b|\\[\\[(\\d+)()\\|` — `3503 passed, 0 failed` (chela judge, PR #427
+    round 1), because no reference to a suffixed shape existed in the real catalog to notice.
+    """
+    assert _shape_tokens_referenced("see shape 328b for the full writeup") == ["328b"]
+    assert _shape_tokens_referenced("the render-side mirror of shape 13") == ["13"]
+    assert _shape_tokens_referenced("[[328b|entry 328b]]") == ["328b"]
+    assert _shape_tokens_referenced("no reference here") == []
 
 
 def test_defeat_shapes_each_file_carries_exactly_one_numbered_section():
