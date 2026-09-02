@@ -199,3 +199,33 @@ value written in one function against a value read by another, at least one fixt
 through BOTH real functions in sequence (write, then read) rather than asserting each one's
 own output shape against a hand-built row — a hand-built "already acknowledged" row is not
 proof the writer would ever produce that row for the reader to consume.
+
+**Round 5 — the round 1 lesson recurred a third time, on the last two members of the same
+named family:** round 1's own "Found" section named all four stamped fields (`by`/`at`/
+`note`/`sha`) as the same shape back in round 1; rounds 1-3 closed each of those over three
+separate rounds. The payload dict actually carries SIX fields, not four —
+`event_log.append(..., payload={"task_id": ..., "pr_url": ..., "by": ..., "at": ..., "sha":
+..., "note": ...})` — and the last two, `task_id`/`pr_url`, are the record's IDENTITY (which
+run/PR this acknowledgement is about), not its content. No test in the file ever named them
+as a family the way round 1 named `by`/`at`/`note`/`sha`, so they went three rounds
+unflagged and unfixed.
+
+1. Judge mutation: `payload={"task_id": task_id, "pr_url": run.get("pr_url"), ...}` →
+   `payload={"task_id": "", "pr_url": None, ...}`; suite stayed green (3533 passed) because
+   every test that touches this payload reads `result["task_id"]`/`result["pr_url"]` (the
+   function's *return* dict, built and asserted separately) or the row's own columns, never
+   the payload's `task_id`/`pr_url` keys themselves — the exact "proven via a different
+   channel, never read back from the payload itself" shape rounds 1-3 already closed for the
+   other four fields, just never extended to these two. Closed by
+   `test_acknowledge_event_payload_carries_the_task_id` and
+   `test_acknowledge_event_payload_carries_the_pr_url`, mirroring the `by`/`sha`/`note`/`at`
+   tests' shape exactly, on the two fields that were never enumerated alongside them.
+
+**Round 5 lesson:** "read the payload dict literal, not just the narrative field list a
+previous round's docstring or Found-section happened to name" — round 1 said "the four
+things the acknowledgement is documented to stamp" and every later round searched for gaps
+against that four-item list. The payload the code actually constructs had six keys from the
+start; the two identity fields were never on anyone's list because nobody re-read the
+`payload={...}` literal itself after round 1. When closing "field X is never independently
+asserted" for one payload, enumerate the payload's dict literal directly, not a prose
+description of it that may already be stale.

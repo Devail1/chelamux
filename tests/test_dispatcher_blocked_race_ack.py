@@ -155,6 +155,38 @@ def test_acknowledge_event_payload_carries_the_ack_timestamp(tmp_path):
     assert events[-1]["payload"]["at"] == row["blocked_race_ack_at"]
 
 
+def test_acknowledge_event_payload_carries_the_task_id(tmp_path):
+    """CMX-336 rework round 5: same defeat shape as the ``by``/``sha``/``note``/``at``
+    payload tests above (`docs/defeat_shapes/336-*.md`), on the identity fields —
+    ``task_id`` and ``pr_url`` are what makes the audit record attributable to a specific
+    run at all. Only ``result["task_id"]``/``result["pr_url"]`` were ever read back by a
+    test; a defeat that hardcodes the payload's ``task_id`` to ``""`` (while the return
+    value and DB row still carry the real one) would otherwise survive."""
+    with dispatcher._db() as conn:
+        _row(conn, task_id="distinctive-task-id")
+
+    dispatcher.acknowledge_blocked_race("distinctive-task-id")
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    assert events[-1]["payload"]["task_id"] == "distinctive-task-id"
+
+
+def test_acknowledge_event_payload_carries_the_pr_url(tmp_path):
+    """CMX-336 rework round 5: same defeat shape, on the other identity field. A defeat
+    that hardcodes the payload's ``pr_url`` to ``None`` (while ``result["pr_url"]`` still
+    carries the real value) would otherwise survive, since no test read the payload's
+    ``pr_url`` back independently."""
+    with dispatcher._db() as conn:
+        _row(conn, pr_url="https://github.com/o/r/pull/431")
+
+    dispatcher.acknowledge_blocked_race("abc123")
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    assert events[-1]["payload"]["pr_url"] == "https://github.com/o/r/pull/431"
+
+
 def test_acknowledge_defaults_by_to_env_user_when_not_given(tmp_path, monkeypatch):
     monkeypatch.delenv("USER", raising=False)
     monkeypatch.setenv("USERNAME", "windows-liav")
