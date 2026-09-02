@@ -500,7 +500,7 @@ def test_defeat_shapes_catalog_documents_every_seeded_shape():
     sections = []
     for f in files:
         text = f.read_text()
-        parts = re.split(r"^## \d+\. ", text, flags=re.MULTILINE)[1:]
+        parts = re.split(r"^## \d+[a-z]?\. ", text, flags=re.MULTILINE)[1:]
         sections.extend(parts)
 
     headings = (
@@ -555,7 +555,7 @@ def test_defeat_shapes_index_carries_no_numbered_sections_of_its_own():
     """
     root = Path(__file__).resolve().parent.parent
     text = (root / "docs" / "DEFEAT_SHAPES.md").read_text()
-    assert not re.search(r"^## \d+\. ", text, flags=re.MULTILINE), (
+    assert not re.search(r"^## \d+[a-z]?\. ", text, flags=re.MULTILINE), (
         "docs/DEFEAT_SHAPES.md picked up a numbered defeat-shape section — new shapes belong "
         "in their own file under docs/defeat_shapes/, not appended here"
     )
@@ -586,23 +586,32 @@ def test_defeat_shapes_file_headings_are_well_formed_and_match_their_filename():
     Seen to go red: `## 21 A shape with no period` — matches neither `^## \\d+\\. ` (the
     section scanner) nor this test's own `^## \\d+\\. ` check, so it fails LOUDLY here
     instead of silently vanishing from the catalog scan.
+
+    CMX-334: a file may now carry a lowercase-letter suffix on its number (`328b-slug.md`,
+    heading `## 328b. Title`) for a second shape on the same branch — see
+    `_shape_token_from_filename`/`_shape_token_from_heading`. The suffix is part of the
+    identifier, so it must match between filename and heading exactly like the digits do.
     """
     root = Path(__file__).resolve().parent.parent
     shapes_dir = root / "docs" / "defeat_shapes"
     files = sorted(shapes_dir.glob("*.md"))
     assert files, f"no shape files found under {shapes_dir}"
     for f in files:
-        filename_num = int(f.name.split("-", 1)[0])
-        first_line = f.read_text().splitlines()[0]
-        m = re.match(r"^## (\d+)\. ", first_line)
-        assert m, (
-            f"{f.name}: heading {first_line!r} does not match '## N. Title' (missing the "
-            f"period after the number makes this shape invisible to the catalog scan)"
+        filename_token = _shape_token_from_filename(f.name)
+        assert filename_token, (
+            f"{f.name}: filename does not start with 'NNN-' or 'NNNx-' (a digit run, "
+            "optional single lowercase-letter suffix, then '-')"
         )
-        heading_num = int(m.group(1))
-        assert heading_num == filename_num, (
-            f"{f.name}: filename number {filename_num} does not match heading number "
-            f"{heading_num}"
+        first_line = f.read_text().splitlines()[0]
+        heading_token = _shape_token_from_heading(first_line)
+        assert heading_token, (
+            f"{f.name}: heading {first_line!r} does not match '## N. Title' or '## Nx. Title' "
+            f"(missing the period after the number makes this shape invisible to the catalog "
+            f"scan)"
+        )
+        assert heading_token == filename_token, (
+            f"{f.name}: filename token {filename_token!r} does not match heading token "
+            f"{heading_token!r}"
         )
 
 
@@ -618,18 +627,26 @@ def test_defeat_shapes_numbers_are_unique_across_the_catalog():
 
     Seen to go red: two catalog files whose headings both open `## 37. ` — the exact
     collision CMX-284's own writeup declared harmless.
+
+    CMX-334: the identifier is now the full token (digits plus an optional single
+    lowercase-letter suffix), not the bare number — `328` and `328b` are DIFFERENT shapes
+    (a branch's second shape suffixes its own number rather than guessing a free one), but
+    `328b` claimed by two files is still the exact ambiguous-reference collision this test
+    exists to catch. `_duplicate_shape_tokens` carries the comparison so it can be unit-tested
+    directly (see `test_duplicate_shape_tokens_*` below) without needing real duplicate files
+    on disk.
     """
     root = Path(__file__).resolve().parent.parent
     shapes_dir = root / "docs" / "defeat_shapes"
     files = sorted(shapes_dir.glob("*.md"))
     assert files, f"no shape files found under {shapes_dir}"
-    numbers = []
+    tokens = []
     for f in files:
         first_line = f.read_text().splitlines()[0]
-        m = re.match(r"^## (\d+)\. ", first_line)
-        assert m, f"{f.name}: heading {first_line!r} does not match '## N. Title'"
-        numbers.append(int(m.group(1)))
-    dupes = sorted({n for n in numbers if numbers.count(n) > 1})
+        token = _shape_token_from_heading(first_line)
+        assert token, f"{f.name}: heading {first_line!r} does not match '## N. Title'"
+        tokens.append(token)
+    dupes = _duplicate_shape_tokens(tokens)
     assert not dupes, (
         f"duplicate defeat-shape numbers: {dupes} — two files claim the same number, making "
         "any 'shape N' cross-reference to it ambiguous; bump one of the colliding files' "
@@ -675,6 +692,103 @@ def test_cmx_task_number_from_branch_parses_or_gives_a_loud_reason():
         )
 
 
+def _shape_token_from_filename(filename: str) -> str | None:
+    """Extract a defeat-shape's identifying token from its filename: the leading digit run
+    (normalized as an int, so the legacy zero-padded `01-...` reads the same as `1`) plus an
+    optional single lowercase-letter suffix (`328-slug.md` -> `"328"`, `328b-slug.md` ->
+    `"328b"`). Returns ``None`` when the filename doesn't start that way.
+    """
+    m = re.match(r"^(\d+)([a-z]?)-", filename)
+    return (str(int(m.group(1))) + m.group(2)) if m else None
+
+
+def _shape_token_from_heading(first_line: str) -> str | None:
+    """Same token, read from a shape file's first line (`## 328b. Title` -> `"328b"`)."""
+    m = re.match(r"^## (\d+)([a-z]?)\. ", first_line)
+    return (str(int(m.group(1))) + m.group(2)) if m else None
+
+
+def _duplicate_shape_tokens(tokens: list[str]) -> list[str]:
+    """Which tokens in ``tokens`` appear more than once, sorted for a stable message.
+
+    CMX-334: the token is the full identifier (digits + optional suffix letter) — `"328"`
+    and `"328b"` are different shapes, so only an exact repeat of the SAME token (suffix
+    included) counts as a collision.
+    """
+    return sorted({t for t in tokens if tokens.count(t) > 1})
+
+
+def _validate_added_defeat_shape_filenames(
+    added_filenames: list[str], task_number: int
+) -> list[str]:
+    """Check filenames this branch adds under `docs/defeat_shapes/` against the branch's own
+    CMX task number. Returns error messages (empty means every filename passes).
+
+    CMX-334: closes the escape hatch that let a second shape on the same branch fall through
+    to a GUESSED, unrelated number when its own plain number was already taken (measured
+    2026-09-01: cmx-321's second shape found 321 taken and guessed 323 — a number belonging
+    to another live task; `dev` only went red once both branches had merged). There is no
+    exception any more: every filename's digit run must equal `task_number`, full stop. A
+    second (or third) shape on the same branch is expressed as a lowercase-letter suffix on
+    the SAME number (`328-slug.md`, then `328b-slug.md`, `328c-slug.md`) — the `328` namespace
+    belongs exclusively to `cmx-328`, so a sibling branch can never land a file in it, and
+    reusing your own number needs no listing read and no coordination with anyone.
+    """
+    errors = []
+    for filename in added_filenames:
+        m = re.match(r"^(\d+)([a-z]?)-", filename)
+        if not m:
+            errors.append(
+                f"{filename} was added under docs/defeat_shapes/ with no leading NNN- or "
+                "NNNx- number"
+            )
+            continue
+        file_number = int(m.group(1))
+        if file_number != task_number:
+            errors.append(
+                f"{filename} is numbered {file_number}, not this branch's own CMX task "
+                f"number {task_number} — every file this branch adds must sit inside its "
+                "own task-number namespace, with no exception; for a second shape on this "
+                "branch, suffix a lowercase letter onto the SAME number (e.g. "
+                f"{task_number}-first.md, then {task_number}b-second.md) instead of "
+                "guessing a different number off a listing."
+            )
+    return errors
+
+
+def test_validate_added_defeat_shape_filenames_rejects_a_number_outside_the_branch_namespace():
+    """CMX-334 guard (a): the bug this task closes — a file numbered outside the branch's own
+    namespace must be REFUSED with no exception, even the "already claimed on dev" case that
+    used to wave it through. Seen live 2026-09-01: cmx-321's second shape found 321 taken and
+    guessed 323, a number that belonged to cmx-323 (a different, live branch).
+    """
+    errors = _validate_added_defeat_shape_filenames(["323-guessed.md"], task_number=321)
+    assert errors, "a file numbered outside the branch's own task number must be refused"
+
+
+def test_validate_added_defeat_shape_filenames_accepts_the_ordinary_and_suffixed_cases():
+    """CMX-334 guard (c) — MUST BE ACCEPTED: a guard that refuses everything would satisfy
+    guard (a) perfectly, so pin the legal paths too. A plain single shape on its own branch
+    passes, and so does a second shape on that same branch expressed as a letter suffix on
+    the SAME number.
+    """
+    assert _validate_added_defeat_shape_filenames(["328-first.md"], task_number=328) == []
+    assert _validate_added_defeat_shape_filenames(
+        ["328-first.md", "328b-second.md"], task_number=328
+    ) == []
+
+
+def test_duplicate_shape_tokens_treats_the_suffix_as_part_of_the_identifier():
+    """CMX-334 guard (b): two files claiming the same suffixed token (`328b` twice) are a
+    collision — the suffix must be compared as part of the identifier, not stripped down to
+    the bare number, or a real duplicate would read as two distinct shapes.
+    """
+    assert _duplicate_shape_tokens(["328", "328b", "329"]) == [], (
+        "a bare number and its own lettered suffix are different shapes, not a duplicate"
+    )
+    assert _duplicate_shape_tokens(["328b", "328b", "329"]) == ["328b"]
+
+
 def test_defeat_shapes_added_files_are_numbered_by_branch_task_id():
     """CMX-301 rework round 6 (re-scoped by a human, superseding rounds 1-5): every prose guard
     tried so far shares one shape — it pins WORDING (a clause, a paragraph, a whole section
@@ -700,14 +814,12 @@ def test_defeat_shapes_added_files_are_numbered_by_branch_task_id():
     Seen to go red: a defeat-shape file added on this branch numbered off "one past the current
     highest" file in a listing instead of this branch's own CMX task number.
 
-    The one sanctioned exception (see "How this catalog grows"'s own text: "the number still
-    has to be unique... bump your file's number... to any other free one") is a task number
-    that is ALREADY claimed by a file that predates this branch on `origin/dev` — e.g. a CMX
-    ticket that spans two PRs, or a genuine historical task-number collision. That is not a
-    guess off a listing (a real, already-committed file settles it, not a race against a
-    sibling branch's own guess), so an added file numbered off the next free slot instead is
-    allowed — but ONLY when `origin/dev` already has a `{task_number}-*.md` file that predates
-    this branch; anything else still has to match the task number exactly.
+    CMX-334: the old "sanctioned exception" here (a task number already claimed by a file that
+    predates this branch on `origin/dev`) is GONE — it was the only way a decentralized guess
+    could enter (see `_validate_added_defeat_shape_filenames`'s docstring for the incident that
+    proved it). The actual filename check now lives in that pure function so it can be
+    unit-tested directly; this test wires it to the real branch/diff and adds the
+    heading-agrees-with-the-task-number check on top.
     """
     root = Path(__file__).resolve().parent.parent
 
@@ -740,37 +852,19 @@ def test_defeat_shapes_added_files_are_numbered_by_branch_task_id():
         pytest.skip("this branch adds no files under docs/defeat_shapes/ relative to "
                      "origin/dev — nothing for this check to verify")
 
-    preexisting = subprocess.run(
-        ["git", "ls-tree", "--name-only", "origin/dev", "--", "docs/defeat_shapes/"],
-        cwd=root, capture_output=True, text=True,
-    )
-    task_number_already_claimed_on_dev = any(
-        Path(p).name.startswith(f"{task_number}-")
-        for p in preexisting.stdout.splitlines() if p.strip()
-    )
+    filenames = [Path(path).name for path in added]
+    errors = _validate_added_defeat_shape_filenames(filenames, task_number)
+    assert not errors, "; ".join(errors)
 
     for path in added:
         filename = Path(path).name
-        m = re.match(r"^(\d+)-", filename)
-        assert m, f"{filename} was added under docs/defeat_shapes/ with no leading NNN- number"
-        file_number = int(m.group(1))
-        if file_number != task_number:
-            assert task_number_already_claimed_on_dev, (
-                f"{filename} is numbered {file_number}, not this branch's own CMX task number "
-                f"{task_number} (branch {branch!r}) — numbering off anything else (e.g. one "
-                "past the current highest file in a listing) is a decentralized guess that "
-                "collides under concurrency; see docs/DEFEAT_SHAPES.md's 'How this catalog "
-                "grows'. (The sanctioned exception — task number already claimed by a "
-                "pre-existing file on origin/dev — does not apply here: no such file exists.)"
-            )
-            continue
         # Filename and heading are asserted to agree elsewhere (see
         # test_defeat_shapes_file_headings_are_well_formed_and_match_their_filename), but that
         # test says nothing about the TASK number — check the heading directly too, so a file
         # correctly named `301-*.md` but whose own heading claims a different shape number
         # still fails here instead of only on the (separate, filename-vs-heading-only) test.
         first_line = (root / path).read_text().splitlines()[0]
-        heading_m = re.match(r"^## (\d+)\. ", first_line)
+        heading_m = re.match(r"^## (\d+)([a-z]?)\. ", first_line)
         assert heading_m, f"{filename}: heading {first_line!r} does not match '## N. Title'"
         assert int(heading_m.group(1)) == task_number, (
             f"{filename}'s heading claims shape {heading_m.group(1)}, not this branch's own "
@@ -789,21 +883,26 @@ def test_defeat_shapes_cross_references_resolve_to_shapes_that_exist():
 
     Seen to go red: a reference left behind as "shape 31" (or any number with no
     `docs/defeat_shapes/31-*.md` file) after a renumber that missed one mention.
+
+    CMX-334: a shape's token may now carry a lowercase-letter suffix (`328b`) — the reference
+    pattern captures that suffix too, so "shape 328b" resolves against the actual `328b-*.md`
+    file rather than being truncated to the bare number.
     """
     root = Path(__file__).resolve().parent.parent
     shapes_dir = root / "docs" / "defeat_shapes"
     files = sorted(shapes_dir.glob("*.md"))
     assert files, f"no shape files found under {shapes_dir}"
-    existing = {int(f.name.split("-", 1)[0]) for f in files}
+    existing = {_shape_token_from_filename(f.name) for f in files}
 
-    ref_pattern = re.compile(r"\bshapes? (\d+)\b|\[\[(\d+)\|")
+    ref_pattern = re.compile(r"\bshapes? (\d+)([a-z]?)\b|\[\[(\d+)([a-z]?)\|")
     for f in files:
         text = f.read_text()
         for m in ref_pattern.finditer(text):
-            num = int(m.group(1) or m.group(2))
-            assert num in existing, (
-                f"{f.name} references shape {num}, which has no "
-                f"docs/defeat_shapes/{num:02d}-*.md file"
+            digits, suffix = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+            token = str(int(digits)) + suffix
+            assert token in existing, (
+                f"{f.name} references shape {token}, which has no "
+                f"docs/defeat_shapes/{token}-*.md file"
             )
 
 
@@ -824,7 +923,7 @@ def test_defeat_shapes_each_file_carries_exactly_one_numbered_section():
     files = sorted(shapes_dir.glob("*.md"))
     assert files, f"no shape files found under {shapes_dir}"
     for f in files:
-        headings = re.findall(r"^## \d+\. ", f.read_text(), flags=re.MULTILINE)
+        headings = re.findall(r"^## \d+[a-z]?\. ", f.read_text(), flags=re.MULTILINE)
         assert len(headings) == 1, (
             f"{f.name} carries {len(headings)} numbered sections — one file per shape means "
             "exactly one; a growing catalog adds a new file, not a second section here"
