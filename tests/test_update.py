@@ -1039,6 +1039,37 @@ def test_cli_check_flag_reports_unknown_when_no_upstream_is_configured(checkout,
     assert "no upstream" in out
 
 
+def test_cli_check_flag_prints_the_ACTUAL_reason_when_the_fetch_itself_fails(
+    checkout, monkeypatch, capsys,
+):
+    """The SECOND input for `status.error` on the `--check` surface (round 7).
+
+    The test above is the only one that reaches this print, so `status.error` was pinned
+    at exactly one value and `print("update --check: no upstream")` read back identically
+    — a checkout whose fetch timed out would be told `no upstream`. This also covers the
+    `not status.ok` half of the condition, which had no `--check` test at all.
+
+    Same shape round 6 closed for the behind-count (1 and 2) and the blip seed (5 and 12):
+    one value can always be hardcoded, two cannot.
+    """
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(
+        update, "commits_behind",
+        lambda *a, **k: update.UpdateStatus(
+            ok=False, error="git rev-list failed: connection timed out"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main.cmd_update(argparse.Namespace(check=True))
+
+    assert exc.value.code != 0
+    out = capsys.readouterr().out
+    assert "connection timed out" in out, (
+        f"--check must print the ACTUAL reason, not a fixed string: {out!r}"
+    )
+    assert "no upstream" not in out  # the other input's reason must not be what surfaces
+
+
 def test_cli_without_check_does_call_apply(checkout, monkeypatch):
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
     called = []
@@ -1325,8 +1356,42 @@ def test_notifier_warns_once_on_transition_to_unknown_state(checkout, monkeypatc
     assert title == "chela: update status unknown"
     unknown_records = [r for r in caplog.records if "update status unknown" in r.getMessage()]
     assert len(unknown_records) == 1
-    assert "no upstream" in unknown_records[0].getMessage()
 
+
+def test_notifier_unknown_state_carries_the_ACTUAL_reason_not_a_fixed_string(
+    checkout, monkeypatch, caplog,
+):
+    """The SECOND input for `status.error` on the push and log surfaces (round 7).
+
+    Every other test reaching this branch produces the one `ok=True`-with-error value
+    `commits_behind` returns in practice ("no upstream configured for this branch"), so
+    `notify.send("no upstream", ...)` and `log.warning(..., "no upstream")` both read back
+    identically to the real interpolation. A second, different reason makes a constant
+    impossible: it cannot be both.
+    """
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(
+        update, "commits_behind",
+        lambda *a, **k: update.UpdateStatus(
+            ok=True, behind=0, error="detached HEAD — no branch to compare against"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        behind = update.check_and_notify(0)
+
+    assert behind == update.UNKNOWN_BEHIND
+    message, title = stub.sent[0]
+    assert "detached HEAD" in message, (
+        f"the push body must carry the ACTUAL reason, not a fixed string: {message!r}"
+    )
+    assert "no upstream" not in message
+    assert title == "chela: update status unknown"
+    records = [r for r in caplog.records if "update status unknown" in r.getMessage()]
+    assert "detached HEAD" in records[0].getMessage(), (
+        "the log line must carry the ACTUAL reason, not a fixed string"
+    )
 
 def test_notifier_respects_disabled_notify_on_transition_to_unknown_state(checkout, monkeypatch, caplog):
     """CMX-328 rework round 2: the unknown-state branch's `notify.send` call is gated on
