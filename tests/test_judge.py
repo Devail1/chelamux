@@ -3408,6 +3408,34 @@ def test_cmd_judge_self_check_cli_exits_zero_when_every_guard_is_killed(tmp_path
     assert "safe to commit" in capsys.readouterr().out
 
 
+def test_cmd_judge_ack_blocked_race_cli_reaches_the_dispatcher(capsys):
+    """🧊 CMX-336 rework: `chela judge ack-blocked-race` is a dead `elif` away from
+    silently falling through to `p_judge.print_help()` instead of ever calling
+    `dispatcher.acknowledge_blocked_race` — nothing in this PR drove the real CLI
+    dispatch for this subcommand before. Same pattern as the self-check CLI tests above:
+    corrupt `elif args.judge_cmd == "ack-blocked-race":` (e.g. `elif False and
+    args.judge_cmd == "ack-blocked-race":`) and this goes red — the mocked dispatcher
+    call is never made, so the success line never prints and the mock assertion fails.
+    """
+    from unittest.mock import patch as mock_patch
+
+    from chela import main
+
+    fake = {
+        "ok": True, "task_id": "cmx-99", "by": "someone-distinctive",
+        "at": "2026-09-02T00:00:00+00:00", "sha": "deadbeefcafe",
+        "pr_url": "https://github.com/o/r/pull/431",
+    }
+    with mock_patch.object(main.dispatcher, "acknowledge_blocked_race", return_value=fake) as mocked:
+        with patch.object(sys, "argv", ["chela", "judge", "ack-blocked-race", "cmx-99",
+                                         "--by", "someone-distinctive"]):
+            main.main()
+
+    mocked.assert_called_once_with("cmx-99", by="someone-distinctive", note="")
+    out = capsys.readouterr().out
+    assert "acknowledged by someone-distinctive" in out
+
+
 # ---------------------------------------------------------------------------
 # CMX-319 — the staleness check must not read its reference from the row it checks
 # ---------------------------------------------------------------------------

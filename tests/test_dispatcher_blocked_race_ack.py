@@ -86,6 +86,20 @@ def test_acknowledge_logs_an_event(tmp_path):
     assert "blocked_race_ack" in kinds
 
 
+def test_acknowledge_event_payload_carries_who_acknowledged_it(tmp_path):
+    """The durable audit record — not just the fact that an event of this type fired
+    (that alone survives a defeat that hardcodes the payload's ``by`` field to ``""``
+    while the DB column and the printed message still carry the real actor)."""
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    dispatcher.acknowledge_blocked_race("abc123", by="someone-distinctive")
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    assert events[-1]["payload"]["by"] == "someone-distinctive"
+
+
 def test_acknowledge_defaults_by_to_env_user_when_not_given(tmp_path, monkeypatch):
     monkeypatch.delenv("USER", raising=False)
     monkeypatch.setenv("USERNAME", "windows-liav")
@@ -104,6 +118,24 @@ def test_acknowledge_falls_back_to_unknown_with_no_actor_available(tmp_path, mon
 
     result = dispatcher.acknowledge_blocked_race("abc123")
     assert result["by"] == "unknown"
+
+
+def test_acknowledge_records_the_explicitly_supplied_by_not_the_env_fallback(tmp_path, monkeypatch):
+    """The explicit ``--by NAME`` is WHO — the first of the four things this command is
+    documented to stamp. Set ``$USER`` to something ELSE so a defeat that ignores the
+    ``by`` argument and falls through to the env fallback chain (e.g. corrupting
+    ``who = (by or "").strip() or ...`` into ``who = ("" or "").strip() or ...``) is
+    caught: it would record the env user instead of the name actually passed."""
+    monkeypatch.setenv("USER", "env-fallback-user")
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    result = dispatcher.acknowledge_blocked_race("abc123", by="someone-distinctive")
+    assert result["by"] == "someone-distinctive"
+
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    assert row["blocked_race_ack_by"] == "someone-distinctive"
 
 
 # --- (b) refuses when there is nothing to acknowledge ------------------------------------
