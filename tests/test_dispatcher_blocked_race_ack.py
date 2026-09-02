@@ -118,6 +118,43 @@ def test_acknowledge_event_payload_carries_the_acknowledged_sha(tmp_path):
     assert events[-1]["payload"]["sha"] == "de291ca34a62"
 
 
+def test_acknowledge_event_payload_carries_the_note(tmp_path):
+    """CMX-336 rework round 3: the same defeat shape as the ``by``/``sha`` payload tests
+    above (`docs/defeat_shapes/336-*.md`), on the third of the four stamped fields — the
+    note is the 'why' of the who/when/why this command is documented to stamp. It lives in
+    exactly two places, the DB column and this payload; only the column was ever read back
+    by a test, so a defeat that hardcodes the payload's ``note`` to ``""`` would otherwise
+    survive."""
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    dispatcher.acknowledge_blocked_race("abc123", note="already shipped, safe to ack")
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    assert events[-1]["payload"]["note"] == "already shipped, safe to ack"
+
+
+def test_acknowledge_event_payload_carries_the_ack_timestamp(tmp_path):
+    """CMX-336 rework round 3: same shape again, on the fourth and last stamped field —
+    ``at`` is WHEN it was acknowledged. ``event_log.append``'s own docstring says the
+    payload, not the summary, is what a filter/de-dup/UI actually works with, so a blank
+    ``at`` in the audit record is not covered by the event's own envelope timestamp. A
+    defeat that hardcodes the payload's ``at`` to ``""`` would otherwise survive, since no
+    test read the payload's ``at`` back independently."""
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    dispatcher.acknowledge_blocked_race("abc123")
+
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    assert events[-1]["payload"]["at"]
+    assert events[-1]["payload"]["at"] == row["blocked_race_ack_at"]
+
+
 def test_acknowledge_defaults_by_to_env_user_when_not_given(tmp_path, monkeypatch):
     monkeypatch.delenv("USER", raising=False)
     monkeypatch.setenv("USERNAME", "windows-liav")
@@ -154,6 +191,32 @@ def test_acknowledge_records_the_explicitly_supplied_by_not_the_env_fallback(tmp
     with dispatcher._db() as conn:
         row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
     assert row["blocked_race_ack_by"] == "someone-distinctive"
+
+
+# --- (a3) the CAS matches a row whose judge_sha is NULL too ------------------------------
+
+def test_acknowledge_matches_a_row_whose_judge_sha_is_null(tmp_path):
+    """CMX-336 rework round 3: the CAS clause deliberately reads ``judge_sha IS ?`` rather
+    than ``judge_sha = ?`` — SQLite's ``=`` never matches NULL, so a row with no recorded
+    ``judge_sha`` at all could never be acknowledged under ``= ?``. That row is the MOST
+    stuck row this ticket exists for: ``_blocked_race_resolved``'s ``sha and head and sha
+    != head`` also can't fire without a sha, so acknowledgement is its only exit. Every
+    other fixture in this file sets a non-NULL ``judge_sha``, where ``IS`` and ``=`` are
+    indistinguishable; this one pins the NULL case so a mutation from ``IS`` to ``=`` goes
+    red."""
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha=None)
+
+    result = dispatcher.acknowledge_blocked_race("abc123", by="liav")
+
+    assert result["ok"] is True
+    assert result["sha"] is None
+
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    assert row["blocked_race_ack_by"] == "liav"
+    assert row["blocked_race_ack_sha"] is None
+    assert row["judge_state"] == judge.J_BLOCKED_RACE
 
 
 # --- (b) refuses when there is nothing to acknowledge ------------------------------------

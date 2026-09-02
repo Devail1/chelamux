@@ -123,3 +123,44 @@ the next round will find the others regardless, at the cost of another full rewo
 4 above is the reminder that "the same family" doesn't cover everything on a function this
 small: a single write can carry a field-fallback gap, an untested branch, AND an
 under-exercised compound predicate all at once, each needing its own fixture shape.
+
+**Round 3 — the round 2 lesson recurred verbatim, plus a genuinely new shape on the same
+CAS clause:**
+
+1. Round 2 fixed the payload's `sha` field but left `note` and `at` — the other two members
+   of the same four-field family (`by`/`at`/`note`/`sha`) round 1's own "Found" section had
+   already named — un-independently-asserted. Judge mutations: `"note": clean_note` →
+   `"note": ""` and `"at": when` → `"at": ""`; both survived (3529 passed) because no test
+   read either field back from the payload, only from the DB column. Closed by
+   `test_acknowledge_event_payload_carries_the_note` and
+   `test_acknowledge_event_payload_carries_the_ack_timestamp`, mirroring the `by`/`sha`
+   tests' shape. This is the round 2 lesson repeating exactly: fixing the one field the
+   judge happened to name and leaving its already-identified siblings costs another full
+   round each time.
+
+2. A structurally distinct shape on the SAME `WHERE` clause round 2 already hardened for
+   `judge_state`: `"WHERE task_id=? AND judge_state=? AND judge_sha IS ?"` uses `IS`
+   deliberately — SQLite's `= ?` never matches a bound `NULL`, and a `J_BLOCKED_RACE` row
+   with no recorded `judge_sha` at all is the single stuck-est row this feature exists for
+   (`_blocked_race_resolved`'s `sha and head and sha != head` also can't fire without a sha,
+   so acknowledgement is its only exit). Every fixture in the file set a non-NULL
+   `judge_sha`, so `IS` and `= ` were indistinguishable to the whole suite. Judge mutation:
+   `judge_sha IS ?` → `judge_sha = ?`; suite stayed green (3529 passed) because nothing ever
+   bound `NULL` through that parameter. This is not the field-fallback shape above (no value
+   is silently dropped once the row IS matched) and not the compound-CAS shape from round 2
+   (both columns are still checked) — it is a comparison OPERATOR whose semantic difference
+   from its sibling is invisible on every non-NULL value, so a suite that never happens to
+   supply the one input class where they diverge can't tell them apart. Closed by
+   `test_acknowledge_matches_a_row_whose_judge_sha_is_null`, which seeds a row with
+   `judge_sha=None` and asserts the acknowledgement still succeeds and still stamps the ack
+   columns. **Guard form that generalizes:** for any `col IS ?` used deliberately over
+   `col = ?` for NULL-safety, at least one fixture must bind `NULL` through that parameter —
+   every other value class leaves the two operators behaviorally identical, so a suite built
+   entirely from populated fixtures can never distinguish "chosen for a reason" from
+   "could have been either."
+
+**Round 3 lesson:** items round 1 explicitly named as siblings-still-to-fix (here: `note`
+and `at`, named back in round 1's own "Found" section) do not stop being live findings just
+because a later round's judge happened to mutate a different field first — read this file's
+own "Found"/lesson sections for the CURRENT task before declaring a round complete, not just
+the specific diff the round's verdict quoted.
