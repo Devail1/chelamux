@@ -100,6 +100,24 @@ def test_acknowledge_event_payload_carries_who_acknowledged_it(tmp_path):
     assert events[-1]["payload"]["by"] == "someone-distinctive"
 
 
+def test_acknowledge_event_payload_carries_the_acknowledged_sha(tmp_path):
+    """CMX-336 rework round 2: the payload's ``sha`` is the exact ``judge_sha`` this
+    acknowledgement covers — scoping the ack to that sha is the invariant the whole
+    feature leans on, and the event is its durable audit record. Same defeat shape as
+    the ``by`` test above (`docs/defeat_shapes/336-*.md`), but on a different field: a
+    defeat that hardcodes the payload's ``sha`` to ``""`` while the DB column and
+    ``result["sha"]`` still carry the real value would otherwise survive, since no test
+    read the payload's ``sha`` back independently."""
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="de291ca34a62")
+
+    dispatcher.acknowledge_blocked_race("abc123")
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    assert events[-1]["payload"]["sha"] == "de291ca34a62"
+
+
 def test_acknowledge_defaults_by_to_env_user_when_not_given(tmp_path, monkeypatch):
     monkeypatch.delenv("USER", raising=False)
     monkeypatch.setenv("USERNAME", "windows-liav")
@@ -182,3 +200,30 @@ def test_acknowledge_is_scoped_to_the_current_judge_sha(tmp_path, monkeypatch):
         row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
     assert row["blocked_race_ack_by"] is None
     assert row["judge_sha"] == "new-sha"
+
+
+def test_acknowledge_is_scoped_to_the_current_judge_state_not_only_sha(tmp_path, monkeypatch):
+    """CMX-336 rework round 2: the CAS is on ``judge_state`` AND ``judge_sha`` TOGETHER
+    (see the docstring above `acknowledge_blocked_race`) — the test above only ever moves
+    the sha between the read and the write, so it cannot tell a WHERE clause that checks
+    both columns apart from one that checks the sha alone. Here the sha stays IDENTICAL
+    but the row's REAL judge_state has moved on (a fresh judge re-run resolved the SAME
+    commit to a different verdict, in the gap between the read and this write) — the
+    acknowledgement must still be refused, not silently stamped onto the fresh verdict
+    just because the sha still matches."""
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="same-sha", judge_state=judge.J_CLEAN)  # real, current state
+
+    stale = dict(dispatcher.list_runs()[0])
+    stale["judge_state"] = judge.J_BLOCKED_RACE  # what a stale read saw before the re-run
+    stale["judge_sha"] = "same-sha"
+    monkeypatch.setattr(dispatcher, "resolve_run", lambda ident: stale)
+
+    result = dispatcher.acknowledge_blocked_race("abc123")
+    assert result["ok"] is False
+    assert "changed while this was being written" in result["error"]
+
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    assert row["blocked_race_ack_by"] is None
+    assert row["judge_state"] == judge.J_CLEAN

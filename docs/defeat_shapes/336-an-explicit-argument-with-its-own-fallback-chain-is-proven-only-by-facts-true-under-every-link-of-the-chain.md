@@ -56,3 +56,43 @@ the one field/argument that carries the information the guard exists to protect.
 never supplies values that let them diverge; this shape is the same family but the fixture
 never even tries to diverge them — no test ever sets the environment fallback to something
 the explicit argument must beat.
+
+**Round 2 — the same gap recurred on the OTHER two stamped fields round 1's fix didn't
+reach, plus a sibling gap on the refusal path:** round 1 closed the `by` field specifically.
+`acknowledge_blocked_race` stamps four things (`by`, `at`, `note`, `sha`); round 1's own
+"Found" section already flagged `note`/`sha` as the un-independently-asserted companions but
+the round only fixed `by`. Round 2's judge found exactly that gap live, on both remaining
+fields, plus a third, unrelated gap on the same PR:
+
+1. `chela/main.py::cmd_judge_ack_blocked_race` passes `note=args.note` straight through to
+   the dispatcher — the only CLI test invoked the subcommand with no `--note` flag at all and
+   asserted `note=""`, which is true whether `args.note` was threaded through or the call site
+   hardcoded `note=""` regardless of the flag. Judge mutation:
+   `note=args.note` → `note=""`; suite stayed green (3526 passed) because no CLI test ever
+   supplied `--note` with a real value and asserted it reached the mocked dispatcher call.
+   Closed by adding `--note "already shipped, safe to ack"` to
+   `test_cmd_judge_ack_blocked_race_cli_reaches_the_dispatcher`'s argv and asserting the mock
+   was called with that exact string.
+2. The `blocked_race_ack` event payload's `sha` field — the exact same "field never
+   independently asserted" gap as `by`, just on a different field of the same payload dict.
+   Judge mutation: `"sha": sha` → `"sha": ""`; suite stayed green because the existing payload
+   test (round 1's own fix) asserted only `payload["by"]`, never `payload["sha"]`. Closed by
+   `test_acknowledge_event_payload_carries_the_acknowledged_sha`, mirroring the `by` test's
+   shape for `sha`.
+3. A structurally different, sibling gap on the same PR: `cmd_judge_ack_blocked_race`'s
+   refusal branch (`sys.exit(1)` when `result["ok"]` is falsy) had no test at all — every CLI
+   test for this subcommand only drove the success path. Judge mutation: `sys.exit(1)` →
+   `sys.exit(0)`; suite stayed green because no test asserted the exit code on a refused
+   acknowledgement. This is not the same shape as the field-fallback gap above — it's an
+   entire *branch* with zero coverage, not a value silently replaced within a covered branch —
+   but it was found by the same round on the same function's CLI wrapper, so it's recorded
+   here rather than opening a fourth catalog entry for "an operator CLI's refusal path has no
+   test at all," a shape general enough it likely already recurs elsewhere uncatalogued.
+   Closed by `test_cmd_judge_ack_blocked_race_cli_exits_nonzero_on_refusal`.
+
+**Round 2 lesson:** when a round's own "Found" section explicitly names sibling fields that
+share the exact shape being fixed (see round 1's "no test anywhere in the file asserted
+`result["by"]`, `row["blocked_race_ack_by"]`, or the event payload's `by` field" — that
+sentence already named `note` and `sha` as the same family, just not yet exercised), fix all
+of them in the same round instead of the one the judge's specific mutation happened to name —
+the next round will find the others regardless, at the cost of another full rework cycle.

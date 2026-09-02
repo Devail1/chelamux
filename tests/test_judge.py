@@ -3416,6 +3416,13 @@ def test_cmd_judge_ack_blocked_race_cli_reaches_the_dispatcher(capsys):
     corrupt `elif args.judge_cmd == "ack-blocked-race":` (e.g. `elif False and
     args.judge_cmd == "ack-blocked-race":`) and this goes red — the mocked dispatcher
     call is never made, so the success line never prints and the mock assertion fails.
+
+    🧊 CMX-336 rework round 2: this passed `--note` as nothing and asserted `note=""` —
+    that's true whether `args.note` was actually threaded through or the call site
+    hardcoded `note=""` regardless of the flag (`docs/defeat_shapes/336-*.md`). `--note`
+    is one of the four things this command is documented to stamp and is advertised in
+    both the changelog and the subcommand's own `--help`, so it must be driven with a
+    real, distinctive value here.
     """
     from unittest.mock import patch as mock_patch
 
@@ -3428,12 +3435,38 @@ def test_cmd_judge_ack_blocked_race_cli_reaches_the_dispatcher(capsys):
     }
     with mock_patch.object(main.dispatcher, "acknowledge_blocked_race", return_value=fake) as mocked:
         with patch.object(sys, "argv", ["chela", "judge", "ack-blocked-race", "cmx-99",
-                                         "--by", "someone-distinctive"]):
+                                         "--by", "someone-distinctive",
+                                         "--note", "already shipped, safe to ack"]):
             main.main()
 
-    mocked.assert_called_once_with("cmx-99", by="someone-distinctive", note="")
+    mocked.assert_called_once_with(
+        "cmx-99", by="someone-distinctive", note="already shipped, safe to ack",
+    )
     out = capsys.readouterr().out
     assert "acknowledged by someone-distinctive" in out
+
+
+def test_cmd_judge_ack_blocked_race_cli_exits_nonzero_on_refusal(capsys):
+    """🧊 CMX-336 rework round 2: `ack-blocked-race` is an operator/scripted surface —
+    its whole refusal path (wrong judge_state, unknown run, lost CAS) is only observable
+    to a caller through the exit status, and nothing drove that branch before
+    (`docs/defeat_shapes/336-*.md`). A mutation turning the refusal's `sys.exit(1)` into
+    `sys.exit(0)` left the whole suite green because no test ever asked for the exit code
+    on a refused acknowledgement.
+    """
+    from unittest.mock import patch as mock_patch
+
+    from chela import main
+
+    fake = {"ok": False, "task_id": "cmx-99", "error": "no run matches 'cmx-99'"}
+    with mock_patch.object(main.dispatcher, "acknowledge_blocked_race", return_value=fake):
+        with patch.object(sys, "argv", ["chela", "judge", "ack-blocked-race", "cmx-99"]):
+            with pytest.raises(SystemExit) as exc:
+                main.main()
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "no run matches 'cmx-99'" in out
 
 
 # ---------------------------------------------------------------------------
