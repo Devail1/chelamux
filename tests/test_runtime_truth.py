@@ -1674,6 +1674,57 @@ def test_judge_blocked_race_does_not_clear_with_no_judge_sha_to_compare(tmp_path
     assert "CMX-239" in scanned
 
 
+# --- judge.blocked_race must be ACKNOWLEDGEABLE on a merged/closed PR (CMX-336) ---------
+#
+# A merged/closed PR's branch is gone: nothing will EVER push a new head past `judge_sha`,
+# so `sha != head` can never fire and the row would nag `chela doctor` forever with no
+# operator exit. `dispatcher.acknowledge_blocked_race` stamps `blocked_race_ack_*` on the
+# row WITHOUT touching `judge_state`/`judge_sha`/`judge_detail` — these pin that
+# `_blocked_race_resolved` honors that stamp, but ONLY for the exact sha it was given for,
+# and that an UNacknowledged row (merged or not) still reports exactly as before.
+
+def test_judge_blocked_race_clears_once_acknowledged_on_the_current_sha(tmp_path, monkeypatch):
+    scanned = _scan_with(tmp_path, monkeypatch, _blocked_race_row(
+        pr_state="merged", pr_head_sha="deadbeef",  # head == judge_sha: never resolves normally
+        blocked_race_ack_at="2026-09-02T10:00:00+00:00",
+        blocked_race_ack_by="liav", blocked_race_ack_sha="deadbeef",
+    ))
+    assert scanned == {}, "an acknowledged row (matching sha) must clear, not keep reporting"
+
+
+def test_judge_blocked_race_unacknowledged_row_on_a_merged_pr_still_reports(tmp_path, monkeypatch):
+    """⭐ MUST HOLD: acknowledgement is an explicit operator action, never inferred from
+    `pr_state` alone. A merged PR with no acknowledgement on it must keep reporting exactly
+    like an open one — the whole point of this fact is that a merged PR is MORE alarming,
+    not less, and silently excluding it (the boundary this ticket forbids) would defeat that."""
+    scanned = _scan_with(tmp_path, monkeypatch, _blocked_race_row(
+        pr_state="merged", pr_head_sha="deadbeef",
+    ))
+    assert "CMX-239" in scanned
+
+
+def test_judge_blocked_race_open_pr_unacknowledged_still_resolves_the_old_way(tmp_path, monkeypatch):
+    """The other half of guard (b): an OPEN PR's unacknowledged row still resolves via the
+    ORIGINAL mechanism (head moved past judge_sha) — acknowledgement is an additional exit,
+    not a replacement for the existing one."""
+    scanned = _scan_with(tmp_path, monkeypatch, _blocked_race_row(
+        pr_state="open", judge_sha="deadbeef", pr_head_sha="cafef00d",
+    ))
+    assert scanned == {}
+
+
+def test_judge_blocked_race_acknowledgement_does_not_cover_a_later_race_on_a_new_sha(tmp_path, monkeypatch):
+    """The scope guard: an acknowledgement stamped for an OLD `judge_sha` must not silence a
+    FRESH `blocked_race` verdict recorded later on a different commit (a reopen, a second
+    CAS loss) — `blocked_race_ack_sha` no longer matches the row's current `judge_sha`."""
+    scanned = _scan_with(tmp_path, monkeypatch, _blocked_race_row(
+        pr_state="merged", judge_sha="newsha", pr_head_sha="newsha",
+        blocked_race_ack_at="2026-08-01T10:00:00+00:00",
+        blocked_race_ack_by="liav", blocked_race_ack_sha="oldsha",
+    ))
+    assert "CMX-239" in scanned
+
+
 # --- restore.dead_epoch_rows: CMX-195, the hole `chela doctor` was green through --------
 
 def test_restore_dead_epoch_rows_reports_the_count(fleet, monkeypatch):

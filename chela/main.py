@@ -2157,6 +2157,27 @@ def cmd_judge_self_check(args) -> None:
           "safe to commit.")
 
 
+def cmd_judge_ack_blocked_race(args) -> None:
+    """🧊 CMX-336: acknowledge a `J_BLOCKED_RACE` row that can never resolve the ordinary
+    way (the PR is merged or closed, so nothing will ever push a new head past the judged
+    commit for `_blocked_race_resolved`'s `judge_sha != pr_head_sha` check to catch).
+
+    This does NOT rewrite `judge_state`, `judge_detail`, or `judge_sha` — the verdict
+    genuinely WAS blocking. It only stamps who/when/why acknowledged it, which is enough
+    for `chela doctor` to stop reporting the row; the original verdict stays readable on
+    the row exactly as the judge wrote it.
+    """
+    result = dispatcher.acknowledge_blocked_race(args.run, by=args.by, note=args.note)
+    if not result.get("ok"):
+        print(f"ack-blocked-race: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    print(f"🧊 {result['task_id']} — blocked-race verdict (sha "
+          f"{(result.get('sha') or '?')[:12]}) acknowledged by {result['by']} at "
+          f"{result['at']}. `chela doctor` stops reporting this run.")
+    if result.get("pr_url"):
+        print(f"  {result['pr_url']}")
+
+
 def cmd_update(args) -> None:
     """``chela update`` — pull the checkout, re-sync deps, restart services. ``--check``
     only reports how far behind it is; it changes nothing.
@@ -2666,6 +2687,22 @@ def main() -> None:
         "--cwd", metavar="DIR", default=".",
         help="Worktree to mutate in place (default: the current directory)",
     )
+    p_jack = judge_sub.add_parser(
+        "ack-blocked-race",
+        help="🧊 Acknowledge a blocked_race verdict that can never resolve on its own "
+             "(the PR merged or closed, so its head will never move past the judged "
+             "commit) — stops `chela doctor` from reporting it without rewriting the "
+             "original verdict",
+    )
+    p_jack.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-84)")
+    p_jack.add_argument(
+        "--by", default="",
+        help="Who is acknowledging this (default: $USER/$USERNAME, else 'unknown')",
+    )
+    p_jack.add_argument(
+        "--note", default="",
+        help="Optional free-text note recorded alongside the acknowledgement",
+    )
 
     # adopt — enroll a hand-opened PR into the judge/merge gate (CMX-276)
     p_adopt = sub.add_parser(
@@ -2947,6 +2984,8 @@ def main() -> None:
             cmd_judge(args)
         elif args.judge_cmd == "self-check":
             cmd_judge_self_check(args)
+        elif args.judge_cmd == "ack-blocked-race":
+            cmd_judge_ack_blocked_race(args)
         else:
             p_judge.print_help()
     elif args.command == "adopt":
