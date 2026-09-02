@@ -89,10 +89,37 @@ fields, plus a third, unrelated gap on the same PR:
    here rather than opening a fourth catalog entry for "an operator CLI's refusal path has no
    test at all," a shape general enough it likely already recurs elsewhere uncatalogued.
    Closed by `test_cmd_judge_ack_blocked_race_cli_exits_nonzero_on_refusal`.
+4. A fourth, ALSO structurally different gap on the same function's write itself: the
+   docstring above `acknowledge_blocked_race` claims "CAS on `judge_state`/`judge_sha`
+   together" over a single SQL statement, `WHERE task_id=? AND judge_state=? AND judge_sha IS
+   ?` — both columns are meant to be independent discriminators, so a concurrent judge re-run
+   that changes EITHER one between the read and the write must refuse the acknowledgement. The
+   only concurrency test in the file (`test_acknowledge_is_scoped_to_the_current_judge_sha`)
+   constructs a stale read that disagrees with the real row on `judge_sha` alone — its
+   `judge_state` is identical throughout — so it cannot tell a `WHERE` clause that checks both
+   columns apart from one that checks `judge_sha` alone and never touches `judge_state` at
+   all. Judge mutation: widen the state clause into a tautology while leaving the sha clause
+   untouched — `AND judge_state=?` → `AND (judge_state=? OR 1)`; the existing sha-only fixture
+   still refuses under this mutation (its sha still disagrees), so the suite stayed green
+   (3526 passed) with `judge_state` doing nothing. This is a THIRD distinct shape from the
+   two above: not a value silently replaced (items 1-2) and not an untested branch (item 3),
+   but a multi-column CAS predicate where every fixture happens to move the same one column,
+   so the OTHER column is never the sole point of disagreement between the stale read and the
+   real row. Closed by `test_acknowledge_is_scoped_to_the_current_judge_state_not_only_sha`,
+   which holds `judge_sha` IDENTICAL between the stale read and the real row and varies only
+   `judge_state` (a fresh judge re-run resolving the SAME commit to a DIFFERENT verdict — the
+   exact concurrency window the docstring describes). **Guard form that generalizes:** for an
+   N-column CAS/optimistic-concurrency `WHERE` clause, one fixture per column is not enough if
+   every fixture also lets a different column disagree at the same time — each column needs
+   its own fixture where it is the ONLY column that disagrees, every other column held
+   identical between the stale read and the real row.
 
 **Round 2 lesson:** when a round's own "Found" section explicitly names sibling fields that
 share the exact shape being fixed (see round 1's "no test anywhere in the file asserted
 `result["by"]`, `row["blocked_race_ack_by"]`, or the event payload's `by` field" — that
 sentence already named `note` and `sha` as the same family, just not yet exercised), fix all
 of them in the same round instead of the one the judge's specific mutation happened to name —
-the next round will find the others regardless, at the cost of another full rework cycle.
+the next round will find the others regardless, at the cost of another full rework cycle. Item
+4 above is the reminder that "the same family" doesn't cover everything on a function this
+small: a single write can carry a field-fallback gap, an untested branch, AND an
+under-exercised compound predicate all at once, each needing its own fixture shape.
