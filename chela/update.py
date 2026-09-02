@@ -583,6 +583,12 @@ def apply(repo: Path | None = None) -> ApplyResult:
                         plugin_updated=plugin_updated, plugin_error=plugin_error)
 
 
+UNKNOWN_BEHIND = -1
+"""Sentinel ``previously_behind`` value meaning "already notified about an unknowable
+state" (e.g. no upstream configured) — distinct from a real behind-count, which is never
+negative, so it can't be mistaken for "0 commits behind"."""
+
+
 def check_and_notify(previously_behind: int) -> int:
     """Called from the daemon loop on a bounded cadence. Edge-triggered exactly like
     ``notify.check_waiting``: logs (and, if configured, pushes) a heads-up once on the
@@ -590,12 +596,24 @@ def check_and_notify(previously_behind: int) -> int:
     operator learns to ignore the log. Returns the behind-count to remember as the next
     call's ``previously_behind``.
 
+    ``ok=True`` with a populated ``error`` (e.g. no upstream configured) is unknowable, not
+    "up to date" — silently returning ``status.behind`` (0) here would make the daemon
+    latch into permanent, unannounced silence. That state gets the same one-time heads-up
+    treatment as a real update, tracked via :data:`UNKNOWN_BEHIND` so it can't be confused
+    with a genuine 0.
+
     ⛔ NEVER calls :func:`apply` / ``git pull`` — informing is this function's entire job.
     """
     status = commits_behind(fetch=True)
     if not status.ok:
         return previously_behind  # can't tell right now; don't flap the edge on a blip
-    if status.behind > 0 and previously_behind == 0:
+    if status.error:
+        if previously_behind != UNKNOWN_BEHIND:
+            log.warning("update status unknown: %s", status.error)
+            if notify.enabled():
+                notify.send(status.error, title="chela: update status unknown")
+        return UNKNOWN_BEHIND
+    if status.behind > 0 and previously_behind <= 0:
         log.warning("update available: %d commit(s) behind — run `chela update`", status.behind)
         if notify.enabled():
             notify.send(f"{status.behind} commit(s) behind — run `chela update`",

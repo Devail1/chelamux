@@ -22,6 +22,16 @@ history lives in `git log`.
   one, verified by matching both the recorded `window_id` and the current tmux server's epoch
   so a restarted server's renumbered ids are never mistaken for a stale run's own window.
   (CMX-329)
+### Changed
+
+- **`chela update --check` and the daemon's update notifier now treat "no upstream
+  configured" as UNKNOWN, not "up to date".** Previously a checkout with no upstream
+  silently reported 0 commits behind, so `--check`'s exit code and the daemon's notifier both
+  went permanently, unannouncedly silent. Both now warn once (log line + push, subject to
+  `notify.enabled()`) on the transition into the unknown state, tracked via a new
+  `UNKNOWN_BEHIND` sentinel, and `--check` exits nonzero for it. A checkout that later gains
+  an upstream and falls genuinely behind still gets the ordinary "update available" notice.
+  (CMX-328)
 
 ## [0.9.0] — 2026-08-30
 
