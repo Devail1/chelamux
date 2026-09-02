@@ -1535,6 +1535,39 @@ def test_notifier_blip_does_not_latch_the_unknown_sentinel(seed, checkout, monke
     )
 
 
+def test_notifier_stays_quiet_on_a_second_tick_where_the_behind_count_grew(
+    checkout, upstream, monkeypatch, caplog,
+):
+    """CMX-335 (issue #428): every other multi-tick test in this file drives
+    ``check_and_notify`` twice against the SAME ``status.behind`` value, so
+    ``status.behind > 0 and previously_behind <= 0`` and the broader (wrong)
+    ``previously_behind != status.behind`` are indistinguishable — both fire on tick 1 and
+    both stay quiet on tick 2 when nothing changed upstream in between. Real checkouts don't
+    freeze like that: the operator stays behind while more commits land. Tick twice with
+    the upstream gaining a commit BETWEEN ticks, so ``status.behind`` genuinely changes
+    (1 -> 2) while ``previously_behind`` stays positive throughout. The correct edge (already
+    notified once, still behind) must stay quiet; ``!= status.behind`` would push again."""
+    _commit(upstream, "new.txt", "new\n")
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        behind = _tick(checkout, 0, monkeypatch)            # tick 1: 0 -> 1, fires
+        assert behind == 1
+        assert len(stub.sent) == 1
+
+        _commit(upstream, "new2.txt", "new2\n")             # upstream moves further ahead
+        behind = _tick(checkout, behind, monkeypatch)        # tick 2: previously_behind=1, behind=2
+
+    assert behind == 2
+    assert len(stub.sent) == 1, (
+        "a checkout that was already behind and fell further behind must stay quiet on the "
+        "second tick — it was already notified once and nothing requires a fresh push per "
+        "additional commit; `previously_behind != status.behind` would fire again here"
+    )
+    assert sum(1 for r in caplog.records if "update available" in r.getMessage()) == 1
+
+
 # --- auto_apply_sweep (CMX-148 part 2): the fully-UNATTENDED half, opt-in ------------
 
 def test_auto_apply_disabled_by_default():
