@@ -154,3 +154,37 @@ fixture happens to test. A rejection fixture proves a bad input stays out; only 
 fixture at the same depths proves a good input still gets in — and on this guard the
 acceptance failure mode is the silent one (`detect_status` returning `None` looks exactly
 like an idle pane), so it is the direction most worth pinning first, not last.
+
+**Recurred: CMX-337 rework round 5, same PR #434 — a distinct sub-shape, same family
+("a guarded condition proven where something else is already doing the work"), found on the
+OTHER half of this PR's diff, `.gitignore`, not `panescan.py`.**
+
+Round 4's fix (and every non-blocking note through round 4) left `.gitignore`'s new
+`*selfcheck*.json` pattern — added earlier on this branch for the no-separator spelling of a
+committed self-check scratch artifact — with no probe of its own in
+`tests/test_gitignore_scratch_files.py::REAL_SELF_CHECK_SCRATCH_FILENAMES`. That list's own
+comment says to keep it "the full list, not a representative sample," and every filename
+already in it is matched by one of the OTHER four patterns
+(`.chela-self-check-*.json`, `*self[-_]check*.json`, `*scratch*experiment*.json`) — so the new
+pattern was never the reason any assertion passed. The judge's round-5 mutation —
+`*selfcheck*.json` → `*selfcheckDISABLED*.json` — kept a syntactically valid, matches-nothing
+gitignore glob, and `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3554 passed).
+This is the same underlying failure as the rest of this entry (a condition proven only where
+it doesn't have to do the work — here, four *other* patterns "do the work" of matching every
+existing probe) but on a hand-maintained pattern-list-vs-probe-list pair rather than a
+position-gated boolean inside a scan loop: adding a line to one list does not require, or
+even hint at, adding the matching line to the other. Closed by adding
+`.chela_selfcheck_cmx337_round3.json` — the real filename that motivated the pattern, and the
+only probe in the list `*selfcheck*.json` alone matches — to
+`REAL_SELF_CHECK_SCRATCH_FILENAMES`; under the mutation
+`test_gitignore_matches_a_real_self_check_scratch_filename[.chela_selfcheck_cmx337_round3.json]`
+fails (`git check-ignore` exit 1) instead of passing. **Guard form that survives, extended to
+list-of-patterns guards:** when a change adds a new entry to one side of a hand-maintained
+pattern-list/probe-list pair, the same change must add a probe on the other side that ONLY
+the new entry matches — not one already covered by an existing entry — or the new entry is
+dead weight from the commit that adds it, with no test signal to say so.
+
+**See also:** [[26|shape 26]] — the same underlying failure (a claim with zero guard of its
+own, hiding behind an otherwise-large green suite), but shape 26 is about a *runtime literal*
+a PR's prose claims to have changed; round 5 above is one line in an already
+enumeration-tested list that was simply never added to its own parallel enumeration.

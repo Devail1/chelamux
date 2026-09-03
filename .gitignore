@@ -55,7 +55,7 @@ TODO.md
 # literal spelling — the old `.chela-self-check-*.json`-only rule caught 2 of the 4 spellings
 # actually committed: .chela-self-check-cmx280.json, .chela-self-check-cmx284.json,
 # scratch_cmx288_experiments.json, self_check_experiments.json (see d77c2c4),
-# .chela_selfcheck_cmx337_round3.json (see docs/defeat_shapes/338).
+# .chela_selfcheck_cmx337_round3.json (see docs/defeat_shapes/337, round 5).
 .chela-self-check-*.json
 *self[-_]check*.json
 *selfcheck*.json

@@ -21,7 +21,7 @@ existing filename in the list below is already matched by one of the OTHER patte
 (`.chela-self-check-*.json`, `*self[-_]check*.json`, `*scratch*experiment*.json`), so the new
 line was load-bearing for nothing this suite could see. The judge mutated it to
 `*selfcheckDISABLED*.json` — still a syntactically valid glob, matching no real filename — and
-the suite stayed green. See docs/defeat_shapes/338. A new pattern added to this list must come
+the suite stayed green. See docs/defeat_shapes/337 (round 5). A new pattern added to this list must come
 with a filename here that ONLY that pattern matches, or it is dead weight from the moment it is
 committed.
 """
