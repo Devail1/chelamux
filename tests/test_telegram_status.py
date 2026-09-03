@@ -907,3 +907,83 @@ def test_first_nonblank_row_is_accepted_at_EVERY_depth_the_lookback_reaches(gap)
     assert st.active is False          # settled: the relay poofs the message
     assert st.verb == "Worked for 1m 17s · 1 shell still running"
     assert st.seconds == 77            # ⭐ the payload that None would have thrown away
+
+
+def test_a_blank_spacer_does_not_make_a_later_row_count_as_the_FIRST_one():
+    """🔴 `seen_first_nonblank` is a latch: once any non-blank row has been seen, every
+    row above it needs the ellipsis. A blank spacer must not reset that latch.
+
+    Under `seen_first_nonblank = False` on the blank branch, the settled line below
+    becomes "first" again and is accepted unconditionally — so a finished turn's
+    past-tense summary is relayed as a live status and the ephemeral message never poofs,
+    which is the sticky-message failure the whole allowlist exists to prevent.
+
+    No existing fixture puts a BLANK row between the banner and the status line, so the
+    latch's reset was invisible.
+    """
+    pane = "\n".join([
+        "◍ output",
+        "",
+        "✻ Worked for 1m 17s · 1 shell still running",   # settled, above a blank spacer
+        "",                                               # ⭐ the blank the latch must survive
+        "✔ Update installed · Restart to update",         # the first non-blank above chrome
+        _RULE, "❯", _RULE, "",
+        "  ⏵⏵ auto mode on · 2 shells · ↰ for agents",
+    ]) + "\n"
+
+    assert detect_status(pane) is None, (
+        "a settled line separated from the banner by a blank row was accepted as a live "
+        "status — the first-non-blank latch was reset by the spacer"
+    )
+
+
+@pytest.mark.parametrize("glyph", list("·✻✽✶✳✢"))
+@pytest.mark.parametrize("gap", [2, 3, 4])
+def test_settled_line_is_rejected_on_every_frame_at_every_reachable_depth(glyph, gap):
+    """⭐ Round 6 parametrized the settled-rejection over all six frames, but only inside
+    `_banner_pane` — which pins the status row at ONE depth. So the frame axis and the
+    depth axis were each covered alone and never together, leaving a mutation that exempts
+    one frame AT one depth (`line[0] == "·" and i == chrome_idx - 2`) invisible to both.
+
+    This is the product of the two axes: every frame, at every depth past the first
+    non-blank row that the lookback reaches.
+    """
+    rows = (
+        ["◍ output", ""]
+        + [f"{glyph} Worked for 1m 17s · 1 shell still running"]
+        + ["  ⎿  filler"] * (gap - 2)
+        + ["✔ Update installed · Restart to update"]
+        + [_RULE, "❯", _RULE, "", "  ⏵⏵ auto mode on · 2 shells · ↰ for agents"]
+    )
+
+    assert detect_status("\n".join(rows) + "\n") is None, (
+        f"a settled line on frame {glyph!r} at depth {gap} was read as live — the ellipsis "
+        "gate must hold across BOTH axes, not each one alone"
+    )
+
+
+def test_the_scan_stops_at_the_NEAREST_accepted_spinner_row():
+    """The widened scan must take the row closest to the chrome and stop. Before this PR
+    the loop broke unconditionally after one non-blank row, so ordering could not matter;
+    widening it made ordering a real property that nothing pinned.
+
+    Replace the `break` with `pass` and the loop keeps going, so a FARTHER spinner row
+    overwrites the nearer one — the relay would show a stale verb and elapsed time from
+    earlier in the scrollback while the current turn runs.
+    """
+    pane = "\n".join([
+        "◍ output",
+        "✽ Stale… (99m 0s · ↓ 1.0k tokens)",     # farther: must NOT win
+        "  ⎿  Tip: something between them",
+        "✽ Current… (2m 10s · ↓ 6.2k tokens)",   # nearest to the chrome: must win
+        _RULE, "❯", _RULE, "",
+        "  ⏵⏵ auto mode on · 2 shells · ↰ for agents",
+    ]) + "\n"
+
+    st = detect_status(pane)
+
+    assert st is not None
+    assert st.verb.startswith("Current…"), (
+        f"the scan returned {st.verb!r} — a farther spinner row overwrote the nearest one, "
+        "so the relay would show a stale verb from earlier in the scrollback"
+    )
