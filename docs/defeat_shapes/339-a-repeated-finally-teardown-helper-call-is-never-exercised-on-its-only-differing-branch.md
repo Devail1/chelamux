@@ -48,3 +48,27 @@ adding `test_all_run_bg_teardowns_route_through_reap`, which walks `tests/test_t
 own AST, finds all six `proc = _run_bg(...)` teardown sites, and asserts each `finally:` body
 is structurally `_reap(proc)` and nothing else — verified to go red against the exact mutation
 above before being committed.
+
+**Round 2 addendum — the round-1 guard's own "nothing else" check enumerated positional args
+and never checked keywords:** `is_reap_call` (the predicate the round-1 guard above added)
+checked `stmt.value.func.id == "_reap"`, `len(stmt.value.args) == 1`, and
+`stmt.value.args[0].id == "proc"` — three conditions that read as "exactly the call
+`_reap(proc)`, no more, no less", but `ast.Call.args` holds only *positional* arguments;
+`ast.Call.keywords` is a separate list the predicate never inspected. **Mutation that defeats
+it:** change one call site's `finally: _reap(proc)` to `finally: _reap(proc, term_timeout=0)`.
+`len(args) == 1` and `args[0].id == "proc"` are both still true, so the guard passed —
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3545 passed, 0 failed) — even though
+`term_timeout=0` is not a cosmetic no-op: `_reap` calls `proc.wait(timeout=term_timeout)` and
+treats any raised `TimeoutExpired` as "didn't exit gracefully", so `timeout=0` collapses that
+window to nothing and SIGKILLs the supervisor before its bash `EXIT` trap (this file's own
+documented `cleanup()` / leaked-ttyd / leaked-`webterm_*` fix) can run — the exact failure mode
+issue #436 closed, reintroduced through the guard meant to catch exactly that. This is the
+AST-guard sibling of #76 (a call *spy* that captures full kwargs but whose assertion only
+checks a subset of them): there the data was captured and under-used; here `.keywords` was
+never even read. **Guard form that survives:** add `and not stmt.value.keywords` to
+`is_reap_call` — one extra positional-and-keyword-both-empty condition. More generally: an AST
+"this call has exactly N arguments and nothing else" guard must check `keywords` alongside
+`args` — checking only one half of Python's call representation is enumerating a subset while
+believing a superset invariant. Found CMX-339 rework round 2 (2026-09-03), PR #437 — the judge
+mutated the same call site to `_reap(proc, term_timeout=0)`; closed by adding
+`and not stmt.value.keywords`, verified to go red against the exact mutation before landing.
