@@ -674,8 +674,9 @@ def detect_exitplanmode(pane_text: str) -> ExitPlan | None:
 STATUS_SPINNERS = frozenset("·✻✽✶✳✢")
 
 # How far above / below the chrome separator the status line and the mode line
-# can sit (blank spacer rows in between), and how far up the pane to look for the
-# separator itself.
+# can sit (blank spacer rows in between, plus — on 2.1.259+ — a tip block and/or
+# an update banner Claude Code draws between the status line and the chrome; see
+# issue #432), and how far up the pane to look for the separator itself.
 _CHROME_SEARCH = 10
 _STATUS_LOOKBACK = 4
 _CHROME_RULE_MIN = 20
@@ -766,9 +767,13 @@ def detect_status(pane_text: str) -> Status | None:
     bullets — this very docstring would match a naive "line starts with a spinner"
     grep — so the status line is found *positionally* instead: locate the **chrome
     separator** (the run of ``─`` that closes the scrollback and opens the prompt
-    box) in the last few rows, then read the first non-blank line **above** it. If
-    that line does not open with a spinner glyph, there is no status line and we
-    return None rather than searching further up into the transcript body.
+    box) in the last few rows, then scan up to :data:`_STATUS_LOOKBACK` non-blank
+    rows above it for one that opens with a spinner glyph — Claude Code can draw a
+    tip block and/or an update banner between the live status line and the chrome,
+    so the status is not always the very first non-blank row. A row after the first
+    is only accepted while it is still *active* (carries the ``…`` ellipsis); a
+    settled/past-tense line found only by scanning past banners is rejected, so
+    widening the scan cannot resurrect an old turn's summary as if it were live.
 
     The shell count is a second, equally cheap read of the **same** captured text:
     on Claude Code 2.1.207 it is not in the status line but in the mode line below
@@ -778,9 +783,9 @@ def detect_status(pane_text: str) -> Status | None:
 
     Returns None for an idle pane, for a pane whose visible text merely *contains*
     bullets, for a pane with no chrome at all (a scrolled-back or non-Claude
-    window) — and, critically, for the **past-tense summary a finished turn leaves
-    behind** (:data:`_RE_STATUS_DONE`), which wears the same spinner glyph in the
-    same slot and never goes away. Never a guess.
+    window), and for a **past-tense summary** found only by scanning past a banner
+    (see :data:`_STATUS_ACTIVE`) — which wears the same spinner glyph in the same
+    slot and never goes away on its own. Never a guess.
     """
     if not pane_text:
         return None
@@ -799,21 +804,42 @@ def detect_status(pane_text: str) -> Status | None:
     if chrome_idx is None:
         return None  # no chrome visible → we cannot say anything about the status
 
+    # Claude Code 2.1.259+ can draw a tip block and/or an update banner between the
+    # live status line and the chrome rule ("⎿ Tip: …", "✔ Update installed …"), so
+    # the status is no longer always the FIRST non-blank row above the chrome — it
+    # can sit several rows back, behind those banners. The scan below therefore
+    # keeps going past a non-blank row that isn't a spinner match, instead of
+    # stopping at the first one (that unconditional stop was the bug: it made the
+    # first banner row look like "no status line" and the feature silently stopped
+    # firing — issue #432).
+    #
+    # The spinner must still sit at **column 0**: Claude gutter-indents every line
+    # of its own output, so an indented "· a bullet" — which its prose is full of —
+    # is body text, not a status, at any distance.
+    #
+    # Widening the scan reopens the risk the old unconditional break was guarding
+    # against in its comment: mistaking a stale spinner line from an earlier turn,
+    # further up the pane, for a live one. But that risk is already covered by the
+    # ellipsis check below (:data:`_STATUS_ACTIVE`) — a finished turn's line is
+    # past-tense and never carries "…" — so once we are past the first non-blank
+    # row, only an ACTIVE (ellipsis) spinner match is accepted; a settled/past-tense
+    # line found only by scanning past banners stays rejected, exactly as before.
+    # The FIRST non-blank row is still accepted unconditionally (active or settled)
+    # so a settled summary sitting directly above the chrome, with no banners in the
+    # way, keeps working exactly as it did before this change.
     verb: str | None = None
+    seen_first_nonblank = False
     for i in range(chrome_idx - 1, max(chrome_idx - 1 - _STATUS_LOOKBACK, -1), -1):
         line = lines[i]
         if not line.strip():
             continue
-        # The first non-blank row above the chrome is either a status line or the
-        # tail of the transcript. The spinner must sit at **column 0**: Claude
-        # gutter-indents every line of its own output, so an indented "· a bullet"
-        # — which its prose is full of, and which lands in exactly this position
-        # whenever a turn's last line is a bullet — is body text, not a status.
-        # Don't search further up: that is how a stale spinner line from an earlier
-        # turn gets mistaken for a live one.
+        is_first = not seen_first_nonblank
         if line[0] in STATUS_SPINNERS:
-            verb = line[1:].strip()
-        break
+            candidate = line[1:].strip()
+            if is_first or _STATUS_ACTIVE in candidate:
+                verb = candidate
+                break
+        seen_first_nonblank = True
     if not verb:
         return None
 

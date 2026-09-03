@@ -107,6 +107,50 @@ total 12
 · Cerebrating… (1m 38s · ↓ 4.6k tokens)
 """
 
+# ── issue #432: a tip block + update banner between the status line and chrome ──
+#
+# Claude Code 2.1.259 can draw a tip block *and* an update banner between the live
+# status line and the chrome rule — measured on a real 36-row pane: status at row
+# 26, the tip block at 27-28, the update banner at 29, chrome at 30 (a gap of
+# EXACTLY 4, i.e. _STATUS_LOOKBACK — see TIP_UPDATE_ONE_TOO_FAR_PANE below for the
+# gap-of-5 boundary case). The old `detect_status` took the first non-blank row
+# above the chrome and broke unconditionally, so it read the update banner instead
+# of ever reaching the status line — silently, since a missing status line looks
+# exactly like an idle pane.
+TIP_UPDATE_BANNER_PANE = f"""\
+● Running 1 shell command…
+  ⎿  $ tmux capture-pane -t chela:@32 -p
+
+✽ Wandering… (2m 10s · ↓ 6.2k tokens)
+  ⎿  Tip: Running multiple Claude sessions in parallel can help you move faster
+     for complex tasks
+✔ Update installed · Restart to update
+{_RULE}
+❯
+{_RULE}
+
+  ⏵⏵ auto mode on · 2 shells · ← for agents
+"""
+
+# Same shape, but the status line sits ONE row further back (gap of 5, one past
+# _STATUS_LOOKBACK) — must still resolve to None. Pins the boundary as "<=
+# _STATUS_LOOKBACK reaches, one more does not", not merely "somewhere in range".
+TIP_UPDATE_ONE_TOO_FAR_PANE = f"""\
+● Running 1 shell command…
+  ⎿  $ tmux capture-pane -t chela:@32 -p
+
+✽ Wandering… (2m 10s · ↓ 6.2k tokens)
+
+  ⎿  Tip: Running multiple Claude sessions in parallel can help you move faster
+     for complex tasks
+✔ Update installed · Restart to update
+{_RULE}
+❯
+{_RULE}
+
+  ⏵⏵ auto mode on · 2 shells · ← for agents
+"""
+
 
 # ── the parser ──────────────────────────────────────────────────────────────
 
@@ -175,6 +219,34 @@ def test_a_stale_spinner_line_further_up_the_pane_is_ignored():
     # in the scrollback must not be mistaken for the current state.
     pane = IDLE_PANE.replace("● Here", "x")  # no-op; keep IDLE shape
     pane = "✻ Churned for 2m 31s\n" + pane
+    assert detect_status(pane) is None
+
+
+def test_status_line_is_found_behind_a_tip_block_and_update_banner():
+    # issue #432: the old unconditional break read the update banner (the first
+    # non-blank row above the chrome) and returned None, so the feature silently
+    # stopped firing. The real status line sits exactly _STATUS_LOOKBACK rows back.
+    st = detect_status(TIP_UPDATE_BANNER_PANE)
+    assert st is not None
+    assert st.active is True
+    assert st.verb == "Wandering… (2m 10s · ↓ 6.2k tokens)"
+    assert st.shells == 2
+
+
+def test_status_line_one_row_beyond_the_lookback_is_not_found():
+    # Same shape as the fixture above, but the status line sits one row past
+    # _STATUS_LOOKBACK — pins the boundary exactly, not just "somewhere in range".
+    assert detect_status(TIP_UPDATE_ONE_TOO_FAR_PANE) is None
+
+
+def test_a_settled_line_found_only_by_scanning_past_a_banner_is_rejected():
+    # ⭐ Widening the scan must not resurrect a settled/past-tense summary that is
+    # only reachable by skipping a non-spinner banner row: the ellipsis check gates
+    # every row after the first non-blank one, exactly as it does for a stale
+    # spinner line further up the pane (the test above).
+    pane = TIP_UPDATE_BANNER_PANE.replace(
+        "✽ Wandering… (2m 10s · ↓ 6.2k tokens)", "✻ Worked for 1m 17s"
+    )
     assert detect_status(pane) is None
 
 
