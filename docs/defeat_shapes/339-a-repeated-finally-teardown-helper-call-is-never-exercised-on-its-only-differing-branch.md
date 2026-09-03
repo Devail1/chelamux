@@ -72,3 +72,38 @@ never even read. **Guard form that survives:** add `and not stmt.value.keywords`
 believing a superset invariant. Found CMX-339 rework round 2 (2026-09-03), PR #437 — the judge
 mutated the same call site to `_reap(proc, term_timeout=0)`; closed by adding
 `and not stmt.value.keywords`, verified to go red against the exact mutation before landing.
+
+**Round 3 addendum — round 2 closed the CALL-SITE representation; the identical harm moves
+to the DEFAULTS and to the terminate/kill ORDER, neither of which the AST guard reads and
+neither of which the helper's own unit tests observe:** the AST guard added in round 1/2 only
+parses the six `finally:` call sites — it has no opinion on what `_reap`'s signature actually
+defaults to, or on the order of statements inside `_reap`'s own body. Both `_reap` unit tests
+(`test_reap_survives_a_sigterm_ignoring_child`, `test_reap_propagates_if_the_child_survives_sigkill_too`)
+pass `term_timeout` and `kill_timeout` explicitly on every call, so neither test ever observes
+the *default* value those six bare `_reap(proc)` call sites actually get at runtime. And the
+propagation test pinned `terminate`/`kill` with three independent
+`fake.X.assert_called_once()` / `call_count` checks — none of which observe relative order,
+because all three stay true under ANY permutation of the four calls. **Mutations that defeat
+it:** (1) `def _reap(proc, term_timeout=10, ...)` → `term_timeout=0` — collapses the graceful
+window at all six call sites identically to the round-2 mutation, just moved from the call
+site to the signature; (2) swap the body to `proc.kill()` first, `proc.terminate()` as the
+"escalation" — every `assert_called_once`/`call_count` in the propagation test still passes;
+(3) `def _reap(proc, ..., kill_timeout=5)` → `kill_timeout=0` — the un-caught final
+`proc.wait(timeout=kill_timeout)` now raises `TimeoutExpired` out of `finally:` on the exact
+hang path #436 exists to absorb. All three: `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed
+green (3545 passed, 0 failed) under each individually. **Why the AST guard's own design
+doesn't extend to these:** it was deliberately written to check *representation at the call
+site* ("is this textually `_reap(proc)`, no more, no less") — the right instrument for the
+round-1/2 shape, but defaults and body-internal ordering aren't call-site text at all; they
+live in the callee's signature and implementation, which no source-derived check of the
+*caller* can see. **Guard form that survives:** stop enumerating representations of the call
+and pin the callee's *effective* contract directly, once: `inspect.signature(_reap).parameters['term_timeout'].default`
+(and `kill_timeout`'s) asserted `>=` a floor large enough to preserve the graceful window and
+the post-SIGKILL wait, plus a single `fake.mock_calls == [call.terminate(), call.wait(...),
+call.kill(), call.wait(...)]` equality in place of the three independent
+`assert_called_once`/`call_count` checks — one assertion that pins method, arguments AND order
+together, so no permutation of the same four calls can satisfy it. Found CMX-339 rework round 3
+(2026-09-03), PR #437 — the judge applied all three mutations above to a throwaway checkout;
+closed by adding `test_reap_defaults_cannot_collapse_either_wait_window` (the signature-default
+floor check) and replacing the propagation test's three assertions with the single
+`mock_calls` sequence, both verified to go red against each mutation in turn before landing.

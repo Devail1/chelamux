@@ -24,6 +24,7 @@ that injects `-L <sock>` — also per-invocation, and it inherits into the scrip
 `tmux` and `chela.discovery` subprocess calls alike.
 """
 import ast
+import inspect
 import json
 import os
 import shutil
@@ -33,7 +34,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -359,13 +360,16 @@ def test_reap_survives_a_sigterm_ignoring_child(tmp_path):
         time.sleep(0.3)  # let it install the SIGTERM handler before we send one
         assert proc.poll() is None, "stub exited before the test even started"
         _reap(proc, term_timeout=1, kill_timeout=5)  # must NOT raise TimeoutExpired
+        # Asserted HERE, inside the try and immediately after _reap returns — not
+        # after this function's own `finally:` below, which reaps the stub itself
+        # and would make this assertion pass regardless of what `_reap` did.
+        assert proc.poll() is not None, "SIGTERM-ignoring child was never reaped"
+        assert not os.path.exists(f"/proc/{proc.pid}"), \
+            f"child pid {proc.pid} outlived the reap — leaked past teardown"
     finally:
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5)
-    assert proc.poll() is not None, "SIGTERM-ignoring child was never reaped"
-    assert not os.path.exists(f"/proc/{proc.pid}"), \
-        f"child pid {proc.pid} outlived the reap — leaked past teardown"
 
 
 def test_reap_propagates_if_the_child_survives_sigkill_too():
@@ -373,16 +377,46 @@ def test_reap_propagates_if_the_child_survives_sigkill_too():
     A process that is still alive after SIGKILL (the only realistic real-world case is
     "the process never actually died") is a genuine "will not exit" regression — the
     exact thing this file's other tests exist to catch — and must still fail the test,
-    not vanish silently."""
+    not vanish silently.
+
+    The sequence is pinned as ONE `mock_calls` equality, not three independent
+    `assert_called_once`/`call_count` checks — those are all satisfied by ANY
+    permutation of the four calls (e.g. kill-then-terminate), which is exactly the
+    ordering mutation docs/defeat_shapes/339 records. `mock_calls` pins the method,
+    the arguments AND the order in one assertion.
+    """
     fake = MagicMock()
     fake.wait = MagicMock(side_effect=subprocess.TimeoutExpired(cmd="stub", timeout=1))
 
     with pytest.raises(subprocess.TimeoutExpired):
         _reap(fake, term_timeout=1, kill_timeout=1)
 
-    fake.terminate.assert_called_once()
-    fake.kill.assert_called_once()
-    assert fake.wait.call_count == 2, "must attempt both the graceful and the SIGKILL wait"
+    assert fake.mock_calls == [
+        call.terminate(),
+        call.wait(timeout=1),
+        call.kill(),
+        call.wait(timeout=1),
+    ], "must SIGTERM, wait, then SIGKILL, wait again — in that order, not any permutation"
+
+
+def test_reap_defaults_cannot_collapse_either_wait_window():
+    """WIRING: `_reap`'s defaults are load-bearing at all six call sites, which all call
+    bare `_reap(proc)` and take both timeouts from the signature. Nothing in the two
+    tests above observes the defaults — both pass every timeout explicitly — so a
+    `term_timeout=0` or `kill_timeout=0` default is invisible to them even though it
+    collapses the graceful-SIGTERM window (skips the supervisor's bash EXIT trap,
+    issue #436's leaked-ttyd/webterm_* regression) or turns the un-caught final
+    `proc.wait(timeout=kill_timeout)` into an immediate `TimeoutExpired` out of
+    `finally:` on the exact hang path `_reap` exists to absorb."""
+    params = inspect.signature(_reap).parameters
+    assert params["term_timeout"].default >= 5, (
+        "term_timeout default collapses the graceful-SIGTERM window before a "
+        "supervisor's bash EXIT trap can run (issue #436)"
+    )
+    assert params["kill_timeout"].default >= 1, (
+        "kill_timeout default is <1s — the un-caught final wait would raise "
+        "TimeoutExpired out of finally: on the hang path _reap exists to absorb"
+    )
 
 
 # --- wiring: every `proc = _run_bg(...)` teardown must actually route through _reap ---
