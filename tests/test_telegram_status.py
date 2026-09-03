@@ -119,6 +119,39 @@ INDENTED_ELLIPSIS_PANE = f"""\
   ⏵⏵ auto mode on · ← for agents
 """
 
+# ⛔ Same false positive as INDENTED_ELLIPSIS_PANE, pushed one row further back: the
+# ellipsis-carrying indented bullet now sits at chrome_idx-3, not chrome_idx-2. The
+# widened scan reaches chrome_idx-1..chrome_idx-4 (_STATUS_LOOKBACK == 4), so this
+# row is still in bounds — but until this fixture existed, only chrome_idx-2 had
+# column-0 coverage, so a mutation that kept the column-0 rule for the two rows
+# nearest the chrome and dropped it for the rest still passed every fixture here.
+# detect_status must still return None.
+INDENTED_ELLIPSIS_DEEPER_PANE = f"""\
+● Here is the plan:
+  · deploying the thing…
+  ⎿  Tip: some tip text here
+✔ Update installed · Restart to update
+{_RULE}
+❯
+{_RULE}
+
+  ⏵⏵ auto mode on · ← for agents
+"""
+
+# Same shape again, but at chrome_idx-4 — the FARTHEST row the widened scan reaches.
+# Pins the column-0 rule at the far end of the lookback, not just the near end.
+INDENTED_ELLIPSIS_DEEPEST_PANE = f"""\
+  · deploying the thing…
+  ⎿  Tip: some tip text here
+     continued
+✔ Update installed · Restart to update
+{_RULE}
+❯
+{_RULE}
+
+  ⏵⏵ auto mode on · ← for agents
+"""
+
 # No chrome at all (scrolled back, or not a Claude window) — we cannot say anything.
 NO_CHROME_PANE = """\
 $ ls -la
@@ -204,6 +237,19 @@ def test_an_indented_ellipsis_bullet_past_the_first_row_is_not_a_status_line():
     # this bullet is indented (body text) but DOES carry "…", so only column-0 rejects
     # it. A guard that drops column-0 for non-first rows would wrongly accept it.
     assert detect_status(INDENTED_ELLIPSIS_PANE) is None
+
+
+def test_an_indented_ellipsis_bullet_at_chrome_minus_3_is_not_a_status_line():
+    # Column-0 must hold three rows back too, not just at the nearest indented row
+    # (chrome_idx-2, pinned above). A mutation that enforces column-0 only for the
+    # two rows nearest the chrome and relaxes it deeper would wrongly accept this.
+    assert detect_status(INDENTED_ELLIPSIS_DEEPER_PANE) is None
+
+
+def test_an_indented_ellipsis_bullet_at_the_farthest_lookback_row_is_not_a_status_line():
+    # Same shape at chrome_idx-4 — the farthest row _STATUS_LOOKBACK reaches. Pins
+    # the column-0 rule at the far end of the widened scan, not just the near end.
+    assert detect_status(INDENTED_ELLIPSIS_DEEPEST_PANE) is None
 
 
 def test_pane_without_chrome_has_no_status():

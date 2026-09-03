@@ -43,3 +43,27 @@ returns `None`.
 **See also:** [[66|shape 66]] — the same family (an AND of independently-variable
 conditions), but there the untested axis is never exercised at all rather than exercised
 redundantly through the tested axis's own rejection.
+
+**Recurred:** CMX-337 rework round 2, same PR #434. The round-1 fix closed column-0 at
+exactly ONE position — `INDENTED_ELLIPSIS_PANE`'s ellipsis-carrying indented bullet sits at
+`chrome_idx-2` — while the production comment it justified claims column-0 holds "at any
+distance". The widened scan reaches `chrome_idx-1` through `chrome_idx-4`
+(`_STATUS_LOOKBACK == 4`), so two of those four reachable rows (`chrome_idx-3`,
+`chrome_idx-4`) had no column-0 coverage at all. The judge's round-2 mutation —
+`if line[0] in STATUS_SPINNERS:` → `if (line[0] if i >= chrome_idx - 2 else
+line.strip()[0]) in STATUS_SPINNERS:` — enforces column-0 only within two rows of the chrome
+and relaxes it deeper, exactly the two rows `INDENTED_ELLIPSIS_PANE` never reached.
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3516 passed) under it. This is the
+same shape as the round-1 entry above (a condition proven only where it doesn't have to do
+the work) but the axis that goes unexercised is POSITION within a bounded scan range, not a
+sibling boolean condition on the same row — and unlike shape 53's unbounded family of
+position formulas, `_STATUS_LOOKBACK` is a small, fixed constant, so the range is exhaustively
+enumerable: pinning both ends closes it completely, no differential fixture needed. Closed by
+two more fixtures, `INDENTED_ELLIPSIS_DEEPER_PANE` (bullet at `chrome_idx-3`) and
+`INDENTED_ELLIPSIS_DEEPEST_PANE` (bullet at `chrome_idx-4`, the farthest row the lookback
+reaches) — under the mutation both are read as an active status line
+(`Status(verb='· deploying the thing…', active=True)`); the correct code returns `None` for
+both. **Guard form that survives, updated:** when a claim like "at any distance" is backed by
+a BOUNDED scan, don't stop at one interior fixture — pin the near end (first row past the
+unconditional-accept row) AND the far end (the last row the lookback constant actually
+reaches); a single interior position leaves either side of it free for a mutation to relax.
