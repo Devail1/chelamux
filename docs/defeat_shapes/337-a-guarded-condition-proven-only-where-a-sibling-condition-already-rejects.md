@@ -67,3 +67,42 @@ both. **Guard form that survives, updated:** when a claim like "at any distance"
 a BOUNDED scan, don't stop at one interior fixture — pin the near end (first row past the
 unconditional-accept row) AND the far end (the last row the lookback constant actually
 reaches); a single interior position leaves either side of it free for a mutation to relax.
+
+**Recurred: CMX-337 rework round 3, same PR #434 — twice, on both gates of the pair.**
+
+1. The round-2 fix (above) pinned the column-0 gate at both ends of the lookback but left
+   the *sibling* gate — the ellipsis check — pinned only at the far end
+   (`chrome_idx-4`, via `test_a_stale_spinner_line_further_up_the_pane_is_ignored` and
+   `test_a_settled_line_found_only_by_scanning_past_a_banner_is_rejected`, which both
+   happen to put their settled line at the same depth). The judge's round-3 mutation —
+   `if is_first or _STATUS_ACTIVE in candidate:` → `if is_first or i > chrome_idx - 4 or
+   _STATUS_ACTIVE in candidate:` — enforces the ellipsis gate only at `chrome_idx-4` and
+   accepts a settled column-0 line unconditionally at every nearer row (`chrome_idx-1`
+   through `chrome_idx-3`). `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green
+   (3518 passed) under it. Closed by two more fixtures at the previously-uncovered near
+   rows — `SETTLED_BEHIND_BANNER_NEAR_PANE` (`chrome_idx-2`) and
+   `SETTLED_BEHIND_TWO_BANNERS_PANE` (`chrome_idx-3`) — exercised by
+   `test_a_settled_line_two_rows_back_is_rejected` and
+   `test_a_settled_line_three_rows_back_is_rejected`; under the mutation both resolve to
+   `Status(verb='Worked for 1m 17s', active=False, ...)` instead of `None`. **The
+   "pin both ends" rule from round 2 was applied to only one of the two ANDed gates —
+   this pair's two conditions have to be closed independently, at both ends, each.**
+
+2. Separately, a NEW sub-shape on the *same* column-0 gate: `BULLETS_PANE`'s own comment
+   claims its indented bullet is "the very last body line — directly above the chrome",
+   but the fixture has a blank spacer between the last bullet and the chrome rule, so the
+   bullet it actually exercises sits at `chrome_idx-2`, not `chrome_idx-1`. No fixture in
+   the file ever put an indented bullet at `chrome_idx-1` — the row that takes the
+   `is_first` path (active-or-settled accepted unconditionally once column-0 passes),
+   making it the single position where a relaxed column-0 check costs the most. The
+   judge's mutation — `if line[0] in STATUS_SPINNERS:` → `if (line.strip()[0] if i ==
+   chrome_idx - 1 else line[0]) in STATUS_SPINNERS:` — relaxes column-0 at exactly that
+   untested row and left it enforced everywhere else the round-2 fixtures already covered.
+   Suite stayed green (3518 passed). Closed by `BULLET_DIRECTLY_ABOVE_CHROME_PANE` (the
+   `BULLETS_PANE` shape with the spacer removed, so the last bullet is truly adjacent to
+   the chrome) via `test_a_bullet_directly_above_the_chrome_is_not_a_status_line`; under
+   the mutation it resolves to `Status(verb='· third bullet', active=False)` instead of
+   `None`. **A comment's claimed position is not evidence of the fixture's actual
+   position — when a docstring/comment says "this row" about a hand-authored multi-line
+   fixture, recompute the index rather than trusting the prose; a spacer or an extra line
+   silently shifts everything below it.**

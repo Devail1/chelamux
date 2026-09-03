@@ -84,15 +84,35 @@ IDLE_PANE = f"""\
 """
 
 # ⛔ THE FALSE POSITIVE the anchoring exists to prevent: Claude's output is full of
-# `·` bullets, and here one is the very last body line — directly above the chrome.
-# It is INDENTED (Claude gutter-indents its own output; a real status line is at
-# column 0), and it is not a status. A spinner grep would relay "third bullet".
+# `·` bullets, and here one is the second-to-last body line (a blank spacer sits
+# between the last bullet and the chrome — see BULLET_DIRECTLY_ABOVE_CHROME_PANE
+# below for the row truly adjacent to the chrome). It is INDENTED (Claude
+# gutter-indents its own output; a real status line is at column 0), and it is not
+# a status. A spinner grep would relay "third bullet".
 BULLETS_PANE = f"""\
 ● Here is the plan:
   · rotate the group
   · filter-repo, then ask GitHub to purge
   · third bullet
 
+{_RULE}
+❯
+{_RULE}
+
+  ⏵⏵ auto mode on · ← for agents
+"""
+
+# ⛔ Same false positive as BULLETS_PANE, but with the blank spacer removed so the
+# indented bullet sits at chrome_idx-1 — the row immediately above the chrome, and
+# the ONLY row that takes the `is_first` path (which accepts active-or-settled
+# unconditionally once column-0 passes). No other fixture in this file puts an
+# indented "· " bullet directly there, so this is the one position where a relaxed
+# column-0 check costs the most: it would relay "third bullet" as a live status.
+BULLET_DIRECTLY_ABOVE_CHROME_PANE = f"""\
+● Here is the plan:
+  · rotate the group
+  · filter-repo, then ask GitHub to purge
+  · third bullet
 {_RULE}
 ❯
 {_RULE}
@@ -150,6 +170,42 @@ INDENTED_ELLIPSIS_DEEPEST_PANE = f"""\
 {_RULE}
 
   ⏵⏵ auto mode on · ← for agents
+"""
+
+# ⛔ A settled/past-tense line reachable ONLY by scanning past a banner, pinned at
+# chrome_idx-2 — the NEAR end of the widened scan. The two existing fixtures that
+# exercise the ellipsis gate on a non-first row (below) both happen to put the
+# settled line at chrome_idx-4, the FAR end, so a mutation that enforces the
+# ellipsis gate only near the chrome (e.g. `i > chrome_idx - 4`) and accepts a
+# settled column-0 line unconditionally at every nearer row would still pass every
+# other fixture here. detect_status must still return None.
+SETTLED_BEHIND_BANNER_NEAR_PANE = f"""\
+● Running 1 shell command…
+  ⎿  $ tmux capture-pane -t chela:@32 -p
+
+✻ Worked for 1m 17s
+✔ Update installed · Restart to update
+{_RULE}
+❯
+{_RULE}
+
+  ⏵⏵ auto mode on · 2 shells · ← for agents
+"""
+
+# Same shape, one row further back: the settled line sits at chrome_idx-3, behind
+# two banner rows instead of one. Together with SETTLED_BEHIND_BANNER_NEAR_PANE
+# (chrome_idx-2) and the existing chrome_idx-4 fixtures below, this pins the
+# ellipsis gate at every row the widened scan reaches.
+SETTLED_BEHIND_TWO_BANNERS_PANE = f"""\
+● Running 1 shell command…
+✻ Worked for 1m 17s
+  ⎿  Tip: some tip text here
+✔ Update installed · Restart to update
+{_RULE}
+❯
+{_RULE}
+
+  ⏵⏵ auto mode on · 2 shells · ← for agents
 """
 
 # No chrome at all (scrolled back, or not a Claude window) — we cannot say anything.
@@ -230,6 +286,14 @@ def test_idle_pane_has_no_status():
 def test_bullets_in_output_are_not_a_status_line():
     # The whole reason for anchoring on the chrome (and demanding column 0).
     assert detect_status(BULLETS_PANE) is None
+
+
+def test_a_bullet_directly_above_the_chrome_is_not_a_status_line():
+    # The row immediately above the chrome (chrome_idx-1) is the ONLY row that
+    # takes the `is_first` path (active-or-settled accepted unconditionally once
+    # column-0 passes) — so it is the one position where a relaxed column-0 check
+    # costs the most. No other fixture puts an indented bullet exactly there.
+    assert detect_status(BULLET_DIRECTLY_ABOVE_CHROME_PANE) is None
 
 
 def test_an_indented_ellipsis_bullet_past_the_first_row_is_not_a_status_line():
@@ -315,11 +379,27 @@ def test_a_settled_line_found_only_by_scanning_past_a_banner_is_rejected():
     # ⭐ Widening the scan must not resurrect a settled/past-tense summary that is
     # only reachable by skipping a non-spinner banner row: the ellipsis check gates
     # every row after the first non-blank one, exactly as it does for a stale
-    # spinner line further up the pane (the test above).
+    # spinner line further up the pane (the test above). This fixture puts the
+    # settled line at chrome_idx-4, the FAR end of the widened scan — see the two
+    # tests below for the NEAR end (chrome_idx-2, chrome_idx-3).
     pane = TIP_UPDATE_BANNER_PANE.replace(
         "✽ Wandering… (2m 10s · ↓ 6.2k tokens)", "✻ Worked for 1m 17s"
     )
     assert detect_status(pane) is None
+
+
+def test_a_settled_line_two_rows_back_is_rejected():
+    # Pins the ellipsis gate at chrome_idx-2 — the row nearest the chrome that is
+    # still NOT the unconditional-accept first row. A mutation that enforces the
+    # gate only near the far end of the lookback (e.g. only at chrome_idx-4) would
+    # accept this settled line unconditionally instead.
+    assert detect_status(SETTLED_BEHIND_BANNER_NEAR_PANE) is None
+
+
+def test_a_settled_line_three_rows_back_is_rejected():
+    # Same as above, one row further back (chrome_idx-3) — closes the remaining
+    # reachable row between the chrome_idx-2 and chrome_idx-4 fixtures.
+    assert detect_status(SETTLED_BEHIND_TWO_BANNERS_PANE) is None
 
 
 # ── should_keep: the one place the keep-or-poof rule lives ───────────────────
