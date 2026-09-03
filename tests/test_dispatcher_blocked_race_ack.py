@@ -417,3 +417,64 @@ def test_acknowledge_stamps_the_REAL_clock_not_a_fixed_timestamp(tmp_path, monke
     with dispatcher._db() as conn:
         row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
     assert row["blocked_race_ack_at"] == "2026-09-03T12:34:56.789012+00:00"
+
+
+def test_acknowledge_resolves_the_identifier_and_stamps_the_RESOLVED_task_id(tmp_path, monkeypatch):
+    """🔴 The acknowledgement lands on the run the operator NAMED, however they named it.
+
+    `resolve_run` accepts a run id, a **branch name**, or a **window name** — that is why
+    `ident` and `task_id` are separate variables, and the subcommand's own `--help`
+    advertises it. Every other fixture here passes the task id itself, where `ident` and
+    `run["task_id"]` are the same string and `task_id = ident` is indistinguishable from
+    `task_id = run["task_id"]`.
+
+    This drives the case where they DIFFER: acknowledge by BRANCH name. Under the mutation
+    the CAS would look for a row whose `task_id` is the branch name, match nothing, and the
+    operator's acknowledgement of a real stuck row would quietly do nothing — while the
+    command still reported the branch name back as the task it acknowledged.
+    """
+    with dispatcher._db() as conn:
+        _row(conn, task_id="abc123", branch_name="cmx-336")
+
+    result = dispatcher.acknowledge_blocked_race("cmx-336", by="liav", note="by branch")
+
+    assert result["ok"] is True
+    assert result["task_id"] == "abc123", (
+        f"the result named {result['task_id']!r} — the identifier the operator typed, not "
+        "the run it resolved to"
+    )
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    assert row["blocked_race_ack_by"] == "liav", (
+        "acknowledging by branch name stamped nothing — the CAS was given the raw "
+        "identifier instead of the resolved task_id"
+    )
+
+
+def test_acknowledge_event_payload_records_the_STAMPED_actor_not_the_raw_argument(tmp_path, monkeypatch):
+    """The `blocked_race_ack` event is the audit record OF the `blocked_race_ack_by`
+    column, so the two must agree.
+
+    They coincide whenever `--by` is given explicitly, which is what every other fixture
+    does — so `\"by\": by` (the raw argument) reads back identically to `\"by\": who` (the
+    value actually stamped). This drives the one case where they differ: `by=\"\"`, where
+    the documented `$USER`/`$USERNAME`/`\"unknown\"` chain fills `who` in. Under the mutation
+    the column would say `liav` while the audit trail said `\"\"` — an audit record that
+    disagrees with the fact it exists to record.
+    """
+    monkeypatch.setenv("USER", "liav")
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    dispatcher.acknowledge_blocked_race("abc123")      # ⭐ no --by: the env chain fills it
+
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    assert row["blocked_race_ack_by"] == "liav"        # the column took the env value
+
+    acked = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert acked, "no blocked_race_ack event was logged"
+    assert acked[0]["payload"]["by"] == "liav", (
+        f"the audit event recorded {acked[0]['payload']['by']!r} but the column was stamped "
+        "'liav' — the event must record the actor actually stamped, not the raw argument"
+    )
