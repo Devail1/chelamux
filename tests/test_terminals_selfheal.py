@@ -27,11 +27,12 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -100,6 +101,32 @@ def _tmux(env, sock, *args, check=True):
                           env=env, capture_output=True, text=True, check=check)
 
 
+def _reap(proc, term_timeout=10, kill_timeout=5):
+    """Teardown-safe reap: SIGTERM, bounded wait, escalate to SIGKILL, wait again.
+
+    A supervisor slow to exit after SIGTERM must not fail the TEST that is merely
+    cleaning up after it — every assertion in that test already ran and passed, so a
+    `TimeoutExpired` out of teardown misreports "the supervisor is broken" when
+    nothing under test was. Escalating to SIGKILL (which a process cannot ignore) is
+    what guarantees no supervisor outlives the test. The final `wait` is deliberately
+    NOT wrapped in its own try/except: if the child survives SIGKILL too, that is a
+    real "process will not die" regression and must still fail the test, not vanish
+    into a blanket `except Exception: pass`.
+
+    Tests that assert SIGTERM promptness as their actual behavior-under-test (see the
+    "must still answer SIGTERM promptly" checks below) call `proc.wait()` directly for
+    that — this helper is for `finally:` cleanup only, not a replacement for them.
+    """
+    proc.terminate()
+    try:
+        proc.wait(timeout=term_timeout)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    proc.kill()
+    proc.wait(timeout=kill_timeout)
+
+
 def _run_bg(env, extra=None):
     return subprocess.Popen(
         [str(SCRIPT)], env={**env, **(extra or {})},
@@ -144,8 +171,7 @@ def test_missing_session_is_created_not_fatal(env, sock):
             "supervisor never created the missing session"
         assert proc.poll() is None, "supervisor exited after creating the session"
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        _reap(proc)
 
 
 def test_unreachable_tmux_backs_off_instead_of_exiting(env, tmp_path):
@@ -167,8 +193,7 @@ def test_unreachable_tmux_backs_off_instead_of_exiting(env, tmp_path):
         time.sleep(3)  # pre-fix this exited in ~12ms; pm2 restarted it ~80x/s
         assert proc.poll() is None, "supervisor exited with no tmux — pm2 would hot-loop"
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        _reap(proc)
 
 
 def test_disabled_wall_still_writes_empty_map_and_idles(env, sock):
@@ -189,8 +214,7 @@ def test_disabled_wall_still_writes_empty_map_and_idles(env, sock):
         proc.terminate()
         proc.wait(timeout=5)  # pre-fix: hung on `sleep 3600`, i.e. up to an hour
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        _reap(proc)
 
 
 @pytest.mark.skipif(shutil.which("pgrep") is None, reason="pgrep not installed")
@@ -233,8 +257,7 @@ def test_disabled_wall_sigterm_does_not_orphan_the_idle_sleep(env):
         assert not os.path.exists(f"/proc/{sleep_pid}"), \
             f"sleep pid {sleep_pid} outlived the supervisor — orphaned onto PID 1"
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        _reap(proc)
 
 
 # --- half 2: a LIVE session must never be recreated (the destructive regression) ---
@@ -257,8 +280,7 @@ def test_live_session_and_its_windows_are_never_recreated(env, sock):
         assert discovery.ANCHOR_WINDOW not in _windows(env, sock), \
             "self-heal added an anchor window to a live session"
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        _reap(proc)
 
 
 def test_create_is_a_noop_even_if_the_has_session_gate_lies(env, sock):
@@ -289,8 +311,7 @@ def test_session_recreated_after_it_disappears(env, sock):
                      msg="it exited when the session was killed"), \
             "supervisor did not recreate the vanished session"
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        _reap(proc)
 
 
 # --- the Python half (chela.discovery), used by the dashboard's spawn path ---
@@ -315,3 +336,49 @@ def test_ensure_session_false_when_tmux_unreachable(env):
     with patch.dict(os.environ, env, clear=False):
         with patch("chela.discovery.subprocess.run", side_effect=FileNotFoundError):
             assert discovery.ensure_session() is False
+
+
+# --- issue #436: teardown reap must never fail the test it is cleaning up after ---
+
+def test_reap_survives_a_sigterm_ignoring_child(tmp_path):
+    """Regression for issue #436: a `finally:` block's `proc.wait(timeout=10)` used to
+    have no SIGKILL fallback, so a supervisor that (for whatever reason) does not exit
+    within 10s of SIGTERM fails the TEST that was cleaning up after it, even though
+    every assertion in that test's body already passed. `_reap` must escalate to
+    SIGKILL instead — which the child cannot ignore — and the whole thing must still
+    reap cleanly with no leaked pid."""
+    stub = tmp_path / "ignore_term.py"
+    stub.write_text(
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "time.sleep(30)\n"
+    )
+    proc = subprocess.Popen([sys.executable, str(stub)])
+    try:
+        time.sleep(0.3)  # let it install the SIGTERM handler before we send one
+        assert proc.poll() is None, "stub exited before the test even started"
+        _reap(proc, term_timeout=1, kill_timeout=5)  # must NOT raise TimeoutExpired
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+    assert proc.poll() is not None, "SIGTERM-ignoring child was never reaped"
+    assert not os.path.exists(f"/proc/{proc.pid}"), \
+        f"child pid {proc.pid} outlived the reap — leaked past teardown"
+
+
+def test_reap_propagates_if_the_child_survives_sigkill_too():
+    """Guard: escalating to SIGKILL must not become a blanket `except Exception: pass`.
+    A process that is still alive after SIGKILL (the only realistic real-world case is
+    "the process never actually died") is a genuine "will not exit" regression — the
+    exact thing this file's other tests exist to catch — and must still fail the test,
+    not vanish silently."""
+    fake = MagicMock()
+    fake.wait = MagicMock(side_effect=subprocess.TimeoutExpired(cmd="stub", timeout=1))
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        _reap(fake, term_timeout=1, kill_timeout=1)
+
+    fake.terminate.assert_called_once()
+    fake.kill.assert_called_once()
+    assert fake.wait.call_count == 2, "must attempt both the graceful and the SIGKILL wait"
