@@ -44,3 +44,49 @@ Closed by `test_cmd_telegram_wires_bot_send_photos_into_the_relay` in
 `tests/test_telegram_gate_starvation.py`, which spies on `chela.telegram.RegistryRelay` and
 asserts the captured `send_photos` kwarg is a bound `BotSender.send_photos` method — red the
 moment the kwarg is dropped, green once it's restored.
+
+**Round 2 — a hand-rolled multipart body's two present pieces are glued together with no
+assertion of the separator between them:** a different shape, filed here rather than as a new
+file because it was found on the same CMX-338 branch and the catalog's own numbering rule ties
+an added file's number to the branch's task id, which this file already claims (see
+`test_defeat_shapes_added_files_are_numbered_by_branch_task_id`).
+
+`_urllib_media_transport`'s hand-rolled `multipart/form-data` body (`chela/telegram/relay.py`)
+writes each field as `f'...name="{name}"\r\n\r\n' f"{value}\r\n"` and each file part as a
+header, then `parts += data`, then `parts += b"\r\n"`, before the next `--{boundary}` (or the
+closing `--{boundary}--`) is appended. The one test exercising the real wire bytes
+(`test_urllib_media_transport_sends_multipart_with_matching_boundary`) asserted that the
+boundary line and the field's value / the file's raw bytes each appeared *somewhere* in the
+body (`assert f"--{boundary}\r\n".encode() in body`, `assert b"c1" in body`, `assert
+b"\x89PNGDATA" in body`) — three independent presence checks, none of which reads the bytes
+*between* any two of them.
+
+**Mutation that defeats it:** drop the trailing `\r\n` that terminates a field value or a file's
+raw bytes before the next boundary:
+
+```diff
+-                 f"{value}\r\n"
++                 f"{value}"
+```
+```diff
+-             parts += b"\r\n"
++             parts += b""
+```
+
+Both the field/file's own bytes and the following `--{boundary}` line are still present in the
+body afterward — gluing them together (`c1--{boundary}` instead of `c1\r\n--{boundary}`,
+`\x89PNGDATA--{boundary}--` instead of `\x89PNGDATA\r\n--{boundary}--`) changes nothing that any
+existing presence check reads. `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3544
+passed, 0 failed) under either mutation — while a Telegram Bot API server parsing the malformed
+body server-side would reject the whole upload (the `\r\n` before a boundary is not decorative;
+RFC 2046 defines the boundary delimiter as starting with a CRLF, so a value that runs straight
+into `--` is fused onto the boundary line as part of the value instead of terminating it).
+
+**Guard form that survives:** for a hand-rolled wire format where a mutation could glue two
+adjacent, independently-real pieces together by dropping the byte(s) between them, presence
+checks on each piece in isolation are not enough — assert the exact adjacency: the piece
+immediately followed by its terminator immediately followed by the next boundary, as one
+contiguous substring (`b'name="chat_id"\r\n\r\nc1\r\n--' + boundary.encode() in body`,
+`b"\x89PNGDATA\r\n--" + boundary.encode() + b"--\r\n" in body`), so a corruption that removes
+just the separator — leaving both neighbors intact and independently "present" — breaks the
+one assertion that spans the seam between them and the suite goes red.

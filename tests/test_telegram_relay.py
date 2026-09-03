@@ -1162,6 +1162,36 @@ def test_send_photos_reports_oversized_image_instead_of_dropping_silently():
     # over the  cap" is not visible in any useful sense.
     assert _format_photo_size(MAX_PHOTO_BYTES) in fields["text"]
     assert _format_photo_size(MAX_PHOTO_BYTES) != ""
+    # The COUNT must be the real number of dropped images, not a blanked-out
+    # placeholder — one oversized image in, "1 image(s) dropped" out.
+    assert "1 image(s) dropped" in fields["text"]
+
+
+def test_send_photos_reports_the_real_count_of_dropped_images():
+    # Two oversized images must report "2", not the count of a single drop —
+    # guards against a marker that always renders the same (possibly
+    # zeroed-out) count regardless of how many images were actually dropped.
+    tr = _Transport()
+    mt = _MediaTransport()
+    sender = BotSender("tok", "chat1", None, transport=tr, media_transport=mt)
+    big = b"x" * (MAX_PHOTO_BYTES + 1)
+    assert sender.send_photos([("image/png", big), ("image/png", big)]) is True
+    _, fields = tr.calls[0]
+    assert "2 image(s) dropped" in fields["text"]
+
+
+def test_send_photos_oversized_marker_uses_the_per_call_thread_not_the_senders_default():
+    # cmd_telegram builds BotSender with topic_id=None and passes the thread
+    # PER CALL (multi-topic relay) — the oversized-drop marker must ride that
+    # per-call thread, not silently fall back to the sender's own (absent)
+    # default topic.
+    tr = _Transport()
+    mt = _MediaTransport()
+    sender = BotSender("tok", "chat1", None, transport=tr, media_transport=mt)
+    big = b"x" * (MAX_PHOTO_BYTES + 1)
+    assert sender.send_photos([("image/png", big)], message_thread_id="99") is True
+    _, fields = tr.calls[0]
+    assert fields["message_thread_id"] == "99"
 
 
 def test_format_photo_size_renders_a_nonempty_human_size():
@@ -1252,6 +1282,11 @@ def test_urllib_media_transport_sends_multipart_with_matching_boundary(monkeypat
     assert b'name="chat_id"' in body and b"c1" in body
     assert b'name="photo"; filename="image.png"' in body
     assert b"\x89PNGDATA" in body
+    # Each part must be CRLF-terminated before the next boundary — Telegram's
+    # multipart parser needs the separator, not just the two pieces glued
+    # together with nothing between them.
+    assert b'name="chat_id"\r\n\r\nc1\r\n--' + boundary.encode() in body
+    assert b"\x89PNGDATA\r\n--" + boundary.encode() + b"--\r\n" in body
 
 
 def test_send_photos_retries_a_media_group_on_429():
@@ -1322,6 +1357,18 @@ def test_relay_sends_images_after_plain_text_fallback_succeeds():
     TelegramRelay(stub, show_tool_calls=True, send_photos=photos).on_message("@1", msg)
     assert len(stub.calls) == 2                 # MarkdownV2 rejected, then plain text
     assert photos.calls == [([("image/png", b"data")], ())]
+
+
+def test_relay_skips_images_when_text_delivery_is_dropped():
+    # The negative control that exists for RegistryRelay
+    # (test_registry_relay_skips_images_when_text_delivery_is_dropped), mirrored
+    # onto the structurally identical TelegramRelay sibling (defeat shape 311):
+    # when the text delivery is dropped entirely, the images must not post anyway.
+    stub = _StubSender(fail_all=True)
+    photos = _PhotoStub()
+    msg = Message("assistant", "tool_result", "x", images=[("image/png", b"d")])
+    TelegramRelay(stub, show_tool_calls=True, send_photos=photos).on_message("@1", msg)
+    assert photos.calls == []  # text never got through — no orphan image post
 
 
 def test_relay_without_send_photos_wired_ignores_images_silently():
