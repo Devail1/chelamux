@@ -5009,7 +5009,10 @@ existing PR updates itself.
    the rendered value…). If the shape the verdict just found isn't catalogued yet, add ONE
    NEW FILE to `docs/defeat_shapes/` as part of this fix — it is the only durable place that
    knowledge can land; the judge's own checkout is thrown away when it finishes and cannot
-   commit it itself.
+   commit it itself. Number it off your own CMX task number, not a listing guess —
+   `NNN-slug.md`, and a second file on the same branch suffixes a lowercase letter (task
+   `cmx-339` → `339-slug.md`, then `339b-slug.md`) — full rule in `docs/DEFEAT_SHAPES.md`'s
+   'How this catalog grows'.
 3. Re-run the SAME validation your original task told you to run (this repo's CI gates are
    not optional) — and if a REQUIRED MUTATION SET is above, your self-check experiments
    file MUST include each one **verbatim** (copy the JSON, do not retype it) alongside any

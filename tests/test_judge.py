@@ -447,6 +447,59 @@ def test_rework_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
     assert "NEW FILE to `docs/defeat_shapes/`" in prompt
 
 
+def _collapse_whitespace(text: str) -> str:
+    """Both prompt sites word-wrap the same sentence differently (a flat concatenated
+    string in ``judge.py`` vs. a triple-quoted, indented block in ``dispatcher.py``), so a
+    byte-exact substring check would fail on cosmetic line breaks alone. Collapsing runs of
+    whitespace to a single space compares the WORDING, which is what must not drift."""
+    return re.sub(r"\s+", " ", text)
+
+
+DEFEAT_SHAPE_NUMBERING_RULE = (
+    "Number it off your own CMX task number, not a listing guess — `NNN-slug.md`, and a "
+    "second file on the same branch suffixes a lowercase letter (task `cmx-339` → "
+    "`339-slug.md`, then `339b-slug.md`) — full rule in `docs/DEFEAT_SHAPES.md`'s 'How this "
+    "catalog grows'."
+)
+
+
+def test_both_defeat_shape_file_prompts_name_the_numbering_rule(tmp_path):
+    """Issue #439: two agents (cmx-339, cmx-337) each guessed a defeat-shape file number
+    within 40 minutes of each other on 2026-09-03 — cmx-337 guessed `338`, the task number
+    of a THEN-LIVE sibling branch, reproducing the exact collision #427's namespace guard
+    was built to catch. The cause: the instruction that PROMPTS the new file
+    (``judge.block_body`` step 4, and ``dispatcher.REWORK_PROMPT`` step 2 — the only two
+    places an agent reads *before* writing the file) said only "add ONE NEW FILE", never
+    how to number it, so an agent reads the next free number off a listing — exactly what
+    ``docs/DEFEAT_SHAPES.md`` forbids.
+
+    Both copies must carry the SAME numbering rule, including the letter-suffix form for a
+    second file on one branch (``docs/DEFEAT_SHAPES.md``'s 'How this catalog grows',
+    closed by #427) — otherwise the next edit fixes one copy and leaves the other stale,
+    which is the two-callers-one-guarded shape from defeat shape 7. Seen to go red: either
+    copy's numbering sentence reworded, dropped, or drifted from the other.
+    """
+    survived = judge.Outcome(
+        judge.Experiment(guard="g", file="f.py", before="a", after="b"),
+        judge.SURVIVED, "it survived",
+        baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+        mutated=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+    )
+    report = judge.Report(outcomes=[survived],
+                           baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""))
+    block = judge.block_body(report, "https://x/1", TEST_CMD)
+    assert DEFEAT_SHAPE_NUMBERING_RULE in _collapse_whitespace(block)
+
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), rework_count=1,
+                 review_history=json.dumps([{"round": 1, "at": "t", "body": "fix the thing"}]))
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    rework = dispatcher._renudge_prompt(wf, row, None)
+    assert rework is not None
+    assert DEFEAT_SHAPE_NUMBERING_RULE in _collapse_whitespace(rework)
+
+
 def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
     """CMX-272: the judge agent should reach for an already-catalogued shape before spending
     a mutation rediscovering one from scratch.

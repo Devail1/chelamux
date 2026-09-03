@@ -1340,7 +1340,10 @@ def block_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
         "away with) isn't already catalogued there, add ONE NEW FILE to `docs/defeat_shapes/` "
         "as part of this fix. This checkout is thrown away when the judge finishes, so it "
         "cannot land the entry itself; the agent doing the rework is the one with a branch "
-        "to put it on.",
+        "to put it on. Number it off your own CMX task number, not a listing guess — "
+        "`NNN-slug.md`, and a second file on the same branch suffixes a lowercase letter "
+        "(task `cmx-339` → `339-slug.md`, then `339b-slug.md`) — full rule in "
+        "`docs/DEFEAT_SHAPES.md`'s 'How this catalog grows'.",
         "",
         f"_The judge never merges and never approves. PR: {pr_url or '(none on the run row)'}._",
     ]
