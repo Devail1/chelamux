@@ -132,3 +132,71 @@ other**, not just that each structure's own fields look individually reasonable 
 list's `attach://` strings reference, so renaming the field in isolation (leaving the
 filename — a different field — untouched) breaks this one assertion even though every other
 existing check on either structure still passes.
+
+**Round 4 — a rejection fixture also fails a LATER, independent check in the same
+OR-of-`continue` chain, so an EARLIER dead-coded discriminator is never actually what makes
+the test pass:** filed here too, same branch/task-number rule as rounds 2-3. Judge round 3 of
+PR #435 found two guards of this shape in a sibling file.
+
+`_tool_result_images` (`chela/telegram/parser.py`) rejects a content block through a chain of
+independent `continue`s, each gating on a different key of the same dict —
+`item.get("type") != "image"`, then `source.get("type") != "base64"`, then `if not data`. Two
+tests each aim at one specific link in that chain:
+`test_tool_result_images_returns_none_for_text_only_content` (a `{"type": "text", "text":
+...}` block, aimed at the first check) and `test_tool_result_images_skips_non_base64_source`
+(a `{"type": "image", "source": {"type": "url", "url": ...}}` block, aimed at the second). But
+each fixture is *minimal* — it only sets the one key the test is nominally about, leaving
+every later key in the chain absent too. The text-block fixture has no `"source"` key at all,
+so it is rejected by the *second* check (`isinstance(source, dict)` is `False` for `None`)
+regardless of what the first check does. The url-source fixture has no `"data"` key, so it is
+rejected by the *third* check (`if not data`) regardless of what the second check does. In
+both cases the test's own assertion (`is None`) passes for a reason entirely unrelated to the
+check it was written to pin.
+
+**Mutation that defeats it:** dead-code the check each test claims to pin, without touching
+the checks after it:
+
+```diff
+-         if not isinstance(item, dict) or item.get("type") != "image":
++         if not isinstance(item, dict) or (False and item.get("type") != "image"):
+```
+```diff
+-         if not isinstance(source, dict) or source.get("type") != "base64":
++         if not isinstance(source, dict) or (False and source.get("type") != "base64"):
+```
+
+Under the first mutation, the text-block fixture still returns `None` — not because the type
+check fired (it can't; it's dead), but because the later `isinstance(source, dict)` check
+rejects the still-missing `source` key exactly as before. Under the second, the url-source
+fixture still returns `None` because the later `if not data` check rejects the still-missing
+`data` key exactly as before. `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3578
+passed, 0 failed) under either mutation — a type-checked, spec-compliant "extract only base64
+image blocks" guard reduced to only ever checking that non-image content is *also* malformed
+in some later, unrelated way.
+
+**Why this is distinct from [[55|shape 55]] and [[308|shape 308]]:** those shapes are about a
+downstream signal never being armed *alongside* a gating condition's refusing value, in a
+`resolve`-style function whose fixtures otherwise vary independently. Here there is no
+downstream signal to arm — the danger is structural: an OR-of-`continue`s chain rejects a
+block through whichever check fires FIRST, and a minimal negative fixture that only sets the
+one field a test claims to target will, by construction, leave every later check's own
+rejecting condition ALSO true (an absent key reads as "wrong" to every later `isinstance`/
+truthiness check just as readily as to the one the test named). Proving check N requires a
+fixture that would pass every check *after* N, not merely a fixture that is missing.
+
+**Guard form that survives:** for a rejection gated by check N in a chain, hand-build a
+fixture that is fully well-formed for every check strictly AFTER N (present, correctly-typed
+keys with valid values all the way to the end of the chain) and wrong only at check N — a
+`{"type": "text", "source": {"type": "base64", "media_type": "image/png", "data": <valid
+b64>}}` block for the first check (wrong `type`, otherwise a fully decodable image), and a
+`{"type": "image", "source": {"type": "url", "data": <valid b64>}}` block for the second
+(wrong `source.type`, otherwise a real, present, decodable `data`) — so only the check under
+test can be the reason the fixture is rejected, and dead-coding it lets the block through to
+production the mutant's own `_tool_result_images([block])` returning the decoded image instead
+of `None`.
+
+**Found:** CMX-338 rework round 4 (2026-09-03), judge round 3 of PR #435.
+`test_tool_result_images_type_discriminator_rejects_non_image_even_with_valid_source` and
+`test_tool_result_images_source_type_discriminator_rejects_non_base64_even_with_data` in
+`tests/test_telegram_parser.py` close it, each building the "wrong at exactly this hop, valid
+everywhere after it" fixture described above.

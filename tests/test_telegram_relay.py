@@ -1112,6 +1112,19 @@ def test_send_photos_single_image_calls_send_photo():
     assert data == b"data"
 
 
+def test_send_photos_single_image_names_the_file_after_its_own_media_type():
+    # DEFEAT_SHAPES 330: _ext_for is unit-tested directly and the media-group
+    # path pins full filenames, but the single-photo CALL SITE only ever
+    # exercised a PNG fixture, so a hardcoded "image.png" (ignoring media_type
+    # entirely) was indistinguishable from the real f"image.{self._ext_for(...)}"
+    # call. A JPEG must go up named .jpg, not .png.
+    mt = _MediaTransport()
+    sender = BotSender("tok", "chat1", "topic1", media_transport=mt)
+    assert sender.send_photos([("image/jpeg", b"data")]) is True
+    _, _, files = mt.calls[0]
+    assert files[0][1] == "image.jpg"
+
+
 def test_send_photos_multiple_images_calls_send_media_group_once():
     # Several images in ONE tool_result must become ONE call, not N rapid
     # sendPhoto calls that could trip flood control (ccbot's send_media_group
@@ -1192,6 +1205,10 @@ def test_send_photos_reports_the_real_count_of_dropped_images(caplog):
     [record] = [r for r in caplog.records if "dropped" in r.getMessage()]
     assert "20.0 MB" in record.getMessage()
     assert "0.0 B" not in record.getMessage()
+    # The COUNT argument on the same log call is a separate parameter from the
+    # total size — checking only the size lets a mutation that zeroes out just
+    # the count (leaving the total intact) slip through unnoticed.
+    assert "2 image(s) dropped" in record.getMessage()
 
 
 def test_send_photos_oversized_marker_uses_the_per_call_thread_not_the_senders_default():
@@ -1297,7 +1314,16 @@ def test_urllib_media_transport_sends_multipart_with_matching_boundary(monkeypat
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
 
     transport = _urllib_media_transport("tok")
-    resp = transport("sendMediaGroup", {"chat_id": "c1"}, [("photo", "image.png", b"\x89PNGDATA")])
+    # TWO fields and TWO files — a single-field/single-file fixture can't tell
+    # a hardcoded field name or a files-loop truncated to its first item apart
+    # from the real interpolated/looped code (DEFEAT_SHAPES 338 round 4): the
+    # real sendMediaGroup call always sends chat_id AND media through the same
+    # fields loop, and one photo per image through the same files loop.
+    resp = transport(
+        "sendMediaGroup",
+        {"chat_id": "c1", "media": "[]"},
+        [("photo0", "photo0.png", b"\x89PNGDATA"), ("photo1", "photo1.jpg", b"JPEGDATA")],
+    )
 
     assert resp == {"ok": True}
     req = captured["req"]
@@ -1310,22 +1336,33 @@ def test_urllib_media_transport_sends_multipart_with_matching_boundary(monkeypat
     assert content_type is not None and content_type.startswith("multipart/form-data; boundary=")
     boundary = content_type.split("boundary=", 1)[1]
     body = req.data
-    assert f"--{boundary}\r\n".encode() in body
-    assert f"--{boundary}--\r\n".encode() in body
-    assert b'name="chat_id"' in body and b"c1" in body
-    assert b'name="photo"; filename="image.png"' in body
-    assert b"\x89PNGDATA" in body
-    # Each part must be CRLF-terminated before the next boundary — Telegram's
-    # multipart parser needs the separator, not just the two pieces glued
-    # together with nothing between them.
-    assert b'name="chat_id"\r\n\r\nc1\r\n--' + boundary.encode() in body
-    assert b"\x89PNGDATA\r\n--" + boundary.encode() + b"--\r\n" in body
-    # The file part's HEADERS must end with a BLANK line (CRLFCRLF) before the
-    # raw bytes start — a third seam of the same body, distinct from the two
-    # above: this one is the boundary between the file part's headers and its
-    # payload, not between a part's payload and the next boundary
-    # (DEFEAT_SHAPES 338 round 3).
-    assert b"Content-Type: application/octet-stream\r\n\r\n\x89PNGDATA" in body
+    # Pin the ENTIRE wire body against a hand-built expectation, part order
+    # included — membership checks on individual fragments (b'name="chat_id"'
+    # in body) can't tell a hardcoded field name from the real one when only
+    # one field is tested, and can't tell a truncated files-loop from a
+    # complete one when only one file is tested. Equality on the whole body
+    # closes both gaps at once.
+    expected = bytearray()
+    for name, value in (("chat_id", "c1"), ("media", "[]")):
+        expected += (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+            f"{value}\r\n"
+        ).encode()
+    for field_name, filename, data in (
+        ("photo0", "photo0.png", b"\x89PNGDATA"),
+        ("photo1", "photo1.jpg", b"JPEGDATA"),
+    ):
+        expected += (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{field_name}"; '
+            f'filename="{filename}"\r\n'
+            "Content-Type: application/octet-stream\r\n\r\n"
+        ).encode()
+        expected += data
+        expected += b"\r\n"
+    expected += f"--{boundary}--\r\n".encode()
+    assert body == bytes(expected)
 
 
 def test_send_photos_retries_a_media_group_on_429():
@@ -1423,6 +1460,26 @@ def test_registry_relay_sends_images_to_the_windows_thread():
     reg = _registry(("@1", "42"))
     msg = Message("assistant", "tool_result", "captured", images=[("image/png", b"data")])
     RegistryRelay(stub, reg, send_photos=photos).on_message("@1", msg)
+    assert photos.calls == [([("image/png", b"data")], ("42",))]
+
+
+def test_registry_relay_sends_images_after_plain_text_fallback_succeeds():
+    # The positive control for RegistryRelay that mirrors
+    # test_relay_sends_images_after_plain_text_fallback_succeeds on TelegramRelay
+    # (defeat shape 311, inverted): round 1 fixed BOTH relays' plain-text
+    # fallback path to still post images, but only TelegramRelay got a test for
+    # it — RegistryRelay's only image tests were the MarkdownV2-success path
+    # and two negative controls, so a regression that dropped the
+    # _relay_images call from ONLY the plain-text branch would ship unnoticed.
+    stub = _ThreadStubSender(fail_markdown=True)
+    photos = _PhotoStub()
+    reg = _registry(("@1", "42"))
+    msg = Message(
+        "assistant", "tool_result", "captured", tool_name="Screenshot",
+        images=[("image/png", b"data")],
+    )
+    RegistryRelay(stub, reg, send_photos=photos).on_message("@1", msg)
+    assert len(stub.calls) == 2                 # MarkdownV2 rejected, then plain text
     assert photos.calls == [([("image/png", b"data")], ("42",))]
 
 

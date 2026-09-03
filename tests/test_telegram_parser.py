@@ -38,6 +38,17 @@ def test_tool_result_images_returns_none_for_text_only_content():
     assert _tool_result_images([_text_block("hello")]) is None
 
 
+def test_tool_result_images_type_discriminator_rejects_non_image_even_with_valid_source():
+    # The text-block fixture above carries no "source" key at all, so a
+    # dead-coded `item.get("type") != "image"` check would still be rejected
+    # by the later `isinstance(source, dict)` check — the type check is never
+    # actually exercised as the reason the block is skipped. Give this block a
+    # fully well-formed base64 image source so ONLY the type discriminator can
+    # be why it's rejected.
+    block = {"type": "text", "source": {"type": "base64", "media_type": "image/png", "data": _PNG_B64}}
+    assert _tool_result_images([block]) is None
+
+
 def test_tool_result_images_returns_none_for_string_content():
     assert _tool_result_images("plain string result") is None
 
@@ -64,6 +75,16 @@ def test_tool_result_images_skips_malformed_base64_without_raising():
 
 def test_tool_result_images_skips_non_base64_source():
     block = {"type": "image", "source": {"type": "url", "url": "https://example/x.png"}}
+    assert _tool_result_images([block]) is None
+
+
+def test_tool_result_images_source_type_discriminator_rejects_non_base64_even_with_data():
+    # The url-source fixture above carries no "data" key, so a dead-coded
+    # `source.get("type") != "base64"` check would still be rejected by the
+    # later `if not data` check — the base64 discriminator is never actually
+    # exercised as the reason the block is skipped. Give it a valid "data" key
+    # so ONLY the source-type check can be why this is rejected.
+    block = {"type": "image", "source": {"type": "url", "data": _PNG_B64}}
     assert _tool_result_images([block]) is None
 
 
