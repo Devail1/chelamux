@@ -1982,3 +1982,61 @@ def test_inbox_report_gone_names_chela_restore_as_the_fallback():
     detail = findings[0].detail
     assert "chela watch" in detail
     assert "chela restore" in detail
+
+
+def test_blocked_race_ack_is_scoped_to_judge_sha_not_pr_head_sha(tmp_path, monkeypatch):
+    """🔴 The acknowledgement clears the verdict it was GIVEN FOR — the row's own
+    `judge_sha` — not whatever `pr_head_sha` happens to hold.
+
+    Every other fixture reaching the ack clause has `judge_sha == pr_head_sha` (or both
+    NULL), so the two columns are indistinguishable there and
+    `row["blocked_race_ack_sha"] == head` reads back identically to
+    `== sha`. This is the ONE fixture where they disagree.
+
+    The case it protects is the one CMX-336 exists for. Round 3 established that the most
+    stuck row is `judge_sha IS NULL` — a race recorded before any sha was stamped — and
+    `pr_head_sha` on that same row is a real commit refreshed from GitHub. Scoping the ack
+    to `pr_head_sha` would mean a valid acknowledgement (which stamps `ack_sha` from
+    `judge_sha`, i.e. NULL) never equals the head, so `chela doctor` nags forever about a
+    verdict a human has already signed off — the exact bug this ticket fixes, surviving
+    the fix.
+    """
+    row = _blocked_race_row(
+        judge_sha=None,
+        pr_head_sha="cafef00d",              # a real head, refreshed from GitHub
+        blocked_race_ack_at="2026-09-03T00:00:00+00:00",
+        blocked_race_ack_by="liav",
+        blocked_race_ack_sha=None,           # stamped FROM judge_sha, so also NULL
+    )
+    scanned = _scan_with(tmp_path, monkeypatch, row)
+
+    assert scanned == {}, (
+        "an acknowledged row still reports: the ack was compared against pr_head_sha "
+        "instead of the judge_sha it was given for, so the most-stuck row (judge_sha "
+        "NULL) can never be cleared by acknowledging it"
+    )
+
+
+def test_blocked_race_ack_for_a_DIFFERENT_sha_does_not_clear_the_row(tmp_path, monkeypatch):
+    """⭐ The counterweight to the test above, and the reason it is not simply
+    `ack_at is not None`.
+
+    An acknowledgement names the verdict it covers. If a NEWER blocking verdict is later
+    recorded on the same row under a different `judge_sha`, the older acknowledgement must
+    NOT silence it — otherwise one ack permanently mutes a run, which is the same
+    "silencing an unexamined verdict" failure the whole ticket guards against. Drop the
+    sha comparison entirely and this goes red.
+    """
+    row = _blocked_race_row(
+        judge_sha="feedface",                        # the CURRENT verdict
+        pr_head_sha="feedface",
+        blocked_race_ack_at="2026-09-03T00:00:00+00:00",
+        blocked_race_ack_by="liav",
+        blocked_race_ack_sha="deadbeef",             # an ack for an OLDER verdict
+    )
+    scanned = _scan_with(tmp_path, monkeypatch, row)
+
+    assert scanned != {}, (
+        "an acknowledgement recorded for a DIFFERENT judge_sha cleared the current "
+        "verdict — one ack must not permanently mute a run"
+    )

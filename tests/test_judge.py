@@ -3745,3 +3745,41 @@ def test_judge_run_calls_pr_live_head_sha_with_THIS_runs_real_pr_url_and_repo_di
         "degraded to None, None would fall back to the row and wrongly report this current"
     )
 
+
+
+def test_cmd_judge_ack_blocked_race_omitting_by_passes_empty_so_the_env_chain_runs(capsys):
+    """🔴 `--by`'s argparse default is what FEEDS the documented $USER/$USERNAME/'unknown'
+    fallback, and nothing pinned the link between the flag's ABSENCE and that chain.
+
+    The dispatcher-level tests prove the chain given `by=""`, and the CLI test above always
+    passes `--by` explicitly — so `default="unknown"` (or any other non-empty default)
+    survives both: the CLI test still gets its explicit value, and the dispatcher tests
+    still get their `""` because they call the function directly. The flag's own `--help`
+    and the changelog both promise the env chain, and only `default=""` lets
+    `acknowledge_blocked_race`'s `(by or "").strip() or os.environ.get("USER") ...` reach
+    the environment at all.
+
+    This is defeat shape 336 — the branch's own entry — one level up the call stack: a
+    value proven at the layer below, with the layer above never driven in the state that
+    makes the layer below's logic reachable.
+    """
+    from unittest.mock import patch as mock_patch
+
+    from chela import main
+
+    fake = {
+        "ok": True, "task_id": "cmx-99", "by": "from-the-env",
+        "at": "2026-09-03T00:00:00+00:00", "sha": "deadbeefcafe",
+        "pr_url": "https://github.com/o/r/pull/431",
+    }
+    with mock_patch.object(main.dispatcher, "acknowledge_blocked_race", return_value=fake) as mocked:
+        with patch.object(sys, "argv", ["chela", "judge", "ack-blocked-race", "cmx-99"]):
+            main.main()
+
+    mocked.assert_called_once_with("cmx-99", by="", note="")
+    called_by = mocked.call_args.kwargs["by"]
+    assert called_by == "", (
+        f"omitting --by handed the dispatcher {called_by!r} instead of '' — a non-empty "
+        "argparse default short-circuits the documented $USER/$USERNAME/'unknown' chain, "
+        "so every acknowledgement would be attributed to that constant"
+    )
