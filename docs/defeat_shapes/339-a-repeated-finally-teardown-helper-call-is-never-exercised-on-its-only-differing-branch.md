@@ -107,3 +107,46 @@ together, so no permutation of the same four calls can satisfy it. Found CMX-339
 closed by adding `test_reap_defaults_cannot_collapse_either_wait_window` (the signature-default
 floor check) and replacing the propagation test's three assertions with the single
 `mock_calls` sequence, both verified to go red against each mutation in turn before landing.
+
+**Round 4 addendum — rounds 1-3 all asked "does every teardown still route THROUGH
+`_reap`?"; the harm that survived was the mirror image, something that must NOT be `_reap`
+being routed through it anyway:** `_reap`'s own docstring draws a must-never boundary —
+tests that assert SIGTERM promptness as their actual behavior-under-test call `proc.wait()`
+directly for that, in the try BODY, above `finally: _reap(proc)`, because `_reap` is
+finally:-only cleanup and "not a replacement for them." Nothing in the suite observed that
+boundary: `_run_bg_teardown_sites` (the round-1/2/3 guard) deliberately yields only
+`tries[0].finalbody` — it has no opinion on the try body at all. **Mutation that defeats
+it:** replace `test_disabled_wall_still_writes_empty_map_and_idles`'s direct
+`proc.terminate(); proc.wait(timeout=5)` promptness pair (in the try body) with a second,
+redundant `_reap(proc)` call, leaving the `finally: _reap(proc)` untouched:
+```diff
+-         proc.terminate()
+-         proc.wait(timeout=5)  # pre-fix: hung on `sleep 3600`, i.e. up to an hour
+-     finally:
+-         _reap(proc)
++         _reap(proc)
++     finally:
++         _reap(proc)
+```
+The finalbody is still exactly `_reap(proc)`, so the AST wiring guard passes unchanged; the
+whole documented regression this test exists to catch — the disabled-wall idle loop
+sleeping in the FOREGROUND, so `pm2 stop` hangs for up to an hour, gets SIGKILLed, and the
+bash EXIT trap never runs (no `cleanup()`, leaked ttyds, leaked `webterm_*` mirror
+sessions) — becomes undetectable: a supervisor that regressed to hanging the full hour
+would now be `_reap`'d (SIGTERM, wait 10s, SIGKILL, wait again) and the test would PASS,
+because the 5s bound that was the ONLY thing asserting promptness is gone.
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3546 passed, 0 failed) under the
+mutation. **Why the round-1/2/3 guard's own design doesn't extend to this:** it was
+deliberately written to check the `finally:` body only, because that is where the
+issue-#436 wiring question lives; a promptness check living in the try BODY, ABOVE the
+`finally:`, is a different AST node entirely, and a source-derived check that never visits
+`tries[0].body` has no way to notice it changed. **Guard form that survives:** don't extend
+`_run_bg_teardown_sites` (it's answering a different question) — walk the same file's AST a
+second way, scoped to just the two functions whose try body contains a documented
+promptness check (`test_disabled_wall_still_writes_empty_map_and_idles` and
+`test_disabled_wall_sigterm_does_not_orphan_the_idle_sleep`), and assert their try body
+still contains a direct `proc.terminate()` and a direct `proc.wait(timeout=<=5)`, and does
+NOT contain a call to `_reap`. Found CMX-339 rework round 4 (2026-09-03), PR #437 — the
+judge applied the mutation above to a throwaway checkout; closed by adding
+`test_promptness_checks_are_not_absorbed_into_reap`, verified to go red against the exact
+mutation before landing.

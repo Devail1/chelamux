@@ -488,3 +488,88 @@ def test_all_run_bg_teardowns_route_through_reap():
             f"teardown no longer escalates to SIGKILL on a hung supervisor (issue #436), "
             f"or overrides a timeout that collapses the graceful-SIGTERM window"
         )
+
+
+# --- wiring: a promptness check must stay a DIRECT proc.wait(), not be absorbed into _reap ---
+#
+# docs/defeat_shapes/339 round 4: _reap's own docstring draws a must-never boundary — tests
+# that assert SIGTERM promptness as their actual behavior-under-test call `proc.wait()`
+# directly for that, in the try BODY, above `finally: _reap(proc)`; `_reap` is finally:-only
+# cleanup, never a replacement for that assertion. test_all_run_bg_teardowns_route_through_reap
+# above reads ONLY `tries[0].finalbody` — it has no opinion on the try body — so swallowing
+# either promptness pair into the finally's `_reap(proc)` (`_reap(proc)` in the body, ANOTHER
+# `_reap(proc)` in finally) is invisible to it. This walks the same file's own AST a second
+# way: for the two functions whose try body contains a direct promptness check, assert that
+# check is still there and still direct, not routed through `_reap`.
+
+_PROMPTNESS_CHECK_FUNCS = frozenset({
+    "test_disabled_wall_still_writes_empty_map_and_idles",
+    "test_disabled_wall_sigterm_does_not_orphan_the_idle_sleep",
+})
+
+
+def _is_proc_method_call(stmt, method_name):
+    return (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Call)
+        and isinstance(stmt.value.func, ast.Attribute)
+        and stmt.value.func.attr == method_name
+        and isinstance(stmt.value.func.value, ast.Name)
+        and stmt.value.func.value.id == "proc"
+    )
+
+
+def _wait_timeout_literal(stmt):
+    """The int literal passed as `timeout=` to a `proc.wait(...)` Expr statement, or None."""
+    if not _is_proc_method_call(stmt, "wait"):
+        return None
+    for kw in stmt.value.keywords:
+        if kw.arg == "timeout" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, int):
+            return kw.value.value
+    return None
+
+
+def _promptness_check_try_bodies():
+    """Yield (function_name, try_body) for the two functions above — the try body, NOT the
+    finally body that `_run_bg_teardown_sites` already covers."""
+    tree = ast.parse(Path(__file__).read_text())
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef) or func.name not in _PROMPTNESS_CHECK_FUNCS:
+            continue
+        tries = [stmt for stmt in func.body if isinstance(stmt, ast.Try)]
+        assert len(tries) == 1, (
+            f"{func.name}: expected exactly one top-level try/finally around its "
+            f"`_run_bg` process"
+        )
+        yield func.name, tries[0].body
+
+
+def test_promptness_checks_are_not_absorbed_into_reap():
+    """WIRING: `_reap` is finally:-only cleanup, never a replacement for a test's own
+    SIGTERM-promptness assertion (see `_reap`'s docstring). Replacing either of the two
+    direct `proc.terminate(); proc.wait(timeout=<=5)` pairs above with a bare `_reap(proc)`
+    call is invisible to `test_all_run_bg_teardowns_route_through_reap`, which reads only
+    the `finally:` body — pin the try BODY directly so that substitution fails."""
+    for name, body in _promptness_check_try_bodies():
+        assert not any(
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "_reap"
+            for stmt in body
+        ), (
+            f"{name}: its try body calls `_reap()` — that absorbs the SIGTERM-promptness "
+            f"check this test exists to make, and _reap is documented as finally:-only "
+            f"cleanup, not a replacement for it"
+        )
+
+        assert any(_is_proc_method_call(stmt, "terminate") for stmt in body), (
+            f"{name}: missing a direct `proc.terminate()` in its try body — the "
+            f"SIGTERM-promptness check this test exists to make is gone"
+        )
+
+        timeouts = [t for t in (_wait_timeout_literal(stmt) for stmt in body) if t is not None]
+        assert timeouts and all(t <= 5 for t in timeouts), (
+            f"{name}: missing a direct `proc.wait(timeout=<=5)` in its try body, or its "
+            f"bound was widened past the 5s promptness assertion this test makes"
+        )
