@@ -1129,6 +1129,12 @@ def test_send_photos_multiple_images_calls_send_media_group_once():
     media = _json.loads(fields["media"])
     assert [m["type"] for m in media] == ["photo", "photo"]
     assert [m["media"] for m in media] == ["attach://photo0", "attach://photo1"]
+    # The FIELD NAME in each file part must be the same name the media JSON
+    # references via attach:// — Telegram resolves attach://<name> against the
+    # multipart field named <name>, not against position. Asserting the
+    # filenames/media list alone lets the two halves of this pairing drift
+    # apart (DEFEAT_SHAPES 338 round 3).
+    assert [f[0] for f in files] == ["photo0", "photo1"]
     assert [f[1] for f in files] == ["photo0.png", "photo1.jpg"]
     assert [f[2] for f in files] == [b"one", b"two"]
 
@@ -1167,7 +1173,7 @@ def test_send_photos_reports_oversized_image_instead_of_dropping_silently():
     assert "1 image(s) dropped" in fields["text"]
 
 
-def test_send_photos_reports_the_real_count_of_dropped_images():
+def test_send_photos_reports_the_real_count_of_dropped_images(caplog):
     # Two oversized images must report "2", not the count of a single drop —
     # guards against a marker that always renders the same (possibly
     # zeroed-out) count regardless of how many images were actually dropped.
@@ -1175,9 +1181,17 @@ def test_send_photos_reports_the_real_count_of_dropped_images():
     mt = _MediaTransport()
     sender = BotSender("tok", "chat1", None, transport=tr, media_transport=mt)
     big = b"x" * (MAX_PHOTO_BYTES + 1)
-    assert sender.send_photos([("image/png", big), ("image/png", big)]) is True
+    with caplog.at_level(logging.WARNING):
+        assert sender.send_photos([("image/png", big), ("image/png", big)]) is True
     _, fields = tr.calls[0]
     assert "2 image(s) dropped" in fields["text"]
+    # The WARNING log line must carry the REAL total size of what was dropped
+    # (the docstring's "only the count and total size are logged"), not a
+    # zeroed-out placeholder — two images just over the 10.0 MB cap sum to
+    # ~20 MB, unmistakably different from "0.0 B" (DEFEAT_SHAPES 338 round 3).
+    [record] = [r for r in caplog.records if "dropped" in r.getMessage()]
+    assert "20.0 MB" in record.getMessage()
+    assert "0.0 B" not in record.getMessage()
 
 
 def test_send_photos_oversized_marker_uses_the_per_call_thread_not_the_senders_default():
@@ -1236,6 +1250,20 @@ def test_send_photos_reports_failure_when_the_oversized_marker_fails_to_deliver(
     assert len(mt.calls) == 1  # the one that fit still uploaded
 
 
+def test_send_photos_reports_failure_when_the_all_oversized_marker_fails_to_deliver():
+    # When EVERY image is oversized, the marker is not just a side note — it is
+    # the ONLY thing send_photos was ever going to send. If it fails to deliver,
+    # overall failure must propagate even though there is no "fits" upload to
+    # also fail (guards against `if not fits: return ok` degrading to an
+    # unconditional `return True` — DEFEAT_SHAPES 338 round 3).
+    tr = _Transport(ok=False)
+    mt = _MediaTransport(ok=True)
+    sender = BotSender("tok", "chat1", "t7", transport=tr, media_transport=mt)
+    big = b"x" * (MAX_PHOTO_BYTES + 1)
+    assert sender.send_photos([("image/png", big)]) is False
+    assert mt.calls == []  # nothing fit, so nothing was ever uploaded
+
+
 def test_send_photos_returns_false_when_upload_fails():
     mt = _MediaTransport(ok=False)
     sender = BotSender("tok", "chat1", None, media_transport=mt)
@@ -1269,10 +1297,15 @@ def test_urllib_media_transport_sends_multipart_with_matching_boundary(monkeypat
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
 
     transport = _urllib_media_transport("tok")
-    resp = transport("sendPhoto", {"chat_id": "c1"}, [("photo", "image.png", b"\x89PNGDATA")])
+    resp = transport("sendMediaGroup", {"chat_id": "c1"}, [("photo", "image.png", b"\x89PNGDATA")])
 
     assert resp == {"ok": True}
     req = captured["req"]
+    # The transport must POST to the Bot API method it was ASKED for, not a
+    # hardcoded one — sendMediaGroup must not silently go to sendPhoto's URL
+    # (DEFEAT_SHAPES 338 round 3).
+    assert "sendMediaGroup" in req.full_url
+    assert "sendPhoto" not in req.full_url
     content_type = req.get_header("Content-type")
     assert content_type is not None and content_type.startswith("multipart/form-data; boundary=")
     boundary = content_type.split("boundary=", 1)[1]
@@ -1287,6 +1320,12 @@ def test_urllib_media_transport_sends_multipart_with_matching_boundary(monkeypat
     # together with nothing between them.
     assert b'name="chat_id"\r\n\r\nc1\r\n--' + boundary.encode() in body
     assert b"\x89PNGDATA\r\n--" + boundary.encode() + b"--\r\n" in body
+    # The file part's HEADERS must end with a BLANK line (CRLFCRLF) before the
+    # raw bytes start — a third seam of the same body, distinct from the two
+    # above: this one is the boundary between the file part's headers and its
+    # payload, not between a part's payload and the next boundary
+    # (DEFEAT_SHAPES 338 round 3).
+    assert b"Content-Type: application/octet-stream\r\n\r\n\x89PNGDATA" in body
 
 
 def test_send_photos_retries_a_media_group_on_429():

@@ -90,3 +90,45 @@ contiguous substring (`b'name="chat_id"\r\n\r\nc1\r\n--' + boundary.encode() in 
 `b"\x89PNGDATA\r\n--" + boundary.encode() + b"--\r\n" in body`), so a corruption that removes
 just the separator — leaving both neighbors intact and independently "present" — breaks the
 one assertion that spans the seam between them and the suite goes red.
+
+**Round 3 — a value that has to match ACROSS two independent structures is only ever
+asserted WITHIN each structure:** filed here too, same branch/task-number rule as round 2.
+Judge round 2 of PR #435 found five more surviving guards in the same file; the one worth
+cataloguing as its own shape (the other four are one-off missing assertions — a hardcoded
+method string, a zeroed log arg, a dropped return value, a dropped header terminator —
+already covered by shapes elsewhere in this catalog) is the `sendMediaGroup` field-name
+pairing:
+
+`_send_media_group` (`chela/telegram/relay.py`) builds two parallel structures that Telegram
+resolves against each other at request time: a `media` JSON list whose each entry points at
+`f"attach://{name}"`, and a `files` list of `(field_name, filename, data)` multipart parts.
+Telegram matches an `attach://<name>` reference to the multipart part whose *field name* is
+literally `<name>` — position in the list is irrelevant to the wire protocol, only the string
+match is. `test_send_photos_multiple_images_calls_send_media_group_once` asserted the `media`
+list's `attach://` strings (`["attach://photo0", "attach://photo1"]`) and the `files` list's
+filenames (`["photo0.png", "photo1.jpg"]`) — each structure fully checked **on its own** — but
+never read `files[i][0]`, the one field that has to equal the name inside the other
+structure's `attach://` string for the pairing to actually work.
+
+**Mutation that defeats it:** rename the file part's field to something that no longer matches
+the `attach://` name the `media` JSON references, while leaving the filename (what the
+existing assertions actually read) unchanged:
+
+```diff
+-             files.append((name, f"{name}.{self._ext_for(media_type)}", data))
++             files.append((f"attach{i}", f"{name}.{self._ext_for(media_type)}", data))
+```
+
+`media` still says `attach://photo0`; `files[0]` still has filename `photo0.png` — every
+existing assertion still holds — but the actual multipart field is now named `attach0`, so
+Telegram's server-side lookup of `attach://photo0` finds nothing and the whole
+`sendMediaGroup` call is rejected. `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green
+(3547 passed, 0 failed) under the mutation.
+
+**Guard form that survives:** when two structures must agree on a shared key to work
+together at runtime, assert the key **read from one structure equals the key read from the
+other**, not just that each structure's own fields look individually reasonable —
+`assert [f[0] for f in files] == ["photo0", "photo1"]`, the literal list of names the `media`
+list's `attach://` strings reference, so renaming the field in isolation (leaving the
+filename — a different field — untouched) breaks this one assertion even though every other
+existing check on either structure still passes.
