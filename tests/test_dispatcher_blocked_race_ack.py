@@ -345,3 +345,75 @@ def test_acknowledge_is_scoped_to_the_current_judge_state_not_only_sha(tmp_path,
         row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
     assert row["blocked_race_ack_by"] is None
     assert row["judge_state"] == judge.J_CLEAN
+
+
+def test_acknowledge_stamps_ONLY_the_named_run_when_a_sibling_shares_its_judge_sha(tmp_path):
+    """🔴 `task_id` is the IDENTITY clause of the CAS, and it is the one clause every other
+    test leaves undiscriminating: they each insert exactly ONE row, where `task_id=?` and a
+    tautology are indistinguishable. Widen the WHERE to `(task_id=? OR 1)` and they all stay
+    green.
+
+    Reachable, not theoretical. Round 3 established that a NULL-`judge_sha`
+    `J_BLOCKED_RACE` row is the MOST stuck row this command exists for — and
+    `judge_sha IS NULL` is exactly the value two different stuck rows CAN share, since the
+    other two CAS clauses (`judge_state`, `judge_sha`) are then identical for both. Losing
+    the identity clause would stamp who/when/why onto a run nobody looked at and stop
+    `chela doctor` reporting its verdict — silencing an unexamined blocking finding, which
+    is the precise failure this whole ticket exists to prevent.
+
+    Both rows here carry `judge_sha=None` so that `task_id` is the ONLY column that
+    disagrees — docs/defeat_shapes/336's own item 4 ("each column needs its own fixture
+    where it is the ONLY column that disagrees"), applied to the third column.
+    """
+    with dispatcher._db() as conn:
+        _row(conn, task_id="target", judge_sha=None)
+        _row(conn, task_id="bystander", judge_sha=None)
+
+    result = dispatcher.acknowledge_blocked_race("target", by="liav", note="the named one")
+
+    assert result["ok"] is True
+    with dispatcher._db() as conn:
+        rows = {
+            r["task_id"]: r for r in
+            conn.execute("SELECT * FROM runs WHERE task_id IN ('target','bystander')")
+        }
+
+    assert rows["target"]["blocked_race_ack_by"] == "liav"
+    assert rows["target"]["blocked_race_ack_at"]
+
+    # ⭐ the whole point: the sibling sharing judge_sha (NULL) must be untouched
+    assert rows["bystander"]["blocked_race_ack_by"] is None, (
+        "acknowledging one run also stamped a DIFFERENT run that merely shared its "
+        "judge_sha — the CAS lost its identity clause, so an unexamined blocking verdict "
+        "would stop being reported"
+    )
+    assert rows["bystander"]["blocked_race_ack_at"] is None
+    assert rows["bystander"]["blocked_race_ack_note"] is None
+    assert rows["bystander"]["judge_state"] == judge.J_BLOCKED_RACE
+
+
+def test_acknowledge_stamps_the_REAL_clock_not_a_fixed_timestamp(tmp_path, monkeypatch):
+    """`blocked_race_ack_at` is WHEN the acknowledgement happened, and it was the one
+    member of the stamped family never asserted against an independently-known value:
+    `by`, `note`, `sha`, `task_id` and `pr_url` each have a test that passes a distinctive
+    value in and reads that exact value back, but `at` was only asserted TRUTHY and
+    SELF-CONSISTENT (payload `at` == the column). Both stay true when the source is a
+    hardcoded constant, and a frozen `at` makes every acknowledgement in the audit trail
+    claim the same time — the one fact the column exists to carry.
+
+    Pinning it to a monkeypatched clock makes the value independently known, so any
+    constant substituted for `_now()` disagrees.
+    """
+    monkeypatch.setattr(dispatcher, "_now", lambda: "2026-09-03T12:34:56.789012+00:00")
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    result = dispatcher.acknowledge_blocked_race("abc123", by="liav")
+
+    assert result["at"] == "2026-09-03T12:34:56.789012+00:00", (
+        "the acknowledgement's timestamp did not come from the clock — a hardcoded "
+        "constant would make every row in the audit trail claim the same time"
+    )
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    assert row["blocked_race_ack_at"] == "2026-09-03T12:34:56.789012+00:00"
