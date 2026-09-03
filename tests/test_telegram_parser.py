@@ -53,6 +53,17 @@ def test_tool_result_images_returns_none_for_string_content():
     assert _tool_result_images("plain string result") is None
 
 
+def test_tool_result_images_returns_none_for_non_iterable_content():
+    # DEFEAT_SHAPES 338 round 5: a string SNEAKS past the early
+    # `not isinstance(content, list)` guard's real job — it iterates into
+    # characters, each of which the later `isinstance(item, dict)` check
+    # rejects too, so the string fixture above passes whether or not the
+    # early return actually fires. An int is not iterable at all: with the
+    # guard dead-coded, `for item in content:` raises TypeError instead of
+    # cleanly returning None, so this is what actually pins the guard.
+    assert _tool_result_images(12345) is None
+
+
 def test_tool_result_images_extracts_multiple_blocks_in_order():
     other = b"other-bytes"
     images = _tool_result_images([
@@ -75,6 +86,19 @@ def test_tool_result_images_skips_malformed_base64_without_raising():
 
 def test_tool_result_images_skips_non_base64_source():
     block = {"type": "image", "source": {"type": "url", "url": "https://example/x.png"}}
+    assert _tool_result_images([block]) is None
+
+
+def test_tool_result_images_skips_when_source_is_not_a_dict():
+    # DEFEAT_SHAPES 338 round 5: round 4 closed the TYPE ("base64") half of
+    # `if not isinstance(source, dict) or source.get("type") != "base64":` on
+    # this same line, but every fixture in the suite carries a dict source
+    # (well- or malformed) — the sibling isinstance(source, dict) clause has
+    # never had a fixture where it's the ONLY thing that can reject the block.
+    # A bare string has no .get method, so if this isinstance check is
+    # dead-coded, source.get(...) raises AttributeError instead of the block
+    # being skipped cleanly — that's what actually pins the guard.
+    block = {"type": "image", "source": "not-a-dict"}
     assert _tool_result_images([block]) is None
 
 

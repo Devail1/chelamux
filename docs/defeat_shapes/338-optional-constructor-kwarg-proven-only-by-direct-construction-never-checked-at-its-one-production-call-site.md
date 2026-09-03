@@ -200,3 +200,112 @@ of `None`.
 `test_tool_result_images_source_type_discriminator_rejects_non_base64_even_with_data` in
 `tests/test_telegram_parser.py` close it, each building the "wrong at exactly this hop, valid
 everywhere after it" fixture described above.
+
+**Round 5a — a failure path guarded on one arm of an if/else is never re-armed on the
+sibling arm that selects the same failure shape:** filed here too, same branch/task-number
+rule as rounds 2-4. Judge round 4 of PR #435 found this recurring on two independent siblings.
+
+`BotSender.send_photos` dispatches to one of two helpers depending on image count —
+`_send_single_photo` for one image, `_send_media_group` for two or more — and each helper ends
+with the identical shape: `if resp.get("ok"): return True` then `_log_send_drop(resp); return
+False`. Round 1 had already guarded the failure path (`resp.get("ok")` False, `_log_send_drop`
+called) for `_send_single_photo` via `test_send_photos_returns_false_when_upload_fails`. That
+test's single-image fixture can only ever route through `_send_single_photo` — `send_photos`'s
+own `len(fits) == 1` branch makes the routing unconditional — so `_send_media_group`'s own
+copy of the identical `if resp.get("ok")` check, and its own `_log_send_drop` call, had no
+fixture of their own: every `_send_media_group`-reaching test in the suite
+(`test_send_photos_multiple_images_calls_send_media_group_once`,
+`test_urllib_media_transport_sends_multipart_with_matching_boundary`,
+`test_send_photos_retries_a_media_group_on_429`) scripted its transport to succeed.
+
+**Mutation that defeats it:** widen `_send_media_group`'s ok-check to always take the success
+branch (`if resp.get("ok") or True:`), or replace its `_log_send_drop(resp)` call with a no-op.
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green under either — the single-image guard
+that looks, at a glance, like it proves "a failed photo upload reports failure and logs it"
+only ever proved that for the routing branch its own fixture happened to select image-count-1
+for.
+
+**Why the sibling's coverage doesn't transfer:** same root cause as [[311|shape 311]]
+(a control proven on one object doesn't transfer to a structurally identical second one) but
+one level down — here the "two objects" are two branches of a single dispatching function
+selecting between two private helpers, not two public classes. A reviewer sees one thorough
+`send_photos` failure test and reasonably assumes both of `send_photos`'s own internal routes
+are proven, because the assertion's *name* talks about `send_photos`, not about which helper
+the fixture's image count happened to route through.
+
+**Guard form that survives:** when a function dispatches to sibling helpers by an input
+property (here, `len(images)`), enumerate the helpers and confirm a failure fixture exists that
+is routed to *each* one specifically — not just one fixture whose image count happens to work
+for whichever helper was open when the first guard was written. Closed by
+`test_send_photos_media_group_upload_failure_returns_false` and
+`test_send_photos_media_group_upload_failure_logs_the_drop` (a 2-image fixture, forcing the
+`_send_media_group` route) alongside a companion
+`test_send_photos_single_image_upload_failure_logs_the_drop` that reads the log record the
+original round-1 test never did.
+
+**Round 5b — a type-gate feeding straight into an operation that would RAISE on the wrong
+type is proven with a fixture that merely reaches a later, independently-rejecting check
+instead of one that would crash without the gate:** a refinement of round 4's shape for the
+case round 4's own prescribed fix ("build a fixture valid at every check after N") cannot
+reach, because the checked step here is not a value-conditioned `continue` in a chain — it is
+a type gate immediately followed by iteration (`for item in content`) or attribute access
+(`source.get(...)`) that only *works* because of the gate.
+
+`_tool_result_images` opens with `if not isinstance(content, list): return None` before
+`for item in content:`, and later does `if not isinstance(source, dict) or source.get("type")
+!= "base64":`. `test_tool_result_images_returns_none_for_string_content` fixtures `content` as
+a plain string — but a string is *iterable* (into one-character strings), each of which the
+next line's `isinstance(item, dict)` rejects anyway, so the function returns `None` whether or
+not the first `isinstance` check ever fires. Every non-base64-source fixture in the suite
+likewise used a `dict` source (just one with the wrong `"type"` value) — never a source that
+isn't a `dict` at all — so `isinstance(source, dict)` was never the reason a block got skipped.
+
+**Mutation that defeats it:** dead-code either isinstance gate —
+`if False and not isinstance(content, list): return None`, or
+`if (False and not isinstance(source, dict)) or source.get("type") != "base64":`.
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3582 passed) under both — round 4's
+own two-fixture close for this same function had no fixture at either of these two gates.
+
+**Guard form that survives:** round 4's "well-formed after N" recipe doesn't apply when
+removing check N would make the code *crash* rather than reach check N+1 cleanly — there is no
+way to make an `int` "well-formed" for a `for` loop, or a bare `str` "well-formed" for `.get`.
+Instead, pick a fixture of a type that is wrong in a way the *next* operation cannot tolerate
+at all: a non-iterable (`12345`, not a string) for the list gate, so a dead-coded check raises
+`TypeError` instead of quietly returning `None`; a value with no `.get` method (a bare `str`,
+not a `dict` with a wrong key) for the dict gate, so a dead-coded check raises `AttributeError`
+instead of falling through to the next `continue`. Either way the mutant doesn't just fail an
+assertion, it errors — which is the point: nothing downstream can coincidentally paper over a
+missing type gate feeding an operation that requires the type.
+
+**Round 5c — both halves of a call-site seam are tested only through doubles permissive
+enough to accept either calling convention, so a positional/keyword-only mismatch between the
+real caller and the real callee is never pinned:** `RegistryRelay._relay_images` calls
+`self._send_photos(msg.images, thread)` positionally. Every `RegistryRelay`/`TelegramRelay`
+image test in the suite passes a `_PhotoStub` whose `__call__(self, images, *args)` accepts a
+positional OR a keyword `thread` with no complaint either way, so it can never notice which
+convention the real call site used. Every direct `BotSender.send_photos` test, in turn, always
+calls it with `message_thread_id=` as a keyword. The two halves of this seam — the real
+production caller and the real production callee — were each individually well-tested, just
+never through each other.
+
+**Mutation that defeats it:** make `send_photos`'s `message_thread_id` keyword-only
+(`def send_photos(self, images, *, message_thread_id=None)`). Every existing test stays green
+— the stub doesn't care, and the direct `BotSender` tests already used the keyword form — while
+the real `RegistryRelay._relay_images` call now raises `TypeError` on every image relay in
+production.
+
+**Guard form that survives:** for a seam tested on both sides only through a double loose
+enough to accept multiple calling conventions, wire the REAL callee into the REAL caller for at
+least one test and drive it end to end — `RegistryRelay(stub, reg,
+send_photos=sender.send_photos).on_message(...)` with a real `BotSender`, asserting the upload
+actually happened with the right thread. Closed by
+`test_registry_relay_wires_the_real_send_photos_positionally`.
+
+**Found:** CMX-338 rework round 5 (2026-09-03), judge round 4 of PR #435. 5a closed by
+`test_send_photos_media_group_upload_failure_returns_false`,
+`test_send_photos_media_group_upload_failure_logs_the_drop`, and
+`test_send_photos_single_image_upload_failure_logs_the_drop` in `tests/test_telegram_relay.py`.
+5b closed by `test_tool_result_images_returns_none_for_non_iterable_content` and
+`test_tool_result_images_skips_when_source_is_not_a_dict` in `tests/test_telegram_parser.py`.
+5c closed by `test_registry_relay_wires_the_real_send_photos_positionally` in
+`tests/test_telegram_relay.py`.

@@ -1287,6 +1287,44 @@ def test_send_photos_returns_false_when_upload_fails():
     assert sender.send_photos([("image/png", b"data")]) is False
 
 
+def test_send_photos_single_image_upload_failure_logs_the_drop(caplog):
+    # DEFEAT_SHAPES 338 round 5: a failed sendPhoto upload must leave a log
+    # trace (_log_send_drop), same rule as CMX-311/CMX-322 — a dropped image
+    # is never silent. The test above only asserted the return value, so
+    # replacing the `_log_send_drop(resp)` call with a no-op statement passed
+    # it anyway. Read the log record, not just the boolean.
+    mt = _MediaTransport(ok=False)
+    sender = BotSender("tok", "chat1", None, media_transport=mt)
+    with caplog.at_level(logging.WARNING):
+        assert sender.send_photos([("image/png", b"data")]) is False
+    assert any("Bad Request" in r.getMessage() for r in caplog.records)
+
+
+def test_send_photos_media_group_upload_failure_returns_false():
+    # DEFEAT_SHAPES 338 round 5: every existing upload-failure test passes
+    # exactly ONE image, so only the sendPhoto/_send_single_photo sibling is
+    # exercised — the sendMediaGroup branch's own `resp.get("ok")` check has
+    # never been armed by a failing multi-image upload.
+    mt = _MediaTransport(ok=False)
+    sender = BotSender("tok", "chat1", None, media_transport=mt)
+    images = [("image/png", b"one"), ("image/jpeg", b"two")]
+    assert sender.send_photos(images) is False
+    assert len(mt.calls) == 1
+    assert mt.calls[0][0] == "sendMediaGroup"
+
+
+def test_send_photos_media_group_upload_failure_logs_the_drop(caplog):
+    # The media-group sibling of test_send_photos_single_image_upload_failure_
+    # logs_the_drop — same rule, same class of blind spot: nothing in the
+    # suite previously read the log record from a failed sendMediaGroup call.
+    mt = _MediaTransport(ok=False)
+    sender = BotSender("tok", "chat1", None, media_transport=mt)
+    images = [("image/png", b"one"), ("image/jpeg", b"two")]
+    with caplog.at_level(logging.WARNING):
+        assert sender.send_photos(images) is False
+    assert any("Bad Request" in r.getMessage() for r in caplog.records)
+
+
 def test_urllib_media_transport_sends_multipart_with_matching_boundary(monkeypatch):
     # The hand-rolled multipart body is the real production wire format — its
     # Content-Type must declare the boundary it actually wrote, or every live
@@ -1503,3 +1541,26 @@ def test_registry_relay_does_not_call_send_photos_for_a_text_only_message():
         "@1", Message("assistant", "text", "hi")
     )
     assert photos.calls == []
+
+
+def test_registry_relay_wires_the_real_send_photos_positionally():
+    # DEFEAT_SHAPES 338 round 5 [WIRING]: RegistryRelay._relay_images calls
+    # self._send_photos(msg.images, thread) POSITIONALLY, but every relay test
+    # above stubs send_photos with _PhotoStub — whose __call__(self, images,
+    # *args) swallows a positional OR keyword thread indiscriminately — and
+    # every direct BotSender.send_photos test above calls it with
+    # message_thread_id= as a KEYWORD. Neither half of the seam ever exercised
+    # the real bound method through the real call site, so making
+    # message_thread_id keyword-only on send_photos would break production
+    # (TypeError on every image relay) while every existing test stayed green.
+    # Wire the real BotSender.send_photos in and drive it through on_message.
+    mt = _MediaTransport()
+    sender = BotSender("tok", "chat1", None, media_transport=mt)
+    reg = _registry(("@1", "42"))
+    stub = _ThreadStubSender()
+    relay = RegistryRelay(stub, reg, send_photos=sender.send_photos)
+    msg = Message("assistant", "tool_result", "captured", images=[("image/png", b"data")])
+    relay.on_message("@1", msg)
+    assert len(mt.calls) == 1
+    _, fields, _ = mt.calls[0]
+    assert fields["message_thread_id"] == "42"
