@@ -1564,3 +1564,142 @@ def test_registry_relay_wires_the_real_send_photos_positionally():
     assert len(mt.calls) == 1
     _, fields, _ = mt.calls[0]
     assert fields["message_thread_id"] == "42"
+
+
+def test_urllib_media_transport_reports_a_network_failure_as_NOT_ok(monkeypatch):
+    """🔴 A URLError must come back `ok: False`. If it returns `{"ok": True}` the whole
+    drop-reporting chain goes silent: `send_photos` returns True, `_log_send_drop` never
+    fires, and an image that never reached Telegram leaves no trace anywhere — the exact
+    "a dropped message must leave a visible marker" rule CMX-311/CMX-322 established for
+    text, defeated on the image path.
+
+    Nothing else covers this arm: every other media test injects a fake `_MediaTransport`,
+    so the real transport's exception handling is only reachable here.
+    """
+    import urllib.error
+    import urllib.request
+
+    def _boom(req, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+
+    resp = _urllib_media_transport("tok")(
+        "sendPhoto", {"chat_id": "c1"}, [("photo", "image.png", b"\x89PNGDATA")]
+    )
+
+    assert resp["ok"] is False, (
+        "a network failure was reported as a successful upload — send_photos would return "
+        "True and the dropped image would leave no marker at all"
+    )
+    assert "connection refused" in resp.get("description", "")
+
+
+def test_urllib_media_transport_boundary_cannot_occur_inside_the_image_bytes(monkeypatch):
+    """The boundary delimits raw binary it does not control, so it must be a value that
+    cannot appear inside it — that is what `uuid4().hex` buys and a literal like `"x"`
+    does not.
+
+    The existing boundary test reads the boundary back out of the body it just wrote, so
+    it agrees with itself for ANY value, `"x"` included. This drives image bytes that
+    CONTAIN the degenerate boundary: with a real uuid the delimiter is still unambiguous,
+    while a short literal splits the payload and corrupts the upload.
+    """
+    import json as _json
+    import urllib.request
+
+    captured = {}
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return _json.dumps({"ok": True}).encode()
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda req, timeout=None: (captured.__setitem__("req", req), _FakeResponse())[1],
+    )
+
+    # image bytes that embed the degenerate boundary AND its delimiter form
+    evil = b"\x89PNG--x\r\n--x--\r\nstill image data"
+    _urllib_media_transport("tok")(
+        "sendPhoto", {"chat_id": "c1"}, [("photo", "image.png", evil)]
+    )
+
+    req = captured["req"]
+    boundary = req.headers["Content-type"].split("boundary=")[1]
+    assert len(boundary) >= 16, (
+        f"boundary {boundary!r} is short enough to occur inside image bytes — a collision "
+        "splits the payload and corrupts the upload"
+    )
+    assert boundary.encode() not in evil, (
+        f"the boundary {boundary!r} occurs inside the image bytes it delimits"
+    )
+
+
+def test_send_photos_single_image_RETRIES_a_flood_controlled_upload():
+    """🔴 A single-photo upload is a real message and must ride the 429 retry like every
+    other one. `_call`'s own docstring reserves `retry_flood=False` for the ephemeral
+    status line — a message whose whole point is that it is disposable — and an image the
+    operator asked for is the opposite of that.
+
+    The media-group path's retry is covered; the single-photo call site is not, so
+    `retry_flood=False` there was invisible. Under it, Telegram's flood control (which
+    CMX-311/CMX-322 exist because of, and which fires exactly when several agents are
+    talking at once) drops the image on the first 429 with no retry.
+    """
+    class _FloodOnce:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, method, fields, files):
+            self.calls.append((method, dict(fields), list(files)))
+            if len(self.calls) == 1:
+                return {"ok": False, "error_code": 429,
+                        "parameters": {"retry_after": 0}}
+            return {"ok": True, "result": {"message_id": 1}}
+
+    mt = _FloodOnce()
+    sender = BotSender("tok", "chat1", "topic1", media_transport=mt)
+
+    assert sender.send_photos([("image/png", b"data")]) is True
+    assert len(mt.calls) == 2, (
+        f"a flood-controlled single-photo upload was not retried ({len(mt.calls)} call(s)) "
+        "— the image is dropped on the first 429, which is when several agents are busy"
+    )
+    assert all(c[0] == "sendPhoto" for c in mt.calls)
+
+
+def test_send_photos_oversized_warning_names_the_CAP_it_exceeded(caplog):
+    """The WARNING is the operator's only machine-readable trace of a dropped image, and
+    'over the  cap' — with the size interpolated away — tells them nothing about WHY.
+
+    Round 3 pinned this same log call's count and total, so both of those are read back
+    from an independently-known value; the cap itself was the one interpolation left
+    asserted by nothing.
+    """
+    import logging as _logging
+
+    mt = _MediaTransport()
+    sender = BotSender("tok", "chat1", "topic1", media_transport=mt)
+    # ⚠️ TWO oversized images on purpose. With a single MAX+1 fixture the TOTAL renders
+    # identically to the CAP ("10.0 MB" both), so an assertion on the cap passes on the
+    # total's interpolation and the blanked-cap mutation survives — the coincide-in-
+    # fixtures shape this suite keeps finding, in the guard written to catch it. Two
+    # images make the total ~20 MB, so only the cap can render as MAX_PHOTO_BYTES.
+    big = b"x" * (MAX_PHOTO_BYTES + 1)
+    with caplog.at_level(_logging.WARNING):
+        sender.send_photos([("image/png", big), ("image/png", big)])
+
+    dropped = [r.getMessage() for r in caplog.records if "dropped" in r.getMessage()]
+    assert dropped, "no WARNING was logged for a dropped oversized image"
+    cap, total = _format_photo_size(MAX_PHOTO_BYTES), _format_photo_size(2 * len(big))
+    assert cap != total, "fixture drifted: the cap and the total must render differently"
+    assert cap in dropped[0], (
+        f"the dropped-image warning does not name the cap it exceeded: {dropped[0]!r}"
+    )
