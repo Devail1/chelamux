@@ -3701,6 +3701,67 @@ def test_cmd_judge_self_check_cli_exits_zero_when_every_guard_is_killed(tmp_path
     assert "safe to commit" in capsys.readouterr().out
 
 
+def test_cmd_judge_ack_blocked_race_cli_reaches_the_dispatcher(capsys):
+    """🧊 CMX-336 rework: `chela judge ack-blocked-race` is a dead `elif` away from
+    silently falling through to `p_judge.print_help()` instead of ever calling
+    `dispatcher.acknowledge_blocked_race` — nothing in this PR drove the real CLI
+    dispatch for this subcommand before. Same pattern as the self-check CLI tests above:
+    corrupt `elif args.judge_cmd == "ack-blocked-race":` (e.g. `elif False and
+    args.judge_cmd == "ack-blocked-race":`) and this goes red — the mocked dispatcher
+    call is never made, so the success line never prints and the mock assertion fails.
+
+    🧊 CMX-336 rework round 2: this passed `--note` as nothing and asserted `note=""` —
+    that's true whether `args.note` was actually threaded through or the call site
+    hardcoded `note=""` regardless of the flag (`docs/defeat_shapes/336-*.md`). `--note`
+    is one of the four things this command is documented to stamp and is advertised in
+    both the changelog and the subcommand's own `--help`, so it must be driven with a
+    real, distinctive value here.
+    """
+    from unittest.mock import patch as mock_patch
+
+    from chela import main
+
+    fake = {
+        "ok": True, "task_id": "cmx-99", "by": "someone-distinctive",
+        "at": "2026-09-02T00:00:00+00:00", "sha": "deadbeefcafe",
+        "pr_url": "https://github.com/o/r/pull/431",
+    }
+    with mock_patch.object(main.dispatcher, "acknowledge_blocked_race", return_value=fake) as mocked:
+        with patch.object(sys, "argv", ["chela", "judge", "ack-blocked-race", "cmx-99",
+                                         "--by", "someone-distinctive",
+                                         "--note", "already shipped, safe to ack"]):
+            main.main()
+
+    mocked.assert_called_once_with(
+        "cmx-99", by="someone-distinctive", note="already shipped, safe to ack",
+    )
+    out = capsys.readouterr().out
+    assert "acknowledged by someone-distinctive" in out
+
+
+def test_cmd_judge_ack_blocked_race_cli_exits_nonzero_on_refusal(capsys):
+    """🧊 CMX-336 rework round 2: `ack-blocked-race` is an operator/scripted surface —
+    its whole refusal path (wrong judge_state, unknown run, lost CAS) is only observable
+    to a caller through the exit status, and nothing drove that branch before
+    (`docs/defeat_shapes/336-*.md`). A mutation turning the refusal's `sys.exit(1)` into
+    `sys.exit(0)` left the whole suite green because no test ever asked for the exit code
+    on a refused acknowledgement.
+    """
+    from unittest.mock import patch as mock_patch
+
+    from chela import main
+
+    fake = {"ok": False, "task_id": "cmx-99", "error": "no run matches 'cmx-99'"}
+    with mock_patch.object(main.dispatcher, "acknowledge_blocked_race", return_value=fake):
+        with patch.object(sys, "argv", ["chela", "judge", "ack-blocked-race", "cmx-99"]):
+            with pytest.raises(SystemExit) as exc:
+                main.main()
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "no run matches 'cmx-99'" in out
+
+
 # ---------------------------------------------------------------------------
 # CMX-319 — the staleness check must not read its reference from the row it checks
 # ---------------------------------------------------------------------------
@@ -3977,3 +4038,41 @@ def test_judge_run_calls_pr_live_head_sha_with_THIS_runs_real_pr_url_and_repo_di
         "degraded to None, None would fall back to the row and wrongly report this current"
     )
 
+
+
+def test_cmd_judge_ack_blocked_race_omitting_by_passes_empty_so_the_env_chain_runs(capsys):
+    """🔴 `--by`'s argparse default is what FEEDS the documented $USER/$USERNAME/'unknown'
+    fallback, and nothing pinned the link between the flag's ABSENCE and that chain.
+
+    The dispatcher-level tests prove the chain given `by=""`, and the CLI test above always
+    passes `--by` explicitly — so `default="unknown"` (or any other non-empty default)
+    survives both: the CLI test still gets its explicit value, and the dispatcher tests
+    still get their `""` because they call the function directly. The flag's own `--help`
+    and the changelog both promise the env chain, and only `default=""` lets
+    `acknowledge_blocked_race`'s `(by or "").strip() or os.environ.get("USER") ...` reach
+    the environment at all.
+
+    This is defeat shape 336 — the branch's own entry — one level up the call stack: a
+    value proven at the layer below, with the layer above never driven in the state that
+    makes the layer below's logic reachable.
+    """
+    from unittest.mock import patch as mock_patch
+
+    from chela import main
+
+    fake = {
+        "ok": True, "task_id": "cmx-99", "by": "from-the-env",
+        "at": "2026-09-03T00:00:00+00:00", "sha": "deadbeefcafe",
+        "pr_url": "https://github.com/o/r/pull/431",
+    }
+    with mock_patch.object(main.dispatcher, "acknowledge_blocked_race", return_value=fake) as mocked:
+        with patch.object(sys, "argv", ["chela", "judge", "ack-blocked-race", "cmx-99"]):
+            main.main()
+
+    mocked.assert_called_once_with("cmx-99", by="", note="")
+    called_by = mocked.call_args.kwargs["by"]
+    assert called_by == "", (
+        f"omitting --by handed the dispatcher {called_by!r} instead of '' — a non-empty "
+        "argparse default short-circuits the documented $USER/$USERNAME/'unknown' chain, "
+        "so every acknowledgement would be attributed to that constant"
+    )

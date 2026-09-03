@@ -1247,6 +1247,25 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # budget), reset to 0 the moment CI is next seen passing (see the pr_checks refresh
         # in `tick`) — it counts a STREAK, not a lifetime total.
         ("ci_infra_streak", "ALTER TABLE runs ADD COLUMN ci_infra_streak INTEGER DEFAULT 0"),
+        # 🧊 CMX-336. `_blocked_race_resolved` (chela/runtime_truth.py) clears a
+        # `J_BLOCKED_RACE` row on exactly one condition — `judge_sha != pr_head_sha`, i.e.
+        # the PR's head moved past the judged commit. That is unreachable once the PR is
+        # merged or closed: the branch is gone, nothing will ever push to it again, so
+        # `chela doctor` (and the ntfy nag it feeds) would report the row forever with no
+        # operator exit besides hand-editing this table — exactly what CMX-323 was
+        # introduced to stop asking people to do. These four columns are the acknowledgement
+        # `acknowledge_blocked_race` writes: WHO, WHEN, an optional NOTE, and the exact
+        # `judge_sha` the acknowledgement covers. ⛔ Deliberately NOT a rewrite of
+        # `judge_state`/`judge_detail`/`judge_sha` — the verdict genuinely WAS blocking, and
+        # overwriting it would falsify the record. `blocked_race_ack_sha` is what scopes the
+        # acknowledgement to the SHA it was actually given for: if the row races again on a
+        # different sha later (a reopen, a fresh push, a second CAS loss), the new
+        # `judge_sha` no longer matches this stamp and `_blocked_race_scan` reports the new
+        # occurrence — an old acknowledgement never silences a verdict it was never shown.
+        ("blocked_race_ack_by", "ALTER TABLE runs ADD COLUMN blocked_race_ack_by TEXT"),
+        ("blocked_race_ack_at", "ALTER TABLE runs ADD COLUMN blocked_race_ack_at TEXT"),
+        ("blocked_race_ack_note", "ALTER TABLE runs ADD COLUMN blocked_race_ack_note TEXT"),
+        ("blocked_race_ack_sha", "ALTER TABLE runs ADD COLUMN blocked_race_ack_sha TEXT"),
     ):
         try:
             conn.execute(ddl)
@@ -3348,6 +3367,73 @@ def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | No
                 (state, (detail or "")[:2000], int(no_verdict), task_id),
             )
         conn.commit()
+
+
+def acknowledge_blocked_race(ident: str, by: str = "", note: str = "") -> dict:
+    """🧊 CMX-336: acknowledge a ``J_BLOCKED_RACE`` verdict that can never resolve the
+    ordinary way — ``_blocked_race_resolved``'s ``judge_sha != pr_head_sha`` check never
+    fires once the PR is merged or closed, because nothing will push to a dead branch
+    again. This is the operator's exit: it does NOT touch ``judge_state``/``judge_detail``/
+    ``judge_sha`` (the verdict genuinely WAS blocking; rewriting it would falsify the
+    record — see the ⛔ note above ``_blocked_race_scan``). It stamps the separate
+    ``blocked_race_ack_*`` columns instead, so ``_blocked_race_resolved`` can treat the row
+    as cleared while every original judge column stays exactly as the judge wrote it.
+
+    Refuses unless the row's CURRENT ``judge_state`` is ``J_BLOCKED_RACE`` right now (CAS on
+    ``judge_state``/``judge_sha`` together) — there is nothing to acknowledge otherwise, and
+    a concurrent judge re-run landing between the read and this write must not have its
+    fresh verdict silently stamped as "acknowledged" under the old sha.
+    """
+    run = resolve_run(ident)
+    if run is None:
+        return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
+    task_id = run["task_id"]
+    if run.get("judge_state") != judge.J_BLOCKED_RACE:
+        return {
+            "ok": False, "task_id": task_id,
+            "error": f"judge_state is {run.get('judge_state')!r}, not "
+                     f"{judge.J_BLOCKED_RACE!r} — there is no blocked-race verdict on this "
+                     "run to acknowledge",
+        }
+
+    who = (by or "").strip() or os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
+    when = _now()
+    sha = run.get("judge_sha")
+    clean_note = (note or "").strip()
+
+    with _db() as conn:
+        cur = conn.execute(
+            "UPDATE runs SET blocked_race_ack_by=?, blocked_race_ack_at=?, "
+            "blocked_race_ack_note=?, blocked_race_ack_sha=? "
+            "WHERE task_id=? AND judge_state=? AND judge_sha IS ?",
+            (who, when, clean_note, sha, task_id, judge.J_BLOCKED_RACE, sha),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            now = conn.execute(
+                "SELECT judge_state, judge_sha FROM runs WHERE task_id=?", (task_id,)
+            ).fetchone()
+            current = (now["judge_state"], now["judge_sha"]) if now else (None, None)
+            log.warning("acknowledge_blocked_race: %s moved to %r before it could be "
+                        "acknowledged", task_id, current)
+            return {
+                "ok": False, "task_id": task_id,
+                "error": "the row's judge_state or judge_sha changed while this was being "
+                         "written (a fresh judge ran, or someone else acknowledged it "
+                         "first) — nothing was changed. Re-read it and decide again.",
+            }
+
+    event_log.append(
+        "blocked_race_ack",
+        f"{task_id}: blocked-race verdict acknowledged by {who}" + (f" — {clean_note}" if clean_note else ""),
+        payload={"task_id": task_id, "pr_url": run.get("pr_url"), "by": who, "at": when,
+                  "sha": sha, "note": clean_note},
+    )
+    log.info("acknowledge_blocked_race: %s (sha %s) acknowledged by %s", task_id, sha, who)
+    return {
+        "ok": True, "task_id": task_id, "pr_url": run.get("pr_url"),
+        "by": who, "at": when, "sha": sha,
+    }
 
 
 def _cleanup_worktree_on_done(wf: WorkflowDef, row: sqlite3.Row) -> None:
