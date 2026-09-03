@@ -19,6 +19,8 @@ spinner sees a live agent forever, and the "ephemeral" message never poofs.
 """
 from __future__ import annotations
 
+import pytest
+
 from chela.telegram.gatewatch import (
     PermissionGateWatcher,
     STATUS_EDIT_MIN_INTERVAL,
@@ -815,3 +817,93 @@ def test_the_status_is_off_when_no_relay_is_wired():
     )
     watcher.poll(["@1"])
     watcher.forget("@1")
+
+
+def _banner_pane(status_line: str) -> str:
+    """The tip-block + update-banner pane of `TIP_UPDATE_BANNER_PANE`, with the status
+    row swapped — so a test can vary the SPINNER GLYPH while holding the layout fixed."""
+    return (
+        "◍ Running 1 shell command…\n"
+        "  ⎿  $ tmux capture-pane -t chela:@32 -p\n"
+        "\n"
+        f"{status_line}\n"
+        "  ⎿  Tip: Running multiple Claude sessions in parallel can help you move faster\n"
+        "     for complex tasks\n"
+        "✔ Update installed · Restart to update\n"
+        f"{_RULE}\n"
+        "❯\n"
+        f"{_RULE}\n"
+        "\n"
+        "  ⏵⏵ auto mode on · 2 shells · ↰ for agents\n"
+    )
+
+
+@pytest.mark.parametrize("glyph", list("·✻✽✶✳✢"))
+def test_scan_past_a_banner_accepts_EVERY_spinner_frame(glyph):
+    """🔴 Claude animates the spinner — the module's own comment records `·` → `✶` → `✽`
+    → `✻` cycling several times a second — so which glyph a pane shows is pure timing.
+    Every scan-past-a-banner fixture froze on `✽`, which makes a mutation that restricts
+    the acceptance path to one glyph (`... and line[0] == "✽"`) invisible.
+
+    In production that mutation would not fail cleanly: the status line would resolve on
+    roughly one frame in six and vanish on the rest, so the Telegram message would
+    FLICKER — appearing, self-deleting and reappearing — which is far harder to diagnose
+    than the silent stop issue #432 describes. All six glyphs must behave identically.
+    """
+    st = detect_status(_banner_pane(f"{glyph} Wandering… (2m 10s · ↓ 6.2k tokens)"))
+
+    assert st is not None, f"spinner frame {glyph!r} was not accepted behind the banner"
+    assert st.active is True
+    assert st.verb == "Wandering… (2m 10s · ↓ 6.2k tokens)"
+
+
+@pytest.mark.parametrize("glyph", list("·✻✽✶✳✢"))
+def test_scan_past_a_banner_REJECTS_a_settled_line_on_EVERY_spinner_frame(glyph):
+    """⭐ The counterweight, at the same coverage. A finished turn's summary is frozen on
+    whatever frame the turn happened to end on, so the ellipsis gate must reject it for
+    all six glyphs too — every settled fixture froze on `✻`, which lets a mutation that
+    exempts one glyph (`... or line[0] != "✻"`) through.
+
+    Without this, the pair of tests above would be satisfied by a parser that accepts
+    everything behind a banner, which is the sticky-message failure the ellipsis
+    discriminator exists to prevent (a frozen "Worked for 1m 17s" that never poofs).
+    """
+    pane = _banner_pane(f"{glyph} Worked for 1m 17s · 1 shell still running")
+
+    assert detect_status(pane) is None, (
+        f"a settled, past-tense line on frame {glyph!r} was read as a live status behind "
+        "the banner — the ellipsis gate must reject every frame, not just ✻"
+    )
+
+
+@pytest.mark.parametrize("gap", [1, 2, 3, 4])
+def test_first_nonblank_row_is_accepted_at_EVERY_depth_the_lookback_reaches(gap):
+    """The production comment says the FIRST non-blank row is accepted unconditionally —
+    active or settled — and carries no distance qualifier. Pre-PR the code did exactly
+    that at any depth `_STATUS_LOOKBACK` reaches; the widened scan must not have quietly
+    narrowed it to the rows nearest the chrome.
+
+    Every existing fixture puts that row at gap 1 or 2, so `is_first = not
+    seen_first_nonblank and i >= chrome_idx - 2` is invisible to them. This drives all
+    four reachable depths.
+
+    What the narrowing would cost is not nothing: a settled line resolves to
+    `Status(active=False)` carrying `shells` and `seconds` — the relay uses `active` to
+    poof the ephemeral message, and the counts are half of what the phone shows. Under the
+    mutation, gaps 3 and 4 collapse to `None` instead, losing both.
+    """
+    rows = (
+        ["◍ output", ""]
+        + ["✻ Worked for 1m 17s · 1 shell still running"]
+        + [""] * (gap - 1)
+        + [_RULE, "❯", _RULE, "", "  ⏵⏵ auto mode on · 2 shells · ↰ for agents"]
+    )
+    st = detect_status("\n".join(rows) + "\n")
+
+    assert st is not None, (
+        f"a settled first non-blank row at gap {gap} resolved to None — the unconditional "
+        "first-row acceptance was narrowed to the rows nearest the chrome"
+    )
+    assert st.active is False          # settled: the relay poofs the message
+    assert st.verb == "Worked for 1m 17s · 1 shell still running"
+    assert st.seconds == 77            # ⭐ the payload that None would have thrown away
