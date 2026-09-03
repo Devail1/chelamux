@@ -23,15 +23,18 @@ default. The supervisor script calls bare `tmux`, so it is isolated with a PATH 
 that injects `-L <sock>` — also per-invocation, and it inherits into the script's own
 `tmux` and `chela.discovery` subprocess calls alike.
 """
+import ast
+import inspect
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -100,6 +103,32 @@ def _tmux(env, sock, *args, check=True):
                           env=env, capture_output=True, text=True, check=check)
 
 
+def _reap(proc, term_timeout=10, kill_timeout=5):
+    """Teardown-safe reap: SIGTERM, bounded wait, escalate to SIGKILL, wait again.
+
+    A supervisor slow to exit after SIGTERM must not fail the TEST that is merely
+    cleaning up after it — every assertion in that test already ran and passed, so a
+    `TimeoutExpired` out of teardown misreports "the supervisor is broken" when
+    nothing under test was. Escalating to SIGKILL (which a process cannot ignore) is
+    what guarantees no supervisor outlives the test. The final `wait` is deliberately
+    NOT wrapped in its own try/except: if the child survives SIGKILL too, that is a
+    real "process will not die" regression and must still fail the test, not vanish
+    into a blanket `except Exception: pass`.
+
+    Tests that assert SIGTERM promptness as their actual behavior-under-test (see the
+    "must still answer SIGTERM promptly" checks below) call `proc.wait()` directly for
+    that — this helper is for `finally:` cleanup only, not a replacement for them.
+    """
+    proc.terminate()
+    try:
+        proc.wait(timeout=term_timeout)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    proc.kill()
+    proc.wait(timeout=kill_timeout)
+
+
 def _run_bg(env, extra=None):
     return subprocess.Popen(
         [str(SCRIPT)], env={**env, **(extra or {})},
@@ -144,8 +173,7 @@ def test_missing_session_is_created_not_fatal(env, sock):
             "supervisor never created the missing session"
         assert proc.poll() is None, "supervisor exited after creating the session"
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        _reap(proc)
 
 
 def test_unreachable_tmux_backs_off_instead_of_exiting(env, tmp_path):
@@ -167,8 +195,7 @@ def test_unreachable_tmux_backs_off_instead_of_exiting(env, tmp_path):
         time.sleep(3)  # pre-fix this exited in ~12ms; pm2 restarted it ~80x/s
         assert proc.poll() is None, "supervisor exited with no tmux — pm2 would hot-loop"
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        _reap(proc)
 
 
 def test_disabled_wall_still_writes_empty_map_and_idles(env, sock):
@@ -189,8 +216,7 @@ def test_disabled_wall_still_writes_empty_map_and_idles(env, sock):
         proc.terminate()
         proc.wait(timeout=5)  # pre-fix: hung on `sleep 3600`, i.e. up to an hour
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        _reap(proc)
 
 
 @pytest.mark.skipif(shutil.which("pgrep") is None, reason="pgrep not installed")
@@ -233,8 +259,7 @@ def test_disabled_wall_sigterm_does_not_orphan_the_idle_sleep(env):
         assert not os.path.exists(f"/proc/{sleep_pid}"), \
             f"sleep pid {sleep_pid} outlived the supervisor — orphaned onto PID 1"
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        _reap(proc)
 
 
 # --- half 2: a LIVE session must never be recreated (the destructive regression) ---
@@ -257,8 +282,7 @@ def test_live_session_and_its_windows_are_never_recreated(env, sock):
         assert discovery.ANCHOR_WINDOW not in _windows(env, sock), \
             "self-heal added an anchor window to a live session"
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        _reap(proc)
 
 
 def test_create_is_a_noop_even_if_the_has_session_gate_lies(env, sock):
@@ -289,8 +313,7 @@ def test_session_recreated_after_it_disappears(env, sock):
                      msg="it exited when the session was killed"), \
             "supervisor did not recreate the vanished session"
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        _reap(proc)
 
 
 # --- the Python half (chela.discovery), used by the dashboard's spawn path ---
@@ -315,3 +338,238 @@ def test_ensure_session_false_when_tmux_unreachable(env):
     with patch.dict(os.environ, env, clear=False):
         with patch("chela.discovery.subprocess.run", side_effect=FileNotFoundError):
             assert discovery.ensure_session() is False
+
+
+# --- issue #436: teardown reap must never fail the test it is cleaning up after ---
+
+def test_reap_survives_a_sigterm_ignoring_child(tmp_path):
+    """Regression for issue #436: a `finally:` block's `proc.wait(timeout=10)` used to
+    have no SIGKILL fallback, so a supervisor that (for whatever reason) does not exit
+    within 10s of SIGTERM fails the TEST that was cleaning up after it, even though
+    every assertion in that test's body already passed. `_reap` must escalate to
+    SIGKILL instead — which the child cannot ignore — and the whole thing must still
+    reap cleanly with no leaked pid."""
+    stub = tmp_path / "ignore_term.py"
+    stub.write_text(
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "time.sleep(30)\n"
+    )
+    proc = subprocess.Popen([sys.executable, str(stub)])
+    try:
+        time.sleep(0.3)  # let it install the SIGTERM handler before we send one
+        assert proc.poll() is None, "stub exited before the test even started"
+        _reap(proc, term_timeout=1, kill_timeout=5)  # must NOT raise TimeoutExpired
+        # Asserted HERE, inside the try and immediately after _reap returns — not
+        # after this function's own `finally:` below, which reaps the stub itself
+        # and would make this assertion pass regardless of what `_reap` did.
+        assert proc.poll() is not None, "SIGTERM-ignoring child was never reaped"
+        assert not os.path.exists(f"/proc/{proc.pid}"), \
+            f"child pid {proc.pid} outlived the reap — leaked past teardown"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def test_reap_propagates_if_the_child_survives_sigkill_too():
+    """Guard: escalating to SIGKILL must not become a blanket `except Exception: pass`.
+    A process that is still alive after SIGKILL (the only realistic real-world case is
+    "the process never actually died") is a genuine "will not exit" regression — the
+    exact thing this file's other tests exist to catch — and must still fail the test,
+    not vanish silently.
+
+    The sequence is pinned as ONE `mock_calls` equality, not three independent
+    `assert_called_once`/`call_count` checks — those are all satisfied by ANY
+    permutation of the four calls (e.g. kill-then-terminate), which is exactly the
+    ordering mutation docs/defeat_shapes/339 records. `mock_calls` pins the method,
+    the arguments AND the order in one assertion.
+    """
+    fake = MagicMock()
+    fake.wait = MagicMock(side_effect=subprocess.TimeoutExpired(cmd="stub", timeout=1))
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        _reap(fake, term_timeout=1, kill_timeout=1)
+
+    assert fake.mock_calls == [
+        call.terminate(),
+        call.wait(timeout=1),
+        call.kill(),
+        call.wait(timeout=1),
+    ], "must SIGTERM, wait, then SIGKILL, wait again — in that order, not any permutation"
+
+
+def test_reap_defaults_cannot_collapse_either_wait_window():
+    """WIRING: `_reap`'s defaults are load-bearing at all six call sites, which all call
+    bare `_reap(proc)` and take both timeouts from the signature. Nothing in the two
+    tests above observes the defaults — both pass every timeout explicitly — so a
+    `term_timeout=0` or `kill_timeout=0` default is invisible to them even though it
+    collapses the graceful-SIGTERM window (skips the supervisor's bash EXIT trap,
+    issue #436's leaked-ttyd/webterm_* regression) or turns the un-caught final
+    `proc.wait(timeout=kill_timeout)` into an immediate `TimeoutExpired` out of
+    `finally:` on the exact hang path `_reap` exists to absorb."""
+    params = inspect.signature(_reap).parameters
+    assert params["term_timeout"].default >= 5, (
+        "term_timeout default collapses the graceful-SIGTERM window before a "
+        "supervisor's bash EXIT trap can run (issue #436)"
+    )
+    assert params["kill_timeout"].default >= 1, (
+        "kill_timeout default is <1s — the un-caught final wait would raise "
+        "TimeoutExpired out of finally: on the hang path _reap exists to absorb"
+    )
+
+
+# --- wiring: every `proc = _run_bg(...)` teardown must actually route through _reap ---
+#
+# docs/defeat_shapes/339: the tests above prove `_reap` itself escalates to SIGKILL, but
+# none of them observe whether any of the six call sites in THIS file still calls it —
+# under normal (fast-exiting) conditions `finally: _reap(proc)` and a hand-rolled
+# `finally: proc.terminate(); proc.wait(timeout=10)` are behaviorally identical, so
+# reverting one call site to the pre-fix shape is invisible to the rest of the suite. This
+# walks this file's OWN source and asserts every such teardown is structurally
+# `finally: _reap(proc)` — nothing else — which a mutation on any one call site trips.
+
+def _run_bg_teardown_sites():
+    """Yield (function_name, finally_body) for every function whose body assigns
+    `proc = _run_bg(...)` — the six real-process teardown call sites this guards."""
+    tree = ast.parse(Path(__file__).read_text())
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef):
+            continue
+        has_run_bg_proc = any(
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and stmt.targets[0].id == "proc"
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "_run_bg"
+            for stmt in func.body
+        )
+        if not has_run_bg_proc:
+            continue
+        tries = [stmt for stmt in func.body if isinstance(stmt, ast.Try)]
+        assert len(tries) == 1, (
+            f"{func.name}: expected exactly one top-level try/finally around its "
+            f"`_run_bg` process, found {len(tries)}"
+        )
+        yield func.name, tries[0].finalbody
+
+
+def test_all_run_bg_teardowns_route_through_reap():
+    """WIRING: reverting any one of the six `finally: _reap(proc)` teardowns to the
+    pre-issue-#436 `proc.terminate(); proc.wait(timeout=10)` shape must be caught — it
+    silently drops the SIGKILL escalation for that call site alone."""
+    sites = list(_run_bg_teardown_sites())
+    assert len(sites) == 6, (
+        f"expected 6 `proc = _run_bg(...)` teardown call sites in this file, found "
+        f"{len(sites)} — if you added one, give it `finally: _reap(proc)` and then "
+        f"update this guard's count"
+    )
+    for name, finalbody in sites:
+        assert len(finalbody) == 1, (
+            f"{name}: `finally:` must be exactly `_reap(proc)` — found "
+            f"{len(finalbody)} statement(s) instead, which bypasses the SIGKILL "
+            f"escalation from issue #436"
+        )
+        [stmt] = finalbody
+        is_reap_call = (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "_reap"
+            and len(stmt.value.args) == 1
+            and isinstance(stmt.value.args[0], ast.Name)
+            and stmt.value.args[0].id == "proc"
+            and not stmt.value.keywords
+        )
+        assert is_reap_call, (
+            f"{name}: `finally:` does not call `_reap(proc)` with no other arguments — "
+            f"teardown no longer escalates to SIGKILL on a hung supervisor (issue #436), "
+            f"or overrides a timeout that collapses the graceful-SIGTERM window"
+        )
+
+
+# --- wiring: a promptness check must stay a DIRECT proc.wait(), not be absorbed into _reap ---
+#
+# docs/defeat_shapes/339 round 4: _reap's own docstring draws a must-never boundary — tests
+# that assert SIGTERM promptness as their actual behavior-under-test call `proc.wait()`
+# directly for that, in the try BODY, above `finally: _reap(proc)`; `_reap` is finally:-only
+# cleanup, never a replacement for that assertion. test_all_run_bg_teardowns_route_through_reap
+# above reads ONLY `tries[0].finalbody` — it has no opinion on the try body — so swallowing
+# either promptness pair into the finally's `_reap(proc)` (`_reap(proc)` in the body, ANOTHER
+# `_reap(proc)` in finally) is invisible to it. This walks the same file's own AST a second
+# way: for the two functions whose try body contains a direct promptness check, assert that
+# check is still there and still direct, not routed through `_reap`.
+
+_PROMPTNESS_CHECK_FUNCS = frozenset({
+    "test_disabled_wall_still_writes_empty_map_and_idles",
+    "test_disabled_wall_sigterm_does_not_orphan_the_idle_sleep",
+})
+
+
+def _is_proc_method_call(stmt, method_name):
+    return (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Call)
+        and isinstance(stmt.value.func, ast.Attribute)
+        and stmt.value.func.attr == method_name
+        and isinstance(stmt.value.func.value, ast.Name)
+        and stmt.value.func.value.id == "proc"
+    )
+
+
+def _wait_timeout_literal(stmt):
+    """The int literal passed as `timeout=` to a `proc.wait(...)` Expr statement, or None."""
+    if not _is_proc_method_call(stmt, "wait"):
+        return None
+    for kw in stmt.value.keywords:
+        if kw.arg == "timeout" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, int):
+            return kw.value.value
+    return None
+
+
+def _promptness_check_try_bodies():
+    """Yield (function_name, try_body) for the two functions above — the try body, NOT the
+    finally body that `_run_bg_teardown_sites` already covers."""
+    tree = ast.parse(Path(__file__).read_text())
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef) or func.name not in _PROMPTNESS_CHECK_FUNCS:
+            continue
+        tries = [stmt for stmt in func.body if isinstance(stmt, ast.Try)]
+        assert len(tries) == 1, (
+            f"{func.name}: expected exactly one top-level try/finally around its "
+            f"`_run_bg` process"
+        )
+        yield func.name, tries[0].body
+
+
+def test_promptness_checks_are_not_absorbed_into_reap():
+    """WIRING: `_reap` is finally:-only cleanup, never a replacement for a test's own
+    SIGTERM-promptness assertion (see `_reap`'s docstring). Replacing either of the two
+    direct `proc.terminate(); proc.wait(timeout=<=5)` pairs above with a bare `_reap(proc)`
+    call is invisible to `test_all_run_bg_teardowns_route_through_reap`, which reads only
+    the `finally:` body — pin the try BODY directly so that substitution fails."""
+    for name, body in _promptness_check_try_bodies():
+        assert not any(
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "_reap"
+            for stmt in body
+        ), (
+            f"{name}: its try body calls `_reap()` — that absorbs the SIGTERM-promptness "
+            f"check this test exists to make, and _reap is documented as finally:-only "
+            f"cleanup, not a replacement for it"
+        )
+
+        assert any(_is_proc_method_call(stmt, "terminate") for stmt in body), (
+            f"{name}: missing a direct `proc.terminate()` in its try body — the "
+            f"SIGTERM-promptness check this test exists to make is gone"
+        )
+
+        timeouts = [t for t in (_wait_timeout_literal(stmt) for stmt in body) if t is not None]
+        assert timeouts and all(t <= 5 for t in timeouts), (
+            f"{name}: missing a direct `proc.wait(timeout=<=5)` in its try body, or its "
+            f"bound was widened past the 5s promptness assertion this test makes"
+        )
