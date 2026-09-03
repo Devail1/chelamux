@@ -388,15 +388,19 @@ def test_reap_propagates_if_the_child_survives_sigkill_too():
     fake = MagicMock()
     fake.wait = MagicMock(side_effect=subprocess.TimeoutExpired(cmd="stub", timeout=1))
 
+    # term_timeout and kill_timeout are DELIBERATELY DIFFERENT — round 4's rework
+    # (docs/defeat_shapes/339) found that parking them on the same value lets the
+    # second `wait(timeout=...)` silently read either parameter and still satisfy
+    # this assertion, making `kill_timeout` an unobserved argument end to end.
     with pytest.raises(subprocess.TimeoutExpired):
-        _reap(fake, term_timeout=1, kill_timeout=1)
+        _reap(fake, term_timeout=1, kill_timeout=2)
 
     assert fake.mock_calls == [
         call.terminate(),
         call.wait(timeout=1),
         call.kill(),
-        call.wait(timeout=1),
-    ], "must SIGTERM, wait, then SIGKILL, wait again — in that order, not any permutation"
+        call.wait(timeout=2),
+    ], "must SIGTERM, wait(term_timeout), then SIGKILL, wait(kill_timeout) — in that order"
 
 
 def test_reap_defaults_cannot_collapse_either_wait_window():
@@ -549,7 +553,16 @@ def test_promptness_checks_are_not_absorbed_into_reap():
     SIGTERM-promptness assertion (see `_reap`'s docstring). Replacing either of the two
     direct `proc.terminate(); proc.wait(timeout=<=5)` pairs above with a bare `_reap(proc)`
     call is invisible to `test_all_run_bg_teardowns_route_through_reap`, which reads only
-    the `finally:` body — pin the try BODY directly so that substitution fails."""
+    the `finally:` body — pin the try BODY directly so that substitution fails.
+
+    round 5 rework (docs/defeat_shapes/339): pinning the three shapes as independent
+    existence checks over an unordered statement list let `proc.kill()` slip in BETWEEN
+    the terminate and the wait — all three shapes stayed true, but the 5s wait no longer
+    measured SIGTERM promptness at all (SIGKILL ends the process instantly regardless of
+    whether it was hung). The property that actually makes this a promptness detector is
+    ADJACENCY: the wait must be the statement immediately after the terminate, with
+    nothing else touching `proc` in between.
+    """
     for name, body in _promptness_check_try_bodies():
         assert not any(
             isinstance(stmt, ast.Expr)
@@ -563,13 +576,19 @@ def test_promptness_checks_are_not_absorbed_into_reap():
             f"cleanup, not a replacement for it"
         )
 
-        assert any(_is_proc_method_call(stmt, "terminate") for stmt in body), (
-            f"{name}: missing a direct `proc.terminate()` in its try body — the "
-            f"SIGTERM-promptness check this test exists to make is gone"
+        terminate_indices = [
+            i for i, stmt in enumerate(body) if _is_proc_method_call(stmt, "terminate")
+        ]
+        assert len(terminate_indices) == 1, (
+            f"{name}: expected exactly one direct `proc.terminate()` in its try body — "
+            f"the SIGTERM-promptness check this test exists to make is gone or duplicated"
         )
 
-        timeouts = [t for t in (_wait_timeout_literal(stmt) for stmt in body) if t is not None]
-        assert timeouts and all(t <= 5 for t in timeouts), (
-            f"{name}: missing a direct `proc.wait(timeout=<=5)` in its try body, or its "
-            f"bound was widened past the 5s promptness assertion this test makes"
+        terminate_idx = terminate_indices[0]
+        next_stmt = body[terminate_idx + 1] if terminate_idx + 1 < len(body) else None
+        timeout = _wait_timeout_literal(next_stmt) if next_stmt is not None else None
+        assert timeout is not None and timeout <= 5, (
+            f"{name}: `proc.terminate()` is not immediately followed by a direct "
+            f"`proc.wait(timeout=<=5)` — something else can now run between them "
+            f"(e.g. `proc.kill()`), which makes the 5s bound measure nothing"
         )

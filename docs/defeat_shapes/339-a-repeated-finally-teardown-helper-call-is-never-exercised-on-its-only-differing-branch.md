@@ -150,3 +150,66 @@ NOT contain a call to `_reap`. Found CMX-339 rework round 4 (2026-09-03), PR #43
 judge applied the mutation above to a throwaway checkout; closed by adding
 `test_promptness_checks_are_not_absorbed_into_reap`, verified to go red against the exact
 mutation before landing.
+
+**Round 5 addendum — round 4's guard pinned three SHAPES over an unordered statement list,
+not the ADJACENCY that makes the pair a detector; and the propagation test's `mock_calls`
+equality had its argument half defeated by a fixture that parks both timeouts on the same
+value:** two independent survivals in one round, both instances of the same underlying
+lesson — a guard that enumerates that certain shapes exist somewhere in a body, or that
+compares two things which happen to hold equal values, is weaker than it reads.
+
+*Experiment 1 — `test_promptness_checks_are_not_absorbed_into_reap`.* The round-4 guard
+checked three things over `tries[0].body` as an unordered set: no top-level `_reap(...)`
+call, a `proc.terminate()` Expr exists, a `proc.wait(timeout=<=5)` Expr exists. None of
+those is "terminate and wait are adjacent, with nothing else able to run between them."
+**Mutation that defeats it:**
+```diff
+-         proc.terminate()
+-         proc.wait(timeout=5)  # pre-fix: hung on `sleep 3600`, i.e. up to an hour
++         proc.terminate()
++         proc.kill()
++         proc.wait(timeout=5)  # pre-fix: hung on `sleep 3600`, i.e. up to an hour
+```
+All three round-4 shapes stay true — `terminate()` is still there, `wait(timeout=5)` is
+still there, no `_reap(...)` appears — but the 5s bound now measures nothing: a supervisor
+regressed to a FOREGROUND `sleep 3600` (bash defers traps until the foreground child exits —
+the exact pm2-hang / leaked-ttyd / leaked-`webterm_*` regression this test exists for) dies
+INSTANTLY from the inserted SIGKILL, the wait returns at once, and the test passes even
+though the promptness property it claims to check (SIGTERM alone is what kills the
+supervisor within 5s) no longer holds. `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed
+green (3547 passed, 0 failed) under the mutation. **Guard form that survives:** find the
+`proc.terminate()` statement's own index in the try body and assert the *very next*
+statement is a direct `proc.wait(timeout=<=5)` — an index check, not a new instrument, since
+the AST walk already holds the statement list in order.
+
+*Experiment 2 — `test_reap_propagates_if_the_child_survives_sigkill_too`.* The round-3
+addendum's `mock_calls` equality was the right instrument (method, arguments AND order in
+one assertion, closing the round-2 permutation gap), but the fixture that exercises it calls
+`_reap(fake, term_timeout=1, kill_timeout=1)` — both timeouts parked on the SAME literal.
+**Mutation that defeats it:**
+```diff
+     proc.kill()
+-    proc.wait(timeout=kill_timeout)
++    proc.wait(timeout=term_timeout)
+```
+The expected `[call.terminate(), call.wait(timeout=1), call.kill(), call.wait(timeout=1)]`
+is satisfied whichever of the two identically-valued parameters the final wait actually
+reads, so routing the post-SIGKILL wait through `term_timeout` instead of `kill_timeout`
+passes unchanged — silently making `kill_timeout` a dead argument at every one of the six
+call sites, and making the round-3 `test_reap_defaults_cannot_collapse_either_wait_window`
+default-floor assertion on `kill_timeout` vacuous (it would keep asserting a floor on a
+parameter nothing reads). `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3547
+passed, 0 failed) under the mutation. **Why an equality assertion doesn't catch this on its
+own:** `mock_calls == [...]` pins order and values correctly, but only once the fixture
+feeding it has already destroyed the one distinction the assertion exists to make — a
+correct instrument mounted on an indistinguishable fixture proves nothing about the
+argument it was meant to isolate (same family as DEFEAT_SHAPES #02, a fixture parked on a
+default value). **Guard form that survives:** give `term_timeout` and `kill_timeout`
+different values in the fixture (`term_timeout=1, kill_timeout=2`) and expect the matching
+distinct values in the `mock_calls` sequence — one-character fixture change, no new
+instrument needed. Found CMX-339 rework round 5 (2026-09-03), PR #437 — the judge applied
+both mutations above to a throwaway checkout; closed by making `test_promptness_checks_are_not_absorbed_into_reap`
+assert adjacency (terminate's index, then the immediately-following statement) instead of
+unordered existence, and by giving `test_reap_propagates_if_the_child_survives_sigkill_too`'s
+fixture two distinct timeout values — both verified to go red against the exact mutations
+before landing.
