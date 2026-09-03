@@ -23,6 +23,7 @@ default. The supervisor script calls bare `tmux`, so it is isolated with a PATH 
 that injects `-L <sock>` — also per-invocation, and it inherits into the script's own
 `tmux` and `chela.discovery` subprocess calls alike.
 """
+import ast
 import json
 import os
 import shutil
@@ -382,3 +383,71 @@ def test_reap_propagates_if_the_child_survives_sigkill_too():
     fake.terminate.assert_called_once()
     fake.kill.assert_called_once()
     assert fake.wait.call_count == 2, "must attempt both the graceful and the SIGKILL wait"
+
+
+# --- wiring: every `proc = _run_bg(...)` teardown must actually route through _reap ---
+#
+# docs/defeat_shapes/339: the tests above prove `_reap` itself escalates to SIGKILL, but
+# none of them observe whether any of the six call sites in THIS file still calls it —
+# under normal (fast-exiting) conditions `finally: _reap(proc)` and a hand-rolled
+# `finally: proc.terminate(); proc.wait(timeout=10)` are behaviorally identical, so
+# reverting one call site to the pre-fix shape is invisible to the rest of the suite. This
+# walks this file's OWN source and asserts every such teardown is structurally
+# `finally: _reap(proc)` — nothing else — which a mutation on any one call site trips.
+
+def _run_bg_teardown_sites():
+    """Yield (function_name, finally_body) for every function whose body assigns
+    `proc = _run_bg(...)` — the six real-process teardown call sites this guards."""
+    tree = ast.parse(Path(__file__).read_text())
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef):
+            continue
+        has_run_bg_proc = any(
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and stmt.targets[0].id == "proc"
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "_run_bg"
+            for stmt in func.body
+        )
+        if not has_run_bg_proc:
+            continue
+        tries = [stmt for stmt in func.body if isinstance(stmt, ast.Try)]
+        assert len(tries) == 1, (
+            f"{func.name}: expected exactly one top-level try/finally around its "
+            f"`_run_bg` process, found {len(tries)}"
+        )
+        yield func.name, tries[0].finalbody
+
+
+def test_all_run_bg_teardowns_route_through_reap():
+    """WIRING: reverting any one of the six `finally: _reap(proc)` teardowns to the
+    pre-issue-#436 `proc.terminate(); proc.wait(timeout=10)` shape must be caught — it
+    silently drops the SIGKILL escalation for that call site alone."""
+    sites = list(_run_bg_teardown_sites())
+    assert len(sites) == 6, (
+        f"expected 6 `proc = _run_bg(...)` teardown call sites in this file, found "
+        f"{len(sites)} — a call site was added or removed; update this guard's count"
+    )
+    for name, finalbody in sites:
+        assert len(finalbody) == 1, (
+            f"{name}: `finally:` must be exactly `_reap(proc)` — found "
+            f"{len(finalbody)} statement(s) instead, which bypasses the SIGKILL "
+            f"escalation from issue #436"
+        )
+        [stmt] = finalbody
+        is_reap_call = (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "_reap"
+            and len(stmt.value.args) == 1
+            and isinstance(stmt.value.args[0], ast.Name)
+            and stmt.value.args[0].id == "proc"
+        )
+        assert is_reap_call, (
+            f"{name}: `finally:` does not call `_reap(proc)` — teardown no longer "
+            f"escalates to SIGKILL on a hung supervisor (issue #436)"
+        )

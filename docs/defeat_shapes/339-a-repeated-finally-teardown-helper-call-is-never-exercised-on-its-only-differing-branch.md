@@ -1,0 +1,50 @@
+## 339. A repeated `finally:` teardown helper call is never exercised on the one branch that distinguishes it from a naive inline replacement
+
+**Assertion form:** a shared teardown helper (`_reap(proc)`: SIGTERM, bounded wait, escalate
+to SIGKILL, wait again) replaces a hand-rolled `proc.terminate(); proc.wait(timeout=10)` at
+six independent `finally:` call sites across one test file, closing issue #436 ("a supervisor
+slow to exit after SIGTERM fails the TEST cleaning up after it, not the code under test").
+Every one of the six looks identical on the page — `finally: _reap(proc)` — and the helper
+itself is unit-tested directly (`test_reap_survives_a_sigterm_ignoring_child`,
+`test_reap_propagates_if_the_child_survives_sigkill_too`).
+
+**Mutation that defeats it:** revert exactly ONE of the six call sites back to the pre-fix
+`proc.terminate(); proc.wait(timeout=10)`. `_reap` and the inline pair are behaviorally
+IDENTICAL under the condition every one of these six tests actually produces — a supervisor
+that exits promptly once SIGTERM'd — because `_reap`'s only extra behavior (the SIGKILL
+escalation) fires solely on the `TimeoutExpired` branch, which none of the six real-process
+teardowns ever reaches. So a call site degraded to the naive form passes every test in the
+file exactly as before: 3514 passed, 0 failed.
+
+**Why the helper's own unit tests don't close this:** `test_reap_survives_a_sigterm_ignoring_child`
+proves `_reap` itself escalates correctly — against a purpose-built stub that ignores SIGTERM.
+It says nothing about whether any of the six OTHER call sites still routes through `_reap` at
+all, because none of those six ever puts a slow-to-exit process through its own teardown; they
+only exercise the fast-exit path, on which `_reap` and the bypass are extensionally the same
+function. This is the same family as DEFEAT_SHAPES #60 (a shared helper's contract proven at
+one call site, not all) and #330 (a call site's argument never independently observed), but
+distinct from both: here every call site LOOKS identical and IS textually correct at the time
+of writing — the gap isn't a call site quietly diverging in shape, it's that NONE of the
+call sites, including the "reference" one, ever exercises the branch that would tell the
+helper and its naive replacement apart. A code reviewer scanning six matching `finally:
+_reap(proc)` lines has no way to see that this is true from the diff alone.
+
+**Guard form that survives:** don't try to make each of the six real-process tests exercise
+the SIGKILL branch (that would mean deliberately hanging six different supervisor scripts,
+which is what `test_reap_survives_a_sigterm_ignoring_child` already does once, generically).
+Instead, close the WIRING gap directly and structurally: parse the test file's own source
+with `ast` and assert every `finally:` block that tears down a `proc = _run_bg(...)` process
+is *exactly* `_reap(proc)` — one statement, one call, one argument — nothing else. This is a
+static, structural check on the test file itself (not a "source-constant vs. rendered-value"
+check on production code — see #67/#70's caution about those), and it fails the moment any of
+the six call sites stops being a bare `_reap(proc)` call, independent of whether the mutated
+site's supervisor happens to exit promptly during the run that would otherwise mask it.
+
+**Found:** CMX-339 rework round 1 (2026-09-03), PR #437 — the judge mutated
+`test_missing_session_is_created_not_fatal`'s `finally: _reap(proc)` back to
+`finally: proc.terminate(); proc.wait(timeout=10)` and the full suite
+(`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q`) stayed green (3514 passed, 0 failed). Closed by
+adding `test_all_run_bg_teardowns_route_through_reap`, which walks `tests/test_terminals_selfheal.py`'s
+own AST, finds all six `proc = _run_bg(...)` teardown sites, and asserts each `finally:` body
+is structurally `_reap(proc)` and nothing else — verified to go red against the exact mutation
+above before being committed.
