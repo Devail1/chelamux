@@ -1703,3 +1703,91 @@ def test_send_photos_oversized_warning_names_the_CAP_it_exceeded(caplog):
     assert cap in dropped[0], (
         f"the dropped-image warning does not name the cap it exceeded: {dropped[0]!r}"
     )
+
+
+def test_bot_sender_default_media_transport_is_the_MULTIPART_one():
+    """🔴 WIRING. Every `send_photos` test injects `media_transport=`, and the two real
+    transport tests call `_urllib_media_transport` directly — so nothing proved that a
+    normally-constructed `BotSender` (i.e. production) actually gets it. Swap the default
+    to `_urllib_transport` (the TEXT transport, whose signature takes no `files`) and every
+    test stays green while every live image upload raises on the first call.
+
+    This is the same class as "the daemon never hands send_photos to RegistryRelay": a
+    feature that is green in the whole suite and dead in production. The discriminator is
+    the arity — the media transport takes (method, fields, files), the text one does not.
+    """
+    import inspect
+
+    sender = BotSender("tok", "chat1", "topic1")          # ⭐ no injection: the real default
+
+    params = inspect.signature(sender._media_transport).parameters
+    assert "files" in params, (
+        f"BotSender's default media transport takes {list(params)} — it is not the "
+        "multipart transport, so every live image upload would fail while the suite passes"
+    )
+
+
+def test_urllib_media_transport_reports_an_HTTP_error_as_NOT_ok(monkeypatch):
+    """The sibling arm of the URLError case. sendPhoto/sendMediaGroup 400s and 429s arrive
+    as `HTTPError`, not `URLError`, and a 429 in particular is the one the retry loop has
+    to see — returning `{"ok": True}` there makes a flood-controlled upload look delivered,
+    so it is never retried AND never reported dropped.
+
+    The body is unreadable here on purpose, which exercises the fallback that synthesises
+    the response from the status code.
+    """
+    import urllib.error
+    import urllib.request
+
+    def _http_error(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _http_error)
+
+    resp = _urllib_media_transport("tok")(
+        "sendPhoto", {"chat_id": "c1"}, [("photo", "image.png", b"\x89PNGDATA")]
+    )
+
+    assert resp["ok"] is False, (
+        "a Telegram HTTP error was reported as a successful upload — a 429 would look "
+        "delivered, so it is neither retried nor reported dropped"
+    )
+    assert resp.get("error_code") == 429
+
+
+def test_retry_loop_still_returns_immediately_when_retry_flood_is_False():
+    """⭐ A regression guard on the shared `_retry_loop` that round 6 routed the photo path
+    through. The pane watcher wires post/edit/delete with `retry_flood=False` precisely so
+    the ephemeral status line NEVER sleeps on a 429 — a disposable message that blocks the
+    watcher is worse than a missing one. Dead-coding that early return makes the status
+    line sleep out its flood wait on every tick.
+    """
+    calls = []
+
+    def _always_flooded():
+        calls.append(1)
+        return {"ok": False, "error_code": 429, "parameters": {"retry_after": 30}}
+
+    sender = BotSender("tok", "chat1", "topic1")
+    resp = sender._retry_loop(_always_flooded, retry_flood=False)
+
+    assert resp["error_code"] == 429      # the 429 is returned, not swallowed
+    assert len(calls) == 1, (
+        f"retry_flood=False slept and retried ({len(calls)} calls) — the ephemeral status "
+        "line must never block the pane watcher on flood control"
+    )
+
+
+def test_registry_relay_does_not_relay_images_when_no_photo_sender_is_wired():
+    """⭐ The negative control the single-topic relay already had, mirrored onto the
+    structurally identical RegistryRelay. Without it, dropping the `is not None` check
+    raises `TypeError: 'NoneType' object is not callable` for every install that has not
+    wired a photo sender — turning a missing feature into a crash on the relay path.
+    """
+    stub = _ThreadStubSender()
+    relay = RegistryRelay(stub, _registry(("@1", "42")))   # ⭐ no send_photos wired
+    msg = Message("assistant", "tool_result", "x", images=[("image/png", b"d")])
+
+    relay.on_message("@1", msg)          # must not raise
+
+    assert stub.calls, "the text half of the message did not relay"
