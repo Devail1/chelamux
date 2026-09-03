@@ -28,8 +28,10 @@ from chela.telegram.relay import (
     BotSender,
     RegistryRelay,
     TelegramRelay,
+    _format_photo_size,
     _scan,
     _truncate_utf16,
+    _urllib_media_transport,
     _utf16_len,
     split_message,
 )
@@ -1127,7 +1129,19 @@ def test_send_photos_multiple_images_calls_send_media_group_once():
     media = _json.loads(fields["media"])
     assert [m["type"] for m in media] == ["photo", "photo"]
     assert [m["media"] for m in media] == ["attach://photo0", "attach://photo1"]
+    assert [f[1] for f in files] == ["photo0.png", "photo1.jpg"]
     assert [f[2] for f in files] == [b"one", b"two"]
+
+
+def test_ext_for_follows_the_blocks_media_type():
+    # A JPEG must not go up named .png — pinned directly against the method,
+    # not just observed incidentally through a filename nobody asserted on.
+    sender = BotSender("tok", "chat1", None)
+    assert sender._ext_for("image/jpeg") == "jpg"
+    assert sender._ext_for("image/jpg") == "jpg"
+    assert sender._ext_for("image/png") == "png"
+    assert sender._ext_for("image/gif") == "gif"
+    assert sender._ext_for("image/") == "png"  # empty subtype falls back to png
 
 
 def test_send_photos_reports_oversized_image_instead_of_dropping_silently():
@@ -1143,6 +1157,30 @@ def test_send_photos_reports_oversized_image_instead_of_dropping_silently():
     assert len(tr.calls) == 1
     _, fields = tr.calls[0]
     assert "dropped" in fields["text"]
+    # The marker must carry a REAL rendered size, not a blanked-out one — CMX-311/
+    # CMX-322: a dropped message leaves a VISIBLE trace, and "0 image(s) dropped
+    # over the  cap" is not visible in any useful sense.
+    assert _format_photo_size(MAX_PHOTO_BYTES) in fields["text"]
+    assert _format_photo_size(MAX_PHOTO_BYTES) != ""
+
+
+def test_format_photo_size_renders_a_nonempty_human_size():
+    assert _format_photo_size(0) == "0.0 B"
+    assert _format_photo_size(1024) == "1.0 KB"
+    assert _format_photo_size(MAX_PHOTO_BYTES) == "10.0 MB"
+
+
+def test_send_photos_uploads_an_image_exactly_at_the_cap():
+    # MAX_PHOTO_BYTES is INCLUSIVE — an image of exactly the cap must still be
+    # uploaded, not reported as dropped.
+    tr = _Transport()
+    mt = _MediaTransport()
+    sender = BotSender("tok", "chat1", None, transport=tr, media_transport=mt)
+    exact = b"x" * MAX_PHOTO_BYTES
+    assert sender.send_photos([("image/png", exact)]) is True
+    assert tr.calls == []                      # no oversized marker
+    assert len(mt.calls) == 1                  # the exact-cap image was uploaded
+    assert mt.calls[0][2][0][2] == exact
 
 
 def test_send_photos_uploads_the_ones_that_fit_and_reports_the_rest():
@@ -1156,10 +1194,64 @@ def test_send_photos_uploads_the_ones_that_fit_and_reports_the_rest():
     assert mt.calls[0][0] == "sendPhoto"
 
 
+def test_send_photos_reports_failure_when_the_oversized_marker_fails_to_deliver():
+    # The marker is the only visible trace of an oversized drop — if IT fails to
+    # deliver, that must surface as an overall failure even when the images that
+    # did fit uploaded fine.
+    tr = _Transport(ok=False)
+    mt = _MediaTransport(ok=True)
+    sender = BotSender("tok", "chat1", "t7", transport=tr, media_transport=mt)
+    big = b"x" * (MAX_PHOTO_BYTES + 1)
+    assert sender.send_photos([("image/png", b"small"), ("image/png", big)]) is False
+    assert len(mt.calls) == 1  # the one that fit still uploaded
+
+
 def test_send_photos_returns_false_when_upload_fails():
     mt = _MediaTransport(ok=False)
     sender = BotSender("tok", "chat1", None, media_transport=mt)
     assert sender.send_photos([("image/png", b"data")]) is False
+
+
+def test_urllib_media_transport_sends_multipart_with_matching_boundary(monkeypatch):
+    # The hand-rolled multipart body is the real production wire format — its
+    # Content-Type must declare the boundary it actually wrote, or every live
+    # upload is rejected. Nothing else in this suite exercises the raw bytes
+    # that go on the wire (every other test injects _MediaTransport instead).
+    import json as _json
+    import urllib.request
+
+    captured = {}
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return _json.dumps({"ok": True}).encode()
+
+    def _fake_urlopen(req, timeout=None):
+        captured["req"] = req
+        return _FakeResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    transport = _urllib_media_transport("tok")
+    resp = transport("sendPhoto", {"chat_id": "c1"}, [("photo", "image.png", b"\x89PNGDATA")])
+
+    assert resp == {"ok": True}
+    req = captured["req"]
+    content_type = req.get_header("Content-type")
+    assert content_type is not None and content_type.startswith("multipart/form-data; boundary=")
+    boundary = content_type.split("boundary=", 1)[1]
+    body = req.data
+    assert f"--{boundary}\r\n".encode() in body
+    assert f"--{boundary}--\r\n".encode() in body
+    assert b'name="chat_id"' in body and b"c1" in body
+    assert b'name="photo"; filename="image.png"' in body
+    assert b"\x89PNGDATA" in body
 
 
 def test_send_photos_retries_a_media_group_on_429():
@@ -1217,6 +1309,21 @@ def test_relay_does_not_call_send_photos_for_a_text_only_message():
     assert photos.calls == []
 
 
+def test_relay_sends_images_after_plain_text_fallback_succeeds():
+    # The MarkdownV2 attempt is rejected, so delivery happens on the SECOND
+    # (plain-text) send — images must still post after that path, not only
+    # after a successful first attempt.
+    stub = _StubSender(fail_markdown=True)
+    photos = _PhotoStub()
+    msg = Message(
+        "assistant", "tool_result", "captured", tool_name="Screenshot",
+        images=[("image/png", b"data")],
+    )
+    TelegramRelay(stub, show_tool_calls=True, send_photos=photos).on_message("@1", msg)
+    assert len(stub.calls) == 2                 # MarkdownV2 rejected, then plain text
+    assert photos.calls == [([("image/png", b"data")], ())]
+
+
 def test_relay_without_send_photos_wired_ignores_images_silently():
     stub = _StubSender()
     msg = Message("assistant", "tool_result", "x", images=[("image/png", b"d")])
@@ -1240,3 +1347,16 @@ def test_registry_relay_skips_images_when_text_delivery_is_dropped():
     msg = Message("assistant", "tool_result", "x", images=[("image/png", b"d")])
     RegistryRelay(stub, reg, send_photos=photos).on_message("@1", msg)
     assert photos.calls == []  # text never got through — no orphan image post
+
+
+def test_registry_relay_does_not_call_send_photos_for_a_text_only_message():
+    # The negative control that exists for TelegramRelay
+    # (test_relay_does_not_call_send_photos_for_a_text_only_message), mirrored
+    # onto the structurally identical RegistryRelay sibling.
+    stub = _ThreadStubSender()
+    photos = _PhotoStub()
+    reg = _registry(("@1", "42"))
+    RegistryRelay(stub, reg, send_photos=photos).on_message(
+        "@1", Message("assistant", "text", "hi")
+    )
+    assert photos.calls == []

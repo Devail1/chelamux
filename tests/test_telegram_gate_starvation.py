@@ -475,3 +475,35 @@ def test_cmd_telegram_warms_the_native_status_cache(daemon_env, monkeypatch, no_
     main.cmd_telegram(_tg_args(no_inbound=no_inbound))
 
     assert calls == [1], "chela telegram never warmed agent_manager's status cache itself"
+
+
+# ── CMX-338: the daemon entrypoint must actually WIRE send_photos ────────────
+
+
+def test_cmd_telegram_wires_bot_send_photos_into_the_relay(daemon_env, monkeypatch):
+    """``RegistryRelay`` must receive ``BotSender.send_photos``, or the whole
+    image-relay feature is dead in production despite every relay-level test
+    (which constructs ``RegistryRelay`` directly) staying green.
+    """
+    import chela.telegram as tg
+    from chela.telegram import BotSender
+
+    monkeypatch.setattr(main, "_outbound_loop", lambda *a, **kw: None)  # foreground; return
+
+    made = []
+    real_relay = tg.RegistryRelay
+
+    def _spy(*a, **kw):
+        relay = real_relay(*a, **kw)
+        made.append(kw)
+        return relay
+
+    monkeypatch.setattr(tg, "RegistryRelay", _spy)
+
+    main.cmd_telegram(_tg_args(no_inbound=True))
+
+    assert made, "cmd_telegram never constructed a RegistryRelay"
+    send_photos = made[0].get("send_photos")
+    assert send_photos is not None, "RegistryRelay built without send_photos wired"
+    assert isinstance(getattr(send_photos, "__self__", None), BotSender)
+    assert send_photos.__func__.__name__ == "send_photos"
