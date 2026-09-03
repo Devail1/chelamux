@@ -100,6 +100,25 @@ BULLETS_PANE = f"""\
   ⏵⏵ auto mode on · ← for agents
 """
 
+# ⛔ Same false positive as BULLETS_PANE, but positioned to isolate the column-0 rule
+# from the ellipsis rule instead of relying on both at once. BULLETS_PANE's bullets
+# carry no "…", so the ellipsis gate alone already rejects them at every row past the
+# first — a mutation that drops the column-0 check for non-first rows would still pass
+# BULLETS_PANE. Here the indented bullet DOES carry "…" and sits behind a banner row
+# (not the first non-blank row above the chrome), so the ellipsis gate alone would
+# accept it; only the column-0 check rejects it. detect_status must still return None.
+INDENTED_ELLIPSIS_PANE = f"""\
+● Here is the plan:
+  ⎿  Tip: some tip text here
+  · deploying the thing…
+✔ Update installed · Restart to update
+{_RULE}
+❯
+{_RULE}
+
+  ⏵⏵ auto mode on · ← for agents
+"""
+
 # No chrome at all (scrolled back, or not a Claude window) — we cannot say anything.
 NO_CHROME_PANE = """\
 $ ls -la
@@ -178,6 +197,13 @@ def test_idle_pane_has_no_status():
 def test_bullets_in_output_are_not_a_status_line():
     # The whole reason for anchoring on the chrome (and demanding column 0).
     assert detect_status(BULLETS_PANE) is None
+
+
+def test_an_indented_ellipsis_bullet_past_the_first_row_is_not_a_status_line():
+    # The column-0 rule must hold on its own, not just alongside the ellipsis rule:
+    # this bullet is indented (body text) but DOES carry "…", so only column-0 rejects
+    # it. A guard that drops column-0 for non-first rows would wrongly accept it.
+    assert detect_status(INDENTED_ELLIPSIS_PANE) is None
 
 
 def test_pane_without_chrome_has_no_status():
