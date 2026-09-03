@@ -57,6 +57,7 @@ TODO.md
 # scratch_cmx288_experiments.json, self_check_experiments.json (see d77c2c4).
 .chela-self-check-*.json
 *self[-_]check*.json
+*selfcheck*.json
 *scratch*experiment*.json
 
 # `chela judge` scratch file — `chela.judge.experiments_path()` always writes this exact

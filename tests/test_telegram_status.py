@@ -259,6 +259,61 @@ TIP_UPDATE_ONE_TOO_FAR_PANE = f"""\
   ⏵⏵ auto mode on · 2 shells · ← for agents
 """
 
+# ⭐ The ACCEPTANCE half of the widened scan, closed at the NEAR end: TIP_UPDATE_BANNER_PANE
+# above only proves "found behind a tip block and/or an update banner" at chrome_idx-4 (a
+# TWO-line tip block). A tip that fits on one line is the same feature rendering shorter
+# text, and it puts the status at chrome_idx-3 — a depth with no positive coverage at all.
+# detect_status MUST still find the status line here (must NOT be None).
+TIP_UPDATE_ONE_LINE_TIP_PANE = f"""\
+● Running 1 shell command…
+  ⎿  $ tmux capture-pane -t chela:@32 -p
+
+✽ Wandering… (2m 10s · ↓ 6.2k tokens)
+  ⎿  Tip: some short tip
+✔ Update installed · Restart to update
+{_RULE}
+❯
+{_RULE}
+
+  ⏵⏵ auto mode on · 2 shells · ← for agents
+"""
+
+# Same acceptance shape, one row nearer still: no tip block at all, just the update banner
+# between the status line and the chrome — status at chrome_idx-2. Closes the near end of
+# the widened scan's ACCEPTANCE path entirely (chrome_idx-2 through chrome_idx-4 above).
+# detect_status MUST still find the status line here (must NOT be None).
+UPDATE_BANNER_ONLY_PANE = f"""\
+● Running 1 shell command…
+  ⎿  $ tmux capture-pane -t chela:@32 -p
+
+✽ Wandering… (2m 10s · ↓ 6.2k tokens)
+✔ Update installed · Restart to update
+{_RULE}
+❯
+{_RULE}
+
+  ⏵⏵ auto mode on · 2 shells · ← for agents
+"""
+
+# ⭐ The OTHER acceptance path, closed at its only untested position: the production comment
+# claims "the FIRST non-blank row is still accepted unconditionally (active or settled)",
+# but every fixture that exercises that path (WORKING_PANE, SETTLED_SHELLS_PANE,
+# SETTLED_QUIET_PANE) puts its status at chrome_idx-2, behind a blank spacer. No fixture
+# puts a column-0 status line at chrome_idx-1 — the row BULLET_DIRECTLY_ABOVE_CHROME_PANE
+# proves for the REJECTION direction only. A settled summary can sit with no blank spacer
+# directly above the chrome (the same shape as SETTLED_SHELLS_PANE with the spacer removed).
+# detect_status MUST still find the status line here (must NOT be None).
+SETTLED_DIRECTLY_ABOVE_CHROME_PANE = f"""\
+● Done.
+
+✻ Worked for 1m 17s · 1 shell still running
+{_RULE}
+❯ fix the OI metric name too
+{_RULE}
+
+  ⏵⏵ auto mode on · 1 shell · ← for agents
+"""
+
 
 # ── the parser ──────────────────────────────────────────────────────────────
 
@@ -373,6 +428,42 @@ def test_status_line_one_row_beyond_the_lookback_is_not_found():
     # Same shape as the fixture above, but the status line sits one row past
     # _STATUS_LOOKBACK — pins the boundary exactly, not just "somewhere in range".
     assert detect_status(TIP_UPDATE_ONE_TOO_FAR_PANE) is None
+
+
+def test_status_line_is_found_behind_a_one_line_tip_and_update_banner():
+    # The rejection gates were pinned at every reachable depth (rounds 2-3), but the
+    # ACCEPTANCE half of the same scan was only ever proven at chrome_idx-4 (a two-line
+    # tip block). A mutation that restricts the scan-past acceptance to `i == chrome_idx
+    # - 4` exactly would silently return None here — issue #432 all over again, one row
+    # nearer the chrome.
+    st = detect_status(TIP_UPDATE_ONE_LINE_TIP_PANE)
+    assert st is not None
+    assert st.active is True
+    assert st.verb == "Wandering… (2m 10s · ↓ 6.2k tokens)"
+    assert st.shells == 2
+
+
+def test_status_line_is_found_behind_an_update_banner_with_no_tip_block():
+    # Same acceptance path, at the NEAREST depth the widened scan reaches: no tip block
+    # at all, only the update banner between the status line and the chrome.
+    st = detect_status(UPDATE_BANNER_ONLY_PANE)
+    assert st is not None
+    assert st.active is True
+    assert st.verb == "Wandering… (2m 10s · ↓ 6.2k tokens)"
+    assert st.shells == 2
+
+
+def test_a_settled_status_directly_above_the_chrome_is_found():
+    # The OTHER acceptance path: "the first non-blank row is accepted unconditionally"
+    # was only ever proven at chrome_idx-2 (behind a blank spacer). A mutation that
+    # restricts that unconditional accept to `i == chrome_idx - 2` exactly would
+    # silently return None for a settled summary with no spacer, directly above the
+    # chrome — losing the "shell still running" warning and the turn receipt.
+    st = detect_status(SETTLED_DIRECTLY_ABOVE_CHROME_PANE)
+    assert st is not None
+    assert st.active is False
+    assert st.shells == 1
+    assert st.seconds == 77  # 1m 17s
 
 
 def test_a_settled_line_found_only_by_scanning_past_a_banner_is_rejected():

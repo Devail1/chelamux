@@ -106,3 +106,51 @@ reaches); a single interior position leaves either side of it free for a mutatio
    position — when a docstring/comment says "this row" about a hand-authored multi-line
    fixture, recompute the index rather than trusting the prose; a spacer or an extra line
    silently shifts everything below it.**
+
+**Recurred: CMX-337 rework round 4, same PR #434 — the "pin both ends" rule from round 2
+applied to the REJECTION gates only; the two ACCEPTANCE paths those gates guard were never
+given the same treatment.**
+
+Rounds 2-3 closed every gate that *rejects* a bad row at every reachable depth
+(`chrome_idx-1` through `chrome_idx-4`): column-0 for indented bullets, and the ellipsis
+check for settled lines found behind a banner. But the whole point of widening the scan was
+to *accept* good rows behind those same banners, and both acceptance paths were proven at
+exactly one depth each — the *opposite* half of shape 337's own lesson ("pin the near end
+and the far end") had only ever been applied to the negative direction:
+
+1. `if is_first or _STATUS_ACTIVE in candidate:` — "found behind a tip block and/or an
+   update banner" was proven only by `TIP_UPDATE_BANNER_PANE`, whose status sits at
+   `chrome_idx-4` (a two-line tip block). The judge's mutation —
+   `if is_first or (i == chrome_idx - 4 and _STATUS_ACTIVE in candidate):` — restricts
+   scan-past acceptance to that single depth and rejects everywhere else the scan reaches.
+   `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3551 passed) because no
+   fixture ever asked "is the status still found" at `chrome_idx-2` or `chrome_idx-3` — a
+   one-line tip block, or the update banner alone, are the *majority* real-world case
+   (shorter rendered text), not an edge case, and this mutation makes the feature silently
+   stop firing at exactly those depths — issue #432 again, one or two rows nearer the
+   chrome. Closed by `TIP_UPDATE_ONE_LINE_TIP_PANE` (`chrome_idx-3`) and
+   `UPDATE_BANNER_ONLY_PANE` (`chrome_idx-2`), both asserting `detect_status(...)` is NOT
+   `None`; under the mutation both resolve to `None` instead of the expected `Status`.
+
+2. `is_first = not seen_first_nonblank` — the production comment's claim that "the FIRST
+   non-blank row is still accepted unconditionally (active or settled)" was proven only at
+   `chrome_idx-2` (every is_first fixture — `WORKING_PANE`, `SETTLED_SHELLS_PANE`,
+   `SETTLED_QUIET_PANE` — puts its status behind a blank spacer). No fixture put a status
+   line at `chrome_idx-1` — the round-3 fixture that finally reached that row
+   (`BULLET_DIRECTLY_ABOVE_CHROME_PANE`) only exercises the REJECTION direction (an
+   indented bullet that must stay rejected there), leaving the ACCEPTANCE direction at
+   that exact position untested. The judge's mutation — `is_first = not
+   seen_first_nonblank and i == chrome_idx - 2` — restricts the unconditional accept to
+   that one depth, so a settled summary with no spacer directly above the chrome resolves
+   to `None`, losing the "shell still running" warning and the turn receipt. Suite stayed
+   green (3551 passed). Closed by `SETTLED_DIRECTLY_ABOVE_CHROME_PANE` (the
+   `SETTLED_SHELLS_PANE` shape with the spacer removed) via
+   `test_a_settled_status_directly_above_the_chrome_is_found`, asserting the status IS
+   found; under the mutation it resolves to `None` instead.
+
+**Guard form that survives, updated again:** "pin the near end and the far end" applies to
+BOTH directions of every gate inside a bounded scan, not just the direction a rejection
+fixture happens to test. A rejection fixture proves a bad input stays out; only a positive
+fixture at the same depths proves a good input still gets in — and on this guard the
+acceptance failure mode is the silent one (`detect_status` returning `None` looks exactly
+like an idle pane), so it is the direction most worth pinning first, not last.
