@@ -1541,7 +1541,9 @@ def cmd_telegram(args) -> None:
     # tool_use/tool_result stream, keeping text/thinking/user turns plus the
     # interactive prompts that need a human.
     bot = BotSender(token, chat)
-    relay = RegistryRelay(bot.send, registry, show_tool_calls=SHOW_TOOL_CALLS)
+    relay = RegistryRelay(
+        bot.send, registry, show_tool_calls=SHOW_TOOL_CALLS, send_photos=bot.send_photos
+    )
     # Pane watcher (Slices C1/A2/B2 + C2): reads each bound window's pane to surface
     # the three live-TUI prompts the transcript can't relay in time — a permission
     # gate, an AskUserQuestion selector and an ExitPlanMode plan approval — each with

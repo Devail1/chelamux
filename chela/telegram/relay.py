@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Callable, NamedTuple
 
 from chela.telegram.format import to_markdown_v2, to_plain_text, unescape_markdown_v2
@@ -57,9 +58,26 @@ _BREAK_BLANK, _BREAK_LINE, _BREAK_SPACE, _BREAK_ANY = 3, 2, 1, 0
 # relay also passes ``message_thread_id`` and an optional ``reply_markup``.
 Sender = Callable[..., bool]
 
+# Posts a batch of images from ONE tool_result: ``send_photos(images, ...) ->
+# ok``, ``images`` being ``(media_type, raw_bytes)`` pairs. The multi-topic
+# relay also passes ``message_thread_id``.
+SendPhotos = Callable[..., bool]
+
 # A transport performs the raw Bot API call: ``transport(method, fields) -> resp``
 # (the decoded Telegram JSON, ``{"ok": bool, ...}``). Injectable for tests.
 Transport = Callable[[str, dict], dict]
+
+# A media transport performs a multipart Bot API call carrying raw file bytes:
+# ``transport(method, fields, files) -> resp``, ``files`` being
+# ``(field_name, filename, raw_bytes)`` triples. Injectable for tests, same as
+# :data:`Transport` — no live Telegram in the test suite.
+MediaTransport = Callable[[str, dict, list[tuple[str, str, bytes]]], dict]
+
+# Telegram's cap on a bot-uploaded photo (``sendPhoto``/``sendMediaGroup`` by raw
+# bytes, not by URL/file_id) — the outbound counterpart of
+# :data:`chela.telegram.media.MAX_FILE_BYTES` (the inbound 20 MB document cap;
+# photos get a smaller limit than generic documents).
+MAX_PHOTO_BYTES = 10 * 1024 * 1024
 
 # Tools whose ``tool_use`` is an interactive prompt the human must answer — these
 # always relay even when tool-call notifications are hidden, or the operator
@@ -344,6 +362,65 @@ def _urllib_transport(token: str) -> Transport:
     return transport
 
 
+def _format_photo_size(num_bytes: int) -> str:
+    """Render a byte count as a human-readable size (e.g. '9.8 MB')."""
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def _urllib_media_transport(token: str) -> MediaTransport:
+    """The default media transport: a hand-rolled ``multipart/form-data`` POST.
+
+    ``sendPhoto``/``sendMediaGroup`` need raw file bytes on the wire, which
+    :func:`_urllib_transport`'s ``application/x-www-form-urlencoded`` body can't
+    carry — so this builds the multipart body by hand rather than pulling in an
+    HTTP client dependency for it (outbound stays stdlib-``urllib``-only, same
+    reasoning as the text transport).
+    """
+
+    def transport(method: str, fields: dict, files: list[tuple[str, str, bytes]]) -> dict:
+        boundary = uuid.uuid4().hex
+        parts = bytearray()
+        for name, value in fields.items():
+            parts += (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode()
+        for field_name, filename, data in files:
+            parts += (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{field_name}"; '
+                f'filename="{filename}"\r\n'
+                "Content-Type: application/octet-stream\r\n\r\n"
+            ).encode()
+            parts += data
+            parts += b"\r\n"
+        parts += f"--{boundary}--\r\n".encode()
+
+        url = _API.format(token=token, method=method)
+        req = urllib.request.Request(
+            url, data=bytes(parts),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            try:
+                return json.load(e)
+            except (ValueError, OSError):
+                return {"ok": False, "error_code": e.code, "description": f"HTTP {e.code}"}
+        except urllib.error.URLError as e:
+            return {"ok": False, "description": str(e.reason)}
+
+    return transport
+
+
 def _retry_after(resp: dict) -> float | None:
     """Flood-control wait (seconds) for a Telegram 429 response, else None.
 
@@ -409,12 +486,37 @@ class BotSender:
         topic_id: str | None = None,
         *,
         transport: Transport | None = None,
+        media_transport: MediaTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ):
         self._chat_id = chat_id
         self._topic_id = topic_id
         self._transport = transport or _urllib_transport(token)
+        self._media_transport = media_transport or _urllib_media_transport(token)
         self._sleep = sleep
+
+    def _retry_loop(self, send_once: Callable[[], dict], retry_flood: bool) -> dict:
+        """Repeat ``send_once`` on a Telegram 429, honouring ``retry_after``.
+
+        Shared by :meth:`_call` (form-encoded) and :meth:`_call_media`
+        (multipart) — the flood-control retry policy is the same for both wire
+        shapes, only how the payload is re-sent differs. See :meth:`_call` for
+        the ``retry_flood=False`` trade-off.
+        """
+        resp = send_once()
+        if not retry_flood:
+            return resp
+        for _ in range(_MAX_SEND_TRIES - 1):
+            wait = _retry_after(resp)
+            if wait is None:
+                return resp
+            wait = min(wait, _MAX_RETRY_AFTER)
+            log.warning(
+                "telegram flood-controlled; retrying in %.1fs", wait
+            )
+            self._sleep(wait)
+            resp = send_once()
+        return resp
 
     def _call(self, method: str, fields: dict, *, retry_flood: bool = True) -> dict:
         """Perform a Bot API call, retrying the SAME payload on a 429.
@@ -434,20 +536,20 @@ class BotSender:
         assistant message is the relay failing at its job. The retry loop is not
         bypassed for anything else.
         """
-        resp = self._transport(method, fields)
-        if not retry_flood:
-            return resp
-        for _ in range(_MAX_SEND_TRIES - 1):
-            wait = _retry_after(resp)
-            if wait is None:
-                return resp
-            wait = min(wait, _MAX_RETRY_AFTER)
-            log.warning(
-                "telegram %s flood-controlled; retrying in %.1fs", method, wait
-            )
-            self._sleep(wait)
-            resp = self._transport(method, fields)
-        return resp
+        return self._retry_loop(lambda: self._transport(method, fields), retry_flood)
+
+    def _call_media(
+        self,
+        method: str,
+        fields: dict,
+        files: list[tuple[str, str, bytes]],
+        *,
+        retry_flood: bool = True,
+    ) -> dict:
+        """The multipart counterpart of :meth:`_call`, for ``sendPhoto``/``sendMediaGroup``."""
+        return self._retry_loop(
+            lambda: self._media_transport(method, fields, files), retry_flood
+        )
 
     def send(
         self,
@@ -600,6 +702,83 @@ class BotSender:
         log.debug("telegram sendChatAction failed: %s", resp.get("description", resp))
         return False
 
+    def send_photos(
+        self,
+        images: list[tuple[str, bytes]],
+        message_thread_id: str | int | None = None,
+    ) -> bool:
+        """Post the images of ONE ``tool_result`` (a screenshot and friends).
+
+        Two or more images go out as a single ``sendMediaGroup`` call rather than
+        N separate ``sendPhoto`` calls — ccbot's precedent — so a multi-screenshot
+        turn can't trip flood control the way N rapid individual sends would (a
+        single call is one flood-control unit, retried as one payload by
+        :meth:`_call_media` on a 429).
+
+        An image over :data:`MAX_PHOTO_BYTES` is excluded from the upload and
+        REPORTED via a text marker (CMX-311/CMX-322: a dropped Telegram message
+        must leave a visible trace, and a dropped image is the same rule) —
+        never silently dropped. Only the count and total size are logged/posted;
+        the bytes themselves never reach a log line.
+        """
+        thread = message_thread_id if message_thread_id is not None else self._topic_id
+        fits = [(mt, data) for mt, data in images if len(data) <= MAX_PHOTO_BYTES]
+        oversized = [(mt, data) for mt, data in images if len(data) > MAX_PHOTO_BYTES]
+        ok = True
+        if oversized:
+            total = sum(len(data) for _, data in oversized)
+            log.warning(
+                "telegram sendPhoto: %d image(s) dropped, over the %s cap (%s total)",
+                len(oversized), _format_photo_size(MAX_PHOTO_BYTES), _format_photo_size(total),
+            )
+            args = (thread,) if thread is not None else ()
+            ok = self.send(
+                f"⚠️ {len(oversized)} image(s) dropped — over Telegram's "
+                f"{_format_photo_size(MAX_PHOTO_BYTES)} photo limit",
+                None, *args,
+            )
+        if not fits:
+            return ok
+        sent = (
+            self._send_single_photo(fits[0][0], fits[0][1], thread)
+            if len(fits) == 1
+            else self._send_media_group(fits, thread)
+        )
+        return ok and sent
+
+    def _ext_for(self, media_type: str) -> str:
+        """A plausible file extension for a base64 ``source.media_type``."""
+        sub = media_type.rsplit("/", 1)[-1].lower()
+        return "jpg" if sub in ("jpeg", "jpg") else (sub or "png")
+
+    def _send_single_photo(self, media_type: str, data: bytes, thread) -> bool:
+        fields = {"chat_id": self._chat_id}
+        if thread:
+            fields["message_thread_id"] = thread
+        resp = self._call_media(
+            "sendPhoto", fields, [("photo", f"image.{self._ext_for(media_type)}", data)]
+        )
+        if resp.get("ok"):
+            return True
+        _log_send_drop(resp)
+        return False
+
+    def _send_media_group(self, images: list[tuple[str, bytes]], thread) -> bool:
+        media = []
+        files = []
+        for i, (media_type, data) in enumerate(images):
+            name = f"photo{i}"
+            media.append({"type": "photo", "media": f"attach://{name}"})
+            files.append((name, f"{name}.{self._ext_for(media_type)}", data))
+        fields = {"chat_id": self._chat_id, "media": json.dumps(media)}
+        if thread:
+            fields["message_thread_id"] = thread
+        resp = self._call_media("sendMediaGroup", fields, files)
+        if resp.get("ok"):
+            return True
+        _log_send_drop(resp)
+        return False
+
 
 # Posted in place of a message that could not be delivered by either attempt
 # (MarkdownV2 then plain text) — see :func:`_notify_drop`.
@@ -639,9 +818,16 @@ class TelegramRelay:
         mon = TranscriptMonitor(on_message=relay.on_message)
     """
 
-    def __init__(self, sender: Sender, *, show_tool_calls: bool = True):
+    def __init__(
+        self,
+        sender: Sender,
+        *,
+        show_tool_calls: bool = True,
+        send_photos: SendPhotos | None = None,
+    ):
         self._sender = sender
         self._show_tool_calls = show_tool_calls
+        self._send_photos = send_photos
 
     def on_message(self, window_id: str, msg: Message) -> None:
         """Relay one parsed message (monitor callback signature)."""
@@ -653,13 +839,25 @@ class TelegramRelay:
         markup = ask_reply_markup(msg)
         kw = {"reply_markup": markup} if markup else {}
         if self._sender(to_markdown_v2(msg), "MarkdownV2", **kw):
+            self._relay_images(msg)
             return
         # MarkdownV2 was rejected — retry the same content as plain text so a
         # formatting edge case never silently drops a message (keyboard kept).
         log.debug("MarkdownV2 rejected for %s; retrying as plain text", window_id)
         if self._sender(to_plain_text(msg), None, **kw):
+            self._relay_images(msg)
             return
         _notify_drop(self._sender, window_id, msg)
+
+    def _relay_images(self, msg: Message) -> None:
+        """Post ``msg``'s images (a screenshot and friends), if any, after its text.
+
+        A no-op when the message carries none (:data:`Message.images` is None
+        for a text-only ``tool_result`` — see :func:`_tool_result_images`) or
+        when no photo capability was wired in (plain-sender tests).
+        """
+        if msg.images and self._send_photos is not None:
+            self._send_photos(msg.images)
 
 
 class RegistryRelay:
@@ -680,10 +878,18 @@ class RegistryRelay:
     :meth:`BotSender.send` in production, a stub in tests.
     """
 
-    def __init__(self, sender: Sender, registry, *, show_tool_calls: bool = True):
+    def __init__(
+        self,
+        sender: Sender,
+        registry,
+        *,
+        show_tool_calls: bool = True,
+        send_photos: SendPhotos | None = None,
+    ):
         self._sender = sender
         self._registry = registry
         self._show_tool_calls = show_tool_calls
+        self._send_photos = send_photos
 
     def on_message(self, window_id: str, msg: Message) -> None:
         """Relay one parsed message to the window's bound topic (monitor callback)."""
@@ -698,8 +904,15 @@ class RegistryRelay:
         markup = ask_reply_markup(msg)
         kw = {"reply_markup": markup} if markup else {}
         if self._sender(to_markdown_v2(msg), "MarkdownV2", thread, **kw):
+            self._relay_images(msg, thread)
             return
         log.debug("MarkdownV2 rejected for %s; retrying as plain text", window_id)
         if self._sender(to_plain_text(msg), None, thread, **kw):
+            self._relay_images(msg, thread)
             return
         _notify_drop(self._sender, window_id, msg, thread)
+
+    def _relay_images(self, msg: Message, thread) -> None:
+        """The per-topic sibling of :meth:`TelegramRelay._relay_images`."""
+        if msg.images and self._send_photos is not None:
+            self._send_photos(msg.images, thread)
