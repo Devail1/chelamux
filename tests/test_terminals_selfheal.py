@@ -429,7 +429,8 @@ def test_all_run_bg_teardowns_route_through_reap():
     sites = list(_run_bg_teardown_sites())
     assert len(sites) == 6, (
         f"expected 6 `proc = _run_bg(...)` teardown call sites in this file, found "
-        f"{len(sites)} — a call site was added or removed; update this guard's count"
+        f"{len(sites)} — if you added one, give it `finally: _reap(proc)` and then "
+        f"update this guard's count"
     )
     for name, finalbody in sites:
         assert len(finalbody) == 1, (
@@ -446,8 +447,10 @@ def test_all_run_bg_teardowns_route_through_reap():
             and len(stmt.value.args) == 1
             and isinstance(stmt.value.args[0], ast.Name)
             and stmt.value.args[0].id == "proc"
+            and not stmt.value.keywords
         )
         assert is_reap_call, (
-            f"{name}: `finally:` does not call `_reap(proc)` — teardown no longer "
-            f"escalates to SIGKILL on a hung supervisor (issue #436)"
+            f"{name}: `finally:` does not call `_reap(proc)` with no other arguments — "
+            f"teardown no longer escalates to SIGKILL on a hung supervisor (issue #436), "
+            f"or overrides a timeout that collapses the graceful-SIGTERM window"
         )
