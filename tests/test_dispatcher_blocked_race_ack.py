@@ -563,6 +563,63 @@ def test_acknowledge_event_summary_omits_the_dash_when_there_is_no_note(tmp_path
     )
 
 
+def test_acknowledge_event_summary_names_the_RESOLVED_task_id_not_the_typed_identifier(
+    tmp_path, monkeypatch,
+):
+    """docs/defeat_shapes/342c (judge round 2 on this PR) — the two summary tests above DO
+    read ``events[-1]["summary"]`` back (closing 342b's "the summary sink is never read"
+    gap), but both pass the task id itself as the identifier, where ``ident`` and the
+    resolved ``task_id`` are the same string — exactly the coincidence [[342|shape 342]]
+    round 8 already named on the DB row and the payload, now recurring one sink further, on
+    the summary the round-1 fix just started reading.
+
+    This drives the case where they DIFFER: acknowledge by BRANCH name, then assert the
+    summary names the RESOLVED task id and does NOT contain the raw identifier the operator
+    typed.
+    """
+    with dispatcher._db() as conn:
+        _row(conn, task_id="abc123", branch_name="cmx-336")
+
+    dispatcher.acknowledge_blocked_race("cmx-336", by="someone-distinctive")
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    summary = events[-1]["summary"]
+    assert "abc123" in summary, (
+        f"summary {summary!r} does not name the resolved task id — a defeat that renders "
+        "the raw identifier instead survives every fixture that acknowledges by task id"
+    )
+    assert "cmx-336" not in summary, (
+        f"summary {summary!r} names the identifier the operator typed (the branch name), "
+        "not the run it resolved to"
+    )
+
+
+def test_acknowledge_event_summary_names_the_STAMPED_actor_not_the_raw_by_argument(
+    tmp_path, monkeypatch,
+):
+    """docs/defeat_shapes/342c companion — same recurrence as the test above, on the
+    ``who``-vs-``by`` pair instead of the ``ident``-vs-``task_id`` pair. Every existing
+    summary fixture passes ``by`` explicitly, where ``who`` (the fallback chain's result)
+    and ``by`` (the raw argument) read back identically. This drives the one case where they
+    differ: no ``--by`` given, so the ``$USER``/``$USERNAME``/``"unknown"`` chain fills
+    ``who`` in while ``by`` itself is ``""``.
+    """
+    monkeypatch.setenv("USER", "someone-distinctive")
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    dispatcher.acknowledge_blocked_race("abc123")   # ⭐ no --by: the env chain fills `who`
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    summary = events[-1]["summary"]
+    assert "someone-distinctive" in summary, (
+        f"summary {summary!r} does not name the stamped actor — a defeat that renders the "
+        "raw `by` argument instead survives every fixture that passes `by` explicitly"
+    )
+
+
 def test_acknowledge_by_prefers_env_USER_over_USERNAME_when_both_are_set(tmp_path, monkeypatch):
     """docs/defeat_shapes/342 (CMX-336 round 9, issue #438) — `--by`'s own `--help` documents
     "default: $USER/$USERNAME, else 'unknown'", and that ORDER is the only thing distinguishing
