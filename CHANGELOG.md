@@ -10,6 +10,8 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-04
+
 ### Added
 
 - **A terminal run's straggler tmux window is now reaped every tick, not just at the moment
@@ -22,6 +24,25 @@ history lives in `git log`.
   one, verified by matching both the recorded `window_id` and the current tmux server's epoch
   so a restarted server's renumbered ids are never mistaken for a stale run's own window.
   (CMX-329)
+
+- **`chela restore --retire-empty`** — a narrower complement to `--apply` that
+  archives-then-removes only the MANUAL rows with nothing on record at all (no cwd, no
+  session — `manual_command()` cannot even offer a relaunch one-liner). After two WSL
+  distro teardowns in one day, `chela restore` was classifying hundreds of these
+  provably-unrecoverable rows, drowning the handful that actually carried a fix; the only
+  documented way to clear one was hand-editing a store. `--retire-empty` reuses `apply()`'s
+  own writers verbatim, so it retires through the exact same archive-before-remove path
+  `--apply` already uses — never a REVIVABLE row, never a MANUAL row that still carries a
+  cwd/session, and never `telegram-bindings.json`. (CMX-323)
+
+- **`chela judge ack-blocked-race <run> [--by NAME] [--note TEXT]`** acknowledges a
+  `J_BLOCKED_RACE` verdict that can never resolve on its own — the PR is merged or closed, so
+  nothing will ever push a new head past the judged commit for `_blocked_race_resolved`'s
+  `judge_sha != pr_head_sha` check to catch, and `chela doctor` would otherwise report the row
+  forever. It stamps who/when/why acknowledged it without rewriting `judge_state`,
+  `judge_detail`, or `judge_sha` — the original verdict stays readable exactly as the judge
+  wrote it. (CMX-336, #431)
+
 ### Changed
 
 - **`chela update --check` and the daemon's update notifier now treat "no upstream
@@ -32,6 +53,111 @@ history lives in `git log`.
   `UNKNOWN_BEHIND` sentinel, and `--check` exits nonzero for it. A checkout that later gains
   an upstream and falls genuinely behind still gets the ordinary "update available" notice.
   (CMX-328)
+
+- **Contributing rules now say, explicitly, that session links must not be published.**
+  `CONTRIBUTING.md` and the dispatcher's agent prompt in `WORKFLOW.md` both spell out that a
+  `Claude-Session: https://claude.ai/code/session_…` trailer belongs in no commit message, PR
+  body, issue or changelog fragment in this repo: git history here is public and permanent,
+  and the link is unopenable for anyone but its author. `Co-Authored-By:` stays — it
+  attributes the work without publishing a session identity.
+
+### Fixed
+
+- **`chela doctor`, `chela update` and `chela plugin` now catch a vanished plugin
+  marketplace as a hard load failure, not a manifest-drift warning.** `claude plugin list`
+  can report `✘ failed to load — Marketplace <x> not found` while the installed manifest is
+  byte-identical to what chela renders — Claude Code resolves a plugin through its
+  marketplace at load time, and a gone marketplace is a load failure no manifest comparison
+  can ever see. All three commands now read Claude Code's own `known_marketplaces.json`,
+  confirm (never guess) when an installed copy's marketplace has vanished from it, and
+  report that ahead of (and instead of) any staleness comparison, distinctly worded from
+  "STALE INSTALL" since only `claude plugin marketplace add` — not `chela update` — fixes
+  it. (CMX-321, #409)
+
+- **A run's `worktree_path` can no longer be recorded as, or deleted from, anywhere outside
+  the configured worktrees root.** `git worktree list` reports the repo's own MAIN working
+  tree exactly like any linked worktree — first entry, no marker — so when a branch was
+  checked out in the main repo (git refuses the same branch in two worktrees, so rework
+  resolution fell back to the existing checkout), worktree lookup returned the main repo as
+  "the existing worktree for this branch" and callers trusted it enough to store it. Task
+  cleanup then deleted it: `~/projects/chelamux`, twice, 90 minutes apart, because the
+  poisoned row re-armed on the next daemon start (issue #398). `root` is now a **required**
+  argument on `ensure_worktree`, `attach_worktree`, `detached_worktree`,
+  `refuse_if_not_a_worktree` and `remove_worktree`, so no call site can silently opt out of
+  the check, and root membership is enforced on the write side (a match outside the root is
+  never returned as reusable) as well as the delete side. The invariant is "inside the
+  worktrees root", deliberately not "is not the main repo": another clone, or another
+  project's worktree, is just as unsafe a deletion target and is caught the same way.
+  (CMX-325, #414)
+
+- **The auto-merge gate now refuses a clean judge verdict it cannot tie to the commit it is
+  about to merge.** `automerge.candidates()` selected on `status == "awaiting_review" and
+  judge_state == CLEAN` and never looked at *which* commit had been judged, so a verdict
+  about a superseded head counted as a verdict about the current one. Observed on
+  2026-08-30: `cmx-321` sat at `judge_state=clean, judge_sha=888f9d6a1` while its real head
+  was `5b1c708dd`, because a release-promotion conflict had to be resolved on the branch
+  after the judge cleared it — a valid auto-merge candidate by the filter's own terms, whose
+  code had never been judged. Latent only because `CHELA_AUTO_MERGE` defaults to off, and it
+  is read per-tick, so this was one setting away from merging unjudged code unattended. The
+  refusal is at the point of merge and is deliberately *not* a resurrection of the bare
+  `judge_sha == pr_head_sha` equality guard, which was itself a defect once: it let a green
+  PR merge unjudged on any flake by permanently retiring a commit from judgement.
+  (CMX-326, #415)
+
+- **CI now runs on `dev`, not just on `pull_request` previews and `main`.** A `pull_request`
+  check only tests a merge preview against `dev` as it stood at check time; once several PRs
+  merge in sequence, later merges land on a `dev` no earlier check ever saw and GitHub never
+  re-runs them. `.github/workflows/ci.yml` now also triggers on `push` to `dev`, so every
+  merge gets a real CI run against the actual integrated tree. (CMX-327, #404)
+
+- **The dashboard's Resume button now checks whether a session's cwd still exists, instead
+  of trusting the dispatcher-ownership join alone.** A tmux restart renumbers every window
+  (`@889` → `@9`), which silently desyncs `_dispatcher_owned_wid_epochs`'s `(wid, epoch)`
+  join from the `runs` table — a reaped run's row landed in the resumable bucket anyway,
+  offering a Resume click into a worktree that no longer exists. `_cwd_is_live` now checks
+  the filesystem directly, on both `GET /api/restore` (hides dead-cwd rows) and
+  `POST /api/restore/resume` (refuses to spawn into one). (CMX-330, #421)
+
+- **Screenshots and other images a tool produces now reach the bound Telegram
+  topic again.** This is a **port gap** from the `ccbot` fold, not a regression:
+  ccbot carried an outbound photo path (`image_data` → `send_photo`), and
+  chelamux never had one — a `tool_result`'s `image` content block (base64
+  screenshot data) matched neither of `_tool_result_text`'s branches and was
+  silently dropped. `chela.telegram.parser` now extracts those blocks
+  (`Message.images`) alongside the existing text, and `BotSender.send_photos`
+  posts them — as a single `sendPhoto` or, for several images in one
+  `tool_result`, one `sendMediaGroup` call (never N rapid sends that could trip
+  flood control) — after the text part, over a hand-rolled multipart transport.
+  An image over Telegram's 10 MB bot-upload cap is excluded and reported with a
+  visible marker (CMX-311/CMX-322's rule: a dropped message must leave a
+  trace), never silently dropped. A text-only `tool_result` is unaffected —
+  no `images`, no photo call. (CMX-338)
+
+- **The test suite can no longer push a real notification to the operator's phone.**
+  `notify.enabled()` is `bool(NOTIFY_URL)`, read from the environment at import, so on the
+  machine that actually runs chela any test reaching a `notify.send` call site pushed a real
+  ntfy/Telegram message. `test_auto_apply_sweep_never_calls_apply_with_a_bespoke_repo_arg`
+  did exactly that — it drives the real `auto_apply_sweep()` and, alone among its three
+  siblings, never stubbed `notify`. CMX-115 had already stripped `CHELA_NOTIFY_URL` from
+  every tmux-spawned agent and judge, which is why this stayed hidden: that covers the
+  dispatcher's own paths, but not a maintainer running `pytest` or `chela judge run` from
+  their own shell. `tests/conftest.py` now fences outbound notifications the way it already
+  fences live `~/.chela` state — `NOTIFY_URL` blanked so every call site gates off, and
+  `_post` (the single transport funnel) raising `LiveNotificationEscape` if anything reaches
+  it anyway. Like `LiveStateEscape` it derives from `BaseException`, because `notify.send`
+  wraps its transport in `except Exception` and would otherwise swallow the guard and report
+  an ordinary send failure.
+
+- **`chela doctor` no longer goes blind to the window it is run from.** macOS `pgrep`
+  excludes the calling process *and all of its ancestors* from the match list unless `-a`
+  is passed (`pgrep(1)`), and a chela CLI invoked from inside an agent window has that
+  window's own `claude` as an ancestor — so `pgrep -P <pane_pid>` returned nothing and the
+  window resolved to `claude_pid=None`. It then dropped out of every population keyed on
+  `claude_pid`, including `doctor`'s peer-messaging check, which under-reported by exactly
+  the window the operator was sitting in: run from inside a fleet window it listed one
+  window without a peer socket, run from outside it listed two. The daemon was never
+  affected — it descends from no agent — so the gap only ever appeared in self-diagnosis,
+  which is where an operator is most likely to look.
 
 ## [0.9.0] — 2026-08-30
 
