@@ -478,3 +478,58 @@ def test_acknowledge_event_payload_records_the_STAMPED_actor_not_the_raw_argumen
         f"the audit event recorded {acked[0]['payload']['by']!r} but the column was stamped "
         "'liav' — the event must record the actor actually stamped, not the raw argument"
     )
+
+
+def test_acknowledge_event_payload_records_the_STAMPED_task_id_when_acknowledged_by_branch_name(
+    tmp_path, monkeypatch,
+):
+    """docs/defeat_shapes/342 (CMX-336 round 9, issue #438) — the intersection of round 5's
+    "read every sink independently" and round 8's "resolve before you stamp", one sink
+    further downstream than round 8 reached.
+
+    `test_acknowledge_resolves_the_identifier_and_stamps_the_RESOLVED_task_id` (round 8)
+    already proves `result["task_id"]` and the DB row are keyed on the RESOLVED run id when
+    acknowledging by branch name — but it never reads the `blocked_race_ack` event's own
+    payload, which is built from the same `task_id` variable at a separate call site
+    (`event_log.append(..., payload={"task_id": task_id, ...})`). A defeat that stamps the
+    payload from the raw `ident` instead — `payload={"task_id": ident, ...}` — would leave
+    `result["task_id"]` and the row correct while the audit trail names the branch, not the
+    run: exactly what `[[336|shape 336]]`'s round-5 "the payload's identity fields were never
+    enumerated" gap looks like one hop further downstream.
+    """
+    with dispatcher._db() as conn:
+        _row(conn, task_id="abc123", branch_name="cmx-336")
+
+    dispatcher.acknowledge_blocked_race("cmx-336", by="liav")   # ⭐ acknowledged by BRANCH name
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    assert events[-1]["payload"]["task_id"] == "abc123", (
+        f"the audit event named {events[-1]['payload']['task_id']!r} — the identifier the "
+        "operator typed, not the run it resolved to"
+    )
+
+
+def test_acknowledge_by_prefers_env_USER_over_USERNAME_when_both_are_set(tmp_path, monkeypatch):
+    """docs/defeat_shapes/342 (CMX-336 round 9, issue #438) — `--by`'s own `--help` documents
+    "default: $USER/$USERNAME, else 'unknown'", and that ORDER is the only thing distinguishing
+    a three-link fallback chain from a plain lookup.
+
+    `test_acknowledge_defaults_by_to_env_user_when_not_given` proves `$USERNAME` is used when
+    `$USER` is absent, but it deletes `$USER` first — so it cannot tell "checked `$USER` first
+    and it was empty" apart from "checked `$USERNAME` first and it happened to be the only one
+    set". This sets BOTH to distinct values so a defeat that reorders the chain
+    (`os.environ.get("USERNAME") or os.environ.get("USER")`) is caught: it would resolve to
+    the `$USERNAME` value instead.
+    """
+    monkeypatch.setenv("USER", "user-var-actor")
+    monkeypatch.setenv("USERNAME", "username-var-actor")
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    result = dispatcher.acknowledge_blocked_race("abc123")   # ⭐ no --by: the env chain fills it
+
+    assert result["by"] == "user-var-actor", (
+        f"the resolved actor was {result['by']!r} — $USER must win over $USERNAME when both "
+        "are set, per the flag's own --help ('default: $USER/$USERNAME, else \\'unknown\\'')"
+    )
