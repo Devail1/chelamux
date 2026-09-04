@@ -19,6 +19,8 @@ def _run(task_id, status, **kw):
         "window_name": kw.get("window_name"),
         "pr_url": kw.get("pr_url"),
         "started_at": kw.get("started_at"),
+        "pr_checks": kw.get("pr_checks"),
+        "pr_mergeable": kw.get("pr_mergeable"),
     }
     return row
 
@@ -133,3 +135,39 @@ def test_cmd_dispatch_runs_no_filter_keeps_legacy_output(capsys):
         main.cmd_dispatch_runs(SimpleNamespace(awaiting=False, status=None))
     out = capsys.readouterr().out
     assert "attempt=1" in out and "w1" in out
+
+
+# --- issue #426: a CONFLICTING PR must not read as `ci:none` -------------------------
+
+
+def test_ci_chip_conflicting_pr_reads_distinct_from_none():
+    """A `pull_request` workflow cannot build a merge preview for a branch that conflicts
+    with its base, so its checks rollup is empty — exactly like `ci:none`. Guard (a): that
+    must not be the reported chip once GitHub says the PR is CONFLICTING."""
+    r = _run("a", "awaiting_review", pr_url="https://x/pull/1",
+              pr_checks="none", pr_mergeable="CONFLICTING")
+    assert main._ci_chip(r) == "ci:blocked (conflicts)"
+    assert main._ci_chip(r) != "ci:none"
+
+
+def test_ci_chip_fresh_push_with_no_checks_yet_still_reads_none():
+    """Guard (b): a genuinely fresh push (mergeable not yet computed) must still read as
+    `ci:none`, not conflicted — or every push looks conflicted for the second GitHub needs
+    to compute mergeability."""
+    r = _run("a", "awaiting_review", pr_url="https://x/pull/1",
+              pr_checks="none", pr_mergeable=None)
+    assert main._ci_chip(r) == "ci:none"
+
+
+def test_ci_chip_mergeable_unknown_is_not_conflicting_nor_clean():
+    """Guard (c): GitHub's own `UNKNOWN` (mergeability still computing) is a third state and
+    must not be read as either clean or conflicting — it falls through to `pr_checks`."""
+    r = _run("a", "awaiting_review", pr_url="https://x/pull/1",
+              pr_checks="pending", pr_mergeable="UNKNOWN")
+    assert main._ci_chip(r) == "ci:pending"
+
+
+def test_format_awaiting_run_shows_conflict_chip():
+    r = _run("abc123", "awaiting_review", pr_url="https://x/pull/1",
+              pr_checks="none", pr_mergeable="CONFLICTING", started_at=_NOW.isoformat())
+    assert "ci:blocked (conflicts)" in main._format_awaiting_run(r, now=_NOW)

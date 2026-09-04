@@ -225,6 +225,29 @@ def test_acknowledge_records_the_explicitly_supplied_by_not_the_env_fallback(tmp
     assert row["blocked_race_ack_by"] == "someone-distinctive"
 
 
+def test_acknowledge_by_whitespace_only_falls_through_to_the_env_chain(tmp_path, monkeypatch):
+    """CMX-342 rework round 5: link 1 of the documented ``$USER``/``$USERNAME``/``"unknown"``
+    fallback chain — a ``--by`` that is present but WHITESPACE-ONLY must be treated the same
+    as no ``--by`` at all, not stamped verbatim. Every other fixture in this file either omits
+    ``by`` entirely or passes a non-blank value, so ``by`` and ``(by or "").strip()`` coincide
+    everywhere else: this is the one fixture where they diverge, and a defeat that drops the
+    ``.strip()`` (``who = (by or "") or os.environ.get(...)``) would still see a truthy
+    ``"   "`` and stamp it verbatim instead of falling through to ``$USER``."""
+    monkeypatch.setenv("USER", "env-fallback-user")
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    result = dispatcher.acknowledge_blocked_race("abc123", by="   ")
+    assert result["by"] == "env-fallback-user", (
+        "a whitespace-only --by must fall through to the $USER/$USERNAME/'unknown' chain, "
+        "not be stamped as-is"
+    )
+
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    assert row["blocked_race_ack_by"] == "env-fallback-user"
+
+
 # --- (a3) the CAS matches a row whose judge_sha is NULL too ------------------------------
 
 def test_acknowledge_matches_a_row_whose_judge_sha_is_null(tmp_path):
@@ -477,4 +500,196 @@ def test_acknowledge_event_payload_records_the_STAMPED_actor_not_the_raw_argumen
     assert acked[0]["payload"]["by"] == "liav", (
         f"the audit event recorded {acked[0]['payload']['by']!r} but the column was stamped "
         "'liav' — the event must record the actor actually stamped, not the raw argument"
+    )
+
+
+def test_acknowledge_event_payload_records_the_STAMPED_task_id_when_acknowledged_by_branch_name(
+    tmp_path, monkeypatch,
+):
+    """docs/defeat_shapes/342 (CMX-336 round 9, issue #438) — the intersection of round 5's
+    "read every sink independently" and round 8's "resolve before you stamp", one sink
+    further downstream than round 8 reached.
+
+    `test_acknowledge_resolves_the_identifier_and_stamps_the_RESOLVED_task_id` (round 8)
+    already proves `result["task_id"]` and the DB row are keyed on the RESOLVED run id when
+    acknowledging by branch name — but it never reads the `blocked_race_ack` event's own
+    payload, which is built from the same `task_id` variable at a separate call site
+    (`event_log.append(..., payload={"task_id": task_id, ...})`). A defeat that stamps the
+    payload from the raw `ident` instead — `payload={"task_id": ident, ...}` — would leave
+    `result["task_id"]` and the row correct while the audit trail names the branch, not the
+    run: exactly what `[[336|shape 336]]`'s round-5 "the payload's identity fields were never
+    enumerated" gap looks like one hop further downstream.
+    """
+    with dispatcher._db() as conn:
+        _row(conn, task_id="abc123", branch_name="cmx-336")
+
+    dispatcher.acknowledge_blocked_race("cmx-336", by="liav")   # ⭐ acknowledged by BRANCH name
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    assert events[-1]["payload"]["task_id"] == "abc123", (
+        f"the audit event named {events[-1]['payload']['task_id']!r} — the identifier the "
+        "operator typed, not the run it resolved to"
+    )
+
+
+def test_acknowledge_event_summary_renders_the_task_id_who_and_note(tmp_path):
+    """docs/defeat_shapes/342b (judge round on this PR) — the ``blocked_race_ack`` event has
+    a THIRD sink of this same acknowledgement, distinct from the DB columns and the payload
+    dict: ``event_log.append``'s own docstring says the ``summary`` string "is what a
+    notification renders". Every test above reads the columns and the payload back
+    independently, but none of them ever reads ``events[-1]["summary"]`` — so a defeat that
+    hardcodes the summary to ``""`` (leaving the payload dict, the DB columns, and the event's
+    mere existence untouched) passed the whole suite.
+
+    This drives the summary's actual content: the task id, who acknowledged it, and the note,
+    all of which the f-string at the call site is documented to render.
+    """
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    dispatcher.acknowledge_blocked_race(
+        "abc123", by="someone-distinctive", note="already shipped, safe to ack",
+    )
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    summary = events[-1]["summary"]
+    assert "abc123" in summary, (
+        f"summary {summary!r} does not name the task — a defeat that empties the summary "
+        "string survives every payload/column assertion, since none of them read it back"
+    )
+    assert "someone-distinctive" in summary, (
+        f"summary {summary!r} does not name who acknowledged it"
+    )
+    assert "already shipped, safe to ack" in summary, (
+        f"summary {summary!r} does not carry the note"
+    )
+
+
+def test_acknowledge_event_summary_omits_the_dash_when_there_is_no_note(tmp_path):
+    """Companion to the summary test above: the note clause is conditional
+    (``f"..." + (f" — {clean_note}" if clean_note else "")``), so a fixture that always
+    supplies a note can't tell "the note is appended" apart from "the note is always
+    appended, even blank" — both look identical to the previous test alone."""
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    dispatcher.acknowledge_blocked_race("abc123", by="someone-distinctive")
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    summary = events[-1]["summary"]
+    assert "abc123" in summary and "someone-distinctive" in summary
+    assert "—" not in summary, (
+        f"summary {summary!r} carries a note separator with no note given"
+    )
+
+
+def test_acknowledge_event_summary_omits_the_dash_for_a_whitespace_only_note(tmp_path):
+    """docs/defeat_shapes/342d (judge round on this PR) — the note clause's condition is
+    ``if clean_note`` (the STRIPPED note), not ``if note`` (the raw argument). The previous
+    test above calls with no note at all, so ``note`` and ``clean_note`` are both falsy
+    (``None`` and ``""``) and can't tell the two conditions apart — a defeat that swaps the
+    guard to ``if note`` still passes it.
+
+    A whitespace-only note is the fixture that separates them: ``clean_note`` strips to
+    ``""`` (falsy) while ``note`` itself (``"   "``) stays truthy. The DB column and the
+    payload's ``"note"`` key both already record ``""`` for this input (pre-existing,
+    asserted elsewhere) — the summary must agree and omit the separator too, not render a
+    dangling ``" — "`` with nothing after it.
+    """
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    dispatcher.acknowledge_blocked_race("abc123", by="someone-distinctive", note="   ")
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    summary = events[-1]["summary"]
+    assert "abc123" in summary and "someone-distinctive" in summary
+    assert "—" not in summary, (
+        f"summary {summary!r} carries a note separator for a whitespace-only note"
+    )
+
+
+def test_acknowledge_event_summary_names_the_RESOLVED_task_id_not_the_typed_identifier(
+    tmp_path, monkeypatch,
+):
+    """docs/defeat_shapes/342c (judge round 2 on this PR) — the two summary tests above DO
+    read ``events[-1]["summary"]`` back (closing 342b's "the summary sink is never read"
+    gap), but both pass the task id itself as the identifier, where ``ident`` and the
+    resolved ``task_id`` are the same string — exactly the coincidence [[342|shape 342]]
+    round 8 already named on the DB row and the payload, now recurring one sink further, on
+    the summary the round-1 fix just started reading.
+
+    This drives the case where they DIFFER: acknowledge by BRANCH name, then assert the
+    summary names the RESOLVED task id and does NOT contain the raw identifier the operator
+    typed.
+    """
+    with dispatcher._db() as conn:
+        _row(conn, task_id="abc123", branch_name="cmx-336")
+
+    dispatcher.acknowledge_blocked_race("cmx-336", by="someone-distinctive")
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    summary = events[-1]["summary"]
+    assert "abc123" in summary, (
+        f"summary {summary!r} does not name the resolved task id — a defeat that renders "
+        "the raw identifier instead survives every fixture that acknowledges by task id"
+    )
+    assert "cmx-336" not in summary, (
+        f"summary {summary!r} names the identifier the operator typed (the branch name), "
+        "not the run it resolved to"
+    )
+
+
+def test_acknowledge_event_summary_names_the_STAMPED_actor_not_the_raw_by_argument(
+    tmp_path, monkeypatch,
+):
+    """docs/defeat_shapes/342c companion — same recurrence as the test above, on the
+    ``who``-vs-``by`` pair instead of the ``ident``-vs-``task_id`` pair. Every existing
+    summary fixture passes ``by`` explicitly, where ``who`` (the fallback chain's result)
+    and ``by`` (the raw argument) read back identically. This drives the one case where they
+    differ: no ``--by`` given, so the ``$USER``/``$USERNAME``/``"unknown"`` chain fills
+    ``who`` in while ``by`` itself is ``""``.
+    """
+    monkeypatch.setenv("USER", "someone-distinctive")
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    dispatcher.acknowledge_blocked_race("abc123")   # ⭐ no --by: the env chain fills `who`
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    summary = events[-1]["summary"]
+    assert "someone-distinctive" in summary, (
+        f"summary {summary!r} does not name the stamped actor — a defeat that renders the "
+        "raw `by` argument instead survives every fixture that passes `by` explicitly"
+    )
+
+
+def test_acknowledge_by_prefers_env_USER_over_USERNAME_when_both_are_set(tmp_path, monkeypatch):
+    """docs/defeat_shapes/342 (CMX-336 round 9, issue #438) — `--by`'s own `--help` documents
+    "default: $USER/$USERNAME, else 'unknown'", and that ORDER is the only thing distinguishing
+    a three-link fallback chain from a plain lookup.
+
+    `test_acknowledge_defaults_by_to_env_user_when_not_given` proves `$USERNAME` is used when
+    `$USER` is absent, but it deletes `$USER` first — so it cannot tell "checked `$USER` first
+    and it was empty" apart from "checked `$USERNAME` first and it happened to be the only one
+    set". This sets BOTH to distinct values so a defeat that reorders the chain
+    (`os.environ.get("USERNAME") or os.environ.get("USER")`) is caught: it would resolve to
+    the `$USERNAME` value instead.
+    """
+    monkeypatch.setenv("USER", "user-var-actor")
+    monkeypatch.setenv("USERNAME", "username-var-actor")
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    result = dispatcher.acknowledge_blocked_race("abc123")   # ⭐ no --by: the env chain fills it
+
+    assert result["by"] == "user-var-actor", (
+        f"the resolved actor was {result['by']!r} — $USER must win over $USERNAME when both "
+        "are set, per the flag's own --help ('default: $USER/$USERNAME, else \\'unknown\\'')"
     )

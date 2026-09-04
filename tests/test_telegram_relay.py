@@ -1112,6 +1112,20 @@ def test_send_photos_single_image_calls_send_photo():
     assert data == b"data"
 
 
+def test_send_photos_single_image_omits_thread_when_none():
+    # DEFEAT_SHAPES 342: every other sendPhoto test above builds a THREADED
+    # sender ("topic1") — a sender with no default topic AND no per-call
+    # thread (the single-topic daemon shape) is unmeasured everywhere else.
+    # The Bot API field must be ABSENT, not sent as message_thread_id=None.
+    mt = _MediaTransport()
+    sender = BotSender("tok", "chat1", None, media_transport=mt)
+    assert sender.send_photos([("image/png", b"data")]) is True
+    _, fields, _ = mt.calls[0]
+    assert "message_thread_id" not in fields, (
+        f"a threadless sendPhoto sent message_thread_id anyway: {fields!r}"
+    )
+
+
 def test_send_photos_single_image_names_the_file_after_its_own_media_type():
     # DEFEAT_SHAPES 330: _ext_for is unit-tested directly and the media-group
     # path pins full filenames, but the single-photo CALL SITE only ever
@@ -1150,6 +1164,20 @@ def test_send_photos_multiple_images_calls_send_media_group_once():
     assert [f[0] for f in files] == ["photo0", "photo1"]
     assert [f[1] for f in files] == ["photo0.png", "photo1.jpg"]
     assert [f[2] for f in files] == [b"one", b"two"]
+
+
+def test_send_photos_media_group_omits_thread_when_none():
+    # The sendMediaGroup sibling of the omission above — the multi-image
+    # fixture (`test_send_photos_multiple_images_calls_send_media_group_once`)
+    # always passes a per-call thread, so the threadless case is unmeasured.
+    mt = _MediaTransport()
+    sender = BotSender("tok", "chat1", None, media_transport=mt)
+    images = [("image/png", b"one"), ("image/jpeg", b"two")]
+    assert sender.send_photos(images) is True
+    _, fields, _ = mt.calls[0]
+    assert "message_thread_id" not in fields, (
+        f"a threadless sendMediaGroup sent message_thread_id anyway: {fields!r}"
+    )
 
 
 def test_ext_for_follows_the_blocks_media_type():
@@ -1829,6 +1857,29 @@ def test_retry_loop_still_returns_immediately_when_retry_flood_is_False():
         f"retry_flood=False slept and retried ({len(calls)} calls) — the ephemeral status "
         "line must never block the pane watcher on flood control"
     )
+
+
+def test_bot_sender_chat_action_never_retries_flood_control():
+    """🔴 The `retry_flood=False` contract driven at the REAL production call
+    site, not just the shared `_retry_loop` helper. Round 6 routed `_call`
+    through `_retry_loop`, and the sibling test above
+    (`test_retry_loop_still_returns_immediately_when_retry_flood_is_False`)
+    calls `_retry_loop` directly — so it stays green even if `_call` stopped
+    forwarding its `retry_flood` kwarg (e.g. hardcoded `retry_flood=True`).
+    `chat_action` is the one call site that hardcodes `retry_flood=False` at
+    `_call(..., retry_flood=False)` — driving it end-to-end proves the kwarg
+    still reaches `_retry_loop` through `_call`, not around it.
+    """
+    tr = _ScriptedTransport([_FLOOD])          # 429 forever
+    slept: list[float] = []
+    sender = BotSender("tok", "chat1", "topic1", transport=tr, sleep=slept.append)
+
+    assert sender.chat_action() is False
+    assert len(tr.calls) == 1, (
+        f"chat_action retried flood control ({len(tr.calls)} call(s)) — a "
+        "typing indicator must never block on a 429"
+    )
+    assert slept == [], "chat_action slept on a 429 — retry_flood=False was not honored"
 
 
 def test_registry_relay_does_not_relay_images_when_no_photo_sender_is_wired():

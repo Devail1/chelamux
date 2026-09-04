@@ -1679,3 +1679,40 @@ def test_a_red_ci_at_the_rework_cap_escalates_on_the_SAME_tick_and_is_not_respaw
     assert run["status"] == "needs_human"
     assert (run["rework_count"] or 0) == 1
     assert len(dispatcher.reviews_of(run)) == 1
+
+
+# --- issue #426: a CONFLICTING PR reports a state distinct from `none`, without ever
+# latching on it once GitHub resolves the conflict -------------------------------------
+
+@pytest.mark.parametrize("checks", [
+    dispatcher.CI_NONE, dispatcher.CI_PASSING, dispatcher.CI_PENDING,
+    dispatcher.CI_FAILING, dispatcher.CI_UNKNOWN, None,
+])
+def test_ci_report_state_conflicting_overrides_any_checks_cache(checks):
+    """GUARD (a): a conflicting PR reports distinctly, whatever the (possibly stale) checks
+    cache says — the merge gate refuses a conflicting PR regardless of CI, so a checks state
+    left over from before the base drifted is not the useful thing to show."""
+    assert dispatcher.ci_report_state(checks, "CONFLICTING") == dispatcher.CI_BLOCKED_CONFLICTING
+
+
+@pytest.mark.parametrize("checks", [dispatcher.CI_NONE, dispatcher.CI_PENDING, None])
+def test_ci_report_state_not_yet_mergeable_falls_through_unchanged(checks):
+    """GUARD (b): a genuinely fresh push, where `mergeable` has not been read at all yet
+    (None) or GitHub is still computing it (`UNKNOWN`), must NOT read as conflicted — only
+    the literal `CONFLICTING` string may override the checks cache."""
+    assert dispatcher.ci_report_state(checks, None) == checks
+    assert dispatcher.ci_report_state(checks, "UNKNOWN") == checks
+
+
+def test_ci_report_state_mergeable_does_not_override_checks():
+    assert dispatcher.ci_report_state(dispatcher.CI_PASSING, "MERGEABLE") == dispatcher.CI_PASSING
+
+
+def test_ci_report_state_does_not_latch_once_conflict_resolves():
+    """GUARD (c)/no-latch: the function is pure and reads the CURRENT `pr_mergeable` on every
+    call — once GitHub resolves the conflict away, the very next read must stop reporting
+    blocked_conflicting, with nothing cached anywhere to un-stick."""
+    assert dispatcher.ci_report_state(dispatcher.CI_NONE, "CONFLICTING") == (
+        dispatcher.CI_BLOCKED_CONFLICTING
+    )
+    assert dispatcher.ci_report_state(dispatcher.CI_PASSING, "MERGEABLE") == dispatcher.CI_PASSING

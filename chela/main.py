@@ -1199,6 +1199,7 @@ _CI_CHIPS = {
     dispatcher.CI_PENDING: "ci:pending",
     dispatcher.CI_NONE: "ci:none",
     dispatcher.CI_UNKNOWN: "ci:UNKNOWN",
+    dispatcher.CI_BLOCKED_CONFLICTING: "ci:blocked (conflicts)",
 }
 
 
@@ -1208,8 +1209,15 @@ def _ci_chip(r: dict) -> str:
     A run with no recorded state (an old row, a PR the tick has not reached yet) reads
     ``ci:?`` and not ``ci:green``: the whole point of the fact is that not-yet-read is not
     a pass.
+
+    🚧 issue #426. Goes through :func:`dispatcher.ci_report_state` rather than reading
+    ``pr_checks`` alone, so a PR GitHub reports ``CONFLICTING`` reads ``ci:blocked
+    (conflicts)`` instead of ``ci:none`` — the same empty rollup a genuinely fresh push
+    produces for its first few seconds, which is exactly why `dispatch-runs --awaiting`
+    could not tell "will never get checks" from "hasn't gotten them yet".
     """
-    return _CI_CHIPS.get(r.get("pr_checks") or "", "ci:?")
+    state = dispatcher.ci_report_state(r.get("pr_checks"), r.get("pr_mergeable"))
+    return _CI_CHIPS.get(state or "", "ci:?")
 
 
 def _format_awaiting_run(r: dict, *, now: datetime | None = None) -> str:

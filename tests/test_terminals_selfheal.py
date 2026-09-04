@@ -399,6 +399,115 @@ def test_reap_propagates_if_the_child_survives_sigkill_too():
     ], "must SIGTERM, wait, then SIGKILL, wait again — in that order, not any permutation"
 
 
+# statements whose only job is to abort the current test outright — an ordinary
+# ast.Expr/ast.Call to a static walk, yet fatal at runtime, so a Return/Raise-only
+# reachability check is blind to them (docs/defeat_shapes/345f)
+_ABORTS_EXECUTION = frozenset({
+    "pytest.skip", "pytest.xfail", "pytest.exit", "sys.exit", "os._exit",
+})
+
+
+def _diverts_control_flow(stmt):
+    """True if `stmt`, or anything nested inside it, can prevent every statement after
+    it in the same body from ever running: a `return`/`raise`, or a call to a function
+    in `_ABORTS_EXECUTION` (`pytest.skip(...)` etc.) — the latter is a plain `ast.Expr`
+    to a static walk, so it is invisible to a check that only looks for
+    `ast.Return`/`ast.Raise` despite raising at runtime.
+
+    Walks `stmt`'s WHOLE subtree, not just `stmt` itself — a top-level `ast.If` (e.g.
+    `if True: return`) is neither a Return nor a Raise, so a check that only classifies
+    `stmt` itself is blind to a diverting statement one block deep (docs/defeat_shapes/345h)."""
+    for node in ast.walk(stmt):
+        if isinstance(node, (ast.Return, ast.Raise)):
+            return True
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            func = node.value.func
+            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                if f"{func.value.id}.{func.attr}" in _ABORTS_EXECUTION:
+                    return True
+    return False
+
+
+def _reap_order_assertion():
+    """The `assert fake.mock_calls == [...]` statement inside
+    test_reap_propagates_if_the_child_survives_sigkill_too — the actual ORDER claim this
+    guard exists to protect, read off this file's own source the same way
+    `_promptness_check_try_bodies` reads it below.
+
+    Collects EVERY top-level FunctionDef matching the name and demands exactly one —
+    Python (and pytest collection) bind the LAST definition of a shadowed name, so a
+    lookup that `return`s on the first `ast.walk` match would silently inspect a dead,
+    shadowed definition while a different function actually runs (docs/defeat_shapes/345h)."""
+    tree = ast.parse(Path(__file__).read_text())
+    matches = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_reap_propagates_if_the_child_survives_sigkill_too"
+    ]
+    assert len(matches) == 1, (
+        f"expected exactly one definition of "
+        f"test_reap_propagates_if_the_child_survives_sigkill_too in this file, found "
+        f"{len(matches)} — a shadowing duplicate makes a by-name lookup inspect the "
+        f"wrong (dead) definition, since Python binds whichever one is defined last"
+    )
+    func = matches[0]
+    asserts = [stmt for stmt in func.body if isinstance(stmt, ast.Assert)]
+    assert len(asserts) == 1, (
+        f"{func.name}: expected exactly one top-level assert pinning the call order, "
+        f"found {len(asserts)}"
+    )
+    assert_stmt = asserts[0]
+    preceding = func.body[: func.body.index(assert_stmt)]
+    assert not any(_diverts_control_flow(stmt) for stmt in preceding), (
+        f"{func.name}: a statement that aborts execution (return/raise/"
+        f"pytest.skip/pytest.xfail/pytest.exit/sys.exit) precedes the pinned "
+        f"order assert — it is dead code, never actually reached, so the ORDER "
+        f"claim it names goes unasserted despite the assert's own AST shape "
+        f"being untouched"
+    )
+    return assert_stmt
+
+
+def test_reap_call_sequence_equality_is_order_sensitive():
+    """GUARD for the ORDER claim in test_reap_propagates_if_the_child_survives_sigkill_too's
+    docstring: that its `mock_calls == [...]` assertion pins ORDER, not just method+args.
+
+    Re-proving that `unittest.mock._CallList.__eq__` is order-sensitive in isolation (build
+    two differently-ordered call lists, assert they differ) is a property of the standard
+    library — true no matter what the sibling assertion actually looks like, so it survives
+    the sibling being rewritten to `sorted(fake.mock_calls, key=repr) == sorted([...],
+    key=repr)`, which is order-INSENSITIVE despite still reading as an equality check. This
+    instead reads the sibling's own assert statement off this file's AST (see
+    `_reap_order_assertion` above) and requires BOTH sides to be bare — `fake.mock_calls`
+    on the left, a plain list literal on the right — so wrapping either side in `sorted(...)`
+    (or any other call) trips this guard directly, rather than a stdlib property that
+    doesn't care.
+    """
+    stmt = _reap_order_assertion()
+    test = stmt.test
+    assert (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Eq)
+    ), "the pinned order claim must be a single `==` comparison, not e.g. `sorted(...) == sorted(...)`"
+
+    left, right = test.left, test.comparators[0]
+    assert (
+        isinstance(left, ast.Attribute)
+        and left.attr == "mock_calls"
+        and isinstance(left.value, ast.Name)
+        and left.value.id == "fake"
+    ), (
+        "the LHS must be the bare `fake.mock_calls` — wrapping it (e.g. "
+        "`sorted(fake.mock_calls, key=repr)`) discards the order it claims to pin"
+    )
+    assert isinstance(right, ast.List), (
+        "the RHS must be a bare list literal — wrapping it (e.g. `sorted([...], key=repr)`) "
+        "makes the comparison order-insensitive while still reading as an equality check"
+    )
+
+
 def test_reap_defaults_cannot_collapse_either_wait_window():
     """WIRING: `_reap`'s defaults are load-bearing at all six call sites, which all call
     bare `_reap(proc)` and take both timeouts from the signature. Nothing in the two
@@ -529,6 +638,43 @@ def _wait_timeout_literal(stmt):
     return None
 
 
+def _decorator_forces_unconditional_skip(func):
+    """True if `func` carries `@pytest.mark.skip` — bare or called — outright, or
+    `@pytest.mark.skipif(...)` with a literal (not runtime-computed) condition — i.e.
+    `skipif(True, ...)` / `skipif(condition=True, ...)`, as opposed to a real check like
+    `shutil.which("pgrep") is None`. A site hidden behind either NEVER RUNS regardless
+    of environment, yet its try-body AST is byte-identical to a live site — invisible
+    to every check in this file unless something looks at `func.decorator_list`, not
+    just `func.body`.
+
+    Checks BOTH the positional and the keyword form of `condition` — pytest's own
+    `evaluate_skip_marks` reads `mark.kwargs['condition']` when the keyword form is
+    used, so a guard that only ever looks at `dec.args[0]` lets `skipif(condition=True,
+    ...)` slip through with `dec.args` empty (docs/defeat_shapes/345h)."""
+    for dec in func.decorator_list:
+        if isinstance(dec, ast.Attribute):
+            # bare `@pytest.mark.skip` (no parens) is a plain attribute access, not a
+            # call — pytest accepts it, and it's the shortest way to write exactly
+            # what this helper exists to reject
+            if dec.attr == "skip":
+                return True
+            continue
+        if not (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)):
+            continue
+        if dec.func.attr == "skip":
+            return True
+        if dec.func.attr == "skipif":
+            condition = dec.args[0] if dec.args else None
+            if condition is None:
+                for kw in dec.keywords:
+                    if kw.arg == "condition":
+                        condition = kw.value
+                        break
+            if isinstance(condition, ast.Constant):
+                return True
+    return False
+
+
 def _promptness_check_try_bodies():
     """Yield (function_name, try_body) for the two functions above — the try body, NOT the
     finally body that `_run_bg_teardown_sites` already covers."""
@@ -536,31 +682,134 @@ def _promptness_check_try_bodies():
     for func in ast.walk(tree):
         if not isinstance(func, ast.FunctionDef) or func.name not in _PROMPTNESS_CHECK_FUNCS:
             continue
+        assert not _decorator_forces_unconditional_skip(func), (
+            f"{func.name}: carries a skip/skipif decorator with a literal (always-true) "
+            f"condition — this guarded promptness site would never actually run, no "
+            f"SIGTERM ever sent to a real supervisor, while still being counted, extracted "
+            f"and replayed by every check below as if it executed"
+        )
         tries = [stmt for stmt in func.body if isinstance(stmt, ast.Try)]
         assert len(tries) == 1, (
             f"{func.name}: expected exactly one top-level try/finally around its "
             f"`_run_bg` process"
         )
+        assert not tries[0].handlers, (
+            f"{func.name}: its try statement has an `except` clause — a "
+            f"`proc.wait(timeout=...)` TimeoutExpired caught there, before reaching "
+            f"`finally: _reap(proc)`, would never be seen by the PROPERTY block below, "
+            f"which replays only the try BODY (via `_proc_call_run`), never any handler "
+            f"wrapped around it"
+        )
         yield func.name, tries[0].body
 
 
-def test_promptness_checks_are_not_absorbed_into_reap():
-    """WIRING: `_reap` is finally:-only cleanup, never a replacement for a test's own
-    SIGTERM-promptness assertion (see `_reap`'s docstring). Replacing either of the two
-    direct `proc.terminate(); proc.wait(timeout=<=5)` pairs above with a bare `_reap(proc)`
-    call is invisible to `test_all_run_bg_teardowns_route_through_reap`, which reads only
-    the `finally:` body — pin the try BODY directly so that substitution fails."""
-    for name, body in _promptness_check_try_bodies():
-        assert not any(
+def _proc_call_run(body):
+    """The maximal contiguous run, at the tail of a try body, of bare `proc.<method>(...)`
+    Expr statements — the guarded terminate/wait pattern, whatever it currently contains.
+    The run boundary is structural (any Expr call on `proc`), not the two method names, so
+    a mutation that squeezes in an extra `proc.kill()` next to `proc.terminate()` /
+    `proc.wait()` stays INSIDE the run and gets extracted (and executed) along with them —
+    it cannot hide next to the pinned pair the way a name-based extraction would let it."""
+
+    def is_proc_call(stmt):
+        return (
             isinstance(stmt, ast.Expr)
             and isinstance(stmt.value, ast.Call)
-            and isinstance(stmt.value.func, ast.Name)
-            and stmt.value.func.id == "_reap"
+            and isinstance(stmt.value.func, ast.Attribute)
+            and isinstance(stmt.value.func.value, ast.Name)
+            and stmt.value.func.value.id == "proc"
+        )
+
+    runs, current = [], []
+    for stmt in body:
+        if is_proc_call(stmt):
+            current.append(stmt)
+        elif current:
+            runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+
+    for run in runs:
+        if any(_is_proc_method_call(s, "terminate") for s in run) and any(
+            _wait_timeout_literal(s) is not None for s in run
+        ):
+            return run
+    return []
+
+
+def _diverts_proc_liveness(stmt):
+    """True if `stmt` can end, signal, or REBIND the real `proc` before the pinned
+    terminate/wait run ever executes — either a bare `Expr` call that names `proc` but
+    is NOT itself a `proc.<method>()` call (e.g. `os.kill(proc.pid, 9)`), or an
+    `Assign` that targets the name `proc` or references it anywhere in its value (e.g.
+    `proc = (_reap(proc), subprocess.Popen(...))[1]`). `_proc_call_run`'s run boundary
+    only recognizes `proc.<method>()` Expr statements, so a statement shaped like
+    either of these sits OUTSIDE whatever run it precedes: it can kill/signal/replace
+    the real `proc` before the pinned run ever executes, silently making that run's
+    promptness assertion vacuous, while being invisible to both the run-boundary scan
+    and the replay (which only ever sees the run's own extracted statements, executed
+    against a stand-in `proc` the PROPERTY block supplies itself). The Assign form is
+    docs/defeat_shapes/345h — it also embeds a call to `_reap` that the sibling
+    `_reap()`-absorption check below must catch even though it isn't a top-level Expr."""
+    if isinstance(stmt, ast.Assign):
+        targets_proc = any(isinstance(t, ast.Name) and t.id == "proc" for t in stmt.targets)
+        references_proc = any(isinstance(n, ast.Name) and n.id == "proc" for n in ast.walk(stmt.value))
+        return targets_proc or references_proc
+    if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
+        return False
+    call = stmt.value
+    if (
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "proc"
+    ):
+        return False  # a proc.<method>() call itself — legitimate, joins the run
+    return any(isinstance(n, ast.Name) and n.id == "proc" for n in ast.walk(call))
+
+
+def test_promptness_checks_are_not_absorbed_into_reap(tmp_path):
+    """WIRING + PROPERTY: `_reap` is finally:-only cleanup, never a replacement for a test's
+    own SIGTERM-promptness assertion (see `_reap`'s docstring). Replacing either of the two
+    direct `proc.terminate(); proc.wait(timeout=<=5)` pairs above with a bare `_reap(proc)`
+    call is invisible to `test_all_run_bg_teardowns_route_through_reap`, which reads only
+    the `finally:` body — the AST checks below pin the try BODY directly so that substitution
+    fails.
+
+    That alone only proves the SHAPE is still there, not that the shape does anything — a
+    `proc.terminate(); proc.wait(timeout=5)` whose `TimeoutExpired` got caught and discarded
+    would still satisfy every AST assertion below while being just as much a no-op as routing
+    through `_reap`. The block after them drives the actual PROPERTY this check exists for —
+    and does so by extracting the REAL guarded statements (via `_proc_call_run`, source and
+    all) out of each of the two functions above and `exec`-ing THEM against a synthetic
+    SIGTERM-ignoring child, rather than a hand-written stand-in that only reproduces the
+    mechanism by hand: a child that ignores SIGTERM must still be detected PROMPTLY, i.e. the
+    actual call-site pattern must fail fast (raise) on such a child, rather than silently
+    succeeding the way `_reap` would (its SIGKILL escalation catches exactly that
+    `TimeoutExpired` and keeps going, taking up to `term_timeout + kill_timeout` seconds
+    before the process is even confirmed dead — masking a real promptness regression instead
+    of failing on it).
+    """
+    source_text = Path(__file__).read_text()
+
+    sites = list(_promptness_check_try_bodies())
+    assert len(sites) == 2, (
+        f"expected 2 promptness-check call sites in this file (one per name in "
+        f"_PROMPTNESS_CHECK_FUNCS), found {len(sites)} — a guarded function renamed "
+        f"out of sync with _PROMPTNESS_CHECK_FUNCS silently drops out of this loop "
+        f"instead of failing it"
+    )
+    for name, body in sites:
+        assert not any(
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_reap"
             for stmt in body
+            for node in ast.walk(stmt)
         ), (
-            f"{name}: its try body calls `_reap()` — that absorbs the SIGTERM-promptness "
-            f"check this test exists to make, and _reap is documented as finally:-only "
-            f"cleanup, not a replacement for it"
+            f"{name}: its try body calls `_reap()` — whether as its own statement or "
+            f"nested inside another (e.g. an `Assign` value) — that absorbs the "
+            f"SIGTERM-promptness check this test exists to make, and _reap is "
+            f"documented as finally:-only cleanup, not a replacement for it "
+            f"(docs/defeat_shapes/345h)"
         )
 
         assert any(_is_proc_method_call(stmt, "terminate") for stmt in body), (
@@ -573,3 +822,48 @@ def test_promptness_checks_are_not_absorbed_into_reap():
             f"{name}: missing a direct `proc.wait(timeout=<=5)` in its try body, or its "
             f"bound was widened past the 5s promptness assertion this test makes"
         )
+
+        # PROPERTY: pull the actual guarded statements — not a rewritten stand-in — out of
+        # THIS function's own source, and exec them against a synthetic SIGTERM-ignoring
+        # child. This must actually detect such a child, and detect it PROMPTLY, not by
+        # falling through to `_reap`'s SIGKILL fallback.
+        run = _proc_call_run(body)
+        assert run, f"{name}: could not locate its terminate/wait run in the try body"
+
+        run_start = body.index(run[0])
+        for preceding_stmt in body[:run_start]:
+            assert not _diverts_proc_liveness(preceding_stmt), (
+                f"{name}: a statement before the guarded terminate/wait run can kill "
+                f"or signal `proc` (e.g. `os.kill(proc.pid, ...)`) without going "
+                f"through a `proc.<method>()` call — `_proc_call_run`'s boundary "
+                f"cannot see it, so the guarded process could already be dead by the "
+                f"time the pinned run executes, making the promptness assertion below "
+                f"vacuous while the replay (which only ever sees the run's own "
+                f"statements against a freshly spawned, still-alive stub) stays "
+                f"untouched"
+            )
+
+        segment = "\n".join(ast.get_source_segment(source_text, stmt) for stmt in run)
+        code = compile(segment, filename=f"<{name} promptness pattern>", mode="exec")
+
+        stub = tmp_path / f"ignore_term_{name}.py"
+        stub.write_text(
+            "import signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "time.sleep(30)\n"
+        )
+        proc = subprocess.Popen([sys.executable, str(stub)])
+        try:
+            time.sleep(0.3)  # let it install the SIGTERM handler before we send one
+            start = time.monotonic()
+            with pytest.raises(subprocess.TimeoutExpired):
+                exec(code, {"proc": proc})  # the pinned call site's OWN statements
+            elapsed = time.monotonic() - start
+            assert elapsed < 8, (
+                f"{name}: its actual terminate/wait pattern must fail FAST on a "
+                f"SIGTERM-ignoring child — a slow or missing failure here means detection "
+                f"got routed through something with a SIGKILL fallback (like _reap), which "
+                f"masks the exact promptness regression this guard exists to catch"
+            )
+        finally:
+            _reap(proc)

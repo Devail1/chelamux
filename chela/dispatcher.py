@@ -185,6 +185,16 @@ CI_PENDING = "pending"
 CI_NONE = "none"
 CI_UNKNOWN = "unknown"
 
+# 🚧 issue #426. A `pull_request` workflow runs against the MERGE PREVIEW (the PR head
+# merged into its base), and GitHub cannot build that preview for a branch that conflicts
+# with its base — so it runs NOTHING. The rollup then reads exactly like CI_NONE, which is
+# also what a genuinely fresh push looks like for the few seconds before checks start, and
+# the merge gate (which only ever waits for green) cannot tell "will never arrive" from
+# "hasn't arrived yet". This is a REPORTING state, never a rollup shape: nothing in
+# `_rollup_state` ever returns it — see `ci_report_state` below, which is the one place
+# that combines the checks cache with GitHub's live `mergeable` verdict to produce it.
+CI_BLOCKED_CONFLICTING = "blocked_conflicting"
+
 # A check that is FINISHED and did not pass. GitHub reports these as CheckRun.conclusion
 # (or StatusContext.state, which uses FAILURE/ERROR only).
 CI_FAILED_CONCLUSIONS = (
@@ -1778,6 +1788,33 @@ def _read_pr_checks(pr_url: str | None, repo_dir: str | None) -> CIStatus:
         rollup if isinstance(rollup, list) else []
     )
     return CIStatus(state, sha, failing, run_ids, infra=infra, plain_failures=plain_failures)
+
+
+def ci_report_state(pr_checks: str | None, pr_mergeable: str | None) -> str | None:
+    """What to SHOW for a PR's CI, given both the checks cache and GitHub's live `mergeable`.
+
+    🚧 issue #426. `pr_checks` alone cannot distinguish "no checks have run yet" from "no
+    checks CAN run" — a `pull_request` workflow builds against the merge preview, and a PR
+    that conflicts with its base has none to build, so its rollup is empty exactly like a
+    fresh, not-yet-started push. `mergeable == 'CONFLICTING'` is the one fact that tells them
+    apart, so when GitHub reports it, the conflict wins over whatever `pr_checks` says —
+    including a stale `passing` left over from before the base branch drifted out from
+    under it: the merge gate is going to refuse this PR either way, and "it conflicts" is
+    the more useful thing to say than a checks state that can no longer be trusted.
+
+    ⛔ Only the literal string ``'CONFLICTING'`` triggers this — never a hole for the other
+    two mergeable states to fall into. ``None`` (never read, or a failed `gh` call) and
+    ``'UNKNOWN'`` (GitHub's own placeholder for "still computing", which every push starts
+    in) both fall through to `pr_checks` unchanged: a genuinely fresh push must keep reading
+    as pending/none, not conflicted, for the second or two GitHub needs to compute
+    mergeability — or every push would look conflicted right after it lands. And because
+    this reads the CURRENT `pr_mergeable` on every call rather than caching its own verdict,
+    it cannot latch: the moment GitHub resolves `mergeable` away from `CONFLICTING` (a
+    rebase, a merged sibling PR), the very next read reports whatever `pr_checks` says then.
+    """
+    if pr_mergeable == "CONFLICTING":
+        return CI_BLOCKED_CONFLICTING
+    return pr_checks
 
 
 def pr_live_head_sha(pr_url: str | None, repo_dir: str | None) -> str | None:

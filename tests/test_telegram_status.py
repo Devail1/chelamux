@@ -373,6 +373,65 @@ def test_an_indented_ellipsis_bullet_at_the_farthest_lookback_row_is_not_a_statu
     assert detect_status(INDENTED_ELLIPSIS_DEEPEST_PANE) is None
 
 
+@pytest.mark.parametrize("glyph", list("·✻✽✶✳✢"))
+@pytest.mark.parametrize("indent", [1, 2, 4])
+def test_indented_bullet_directly_above_chrome_is_rejected_on_every_glyph_and_indent(
+    glyph, indent
+):
+    """CMX-343: BULLET_DIRECTLY_ABOVE_CHROME_PANE only ever used `·` at a 2-space gutter to
+    pin column-0 rejection at the `is_first` row (active-or-settled accepted unconditionally
+    once column-0 passes) — the one position where a relaxed check costs the most. That left
+    the rule provable-as-conditional on either axis alone: `line[0] == "·"` or a hardcoded
+    2-space strip would each still pass every existing fixture. This drives the PRODUCT of
+    both axes, not each one alone.
+    """
+    gutter = " " * indent
+    pane = (
+        "● Here is the plan:\n"
+        f"{gutter}· rotate the group\n"
+        f"{gutter}· filter-repo, then ask GitHub to purge\n"
+        f"{gutter}{glyph} third bullet\n"
+        f"{_RULE}\n"
+        "❯\n"
+        f"{_RULE}\n"
+        "\n"
+        "  ⏵⏵ auto mode on · ← for agents\n"
+    )
+    assert detect_status(pane) is None, (
+        f"an indented bullet (glyph {glyph!r}, indent {indent}) directly above the chrome "
+        "was read as a live status — the column-0 rule must hold across every glyph and "
+        "indent width, not just `·` at a 2-space gutter"
+    )
+
+
+@pytest.mark.parametrize("glyph", list("·✻✽✶✳✢"))
+@pytest.mark.parametrize("indent", [1, 2, 4])
+def test_indented_ellipsis_bullet_past_first_row_is_rejected_on_every_glyph_and_indent(
+    glyph, indent
+):
+    """Same defect shape, on the ellipsis-gated non-first-row path: INDENTED_ELLIPSIS_PANE
+    only ever used `·` at a 2-space gutter to prove column-0 rejects a line the ellipsis gate
+    alone would accept. Drives the product of both axes here too, not each one alone.
+    """
+    gutter = " " * indent
+    pane = (
+        "● Here is the plan:\n"
+        "  ⎿  Tip: some tip text here\n"
+        f"{gutter}{glyph} deploying the thing…\n"
+        "✔ Update installed · Restart to update\n"
+        f"{_RULE}\n"
+        "❯\n"
+        f"{_RULE}\n"
+        "\n"
+        "  ⏵⏵ auto mode on · ← for agents\n"
+    )
+    assert detect_status(pane) is None, (
+        f"an indented ellipsis-carrying bullet (glyph {glyph!r}, indent {indent}) past the "
+        "first row was read as a live status — only the column-0 rule can reject it here, "
+        "and it must hold across every glyph and indent width"
+    )
+
+
 def test_pane_without_chrome_has_no_status():
     assert detect_status(NO_CHROME_PANE) is None
 
