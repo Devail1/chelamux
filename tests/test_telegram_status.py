@@ -987,3 +987,61 @@ def test_the_scan_stops_at_the_NEAREST_accepted_spinner_row():
         f"the scan returned {st.verb!r} — a farther spinner row overwrote the nearest one, "
         "so the relay would show a stale verb from earlier in the scrollback"
     )
+
+
+@pytest.mark.parametrize("glyph", list("·✻✽✶✳✢"))
+@pytest.mark.parametrize("gap", [2, 3, 4])
+def test_ACCEPTANCE_holds_on_every_frame_at_every_reachable_depth(glyph, gap):
+    """⭐ The acceptance half of the product, mirroring round 7's rejection half.
+
+    Round 6 pinned all six frames at ONE depth (`_banner_pane`), and the depth fixtures
+    all use `✽` — so acceptance was proven along each axis alone and a mutation gated on
+    the CELL (`_STATUS_ACTIVE in candidate and (i == chrome_idx - 4 or line[0] == "✽")`)
+    satisfied both. In production that is the flicker failure: the status resolves only on
+    the frame/depth combinations the mutation happens to allow, so the Telegram message
+    appears and self-deletes as the spinner animates and the banner block changes height.
+    """
+    rows = (
+        ["◍ output", ""]
+        + [f"{glyph} Wandering… (2m 10s · ↓ 6.2k tokens)"]
+        + ["  ⎿  filler"] * (gap - 2)
+        + ["✔ Update installed · Restart to update"]
+        + [_RULE, "❯", _RULE, "", "  ⏵⏵ auto mode on · 2 shells · ↰ for agents"]
+    )
+
+    st = detect_status("\n".join(rows) + "\n")
+
+    assert st is not None, (
+        f"an ACTIVE line on frame {glyph!r} at depth {gap} was not accepted — acceptance "
+        "must hold across the product of the two axes, not each one alone"
+    )
+    assert st.active is True
+    assert st.verb == "Wandering… (2m 10s · ↓ 6.2k tokens)"
+
+
+@pytest.mark.parametrize("glyph", list("·✻✽✶✳✢"))
+def test_the_FIRST_nonblank_row_is_accepted_on_every_frame_active_or_settled(glyph):
+    """The other acceptance path: the production comment promises the first non-blank row
+    is taken unconditionally, **active or settled**. Every fixture proving it used `✻` for
+    the settled case and `✽` for the active one, so `is_first = not seen_first_nonblank
+    and (line[0] == "✻" or _STATUS_ACTIVE in line)` reproduced both while silently
+    dropping every other settled frame.
+
+    A settled line resolves to `Status(active=False)` carrying `shells`/`seconds` — the
+    relay poofs on `active` and shows the counts — so losing four of six frames means
+    those turns end with a stale message and no final numbers.
+    """
+    rows = [
+        "◍ output", "",
+        f"{glyph} Worked for 1m 17s · 1 shell still running",
+        _RULE, "❯", _RULE, "", "  ⏵⏵ auto mode on · 2 shells · ↰ for agents",
+    ]
+
+    st = detect_status("\n".join(rows) + "\n")
+
+    assert st is not None, (
+        f"a SETTLED first non-blank row on frame {glyph!r} was dropped — the "
+        "unconditional first-row acceptance must not depend on which frame it froze on"
+    )
+    assert st.active is False
+    assert st.seconds == 77
