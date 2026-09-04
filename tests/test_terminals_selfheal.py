@@ -399,6 +399,36 @@ def test_reap_propagates_if_the_child_survives_sigkill_too():
     ], "must SIGTERM, wait, then SIGKILL, wait again — in that order, not any permutation"
 
 
+def test_reap_call_sequence_equality_is_order_sensitive():
+    """GUARD for the ORDER claim in test_reap_propagates_if_the_child_survives_sigkill_too's
+    docstring: that test only ever drives the ONE order the real `_reap` actually produces, so
+    the claim that its `mock_calls == [...]` pins ORDER (not just method+args) was never
+    exercised by a case where order alone differs. Build the identical four calls — same
+    methods, same arguments — in a different order (kill-before-terminate instead of
+    terminate-before-kill) and assert that sequence does NOT equal the pinned expected order.
+    This is independent of `_reap`'s own implementation, so the claim holds even without
+    touching (or being able to touch) the reap helper itself.
+    """
+    fake = MagicMock()
+    fake.kill()
+    fake.wait(timeout=1)
+    fake.terminate()
+    fake.wait(timeout=1)
+
+    expected_reap_order = [
+        call.terminate(),
+        call.wait(timeout=1),
+        call.kill(),
+        call.wait(timeout=1),
+    ]
+    assert fake.mock_calls != expected_reap_order, (
+        "the same four calls (method + arguments) in a different order must NOT equal the "
+        "pinned reap sequence — if it did, the mock_calls equality in "
+        "test_reap_propagates_if_the_child_survives_sigkill_too would be blind to ordering "
+        "and its 'order' claim would be false"
+    )
+
+
 def test_reap_defaults_cannot_collapse_either_wait_window():
     """WIRING: `_reap`'s defaults are load-bearing at all six call sites, which all call
     bare `_reap(proc)` and take both timeouts from the signature. Nothing in the two
@@ -544,12 +574,25 @@ def _promptness_check_try_bodies():
         yield func.name, tries[0].body
 
 
-def test_promptness_checks_are_not_absorbed_into_reap():
-    """WIRING: `_reap` is finally:-only cleanup, never a replacement for a test's own
-    SIGTERM-promptness assertion (see `_reap`'s docstring). Replacing either of the two
+def test_promptness_checks_are_not_absorbed_into_reap(tmp_path):
+    """WIRING + PROPERTY: `_reap` is finally:-only cleanup, never a replacement for a test's
+    own SIGTERM-promptness assertion (see `_reap`'s docstring). Replacing either of the two
     direct `proc.terminate(); proc.wait(timeout=<=5)` pairs above with a bare `_reap(proc)`
     call is invisible to `test_all_run_bg_teardowns_route_through_reap`, which reads only
-    the `finally:` body — pin the try BODY directly so that substitution fails."""
+    the `finally:` body — the AST checks below pin the try BODY directly so that substitution
+    fails.
+
+    That alone only proves the SHAPE is still there, not that the shape does anything — a
+    `proc.terminate(); proc.wait(timeout=5)` whose `TimeoutExpired` got caught and discarded
+    would still satisfy every AST assertion below while being just as much a no-op as routing
+    through `_reap`. The block after them drives the actual PROPERTY this check exists for: a
+    child that ignores SIGTERM must still be detected PROMPTLY, i.e. the direct
+    `proc.wait(timeout=<=5)` pattern must fail fast (raise) on such a child, rather than
+    silently succeeding the way `_reap` would (its SIGKILL escalation catches exactly that
+    `TimeoutExpired` and keeps going, taking up to `term_timeout + kill_timeout` seconds
+    before the process is even confirmed dead — masking a real promptness regression instead
+    of failing on it).
+    """
     for name, body in _promptness_check_try_bodies():
         assert not any(
             isinstance(stmt, ast.Expr)
@@ -573,3 +616,28 @@ def test_promptness_checks_are_not_absorbed_into_reap():
             f"{name}: missing a direct `proc.wait(timeout=<=5)` in its try body, or its "
             f"bound was widened past the 5s promptness assertion this test makes"
         )
+
+    # PROPERTY: the pinned pattern — a bare `proc.terminate(); proc.wait(timeout=T)`, not
+    # `_reap` — must actually detect a SIGTERM-ignoring child, and detect it PROMPTLY.
+    stub = tmp_path / "ignore_term_promptness.py"
+    stub.write_text(
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "time.sleep(30)\n"
+    )
+    proc = subprocess.Popen([sys.executable, str(stub)])
+    try:
+        time.sleep(0.3)  # let it install the SIGTERM handler before we send one
+        start = time.monotonic()
+        proc.terminate()
+        with pytest.raises(subprocess.TimeoutExpired):
+            proc.wait(timeout=2)  # the pinned pattern: direct, not through _reap
+        elapsed = time.monotonic() - start
+        assert elapsed < 5, (
+            "a direct proc.wait(timeout=...) must fail FAST on a SIGTERM-ignoring child — "
+            "a slow or missing failure here means detection got routed through something "
+            "with a SIGKILL fallback (like _reap), which masks the exact promptness "
+            "regression this guard exists to catch"
+        )
+    finally:
+        _reap(proc)
