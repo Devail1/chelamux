@@ -1674,6 +1674,57 @@ def test_judge_blocked_race_does_not_clear_with_no_judge_sha_to_compare(tmp_path
     assert "CMX-239" in scanned
 
 
+# --- judge.blocked_race must be ACKNOWLEDGEABLE on a merged/closed PR (CMX-336) ---------
+#
+# A merged/closed PR's branch is gone: nothing will EVER push a new head past `judge_sha`,
+# so `sha != head` can never fire and the row would nag `chela doctor` forever with no
+# operator exit. `dispatcher.acknowledge_blocked_race` stamps `blocked_race_ack_*` on the
+# row WITHOUT touching `judge_state`/`judge_sha`/`judge_detail` — these pin that
+# `_blocked_race_resolved` honors that stamp, but ONLY for the exact sha it was given for,
+# and that an UNacknowledged row (merged or not) still reports exactly as before.
+
+def test_judge_blocked_race_clears_once_acknowledged_on_the_current_sha(tmp_path, monkeypatch):
+    scanned = _scan_with(tmp_path, monkeypatch, _blocked_race_row(
+        pr_state="merged", pr_head_sha="deadbeef",  # head == judge_sha: never resolves normally
+        blocked_race_ack_at="2026-09-02T10:00:00+00:00",
+        blocked_race_ack_by="liav", blocked_race_ack_sha="deadbeef",
+    ))
+    assert scanned == {}, "an acknowledged row (matching sha) must clear, not keep reporting"
+
+
+def test_judge_blocked_race_unacknowledged_row_on_a_merged_pr_still_reports(tmp_path, monkeypatch):
+    """⭐ MUST HOLD: acknowledgement is an explicit operator action, never inferred from
+    `pr_state` alone. A merged PR with no acknowledgement on it must keep reporting exactly
+    like an open one — the whole point of this fact is that a merged PR is MORE alarming,
+    not less, and silently excluding it (the boundary this ticket forbids) would defeat that."""
+    scanned = _scan_with(tmp_path, monkeypatch, _blocked_race_row(
+        pr_state="merged", pr_head_sha="deadbeef",
+    ))
+    assert "CMX-239" in scanned
+
+
+def test_judge_blocked_race_open_pr_unacknowledged_still_resolves_the_old_way(tmp_path, monkeypatch):
+    """The other half of guard (b): an OPEN PR's unacknowledged row still resolves via the
+    ORIGINAL mechanism (head moved past judge_sha) — acknowledgement is an additional exit,
+    not a replacement for the existing one."""
+    scanned = _scan_with(tmp_path, monkeypatch, _blocked_race_row(
+        pr_state="open", judge_sha="deadbeef", pr_head_sha="cafef00d",
+    ))
+    assert scanned == {}
+
+
+def test_judge_blocked_race_acknowledgement_does_not_cover_a_later_race_on_a_new_sha(tmp_path, monkeypatch):
+    """The scope guard: an acknowledgement stamped for an OLD `judge_sha` must not silence a
+    FRESH `blocked_race` verdict recorded later on a different commit (a reopen, a second
+    CAS loss) — `blocked_race_ack_sha` no longer matches the row's current `judge_sha`."""
+    scanned = _scan_with(tmp_path, monkeypatch, _blocked_race_row(
+        pr_state="merged", judge_sha="newsha", pr_head_sha="newsha",
+        blocked_race_ack_at="2026-08-01T10:00:00+00:00",
+        blocked_race_ack_by="liav", blocked_race_ack_sha="oldsha",
+    ))
+    assert "CMX-239" in scanned
+
+
 # --- restore.dead_epoch_rows: CMX-195, the hole `chela doctor` was green through --------
 
 def test_restore_dead_epoch_rows_reports_the_count(fleet, monkeypatch):
@@ -1931,3 +1982,61 @@ def test_inbox_report_gone_names_chela_restore_as_the_fallback():
     detail = findings[0].detail
     assert "chela watch" in detail
     assert "chela restore" in detail
+
+
+def test_blocked_race_ack_is_scoped_to_judge_sha_not_pr_head_sha(tmp_path, monkeypatch):
+    """🔴 The acknowledgement clears the verdict it was GIVEN FOR — the row's own
+    `judge_sha` — not whatever `pr_head_sha` happens to hold.
+
+    Every other fixture reaching the ack clause has `judge_sha == pr_head_sha` (or both
+    NULL), so the two columns are indistinguishable there and
+    `row["blocked_race_ack_sha"] == head` reads back identically to
+    `== sha`. This is the ONE fixture where they disagree.
+
+    The case it protects is the one CMX-336 exists for. Round 3 established that the most
+    stuck row is `judge_sha IS NULL` — a race recorded before any sha was stamped — and
+    `pr_head_sha` on that same row is a real commit refreshed from GitHub. Scoping the ack
+    to `pr_head_sha` would mean a valid acknowledgement (which stamps `ack_sha` from
+    `judge_sha`, i.e. NULL) never equals the head, so `chela doctor` nags forever about a
+    verdict a human has already signed off — the exact bug this ticket fixes, surviving
+    the fix.
+    """
+    row = _blocked_race_row(
+        judge_sha=None,
+        pr_head_sha="cafef00d",              # a real head, refreshed from GitHub
+        blocked_race_ack_at="2026-09-03T00:00:00+00:00",
+        blocked_race_ack_by="liav",
+        blocked_race_ack_sha=None,           # stamped FROM judge_sha, so also NULL
+    )
+    scanned = _scan_with(tmp_path, monkeypatch, row)
+
+    assert scanned == {}, (
+        "an acknowledged row still reports: the ack was compared against pr_head_sha "
+        "instead of the judge_sha it was given for, so the most-stuck row (judge_sha "
+        "NULL) can never be cleared by acknowledging it"
+    )
+
+
+def test_blocked_race_ack_for_a_DIFFERENT_sha_does_not_clear_the_row(tmp_path, monkeypatch):
+    """⭐ The counterweight to the test above, and the reason it is not simply
+    `ack_at is not None`.
+
+    An acknowledgement names the verdict it covers. If a NEWER blocking verdict is later
+    recorded on the same row under a different `judge_sha`, the older acknowledgement must
+    NOT silence it — otherwise one ack permanently mutes a run, which is the same
+    "silencing an unexamined verdict" failure the whole ticket guards against. Drop the
+    sha comparison entirely and this goes red.
+    """
+    row = _blocked_race_row(
+        judge_sha="feedface",                        # the CURRENT verdict
+        pr_head_sha="feedface",
+        blocked_race_ack_at="2026-09-03T00:00:00+00:00",
+        blocked_race_ack_by="liav",
+        blocked_race_ack_sha="deadbeef",             # an ack for an OLDER verdict
+    )
+    scanned = _scan_with(tmp_path, monkeypatch, row)
+
+    assert scanned != {}, (
+        "an acknowledgement recorded for a DIFFERENT judge_sha cleared the current "
+        "verdict — one ack must not permanently mute a run"
+    )

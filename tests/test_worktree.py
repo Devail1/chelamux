@@ -77,7 +77,7 @@ def test_survives_a_stale_branch_with_no_worktree_attached(repo: Path, tmp_path:
     old_wt, _ = worktree.ensure_worktree(repo, "old-task", "main", "PROJ", 1, root)
     subprocess.run(["git", "-C", str(old_wt), "commit", "--allow-empty", "-q", "-m", "stray"],
                     check=True, capture_output=True)
-    worktree.remove_worktree(repo, old_wt)  # worktree gone, branch "proj-1" left behind
+    worktree.remove_worktree(repo, old_wt, root)  # worktree gone, branch "proj-1" left behind
     assert "proj-1" in _branches(repo)
     assert not old_wt.exists()
 
@@ -123,9 +123,10 @@ def test_survives_a_dead_worktree_administrative_record(repo: Path, tmp_path: Pa
 # --- remove_worktree: all four ways a worktree can go stale (CMX-164) -------------------
 
 def test_remove_worktree_removes_a_live_worktree(repo: Path, tmp_path: Path):
-    wt_path, _ = worktree.ensure_worktree(repo, "task-1", "main", "PROJ", 1, tmp_path / "worktrees")
+    root = tmp_path / "worktrees"
+    wt_path, _ = worktree.ensure_worktree(repo, "task-1", "main", "PROJ", 1, root)
 
-    assert worktree.remove_worktree(repo, wt_path) is True
+    assert worktree.remove_worktree(repo, wt_path, root) is True
     assert not wt_path.exists()
 
 
@@ -138,7 +139,7 @@ def test_remove_worktree_falls_back_to_a_direct_delete_for_an_unregistered_direc
     wt_path.mkdir()
     (wt_path / "junk.txt").write_text("leftover from a crashed create\n")
 
-    removed = worktree.remove_worktree(repo, wt_path)
+    removed = worktree.remove_worktree(repo, wt_path, tmp_path)
 
     assert removed is True
     assert not wt_path.exists()
@@ -159,7 +160,7 @@ def test_remove_worktree_on_EPERM_logs_loudly_and_leaves_the_directory(
     monkeypatch.setattr(worktree.shutil, "rmtree", _boom)
 
     with caplog.at_level(logging.WARNING):
-        removed = worktree.remove_worktree(repo, wt_path)
+        removed = worktree.remove_worktree(repo, wt_path, tmp_path)
 
     assert removed is False
     assert wt_path.is_dir()                  # left in place, not half-deleted
@@ -196,8 +197,11 @@ def test_remove_worktree_REFUSES_the_repository_itself(repo, tmp_path):
     ignored = repo / "TODO.md"
     ignored.write_text("the gitignored tracker that no clone can restore\n")
 
+    # root=repo.parent (== tmp_path here) so the STRUCTURAL check, not the root-membership
+    # check, is what fires — the repo is "inside" this root, exactly as the real incident's
+    # main repo was inside the wider filesystem the daemon could see.
     with pytest.raises(worktree.NotAWorktree) as exc:
-        worktree.remove_worktree(repo, repo)
+        worktree.remove_worktree(repo, repo, repo.parent)
 
     assert repo.is_dir(), "the repository was deleted"
     assert ignored.exists(), "the gitignored file was destroyed"
@@ -208,7 +212,7 @@ def test_remove_worktree_REFUSES_a_directory_containing_the_repository(repo):
     """A path that is an ANCESTOR of the repo can never be a worktree, and deleting it takes
     the repo with it."""
     with pytest.raises(worktree.NotAWorktree):
-        worktree.remove_worktree(repo, repo.parent)
+        worktree.remove_worktree(repo, repo.parent, repo.parent)
     assert repo.is_dir()
 
 
@@ -224,7 +228,7 @@ def test_remove_worktree_REFUSES_an_unrelated_clone(repo, tmp_path):
     precious.write_text("not chela's to delete\n")
 
     with pytest.raises(worktree.NotAWorktree) as exc:
-        worktree.remove_worktree(repo, other)
+        worktree.remove_worktree(repo, other, tmp_path)
 
     assert precious.exists()
     assert ".git is a DIRECTORY" in str(exc.value)
@@ -236,11 +240,11 @@ def test_remove_worktree_STILL_REMOVES_a_real_worktree(repo, tmp_path):
     in the system.
     """
     wt = tmp_path / "wt"
-    worktree.detached_worktree(repo, "main", wt)
+    worktree.detached_worktree(repo, "main", wt, tmp_path)
     assert wt.is_dir()
     assert (wt / ".git").is_file(), "a linked worktree's .git must be a file, not a dir"
 
-    assert worktree.remove_worktree(repo, wt) is True
+    assert worktree.remove_worktree(repo, wt, tmp_path) is True
     assert not wt.exists(), "a genuine worktree was left behind"
 
 
@@ -253,13 +257,13 @@ def test_remove_worktree_STILL_REMOVES_an_unregistered_leftover(repo, tmp_path):
     orphan.mkdir()
     (orphan / "junk.txt").write_text("leftover\n")
 
-    assert worktree.remove_worktree(repo, orphan) is True
+    assert worktree.remove_worktree(repo, orphan, tmp_path) is True
     assert not orphan.exists()
 
 
 def test_remove_worktree_is_silent_on_a_path_that_does_not_exist(repo, tmp_path):
     """MUST BE ACCEPTED — nothing to delete is not an error, and must not raise."""
-    worktree.refuse_if_not_a_worktree(repo, tmp_path / "never-existed")
+    worktree.refuse_if_not_a_worktree(repo, tmp_path / "never-existed", tmp_path)
 
 
 def test_the_guard_runs_BEFORE_any_deletion_path(repo, monkeypatch):
@@ -275,7 +279,141 @@ def test_the_guard_runs_BEFORE_any_deletion_path(repo, monkeypatch):
                             AssertionError("git ran despite the refusal")))
 
     with pytest.raises(worktree.NotAWorktree):
-        worktree.remove_worktree(repo, repo)
+        worktree.remove_worktree(repo, repo, repo.parent)
 
     assert called == [], f"a deletion path ran before the guard refused: {called}"
 
+
+# ---------------------------------------------------------------------------
+# CMX-325 — the invariant is "inside the worktrees root", not just "not the main
+# repo" (issue #398, second deletion)
+# ---------------------------------------------------------------------------
+
+def test_remove_worktree_REFUSES_a_path_outside_the_worktrees_root(repo, tmp_path):
+    """A directory that is a perfectly normal, unregistered leftover would otherwise sail
+    through the structural checks (no `.git` at all) and hit the `shutil.rmtree` fallback —
+    exactly the mechanism that deleted the main repo. Root-membership must catch it even
+    when nothing about the path itself looks like a repository.
+    """
+    root = tmp_path / "worktrees"
+    root.mkdir()
+    outside = tmp_path / "elsewhere" / "some-directory"
+    outside.mkdir(parents=True)
+    (outside / "precious.txt").write_text("not under the worktrees root\n")
+
+    with pytest.raises(worktree.NotAWorktree) as exc:
+        worktree.remove_worktree(repo, outside, root)
+
+    assert outside.exists(), "a path outside the worktrees root was deleted"
+    assert "outside the worktrees root" in str(exc.value).lower()
+
+
+def test_remove_worktree_STILL_REMOVES_a_leftover_inside_the_worktrees_root(repo, tmp_path):
+    """⭐ MUST BE ACCEPTED — the root-membership guard must not refuse the ordinary case:
+    an unregistered leftover directory that genuinely lives under the configured root."""
+    root = tmp_path / "worktrees"
+    inside = root / "task-1"
+    inside.mkdir(parents=True)
+    (inside / "junk.txt").write_text("leftover\n")
+
+    assert worktree.remove_worktree(repo, inside, root) is True
+    assert not inside.exists()
+
+
+def test_find_existing_worktree_ignores_a_match_outside_root(repo, tmp_path):
+    """🔴 The write-side half of issue #398, reproduced directly: `cmx-319`'s branch was
+    checked out in the MAIN REPO when its rework respawned. `git worktree list` reports the
+    main working tree exactly like any linked worktree, so a naive lookup returns it as "the
+    existing worktree for this branch" — and callers trusted that enough to record it as a
+    run's `worktree_path`. A match outside `root` must never be returned as reusable.
+    """
+    subprocess.run(["git", "-C", str(repo), "checkout", "-b", "proj-1"],
+                    check=True, capture_output=True)
+
+    root = tmp_path / "worktrees"
+    found = worktree._find_existing_worktree(repo, "proj-1", root)
+
+    assert found is None
+
+
+def test_find_existing_worktree_still_returns_a_match_inside_root(repo, tmp_path):
+    """⭐ MUST BE ACCEPTED — the ordinary rework-reuse case: a live worktree genuinely under
+    the configured root must still be found."""
+    root = tmp_path / "worktrees"
+    wt_path, _ = worktree.ensure_worktree(repo, "task-1", "main", "PROJ", 1, root)
+    subprocess.run(["git", "-C", str(repo), "worktree", "prune"], check=True, capture_output=True)
+
+    found = worktree._find_existing_worktree(repo, "proj-1", root)
+
+    assert found == wt_path
+
+
+def test_attach_worktree_refuses_to_reuse_the_main_repo_as_the_worktree(repo, tmp_path):
+    """The full write path: a branch checked out in the main repo must never come back out
+    of `attach_worktree` as a reusable path — git then refuses to add a second worktree for
+    the same branch, which surfaces as a loud `CalledProcessError` instead of a silently
+    recorded `worktree_path` pointing at the main repo.
+    """
+    subprocess.run(["git", "-C", str(repo), "checkout", "-b", "proj-1"],
+                    check=True, capture_output=True)
+
+    root = tmp_path / "worktrees"
+    with pytest.raises(subprocess.CalledProcessError):
+        worktree.attach_worktree(repo, "proj-1", root / "task-1", root)
+
+
+
+def test_is_inside_root_resolves_BOTH_sides_so_a_symlinked_root_still_matches(tmp_path):
+    """⭐ MUST BE ACCEPTED. `is_inside_root`'s docstring makes resolution an explicit
+    promise — "a symlinked ``~/.chela`` or a relative ``root`` would slip past this" — and
+    that promise is what makes the guard safe to put in front of a deletion: a root reached
+    through a symlink must still recognise its OWN contents. Drop either `.resolve()` and
+    the comparison is done on unresolved paths, `run-1` stops being "inside" the very root
+    it lives under, and every caller downstream treats a legitimate worktree as foreign.
+    """
+    real_root = tmp_path / "real" / "worktrees"
+    real_root.mkdir(parents=True)
+    link_root = tmp_path / "linked-worktrees"
+    link_root.symlink_to(real_root, target_is_directory=True)
+    inside = real_root / "run-1"
+    inside.mkdir()
+
+    assert worktree.is_inside_root(inside, link_root) is True, (
+        "a worktree under a SYMLINKED root read as outside it — both sides must be "
+        "resolved before comparing, or the guard refuses the ordinary case"
+    )
+    # ⛔ and the negative direction must survive the same resolution, or the test above
+    # would pass just as well on a function that returned True unconditionally.
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    assert worktree.is_inside_root(outside, link_root) is False
+
+
+def test_is_inside_root_treats_an_UNRESOLVABLE_path_as_OUTSIDE(tmp_path, monkeypatch):
+    """A path that cannot be resolved is UNKNOWN, and unknown must fail CLOSED here.
+
+    `False` from this function is what REFUSES a deletion, so the `except OSError` arm is
+    not error handling — it is the safe answer. Flip it to `True` and a dangling symlink, a
+    permission wall or an ELOOP on the stored `worktree_path` reads as a legitimate
+    deletion target, which is the whole shape of issue #398 arriving through a different
+    door.
+    """
+    root = tmp_path / "worktrees"
+    root.mkdir()
+    victim = root / "run-1"
+    victim.mkdir()
+    assert worktree.is_inside_root(victim, root) is True  # sanity: inside, while resolvable
+
+    real_resolve = Path.resolve
+
+    def exploding_resolve(self, *args, **kwargs):
+        if self == victim:
+            raise OSError(40, "Too many levels of symbolic links")
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", exploding_resolve)
+
+    assert worktree.is_inside_root(victim, root) is False, (
+        "an UNRESOLVABLE path read as INSIDE the worktrees root — the OSError arm must "
+        "fail closed, because False is what refuses the deletion"
+    )

@@ -119,6 +119,15 @@ os.environ.setdefault("CHELA_SEED_CONFIRM_POLL_INTERVAL", "0.01")
 os.environ.setdefault("CHELA_SEED_RESEND_SETTLE_SECONDS", "0")
 
 
+class LiveNotificationEscape(BaseException):
+    """A test pushed a REAL notification to the operator's phone.
+
+    ``BaseException`` for the same reason as :class:`LiveStateEscape`: ``notify.send``
+    wraps its transport in ``except Exception`` so a dead notifier can never wedge a live
+    daemon, and a guard the product code catches is not a guard.
+    """
+
+
 class LiveStateEscape(BaseException):
     """A test reached the developer's real ``~/.chela`` / ``~/.claude``.
 
@@ -221,3 +230,48 @@ def _no_live_state(monkeypatch):
     monkeypatch.setattr(builtins, "open", guard(builtins.open))
     monkeypatch.setattr(io, "open", guard(io.open))
     monkeypatch.setattr(os, "open", guard(os.open))
+
+
+@pytest.fixture(autouse=True)
+def _no_live_notifications(monkeypatch):
+    """The fence for OUTBOUND side effects: no test may push a real notification.
+
+    ``notify.enabled()`` is just ``bool(NOTIFY_URL)``, and ``NOTIFY_URL`` is read from the
+    environment at import — so on the machine that actually runs chela, any test that
+    reaches a ``notify.send`` call site pushes a REAL ntfy/Telegram message to the
+    operator's phone. That is not hypothetical: on 2026-09-01 the operator received **109**
+    pushes reading "auto-update applied — applied 1 commit(s), restarted no services",
+    which is a test fixture's signature, not a real update (a genuine auto-update converges
+    and stops; a fixture built one commit behind never does). The source was
+    ``test_auto_apply_sweep_never_calls_apply_with_a_bespoke_repo_arg``, which drives the
+    real ``auto_apply_sweep()`` and — alone among its three siblings — never stubbed
+    ``notify``.
+
+    CMX-115 already stripped ``CHELA_NOTIFY_URL`` from the env of every tmux-spawned agent
+    and judge, which is why this stayed hidden: that covers the dispatcher's own paths, but
+    NOT a maintainer running ``pytest`` or ``chela judge run`` from their own shell, which
+    is the normal way this suite is run by hand.
+
+    So it is fixed here rather than in the one test that leaked, for the same reason
+    :func:`_no_live_state` exists: a comment is only a wish, and a suite where any of ~3500
+    tests can page a human is one refactor away from doing it again. Both doors are shut —
+    ``NOTIFY_URL`` is blanked so ``enabled()`` gates the call sites off, and ``_post`` (the
+    single funnel every transport goes through) raises if anything reaches it anyway, e.g.
+    a test that sets its own URL.
+
+    A test that genuinely wants to exercise the transport overrides ``_post`` itself; its
+    ``monkeypatch.setattr`` runs after this one and wins.
+    """
+    from chela import notify
+
+    def guarded(req):
+        raise LiveNotificationEscape(
+            "test sent a REAL notification: "
+            f"{getattr(req, 'full_url', req)!r}\n"
+            "Tests must never push to the operator's notifier. Stub the module the code "
+            "under test calls (`monkeypatch.setattr(update, 'notify', stub)`), or patch "
+            "`notify._post` if the transport itself is what you are testing."
+        )
+
+    monkeypatch.setattr(notify, "NOTIFY_URL", "")
+    monkeypatch.setattr(notify, "_post", guarded)

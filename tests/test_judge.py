@@ -447,6 +447,59 @@ def test_rework_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
     assert "NEW FILE to `docs/defeat_shapes/`" in prompt
 
 
+def _collapse_whitespace(text: str) -> str:
+    """Both prompt sites word-wrap the same sentence differently (a flat concatenated
+    string in ``judge.py`` vs. a triple-quoted, indented block in ``dispatcher.py``), so a
+    byte-exact substring check would fail on cosmetic line breaks alone. Collapsing runs of
+    whitespace to a single space compares the WORDING, which is what must not drift."""
+    return re.sub(r"\s+", " ", text)
+
+
+DEFEAT_SHAPE_NUMBERING_RULE = (
+    "Number it off your own CMX task number, not a listing guess — `NNN-slug.md`, and a "
+    "second file on the same branch suffixes a lowercase letter (task `cmx-339` → "
+    "`339-slug.md`, then `339b-slug.md`) — full rule in `docs/DEFEAT_SHAPES.md`'s 'How this "
+    "catalog grows'."
+)
+
+
+def test_both_defeat_shape_file_prompts_name_the_numbering_rule(tmp_path):
+    """Issue #439: two agents (cmx-339, cmx-337) each guessed a defeat-shape file number
+    within 40 minutes of each other on 2026-09-03 — cmx-337 guessed `338`, the task number
+    of a THEN-LIVE sibling branch, reproducing the exact collision #427's namespace guard
+    was built to catch. The cause: the instruction that PROMPTS the new file
+    (``judge.block_body`` step 4, and ``dispatcher.REWORK_PROMPT`` step 2 — the only two
+    places an agent reads *before* writing the file) said only "add ONE NEW FILE", never
+    how to number it, so an agent reads the next free number off a listing — exactly what
+    ``docs/DEFEAT_SHAPES.md`` forbids.
+
+    Both copies must carry the SAME numbering rule, including the letter-suffix form for a
+    second file on one branch (``docs/DEFEAT_SHAPES.md``'s 'How this catalog grows',
+    closed by #427) — otherwise the next edit fixes one copy and leaves the other stale,
+    which is the two-callers-one-guarded shape from defeat shape 7. Seen to go red: either
+    copy's numbering sentence reworded, dropped, or drifted from the other.
+    """
+    survived = judge.Outcome(
+        judge.Experiment(guard="g", file="f.py", before="a", after="b"),
+        judge.SURVIVED, "it survived",
+        baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+        mutated=judge.SuiteResult(True, 0, 1, 0, 0, ""),
+    )
+    report = judge.Report(outcomes=[survived],
+                           baseline=judge.SuiteResult(True, 0, 1, 0, 0, ""))
+    block = judge.block_body(report, "https://x/1", TEST_CMD)
+    assert DEFEAT_SHAPE_NUMBERING_RULE in _collapse_whitespace(block)
+
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), rework_count=1,
+                 review_history=json.dumps([{"round": 1, "at": "t", "body": "fix the thing"}]))
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    rework = dispatcher._renudge_prompt(wf, row, None)
+    assert rework is not None
+    assert DEFEAT_SHAPE_NUMBERING_RULE in _collapse_whitespace(rework)
+
+
 def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
     """CMX-272: the judge agent should reach for an already-catalogued shape before spending
     a mutation rediscovering one from scratch.
@@ -500,7 +553,7 @@ def test_defeat_shapes_catalog_documents_every_seeded_shape():
     sections = []
     for f in files:
         text = f.read_text()
-        parts = re.split(r"^## \d+\. ", text, flags=re.MULTILINE)[1:]
+        parts = re.split(_SHAPE_HEADING_RE, text, flags=re.MULTILINE)[1:]
         sections.extend(parts)
 
     headings = (
@@ -555,7 +608,7 @@ def test_defeat_shapes_index_carries_no_numbered_sections_of_its_own():
     """
     root = Path(__file__).resolve().parent.parent
     text = (root / "docs" / "DEFEAT_SHAPES.md").read_text()
-    assert not re.search(r"^## \d+\. ", text, flags=re.MULTILINE), (
+    assert not re.search(_SHAPE_HEADING_RE, text, flags=re.MULTILINE), (
         "docs/DEFEAT_SHAPES.md picked up a numbered defeat-shape section — new shapes belong "
         "in their own file under docs/defeat_shapes/, not appended here"
     )
@@ -586,23 +639,32 @@ def test_defeat_shapes_file_headings_are_well_formed_and_match_their_filename():
     Seen to go red: `## 21 A shape with no period` — matches neither `^## \\d+\\. ` (the
     section scanner) nor this test's own `^## \\d+\\. ` check, so it fails LOUDLY here
     instead of silently vanishing from the catalog scan.
+
+    CMX-334: a file may now carry a lowercase-letter suffix on its number (`328b-slug.md`,
+    heading `## 328b. Title`) for a second shape on the same branch — see
+    `_shape_token_from_filename`/`_shape_token_from_heading`. The suffix is part of the
+    identifier, so it must match between filename and heading exactly like the digits do.
     """
     root = Path(__file__).resolve().parent.parent
     shapes_dir = root / "docs" / "defeat_shapes"
     files = sorted(shapes_dir.glob("*.md"))
     assert files, f"no shape files found under {shapes_dir}"
     for f in files:
-        filename_num = int(f.name.split("-", 1)[0])
-        first_line = f.read_text().splitlines()[0]
-        m = re.match(r"^## (\d+)\. ", first_line)
-        assert m, (
-            f"{f.name}: heading {first_line!r} does not match '## N. Title' (missing the "
-            f"period after the number makes this shape invisible to the catalog scan)"
+        filename_token = _shape_token_from_filename(f.name)
+        assert filename_token, (
+            f"{f.name}: filename does not start with 'NNN-' or 'NNNx-' (a digit run, "
+            "optional single lowercase-letter suffix, then '-')"
         )
-        heading_num = int(m.group(1))
-        assert heading_num == filename_num, (
-            f"{f.name}: filename number {filename_num} does not match heading number "
-            f"{heading_num}"
+        first_line = f.read_text().splitlines()[0]
+        heading_token = _shape_token_from_heading(first_line)
+        assert heading_token, (
+            f"{f.name}: heading {first_line!r} does not match '## N. Title' or '## Nx. Title' "
+            f"(missing the period after the number makes this shape invisible to the catalog "
+            f"scan)"
+        )
+        assert heading_token == filename_token, (
+            f"{f.name}: filename token {filename_token!r} does not match heading token "
+            f"{heading_token!r}"
         )
 
 
@@ -618,18 +680,26 @@ def test_defeat_shapes_numbers_are_unique_across_the_catalog():
 
     Seen to go red: two catalog files whose headings both open `## 37. ` — the exact
     collision CMX-284's own writeup declared harmless.
+
+    CMX-334: the identifier is now the full token (digits plus an optional single
+    lowercase-letter suffix), not the bare number — `328` and `328b` are DIFFERENT shapes
+    (a branch's second shape suffixes its own number rather than guessing a free one), but
+    `328b` claimed by two files is still the exact ambiguous-reference collision this test
+    exists to catch. `_duplicate_shape_tokens` carries the comparison so it can be unit-tested
+    directly (see `test_duplicate_shape_tokens_*` below) without needing real duplicate files
+    on disk.
     """
     root = Path(__file__).resolve().parent.parent
     shapes_dir = root / "docs" / "defeat_shapes"
     files = sorted(shapes_dir.glob("*.md"))
     assert files, f"no shape files found under {shapes_dir}"
-    numbers = []
+    tokens = []
     for f in files:
         first_line = f.read_text().splitlines()[0]
-        m = re.match(r"^## (\d+)\. ", first_line)
-        assert m, f"{f.name}: heading {first_line!r} does not match '## N. Title'"
-        numbers.append(int(m.group(1)))
-    dupes = sorted({n for n in numbers if numbers.count(n) > 1})
+        token = _shape_token_from_heading(first_line)
+        assert token, f"{f.name}: heading {first_line!r} does not match '## N. Title'"
+        tokens.append(token)
+    dupes = _duplicate_shape_tokens(tokens)
     assert not dupes, (
         f"duplicate defeat-shape numbers: {dupes} — two files claim the same number, making "
         "any 'shape N' cross-reference to it ambiguous; bump one of the colliding files' "
@@ -675,6 +745,163 @@ def test_cmx_task_number_from_branch_parses_or_gives_a_loud_reason():
         )
 
 
+# CMX-334 rework round 2: the single source of truth for "what does a numbered defeat-shape
+# section heading look like" — every scanner below that only needs to find/count/split on a
+# heading (not extract its token) shares this ONE literal, instead of each carrying its own
+# copy of `^## \d+[a-z]?\. `. Before this, three inline copies of that pattern (the index
+# guard, the catalog splitter, and the one-section-per-file counter) were each independently
+# narrowable back to `^## \d+\. ` with the suite still green, because every file currently in
+# `docs/defeat_shapes/` is unsuffixed — see `test_shape_heading_re_matches_a_suffixed_heading`
+# below, which pins this literal directly against a suffixed heading instead of relying on
+# what happens to be on disk.
+_SHAPE_HEADING_RE = r"^## \d+[a-z]?\. "
+
+
+def test_shape_heading_re_matches_a_suffixed_heading():
+    """CMX-334 rework round 2: pins `_SHAPE_HEADING_RE` — the pattern shared by the index
+    guard, the catalog splitter, and the one-section-per-file counter — directly against a
+    literal suffixed heading, independent of whether any real file under
+    `docs/defeat_shapes/` uses the suffix yet (none currently do).
+
+    Seen to survive: `^## \\d+[a-z]?\\. ` narrowed to `^## \\d+\\. ` — `3508 passed, 0 failed`
+    (chela judge, PR #427 round 2), because every on-disk file is unsuffixed so none of the
+    three real scan sites ever exercised the dropped branch.
+    """
+    assert re.search(_SHAPE_HEADING_RE, "## 328b. Title", flags=re.MULTILINE)
+    assert re.search(_SHAPE_HEADING_RE, "## 328. Title", flags=re.MULTILINE)
+    assert not re.search(_SHAPE_HEADING_RE, "## 328 Title (no period)", flags=re.MULTILINE)
+
+
+def _shape_token_from_filename(filename: str) -> str | None:
+    """Extract a defeat-shape's identifying token from its filename: the leading digit run
+    (normalized as an int, so the legacy zero-padded `01-...` reads the same as `1`) plus an
+    optional single lowercase-letter suffix (`328-slug.md` -> `"328"`, `328b-slug.md` ->
+    `"328b"`). Returns ``None`` when the filename doesn't start that way.
+    """
+    m = re.match(r"^(\d+)([a-z]?)-", filename)
+    return (str(int(m.group(1))) + m.group(2)) if m else None
+
+
+def _shape_token_from_heading(first_line: str) -> str | None:
+    """Same token, read from a shape file's first line (`## 328b. Title` -> `"328b"`)."""
+    m = re.match(r"^## (\d+)([a-z]?)\. ", first_line)
+    return (str(int(m.group(1))) + m.group(2)) if m else None
+
+
+def test_shape_token_from_filename_and_heading_carry_the_suffix():
+    """CMX-334 rework round 1: `_shape_token_from_filename` and `_shape_token_from_heading`
+    are the REAL functions every on-disk-scanning test above calls, but every file currently
+    in `docs/defeat_shapes/` is unsuffixed — so a mutation that drops the suffix from either
+    function's return (`+ m.group(2)` deleted) never disagrees with what's on disk today, and
+    the suite stays green. Pin the suffix directly against a literal input, independent of
+    what the catalog happens to contain right now.
+
+    Seen to survive: `return (str(int(m.group(1))) + m.group(2)) if m else None` mutated to
+    `return (str(int(m.group(1)))) if m else None` in either function — `3503 passed, 0
+    failed` (chela judge, PR #427 round 1), because no test called either function with a
+    suffixed argument.
+    """
+    assert _shape_token_from_filename("328-first-shape.md") == "328"
+    assert _shape_token_from_filename("328b-second-shape.md") == "328b"
+    assert _shape_token_from_heading("## 328. Title") == "328"
+    assert _shape_token_from_heading("## 328b. Title") == "328b"
+
+
+def _duplicate_shape_tokens(tokens: list[str]) -> list[str]:
+    """Which tokens in ``tokens`` appear more than once, sorted for a stable message.
+
+    CMX-334: the token is the full identifier (digits + optional suffix letter) — `"328"`
+    and `"328b"` are different shapes, so only an exact repeat of the SAME token (suffix
+    included) counts as a collision.
+    """
+    return sorted({t for t in tokens if tokens.count(t) > 1})
+
+
+def _validate_added_defeat_shape_filenames(
+    added_filenames: list[str], task_number: int
+) -> list[str]:
+    """Check filenames this branch adds under `docs/defeat_shapes/` against the branch's own
+    CMX task number. Returns error messages (empty means every filename passes).
+
+    CMX-334: closes the escape hatch that let a second shape on the same branch fall through
+    to a GUESSED, unrelated number when its own plain number was already taken (measured
+    2026-09-01: cmx-321's second shape found 321 taken and guessed 323 — a number belonging
+    to another live task; `dev` only went red once both branches had merged). There is no
+    exception any more: every filename's digit run must equal `task_number`, full stop. A
+    second (or third) shape on the same branch is expressed as a lowercase-letter suffix on
+    the SAME number (`328-slug.md`, then `328b-slug.md`, `328c-slug.md`) — the `328` namespace
+    belongs exclusively to `cmx-328`, so a sibling branch can never land a file in it, and
+    reusing your own number needs no listing read and no coordination with anyone.
+    """
+    errors = []
+    for filename in added_filenames:
+        m = re.match(r"^(\d+)([a-z]?)-", filename)
+        if not m:
+            errors.append(
+                f"{filename} was added under docs/defeat_shapes/ with no leading NNN- or "
+                "NNNx- number"
+            )
+            continue
+        file_number = int(m.group(1))
+        if file_number != task_number:
+            errors.append(
+                f"{filename} is numbered {file_number}, not this branch's own CMX task "
+                f"number {task_number} — every file this branch adds must sit inside its "
+                "own task-number namespace, with no exception; for a second shape on this "
+                "branch, suffix a lowercase letter onto the SAME number (e.g. "
+                f"{task_number}-first.md, then {task_number}b-second.md) instead of "
+                "guessing a different number off a listing."
+            )
+    return errors
+
+
+def test_validate_added_defeat_shape_filenames_rejects_a_number_outside_the_branch_namespace():
+    """CMX-334 guard (a): the bug this task closes — a file numbered outside the branch's own
+    namespace must be REFUSED with no exception, even the "already claimed on dev" case that
+    used to wave it through. Seen live 2026-09-01: cmx-321's second shape found 321 taken and
+    guessed 323, a number that belonged to cmx-323 (a different, live branch).
+    """
+    errors = _validate_added_defeat_shape_filenames(["323-guessed.md"], task_number=321)
+    assert errors, "a file numbered outside the branch's own task number must be refused"
+
+
+def test_validate_added_defeat_shape_filenames_accepts_the_ordinary_and_suffixed_cases():
+    """CMX-334 guard (c) — MUST BE ACCEPTED: a guard that refuses everything would satisfy
+    guard (a) perfectly, so pin the legal paths too. A plain single shape on its own branch
+    passes, and so does a second shape on that same branch expressed as a letter suffix on
+    the SAME number.
+    """
+    assert _validate_added_defeat_shape_filenames(["328-first.md"], task_number=328) == []
+    assert _validate_added_defeat_shape_filenames(
+        ["328-first.md", "328b-second.md"], task_number=328
+    ) == []
+
+
+def test_validate_added_defeat_shape_filenames_rejects_a_filename_with_no_leading_number():
+    """CMX-334 rework round 2: every existing test above feeds
+    `_validate_added_defeat_shape_filenames` a filename that DOES start with a digit run, so
+    the `if not m:` branch — the function's own docstring calls this its first error path,
+    "no leading NNN- or NNNx- number" — was never once exercised and could be dead-coded
+    (`if not m:` -> `if False and not m:`) with the whole suite still green.
+
+    Seen to survive: `if not m:` mutated to `if False and not m:` — `3508 passed, 0 failed`
+    (chela judge, PR #427 round 2).
+    """
+    errors = _validate_added_defeat_shape_filenames(["my-new-shape.md"], task_number=334)
+    assert errors, "a filename with no leading NNN- or NNNx- number must be refused"
+
+
+def test_duplicate_shape_tokens_treats_the_suffix_as_part_of_the_identifier():
+    """CMX-334 guard (b): two files claiming the same suffixed token (`328b` twice) are a
+    collision — the suffix must be compared as part of the identifier, not stripped down to
+    the bare number, or a real duplicate would read as two distinct shapes.
+    """
+    assert _duplicate_shape_tokens(["328", "328b", "329"]) == [], (
+        "a bare number and its own lettered suffix are different shapes, not a duplicate"
+    )
+    assert _duplicate_shape_tokens(["328b", "328b", "329"]) == ["328b"]
+
+
 def test_defeat_shapes_added_files_are_numbered_by_branch_task_id():
     """CMX-301 rework round 6 (re-scoped by a human, superseding rounds 1-5): every prose guard
     tried so far shares one shape — it pins WORDING (a clause, a paragraph, a whole section
@@ -699,6 +926,20 @@ def test_defeat_shapes_added_files_are_numbered_by_branch_task_id():
 
     Seen to go red: a defeat-shape file added on this branch numbered off "one past the current
     highest" file in a listing instead of this branch's own CMX task number.
+
+    CMX-334: the old "sanctioned exception" here (a task number already claimed by a file that
+    predates this branch on `origin/dev`) is GONE — it was the only way a decentralized guess
+    could enter (see `_validate_added_defeat_shape_filenames`'s docstring for the incident that
+    proved it). The actual filename check now lives in that pure function so it can be
+    unit-tested directly; this test wires it to the real branch/diff and adds the
+    heading-agrees-with-the-task-number check on top.
+
+    CMX-334 rework round 1: the actual error-computing logic below now lives in
+    `_defeat_shape_numbering_check`, a pure function this test wires to real branch/git
+    state. This wiring can only ever hand that function THIS branch's own (valid) diff — a
+    call site reverted to a no-op has nothing here to disagree about, which is exactly how it
+    survived a mutation battery (see `test_defeat_shape_numbering_check_flags_*` below, which
+    exercises the same function against an injected bad file instead).
     """
     root = Path(__file__).resolve().parent.parent
 
@@ -731,28 +972,122 @@ def test_defeat_shapes_added_files_are_numbered_by_branch_task_id():
         pytest.skip("this branch adds no files under docs/defeat_shapes/ relative to "
                      "origin/dev — nothing for this check to verify")
 
-    for path in added:
+    errors = _defeat_shape_numbering_check(root, task_number, branch, added)
+    assert not errors, "; ".join(errors)
+
+
+def _defeat_shape_numbering_check(
+    root: Path, task_number: int, branch: str, added_paths: list[str]
+) -> list[str]:
+    """The full numbering check `test_defeat_shapes_added_files_are_numbered_by_branch_task_id`
+    wires to real branch/git state: given the branch's own CMX task number and the paths of
+    defeat-shape files newly added on it, return every numbering error — both the
+    filename-vs-branch-namespace check (`_validate_added_defeat_shape_filenames`) and the
+    heading-vs-task-number check. Empty means everything passed.
+    """
+    filenames = [Path(path).name for path in added_paths]
+    errors = _validate_added_defeat_shape_filenames(filenames, task_number)
+
+    for path in added_paths:
         filename = Path(path).name
-        m = re.match(r"^(\d+)-", filename)
-        assert m, f"{filename} was added under docs/defeat_shapes/ with no leading NNN- number"
-        assert int(m.group(1)) == task_number, (
-            f"{filename} is numbered {m.group(1)}, not this branch's own CMX task number "
-            f"{task_number} (branch {branch!r}) — numbering off anything else (e.g. one past "
-            "the current highest file in a listing) is a decentralized guess that collides "
-            "under concurrency; see docs/DEFEAT_SHAPES.md's 'How this catalog grows'"
-        )
         # Filename and heading are asserted to agree elsewhere (see
         # test_defeat_shapes_file_headings_are_well_formed_and_match_their_filename), but that
         # test says nothing about the TASK number — check the heading directly too, so a file
         # correctly named `301-*.md` but whose own heading claims a different shape number
         # still fails here instead of only on the (separate, filename-vs-heading-only) test.
         first_line = (root / path).read_text().splitlines()[0]
-        heading_m = re.match(r"^## (\d+)\. ", first_line)
-        assert heading_m, f"{filename}: heading {first_line!r} does not match '## N. Title'"
-        assert int(heading_m.group(1)) == task_number, (
-            f"{filename}'s heading claims shape {heading_m.group(1)}, not this branch's own "
-            f"CMX task number {task_number} (branch {branch!r})"
-        )
+        heading_m = re.match(r"^## (\d+)([a-z]?)\. ", first_line)
+        if not heading_m:
+            errors.append(f"{filename}: heading {first_line!r} does not match '## N. Title'")
+            continue
+        if int(heading_m.group(1)) != task_number:
+            errors.append(
+                f"{filename}'s heading claims shape {heading_m.group(1)}, not this branch's "
+                f"own CMX task number {task_number} (branch {branch!r})"
+            )
+    return errors
+
+
+def test_defeat_shape_numbering_check_flags_a_filename_outside_the_branch_namespace(tmp_path):
+    """CMX-334 rework round 1: isolates the `_validate_added_defeat_shape_filenames` call
+    site inside `_defeat_shape_numbering_check`. The injected file's HEADING already matches
+    the branch's task number (so the separate heading-vs-task-number check has nothing to
+    flag on its own) — only its FILENAME claims a different task number, so only the validate
+    call site can catch this. A call site reverted to `errors = []` (chela judge round 1
+    finding #1, PR #427) produces zero errors here, where the real wiring produces one.
+    """
+    shape_file = tmp_path / "docs" / "defeat_shapes" / "999-guessed.md"
+    shape_file.parent.mkdir(parents=True)
+    shape_file.write_text("## 334. Heading matches the task number, filename does not\n")
+    errors = _defeat_shape_numbering_check(
+        tmp_path, task_number=334, branch="cmx-334",
+        added_paths=["docs/defeat_shapes/999-guessed.md"],
+    )
+    assert errors, (
+        "a file whose FILENAME number disagrees with the branch's task number must be "
+        "flagged, even when its heading happens to agree"
+    )
+
+
+def test_defeat_shape_numbering_check_flags_a_heading_that_disagrees_with_the_task_number(
+    tmp_path,
+):
+    """CMX-334 rework round 1: the mirror of the test above — the FILENAME already matches the
+    branch's task number (so `_validate_added_defeat_shape_filenames` has nothing to flag on
+    its own), but the HEADING claims a different task number. Only the heading-vs-task-number
+    half of `_defeat_shape_numbering_check` can catch this; nothing before this round pinned
+    that half against real branch state at all, since it only ever ran on this branch's own
+    (previously nonexistent) added files.
+    """
+    shape_file = tmp_path / "docs" / "defeat_shapes" / "334-ok-name.md"
+    shape_file.parent.mkdir(parents=True)
+    shape_file.write_text("## 335. Filename matches the task number, heading does not\n")
+    errors = _defeat_shape_numbering_check(
+        tmp_path, task_number=334, branch="cmx-334",
+        added_paths=["docs/defeat_shapes/334-ok-name.md"],
+    )
+    assert errors, (
+        "a file whose HEADING number disagrees with the branch's task number must be "
+        "flagged, even when its filename happens to agree"
+    )
+
+
+def test_defeat_shape_numbering_check_flags_a_malformed_heading(tmp_path):
+    """CMX-334 rework round 2: every existing test above gives `_defeat_shape_numbering_check`
+    a file whose first line DOES match `## N. Title` (possibly with the wrong N), so the
+    `if not heading_m:` branch — the malformed-heading error path, "does not match '## N.
+    Title'" — was never exercised and could be dead-coded (`if not heading_m:` -> `if False
+    and not heading_m:`) with the whole suite still green; nothing forced the code past that
+    point to run against a real `None` and crash.
+
+    Seen to survive: `if not heading_m:` mutated to `if False and not heading_m:` — `3508
+    passed, 0 failed` (chela judge, PR #427 round 2).
+    """
+    shape_file = tmp_path / "docs" / "defeat_shapes" / "334-ok-name.md"
+    shape_file.parent.mkdir(parents=True)
+    shape_file.write_text("334 no hash, no period, not a heading at all\n")
+    errors = _defeat_shape_numbering_check(
+        tmp_path, task_number=334, branch="cmx-334",
+        added_paths=["docs/defeat_shapes/334-ok-name.md"],
+    )
+    assert errors, (
+        "a file whose first line is not a '## N. Title' heading at all must be flagged"
+    )
+
+
+def test_defeat_shape_numbering_check_accepts_a_correctly_numbered_file(tmp_path):
+    """CMX-334 rework round 1: a guard that flags everything would pass both tests above too —
+    pin the legal path so a false positive on an ordinary, correctly-numbered addition also
+    fails loudly.
+    """
+    shape_file = tmp_path / "docs" / "defeat_shapes" / "334-ok.md"
+    shape_file.parent.mkdir(parents=True)
+    shape_file.write_text("## 334. Correctly numbered\n")
+    errors = _defeat_shape_numbering_check(
+        tmp_path, task_number=334, branch="cmx-334",
+        added_paths=["docs/defeat_shapes/334-ok.md"],
+    )
+    assert errors == []
 
 
 def test_defeat_shapes_cross_references_resolve_to_shapes_that_exist():
@@ -766,22 +1101,56 @@ def test_defeat_shapes_cross_references_resolve_to_shapes_that_exist():
 
     Seen to go red: a reference left behind as "shape 31" (or any number with no
     `docs/defeat_shapes/31-*.md` file) after a renumber that missed one mention.
+
+    CMX-334: a shape's token may now carry a lowercase-letter suffix (`328b`) — the reference
+    pattern captures that suffix too, so "shape 328b" resolves against the actual `328b-*.md`
+    file rather than being truncated to the bare number.
     """
     root = Path(__file__).resolve().parent.parent
     shapes_dir = root / "docs" / "defeat_shapes"
     files = sorted(shapes_dir.glob("*.md"))
     assert files, f"no shape files found under {shapes_dir}"
-    existing = {int(f.name.split("-", 1)[0]) for f in files}
+    existing = {_shape_token_from_filename(f.name) for f in files}
 
-    ref_pattern = re.compile(r"\bshapes? (\d+)\b|\[\[(\d+)\|")
     for f in files:
-        text = f.read_text()
-        for m in ref_pattern.finditer(text):
-            num = int(m.group(1) or m.group(2))
-            assert num in existing, (
-                f"{f.name} references shape {num}, which has no "
-                f"docs/defeat_shapes/{num:02d}-*.md file"
+        for token in _shape_tokens_referenced(f.read_text()):
+            assert token in existing, (
+                f"{f.name} references shape {token}, which has no "
+                f"docs/defeat_shapes/{token}-*.md file"
             )
+
+
+def _shape_tokens_referenced(text: str) -> list[str]:
+    """Every defeat-shape token `text` references, either as prose ("shape 328b", "shapes
+    21") or a `[[328b|...]]` wiki-style link — in the order they appear.
+
+    CMX-334 rework round 1: split out of the cross-reference test above so the real reference
+    pattern — the exact code every mutation battery targets — can be unit-tested directly
+    against a literal string, independent of what `docs/defeat_shapes/` happens to contain on
+    disk right now (every file there is still unsuffixed, so the on-disk-scanning test above
+    can never exercise a suffixed reference).
+    """
+    ref_pattern = re.compile(r"\bshapes? (\d+)([a-z]?)\b|\[\[(\d+)([a-z]?)\|")
+    tokens = []
+    for m in ref_pattern.finditer(text):
+        digits, suffix = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+        tokens.append(str(int(digits)) + suffix)
+    return tokens
+
+
+def test_shape_tokens_referenced_captures_the_suffix_in_prose_and_wiki_links():
+    """CMX-334 rework round 1: pins the reference pattern's suffix capture directly, so a
+    mutation that blanks the suffix group (`([a-z]?)` -> `()`) turns this red regardless of
+    what's on disk in `docs/defeat_shapes/` today.
+
+    Seen to survive: `\\bshapes? (\\d+)([a-z]?)\\b|\\[\\[(\\d+)([a-z]?)\\|` mutated to
+    `\\bshapes? (\\d+)()\\b|\\[\\[(\\d+)()\\|` — `3503 passed, 0 failed` (chela judge, PR #427
+    round 1), because no reference to a suffixed shape existed in the real catalog to notice.
+    """
+    assert _shape_tokens_referenced("see shape 328b for the full writeup") == ["328b"]
+    assert _shape_tokens_referenced("the render-side mirror of shape 13") == ["13"]
+    assert _shape_tokens_referenced("[[328b|entry 328b]]") == ["328b"]
+    assert _shape_tokens_referenced("no reference here") == []
 
 
 def test_defeat_shapes_each_file_carries_exactly_one_numbered_section():
@@ -801,7 +1170,7 @@ def test_defeat_shapes_each_file_carries_exactly_one_numbered_section():
     files = sorted(shapes_dir.glob("*.md"))
     assert files, f"no shape files found under {shapes_dir}"
     for f in files:
-        headings = re.findall(r"^## \d+\. ", f.read_text(), flags=re.MULTILINE)
+        headings = re.findall(_SHAPE_HEADING_RE, f.read_text(), flags=re.MULTILINE)
         assert len(headings) == 1, (
             f"{f.name} carries {len(headings)} numbered sections — one file per shape means "
             "exactly one; a growing catalog adds a new file, not a second section here"
@@ -951,7 +1320,7 @@ def _workflow_repo(tmp_path: Path, task_id: str, guard_test: str, *,
         _git(repo, "add", "-A")
         _git(repo, "commit", "-qm", "the feature and its proof")
         wt.parent.mkdir(parents=True, exist_ok=True)
-        worktree.detached_worktree(repo, "main", wt)
+        worktree.detached_worktree(repo, "main", wt, wt.parent)
         assert (wt / ".git").is_file(), "fixture must model a LINKED worktree"
     else:
         _project(wt, guard_test=guard_test)
@@ -3054,7 +3423,7 @@ def test_a_missing_judge_window_is_HELD_not_reaped_while_its_lock_is_live(tmp_pa
     lock_path = _write_live_judge_lock(wf, "abc123")
 
     removed: list[Path] = []
-    with patch.object(dispatcher, "remove_worktree", side_effect=lambda repo, p: removed.append(p) or True):
+    with patch.object(dispatcher, "remove_worktree", side_effect=lambda repo, p, root: removed.append(p) or True):
         summary = _tick(wf, lambda *a: True, windows=())   # window missing from THIS snapshot
 
     assert summary["judge_lost"] == 0
@@ -3385,6 +3754,67 @@ def test_cmd_judge_self_check_cli_exits_zero_when_every_guard_is_killed(tmp_path
     assert "safe to commit" in capsys.readouterr().out
 
 
+def test_cmd_judge_ack_blocked_race_cli_reaches_the_dispatcher(capsys):
+    """🧊 CMX-336 rework: `chela judge ack-blocked-race` is a dead `elif` away from
+    silently falling through to `p_judge.print_help()` instead of ever calling
+    `dispatcher.acknowledge_blocked_race` — nothing in this PR drove the real CLI
+    dispatch for this subcommand before. Same pattern as the self-check CLI tests above:
+    corrupt `elif args.judge_cmd == "ack-blocked-race":` (e.g. `elif False and
+    args.judge_cmd == "ack-blocked-race":`) and this goes red — the mocked dispatcher
+    call is never made, so the success line never prints and the mock assertion fails.
+
+    🧊 CMX-336 rework round 2: this passed `--note` as nothing and asserted `note=""` —
+    that's true whether `args.note` was actually threaded through or the call site
+    hardcoded `note=""` regardless of the flag (`docs/defeat_shapes/336-*.md`). `--note`
+    is one of the four things this command is documented to stamp and is advertised in
+    both the changelog and the subcommand's own `--help`, so it must be driven with a
+    real, distinctive value here.
+    """
+    from unittest.mock import patch as mock_patch
+
+    from chela import main
+
+    fake = {
+        "ok": True, "task_id": "cmx-99", "by": "someone-distinctive",
+        "at": "2026-09-02T00:00:00+00:00", "sha": "deadbeefcafe",
+        "pr_url": "https://github.com/o/r/pull/431",
+    }
+    with mock_patch.object(main.dispatcher, "acknowledge_blocked_race", return_value=fake) as mocked:
+        with patch.object(sys, "argv", ["chela", "judge", "ack-blocked-race", "cmx-99",
+                                         "--by", "someone-distinctive",
+                                         "--note", "already shipped, safe to ack"]):
+            main.main()
+
+    mocked.assert_called_once_with(
+        "cmx-99", by="someone-distinctive", note="already shipped, safe to ack",
+    )
+    out = capsys.readouterr().out
+    assert "acknowledged by someone-distinctive" in out
+
+
+def test_cmd_judge_ack_blocked_race_cli_exits_nonzero_on_refusal(capsys):
+    """🧊 CMX-336 rework round 2: `ack-blocked-race` is an operator/scripted surface —
+    its whole refusal path (wrong judge_state, unknown run, lost CAS) is only observable
+    to a caller through the exit status, and nothing drove that branch before
+    (`docs/defeat_shapes/336-*.md`). A mutation turning the refusal's `sys.exit(1)` into
+    `sys.exit(0)` left the whole suite green because no test ever asked for the exit code
+    on a refused acknowledgement.
+    """
+    from unittest.mock import patch as mock_patch
+
+    from chela import main
+
+    fake = {"ok": False, "task_id": "cmx-99", "error": "no run matches 'cmx-99'"}
+    with mock_patch.object(main.dispatcher, "acknowledge_blocked_race", return_value=fake):
+        with patch.object(sys, "argv", ["chela", "judge", "ack-blocked-race", "cmx-99"]):
+            with pytest.raises(SystemExit) as exc:
+                main.main()
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "no run matches 'cmx-99'" in out
+
+
 # ---------------------------------------------------------------------------
 # CMX-319 — the staleness check must not read its reference from the row it checks
 # ---------------------------------------------------------------------------
@@ -3661,3 +4091,41 @@ def test_judge_run_calls_pr_live_head_sha_with_THIS_runs_real_pr_url_and_repo_di
         "degraded to None, None would fall back to the row and wrongly report this current"
     )
 
+
+
+def test_cmd_judge_ack_blocked_race_omitting_by_passes_empty_so_the_env_chain_runs(capsys):
+    """🔴 `--by`'s argparse default is what FEEDS the documented $USER/$USERNAME/'unknown'
+    fallback, and nothing pinned the link between the flag's ABSENCE and that chain.
+
+    The dispatcher-level tests prove the chain given `by=""`, and the CLI test above always
+    passes `--by` explicitly — so `default="unknown"` (or any other non-empty default)
+    survives both: the CLI test still gets its explicit value, and the dispatcher tests
+    still get their `""` because they call the function directly. The flag's own `--help`
+    and the changelog both promise the env chain, and only `default=""` lets
+    `acknowledge_blocked_race`'s `(by or "").strip() or os.environ.get("USER") ...` reach
+    the environment at all.
+
+    This is defeat shape 336 — the branch's own entry — one level up the call stack: a
+    value proven at the layer below, with the layer above never driven in the state that
+    makes the layer below's logic reachable.
+    """
+    from unittest.mock import patch as mock_patch
+
+    from chela import main
+
+    fake = {
+        "ok": True, "task_id": "cmx-99", "by": "from-the-env",
+        "at": "2026-09-03T00:00:00+00:00", "sha": "deadbeefcafe",
+        "pr_url": "https://github.com/o/r/pull/431",
+    }
+    with mock_patch.object(main.dispatcher, "acknowledge_blocked_race", return_value=fake) as mocked:
+        with patch.object(sys, "argv", ["chela", "judge", "ack-blocked-race", "cmx-99"]):
+            main.main()
+
+    mocked.assert_called_once_with("cmx-99", by="", note="")
+    called_by = mocked.call_args.kwargs["by"]
+    assert called_by == "", (
+        f"omitting --by handed the dispatcher {called_by!r} instead of '' — a non-empty "
+        "argparse default short-circuits the documented $USER/$USERNAME/'unknown' chain, "
+        "so every acknowledgement would be attributed to that constant"
+    )

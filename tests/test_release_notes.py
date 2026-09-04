@@ -414,6 +414,26 @@ def test_collect_fragments_merges_duplicate_categories_across_files(tmp_path):
     assert "another fix" in notes
 
 
+def test_collect_fragments_matches_an_uppercase_md_suffix(tmp_path):
+    """`_fragment_paths` normalises the suffix (`p.suffix.lower() == ".md"`), so a
+    fragment saved as `CMX-321.MD` is a fragment by the module's own definition — every
+    other fixture in this file (and every real file under `changelog.d/`) uses a
+    lower-case `.md`, so the `.lower()` half of that check is a fixed point of the whole
+    suite. If it silently narrowed to a bare `p.suffix == ".md"`, an upper-case-suffix
+    fragment would drop out of `_fragment_paths` — and therefore out of the release body
+    `collect_fragments` builds — with no error, just missing text.
+    """
+    d = tmp_path / "changelog.d"
+    d.mkdir()
+    (d / "CMX-321.MD").write_text("### Added\n\n- upper-case suffix fragment\n")
+
+    notes = collect_fragments(d)
+
+    assert "upper-case suffix fragment" in notes, (
+        "a fragment with an upper-case .MD suffix was not collected"
+    )
+
+
 def test_promote_unreleased_combines_existing_body_and_fragments(tmp_path):
     changelog = (
         "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- already there\n\n"

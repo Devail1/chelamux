@@ -846,7 +846,7 @@ def test_the_job_mapping_is_pinned_exactly(job):
 # `workflow["on"]` raises `KeyError`; `workflow[True]` is the real key. Verified directly:
 # `yaml.safe_load(open("ci.yml"))` prints `[..., True, ...]` for `list(workflow)`.
 _EXPECTED_TRIGGERS: dict = {
-    "push": {"branches": ["main"]},
+    "push": {"branches": ["main", "dev"]},
     "pull_request": None,
 }
 

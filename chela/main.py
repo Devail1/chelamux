@@ -940,6 +940,14 @@ def _report_installed_plugin(directory: Path, port: int) -> None:
         return
     expected = hooks.hooks_spec(port)
     for copy in copies:
+        if hooks.marketplace_missing(copy):
+            print(f"\n⛔ the installed copy's marketplace {copy.marketplace!r} is GONE — "
+                  f"Claude Code will not load {copy.manifest} AT ALL, no matter what it "
+                  "contains (this is not a stale-hooks problem — rendering or reinstalling "
+                  "does nothing until the marketplace itself is back). Re-add it by hand: "
+                  "`claude plugin marketplace add <path-or-url>`, then restart your agent "
+                  "windows.")
+            continue
         if copy.hooks is None:
             print(f"\n⚠️  the installed copy at {copy.manifest} cannot be read "
                   f"({copy.error}) — so chela cannot tell you whether the hooks agents "
@@ -1533,7 +1541,9 @@ def cmd_telegram(args) -> None:
     # tool_use/tool_result stream, keeping text/thinking/user turns plus the
     # interactive prompts that need a human.
     bot = BotSender(token, chat)
-    relay = RegistryRelay(bot.send, registry, show_tool_calls=SHOW_TOOL_CALLS)
+    relay = RegistryRelay(
+        bot.send, registry, show_tool_calls=SHOW_TOOL_CALLS, send_photos=bot.send_photos
+    )
     # Pane watcher (Slices C1/A2/B2 + C2): reads each bound window's pane to surface
     # the three live-TUI prompts the transcript can't relay in time — a permission
     # gate, an AskUserQuestion selector and an ExitPlanMode plan approval — each with
@@ -1759,11 +1769,17 @@ def cmd_restore(args) -> None:
     ``--apply`` (CMX-196) acts on the classification instead of merely printing it: a
     REVIVABLE row is re-stamped at its new address (``chela.restore.apply`` ->
     ``chela.inbox.readdress`` / ``chela.sessionids.rekey``); a MANUAL row is archived
-    (``chela.roster.archive``) and only then removed from its live store. Without the flag
-    nothing is written and no agent is relaunched, spawned, resumed or killed — the operator
-    acts by hand: ``chela watch``/``register``, re-dispatch, or clear a row themselves.
-    ``telegram-bindings.json`` is never written either way: that store belongs to
-    ``chela-telegram``'s own in-memory registry, and its own reconcile tick reaps it.
+    (``chela.roster.archive``) and only then removed from its live store. Without either
+    write flag nothing is written and no agent is relaunched, spawned, resumed or killed —
+    the operator acts by hand: ``chela watch``/``register``, re-dispatch, or clear a row
+    themselves. ``telegram-bindings.json`` is never written either way: that store belongs
+    to ``chela-telegram``'s own in-memory registry, and its own reconcile tick reaps it.
+
+    ``--retire-empty`` (CMX-323) is the narrower complement: it archives-then-removes ONLY
+    the MANUAL rows with nothing on record at all (no cwd, or no session — bookkeeping residue
+    a hard death left behind, not work a human could act on). Every REVIVABLE row and every
+    MANUAL row that still carries a relaunch command is left completely untouched — see
+    ``chela.restore.retire_empty``. Mutually exclusive with ``--apply``.
 
     ⚠️ The roster only helps starting from the NEXT reboot — there is no snapshot of an
     epoch chela was never running to observe. A run today still reports the stale rows
@@ -1772,6 +1788,7 @@ def cmd_restore(args) -> None:
     from chela.telegram.bindings import BindingRegistry
 
     apply_flag = bool(getattr(args, "apply", False))
+    retire_flag = bool(getattr(args, "retire_empty", False))
 
     now_epoch = epoch.current()
     store = inbox.load()
@@ -1802,8 +1819,13 @@ def cmd_restore(args) -> None:
     manual = [v for v in verdicts if v.verdict == "MANUAL"]
 
     # Applied BEFORE the verdict block prints, so each row's line can carry the outcome —
-    # one per verdict, same order, per restore.apply()'s contract.
-    results = restore.apply(verdicts) if apply_flag and verdicts else []
+    # one per verdict, same order, per restore.apply()'s / restore.retire_empty()'s contract.
+    if apply_flag and verdicts:
+        results = restore.apply(verdicts)
+    elif retire_flag and verdicts:
+        results = restore.retire_empty(verdicts)
+    else:
+        results = []
 
     if verdicts:
         print(f"{len(verdicts)} classified row(s) (three session-stamped stores: "
@@ -1825,9 +1847,16 @@ def cmd_restore(args) -> None:
               "address; MANUAL rows were archived to roster-archive.json, then removed. "
               "telegram-bindings.json rows are left for chela-telegram's own reconcile tick "
               "to reap — see each row's outcome above.")
+    elif retire_flag:
+        print("\nchela restore --retire-empty: only the MANUAL rows with nothing on record "
+              "(no cwd, or no session) were archived to roster-archive.json, then removed. "
+              "Every REVIVABLE row and every MANUAL row that still carries a relaunch "
+              "command was left untouched — see each row's outcome above. Act on those by "
+              "hand, or re-run with --apply once you are ready to write ALL of them.")
     else:
         print("\nreport only — chela restore never writes to a store. Act by hand: "
-              "chela watch/register for a REVIVABLE row, re-dispatch, or clear a row "
+              "chela watch/register for a REVIVABLE row, re-dispatch, `chela restore "
+              "--retire-empty` for a MANUAL row with nothing on record, or clear a row "
               "yourself once you have decided what happened to it.")
 
     # Nonzero while anything is MANUAL — the agent behind such a row is orphaned and needs
@@ -2130,6 +2159,27 @@ def cmd_judge_self_check(args) -> None:
           "safe to commit.")
 
 
+def cmd_judge_ack_blocked_race(args) -> None:
+    """🧊 CMX-336: acknowledge a `J_BLOCKED_RACE` row that can never resolve the ordinary
+    way (the PR is merged or closed, so nothing will ever push a new head past the judged
+    commit for `_blocked_race_resolved`'s `judge_sha != pr_head_sha` check to catch).
+
+    This does NOT rewrite `judge_state`, `judge_detail`, or `judge_sha` — the verdict
+    genuinely WAS blocking. It only stamps who/when/why acknowledged it, which is enough
+    for `chela doctor` to stop reporting the row; the original verdict stays readable on
+    the row exactly as the judge wrote it.
+    """
+    result = dispatcher.acknowledge_blocked_race(args.run, by=args.by, note=args.note)
+    if not result.get("ok"):
+        print(f"ack-blocked-race: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    print(f"🧊 {result['task_id']} — blocked-race verdict (sha "
+          f"{(result.get('sha') or '?')[:12]}) acknowledged by {result['by']} at "
+          f"{result['at']}. `chela doctor` stops reporting this run.")
+    if result.get("pr_url"):
+        print(f"  {result['pr_url']}")
+
+
 def cmd_update(args) -> None:
     """``chela update`` — pull the checkout, re-sync deps, restart services. ``--check``
     only reports how far behind it is; it changes nothing.
@@ -2146,7 +2196,9 @@ def cmd_update(args) -> None:
 
     if getattr(args, "check", False):
         status = update.commits_behind(repo)
-        if not status.ok:
+        if not status.ok or status.error:
+            # ``ok=True`` with a populated ``error`` (e.g. no upstream configured) is
+            # unknowable, not a pass — "up to date" would be a guess dressed as an answer.
             print(f"update --check: {status.error}")
             sys.exit(1)
         if status.behind:
@@ -2161,17 +2213,29 @@ def cmd_update(args) -> None:
         if result.backup_ref:
             print(f"(pre-rewrite HEAD is safe at {result.backup_ref})")
         sys.exit(1)
+    # CMX-321: a pull/sync/restart that genuinely succeeded is still NOT a success worth a
+    # ✅ when the plugin refresh below failed — the whole point of `chela update` is that
+    # agents end up running current hooks, and a plugin that cannot load makes that false
+    # no matter how clean the git/deps/services half went. Downgrade the headline itself
+    # rather than letting a bare ✅ read as "you're done" with the real failure buried in
+    # an easy-to-miss ⚠️ line underneath it (the exact shape that hid CMX-321 in the wild).
     if result.behind_before == 0:
-        print("up to date — nothing to do")
+        headline = "up to date — nothing to do"
     else:
         action = (f"⛑️ recovered from an upstream history rewrite (old HEAD backed up at "
                   f"{result.backup_ref}), reset onto" if result.rewrite_recovered else "pulled")
         if result.restarted:
-            print(f"✅ {action} {result.behind_before} commit(s), re-synced deps, restarted: "
-                  f"{', '.join(result.restarted)}")
+            headline = (f"{action} {result.behind_before} commit(s), re-synced deps, "
+                        f"restarted: {', '.join(result.restarted)}")
         else:
-            print(f"✅ {action} {result.behind_before} commit(s), re-synced deps "
-                  "(no running chela-* PM2 services to restart)")
+            headline = (f"{action} {result.behind_before} commit(s), re-synced deps "
+                        "(no running chela-* PM2 services to restart)")
+    if result.plugin_error:
+        print(f"⚠️  {headline} — but the plugin refresh below did NOT succeed")
+    elif result.behind_before == 0:
+        print(headline)
+    else:
+        print(f"✅ {headline}")
     # The plugin refresh (chela.update._refresh_plugin_if_needed) runs on EVERY apply()
     # outcome, not just after a pull — a stale/unreadable install is a separate problem
     # from the checkout being behind — so this reports independently of behind_before too.
@@ -2184,7 +2248,21 @@ def cmd_update(args) -> None:
         print("   run by hand: `claude plugin marketplace update <marketplace>` then "
               "`claude plugin update chela@<marketplace>`, then restart your agent "
               "windows.")
-    if doctor.installed_hooks_stale():
+    # Two DIFFERENT residual problems the refresh above can still leave behind — reported
+    # with different wording on purpose (CMX-321): stale hooks are OLD but the plugin still
+    # loads; a gone marketplace means the plugin does not load AT ALL, and no amount of
+    # `claude plugin update` fixes that without `marketplace add` first.
+    missing_marketplaces = sorted({
+        copy.marketplace for copy in hooks.installed_plugins()
+        if hooks.marketplace_missing(copy)
+    })
+    if missing_marketplaces:
+        print(f"⛔ the installed plugin will NOT LOAD — its marketplace "
+              f"({', '.join(missing_marketplaces)}) is gone from Claude Code's own "
+              "registry. `chela update` cannot fix this by itself: re-add it by hand — "
+              "`claude plugin marketplace add <path-or-url>` — then run `chela update` "
+              "again, then restart your agent windows.")
+    elif doctor.installed_hooks_stale():
         # The refresh above (chela.update._refresh_plugin_if_needed) already ran `claude
         # plugin marketplace update` + `claude plugin update` for every confirmed-installed
         # copy — this is the safety net for when that still didn't converge (see
@@ -2611,6 +2689,22 @@ def main() -> None:
         "--cwd", metavar="DIR", default=".",
         help="Worktree to mutate in place (default: the current directory)",
     )
+    p_jack = judge_sub.add_parser(
+        "ack-blocked-race",
+        help="🧊 Acknowledge a blocked_race verdict that can never resolve on its own "
+             "(the PR merged or closed, so its head will never move past the judged "
+             "commit) — stops `chela doctor` from reporting it without rewriting the "
+             "original verdict",
+    )
+    p_jack.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-84)")
+    p_jack.add_argument(
+        "--by", default="",
+        help="Who is acknowledging this (default: $USER/$USERNAME, else 'unknown')",
+    )
+    p_jack.add_argument(
+        "--note", default="",
+        help="Optional free-text note recorded alongside the acknowledgement",
+    )
 
     # adopt — enroll a hand-opened PR into the judge/merge gate (CMX-276)
     p_adopt = sub.add_parser(
@@ -2763,11 +2857,19 @@ def main() -> None:
         help="Report epoch-dangling rows left by a hard tmux death "
              "(inbox/telegram-bindings/session-ids/dispatcher runs). Read-only by default.",
     )
-    p_restore.add_argument(
+    p_restore_write = p_restore.add_mutually_exclusive_group()
+    p_restore_write.add_argument(
         "--apply", action="store_true",
         help="Act on the classification: re-stamp REVIVABLE rows at their new address, "
              "archive-then-remove MANUAL ones. telegram-bindings.json is still never "
              "written — chela-telegram's own reconcile tick reaps it.",
+    )
+    p_restore_write.add_argument(
+        "--retire-empty", action="store_true",
+        help="Narrower than --apply: archive-then-remove only the MANUAL rows with "
+             "NOTHING on record (no cwd, or no session — no relaunch command to offer). "
+             "Every REVIVABLE row and every MANUAL row that still carries a cwd/session "
+             "is left untouched. telegram-bindings.json is still never written.",
     )
 
     # task-finished — final step in the dispatcher work-item lifecycle
@@ -2884,6 +2986,8 @@ def main() -> None:
             cmd_judge(args)
         elif args.judge_cmd == "self-check":
             cmd_judge_self_check(args)
+        elif args.judge_cmd == "ack-blocked-race":
+            cmd_judge_ack_blocked_race(args)
         else:
             p_judge.print_help()
     elif args.command == "adopt":

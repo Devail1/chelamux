@@ -279,3 +279,71 @@ def test_a_missing_tool_is_just_an_unknown_fact(no_proc, monkeypatch):
     assert sessions._resumed_session(1) is None
     assert sessions.proc_started(1) is None
     assert sessions._proc_cwd(1) is None
+
+
+def test_sh_children_lists_the_callers_own_ancestors(no_proc):
+    """A parent's child list must include THIS process — which is an ancestor of the
+    ``pgrep`` that answers.
+
+    macOS ``pgrep`` omits the caller and all of its ancestors unless ``-a`` is passed
+    (pgrep(1)). chela reaches this path from inside agent windows, where the window's own
+    ``claude`` IS an ancestor of every command it runs: without ``-a``, ``_claude_pid``
+    returns None for the very window the caller sits in, and every population keyed on
+    ``claude_pid`` silently loses it — ``chela doctor``'s peer-messaging check included,
+    which then under-reports by exactly that window.
+
+    Asserting on ``getppid() -> getpid()`` rather than a spawned child is the point: only
+    an ANCESTOR reproduces the exclusion, and a descendant (what every other test here
+    uses) is listed either way. Green on Linux with or without the fix — procps excludes
+    only ``pgrep`` itself — which is exactly why this regression hides in CI.
+    """
+    assert os.getpid() in sessions._sh_children(os.getppid())
+
+
+def test_the_ancestor_flag_is_platform_gated_in_both_directions():
+    """The darwin branch is the one Linux CI never executes, so assert it by ARGUMENT.
+
+    GNU procps spells ``-a`` as ``--list-full``, which prepends the command to every line
+    and would break ``_sh_children``'s all-digits parse — so the non-darwin answer being
+    EMPTY is as load-bearing as the darwin answer being ``-a``. freebsd is asserted too:
+    it ships BSD pgrep with the same ancestor exclusion but is deliberately out of scope,
+    and pinning it here makes that a decision rather than an oversight.
+    """
+    assert sessions._pgrep_ancestor_flag("darwin") == ["-a"]
+    assert sessions._pgrep_ancestor_flag("linux") == []
+    assert sessions._pgrep_ancestor_flag("freebsd14") == []
+
+
+def test_sh_children_emits_the_ancestor_flag_on_darwin_and_never_on_linux(monkeypatch):
+    """One assertion over the WHOLE path: platform read -> flag choice -> argv.
+
+    The flag is computed from ``sys.platform`` at the point of use rather than bound to a
+    module constant at import, because a constant is a third place the fix can die that no
+    test on Linux can see: ``_pgrep_ancestor_flag`` correct, ``_sh_children`` splicing
+    correctly, and the constant bound from a hardcoded ``"linux"`` all coexist happily
+    while macOS silently loses the flag. There is no binding to get wrong now, and driving
+    the real ``sys.platform`` means Linux CI executes the darwin branch for real.
+
+    GNU procps spells ``-a`` as ``--list-full``, which prepends the command and would break
+    the all-digits parse below — so the linux case asserting NO flag is as load-bearing as
+    the darwin case asserting one.
+    """
+    seen = []
+
+    def fake_sh(argv, **kw):
+        seen.append(list(argv))
+        return ""
+
+    monkeypatch.setattr(sessions, "_sh", fake_sh)
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    sessions._sh_children(4321)
+    assert seen[-1] == ["pgrep", "-a", "-P", "4321"]
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    sessions._sh_children(4321)
+    assert seen[-1] == ["pgrep", "-P", "4321"]
+
+    monkeypatch.setattr(sys, "platform", "freebsd14")
+    sessions._sh_children(4321)
+    assert seen[-1] == ["pgrep", "-P", "4321"]

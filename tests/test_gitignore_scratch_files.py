@@ -14,6 +14,16 @@ experiments JSON, so agents keep inventing their own — `.chela-self-check-*.js
 2 of the 4 distinct spellings actually committed across CMX-280/284/286/288/282->dev (see
 d77c2c4, docs/defeat_shapes/28). This guard now probes every real spelling on record, so a
 future gitignore edit that narrows back to one of them fails here instead of shipping quiet.
+
+CMX-337 round 5: `*selfcheck*.json` (the no-separator spelling, added for
+`.chela_selfcheck_cmx337_round3.json`) landed in .gitignore with no probe of its own — every
+existing filename in the list below is already matched by one of the OTHER patterns
+(`.chela-self-check-*.json`, `*self[-_]check*.json`, `*scratch*experiment*.json`), so the new
+line was load-bearing for nothing this suite could see. The judge mutated it to
+`*selfcheckDISABLED*.json` — still a syntactically valid glob, matching no real filename — and
+the suite stayed green. See docs/defeat_shapes/337 (round 5). A new pattern added to this list must come
+with a filename here that ONLY that pattern matches, or it is dead weight from the moment it is
+committed.
 """
 from __future__ import annotations
 
@@ -33,6 +43,7 @@ REAL_SELF_CHECK_SCRATCH_FILENAMES = [
     ".chela-self-check-cmx286.json",
     "scratch_cmx288_experiments.json",
     "self_check_experiments.json",
+    ".chela_selfcheck_cmx337_round3.json",
 ]
 
 

@@ -620,6 +620,57 @@ def installed_plugins() -> list[InstalledPlugin]:
     return copies
 
 
+# --- CMX-321: a copy can be perfectly INSTALLED and still not LOAD ------------------
+#
+# `installed_plugins()` above answers "does Claude Code have a copy on disk, and does its
+# manifest read clean" — both true INDEPENDENT of whether the marketplace that copy was
+# installed under still exists. Found 2026-08-30: a marketplace-cache sweep (or a manual
+# `claude plugin marketplace remove`) can drop a marketplace from Claude Code's own
+# `known_marketplaces.json` while `installed_plugins.json` still lists a plugin as
+# installed "under" it and the cached `hooks/hooks.json` is still sitting there, readable,
+# byte-for-byte current. Every check above reports green — `copy.hooks is not None`, no
+# drift — while `claude plugin list` shows `chela@chela — ✘ failed to load — Marketplace
+# chela not found`: Claude Code resolves a plugin through its marketplace at load time,
+# not through the cache path alone, and a gone marketplace is a hard load failure no
+# manifest comparison can see. This is a DIFFERENT failure than a stale manifest (the
+# hooks that run are STALE, i.e. old-but-working) — this one is "not running at all" —
+# and needs its own check rather than folding into drift, or the two get reported with
+# the same wording and an operator fixes the wrong thing.
+
+def registered_marketplaces() -> set[str] | None:
+    """Every marketplace slug Claude Code currently has registered, read from its own
+    ``known_marketplaces.json`` (a sibling of ``installed_plugins.json`` under
+    :func:`plugins_dir`). ``None`` — never an empty set — when the file is missing or
+    unreadable: a plugin can only ever be installed FROM a marketplace, so a copy that
+    exists in ``installed_plugins.json`` with no readable registry at all means chela
+    cannot see the registry, not that it definitely emptied — treating that as "every
+    marketplace is gone" would flag a false positive on a machine where this file happens
+    to be unreadable for reasons unrelated to the plugin. :func:`marketplace_missing` reads
+    ``None`` as "cannot verify" and refuses to guess, matching the "never guess" rule
+    :func:`chela.update._plugin_marketplaces` already follows for the same registry.
+    """
+    path = plugins_dir() / "known_marketplaces.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return set(data.keys()) if isinstance(data, dict) else None
+
+
+def marketplace_missing(copy: InstalledPlugin) -> bool:
+    """Whether Claude Code will refuse to load ``copy`` because the marketplace it was
+    installed under is gone from Claude Code's own registry — true independent of whether
+    ``copy.hooks`` reads clean or matches the rendered manifest. ``False`` (not "cannot
+    tell") when ``copy.marketplace`` itself could not be determined, or when the registry
+    itself could not be read (see :func:`registered_marketplaces`) — both are "chela cannot
+    confirm this is missing", which is not the same claim as "confirmed missing".
+    """
+    if not copy.marketplace:
+        return False
+    registered = registered_marketplaces()
+    return registered is not None and copy.marketplace not in registered
+
+
 # Every field of a hook that decides whether it WORKS. `url` (CMX-41: a port nobody
 # serves) and `timeout` (CMX-56: a gate hook killed after 2s) each killed a feature
 # silently on their own; `type` and `command` are the same trapdoor for the SessionStart

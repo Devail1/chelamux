@@ -10,6 +10,29 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Added
+
+- **A terminal run's straggler tmux window is now reaped every tick, not just at the moment
+  it transitions.** Each terminal transition already fires a best-effort `tmux kill-window`,
+  but that call is fire-and-forget and can silently fail (a transient tmux hiccup, or the
+  self-kill race of an agent's own `chela task-finished` tearing down the window it is running
+  in) — the run still looked done everywhere except the dashboard, which kept showing a live
+  window sitting in a directory that no longer existed. `_reap_terminal_windows` now re-checks
+  every `done`/`closed` row of a workflow on every tick and kills any window still alive for
+  one, verified by matching both the recorded `window_id` and the current tmux server's epoch
+  so a restarted server's renumbered ids are never mistaken for a stale run's own window.
+  (CMX-329)
+### Changed
+
+- **`chela update --check` and the daemon's update notifier now treat "no upstream
+  configured" as UNKNOWN, not "up to date".** Previously a checkout with no upstream
+  silently reported 0 commits behind, so `--check`'s exit code and the daemon's notifier both
+  went permanently, unannouncedly silent. Both now warn once (log line + push, subject to
+  `notify.enabled()`) on the transition into the unknown state, tracked via a new
+  `UNKNOWN_BEHIND` sentinel, and `--check` exits nonzero for it. A checkout that later gains
+  an upstream and falls genuinely behind still gets the ordinary "update available" notice.
+  (CMX-328)
+
 ## [0.9.0] — 2026-08-30
 
 ### Added

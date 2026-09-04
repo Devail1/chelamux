@@ -1615,6 +1615,22 @@ def _dispatcher_owned_wid_epochs() -> set[tuple[str, str | None]]:
     return owned
 
 
+def _cwd_is_live(cwd: str | None) -> bool:
+    """Whether a verdict's recorded cwd still exists on disk.
+
+    Split out as its own seam (tests stub this, not the real filesystem) because a
+    tmux restart renumbers every window — ``@889`` becomes ``@9`` — which desyncs
+    ``_dispatcher_owned_wid_epochs``'s (wid, epoch) join from the ``runs`` table
+    (CMX-330: `@889`/`@891`/`@897` → `@9`/`@11`/`@13` silently failed that join open,
+    landing a reaped run's row in the resumable bucket anyway). The window identity a
+    run was spawned under is therefore not trustworthy for this decision on its own;
+    whether the worktree it would resume into still exists is a fact independent of
+    tmux's window numbering, and is what actually determines whether a Resume click
+    can succeed.
+    """
+    return bool(cwd) and os.path.isdir(cwd)
+
+
 def _shape_restore_row(v: restore.Verdict, *, resumable: bool) -> dict:
     shaped = {"store": v.store, "wid": v.wid, "cwd": v.cwd, "label": v.label,
               "stamped_epoch": v.stamped_epoch}
@@ -1631,21 +1647,24 @@ def api_restore():
     alive under a different address, which is ``chela restore --apply``'s job (a
     re-stamp), not a resume — showing it here as "resumable" would be a lie.
 
-    Dispatcher-owned rows (``_dispatcher_owned_wid_epochs``) are split into
-    ``dispatcher_rows`` instead of ``rows``: that worktree is still the dispatcher's —
-    a judge worktree is reaped on verdict publication, an agent's on run completion —
-    and resuming into it races that lifecycle the same way a second writer on
-    ``roster.json``/``telegram-bindings.json`` already has three times before. They are
-    never resumable, only *shown* (hidden by default; the sidebar's toggle reveals them
-    with no Resume affordance) — ``session_id`` is left off their shape since there is
-    no action for the client to build with it.
+    Dispatcher-owned rows (``_dispatcher_owned_wid_epochs``) and rows whose recorded
+    cwd no longer exists (``_cwd_is_live`` — a reaped worktree, a deleted branch) are
+    both split into ``dispatcher_rows`` instead of ``rows``: neither can be resumed
+    into. A dispatcher-owned worktree is reaped on verdict publication or run
+    completion, racing a resume the same way a second writer on
+    ``roster.json``/``telegram-bindings.json`` already has three times before; a dead
+    cwd can't be resumed into at all, ownership match or not (CMX-330 — a tmux restart
+    renumbers windows, so the ownership join alone silently missed this case). Neither
+    is ever resumable, only *shown* (hidden by default; the sidebar's toggle reveals
+    them with no Resume affordance) — ``session_id`` is left off their shape since
+    there is no action for the client to build with it.
     """
     _require_terminals()
     owned = _dispatcher_owned_wid_epochs()
     candidates = [v for v in _restore_verdicts() if v.verdict == "MANUAL" and v.manual_command()]
     rows, dispatcher_rows = [], []
     for v in candidates:
-        if (v.wid, v.stamped_epoch) in owned:
+        if (v.wid, v.stamped_epoch) in owned or not _cwd_is_live(v.cwd):
             dispatcher_rows.append(_shape_restore_row(v, resumable=False))
         else:
             rows.append(_shape_restore_row(v, resumable=True))
@@ -1693,6 +1712,11 @@ def api_restore_resume():
                         "error": "this session is dispatcher-owned — its worktree is still "
                                  "the dispatcher's and resuming it would race that lifecycle; "
                                  "not a manual recovery target"}), 409
+
+    if not _cwd_is_live(verdict.cwd):
+        return jsonify({"ok": False,
+                        "error": "this session's working directory no longer exists — "
+                                 "nowhere to resume it into"}), 409
 
     result = spawn.spawn_window(verdict.cwd, command=f"claude --resume {verdict.session_id}")
     if not result.ok:

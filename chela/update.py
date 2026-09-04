@@ -394,15 +394,21 @@ def _update_plugin(repo: Path) -> tuple[list[str], str]:
 def _plugin_refresh_needed(copies: list[hooks.InstalledPlugin]) -> bool:
     """Whether at least one installed copy warrants running ``claude plugin ...`` at all.
 
-    Two DIFFERENT conditions, both real, neither a substitute for the other:
+    THREE different conditions, none a substitute for the others:
 
     - drift (:func:`chela.runtime_truth.installed_hooks_stale`) — a readable manifest that
       disagrees with what would render now (the CMX-41 port-drift class). Requires
       ``copy.hooks is not None``, so it is blind to the next case.
-    - unreadable (``copy.hooks is None``) — the outage this ticket exists for: an installed
+    - unreadable (``copy.hooks is None``) — the outage CMX-186 exists for: an installed
       copy Claude Code still points at, but whose ``hooks/hooks.json`` a sweep or a failed
       install left missing or broken. Drift can't see this; only checking ``hooks is None``
       directly does.
+    - marketplace gone (:func:`chela.hooks.marketplace_missing`) — the outage CMX-321
+      exists for: a manifest that reads PERFECTLY, with zero drift, from a copy Claude Code
+      will still refuse to load because its marketplace vanished from its own registry.
+      Neither of the above two conditions can see this — it is not about the manifest at
+      all — so without this arm, a marketplace disappearing with no drift and no cache
+      damage would never even trigger an attempt, let alone surface an error.
 
     Without this gate, every hourly ``auto_apply_sweep`` tick would run two
     network-touching ``claude`` invocations forever, even when nothing needs it.
@@ -412,6 +418,7 @@ def _plugin_refresh_needed(copies: list[hooks.InstalledPlugin]) -> bool:
     return bool(copies) and (
         runtime_truth.installed_hooks_stale()
         or any(copy.hooks is None for copy in copies)
+        or any(hooks.marketplace_missing(copy) for copy in copies)
     )
 
 
@@ -576,6 +583,12 @@ def apply(repo: Path | None = None) -> ApplyResult:
                         plugin_updated=plugin_updated, plugin_error=plugin_error)
 
 
+UNKNOWN_BEHIND = -1
+"""Sentinel ``previously_behind`` value meaning "already notified about an unknowable
+state" (e.g. no upstream configured) — distinct from a real behind-count, which is never
+negative, so it can't be mistaken for "0 commits behind"."""
+
+
 def check_and_notify(previously_behind: int) -> int:
     """Called from the daemon loop on a bounded cadence. Edge-triggered exactly like
     ``notify.check_waiting``: logs (and, if configured, pushes) a heads-up once on the
@@ -583,12 +596,24 @@ def check_and_notify(previously_behind: int) -> int:
     operator learns to ignore the log. Returns the behind-count to remember as the next
     call's ``previously_behind``.
 
+    ``ok=True`` with a populated ``error`` (e.g. no upstream configured) is unknowable, not
+    "up to date" — silently returning ``status.behind`` (0) here would make the daemon
+    latch into permanent, unannounced silence. That state gets the same one-time heads-up
+    treatment as a real update, tracked via :data:`UNKNOWN_BEHIND` so it can't be confused
+    with a genuine 0.
+
     ⛔ NEVER calls :func:`apply` / ``git pull`` — informing is this function's entire job.
     """
     status = commits_behind(fetch=True)
     if not status.ok:
         return previously_behind  # can't tell right now; don't flap the edge on a blip
-    if status.behind > 0 and previously_behind == 0:
+    if status.error:
+        if previously_behind != UNKNOWN_BEHIND:
+            log.warning("update status unknown: %s", status.error)
+            if notify.enabled():
+                notify.send(status.error, title="chela: update status unknown")
+        return UNKNOWN_BEHIND
+    if status.behind > 0 and previously_behind <= 0:
         log.warning("update available: %d commit(s) behind — run `chela update`", status.behind)
         if notify.enabled():
             notify.send(f"{status.behind} commit(s) behind — run `chela update`",

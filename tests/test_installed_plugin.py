@@ -61,6 +61,14 @@ def _install(spec: dict, version: str = "0.1.0", marketplace: str = "chela",
     return root
 
 
+def _register_marketplaces(*names: str) -> None:
+    """Claude Code's own registry of marketplaces it currently knows about — the file
+    `claude plugin marketplace remove` (or a cache sweep) can drop an entry from without
+    touching `installed_plugins.json` or the cached manifest at all."""
+    path = hooks.plugins_dir() / "known_marketplaces.json"
+    path.write_text(json.dumps({name: {} for name in names}), encoding="utf-8")
+
+
 def _stale(port: int = PORT) -> dict:
     """The manifest that hid all day: PermissionRequest killed after 2 seconds."""
     spec = hooks.hooks_spec(port)
@@ -343,3 +351,159 @@ def test_drift_sees_a_hook_dropped_from_an_entry_that_declares_two(env):
                                                   "timeout": 1})
     drift = hooks.manifest_drift(hooks.hooks_spec(PORT), expected)
     assert any("Stop" in d and "1 hook(s)" in d for d in drift)
+
+
+# --- CMX-321: installed and byte-identical is not the same claim as LOADS -------------
+
+def test_registered_marketplaces_is_none_when_the_registry_is_missing(env):
+    """No `known_marketplaces.json` at all is "cannot verify", never "empty registry" —
+    a plugin can only ever be installed FROM a marketplace, so an unreadable registry is
+    chela's blind spot, not proof every marketplace vanished."""
+    assert hooks.registered_marketplaces() is None
+
+
+def test_registered_marketplaces_reads_the_keys(env):
+    _register_marketplaces("anthropic-agent-skills", "chela")
+    assert hooks.registered_marketplaces() == {"anthropic-agent-skills", "chela"}
+
+
+def test_registered_marketplaces_is_none_when_the_file_is_not_a_dict(env):
+    """Present but malformed (a JSON list, here) must land on the same "cannot verify"
+    branch as a missing file — never an empty set, which would read as EVERY installed
+    copy's marketplace being gone (a false ERROR from doctor, a false ⛔ from `chela
+    update`) on any machine where this registry happens to be malformed."""
+    path = hooks.plugins_dir() / "known_marketplaces.json"
+    path.write_text("[]", encoding="utf-8")
+    assert hooks.registered_marketplaces() is None
+
+
+def test_registered_marketplaces_is_none_when_the_json_is_unparseable(env):
+    """The third of three documented reachability paths for "missing or unreadable":
+    missing (tested above) and present-but-not-a-dict (tested above) both land on `None`,
+    but so must present-and-not-even-JSON — the `ValueError` half of
+    `except (OSError, ValueError)`. Getting this arm wrong is not quiet: an uncaught
+    `json.JSONDecodeError` would propagate out of this function into `chela doctor`,
+    `chela update` and `chela plugin`, the three surfaces that call it."""
+    path = hooks.plugins_dir() / "known_marketplaces.json"
+    path.write_text("not json", encoding="utf-8")
+    assert hooks.registered_marketplaces() is None
+
+
+def test_marketplace_missing_is_false_when_the_registry_cannot_be_read(env):
+    """Never guess "gone" from an absent file — that would false-positive on every
+    environment where this registry happens not to exist for unrelated reasons."""
+    _install(hooks.hooks_spec(PORT))
+    copy = hooks.installed_plugins()[0]
+    assert hooks.marketplace_missing(copy) is False
+
+
+def test_marketplace_missing_is_false_when_the_marketplace_is_present(env):
+    _install(hooks.hooks_spec(PORT))
+    _register_marketplaces("anthropic-agent-skills", "chela")
+    copy = hooks.installed_plugins()[0]
+    assert hooks.marketplace_missing(copy) is False
+
+
+def test_marketplace_missing_is_true_when_the_registry_no_longer_has_it(env):
+    """The exact shape found 2026-08-30: `installed_plugins.json` still lists the plugin,
+    the cached manifest is perfectly readable, but Claude Code's marketplace registry no
+    longer has the marketplace it was installed under."""
+    _install(hooks.hooks_spec(PORT))
+    _register_marketplaces("anthropic-agent-skills", "superpowers-marketplace")
+    copy = hooks.installed_plugins()[0]
+    assert hooks.marketplace_missing(copy) is True
+
+
+def test_marketplace_missing_is_false_when_the_marketplace_could_not_be_determined(env):
+    """A registry entry keyed with no `@marketplace` suffix at all leaves `marketplace`
+    `None` — a different, already-handled gap than a confirmed-but-vanished marketplace,
+    and not something this check should also flag."""
+    root = _install(hooks.hooks_spec(PORT), register=False)
+    registry = hooks.plugins_dir() / "installed_plugins.json"
+    registry.write_text(json.dumps({"version": 2, "plugins": {
+        "chela": [{"scope": "user", "installPath": str(root), "version": "0.1.0"}],
+    }}), encoding="utf-8")
+    _register_marketplaces("anthropic-agent-skills")   # a real registry — just no match
+    copy = hooks.installed_plugins()[0]
+    assert copy.marketplace is None
+    assert hooks.marketplace_missing(copy) is False
+
+
+def test_doctor_ERRORs_when_the_marketplace_is_gone(env):
+    """This must read as a LOAD failure, not a staleness one — `claude plugin list` calls
+    it "failed to load", and a manifest comparison alone can never see it."""
+    _render()
+    # "acme" (not "chela") on purpose — "chela" appears in this message for reasons that
+    # have nothing to do with the slug (`chela@...`, "chela does not know..."), so pinning
+    # the slug with the tool's own name can never fail when the slug is rendered blank.
+    _install(hooks.hooks_spec(PORT), marketplace="acme")
+    _register_marketplaces("anthropic-agent-skills")
+    body = _text(_levels(_check(), doctor.ERROR))
+    assert "GONE" in body
+    assert "CANNOT LOAD IT AT ALL" in body
+    # a bare "acme" also shows up in the installed copy's cache PATH regardless of whether
+    # the slug is actually interpolated — pin the two spots that render `copy.marketplace`
+    # through an f-string, which a blanked slug cannot satisfy.
+    assert "marketplace 'acme' is GONE" in body   # names the vanished marketplace slug
+    assert "chela@acme" in body
+    assert "failed to load" in body
+    assert "STALE" not in body                    # never conflated with the drift wording
+    # a third f-string render site, in the fix instruction itself — a bare "claude plugin
+    # marketplace add" substring survives a blanked slug just as easily as the two above did
+    # before they were pinned (docs/defeat_shapes/79); pin the interpolated phrase instead.
+    assert "path-or-url-to-the-acme-marketplace" in body
+    # a fourth render site: the one piece of evidence in this message is WHICH registry
+    # file the verdict was read from — a blanked path is indistinguishable from a correct
+    # one to every assertion above (docs/defeat_shapes/79, at a fourth site).
+    assert str(hooks.plugins_dir() / "known_marketplaces.json") in body
+
+
+def test_doctor_reports_the_gone_marketplace_even_with_zero_manifest_drift(env):
+    """The manifest can be byte-for-byte current and this must still fire — it is not a
+    drift check at all."""
+    _render()
+    _install(hooks.hooks_spec(PORT))          # matches the rendered manifest exactly
+    _register_marketplaces("anthropic-agent-skills")
+    findings = _check()
+    assert _levels(findings, doctor.ERROR)
+    assert "installed plugin matches" not in _text(findings)
+
+
+def test_doctor_reports_the_gone_marketplace_instead_of_stale_when_both_are_true(env):
+    """A copy can be BOTH stale AND unloadable at once — report the load failure (the more
+    severe, more specific claim) and skip the now-moot drift comparison, so an operator is
+    never told to fix hook content that will not matter until the marketplace is back."""
+    _render()
+    _install(_stale())
+    _register_marketplaces("anthropic-agent-skills")
+    body = _text(_levels(_check(), doctor.ERROR))
+    assert "CANNOT LOAD IT AT ALL" in body
+    assert "THE HOOKS THAT RUN ARE STALE" not in body
+
+
+def test_chela_plugin_names_a_gone_marketplace_distinctly_from_a_stale_install(env, capsys):
+    """Mirrors the doctor-side guards (`test_doctor_ERRORs_when_the_marketplace_is_gone`,
+    `test_doctor_reports_the_gone_marketplace_instead_of_stale_when_both_are_true`): a
+    ZERO-drift install can never exercise the `continue` that pre-empts the drift report,
+    and "chela" is not a safe marketplace name to pin a slug with — it appears in this
+    message for reasons that have nothing to do with the slug (`chela@...`, "chela does
+    not know where it came from"). Stale + "acme" makes both branches live at once, so a
+    mutated `continue` (which lets the drift report ALSO fire) and a blanked slug (which
+    "STALE" or "chela" alone can never catch) both go red.
+    """
+    directory = _render()
+    root = _install(_stale(), marketplace="acme")
+    _register_marketplaces("anthropic-agent-skills")
+    main._report_installed_plugin(directory, PORT)
+    out = capsys.readouterr().out
+    assert "GONE" in out
+    assert "will not load" in out.lower()
+    assert "STALE INSTALL" not in out
+    # the gone-marketplace branch must PRE-EMPT the drift report for the same copy — a
+    # `continue` mutated away lets this line also print, since `_stale()` really does drift
+    assert "agrees with what was just rendered" not in out
+    assert "marketplace 'acme' is GONE" in out    # names the vanished marketplace slug
+    assert "claude plugin marketplace add" in out
+    # WHICH installed manifest will not load — a blanked path satisfies every assertion
+    # above just as well as a correct one (docs/defeat_shapes/79, at a fourth site).
+    assert str(root / "hooks" / "hooks.json") in out

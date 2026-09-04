@@ -42,6 +42,7 @@ from chela.worktree import (
     detached_worktree,
     disk_usage_bytes,
     ensure_worktree,
+    is_inside_root,
     remove_worktree,
 )
 
@@ -675,7 +676,7 @@ def _base_write_worktree(repo: Path, base: str, root: Path, what: str) -> Path |
 
     wt_path = (root / BASE_WRITE_DIRNAME).resolve()
     try:
-        wt_path, _ = detached_worktree(repo, sha, wt_path)
+        wt_path, _ = detached_worktree(repo, sha, wt_path, root)
     except BranchGone:
         log.warning("%s skipped: origin/%s did not resolve after fetch", what, base)
         return None
@@ -1246,6 +1247,25 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # budget), reset to 0 the moment CI is next seen passing (see the pr_checks refresh
         # in `tick`) — it counts a STREAK, not a lifetime total.
         ("ci_infra_streak", "ALTER TABLE runs ADD COLUMN ci_infra_streak INTEGER DEFAULT 0"),
+        # 🧊 CMX-336. `_blocked_race_resolved` (chela/runtime_truth.py) clears a
+        # `J_BLOCKED_RACE` row on exactly one condition — `judge_sha != pr_head_sha`, i.e.
+        # the PR's head moved past the judged commit. That is unreachable once the PR is
+        # merged or closed: the branch is gone, nothing will ever push to it again, so
+        # `chela doctor` (and the ntfy nag it feeds) would report the row forever with no
+        # operator exit besides hand-editing this table — exactly what CMX-323 was
+        # introduced to stop asking people to do. These four columns are the acknowledgement
+        # `acknowledge_blocked_race` writes: WHO, WHEN, an optional NOTE, and the exact
+        # `judge_sha` the acknowledgement covers. ⛔ Deliberately NOT a rewrite of
+        # `judge_state`/`judge_detail`/`judge_sha` — the verdict genuinely WAS blocking, and
+        # overwriting it would falsify the record. `blocked_race_ack_sha` is what scopes the
+        # acknowledgement to the SHA it was actually given for: if the row races again on a
+        # different sha later (a reopen, a fresh push, a second CAS loss), the new
+        # `judge_sha` no longer matches this stamp and `_blocked_race_scan` reports the new
+        # occurrence — an old acknowledgement never silences a verdict it was never shown.
+        ("blocked_race_ack_by", "ALTER TABLE runs ADD COLUMN blocked_race_ack_by TEXT"),
+        ("blocked_race_ack_at", "ALTER TABLE runs ADD COLUMN blocked_race_ack_at TEXT"),
+        ("blocked_race_ack_note", "ALTER TABLE runs ADD COLUMN blocked_race_ack_note TEXT"),
+        ("blocked_race_ack_sha", "ALTER TABLE runs ADD COLUMN blocked_race_ack_sha TEXT"),
     ):
         try:
             conn.execute(ddl)
@@ -3349,7 +3369,74 @@ def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | No
         conn.commit()
 
 
-def _cleanup_worktree_on_done(repo_path: Path, row: sqlite3.Row) -> None:
+def acknowledge_blocked_race(ident: str, by: str = "", note: str = "") -> dict:
+    """🧊 CMX-336: acknowledge a ``J_BLOCKED_RACE`` verdict that can never resolve the
+    ordinary way — ``_blocked_race_resolved``'s ``judge_sha != pr_head_sha`` check never
+    fires once the PR is merged or closed, because nothing will push to a dead branch
+    again. This is the operator's exit: it does NOT touch ``judge_state``/``judge_detail``/
+    ``judge_sha`` (the verdict genuinely WAS blocking; rewriting it would falsify the
+    record — see the ⛔ note above ``_blocked_race_scan``). It stamps the separate
+    ``blocked_race_ack_*`` columns instead, so ``_blocked_race_resolved`` can treat the row
+    as cleared while every original judge column stays exactly as the judge wrote it.
+
+    Refuses unless the row's CURRENT ``judge_state`` is ``J_BLOCKED_RACE`` right now (CAS on
+    ``judge_state``/``judge_sha`` together) — there is nothing to acknowledge otherwise, and
+    a concurrent judge re-run landing between the read and this write must not have its
+    fresh verdict silently stamped as "acknowledged" under the old sha.
+    """
+    run = resolve_run(ident)
+    if run is None:
+        return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
+    task_id = run["task_id"]
+    if run.get("judge_state") != judge.J_BLOCKED_RACE:
+        return {
+            "ok": False, "task_id": task_id,
+            "error": f"judge_state is {run.get('judge_state')!r}, not "
+                     f"{judge.J_BLOCKED_RACE!r} — there is no blocked-race verdict on this "
+                     "run to acknowledge",
+        }
+
+    who = (by or "").strip() or os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
+    when = _now()
+    sha = run.get("judge_sha")
+    clean_note = (note or "").strip()
+
+    with _db() as conn:
+        cur = conn.execute(
+            "UPDATE runs SET blocked_race_ack_by=?, blocked_race_ack_at=?, "
+            "blocked_race_ack_note=?, blocked_race_ack_sha=? "
+            "WHERE task_id=? AND judge_state=? AND judge_sha IS ?",
+            (who, when, clean_note, sha, task_id, judge.J_BLOCKED_RACE, sha),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            now = conn.execute(
+                "SELECT judge_state, judge_sha FROM runs WHERE task_id=?", (task_id,)
+            ).fetchone()
+            current = (now["judge_state"], now["judge_sha"]) if now else (None, None)
+            log.warning("acknowledge_blocked_race: %s moved to %r before it could be "
+                        "acknowledged", task_id, current)
+            return {
+                "ok": False, "task_id": task_id,
+                "error": "the row's judge_state or judge_sha changed while this was being "
+                         "written (a fresh judge ran, or someone else acknowledged it "
+                         "first) — nothing was changed. Re-read it and decide again.",
+            }
+
+    event_log.append(
+        "blocked_race_ack",
+        f"{task_id}: blocked-race verdict acknowledged by {who}" + (f" — {clean_note}" if clean_note else ""),
+        payload={"task_id": task_id, "pr_url": run.get("pr_url"), "by": who, "at": when,
+                  "sha": sha, "note": clean_note},
+    )
+    log.info("acknowledge_blocked_race: %s (sha %s) acknowledged by %s", task_id, sha, who)
+    return {
+        "ok": True, "task_id": task_id, "pr_url": run.get("pr_url"),
+        "by": who, "at": when, "sha": sha,
+    }
+
+
+def _cleanup_worktree_on_done(wf: WorkflowDef, row: sqlite3.Row) -> None:
     """Free a finished run's worktree the moment its row goes `done` — not later.
 
     `done` is terminal and NOT_CLAIMABLE: nothing ever reworks a `done` row, so nothing
@@ -3383,11 +3470,66 @@ def _cleanup_worktree_on_done(repo_path: Path, row: sqlite3.Row) -> None:
     if not wt_path.is_dir():
         return
     try:
-        remove_worktree(repo_path, wt_path)
+        remove_worktree(wf.path.parent, wt_path, resolve_workspace_root(wf))
     except NotAWorktree as e:
         log.error("task %s: REFUSED to clean up its worktree — %s. Clear the row's "
                   "worktree_path (it is not a worktree) before this task completes again.",
                   row["task_id"], e)
+
+
+def _reap_terminal_windows(conn: sqlite3.Connection, workflow_path: str) -> int:
+    """🧟 CMX-329 (issue #403). Kill a straggler tmux window left behind by a run that has
+    already gone TERMINAL — ``done`` or ``closed``, and ONLY those two.
+
+    Every terminal transition already fires a single best-effort ``tmux kill-window`` at the
+    moment it happens (``mark_awaiting_review``, the reconcile branches above) — but each of
+    those is fire-and-forget: `_kill_window` never checks its own exit code, and nothing ever
+    revisits a call that silently failed (a transient tmux hiccup, or the self-kill race of an
+    agent's own `chela task-finished` tearing down the very window that command is running
+    in). The worktree still gets freed on schedule (`_cleanup_worktree_on_done` runs
+    regardless), so the run itself looks perfectly done — it is only the window that lingers,
+    now sitting in a directory that no longer exists (`(deleted)` in `chela status` and the
+    dashboard wall, then "agent status unavailable" once the cached cwd expires). Observed
+    three times on 2026-08-24 with no special trigger: three ordinary merges, three survivors.
+
+    This is the self-healing second chance: called every tick, it re-checks EVERY terminal row
+    of THIS workflow, not just the ones that just transitioned, so a straggler from a PRIOR
+    tick (or one this daemon didn't even see transition, e.g. `chela merge`'s own worktree
+    removal happening between ticks) still gets caught on the next pass.
+
+    ⛔ Terminal-only, no exceptions — a run still `needs_human` or `awaiting_review` may yet
+    matter: a human can still act on its window, and a rework can still re-spawn into it.
+    Nothing here ever touches a non-terminal row; the WHERE clause is the whole guard.
+
+    ⛔ Ownership, not coincidence — a window is only ever killed when BOTH its `window_id` is
+    on record AND the row's `window_epoch` matches the tmux server running RIGHT NOW
+    (:mod:`chela.epoch`). tmux hands out `@N` per SERVER and never recycles one within a
+    server's life, but a restart renumbers from `@0` again — so an id stamped under a dead
+    epoch naming something live now is a coincidence, not this run's window, and killing it
+    would take out an unrelated agent that happens to hold that number today (CMX-48: a wrong
+    wid is worse than no wid). An unreadable current epoch (no tmux, no server) verifies
+    NOTHING, so nothing is killed — the same fail-closed shape as `epoch.is_dangling`.
+    """
+    now_epoch = epoch.current()
+    if not now_epoch:
+        return 0
+    rows = conn.execute(
+        "SELECT window_id FROM runs WHERE workflow_path=? AND status IN ('done', 'closed') "
+        "AND window_id IS NOT NULL AND window_epoch=?",
+        (workflow_path, now_epoch),
+    ).fetchall()
+    if not rows:
+        return 0
+    live_ids = _tmux_window_ids()
+    reaped = 0
+    for row in rows:
+        window_id = row["window_id"]
+        if window_id in live_ids:
+            _kill_window(window_id)
+            reaped += 1
+            log.info("Reaped straggler window %s — its run is terminal but its tmux "
+                      "window was still alive", window_id)
+    return reaped
 
 
 def _prune_done_rows(
@@ -3441,6 +3583,21 @@ def _tmux_windows() -> set[str]:
     return set(line.strip() for line in out.stdout.splitlines() if line.strip())
 
 
+def _tmux_window_ids() -> set[str]:
+    """Live tmux window ``@N`` addresses in ``TMUX_SESSION`` — companion to
+    :func:`_tmux_windows`, which returns NAMES. :func:`_reap_terminal_windows` needs ids:
+    a name is not a safe kill target across two rows that (however rarely) share one, and
+    it carries no epoch to verify against.
+    """
+    out = subprocess.run(
+        ["tmux", "list-windows", "-t", TMUX_SESSION, "-F", "#{window_id}"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        return set()
+    return set(line.strip() for line in out.stdout.splitlines() if line.strip())
+
+
 def poll_interval(workflow_path: str | Path, default: float | None = None) -> float:
     """The effective seconds between ticks for this workflow.
 
@@ -3469,7 +3626,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
         "judged": 0, "judge_lost": 0, "judge_stranded": 0,
-        "trial_ledger": 0, "disk_budget_exceeded": False,
+        "trial_ledger": 0, "disk_budget_exceeded": False, "window_reaped": 0,
         "blocked": True, "error": error, "held": False, "hold_expired": False,
         "refused": refused,
     }
@@ -3550,6 +3707,7 @@ def tick(workflow_path: str | Path) -> dict:
         "judge_stranded": 0,
         "trial_ledger": 0,
         "disk_budget_exceeded": False,
+        "window_reaped": 0,
         "blocked": blocked,
         "error": status.error,
         "held": False,
@@ -3695,7 +3853,7 @@ def tick(workflow_path: str | Path) -> dict:
                     "UPDATE runs SET status='done' WHERE task_id=?", (row["task_id"],)
                 )
                 conn.commit()
-                _cleanup_worktree_on_done(wf.path.parent, row)
+                _cleanup_worktree_on_done(wf, row)
                 merged_in_tick += 1
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (PR merged)", row["task_id"])
@@ -3739,7 +3897,7 @@ def tick(workflow_path: str | Path) -> dict:
                     "UPDATE runs SET status='closed' WHERE task_id=?", (row["task_id"],)
                 )
                 conn.commit()
-                _cleanup_worktree_on_done(wf.path.parent, row)
+                _cleanup_worktree_on_done(wf, row)
                 summary["reconciled_closed"] += 1
                 log.info("Task %s closed (PR closed without merging)", row["task_id"])
                 continue
@@ -3775,7 +3933,7 @@ def tick(workflow_path: str | Path) -> dict:
                     (pr_url, row["task_id"]),
                 )
                 conn.commit()
-                _cleanup_worktree_on_done(wf.path.parent, row)
+                _cleanup_worktree_on_done(wf, row)
                 merged_in_tick += 1
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (removed from source, window killed)", row["task_id"])
@@ -3806,7 +3964,7 @@ def tick(workflow_path: str | Path) -> dict:
                         (_now(), pr_url, pr_state, row["task_id"]),
                     )
                     conn.commit()
-                    _cleanup_worktree_on_done(wf.path.parent, row)
+                    _cleanup_worktree_on_done(wf, row)
                     summary["reconciled_done"] += 1
                     log.info("Task %s done (removed from source, merged PR found)", row["task_id"])
                     continue
@@ -3948,6 +4106,14 @@ def tick(workflow_path: str | Path) -> dict:
                         "Task %s idle at empty prompt; re-sent prompt to %s",
                         row["task_id"], window,
                     )
+
+        # 1a2. 🧟 Reap any straggler window left behind by a run that is ALREADY terminal —
+        # this tick's own done/closed transitions above, and any from a prior tick whose
+        # in-line kill silently failed (see _reap_terminal_windows). Commit first, same
+        # reason as 1b below: the transitions just made must be durable before this reads
+        # them back.
+        conn.commit()
+        summary["window_reaped"] = _reap_terminal_windows(conn, str(wf.path))
 
         # 1b. Strike the merged tasks in the tracker — we are its only writer.
         # Commit the reconcile first so the `done` rows are durable: if the
@@ -4843,7 +5009,10 @@ existing PR updates itself.
    the rendered value…). If the shape the verdict just found isn't catalogued yet, add ONE
    NEW FILE to `docs/defeat_shapes/` as part of this fix — it is the only durable place that
    knowledge can land; the judge's own checkout is thrown away when it finishes and cannot
-   commit it itself.
+   commit it itself. Number it off your own CMX task number, not a listing guess —
+   `NNN-slug.md`, and a second file on the same branch suffixes a lowercase letter (task
+   `cmx-339` → `339-slug.md`, then `339b-slug.md`) — full rule in `docs/DEFEAT_SHAPES.md`'s
+   'How this catalog grows'.
 3. Re-run the SAME validation your original task told you to run (this repo's CI gates are
    not optional) — and if a REQUIRED MUTATION SET is above, your self-check experiments
    file MUST include each one **verbatim** (copy the JSON, do not retype it) alongside any
@@ -5081,8 +5250,20 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
 
     root = resolve_workspace_root(wf)
     want = Path(row["worktree_path"]) if row["worktree_path"] else (root / task_id)
+    # ⛔ CMX-325 (issue #398): `want` came straight off the DB row here — including a row
+    # written before this fix existed, or one hand-repaired without also clearing a bad
+    # `worktree_path`. Never hand a path outside the worktrees root to `attach_worktree`
+    # as the CREATE target: `_find_existing_worktree` refuses to REUSE such a path, but a
+    # poisoned `want` would still be where a fresh `git worktree add` gets pointed. Fall
+    # back to the normal `root / task_id` location instead of trusting the stored value.
+    if not is_inside_root(want, root):
+        log.warning(
+            "Task %s: recorded worktree_path %s is OUTSIDE the worktrees root %s — "
+            "ignoring it and using %s instead", task_id, want, root, root / task_id,
+        )
+        want = root / task_id
     try:
-        worktree, attached = attach_worktree(repo_path, branch, want)
+        worktree, attached = attach_worktree(repo_path, branch, want, root)
     except BranchGone as e:
         _escalate(
             conn, row, f"rework: {e} — the work it points at is unreachable",
@@ -5370,7 +5551,7 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
     conn.commit()
 
     try:
-        created = detached_worktree(wf.path.parent, sha, worktree)[1]
+        created = detached_worktree(wf.path.parent, sha, worktree, resolve_workspace_root(wf))[1]
     except (BranchGone, subprocess.CalledProcessError) as e:
         detail = getattr(e, "stderr", None) or str(e)
         if isinstance(detail, bytes):
@@ -5502,7 +5683,10 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         if alive:
             _kill_windows_named(window)
         try:
-            remove_worktree(wf.path.parent, judge.judge_worktree_path(wf, row["task_id"]))
+            remove_worktree(
+                wf.path.parent, judge.judge_worktree_path(wf, row["task_id"]),
+                resolve_workspace_root(wf),
+            )
         except NotAWorktree as e:                      # CMX-320 — never crash the reaper
             log.error("judge reap for %s: REFUSED to remove %s", row["task_id"], e)
         handed_over += 1

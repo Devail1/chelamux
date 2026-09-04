@@ -888,16 +888,33 @@ def _checks_report(declared: dict[str, dict], obs: Observation) -> list[Finding]
 # dispatcher's own per-sha trigger (`judge_sha != pr_head_sha`) re-judges the new head
 # automatically. A row whose head has NOT moved keeps reporting no matter how many times its
 # `status` changes underneath it — that is the guarantee `_blocked_race_resolved` encodes.
+#
+# 🧊 CMX-336: that guarantee has a hole once the PR is MERGED or CLOSED — the branch is gone,
+# nothing will ever push a new head past `judge_sha` again, so `sha != head` can never fire
+# and the row would nag `chela doctor` (and the ntfy notifier it feeds) forever, with no
+# operator exit besides hand-editing `scheduler.db` — exactly what CMX-323 exists to stop
+# asking people to do. `dispatcher.acknowledge_blocked_race` is that exit: it stamps
+# `blocked_race_ack_by`/`_at`/`_note`/`_sha` on the row WITHOUT touching `judge_state`,
+# `judge_detail`, or `judge_sha` themselves — the verdict genuinely WAS blocking, and
+# rewriting it would falsify the record (the ⛔ this ticket's dispatch brief names
+# explicitly). `_blocked_race_resolved` treats a row as resolved once acknowledged FOR THE
+# EXACT `judge_sha` it currently carries — an acknowledgement stamped under an older sha
+# (the row raced again since) does not silence the new occurrence, and an unacknowledged row
+# keeps reporting exactly as before, merged/closed or not.
 
 
 def _blocked_race_resolved(row: dict) -> bool:
-    """True once the PR's head has moved past the commit the race was recorded on — the
-    only thing (besides `judge_state` itself changing, which already takes a row out of the
-    scan below) that resolves a `J_BLOCKED_RACE` row. A missing `judge_sha` or `pr_head_sha`
-    proves nothing either way, so it does NOT resolve — silence is not a signal here."""
+    """True once the PR's head has moved past the commit the race was recorded on, OR the
+    row has been explicitly acknowledged (CMX-336) for its CURRENT `judge_sha` — the only
+    two things (besides `judge_state` itself changing, which already takes a row out of the
+    scan below) that resolve a `J_BLOCKED_RACE` row. A missing `judge_sha` or `pr_head_sha`
+    proves nothing either way, so it does NOT resolve on its own — silence is not a signal
+    here; only an explicit acknowledgement or an actually-moved head does."""
     sha = row.get("judge_sha")
     head = row.get("pr_head_sha")
-    return bool(sha and head and sha != head)
+    if sha and head and sha != head:
+        return True
+    return bool(row.get("blocked_race_ack_at")) and row.get("blocked_race_ack_sha") == sha
 
 
 def _blocked_race_scan() -> dict[str, dict]:
@@ -1149,6 +1166,23 @@ def _installed_report(expected: dict, obs: Observation) -> list[Finding]:
         )]
     out: list[Finding] = []
     for copy in copies:
+        if hooks.marketplace_missing(copy):
+            out.append(Finding(
+                ERROR,
+                f"the installed plugin's marketplace {copy.marketplace!r} is GONE — "
+                "Claude Code CANNOT LOAD IT AT ALL",
+                f"{copy.manifest} still reads fine (and may even match the rendered "
+                "manifest byte-for-byte) — this is not a stale-hooks problem, it is a "
+                f"load failure: `claude plugin list` reports `chela@{copy.marketplace}` "
+                "as failed to load because its marketplace is no longer in Claude Code's "
+                f"own registry ({hooks.plugins_dir() / 'known_marketplaces.json'}). No "
+                "hook from this copy runs until the marketplace is re-added by hand — "
+                f"`claude plugin marketplace add <path-or-url-to-the-{copy.marketplace}-"
+                "marketplace>` — chela does not know where it came from, so it cannot "
+                "guess. Then `chela update` (to refresh the plugin under it) and restart "
+                "your agent windows.",
+            ))
+            continue
         if copy.hooks is None:
             out.append(Finding(
                 ERROR, f"cannot verify the INSTALLED plugin at {copy.manifest}",

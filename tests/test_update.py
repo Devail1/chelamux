@@ -110,6 +110,13 @@ def _install_plugin(
     return root
 
 
+def _register_marketplaces(*names: str) -> None:
+    """Claude Code's own registry of marketplaces it currently knows about (CMX-321) —
+    dropping an entry here is independent of `installed_plugins.json` and the cache."""
+    path = hooks.plugins_dir() / "known_marketplaces.json"
+    path.write_text(json.dumps({name: {} for name in names}), encoding="utf-8")
+
+
 # --- apply_stuck_after_seconds: the ceiling must be DERIVED, not an independent literal -
 
 def test_stuck_after_ceiling_is_derived_from_the_timeout_constants():
@@ -538,6 +545,41 @@ def test_plugin_refresh_needed_when_unreadable(checkout):
 
 def test_plugin_refresh_not_needed_when_nothing_is_installed(checkout):
     assert update._plugin_refresh_needed([]) is False
+
+
+def test_plugin_refresh_needed_when_marketplace_gone(checkout):
+    """🔴 THE LOAD-BEARING GUARD for CMX-321: a manifest with ZERO drift still needs a
+    refresh attempt when its marketplace has vanished from Claude Code's own registry —
+    `installed_hooks_stale()` and `copy.hooks is None` are both blind to this, since it is
+    not a manifest problem at all."""
+    _install_plugin(marketplace="acme")
+    _register_marketplaces("some-other-marketplace")
+    copies = hooks.installed_plugins()
+    assert copies[0].hooks is not None            # manifest reads clean...
+    assert main.doctor.installed_hooks_stale() is False  # ...and it's not the drift arm...
+    assert hooks.marketplace_missing(copies[0])   # ...but the marketplace itself is gone
+    assert update._plugin_refresh_needed(copies) is True
+
+
+def test_refresh_plugin_if_needed_runs_when_marketplace_gone(checkout, monkeypatch):
+    """The attempt must actually fire (and therefore surface a `plugin_error`) even with
+    no drift — silently skipping it here is exactly how CMX-321 stayed invisible until
+    something else happened to trigger a refresh."""
+    _install_plugin(marketplace="acme")
+    _register_marketplaces("some-other-marketplace")
+    calls = []
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        calls.append(args)
+        return _FakeCP(returncode=1, stderr="Marketplace acme not found")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    updated, error = update._refresh_plugin_if_needed(checkout)
+
+    assert calls, "the marketplace-gone gate must have actually driven claude, not skipped"
+    assert updated == []
+    assert "not found" in error
 
 
 def test_refresh_plugin_if_needed_skips_quietly_when_matching(checkout, monkeypatch):
@@ -970,6 +1012,64 @@ def test_cli_check_flag_never_calls_apply(checkout, upstream, monkeypatch):
     main.cmd_update(argparse.Namespace(check=True))
 
 
+def test_cli_check_flag_reports_up_to_date_with_upstream_and_no_drift(checkout, monkeypatch, capsys):
+    """The positive half of the CMX-328 guards below: a branch WITH an upstream and
+    nothing behind must still say `up to date` — proving the new no-upstream handling
+    didn't turn `--check` into a blanket complainer."""
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+
+    main.cmd_update(argparse.Namespace(check=True))
+
+    assert capsys.readouterr().out.strip() == "up to date"
+
+
+def test_cli_check_flag_reports_unknown_when_no_upstream_is_configured(checkout, monkeypatch, capsys):
+    """CMX-328 (issue #412): `commits_behind()` already answers `ok=True, error="no
+    upstream configured..."` for a branch with no upstream — unknowable, not a pass.
+    `--check` must say so and exit nonzero, never print `up to date`."""
+    _git(checkout, "checkout", "-q", "-b", "scratch", "--no-track")
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+
+    with pytest.raises(SystemExit) as exc:
+        main.cmd_update(argparse.Namespace(check=True))
+
+    assert exc.value.code != 0
+    out = capsys.readouterr().out
+    assert "up to date" not in out
+    assert "no upstream" in out
+
+
+def test_cli_check_flag_prints_the_ACTUAL_reason_when_the_fetch_itself_fails(
+    checkout, monkeypatch, capsys,
+):
+    """The SECOND input for `status.error` on the `--check` surface (round 7).
+
+    The test above is the only one that reaches this print, so `status.error` was pinned
+    at exactly one value and `print("update --check: no upstream")` read back identically
+    — a checkout whose fetch timed out would be told `no upstream`. This also covers the
+    `not status.ok` half of the condition, which had no `--check` test at all.
+
+    Same shape round 6 closed for the behind-count (1 and 2) and the blip seed (5 and 12):
+    one value can always be hardcoded, two cannot.
+    """
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(
+        update, "commits_behind",
+        lambda *a, **k: update.UpdateStatus(
+            ok=False, error="git rev-list failed: connection timed out"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main.cmd_update(argparse.Namespace(check=True))
+
+    assert exc.value.code != 0
+    out = capsys.readouterr().out
+    assert "connection timed out" in out, (
+        f"--check must print the ACTUAL reason, not a fixed string: {out!r}"
+    )
+    assert "no upstream" not in out  # the other input's reason must not be what surfaces
+
+
 def test_cli_without_check_does_call_apply(checkout, monkeypatch):
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
     called = []
@@ -1033,6 +1133,93 @@ def test_update_prints_the_plugin_refresh_failure(checkout, monkeypatch, capsys)
     assert "boom" in out
 
 
+def test_update_does_not_print_a_bare_success_line_when_the_plugin_refresh_failed(
+    checkout, monkeypatch, capsys,
+):
+    """CMX-321: the git/deps/services half genuinely succeeded here (`behind_before=4`,
+    four services restarted) — but a `plugin_error` means the whole POINT of the command
+    (agents running current hooks) did not happen, and a bare ✅ read as unqualified
+    success while that failure sat in an easy-to-miss ⚠️ line underneath it, in the wild."""
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=4,
+        restarted=["chela-daemon", "chela-dashboard", "chela-telegram", "chela-agent-terminals"],
+        plugin_error="marketplace update (chela): Marketplace chela not found"))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    out = capsys.readouterr().out
+    assert "✅" not in out
+    assert "4 commit(s)" in out                    # the real outcome is still reported...
+    assert "did NOT succeed" in out                # ...but not as an unqualified success
+    assert "could not refresh the installed plugin" in out
+
+
+def test_update_still_prints_a_success_line_without_a_plugin_error(checkout, monkeypatch, capsys):
+    """The downgrade above must be conditional on `plugin_error` — an ordinary successful
+    pull with a healthy plugin keeps its ✅."""
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=1, restarted=["chela-daemon"]))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    assert "✅" in capsys.readouterr().out
+
+
+def test_update_names_a_gone_marketplace_distinctly_from_stale_hooks(checkout, monkeypatch, capsys):
+    """The product fix half of CMX-321: this must not be discoverable only via `chela
+    doctor` after the fact — `chela update` itself has to say the plugin will not load,
+    in wording that is not "stale" (stale means old-but-working; this is not working).
+
+    `installed_hooks_stale` is pinned True (not False) on purpose: the gone-marketplace
+    report and the stale-hooks report are mutually exclusive by an `elif` in
+    `chela/main.py` — with both arms true, only the load-failure message may print. A
+    `False` pin here would pass whether that branch were `if` or `elif`, since the stale
+    arm would never fire either way.
+    """
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=0))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: True)
+    # "acme" (not "chela") on purpose — "chela" appears in this message for reasons that
+    # have nothing to do with the slug (`chela update`, "chela cannot..."), so pinning the
+    # slug with the tool's own name can never fail when the slug is rendered blank.
+    _install_plugin(marketplace="acme")
+    _register_marketplaces("anthropic-agent-skills")
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    out = capsys.readouterr().out
+    assert "will NOT LOAD" in out
+    assert "acme" in out
+    assert "claude plugin marketplace add" in out
+    assert "hooks still look stale" not in out
+
+
+def test_update_does_not_warn_about_a_healthy_registered_plugin(checkout, monkeypatch, capsys):
+    """Issue #416, the follow-up half of the CMX-321 `[MUTATION]` verdict on #409: a copy
+    that is both installed AND still registered in `known_marketplaces.json` is healthy —
+    `hooks.marketplace_missing` is False for it — and must never be told it will not load.
+    A widened comprehension (`if copy.marketplace or hooks.marketplace_missing(copy)`)
+    would fire on every registered copy's truthy `marketplace` alone; this is the case
+    every existing `cmd_update` test skips, since only one of them installs a plugin at
+    all and that one's marketplace is genuinely gone."""
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=0))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
+    _install_plugin(marketplace="acme")
+    _register_marketplaces("acme")
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    out = capsys.readouterr().out
+    assert "will NOT LOAD" not in out
+
+
 def test_update_reports_the_plugin_refresh_even_when_already_up_to_date(
     checkout, monkeypatch, capsys,
 ):
@@ -1093,7 +1280,8 @@ def _tick(repo, previously_behind, monkeypatch):
 
 def test_notifier_never_pulls(checkout, upstream, git_calls, monkeypatch):
     _commit(upstream, "new.txt", "new\n")
-    monkeypatch.setattr(update, "notify", _StubNotify(enabled=False))
+    stub = _StubNotify(enabled=False)
+    monkeypatch.setattr(update, "notify", stub)
     before_head = subprocess.run(
         ["git", "-C", str(checkout), "rev-parse", "HEAD"],
         check=True, capture_output=True, text=True,
@@ -1103,6 +1291,7 @@ def test_notifier_never_pulls(checkout, upstream, git_calls, monkeypatch):
 
     assert behind == 1
     assert not any(args and args[0] in ("pull", "merge") for args in git_calls)
+    assert stub.sent == []                             # disabled notifier must not push
     after_head = subprocess.run(
         ["git", "-C", str(checkout), "rev-parse", "HEAD"],
         check=True, capture_output=True, text=True,
@@ -1122,6 +1311,16 @@ def test_notifier_logs_and_notifies_exactly_once_across_repeated_ticks(checkout,
     assert behind == 1
     assert len(stub.sent) == 1                          # not one per tick
     assert sum(1 for r in caplog.records if "update available" in r.getMessage()) == 1
+    # ⭐ The COUNT, pinned here at 1 — `test_notifier_fires_when_a_checkout_that_was_unknown
+    # _later_falls_genuinely_behind` pins it at 2. Two different behind-values in the same
+    # suite is what makes `status.behind` unhardcodeable: rounds 4-6 each pinned a single
+    # value and the judge hardcoded a mutant to exactly it, three times running.
+    assert "1 commit(s) behind" in stub.sent[0][0], (
+        f"the push must carry the ACTUAL behind-count, not a fixed one: {stub.sent[0][0]!r}"
+    )
+    assert any("1 commit(s) behind" in r.getMessage() for r in caplog.records), (
+        "the log line must carry the ACTUAL behind-count, not a fixed one"
+    )
 
 
 def test_notifier_stays_quiet_when_nothing_is_behind(checkout, monkeypatch):
@@ -1132,6 +1331,241 @@ def test_notifier_stays_quiet_when_nothing_is_behind(checkout, monkeypatch):
 
     assert behind == 0
     assert stub.sent == []
+
+
+def test_notifier_warns_once_on_transition_to_unknown_state(checkout, monkeypatch, caplog):
+    """CMX-328 (issue #412): a branch with no upstream is UNKNOWABLE, not silence — the
+    daemon must say so once (edge-triggered like a real update), or it never notifies at
+    all, forever, on a checkout that will never be able to answer."""
+    _git(checkout, "checkout", "-q", "-b", "scratch", "--no-track")
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        behind = _tick(checkout, 0, monkeypatch)
+        behind = _tick(checkout, behind, monkeypatch)   # a second tick, still unknown
+
+    assert update.UNKNOWN_BEHIND < 0     # pin: a real behind-count is never negative
+    assert behind == update.UNKNOWN_BEHIND
+    assert len(stub.sent) == 1                          # not one per tick
+    # DEFEAT_SHAPES #322 / #328: the literal title/prefix alone survives a mutation that
+    # blanks the INTERPOLATED reason — assert the actual reason text made it into both the
+    # push body and the log line, not just that a send/log happened at all.
+    message, title = stub.sent[0]
+    assert "no upstream" in message
+    assert title == "chela: update status unknown"
+    unknown_records = [r for r in caplog.records if "update status unknown" in r.getMessage()]
+    assert len(unknown_records) == 1
+
+
+def test_notifier_warns_about_unknown_even_when_it_was_ALREADY_behind(
+    checkout, monkeypatch, caplog,
+):
+    """The unknown-state edge must fire on the transition into unknown FROM ANY prior
+    state, not only from 0 (round 8).
+
+    Every other test reaching this branch enters with ``previously_behind == 0``, so the
+    edge was pinned at exactly one input and could be narrowed from ``!= UNKNOWN_BEHIND``
+    to ``== 0`` while staying green. The failure that hides behind that narrowing is the
+    exact one this PR exists to remove: a daemon that has already announced a real
+    behind-count (here 2) and then LOSES its upstream — a rebase onto a deleted remote
+    branch, a renamed default — would get nothing at all and latch silent forever, which
+    is worse than the original bug, because now the operator has seen it working.
+    """
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(
+        update, "commits_behind",
+        lambda *a, **k: update.UpdateStatus(
+            ok=True, behind=0, error="no upstream configured for this branch"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        behind = update.check_and_notify(2)   # ⭐ NOT 0 — it had already notified a real update
+
+    assert behind == update.UNKNOWN_BEHIND
+    assert len(stub.sent) == 1, (
+        "a checkout that was already behind and then lost its upstream got NO warning — "
+        "the unknown edge only fires from 0, so the daemon latches silent forever"
+    )
+    assert any("update status unknown" in r.getMessage() for r in caplog.records)
+
+
+def test_notifier_unknown_state_carries_the_ACTUAL_reason_not_a_fixed_string(
+    checkout, monkeypatch, caplog,
+):
+    """The SECOND input for `status.error` on the push and log surfaces (round 7).
+
+    Every other test reaching this branch produces the one `ok=True`-with-error value
+    `commits_behind` returns in practice ("no upstream configured for this branch"), so
+    `notify.send("no upstream", ...)` and `log.warning(..., "no upstream")` both read back
+    identically to the real interpolation. A second, different reason makes a constant
+    impossible: it cannot be both.
+    """
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(
+        update, "commits_behind",
+        lambda *a, **k: update.UpdateStatus(
+            ok=True, behind=0, error="detached HEAD — no branch to compare against"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        behind = update.check_and_notify(0)
+
+    assert behind == update.UNKNOWN_BEHIND
+    message, title = stub.sent[0]
+    assert "detached HEAD" in message, (
+        f"the push body must carry the ACTUAL reason, not a fixed string: {message!r}"
+    )
+    assert "no upstream" not in message
+    assert title == "chela: update status unknown"
+    records = [r for r in caplog.records if "update status unknown" in r.getMessage()]
+    assert "detached HEAD" in records[0].getMessage(), (
+        "the log line must carry the ACTUAL reason, not a fixed string"
+    )
+
+def test_notifier_respects_disabled_notify_on_transition_to_unknown_state(checkout, monkeypatch, caplog):
+    """CMX-328 rework round 2: the unknown-state branch's `notify.send` call is gated on
+    `notify.enabled()` in the source, but every existing test of this branch constructs
+    `_StubNotify(enabled=True)` — none of them would notice if that gate were deleted. Mirror
+    `test_notifier_never_pulls` for the new unknown branch (round 3: that test now also binds
+    its stub and asserts `.sent == []`, so both branches' gates are actually proven, not just
+    scenery): the log line is unconditional (an operator reading the log still learns about
+    it), but the push must not fire when disabled."""
+    _git(checkout, "checkout", "-q", "-b", "scratch", "--no-track")
+    stub = _StubNotify(enabled=False)
+    monkeypatch.setattr(update, "notify", stub)
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        behind = _tick(checkout, 0, monkeypatch)
+
+    assert behind == update.UNKNOWN_BEHIND
+    assert stub.sent == []                              # disabled notifier must not push
+    assert any("update status unknown" in r.getMessage() for r in caplog.records)
+
+
+def test_notifier_fires_when_a_checkout_that_was_unknown_later_falls_genuinely_behind(
+    checkout, upstream, monkeypatch, caplog,
+):
+    """CMX-328 rework: `check_and_notify`'s real-update edge was widened from
+    `previously_behind == 0` to `previously_behind <= 0` specifically so a checkout latched
+    at `UNKNOWN_BEHIND` (-1) — e.g. one with no upstream configured yet — can still notify
+    once it gains an upstream and that upstream moves ahead. Narrowing the edge back to
+    `== 0` makes this exact sequence go permanently silent: -1 never equals 0, so the
+    daemon would never announce this checkout's very first real update. Every OTHER
+    notifier test enters `previously_behind` already at 0, so none of them would notice
+    that regression."""
+    _git(checkout, "checkout", "-q", "-b", "scratch", "--no-track")   # starts with no upstream
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        behind = _tick(checkout, 0, monkeypatch)              # tick 1: unknown -> UNKNOWN_BEHIND
+        assert behind == update.UNKNOWN_BEHIND
+
+        _git(checkout, "branch", "--set-upstream-to=origin/main", "scratch")  # `upstream` fixture is `-b main`
+        _commit(upstream, "new.txt", "new\n")
+        _commit(upstream, "new2.txt", "new2\n")
+        behind = _tick(checkout, behind, monkeypatch)          # tick 2: -1 -> genuinely behind
+
+    assert behind == 2
+    titles = [title for _, title in stub.sent]
+    assert titles == ["chela: update status unknown", "chela: update available"], (
+        "a checkout that transitions straight from UNKNOWN to genuinely behind must still "
+        "get the real-update notification — narrowing `previously_behind <= 0` back to "
+        "`== 0` silences it forever since -1 never equals 0"
+    )
+    # DEFEAT_SHAPES #322/#328 (round 4, tightened round 5): the title alone survives a
+    # mutation that blanks the INTERPOLATED body/log-arg on the real-update branch — assert
+    # the actual behind-count made it into both the push body and the log line, not just the
+    # title. Two upstream commits (behind == 2) so a mutant hardcoding the count to the
+    # fixture's old single-commit value (1) is distinguishable from the real, passed-through
+    # `status.behind`.
+    real_update_message = stub.sent[1][0]
+    assert "2 commit(s) behind" in real_update_message
+    available_records = [r for r in caplog.records if "update available" in r.getMessage()]
+    assert len(available_records) == 1
+    assert "2 commit(s) behind" in available_records[0].getMessage()
+
+
+@pytest.mark.parametrize("seed", [5, 12, update.UNKNOWN_BEHIND])
+def test_notifier_blip_does_not_latch_the_unknown_sentinel(seed, checkout, monkeypatch, caplog):
+    """CMX-328 rework round 4 (tightened round 5): a transient ``git fetch`` failure
+    (``status.ok is False``) must return the caller's OWN ``previously_behind`` unchanged,
+    never the ``UNKNOWN_BEHIND`` sentinel. Before this PR, that return value was always a
+    real, non-negative behind-count, so mis-returning there cost at most one
+    duplicate/missing notice. The sentinel makes it load-bearing: if a blip ever returns
+    ``UNKNOWN_BEHIND`` while the checkout is actually fine, the very next tick sees
+    ``previously_behind == UNKNOWN_BEHIND`` already and the ``!= UNKNOWN_BEHIND`` edge in
+    the unknown-state branch never fires again — a single blip permanently mutes the
+    unknown-state warning this PR exists to add. Driven with TWO seeds (5 and 12), and that
+    is the point: rounds 4, 5 and 6 each re-picked a single fixture value, and each time the
+    judge hardcoded a mutant to exactly that value and stayed green. Whatever ONE constant
+    the suite pins, ``return <that constant>`` is indistinguishable from a real pass-through.
+    Two distinct inputs end the regress permanently — no fixed return can be both 5 and 12.
+
+    ``UNKNOWN_BEHIND`` (-1) is the third seed and it is not decoration: this branch exists
+    so a blip can never move the sentinel state machine, and a clamp like
+    ``max(previously_behind, 0)`` reads back unchanged for 5 and 12 while silently resetting
+    a latched checkout to 0 — after which the next unknown-state tick sees ``!= UNKNOWN_BEHIND``
+    and re-warns, restoring the once-per-tick drumbeat the edge-trigger exists to prevent."""
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(
+        update, "commits_behind",
+        lambda *a, **k: update.UpdateStatus(ok=False, error="git fetch timed out"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        behind = update.check_and_notify(seed)   # a checkout `seed` commits behind hits a blip
+
+    assert behind == seed, (
+        f"a blip must return the caller's own previously_behind ({seed}), not the "
+        "UNKNOWN_BEHIND sentinel and not any other fixed value — latching here would "
+        "permanently silence the unknown-state warning on every later tick"
+    )
+    assert stub.sent == []
+    assert not any(
+        "update status unknown" in r.getMessage() or "update available" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_notifier_stays_quiet_on_a_second_tick_where_the_behind_count_grew(
+    checkout, upstream, monkeypatch, caplog,
+):
+    """CMX-335 (issue #428): every other multi-tick test in this file drives
+    ``check_and_notify`` twice against the SAME ``status.behind`` value, so
+    ``status.behind > 0 and previously_behind <= 0`` and the broader (wrong)
+    ``previously_behind != status.behind`` are indistinguishable — both fire on tick 1 and
+    both stay quiet on tick 2 when nothing changed upstream in between. Real checkouts don't
+    freeze like that: the operator stays behind while more commits land. Tick twice with
+    the upstream gaining a commit BETWEEN ticks, so ``status.behind`` genuinely changes
+    (1 -> 2) while ``previously_behind`` stays positive throughout. The correct edge (already
+    notified once, still behind) must stay quiet; ``!= status.behind`` would push again."""
+    _commit(upstream, "new.txt", "new\n")
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        behind = _tick(checkout, 0, monkeypatch)            # tick 1: 0 -> 1, fires
+        assert behind == 1
+        assert len(stub.sent) == 1
+
+        _commit(upstream, "new2.txt", "new2\n")             # upstream moves further ahead
+        behind = _tick(checkout, behind, monkeypatch)        # tick 2: previously_behind=1, behind=2
+
+    assert behind == 2
+    assert len(stub.sent) == 1, (
+        "a checkout that was already behind and fell further behind must stay quiet on the "
+        "second tick — it was already notified once and nothing requires a fresh push per "
+        "additional commit; `previously_behind != status.behind` would fire again here"
+    )
+    assert sum(1 for r in caplog.records if "update available" in r.getMessage()) == 1
 
 
 # --- auto_apply_sweep (CMX-148 part 2): the fully-UNATTENDED half, opt-in ------------
@@ -1322,6 +1756,67 @@ def test_the_daemon_loop_still_only_informs_when_auto_update_is_off(monkeypatch)
     assert calls == [0], (
         "cmd_run did NOT call update.check_and_notify on the loop pass with auto-update "
         "off — the default informer path is unwired"
+    )
+
+
+def _run_two_daemon_ticks(monkeypatch) -> None:
+    """Like `_run_one_daemon_tick`, but drives exactly two iterations and forces the
+    update-check branch due on BOTH — `UPDATE_CHECK_INTERVAL_SECONDS` pinned to 0 so tick
+    2's real-clock gap (however small) still satisfies `now - last_update_check >= 0`."""
+    monkeypatch.setattr(main.GracefulShutdown, "install", lambda self: self)
+
+    remaining = 2
+
+    def stop_after_two(self, _seconds):
+        nonlocal remaining
+        remaining -= 1
+        if remaining <= 0:
+            self._event.set()
+            return True
+        return False
+
+    monkeypatch.setattr(main.GracefulShutdown, "wait", stop_after_two)
+    monkeypatch.setattr(main, "UPDATE_CHECK_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(main.scheduler, "init", lambda: None)
+    monkeypatch.setattr(main.scheduler, "tick", lambda: 0)
+    monkeypatch.setattr(main.agent_manager, "reconcile_window_names", lambda: [])
+    monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", [])
+    monkeypatch.setattr(main.notify, "enabled", lambda: False)
+    monkeypatch.setattr(main.rooms, "has_pending", lambda: False)
+    monkeypatch.setattr(main.inbox, "enabled", lambda: False)
+    monkeypatch.setattr(main.capabilities, "effective", lambda: [])
+    monkeypatch.setattr(main.capabilities, "announce", lambda caps, log: None)
+    monkeypatch.setattr(main.capabilities, "publish", lambda caps, boot_id: None)
+    monkeypatch.setattr(main.agent_manager, "start_background_refresh", lambda *a, **kw: None)
+    monkeypatch.setattr(main.update, "auto_apply_enabled", lambda: False)
+
+
+def test_the_daemon_loop_carries_check_and_notifys_return_value_into_the_next_tick(monkeypatch):
+    """🔴 WIRING (production call-site): `check_and_notify`'s whole edge-triggered contract
+    depends on the daemon actually remembering what it returned — `update_behind_seen =
+    update.check_and_notify(update_behind_seen)`. Dropping the assignment (calling it as a
+    bare statement) makes `cmd_run` re-derive from the stale initial value every tick
+    instead of threading the real return forward. Every unit test of `check_and_notify`
+    itself stays green under that mutation because none of them drive `cmd_run` across more
+    than one tick — this one does, and asserts tick 2 is handed exactly what tick 1
+    returned, not the loop's original seed value."""
+    _run_two_daemon_ticks(monkeypatch)
+    seen_values = []
+
+    def fake_check_and_notify(previously_behind):
+        seen_values.append(previously_behind)
+        # first call returns something OTHER than the loop's initial seed (0), so a dropped
+        # assignment is distinguishable from "tick 2 happened to see 0 anyway".
+        return 7 if previously_behind == 0 else previously_behind
+
+    monkeypatch.setattr(main.update, "check_and_notify", fake_check_and_notify)
+
+    main.cmd_run(SimpleNamespace())
+
+    assert seen_values == [0, 7], (
+        f"tick 2 must be called with tick 1's RETURN value (7), not the loop's initial seed "
+        f"(0) — got {seen_values}; the daemon is not threading check_and_notify's sentinel "
+        "across ticks, so the once-per-transition edge is dead in production"
     )
 
 

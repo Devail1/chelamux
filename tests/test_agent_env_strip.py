@@ -145,3 +145,42 @@ def test_spawn_judge_strips_notify_url_too(monkeypatch, tmp_path):
     claude_idx = next(i for i, line in enumerate(sent) if line.startswith("claude"))
     assert unset_idx < claude_idx
     assert "CHELA_NOTIFY_URL" in sent[unset_idx]
+
+
+def test_the_suite_itself_cannot_push_a_real_notification(monkeypatch):
+    """🔴 THE FENCE. CMX-115 (above) strips `CHELA_NOTIFY_URL` from every tmux-spawned
+    agent and judge — but NOT from a maintainer running `pytest` or `chela judge run` in
+    their own shell, which is how this suite is normally run by hand. That gap paged the
+    operator 109 times on 2026-09-01, from
+    `test_auto_apply_sweep_never_calls_apply_with_a_bespoke_repo_arg` — which drives the
+    real `auto_apply_sweep()` and, alone among its three siblings, never stubbed `notify`.
+
+    conftest's `_no_live_notifications` shuts both doors. This pins both halves: delete
+    the `NOTIFY_URL` blanking and the first assert goes red on any machine with a notifier
+    configured; delete the `_post` guard and the second does, everywhere.
+    """
+    import pytest
+
+    import chela.notify as notify
+
+    # Door 1: every `if notify.enabled()` call site is gated off, even though the
+    # operator's real environment has CHELA_NOTIFY_URL set.
+    assert notify.enabled() is False, (
+        "conftest did not blank NOTIFY_URL — every `if notify.enabled():` call site in the "
+        "product is live, and the suite can page the operator"
+    )
+
+    # Door 2: and a test that sets its own URL still cannot reach the network. `send()`
+    # wraps its transport in `except Exception` and returns False, so a guard deriving
+    # from Exception would be SWALLOWED and read as an ordinary send failure — the escape
+    # must propagate.
+    monkeypatch.setattr(notify, "NOTIFY_URL", "https://ntfy.sh/not-a-real-topic")
+    assert notify.enabled() is True  # the fixture's blanking is genuinely overridden here
+
+    with pytest.raises(BaseException) as excinfo:
+        notify.send("this must never leave the machine", title="chela: test escape")
+
+    assert type(excinfo.value).__name__ == "LiveNotificationEscape", (
+        f"send() did not raise the fence's escape (got {type(excinfo.value).__name__}) — "
+        "if it returned False instead, the guard derives from Exception and send() ate it"
+    )

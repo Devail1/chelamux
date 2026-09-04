@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -305,8 +306,16 @@ def test_cmd_watch_windowless_registration_is_END_TO_END_real(tmp_path, monkeypa
 # is never called ... or a reverted dispatch merges silently."
 
 def _drive(argv):
-    """Run ``main.main()`` with ``argv`` as process args (argparse reads ``sys.argv``)."""
-    with patch.object(sys, "argv", ["chela", *argv]):
+    """Run ``main.main()`` with ``argv`` as process args (argparse reads ``sys.argv``).
+
+    ⚠️ Pins ``COLUMNS`` wide enough that argparse never wraps a help line. Left to the
+    ambient terminal, a narrow width (COLUMNS=70 reproduces it) makes textwrap break on the
+    hyphen in ``telegram-bindings.json``, splitting it into ``telegram-`` / ``bindings.json``
+    across two lines — collapsing whitespace then re-inserts a space at the hyphen, turning
+    one word into two and breaking any assertion that expects it contiguous. CI happened to
+    pass at its own ≥80 width, which hid this for reasons unrelated to what the guard checks.
+    """
+    with patch.object(sys, "argv", ["chela", *argv]), patch.dict(os.environ, {"COLUMNS": "200"}):
         main.main()
 
 
@@ -1195,6 +1204,23 @@ def test_a_dry_run_still_makes_the_read_only_claim(live_stores, capsys):
     assert "were re-stamped at their new address" not in out
 
 
+def test_a_dry_run_points_the_operator_at_retire_empty_for_a_no_op_MANUAL_row(
+        live_stores, capsys):
+    """🔴 GUARD (CMX-323, DEFEAT_SHAPES #323): the dry run's read-only contract must name
+    `chela restore --retire-empty` as the way to clear a MANUAL row with nothing on record —
+    that pointer IS the discoverability half of the fix; before it, the only documented way to
+    clear one was hand-editing a store. Dropping just this clause still leaves the read-only
+    claim itself intact (see the guard above), so it needs its own assertion.
+    """
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+
+    out = " ".join(capsys.readouterr().out.split())
+    assert "chela restore --retire-empty` for a MANUAL row with nothing on record" in out, (
+        f"the dry run must point the operator at --retire-empty. Got:\n{out}"
+    )
+
+
 def test_apply_prints_each_rows_DETAIL_not_just_its_outcome(live_stores, capsys):
     """🔴 GUARD (CMX-196 round 5): `ApplyResult.detail` is the per-row explanation `--apply`
     prints beside each outcome, and it is the only place the report says WHY.
@@ -1266,3 +1292,221 @@ def test_applys_help_states_the_permanent_bindings_exclusion(capsys):
         f"--apply's help must state the permanent bindings exclusion. Got:\n{out}"
     )
     assert "reconcile tick reaps it" in out, "...and that the daemon handles it instead"
+
+
+# --- END-TO-END, `--retire-empty` (CMX-323: the narrow write half) ------------------------
+
+@pytest.fixture()
+def live_stores_with_empty_manual(live_stores, tmp_path):
+    """`live_stores` plus one MORE session-ids row with NOTHING on record at all: no roster
+    join (unlike `@5`, which the roster resolves to `CWD_FIVE`/`SID_DEAD` and therefore
+    still carries a relaunch command). `@8` is exactly the row `--retire-empty` exists to
+    clear — see `chela.restore.retire_empty`.
+    """
+    chela_dir = tmp_path / "chela"
+    session_ids = json.loads((chela_dir / "session-ids.json").read_text())
+    session_ids["@8"] = {"session_id": "dddddddd-9999-8888-7777-666666666666", "epoch": OLD}
+    (chela_dir / "session-ids.json").write_text(json.dumps(session_ids))
+    return live_stores
+
+
+def test_chela_restore_retire_empty_clears_ONLY_the_row_with_nothing_on_record(
+        live_stores_with_empty_manual, tmp_path, capsys):
+    chela_dir = tmp_path / "chela"
+    bindings_before = (chela_dir / "telegram-bindings.json").read_bytes()
+
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--retire-empty"])
+
+    assert exc.value.code == 1, (
+        "MANUAL rows with a cwd/session are still unresolved after --retire-empty — the "
+        "command must still fail loudly"
+    )
+    out = capsys.readouterr().out
+    # ⛔ NOT bare substrings of the whole report (`'=> archived' in out`) — that shape passed
+    # even when `restore.retire_empty(verdicts)` was called with the verdicts REVERSED at the
+    # `cmd_restore` call site (judge round 3, CMX-323): the multiset of outcome words is
+    # unchanged by a reversal, only which ROW each word lands beside. Pin each row's own line.
+    # ⚠️ `@5`/`@7`/`@8` each appear TWICE (once in the orphan list, once in the verdict
+    # block) — the "MANUAL"/"REVIVABLE" marker scopes `_line_with` to the verdict line.
+    archived_line = _line_with(out, "[session-ids]", "@8", "MANUAL")
+    assert "=> archived" in archived_line, (
+        f"the nothing-on-record row must be reported archived on ITS OWN line. "
+        f"Got: {archived_line!r}"
+    )
+    bindings_line = _line_with(out, "[telegram.bindings]", "@2")
+    assert "=> left-to-daemon" in bindings_line, (
+        f"the bindings row must be reported left-to-daemon on ITS OWN line. "
+        f"Got: {bindings_line!r}"
+    )
+    kept_manual_line = _line_with(out, "[session-ids]", "@5", "MANUAL")
+    assert "=> kept" in kept_manual_line, (
+        f"the MANUAL row that still carries a cwd/session must be reported kept on ITS OWN "
+        f"line. Got: {kept_manual_line!r}"
+    )
+    revivable_line = _line_with(out, "[session-ids]", "@7", "REVIVABLE")
+    assert "=> kept" in revivable_line, (
+        f"the REVIVABLE row must be reported kept on ITS OWN line. Got: {revivable_line!r}"
+    )
+    orchestrator_line = _line_with(out, "[inbox.orchestrator]", "@1")
+    assert "=> kept" in orchestrator_line, (
+        f"the orchestrator row (has a cwd/session) must be reported kept on ITS OWN line. "
+        f"Got: {orchestrator_line!r}"
+    )
+
+    session_ids = json.loads((chela_dir / "session-ids.json").read_text())
+    assert "@8" not in session_ids, "the empty row must be retired"
+    assert "@5" in session_ids, (
+        "a MANUAL row that still carries a cwd/session must survive --retire-empty untouched"
+    )
+    assert "@7" in session_ids, "a REVIVABLE row must never be re-stamped by --retire-empty"
+    assert session_ids["@7"]["session_id"] == SID_LIVE and session_ids["@7"]["epoch"] == OLD, (
+        "--retire-empty must not touch a REVIVABLE row's bytes at all"
+    )
+
+    inbox_store = json.loads((chela_dir / "inbox.json").read_text())
+    assert inbox_store["orchestrator"] == "@1", (
+        "the orchestrator row still carries a cwd/session (roster join) and must be KEPT"
+    )
+
+    assert (chela_dir / "telegram-bindings.json").read_bytes() == bindings_before, (
+        "--retire-empty must never write telegram-bindings.json, empty row or not"
+    )
+
+    archived = json.loads((chela_dir / "roster-archive.json").read_text())["archived"]
+    assert [(a["store"], a["wid"]) for a in archived] == [("session-ids", "@8")], (
+        "only the empty row may land in the archive"
+    )
+
+
+def test_retire_empty_must_not_repeat_the_READ_ONLY_claim_it_just_broke(live_stores, capsys):
+    """🔴 GUARD (CMX-323, DEFEAT_SHAPES #323): `--retire-empty` writes too, so it must NOT
+    print the dry run's "report only — chela restore never writes to a store" claim either.
+    CMX-196 round 4 guarded exactly this contradiction for `--apply`
+    (`test_apply_must_not_repeat_the_READ_ONLY_claim_it_just_broke`), but the guard was never
+    mirrored onto `--retire-empty` when this ticket added it as a third branch of the same
+    `if apply_flag: ... elif retire_flag: ... else:` chain. Neutralise the `elif retire_flag:`
+    branch (`elif False and retire_flag:`) and `--retire-empty` archives-then-removes the
+    no-op MANUAL row and then tells the operator it never writes — the report contradicting
+    what the command just did.
+    """
+    with pytest.raises(SystemExit):
+        _drive(["restore", "--retire-empty"])
+
+    out = capsys.readouterr().out
+    assert "never writes to a store" not in out, (
+        f"--retire-empty claimed to be read-only AFTER writing. Got:\n{out}"
+    )
+    # 🔴 GUARD (judge round 4, tightened round 6): every clause, mirroring the --apply guard
+    # above (`test_apply_must_not_repeat_the_READ_ONLY_claim_it_just_broke`). This summary is
+    # the only record the operator gets of a write that already happened, and it covers TWO
+    # dispositions — what was retired, and what was deliberately left alone. The KEPT clause
+    # covers the MAJORITY of rows on a narrower flag, so it is not optional: drop it and every
+    # REVIVABLE/still-actionable-MANUAL row's fate goes unstated, silently. Asserted per clause
+    # rather than on the first sentence, since a mutation that blanks the KEPT clause alone
+    # leaves the retired-rows clause (asserted below) untouched and green.
+    #
+    # ⛔ Round 6 found the bare fragment "was left untouched" true of a DIFFERENT, WRONG
+    # sentence too: "Every REVIVABLE row and every MANUAL row was left untouched" (dropping
+    # "that still carries a relaunch command") — which flatly contradicts the retired-rows
+    # clause printed one sentence earlier and still contains the fragment. Assert the whole
+    # contiguous sentence instead, so dropping the qualifier breaks the match.
+    #
+    # ⛔ Round 1 (rework) found the first two clauses split exactly either side of the
+    # RETIREMENT CRITERION's parenthetical ("(no cwd, or no session)") without ever
+    # asserting it — so a mutation flipping OR to AND there (silently narrowing which rows
+    # --retire-empty is willing to touch) left both fragments true and the suite green.
+    # Merged into one contiguous clause spanning the parenthetical so that mutation breaks
+    # the match. (docs/defeat_shapes/301: a prose guard pins substrings untouched by the
+    # mutation it was written to catch.)
+    for clause in ("only the MANUAL rows with nothing on record (no cwd, or no session) "
+                   "were archived to roster-archive.json, then removed",
+                   "MANUAL row that still carries a relaunch command was left untouched",
+                   "re-run with --apply once you are ready to write ALL of them"):
+        assert clause in out, (
+            f"--retire-empty's summary lost the {clause!r} clause — that disposition goes "
+            f"unstated. Got:\n{out}"
+        )
+
+
+def test_chela_restore_retire_empty_and_apply_are_mutually_exclusive(live_stores, capsys):
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--apply", "--retire-empty"])
+
+    assert exc.value.code == 2, "argparse must refuse both write flags at once"
+
+
+def test_restores_help_documents_retire_empty(capsys):
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--help"])
+    assert exc.value.code == 0
+    out = " ".join(capsys.readouterr().out.split())
+
+    assert "--retire-empty" in out, "the new flag must be discoverable from --help"
+    assert "NOTHING on record" in out, "...and say what it does, not just that it exists"
+
+
+def test_retire_emptys_help_states_the_permanent_bindings_exclusion(capsys):
+    """🔴 GUARD (CMX-323, DEFEAT_SHAPES #323/#311's own shape, mirrored back onto itself):
+    `test_applys_help_states_the_permanent_bindings_exclusion` proves --apply's help states
+    the exclusion, and `--retire-empty` makes the IDENTICAL contract claim in its own help
+    string. But the only test that reads `--retire-empty`'s help
+    (`test_restores_help_documents_retire_empty`) greps the WHOLE `restore --help` output for
+    unrelated phrases — and --apply's help supplies "telegram-bindings.json is still never
+    written" regardless, so blanking that clause from --retire-empty's own help text would
+    satisfy every existing test while an operator reading `--retire-empty`'s help alone
+    (`--help` output for one flag can be filtered by tools/pagers) loses the promise.
+
+    Also pins the NARROWNESS promise itself — that every REVIVABLE row and every MANUAL row
+    still carrying a cwd/session is left untouched (judge round 5): that promise is the
+    entire reason the flag exists, and the pre-flight help is the surface an operator reads
+    BEFORE running a flag that writes, not just the post-write summary.
+
+    Scoped past argparse's line-wrapping by matching only within the `--retire-empty` block:
+    ⛔ NOT `out.split("--retire-empty", 1)[1]` — the FIRST occurrence of "--retire-empty" is
+    the usage line (`usage: chela restore [-h] [--apply | --retire-empty]`), so that split's
+    "block" actually contains --apply's own help text too, and --apply supplies both asserted
+    phrases regardless of what --retire-empty's own text says (judge round 5 finding). Split
+    on the LAST occurrence instead — it is the option's own marker and the last option in the
+    group, so the text after it is --retire-empty's help and nothing else's.
+    """
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--help"])
+    assert exc.value.code == 0
+    out = " ".join(capsys.readouterr().out.split())
+
+    retire_empty_block = out.rsplit("--retire-empty", 1)[1]
+    assert "telegram-bindings.json is still never written" in retire_empty_block, (
+        f"--retire-empty's OWN help text must state the permanent bindings exclusion, not "
+        f"rely on --apply's copy of the same sentence. Got:\n{retire_empty_block}"
+    )
+    # ⛔ Round 6 found the split fragments ("Every REVIVABLE row and every MANUAL row" +
+    # "is left untouched") true of the OPPOSITE promise too: dropping "that still carries a
+    # cwd/session" makes the help claim every MANUAL row — not just the empty ones — is left
+    # untouched, which is the exact inverse of what --retire-empty does. Assert the whole
+    # contiguous sentence, plus a negative counterweight for the dropped-qualifier phrasing.
+    assert "every MANUAL row that still carries a cwd/session is left untouched" in retire_empty_block, (
+        f"--retire-empty's help must state the FULL narrowness promise BEFORE the write "
+        f"happens, not just fragments of it. Got:\n{retire_empty_block}"
+    )
+    assert "every MANUAL row is left untouched" not in retire_empty_block, (
+        f"--retire-empty's help must not drop the qualifier — that claims the OPPOSITE of "
+        f"what the flag does. Got:\n{retire_empty_block}"
+    )
+    # 🔴 GUARD (judge round 1 rework): `test_restores_help_documents_retire_empty` only
+    # greps for "NOTHING on record" in isolation, and the sibling assertions above stop at
+    # "telegram-bindings.json is still never written" / the narrowness-promise sentence —
+    # neither one touches the RETIREMENT CRITERION's own parenthetical. A mutation flipping
+    # its OR to AND ("no cwd and no session") narrows what an operator believes the flag
+    # will touch, and left every existing assertion here true. Assert the whole contiguous
+    # sentence, parenthetical included, so that mutation breaks the match.
+    # (docs/defeat_shapes/301: a prose guard pins substrings untouched by the mutation it
+    # was written to catch.)
+    assert (
+        "NOTHING on record (no cwd, or no session — no relaunch command to offer)"
+        in retire_empty_block
+    ), (
+        f"--retire-empty's help must state the RETIREMENT CRITERION correctly — either a "
+        f"missing cwd OR a missing session qualifies, not only both at once. "
+        f"Got:\n{retire_empty_block}"
+    )

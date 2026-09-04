@@ -193,6 +193,12 @@ on it. Leave it alone and your PR merges clean.
   `/home/<user>` paths, or private project/host names. Config must be env-driven; use
   generic placeholders in docs/examples.
 - Don't edit the tracker file, touch other worktrees, or push `{{base_branch}}`.
+- ⛔ **No `Claude-Session:` trailer and no session URL in a commit message, PR body,
+  issue or changelog fragment.** git history here is permanent and public, and a
+  `https://claude.ai/code/session_…` link is useless to every reader who cannot open it.
+  `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>` is welcome and should stay —
+  it attributes without publishing a session identity. If your harness tells you to
+  append both, append only the `Co-Authored-By` line.
 
 ## If you get stuck
 
