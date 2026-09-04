@@ -225,6 +225,29 @@ def test_acknowledge_records_the_explicitly_supplied_by_not_the_env_fallback(tmp
     assert row["blocked_race_ack_by"] == "someone-distinctive"
 
 
+def test_acknowledge_by_whitespace_only_falls_through_to_the_env_chain(tmp_path, monkeypatch):
+    """CMX-342 rework round 5: link 1 of the documented ``$USER``/``$USERNAME``/``"unknown"``
+    fallback chain — a ``--by`` that is present but WHITESPACE-ONLY must be treated the same
+    as no ``--by`` at all, not stamped verbatim. Every other fixture in this file either omits
+    ``by`` entirely or passes a non-blank value, so ``by`` and ``(by or "").strip()`` coincide
+    everywhere else: this is the one fixture where they diverge, and a defeat that drops the
+    ``.strip()`` (``who = (by or "") or os.environ.get(...)``) would still see a truthy
+    ``"   "`` and stamp it verbatim instead of falling through to ``$USER``."""
+    monkeypatch.setenv("USER", "env-fallback-user")
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    result = dispatcher.acknowledge_blocked_race("abc123", by="   ")
+    assert result["by"] == "env-fallback-user", (
+        "a whitespace-only --by must fall through to the $USER/$USERNAME/'unknown' chain, "
+        "not be stamped as-is"
+    )
+
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    assert row["blocked_race_ack_by"] == "env-fallback-user"
+
+
 # --- (a3) the CAS matches a row whose judge_sha is NULL too ------------------------------
 
 def test_acknowledge_matches_a_row_whose_judge_sha_is_null(tmp_path):
