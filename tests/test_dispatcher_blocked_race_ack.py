@@ -563,6 +563,33 @@ def test_acknowledge_event_summary_omits_the_dash_when_there_is_no_note(tmp_path
     )
 
 
+def test_acknowledge_event_summary_omits_the_dash_for_a_whitespace_only_note(tmp_path):
+    """docs/defeat_shapes/342d (judge round on this PR) — the note clause's condition is
+    ``if clean_note`` (the STRIPPED note), not ``if note`` (the raw argument). The previous
+    test above calls with no note at all, so ``note`` and ``clean_note`` are both falsy
+    (``None`` and ``""``) and can't tell the two conditions apart — a defeat that swaps the
+    guard to ``if note`` still passes it.
+
+    A whitespace-only note is the fixture that separates them: ``clean_note`` strips to
+    ``""`` (falsy) while ``note`` itself (``"   "``) stays truthy. The DB column and the
+    payload's ``"note"`` key both already record ``""`` for this input (pre-existing,
+    asserted elsewhere) — the summary must agree and omit the separator too, not render a
+    dangling ``" — "`` with nothing after it.
+    """
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    dispatcher.acknowledge_blocked_race("abc123", by="someone-distinctive", note="   ")
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    summary = events[-1]["summary"]
+    assert "abc123" in summary and "someone-distinctive" in summary
+    assert "—" not in summary, (
+        f"summary {summary!r} carries a note separator for a whitespace-only note"
+    )
+
+
 def test_acknowledge_event_summary_names_the_RESOLVED_task_id_not_the_typed_identifier(
     tmp_path, monkeypatch,
 ):
