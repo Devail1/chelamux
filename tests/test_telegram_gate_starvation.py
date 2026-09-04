@@ -34,6 +34,7 @@ import pytest
 
 from chela import main
 from chela.telegram.gatewatch import PermissionGateWatcher
+from chela.telegram.parser import Message
 
 # A real single-select AskUserQuestion selector (Claude Code 2.1.207) — the same
 # measured render ``tests/test_telegram_panescan.py`` keys its detector tests on.
@@ -507,3 +508,91 @@ def test_cmd_telegram_wires_bot_send_photos_into_the_relay(daemon_env, monkeypat
     assert send_photos is not None, "RegistryRelay built without send_photos wired"
     assert isinstance(getattr(send_photos, "__self__", None), BotSender)
     assert send_photos.__func__.__name__ == "send_photos"
+
+
+# ── CMX-344: the daemon must wire the OPERATOR's CHELA_SHOW_TOOL_CALLS into ──
+# ── the relay's actual BEHAVIOUR, not merely pass a same-named kwarg ─────────
+
+
+class _FakeBotSender:
+    """Stands in for the real `BotSender` the daemon constructs — records every
+    `send()` call so the test can see whether a tool_use event actually reached
+    the wire, not just that some object was built.
+    """
+
+    def __init__(self, *a, **kw):
+        self.calls: list[tuple] = []
+
+    def send(self, text, parse_mode=None, message_thread_id=None, reply_markup=None):
+        self.calls.append((text, parse_mode, message_thread_id, reply_markup))
+        return True
+
+    def send_photos(self, images, message_thread_id=None):
+        return True
+
+    # cmd_telegram also wires post/edit/delete/chat_action into the status line
+    # and the pane watcher (unrelated to this guard) — stubbed so construction
+    # doesn't blow up on a missing attribute.
+    def post(self, *a, **kw):
+        return 1
+
+    def edit(self, *a, **kw):
+        return True
+
+    def delete(self, *a, **kw):
+        return True
+
+    def chat_action(self, *a, **kw):
+        return True
+
+
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+def test_cmd_telegram_wires_show_tool_calls_into_relay_behaviour(
+    daemon_env, monkeypatch, show_tool_calls
+):
+    """🔴 BEHAVIOURAL, not structural. Round 7 of #435 shipped a WIRING guard
+    checking `inspect.signature(...)` for a `files` parameter — that proves
+    SHAPE, not behaviour, and the judge killed it with a transport that does
+    nothing (`lambda method, fields, files: {"ok": True}`), whole suite green,
+    every live image "uploaded" and never sent. This test drives `cmd_telegram`'s
+    REAL construction end-to-end (the daemon reads `SHOW_TOOL_CALLS` at
+    `chela/main.py`'s `RegistryRelay(...)` call, which is what decides whether
+    the image path even runs) and asserts a tool_use event reaches — or is
+    dropped from — the wire accordingly, not merely that a same-named kwarg was
+    forwarded to a constructor.
+    """
+    import chela.telegram as tg
+
+    monkeypatch.setattr(main, "SHOW_TOOL_CALLS", show_tool_calls)
+    monkeypatch.setattr(main, "_outbound_loop", lambda *a, **kw: None)  # foreground; return
+    monkeypatch.setattr(tg, "BotSender", _FakeBotSender)
+
+    made = []
+    real_relay = tg.RegistryRelay
+
+    def _spy(*a, **kw):
+        relay = real_relay(*a, **kw)
+        made.append(relay)
+        return relay
+
+    monkeypatch.setattr(tg, "RegistryRelay", _spy)
+
+    main.cmd_telegram(_tg_args(no_inbound=True))
+
+    assert made, "cmd_telegram never constructed a RegistryRelay"
+    relay = made[0]
+    fake_sender = relay._sender.__self__
+    assert isinstance(fake_sender, _FakeBotSender)
+
+    relay.on_message("@6", Message("assistant", "tool_use", "Bash", tool_name="Bash"))
+
+    if show_tool_calls:
+        assert fake_sender.calls, (
+            "CHELA_SHOW_TOOL_CALLS=true never reached the daemon's relay — a "
+            "tool_use event was dropped despite the operator asking to see it"
+        )
+    else:
+        assert not fake_sender.calls, (
+            "CHELA_SHOW_TOOL_CALLS=false never reached the daemon's relay — a "
+            "tool_use event was sent despite the operator asking to hide it"
+        )
