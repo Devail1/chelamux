@@ -603,6 +603,13 @@ def _promptness_check_try_bodies():
             f"{func.name}: expected exactly one top-level try/finally around its "
             f"`_run_bg` process"
         )
+        assert not tries[0].handlers, (
+            f"{func.name}: its try statement has an `except` clause — a "
+            f"`proc.wait(timeout=...)` TimeoutExpired caught there, before reaching "
+            f"`finally: _reap(proc)`, would never be seen by the PROPERTY block below, "
+            f"which replays only the try BODY (via `_proc_call_run`), never any handler "
+            f"wrapped around it"
+        )
         yield func.name, tries[0].body
 
 
@@ -665,7 +672,14 @@ def test_promptness_checks_are_not_absorbed_into_reap(tmp_path):
     """
     source_text = Path(__file__).read_text()
 
-    for name, body in _promptness_check_try_bodies():
+    sites = list(_promptness_check_try_bodies())
+    assert len(sites) == 2, (
+        f"expected 2 promptness-check call sites in this file (one per name in "
+        f"_PROMPTNESS_CHECK_FUNCS), found {len(sites)} — a guarded function renamed "
+        f"out of sync with _PROMPTNESS_CHECK_FUNCS silently drops out of this loop "
+        f"instead of failing it"
+    )
+    for name, body in sites:
         assert not any(
             isinstance(stmt, ast.Expr)
             and isinstance(stmt.value, ast.Call)
