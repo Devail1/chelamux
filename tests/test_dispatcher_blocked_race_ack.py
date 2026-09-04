@@ -510,6 +510,59 @@ def test_acknowledge_event_payload_records_the_STAMPED_task_id_when_acknowledged
     )
 
 
+def test_acknowledge_event_summary_renders_the_task_id_who_and_note(tmp_path):
+    """docs/defeat_shapes/342b (judge round on this PR) — the ``blocked_race_ack`` event has
+    a THIRD sink of this same acknowledgement, distinct from the DB columns and the payload
+    dict: ``event_log.append``'s own docstring says the ``summary`` string "is what a
+    notification renders". Every test above reads the columns and the payload back
+    independently, but none of them ever reads ``events[-1]["summary"]`` — so a defeat that
+    hardcodes the summary to ``""`` (leaving the payload dict, the DB columns, and the event's
+    mere existence untouched) passed the whole suite.
+
+    This drives the summary's actual content: the task id, who acknowledged it, and the note,
+    all of which the f-string at the call site is documented to render.
+    """
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    dispatcher.acknowledge_blocked_race(
+        "abc123", by="someone-distinctive", note="already shipped, safe to ack",
+    )
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    summary = events[-1]["summary"]
+    assert "abc123" in summary, (
+        f"summary {summary!r} does not name the task — a defeat that empties the summary "
+        "string survives every payload/column assertion, since none of them read it back"
+    )
+    assert "someone-distinctive" in summary, (
+        f"summary {summary!r} does not name who acknowledged it"
+    )
+    assert "already shipped, safe to ack" in summary, (
+        f"summary {summary!r} does not carry the note"
+    )
+
+
+def test_acknowledge_event_summary_omits_the_dash_when_there_is_no_note(tmp_path):
+    """Companion to the summary test above: the note clause is conditional
+    (``f"..." + (f" — {clean_note}" if clean_note else "")``), so a fixture that always
+    supplies a note can't tell "the note is appended" apart from "the note is always
+    appended, even blank" — both look identical to the previous test alone."""
+    with dispatcher._db() as conn:
+        _row(conn)
+
+    dispatcher.acknowledge_blocked_race("abc123", by="someone-distinctive")
+
+    events = [e for e in event_log.read()["events"] if e["type"] == "blocked_race_ack"]
+    assert events, "expected a blocked_race_ack event"
+    summary = events[-1]["summary"]
+    assert "abc123" in summary and "someone-distinctive" in summary
+    assert "—" not in summary, (
+        f"summary {summary!r} carries a note separator with no note given"
+    )
+
+
 def test_acknowledge_by_prefers_env_USER_over_USERNAME_when_both_are_set(tmp_path, monkeypatch):
     """docs/defeat_shapes/342 (CMX-336 round 9, issue #438) — `--by`'s own `--help` documents
     "default: $USER/$USERNAME, else 'unknown'", and that ORDER is the only thing distinguishing
