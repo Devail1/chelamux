@@ -416,7 +416,14 @@ def _reap_order_assertion():
             f"{func.name}: expected exactly one top-level assert pinning the call order, "
             f"found {len(asserts)}"
         )
-        return asserts[0]
+        assert_stmt = asserts[0]
+        preceding = func.body[: func.body.index(assert_stmt)]
+        assert not any(isinstance(stmt, (ast.Return, ast.Raise)) for stmt in preceding), (
+            f"{func.name}: a `return`/`raise` precedes the pinned order assert — it is "
+            f"dead code, never actually reached, so the ORDER claim it names goes "
+            f"unasserted despite the assert's own AST shape being untouched"
+        )
+        return assert_stmt
     raise AssertionError(
         "test_reap_propagates_if_the_child_survives_sigkill_too not found in this file"
     )
@@ -591,6 +598,23 @@ def _wait_timeout_literal(stmt):
     return None
 
 
+def _decorator_forces_unconditional_skip(func):
+    """True if `func` carries `@pytest.mark.skip(...)` outright, or `@pytest.mark.skipif(...)`
+    with a literal (not runtime-computed) condition — i.e. `skipif(True, ...)` /
+    `skipif(False, ...)`, as opposed to a real check like `shutil.which("pgrep") is None`. A
+    site hidden behind either NEVER RUNS regardless of environment, yet its try-body AST is
+    byte-identical to a live site — invisible to every check in this file unless something
+    looks at `func.decorator_list`, not just `func.body`."""
+    for dec in func.decorator_list:
+        if not (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)):
+            continue
+        if dec.func.attr == "skip":
+            return True
+        if dec.func.attr == "skipif" and dec.args and isinstance(dec.args[0], ast.Constant):
+            return True
+    return False
+
+
 def _promptness_check_try_bodies():
     """Yield (function_name, try_body) for the two functions above — the try body, NOT the
     finally body that `_run_bg_teardown_sites` already covers."""
@@ -598,6 +622,12 @@ def _promptness_check_try_bodies():
     for func in ast.walk(tree):
         if not isinstance(func, ast.FunctionDef) or func.name not in _PROMPTNESS_CHECK_FUNCS:
             continue
+        assert not _decorator_forces_unconditional_skip(func), (
+            f"{func.name}: carries a skip/skipif decorator with a literal (always-true) "
+            f"condition — this guarded promptness site would never actually run, no "
+            f"SIGTERM ever sent to a real supervisor, while still being counted, extracted "
+            f"and replayed by every check below as if it executed"
+        )
         tries = [stmt for stmt in func.body if isinstance(stmt, ast.Try)]
         assert len(tries) == 1, (
             f"{func.name}: expected exactly one top-level try/finally around its "
