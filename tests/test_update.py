@@ -842,7 +842,15 @@ def test_apply_restarts_a_stale_service_even_with_nothing_behind(checkout, monke
     landed the commit) but whose running PM2 service still predates it. The early return
     for "nothing to pull" must not ALSO mean "nothing to restart" — `chela update` reported
     success while `chela doctor` kept flagging the service as stale. Reverting the restart
-    check to live only behind the pull (as it did before this fix) turns this red."""
+    check to live only behind the pull (as it did before this fix) turns this red.
+
+    ⛔ TWO services on purpose, one stale and one FRESH. With a single-service `jlist` the
+    judge's mutant that restarts *every* running `chela-*` service produced byte-identical
+    argv to the correct "only what freshness named" — the only-running and the only-stale
+    service were the same object, so no assertion could tell them apart (CMX-346 round 1,
+    SURVIVED). Restarting the whole fleet on a routine no-op update is the failure this
+    guards: it would bounce the operator's Telegram bridge every tick. See
+    docs/defeat_shapes/346-a-single-item-fixture-collapses-every-candidate-source.md."""
     commit_epoch = update._current_commit_epoch(checkout)
     assert commit_epoch is not None
     restart_calls = []
@@ -852,6 +860,8 @@ def test_apply_restarts_a_stale_service_even_with_nothing_behind(checkout, monke
             return _FakeCP(stdout=json.dumps([
                 {"name": "chela-dashboard",
                  "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+                {"name": "chela-telegram",
+                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch + 100) * 1000}},
             ]))
         if args[:2] == ["pm2", "restart"]:
             restart_calls.append(args)
@@ -864,13 +874,18 @@ def test_apply_restarts_a_stale_service_even_with_nothing_behind(checkout, monke
 
     assert result.ok is True
     assert result.behind_before == 0
+    # The FRESH chela-telegram must appear in neither.
     assert result.restarted == ["chela-dashboard"]
     assert restart_calls == [["pm2", "restart", "chela-dashboard"]]
 
 
 def test_apply_never_restarts_a_fresh_service_with_nothing_behind(checkout, monkeypatch):
     """Counterweight: a service that already matches HEAD must not be restarted just
-    because the up-to-date path now checks freshness at all."""
+    because the up-to-date path now checks freshness at all.
+
+    ⛔⛔ The one that matters. A fix that restarts unconditionally passes the stale-service
+    guard above perfectly and bounces every running service on every routine no-op
+    `chela update`."""
     commit_epoch = update._current_commit_epoch(checkout)
     assert commit_epoch is not None
 
@@ -1359,6 +1374,12 @@ def test_update_cli_reports_a_restart_only_catch_up_when_nothing_behind(
     out = capsys.readouterr().out
     assert "nothing to do" not in out
     assert "restarted stale service(s): chela-dashboard" in out
+    # ⭐ And it must carry the ✅ SUCCESS marker. `cmd_update` routes the no-op headline
+    # down a bare `print(headline)` branch and every real action down `print(f"✅ ...")`;
+    # a restart IS a real action. A mutant that reverted the branch's `and not
+    # result.restarted` still printed the right words, unmarked, and survived the two
+    # assertions above (CMX-346 round 1, SURVIVED) — the operator's eye scans for the ✅.
+    assert "✅" in out
 
 
 def test_update_fallback_reminder_leads_with_the_cli_command(checkout, monkeypatch, capsys):
@@ -1766,7 +1787,14 @@ def test_auto_apply_sweep_reports_a_restart_only_catch_up_loudly(checkout, monke
     assert restart_calls == [["pm2", "restart", "chela-dashboard"]]
     assert len(stub.sent) == 1
     assert "restarted stale service(s)" in stub.sent[0][0]
-    assert any("UNATTENDED" in r.getMessage() for r in caplog.records)
+    # ⭐ The WARNING must NAME what it restarted — being loud is not the point, being
+    # loud about WHICH services is. A mutant that logged a bare "restarted stale
+    # service(s)" with the names dropped survived the old "UNATTENDED in the message"
+    # assertion (CMX-346 round 1, SURVIVED): an operator reading the log unattended
+    # cannot tell a one-service catch-up from a whole-fleet bounce.
+    unattended = [r.getMessage() for r in caplog.records if "UNATTENDED" in r.getMessage()]
+    assert len(unattended) == 1
+    assert "chela-dashboard" in unattended[0]
 
 
 def test_auto_apply_sweep_pulls_and_restarts_when_behind(checkout, upstream, monkeypatch, caplog):
