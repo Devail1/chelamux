@@ -47,6 +47,13 @@ hand or by a previous ``apply()`` that reached "pull" but died before "pm2 resta
 that return checks :func:`services_running_stale_code` and restarts what it names before
 returning, instead of reporting success while ``chela doctor`` still flags the services as
 stale.
+
+**...and "nothing to restart" still means "sync first" (issue #453).** The commit that
+made those services stale arrived by a route that never ran ``uv sync`` either — the same
+bare pull / hand merge / rebase / died-mid-``apply()`` causes above — so if it moved
+``uv.lock`` this path restarted new code against old dependencies. It now re-syncs
+immediately before that restart, in the same order ``CONTRIBUTING.md``'s deploy sequence
+uses and the pull path below already follows.
 """
 from __future__ import annotations
 
@@ -559,6 +566,15 @@ def apply(repo: Path | None = None) -> ApplyResult:
         freshness = services_running_stale_code(repo)
         restarted: list[str] = []
         if freshness.ok and freshness.stale:
+            # issue #453: the commit that made these services stale arrived by a route
+            # that never synced (a bare `git pull`, a hand merge, a rebase, or a previous
+            # `apply()` that died between "pull" and "pm2 restart") — it may have moved
+            # `uv.lock`, so restarting onto it without syncing first risks new code against
+            # old dependencies. Same order as the pull path below: sync, then restart.
+            sync_cp = _sh(["uv", "sync", "--all-extras"], cwd=repo)
+            if sync_cp is None or sync_cp.returncode != 0:
+                err = sync_cp.stderr.strip() if sync_cp is not None else "uv sync failed to run"
+                return ApplyResult(ok=False, step="uv-sync", behind_before=0, error=err)
             restart_cp = _sh(["pm2", "restart", *freshness.stale], cwd=repo)
             if restart_cp is None or restart_cp.returncode != 0:
                 err = (restart_cp.stderr.strip() if restart_cp is not None

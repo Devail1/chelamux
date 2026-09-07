@@ -854,7 +854,7 @@ def test_apply_restarts_a_stale_service_even_with_nothing_behind(checkout, monke
     same shape, not a new one."""
     commit_epoch = update._current_commit_epoch(checkout)
     assert commit_epoch is not None
-    restart_calls = []
+    calls = []
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
         if args[:2] == ["pm2", "jlist"]:
@@ -864,8 +864,8 @@ def test_apply_restarts_a_stale_service_even_with_nothing_behind(checkout, monke
                 {"name": "chela-telegram",
                  "pm2_env": {"status": "online", "pm_uptime": (commit_epoch + 100) * 1000}},
             ]))
-        if args[:2] == ["pm2", "restart"]:
-            restart_calls.append(args)
+        if args[:2] == ["uv", "sync"] or args[:2] == ["pm2", "restart"]:
+            calls.append(args)
             return _FakeCP()
         raise AssertionError(f"unexpected _sh call: {args}")
 
@@ -877,7 +877,8 @@ def test_apply_restarts_a_stale_service_even_with_nothing_behind(checkout, monke
     assert result.behind_before == 0
     # The FRESH chela-telegram must appear in neither.
     assert result.restarted == ["chela-dashboard"]
-    assert restart_calls == [["pm2", "restart", "chela-dashboard"]]
+    # issue #453: sync BEFORE restart, same order as the pull path.
+    assert calls == [["uv", "sync", "--all-extras"], ["pm2", "restart", "chela-dashboard"]]
 
 
 def test_apply_never_restarts_a_fresh_service_with_nothing_behind(checkout, monkeypatch):
@@ -951,6 +952,8 @@ def test_apply_fails_at_pm2_restart_when_the_stale_only_restart_fails(checkout, 
                 {"name": "chela-dashboard",
                  "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
             ]))
+        if args[:2] == ["uv", "sync"]:
+            return _FakeCP()
         if args[:2] == ["pm2", "restart"]:
             return _FakeCP(returncode=1, stderr="pm2 daemon unreachable")
         raise AssertionError(f"unexpected _sh call: {args}")
@@ -963,6 +966,68 @@ def test_apply_fails_at_pm2_restart_when_the_stale_only_restart_fails(checkout, 
     assert result.step == "pm2-restart"
     assert "pm2 daemon unreachable" in result.error
     assert result.behind_before == 0
+
+
+def test_apply_syncs_deps_before_restarting_a_stale_only_service(checkout, monkeypatch):
+    """🔴 THE LOAD-BEARING GUARD for issue #453: the restart-only path (CMX-346) restarted
+    whatever `services_running_stale_code()` named WITHOUT re-syncing dependencies first —
+    unlike the pull path fifteen lines below, which syncs before restarting. The commit
+    that made a service stale can arrive by a route that never synced (a bare `git pull`, a
+    hand `main -> dev` back-merge, a rebase, or a previous `apply()` that died between
+    "pull" and "pm2 restart") — if it moved `uv.lock`, restarting without syncing brings the
+    service up on new code against old dependencies. Dropping the `uv sync` call from the
+    restart-only branch turns this red, because `pm2 restart` would then be the first call
+    `fake_sh` sees and this asserts on `sync_calls` instead."""
+    commit_epoch = update._current_commit_epoch(checkout)
+    assert commit_epoch is not None
+    sync_calls = []
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout=json.dumps([
+                {"name": "chela-dashboard",
+                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+            ]))
+        if args[:2] == ["uv", "sync"]:
+            sync_calls.append(args)
+            return _FakeCP(returncode=1, stderr="dependency conflict")
+        raise AssertionError(f"unexpected _sh call: {args} — `pm2 restart` must never run "
+                             "when `uv sync` failed")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    result = update.apply(checkout)
+
+    assert sync_calls == [["uv", "sync", "--all-extras"]]
+    assert result.ok is False
+    assert result.step == "uv-sync"
+    assert "dependency conflict" in result.error
+
+
+def test_apply_never_syncs_deps_when_nothing_is_stale_with_nothing_behind(
+    checkout, monkeypatch,
+):
+    """Counterweight: with no stale service to restart, there is nothing to sync for
+    either — `uv sync` firing on every routine no-op `chela update` would make an
+    already-cheap early return needlessly slow."""
+    commit_epoch = update._current_commit_epoch(checkout)
+    assert commit_epoch is not None
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout=json.dumps([
+                {"name": "chela-dashboard",
+                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch + 100) * 1000}},
+            ]))
+        raise AssertionError(f"unexpected _sh call: {args} — nothing was stale, "
+                             "`uv sync` must never run")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    result = update.apply(checkout)
+
+    assert result.ok is True
+    assert result.restarted == []
 
 
 def test_the_live_pm2_restart_fence_actually_blocks_the_real_call(checkout):
@@ -1801,6 +1866,8 @@ def test_auto_apply_sweep_reports_a_restart_only_catch_up_loudly(checkout, monke
                 {"name": "chela-dashboard",
                  "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
             ]))
+        if args[:2] == ["uv", "sync"]:
+            return _FakeCP()
         if args[:2] == ["pm2", "restart"]:
             restart_calls.append(args)
             return _FakeCP()
