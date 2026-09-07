@@ -1002,6 +1002,36 @@ def test_apply_syncs_deps_before_restarting_a_stale_only_service(checkout, monke
     assert result.ok is False
     assert result.step == "uv-sync"
     assert "dependency conflict" in result.error
+    assert result.behind_before == 0
+
+
+def test_apply_reports_uv_sync_missing_binary_on_the_stale_only_path(checkout, monkeypatch):
+    """Counterpart to the test above: when `_sh` can't even run `uv sync` (missing binary,
+    timeout — both surface as `_sh` returning ``None``, see its docstring), the stale-only
+    path must still report a legible error rather than an empty string. Kills a mutation
+    that dropped the ``sync_cp is None`` fallback message to ``""``."""
+    commit_epoch = update._current_commit_epoch(checkout)
+    assert commit_epoch is not None
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout=json.dumps([
+                {"name": "chela-dashboard",
+                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+            ]))
+        if args[:2] == ["uv", "sync"]:
+            return None
+        raise AssertionError(f"unexpected _sh call: {args} — `pm2 restart` must never run "
+                             "when `uv sync` failed to run")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    result = update.apply(checkout)
+
+    assert result.ok is False
+    assert result.step == "uv-sync"
+    assert result.error == "uv sync failed to run"
+    assert result.behind_before == 0
 
 
 def test_apply_never_syncs_deps_when_nothing_is_stale_with_nothing_behind(
