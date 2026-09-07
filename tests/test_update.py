@@ -908,6 +908,37 @@ def test_apply_never_restarts_a_fresh_service_with_nothing_behind(checkout, monk
     assert result.restarted == []
 
 
+def test_a_service_started_exactly_at_the_threshold_is_not_stale(checkout, monkeypatch):
+    """The boundary itself. `services_running_stale_code` is `pm_uptime/1000 < threshold`,
+    and every other fixture in this file sits 100s to either side of it — bracketing the
+    cap without ever landing ON it, so `<` -> `<=` would survive every one of them. Same
+    shape as docs/defeat_shapes/333 (a bracketing pair that straddles the limit instead of
+    sitting on it), one axis over. A service that started at the very instant the code
+    became current has loaded that code; calling it stale would restart it for nothing,
+    every single update, forever."""
+    commit_epoch = update._current_commit_epoch(checkout)
+    assert commit_epoch is not None
+    arrival_epoch = update._checkout_arrival_epoch(checkout)
+    threshold = max(commit_epoch, arrival_epoch) if arrival_epoch is not None else commit_epoch
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout=json.dumps([
+                {"name": "chela-dashboard",
+                 "pm2_env": {"status": "online", "pm_uptime": threshold * 1000}},
+            ]))
+        raise AssertionError(f"unexpected _sh call: {args} — a service AT the threshold "
+                             "is current, so nothing may be restarted")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    freshness = update.services_running_stale_code(checkout)
+
+    assert freshness.ok is True
+    assert freshness.stale == []
+    assert update.apply(checkout).restarted == []
+
+
 def test_apply_fails_at_pm2_restart_when_the_stale_only_restart_fails(checkout, monkeypatch):
     """The restart-only path must fail the same way the post-pull restart does: a broken
     `pm2` here must not be reported as a successful update."""
