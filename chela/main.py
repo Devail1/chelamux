@@ -2228,7 +2228,14 @@ def cmd_update(args) -> None:
     # rather than letting a bare ✅ read as "you're done" with the real failure buried in
     # an easy-to-miss ⚠️ line underneath it (the exact shape that hid CMX-321 in the wild).
     if result.behind_before == 0:
-        headline = "up to date — nothing to do"
+        if result.restarted:
+            # CMX-346: nothing to pull is not nothing to do — these services were already
+            # running the old code before this run (a prior `apply()` that pulled but died
+            # before restarting, or a bare `git pull` by hand) and update.apply() just
+            # caught up on the restart alone.
+            headline = f"up to date — restarted stale service(s): {', '.join(result.restarted)}"
+        else:
+            headline = "up to date — nothing to do"
     else:
         action = (f"⛑️ recovered from an upstream history rewrite (old HEAD backed up at "
                   f"{result.backup_ref}), reset onto" if result.rewrite_recovered else "pulled")
@@ -2240,7 +2247,7 @@ def cmd_update(args) -> None:
                         "(no running chela-* PM2 services to restart)")
     if result.plugin_error:
         print(f"⚠️  {headline} — but the plugin refresh below did NOT succeed")
-    elif result.behind_before == 0:
+    elif result.behind_before == 0 and not result.restarted:
         print(headline)
     else:
         print(f"✅ {headline}")

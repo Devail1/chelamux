@@ -137,6 +137,28 @@ class LiveStateEscape(BaseException):
     """
 
 
+class LiveProcessEscape(BaseException):
+    """A test ran ``pm2 restart`` for real via ``chela.update._sh``.
+
+    ``update._sh`` is the sole funnel ``chela.update`` shells out through for ``pm2`` and
+    ``uv`` (see :func:`chela.update._online_chela_services`, :func:`chela.update.apply`).
+    A READ (``pm2 jlist``) is tolerated unstubbed elsewhere in this suite — it is how
+    :func:`chela.runtime_truth`'s ``services_current`` fact gets exercised against this
+    box's own real PM2 list in ordinary ``chela doctor`` tests, and it changes nothing.
+    A RESTART is a different order of problem: on a machine that actually runs chela
+    (this one), it hits the operator's REAL ``chela-*`` services. Not hypothetical —
+    CMX-346's own new restart-on-the-up-to-date-path, exercised via ``update.apply()`` /
+    ``auto_apply_sweep()`` in tests that stubbed everything else but this, read this box's
+    real ``pm2 jlist``, found its real services older than a just-cloned test fixture's
+    commit, and ran a real ``pm2 restart chela-daemon chela-dashboard
+    chela-agent-terminals chela-telegram`` — the same shape as the 109-push notify incident
+    :func:`_no_live_notifications` documents, one call site over. ``BaseException`` for the
+    same reason as :class:`LiveStateEscape`: ``_sh`` never raises on its own (it returns
+    ``None`` on a missing binary), so nothing product code does could ever catch this and
+    mask it.
+    """
+
+
 def _is_live_state(path) -> bool:
     try:
         p = Path(os.fspath(path))
@@ -275,3 +297,37 @@ def _no_live_notifications(monkeypatch):
 
     monkeypatch.setattr(notify, "NOTIFY_URL", "")
     monkeypatch.setattr(notify, "_post", guarded)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_pm2_restart(monkeypatch):
+    """The fence for the ONE mutating call in ``chela.update._sh``: no test may run a REAL
+    ``pm2 restart``. See :class:`LiveProcessEscape` for the incident this closes.
+
+    Narrower than :func:`_no_live_state` / :func:`_no_live_notifications` on purpose:
+    ``pm2 jlist`` (a read) is left to run for real when a test doesn't stub ``_sh`` at all,
+    because that is already how ordinary ``chela doctor`` / ``runtime_truth`` tests on this
+    box exercise the ``services_current`` fact, and blocking it too would fail ~20 unrelated
+    tests for a class of read this suite has always tolerated. ``pm2 restart`` is not a
+    read, and a test reaching it for real gets this fence instead of a real restart.
+
+    A test that wants ``update.apply()`` (or anything calling through it —
+    ``services_running_stale_code``, ``auto_apply_sweep``) to actually restart something
+    overrides this with its own ``monkeypatch.setattr(update, "_sh", fake_sh)``, same as
+    today; that call happens inside the test body, after this fixture, so it wins.
+    """
+    from chela import update
+
+    real_sh = update._sh
+
+    def guarded(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "restart"]:
+            raise LiveProcessEscape(
+                f"test ran a REAL `pm2 restart` via chela.update._sh: {args!r} "
+                f"(cwd={cwd!r})\nTests must never restart the operator's real pm2 "
+                "services. Stub `chela.update._sh` (see tests/test_update.py's "
+                "`_FakeCP` / `_pm2_stub`)."
+            )
+        return real_sh(args, cwd, timeout=timeout)
+
+    monkeypatch.setattr(update, "_sh", guarded)

@@ -21,6 +21,9 @@ from types import SimpleNamespace
 import pytest
 
 from chela import config, hooks, main, update
+# ``conftest``, not ``tests.conftest``: tests/ has no __init__.py, so pytest imports the
+# conftest as a TOP-LEVEL module (see tests/test_isolation.py for the same note).
+from conftest import LiveProcessEscape
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -175,8 +178,10 @@ def test_dirty_tree_refuses_and_never_pulls(checkout, upstream, git_calls):
     assert not any(args and args[0] == "pull" for args in git_calls)
 
 
-def test_a_clean_tree_with_nothing_behind_never_calls_pull_either(checkout, git_calls):
+def test_a_clean_tree_with_nothing_behind_never_calls_pull_either(checkout, git_calls, monkeypatch):
     """Sanity: the dirty-check itself must actually run `git status`, not just always pass."""
+    monkeypatch.setattr(update, "_sh",
+                         lambda args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS: _FakeCP(stdout="[]"))
     result = update.apply(checkout)
     assert result.ok is True
     assert result.behind_before == 0
@@ -761,6 +766,8 @@ def test_apply_skips_claude_when_nothing_is_behind_and_the_plugin_is_healthy(
     _install_plugin(marketplace="acme")
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout="[]")
         raise AssertionError(f"unexpected _sh call: {args}")
 
     monkeypatch.setattr(update, "_sh", fake_sh)
@@ -769,6 +776,7 @@ def test_apply_skips_claude_when_nothing_is_behind_and_the_plugin_is_healthy(
 
     assert result.ok is True
     assert result.behind_before == 0
+    assert result.restarted == []
     assert result.plugin_updated == []
     assert result.plugin_error == ""
 
@@ -785,6 +793,8 @@ def test_apply_refreshes_a_stale_plugin_even_with_nothing_behind(checkout, monke
     plugin_calls = []
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout="[]")
         if args[0] == "claude":
             plugin_calls.append(args)
             return _FakeCP()
@@ -809,6 +819,8 @@ def test_apply_is_still_ok_when_the_plugin_refresh_fails_with_nothing_behind(
     _install_plugin(marketplace="acme", unreadable=True)
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout="[]")
         if args[0] == "claude":
             return _FakeCP(returncode=1, stderr="boom")
         raise AssertionError(f"unexpected _sh call: {args}")
@@ -822,6 +834,99 @@ def test_apply_is_still_ok_when_the_plugin_refresh_fails_with_nothing_behind(
     assert result.restarted == []
     assert result.plugin_updated == []
     assert "boom" in result.plugin_error
+
+
+def test_apply_restarts_a_stale_service_even_with_nothing_behind(checkout, monkeypatch):
+    """🔴 THE LOAD-BEARING GUARD for CMX-346: issue #451, hit deploying 0.10.1 — a checkout
+    that was already up to date (a prior `apply()`, or a bare `git pull` by hand, already
+    landed the commit) but whose running PM2 service still predates it. The early return
+    for "nothing to pull" must not ALSO mean "nothing to restart" — `chela update` reported
+    success while `chela doctor` kept flagging the service as stale. Reverting the restart
+    check to live only behind the pull (as it did before this fix) turns this red."""
+    commit_epoch = update._current_commit_epoch(checkout)
+    assert commit_epoch is not None
+    restart_calls = []
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout=json.dumps([
+                {"name": "chela-dashboard",
+                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+            ]))
+        if args[:2] == ["pm2", "restart"]:
+            restart_calls.append(args)
+            return _FakeCP()
+        raise AssertionError(f"unexpected _sh call: {args}")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    result = update.apply(checkout)
+
+    assert result.ok is True
+    assert result.behind_before == 0
+    assert result.restarted == ["chela-dashboard"]
+    assert restart_calls == [["pm2", "restart", "chela-dashboard"]]
+
+
+def test_apply_never_restarts_a_fresh_service_with_nothing_behind(checkout, monkeypatch):
+    """Counterweight: a service that already matches HEAD must not be restarted just
+    because the up-to-date path now checks freshness at all."""
+    commit_epoch = update._current_commit_epoch(checkout)
+    assert commit_epoch is not None
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout=json.dumps([
+                {"name": "chela-dashboard",
+                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch + 100) * 1000}},
+            ]))
+        raise AssertionError(f"unexpected _sh call: {args} — nothing was stale, "
+                             "pm2 restart must never run")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    result = update.apply(checkout)
+
+    assert result.ok is True
+    assert result.behind_before == 0
+    assert result.restarted == []
+
+
+def test_apply_fails_at_pm2_restart_when_the_stale_only_restart_fails(checkout, monkeypatch):
+    """The restart-only path must fail the same way the post-pull restart does: a broken
+    `pm2` here must not be reported as a successful update."""
+    commit_epoch = update._current_commit_epoch(checkout)
+    assert commit_epoch is not None
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout=json.dumps([
+                {"name": "chela-dashboard",
+                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+            ]))
+        if args[:2] == ["pm2", "restart"]:
+            return _FakeCP(returncode=1, stderr="pm2 daemon unreachable")
+        raise AssertionError(f"unexpected _sh call: {args}")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    result = update.apply(checkout)
+
+    assert result.ok is False
+    assert result.step == "pm2-restart"
+    assert "pm2 daemon unreachable" in result.error
+    assert result.behind_before == 0
+
+
+def test_the_live_pm2_restart_fence_actually_blocks_the_real_call(checkout):
+    """The suite-wide safety net (tests/conftest.py's `_no_live_pm2_restart`), doing the
+    one job it exists for. This is not hypothetical: chasing CMX-346's own fix down before
+    this fence existed, a test exercising the exact `behind==0`-but-stale path above ran a
+    REAL `pm2 restart chela-daemon chela-dashboard chela-agent-terminals chela-telegram`
+    against this box's actual services. Delete the fence (or narrow its match past `pm2
+    restart`) and this goes red instead of silently doing it again."""
+    with pytest.raises(LiveProcessEscape):
+        update._sh(["pm2", "restart", "chela-dashboard"], cwd=checkout)
 
 
 # --- `--check` is read-only ----------------------------------------------------------
@@ -1239,6 +1344,23 @@ def test_update_reports_the_plugin_refresh_even_when_already_up_to_date(
     assert "acme" in out
 
 
+def test_update_cli_reports_a_restart_only_catch_up_when_nothing_behind(
+    checkout, monkeypatch, capsys,
+):
+    """CMX-346: `apply()`'s up-to-date path can now restart stale services on its own —
+    the CLI must say so, not print the old blanket "nothing to do" over a real action."""
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+        ok=True, step="done", behind_before=0, restarted=["chela-dashboard"]))
+    monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
+
+    main.cmd_update(argparse.Namespace(check=False))
+
+    out = capsys.readouterr().out
+    assert "nothing to do" not in out
+    assert "restarted stale service(s): chela-dashboard" in out
+
+
 def test_update_fallback_reminder_leads_with_the_cli_command(checkout, monkeypatch, capsys):
     """Nit fix: the reminder must lead with the command that actually works headlessly
     (`claude plugin update chela@<marketplace>`), not `/plugin update` — that Claude Code
@@ -1597,6 +1719,8 @@ def test_auto_apply_sweep_stays_silent_when_nothing_is_behind(checkout, monkeypa
     """🔴 The quiet path: with nothing behind, this must neither log nor notify — a drumbeat
     of "nothing to do" every hour is exactly the log-blindness this module warns against."""
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    monkeypatch.setattr(update, "_sh",
+                         lambda args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS: _FakeCP(stdout="[]"))
     stub = _StubNotify(enabled=True)
     monkeypatch.setattr(update, "notify", stub)
 
@@ -1607,6 +1731,42 @@ def test_auto_apply_sweep_stays_silent_when_nothing_is_behind(checkout, monkeypa
     assert result.behind_before == 0
     assert stub.sent == []
     assert caplog.records == []
+
+
+def test_auto_apply_sweep_reports_a_restart_only_catch_up_loudly(checkout, monkeypatch, caplog):
+    """CMX-346: with nothing behind but a service caught stale, `apply()` now restarts it
+    on its own — that is a real unattended action and must be logged/notified like any
+    other, not folded into the quiet "nothing was behind" path."""
+    commit_epoch = update._current_commit_epoch(checkout)
+    assert commit_epoch is not None
+    monkeypatch.setattr(update, "repo_root", lambda: checkout)
+    restart_calls = []
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout=json.dumps([
+                {"name": "chela-dashboard",
+                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+            ]))
+        if args[:2] == ["pm2", "restart"]:
+            restart_calls.append(args)
+            return _FakeCP()
+        raise AssertionError(f"unexpected _sh call: {args}")
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(update, "notify", stub)
+
+    with caplog.at_level(logging.WARNING, logger=update.log.name):
+        result = update.auto_apply_sweep()
+
+    assert result.ok is True
+    assert result.behind_before == 0
+    assert result.restarted == ["chela-dashboard"]
+    assert restart_calls == [["pm2", "restart", "chela-dashboard"]]
+    assert len(stub.sent) == 1
+    assert "restarted stale service(s)" in stub.sent[0][0]
+    assert any("UNATTENDED" in r.getMessage() for r in caplog.records)
 
 
 def test_auto_apply_sweep_pulls_and_restarts_when_behind(checkout, upstream, monkeypatch, caplog):

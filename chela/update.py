@@ -39,6 +39,14 @@ local checkout has) — both checked BEFORE anything touches disk. Only then doe
 re-sync dependencies with every extra installed (never ``--frozen``, which prunes extras
 nobody asked to remove), and restart whatever ``chela-*`` PM2 services are actually
 running.
+
+**"Nothing to pull" is not "nothing to restart" (CMX-346).** The "already up to date"
+early return mirrors the plugin check above it for the same reason: a service can be
+running stale code with no commit pending right now — the commit was already pulled, by
+hand or by a previous ``apply()`` that reached "pull" but died before "pm2 restart" — so
+that return checks :func:`services_running_stale_code` and restarts what it names before
+returning, instead of reporting success while ``chela doctor`` still flags the services as
+stale.
 """
 from __future__ import annotations
 
@@ -543,12 +551,27 @@ def apply(repo: Path | None = None) -> ApplyResult:
         backup_ref = recovery.backup_ref
 
     if status.behind == 0 and not rewrite_recovered:
+        # A service can go stale with NO commit involved right now too — the commit was
+        # already pulled (by hand, or by a previous `apply()` that reached "pull" but died
+        # before "pm2 restart") — so this must not live behind "we just pulled" either, on
+        # exactly the same reasoning as the plugin check below (CMX-346): the early return
+        # for "nothing to pull" was never a promise that the running services are current.
+        freshness = services_running_stale_code(repo)
+        restarted: list[str] = []
+        if freshness.ok and freshness.stale:
+            restart_cp = _sh(["pm2", "restart", *freshness.stale], cwd=repo)
+            if restart_cp is None or restart_cp.returncode != 0:
+                err = (restart_cp.stderr.strip() if restart_cp is not None
+                       else "pm2 restart failed to run")
+                return ApplyResult(ok=False, step="pm2-restart", behind_before=0, error=err)
+            restarted = freshness.stale
+
         # A plugin can go stale or unreadable with NO commit involved (a cache sweep, a
         # manual uninstall, a failed install) — this check must not live behind "we just
         # pulled", or the exact outage it exists for never gets repaired (see module
         # docstring). It never touches the working tree, so it's safe on this early return.
         plugin_updated, plugin_error = _refresh_plugin_if_needed(repo)
-        return ApplyResult(ok=True, step="done", behind_before=0,
+        return ApplyResult(ok=True, step="done", behind_before=0, restarted=restarted,
                             plugin_updated=plugin_updated, plugin_error=plugin_error)
 
     if not rewrite_recovered:
@@ -634,15 +657,18 @@ def auto_apply_sweep() -> ApplyResult:
 
     Runs the *exact same* :func:`apply` a human's own ``chela update`` runs — nothing here
     re-implements or loosens its dirty-tree / diverged-branch refusal. Stays silent only
-    when there was truly nothing to do (``behind_before == 0`` and ``ok``); every real
-    attempt — a successful pull-and-restart, or a refusal — is logged loudly and (if
-    configured) pushed to :mod:`chela.notify`, because a stuck refusal (e.g. a dirty tree
-    from a manual edit on the host) needs a human's attention to clear, and unlike an
-    auto-merge candidate it will not resolve itself by waiting for the next tick.
+    when there was truly nothing to do (``behind_before == 0``, ``ok``, and nothing
+    restarted — CMX-346: ``apply()``'s up-to-date path can now restart services that were
+    already running stale code with no commit to pull, and that is a real unattended
+    action, not the quiet common case); every real attempt — a pull-and-restart, a
+    restart-only catch-up, or a refusal — is logged loudly and (if configured) pushed to
+    :mod:`chela.notify`, because a stuck refusal (e.g. a dirty tree from a manual edit on
+    the host) needs a human's attention to clear, and unlike an auto-merge candidate it
+    will not resolve itself by waiting for the next tick.
     """
     result = apply()
-    if result.ok and result.behind_before == 0:
-        return result  # nothing was behind — the common case, kept quiet on purpose
+    if result.ok and result.behind_before == 0 and not result.restarted:
+        return result  # nothing was behind and nothing needed restarting — kept quiet
 
     if result.ok:
         restarted = ", ".join(result.restarted) or "no services"
@@ -650,15 +676,24 @@ def auto_apply_sweep() -> ApplyResult:
                         if result.plugin_updated else "")
         if result.plugin_error:
             plugin_note = f"; plugin refresh FAILED: {result.plugin_error}"
-        log.warning(
-            "⬆️⚠️ auto-update: applied %d commit(s) UNATTENDED (CHELA_AUTO_UPDATE) — "
-            "restarted %s%s", result.behind_before, restarted, plugin_note,
-        )
-        if notify.enabled():
-            notify.send(
-                f"applied {result.behind_before} commit(s), restarted {restarted}{plugin_note}",
-                title="chela: auto-update applied",
+        if result.behind_before == 0:
+            log.warning(
+                "⬆️⚠️ auto-update: nothing to pull, but restarted stale service(s) "
+                "UNATTENDED (CHELA_AUTO_UPDATE) — %s%s", restarted, plugin_note,
             )
+            if notify.enabled():
+                notify.send(f"restarted stale service(s): {restarted}{plugin_note}",
+                             title="chela: auto-update restarted stale services")
+        else:
+            log.warning(
+                "⬆️⚠️ auto-update: applied %d commit(s) UNATTENDED (CHELA_AUTO_UPDATE) — "
+                "restarted %s%s", result.behind_before, restarted, plugin_note,
+            )
+            if notify.enabled():
+                notify.send(
+                    f"applied {result.behind_before} commit(s), restarted {restarted}{plugin_note}",
+                    title="chela: auto-update applied",
+                )
     else:
         log.error("auto-update: refused at step %r — %s", result.step, result.error)
         if notify.enabled():
