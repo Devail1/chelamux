@@ -10,6 +10,43 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-09-07
+
+### Added
+
+- **The test suite can no longer restart the operator's real PM2 services.** An autouse
+  fence in `tests/conftest.py` blocks any real `pm2 restart` reaching `chela.update._sh`,
+  with a test proving the fence itself raises. Found the hard way: an existing test that
+  drove `update.apply()` without stubbing `_sh` read this box's actual `pm2 jlist`, found
+  the real `chela-*` services older than a freshly-cloned fixture's commit, and restarted
+  all four — the same shape as the notify module's 109-push incident, one call site over.
+  Reads (`pm2 jlist`) are deliberately still allowed through unstubbed. (CMX-346, #452)
+
+### Fixed
+
+- **`chela update` no longer reports success while leaving services on old code.** Its
+  "already up to date" early return skipped straight past the `pm2 restart`, so a checkout
+  that advanced by any route other than `chela update` itself — a bare `git pull`, a hand
+  `main → dev` back-merge, a rebase, or a previous `apply()` that died between "pull" and
+  "restart" — printed `up to date — nothing to do` while `chela doctor` went on reporting
+  the same services as predating the checked-out commit. The early return now consults
+  `services_running_stale_code()` (the fact `doctor` already reports) and restarts exactly
+  the services it names, on the same "must not live behind *we just pulled*" reasoning
+  already applied to the plugin refresh three lines above it. Services
+  that already match HEAD are still left alone, so a genuine no-op update stays free. The
+  CLI headline, the unattended auto-update log and its notification now name this
+  restart-only catch-up distinctly from both "nothing to do" and "pulled N commits".
+  (CMX-346, #452, issue #451)
+
+- **`chela update`'s restart-only catch-up (CMX-346) now syncs dependencies before
+  restarting a stale service, same as the pull path.** The commit that made a service stale
+  can arrive by a route that never ran `uv sync` (a bare `git pull`, a hand `main → dev`
+  back-merge, a rebase, or a previous `apply()` that died between "pull" and "pm2 restart") —
+  if it moved `uv.lock`, restarting straight onto it risked bringing the service up on new
+  code against old dependencies. The restart-only branch now runs `uv sync --all-extras`
+  first and fails the step (without restarting) if it doesn't succeed, on the same ordering
+  the pull path already used. (CMX-347, #454, issue #453)
+
 ## [0.10.1] — 2026-09-04
 
 ### Fixed
