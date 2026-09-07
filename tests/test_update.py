@@ -850,7 +850,8 @@ def test_apply_restarts_a_stale_service_even_with_nothing_behind(checkout, monke
     service were the same object, so no assertion could tell them apart (CMX-346 round 1,
     SURVIVED). Restarting the whole fleet on a routine no-op update is the failure this
     guards: it would bounce the operator's Telegram bridge every tick. See
-    docs/defeat_shapes/346-a-single-item-fixture-collapses-every-candidate-source.md."""
+    docs/defeat_shapes/306-a-single-item-fixture-collapses-every-candidate-source.md — the
+    same shape, not a new one."""
     commit_epoch = update._current_commit_epoch(checkout)
     assert commit_epoch is not None
     restart_calls = []
