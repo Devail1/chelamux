@@ -76,6 +76,23 @@ function _runPrCell(prUrl) {
     return `<a class="pr-badge" href="${escHtml(prUrl)}" target="_blank" rel="noopener noreferrer" title="${escHtml(prUrl)}">${escHtml(label)}</a>`;
 }
 
+// Progress inside a dispatched run's OWN task list (issue #462) — `r.tasks`, as
+// `tasklists.progress_for_run` computed it server-side: `null` whenever the run
+// couldn't be joined to a live session's task directory (no window yet, a dead
+// epoch, or a session that never wrote one), which must render as NOTHING here —
+// not "0/0" — so an ordinary run with no task data looks exactly as it always has.
+function _taskProgressChip(tasks) {
+    if (!tasks || !tasks.total) return '';
+    const label = `${tasks.done}/${tasks.total}`;
+    const lines = [`${tasks.done} of ${tasks.total} tasks done`];
+    if (tasks.in_progress) lines.push(`In progress: ${tasks.in_progress.subject}`);
+    for (const b of (tasks.blocked || [])) {
+        const by = (b.blocked_by || []).join(', ');
+        lines.push(by ? `"${b.subject}" blocked by ${by}` : `"${b.subject}" blocked`);
+    }
+    return `<span class="task-progress-chip" title="${attrEsc(lines.join('\n'))}">☑ ${escHtml(label)}</span>`;
+}
+
 // data-label + cell-empty: read by the @media (max-width:768px) block to
 // re-flow these tables as stacked label/value rows. _cell() collapses
 // no-content cells so the mobile view hides them entirely instead of
@@ -121,11 +138,12 @@ function _renderRunsTable(runs, label) {
         return `<div style="padding:8px 0; color:var(--text-dim); font-size:11px;">No ${label}.</div>`;
     }
     return '<div class="table-wrap dispatcher-table-wrap"><table class="dispatcher-table"><thead><tr>' +
-        '<th>Task</th><th>Status</th><th>Branch</th><th>Window</th><th>Started</th><th>Ended</th><th>Attempt</th><th>PR</th><th>Error</th><th></th>' +
+        '<th>Task</th><th>Status</th><th>Tasks</th><th>Branch</th><th>Window</th><th>Started</th><th>Ended</th><th>Attempt</th><th>PR</th><th>Error</th><th></th>' +
         '</tr></thead><tbody>' +
         runs.map(r => '<tr data-task-id="' + attrEsc(r.task_id || '') + '">' +
             `<td data-label="Task" title="${attrEsc(r.task_id)}"><b>${escHtml((r.title || '').slice(0, 80))}</b><div class="ts">${escHtml(_runDisplayId(r))}</div></td>` +
             _cell('Status', _runStatusBadge(r.status)) +
+            _cell('Tasks', _taskProgressChip(r.tasks)) +
             _cell('Branch', escHtml(r.branch_name || '')) +
             _cell('Window', escHtml(r.window_name || '')) +
             _cell('Started', shortTime(r.started_at), 'ts') +
@@ -256,7 +274,7 @@ function renderDispatcher(data) {
 
 
 // --- Stage 0: ES-module exports ---
-export { _runDisplayId, _runPrCell, renderDispatcher };
+export { _runDisplayId, _runPrCell, _taskProgressChip, renderDispatcher };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

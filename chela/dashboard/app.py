@@ -27,7 +27,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, diffsurface, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, spawn, starter, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, diffsurface, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, spawn, starter, tasklists, transcripts, update, userconfig
 from chela.dashboard import resources
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -3148,6 +3148,12 @@ def api_dispatcher():
     """
     workflows_payload = []
     all_runs = dispatcher.list_runs()
+    # Fetched ONCE for the whole request (issue #462): session_entries.json is one file
+    # read, current_epoch one tmux round trip, and every run below reuses both instead
+    # of paying for either per-row. See tasklists.resolve_session_id for why a run's own
+    # window_epoch (not just this lookup's) has to agree with current_epoch.
+    session_entries = sessionids.entries()
+    current_epoch = epoch.current()
 
     for wf_path in _discover_dispatch_workflows(all_runs):
         exists = wf_path.exists()
@@ -3284,6 +3290,10 @@ def api_dispatcher():
             # or one the tick has not asked GitHub about yet — carries None, and the
             # frontend renders that as "ci ?", never as green: not-yet-read is not a pass.
             r.setdefault("pr_checks", None)
+            # Per-run task-list progress (issue #462) — None (not "0/0", not an error)
+            # whenever the run can't be joined to a live session's task directory; see
+            # tasklists.progress_for_run.
+            r["tasks"] = tasklists.progress_for_run(r, session_entries, current_epoch)
         entry["active_runs"] = active
         entry["awaiting_review_runs"] = awaiting
         entry["recent_runs"] = recent
