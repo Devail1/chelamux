@@ -118,7 +118,9 @@ def test_a_very_long_detail_is_truncated_not_dropped(monkeypatch):
 
     message = stub.sent[0][0]
     assert "it broke" in message
-    assert 0 < len(message) < len(long_detail)
+    assert "x" * doctor._MAX_DETAIL in message, (
+        "the detail was truncated away to (near) nothing instead of keeping a useful prefix")
+    assert len(message) < len(long_detail)
 
 
 def test_a_finding_with_no_detail_still_notifies_title_only(monkeypatch):
