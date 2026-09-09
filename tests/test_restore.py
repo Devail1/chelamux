@@ -15,6 +15,7 @@ from __future__ import annotations
 
 
 
+from chela import sessions
 from chela.restore import (
     ARCHIVED,
     KEPT,
@@ -28,6 +29,7 @@ from chela.restore import (
     Orphan,
     Verdict,
     _classify,
+    _default_check_resumed,
     apply,
     plan,
     resume,
@@ -1138,6 +1140,148 @@ def test_resume_reports_RESUME_FAILED_and_writes_nothing_when_the_launch_fails()
     )
     assert results[0].action == RESUME_FAILED
     assert results[0].detail == "tmux is unreachable"
+
+
+def test_resume_persists_a_resume_failure_when_the_SPAWN_itself_fails_not_only_on_a_dead_liveness_check():
+    """🔴 GUARD (CMX-353 rework round 1): a spawn failure must persist a resume failure too —
+    not only the liveness-check-failed branch below. Without this, a session whose
+    `spawn_window` keeps erroring (a full tmux server, a bad cwd) is relaunched forever on
+    every `chela restore --resume` pass instead of ever tripping the durable retry bound."""
+    record_calls = []
+    calls, kit = _resume_kit(
+        spawn_window=lambda cwd, command=None: (
+            calls.append(("spawn", cwd, command)),
+            SpawnResult(ok=False, error="tmux is unreachable"))[1],
+        record_resume_failure=lambda sid, reason: (record_calls.append((sid, reason)), 1)[1],
+    )
+    v = _launchable(wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert results[0].action == RESUME_FAILED
+    assert record_calls == [(SID_OK, "tmux is unreachable")], (
+        "a spawn failure must be persisted via record_resume_failure exactly like a dead "
+        "liveness check is, so a session whose launch keeps erroring eventually blocks too"
+    )
+
+
+# --------------------------------------------------------------------------
+# _default_check_resumed — the real liveness logic (CMX-353 rework round 1, issue #468)
+#
+# Every test above exercises `resume()` with `check_resumed` stubbed out entirely, which
+# proves the SEAM is wired (test_resume_liveness_and_retry_bound_defaults_wire_to_the_real_modules
+# below) but never executes a single line of `_default_check_resumed`'s own body. These call
+# the real function directly, faking only its evidence source (`sessions.wid_for_session` /
+# `sessions.panes`) — the same discipline defeat_shapes 319/330 prescribe for a leaf function
+# whose only prior tests monkeypatched it away wholesale.
+# --------------------------------------------------------------------------
+
+def test_default_check_resumed_returns_False_immediately_for_a_falsy_wid(monkeypatch):
+    """🔴 GUARD: 'UNKNOWN MUST NOT READ AS OK' — a falsy wid must return False WITHOUT ever
+    consulting tmux evidence or waiting out the settle window. A spy on `sessions.panes`
+    (the first thing the real alive-check touches) proves the short circuit actually fires,
+    rather than merely happening to return False after looking anyway."""
+    calls = []
+    monkeypatch.setattr(sessions, "panes",
+                         lambda force=False: (calls.append(("panes", force)), {})[1])
+    monkeypatch.setattr(sessions, "wid_for_session",
+                         lambda sid, pane_map=None: (calls.append(("wid_for_session", sid)), None)[1])
+    sleeps = []
+
+    result = _default_check_resumed(None, SID_OK, sleep=sleeps.append)
+
+    assert result is False
+    assert calls == [], "a falsy wid must never even look at tmux evidence"
+    assert sleeps == [], "must return before waiting out the settle window too"
+
+
+def test_default_check_resumed_requires_real_tmux_evidence_not_assumed(monkeypatch):
+    """🔴 GUARD: liveness must come from `sessions.wid_for_session` actually matching the
+    resumed wid — not be assumed true. `wid_for_session` here NEVER returns the resumed
+    wid, so a correct implementation can never build a confirmation streak."""
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+    monkeypatch.setattr(sessions, "wid_for_session", lambda sid, pane_map=None: "@some-other-window")
+
+    result = _default_check_resumed("@99", SID_OK, sleep=lambda s: None,
+                                     attempts=3, confirmations=2, delay=0, settle=0)
+
+    assert result is False, (
+        "wid_for_session never once matched the resumed wid — this must never read as alive"
+    )
+
+
+def test_default_check_resumed_requires_CONSECUTIVE_confirmations(monkeypatch):
+    """🔴 GUARD: the exact measured false positive the module comment documents — a doomed
+    `claude --resume <bad sid>` process reads as alive for one brief window then vanishes.
+    One sighting followed by a gap must NOT read as alive; only `_LIVENESS_CONFIRMATIONS`
+    CONSECUTIVE sightings may. Left at the REAL default `attempts`/`confirmations` (only
+    `sleep` is faked) — passing `confirmations=2` explicitly here would keep this green even
+    if the module's own `_LIVENESS_CONFIRMATIONS` constant were corrupted to 1, the same
+    "override swallows the real value" gap defeat_shapes 352c describes."""
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+    sightings = iter(["@99"] + ["@gone"] * 10)   # alive once, then gone for good
+    monkeypatch.setattr(sessions, "wid_for_session",
+                         lambda sid, pane_map=None: next(sightings))
+
+    result = _default_check_resumed("@99", SID_OK, sleep=lambda s: None)
+
+    assert result is False, (
+        "alive once, then gone, must not satisfy the real CONSECUTIVE-sightings requirement"
+    )
+
+
+def test_default_check_resumed_waits_out_the_settle_window_before_looking_at_all(monkeypatch):
+    """🔴 GUARD: the measured 0.5s-1.9s span in which a doomed relaunch still reads as alive
+    — the real default `settle` (not overridden here) must actually be waited out via
+    `sleep` before the first tmux evidence is even consulted. Pinned to a literal, not to
+    the module's own (possibly-corrupted) constant, so a mutated constant cannot drag this
+    assertion down with it."""
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+    monkeypatch.setattr(sessions, "wid_for_session", lambda sid, pane_map=None: "@99")
+    sleeps = []
+
+    result = _default_check_resumed("@99", SID_OK, sleep=sleeps.append,
+                                     attempts=1, confirmations=1, delay=0.01)
+
+    assert result is True
+    assert sleeps and sleeps[0] == 2.0, (
+        "the real default settle window must be waited out before the first look"
+    )
+
+
+def test_default_check_resumed_forces_a_fresh_pane_read(monkeypatch):
+    """🔴 GUARD: must never trust the 1s `sessions.panes()` cache a concurrent caller may
+    have populated before the resumed process even started — every read must pass
+    `force=True`."""
+    force_flags = []
+    monkeypatch.setattr(sessions, "panes",
+                         lambda force=False: (force_flags.append(force), {})[1])
+    monkeypatch.setattr(sessions, "wid_for_session", lambda sid, pane_map=None: None)
+
+    _default_check_resumed("@99", SID_OK, sleep=lambda s: None,
+                            attempts=1, confirmations=1, delay=0, settle=0)
+
+    assert force_flags == [True], "must never trust the cached pane read"
+
+
+def test_default_check_resumed_confirms_a_genuinely_alive_relaunch(monkeypatch):
+    """⛔⛔ The counterweight that matters (raised on this same PR by a peer session): a
+    liveness check tightened to satisfy the guards above must still confirm a GENUINELY
+    alive relaunch — otherwise a healthy resume reports RESUME_FAILED, a failure record is
+    persisted, and CMX-353's own durable retry bound then refuses to ever retry it again,
+    which is strictly worse than the bug issue #468 was filed to fix. Drives the REAL
+    function, at its REAL default attempts/delay/confirmations/settle (only `sleep` is
+    faked, so the test doesn't actually wait 2+ seconds), against evidence that
+    consistently confirms the resumed wid."""
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+    monkeypatch.setattr(sessions, "wid_for_session",
+                         lambda sid, pane_map=None: "@99" if sid == SID_OK else None)
+    sleeps = []
+
+    result = _default_check_resumed("@99", SID_OK, sleep=sleeps.append)
+
+    assert result is True, "a session consistently confirmed alive must report resumed"
+    assert sleeps[0] == 2.0, "must still wait out the settle window first"
 
 
 # --------------------------------------------------------------------------
