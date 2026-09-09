@@ -49,3 +49,24 @@ checkout of the PR's head, stayed green. Closed by moving the test's port to `60
 command hook) and extending that same sibling test to cover `MessageDisplay`'s command too,
 so both of this repo's command hooks share one port-plumbing guard instead of the new one
 inventing its own, weaker version.
+
+**Also found (CMX-351, PR #464, rework round 1, unrelated ticket — same underlying shape,
+at THREE call sites at once):** `chela/telegram/panescan.py`'s `detect_status` reads
+`manifest.spinners` and `manifest.active_marker`, and `detect_exitplanmode` reads
+`plan_pattern.top`, from the manifest loaded via `detection_manifest.load()` — but the bundled
+manifest's own values (`spinners = "·✻✽✶✳✢"`, `active_marker = "…"`, the `"ExitPlanMode"`
+pattern's `top` regexes matching "Would you like to proceed?") are exactly the literals the
+module used to hardcode before this PR's extraction. The judge replaced each read with a
+hardcoded copy of that same bundled value — `spinners = frozenset("·✻✽✶✳✢")`,
+`active_marker = "…"`, and the `top` search inlined as
+`(re.compile(r"^\s*Would you like to proceed\?"), re.compile(r"^\s*Claude has written up a
+plan"))` — and every existing test, all of which exercise only the bundled manifest with no
+override present, stayed green (`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q`, 3774 passed) under
+all three mutations: a hardcoded copy of today's default is byte-identical to reading it, for
+any pane the bundled-manifest fixtures ever construct. Closed by three new tests, each writing
+an override manifest whose value for that ONE field differs from the bundled default (a `"#"`
+spinner, an `"LIVE"` active_marker, a `"CUSTOM_PROCEED_MARKER"` top regex) and asserting the
+pane using the OVERRIDE's value classifies correctly while the pane using the BUNDLED default's
+value no longer does — the exact "differs from every fallback the code could silently
+substitute" fix this shape's guard form already prescribes, applied to a module-level accessor
+read instead of a function parameter.

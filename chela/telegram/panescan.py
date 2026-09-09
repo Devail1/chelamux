@@ -39,12 +39,17 @@ side-by-side preview box — none of which the others see at all), because mirro
 pane needs no per-shape parser. It is not a fallback: it is the surface you *drive*,
 while the hook payload remains the one you *read* (:mod:`chela.telegram.hookgate`).
 
-This module is the **sole home** for the Claude-Code TUI regexes — the "signatures
-table". Keeping every such pattern here means a Claude Code version bump that
-reworded a prompt is a one-file edit. The permission/bash-approval, AskUserQuestion,
-**status-line and dialog-mirror** patterns are ported from six-ddc/ccbot's
-``terminal_parser.py`` (https://github.com/six-ddc/ccbot, MIT). See the top-level
-NOTICE file for upstream attribution.
+The "signatures table" — the top/bottom marker regexes for every gate/dialog shape,
+plus the status-line glyph set — is **data**, not code (issue #458): it lives in
+:mod:`chela.telegram.detection_manifest` (bundled ``detection_manifest.toml``, with
+a live-reloading ``$CHELA_DIR/agent-detection/claude-code.toml`` override), loaded
+here via :func:`chela.telegram.detection_manifest.load`. A Claude Code version bump
+that reworded a prompt is now a manifest edit, not a code change; this module keeps
+only the scanning *algorithm* that evaluates those patterns against a pane. The
+permission/bash-approval, AskUserQuestion, **status-line and dialog-mirror**
+patterns were originally ported from six-ddc/ccbot's ``terminal_parser.py``
+(https://github.com/six-ddc/ccbot, MIT). See the top-level NOTICE file for upstream
+attribution.
 
 Public API: :func:`detect_permission_gate` returns a :class:`Gate` when the pane
 shows a permission/bash-approval prompt; :func:`detect_askuserquestion` returns an
@@ -59,6 +64,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+
+from chela.telegram import detection_manifest
+from chela.telegram.detection_manifest import Manifest, PatternSpec
+
+
+def _manifest() -> Manifest:
+    """The active pattern manifest — resolved (and, when the override changed,
+    re-resolved) on every call. See :func:`detection_manifest.load`."""
+    return detection_manifest.load()
 
 
 @dataclass(frozen=True)
@@ -83,58 +97,6 @@ class Gate:
     detail: str | None = None
 
 
-@dataclass(frozen=True)
-class _UIPattern:
-    """A top/bottom marker pair that delimits a gate region in the pane.
-
-    Extraction scans lines top-down: the first line matching any ``top`` regex
-    marks the start, the first subsequent line matching any ``bottom`` regex
-    marks the end (both boundary lines included). ``top``/``bottom`` are tuples
-    so a reworded prompt across Claude Code versions is an added alternative, not
-    a rewrite. An empty ``bottom`` extends the region to the last non-empty line.
-    """
-
-    name: str
-    top: tuple[re.Pattern[str], ...]
-    bottom: tuple[re.Pattern[str], ...]
-    min_gap: int = 2  # minimum lines between top and bottom (inclusive)
-
-
-# ── The signatures table (order matters — first match wins) ──────────────
-#
-# Ported verbatim (patterns only) from ccbot terminal_parser.py:74-99 — the
-# PermissionPrompt + BashApproval UIPatterns. To support a new gate wording or a
-# Claude Code version bump, edit ONLY this table.
-GATE_PATTERNS: list[_UIPattern] = [
-    _UIPattern(
-        name="PermissionPrompt",
-        top=(
-            re.compile(r"^\s*Do you want to proceed\?"),
-            re.compile(r"^\s*Do you want to make this edit"),
-            re.compile(r"^\s*Do you want to create \S"),
-            re.compile(r"^\s*Do you want to delete \S"),
-        ),
-        bottom=(re.compile(r"^\s*Esc to cancel"),),
-    ),
-    _UIPattern(
-        # Permission menu with numbered choices (no "Esc to cancel" line)
-        name="PermissionPrompt",
-        top=(re.compile(r"^\s*❯\s*1\.\s*Yes"),),
-        bottom=(),
-        min_gap=2,
-    ),
-    _UIPattern(
-        # Bash command approval
-        name="BashApproval",
-        top=(
-            re.compile(r"^\s*Bash command\s*$"),
-            re.compile(r"^\s*This command requires approval"),
-        ),
-        bottom=(re.compile(r"^\s*Esc to cancel"),),
-    ),
-]
-
-
 _RE_LONG_DASH = re.compile(r"^─{5,}$")
 
 
@@ -145,7 +107,7 @@ def _shorten_separators(text: str) -> str:
     )
 
 
-def _try_extract(lines: list[str], pattern: _UIPattern) -> str | None:
+def _try_extract(lines: list[str], pattern: PatternSpec) -> str | None:
     """Return the region text matching ``pattern``, or None.
 
     Mirrors ccbot's extractor: first ``top`` match starts the region, first
@@ -190,33 +152,11 @@ def _try_extract(lines: list[str], pattern: _UIPattern) -> str | None:
 # (:func:`detect_dialog`).
 #
 # Ported from ccbot's ``UI_PATTERNS`` (terminal_parser.py:49-118) — the same eight
-# entries, in the same order (first match wins), reusing the gate table above verbatim
-# for the three it already holds rather than restating their regexes.
-_PLAN_UI = _UIPattern(
-    name="ExitPlanMode",
-    top=(
-        re.compile(r"^\s*Would you like to proceed\?"),
-        # v2.1.29+: a longer prefix that may wrap across lines.
-        re.compile(r"^\s*Claude has written up a plan"),
-    ),
-    bottom=(
-        re.compile(r"^\s*ctrl-g to edit in "),
-        re.compile(r"^\s*Esc to (cancel|exit)"),
-    ),
-)
-_ASKUQ_MULTI_UI = _UIPattern(
-    name="AskUserQuestion",
-    top=(re.compile(r"^\s*←\s+[☐✔☒]"),),   # the multi-tab strip — its footer varies by tab
-    bottom=(),
-    min_gap=1,
-)
-_ASKUQ_SINGLE_UI = _UIPattern(
-    name="AskUserQuestion",
-    top=(re.compile(r"^\s*[☐✔☒]"),),
-    bottom=(re.compile(r"^\s*Enter to select"),),
-    min_gap=1,
-)
-# ⚠️ THE MIRROR MUST SHOW WHAT IS BEING APPROVED, and this is the entry that makes it.
+# entries, in the same order (first match wins), reusing the gate patterns above
+# verbatim for the three it already holds rather than restating their regexes.
+#
+# ⚠️ THE MIRROR MUST SHOW WHAT IS BEING APPROVED — this is why, in the manifest's
+# ``[[pattern]]`` order, ``ToolApproval`` comes BEFORE ``PermissionPrompt``.
 #
 # Claude Code heads a tool-approval dialog with the CALL it wants to make, and only then
 # asks::
@@ -236,43 +176,13 @@ _ASKUQ_SINGLE_UI = _UIPattern(
 # (:func:`scrape_gate_identity`). So the mirror anchors on the HEADER first and only falls
 # back to the prompt patterns for a dialog that has none. The file tools head their dialog
 # the same way ("Edit file" / "Create file" / …), so they are here too.
-_TOOL_APPROVAL_UI = _UIPattern(
-    name="ToolApproval",
-    top=(
-        re.compile(r"^\s*Bash command\s*$"),
-        re.compile(r"^\s*This command requires approval"),
-        re.compile(r"^\s*(Edit|Create|Write|Read|MultiEdit|NotebookEdit) file\s*$"),
-    ),
-    bottom=(re.compile(r"^\s*Esc to cancel"),),
-)
-_RESTORE_UI = _UIPattern(
-    name="RestoreCheckpoint",
-    top=(re.compile(r"^\s*Restore the code"),),
-    bottom=(re.compile(r"^\s*Enter to continue"),),
-)
-_SETTINGS_UI = _UIPattern(
-    name="Settings",
-    top=(
-        re.compile(r"^\s*Settings:.*tab to cycle"),
-        re.compile(r"^\s*Select model"),      # /model
-    ),
-    bottom=(
-        re.compile(r"Esc to cancel"),
-        re.compile(r"Esc to exit"),
-        re.compile(r"Enter to confirm"),
-        re.compile(r"^\s*Type to filter"),
-    ),
-)
-
-DIALOG_PATTERNS: list[_UIPattern] = [
-    _PLAN_UI,
-    _ASKUQ_MULTI_UI,
-    _ASKUQ_SINGLE_UI,
-    _TOOL_APPROVAL_UI,       # BEFORE the prompt patterns — it is what carries the command
-    *GATE_PATTERNS,          # PermissionPrompt ×2 + BashApproval — already measured above
-    _RESTORE_UI,
-    _SETTINGS_UI,
-]
+#
+# The full ordered table — ``ExitPlanMode``, both ``AskUserQuestion`` shapes,
+# ``ToolApproval``, both ``PermissionPrompt`` entries + ``BashApproval`` (tagged
+# ``"gate"`` too — :attr:`Manifest.gate_patterns` filters exactly these three back
+# out, in this same order), ``RestoreCheckpoint``, ``Settings`` — lives in
+# ``detection_manifest.toml``; see :func:`detect_dialog` and
+# :func:`detect_permission_gate`.
 
 
 @dataclass(frozen=True)
@@ -299,8 +209,8 @@ class Dialog:
 def detect_dialog(pane_text: str) -> Dialog | None:
     """The dialog region on the pane, for a **verbatim** mirror. Never parses it.
 
-    Tries :data:`DIALOG_PATTERNS` in order; first match wins. Returns ``None`` for a
-    normal / working pane.
+    Tries the manifest's :attr:`Manifest.dialog_patterns` in order; first match
+    wins. Returns ``None`` for a normal / working pane.
 
     This is the universal detector, and it is deliberately the *dumbest* one in the
     module: it finds a top marker and a bottom marker and hands back everything between
@@ -314,7 +224,7 @@ def detect_dialog(pane_text: str) -> Dialog | None:
         return None
 
     lines = pane_text.strip().split("\n")
-    for pattern in DIALOG_PATTERNS:
+    for pattern in _manifest().dialog_patterns:
         region = _try_extract(lines, pattern)
         if region is not None:
             return Dialog(text=region, name=pattern.name)
@@ -382,16 +292,16 @@ def scrape_gate_identity(pane_text: str) -> tuple[str | None, str | None]:
 def detect_permission_gate(pane_text: str) -> Gate | None:
     """Detect a permission/approval gate in captured pane text.
 
-    Tries each pattern in :data:`GATE_PATTERNS` in declaration order; first match
-    wins. Returns a :class:`Gate` with the region text + kind + the scraped
-    identity (:func:`scrape_gate_identity`), or ``None`` when the pane shows no
-    recognizable gate (a normal / working pane).
+    Tries each pattern in the manifest's :attr:`Manifest.gate_patterns` in
+    declaration order; first match wins. Returns a :class:`Gate` with the region
+    text + kind + the scraped identity (:func:`scrape_gate_identity`), or ``None``
+    when the pane shows no recognizable gate (a normal / working pane).
     """
     if not pane_text:
         return None
 
     lines = pane_text.strip().split("\n")
-    for pattern in GATE_PATTERNS:
+    for pattern in _manifest().gate_patterns:
         region = _try_extract(lines, pattern)
         if region is not None:
             tool, detail = scrape_gate_identity(pane_text)
@@ -602,19 +512,11 @@ def detect_askuserquestion(pane_text: str) -> AskUQ | None:
 #
 # The plan text the human must read is everything **above** the proceed prompt;
 # the options below are represented by the inline keyboard, so they are not part
-# of the relayed body. The proceed-prompt + bottom markers are ported from
-# six-ddc/ccbot's ``terminal_parser.py`` ExitPlanMode ``UIPattern`` (top /
-# bottom); the ``Claude has written up a plan`` alternative is the v2.1.29+
-# wording where the prompt wraps. See the top-level NOTICE for attribution.
-_RE_PLAN_TOP = (
-    re.compile(r"^\s*Would you like to proceed\?"),
-    re.compile(r"^\s*Claude has written up a plan"),
-)
-_RE_PLAN_BOTTOM = (
-    re.compile(r"^\s*ctrl-g to edit in "),
-    re.compile(r"^\s*Esc to (cancel|exit)"),
-)
-_PLAN_MIN_GAP = 2  # min lines from the proceed prompt to the bottom marker
+# of the relayed body. The proceed-prompt + bottom markers (the ``"ExitPlanMode"``
+# entry in ``detection_manifest.toml``) are ported from six-ddc/ccbot's
+# ``terminal_parser.py`` ExitPlanMode ``UIPattern`` (top / bottom); the ``Claude
+# has written up a plan`` alternative is the v2.1.29+ wording where the prompt
+# wraps. See the top-level NOTICE for attribution.
 
 
 @dataclass(frozen=True)
@@ -639,16 +541,21 @@ def detect_exitplanmode(pane_text: str) -> ExitPlan | None:
     footer — so it never fires on a permission prompt (``Do you want to
     proceed?``), an AskUserQuestion selector (no such prompt), or a normal pane.
     Returns an :class:`ExitPlan` carrying the plan region scraped from *above* the
-    prompt, or ``None`` when the pane shows no plan-approval selector.
+    prompt, or ``None`` when the pane shows no plan-approval selector (including
+    when the active manifest defines no ``"ExitPlanMode"`` pattern at all).
     """
     if not pane_text:
+        return None
+
+    plan_pattern = _manifest().pattern("ExitPlanMode")
+    if plan_pattern is None:
         return None
 
     lines = pane_text.split("\n")
 
     proceed_idx: int | None = None
     for i, line in enumerate(lines):
-        if any(p.search(line) for p in _RE_PLAN_TOP):
+        if any(p.search(line) for p in plan_pattern.top):
             proceed_idx = i
             break
     if proceed_idx is None:
@@ -656,10 +563,10 @@ def detect_exitplanmode(pane_text: str) -> ExitPlan | None:
 
     bottom_idx: int | None = None
     for i in range(proceed_idx + 1, len(lines)):
-        if any(p.search(lines[i]) for p in _RE_PLAN_BOTTOM):
+        if any(p.search(lines[i]) for p in plan_pattern.bottom):
             bottom_idx = i
             break
-    if bottom_idx is None or bottom_idx - proceed_idx < _PLAN_MIN_GAP:
+    if bottom_idx is None or bottom_idx - proceed_idx < plan_pattern.min_gap:
         return None
 
     plan = _shorten_separators("\n".join(lines[:proceed_idx])).strip()
@@ -670,8 +577,8 @@ def detect_exitplanmode(pane_text: str) -> ExitPlan | None:
 
 # The glyphs Claude Code cycles through at the head of its status line (measured
 # on 2.1.207: the same frame animates `·` → `✶` → `✽` → `✻` several times a
-# second). Ported from ccbot's ``STATUS_SPINNERS``.
-STATUS_SPINNERS = frozenset("·✻✽✶✳✢")
+# second) live in the manifest's ``[status].spinners`` (:attr:`Manifest.spinners`),
+# ported from ccbot's ``STATUS_SPINNERS``.
 
 # How far above / below the chrome separator the status line and the mode line
 # can sit (blank spacer rows in between, plus — on 2.1.259+ — a tip block and/or
@@ -707,12 +614,13 @@ _RE_SHELLS = re.compile(r"(?:^|·)\s*(\d+)\s+shells?\b")
 #
 # The discriminator is NOT the verb — both verbs are drawn from an open-ended
 # whimsical set ("Worked", "Churned", …), so blocklisting them is whack-a-mole. It
-# is the **ellipsis**: a live verb is always rendered mid-action, ``Cerebrating…``,
-# and a finished summary never is. Keying on the ellipsis is an allowlist, so an
-# unrecognised line fails CLOSED — treated as "not working", i.e. poofed — which is
-# the safe direction: a missing status message costs a little live-ness, a sticky
-# one is a lie that never goes away. Measured on Claude Code 2.1.207.
-_STATUS_ACTIVE = "…"
+# is the **ellipsis** (the manifest's ``[status].active_marker`` —
+# :attr:`Manifest.active_marker`): a live verb is always rendered mid-action,
+# ``Cerebrating…``, and a finished summary never is. Keying on the ellipsis is an
+# allowlist, so an unrecognised line fails CLOSED — treated as "not working", i.e.
+# poofed — which is the safe direction: a missing status message costs a little
+# live-ness, a sticky one is a lie that never goes away. Measured on Claude Code
+# 2.1.207.
 
 # The settled line's turn duration — "Worked for 1m 17s", "Churned for 2m 31s".
 # Read only from the settled shape, where it means exactly one thing (how long the
@@ -784,11 +692,15 @@ def detect_status(pane_text: str) -> Status | None:
     Returns None for an idle pane, for a pane whose visible text merely *contains*
     bullets, for a pane with no chrome at all (a scrolled-back or non-Claude
     window), and for a **past-tense summary** found only by scanning past a banner
-    (see :data:`_STATUS_ACTIVE`) — which wears the same spinner glyph in the same
-    slot and never goes away on its own. Never a guess.
+    (see :attr:`Manifest.active_marker`) — which wears the same spinner glyph in
+    the same slot and never goes away on its own. Never a guess.
     """
     if not pane_text:
         return None
+
+    manifest = _manifest()
+    spinners = manifest.spinners
+    active_marker = manifest.active_marker
 
     lines = pane_text.split("\n")
 
@@ -820,8 +732,8 @@ def detect_status(pane_text: str) -> Status | None:
     # Widening the scan reopens the risk the old unconditional break was guarding
     # against in its comment: mistaking a stale spinner line from an earlier turn,
     # further up the pane, for a live one. But that risk is already covered by the
-    # ellipsis check below (:data:`_STATUS_ACTIVE`) — a finished turn's line is
-    # past-tense and never carries "…" — so once we are past the first non-blank
+    # ellipsis check below (:attr:`Manifest.active_marker`) — a finished turn's line
+    # is past-tense and never carries "…" — so once we are past the first non-blank
     # row, only an ACTIVE (ellipsis) spinner match is accepted; a settled/past-tense
     # line found only by scanning past banners stays rejected, exactly as before.
     # The FIRST non-blank row is still accepted unconditionally (active or settled)
@@ -834,9 +746,9 @@ def detect_status(pane_text: str) -> Status | None:
         if not line.strip():
             continue
         is_first = not seen_first_nonblank
-        if line[0] in STATUS_SPINNERS:
+        if line[0] in spinners:
             candidate = line[1:].strip()
-            if is_first or _STATUS_ACTIVE in candidate:
+            if is_first or active_marker in candidate:
                 verb = candidate
                 break
         seen_first_nonblank = True
@@ -844,9 +756,9 @@ def detect_status(pane_text: str) -> Status | None:
         return None
 
     # Working, or the settled summary of a turn that is already over? See
-    # _STATUS_ACTIVE — the ellipsis is the discriminator, and it is an allowlist,
-    # so an unrecognised shape settles rather than ticking forever.
-    active = _STATUS_ACTIVE in verb
+    # active_marker above — the ellipsis is the discriminator, and it is an
+    # allowlist, so an unrecognised shape settles rather than ticking forever.
+    active = active_marker in verb
 
     # The shell count lives in the mode line (below the chrome) while a turn runs,
     # and in the settled line itself once it ends ("· 1 shell still running") — so

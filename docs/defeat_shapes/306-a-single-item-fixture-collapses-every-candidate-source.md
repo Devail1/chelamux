@@ -308,3 +308,18 @@ row's `Verdict` object, provably diverging from `[r.verdict for r in results] ==
 from the expected per-row action list — not just "the same set of outcomes occurred somewhere."
 Closed by extending `test_retire_empty_preserves_order_one_result_per_verdict_mixed_batch` with
 a second retirable target in a different store, each given a distinct forced outcome.
+
+**Also found (CMX-351, PR #464, rework round 1, unrelated ticket — same underlying shape):**
+`chela/telegram/detection_manifest.py`'s `Manifest.pattern(name)` is documented as "the first
+pattern with this `name`" — `next((p for p in self.patterns if p.name == name), None)`. Every
+manifest any existing fixture ever loads (the bundled one, and every override built in
+`tests/test_telegram_detection_manifest.py`) happens to declare `"ExitPlanMode"` as the FIRST
+`[[pattern]]` entry, so "the first pattern named X" and "the first pattern, period" are
+indistinguishable for any of them — exactly like a one-agent fixture making `sel.value` and
+`wids[0]` alias each other above. The judge mutated the predicate to
+`p.name == name or True`, which always returns the first pattern regardless of `name`; the
+suite stayed green (`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q`, 3774 passed) because no fixture
+ever put a DIFFERENTLY-named pattern in front of `"ExitPlanMode"`. Closed by a new test whose
+override declares a `"FirstOne"` pattern before `"ExitPlanMode"` and asserts
+`manifest.pattern("ExitPlanMode").name == "ExitPlanMode"` — which the mutated predicate fails
+outright, since it now returns `"FirstOne"`.
