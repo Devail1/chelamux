@@ -10,6 +10,15 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Telegram relay no longer dumps a skill's entire body into the chat.** A `Skill`
+  invocation's full body (its whole `SKILL.md`, sometimes 100K+ chars) arrives as a separate
+  synthetic record keyed by `sourceToolUseID`; it's now replaced with a short
+  `Loaded skill: <name>` marker, including when the originating tool_use has fallen outside
+  the current read window (e.g. the transcript monitor skipped to EOF on a large file) — that
+  case previously still relayed the raw body. (CMX-348, #455)
+
 ## [0.10.2] — 2026-09-07
 
 ### Added

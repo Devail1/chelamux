@@ -215,9 +215,20 @@ def parse_entries(
             source_id = data.get("sourceToolUseID")
             if source_id and data.get("isMeta"):
                 skill_info = pending.pop(source_id, None)
-                if skill_info is not None and skill_info.tool_name == "Skill":
-                    name = skill_info.skill or "unknown"
-                    out.append(Message("user", "text", f"Loaded skill: {name}", timestamp=ts))
+                # A missing pending entry (the originating tool_use fell
+                # outside this read window — e.g. the transcript monitor
+                # skipped to EOF on a large file, see CMX-348) is treated the
+                # SAME as a resolved Skill entry, not relayed: isMeta +
+                # sourceToolUseID together already identify this as
+                # tool-injected synthetic content, so there is no safe way to
+                # let an unresolved one fall through to a raw multi-KB dump.
+                # Only a pending entry that resolves to some OTHER tool (a
+                # real, non-Skill tool_use) is known-safe to relay normally.
+                if skill_info is None or skill_info.tool_name == "Skill":
+                    name = skill_info.skill if skill_info is not None else None
+                    out.append(
+                        Message("user", "text", f"Loaded skill: {name or 'unknown'}", timestamp=ts)
+                    )
                     continue
             user_text: list[str] = []
             for block in content:
