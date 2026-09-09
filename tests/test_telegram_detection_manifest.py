@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 import pytest
 
@@ -131,6 +132,50 @@ def test_unreadable_override_directory_falls_back_to_bundled(caplog):
     assert m.patterns == detection_manifest.load_bundled().patterns
 
 
+def test_unreadable_override_file_falls_back_to_bundled(monkeypatch, caplog):
+    """A present, regular file that raises OSError on read (a chmod-000 file, an I/O
+    error) is the exact case `load()`'s ``except (OSError, ...)`` exists for — distinct
+    from the directory case above, which never reaches that except at all because
+    ``override.is_file()`` is already False. Simulated via monkeypatch (not chmod) so
+    this passes the same whether the test runs as root or not."""
+    override = detection_manifest.override_manifest_path()
+    override.parent.mkdir(parents=True, exist_ok=True)
+    override.write_text("placeholder", encoding="utf-8")
+    detection_manifest._reset_cache_for_tests()
+
+    real_read_text = Path.read_text
+
+    def broken_read_text(self, *args, **kwargs):
+        if self == override:
+            raise OSError("simulated I/O error")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", broken_read_text)
+
+    with caplog.at_level(logging.ERROR, logger="chela.telegram.detection_manifest"):
+        m = detection_manifest.load()
+
+    assert m.patterns == detection_manifest.load_bundled().patterns
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors, "an unreadable override must log LOUDLY, not fail silently"
+    assert str(override) in errors[0].message
+
+
+def test_bad_regex_in_pattern_is_rejected_with_manifest_error(tmp_path):
+    """``re.error`` (NOT a ``ValueError``) must be converted to ``ManifestError`` inside
+    ``_compile_all`` — if it escapes uncaught, it also escapes ``load()``'s except
+    tuple and every pane scan raises instead of falling back to bundled."""
+    bad = tmp_path / "bad.toml"
+    bad.write_text(
+        '[status]\nspinners = ["."]\nactive_marker = "…"\n\n'
+        '[[pattern]]\nname = "BadRegex"\ntables = ["dialog"]\n'
+        "top = ['(unclosed']\nbottom = []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ManifestError, match="regex"):
+        detection_manifest.load_file(bad)
+
+
 def test_missing_pattern_key_is_rejected_with_manifest_error(tmp_path):
     bad = tmp_path / "bad.toml"
     bad.write_text(
@@ -140,6 +185,59 @@ def test_missing_pattern_key_is_rejected_with_manifest_error(tmp_path):
     )
     with pytest.raises(ManifestError, match="top"):
         detection_manifest.load_file(bad)
+
+
+def test_manifest_with_zero_pattern_entries_is_rejected_with_manifest_error(tmp_path):
+    """Accepting a manifest with no ``[[pattern]]`` entries at all is exactly the
+    'silently degrade to no patterns' outcome the module docstring forbids (CMX-337 /
+    issue #434). ``pattern = []`` (a plain empty array, not an omitted key) is what
+    exercises the ``not entries`` check in ``_parse`` rather than the KeyError path."""
+    bad = tmp_path / "bad.toml"
+    bad.write_text(
+        # `pattern = []` must come BEFORE the `[status]` table header — once inside
+        # `[status]`, a bare `pattern = []` line would set `status.pattern`, not the
+        # root-level `pattern` key `_parse` actually reads via `raw["pattern"]`.
+        'pattern = []\n[status]\nspinners = ["."]\nactive_marker = "…"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ManifestError, match="pattern"):
+        detection_manifest.load_file(bad)
+
+
+def test_pattern_with_empty_name_is_rejected_with_manifest_error(tmp_path):
+    bad = tmp_path / "bad.toml"
+    bad.write_text(
+        '[status]\nspinners = ["."]\nactive_marker = "…"\n\n'
+        '[[pattern]]\nname = ""\ntables = ["dialog"]\n'
+        "top = ['^\\s*X']\nbottom = []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ManifestError, match="name"):
+        detection_manifest.load_file(bad)
+
+
+def test_dialog_patterns_and_gate_patterns_filter_by_table_membership(tmp_path):
+    """``dialog_patterns``/``gate_patterns`` must filter :attr:`Manifest.patterns` by
+    table membership, not merely return the whole list in declaration order — the
+    bundled manifest can't catch a corruption that returns ``self.patterns`` verbatim
+    from ``dialog_patterns`` because every one of its nine entries happens to carry
+    "dialog" (see docs/defeat_shapes/306). This manifest has a gate-ONLY entry that
+    must be absent from ``dialog_patterns``."""
+    manifest_toml = tmp_path / "manifest.toml"
+    manifest_toml.write_text(
+        '[status]\nspinners = ["."]\nactive_marker = "…"\n\n'
+        '[[pattern]]\nname = "GateOnly"\ntables = ["gate"]\n'
+        "top = ['^\\s*GATE_ONLY']\nbottom = []\nmin_gap = 1\n\n"
+        '[[pattern]]\nname = "DialogOnly"\ntables = ["dialog"]\n'
+        "top = ['^\\s*DIALOG_ONLY']\nbottom = []\nmin_gap = 1\n\n"
+        '[[pattern]]\nname = "Both"\ntables = ["gate", "dialog"]\n'
+        "top = ['^\\s*BOTH']\nbottom = []\nmin_gap = 1\n",
+        encoding="utf-8",
+    )
+    m = detection_manifest.load_file(manifest_toml)
+
+    assert [p.name for p in m.gate_patterns] == ["GateOnly", "Both"]
+    assert [p.name for p in m.dialog_patterns] == ["DialogOnly", "Both"]
 
 
 def test_override_genuinely_overrides_a_synthetic_prompt_is_detected():
@@ -289,6 +387,69 @@ def test_exitplanmode_top_markers_come_from_the_manifest_not_hardcoded_regexes()
     # marker — a hardcoded copy of it would still fire here; it must not.
     bundled_wording_pane = " Would you like to proceed?\n ❯ 1. Yes\n\n Esc to cancel\n"
     assert detect_exitplanmode(bundled_wording_pane) is None
+
+
+def test_exitplanmode_bottom_markers_come_from_the_manifest_not_hardcoded_regexes():
+    """Isolates ``plan_pattern.bottom`` specifically: top and min_gap are left at
+    values a hardcoded call site would also satisfy, so only the bottom marker can
+    explain a difference. ``'^\\s*Esc to cancel'`` is deliberately NOT used as the
+    override's bottom (the bundled bottom regex ``'^\\s*Esc to (cancel|exit)'`` also
+    matches it, so it can't distinguish wired from hardcoded — see the round-2 note
+    on defeat shape 303)."""
+    _write_override(
+        '[status]\nspinners = ["·"]\nactive_marker = "…"\n\n'
+        '[[pattern]]\nname = "ExitPlanMode"\ntables = ["dialog"]\n'
+        'top = [\'^\\s*Would you like to proceed\\?\']\n'
+        'bottom = [\'^\\s*CUSTOM_BOTTOM_MARKER\']\nmin_gap = 1\n'
+    )
+
+    pane = (
+        "● Here is my plan:\n\n"
+        "  1. Do a thing\n\n"
+        " Would you like to proceed?\n"
+        " ❯ 1. Yes\n\n"
+        " CUSTOM_BOTTOM_MARKER\n"
+    )
+    plan = detect_exitplanmode(pane)
+    assert plan is not None
+    assert "Here is my plan" in plan.text
+
+    # The bundled bottom wording ("Esc to cancel") is not this override's bottom
+    # marker — a hardcoded copy of it would still find a bottom line here and return
+    # a match; it must not, since this override never matches "Esc to cancel".
+    bundled_bottom_pane = (
+        " Would you like to proceed?\n"
+        " ❯ 1. Yes\n\n"
+        " Esc to cancel\n"
+    )
+    assert detect_exitplanmode(bundled_bottom_pane) is None
+
+
+def test_exitplanmode_min_gap_comes_from_the_manifest_not_the_bundled_value():
+    """Isolates ``plan_pattern.min_gap``: top and bottom are the bundled wording (so a
+    hardcoded call site's marker regexes also match), and only the gap threshold
+    differs from the bundled default of 2."""
+    _write_override(
+        '[status]\nspinners = ["·"]\nactive_marker = "…"\n\n'
+        '[[pattern]]\nname = "ExitPlanMode"\ntables = ["dialog"]\n'
+        'top = [\'^\\s*Would you like to proceed\\?\']\n'
+        'bottom = [\'^\\s*Esc to cancel\']\nmin_gap = 5\n'
+    )
+
+    # Gap of 3 lines: satisfies the bundled default (min_gap=2) but not this
+    # override's min_gap=5 — a call site still reading the bundled/hardcoded value
+    # would accept this pane; the wired call site must reject it.
+    pane = " Would you like to proceed?\n ❯ 1. Yes\n\n Esc to cancel\n"
+    assert detect_exitplanmode(pane) is None
+
+    # A gap of 5 lines satisfies this override's min_gap=5 — proves the marker
+    # regexes themselves still match and only the gap check differed above.
+    wide_pane = (
+        " Would you like to proceed?\n"
+        " line 1\n line 2\n line 3\n line 4\n"
+        " Esc to cancel\n"
+    )
+    assert detect_exitplanmode(wide_pane) is not None
 
 
 def test_exitplanmode_returns_none_when_manifest_defines_no_exitplanmode_pattern():
