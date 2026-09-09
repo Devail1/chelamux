@@ -1198,6 +1198,94 @@ def test_a_read_back_that_explodes_does_not_crash_doctor(fleet, monkeypatch):
     assert any(f.fact == "plugin.installed" and f.level == doctor.ERROR for f in findings)
 
 
+# --- issue #459: a flapping CANNOT VERIFY gets one re-check before it counts as red ----
+
+def test_cannot_verify_once_then_green_produces_no_finding(fleet, monkeypatch):
+    """A `cannot_verify` that clears on an immediate retry was never a finding — it was
+    one bad tick, exactly like the pytest collector flapping red/green four times in four
+    minutes with nothing actually broken."""
+    calls: list[int] = []
+
+    def flaky_read_back():
+        calls.append(1)
+        if len(calls) == 1:
+            return runtime_truth.cannot_verify("transient hiccup")
+        return runtime_truth.observed("the-owner-says-this")
+
+    flaky = runtime_truth.Fact(
+        name="flaky.fact",
+        declared_by="this test",
+        owned_by="an owner that hiccups once and then answers",
+        declare=lambda: "the-owner-says-this",
+        read_back=flaky_read_back,
+        report=lambda declared, obs: [runtime_truth.Finding(doctor.OK, "agrees")],
+    )
+    monkeypatch.setattr(runtime_truth, "facts", lambda: [flaky])
+
+    findings = doctor.check()
+
+    assert len(calls) == 2, "must re-check once before giving up on a cannot_verify"
+    assert [f.level for f in findings] == [doctor.OK]
+    assert not any("CANNOT VERIFY" in f.title for f in findings), (
+        "an unknown that cleared on retry must not be reported as a finding at all")
+
+
+def test_cannot_verify_on_both_looks_still_reports_cannot_verify(fleet, monkeypatch):
+    """⛔ Counterweight to the test above: an owner that is genuinely, persistently
+    unreadable must still come back CANNOT VERIFY — a "fix" that swallows every unknown
+    (never re-checks, or reads a still-unverifiable second look as fine) would pass the
+    first guard perfectly while blinding doctor to a real unknown."""
+    calls: list[int] = []
+
+    def always_unreadable():
+        calls.append(1)
+        return runtime_truth.cannot_verify("still gone")
+
+    persistent = runtime_truth.Fact(
+        name="persistent.fact",
+        declared_by="this test",
+        owned_by="an owner that never answers",
+        declare=lambda: "whatever",
+        read_back=always_unreadable,
+        report=lambda declared, obs: [runtime_truth.Finding(doctor.OK, "green!")],
+    )
+    monkeypatch.setattr(runtime_truth, "facts", lambda: [persistent])
+
+    findings = doctor.check()
+
+    assert len(calls) == 2, "the retry must actually run, not be skipped or short-circuited"
+    assert [f.level for f in findings] == [doctor.ERROR]
+    assert "CANNOT VERIFY persistent.fact" in findings[0].title
+    assert "still gone" in findings[0].detail
+    assert "green!" not in findings[0].title
+
+
+def test_a_real_error_is_reported_on_the_first_read_with_no_retry(fleet, monkeypatch):
+    """The re-check is scoped to `cannot_verify` only: a fact whose owner DID answer — even
+    with a value that makes it a genuine ERROR — must page on its first edge, with no added
+    latency from a retry that was never about established failures."""
+    calls: list[int] = []
+
+    def read_back():
+        calls.append(1)
+        return runtime_truth.observed("broken-value")
+
+    real_error = runtime_truth.Fact(
+        name="real.error",
+        declared_by="this test",
+        owned_by="an owner that answered with a genuinely wrong value",
+        declare=lambda: "expected-value",
+        read_back=read_back,
+        report=lambda declared, obs: [runtime_truth.Finding(doctor.ERROR, "mismatch")],
+    )
+    monkeypatch.setattr(runtime_truth, "facts", lambda: [real_error])
+
+    findings = doctor.check()
+
+    assert len(calls) == 1, "a real ERROR must not pay the cannot_verify retry"
+    assert [f.level for f in findings] == [doctor.ERROR]
+
+
 # --- exit codes: the dispatcher and the operator both read them -----------------------
 
 def test_exit_code_is_1_on_an_error(monkeypatch, capsys):

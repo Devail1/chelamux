@@ -25,8 +25,8 @@ class _StubNotify:
         return True
 
 
-def _finding(level, title, fact="some.fact"):
-    return doctor.Finding(level, title, fact=fact)
+def _finding(level, title, fact="some.fact", detail=""):
+    return doctor.Finding(level, title, detail=detail, fact=fact)
 
 
 def test_notifies_once_on_the_transition_into_red(monkeypatch):
@@ -81,6 +81,56 @@ def test_logs_even_when_notify_is_not_configured(monkeypatch, caplog):
     assert red == {("some.fact", "it broke")}
     assert stub.sent == []
     assert any("it broke" in r.getMessage() for r in caplog.records)
+
+
+def test_the_push_and_log_carry_the_findings_detail_not_just_its_title(monkeypatch, caplog):
+    """issue #459: `collected_js_suites` already captures the exit code and a stderr
+    fragment in the finding's detail — a title-only log line and push threw it away, and
+    it was the only evidence left once the flap had passed. Both must carry it."""
+    import logging
+
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(doctor, "notify", stub)
+    monkeypatch.setattr(doctor, "check", lambda: [_finding(
+        doctor.ERROR, "it broke",
+        detail="`pytest --collect-only` exited 2: ImportError: no module named foo")])
+
+    with caplog.at_level(logging.ERROR, logger=doctor.log.name):
+        doctor.check_and_notify(set())
+
+    assert any("exited 2" in r.getMessage() for r in caplog.records), (
+        "the log line dropped the detail — only the title reached it")
+    assert len(stub.sent) == 1
+    assert "exited 2" in stub.sent[0][0], (
+        "the push body dropped the detail — only the title reached it")
+
+
+def test_a_very_long_detail_is_truncated_not_dropped(monkeypatch):
+    """A phone push has no business carrying a multi-KB traceback, but truncating to
+    nothing defeats the point just as badly as never emitting it at all."""
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(doctor, "notify", stub)
+    long_detail = "x" * 5000
+    monkeypatch.setattr(
+        doctor, "check", lambda: [_finding(doctor.ERROR, "it broke", detail=long_detail)])
+
+    doctor.check_and_notify(set())
+
+    message = stub.sent[0][0]
+    assert "it broke" in message
+    assert 0 < len(message) < len(long_detail)
+
+
+def test_a_finding_with_no_detail_still_notifies_title_only(monkeypatch):
+    """Not every ERROR carries a detail — the message must not blow up or print a stray
+    blank line when there is nothing to append."""
+    stub = _StubNotify(enabled=True)
+    monkeypatch.setattr(doctor, "notify", stub)
+    monkeypatch.setattr(doctor, "check", lambda: [_finding(doctor.ERROR, "it broke")])
+
+    doctor.check_and_notify(set())
+
+    assert stub.sent[0][0] == "✗ it broke"
 
 
 def test_a_second_distinct_error_under_an_already_red_fact_still_notifies(monkeypatch):

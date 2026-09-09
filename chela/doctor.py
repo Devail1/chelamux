@@ -62,6 +62,21 @@ from chela.runtime_truth import (  # noqa: F401 — doctor's public surface, re-
 
 log = logging.getLogger(__name__)
 
+# issue #459: a CANNOT VERIFY finding already captures the diagnostic that would explain
+# it (an exit code, a stderr fragment) in `Finding.detail` — but a title-only push threw
+# it away, so the one incident that needed it was undiagnosable after the fact. Truncated,
+# not omitted: a full traceback-length detail has no place in a phone push either.
+_MAX_DETAIL = 500
+
+
+def _detail_for_notify(finding: Finding) -> str:
+    detail = finding.detail
+    if not detail:
+        return ""
+    if len(detail) > _MAX_DETAIL:
+        return detail[:_MAX_DETAIL].rstrip() + "…"
+    return detail
+
 
 def check() -> list[Finding]:
     """Every fact in the registry, in the order a human wants to read them."""
@@ -83,13 +98,21 @@ def check_and_notify(previously_red: set[tuple[str, str]]) -> set[tuple[str, str
     ``previously_red``.
     """
     findings = check()
-    current_red = {(f.fact, f.title) for f in findings if f.level == ERROR}
+    red_by_key = {(f.fact, f.title): f for f in findings if f.level == ERROR}
+    current_red = set(red_by_key)
     newly_red = current_red - previously_red
     if not newly_red:
         return current_red
     for fact_name, title in sorted(newly_red):
-        log.error("doctor: %s: %s", fact_name, title)
+        detail = _detail_for_notify(red_by_key[(fact_name, title)])
+        if detail:
+            log.error("doctor: %s: %s\n    %s", fact_name, title, detail)
+        else:
+            log.error("doctor: %s: %s", fact_name, title)
     if notify.enabled():
-        message = "\n".join(f"✗ {title}" for _, title in sorted(newly_red))
-        notify.send(message, title="chela doctor: new red finding(s)")
+        lines = []
+        for fact_name, title in sorted(newly_red):
+            detail = _detail_for_notify(red_by_key[(fact_name, title)])
+            lines.append(f"✗ {title}\n{detail}" if detail else f"✗ {title}")
+        notify.send("\n".join(lines), title="chela doctor: new red finding(s)")
     return current_red
