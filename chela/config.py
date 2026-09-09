@@ -897,6 +897,21 @@ AUTO_UPDATE_ENABLED = os.environ.get("CHELA_AUTO_UPDATE", "false").strip().lower
     "true", "1", "yes", "on",
 )
 
+# ♻️ `chela restore --resume` (CMX-350, issue #457) — the one write mode `chela restore`
+# has that starts a NEW process rather than editing a JSON store: it runs the exact
+# `claude --resume <sid>` one-liner a MANUAL row already prints for a human. Typing the
+# CLI flag is still a human decision, same as `--apply`/`--retire-empty` — but those only
+# ever rewrite bookkeeping, while this launches a tmux window and a Claude session, so it
+# gets the SAME extra env-gate as ORCHESTRATOR_ENABLED/AUTO_MERGE_ENABLED/AUTO_UPDATE_ENABLED
+# above rather than trusting the flag alone.
+#
+# ⛔ Defaults OFF: a fresh/external install must not silently relaunch agents from a restore
+# report. `chela/main.py::cmd_restore` refuses `--resume` (falls back to the read-only
+# report) until an operator sets this once they trust the classification on their own fleet.
+RESTORE_RESUME_ENABLED = os.environ.get("CHELA_RESTORE_RESUME", "false").strip().lower() in (
+    "true", "1", "yes", "on",
+)
+
 # A Dispatch-tab knob (CMX-220), restart_required — same latched-constant shape as
 # JUDGE_ENABLED/CRITIC_ENABLED above.
 _dispatch_raw = dispatch_value("dispatch_workflows")

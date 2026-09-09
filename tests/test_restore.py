@@ -20,19 +20,24 @@ from chela.restore import (
     KEPT,
     LEFT_TO_DAEMON,
     RACED,
+    RESUME_FAILED,
+    RESUMED,
     REVIVED,
+    SKIPPED,
     ApplyResult,
     Orphan,
     Verdict,
     _classify,
     apply,
     plan,
+    resume,
     retire_empty,
     scan_all,
     scan_runs,
     scan_session_ids,
     scan_watches,
 )
+from chela.spawn import SpawnResult
 
 OLD = "786-1784045825"        # the tmux server that was OOM-killed
 NEW = "9001-1784099999"       # the one that came back, numbering from @0 again
@@ -891,3 +896,300 @@ def test_retire_empty_defaults_wire_to_apply(monkeypatch):
     restore_mod.retire_empty([v])
 
     assert called == [[v]], "retire_empty must call chela.restore.apply() with the filtered subset"
+
+
+# --------------------------------------------------------------------------
+# resume — the launch half (CMX-350, issue #457): actually relaunch a MANUAL agent
+# --------------------------------------------------------------------------
+
+# A session id that satisfies `chela.sessions.SESSION_RE` (hex + dashes, 8-64 chars) — the
+# same reason test_restore_cli.py picks hex-shaped ids over "sid-1"/"sid-dead": those fail
+# the regex before reaching any of resume()'s other guards.
+SID_OK = "deadbeef-1111-2222-3333-444444444444"
+
+
+def _launchable(store="session-ids", wid="@1", session_id=SID_OK, cwd="/home/x"):
+    """A MANUAL row `manual_command()` CAN build a real one-liner from, with a session id
+    that also passes resume()'s shape check — the row resume() should actually launch."""
+    return Verdict(store=store, wid=wid, stamped_epoch=OLD, verdict="MANUAL",
+                   session_id=session_id, new_wid=None, cwd=cwd, label="l")
+
+
+def _resume_kit(**overrides):
+    """`_writers()` plus the two writers unique to `resume()` — sharing the SAME `calls`
+    list so a single assertion can see the full launch-then-bookkeeping order."""
+    calls, kit = _writers()
+    kit["spawn_window"] = lambda cwd, command=None: (
+        calls.append(("spawn", cwd, command)),
+        SpawnResult(ok=True, name="shell-9", wid="@99", cwd=cwd))[1]
+    kit["register_orchestrator"] = lambda wid: (
+        calls.append(("register", wid)), {"ok": True})[1]
+    kit.update(overrides)
+    return calls, kit
+
+
+def test_resume_never_relaunches_a_REVIVABLE_row():
+    """⛔⛔ The counterweight that matters (issue #457): a REVIVABLE row's session is
+    already confirmed alive elsewhere — relaunching it would fork a live agent into two
+    processes racing one worktree (CMX-346). It must go through apply()'s re-stamp path,
+    unchanged, and `spawn_window` must never even be called."""
+    calls, kit = _resume_kit()
+    v = _revivable("session-ids", wid="@7", new_wid="@42")
+
+    results = resume([v], [], **kit)
+
+    assert not any(c[0] == "spawn" for c in calls), "a REVIVABLE row must never be launched"
+    assert calls == [("rekey", "@7", "@42", "sid-live", OLD)]
+    assert results[0].verdict == v and results[0].action == REVIVED
+
+
+def test_resume_archives_a_MANUAL_row_with_nothing_on_record_never_launches():
+    """A MANUAL row with no cwd/session cannot build a command — routed to apply()'s
+    archive path exactly like retire_empty(), never launched against a guessed path."""
+    calls, kit = _resume_kit()
+    v = _empty_manual("session-ids", wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert not any(c[0] == "spawn" for c in calls)
+    assert [c[0] for c in calls] == ["archive", "remove"]
+    assert results == [ApplyResult(v, ARCHIVED, "")]
+
+
+def test_resume_leaves_telegram_bindings_untouched():
+    calls, kit = _resume_kit()
+    v = _manual("telegram.bindings", wid="@2")
+
+    results = resume([v], [], **kit)
+
+    assert calls == []
+    assert results[0].action == LEFT_TO_DAEMON
+
+
+def test_resume_launches_an_eligible_MANUAL_row():
+    calls, kit = _resume_kit()
+    v = _launchable(wid="@5", cwd="/home/x/proj")
+
+    results = resume([v], [], **kit)
+
+    spawn_calls = [c for c in calls if c[0] == "spawn"]
+    assert spawn_calls == [("spawn", "/home/x/proj", f"claude --resume {SID_OK}")]
+    assert [c[0] for c in calls] == ["spawn", "archive", "remove"], (
+        "archive must land BEFORE the row is removed — reversed, a crash in between "
+        "loses the row with no trace"
+    )
+    assert results == [ApplyResult(v, RESUMED, "resumed at @99")]
+
+
+def test_resume_relaunches_and_reregisters_the_orchestrator_row():
+    """The orchestrator's own row is not just archived-and-removed — it is re-registered
+    at the freshly spawned address, in the same pass, so the inbox comes back armed."""
+    calls, kit = _resume_kit()
+    v = _launchable(store="inbox.orchestrator", wid="@0")
+
+    results = resume([v], [], **kit)
+
+    assert [c[0] for c in calls] == ["spawn", "archive", "register"]
+    assert calls[-1] == ("register", "@99")
+    assert results == [ApplyResult(v, RESUMED, "resumed at @99, orchestrator re-registered")]
+
+
+def test_resume_reports_but_does_not_crash_when_orchestrator_reregistration_fails():
+    calls, kit = _resume_kit(register_orchestrator=lambda wid: (
+        calls.append(("register", wid)), {"ok": False})[1])
+    v = _launchable(store="inbox.orchestrator", wid="@0")
+
+    results = resume([v], [], **kit)
+
+    assert results[0].action == RACED
+    assert "re-registering the orchestrator failed" in results[0].detail
+
+
+def test_resume_never_reregisters_when_the_launch_returns_no_wid():
+    """⛔⛔ `SpawnResult.wid` is documented as `None` on a tmux build that echoes none, with
+    `ok=True` — the window still opened. `resume()` computes
+    ``ok = bool(result.wid) and bool(register_orchestrator(result.wid).get("ok"))``, which
+    must short-circuit on the falsy `wid` and never call `register_orchestrator` with a
+    bogus/empty address."""
+    calls, kit = _resume_kit(spawn_window=lambda cwd, command=None: (
+        calls.append(("spawn", cwd, command)),
+        SpawnResult(ok=True, name="shell-9", wid=None, cwd=cwd))[1])
+    v = _launchable(store="inbox.orchestrator", wid="@0")
+
+    results = resume([v], [], **kit)
+
+    assert not any(c[0] == "register" for c in calls), (
+        "register_orchestrator must never be called when the launch returned no wid"
+    )
+    assert results[0].action == RACED
+
+
+def test_resume_reports_RACED_not_RESUMED_when_remove_session_declines():
+    """A session-ids row's own `remove_session` can decline exactly like `apply()`'s does
+    (the row moved on since `plan()` computed it) — the launch already happened, so this
+    must NOT report RESUMED (which would tell an operator the row is now clean) while the
+    row is still sitting in session-ids.json."""
+    calls, kit = _resume_kit(remove_session=lambda wid, sid, stamped: (
+        calls.append(("remove", wid, sid, stamped)), False)[1])
+    v = _launchable(store="session-ids", wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert results[0].action == RACED, (
+        f"remove_session declining must report RACED, not RESUMED — got {results[0].action}"
+    )
+    assert "row moved on" in results[0].detail
+
+
+def test_resume_skips_a_session_id_that_does_not_look_like_one():
+    """Defense in depth: the launch command is sent through a live shell pane
+    (`send-keys` then Enter) — never send anything that isn't a plausible session id."""
+    calls, kit = _resume_kit()
+    v = _launchable(session_id="sid-dead")   # fails SESSION_RE (leading 's')
+
+    results = resume([v], [], **kit)
+
+    assert calls == [], "a bad-shaped session id must never reach spawn_window"
+    assert results[0].action == SKIPPED
+    assert "does not look like a session id" in results[0].detail
+
+
+def test_resume_never_resumes_the_same_session_twice_in_one_pass():
+    """The 'never resume more than once per (session_id, epoch)' bound from issue #457:
+    the three stores plan() reads can independently carry the same session (the
+    orchestrator's is often stamped in both inbox.json and session-ids.json)."""
+    calls, kit = _resume_kit()
+    first = _launchable(store="inbox.orchestrator", wid="@0")
+    second = _launchable(store="session-ids", wid="@1")   # same SID_OK, same stamped_epoch
+
+    results = resume([first, second], [], **kit)
+
+    assert len([c for c in calls if c[0] == "spawn"]) == 1, (
+        "the second sighting of the same (session_id, epoch) must not launch a second time"
+    )
+    assert results[0].action == RESUMED
+    assert results[1].action == SKIPPED
+    assert "already resumed" in results[1].detail
+
+
+def test_resume_refuses_a_row_whose_task_is_still_ACTIVE_in_the_dispatcher():
+    """The CMX-282/#353 lesson (issue #457's guard): a task the dispatcher still marks
+    claimed/running against this exact dangling window is the dispatcher's to reap or
+    retry, not this command's to relaunch out from under it."""
+    calls, kit = _resume_kit()
+    v = _launchable(wid="@5")
+    runs = [{"task_id": "cmx-9", "status": "running", "window_id": "@5"}]
+
+    results = resume([v], runs, **kit)
+
+    assert calls == [], "an in-flight task's window must never be launched"
+    assert results[0].action == SKIPPED
+    assert "cmx-9" in results[0].detail and "ACTIVE" in results[0].detail
+
+
+def test_resume_refuses_a_row_whose_JUDGE_window_is_still_ACTIVE():
+    """The counterpart half of the same guard — a judge window, not just the agent's own."""
+    calls, kit = _resume_kit()
+    v = _launchable(wid="@5")
+    runs = [{"task_id": "cmx-9", "status": "claimed", "judge_window_id": "@5"}]
+
+    results = resume([v], runs, **kit)
+
+    assert calls == []
+    assert results[0].action == SKIPPED
+
+
+def test_resume_still_launches_when_the_matching_run_is_TERMINAL():
+    """The counterweight: a run row that matches the window but is NOT active (already
+    done/closed/failed-out) must not block the launch — the guard is about a task the
+    dispatcher still owns, not about the mere existence of a run row."""
+    calls, kit = _resume_kit()
+    v = _launchable(wid="@5")
+    runs = [{"task_id": "cmx-9", "status": "done", "window_id": "@5"}]
+
+    results = resume([v], runs, **kit)
+
+    assert any(c[0] == "spawn" for c in calls)
+    assert results[0].action == RESUMED
+
+
+def test_resume_reports_RESUME_FAILED_and_writes_nothing_when_the_launch_fails():
+    calls, kit = _resume_kit(spawn_window=lambda cwd, command=None: (
+        calls.append(("spawn", cwd, command)),
+        SpawnResult(ok=False, error="tmux is unreachable"))[1])
+    v = _launchable(wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert [c[0] for c in calls] == ["spawn"], (
+        "a failed launch must never be archived or removed — the row is untouched"
+    )
+    assert results[0].action == RESUME_FAILED
+    assert results[0].detail == "tmux is unreachable"
+
+
+def test_resume_defaults_wire_to_the_real_spawn_and_inbox_modules(monkeypatch):
+    """🔴 GUARD: with no ``spawn_window``/``register_orchestrator`` kwargs, resume() must
+    call the REAL `chela.spawn.spawn_window` / `chela.inbox.register` — not a silently-inert
+    no-op. Both are resolved INSIDE the function body (not bound at import time) precisely
+    so a caller can fake this one tmux-touching leaf without disturbing anything else —
+    proven here by patching the module attribute and observing the call land."""
+    import chela.inbox as inbox_mod
+    import chela.spawn as spawn_mod
+
+    spawn_calls = []
+    register_calls = []
+    monkeypatch.setattr(spawn_mod, "spawn_window", lambda cwd, command=None: (
+        spawn_calls.append((cwd, command)),
+        SpawnResult(ok=True, name="s", wid="@99", cwd=cwd))[1])
+    monkeypatch.setattr(inbox_mod, "register", lambda wid: (
+        register_calls.append(wid), {"ok": True})[1])
+
+    v = _launchable(store="inbox.orchestrator", wid="@0")
+    results = resume([v], [])
+
+    assert spawn_calls == [("/home/x", f"claude --resume {SID_OK}")]
+    assert register_calls == ["@99"]
+    assert results[0].action == RESUMED
+
+
+def test_resume_preserves_order_one_result_per_verdict_mixed_batch():
+    """Same ordering guard as retire_empty's — a launched row's result must land on the
+    launched row, not on its neighbour, in a batch mixing every outcome."""
+    calls, kit = _resume_kit()
+    revivable = _revivable("session-ids", wid="@7", new_wid="@42")
+    empty = _empty_manual("session-ids", wid="@1")
+    launched = _launchable(wid="@5", session_id="cafebabe-0000-1111-2222-333344445555")
+    bad_shape = _launchable(wid="@6", session_id="sid-dead")
+
+    results = resume([revivable, empty, launched, bad_shape], [], **kit)
+
+    assert [r.verdict for r in results] == [revivable, empty, launched, bad_shape]
+    assert [r.action for r in results] == [REVIVED, ARCHIVED, RESUMED, SKIPPED]
+
+
+def test_resume_delegates_the_non_eligible_subset_to_apply(monkeypatch):
+    """🔴 GUARD: resume() must delegate REVIVABLE / telegram.bindings / empty-MANUAL rows
+    to the real chela.restore.apply(), not a private reimplementation."""
+    import chela.restore as restore_mod
+
+    called = []
+
+    def fake_apply(targets, **kw):
+        called.append(targets)
+        return [ApplyResult(t, KEPT) for t in targets]
+
+    monkeypatch.setattr(restore_mod, "apply", fake_apply)
+
+    v = _revivable("session-ids", wid="@7", new_wid="@42")
+    restore_mod.resume([v], [])
+
+    assert called == [[v]], "resume must call chela.restore.apply() with the filtered subset"
+
+
+def test_the_three_resume_outcome_words_are_distinct_from_apply_and_each_other():
+    """🔴 GUARD: pin the resume-specific vocabulary — a report is only useful if two
+    different outcomes never render the same word as far as an operator can tell."""
+    assert (RESUMED, RESUME_FAILED, SKIPPED) == ("resumed", "resume-failed", "skipped")
+    all_words = {LEFT_TO_DAEMON, REVIVED, ARCHIVED, RACED, KEPT, RESUMED, RESUME_FAILED, SKIPPED}
+    assert len(all_words) == 8

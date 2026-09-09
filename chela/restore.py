@@ -105,7 +105,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from chela import dispatcher, epoch, inbox, roster, sessionids, sessions
+from chela import dispatcher, epoch, inbox, roster, sessionids, sessions, spawn as spawn_mod
 
 
 @dataclass(frozen=True)
@@ -349,6 +349,153 @@ def apply(verdicts: list[Verdict], *,
         out.append(ApplyResult(v, ARCHIVED if ok else RACED,
                                 "" if ok else
                                 "archived, but the row moved on before it could be removed"))
+    return out
+
+
+# --- resume: the launch half (CMX-350, issue #457) --------------------------------------
+
+RESUMED = "resumed"                 # MANUAL, `claude --resume` relaunched successfully
+RESUME_FAILED = "resume-failed"     # MANUAL, eligible, but the launch itself failed
+SKIPPED = "skipped"                 # MANUAL, eligible, but a guard refused to launch it
+
+
+def _task_in_flight(wid: str, runs: list[dict]) -> str | None:
+    """The ``task_id`` of a ``dispatcher.runs`` row that STILL claims ``wid`` — as either
+    its agent or its judge window — with an ACTIVE status (``claimed``/``running``), or
+    ``None`` if nothing does.
+
+    The CMX-282/#353 lesson (issue #457's guard): a run the dispatcher itself still
+    considers in flight is the dispatcher's own reconcile loop to reap or retry, not this
+    command's to relaunch out from under it — a `Login expired` pane taught that lesson
+    once already, and a manual `claude --resume` racing the SAME window a live reconcile
+    tick is about to touch is the identical shape one layer up.
+    """
+    for row in runs or []:
+        status = row.get("status")
+        if status not in dispatcher.ACTIVE_STATUSES:
+            continue
+        if str(row.get("window_id") or "") == wid or str(row.get("judge_window_id") or "") == wid:
+            return row.get("task_id")
+    return None
+
+
+def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
+           spawn_window=None,
+           register_orchestrator=None,
+           **apply_kwargs) -> list[ApplyResult]:
+    """CMX-350: actually relaunch a MANUAL row's dead agent — the one write path in this
+    module that starts a NEW process rather than editing a JSON store.
+
+    ⛔⛔ **The counterweight, and the one that matters (issue #457).** A REVIVABLE verdict
+    is NEVER handed to ``spawn_window`` — that session is already confirmed alive under
+    ``new_wid`` (:func:`plan`'s own ``wid_for_session`` check), so relaunching it would
+    fork a live agent into two processes racing one worktree, the exact CMX-346 failure
+    mode. REVIVABLE (and ``telegram.bindings``, and a MANUAL row with nothing on record)
+    are delegated to :func:`apply` UNCHANGED — the exact same re-stamp/archive/left-to-
+    daemon paths ``--apply`` uses, never a second reimplementation.
+
+    A MANUAL row is only ever launched when ALL of:
+
+    * it carries a complete ``(cwd, session_id)`` — :meth:`Verdict.manual_command` is not
+      ``None``. A row missing either is routed to :func:`apply`, which archives it exactly
+      like :func:`retire_empty` — never launched against a guessed path.
+    * its ``session_id`` matches :data:`chela.sessions.SESSION_RE` — defense in depth
+      against sending anything else through a live shell pane (the launch command is sent
+      via tmux `send-keys`, which the pane's own shell then parses).
+    * its ``(session_id, stamped_epoch)`` has not already been resumed EARLIER IN THIS SAME
+      CALL — the three stores :func:`plan` reads can independently carry the same session
+      (the orchestrator's own session is often stamped in both ``inbox.json`` and
+      ``session-ids.json``); a second sighting is a duplicate address for a session this
+      call just relaunched, not a second dead agent. This is the "never resume more than
+      once per (session_id, epoch)" bound from issue #457.
+    * no ``dispatcher.runs`` row still marks a task ACTIVE against this exact dangling
+      window (:func:`_task_in_flight`) — the CMX-282 lesson.
+
+    A row that fails any of these is reported :data:`SKIPPED` with why, and is left
+    completely untouched (never archived, never removed) — a human still sees it plainly
+    on the next ``chela restore``.
+
+    On a successful launch the row is archived (:func:`chela.roster.archive`) exactly as
+    :func:`apply` does for MANUAL rows, then either re-registered (``inbox.orchestrator`` —
+    via ``register_orchestrator`` at the freshly spawned wid, so the inbox comes back armed
+    in the same pass) or removed from ``session-ids.json`` (``remove_session``, an
+    ``apply_kwargs`` DI seam, same as :func:`apply`).
+
+    ``**apply_kwargs`` forwards to :func:`apply` for the delegated subset (same DI seam,
+    same reason) and supplies ``archive``/``remove_session`` for the resumed subset here.
+
+    ``spawn_window``/``register_orchestrator`` default to ``None`` and are resolved to the
+    real :func:`chela.spawn.spawn_window`/:func:`chela.inbox.register` INSIDE the function
+    body (rather than bound at import time, the way :func:`apply`'s pure-JSON writers are) —
+    both touch tmux (a `new-window`, and `register`'s own liveness check via
+    :func:`chela.discovery.get_windows_by_id`), so a caller needs to be able to fake just
+    that leaf the way ``tests/test_restore_cli.py``'s own ``live_stores`` fixture fakes
+    every OTHER tmux-touching call, without also stubbing the pure store writers around it.
+
+    Returns one :class:`ApplyResult` per input verdict, same order, same contract as
+    :func:`apply`/:func:`retire_empty`.
+    """
+    if spawn_window is None:
+        spawn_window = spawn_mod.spawn_window
+    if register_orchestrator is None:
+        register_orchestrator = inbox.register
+    archive = apply_kwargs.get("archive", roster.archive)
+    remove_session = apply_kwargs.get("remove_session", sessionids.remove)
+
+    eligible = [v for v in verdicts
+                if v.store != "telegram.bindings" and v.verdict == "MANUAL"
+                and v.manual_command() is not None]
+    eligible_ids = {id(v) for v in eligible}
+    rest = [v for v in verdicts if id(v) not in eligible_ids]
+    rest_results = iter(apply(rest, **apply_kwargs))
+
+    resumed_sessions: set[tuple[str, str | None]] = set()
+    resumed_by_id: dict[int, ApplyResult] = {}
+    for v in eligible:
+        if not sessions.SESSION_RE.match(v.session_id or ""):
+            resumed_by_id[id(v)] = ApplyResult(
+                v, SKIPPED, "session id does not look like a session id — refusing to "
+                            "launch it")
+            continue
+
+        dedup_key = (v.session_id, v.stamped_epoch)
+        if dedup_key in resumed_sessions:
+            resumed_by_id[id(v)] = ApplyResult(
+                v, SKIPPED, f"session {v.session_id} was already resumed earlier in this "
+                            "pass")
+            continue
+
+        task_id = _task_in_flight(v.wid, runs)
+        if task_id:
+            resumed_by_id[id(v)] = ApplyResult(
+                v, SKIPPED, f"task {task_id} is still ACTIVE in the dispatcher — refusing "
+                            "to relaunch out from under it")
+            continue
+
+        result = spawn_window(v.cwd, command=f"claude --resume {v.session_id}")
+        if not result.ok:
+            resumed_by_id[id(v)] = ApplyResult(v, RESUME_FAILED, result.error or "")
+            continue
+
+        resumed_sessions.add(dedup_key)
+        archive(_archive_entry(v))
+        if v.store == "inbox.orchestrator":
+            ok = bool(result.wid) and bool(register_orchestrator(result.wid).get("ok"))
+            detail = (f"resumed at {result.wid}, orchestrator re-registered" if ok else
+                      f"resumed at {result.wid or '?'}, but re-registering the "
+                      "orchestrator failed")
+        else:
+            ok = remove_session(v.wid, v.session_id, v.stamped_epoch)
+            detail = f"resumed at {result.wid or '?'}" + (
+                "" if ok else " (row moved on before it could be removed)")
+        resumed_by_id[id(v)] = ApplyResult(v, RESUMED if ok else RACED, detail)
+
+    out: list[ApplyResult] = []
+    for v in verdicts:
+        if id(v) in resumed_by_id:
+            out.append(resumed_by_id[id(v)])
+        else:
+            out.append(next(rest_results))
     return out
 
 

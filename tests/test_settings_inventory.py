@@ -59,13 +59,14 @@ def test_inventory_matches_env_reads():
     )
 
 
-def test_inventory_count_is_41():
+def test_inventory_count_is_42():
     # The number CMX-207's ticket and the doc's own prose both cite (58, until CMX-217
     # wired the 9-strong Daemon-intervals group through config.dashboard_setting() and
     # they stopped being literal os.environ.get("CHELA_...") call sites — see the doc's
     # "WIRED (CMX-217)" note — then 49, until CMX-220 wired the 9-strong Dispatch/judge/
     # critic group the same way — see the doc's "WIRED (CMX-220)" note — then 40, until
-    # CMX-277 added CHELA_TERMINAL_TIMESTAMPS). A change here without a change to the
-    # doc's stated count is exactly the kind of drift this file exists to catch — pinned
-    # as its own assertion so a future diff has to touch the prose too.
-    assert len(_scan_env_reads()) == 41
+    # CMX-277 added CHELA_TERMINAL_TIMESTAMPS, then 41, until CMX-350 added
+    # CHELA_RESTORE_RESUME). A change here without a change to the doc's stated count is
+    # exactly the kind of drift this file exists to catch — pinned as its own assertion
+    # so a future diff has to touch the prose too.
+    assert len(_scan_env_reads()) == 42

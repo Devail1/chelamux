@@ -101,6 +101,102 @@ def test_restore_exits_ZERO_when_nothing_is_orphaned(restore_env, capsys):
     assert "nothing orphaned" in capsys.readouterr().out
 
 
+def test_restore_resume_exits_ZERO_when_the_only_MANUAL_row_was_actually_RESUMED(
+        restore_env, capsys):
+    """`chela/main.py`'s '--resume is the one exception' branch: a MANUAL row `--resume`
+    actually relaunched is no longer orphaned, so a call where EVERY MANUAL row comes back
+    `RESUMED` must exit 0 — even though `verdicts` still holds a MANUAL row. A guard that
+    only checks `bool(manual)` (ignoring the resume outcome) cannot tell this apart from the
+    plain MANUAL case above and would wrongly exit 1 here — see docs/defeat_shapes/350-resume-exit-code-dead-branch.md."""
+    restore_env.setattr(main.config, "RESTORE_RESUME_ENABLED", True)
+    verdict = _verdict("MANUAL")
+    restore_env.setattr(restore_mod, "plan", lambda *a, **k: [verdict])
+    restore_env.setattr(
+        restore_mod, "resume",
+        lambda *a, **k: [restore_mod.ApplyResult(verdict, restore_mod.RESUMED)],
+    )
+
+    main.cmd_restore(SimpleNamespace(resume=True))     # must NOT raise
+
+    assert "=> resumed" in capsys.readouterr().out
+
+
+def test_restore_resume_exits_NONZERO_when_a_MANUAL_row_was_not_resolved_by_resume(
+        restore_env, capsys):
+    """The counterweight: a guard that always exits 0 under `--resume` would be satisfied
+    just as easily as one that ignores the outcome entirely. A row `resume()` reports as
+    `skipped`/`resume-failed` (anything other than RESUMED) must still force exit 1."""
+    restore_env.setattr(main.config, "RESTORE_RESUME_ENABLED", True)
+    verdict = _verdict("MANUAL")
+    restore_env.setattr(restore_mod, "plan", lambda *a, **k: [verdict])
+    restore_env.setattr(
+        restore_mod, "resume",
+        lambda *a, **k: [restore_mod.ApplyResult(verdict, restore_mod.SKIPPED, "in flight")],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main.cmd_restore(SimpleNamespace(resume=True))
+
+    assert exc.value.code == 1
+    assert "=> skipped" in capsys.readouterr().out
+
+
+def test_restore_resume_exit_code_follows_EACH_ROWS_OWN_outcome_not_just_the_first(
+        restore_env, capsys):
+    """🔴 GUARD: the exit-code branch pairs `zip(verdicts, results)` — one outcome per row,
+    same order — not a single verdict for the whole batch. Drive two MANUAL rows that
+    DISAGREE: @1 actually RESUMED, @2 only SKIPPED. A mutant that consults only
+    `results[0]` (@1, RESUMED) would wrongly conclude nothing is orphaned and exit 0; the
+    real row @2 is still dangling, so this must exit 1."""
+    restore_env.setattr(main.config, "RESTORE_RESUME_ENABLED", True)
+    resumed_row = _verdict("MANUAL", wid="@1")
+    skipped_row = _verdict("MANUAL", wid="@2")
+    restore_env.setattr(restore_mod, "plan", lambda *a, **k: [resumed_row, skipped_row])
+    restore_env.setattr(
+        restore_mod, "resume",
+        lambda *a, **k: [
+            restore_mod.ApplyResult(resumed_row, restore_mod.RESUMED),
+            restore_mod.ApplyResult(skipped_row, restore_mod.SKIPPED, "in flight"),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main.cmd_restore(SimpleNamespace(resume=True))
+
+    assert exc.value.code == 1, (
+        "row @2 is still SKIPPED — checking only the batch's first result would wrongly "
+        "read this as fully resolved and exit 0"
+    )
+    out = capsys.readouterr().out
+    assert "=> resumed" in _line_with(out, "@1")
+    assert "=> skipped" in _line_with(out, "@2")
+
+
+def test_restore_resume_exit_code_pairs_the_RIGHT_result_to_the_RIGHT_row(
+        restore_env, capsys):
+    """The counterpart guard, pinned so a REORDERED `zip(verdicts, results)` is caught too:
+    a REVIVABLE row's own result never counts toward the exit code (only MANUAL does), and
+    here the ONE MANUAL row actually resolved (RESUMED). Correct pairing must exit 0 — a
+    mutant that pairs verdicts/results out of order (e.g. a reversed zip) would instead
+    attach the REVIVABLE row's REVIVED result to the MANUAL row and wrongly exit 1."""
+    restore_env.setattr(main.config, "RESTORE_RESUME_ENABLED", True)
+    revivable_row = _verdict("REVIVABLE", wid="@1")
+    resumed_row = _verdict("MANUAL", wid="@2")
+    restore_env.setattr(restore_mod, "plan", lambda *a, **k: [revivable_row, resumed_row])
+    restore_env.setattr(
+        restore_mod, "resume",
+        lambda *a, **k: [
+            restore_mod.ApplyResult(revivable_row, restore_mod.REVIVED),
+            restore_mod.ApplyResult(resumed_row, restore_mod.RESUMED),
+        ],
+    )
+
+    main.cmd_restore(SimpleNamespace(resume=True))     # must NOT raise
+
+    out = capsys.readouterr().out
+    assert "=> resumed" in _line_with(out, "@2")
+
+
 # --- objective 5's operator-visible half ----------------------------------------------
 
 def _watch_env(monkeypatch, session, self_wid="@0"):
@@ -1510,3 +1606,236 @@ def test_retire_emptys_help_states_the_permanent_bindings_exclusion(capsys):
         f"missing cwd OR a missing session qualifies, not only both at once. "
         f"Got:\n{retire_empty_block}"
     )
+
+
+# --- END-TO-END, `--resume` (CMX-350, issue #457): the launch half ------------------------
+
+def test_chela_restore_resume_and_apply_are_mutually_exclusive(live_stores, capsys):
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--apply", "--resume"])
+
+    assert exc.value.code == 2, "argparse must refuse --apply and --resume together"
+
+
+def test_chela_restore_resume_and_retire_empty_are_mutually_exclusive(live_stores, capsys):
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--retire-empty", "--resume"])
+
+    assert exc.value.code == 2, "argparse must refuse --retire-empty and --resume together"
+
+
+def test_restores_help_documents_resume(capsys):
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--help"])
+    assert exc.value.code == 0
+    out = " ".join(capsys.readouterr().out.split())
+
+    assert "--resume" in out, "the new flag must be discoverable from --help"
+    assert "CHELA_RESTORE_RESUME" in out, "...and say how to actually enable it"
+
+
+def test_chela_restore_resume_is_disabled_by_default_falls_back_to_read_only(
+        live_stores, tmp_path, capsys):
+    """🔴🔒 GUARD: `chela.config.RESTORE_RESUME_ENABLED` (CHELA_RESTORE_RESUME) must gate
+    the launch — a fresh/external install must not silently relaunch tmux windows and
+    Claude sessions the first time an operator types `--resume`. Without the env var set,
+    `--resume` must behave exactly like a bare `chela restore`: nothing on disk changes,
+    and `restore.resume` (the one function that can call `spawn_window`) is never called.
+    """
+    from chela import restore as restore_mod
+
+    called = []
+    live_stores.setattr(restore_mod, "resume", lambda *a, **k: called.append(1))
+    chela_dir = tmp_path / "chela"
+    before = _store_bytes(chela_dir)
+
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--resume"])
+
+    assert exc.value.code == 1, "still read-only — falls back to the same report as --apply-less restore"
+    out = capsys.readouterr().out
+    assert "disabled by default" in out and "CHELA_RESTORE_RESUME=true" in out, (
+        f"the refusal must say WHY and how to opt in. Got:\n{out}"
+    )
+    assert called == [], "restore.resume() must never even be called without the env gate"
+    assert _store_bytes(chela_dir) == before, (
+        "a refused --resume must touch NOTHING on disk, same as a bare chela restore"
+    )
+
+
+def test_CHELA_RESTORE_RESUME_true_env_var_alone_actually_enables_the_launch(
+        live_stores, tmp_path, monkeypatch, capsys):
+    """⭐🔴 GUARD: every OTHER `--resume` test opts in by monkeypatching the config
+    ATTRIBUTE directly (`config.RESTORE_RESUME_ENABLED = True`), which proves the CLI's own
+    gate check but nothing about the documented ENV VAR -> config link an operator actually
+    relies on. Set ONLY `CHELA_RESTORE_RESUME=true`, reload `chela.config` from it — no
+    attribute monkeypatch anywhere in this test — and drive the real launch end-to-end. A
+    typo'd env var name, or a change to which values count as truthy, would leave this
+    stuck on the disabled/read-only report and never reach `spawn_window`.
+    """
+    monkeypatch.setenv("CHELA_RESTORE_RESUME", "true")
+    import chela.config as config
+    importlib.reload(config)
+    assert config.RESTORE_RESUME_ENABLED is True, (
+        "CHELA_RESTORE_RESUME=true must flip config.RESTORE_RESUME_ENABLED via nothing but "
+        "the environment"
+    )
+
+    from chela import spawn as spawn_mod
+    spawned = []
+
+    def fake_spawn_window(cwd, command=None):
+        spawned.append((cwd, command))
+        return spawn_mod.SpawnResult(ok=True, name="shell-9", wid="@99", cwd=str(cwd))
+
+    monkeypatch.setattr(spawn_mod, "spawn_window", fake_spawn_window)
+
+    # Leaf-only fake, same reasoning as the `resume_enabled` fixture below: `inbox.register`
+    # would otherwise shell out to real tmux to verify @99 exists.
+    from chela import inbox as inbox_mod
+    monkeypatch.setattr(inbox_mod, "register", lambda wid: {"ok": True, "orchestrator": wid})
+
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--resume"])
+
+    out = capsys.readouterr().out
+    assert "disabled by default" not in out, (
+        "the env var alone (no attribute monkeypatch) must be enough to actually enable "
+        "--resume"
+    )
+    assert exc.value.code == 1  # telegram.bindings row is left-to-daemon forever
+    assert (CWD_FIVE, f"claude --resume {SID_DEAD}") in spawned, (
+        f"the env-var-only gate must let the eligible MANUAL row actually launch. "
+        f"spawned={spawned}"
+    )
+
+
+@pytest.fixture()
+def resume_enabled(live_stores, monkeypatch):
+    """`live_stores` plus the env gate — and the ONE tmux-touching leaf (`spawn_window`)
+    faked, exactly the way `live_stores` itself already fakes every OTHER tmux call
+    (`sessions.panes`/`wid_claiming_session`). Every store write downstream of a successful
+    launch (`roster.archive`, `sessionids.remove`, `inbox.register`) is real, against the
+    real temp CHELA_DIR — only the process spawn itself is stubbed.
+    """
+    monkeypatch.setenv("CHELA_RESTORE_RESUME", "true")
+    import chela.config as config
+    importlib.reload(config)
+
+    from chela import spawn as spawn_mod
+    spawned = []
+
+    def fake_spawn_window(cwd, command=None):
+        spawned.append((cwd, command))
+        return spawn_mod.SpawnResult(ok=True, name="shell-9", wid="@99", cwd=str(cwd))
+
+    monkeypatch.setattr(spawn_mod, "spawn_window", fake_spawn_window)
+
+    # `inbox.register("@99")` would otherwise shell out to real tmux (`discovery
+    # .get_windows_by_id`) to verify @99 exists, which it never will in this sandbox —
+    # fake it the same "leaf, not the seam" way, so the orchestrator branch is still
+    # exercised for real (store["orchestrator"] etc. actually gets written).
+    from chela import inbox as inbox_mod
+    registered = []
+
+    def fake_register(wid):
+        registered.append(wid)
+        with inbox_mod.locked_store() as store:
+            store["orchestrator"] = wid
+            store["orchestrator_epoch"] = "9001-1784099999"
+            store["orchestrator_session"] = SID_ORCH
+            store["orchestrator_name"] = "resumed"
+        return {"ok": True, "orchestrator": wid}
+
+    monkeypatch.setattr(inbox_mod, "register", fake_register)
+    monkeypatch.setattr(config, "RESTORE_RESUME_ENABLED", True)
+    return spawned, registered
+
+
+def test_chela_restore_resume_relaunches_the_MANUAL_session_ids_row(
+        resume_enabled, tmp_path, capsys):
+    spawned, registered = resume_enabled
+    chela_dir = tmp_path / "chela"
+
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--resume"])
+
+    # telegram.bindings @2 is left-to-daemon forever, so the command still exits nonzero —
+    # same shape as --apply's own e2e test.
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "=> resumed" in out
+
+    # session-ids @5 (SID_DEAD, CWD_FIVE) is the MANUAL row with a complete cwd/session —
+    # it must actually be launched, with the exact `claude --resume` one-liner.
+    assert (CWD_FIVE, f"claude --resume {SID_DEAD}") in spawned, (
+        f"the eligible MANUAL row was not launched. spawned={spawned}"
+    )
+    session_ids = json.loads((chela_dir / "session-ids.json").read_text())
+    assert "@5" not in session_ids, "the resumed row must be removed from session-ids.json"
+
+    # REVIVABLE session-ids @7 must still be re-stamped, never launched.
+    assert not any(SID_LIVE in (cmd or "") for _cwd, cmd in spawned), (
+        "a REVIVABLE row must never be launched"
+    )
+    assert "@7" not in session_ids and session_ids["@42"]["session_id"] == SID_LIVE
+
+    # The orchestrator's own MANUAL row (@1, SID_ORCH) is also complete — resumed and
+    # re-registered at its fresh address in the SAME pass.
+    assert ("/home/liav", f"claude --resume {SID_ORCH}") in spawned
+    assert registered == ["@99"], "the orchestrator must be re-registered at the NEW wid"
+    inbox_store = json.loads((chela_dir / "inbox.json").read_text())
+    assert inbox_store["orchestrator"] == "@99", (
+        "the inbox must come back armed at the freshly resumed address in this same pass"
+    )
+
+    archived = json.loads((chela_dir / "roster-archive.json").read_text())["archived"]
+    assert {(a["store"], a["wid"]) for a in archived} == {
+        ("inbox.orchestrator", "@1"), ("session-ids", "@5"),
+    }, "both resumed rows must be archived before being replaced/removed"
+
+
+def test_chela_restore_resume_never_writes_telegram_bindings_json(resume_enabled, tmp_path):
+    chela_dir = tmp_path / "chela"
+    before = (chela_dir / "telegram-bindings.json").read_bytes()
+
+    with pytest.raises(SystemExit):
+        _drive(["restore", "--resume"])
+
+    assert (chela_dir / "telegram-bindings.json").read_bytes() == before, (
+        "--resume wrote to telegram-bindings.json — that store belongs to chela-telegram alone"
+    )
+
+
+def test_chela_restore_resume_refuses_a_row_whose_task_is_still_ACTIVE(
+        live_stores, tmp_path, monkeypatch, capsys):
+    """The CMX-282/#353 lesson end-to-end: `live_stores`' own fixture dispatcher row
+    (task `abc123`, `status: running`, `window_id: @9`) does not collide with any resumable
+    row's wid by default — this rewires session-ids `@5` (the resumable MANUAL row) to
+    share the ACTIVE run's window id, and the launch must be refused."""
+    monkeypatch.setenv("CHELA_RESTORE_RESUME", "true")
+    import chela.config as config
+    importlib.reload(config)
+    monkeypatch.setattr(config, "RESTORE_RESUME_ENABLED", True)
+
+    from chela import dispatcher
+    monkeypatch.setattr(dispatcher, "list_runs", lambda *a, **k: [{
+        "task_id": "abc123", "status": "running", "window_id": "@5", "window_epoch": OLD,
+    }])
+
+    from chela import spawn as spawn_mod
+    spawned = []
+    monkeypatch.setattr(spawn_mod, "spawn_window", lambda cwd, command=None: (
+        spawned.append((cwd, command)), spawn_mod.SpawnResult(ok=True, wid="@99"))[1])
+
+    with pytest.raises(SystemExit):
+        _drive(["restore", "--resume"])
+
+    out = capsys.readouterr().out
+    line = _line_with(out, "[session-ids]", "@5", "MANUAL")
+    assert "=> skipped" in line, f"an in-flight task's window must be refused. Got: {line!r}"
+    assert not any(cwd == CWD_FIVE for cwd, _cmd in spawned), (
+        "the in-flight row must never reach spawn_window"
+    )
+    session_ids = json.loads((tmp_path / "chela" / "session-ids.json").read_text())
+    assert "@5" in session_ids, "a refused row must be left completely untouched"
