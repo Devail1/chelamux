@@ -141,6 +141,62 @@ def test_restore_resume_exits_NONZERO_when_a_MANUAL_row_was_not_resolved_by_resu
     assert "=> skipped" in capsys.readouterr().out
 
 
+def test_restore_resume_exit_code_follows_EACH_ROWS_OWN_outcome_not_just_the_first(
+        restore_env, capsys):
+    """🔴 GUARD: the exit-code branch pairs `zip(verdicts, results)` — one outcome per row,
+    same order — not a single verdict for the whole batch. Drive two MANUAL rows that
+    DISAGREE: @1 actually RESUMED, @2 only SKIPPED. A mutant that consults only
+    `results[0]` (@1, RESUMED) would wrongly conclude nothing is orphaned and exit 0; the
+    real row @2 is still dangling, so this must exit 1."""
+    restore_env.setattr(main.config, "RESTORE_RESUME_ENABLED", True)
+    resumed_row = _verdict("MANUAL", wid="@1")
+    skipped_row = _verdict("MANUAL", wid="@2")
+    restore_env.setattr(restore_mod, "plan", lambda *a, **k: [resumed_row, skipped_row])
+    restore_env.setattr(
+        restore_mod, "resume",
+        lambda *a, **k: [
+            restore_mod.ApplyResult(resumed_row, restore_mod.RESUMED),
+            restore_mod.ApplyResult(skipped_row, restore_mod.SKIPPED, "in flight"),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main.cmd_restore(SimpleNamespace(resume=True))
+
+    assert exc.value.code == 1, (
+        "row @2 is still SKIPPED — checking only the batch's first result would wrongly "
+        "read this as fully resolved and exit 0"
+    )
+    out = capsys.readouterr().out
+    assert "=> resumed" in _line_with(out, "@1")
+    assert "=> skipped" in _line_with(out, "@2")
+
+
+def test_restore_resume_exit_code_pairs_the_RIGHT_result_to_the_RIGHT_row(
+        restore_env, capsys):
+    """The counterpart guard, pinned so a REORDERED `zip(verdicts, results)` is caught too:
+    a REVIVABLE row's own result never counts toward the exit code (only MANUAL does), and
+    here the ONE MANUAL row actually resolved (RESUMED). Correct pairing must exit 0 — a
+    mutant that pairs verdicts/results out of order (e.g. a reversed zip) would instead
+    attach the REVIVABLE row's REVIVED result to the MANUAL row and wrongly exit 1."""
+    restore_env.setattr(main.config, "RESTORE_RESUME_ENABLED", True)
+    revivable_row = _verdict("REVIVABLE", wid="@1")
+    resumed_row = _verdict("MANUAL", wid="@2")
+    restore_env.setattr(restore_mod, "plan", lambda *a, **k: [revivable_row, resumed_row])
+    restore_env.setattr(
+        restore_mod, "resume",
+        lambda *a, **k: [
+            restore_mod.ApplyResult(revivable_row, restore_mod.REVIVED),
+            restore_mod.ApplyResult(resumed_row, restore_mod.RESUMED),
+        ],
+    )
+
+    main.cmd_restore(SimpleNamespace(resume=True))     # must NOT raise
+
+    out = capsys.readouterr().out
+    assert "=> resumed" in _line_with(out, "@2")
+
+
 # --- objective 5's operator-visible half ----------------------------------------------
 
 def _watch_env(monkeypatch, session, self_wid="@0"):
@@ -1604,6 +1660,53 @@ def test_chela_restore_resume_is_disabled_by_default_falls_back_to_read_only(
     assert called == [], "restore.resume() must never even be called without the env gate"
     assert _store_bytes(chela_dir) == before, (
         "a refused --resume must touch NOTHING on disk, same as a bare chela restore"
+    )
+
+
+def test_CHELA_RESTORE_RESUME_true_env_var_alone_actually_enables_the_launch(
+        live_stores, tmp_path, monkeypatch, capsys):
+    """⭐🔴 GUARD: every OTHER `--resume` test opts in by monkeypatching the config
+    ATTRIBUTE directly (`config.RESTORE_RESUME_ENABLED = True`), which proves the CLI's own
+    gate check but nothing about the documented ENV VAR -> config link an operator actually
+    relies on. Set ONLY `CHELA_RESTORE_RESUME=true`, reload `chela.config` from it — no
+    attribute monkeypatch anywhere in this test — and drive the real launch end-to-end. A
+    typo'd env var name, or a change to which values count as truthy, would leave this
+    stuck on the disabled/read-only report and never reach `spawn_window`.
+    """
+    monkeypatch.setenv("CHELA_RESTORE_RESUME", "true")
+    import chela.config as config
+    importlib.reload(config)
+    assert config.RESTORE_RESUME_ENABLED is True, (
+        "CHELA_RESTORE_RESUME=true must flip config.RESTORE_RESUME_ENABLED via nothing but "
+        "the environment"
+    )
+
+    from chela import spawn as spawn_mod
+    spawned = []
+
+    def fake_spawn_window(cwd, command=None):
+        spawned.append((cwd, command))
+        return spawn_mod.SpawnResult(ok=True, name="shell-9", wid="@99", cwd=str(cwd))
+
+    monkeypatch.setattr(spawn_mod, "spawn_window", fake_spawn_window)
+
+    # Leaf-only fake, same reasoning as the `resume_enabled` fixture below: `inbox.register`
+    # would otherwise shell out to real tmux to verify @99 exists.
+    from chela import inbox as inbox_mod
+    monkeypatch.setattr(inbox_mod, "register", lambda wid: {"ok": True, "orchestrator": wid})
+
+    with pytest.raises(SystemExit) as exc:
+        _drive(["restore", "--resume"])
+
+    out = capsys.readouterr().out
+    assert "disabled by default" not in out, (
+        "the env var alone (no attribute monkeypatch) must be enough to actually enable "
+        "--resume"
+    )
+    assert exc.value.code == 1  # telegram.bindings row is left-to-daemon forever
+    assert (CWD_FIVE, f"claude --resume {SID_DEAD}") in spawned, (
+        f"the env-var-only gate must let the eligible MANUAL row actually launch. "
+        f"spawned={spawned}"
     )
 
 

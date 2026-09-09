@@ -1005,6 +1005,42 @@ def test_resume_reports_but_does_not_crash_when_orchestrator_reregistration_fail
     assert "re-registering the orchestrator failed" in results[0].detail
 
 
+def test_resume_never_reregisters_when_the_launch_returns_no_wid():
+    """⛔⛔ `SpawnResult.wid` is documented as `None` on a tmux build that echoes none, with
+    `ok=True` — the window still opened. `resume()` computes
+    ``ok = bool(result.wid) and bool(register_orchestrator(result.wid).get("ok"))``, which
+    must short-circuit on the falsy `wid` and never call `register_orchestrator` with a
+    bogus/empty address."""
+    calls, kit = _resume_kit(spawn_window=lambda cwd, command=None: (
+        calls.append(("spawn", cwd, command)),
+        SpawnResult(ok=True, name="shell-9", wid=None, cwd=cwd))[1])
+    v = _launchable(store="inbox.orchestrator", wid="@0")
+
+    results = resume([v], [], **kit)
+
+    assert not any(c[0] == "register" for c in calls), (
+        "register_orchestrator must never be called when the launch returned no wid"
+    )
+    assert results[0].action == RACED
+
+
+def test_resume_reports_RACED_not_RESUMED_when_remove_session_declines():
+    """A session-ids row's own `remove_session` can decline exactly like `apply()`'s does
+    (the row moved on since `plan()` computed it) — the launch already happened, so this
+    must NOT report RESUMED (which would tell an operator the row is now clean) while the
+    row is still sitting in session-ids.json."""
+    calls, kit = _resume_kit(remove_session=lambda wid, sid, stamped: (
+        calls.append(("remove", wid, sid, stamped)), False)[1])
+    v = _launchable(store="session-ids", wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert results[0].action == RACED, (
+        f"remove_session declining must report RACED, not RESUMED — got {results[0].action}"
+    )
+    assert "row moved on" in results[0].detail
+
+
 def test_resume_skips_a_session_id_that_does_not_look_like_one():
     """Defense in depth: the launch command is sent through a live shell pane
     (`send-keys` then Enter) — never send anything that isn't a plausible session id."""
