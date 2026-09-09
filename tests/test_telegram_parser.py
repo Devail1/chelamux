@@ -181,3 +181,115 @@ def test_parse_entries_text_only_tool_result_has_no_images():
 
 def test_message_images_defaults_to_none():
     assert Message("assistant", "text", "hi").images is None
+
+
+# --------------------------------------------------------------------------
+# skill-body suppression (CMX-348) — a Skill invocation's full body arrives
+# as a SEPARATE synthetic "isMeta" user record, keyed back to the tool_use
+# via "sourceToolUseID" (not the usual tool_result "tool_use_id"). Relayed
+# verbatim this is a 100K+ char wall of text; parse_entries must replace it
+# with a short "Loaded skill: <name>" event instead.
+# --------------------------------------------------------------------------
+
+def _skill_tool_use_entry(tool_id: str, skill: str) -> dict:
+    return {
+        "type": "assistant",
+        "timestamp": "t",
+        "message": {
+            "content": [
+                {"type": "tool_use", "id": tool_id, "name": "Skill", "input": {"skill": skill}}
+            ]
+        },
+    }
+
+
+def _skill_tool_result_entry(tool_id: str) -> dict:
+    return {
+        "type": "user",
+        "timestamp": "t",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": "Launching skill: irrelevant",
+                }
+            ]
+        },
+    }
+
+
+def _skill_body_entry(tool_id: str, body: str) -> dict:
+    return {
+        "type": "user",
+        "isMeta": True,
+        "sourceToolUseID": tool_id,
+        "timestamp": "t",
+        "message": {"content": [{"type": "text", "text": body}]},
+    }
+
+
+def test_skill_body_is_replaced_with_a_short_name_marker():
+    big_body = "Base directory for this skill: /x/y\n\n# Some Skill\n\n" + ("word " * 50_000)
+    entries = [
+        _skill_tool_use_entry("tu_1", "superpowers:brainstorming"),
+        _skill_tool_result_entry("tu_1"),
+        _skill_body_entry("tu_1", big_body),
+    ]
+    events, _ = parse_entries(entries)
+    user_texts = [m for m in events if m.role == "user" and m.content_type == "text"]
+    assert len(user_texts) == 1
+    assert user_texts[0].text == "Loaded skill: superpowers:brainstorming"
+
+
+def test_skill_body_pending_survives_across_poll_cycles():
+    # The tool_use and its result land in one poll; the body arrives in the
+    # NEXT one — mirrors CMX-348's actual timing and the existing
+    # cross-cycle tool-pairing contract this module already relies on.
+    events1, pending = parse_entries(
+        [_skill_tool_use_entry("tu_2", "handoff"), _skill_tool_result_entry("tu_2")]
+    )
+    assert not [m for m in events1 if m.role == "user" and m.content_type == "text"]
+
+    events2, pending = parse_entries([_skill_body_entry("tu_2", "# Handoff\n\nbody")], pending)
+    user_texts = [m for m in events2 if m.role == "user" and m.content_type == "text"]
+    assert len(user_texts) == 1
+    assert user_texts[0].text == "Loaded skill: handoff"
+    assert "tu_2" not in pending
+
+
+def test_non_skill_source_tool_use_id_is_relayed_normally():
+    # A sourceToolUseID that does NOT resolve to a "Skill" tool_use (e.g. the
+    # tool_use record fell outside this read window) must not be swallowed —
+    # it falls through to ordinary user-text handling.
+    entries = [_skill_body_entry("tu_unknown", "hello from an untracked source")]
+    events, _ = parse_entries(entries)
+    user_texts = [m for m in events if m.role == "user" and m.content_type == "text"]
+    assert len(user_texts) == 1
+    assert user_texts[0].text == "hello from an untracked source"
+
+
+def test_skill_tool_result_still_carries_its_own_short_text():
+    # The Skill tool_result itself ("Launching skill: ...") must keep relaying
+    # exactly as before — only the LATER synthetic body record is suppressed.
+    entries = [_skill_tool_use_entry("tu_3", "orchestrate"), _skill_tool_result_entry("tu_3")]
+    events, _ = parse_entries(entries)
+    result = [m for m in events if m.content_type == "tool_result"][0]
+    assert result.tool_name == "Skill"
+    assert result.text == "Launching skill: irrelevant"
+
+
+def test_skill_name_falls_back_to_unknown_when_input_has_no_skill_field():
+    entries = [
+        {
+            "type": "assistant",
+            "timestamp": "t",
+            "message": {
+                "content": [{"type": "tool_use", "id": "tu_4", "name": "Skill", "input": {}}]
+            },
+        },
+        _skill_body_entry("tu_4", "# Body"),
+    ]
+    events, _ = parse_entries(entries)
+    user_texts = [m for m in events if m.role == "user" and m.content_type == "text"]
+    assert user_texts[0].text == "Loaded skill: unknown"
