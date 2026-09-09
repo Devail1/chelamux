@@ -20,14 +20,15 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**41** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+**42** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
 wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
 added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
 was never a literal read to begin with), so those 18 are no longer *literal*
 `os.environ.get("CHELA_…")` call sites — see "WIRED" under Groups 2 and 3 — then 40, until
-CMX-277 added `CHELA_TERMINAL_TIMESTAMPS`, group 8) — every literal `CHELA_*` name a
-Python module in `chela/` reads straight off `os.environ`.
+CMX-277 added `CHELA_TERMINAL_TIMESTAMPS`, group 8 — then 41, until CMX-350 added
+`CHELA_RESTORE_RESUME`, group 4) — every literal `CHELA_*` name a Python module in
+`chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
 the README config table twice has (CMX-…, see `docs/CONFIG.md` history).
@@ -196,19 +197,20 @@ restarted; the other seven (`chela/config.py`'s `max_reworks()`/
 `memory_slice_budget_bytes()`, `chela/gateanswer.py`'s `wait_budget()`/`max_waits()`) are
 read per call and take effect on the next tick/request.
 
-### 4. Unattended-risk switches (3) — `trust-boundary`, keep env-file-only
+### 4. Unattended-risk switches (4) — `trust-boundary`, keep env-file-only
 
 | Variable | Default | Notes |
 |---|---|---|
 | `CHELA_AUTO_MERGE` | `false` | Fully-unattended merge sweep — opt-in risk, `docs/ESCALATION_CONTRACT.md` |
 | `CHELA_AUTO_UPDATE` | `false` | Fully-unattended self-update sweep — opt-in risk, same doc |
 | `CHELA_ORCHESTRATOR` | `false` | Auto-launches the embedded orchestrator persona, which holds `chela merge` authority |
+| `CHELA_RESTORE_RESUME` | `false` | Gates `chela restore --resume` (CMX-350) — without it the flag falls back to the read-only report; unlike the other three this never fires unattended, a human still has to type the flag |
 
-These three are the ones `userconfig.py`'s doc-comment is warning about by name. A
+The first three are the ones `userconfig.py`'s doc-comment is warning about by name. A
 checkbox is a worse UX for "I read the escalation contract and accept the risk" than a
-one-line env edit — a checkbox implies casualness these three should not have. If a
-redesign surfaces them at all, it should be **read-only status** (what the drawer's
-Connections & Status section already does for other facts), not a write control.
+one-line env edit — a checkbox implies casualness these should not have. If a redesign
+surfaces them at all, it should be **read-only status** (what the drawer's Connections &
+Status section already does for other facts), not a write control.
 
 ### 5. Notifications / inbox (9) — mixed
 

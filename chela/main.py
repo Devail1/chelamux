@@ -1789,6 +1789,17 @@ def cmd_restore(args) -> None:
     MANUAL row that still carries a relaunch command is left completely untouched — see
     ``chela.restore.retire_empty``. Mutually exclusive with ``--apply``.
 
+    ``--resume`` (CMX-350, issue #457) goes one step further than ``--apply``: a MANUAL row
+    carrying a complete ``(cwd, session_id)`` is actually relaunched — the exact
+    ``claude --resume`` one-liner the report already prints — and its ``inbox.orchestrator``
+    row, if that is the one resumed, is re-registered at the fresh address so the inbox comes
+    back armed in the same pass. REVIVABLE rows are still only ever re-stamped, never
+    relaunched — see ``chela.restore.resume`` for the full guard list (CMX-282 in-flight
+    check, dedup per session, session-id shape check). Disabled by default: set
+    ``CHELA_RESTORE_RESUME=true`` (:data:`chela.config.RESTORE_RESUME_ENABLED`) to allow it —
+    without it, ``--resume`` falls back to the read-only report. Mutually exclusive with
+    ``--apply``/``--retire-empty``.
+
     ⚠️ The roster only helps starting from the NEXT reboot — there is no snapshot of an
     epoch chela was never running to observe. A run today still reports the stale rows
     already sitting in each store; it cannot enumerate a dead fleet the roster never saw.
@@ -1797,6 +1808,12 @@ def cmd_restore(args) -> None:
 
     apply_flag = bool(getattr(args, "apply", False))
     retire_flag = bool(getattr(args, "retire_empty", False))
+    resume_flag = bool(getattr(args, "resume", False))
+    if resume_flag and not config.RESTORE_RESUME_ENABLED:
+        print("⛔ chela restore --resume is disabled by default — set "
+              "CHELA_RESTORE_RESUME=true to allow it to relaunch MANUAL rows. Falling "
+              "back to a read-only report.\n")
+        resume_flag = False
 
     now_epoch = epoch.current()
     store = inbox.load()
@@ -1832,6 +1849,8 @@ def cmd_restore(args) -> None:
         results = restore.apply(verdicts)
     elif retire_flag and verdicts:
         results = restore.retire_empty(verdicts)
+    elif resume_flag and verdicts:
+        results = restore.resume(verdicts, runs)
     else:
         results = []
 
@@ -1861,6 +1880,12 @@ def cmd_restore(args) -> None:
               "Every REVIVABLE row and every MANUAL row that still carries a relaunch "
               "command was left untouched — see each row's outcome above. Act on those by "
               "hand, or re-run with --apply once you are ready to write ALL of them.")
+    elif resume_flag:
+        print("\nchela restore --resume: MANUAL rows with a complete cwd/session were "
+              "relaunched with `claude --resume`; the orchestrator's own row, if resumed, "
+              "was re-registered at its fresh address. REVIVABLE rows were still only "
+              "re-stamped, never relaunched. A row marked `skipped` or `resume-failed` "
+              "above was NOT touched — see its detail for why, and act on it by hand.")
     else:
         print("\nreport only — chela restore never writes to a store. Act by hand: "
               "chela watch/register for a REVIVABLE row, re-dispatch, `chela restore "
@@ -1870,9 +1895,20 @@ def cmd_restore(args) -> None:
     # Nonzero while anything is MANUAL — the agent behind such a row is orphaned and needs
     # a human. This is what composes into a restart procedure ("run chela restore, then
     # check its exit code before declaring the box recovered"). This holds even after
-    # --apply: archiving a MANUAL row's bookkeeping does not resolve the orphaned agent
-    # itself, which still needs a human to decide what happened to it.
-    if manual:
+    # --apply/--retire-empty: archiving a MANUAL row's bookkeeping does not resolve the
+    # orphaned agent itself, which still needs a human to decide what happened to it.
+    #
+    # --resume is the one exception: a row --resume actually RESUMED is no longer
+    # orphaned — the agent is running again — so only a MANUAL row --resume did NOT
+    # resolve (skipped, failed to launch, or --resume was not even attempted) still counts.
+    if resume_flag and results:
+        still_orphaned = any(
+            v.verdict == "MANUAL" and r.action != restore.RESUMED
+            for v, r in zip(verdicts, results)
+        )
+    else:
+        still_orphaned = bool(manual)
+    if still_orphaned:
         sys.exit(1)
 
 
@@ -2885,6 +2921,14 @@ def main() -> None:
              "NOTHING on record (no cwd, or no session — no relaunch command to offer). "
              "Every REVIVABLE row and every MANUAL row that still carries a cwd/session "
              "is left untouched. telegram-bindings.json is still never written.",
+    )
+    p_restore_write.add_argument(
+        "--resume", action="store_true",
+        help="Actually relaunch MANUAL rows carrying a complete cwd/session (the exact "
+             "`claude --resume` one-liner the report prints), and re-register the "
+             "orchestrator's own row so the inbox comes back armed. REVIVABLE rows are "
+             "still only re-stamped, never relaunched. Disabled by default — set "
+             "CHELA_RESTORE_RESUME=true to allow it.",
     )
 
     # task-finished — final step in the dispatcher work-item lifecycle
