@@ -103,9 +103,10 @@ shape gets a retire path here but must not be read as license to bulk-delete a r
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
-from chela import dispatcher, epoch, inbox, roster, sessionids, sessions, spawn as spawn_mod
+from chela import dispatcher, epoch, inbox, resume_state, roster, sessionids, sessions, spawn as spawn_mod
 
 
 @dataclass(frozen=True)
@@ -352,11 +353,69 @@ def apply(verdicts: list[Verdict], *,
     return out
 
 
-# --- resume: the launch half (CMX-350, issue #457) --------------------------------------
+# --- resume: the launch half (CMX-350/issue #457, liveness+retry-bound CMX-353/#468) ------
 
 RESUMED = "resumed"                 # MANUAL, `claude --resume` relaunched successfully
 RESUME_FAILED = "resume-failed"     # MANUAL, eligible, but the launch itself failed
 SKIPPED = "skipped"                 # MANUAL, eligible, but a guard refused to launch it
+
+
+# How `_default_check_resumed` waits for a freshly relaunched session to prove itself
+# genuinely alive, not just momentarily present.
+#
+# ⚠️ Measured in the world (CMX-353's own `Verify` step), not guessed: `claude --resume
+# <a session id claude has never heard of>` prints "No conversation found ..." and EXITS —
+# but not instantly. Sending `claude --resume <bogus>` via `spawn_window` and polling
+# `sessions.wid_for_session` every 0.25s showed the doomed process's OWN `--resume <sid>`
+# command line (the exact evidence `wid_claiming_session`/`wid_for_session` trust) reads as
+# alive from roughly t=0.5s to t=1.9s after the spawn returns, then gone for good by t=2.0s.
+# A check that returns on the FIRST sighting of that command line — which is what an
+# eyes-closed poll-until-true does — reads that doomed process's brief startup window as
+# "resumed", the exact false positive this function exists to rule out one layer down from
+# the CMX-350 defect it fixes. So this waits out `_LIVENESS_SETTLE_S` (comfortably past that
+# measured window) BEFORE looking at all, then requires `_LIVENESS_CONFIRMATIONS` CONSECUTIVE
+# sightings spaced `_LIVENESS_DELAY_S` apart — a session that is genuinely alive (an
+# interactive `claude` sitting at its own prompt) stays alive across that whole span; one
+# that already exited never re-appears to restart the streak.
+_LIVENESS_SETTLE_S = 2.0
+_LIVENESS_ATTEMPTS = 5
+_LIVENESS_DELAY_S = 0.75
+_LIVENESS_CONFIRMATIONS = 2
+
+
+def _default_check_resumed(wid: str | None, session_id: str, *,
+                            attempts: int = _LIVENESS_ATTEMPTS,
+                            delay: float = _LIVENESS_DELAY_S,
+                            settle: float = _LIVENESS_SETTLE_S,
+                            confirmations: int = _LIVENESS_CONFIRMATIONS,
+                            sleep=time.sleep) -> bool:
+    """Issue #468's liveness half: is ``session_id`` ACTUALLY running at ``wid`` right now,
+    not merely "did a tmux window get created there" — and not merely "did a doomed process
+    briefly exist there" (see the module-level comment above for how that second trap was
+    found and measured, not assumed).
+
+    Reads :func:`chela.sessions.wid_for_session` — the same evidence :func:`plan` itself
+    trusts to call a session REVIVABLE elsewhere (the pane's own ``claude --resume <sid>``
+    command line, or the event log bounded by the process's own start time) — forcing a
+    fresh pane read every time (``force=True``) so this never trusts the 1s cache a
+    concurrent caller may have just populated before the resumed process even started.
+
+    ``wid`` falsy (a tmux build that echoed no id) returns ``False`` immediately — the
+    "UNKNOWN MUST NOT READ AS OK" rule this whole module's docstring opens with: without an
+    address there is nothing this can confirm the session is running at.
+    """
+    if not wid:
+        return False
+    sleep(settle)
+    streak = 0
+    for i in range(attempts):
+        if i:
+            sleep(delay)
+        alive = sessions.wid_for_session(session_id, sessions.panes(force=True)) == wid
+        streak = streak + 1 if alive else 0
+        if streak >= confirmations:
+            return True
+    return False
 
 
 def _task_in_flight(wid: str, runs: list[dict]) -> str | None:
@@ -382,9 +441,13 @@ def _task_in_flight(wid: str, runs: list[dict]) -> str | None:
 def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
            spawn_window=None,
            register_orchestrator=None,
+           check_resumed=None,
+           resume_blocked=None,
+           record_resume_failure=None,
+           clear_resume_failure=None,
            **apply_kwargs) -> list[ApplyResult]:
-    """CMX-350: actually relaunch a MANUAL row's dead agent — the one write path in this
-    module that starts a NEW process rather than editing a JSON store.
+    """CMX-350/issue #468: actually relaunch a MANUAL row's dead agent — the one write path
+    in this module that starts a NEW process rather than editing a JSON store.
 
     ⛔⛔ **The counterweight, and the one that matters (issue #457).** A REVIVABLE verdict
     is NEVER handed to ``spawn_window`` — that session is already confirmed alive under
@@ -410,27 +473,49 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
       once per (session_id, epoch)" bound from issue #457.
     * no ``dispatcher.runs`` row still marks a task ACTIVE against this exact dangling
       window (:func:`_task_in_flight`) — the CMX-282 lesson.
+    * its ``session_id`` is not already BLOCKED by an earlier resume of it that did not
+      come up alive — :func:`chela.resume_state.blocked_reason`, checked BEFORE anything
+      is spawned. This is issue #468's durable half of the retry bound: unlike the
+      in-process ``resumed_sessions`` dedup below (which only knows about THIS call),
+      this reads a count :func:`chela.resume_state.record_failure` persisted to disk by a
+      PRIOR ``chela restore --resume`` invocation, so a session that keeps coming up dead
+      stops being relaunched after :data:`chela.resume_state.MAX_TRIES` attempts instead
+      of forever.
 
     A row that fails any of these is reported :data:`SKIPPED` with why, and is left
     completely untouched (never archived, never removed) — a human still sees it plainly
     on the next ``chela restore``.
 
-    On a successful launch the row is archived (:func:`chela.roster.archive`) exactly as
-    :func:`apply` does for MANUAL rows, then either re-registered (``inbox.orchestrator`` —
-    via ``register_orchestrator`` at the freshly spawned wid, so the inbox comes back armed
-    in the same pass) or removed from ``session-ids.json`` (``remove_session``, an
-    ``apply_kwargs`` DI seam, same as :func:`apply`).
+    ⛔⛔ **The other counterweight (issue #468): "window created" is not "agent running".**
+    A launch that opens a tmux window and sends the resume command is only reported
+    :data:`RESUMED` — and only then archived/removed — once :func:`check_resumed` confirms
+    ``session_id`` is genuinely alive at the freshly spawned address (defaults to
+    :func:`_default_check_resumed`, which polls :func:`chela.sessions.wid_for_session` — the
+    same evidence :func:`plan` itself trusts to call a session REVIVABLE elsewhere). A
+    launch whose window came up but whose session never did is reported
+    :data:`RESUME_FAILED`, the row is left exactly as it was (never archived, never
+    removed — the CMX-350 defect this closes), and the failure is persisted via
+    :func:`record_resume_failure` so the NEXT ``chela restore --resume`` sees it as blocked
+    rather than relaunching the same dead session again. A genuinely successful resume
+    clears any prior failure record for that session (:func:`clear_resume_failure`) so a
+    LATER, unrelated death of the same session starts its own retry count from zero.
+
+    On a successful, VERIFIED-ALIVE launch the row is archived (:func:`chela.roster.archive`)
+    exactly as :func:`apply` does for MANUAL rows, then either re-registered
+    (``inbox.orchestrator`` — via ``register_orchestrator`` at the freshly spawned wid, so
+    the inbox comes back armed in the same pass) or removed from ``session-ids.json``
+    (``remove_session``, an ``apply_kwargs`` DI seam, same as :func:`apply`).
 
     ``**apply_kwargs`` forwards to :func:`apply` for the delegated subset (same DI seam,
     same reason) and supplies ``archive``/``remove_session`` for the resumed subset here.
 
-    ``spawn_window``/``register_orchestrator`` default to ``None`` and are resolved to the
-    real :func:`chela.spawn.spawn_window`/:func:`chela.inbox.register` INSIDE the function
-    body (rather than bound at import time, the way :func:`apply`'s pure-JSON writers are) —
-    both touch tmux (a `new-window`, and `register`'s own liveness check via
-    :func:`chela.discovery.get_windows_by_id`), so a caller needs to be able to fake just
-    that leaf the way ``tests/test_restore_cli.py``'s own ``live_stores`` fixture fakes
-    every OTHER tmux-touching call, without also stubbing the pure store writers around it.
+    ``spawn_window``/``register_orchestrator``/``check_resumed``/``resume_blocked``/
+    ``record_resume_failure``/``clear_resume_failure`` all default to ``None`` and are
+    resolved to their real implementations INSIDE the function body (rather than bound at
+    import time, the way :func:`apply`'s pure-JSON writers are) — every one of them touches
+    tmux, the filesystem, or both, so a caller needs to be able to fake just these leaves the
+    way ``tests/test_restore_cli.py``'s own ``live_stores`` fixture fakes every OTHER
+    tmux-touching call, without also stubbing the pure store writers around it.
 
     Returns one :class:`ApplyResult` per input verdict, same order, same contract as
     :func:`apply`/:func:`retire_empty`.
@@ -439,6 +524,14 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
         spawn_window = spawn_mod.spawn_window
     if register_orchestrator is None:
         register_orchestrator = inbox.register
+    if check_resumed is None:
+        check_resumed = _default_check_resumed
+    if resume_blocked is None:
+        resume_blocked = resume_state.blocked_reason
+    if record_resume_failure is None:
+        record_resume_failure = resume_state.record_failure
+    if clear_resume_failure is None:
+        clear_resume_failure = resume_state.clear
     archive = apply_kwargs.get("archive", roster.archive)
     remove_session = apply_kwargs.get("remove_session", sessionids.remove)
 
@@ -472,12 +565,28 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
                             "to relaunch out from under it")
             continue
 
+        blocked = resume_blocked(v.session_id)
+        if blocked:
+            resumed_by_id[id(v)] = ApplyResult(
+                v, SKIPPED, f"resume already failed for session {v.session_id} — not "
+                            f"retrying: {blocked}")
+            continue
+
         result = spawn_window(v.cwd, command=f"claude --resume {v.session_id}")
         if not result.ok:
+            record_resume_failure(v.session_id, result.error or "spawn failed")
             resumed_by_id[id(v)] = ApplyResult(v, RESUME_FAILED, result.error or "")
             continue
 
+        if not check_resumed(result.wid, v.session_id):
+            reason = (f"window {result.wid or '?'} opened but claude --resume "
+                      f"{v.session_id} never came up alive")
+            record_resume_failure(v.session_id, reason)
+            resumed_by_id[id(v)] = ApplyResult(v, RESUME_FAILED, reason)
+            continue
+
         resumed_sessions.add(dedup_key)
+        clear_resume_failure(v.session_id)
         archive(_archive_entry(v))
         if v.store == "inbox.orchestrator":
             ok = bool(result.wid) and bool(register_orchestrator(result.wid).get("ok"))

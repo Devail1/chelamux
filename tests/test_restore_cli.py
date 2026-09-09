@@ -476,6 +476,8 @@ def live_stores(tmp_path, monkeypatch):
     importlib.reload(sessionids_mod)
     import chela.roster as roster_mod
     importlib.reload(roster_mod)
+    import chela.resume_state as resume_state_mod
+    importlib.reload(resume_state_mod)
 
     # The dispatcher `runs` table — the store the round-1 review credited as a real
     # improvement on the brief, and the largest scanner in restore.py. It carries BOTH
@@ -1712,11 +1714,18 @@ def test_CHELA_RESTORE_RESUME_true_env_var_alone_actually_enables_the_launch(
 
 @pytest.fixture()
 def resume_enabled(live_stores, monkeypatch):
-    """`live_stores` plus the env gate — and the ONE tmux-touching leaf (`spawn_window`)
-    faked, exactly the way `live_stores` itself already fakes every OTHER tmux call
-    (`sessions.panes`/`wid_claiming_session`). Every store write downstream of a successful
-    launch (`roster.archive`, `sessionids.remove`, `inbox.register`) is real, against the
-    real temp CHELA_DIR — only the process spawn itself is stubbed.
+    """`live_stores` plus the env gate — and the tmux-touching leaves (`spawn_window`, and
+    issue #468's liveness check) faked, exactly the way `live_stores` itself already fakes
+    every OTHER tmux call (`sessions.panes`/`wid_claiming_session`). Every store write
+    downstream of a successful, VERIFIED-ALIVE launch (`roster.archive`, `sessionids.remove`,
+    `inbox.register`) is real, against the real temp CHELA_DIR — only the process spawn and
+    its liveness confirmation are stubbed.
+
+    `chela.restore._default_check_resumed` is faked to always confirm alive, rather than
+    reusing the `wid_claiming_session` fake `live_stores` already sets up: that fake also
+    backs `plan()`'s OWN `wid_for_session` classification, so making it recognize the
+    freshly-spawned `@99` would wrongly reclassify the MANUAL rows this fixture exists to
+    launch as REVIVABLE before `resume()` ever gets to spawn them.
     """
     monkeypatch.setenv("CHELA_RESTORE_RESUME", "true")
     import chela.config as config
@@ -1730,6 +1739,9 @@ def resume_enabled(live_stores, monkeypatch):
         return spawn_mod.SpawnResult(ok=True, name="shell-9", wid="@99", cwd=str(cwd))
 
     monkeypatch.setattr(spawn_mod, "spawn_window", fake_spawn_window)
+
+    from chela import restore as restore_mod
+    monkeypatch.setattr(restore_mod, "_default_check_resumed", lambda wid, sid, **k: True)
 
     # `inbox.register("@99")` would otherwise shell out to real tmux (`discovery
     # .get_windows_by_id`) to verify @99 exists, which it never will in this sandbox —
