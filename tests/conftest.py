@@ -52,6 +52,7 @@ import builtins
 import io
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -82,6 +83,53 @@ _EXEMPT: tuple[Path, ...] = tuple(d / "worktrees" for d in REAL_CHELA_DIRS)
 SANDBOX_CHELA_DIR = Path(tempfile.mkdtemp(prefix="chela-tests-"))
 os.environ["CHELA_DIR"] = str(SANDBOX_CHELA_DIR)
 atexit.register(shutil.rmtree, SANDBOX_CHELA_DIR, ignore_errors=True)
+
+# **pm2 is live state too, and it is the one the fence below (`_no_live_pm2_restart`)
+# cannot fully close.** Issue #466: nothing anywhere in this repo sets `PM2_HOME`, so every
+# `pm2` subprocess — including from routes that fence never sees, because it is an
+# in-process `monkeypatch.setattr(chela.update, "_sh", ...)` — defaults to the OPERATOR'S
+# REAL God Daemon at `~/.pm2`. `tests/test_graceful_shutdown.py` spawns the actual `python
+# -m chela.main run` daemon as a real subprocess; the dashboard's `/api/update/apply` route
+# runs `update.apply()` on a background thread that can outlive the test function whose
+# monkeypatch already unwound. Either one, unmocked, reaches real `pm2 restart` on this
+# box. Measured 2026-09-09: 315+ real `Stopping app:` commands against all four `chela-*`
+# services in one test/judge window — no OOM, no traceback, pure disruption, and a live
+# session went hook-blind because its dashboard kept bouncing mid-request.
+#
+# `PM2_HOME=$(mktemp -d)` PER TEST would isolate it but leaks a fresh pm2 God Daemon —
+# pm2 spawns one, in whatever home it's pointed at, on first use — every time any test
+# touches pm2. So this is ONE throwaway home for the whole session, same shape as
+# `SANDBOX_CHELA_DIR` above, with its own `atexit` teardown that kills whatever daemon may
+# have started there (`pm2 kill` against THIS home, never the operator's) before removing
+# the directory: no God Daemon survives the run.
+#
+# A `pm2 jlist` read against this empty home answers `[]`, not an error, and that is
+# deliberate: `chela.update._online_chela_services` already treats an empty list as the
+# normal "nothing to restart" case (a dev checkout run by hand has no services either),
+# which is exactly what the ~20 `chela doctor` / `runtime_truth` tests that exercise
+# `repo.services_current` unstubbed rely on — they assert the READ doesn't crash, never
+# the operator's actual fleet contents (which no test can know ahead of time). Making pm2
+# UNREACHABLE instead (e.g. blocking its socket) would fail those reads outright, trading
+# this bug for exactly the one CMX-346's own fence comment warns against.
+SANDBOX_PM2_HOME = Path(tempfile.mkdtemp(prefix="chela-tests-pm2-"))
+os.environ["PM2_HOME"] = str(SANDBOX_PM2_HOME)
+
+
+def _kill_sandbox_pm2_daemon() -> None:
+    if shutil.which("pm2"):
+        try:
+            subprocess.run(
+                ["pm2", "kill"],
+                env={**os.environ, "PM2_HOME": str(SANDBOX_PM2_HOME)},
+                capture_output=True, timeout=15,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass  # nothing to kill, or pm2 hung on its own way out — the rmtree below
+                  # still removes the pid/socket files so nothing points at this home again
+    shutil.rmtree(SANDBOX_PM2_HOME, ignore_errors=True)
+
+
+atexit.register(_kill_sandbox_pm2_daemon)
 
 # A developer who exported these to debug against live files would otherwise aim the whole
 # suite straight back at production, under the sandbox's nose.
@@ -315,6 +363,13 @@ def _no_live_pm2_restart(monkeypatch):
     ``services_running_stale_code``, ``auto_apply_sweep``) to actually restart something
     overrides this with its own ``monkeypatch.setattr(update, "_sh", fake_sh)``, same as
     today; that call happens inside the test body, after this fixture, so it wins.
+
+    Deliberately NOT the only thing standing between a test and the operator's real fleet
+    (issue #466): this is in-process, so it never sees a subprocess a test spawns, or a
+    background thread that outlives the test whose monkeypatch installed it. ``PM2_HOME``
+    above is the structural layer that holds even then — this one stays for the fast,
+    legible failure it gives a test that reaches ``pm2 restart`` synchronously through
+    ``_sh``, same process, same call stack.
     """
     from chela import update
 
