@@ -68,6 +68,39 @@ def test_read_tasks_skips_a_file_missing_required_fields(tmp_path):
     assert [t["id"] for t in tasks] == ["1"]
 
 
+def test_read_tasks_skips_a_file_whose_subject_is_present_but_empty(tmp_path):
+    # 🔴 GUARD: `not subject` is a distinct disjunct from `not isinstance(subject, str)` —
+    # a record with subject="" passes the isinstance check but must still be skipped. A
+    # judge mutation dead-coded this exact clause (`or not subject` -> `or (False and not
+    # subject)`) and the suite stayed green because no fixture ever supplied an empty-but-
+    # present subject.
+    root = tmp_path / "sid-1"
+    _write_task(root, "1.json", id="1", subject="good one", status="completed", blockedBy=[])
+    _write_task(root, "2.json", id="2", subject="", status="pending")
+
+    tasks = tasklists.read_tasks("sid-1", base=tmp_path)
+
+    assert [t["id"] for t in tasks] == ["1"]
+
+
+def test_read_tasks_skips_a_file_whose_top_level_json_is_not_an_object(tmp_path):
+    # 🔴 GUARD: a torn/malformed write can leave valid JSON that parses to something other
+    # than an object (a bare list, string, or number) — the docstring's "a malformed N.json
+    # is skipped, not fatal" covers this too, not just invalid JSON syntax. Without this
+    # clause, obj.get() raises AttributeError, which the `except (OSError, ValueError)`
+    # above does NOT catch, so one such file would 500 /api/dispatcher instead of being
+    # skipped. A judge mutation dead-coded this exact clause (`if not isinstance(obj, dict)`
+    # -> `if False and not isinstance(obj, dict)`) and the suite stayed green because no
+    # fixture ever wrote a non-dict top level.
+    root = tmp_path / "sid-1"
+    _write_task(root, "1.json", id="1", subject="good one", status="completed", blockedBy=[])
+    (root / "2.json").write_text(json.dumps([1, 2, 3]))
+
+    tasks = tasklists.read_tasks("sid-1", base=tmp_path)
+
+    assert [t["id"] for t in tasks] == ["1"]
+
+
 def test_read_tasks_tolerates_a_missing_or_junk_blockedby(tmp_path):
     root = tmp_path / "sid-1"
     _write_task(root, "1.json", id="1", subject="no blockedBy key at all", status="pending")

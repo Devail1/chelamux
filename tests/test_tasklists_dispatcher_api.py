@@ -128,6 +128,47 @@ def test_a_reused_window_id_does_not_attach_a_stale_run_to_the_new_occupants_tas
     assert active[0]["tasks"] is None
 
 
+# --- 🔴 GUARD: session_entries/current_epoch are fetched ONCE per request, not per run ---
+
+def test_session_entries_and_current_epoch_are_fetched_once_for_the_whole_request_not_per_run(
+    monkeypatch, client, tmp_path,
+):
+    # app.py's own comment states the reason: sessionids.entries() is one file read and
+    # epoch.current() one tmux round trip, paid for once per request and reused by every
+    # run below — never re-fetched per row. A judge mutation swapped the reused local
+    # variables for fresh sessionids.entries()/epoch.current() calls at the per-run call
+    # site (still functionally correct with two runs and one shared fixture), and the
+    # suite stayed green because nothing counted how many times either was actually
+    # called. Two runs here means a per-run re-fetch calls each function twice; the fix
+    # must call each exactly once regardless of run count.
+    runs = [
+        _run(task_id="run-A", status="running", window_id="@5", window_epoch="111-222"),
+        _run(task_id="run-B", status="running", window_id="@6", window_epoch="111-222"),
+    ]
+    entries = {
+        "@5": {"session_id": "sid-A", "epoch": "111-222"},
+        "@6": {"session_id": "sid-B", "epoch": "111-222"},
+    }
+    _setup(monkeypatch, tmp_path, runs, entries=entries, current_epoch="111-222")
+
+    entries_calls = []
+    epoch_calls = []
+    monkeypatch.setattr(dash.sessionids, "entries", lambda: (entries_calls.append(1), entries)[1])
+    monkeypatch.setattr(dash.epoch, "current", lambda: (epoch_calls.append(1), "111-222")[1])
+
+    data = client.get("/api/dispatcher").get_json()
+
+    assert len(data["workflows"][0]["active_runs"]) == 2
+    assert len(entries_calls) == 1, (
+        f"sessionids.entries() was called {len(entries_calls)} times for a 2-run request "
+        "— it must be fetched once per request, not once per run"
+    )
+    assert len(epoch_calls) == 1, (
+        f"epoch.current() was called {len(epoch_calls)} times for a 2-run request — it "
+        "must be fetched once per request, not once per run"
+    )
+
+
 # --- MUST STILL PASS: shape unchanged with zero runs, zero task data -----------
 
 def test_api_dispatcher_shape_is_unchanged_with_no_runs(monkeypatch, client, tmp_path):
