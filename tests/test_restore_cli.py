@@ -101,6 +101,46 @@ def test_restore_exits_ZERO_when_nothing_is_orphaned(restore_env, capsys):
     assert "nothing orphaned" in capsys.readouterr().out
 
 
+def test_restore_resume_exits_ZERO_when_the_only_MANUAL_row_was_actually_RESUMED(
+        restore_env, capsys):
+    """`chela/main.py`'s '--resume is the one exception' branch: a MANUAL row `--resume`
+    actually relaunched is no longer orphaned, so a call where EVERY MANUAL row comes back
+    `RESUMED` must exit 0 — even though `verdicts` still holds a MANUAL row. A guard that
+    only checks `bool(manual)` (ignoring the resume outcome) cannot tell this apart from the
+    plain MANUAL case above and would wrongly exit 1 here — see docs/defeat_shapes/350-resume-exit-code-dead-branch.md."""
+    restore_env.setattr(main.config, "RESTORE_RESUME_ENABLED", True)
+    verdict = _verdict("MANUAL")
+    restore_env.setattr(restore_mod, "plan", lambda *a, **k: [verdict])
+    restore_env.setattr(
+        restore_mod, "resume",
+        lambda *a, **k: [restore_mod.ApplyResult(verdict, restore_mod.RESUMED)],
+    )
+
+    main.cmd_restore(SimpleNamespace(resume=True))     # must NOT raise
+
+    assert "=> resumed" in capsys.readouterr().out
+
+
+def test_restore_resume_exits_NONZERO_when_a_MANUAL_row_was_not_resolved_by_resume(
+        restore_env, capsys):
+    """The counterweight: a guard that always exits 0 under `--resume` would be satisfied
+    just as easily as one that ignores the outcome entirely. A row `resume()` reports as
+    `skipped`/`resume-failed` (anything other than RESUMED) must still force exit 1."""
+    restore_env.setattr(main.config, "RESTORE_RESUME_ENABLED", True)
+    verdict = _verdict("MANUAL")
+    restore_env.setattr(restore_mod, "plan", lambda *a, **k: [verdict])
+    restore_env.setattr(
+        restore_mod, "resume",
+        lambda *a, **k: [restore_mod.ApplyResult(verdict, restore_mod.SKIPPED, "in flight")],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main.cmd_restore(SimpleNamespace(resume=True))
+
+    assert exc.value.code == 1
+    assert "=> skipped" in capsys.readouterr().out
+
+
 # --- objective 5's operator-visible half ----------------------------------------------
 
 def _watch_env(monkeypatch, session, self_wid="@0"):
