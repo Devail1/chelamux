@@ -10,6 +10,50 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.10.3] — 2026-09-09
+
+### Added
+
+- **`chela restore --resume` can now actually relaunch a MANUAL row, instead of only
+  printing the `claude --resume` one-liner for a human to run by hand.** Disabled by
+  default (set `CHELA_RESTORE_RESUME=true` to opt in) — without it the flag falls back to
+  the read-only report. A REVIVABLE row is still only ever re-stamped, never relaunched
+  (relaunching an already-live session would fork it into two processes racing one
+  worktree, CMX-346's failure mode); a row is refused and left untouched if its session id
+  doesn't look like one, if it was already resumed earlier in the same pass, or if a
+  `dispatcher.runs` row still marks its task `claimed`/`running` (the CMX-282 lesson — a
+  task the dispatcher itself still owns is not this command's to relaunch out from under
+  it). A resumed `inbox.orchestrator` row is re-registered at its fresh address in the same
+  pass, so the inbox comes back armed. (CMX-350, issue #457)
+
+- **The wall now shows progress inside a dispatched run, not just its status.** Claude
+  Code already writes a structured task list per session
+  (`~/.claude/tasks/<session-id>/N.json`); nothing read it before. `/api/dispatcher` now
+  joins each run to its own list (a new `chela.tasklists` reader, read-only) and every
+  run card/row carries a `4/7`-style chip showing progress, the current in-progress
+  task's subject, and any blocked-by relationships as a tooltip. The join is by SESSION
+  ID, verified against the run's own recorded tmux epoch — not by window id alone — so a
+  window id tmux reissues after a restart can never attach one agent's tasks to another
+  run's row. A run with no task directory (most of them) renders exactly as before —
+  never "0/0". (CMX-352, #462)
+
+### Changed
+
+- **The TUI status/gate/dialog detector reads its regex patterns from a manifest,
+  not hardcoded Python.** `chela/telegram/panescan.py` used to bake every
+  Claude-Code-chrome regex (permission gates, Bash approval, AskUserQuestion,
+  ExitPlanMode, checkpoint restore, Settings, the status-line spinner glyphs) into
+  the module — a chrome change cost a code change, a PR, a judge round, a release,
+  and a deploy. The pattern tables now live in `chela/telegram/detection_manifest.toml`
+  (bundled with the package) and can be replaced, without a `chela-telegram` restart,
+  by dropping a full override manifest at `$CHELA_DIR/agent-detection/claude-code.toml`
+  — picked up on the next pane scan via an mtime check. With no override present,
+  detection is unchanged: same patterns, same order, same glyphs. A present but
+  malformed/unreadable override is logged at ERROR and the bundled manifest is used
+  instead of silently classifying every pane as unrecognized (the CMX-337/#434 shape
+  this is meant to stop repeating). The scanning algorithm itself did not move — only
+  the data it scans against.
+
 ### Fixed
 
 - **The Telegram relay no longer dumps a skill's entire body into the chat.** A `Skill`
@@ -18,6 +62,16 @@ history lives in `git log`.
   `Loaded skill: <name>` marker, including when the originating tool_use has fallen outside
   the current read window (e.g. the transcript monitor skipped to EOF on a large file) — that
   case previously still relayed the raw body. (CMX-348, #455)
+
+- **A flapping `CANNOT VERIFY` no longer pages once per flap, and its diagnostic detail
+  now reaches the log and the push.** `runtime_truth.audit` gives a `cannot_verify`
+  observation ONE immediate re-check before it counts as red — an unknown that clears on
+  retry (a transient `pytest --collect-only` hiccup, say) was never a finding, only a
+  bad tick. A real ERROR is unaffected: it still pages on its first edge, with no added
+  latency. `doctor.check_and_notify` also now carries the finding's `detail` (truncated)
+  into both `log.error` and the notification body, instead of the title alone — the exit
+  code and stderr fragment a `CANNOT VERIFY` finding already captures were previously
+  logged nowhere. (CMX-349, #459)
 
 ## [0.10.2] — 2026-09-07
 
