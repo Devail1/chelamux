@@ -77,7 +77,10 @@ function _kanbanPayload(run) {
 const TASKS = {
     total: 4, done: 3,
     in_progress: { id: 't-4', subject: 'wire the tooltip guard' },
-    blocked: [],
+    blocked: [
+        { id: 't-5', subject: 'ship the release notes', blocked_by: ['t-1', 't-2'] },
+        { id: 't-6', subject: 'audit the migration', blocked_by: [] },
+    ],
 };
 
 // --- dispatcher.js's runs table: the WIRING call site --------------------------------
@@ -117,6 +120,20 @@ test('the chip\'s tooltip names the CURRENT in-progress task\'s subject', () => 
     assert.match(chip.getAttribute('title') || '', /In progress: wire the tooltip guard/,
         `the chip's tooltip must name the in-progress task's subject — got title: ` +
         `"${chip.getAttribute('title')}"`);
+});
+
+// --- the chip's tooltip: blocked-by relationships (the changelog's sibling promise) --
+
+test('the chip\'s tooltip also names each BLOCKED task, with its blocked-by ids when present', () => {
+    renderDispatcher(_dispatcherPayload(_run({ task_id: 't-3b', tasks: TASKS })));
+
+    const chip = document.querySelector('.dispatcher-table .task-progress-chip');
+    assert.ok(chip, 'setup: no chip rendered');
+    const title = chip.getAttribute('title') || '';
+    assert.match(title, /"ship the release notes" blocked by t-1, t-2/,
+        `the chip's tooltip must name a blocked task and its blocked-by ids — got title: "${title}"`);
+    assert.match(title, /"audit the migration" blocked(?!\s+by)/,
+        `a blocked task with no blocked-by ids must still be named, without a dangling "by" — got title: "${title}"`);
 });
 
 // --- kanban.js's card renderer: the SECOND, independently-guarded WIRING call site ----
