@@ -189,6 +189,13 @@ class Fact:
 
 # --- the engine: the same three steps for every fact, forever -----------------------
 
+def _read_back(fact: Fact) -> Observation:
+    try:
+        return fact.read_back()
+    except Exception as exc:
+        return cannot_verify(f"{type(exc).__name__}: {exc}")
+
+
 def audit(fact: Fact) -> list[Finding]:
     """Read the declared value, read back the owned value, compare. That is doctor."""
     try:
@@ -198,10 +205,17 @@ def audit(fact: Fact) -> list[Finding]:
             ERROR, f"{fact.name}: cannot read the value chela DECLARES",
             f"{type(exc).__name__}: {exc} — declared by {fact.declared_by}.",
         ))]
-    try:
-        obs = fact.read_back()
-    except Exception as exc:
-        obs = cannot_verify(f"{type(exc).__name__}: {exc}")
+    obs = _read_back(fact)
+    if obs.unverifiable:
+        # issue #459: an owner that could not be read gets ONE immediate re-check before
+        # the unknown counts as a finding. `cannot_verify` means "I could not establish
+        # this", not "this is broken" — a transient one-bad-tick unknown that clears on
+        # an immediate retry was never a finding, and paging on it turns a flapping
+        # collector into a flapping page. A real ERROR never reaches this branch (it
+        # comes back `observed(...)` and goes straight to `fact.report` below, still on
+        # its first and only read), and an owner that is genuinely, persistently
+        # unreadable still ends up CANNOT VERIFY after its second try.
+        obs = _read_back(fact)
     if obs.unverifiable:
         return [_stamp(fact, Finding(
             fact.unverifiable_level,
