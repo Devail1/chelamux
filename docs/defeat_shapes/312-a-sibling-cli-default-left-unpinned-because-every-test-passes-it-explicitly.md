@@ -254,3 +254,16 @@ and a footer rule at different positions. Closed by
 `test_promote_unreleased_stops_at_a_footer_rule_that_precedes_the_next_heading` and
 `test_promote_unreleased_stops_at_the_next_heading_that_precedes_a_footer_rule` in
 `tests/test_release_notes.py`.
+
+**Also found (CMX-351, PR #464, rework round 1, unrelated ticket — same underlying shape,
+"every caller passes it explicitly" instead of "every test"):**
+`chela/telegram/detection_manifest.py`'s `_parse` reads each `[[pattern]]` entry's `min_gap`
+as `entry.get("min_gap", 2)` — a default carried over from the deleted `_UIPattern` dataclass.
+Every `[[pattern]]` entry in the bundled manifest AND every override built in
+`tests/test_telegram_detection_manifest.py` sets `min_gap` explicitly, so the `.get()` call's
+default value has never been independently exercised — the same gap as an unpinned CLI
+default, just via a TOML-entry default instead of an `argparse` one. The judge changed the
+default to `entry.get("min_gap", 0)`; the suite stayed green
+(`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q`, 3774 passed) because no fixture ever omitted the
+key. Closed by a new test that loads a manifest whose one `[[pattern]]` entry omits `min_gap`
+entirely and asserts the resulting `PatternSpec.min_gap == 2`.

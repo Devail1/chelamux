@@ -45,3 +45,25 @@ any keydown close the modal and swallow the keystroke via `preventDefault()` —
 character typed into the autofocused search box would shut the inbox. Closed by a new test that
 dispatches `key: 'a'` with the modal open and asserts the modal stays open and
 `dispatchEvent`'s return value stays `true` (not prevented).
+
+**Also found (CMX-351, PR #464, rework round 1, unrelated ticket — same underlying shape,
+applied four times to guard clauses instead of a keydown filter):**
+`chela/telegram/detection_manifest.py`'s `_parse` opens with four early-fail guard clauses —
+`if plan_pattern is None: return None` in `panescan.detect_exitplanmode`, and three
+`ManifestError`-raising `if` checks on `[[pattern]].tables`, `[status].spinners`, and
+`[status].active_marker`. Every fixture in `tests/test_telegram_detection_manifest.py` before
+this PR only ever constructed manifests where the checked property was already valid (a
+present `"ExitPlanMode"` pattern; a `tables` value that's a real subset; a non-empty
+`spinners`/`active_marker`), so no fixture ever drove the "other" branch. The judge dead-coded
+all four (`if False and …:`) — for the `tables`/`spinners`/`active_marker` checks the mutated
+manifests loaded successfully with the invalid value silently accepted; for
+`plan_pattern is None` the dead-coded guard let execution fall through to
+`plan_pattern.top`, which — since nothing constructed a manifest omitting `"ExitPlanMode"` —
+never actually ran under any existing test either.
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (3774 passed) under all four
+mutations. Closed by four new tests, each constructing the one input the existing suite never
+built: a manifest with `tables = ["dialogue"]` (typo), `spinners = []`, `active_marker = ""`,
+and an override manifest with no `"ExitPlanMode"` `[[pattern]]` entry at all (driven through
+`detect_exitplanmode`, since dead-coding that particular guard turns the *absence* case into
+an `AttributeError` rather than a silent pass-through — still red, just via a crash instead of
+a failed assertion).

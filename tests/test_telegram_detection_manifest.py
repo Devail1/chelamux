@@ -23,7 +23,12 @@ import pytest
 
 from chela.telegram import detection_manifest
 from chela.telegram.detection_manifest import ManifestError
-from chela.telegram.panescan import detect_dialog, detect_permission_gate, detect_status
+from chela.telegram.panescan import (
+    detect_dialog,
+    detect_exitplanmode,
+    detect_permission_gate,
+    detect_status,
+)
 
 # ── The pinned corpus — real captured-pane shapes, one per manifest pattern kind ──
 
@@ -197,3 +202,181 @@ def test_override_edit_takes_effect_without_a_restart():
     os.utime(override, (stat.st_atime, stat.st_mtime + 5))
 
     assert detect_dialog(pane) is None, "manifest edit was not picked up without a restart"
+
+
+# ── Wiring guards — the call sites must READ the manifest, never copy its values ──
+#
+# Each guard below uses an override whose value DIFFERS from the bundled default, so a
+# call site that quietly reverted to a hardcoded literal (which necessarily matches
+# *today's* bundled value, since it was copied from it) is distinguishable from one that
+# actually reads `manifest.spinners` / `manifest.active_marker` / the pattern's own
+# `top` regexes on every call. See docs/defeat_shapes/303 for why a value that merely
+# equals the bundled default is not evidence a call site reads it live.
+
+
+def _write_override(text: str) -> None:
+    override = detection_manifest.override_manifest_path()
+    override.parent.mkdir(parents=True, exist_ok=True)
+    override.write_text(text, encoding="utf-8")
+    detection_manifest._reset_cache_for_tests()
+
+
+def test_status_spinners_come_from_the_manifest_not_a_hardcoded_copy():
+    _write_override(
+        '[status]\nspinners = ["#"]\nactive_marker = "…"\n\n'
+        '[[pattern]]\nname = "Dummy"\ntables = ["dialog"]\n'
+        'top = [\'^\\s*DUMMY_MARKER\']\nbottom = []\nmin_gap = 1\n'
+    )
+
+    pane = (
+        "some prior output\n\n# Cerebrating… (5s)\n"
+        + "─" * 40
+        + "\n> \n"
+        + "─" * 40
+        + "\n"
+    )
+    status = detect_status(pane)
+    assert status is not None and status.active is True
+
+    # A hardcoded copy of the bundled glyph set ('·✻✽✶✳✢') would still classify the
+    # bundled corpus's own spinner as working under this override — it must not.
+    assert detect_status(WORKING_PANE) is None
+
+
+def test_status_active_marker_comes_from_the_manifest_not_a_hardcoded_copy():
+    _write_override(
+        '[status]\nspinners = ["·"]\nactive_marker = "LIVE"\n\n'
+        '[[pattern]]\nname = "Dummy"\ntables = ["dialog"]\n'
+        'top = [\'^\\s*DUMMY_MARKER\']\nbottom = []\nmin_gap = 1\n'
+    )
+
+    pane = (
+        "some prior output\n\n· Cerebrating LIVE (5s)\n"
+        + "─" * 40
+        + "\n> \n"
+        + "─" * 40
+        + "\n"
+    )
+    status = detect_status(pane)
+    assert status is not None and status.active is True
+
+    # The bundled ellipsis is not this override's marker — a hardcoded copy of "…"
+    # would still call the bundled corpus's own working line "active"; it must not.
+    settled = detect_status(WORKING_PANE)
+    assert settled is not None and settled.active is False
+
+
+def test_exitplanmode_top_markers_come_from_the_manifest_not_hardcoded_regexes():
+    _write_override(
+        '[status]\nspinners = ["·"]\nactive_marker = "…"\n\n'
+        '[[pattern]]\nname = "ExitPlanMode"\ntables = ["dialog"]\n'
+        'top = [\'^\\s*CUSTOM_PROCEED_MARKER\']\n'
+        'bottom = [\'^\\s*Esc to cancel\']\nmin_gap = 1\n'
+    )
+
+    pane = (
+        "● Here is my plan:\n\n"
+        "  1. Do a thing\n\n"
+        " CUSTOM_PROCEED_MARKER\n"
+        " ❯ 1. Yes\n\n"
+        " Esc to cancel\n"
+    )
+    plan = detect_exitplanmode(pane)
+    assert plan is not None
+    assert "Here is my plan" in plan.text
+
+    # The bundled wording ("Would you like to proceed?") is not this override's top
+    # marker — a hardcoded copy of it would still fire here; it must not.
+    bundled_wording_pane = " Would you like to proceed?\n ❯ 1. Yes\n\n Esc to cancel\n"
+    assert detect_exitplanmode(bundled_wording_pane) is None
+
+
+def test_exitplanmode_returns_none_when_manifest_defines_no_exitplanmode_pattern():
+    """No existing fixture ever loads a manifest that omits 'ExitPlanMode' entirely,
+    so the early `if plan_pattern is None: return None` guard has never been driven —
+    dead-coding it is invisible unless a manifest without that pattern is exercised."""
+    _write_override(
+        '[status]\nspinners = ["·"]\nactive_marker = "…"\n\n'
+        '[[pattern]]\nname = "SomethingElse"\ntables = ["dialog"]\n'
+        'top = [\'^\\s*SOME_OTHER_MARKER\']\nbottom = []\nmin_gap = 1\n'
+    )
+
+    pane = (
+        "● Here is my plan:\n\n"
+        "  1. Do a thing\n\n"
+        " Would you like to proceed?\n"
+        " ❯ 1. Yes, and auto-accept edits\n\n"
+        " Esc to cancel\n"
+    )
+    assert detect_exitplanmode(pane) is None
+
+
+def test_manifest_pattern_selects_by_name_not_by_position():
+    """`.pattern(name)` must return the entry whose ``name`` matches — not whichever
+    entry happens to be first. The bundled manifest's own patterns can't catch a
+    positional lookup because 'ExitPlanMode' already IS the first entry there; this
+    override reorders a different-named pattern in front of it."""
+    _write_override(
+        '[status]\nspinners = ["·"]\nactive_marker = "…"\n\n'
+        '[[pattern]]\nname = "FirstOne"\ntables = ["dialog"]\n'
+        'top = [\'^\\s*FIRST_MARKER\']\nbottom = []\nmin_gap = 1\n\n'
+        '[[pattern]]\nname = "ExitPlanMode"\ntables = ["dialog"]\n'
+        'top = [\'^\\s*Would you like to proceed\\?\']\n'
+        'bottom = [\'^\\s*Esc to cancel\']\nmin_gap = 2\n'
+    )
+
+    p = detection_manifest.load().pattern("ExitPlanMode")
+    assert p is not None
+    assert p.name == "ExitPlanMode"
+
+
+def test_pattern_with_invalid_tables_value_is_rejected(tmp_path):
+    bad = tmp_path / "bad.toml"
+    bad.write_text(
+        '[status]\nspinners = ["."]\nactive_marker = "…"\n\n'
+        '[[pattern]]\nname = "Typo"\ntables = ["dialogue"]\n'
+        "top = ['^\\s*X']\nbottom = []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ManifestError, match="tables"):
+        detection_manifest.load_file(bad)
+
+
+def test_empty_spinners_list_is_rejected_with_manifest_error(tmp_path):
+    bad = tmp_path / "bad.toml"
+    bad.write_text(
+        '[status]\nspinners = []\nactive_marker = "…"\n\n'
+        '[[pattern]]\nname = "X"\ntables = ["dialog"]\n'
+        "top = ['^\\s*X']\nbottom = []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ManifestError, match="spinners"):
+        detection_manifest.load_file(bad)
+
+
+def test_empty_active_marker_is_rejected_with_manifest_error(tmp_path):
+    bad = tmp_path / "bad.toml"
+    bad.write_text(
+        '[status]\nspinners = ["."]\nactive_marker = ""\n\n'
+        '[[pattern]]\nname = "X"\ntables = ["dialog"]\n'
+        "top = ['^\\s*X']\nbottom = []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ManifestError, match="active_marker"):
+        detection_manifest.load_file(bad)
+
+
+def test_pattern_omitting_min_gap_defaults_to_two(tmp_path):
+    """The default carried over from the deleted ``_UIPattern`` dataclass — the only
+    value an override entry that omits ``min_gap`` gets. Every existing fixture sets
+    ``min_gap`` explicitly, so this default was never independently exercised."""
+    ok = tmp_path / "ok.toml"
+    ok.write_text(
+        '[status]\nspinners = ["."]\nactive_marker = "…"\n\n'
+        '[[pattern]]\nname = "NoMinGap"\ntables = ["dialog"]\n'
+        "top = ['^\\s*X']\nbottom = []\n",
+        encoding="utf-8",
+    )
+    p = detection_manifest.load_file(ok).pattern("NoMinGap")
+    assert p is not None
+    assert p.min_gap == 2
