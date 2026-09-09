@@ -64,6 +64,12 @@ class _Pending:
     """A ``tool_use`` awaiting its ``tool_result``, carried across poll cycles."""
 
     tool_name: str
+    # The invoked skill identifier (e.g. "superpowers:brainstorming") when
+    # ``tool_name == "Skill"``, else None. Kept in ``pending`` past its
+    # ``tool_result`` — see the ``sourceToolUseID`` handling in
+    # :func:`parse_entries` — since the skill's full body arrives as a LATER,
+    # separate synthetic user record, not inside that tool_result.
+    skill: str | None = None
 
 
 def parse_line(line: str) -> dict | None:
@@ -182,9 +188,13 @@ def parse_entries(
                 elif btype == "tool_use":
                     name = block.get("name", "unknown")
                     tuid = block.get("id") or None
-                    if tuid:
-                        pending[tuid] = _Pending(tool_name=name)
                     tinput = block.get("input")
+                    if tuid:
+                        skill = tinput.get("skill") if isinstance(tinput, dict) else None
+                        pending[tuid] = _Pending(
+                            tool_name=name,
+                            skill=skill if isinstance(skill, str) else None,
+                        )
                     out.append(
                         Message(
                             "assistant", "tool_use", name,
@@ -193,6 +203,33 @@ def parse_entries(
                         )
                     )
         else:  # user
+            # A Skill invocation is followed by a SEPARATE, synthetic ``isMeta``
+            # user record — not a tool_result — carrying the skill's ENTIRE body
+            # (its whole SKILL.md, sometimes 100K+ chars) as plain "text" content,
+            # keyed back to the ``Skill`` tool_use via ``sourceToolUseID`` rather
+            # than the usual ``tool_use_id``. Left unhandled, that body relays
+            # like any other user turn — precisely what CMX-348 reported (one
+            # `update-config` invocation posted 257,276 chars to Telegram). The
+            # terminal never shows this raw body either; it only surfaces the
+            # skill's name, so mirror that instead of relaying the dump.
+            source_id = data.get("sourceToolUseID")
+            if source_id and data.get("isMeta"):
+                skill_info = pending.pop(source_id, None)
+                # A missing pending entry (the originating tool_use fell
+                # outside this read window — e.g. the transcript monitor
+                # skipped to EOF on a large file, see CMX-348) is treated the
+                # SAME as a resolved Skill entry, not relayed: isMeta +
+                # sourceToolUseID together already identify this as
+                # tool-injected synthetic content, so there is no safe way to
+                # let an unresolved one fall through to a raw multi-KB dump.
+                # Only a pending entry that resolves to some OTHER tool (a
+                # real, non-Skill tool_use) is known-safe to relay normally.
+                if skill_info is None or skill_info.tool_name == "Skill":
+                    name = skill_info.skill if skill_info is not None else None
+                    out.append(
+                        Message("user", "text", f"Loaded skill: {name or 'unknown'}", timestamp=ts)
+                    )
+                    continue
             user_text: list[str] = []
             for block in content:
                 if not isinstance(block, dict):
@@ -202,7 +239,12 @@ def parse_entries(
                 btype = block.get("type", "")
                 if btype == "tool_result":
                     tuid = block.get("tool_use_id") or None
-                    info = pending.pop(tuid, None) if tuid else None
+                    info = pending.get(tuid) if tuid else None
+                    # A Skill invocation's entry stays in ``pending`` past its
+                    # (short) tool_result — its full body arrives as a LATER,
+                    # separate ``sourceToolUseID`` record, handled below.
+                    if info is not None and info.tool_name != "Skill" and tuid:
+                        pending.pop(tuid, None)
                     raw_content = block.get("content", "")
                     result_text = _tool_result_text(raw_content).strip()
                     images = _tool_result_images(raw_content)

@@ -181,3 +181,194 @@ def test_parse_entries_text_only_tool_result_has_no_images():
 
 def test_message_images_defaults_to_none():
     assert Message("assistant", "text", "hi").images is None
+
+
+# --------------------------------------------------------------------------
+# skill-body suppression (CMX-348) — a Skill invocation's full body arrives
+# as a SEPARATE synthetic "isMeta" user record, keyed back to the tool_use
+# via "sourceToolUseID" (not the usual tool_result "tool_use_id"). Relayed
+# verbatim this is a 100K+ char wall of text; parse_entries must replace it
+# with a short "Loaded skill: <name>" event instead.
+# --------------------------------------------------------------------------
+
+def _skill_tool_use_entry(tool_id: str, skill: str) -> dict:
+    return {
+        "type": "assistant",
+        "timestamp": "t",
+        "message": {
+            "content": [
+                {"type": "tool_use", "id": tool_id, "name": "Skill", "input": {"skill": skill}}
+            ]
+        },
+    }
+
+
+def _skill_tool_result_entry(tool_id: str) -> dict:
+    return {
+        "type": "user",
+        "timestamp": "t",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": "Launching skill: irrelevant",
+                }
+            ]
+        },
+    }
+
+
+def _skill_body_entry(tool_id: str, body: str) -> dict:
+    return {
+        "type": "user",
+        "isMeta": True,
+        "sourceToolUseID": tool_id,
+        "timestamp": "t",
+        "message": {"content": [{"type": "text", "text": body}]},
+    }
+
+
+def _non_meta_source_id_entry(tool_id: str, body: str) -> dict:
+    # Same sourceToolUseID shape as a real skill-body record, but NOT isMeta —
+    # an ordinary user turn that merely happens to carry a sourceToolUseID.
+    return {
+        "type": "user",
+        "isMeta": False,
+        "sourceToolUseID": tool_id,
+        "timestamp": "t",
+        "message": {"content": [{"type": "text", "text": body}]},
+    }
+
+
+def _bash_tool_use_entry(tool_id: str) -> dict:
+    return {
+        "type": "assistant",
+        "timestamp": "t",
+        "message": {
+            "content": [
+                {"type": "tool_use", "id": tool_id, "name": "Bash", "input": {"command": "ls"}}
+            ]
+        },
+    }
+
+
+def test_skill_body_is_replaced_with_a_short_name_marker():
+    big_body = "Base directory for this skill: /x/y\n\n# Some Skill\n\n" + ("word " * 50_000)
+    entries = [
+        _skill_tool_use_entry("tu_1", "superpowers:brainstorming"),
+        _skill_tool_result_entry("tu_1"),
+        _skill_body_entry("tu_1", big_body),
+    ]
+    events, _ = parse_entries(entries)
+    user_texts = [m for m in events if m.role == "user" and m.content_type == "text"]
+    assert len(user_texts) == 1
+    assert user_texts[0].text == "Loaded skill: superpowers:brainstorming"
+
+
+def test_skill_body_pending_survives_across_poll_cycles():
+    # The tool_use and its result land in one poll; the body arrives in the
+    # NEXT one — mirrors CMX-348's actual timing and the existing
+    # cross-cycle tool-pairing contract this module already relies on.
+    events1, pending = parse_entries(
+        [_skill_tool_use_entry("tu_2", "handoff"), _skill_tool_result_entry("tu_2")]
+    )
+    assert not [m for m in events1 if m.role == "user" and m.content_type == "text"]
+
+    events2, pending = parse_entries([_skill_body_entry("tu_2", "# Handoff\n\nbody")], pending)
+    user_texts = [m for m in events2 if m.role == "user" and m.content_type == "text"]
+    assert len(user_texts) == 1
+    assert user_texts[0].text == "Loaded skill: handoff"
+    assert "tu_2" not in pending
+
+
+def test_missing_pending_entry_for_source_id_is_suppressed_as_unknown_skill():
+    # A sourceToolUseID that resolves to NOTHING in ``pending`` (e.g. the
+    # originating tool_use fell outside this read window — the transcript
+    # monitor skipping to EOF on a large file loses it exactly this way, see
+    # CMX-348) must still be suppressed, not relayed raw: isMeta +
+    # sourceToolUseID together already identify this as tool-injected
+    # synthetic content (almost always a skill body, sometimes 100K+ chars),
+    # so there is no safe fallback that relays it.
+    big_body = "word " * 50_000
+    entries = [_skill_body_entry("tu_unknown", big_body)]
+    events, _ = parse_entries(entries)
+    user_texts = [m for m in events if m.role == "user" and m.content_type == "text"]
+    assert len(user_texts) == 1
+    assert user_texts[0].text == "Loaded skill: unknown"
+
+
+def test_isMeta_without_source_id_relays_in_full():
+    # isMeta alone (no sourceToolUseID) is the shape of a cross-session peer
+    # notification, not a skill body — it must relay in full. Guards against
+    # a future refactor collapsing the gate to ``if data.get("isMeta"):``
+    # alone, which would silently swallow every peer message too.
+    entries = [
+        {
+            "type": "user",
+            "isMeta": True,
+            "timestamp": "t",
+            "message": {"content": [{"type": "text", "text": "peer notice: hello"}]},
+        }
+    ]
+    events, _ = parse_entries(entries)
+    user_texts = [m for m in events if m.role == "user" and m.content_type == "text"]
+    assert len(user_texts) == 1
+    assert user_texts[0].text == "peer notice: hello"
+
+
+def test_non_meta_source_id_is_relayed_normally_not_swallowed():
+    # A NON-meta user record that happens to carry a sourceToolUseID matching
+    # a real pending Skill tool_use must still relay as ordinary user text —
+    # the swallow requires isMeta True, not just a matching sourceToolUseID.
+    entries = [
+        _skill_tool_use_entry("tu_5", "orchestrate"),
+        _non_meta_source_id_entry("tu_5", "just a regular message"),
+    ]
+    events, pending = parse_entries(entries)
+    user_texts = [m for m in events if m.role == "user" and m.content_type == "text"]
+    assert len(user_texts) == 1
+    assert user_texts[0].text == "just a regular message"
+    # Not popped: the swallow condition never fired, so the Skill entry is
+    # still waiting for its (separate) isMeta body record.
+    assert "tu_5" in pending
+
+
+def test_source_id_resolving_to_non_skill_pending_entry_falls_through():
+    # A sourceToolUseID whose pending entry resolves to some OTHER tool (not
+    # "Skill") must fall through to ordinary user-text handling, not be
+    # swallowed as if it were a skill body.
+    entries = [
+        _bash_tool_use_entry("tu_6"),
+        _skill_body_entry("tu_6", "hello from a non-skill source"),
+    ]
+    events, _ = parse_entries(entries)
+    user_texts = [m for m in events if m.role == "user" and m.content_type == "text"]
+    assert len(user_texts) == 1
+    assert user_texts[0].text == "hello from a non-skill source"
+
+
+def test_skill_tool_result_still_carries_its_own_short_text():
+    # The Skill tool_result itself ("Launching skill: ...") must keep relaying
+    # exactly as before — only the LATER synthetic body record is suppressed.
+    entries = [_skill_tool_use_entry("tu_3", "orchestrate"), _skill_tool_result_entry("tu_3")]
+    events, _ = parse_entries(entries)
+    result = [m for m in events if m.content_type == "tool_result"][0]
+    assert result.tool_name == "Skill"
+    assert result.text == "Launching skill: irrelevant"
+
+
+def test_skill_name_falls_back_to_unknown_when_input_has_no_skill_field():
+    entries = [
+        {
+            "type": "assistant",
+            "timestamp": "t",
+            "message": {
+                "content": [{"type": "tool_use", "id": "tu_4", "name": "Skill", "input": {}}]
+            },
+        },
+        _skill_body_entry("tu_4", "# Body"),
+    ]
+    events, _ = parse_entries(entries)
+    user_texts = [m for m in events if m.role == "user" and m.content_type == "text"]
+    assert user_texts[0].text == "Loaded skill: unknown"
