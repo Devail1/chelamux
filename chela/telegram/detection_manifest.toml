@@ -1,0 +1,128 @@
+# Bundled default agent-detection manifest for Claude Code's live TUI (issue #458).
+#
+# This is DATA, not policy: the top/bottom marker regexes and glyph sets that
+# `chela/telegram/panescan.py` scans a captured tmux pane against. It is measured
+# against the Claude Code version chelamux runs behind at release time — see the
+# NOTICE file for the ccbot provenance of these patterns.
+#
+# An operator can override this file WITHOUT a chela-telegram restart by dropping a
+# complete replacement manifest (same schema) at:
+#
+#     $CHELA_DIR/agent-detection/claude-code.toml     (default $CHELA_DIR: ~/.chela)
+#
+# The override file, if present and well-formed, REPLACES this bundled manifest in
+# full (it is not merged field-by-field) — resolution order is local override >
+# bundled default. A missing override is normal (bundled applies). A present but
+# malformed/unreadable override is logged loudly and this bundled manifest is used
+# instead — detection never silently degrades to "unknown" (see the CMX-337 /
+# issue #434 fail-closed-None incident this file exists to stop repeating).
+#
+# Each `[[pattern]]` entry is a top/bottom marker pair: the first pane line matching
+# any `top` regex starts the region, the first later line matching any `bottom`
+# regex ends it (`bottom = []` extends to the last non-empty line instead).
+# `tables` says which detector(s) the pattern feeds: "gate" (a permission/approval
+# prompt `detect_permission_gate` must answer) and/or "dialog" (any blocked-state
+# dialog `detect_dialog` mirrors verbatim — a superset of "gate"). Order matters:
+# each table is built by filtering this list top-to-bottom, first match wins.
+
+[status]
+# Glyphs Claude Code cycles the status-line spinner through (measured 2.1.207).
+spinners = ["·", "✻", "✽", "✶", "✳", "✢"]
+# The ellipsis marks a status line as WORKING (vs. a settled past-tense summary
+# wearing the same glyph in the same slot) — see panescan.py's `_STATUS_ACTIVE`.
+active_marker = "…"
+
+[[pattern]]
+name = "ExitPlanMode"
+tables = ["dialog"]
+top = [
+  '^\s*Would you like to proceed\?',
+  '^\s*Claude has written up a plan',  # v2.1.29+: a longer prefix that may wrap
+]
+bottom = [
+  '^\s*ctrl-g to edit in ',
+  '^\s*Esc to (cancel|exit)',
+]
+min_gap = 2
+
+[[pattern]]
+# The multi-tab / multi-select AskUserQuestion strip.
+name = "AskUserQuestion"
+tables = ["dialog"]
+top = ['^\s*←\s+[☐✔☒]']
+bottom = []
+min_gap = 1
+
+[[pattern]]
+# The single-question AskUserQuestion checkbox header.
+name = "AskUserQuestion"
+tables = ["dialog"]
+top = ['^\s*[☐✔☒]']
+bottom = ['^\s*Enter to select']
+min_gap = 1
+
+[[pattern]]
+# Anchors on the tool-call HEADER first (see panescan.py's big comment on why
+# this must come before the PermissionPrompt entries below): the mirror must
+# show what is being approved, and the header is where the command/file lives.
+name = "ToolApproval"
+tables = ["dialog"]
+top = [
+  '^\s*Bash command\s*$',
+  '^\s*This command requires approval',
+  '^\s*(Edit|Create|Write|Read|MultiEdit|NotebookEdit) file\s*$',
+]
+bottom = ['^\s*Esc to cancel']
+min_gap = 2
+
+[[pattern]]
+name = "PermissionPrompt"
+tables = ["gate", "dialog"]
+top = [
+  '^\s*Do you want to proceed\?',
+  '^\s*Do you want to make this edit',
+  '^\s*Do you want to create \S',
+  '^\s*Do you want to delete \S',
+]
+bottom = ['^\s*Esc to cancel']
+min_gap = 2
+
+[[pattern]]
+# Permission menu with numbered choices (no "Esc to cancel" line).
+name = "PermissionPrompt"
+tables = ["gate", "dialog"]
+top = ['^\s*❯\s*1\.\s*Yes']
+bottom = []
+min_gap = 2
+
+[[pattern]]
+name = "BashApproval"
+tables = ["gate", "dialog"]
+top = [
+  '^\s*Bash command\s*$',
+  '^\s*This command requires approval',
+]
+bottom = ['^\s*Esc to cancel']
+min_gap = 2
+
+[[pattern]]
+name = "RestoreCheckpoint"
+tables = ["dialog"]
+top = ['^\s*Restore the code']
+bottom = ['^\s*Enter to continue']
+min_gap = 2
+
+[[pattern]]
+name = "Settings"
+tables = ["dialog"]
+top = [
+  '^\s*Settings:.*tab to cycle',
+  '^\s*Select model',  # /model
+]
+bottom = [
+  'Esc to cancel',
+  'Esc to exit',
+  'Enter to confirm',
+  '^\s*Type to filter',
+]
+min_gap = 2
