@@ -2382,6 +2382,20 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kanban-ci-chip.ci-pending { color: var(--yellow); border-color: rgba(210, 153, 34, 0.45); background: rgba(210, 153, 34, 0.08); }
 .kanban-ci-chip.ci-unknown { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.08); }
 
+/* Progress inside a run's OWN task list (issue #462) — "4/7", tooltip carries the
+   current in-progress subject + blocked-by relationships. Same chip shape as the CI
+   chip above; renders only when the server actually joined a session's task list
+   (dispatcher.js's _taskProgressChip returns '' otherwise), so an ordinary run with
+   no task data shows nothing here, same as before this existed. */
+.task-progress-chip {
+    border-radius: 10px;
+    padding: 0 8px;
+    font-size: 10px;
+    white-space: nowrap;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+}
+
 .kanban-card-error {
     color: var(--red);
     font-size: 10px;

@@ -1,6 +1,6 @@
 // --- Stage 0: ES-module imports ---
 import { $, BASE_PATH, attrEsc, escHtml } from './util.js';
-import { _runDisplayId, _runPrCell } from './dispatcher.js';
+import { _runDisplayId, _runPrCell, _taskProgressChip } from './dispatcher.js';
 import { pollWork, postWorkDelete } from './work.js';
 import { openTaskModal } from './taskmodal.js';
 import { displayTitle } from './taskmodalmodel.js';
@@ -230,6 +230,9 @@ function _kCard(card) {
     const stateChip = chipMeta
         ? `<span class="kanban-state-chip ${chipMeta.cls}">${escHtml(chipMeta.label)}</span>`
         : '';
+    // Progress inside the run's own task list (issue #462) — see _taskProgressChip;
+    // renders nothing when card.tasks is null (no session to join, or no task dir).
+    const taskChip = _taskProgressChip(card.tasks);
     // Merge button rides next to the PR badge on Awaiting Review cards —
     // that's where cards with open, unmerged PRs live. dispatcher.tick()
     // refreshes pr_state via `gh pr view` for any row carrying a pr_url, so the
@@ -270,6 +273,7 @@ function _kCard(card) {
             <span class="kanban-card-id" title="${tid}">${displayId}</span>
             ${branchOrLine}
             ${stateChip}
+            ${taskChip}
             ${pr}
             ${ci}
             ${merge}
