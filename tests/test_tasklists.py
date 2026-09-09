@@ -3,6 +3,7 @@ reader and its wid-safe join to a dispatcher run (issue #462).
 """
 from __future__ import annotations
 
+import importlib
 import json
 import os
 from pathlib import Path
@@ -110,6 +111,33 @@ def test_read_tasks_tolerates_a_missing_or_junk_blockedby(tmp_path):
 
     assert tasks[0]["blocked_by"] == []
     assert tasks[1]["blocked_by"] == []
+
+
+# --- TASKS_DIR — the module's own default, exercised for real -------------------
+
+def test_tasks_dir_defaults_to_claude_config_dir_tasks_without_any_override(monkeypatch, tmp_path):
+    # 🔴 GUARD (docs/defeat_shapes 352c): every OTHER test in this file passes base=
+    # explicitly, and test_tasklists_dispatcher_api.py monkeypatches TASKS_DIR itself —
+    # nothing ever proves the module's own default constant resolves under the real
+    # config dir. A judge mutation repointed it (`claude_config_dir() / "tasks"` ->
+    # `claude_config_dir() / "tasks-never-here"`) and the suite stayed green because no
+    # fixture ever exercised the un-overridden default. Reload the module against a
+    # fake CLAUDE_CONFIG_DIR and call read_tasks with NO base= at all — this can only
+    # pass if the real TASKS_DIR constant still resolves to <config dir>/tasks.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    importlib.reload(tasklists)
+    try:
+        _write_task(tmp_path / "tasks" / "sid-real", "1.json",
+                    id="1", subject="found at the real default", status="pending", blockedBy=[])
+
+        tasks = tasklists.read_tasks("sid-real")  # deliberately no base=
+
+        assert tasks == [{
+            "id": "1", "subject": "found at the real default",
+            "status": "pending", "blocked_by": [],
+        }]
+    finally:
+        importlib.reload(tasklists)
 
 
 # --- summarize -----------------------------------------------------------------

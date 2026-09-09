@@ -110,6 +110,24 @@ test('the dispatcher runs table renders NOTHING in the Tasks column when a run h
         'a run with tasks:null must render no chip at all — never "0/0"');
 });
 
+test('the dispatcher runs table\'s <th>Tasks</th> header stays aligned with the Tasks <td> — dropping or moving the header must not go unnoticed', () => {
+    renderDispatcher(_dispatcherPayload(_run({ tasks: TASKS })));
+
+    const headers = [...document.querySelectorAll('.dispatcher-table thead th')];
+    const row = document.querySelector('.dispatcher-table tbody tr');
+    const cells = [...row.querySelectorAll('td')];
+    assert.equal(headers.length, cells.length,
+        `header/cell count mismatch (${headers.length} <th> vs ${cells.length} <td>) — a ` +
+        'dropped <th> shifts every column in the table under its neighbour\'s heading');
+
+    const tasksHeaderIndex = headers.findIndex(th => th.textContent.trim() === 'Tasks');
+    assert.notEqual(tasksHeaderIndex, -1, 'no <th>Tasks</th> found in the dispatcher runs table header');
+    const tasksCellIndex = cells.findIndex(td => td.getAttribute('data-label') === 'Tasks');
+    assert.equal(tasksHeaderIndex, tasksCellIndex,
+        'the <th>Tasks</th> header is not at the same column index as the Tasks <td> — the ' +
+        'header and cell have drifted apart');
+});
+
 // --- the chip's tooltip: the current in-progress task's subject ----------------------
 
 test('the chip\'s tooltip names the CURRENT in-progress task\'s subject', () => {

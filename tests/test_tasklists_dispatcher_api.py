@@ -128,6 +128,44 @@ def test_a_reused_window_id_does_not_attach_a_stale_run_to_the_new_occupants_tas
     assert active[0]["tasks"] is None
 
 
+# --- 🔴 GUARD: the join runs on EVERY bucket, not only active_runs -------------
+
+def test_a_recent_completed_run_also_carries_its_task_progress(monkeypatch, client, tmp_path):
+    # docs/defeat_shapes 352d: every OTHER test in this file reads only
+    # data["workflows"][0]["active_runs"]. app.py actually loops
+    # `for r in (*active, *awaiting, *recent)` — kanban.js builds cards from all
+    # three buckets (active_runs, awaiting_review_runs, recent_runs) off this same
+    # payload, so a run that has finished must carry `tasks` too. A judge mutation
+    # scoped the join to `... if r in active else None`, which corrupts nothing this
+    # file's own (active-only) assertions ever read, and the suite stayed green.
+    runs = [_run(status="done", window_id="@5", window_epoch="111-222")]
+    entries = {"@5": {"session_id": "sid-live", "epoch": "111-222"}}
+    _setup(monkeypatch, tmp_path, runs, entries=entries, current_epoch="111-222")
+    _write_task(tmp_path / "tasks" / "sid-live", "1.json",
+                id="1", subject="first", status="completed", blockedBy=[])
+
+    data = client.get("/api/dispatcher").get_json()
+    recent = data["workflows"][0]["recent_runs"]
+    assert len(recent) == 1
+    assert recent[0]["tasks"] == {
+        "total": 1, "done": 1, "in_progress": None, "blocked": [],
+    }
+
+
+def test_an_awaiting_review_run_also_carries_its_task_progress(monkeypatch, client, tmp_path):
+    # Same guard as above, the OTHER non-active bucket the join must still reach.
+    runs = [_run(status="awaiting_review", window_id="@5", window_epoch="111-222")]
+    entries = {"@5": {"session_id": "sid-live", "epoch": "111-222"}}
+    _setup(monkeypatch, tmp_path, runs, entries=entries, current_epoch="111-222")
+    _write_task(tmp_path / "tasks" / "sid-live", "1.json",
+                id="1", subject="first", status="in_progress", blockedBy=[])
+
+    data = client.get("/api/dispatcher").get_json()
+    awaiting = data["workflows"][0]["awaiting_review_runs"]
+    assert len(awaiting) == 1
+    assert awaiting[0]["tasks"]["total"] == 1
+
+
 # --- 🔴 GUARD: session_entries/current_epoch are fetched ONCE per request, not per run ---
 
 def test_session_entries_and_current_epoch_are_fetched_once_for_the_whole_request_not_per_run(
