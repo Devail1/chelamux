@@ -15,6 +15,7 @@ from __future__ import annotations
 
 
 
+from chela import sessions
 from chela.restore import (
     ARCHIVED,
     KEPT,
@@ -28,6 +29,7 @@ from chela.restore import (
     Orphan,
     Verdict,
     _classify,
+    _default_check_resumed,
     apply,
     plan,
     resume,
@@ -916,14 +918,26 @@ def _launchable(store="session-ids", wid="@1", session_id=SID_OK, cwd="/home/x")
 
 
 def _resume_kit(**overrides):
-    """`_writers()` plus the two writers unique to `resume()` — sharing the SAME `calls`
-    list so a single assertion can see the full launch-then-bookkeeping order."""
+    """`_writers()` plus the writers unique to `resume()` — sharing the SAME `calls`
+    list so a single assertion can see the full launch-then-bookkeeping order.
+
+    `check_resumed`/`resume_blocked`/`record_resume_failure`/`clear_resume_failure`
+    default to the "everything is fine" shape (the launch is genuinely alive, nothing is
+    blocked, and the failure hooks are no-ops) so every pre-existing test below — written
+    before issue #468 added these seams — keeps exercising exactly the same
+    launch-then-bookkeeping path with an unchanged `calls` list. Tests that exercise the
+    NEW liveness/retry-bound behaviour override these explicitly.
+    """
     calls, kit = _writers()
     kit["spawn_window"] = lambda cwd, command=None: (
         calls.append(("spawn", cwd, command)),
         SpawnResult(ok=True, name="shell-9", wid="@99", cwd=cwd))[1]
     kit["register_orchestrator"] = lambda wid: (
         calls.append(("register", wid)), {"ok": True})[1]
+    kit["check_resumed"] = lambda wid, session_id: True
+    kit["resume_blocked"] = lambda session_id: None
+    kit["record_resume_failure"] = lambda session_id, reason: 1
+    kit["clear_resume_failure"] = lambda session_id: None
     kit.update(overrides)
     return calls, kit
 
@@ -1128,12 +1142,252 @@ def test_resume_reports_RESUME_FAILED_and_writes_nothing_when_the_launch_fails()
     assert results[0].detail == "tmux is unreachable"
 
 
+def test_resume_persists_a_resume_failure_when_the_SPAWN_itself_fails_not_only_on_a_dead_liveness_check():
+    """🔴 GUARD (CMX-353 rework round 1): a spawn failure must persist a resume failure too —
+    not only the liveness-check-failed branch below. Without this, a session whose
+    `spawn_window` keeps erroring (a full tmux server, a bad cwd) is relaunched forever on
+    every `chela restore --resume` pass instead of ever tripping the durable retry bound."""
+    record_calls = []
+    calls, kit = _resume_kit(
+        spawn_window=lambda cwd, command=None: (
+            calls.append(("spawn", cwd, command)),
+            SpawnResult(ok=False, error="tmux is unreachable"))[1],
+        record_resume_failure=lambda sid, reason: (record_calls.append((sid, reason)), 1)[1],
+    )
+    v = _launchable(wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert results[0].action == RESUME_FAILED
+    assert record_calls == [(SID_OK, "tmux is unreachable")], (
+        "a spawn failure must be persisted via record_resume_failure exactly like a dead "
+        "liveness check is, so a session whose launch keeps erroring eventually blocks too"
+    )
+
+
+# --------------------------------------------------------------------------
+# _default_check_resumed — the real liveness logic (CMX-353 rework round 1, issue #468)
+#
+# Every test above exercises `resume()` with `check_resumed` stubbed out entirely, which
+# proves the SEAM is wired (test_resume_liveness_and_retry_bound_defaults_wire_to_the_real_modules
+# below) but never executes a single line of `_default_check_resumed`'s own body. These call
+# the real function directly, faking only its evidence source (`sessions.wid_for_session` /
+# `sessions.panes`) — the same discipline defeat_shapes 319/330 prescribe for a leaf function
+# whose only prior tests monkeypatched it away wholesale.
+# --------------------------------------------------------------------------
+
+def test_default_check_resumed_returns_False_immediately_for_a_falsy_wid(monkeypatch):
+    """🔴 GUARD: 'UNKNOWN MUST NOT READ AS OK' — a falsy wid must return False WITHOUT ever
+    consulting tmux evidence or waiting out the settle window. A spy on `sessions.panes`
+    (the first thing the real alive-check touches) proves the short circuit actually fires,
+    rather than merely happening to return False after looking anyway."""
+    calls = []
+    monkeypatch.setattr(sessions, "panes",
+                         lambda force=False: (calls.append(("panes", force)), {})[1])
+    monkeypatch.setattr(sessions, "wid_for_session",
+                         lambda sid, pane_map=None: (calls.append(("wid_for_session", sid)), None)[1])
+    sleeps = []
+
+    result = _default_check_resumed(None, SID_OK, sleep=sleeps.append)
+
+    assert result is False
+    assert calls == [], "a falsy wid must never even look at tmux evidence"
+    assert sleeps == [], "must return before waiting out the settle window too"
+
+
+def test_default_check_resumed_requires_real_tmux_evidence_not_assumed(monkeypatch):
+    """🔴 GUARD: liveness must come from `sessions.wid_for_session` actually matching the
+    resumed wid — not be assumed true. `wid_for_session` here NEVER returns the resumed
+    wid, so a correct implementation can never build a confirmation streak."""
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+    monkeypatch.setattr(sessions, "wid_for_session", lambda sid, pane_map=None: "@some-other-window")
+
+    result = _default_check_resumed("@99", SID_OK, sleep=lambda s: None,
+                                     attempts=3, confirmations=2, delay=0, settle=0)
+
+    assert result is False, (
+        "wid_for_session never once matched the resumed wid — this must never read as alive"
+    )
+
+
+def test_default_check_resumed_requires_CONSECUTIVE_confirmations(monkeypatch):
+    """🔴 GUARD: the exact measured false positive the module comment documents — a doomed
+    `claude --resume <bad sid>` process reads as alive for one brief window then vanishes.
+    One sighting followed by a gap must NOT read as alive; only `_LIVENESS_CONFIRMATIONS`
+    CONSECUTIVE sightings may. Left at the REAL default `attempts`/`confirmations` (only
+    `sleep` is faked) — passing `confirmations=2` explicitly here would keep this green even
+    if the module's own `_LIVENESS_CONFIRMATIONS` constant were corrupted to 1, the same
+    "override swallows the real value" gap defeat_shapes 352c describes."""
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+    sightings = iter(["@99"] + ["@gone"] * 10)   # alive once, then gone for good
+    monkeypatch.setattr(sessions, "wid_for_session",
+                         lambda sid, pane_map=None: next(sightings))
+
+    result = _default_check_resumed("@99", SID_OK, sleep=lambda s: None)
+
+    assert result is False, (
+        "alive once, then gone, must not satisfy the real CONSECUTIVE-sightings requirement"
+    )
+
+
+def test_default_check_resumed_waits_out_the_settle_window_before_looking_at_all(monkeypatch):
+    """🔴 GUARD: the measured 0.5s-1.9s span in which a doomed relaunch still reads as alive
+    — the real default `settle` (not overridden here) must actually be waited out via
+    `sleep` before the first tmux evidence is even consulted. Pinned to a literal, not to
+    the module's own (possibly-corrupted) constant, so a mutated constant cannot drag this
+    assertion down with it."""
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+    monkeypatch.setattr(sessions, "wid_for_session", lambda sid, pane_map=None: "@99")
+    sleeps = []
+
+    result = _default_check_resumed("@99", SID_OK, sleep=sleeps.append,
+                                     attempts=1, confirmations=1, delay=0.01)
+
+    assert result is True
+    assert sleeps and sleeps[0] == 2.0, (
+        "the real default settle window must be waited out before the first look"
+    )
+
+
+def test_default_check_resumed_forces_a_fresh_pane_read(monkeypatch):
+    """🔴 GUARD: must never trust the 1s `sessions.panes()` cache a concurrent caller may
+    have populated before the resumed process even started — every read must pass
+    `force=True`."""
+    force_flags = []
+    monkeypatch.setattr(sessions, "panes",
+                         lambda force=False: (force_flags.append(force), {})[1])
+    monkeypatch.setattr(sessions, "wid_for_session", lambda sid, pane_map=None: None)
+
+    _default_check_resumed("@99", SID_OK, sleep=lambda s: None,
+                            attempts=1, confirmations=1, delay=0, settle=0)
+
+    assert force_flags == [True], "must never trust the cached pane read"
+
+
+def test_default_check_resumed_confirms_a_genuinely_alive_relaunch(monkeypatch):
+    """⛔⛔ The counterweight that matters (raised on this same PR by a peer session): a
+    liveness check tightened to satisfy the guards above must still confirm a GENUINELY
+    alive relaunch — otherwise a healthy resume reports RESUME_FAILED, a failure record is
+    persisted, and CMX-353's own durable retry bound then refuses to ever retry it again,
+    which is strictly worse than the bug issue #468 was filed to fix. Drives the REAL
+    function, at its REAL default attempts/delay/confirmations/settle (only `sleep` is
+    faked, so the test doesn't actually wait 2+ seconds), against evidence that
+    consistently confirms the resumed wid."""
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+    monkeypatch.setattr(sessions, "wid_for_session",
+                         lambda sid, pane_map=None: "@99" if sid == SID_OK else None)
+    sleeps = []
+
+    result = _default_check_resumed("@99", SID_OK, sleep=sleeps.append)
+
+    assert result is True, "a session consistently confirmed alive must report resumed"
+    assert sleeps[0] == 2.0, "must still wait out the settle window first"
+
+
+# --------------------------------------------------------------------------
+# resume — liveness + durable retry bound (CMX-353, issue #468)
+# --------------------------------------------------------------------------
+
+def test_resume_reports_RESUME_FAILED_not_RESUMED_when_the_window_never_comes_alive():
+    """🔴 GUARD (issue #468, defect 1): `spawn_window` succeeding only means a tmux window
+    was CREATED — it says nothing about whether `claude --resume` actually came up. A
+    launch whose liveness check fails must report RESUME_FAILED, and the row must be left
+    completely untouched: never archived, never removed, never re-registered — exactly the
+    same "row is untouched" contract a launch failure already gets."""
+    record_calls = []
+    calls, kit = _resume_kit(
+        check_resumed=lambda wid, sid: False,
+        record_resume_failure=lambda sid, reason: (record_calls.append((sid, reason)), 1)[1],
+    )
+    v = _launchable(wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert [c[0] for c in calls] == ["spawn"], (
+        "a window that never came alive must never be archived or removed"
+    )
+    assert results[0].action == RESUME_FAILED
+    assert "@99" in results[0].detail and SID_OK in results[0].detail
+    assert record_calls == [(SID_OK, results[0].detail)], (
+        "the failure must be persisted via record_resume_failure so a later pass can see it"
+    )
+
+
+def test_resume_still_reports_RESUMED_for_a_genuinely_alive_relaunch():
+    """⛔⛔ The counterweight that matters: a liveness check tightened too far (or one that
+    waits on a signal a healthy resumed agent never sends) would silently disable the whole
+    feature while still passing the RESUME_FAILED guard above. A relaunch `check_resumed`
+    confirms alive must still report RESUMED and still be archived/removed exactly as
+    before — and the failure-clearing hook must run, not the failure-recording one."""
+    check_calls = []
+    clear_calls = []
+    calls, kit = _resume_kit(
+        check_resumed=lambda wid, sid: (check_calls.append((wid, sid)), True)[1],
+        clear_resume_failure=lambda sid: clear_calls.append(sid),
+    )
+    v = _launchable(wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert check_calls == [("@99", SID_OK)]
+    assert clear_calls == [SID_OK]
+    assert [c[0] for c in calls] == ["spawn", "archive", "remove"]
+    assert results[0].action == RESUMED
+
+
+def test_resume_does_not_relaunch_a_session_whose_resume_already_failed_on_a_prior_pass():
+    """🔴 GUARD (issue #468, defect 2): the durable bound. A session that FAILED to come up
+    alive on one `resume()` call must not be relaunched by the NEXT `resume()` call — a
+    fresh Python-level `resumed_sessions` set (scoped to one call) cannot see this; only a
+    store that survives between calls can. Simulated here with a plain dict standing in for
+    `resume-attempts.json`, read/written exactly the way `chela.resume_state` is, across
+    two SEPARATE `resume()` invocations."""
+    store: dict[str, dict] = {}
+
+    def resume_blocked(sid):
+        entry = store.get(sid)
+        if not entry or entry["tries"] < 1:
+            return None
+        return entry["reason"]
+
+    def record_resume_failure(sid, reason):
+        tries = store.get(sid, {"tries": 0})["tries"] + 1
+        store[sid] = {"tries": tries, "reason": reason}
+        return tries
+
+    calls, kit = _resume_kit(
+        check_resumed=lambda wid, sid: False,   # every launch in this test dies
+        resume_blocked=resume_blocked,
+        record_resume_failure=record_resume_failure,
+    )
+    v = _launchable(wid="@5")
+
+    first = resume([v], [], **kit)
+    assert first[0].action == RESUME_FAILED
+    assert [c[0] for c in calls] == ["spawn"]
+
+    calls.clear()
+    second_v = _launchable(wid="@5")   # a fresh Verdict — same session, next `chela restore` pass
+    second = resume([second_v], [], **kit)
+
+    assert calls == [], "the second pass must not even call spawn_window for a blocked session"
+    assert second[0].action == SKIPPED
+    assert "already failed" in second[0].detail and SID_OK in second[0].detail
+
+
 def test_resume_defaults_wire_to_the_real_spawn_and_inbox_modules(monkeypatch):
     """🔴 GUARD: with no ``spawn_window``/``register_orchestrator`` kwargs, resume() must
     call the REAL `chela.spawn.spawn_window` / `chela.inbox.register` — not a silently-inert
     no-op. Both are resolved INSIDE the function body (not bound at import time) precisely
     so a caller can fake this one tmux-touching leaf without disturbing anything else —
-    proven here by patching the module attribute and observing the call land."""
+    proven here by patching the module attribute and observing the call land.
+
+    ``check_resumed``/``resume_blocked``/``record_resume_failure``/``clear_resume_failure``
+    ARE overridden here (unlike ``spawn_window``/``register_orchestrator``) — this test is
+    scoped to proving the spawn/register wiring, not the liveness/retry-bound machinery
+    (covered by ``test_resume_liveness_and_retry_bound_defaults_wire_to_the_real_modules``
+    below); leaving them at their real defaults would poll real tmux and touch the real
+    ``resume-attempts.json`` on this machine."""
     import chela.inbox as inbox_mod
     import chela.spawn as spawn_mod
 
@@ -1146,11 +1400,56 @@ def test_resume_defaults_wire_to_the_real_spawn_and_inbox_modules(monkeypatch):
         register_calls.append(wid), {"ok": True})[1])
 
     v = _launchable(store="inbox.orchestrator", wid="@0")
-    results = resume([v], [])
+    results = resume([v], [], check_resumed=lambda wid, sid: True,
+                      resume_blocked=lambda sid: None,
+                      record_resume_failure=lambda sid, reason: 1,
+                      clear_resume_failure=lambda sid: None)
 
     assert spawn_calls == [("/home/x", f"claude --resume {SID_OK}")]
     assert register_calls == ["@99"]
     assert results[0].action == RESUMED
+
+
+def test_resume_liveness_and_retry_bound_defaults_wire_to_the_real_modules(monkeypatch):
+    """🔴 GUARD: with no ``check_resumed``/``resume_blocked``/``record_resume_failure``/
+    ``clear_resume_failure`` kwargs, resume() must call the REAL
+    ``chela.restore._default_check_resumed`` / ``chela.resume_state.blocked_reason`` /
+    ``chela.resume_state.record_failure`` / ``chela.resume_state.clear`` — not a silently-
+    inert no-op. Patches the module attributes ``resume()`` actually resolves at call time
+    and observes each call land, on both the alive and the dead-session path."""
+    import chela.resume_state as resume_state_mod
+    import chela.restore as restore_mod
+
+    calls = []
+    monkeypatch.setattr(restore_mod, "_default_check_resumed",
+                         lambda wid, sid, **k: (calls.append(("check", wid, sid)), True)[1])
+    monkeypatch.setattr(resume_state_mod, "blocked_reason",
+                         lambda sid, *a, **k: (calls.append(("blocked", sid)), None)[1])
+    monkeypatch.setattr(resume_state_mod, "clear",
+                         lambda sid: calls.append(("clear", sid)))
+
+    kit = {"spawn_window": lambda cwd, command=None: SpawnResult(
+               ok=True, name="s", wid="@99", cwd=cwd),
+           "register_orchestrator": lambda wid: {"ok": True},
+           "archive": lambda entry: None, "remove_session": lambda *a: True}
+    v = _launchable(wid="@5")
+    results = resume([v], [], **kit)
+
+    assert ("blocked", SID_OK) in calls
+    assert ("check", "@99", SID_OK) in calls
+    assert ("clear", SID_OK) in calls
+    assert results[0].action == RESUMED
+
+    calls.clear()
+    monkeypatch.setattr(restore_mod, "_default_check_resumed",
+                         lambda wid, sid, **k: (calls.append(("check", wid, sid)), False)[1])
+    monkeypatch.setattr(resume_state_mod, "record_failure",
+                         lambda sid, reason: (calls.append(("record", sid, reason)), 1)[1])
+    v2 = _launchable(wid="@6", session_id="cafebabe-0000-1111-2222-333344445555")
+    results2 = resume([v2], [], **kit)
+
+    assert any(c[0] == "record" for c in calls)
+    assert results2[0].action == RESUME_FAILED
 
 
 def test_resume_preserves_order_one_result_per_verdict_mixed_batch():
