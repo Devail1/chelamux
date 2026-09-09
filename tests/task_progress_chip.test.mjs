@@ -135,9 +135,13 @@ test('the chip\'s tooltip names the CURRENT in-progress task\'s subject', () => 
 
     const chip = document.querySelector('.dispatcher-table .task-progress-chip');
     assert.ok(chip, 'setup: no chip rendered');
-    assert.match(chip.getAttribute('title') || '', /In progress: wire the tooltip guard/,
+    const title = chip.getAttribute('title') || '';
+    assert.match(title, /^3 of 4 tasks done/,
+        `the chip's tooltip must OPEN with the run's actual progress summary line ` +
+        `("3 of 4 tasks done") — got title: "${title}"`);
+    assert.match(title, /In progress: wire the tooltip guard/,
         `the chip's tooltip must name the in-progress task's subject — got title: ` +
-        `"${chip.getAttribute('title')}"`);
+        `"${title}"`);
 });
 
 // --- the chip's tooltip: blocked-by relationships (the changelog's sibling promise) --
