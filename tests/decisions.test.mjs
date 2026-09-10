@@ -1318,3 +1318,12 @@ test('🔴 GUARD: the decisions panel subscribes to the blocked_race verdict kin
     assert.ok(decisions.DECISION_TYPES.includes('run_judge_blocked_race'),
         `run_judge_blocked_race must be subscribed, got: ${decisions.DECISION_TYPES.join(',')}`);
 });
+
+// 🔴 GUARD (CMX-358 round 2): the panel must SUBSCRIBE to the unjudged-merge kind too —
+// `DECISION_TYPES` is what the scoped /api/log fetch asks for, so a kind missing from it
+// never reaches the Decisions panel no matter how correctly inbox.py emits it. This kind
+// shipped with no test of its own; every sibling verdict kind above already has one.
+test('🔴 GUARD: the decisions panel subscribes to the unjudged-merged kind', () => {
+    assert.ok(decisions.DECISION_TYPES.includes('run_unjudged_merged'),
+        `run_unjudged_merged must be subscribed, got: ${decisions.DECISION_TYPES.join(',')}`);
+});

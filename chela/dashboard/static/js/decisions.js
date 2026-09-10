@@ -103,6 +103,11 @@ const DECISION_TYPES = [
     // corruption) rather than an unknown. Also off the ordinary `run_changes_requested`
     // path, for the same reason: the run moved before the verdict could send it back.
     'run_judge_blocked_race',
+    // CMX-358 (#480): a PR merged before a judge was ever SCHEDULED for it — the one
+    // outcome that used to leave no trace at all. `judge_state` reaches this from
+    // dispatcher.py's reconcile-to-done branch, not the judge itself; see chela/judge.py's
+    // J_UNJUDGED_MERGED comment.
+    'run_unjudged_merged',
     'finished', 'blocked', 'died', 'gone_unknown', 'completed_gone',
     'watch_epoch_lost', 'inbox_undeliverable', 'inbox_self_healed',
 ];

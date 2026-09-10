@@ -73,6 +73,10 @@ const TYPE_CLASS = {
     // and the one push that says "a guard survived corruption, possibly already shipped"
     // reads as an anonymous `·`.
     run_judge_blocked_race: 'run',
+    // CMX-358 (#480): the PR merged before a judge ever ran for it — same reasoning as the
+    // two above, without this it falls to `other` and the one push that says "this shipped
+    // with NO verdict at all" reads as an anonymous `·`.
+    run_unjudged_merged: 'run',
     // The inbox cannot reach the orchestrator (CMX-77): its queue is addressed to a window
     // id a dead tmux server issued, or to a session that has exited. It is a `gate` because
     // that is exactly what it is — work is stuck until a HUMAN (or the orchestrator's next

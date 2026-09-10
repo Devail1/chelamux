@@ -118,6 +118,16 @@ J_BLOCKED_RACE = "blocked_race"
 # per-sha trigger) already recorded. Leaving the row untouched costs nothing: the same
 # per-sha trigger that already re-spawns "once per commit" fires for the new head on its own.
 J_STALE_HEAD = "stale_head"
+# ⚖️🕳️ CMX-358, issue #480: a run whose PR merges before a judge was ever SCHEDULED for it
+# leaves `judge_state` at its initial `''` — the same sentinel an un-judged-YET row carries.
+# One value, two meanings ("not yet" and "never"), and this repo's own rule is that an
+# unknown must not read as OK. Written from exactly one place — `dispatcher.py`'s
+# reconcile-to-done branch, and ONLY when the row's `judge_state` was still empty there (a
+# row that already carries a real verdict, however it got one, is untouched — see that
+# branch's own comment). Never gates the `done` transition itself: judging a merged head is
+# moot (its commit cannot change), so this is a record, not a lever, exactly like every
+# other value here.
+J_UNJUDGED_MERGED = "unjudged_merged"
 
 # A judge that proposes forty mutations is not being thorough, it is re-running the suite
 # forty times. The cap is enforced OUT LOUD (the report says what was dropped) — a silent

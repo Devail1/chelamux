@@ -1317,6 +1317,23 @@ def run_events(runs: list[dict], seen: dict[str, str],
             out.append(_event("run_failed",
                               f"📥 {label} FAILED{' — ' + err[0][:120] if err else ''}"
                               f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+        elif status == "done" and judge_state == judge.J_UNJUDGED_MERGED:
+            # ⚖️🕳️ CMX-358 (#480): the one outcome nothing else in this function surfaces —
+            # a clean or cannot-verify verdict is MOOT once the PR is merged (see the
+            # `awaiting_review`-gated branches above), but "no verdict was ever produced" is
+            # not moot just because the code already shipped; it is the one case nothing
+            # else will ever tell a human about. `done` is terminal, so this mark can only
+            # ever fire once for a given row — there is no later status change to watch for.
+            payload["judge_state"] = judge_state
+            payload["judge_detail"] = run.get("judge_detail")
+            pr = run.get("pr_url")
+            ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+            detail = str(run.get("judge_detail") or "")[:200]
+            out.append(_event(
+                "run_unjudged_merged",
+                f"⚖️🕳️ {label} — merged with NO judge verdict (never scheduled) — {ref}"
+                f"{': ' + detail if detail else ''}"
+                f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
     return out, fresh
 
 
@@ -1409,6 +1426,12 @@ def stale_reason(event: dict, runs: list[dict],
     is strictly the more urgent of the two, never the less.
     """
     kind = event.get("kind")
+    # ⚖️🕳️ CMX-358 (#480): `run_unjudged_merged` is deliberately NOT in this tuple. Every
+    # kind above is a claim that can be invalidated by something that happens LATER (the run
+    # leaves its status, a newer commit supersedes the judged sha) — `run_unjudged_merged`
+    # fires only once `status` is already `done`, which is terminal, so there is no later
+    # state for the claim to rot against. Falling through to `return None` below is the
+    # correct "never stale" answer, not an oversight.
     if kind not in ("run_review", "run_failed", "run_needs_human", "run_changes_requested",
                      "run_judge_clean", "run_judge_cannot_verify", "run_judge_blocked_race"):
         return None

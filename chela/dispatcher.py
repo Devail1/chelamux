@@ -2416,6 +2416,22 @@ def _is_guard_path(path: str) -> bool:
     return (parts[:1] == ("tests",)) or path.endswith(".test.mjs")
 
 
+def _unjudged_merge_changelog_note(worktree_path: str, base_branch: str) -> dict | None:
+    """⚖️📝🕳️ CMX-358 (#480): the judge's own changelog note (`judge._changelog_missing_note`,
+    normally rendered into its PR comment via `report.notes`) never gets a chance to fire on a
+    PR that merges before a judge was ever scheduled for it — this is that note's only footing
+    on the unjudged-merge path. A thin pass-through, deliberately: `_changelog_missing_note`
+    already excludes a docs-only diff (the same prose test `_docs_only_diff` encodes), so
+    re-deriving that distinction here — instead of reusing the judge's own helper — is exactly
+    the duplication issue #480 warns against.
+
+    Returns ``None`` whenever the judge's own helper would: no signal (no base_branch, an
+    unresolvable ref, a git failure, an empty diff), a docs-only diff, or a changelog entry
+    already among the touched files. Never blocks anything — same as the judge's own note.
+    """
+    return judge._changelog_missing_note(Path(worktree_path), base_branch)
+
+
 def check_no_new_guards(task_id: str) -> bool | None:
     """⚖️🔎 CMX-250 review round 1: whether ``--no-new-guards`` looks WRONG for this run —
     its diff (vs its own ``base_branch``, read from its own worktree, right now) touches a
@@ -3886,14 +3902,44 @@ def tick(workflow_path: str | Path) -> dict:
                 # and the strike is simply retried on the next tick.
                 if row["window_name"]:
                     _kill_window(row["window_name"])
-                conn.execute(
-                    "UPDATE runs SET status='done' WHERE task_id=?", (row["task_id"],)
-                )
+                # ⚖️🕳️ CMX-358 (#480): a merge can land while a judge was never even
+                # SCHEDULED for this row — `judge_state` is still the initial `''`
+                # sentinel, indistinguishable from "not yet judged". Stamp a distinct
+                # terminal value so "shipped unjudged" is a value a query can find, not
+                # an absence it has to infer. ⛔ GUARD: fires ONLY when `judge_state` is
+                # still empty here — a row that already carries a real verdict (clean,
+                # blocked, cannot_verify, blocked_race, however it got one) is left
+                # exactly as the judge wrote it; this records what never happened, it
+                # never replaces what did. The `done` transition itself stays
+                # unconditional either way — judging a merged head is moot (its commit
+                # cannot change), never a gate on reaching `done`.
+                unjudged = not row["judge_state"]
+                judge_detail = None
+                if unjudged:
+                    judge_detail = "no judge ever ran for this PR before it merged"
+                    if row["worktree_path"]:
+                        note = _unjudged_merge_changelog_note(
+                            row["worktree_path"],
+                            wf.get("workspace", "base_branch", default="master"),
+                        )
+                        if note:
+                            judge_detail += f" — also: {note['body']}"
+                if unjudged:
+                    conn.execute(
+                        "UPDATE runs SET status='done', judge_state=?, judge_detail=? "
+                        "WHERE task_id=?",
+                        (judge.J_UNJUDGED_MERGED, judge_detail[:2000], row["task_id"]),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE runs SET status='done' WHERE task_id=?", (row["task_id"],)
+                    )
                 conn.commit()
                 _cleanup_worktree_on_done(wf, row)
                 merged_in_tick += 1
                 summary["reconciled_done"] += 1
-                log.info("Task %s done (PR merged)", row["task_id"])
+                log.info("Task %s done (PR merged)%s", row["task_id"],
+                          " [unjudged]" if unjudged else "")
                 continue
             if row["status"] in RECONCILE_MERGE_STATUSES and row["pr_state"] == "closed":
                 # A human closed the PR WITHOUT merging — a rejected trial, not shipped

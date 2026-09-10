@@ -2359,6 +2359,107 @@ def test_the_cannot_verify_reason_is_EXCERPTED_into_the_summary(
     assert len(summary) < len(_LONG_DETAIL) + 200
 
 
+# --- CMX-358 (#480): a PR merged before a judge was ever SCHEDULED for it must not go ----
+# unnotified — the one outcome nothing else in this module surfaces.
+
+
+def _unjudged_merged_run(**over):
+    return dict(_clean_run(), status="done", judge_state=judge.J_UNJUDGED_MERGED,
+                judge_detail=over.pop("judge_detail",
+                                       "no judge ever ran for this PR before it merged"),
+                **over)
+
+
+def test_an_unjudged_merge_fires_its_own_event(store_file, windows, sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_unjudged_merged_run()])
+
+    assert len(sends) == 1
+    text = sends[0][1]
+    assert "NO judge verdict" in text
+    assert "pull/9" in text
+
+
+def test_an_unjudged_merged_run_fires_exactly_once(store_file, windows, sends, monkeypatch):
+    """`done` is terminal, so the mark can never churn back — the event must fire once, ever,
+    even across repeated ticks that keep handing back the same row."""
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    run = _unjudged_merged_run()
+    inbox.tick({}, runs=[run])
+    inbox.tick({}, runs=[run])
+    inbox.tick({}, runs=[run])
+
+    assert len(sends) == 1
+
+
+def test_a_clean_merged_run_never_fires_the_unjudged_event(store_file, windows, sends, monkeypatch):
+    """🔴 GUARD: the counterweight. A run that reached `done` through the NORMAL judged path
+    (`judge_state` left exactly as the judge wrote it — `clean` here) must never trip
+    `run_unjudged_merged`, or every merged run would read as unjudged."""
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[dict(_verdict_run(judge.J_CLEAN), status="done")])
+
+    assert sends == []
+
+
+def test_the_unjudged_merged_reason_is_EXCERPTED_into_the_summary(
+        store_file, windows, sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_unjudged_merged_run(judge_detail=_LONG_DETAIL)])
+
+    summary = sends[0][1]
+    assert _LONG_DETAIL[:40] in summary
+    assert _LONG_DETAIL not in summary
+
+
+def test_an_unjudged_merged_events_kind_and_payload_are_the_literals_every_consumer_keys_on(
+        store_file, windows, monkeypatch):
+    """🔴 GUARD (CMX-358 round 2): the twin of
+    `test_a_blocked_race_verdicts_payload_carries_the_judged_sha_and_state` for
+    `J_UNJUDGED_MERGED`. The tests above only ever read the rendered summary TEXT — they
+    would not notice the emitted `kind` string being renamed, or `judge_state`/`judge_detail`
+    being dropped from the payload, since neither field feeds the summary line directly.
+    But `kind` is the literal every consumer keys on (decisions.js DECISION_TYPES,
+    feedmodel TYPE_CLASS, `chela events --type`), and the payload is what a consumer reading
+    the durable record — not the one-shot push — has to learn the verdict from."""
+    _statuses(monkeypatch, {ORCH: inbox.BUSY})     # busy → it queues, so we can read it
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_unjudged_merged_run(judge_detail=_LONG_DETAIL)])
+
+    queued = inbox.load()["queue"]
+    assert len(queued) == 1
+    assert queued[0]["kind"] == "run_unjudged_merged", (
+        f"the emitted kind must be the literal every consumer keys on, "
+        f"got {queued[0]['kind']!r}"
+    )
+    payload = queued[0]["payload"]
+    assert payload["judge_state"] == judge.J_UNJUDGED_MERGED, (
+        f"the verdict did not reach the payload, got {payload['judge_state']!r}"
+    )
+    assert payload["judge_detail"] == _LONG_DETAIL, (
+        f"the judge detail did not survive into the payload, got {payload['judge_detail']!r}"
+    )
+
+
 # --- CMX-247: the needs_human summary must say WHY, not always the same fixed guess ------
 #
 # `dispatcher._escalate` is the only writer of `needs_human`, and its call sites hand it
