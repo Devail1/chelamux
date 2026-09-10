@@ -1001,6 +1001,18 @@ test('CMX-359: `done` agents float into their own "Finished" cluster, decoupled 
     assert.equal(cluster.querySelectorAll('.agent-row').length, 1,
         'a non-done agent must not be swept into the Finished cluster');
     assert.equal(cluster.querySelector('.triage-count').textContent, '1');
+    // 🔴 GUARD (CMX-359 rework round 1): the two checks above only prove the Finished
+    // cluster's OWN contents are right — they say nothing about whether `done-agent`
+    // is ALSO still sitting in its project group below. Dropping `&& !isDone(a)` from
+    // `rest`'s filter (nav.js:385) leaves the Finished cluster untouched (it is built
+    // from `rows`, not `rest`) while ALSO leaving the done row in `rest`, so it renders
+    // a SECOND time in its project group — "each agent shows in exactly one place" is
+    // exactly the invariant this test's own title claims, and neither assertion above
+    // can see a duplicate.
+    assert.equal(
+        document.querySelectorAll('#sidebar-agents .agent-row[data-agent="done-agent"]').length, 1,
+        'the done agent rendered more than once — it must be lifted OUT of its project ' +
+        'group when it floats into the Finished cluster, not merely copied into both');
 });
 
 test('CMX-359: "Needs you" outranks "Finished" — a row can only ever appear in one cluster', () => {

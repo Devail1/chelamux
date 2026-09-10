@@ -424,3 +424,21 @@ def test_last_user_activity_at_is_none_when_there_is_no_real_user_turn(tmp_path)
 def test_last_user_activity_at_is_none_for_a_missing_file(tmp_path):
     assert transcripts.last_user_activity_at(tmp_path / "nope.jsonl") is None
 
+
+def test_last_user_activity_at_skips_a_non_string_timestamp_instead_of_raising(tmp_path):
+    """A record can otherwise look exactly like a real user turn (type=='user', not a
+    sidechain/meta, string content) and still carry a non-string `timestamp` — a
+    mid-write record, or a malformed one. `_is_real_user_turn` must reject it BEFORE
+    `rec["timestamp"].replace(...)` is ever reached: `.replace()` on a non-str raises
+    AttributeError, which nothing downstream catches (only ValueError is caught).
+    Regression guard: judge mutation dead-coded the isinstance check with `if False and
+    ...` (chela PR #485) — the predicate then accepted the malformed record, and
+    `.replace()` would raise, uncaught, the moment a real transcript hit this shape."""
+    path = tmp_path / "s.jsonl"
+    _write(path, [
+        {**_user("the real prompt"), "timestamp": "2026-08-21T09:00:00Z"},
+        {**_user("malformed newest record"), "timestamp": None},
+    ])
+    last = transcripts.last_user_activity_at(path)
+    assert last == datetime.fromisoformat("2026-08-21T09:00:00+00:00").timestamp()
+

@@ -33,12 +33,14 @@ def client():
 
 
 @contextmanager
-def _fleet(*, status: dict[str, str], runs=(), is_done=True):
+def _fleet(*, status: dict[str, str], runs=(), is_done=True, dead=()):
     """``status`` is ``{window_id: busy|idle|waiting}``; ``runs`` makes a window
-    dispatcher-owned (empty means every window is a REGULAR, hand-launched one)."""
-    pids = {wid: 1000 + i for i, wid in enumerate(LIVE.values())}
+    dispatcher-owned (empty means every window is a REGULAR, hand-launched one).
+    ``dead`` is window_ids with no live claude pid — ``claude_pid`` reads as ``None``
+    for them, the same as a plain shell or a session whose claude process exited."""
+    pids = {wid: 1000 + i for i, wid in enumerate(LIVE.values()) if wid not in dead}
     smap = {
-        "by_pid": {pids[wid]: st for wid, st in status.items()},
+        "by_pid": {pids[wid]: st for wid, st in status.items() if wid in pids},
         "cwd_by_pid": {},
     }
     with (
@@ -96,4 +98,16 @@ def test_a_busy_session_never_reads_done_even_with_evidence(client):
 def test_no_evidence_means_no_done_even_though_otherwise_eligible(client):
     with _fleet(status={"@1": "idle", "@9": "idle"}, is_done=False):
         agents = _by_wid(client)
+    assert agents["@9"]["done"] is False
+
+
+def test_no_live_claude_pid_never_reads_done_even_with_evidence(client):
+    """The ``claude_running`` conjunct: a window with no live claude process (a plain
+    shell, or a session whose claude exited) must never read `done`, even though every
+    other conjunct — not dispatched, not busy, not needs_human, transcript evidence — is
+    satisfied. Regression guard: judge mutation replaced this conjunct with `True`
+    (chela PR #485) and the suite stayed green because nothing exercised `dead`."""
+    with _fleet(status={"@1": "idle"}, dead={"@9"}):
+        agents = _by_wid(client)
+    assert agents["@9"]["claude_running"] is False
     assert agents["@9"]["done"] is False
