@@ -10,6 +10,48 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-09-10
+
+### Fixed
+
+- **`chela wait`'s poll cadence is now guarded, and `_poll` actually reads it.** `POLL_INTERVAL`
+  was referenced by no test — raising it to a `sleep 30/60` value passed the whole suite, at
+  which point `chela wait` *is* the polling loop it exists to replace (#478). Worse, the
+  constant was partly inert: `_poll(..., interval=POLL_INTERVAL)` bound it as a default
+  argument at import, so changing it at runtime had no effect. `_poll` now reads the module
+  global fresh each iteration, and the cadence is bounded on **both** sides against the live
+  value — a ceiling catches a too-coarse interval, a floor catches a busy-spin that ignores
+  the constant and sleeps near zero.
+- **`wait_for`'s total-`unknown`-on-epoch-change branch is documented as deliberate** (#479).
+  Every caller runs inside a pane of the tmux server it is watching (`cmd_wait` passes
+  `by=orchestrator.self_wid()`), so a restart kills the waiter along with the server — there is
+  no surviving process to hand a re-resolved wid to, unlike `inbox.resolve_heal`, which heals
+  *stored* state a later process reads back. This holds for `CHELA_RESTORE_RESUME`'s
+  same-session/new-wid relaunch too, which can only run after the old server is already gone.
+  Documented rather than building unreachable re-resolve machinery.
+- Two new entries in `docs/defeat_shapes/`, both found by the judge on this PR: a paired accept
+  case whose stub **discarded the argument under test** (a recurrence of shape 18 in a new
+  module), and a cadence assertion that **bounded the observed interval only from above**.
+
+- **A PR merged before its judge ran no longer ships silently unjudged.** A run whose PR was
+  merged (by a human, out from under a judge that was never scheduled for it) used to reach
+  `done` with `judge_state` still `''` — the same sentinel an un-judged-*yet* row carries, so
+  "not yet" and "never" read as the same thing. That row now gets a distinct terminal
+  `judge_state` (`unjudged_merged`), a decisions-inbox event so a human hears about it once,
+  and — since the changelog gate normally rides on the judge — a non-blocking note when the
+  merged diff touches non-docs files with no `changelog.d/` fragment. (CMX-358, #480)
+
+- **`chela wait`'s cadence guard blamed `_poll` for sleeps it never made, and went red on
+  an unrelated PR.** `wait.time` *is* the stdlib `time` module, so the guard's stub —
+  `monkeypatch.setattr(wait.time, "sleep", ...)` — replaced `time.sleep` **process-wide**
+  and recorded every sleep any thread in that process happened to make. One leaked daemon
+  thread calling `time.sleep(0.001)` was enough to fail the floor assertion with
+  `[0.5, 0.5, 0.5, 0.5, 0.5, 0.001, 0.5, 0.5]` — a guard reporting a defect in code it was
+  not watching. `_poll` now sleeps through a `wait._sleep` seam that only this module
+  calls, and the stubs observe that instead, so an unrelated sleeper cannot enter the
+  recording at all. Pinned by a counterweight that runs a noisy thread alongside the wait
+  and asserts it stays out of the reading.
+
 ## [0.11.0] — 2026-09-10
 
 ### Added
