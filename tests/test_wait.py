@@ -395,5 +395,9 @@ def test_cadence_guard_is_not_defeated_by_an_unrelated_thread_sleeping(windows, 
     assert result["ok"] is True
     # The whole point: the unrelated 0.001 sleeps are ABSENT from the recording.
     assert sleeps, "expected _poll to sleep at least once"
+    # DEFEAT_SHAPES #5: comparing against `wait.POLL_INTERVAL` alone cannot see the
+    # constant itself drift — if it became 60, the comparison below would pass vacuously.
+    # Pin the literal that is in the source today, so a change to it fails HERE too.
+    assert wait.POLL_INTERVAL == 0.5
     assert all(d == wait.POLL_INTERVAL for d in sleeps), (
         f"an unrelated thread's sleeps leaked into _poll's cadence recording: {sleeps}")
