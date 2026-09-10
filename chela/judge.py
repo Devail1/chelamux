@@ -431,11 +431,33 @@ def _no_color_env() -> dict[str, str]:
     saw the mutation at all. Forcing every suite run to compile from source, every time, is
     what makes "the file on disk really changed" (the promise :func:`apply_mutation` already
     proves) also true of what the suite actually EXECUTES.
+
+    ⛔ CMX-357 (found chasing an intermittently-red baseline this ticket's own self-check
+    hit): the judge process is itself a normal chela process, so importing :mod:`chela.config`
+    already sourced the OPERATOR's real ``$CHELA_DIR/chela.env`` into ITS OWN
+    ``os.environ`` (``config.load_env_file``'s ``os.environ.setdefault`` — CMX-357 also
+    fixed it) before this function ever runs. ``dict(os.environ)`` then copies that
+    pollution straight into the suite subprocess — the repo's OWN test suite goes to real
+    lengths (``tests/conftest.py``'s ``CHELA_ENV_FILE=""``) to keep the developer's real
+    ``chela.env`` out of a test run, and this one line undid it wholesale: a suite spawned
+    by ``chela judge self-check``/``chela task-finished`` inherited ``CHELA_RESTORE_RESUME``
+    (this operator's own real ``chela.env`` sets it ``true``) and a default-disabled test
+    (``test_chela_restore_resume_is_disabled_by_default_falls_back_to_read_only``) failed —
+    not because the PR under judgment was wrong, but because the JUDGE's own box was
+    configured for daily use. Same root cause as ``FORCE_COLOR``/``NODE_CHANNEL_FD`` above,
+    generalised: every key :func:`chela.config.load_env_file` set via ``setdefault`` is
+    popped, so only a GENUINE ``export`` in the judge's real shell (which the file itself
+    would never outrank anyway, per that function's own precedence) can still reach the
+    suite.
     """
+    from chela import config
+
     env = dict(os.environ)
     env.pop("FORCE_COLOR", None)
     env.pop("NODE_CHANNEL_FD", None)
     env.pop("NODE_CHANNEL_SERIALIZATION_MODE", None)
+    for key in config.ENV_FILE_VARS:
+        env.pop(key, None)
     env["NO_COLOR"] = "1"
     env["PY_COLORS"] = "0"
     env["PYTHONDONTWRITEBYTECODE"] = "1"

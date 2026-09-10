@@ -48,6 +48,7 @@ from chela import (
     scheduler,
     sessionids,
     update,
+    wait,
     workflow,
 )
 from chela.personas import autolaunch, lease
@@ -1029,7 +1030,20 @@ def cmd_read(args) -> None:
 
 
 def cmd_drive(args) -> None:
-    """Message a sibling window (wid-keyed). Thin alias over the tmux send path."""
+    """Message a sibling window (wid-keyed). Thin alias over the tmux send path.
+
+    ⛔ **Issue #456's counterweight to herdr's atomic ``agent.prompt``.** A window sitting
+    ``WAITING`` is mid permission/question prompt — typing prose into it is not an
+    answer, it is noise racing whatever the prompt is actually waiting on (the same hazard
+    the decisions inbox's idle gate exists to avoid, see ``inbox.py``'s module docstring).
+    So a target already blocked is REFUSED by default, before anything is sent — never
+    typed into on a guess. ``--force`` is the deliberate override for the one legitimate
+    case: the prompt itself is a free-text question and this message IS the answer.
+
+    ``--wait`` makes the send atomic with a wait: on a successful send it blocks (via
+    :func:`chela.wait.wait_for`) until the target reaches that state, so a caller never
+    has to hand-roll its own poll loop after driving a sibling.
+    """
     wid = _resolve_wid(args.wid)
     if not wid:
         print("no target window id (pass @N)", file=sys.stderr)
@@ -1037,11 +1051,53 @@ def cmd_drive(args) -> None:
     if wid not in discovery.get_windows_by_id():
         print(f"{wid} is not a live window", file=sys.stderr)
         sys.exit(1)
+    status = inbox.status_snapshot().get(wid)
+    if status == inbox.WAITING and not args.force:
+        print(f"{wid} is BLOCKED on a prompt right now — refusing to type a message into "
+              "it (prose typed there is not read as an answer to the prompt, and races "
+              "whatever IS). Resolve the prompt directly, or pass --force to send anyway "
+              "(e.g. the prompt is itself a free-text question this message answers).",
+              file=sys.stderr)
+        sys.exit(1)
     sender = orchestrator.self_wid() or "orchestrator"
-    if messenger.send_tmux(wid, f"[{sender}] {args.message}"):
-        print(f"Sent to {wid}")
-    else:
+    if not messenger.send_tmux(wid, f"[{sender}] {args.message}"):
         print(f"{wid} — send failed", file=sys.stderr)
+        sys.exit(1)
+    print(f"Sent to {wid}")
+    if args.wait:
+        result = wait.wait_for(wid, args.wait, args.timeout, by=orchestrator.self_wid())
+        _print_wait_result(wid, result)
+        if not result.get("ok"):
+            sys.exit(1)
+
+
+def _print_wait_result(target: str, result: dict) -> None:
+    state, detail = result.get("state"), result.get("detail") or ""
+    if state in wait.UNTIL_STATES:
+        print(f"{target}: {state.upper()} — {detail}")
+    elif state == "timeout":
+        print(f"{target}: TIMED OUT — {detail}", file=sys.stderr)
+    elif state == "unknown":
+        print(f"{target}: OUTCOME UNKNOWN — {detail}", file=sys.stderr)
+    else:
+        print(f"{target}: {detail}", file=sys.stderr)
+
+
+def cmd_wait(args) -> None:
+    """Block until a delegated agent or dispatcher task reaches ``--until`` (done/blocked).
+
+    Event-driven off the durable event log (:mod:`chela.wait`), not a hand-rolled
+    ``sqlite3 … | sleep`` loop — issue #456. A window-id target is watched automatically
+    if it isn't already (mirrors what any dispatch already does via ``chela watch``),
+    which is what lets a tmux restart mid-wait be reported UNKNOWN instead of mistaken
+    for the wrong session's completion.
+    """
+    result = wait.wait_for(args.target, args.until, args.timeout, by=orchestrator.self_wid())
+    if args.json:
+        print(json.dumps(result, default=str))
+    else:
+        _print_wait_result(args.target, result)
+    if not result.get("ok"):
         sys.exit(1)
 
 
@@ -2619,6 +2675,21 @@ def main() -> None:
     p_drive = sub.add_parser("drive", help="Message a sibling window (wid-keyed send)")
     p_drive.add_argument("wid", help="Target window id (@N or N)")
     p_drive.add_argument("message", help="Message text")
+    p_drive.add_argument("--force", action="store_true",
+                         help="Send even if the target is currently BLOCKED on a prompt")
+    p_drive.add_argument("--wait", choices=wait.UNTIL_STATES, default=None,
+                         help="After a successful send, block until the target reaches "
+                              "this state (atomic — see `chela wait`)")
+    p_drive.add_argument("--timeout", type=float, default=None, metavar="SECONDS",
+                         help="Max seconds for --wait (default: wait forever)")
+
+    p_wait = sub.add_parser(
+        "wait", help="Block until a delegated agent/task reaches a state (event-driven)")
+    p_wait.add_argument("target", help="Window id (@N or N) or a dispatcher task id")
+    p_wait.add_argument("--until", choices=wait.UNTIL_STATES, default=wait.DONE)
+    p_wait.add_argument("--timeout", type=float, default=None, metavar="SECONDS",
+                        help="Max seconds to wait (default: wait forever)")
+    p_wait.add_argument("--json", action="store_true", help="Emit the result as JSON")
 
     # dispatch
     p_disp = sub.add_parser("dispatch", help="Run the work-item dispatcher")
@@ -3019,6 +3090,8 @@ def main() -> None:
         cmd_restore(args)
     elif args.command == "drive":
         cmd_drive(args)
+    elif args.command == "wait":
+        cmd_wait(args)
     elif args.command == "dispatch":
         cmd_dispatch(args)
     elif args.command == "dispatch-runs":
