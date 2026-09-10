@@ -10,6 +10,75 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-09-10
+
+### Added
+
+- **`chela wait <wid|task> [--until done|blocked] [--timeout Ns]`** — block until delegated
+  work finishes or blocks, instead of hand-rolling `until … sleep 60` around a `sqlite3`
+  query. It reads the durable event log rather than tmux, so it cannot miss a transition
+  that happened between two samples, and it distinguishes **satisfied / timed out /
+  unknown** with separate exit codes — a timeout is a result you can branch on, not silence.
+  A window target is auto-watched if it isn't already, which is what stamps the tmux epoch
+  the guard below relies on. Issue #456.
+  - ⛔ **A wait is never satisfied by a different session that inherited the wid.** tmux
+    reissues small window ids per server, so `@3` after a restart may name a stranger.
+    `inbox.agent_events` refuses to attribute that stranger's busy→idle to the old watch and
+    emits `watch_epoch_lost`; `chela wait` reports it as `unknown`, never as a completed
+    dispatch. Guarded by driving a real epoch change with a stranger going idle *exactly as
+    a genuine finish would look*.
+- **`chela drive --force / --wait / --timeout`** — `chela drive` now refuses to type into a
+  target that is already **blocked** on a prompt, where prose would be read as the answer to
+  that prompt and race whatever it is actually waiting on. `--force` is the deliberate
+  override for the one legitimate case (the prompt is a free-text question this message
+  answers); `--wait`/`--timeout` make the send atomic with a wait.
+
+- **The decisions inbox is documented on the site at last.** "The orchestration loop" —
+  one of chela's three stated pillars — appeared **nowhere** on chela.pages.dev: not in
+  `docs.html`, not on the landing page, which pitched schedule + dispatch + wall only. It is
+  now a first-class docs section (`#orchestration`) and a fourth feature card on the landing
+  page, alongside new sections for **agent rooms** (`#rooms`), **agent autonomy and the
+  resource-isolation gap** (`#autonomy`), and **how it works** (`#internals`, including the
+  HTTP API and why chela does not depend on a structured agent protocol).
+- `docs/README.md` — an index separating the user-facing references from the internal design
+  records, so the directory stops reading as one undifferentiated pile.
+
+- **A sticky sidebar table of contents on the docs page**, with scroll-spy marking the
+  section you are actually reading. At 13 sections the old inline card had stopped being
+  navigation and become a list you scrolled past once. The same `<nav class="toc">` element
+  is the card on narrow screens and the sidebar on wide ones — one element, two behaviours,
+  so there is no second copy of the section list to drift.
+
+### Changed
+
+- **README cut from 811 lines to ~150** — a front door, not a manual: what chela is, install,
+  a five-step quickstart, and a map into the docs site. Everything it used to carry in full
+  now lives at [chela.pages.dev/docs](https://chela.pages.dev/docs).
+
+### Fixed
+
+- **The judge inherited the operator's own `chela.env`, so a machine configured for daily
+  use failed tests the PR under judgment had nothing to do with.** `_no_color_env()` built
+  the suite subprocess's environment from `dict(os.environ)` — but the judge is itself a
+  normal chela process, so importing `chela.config` had already `setdefault`-ed every key
+  from the real `$CHELA_DIR/chela.env` into it. That silently undid the fence
+  `tests/conftest.py` maintains (`CHELA_ENV_FILE=""`) precisely to keep a developer's
+  config out of a test run. Observed with `CHELA_RESTORE_RESUME=true` set for real use:
+  `test_chela_restore_resume_is_disabled_by_default_falls_back_to_read_only` failed inside
+  `chela judge self-check` and `chela task-finished`, stranding a run whose own code was
+  fine. Every key `config.load_env_file` sets is now popped, so only a genuine `export` in
+  the judge's shell reaches the suite — the same shape as the existing `FORCE_COLOR` /
+  `NODE_CHANNEL_FD` pops, generalised instead of extended one variable at a time.
+
+- **The landing site said "MIT licensed" in both footers.** chela has been **AGPL v3** since
+  after 0.3.0 (`LICENSE`, and the README badge). The public site had been stating the wrong
+  licence to every visitor.
+
+- **The page heading sat flush against the left edge of a phone screen.** `.doc-hero`'s
+  `padding:36px 0 8px` shorthand zeroed the side padding it was inheriting from `.wrap`;
+  `padding-block` leaves the gutter alone. The landing page's `.hero` had the identical bug
+  and is fixed with it.
+
 ## [0.10.5] — 2026-09-10
 
 ### Fixed
