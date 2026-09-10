@@ -75,6 +75,16 @@ EPOCH_LOST_KIND = "watch_epoch_lost"
 
 POLL_INTERVAL = 0.5
 
+# ⛔ The seam a cadence test observes — NOT `time.sleep` directly. `wait.time` IS the
+# stdlib `time` module, so `monkeypatch.setattr(wait.time, "sleep", ...)` replaces
+# `time.sleep` PROCESS-WIDE: the recorded durations then include every sleep any other
+# thread in that process happened to make, and an assertion about "_poll's cadence"
+# silently becomes an assertion about the whole process's. Measured 2026-09-10 — a single
+# leaked daemon thread calling `time.sleep(0.001)` turned the floor assertion red with
+# `[0.5, 0.5, 0.5, 0.5, 0.5, 0.001, 0.5, 0.5]`, blaming `_poll` for a sleep it never made.
+# Patching THIS name observes only this module.
+_sleep = time.sleep
+
 
 def resolve_target(token: str) -> tuple[str, str]:
     """``("wid", "@12")`` for anything that looks like a window id, else ``("task", token)``.
@@ -143,7 +153,7 @@ def _poll(types: frozenset, matches, deadline: float | None) -> dict | None:
         cursor = batch["next_seq"]
         if deadline is not None and time.time() >= deadline:
             return None
-        time.sleep(POLL_INTERVAL)
+        _sleep(POLL_INTERVAL)
 
 
 def _find_run(task_id: str) -> dict | None:

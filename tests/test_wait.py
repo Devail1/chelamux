@@ -199,7 +199,7 @@ def test_wait_wid_done_polls_at_a_bounded_cadence(windows, monkeypatch):
     monkeypatch.setattr(inbox, "IDLE_CONFIRM_SECONDS", 0)
     sleeps: list[float] = []
     real_sleep = time.sleep
-    monkeypatch.setattr(wait.time, "sleep", lambda d: (sleeps.append(d), real_sleep(0.01)))
+    monkeypatch.setattr(wait, "_sleep", lambda d: (sleeps.append(d), real_sleep(0.01)))
 
     def deliver_finished():
         real_sleep(0.05)
@@ -238,7 +238,7 @@ def test_wait_wid_done_still_resolves_correctly_at_a_slower_poll_interval(window
     monkeypatch.setattr(wait, "POLL_INTERVAL", 1.7)  # deliberately not the shipped 0.5
     sleeps: list[float] = []
     real_sleep = time.sleep
-    monkeypatch.setattr(wait.time, "sleep", lambda d: (sleeps.append(d), real_sleep(0.01)))
+    monkeypatch.setattr(wait, "_sleep", lambda d: (sleeps.append(d), real_sleep(0.01)))
 
     def deliver_finished():
         real_sleep(0.05)
@@ -347,3 +347,57 @@ def test_wait_task_unknown_id_is_an_error(monkeypatch):
 
     assert result["ok"] is False
     assert result["state"] == "error"
+
+
+def test_cadence_guard_is_not_defeated_by_an_unrelated_thread_sleeping(windows, monkeypatch):
+    """⛔⛔ The counterweight for the cadence guard's OWN stub (2026-09-10).
+
+    `wait.time` IS the stdlib `time` module, so the original stub —
+    `monkeypatch.setattr(wait.time, "sleep", ...)` — replaced `time.sleep` process-wide
+    and recorded every sleep ANY thread made. A single leaked daemon thread calling
+    `time.sleep(0.001)` was enough to fail the floor assertion with
+    `[0.5, 0.5, 0.5, 0.5, 0.5, 0.001, 0.5, 0.5]`, blaming `_poll` for a sleep it never
+    made. That is a guard reporting a defect in code it was not watching — the same class
+    of mistake as attributing a shared counter's movement to the change in front of you.
+
+    This pins the fix: the stub observes `wait._sleep`, a seam only this module calls, so
+    an unrelated sleeper cannot enter the recording at all. Corrupt by pointing the stub
+    back at `wait.time` and this test goes RED while the noise thread runs.
+    """
+    stop = threading.Event()
+
+    def noise():
+        real = time.sleep
+        while not stop.is_set():
+            real(0.001)                      # an unrelated caller, far below POLL_INTERVAL
+
+    noisy = threading.Thread(target=noise, daemon=True)
+    noisy.start()
+    try:
+        inbox.watch(AGENT, "do the thing", by=ORCH)
+        monkeypatch.setattr(inbox, "IDLE_CONFIRM_SECONDS", 0)
+        sleeps: list[float] = []
+        real_sleep = time.sleep
+        monkeypatch.setattr(wait, "_sleep", lambda d: (sleeps.append(d), real_sleep(0.01)))
+
+        def deliver_finished():
+            real_sleep(0.05)
+            _tick(monkeypatch, **{ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+        t = threading.Thread(target=deliver_finished)
+        t.start()
+        result = wait.wait_for(AGENT, wait.DONE, timeout=5)
+        t.join()
+    finally:
+        stop.set()
+        noisy.join(timeout=1)
+
+    assert result["ok"] is True
+    # The whole point: the unrelated 0.001 sleeps are ABSENT from the recording.
+    assert sleeps, "expected _poll to sleep at least once"
+    # DEFEAT_SHAPES #5: comparing against `wait.POLL_INTERVAL` alone cannot see the
+    # constant itself drift — if it became 60, the comparison below would pass vacuously.
+    # Pin the literal that is in the source today, so a change to it fails HERE too.
+    assert wait.POLL_INTERVAL == 0.5
+    assert all(d == wait.POLL_INTERVAL for d in sleeps), (
+        f"an unrelated thread's sleeps leaked into _poll's cadence recording: {sleeps}")
