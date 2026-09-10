@@ -794,6 +794,40 @@ def did_work_since(wid: str, since: float) -> bool:
     return last is not None and last > since
 
 
+def is_done(wid: str) -> bool:
+    """Has this REGULAR (hand-launched) window finished something you haven't seen?
+
+    The dashboard's missing bit (issue #475): the sidebar's three-word state
+    vocabulary (``working``/``waiting``/``idle``) has no way to say "idle, AND the
+    agent said something since you last spoke" — grey ``idle`` covers both that and
+    "untouched since you opened it" alike. This is that fourth signal, computed the
+    same way :func:`did_work_since` proves a dispatch finished — a main-chain
+    ASSISTANT turn after a baseline — except the baseline here is the session's OWN
+    last real USER turn (:func:`chela.transcripts.last_user_activity_at`), not a
+    registered watch time: a regular session nobody dispatched has no watch to
+    supply one, so "the last time the human spoke" is the only baseline available.
+    It decays for free — the moment you send another prompt, that becomes the new
+    baseline and this reads False again until the agent replies.
+
+    ⛔ Resolved by ``wid`` via :func:`chela.sessions.transcript_for_window`, never by
+    cwd — the identical CMX-191 hazard :func:`did_work_since` documents at length: a
+    cwd-keyed lookup would credit a SIBLING window's turn to this one, badging a
+    session ``done`` for work it never did.
+
+    False (never True) for a session that has never been prompted at all, or whose
+    newest turn is the human's own (no assistant reply since) — the counterweight
+    the issue's guard calls out: an untouched session must never read ``done``.
+    """
+    path = sessions.transcript_for_window(wid)
+    if path is None:
+        return False
+    last_user = transcripts.last_user_activity_at(path)
+    if last_user is None:
+        return False
+    last_assistant = transcripts.last_assistant_activity_at(path)
+    return last_assistant is not None and last_assistant > last_user
+
+
 def final_message(wid: str) -> str | None:
     """What the agent last SAID, for the completion notice — or None.
 

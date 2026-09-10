@@ -274,8 +274,14 @@ function toggleGroup(name) {
 function _agentRowHtml(a) {
     const dot = agentDotColor(a);
     const active = a.name === _detailAgent ? ' active' : '';
-    const stWord = _AGENT_STATUS_WORD[dot] || 'idle';
-    const stCls = _SIDEBAR_DOT_CLASS[dot] || 'idle';
+    // `done` (issue #475): a REGULAR session that is idle AND has an assistant
+    // turn since you last spoke — computed server-side (inbox.is_done) from the
+    // transcript, not guessed here. `a.done` is only ever true when `dot` is
+    // already 'grey' (app.py gates it on session_status !== 'busy' && !needs_human),
+    // so this never fights the working/waiting colours.
+    const done = isDone(a);
+    const stWord = done ? 'done' : (_AGENT_STATUS_WORD[dot] || 'idle');
+    const stCls = done ? 'done' : (_SIDEBAR_DOT_CLASS[dot] || 'idle');
     const label = _agentLabel(a);
 
     // Open-on-wall cue: a click on this row RESTORES a hidden pane vs merely
@@ -367,16 +373,28 @@ function renderSidebarAgents(agents) {
 
     // Triage: agents waiting on input float into a "Needs you" cluster above the
     // project groups. Each agent shows in exactly one place — lifted out of its
-    // group while it's blocked, like a starred item.
+    // group while it's blocked, like a starred item. `done` sessions get the same
+    // treatment one tier down (issue #475's actual payoff — the badge alone can't
+    // be scanned at a glance the way a cluster can): idle-with-unread-output
+    // floats into its own "Finished" cluster, so it decays back into the project
+    // groups the moment you prompt it again (the next poll sees a.done go false).
     const waiting = rows.filter(wantsHuman)
         .sort((a, b) => a.name.localeCompare(b.name));
-    const rest = rows.filter(a => !wantsHuman(a));
+    const finished = rows.filter(a => !wantsHuman(a) && isDone(a))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    const rest = rows.filter(a => !wantsHuman(a) && !isDone(a));
 
     let html = '';
     if (waiting.length) {
         html += `<div class="side-triage">
             <div class="triage-head">Needs you <span class="triage-count">${waiting.length}</span></div>
             ${waiting.map(_agentRowHtml).join('')}
+        </div>`;
+    }
+    if (finished.length) {
+        html += `<div class="side-triage side-finished">
+            <div class="triage-head">Finished <span class="triage-count">${finished.length}</span></div>
+            ${finished.map(_agentRowHtml).join('')}
         </div>`;
     }
 
@@ -427,6 +445,14 @@ const _AGENT_STATUS_WORD = { green: 'working', yellow: 'waiting', grey: 'idle' }
 // Status colour → the pane dot's CSS state class, so the sidebar dot pulses
 // identically to the wall's .term-status-dot (working/waiting/idle).
 const _SIDEBAR_DOT_CLASS = { green: 'working', yellow: 'waiting', grey: 'idle' };
+
+// The fourth sidebar state (issue #475): idle, but the agent said something
+// since you last spoke. `a.done` is the server's word (inbox.is_done), not
+// re-derived here — the wid-keyed transcript resolution it needs (CMX-191) can
+// only be done server-side.
+function isDone(a) {
+    return !!(a && a.done);
+}
 
 // Single source of the always-visible sidebar agent list. Owns the /api/agents
 // fetch that also primes _agentsCache (schedule dropdown, detail view, etc.).

@@ -1425,6 +1425,116 @@ def test_did_work_since_still_resolves_via_cwd_with_no_sibling_to_confuse_it(
     assert inbox.did_work_since("@7", since) is True
 
 
+# --- is_done: the sidebar's fourth state (issue #475) ------------------------
+#
+# `idle` alone can't tell "finished, output unread" from "untouched since you opened
+# it". `is_done` answers it the same way `did_work_since` proves a dispatch finished
+# — a main-chain ASSISTANT turn after a baseline — except the baseline is the
+# session's OWN last real USER turn, since a regular (hand-launched) session has no
+# registered watch to supply one.
+
+def _write_user_turn(path, when_epoch, content="go do the thing"):
+    when = datetime.fromtimestamp(when_epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    path.write_text(json.dumps(
+        {"type": "user", "timestamp": when, "message": {"content": content}}) + "\n")
+    os.utime(path, (when_epoch, when_epoch))
+
+
+def _append_assistant_turn(path, when_epoch):
+    when = datetime.fromtimestamp(when_epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    with path.open("a") as f:
+        f.write(json.dumps(
+            {"type": "assistant", "timestamp": when, "message": {"content": "done"}}) + "\n")
+    os.utime(path, (when_epoch, when_epoch))
+
+
+def test_is_done_true_when_the_agent_replied_after_the_last_prompt(
+        tmp_path, monkeypatch, no_native_status):
+    cwd = "/home/x/proj"
+    proj = tmp_path / transcripts.encode_cwd(cwd)
+    proj.mkdir(parents=True)
+    now = time.time()
+    path = proj / "mine.jsonl"
+    _write_user_turn(path, now - 100)
+    _append_assistant_turn(path, now)
+
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window", _REAL_TRANSCRIPT_FOR_WINDOW)
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", tmp_path)
+    pane_map = {"@7": sessions.Pane(wid="@7", launched_in=cwd, claude_pid=101)}
+    monkeypatch.setattr(inbox.sessions, "panes", lambda force=False: pane_map)
+    monkeypatch.setattr(inbox.discovery, "get_window_cwd_by_id", lambda wid: cwd)
+
+    assert inbox.is_done("@7") is True
+
+
+def test_is_done_false_with_no_assistant_turn_since_the_last_prompt(
+        tmp_path, monkeypatch, no_native_status):
+    """The guard's explicit counterweight: a session sitting on its own unanswered
+    prompt (or one whose newest assistant turn PREDATES that prompt) must never read
+    `done` — corrupting this by dropping the `did_work_since`-style ordering check
+    would badge every idle row `done`, making the state worthless."""
+    cwd = "/home/x/proj"
+    proj = tmp_path / transcripts.encode_cwd(cwd)
+    proj.mkdir(parents=True)
+    now = time.time()
+    path = proj / "mine.jsonl"
+    _write_assistant_turn(path, now - 200)          # old reply
+    with path.open("a") as f:
+        when = datetime.fromtimestamp(now, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        f.write(json.dumps({"type": "user", "timestamp": when,
+                             "message": {"content": "a new prompt"}}) + "\n")
+    os.utime(path, (now, now))
+
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window", _REAL_TRANSCRIPT_FOR_WINDOW)
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", tmp_path)
+    pane_map = {"@7": sessions.Pane(wid="@7", launched_in=cwd, claude_pid=101)}
+    monkeypatch.setattr(inbox.sessions, "panes", lambda force=False: pane_map)
+    monkeypatch.setattr(inbox.discovery, "get_window_cwd_by_id", lambda wid: cwd)
+
+    assert inbox.is_done("@7") is False
+
+
+def test_is_done_false_for_a_never_prompted_session(tmp_path, monkeypatch, no_native_status):
+    """A freshly-opened session nobody has typed into yet: no user turn at all, so
+    there is no baseline — must read `idle`, never `done`."""
+    cwd = "/home/x/proj"
+    proj = tmp_path / transcripts.encode_cwd(cwd)
+    proj.mkdir(parents=True)
+    _write_assistant_turn(proj / "mine.jsonl", time.time())
+
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window", _REAL_TRANSCRIPT_FOR_WINDOW)
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", tmp_path)
+    pane_map = {"@7": sessions.Pane(wid="@7", launched_in=cwd, claude_pid=101)}
+    monkeypatch.setattr(inbox.sessions, "panes", lambda force=False: pane_map)
+    monkeypatch.setattr(inbox.discovery, "get_window_cwd_by_id", lambda wid: cwd)
+
+    assert inbox.is_done("@7") is False
+
+
+def test_is_done_refuses_a_shared_cwd_rather_than_crediting_a_sibling(
+        tmp_path, monkeypatch, no_native_status):
+    """Same CMX-191 hazard `did_work_since` guards against: @7 prompted its own agent
+    and got no reply; its SIBLING @8 (same cwd) has a fresh assistant turn. Resolving
+    by cwd would hand @7 the sibling's reply and badge it `done` for work it never did."""
+    cwd = "/home/x/proj"
+    proj = tmp_path / transcripts.encode_cwd(cwd)
+    proj.mkdir(parents=True)
+    now = time.time()
+    _write_user_turn(proj / "mine.jsonl", now - 50)         # @7: prompted, no reply yet
+    _write_assistant_turn(proj / "sibling.jsonl", now)      # @8: fresh reply
+
+    monkeypatch.setattr(inbox.sessions, "transcript_for_window", _REAL_TRANSCRIPT_FOR_WINDOW)
+    monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", tmp_path)
+    pane_map = {
+        "@7": sessions.Pane(wid="@7", launched_in=cwd, claude_pid=101),
+        "@8": sessions.Pane(wid="@8", launched_in=cwd, claude_pid=102),
+    }
+    monkeypatch.setattr(inbox.sessions, "panes", lambda force=False: pane_map)
+    monkeypatch.setattr(inbox.discovery, "get_window_cwd_by_id", lambda wid: cwd)
+
+    assert inbox.is_done("@7") is False
+
+
 # --- BUG 4 (live, CMX-193): `finished` fired on `idle` sampled MID-TASK -----------
 #
 # CMX-191's own ticket said, verbatim: "do NOT change the busy→idle edge detector; this
