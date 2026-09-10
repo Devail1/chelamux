@@ -1230,6 +1230,51 @@ def test_default_check_resumed_requires_CONSECUTIVE_confirmations(monkeypatch):
     )
 
 
+def test_default_check_resumed_streak_RESETS_on_a_non_alive_poll(monkeypatch):
+    """🔴 GUARD (issue #471 finding 1): the previous CONSECUTIVE test above uses
+    `["@99"] + ["@gone"]*10` — exactly ONE alive sighting, so it cannot tell a streak that
+    genuinely RESETS on a dead poll from a streak that simply never advances past 1 (e.g. an
+    `else: pass` instead of `else: streak = 0`). Drive an alive/dead/alive pattern instead: a
+    correct reset needs a FULL fresh run of `confirmations` consecutive sightings after the
+    gap, so `attempts=3` is exhausted with only one post-gap alive poll and this must read as
+    NOT resumed. A streak that fails to reset on the dead poll would instead count the two
+    alive sightings as cumulative and wrongly return True."""
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+    sightings = iter(["@99", "@gone", "@99"])   # alive, dead, alive — streak must restart at 3
+    monkeypatch.setattr(sessions, "wid_for_session", lambda sid, pane_map=None: next(sightings))
+
+    result = _default_check_resumed("@99", SID_OK, sleep=lambda s: None,
+                                     attempts=3, confirmations=2, delay=0, settle=0)
+
+    assert result is False, (
+        "a non-alive poll must reset the streak — one alive sighting after the gap is not "
+        "two CONSECUTIVE sightings"
+    )
+
+
+def test_default_check_resumed_spaces_confirmations_LIVENESS_DELAY_S_apart(monkeypatch):
+    """🔴 GUARD (issue #471 finding 2): the existing settle-window test only asserts
+    `sleeps[0]` (the settle wait). Nothing pins the spacing BETWEEN confirmation polls to the
+    real `_LIVENESS_DELAY_S` — the whole point of that gap is that back-to-back polls with no
+    delay could both land inside the doomed process's brief measured alive window, which is
+    exactly the false positive this module exists to rule out. Left at the REAL default
+    `delay` (not overridden), so a corrupted `_LIVENESS_DELAY_S` constant is caught here, not
+    silently swallowed by an explicit override."""
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+    # dead once, then alive for two CONSECUTIVE polls — exercises sleeps[1] and sleeps[2].
+    sightings = iter(["@gone", "@99", "@99"])
+    monkeypatch.setattr(sessions, "wid_for_session", lambda sid, pane_map=None: next(sightings))
+    sleeps = []
+
+    result = _default_check_resumed("@99", SID_OK, sleep=sleeps.append,
+                                     attempts=3, confirmations=2)
+
+    assert result is True
+    assert sleeps[1:] == [0.75, 0.75], (
+        "every poll after the first must be spaced the real _LIVENESS_DELAY_S apart"
+    )
+
+
 def test_default_check_resumed_waits_out_the_settle_window_before_looking_at_all(monkeypatch):
     """🔴 GUARD: the measured 0.5s-1.9s span in which a doomed relaunch still reads as alive
     — the real default `settle` (not overridden here) must actually be waited out via
@@ -1282,6 +1327,31 @@ def test_default_check_resumed_confirms_a_genuinely_alive_relaunch(monkeypatch):
 
     assert result is True, "a session consistently confirmed alive must report resumed"
     assert sleeps[0] == 2.0, "must still wait out the settle window first"
+
+
+def test_default_check_resumed_confirms_a_relaunch_that_takes_a_couple_polls_to_appear(monkeypatch):
+    """🔴 GUARD (issue #471 finding 3 — THE ONE WITH A LIVE-FLEET CONSEQUENCE): the counterweight
+    test above only proves an IMMEDIATELY alive relaunch is confirmed. It says nothing about a
+    session that is genuinely alive but simply hasn't shown up in a pane scan yet on the first
+    poll or two — a slow-but-healthy resume, exactly what a loaded box (this one, routinely)
+    produces. `resume_state.MAX_TRIES` is 1, so a false RESUME_FAILED here doesn't just cost a
+    retry — it blocks that session PERMANENTLY, the "strictly worse than issue #468" outcome
+    CMX-353's own counterweight test is named for. Driven at the REAL default
+    attempts/delay/confirmations/settle (only `sleep` is faked) so a shrunken `_LIVENESS_ATTEMPTS`
+    budget — which would starve this exact scenario — is caught, not silently overridden away."""
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+    # dead for the first two polls, then alive from the third poll on — the resumed process is
+    # genuinely healthy, it just hadn't appeared in a pane scan yet.
+    sightings = iter(["@gone", "@gone", "@99", "@99", "@99", "@99", "@99"])
+    monkeypatch.setattr(sessions, "wid_for_session", lambda sid, pane_map=None: next(sightings))
+    sleeps = []
+
+    result = _default_check_resumed("@99", SID_OK, sleep=sleeps.append)
+
+    assert result is True, (
+        "a relaunch that takes a couple of polls to appear must still be confirmed — the "
+        "attempts budget exists exactly to give it that room"
+    )
 
 
 # --------------------------------------------------------------------------
