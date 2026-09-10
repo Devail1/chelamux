@@ -47,6 +47,10 @@ test('a gate is a gate, a tool call is the firehose, an unknown type is shown', 
     // `run_changes_requested` because it left review before the write could land. Same
     // reasoning: unmapped falls to `other` and renders as an anonymous `·`.
     assert.equal(classOf('run_judge_blocked_race'), 'run');
+    // CMX-358: a PR merged with NO judge verdict at all — the one outcome nothing else
+    // surfaces. Unmapped falls to `other` and the push that says "this shipped unjudged"
+    // reads as an anonymous `·`, indistinguishable from noise.
+    assert.equal(classOf('run_unjudged_merged'), 'run');
     assert.equal(classOf('daemon_start'), 'lifecycle');
     // An inbox that cannot deliver is a GATE: work is stuck until a human acts, and it
     // stayed invisible for a whole outage (CMX-77). `other` would render it as a `·`.
