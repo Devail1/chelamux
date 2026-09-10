@@ -887,6 +887,12 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
     animation: term-status-pulse-waiting 1s ease-in-out infinite;
 }
 .term-status-dot.idle:not(.gs-dot) { background: var(--text-dim); box-shadow: none; }
+/* Fourth sidebar state (issue #475): idle, but the agent said something since
+   you last spoke — --ok-sky, matching the wall tile's own "done" pill
+   (.gs-state-done above) so the concept reads the same colour everywhere it
+   appears. Colour is never the only cue: the row's .ar-state word ("done")
+   always renders alongside it, same as working/waiting/idle. */
+.term-status-dot.done:not(.gs-dot) { background: var(--ok-sky); box-shadow: 0 0 6px var(--ok-sky); }
 @keyframes term-status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 /* Waiting-on-input throbs its halo (stronger than the busy opacity fade). */
 @keyframes term-status-pulse-waiting {
@@ -3006,6 +3012,18 @@ input[type="text"]:focus, textarea:focus, select:focus {
     background: color-mix(in srgb, var(--yellow) 22%, transparent); color: var(--yellow);
 }
 
+/* ---- Finished cluster (issue #475): same triage card, sky-blue vocabulary so
+   it never reads as "needs you" at a glance — this is unread output, not a
+   blocker. One tier below "Needs you" when both are present. */
+.side-triage.side-finished {
+    border-color: color-mix(in srgb, var(--ok-sky) 35%, var(--border));
+    background: color-mix(in srgb, var(--ok-sky) 8%, transparent);
+}
+.side-finished .triage-head { color: var(--ok-sky); }
+.side-finished .triage-count {
+    background: color-mix(in srgb, var(--ok-sky) 22%, transparent); color: var(--ok-sky);
+}
+
 /* ---- Project groups: collapsible header with a session count + working-dot
    rollup. Only emitted when 2+ sessions share a repo. */
 .side-group { margin-bottom: 1px; }
@@ -3132,6 +3150,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .ar-state { flex: 0 0 auto; font-weight: 600; text-transform: capitalize; }
 .ar-state.working { color: var(--green); }
 .ar-state.waiting { color: var(--yellow); }
+.ar-state.done { color: var(--ok-sky); }
 .ar-state.idle { color: var(--text-dim); }
 .ar-age { flex: 0 0 auto; opacity: 0.8; }
 .ar-recap { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85; }

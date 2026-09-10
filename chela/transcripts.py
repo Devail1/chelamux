@@ -307,6 +307,38 @@ def last_assistant_activity_at(path: Path) -> float | None:
         return None
 
 
+def last_user_activity_at(path: Path) -> float | None:
+    """Epoch seconds of the newest REAL user turn in the transcript at ``path``.
+
+    The baseline half of "did the agent finish something you haven't seen" (see
+    :func:`chela.inbox.is_done`): you need to know when the human last spoke before
+    you can ask whether the agent has said anything since. A tool-result record also
+    has ``type == "user"`` — Claude Code round-trips tool results through the user
+    role — so it is excluded the same way :func:`iter_turns` excludes it: a real
+    prompt's ``message.content`` is a string, a tool-result carrier's is a list.
+
+    Content-derived (the record's timestamp), not file mtime — same reasoning as
+    :func:`_last_record_ts`. Sidechains and meta records are skipped, matching
+    :func:`last_assistant_activity_at`. None when there is no real user turn yet,
+    the timestamp is unparseable, or ``path`` cannot be read.
+    """
+    def _is_real_user_turn(o: dict) -> bool:
+        if o.get("type") != "user" or o.get("isSidechain") or o.get("isMeta"):
+            return False
+        if not isinstance(o.get("timestamp"), str):
+            return False
+        content = (o.get("message") or {}).get("content")
+        return isinstance(content, str) and bool(content.strip())
+
+    rec = latest_record(path, _is_real_user_turn)
+    if not rec:
+        return None
+    try:
+        return datetime.fromisoformat(rec["timestamp"].replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def last_assistant_text(path: Path) -> str | None:
     """The TEXT of the newest main-chain assistant turn in ``path`` — what the agent
     actually said last — or None if it never said anything in words.

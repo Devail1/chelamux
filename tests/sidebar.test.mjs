@@ -960,3 +960,60 @@ test('CMX-230: the sidebar row\'s .ar-ctx renders the real percentage number, no
         '.ar-ctx must carry the real percentage number, not a bare "%" the warn/danger class alone would leave');
     assert.ok(chip.classList.contains('danger'), 'a used_pct > 80 must still carry the danger class alongside the number');
 });
+
+// --- Issue #475: the sidebar's fourth state — `idle` that is actually `done` ------
+//
+// The server (inbox.is_done) is the ONLY thing allowed to decide `done` — nav.js
+// just reads `a.done` off the /api/agents record and renders it, the same way it
+// already trusts `a.needs_human`/`a.session_status`. These tests drive the REAL
+// `renderSidebarAgents`/`_agentRowHtml` so a blanked word or a dropped cluster shows
+// up as a missing node, not a passing regex over the source text.
+
+test('CMX-359: a `done` agent renders the word "done" on its row — colour is not the only cue', () => {
+    nav.renderSidebarAgents([agent('finished-one', { session_status: 'idle', done: true })]);
+    const row = rowFor('finished-one');
+    assert.equal(row.querySelector('.ar-state').textContent, 'done',
+        '.ar-state must carry the real "done" word, not fall back to "idle" — a red-weak viewer needs the word, not the dot colour');
+    assert.ok(row.querySelector('.term-status-dot').classList.contains('done'),
+        'the status dot must carry the done CSS class too, so its colour matches the word');
+});
+
+test('CMX-359: an idle agent with no `done` evidence still reads plain "idle" — the counterweight', () => {
+    // The issue's explicit guard: dropping the did_work_since-style ordering check
+    // would badge EVERY idle row "done". Pin the false/undefined case stays "idle".
+    nav.renderSidebarAgents([
+        agent('untouched-one', { session_status: 'idle' }),          // done: undefined
+        agent('untouched-two', { session_status: 'idle', done: false }),
+    ]);
+    assert.equal(rowFor('untouched-one').querySelector('.ar-state').textContent, 'idle');
+    assert.equal(rowFor('untouched-two').querySelector('.ar-state').textContent, 'idle');
+});
+
+test('CMX-359: `done` agents float into their own "Finished" cluster, decoupled from project groups', () => {
+    nav.renderSidebarAgents([
+        agent('done-agent', { window_id: '@2', session_status: 'idle', done: true, cwd: '/home/x/proj' }),
+        agent('plain-agent', { window_id: '@3', session_status: 'idle', cwd: '/home/x/proj' }),
+    ]);
+    const cluster = document.querySelector('#sidebar-agents .side-finished');
+    assert.ok(cluster, 'no .side-finished cluster rendered for a done agent');
+    assert.ok(cluster.querySelector('.agent-row[data-agent="done-agent"]'),
+        'the done agent must render INSIDE the Finished cluster');
+    assert.equal(cluster.querySelectorAll('.agent-row').length, 1,
+        'a non-done agent must not be swept into the Finished cluster');
+    assert.equal(cluster.querySelector('.triage-count').textContent, '1');
+});
+
+test('CMX-359: "Needs you" outranks "Finished" — a row can only ever appear in one cluster', () => {
+    // The server never actually emits both flags together (app.py gates `done` on
+    // `!needs_human`), but nav.js's own partition must still resolve the conflict
+    // the same way if it ever saw one: wantsHuman wins, so the row is never
+    // duplicated into both clusters.
+    nav.renderSidebarAgents([
+        agent('blocked-and-done', { session_status: 'waiting', done: true }),
+    ]);
+    const needsYou = document.querySelector('#sidebar-agents .side-triage:not(.side-finished)');
+    const finished = document.querySelector('#sidebar-agents .side-finished');
+    assert.ok(needsYou && needsYou.querySelector('.agent-row[data-agent="blocked-and-done"]'),
+        'a waiting agent must render in the "Needs you" cluster');
+    assert.ok(!finished, 'a row already claimed by "Needs you" must not also spawn a "Finished" cluster');
+});

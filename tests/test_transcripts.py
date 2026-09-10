@@ -356,3 +356,71 @@ def test_last_assistant_text_survives_a_truncated_line(tmp_path):
                     + "\n{\"type\": \"assist\n")
     assert transcripts.last_assistant_text(path) == "good"
 
+
+# --- last_user_activity_at: the baseline for the sidebar's `done` state (#475) ---
+#
+# inbox.is_done needs "when did the human last speak" so it can ask "has the agent
+# said anything since". A tool-result record ALSO has type == "user" (Claude Code
+# round-trips tool results through the user role) — the load-bearing filter is the
+# same content-shape check iter_turns already uses: a real prompt's content is a
+# string, a tool-result carrier's is a list.
+
+def _user(content, **extra):
+    return {"type": "user", "timestamp": "2026-08-21T10:00:00Z",
+            "message": {"role": "user", "content": content}, **extra}
+
+
+def test_last_user_activity_at_returns_the_newest_real_prompt(tmp_path):
+    path = tmp_path / "s.jsonl"
+    _write(path, [
+        {**_user("first"), "timestamp": "2026-08-21T09:00:00Z"},
+        {**_user("second"), "timestamp": "2026-08-21T10:00:00Z"},
+    ])
+    last = transcripts.last_user_activity_at(path)
+    assert last == datetime.fromisoformat("2026-08-21T10:00:00+00:00").timestamp()
+
+
+def test_last_user_activity_at_ignores_tool_result_carriers(tmp_path):
+    """A tool-result record's `message.content` is a LIST of blocks, not a string — the
+    same shape iter_turns already uses to tell it apart from a real prompt. Counting it
+    would read 'a tool finished' as 'the human spoke'."""
+    path = tmp_path / "s.jsonl"
+    _write(path, [
+        {**_user("real prompt"), "timestamp": "2026-08-21T09:00:00Z"},
+        {**_user([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]),
+         "timestamp": "2026-08-21T10:00:00Z"},
+    ])
+    last = transcripts.last_user_activity_at(path)
+    assert last == datetime.fromisoformat("2026-08-21T09:00:00+00:00").timestamp()
+
+
+def test_last_user_activity_at_ignores_sidechains_and_meta(tmp_path):
+    path = tmp_path / "s.jsonl"
+    _write(path, [
+        {**_user("the real prompt"), "timestamp": "2026-08-21T09:00:00Z"},
+        {**_user("subagent chatter"), "timestamp": "2026-08-21T10:00:00Z", "isSidechain": True},
+        {**_user("meta noise"), "timestamp": "2026-08-21T11:00:00Z", "isMeta": True},
+    ])
+    last = transcripts.last_user_activity_at(path)
+    assert last == datetime.fromisoformat("2026-08-21T09:00:00+00:00").timestamp()
+
+
+def test_last_user_activity_at_ignores_blank_content(tmp_path):
+    path = tmp_path / "s.jsonl"
+    _write(path, [
+        {**_user("the real prompt"), "timestamp": "2026-08-21T09:00:00Z"},
+        {**_user("   "), "timestamp": "2026-08-21T10:00:00Z"},
+    ])
+    last = transcripts.last_user_activity_at(path)
+    assert last == datetime.fromisoformat("2026-08-21T09:00:00+00:00").timestamp()
+
+
+def test_last_user_activity_at_is_none_when_there_is_no_real_user_turn(tmp_path):
+    path = tmp_path / "s.jsonl"
+    _write(path, [_assistant([{"type": "text", "text": "hello"}])])
+    assert transcripts.last_user_activity_at(path) is None
+
+
+def test_last_user_activity_at_is_none_for_a_missing_file(tmp_path):
+    assert transcripts.last_user_activity_at(tmp_path / "nope.jsonl") is None
+

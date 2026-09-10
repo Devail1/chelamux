@@ -217,6 +217,22 @@ def api_agents():
         liveness, health = _liveness(claude_running, sess_status)
         win_type = agent_manager.window_type(window_id, claude_running)
         is_dispatched = window_id in dispatched
+        needs_human = _needs_human(window_id, sess_status, is_dispatched)
+
+        # `done` (issue #475): idle AND the agent said something since you last
+        # spoke. REGULAR sessions only — a dispatched worker kills its own window
+        # on every terminal transition (dispatcher._kill_window), so its row is
+        # gone before a badge could show; its outcome belongs on the Dispatch
+        # board, not here. Scoped to windows that are otherwise idle (not busy,
+        # not already flagged needs_human) so it never fights the dot colour it
+        # is meant to refine.
+        done = (
+            claude_running
+            and not is_dispatched
+            and sess_status != "busy"
+            and not needs_human
+            and inbox.is_done(window_id)
+        )
 
         agents.append({
             "name": name,
@@ -233,7 +249,8 @@ def api_agents():
             # pops out the moment it wants a human. Both are facts about the window, so
             # they ship on every row — the *behaviour* they drive is the client's.
             "dispatched": is_dispatched,
-            "needs_human": _needs_human(window_id, sess_status, is_dispatched),
+            "needs_human": needs_human,
+            "done": done,
             "liveness": liveness,
             "health": health,
             "status": sess_status,
