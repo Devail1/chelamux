@@ -10,6 +10,31 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.10.4] — 2026-09-10
+
+### Fixed
+
+- **`chela restore --resume` verifies a relaunched session came up alive before calling it
+  `RESUMED`, and stops retrying a session whose resume keeps failing.** Previously it
+  reported `RESUMED` as soon as `spawn_window()` opened a tmux window — nothing confirmed
+  `claude --resume <sid>` actually started or stayed up, so a relaunch that died a moment
+  later was archived as a success. It now polls for the resumed session to be genuinely
+  alive at its new address before archiving the row; a launch whose window opened but whose
+  session never came up is reported `RESUME_FAILED` and left untouched. A failed resume is
+  also now persisted per session id (`resume-attempts.json`), so a session that keeps
+  coming up dead is no longer relaunched on every subsequent `chela restore --resume` pass —
+  it is reported as blocked instead. (CMX-353, #468)
+
+- **Tests and judge mutation runs can no longer reach the operator's real pm2 daemon.**
+  Nothing set `PM2_HOME`, so any `pm2` subprocess the suite (or a judge's mutation cycle)
+  could reach — including from a route the in-process `_no_live_pm2_restart` fence never
+  sees, such as the real daemon `tests/test_graceful_shutdown.py` spawns, or a background
+  thread that outlives the test that started it — defaulted to `~/.pm2`, the machine's
+  real God Daemon. `tests/conftest.py` now points `PM2_HOME` at one throwaway home for the
+  whole test session, with its own teardown that kills that home's daemon and removes it
+  so nothing survives the run; a `pm2 jlist` read against it answers `[]`, which is the
+  same "nothing to restart" case `chela.update` already treats as normal. (CMX-354, issue #466)
+
 ## [0.10.3] — 2026-09-09
 
 ### Added
