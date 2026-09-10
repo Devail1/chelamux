@@ -8,6 +8,7 @@ so no real ``~/.chela/resume-attempts.json`` is touched.
 from __future__ import annotations
 
 import importlib
+import json
 
 import pytest
 
@@ -83,3 +84,83 @@ def test_clear_actually_drops_the_failure_record(resume_state):
 def test_clear_of_an_unknown_session_is_a_harmless_noop(resume_state):
     resume_state.clear("never-recorded")
     assert resume_state.blocked_reason("never-recorded") is None
+
+
+# --------------------------------------------------------------------------
+# GUARD (issue #471 finding 4): UNKNOWN MUST NOT READ AS OK — an empty persisted reason
+# must not make an at-limit session read as retryable.
+# --------------------------------------------------------------------------
+
+def test_blocked_reason_still_blocks_when_the_persisted_reason_is_falsy(resume_state):
+    """Every test above only ever persists a truthy reason via `record_failure`, so none of
+    them can tell `entry.get("reason") or "<default>"` apart from a mutation that reads the
+    reason bare (`entry.get("reason")`) — both pass every existing test. Write a row with an
+    empty reason directly (bypassing `record_failure`, which the module docstring notes is a
+    read-modify-write over the raw store) and prove `blocked_reason` still returns a truthy
+    value once `tries` has reached the limit — never `None`, which the caller
+    (`chela.restore.resume`) reads as "safe to relaunch"."""
+    resume_state._save({"sid-1": {"tries": 1, "reason": ""}})
+
+    result = resume_state.blocked_reason("sid-1")
+
+    assert result is not None, (
+        "an empty persisted reason at max_tries must still block — UNKNOWN MUST NOT READ AS OK"
+    )
+    assert result, "the fallback reason text must itself be truthy"
+
+
+# --------------------------------------------------------------------------
+# GUARD (issue #471 finding 5): `_save` is ATOMIC — a concurrent reader sees old or new,
+# never half. Same shape as tests/test_roster.py:107's `os.replace` failure injection.
+# --------------------------------------------------------------------------
+
+def test_save_is_atomic_an_interrupted_replace_leaves_the_previous_store_readable(
+    resume_state, monkeypatch
+):
+    resume_state.record_failure("sid-1", "first failure")
+
+    def boom(*_a, **_kw):
+        raise OSError("simulated kill mid-write")
+
+    monkeypatch.setattr(resume_state.os, "replace", boom)
+    with pytest.raises(OSError):
+        resume_state.record_failure("sid-1", "second failure")
+    monkeypatch.undo()   # restore the real os.replace before reading back
+
+    data = json.loads(resume_state._STORE.read_text())
+    assert data["sid-1"] == {"tries": 1, "reason": "first failure"}, (
+        "a reader must see the OLD store intact, never a half-written new one"
+    )
+
+
+# --------------------------------------------------------------------------
+# GUARD (issue #471 finding 6): `record_failure` RAISES on a store failure rather than
+# swallowing it — a failure it could not record is a bound `blocked_reason` can no longer
+# enforce, and the caller needs to know.
+# --------------------------------------------------------------------------
+
+def test_record_failure_raises_when_the_store_write_fails(resume_state, monkeypatch):
+    def boom(_data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(resume_state, "_save", boom)
+
+    with pytest.raises(OSError):
+        resume_state.record_failure("sid-1", "spawn failed")
+
+
+# --------------------------------------------------------------------------
+# GUARD (issue #471 finding 7): `record_failure` refuses a falsy session id rather than
+# silently recording nothing — an un-keyed failure is a bound `blocked_reason` can never
+# enforce.
+# --------------------------------------------------------------------------
+
+def test_record_failure_refuses_a_falsy_session_id(resume_state):
+    with pytest.raises(ValueError):
+        resume_state.record_failure("", "some reason")
+    with pytest.raises(ValueError):
+        resume_state.record_failure(None, "some reason")
+
+    assert resume_state._load() == {}, (
+        "a refused call must record nothing at all, not a row keyed on an empty/None id"
+    )
