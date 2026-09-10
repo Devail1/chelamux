@@ -2359,6 +2359,75 @@ def test_the_cannot_verify_reason_is_EXCERPTED_into_the_summary(
     assert len(summary) < len(_LONG_DETAIL) + 200
 
 
+# --- CMX-358 (#480): a PR merged before a judge was ever SCHEDULED for it must not go ----
+# unnotified — the one outcome nothing else in this module surfaces.
+
+
+def _unjudged_merged_run(**over):
+    return dict(_clean_run(), status="done", judge_state=judge.J_UNJUDGED_MERGED,
+                judge_detail=over.pop("judge_detail",
+                                       "no judge ever ran for this PR before it merged"),
+                **over)
+
+
+def test_an_unjudged_merge_fires_its_own_event(store_file, windows, sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_unjudged_merged_run()])
+
+    assert len(sends) == 1
+    text = sends[0][1]
+    assert "NO judge verdict" in text
+    assert "pull/9" in text
+
+
+def test_an_unjudged_merged_run_fires_exactly_once(store_file, windows, sends, monkeypatch):
+    """`done` is terminal, so the mark can never churn back — the event must fire once, ever,
+    even across repeated ticks that keep handing back the same row."""
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    run = _unjudged_merged_run()
+    inbox.tick({}, runs=[run])
+    inbox.tick({}, runs=[run])
+    inbox.tick({}, runs=[run])
+
+    assert len(sends) == 1
+
+
+def test_a_clean_merged_run_never_fires_the_unjudged_event(store_file, windows, sends, monkeypatch):
+    """🔴 GUARD: the counterweight. A run that reached `done` through the NORMAL judged path
+    (`judge_state` left exactly as the judge wrote it — `clean` here) must never trip
+    `run_unjudged_merged`, or every merged run would read as unjudged."""
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[dict(_verdict_run(judge.J_CLEAN), status="done")])
+
+    assert sends == []
+
+
+def test_the_unjudged_merged_reason_is_EXCERPTED_into_the_summary(
+        store_file, windows, sends, monkeypatch):
+    _statuses(monkeypatch, {ORCH: inbox.IDLE})
+    store = inbox.load()
+    store["orchestrator"] = ORCH
+    inbox.save(store)
+
+    inbox.tick({}, runs=[_unjudged_merged_run(judge_detail=_LONG_DETAIL)])
+
+    summary = sends[0][1]
+    assert _LONG_DETAIL[:40] in summary
+    assert _LONG_DETAIL not in summary
+
+
 # --- CMX-247: the needs_human summary must say WHY, not always the same fixed guess ------
 #
 # `dispatcher._escalate` is the only writer of `needs_human`, and its call sites hand it
