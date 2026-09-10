@@ -173,6 +173,89 @@ def test_wait_wid_not_live_is_an_error_not_a_guess(monkeypatch):
     assert result["state"] == "error"
 
 
+# --- issue #478: the poll cadence itself is guarded, not just the outcome -------
+
+# A ceiling well under the `sleep 30/60` regression #478 guards against, and well
+# over the shipped 0.5s — see the module docstring on `_poll` for why it must be live.
+CADENCE_CEILING = 2.0
+
+
+def test_wait_wid_done_polls_at_a_bounded_cadence(windows, monkeypatch):
+    """issue #478: raising POLL_INTERVAL to a `sleep 30/60` value must go RED — nothing
+    in the suite previously depended on the constant. Counterweight: this asserts the
+    OBSERVED interval `_poll` actually sleeps for, not the literal `POLL_INTERVAL == 0.5`
+    (pinning the literal would pass for any implementation that keeps the constant but
+    ignores it). No real multi-second wait either way: `time.sleep` is intercepted so
+    each requested duration is recorded and bounded directly, never derived from a
+    `time.time()` delta — see the guard against CI flake in the issue.
+
+    Bounded on BOTH sides against the live `wait.POLL_INTERVAL` (not a re-typed literal):
+    the ceiling catches a too-coarse interval, the floor catches the opposite failure —
+    a busy-spin that ignores the constant and sleeps near-zero (issue found in review:
+    `time.sleep(POLL_INTERVAL)` degenerating to `time.sleep(0)` still satisfied a
+    ceiling-only assertion).
+    """
+    inbox.watch(AGENT, "do the thing", by=ORCH)
+    monkeypatch.setattr(inbox, "IDLE_CONFIRM_SECONDS", 0)
+    sleeps: list[float] = []
+    real_sleep = time.sleep
+    monkeypatch.setattr(wait.time, "sleep", lambda d: (sleeps.append(d), real_sleep(0.01)))
+
+    def deliver_finished():
+        real_sleep(0.05)
+        _tick(monkeypatch, **{ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    t = threading.Thread(target=deliver_finished)
+    t.start()
+    result = wait.wait_for(AGENT, wait.DONE, timeout=5)
+    t.join()
+
+    assert result["ok"] is True
+    assert sleeps, "expected _poll to sleep at least once before the event landed"
+    assert all(d <= CADENCE_CEILING for d in sleeps), (
+        f"poll interval too coarse to be event-driven, not a disguised sleep loop: {sleeps}")
+    assert all(d >= wait.POLL_INTERVAL for d in sleeps), (
+        f"poll interval busy-spun below the live POLL_INTERVAL, ignoring it: {sleeps}")
+
+
+def test_wait_wid_done_still_resolves_correctly_at_a_slower_poll_interval(windows, monkeypatch):
+    """Paired accept case for #478: a deliberately SLOWED interval (not the shipped 0.5s)
+    must still produce the correct outcome — only when it fires moves, not whether it
+    fires correctly. A guard that goes red for ANY interval change, not just a raised
+    one, would be pinning a literal instead of the cadence property that matters.
+
+    Also captures the requested durations `_poll` actually asks `time.sleep` for and
+    asserts the monkeypatched 1.7 shows up among them — not just that the wait still
+    resolves correctly. Resolving correctly alone is silent about *why*: `_wait_wid`
+    also reacts to the delivered event on its own, so a `_poll` that froze
+    `POLL_INTERVAL` at import (and so never saw 1.7) would still pass `ok`/`state`/
+    `event` here. Recording `sleeps` is what makes the live-read production change
+    (module docstring on `_poll`, issue #478) load-bearing in this test rather than in
+    the cadence test alone.
+    """
+    inbox.watch(AGENT, "do the thing", by=ORCH)
+    monkeypatch.setattr(inbox, "IDLE_CONFIRM_SECONDS", 0)
+    monkeypatch.setattr(wait, "POLL_INTERVAL", 1.7)  # deliberately not the shipped 0.5
+    sleeps: list[float] = []
+    real_sleep = time.sleep
+    monkeypatch.setattr(wait.time, "sleep", lambda d: (sleeps.append(d), real_sleep(0.01)))
+
+    def deliver_finished():
+        real_sleep(0.05)
+        _tick(monkeypatch, **{ORCH: inbox.IDLE, AGENT: inbox.IDLE})
+
+    t = threading.Thread(target=deliver_finished)
+    t.start()
+    result = wait.wait_for(AGENT, wait.DONE, timeout=5)
+    t.join()
+
+    assert result["ok"] is True
+    assert result["state"] == "done"
+    assert result["event"]["type"] == "finished"
+    assert 1.7 in sleeps, (
+        f"expected _poll to read the live wait.POLL_INTERVAL (1.7), got: {sleeps}")
+
+
 # --- the counterweight guard: a wid-reuse must NOT resolve the old wait ---------
 
 def test_wait_wid_does_not_resolve_when_the_wid_is_reissued_to_a_stranger(

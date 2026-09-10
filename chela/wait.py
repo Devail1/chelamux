@@ -114,8 +114,7 @@ def _as_record(inbox_event: dict) -> dict:
             "ts": time.time(), "seq": None}
 
 
-def _poll(types: frozenset, matches, deadline: float | None,
-          interval: float = POLL_INTERVAL) -> dict | None:
+def _poll(types: frozenset, matches, deadline: float | None) -> dict | None:
     """Poll the durable event log, from its CURRENT tip, for the first record matching.
 
     Starts at ``event_log.tip()`` — never replays the past, so this can never fire on an
@@ -125,6 +124,13 @@ def _poll(types: frozenset, matches, deadline: float | None,
     checked on EVERY poll regardless of whether the log had anything new — a target
     that simply never fires still returns on time rather than blocking on
     :func:`chela.event_log.follow`'s own "only yield on new data" gate.
+
+    Reads module-level ``POLL_INTERVAL`` fresh on EVERY iteration rather than freezing it
+    as a default argument (issue #478) — a ``def f(..., interval=POLL_INTERVAL)`` default
+    is bound once, at import, so a test (or a caller) changing the module attribute later
+    would silently have no effect. Reading it live is what makes the constant actually
+    configurable, and lets a test assert on the cadence via ``wait.POLL_INTERVAL`` /
+    ``time.sleep`` without needing a real multi-second wall-clock wait.
     """
     tip = event_log.tip()
     cursor, boot = tip["seq"], tip["boot_id"]
@@ -137,7 +143,7 @@ def _poll(types: frozenset, matches, deadline: float | None,
         cursor = batch["next_seq"]
         if deadline is not None and time.time() >= deadline:
             return None
-        time.sleep(interval)
+        time.sleep(POLL_INTERVAL)
 
 
 def _find_run(task_id: str) -> dict | None:
@@ -219,6 +225,30 @@ def wait_for(target: str, until: str = DONE, timeout: float | None = None,
     ordinary outcome (a bad target, a timeout, a lost race with a tmux restart) — those
     are reported in the result, not as exceptions, so a caller (the CLI, or
     ``chela drive --wait``) decides the exit code once, in one place.
+
+    Issue #479: the ``"unknown"`` branch a wid-watch reaches on :data:`EPOCH_LOST_KIND`
+    (see :func:`_wait_wid`) is deliberate, not an unfinished re-resolve. A wid-watch's
+    epoch only goes dangling when the whole tmux SERVER has restarted (:mod:`chela.epoch`
+    scans, this is not one window dying) — and every real caller (``cmd_wait`` in
+    ``chela/main.py`` always passes ``by=orchestrator.self_wid()``) is itself running
+    inside a pane of THAT SAME server: the orchestrator's own interactive shell, or a
+    script it runs synchronously right after delegating work. When that server dies, the
+    waiting process dies with it (its pane's pty closes under it) BEFORE it could ever
+    observe the restart it would need to react to — there is no surviving caller left to
+    re-resolve a moved target, unlike :func:`chela.inbox.resolve_heal`, which heals the
+    orchestrator's OWN address because that is stored state a later, freshly-started
+    process reads back, not a live call that must itself outlive the crash.
+
+    This holds even for ``CHELA_RESTORE_RESUME=true`` (v0.10.5), which can relaunch a
+    MANUAL row under ``claude --resume <sid>`` at a NEW wid with the SAME session id —
+    the one shape where "the target legitimately moved" is real. That relaunch can only
+    run AFTER the dead server is noticed and ``chela restore --resume`` is invoked against
+    the NEW server, by which point any waiter that was watching from inside the OLD
+    server is already gone — so there is no process to hand the new wid to. A waiter that
+    runs detached from any tmux pane (backgrounded, outside the crashing server) is not a
+    supported shape today — the module docstring above describes this as a synchronous
+    call an orchestrator (or a script it runs) makes, not a detached daemon — so it is not
+    covered by this analysis.
     """
     if until not in UNTIL_STATES:
         return _error(f"--until must be one of {UNTIL_STATES}, got {until!r}")
