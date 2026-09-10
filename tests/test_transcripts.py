@@ -425,6 +425,21 @@ def test_last_user_activity_at_is_none_for_a_missing_file(tmp_path):
     assert transcripts.last_user_activity_at(tmp_path / "nope.jsonl") is None
 
 
+def test_last_user_activity_at_is_none_when_the_newest_timestamp_is_unparseable(tmp_path):
+    """The newest real user record can carry a syntactically-string but unparseable
+    timestamp (e.g. truncated mid-write). `datetime.fromisoformat` raises ValueError,
+    which must surface as None per the docstring ('None when ... the timestamp is
+    unparseable') — NOT as 0.0. Returning 0.0 would make `inbox.is_done`'s
+    `last_assistant_activity_at(...) > last_user_activity_at(...)` compare against an
+    epoch-zero floor instead of short-circuiting on None, badging a session `done`
+    forever off one malformed record."""
+    path = tmp_path / "s.jsonl"
+    _write(path, [
+        {**_user("the real prompt"), "timestamp": "not-a-timestamp"},
+    ])
+    assert transcripts.last_user_activity_at(path) is None
+
+
 def test_last_user_activity_at_skips_a_non_string_timestamp_instead_of_raising(tmp_path):
     """A record can otherwise look exactly like a real user turn (type=='user', not a
     sidechain/meta, string content) and still carry a non-string `timestamp` — a
