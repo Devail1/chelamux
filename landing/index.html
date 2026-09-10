@@ -4,10 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>chela — put a fleet of Claude Code agents to work</title>
-<meta name="description" content="A tiny control plane that schedules Claude Code agents, dispatches a TODO list into pull requests, and streams the whole fleet on one live terminal wall — and lets you share any session end-to-end encrypted, over a single tmux session.">
+<meta name="description" content="A tiny control plane that schedules Claude Code agents, dispatches a TODO list into pull requests, pushes each completion back to the orchestrator, and streams the whole fleet on one live terminal wall — shareable end-to-end encrypted, over a single tmux session.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <meta property="og:title" content="chela — put a fleet of Claude Code agents to work">
-<meta property="og:description" content="Schedule agents, dispatch TODOs into PRs, watch the fleet on a live terminal wall — and share any session end-to-end encrypted. Unattended.">
+<meta property="og:description" content="Schedule agents, dispatch TODOs into PRs, and get told the moment one finishes or blocks — with the whole fleet on a live terminal wall you can share, end-to-end encrypted.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://chela.pages.dev/">
 <meta property="og:site_name" content="chela">
@@ -17,7 +17,7 @@
 <meta property="og:image:alt" content="chela — schedule Claude Code agents, dispatch TODOs to PRs, and watch the fleet on a live terminal wall.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="chela — put a fleet of Claude Code agents to work">
-<meta name="twitter:description" content="Schedule agents, dispatch TODOs into PRs, watch the fleet on a live terminal wall — and share any session end-to-end encrypted. Unattended.">
+<meta name="twitter:description" content="Schedule agents, dispatch TODOs into PRs, and get told the moment one finishes or blocks — with the whole fleet on a live terminal wall you can share, end-to-end encrypted.">
 <meta name="twitter:image" content="https://chela.pages.dev/img/og.png">
 <style>
   :root{
@@ -190,9 +190,10 @@
   <h1>Put a fleet of Claude Code agents<br>to work — <span class="accent">unattended.</span></h1>
   <p class="sub">
     chela is a tiny control plane over a single tmux session. It <strong>schedules</strong>
-    agents, <strong>dispatches</strong> a TODO list into pull requests, and streams the whole
-    fleet on one <strong>live terminal wall</strong> — which you can <strong>share, end-to-end
-    encrypted</strong>. You walk away; the agents keep working.
+    agents, <strong>dispatches</strong> a TODO list into pull requests, <strong>tells you the
+    moment one finishes or blocks</strong>, and streams the whole fleet on one <strong>live
+    terminal wall</strong> — which you can <strong>share, end-to-end encrypted</strong>. You walk
+    away; the agents keep working.
   </p>
   <div class="cta">
     <a class="btn btn-primary" href="#install">Get started</a>
@@ -236,6 +237,14 @@ uv run chela run</pre>
       <p>Point chela at a <code>WORKFLOW.md</code>. Each open <code>- [ ]</code> becomes a git
       worktree, an agent that implements it, and a pull request — which an <strong>adversarial
       judge</strong> re-reviews before it reaches you.</p>
+    </div>
+    <div class="card">
+      <span class="ic">📥</span>
+      <h3>Closes the loop</h3>
+      <p>An orchestrator is just another agent — it can only act when something messages it, so an
+      agent <em>finishing</em> is invisible to it. chela pushes completions, blocks and deaths back
+      into the orchestrator's own session, gated strictly on <code>idle</code> so a live agent is
+      never interrupted mid-thought. <a class="more" href="docs.html#orchestration">How it works →</a></p>
     </div>
     <div class="card">
       <span class="ic">▦</span>
@@ -377,7 +386,7 @@ uv run chela doctor</pre>
 </section>
 
 <footer>
-  chela · MIT licensed · a control plane for Claude Code agents on tmux
+  chela · AGPL v3 licensed · a control plane for Claude Code agents on tmux
 </footer>
 
 </body>

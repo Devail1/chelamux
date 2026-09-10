@@ -122,10 +122,10 @@ dispatch-runs`. **Auto-merge is off by default** — the PR waits for you to mer
 - **Exact context / rate-limit numbers** — `uv run chela install-statusline --write`
   installs the statusLine hook the dashboard reads.
 - **Phone push when an agent blocks** — set `CHELA_NOTIFY_URL` (ntfy / Telegram /
-  webhook); see [README → Needs-input notifications](../README.md#needs-input-notifications).
+  webhook); see [Needs-input notifications](https://chela.pages.dev/docs#needs-input).
 - **Remote access** — the dashboard binds `127.0.0.1` with no built-in auth by
   design. Put it behind Tailscale or an SSH tunnel — the tailnet is the trust
-  boundary. See [README → Remote access & security](../README.md#remote-access--security).
+  boundary. See [Remote access & security](https://chela.pages.dev/docs#security).
 
 ## Fonts (macOS)
 

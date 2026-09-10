@@ -387,7 +387,7 @@ documented rather than quietly missing:
 ## The room recap (`SessionStart`)
 
 **Hooks are read at agent startup, and an agent's context does not survive its process.**
-Everything a [room](../README.md#agent-rooms--agents-that-can-actually-talk-to-each-other)
+Everything a [room](https://chela.pages.dev/docs#rooms)
 ever told an agent — the handoff, the question, the blocker — was injected into a
 *session*, and a dispatched agent is a fresh session every run. Restart it and the shared
 context is gone: the ledger still holds every post, and the only reader who needed them
