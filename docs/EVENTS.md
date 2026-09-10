@@ -169,7 +169,7 @@ cannot do and a pane scrape can only approximate. Ingestion answers nothing; the
 that *does* answer — an `AskUserQuestion`, and only with a human's tap — is
 [documented where it lives](HOOKS.md#answering-a-question-with-zero-keypresses).
 
-And **[agent rooms](../README.md#agent-rooms--agents-that-can-actually-talk-to-each-other)**
+And **[agent rooms](https://chela.pages.dev/docs#rooms)**
 (`chela room`): a room's ledger *is* this log. Every post is one event — `room_question`,
 `room_handoff`, `room_status`, … (one per kind) — plus a `room_delivery` when a post is
 actually pasted into a peer's terminal, which is also what the loop guard's rate limit

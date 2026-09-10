@@ -1,7 +1,7 @@
 # Config — the environment is the single source of truth
 
 chela is configured by environment variables (the full table is in the
-[README](../README.md#config-environment)). This document is about *where those variables
+[the docs site](https://chela.pages.dev/docs#config)). This document is about *where those variables
 are written down*, which is a separate question, and one chela got wrong.
 
 **One file: `$CHELA_DIR/chela.env`.** Everything reads it — `chela` itself sources it at
