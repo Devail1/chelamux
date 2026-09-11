@@ -13,7 +13,7 @@ and ``tests/test_restore_cli.py`` guards that end-to-end on the real store bytes
 """
 from __future__ import annotations
 
-
+import subprocess
 
 from chela import sessions
 from chela.restore import (
@@ -30,6 +30,7 @@ from chela.restore import (
     Verdict,
     _classify,
     _default_check_resumed,
+    _default_kill_window,
     apply,
     plan,
     resume,
@@ -901,6 +902,28 @@ def test_retire_empty_defaults_wire_to_apply(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# _default_kill_window (issue #473) — the actual tmux argv
+# --------------------------------------------------------------------------
+
+def test_default_kill_window_issues_real_tmux_kill_window(monkeypatch):
+    """🔴 GUARD: `_default_kill_window` must shell out to `tmux kill-window -t <wid>`
+    specifically — every `resume()` test below DIs `kill_window` away, so nothing else in
+    this suite would notice if this leaf silently issued a different tmux subcommand (e.g.
+    `list-windows`, which touches the window but never closes it)."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _default_kill_window("@42")
+
+    assert captured["cmd"] == ["tmux", "kill-window", "-t", "@42"]
+
+
+# --------------------------------------------------------------------------
 # resume — the launch half (CMX-350, issue #457): actually relaunch a MANUAL agent
 # --------------------------------------------------------------------------
 
@@ -927,6 +950,13 @@ def _resume_kit(**overrides):
     before issue #468 added these seams — keeps exercising exactly the same
     launch-then-bookkeeping path with an unchanged `calls` list. Tests that exercise the
     NEW liveness/retry-bound behaviour override these explicitly.
+
+    `kill_window` defaults to a bare no-op (deliberately NOT appended to the shared `calls`
+    list, so it stays invisible to every pre-existing `[c[0] for c in calls] == [...]`
+    assertion below) rather than `None` — a test that drives the liveness-failure branch
+    without overriding it would otherwise fall through to the real `_default_kill_window`
+    and shell out to an actual tmux server for `@99`. Tests exercising the kill-window
+    contract itself override this explicitly.
     """
     calls, kit = _writers()
     kit["spawn_window"] = lambda cwd, command=None: (
@@ -938,6 +968,7 @@ def _resume_kit(**overrides):
     kit["resume_blocked"] = lambda session_id: None
     kit["record_resume_failure"] = lambda session_id, reason: 1
     kit["clear_resume_failure"] = lambda session_id: None
+    kit["kill_window"] = lambda wid: None
     kit.update(overrides)
     return calls, kit
 
@@ -1405,6 +1436,88 @@ def test_resume_still_reports_RESUMED_for_a_genuinely_alive_relaunch():
     assert results[0].action == RESUMED
 
 
+# --------------------------------------------------------------------------
+# window cleanup on a failed liveness check (issue #473)
+# --------------------------------------------------------------------------
+
+def test_resume_closes_the_window_it_opened_when_the_liveness_check_fails():
+    """🔴 GUARD (issue #473): a resume whose liveness check fails must close the window
+    `resume()` itself opened, targeting EXACTLY the wid `spawn_window` returned — never a
+    name lookup or a guess."""
+    kill_calls = []
+    calls, kit = _resume_kit(
+        check_resumed=lambda wid, sid: False,
+        kill_window=lambda wid: kill_calls.append(wid),
+    )
+    v = _launchable(wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert kill_calls == ["@99"], (
+        f"the window resume() opened (@99) must be closed. kill_calls={kill_calls}"
+    )
+    assert results[0].action == RESUME_FAILED
+
+
+def test_resume_never_closes_the_window_on_a_successful_resume():
+    """⛔⛔ The counterweight that matters: a resume that SUCCEEDS must never close its
+    window — that window is the entire point of the feature. A fix that closes
+    unconditionally passes the guard above and destroys every successful resume."""
+    kill_calls = []
+    calls, kit = _resume_kit(
+        check_resumed=lambda wid, sid: True,
+        kill_window=lambda wid: kill_calls.append(wid),
+    )
+    v = _launchable(wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert kill_calls == [], (
+        f"a successful resume must never close its own window. kill_calls={kill_calls}"
+    )
+    assert results[0].action == RESUMED
+
+
+def test_resume_never_closes_a_window_when_spawn_window_itself_failed():
+    """The branch immediately above the liveness check — `spawn_window` itself failing —
+    opened NO window, so it must keep closing nothing."""
+    kill_calls = []
+    calls, kit = _resume_kit(
+        spawn_window=lambda cwd, command=None: SpawnResult(ok=False, error="tmux is unreachable"),
+        kill_window=lambda wid: kill_calls.append(wid),
+    )
+    v = _launchable(wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert kill_calls == [], (
+        f"a spawn failure opened no window, so nothing must be closed. kill_calls={kill_calls}"
+    )
+    assert results[0].action == RESUME_FAILED
+
+
+def test_resume_never_closes_a_window_when_spawn_window_returned_no_wid():
+    """⛔ Never close a window resume() did not open: if `spawn_window` returned no wid
+    (`ok=True`, `wid=None` — an older tmux build that echoed no id), close nothing — no
+    name lookup, no "most recent window" guess. A wrong kill here would reap a live agent,
+    and window ids are reused across tmux servers."""
+    kill_calls = []
+    calls, kit = _resume_kit(
+        spawn_window=lambda cwd, command=None: SpawnResult(
+            ok=True, name="shell-9", wid=None, cwd=cwd),
+        check_resumed=lambda wid, sid: False,
+        kill_window=lambda wid: kill_calls.append(wid),
+    )
+    v = _launchable(wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert kill_calls == [], (
+        f"a wid-less spawn must never be closed by guess. kill_calls={kill_calls}"
+    )
+    assert results[0].action == RESUME_FAILED
+
+
 def test_resume_does_not_relaunch_a_session_whose_resume_already_failed_on_a_prior_pass():
     """🔴 GUARD (issue #468, defect 2): the durable bound. A session that FAILED to come up
     alive on one `resume()` call must not be relaunched by the NEXT `resume()` call — a
@@ -1501,7 +1614,8 @@ def test_resume_liveness_and_retry_bound_defaults_wire_to_the_real_modules(monke
     kit = {"spawn_window": lambda cwd, command=None: SpawnResult(
                ok=True, name="s", wid="@99", cwd=cwd),
            "register_orchestrator": lambda wid: {"ok": True},
-           "archive": lambda entry: None, "remove_session": lambda *a: True}
+           "archive": lambda entry: None, "remove_session": lambda *a: True,
+           "kill_window": lambda wid: None}
     v = _launchable(wid="@5")
     results = resume([v], [], **kit)
 
@@ -1520,6 +1634,36 @@ def test_resume_liveness_and_retry_bound_defaults_wire_to_the_real_modules(monke
 
     assert any(c[0] == "record" for c in calls)
     assert results2[0].action == RESUME_FAILED
+
+
+def test_resume_kill_window_default_resolves_to_the_real_default_kill_window(monkeypatch):
+    """🔴 GUARD: with no `kill_window` kwarg, resume() must resolve to the REAL
+    `chela.restore._default_kill_window` — not a silently-inert no-op. Every OTHER test in
+    this file supplies an explicit `kill_window` (`_resume_kit`'s deliberate `lambda wid:
+    None`, or an inline override on the tests around line 1448), which proves the DI seam's
+    USAGE but never its DEFAULT: `kill_window = _default_kill_window` degrading to
+    `kill_window = lambda wid: None` slipped past the whole suite until this test pinned it
+    (docs/defeat_shapes/361b). Patches `_default_kill_window` itself — the module
+    attribute `resume()` actually resolves at call time — rather than `subprocess.run`, so
+    this stays scoped to the wiring, not `_default_kill_window`'s own body (covered by
+    `test_default_kill_window_issues_real_tmux_kill_window` above)."""
+    import chela.restore as restore_mod
+
+    kill_calls = []
+    monkeypatch.setattr(restore_mod, "_default_kill_window", lambda wid: kill_calls.append(wid))
+
+    v = _launchable(wid="@5")
+    results = resume(
+        [v], [],
+        spawn_window=lambda cwd, command=None: SpawnResult(ok=True, name="s", wid="@99", cwd=cwd),
+        check_resumed=lambda wid, sid: False,
+        resume_blocked=lambda sid: None,
+        record_resume_failure=lambda sid, reason: 1,
+        clear_resume_failure=lambda sid: None,
+    )
+
+    assert kill_calls == ["@99"]
+    assert results[0].action == RESUME_FAILED
 
 
 def test_resume_preserves_order_one_result_per_verdict_mixed_batch():
