@@ -4614,19 +4614,16 @@ def tick(workflow_path: str | Path) -> dict:
         ).fetchall():
             if active >= max_concurrent:
                 continue                     # waits its turn — it does not jump the queue
-            # ⛔🏃‍♂️💀 issue #491: refuse at the source. `pr_state` was refreshed in phase 0
-            # of THIS SAME tick, so a merge already observed this tick is known here before
-            # the spawn decision — spawning a rework agent onto a branch that just shipped
-            # would race an orphaned window into existence. Leave the row exactly as it is:
-            # `changes_requested` + `pr_state='merged'` is already a member of
-            # RECONCILE_MERGE_STATUSES, so step 1's reconcile closes it (and tears down any
-            # window) on the very next tick — this is a refusal, not a second reconcile path.
-            if row["pr_state"] == "merged":
-                log.info(
-                    "Task %s: PR already merged — skipping rework spawn, leaving it for "
-                    "reconcile", row["task_id"],
-                )
-                continue
+            # ⛔🏃‍♂️💀 issue #491: no `pr_state == "merged"` check belongs here. `pr_state`
+            # was already refreshed in phase 0 of THIS SAME tick, and step 1's reconcile
+            # (RECONCILE_MERGE_STATUSES includes `changes_requested`) runs BEFORE this loop
+            # and closes any `changes_requested` row whose `pr_state` reads `merged` to
+            # `done`, same tick, same connection. A row this query selects is therefore
+            # already proven `pr_state != "merged"` — a second check here can never fire and
+            # was removed as dead code (docs/defeat_shapes/360-*.md). The out-of-band-merge
+            # race this guards against is closed entirely by step 1 and by
+            # RECONCILE_MERGE_STATUSES_WITH_RUNNING once a rework is `running` (see the
+            # comment above that tuple's definition).
             try:
                 if _respawn_rework(wf, row, conn):
                     active += 1

@@ -2,22 +2,24 @@
 
 `_respawn_rework` flips an EXISTING review-state row — one that already owns an open PR —
 back to `running` to work a fresh verdict. That flip can race a human merging the PR out of
-band (`gh pr merge`, never through `chela merge`): the merge can land between phase 0's
-`pr_state` refresh and the spawn decision within the same tick, or on any later tick once
-the row already reads `running`. Before this fix, `running` was not in
-`RECONCILE_MERGE_STATUSES`, so a row in that shape sat forever — nothing closed it, and
-nothing tore down the now-pointless agent's window — until the (much slower) idle watchdog
-eventually caught it.
+band (`gh pr merge`, never through `chela merge`): the merge can land in the gap between the
+row going `running` and the next tick's `pr_state` refresh, or on any later tick once the row
+already reads `running`. Before this fix, `running` was not in `RECONCILE_MERGE_STATUSES`, so
+a row in that shape sat forever — nothing closed it, and nothing tore down the now-pointless
+agent's window — until the (much slower) idle watchdog eventually caught it.
 
-Two halves, covering two different windows:
-
-  ① SPAWN-SIDE REFUSAL (3b, the rework loop) — a `changes_requested` row whose `pr_state`
-     was already refreshed to `merged` this same tick is never handed to `_respawn_rework`.
-  ② RECONCILE — a row that is ALREADY `running` with a merged PR (the race already
-     happened) closes to `done` and its window is torn down, same as a review-state row.
+RECONCILE is the only half this needs: a row that is ALREADY `running` with a merged PR (the
+race already happened) closes to `done` and its window is torn down, same as a review-state
+row. There is no separate spawn-side refusal in the rework loop (3b) — a `changes_requested`
+row's `pr_state` is refreshed in phase 0 and, if it reads `merged`, step 1's reconcile (which
+runs before 3b, same tick, same connection) already closes it to `done` before 3b's
+`WHERE status='changes_requested'` query can ever select it. A `pr_state == "merged"` check
+inside 3b was tried and shipped as dead code — see docs/defeat_shapes/360-*.md — and was
+removed rather than pinned with a fixture, because no fixture can put a row in front of 3b in
+that state; the system itself forecloses it one step earlier.
 
 ⛔⛔ The counterweight, tested here too: a `running` row whose PR is NOT merged is a live
-agent doing real work and must be left completely alone by both paths.
+agent doing real work and must be left completely alone.
 """
 from __future__ import annotations
 
@@ -38,62 +40,7 @@ def _own_runs_db(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
 
 
-# --- ① spawn-side refusal ---------------------------------------------------------------
-
-def test_a_merged_rework_row_is_never_handed_to_respawn(tmp_path):
-    """🔴 GUARD (accept case, spawn side): `pr_state` is already `merged` on the row — the
-    rework loop must skip it instead of launching an agent onto a branch that just shipped.
-    Corrupt by dropping the `pr_state == "merged"` refusal check in the 3b loop → RED."""
-    wf = _wf(tmp_path, concurrency={"max": 2})
-    source = _Source("abc123")
-    with dispatcher._db() as conn:
-        _row(conn, workflow_path=str(wf.path), status="changes_requested",
-             pr_state="merged")
-
-    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
-         patch.object(dispatcher, "get_source", return_value=source), \
-         patch.object(dispatcher, "_claim_order", return_value=[]), \
-         patch.object(dispatcher, "attach_worktree") as attach, \
-         patch.object(dispatcher, "_read_pr_status", return_value=("merged", "MERGEABLE")), \
-         patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
-        summary = dispatcher.tick(wf.path)
-
-    assert summary["reworked"] == 0
-    assert attach.call_count == 0     # _respawn_rework never even started
-    # step 1's reconcile (same tick) already closed it — RECONCILE_MERGE_STATUSES
-    # includes changes_requested, so this is the reconcile path proving it, not the
-    # refusal path — but either way, no rework agent exists for this row.
-    assert dispatcher.resolve_run("abc123")["status"] == "done"
-
-
-def test_an_open_rework_row_still_spawns_ARM_TWO_OF_THE_GUARD(tmp_path):
-    """🔴 GUARD (the OTHER arm — required so a fixture where every run is merged can't
-    fake a pass): a `changes_requested` row whose PR is still `open` DOES spawn a rework
-    agent. Without this arm, a refusal check that always skips (e.g. one with an inverted
-    condition, or one that fires unconditionally) would pass the test above trivially."""
-    wf = _wf(tmp_path, concurrency={"max": 2})
-    source = _Source("abc123")
-    wt = tmp_path / ".chela" / "wts" / "abc123"
-    wt.mkdir(parents=True)
-    with dispatcher._db() as conn:
-        _row(conn, workflow_path=str(wf.path), status="changes_requested",
-             pr_state="open", worktree_path=str(wt))
-
-    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
-         patch.object(dispatcher, "get_source", return_value=source), \
-         patch.object(dispatcher, "_claim_order", return_value=[]), \
-         patch.object(dispatcher, "attach_worktree", return_value=(wt, False)), \
-         patch.object(dispatcher, "send_tmux", return_value=True), \
-         patch.object(dispatcher, "_wait_for_ready", return_value=True), \
-         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
-         patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
-        summary = dispatcher.tick(wf.path)
-
-    assert summary["reworked"] == 1
-    assert dispatcher.resolve_run("abc123")["status"] == "running"
-
-
-# --- ② reconcile: a `running` row already stranded by the race --------------------------
+# --- reconcile: a `running` row already stranded by the race ---------------------------
 
 def test_a_running_rework_row_with_a_merged_pr_closes_and_kills_its_window(tmp_path):
     """🔴 GUARD (accept case, reconcile side): the race already happened — the row is
