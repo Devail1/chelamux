@@ -1636,6 +1636,36 @@ def test_resume_liveness_and_retry_bound_defaults_wire_to_the_real_modules(monke
     assert results2[0].action == RESUME_FAILED
 
 
+def test_resume_kill_window_default_resolves_to_the_real_default_kill_window(monkeypatch):
+    """🔴 GUARD: with no `kill_window` kwarg, resume() must resolve to the REAL
+    `chela.restore._default_kill_window` — not a silently-inert no-op. Every OTHER test in
+    this file supplies an explicit `kill_window` (`_resume_kit`'s deliberate `lambda wid:
+    None`, or an inline override on the tests around line 1448), which proves the DI seam's
+    USAGE but never its DEFAULT: `kill_window = _default_kill_window` degrading to
+    `kill_window = lambda wid: None` slipped past the whole suite until this test pinned it
+    (docs/defeat_shapes/361b). Patches `_default_kill_window` itself — the module
+    attribute `resume()` actually resolves at call time — rather than `subprocess.run`, so
+    this stays scoped to the wiring, not `_default_kill_window`'s own body (covered by
+    `test_default_kill_window_issues_real_tmux_kill_window` above)."""
+    import chela.restore as restore_mod
+
+    kill_calls = []
+    monkeypatch.setattr(restore_mod, "_default_kill_window", lambda wid: kill_calls.append(wid))
+
+    v = _launchable(wid="@5")
+    results = resume(
+        [v], [],
+        spawn_window=lambda cwd, command=None: SpawnResult(ok=True, name="s", wid="@99", cwd=cwd),
+        check_resumed=lambda wid, sid: False,
+        resume_blocked=lambda sid: None,
+        record_resume_failure=lambda sid, reason: 1,
+        clear_resume_failure=lambda sid: None,
+    )
+
+    assert kill_calls == ["@99"]
+    assert results[0].action == RESUME_FAILED
+
+
 def test_resume_preserves_order_one_result_per_verdict_mixed_batch():
     """Same ordering guard as retire_empty's — a launched row's result must land on the
     launched row, not on its neighbour, in a batch mixing every outcome."""
