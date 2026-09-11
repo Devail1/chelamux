@@ -1405,6 +1405,88 @@ def test_resume_still_reports_RESUMED_for_a_genuinely_alive_relaunch():
     assert results[0].action == RESUMED
 
 
+# --------------------------------------------------------------------------
+# window cleanup on a failed liveness check (issue #473)
+# --------------------------------------------------------------------------
+
+def test_resume_closes_the_window_it_opened_when_the_liveness_check_fails():
+    """🔴 GUARD (issue #473): a resume whose liveness check fails must close the window
+    `resume()` itself opened, targeting EXACTLY the wid `spawn_window` returned — never a
+    name lookup or a guess."""
+    kill_calls = []
+    calls, kit = _resume_kit(
+        check_resumed=lambda wid, sid: False,
+        kill_window=lambda wid: kill_calls.append(wid),
+    )
+    v = _launchable(wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert kill_calls == ["@99"], (
+        f"the window resume() opened (@99) must be closed. kill_calls={kill_calls}"
+    )
+    assert results[0].action == RESUME_FAILED
+
+
+def test_resume_never_closes_the_window_on_a_successful_resume():
+    """⛔⛔ The counterweight that matters: a resume that SUCCEEDS must never close its
+    window — that window is the entire point of the feature. A fix that closes
+    unconditionally passes the guard above and destroys every successful resume."""
+    kill_calls = []
+    calls, kit = _resume_kit(
+        check_resumed=lambda wid, sid: True,
+        kill_window=lambda wid: kill_calls.append(wid),
+    )
+    v = _launchable(wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert kill_calls == [], (
+        f"a successful resume must never close its own window. kill_calls={kill_calls}"
+    )
+    assert results[0].action == RESUMED
+
+
+def test_resume_never_closes_a_window_when_spawn_window_itself_failed():
+    """The branch immediately above the liveness check — `spawn_window` itself failing —
+    opened NO window, so it must keep closing nothing."""
+    kill_calls = []
+    calls, kit = _resume_kit(
+        spawn_window=lambda cwd, command=None: SpawnResult(ok=False, error="tmux is unreachable"),
+        kill_window=lambda wid: kill_calls.append(wid),
+    )
+    v = _launchable(wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert kill_calls == [], (
+        f"a spawn failure opened no window, so nothing must be closed. kill_calls={kill_calls}"
+    )
+    assert results[0].action == RESUME_FAILED
+
+
+def test_resume_never_closes_a_window_when_spawn_window_returned_no_wid():
+    """⛔ Never close a window resume() did not open: if `spawn_window` returned no wid
+    (`ok=True`, `wid=None` — an older tmux build that echoed no id), close nothing — no
+    name lookup, no "most recent window" guess. A wrong kill here would reap a live agent,
+    and window ids are reused across tmux servers."""
+    kill_calls = []
+    calls, kit = _resume_kit(
+        spawn_window=lambda cwd, command=None: SpawnResult(
+            ok=True, name="shell-9", wid=None, cwd=cwd),
+        check_resumed=lambda wid, sid: False,
+        kill_window=lambda wid: kill_calls.append(wid),
+    )
+    v = _launchable(wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert kill_calls == [], (
+        f"a wid-less spawn must never be closed by guess. kill_calls={kill_calls}"
+    )
+    assert results[0].action == RESUME_FAILED
+
+
 def test_resume_does_not_relaunch_a_session_whose_resume_already_failed_on_a_prior_pass():
     """🔴 GUARD (issue #468, defect 2): the durable bound. A session that FAILED to come up
     alive on one `resume()` call must not be relaunched by the NEXT `resume()` call — a

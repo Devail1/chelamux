@@ -103,6 +103,7 @@ shape gets a retire path here but must not be read as license to bulk-delete a r
 """
 from __future__ import annotations
 
+import subprocess
 import time
 from dataclasses import dataclass
 
@@ -418,6 +419,20 @@ def _default_check_resumed(wid: str | None, session_id: str, *,
     return False
 
 
+def _default_kill_window(wid: str) -> None:
+    """Issue #473: close a window :func:`resume` itself just opened, after its liveness
+    check concludes ``claude --resume`` never came up alive in it.
+
+    Targets ``wid`` alone (a bare ``tmux kill-window -t @N`` — window ids are unique across
+    an entire tmux server, so no session prefix is needed, and none is threaded through
+    here to construct one from). Best-effort, exactly like the dispatcher's own
+    ``_kill_window``: a tmux that is already gone, or a window that already closed itself,
+    is not this function's problem to raise about — the row is already being reported
+    ``resume-failed`` regardless of whether this cleanup succeeds.
+    """
+    subprocess.run(["tmux", "kill-window", "-t", wid], capture_output=True)
+
+
 def _task_in_flight(wid: str, runs: list[dict]) -> str | None:
     """The ``task_id`` of a ``dispatcher.runs`` row that STILL claims ``wid`` — as either
     its agent or its judge window — with an ACTIVE status (``claimed``/``running``), or
@@ -445,6 +460,7 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
            resume_blocked=None,
            record_resume_failure=None,
            clear_resume_failure=None,
+           kill_window=None,
            **apply_kwargs) -> list[ApplyResult]:
     """CMX-350/issue #468: actually relaunch a MANUAL row's dead agent — the one write path
     in this module that starts a NEW process rather than editing a JSON store.
@@ -500,6 +516,15 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
     clears any prior failure record for that session (:func:`clear_resume_failure`) so a
     LATER, unrelated death of the same session starts its own retry count from zero.
 
+    ⛔⛔ **Issue #473's counterweight to the counterweight: a failed liveness check must also
+    close the window it just opened** (:func:`_default_kill_window`, targeting ``result.wid``
+    — the exact id :func:`spawn_window` handed back, never a name lookup or a "most recent
+    window" guess), or ``MAX_TRIES`` turns every permanently-failing session into a
+    permanently-leaked bare ``bash`` window that ``chela status`` counts as a fleet member.
+    The branch immediately above — ``spawn_window`` itself failing — opened no window and
+    must keep closing nothing. And a launch that DOES come up alive must never have its
+    window closed here; that window is the entire point of this function.
+
     On a successful, VERIFIED-ALIVE launch the row is archived (:func:`chela.roster.archive`)
     exactly as :func:`apply` does for MANUAL rows, then either re-registered
     (``inbox.orchestrator`` — via ``register_orchestrator`` at the freshly spawned wid, so
@@ -510,8 +535,8 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
     same reason) and supplies ``archive``/``remove_session`` for the resumed subset here.
 
     ``spawn_window``/``register_orchestrator``/``check_resumed``/``resume_blocked``/
-    ``record_resume_failure``/``clear_resume_failure`` all default to ``None`` and are
-    resolved to their real implementations INSIDE the function body (rather than bound at
+    ``record_resume_failure``/``clear_resume_failure``/``kill_window`` all default to ``None``
+    and are resolved to their real implementations INSIDE the function body (rather than bound at
     import time, the way :func:`apply`'s pure-JSON writers are) — every one of them touches
     tmux, the filesystem, or both, so a caller needs to be able to fake just these leaves the
     way ``tests/test_restore_cli.py``'s own ``live_stores`` fixture fakes every OTHER
@@ -532,6 +557,8 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
         record_resume_failure = resume_state.record_failure
     if clear_resume_failure is None:
         clear_resume_failure = resume_state.clear
+    if kill_window is None:
+        kill_window = _default_kill_window
     archive = apply_kwargs.get("archive", roster.archive)
     remove_session = apply_kwargs.get("remove_session", sessionids.remove)
 
@@ -582,6 +609,13 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
             reason = (f"window {result.wid or '?'} opened but claude --resume "
                       f"{v.session_id} never came up alive")
             record_resume_failure(v.session_id, reason)
+            # issue #473: the window this call just opened never came up alive — close it
+            # so it does not sit around as a bare `bash` shell `chela status` reports as a
+            # fleet member. Only when `spawn_window` actually returned an id: a `result.wid`
+            # of `None` means there is nothing this call can safely address (see
+            # `_default_kill_window`'s docstring — no name lookup, no "most recent" guess).
+            if result.wid:
+                kill_window(result.wid)
             resumed_by_id[id(v)] = ApplyResult(v, RESUME_FAILED, reason)
             continue
 
