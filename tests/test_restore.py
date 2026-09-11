@@ -13,7 +13,7 @@ and ``tests/test_restore_cli.py`` guards that end-to-end on the real store bytes
 """
 from __future__ import annotations
 
-
+import subprocess
 
 from chela import sessions
 from chela.restore import (
@@ -30,6 +30,7 @@ from chela.restore import (
     Verdict,
     _classify,
     _default_check_resumed,
+    _default_kill_window,
     apply,
     plan,
     resume,
@@ -901,6 +902,28 @@ def test_retire_empty_defaults_wire_to_apply(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# _default_kill_window (issue #473) — the actual tmux argv
+# --------------------------------------------------------------------------
+
+def test_default_kill_window_issues_real_tmux_kill_window(monkeypatch):
+    """🔴 GUARD: `_default_kill_window` must shell out to `tmux kill-window -t <wid>`
+    specifically — every `resume()` test below DIs `kill_window` away, so nothing else in
+    this suite would notice if this leaf silently issued a different tmux subcommand (e.g.
+    `list-windows`, which touches the window but never closes it)."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _default_kill_window("@42")
+
+    assert captured["cmd"] == ["tmux", "kill-window", "-t", "@42"]
+
+
+# --------------------------------------------------------------------------
 # resume — the launch half (CMX-350, issue #457): actually relaunch a MANUAL agent
 # --------------------------------------------------------------------------
 
@@ -927,6 +950,13 @@ def _resume_kit(**overrides):
     before issue #468 added these seams — keeps exercising exactly the same
     launch-then-bookkeeping path with an unchanged `calls` list. Tests that exercise the
     NEW liveness/retry-bound behaviour override these explicitly.
+
+    `kill_window` defaults to a bare no-op (deliberately NOT appended to the shared `calls`
+    list, so it stays invisible to every pre-existing `[c[0] for c in calls] == [...]`
+    assertion below) rather than `None` — a test that drives the liveness-failure branch
+    without overriding it would otherwise fall through to the real `_default_kill_window`
+    and shell out to an actual tmux server for `@99`. Tests exercising the kill-window
+    contract itself override this explicitly.
     """
     calls, kit = _writers()
     kit["spawn_window"] = lambda cwd, command=None: (
@@ -938,6 +968,7 @@ def _resume_kit(**overrides):
     kit["resume_blocked"] = lambda session_id: None
     kit["record_resume_failure"] = lambda session_id, reason: 1
     kit["clear_resume_failure"] = lambda session_id: None
+    kit["kill_window"] = lambda wid: None
     kit.update(overrides)
     return calls, kit
 
@@ -1583,7 +1614,8 @@ def test_resume_liveness_and_retry_bound_defaults_wire_to_the_real_modules(monke
     kit = {"spawn_window": lambda cwd, command=None: SpawnResult(
                ok=True, name="s", wid="@99", cwd=cwd),
            "register_orchestrator": lambda wid: {"ok": True},
-           "archive": lambda entry: None, "remove_session": lambda *a: True}
+           "archive": lambda entry: None, "remove_session": lambda *a: True,
+           "kill_window": lambda wid: None}
     v = _launchable(wid="@5")
     results = resume([v], [], **kit)
 
