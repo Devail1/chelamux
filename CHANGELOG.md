@@ -10,6 +10,15 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-09-11
+
+### Added
+
+- **The sidebar shows a `done` state for a regular session with unread agent output.** A
+  session whose agent finished replying since the human's last prompt now gets a distinct
+  `done` badge (color plus the literal word `done`, not color alone) so it isn't confused
+  with `waiting`/`needs you`. (CMX-359, #485)
+
 ## [0.11.1] — 2026-09-10
 
 ### Fixed
