@@ -90,9 +90,22 @@ NOT_CLAIMABLE = (*ACTIVE_STATUSES, *REVIEW_STATUSES, "done", "closed")
 # states (a PR is open, waiting on a human or CI) AND `failed` — a fresh-dispatch retry
 # gets its own PR per attempt, and a HUMAN merging attempt N's PR by hand while the row
 # still reads `failed` (retries left) must stop the claim loop from spawning attempt
-# N+1 for work that already shipped. `claimed`/`running` are excluded: neither has
-# opened a PR yet, so `pr_state` cannot be `merged` for them.
+# N+1 for work that already shipped. `claimed` is excluded: it truly has no PR yet, so
+# `pr_state` cannot be `merged` for it.
+#
+# ⚠️ `running` is NOT excluded the same way (issue #491) — it gets its own tuple below,
+# not a slot here, because "PR merged" means something different for the two ways a row
+# reaches `running`. A FIRST dispatch has no PR yet, same as `claimed`. But a REWORK
+# (`_respawn_rework`) flips an EXISTING review-state row — one that already owns an open
+# PR — back to `running` to work a fresh verdict, and a human merging that PR out of
+# band can land in the gap between phase 0's pr_state refresh and the spawn decision (or
+# between one tick and the next). `pr_state == 'merged'` is what tells the two apart: a
+# first-dispatch row's `pr_state` cannot become `merged` without a PR to merge.
 RECONCILE_MERGE_STATUSES = (*REVIEW_STATUSES, "failed")
+# ⛔ Merge-reconcile ONLY. Do not use this for the "closed" branch below or anywhere a
+# row's own agent might still be at work — a `running` row whose PR is NOT merged is a
+# live agent and must be left alone (see the reconcile loop's merged-check comment).
+RECONCILE_MERGE_STATUSES_WITH_RUNNING = (*RECONCILE_MERGE_STATUSES, "running")
 
 # Readiness poll (see _wait_for_ready) — how long to wait for the agent TUI to
 # accept input before sending the prompt, and how often to re-check.
@@ -3895,7 +3908,16 @@ def tick(workflow_path: str | Path) -> dict:
             (str(wf.path), *ACTIVE_STATUSES, *RECONCILE_MERGE_STATUSES),
         ).fetchall()
         for row in rows:
-            if row["status"] in RECONCILE_MERGE_STATUSES and row["pr_state"] == "merged":
+            # ⛔🏃‍♂️💀 issue #491: `RECONCILE_MERGE_STATUSES_WITH_RUNNING`, not
+            # `RECONCILE_MERGE_STATUSES` — a `running` row whose rework spawn raced an
+            # out-of-band merge (`_respawn_rework` flips an EXISTING row that already owns
+            # an open PR back to `running`) has nothing left to build, same as a review-
+            # state row does. ⛔⛔ The counterweight lives entirely in the `pr_state ==
+            # "merged"` half of this AND: a `running` row whose PR is NOT merged is a live
+            # agent doing real work and this condition is False for it — it falls through
+            # untouched to the watchdog path below, exactly as before.
+            if (row["status"] in RECONCILE_MERGE_STATUSES_WITH_RUNNING
+                    and row["pr_state"] == "merged"):
                 # pr_state was refreshed in phase 0 above, so we see the merge on
                 # the very tick it lands. The tracker strike happens in 1b, after
                 # this transition is durable — if it fails, this row stays `done`
@@ -4592,6 +4614,19 @@ def tick(workflow_path: str | Path) -> dict:
         ).fetchall():
             if active >= max_concurrent:
                 continue                     # waits its turn — it does not jump the queue
+            # ⛔🏃‍♂️💀 issue #491: refuse at the source. `pr_state` was refreshed in phase 0
+            # of THIS SAME tick, so a merge already observed this tick is known here before
+            # the spawn decision — spawning a rework agent onto a branch that just shipped
+            # would race an orphaned window into existence. Leave the row exactly as it is:
+            # `changes_requested` + `pr_state='merged'` is already a member of
+            # RECONCILE_MERGE_STATUSES, so step 1's reconcile closes it (and tears down any
+            # window) on the very next tick — this is a refusal, not a second reconcile path.
+            if row["pr_state"] == "merged":
+                log.info(
+                    "Task %s: PR already merged — skipping rework spawn, leaving it for "
+                    "reconcile", row["task_id"],
+                )
+                continue
             try:
                 if _respawn_rework(wf, row, conn):
                     active += 1
