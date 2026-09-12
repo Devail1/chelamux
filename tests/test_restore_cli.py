@@ -1977,6 +1977,35 @@ def test_the_tmux_fence_classifier_exempts_a_PATH_shim_that_is_not_the_real_tmux
     ) is None
 
 
+def test_the_env_kwarg_from_a_real_Popen_call_reaches_the_classifier(tmp_path):
+    """The three unit tests above call `_tmux_violation` directly — none of them go through
+    `guarded_init` (`tests/conftest.py`), so nothing exercises the one line that actually
+    wires a real `Popen` call's `env=` kwarg into the classifier:
+    `_tmux_violation(list(args), kw.get("env"))`. Falling back to `os.environ` instead of the
+    passed `env` can only WIDEN what counts as the real tmux binary: a PATH-shim call made
+    with its own `env=` would then be judged against the *test process's* PATH instead, which
+    resolves bare `tmux` to the real system binary and wrongly flags a shimmed, harmless call
+    as a violation. Drive this through an ACTUAL `subprocess.run` (→ `Popen`) with a shimmed
+    `env=` so only the real wiring — not a direct classifier call — can make this pass; the
+    shim never execs anything but `exit 0`, so nothing here can reach a live tmux server."""
+    import shutil
+    import subprocess as subprocess_mod
+
+    if shutil.which("tmux") is None:
+        pytest.skip("tmux not installed")
+
+    shim = tmp_path / "tmux"
+    shim.write_text("#!/bin/sh\nexit 0\n")
+    shim.chmod(0o755)
+
+    result = subprocess_mod.run(
+        ["tmux", "kill-window", "-t", "@1"],
+        env={"PATH": str(tmp_path)},
+        capture_output=True,
+    )
+    assert result.returncode == 0
+
+
 _EXPECTED_TMUX_MUTATING_SUBCOMMANDS = (
     "kill-window", "kill-session",
     "new-window", "new-session",
