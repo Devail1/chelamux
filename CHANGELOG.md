@@ -10,6 +10,39 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.12.1] — 2026-09-12
+
+### Fixed
+
+- **A merged PR whose run row was still `running` never reconciled.** A rework spawn
+  (`_respawn_rework`) flips an existing review-state row — one that already owns an open
+  PR — back to `running`, and that could race a human merging the PR out of band: the row
+  would sit `running` forever, with nothing to close it and nothing to tear down the now-
+  pointless agent's window, until the (much slower) idle watchdog eventually caught it. The
+  merge-reconcile path now also closes an already-`running` row once its PR merges —
+  killing its window — while leaving any `running` row whose PR is *not* merged completely
+  alone. (CMX-360, #491)
+
+- **A failed `chela restore --resume` no longer leaks the tmux window it opened.**
+  When the post-launch liveness check concludes `claude --resume` never came up alive,
+  `resume()` now closes exactly the window `spawn_window` handed back before reporting
+  `resume-failed`. Previously that window was left behind as a bare `bash` shell —
+  permanently, once the retry bound kicked in — and `chela status` counted it as a
+  fleet member. A launch that opens no window (spawn itself failing) or returns no wid
+  still closes nothing, and a genuinely successful resume still never touches its own
+  window. (#473)
+
+- **The test suite can no longer issue a live `tmux kill-window` against the operator's
+  default socket.** `tests/test_restore_cli.py`'s own `live_stores`/`resume()` end-to-end
+  tests left `_default_kill_window` unstubbed in two places, so a failed liveness check
+  during `--resume` shelled out to a real `tmux kill-window -t @99` — a plausible live
+  window id — on whichever tmux server the suite happened to run against. Both tests now
+  stub the leaf, and `tests/conftest.py` gained a session-wide fence
+  (`_no_live_tmux_mutation`) that fails any test outright if a mutating tmux subcommand
+  (`kill-window`, `kill-session`, `new-window`, `new-session`, `send-keys`,
+  `rename-window`, `respawn-*`) reaches the real tmux binary on the default socket from
+  ANY code path, not just this one. (#494)
+
 ## [0.12.0] — 2026-09-11
 
 ### Added
