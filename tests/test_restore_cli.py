@@ -2006,6 +2006,20 @@ def test_the_env_kwarg_from_a_real_Popen_call_reaches_the_classifier(tmp_path):
     assert result.returncode == 0
 
 
+def test_the_tmux_fence_classifier_exempts_a_new_session_via_the_s_flag_not_just_t():
+    """Direct unit test of `_tmux_violation`'s target-flag scan: `-t` targets an EXISTING
+    window/session, `-s` NAMES a new one, so `tmux new-session -s <safe_session>` — the
+    shape a test actually uses to create a scoped session — is exempt only because `-s` is
+    in the scan too. Every other test of this carve-out (including the two above) drives
+    `-t`-shaped argv; none of them would notice `-s` silently dropped from the flag tuple."""
+    from conftest import _tmux_violation
+
+    safe_session = os.environ["CHELA_TMUX_SESSION"]
+    assert _tmux_violation(
+        ["tmux", "new-session", "-s", safe_session], None
+    ) is None
+
+
 _EXPECTED_TMUX_MUTATING_SUBCOMMANDS = (
     "kill-window", "kill-session",
     "new-window", "new-session",
