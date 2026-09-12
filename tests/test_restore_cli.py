@@ -1697,6 +1697,14 @@ def test_CHELA_RESTORE_RESUME_true_env_var_alone_actually_enables_the_launch(
     from chela import inbox as inbox_mod
     monkeypatch.setattr(inbox_mod, "register", lambda wid: {"ok": True, "orchestrator": wid})
 
+    # Leaf-only fake (issue #494): `check_resumed` is left at its real default here (this
+    # test is about the env-var gate, not liveness confirmation), so the fake `@99` window
+    # never comes up alive and `resume()` rolls it back via `kill_window` — which defaults
+    # to `_default_kill_window`, a REAL `tmux kill-window -t @99` on the operator's default
+    # socket. `live_stores` fakes every other tmux-touching leaf but this one; fake it here
+    # too, same as CMX-361's `_resume_kit()` did for `tests/test_restore.py`.
+    monkeypatch.setattr(restore_mod, "_default_kill_window", lambda wid: None)
+
     with pytest.raises(SystemExit) as exc:
         _drive(["restore", "--resume"])
 
@@ -1840,6 +1848,13 @@ def test_chela_restore_resume_refuses_a_row_whose_task_is_still_ACTIVE(
     monkeypatch.setattr(spawn_mod, "spawn_window", lambda cwd, command=None: (
         spawned.append((cwd, command)), spawn_mod.SpawnResult(ok=True, wid="@99"))[1])
 
+    # Leaf-only fake (issue #494): the orchestrator's own MANUAL row (@1) still reaches
+    # `spawn_window` above and, with `check_resumed` left at its real default, never comes
+    # up alive — `resume()` then rolls it back via `kill_window`, which defaults to a REAL
+    # `tmux kill-window -t @99` on the operator's default socket. Same fix as the test
+    # above; unrelated to what THIS test asserts (the in-flight refusal for @5).
+    monkeypatch.setattr(restore_mod, "_default_kill_window", lambda wid: None)
+
     with pytest.raises(SystemExit):
         _drive(["restore", "--resume"])
 
@@ -1851,3 +1866,175 @@ def test_chela_restore_resume_refuses_a_row_whose_task_is_still_ACTIVE(
     )
     session_ids = json.loads((tmp_path / "chela" / "session-ids.json").read_text())
     assert "@5" in session_ids, "a refused row must be left completely untouched"
+
+
+# --- issue #494: the suite-wide tmux fence, proved directly ----------------------------
+#
+# The two tests above now stub `_default_kill_window` so they never reach real tmux at
+# all — which means neither one, on its own, still proves the fence in
+# `tests/conftest.py`'s `_no_live_tmux_mutation` actually catches the leak they used to
+# have. Prove the fence directly instead: it must survive with those stubs deleted, and
+# it must survive for ANY code path, not just `restore.py`'s.
+
+def test_the_suite_wide_tmux_fence_refuses_a_default_socket_kill_window():
+    """🔴 GUARD (issue #494): a bare `tmux kill-window` on the DEFAULT socket must be
+    refused by `tests/conftest.py`'s session-wide fence, from ANY call site — this is the
+    structural guarantee the two tests above rely on now that their own stubs no longer
+    exercise it. `@1` is a plausible LIVE window id on a host actually running chela."""
+    import subprocess as subprocess_mod
+
+    from conftest import LiveTmuxMutationEscape
+
+    with pytest.raises(LiveTmuxMutationEscape):
+        subprocess_mod.run(["tmux", "kill-window", "-t", "@1"], capture_output=True)
+
+
+def test_the_tmux_fence_still_allows_a_private_socket_kill_window():
+    """Counterweight: the fence must not become a blanket tmux blocker — a `-L` private
+    socket is exactly how a test is supposed to touch tmux for real (see
+    ``tests/test_epoch_live.py``'s ``TMUX_BIN`` helper), and must reach the real binary
+    untouched."""
+    import shutil
+    import subprocess as subprocess_mod
+
+    tmux_bin = shutil.which("tmux")
+    if tmux_bin is None:
+        pytest.skip("tmux not installed")
+    # Never raises LiveTmuxMutationEscape; tmux itself may still exit nonzero (no such
+    # window on this throwaway socket), which is not what this guard is about.
+    subprocess_mod.run(
+        [tmux_bin, "-L", "chelatest-fence-proof-issue-494", "kill-window", "-t", "@1"],
+        capture_output=True, timeout=5,
+    )
+
+
+# --- CMX-362 rework: the fence's INTERNALS, proven without ever risking a live call -----
+#
+# The two tests above are the only ones that drive a REAL `subprocess.Popen` through the
+# fence, deliberately: any further corruption of the detection half (dropping a subcommand
+# from the mutating set, dead-coding the `raise`, disarming the fixture) would, if proven the
+# same way, actually let the call through to the operator's default socket — refiring the
+# exact incident (issue #494) this fence exists to prevent. See
+# docs/defeat_shapes/362-*.md. Everything below instead unit-tests the PURE classifier
+# `_tmux_violation` directly — no `Popen` involved, so there is nothing here that can ever
+# reach a real tmux server, however the classifier is corrupted.
+
+def test_the_tmux_guard_cannot_be_swallowed_by_a_writer_that_catches_Exception():
+    """`LiveTmuxMutationEscape` derives from `BaseException`, not `Exception`, for the same
+    reason as `LiveStateEscape` (tests/test_isolation.py): call sites this fence watches
+    (`chela.spawn._send`, `chela.agent_manager.reconcile_window_names`) wrap their own tmux
+    calls in `except Exception` so a tmux hiccup can never stall a live agent — a guard a
+    writer's own except clause can catch is no guard at all. Simulated here (rather than
+    through those two real functions, whose OWN except clauses happen to be narrower than
+    bare `Exception` today) so this test keeps discriminating the class hierarchy even if
+    those call sites' except clauses ever change shape."""
+    import subprocess as subprocess_mod
+
+    from conftest import LiveTmuxMutationEscape
+
+    def writer_that_swallows_exception():
+        try:
+            subprocess_mod.run(["tmux", "send-keys", "-t", "@1", "-l", "x"],
+                                capture_output=True)
+        except Exception:
+            return  # exactly the shape the real call sites above use around their tmux call
+
+    with pytest.raises(LiveTmuxMutationEscape):
+        writer_that_swallows_exception()
+
+
+def test_the_tmux_fence_classifier_exempts_a_private_socket_even_when_the_subcommand_leads():
+    """Direct unit test of `_tmux_violation`'s `-L`/`-S` exemption line. The integration test
+    above (`test_the_tmux_fence_still_allows_a_private_socket_kill_window`) puts `-L` ahead of
+    the subcommand — real tmux argv order — where `rest[0]` is `-L` itself, so the
+    subcommand-membership check alone already returns `None` for it; that test alone cannot
+    prove the explicit exemption line does anything. Feed the classifier an argv where the
+    mutating subcommand is `rest[0]` and `-L` appears LATER in `rest`, so only the exemption
+    line can be why this returns `None`."""
+    from conftest import _tmux_violation
+
+    assert _tmux_violation(
+        ["tmux", "kill-window", "-t", "@1", "-L", "private-socket"], None
+    ) is None
+
+
+def test_the_tmux_fence_classifier_exempts_a_PATH_shim_that_is_not_the_real_tmux_binary(
+    tmp_path,
+):
+    """Direct unit test of `_tmux_violation`'s `_resolves_to_real_tmux` carve-out (see the
+    block comment above `_TMUX_MUTATING_SUBCOMMANDS`): a `tmux`-named script on `PATH` that
+    is NOT the real system binary — the exact shape `tests/test_terminals_selfheal.py` uses —
+    must be exempt even when its argv looks like a mutating call on the default socket,
+    because the exec that actually runs never reaches the real tmux server."""
+    from conftest import _tmux_violation
+
+    shim = tmp_path / "tmux"
+    shim.write_text("#!/bin/sh\nexit 0\n")
+    shim.chmod(0o755)
+
+    assert _tmux_violation(
+        ["tmux", "kill-window", "-t", "@1"], {"PATH": str(tmp_path)}
+    ) is None
+
+
+def test_the_env_kwarg_from_a_real_Popen_call_reaches_the_classifier(tmp_path):
+    """The three unit tests above call `_tmux_violation` directly — none of them go through
+    `guarded_init` (`tests/conftest.py`), so nothing exercises the one line that actually
+    wires a real `Popen` call's `env=` kwarg into the classifier:
+    `_tmux_violation(list(args), kw.get("env"))`. Falling back to `os.environ` instead of the
+    passed `env` can only WIDEN what counts as the real tmux binary: a PATH-shim call made
+    with its own `env=` would then be judged against the *test process's* PATH instead, which
+    resolves bare `tmux` to the real system binary and wrongly flags a shimmed, harmless call
+    as a violation. Drive this through an ACTUAL `subprocess.run` (→ `Popen`) with a shimmed
+    `env=` so only the real wiring — not a direct classifier call — can make this pass; the
+    shim never execs anything but `exit 0`, so nothing here can reach a live tmux server."""
+    import shutil
+    import subprocess as subprocess_mod
+
+    if shutil.which("tmux") is None:
+        pytest.skip("tmux not installed")
+
+    shim = tmp_path / "tmux"
+    shim.write_text("#!/bin/sh\nexit 0\n")
+    shim.chmod(0o755)
+
+    result = subprocess_mod.run(
+        ["tmux", "kill-window", "-t", "@1"],
+        env={"PATH": str(tmp_path)},
+        capture_output=True,
+    )
+    assert result.returncode == 0
+
+
+def test_the_tmux_fence_classifier_exempts_a_new_session_via_the_s_flag_not_just_t():
+    """Direct unit test of `_tmux_violation`'s target-flag scan: `-t` targets an EXISTING
+    window/session, `-s` NAMES a new one, so `tmux new-session -s <safe_session>` — the
+    shape a test actually uses to create a scoped session — is exempt only because `-s` is
+    in the scan too. Every other test of this carve-out (including the two above) drives
+    `-t`-shaped argv; none of them would notice `-s` silently dropped from the flag tuple."""
+    from conftest import _tmux_violation
+
+    safe_session = os.environ["CHELA_TMUX_SESSION"]
+    assert _tmux_violation(
+        ["tmux", "new-session", "-s", safe_session], None
+    ) is None
+
+
+_EXPECTED_TMUX_MUTATING_SUBCOMMANDS = (
+    "kill-window", "kill-session",
+    "new-window", "new-session",
+    "send-keys", "rename-window",
+    "respawn-window", "respawn-pane",
+)
+
+
+@pytest.mark.parametrize("subcmd", _EXPECTED_TMUX_MUTATING_SUBCOMMANDS)
+def test_every_mutating_tmux_subcommand_is_pinned_in_the_membership_set(subcmd):
+    """Pins `_TMUX_MUTATING_SUBCOMMANDS`'s full membership one member at a time — cf.
+    `tests/test_isolation.py::test_every_door_into_the_real_dir_is_guarded`'s door-by-door
+    parametrization. `send-keys` is the subcommand that types into a live agent's pane;
+    dropping it (or any other member) from the set must fail a specific, named case here, not
+    go unnoticed because only `kill-window` had any coverage at all."""
+    from conftest import _tmux_violation
+
+    assert _tmux_violation(["tmux", subcmd, "-t", "@1"], None) is not None
