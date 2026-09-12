@@ -1697,6 +1697,14 @@ def test_CHELA_RESTORE_RESUME_true_env_var_alone_actually_enables_the_launch(
     from chela import inbox as inbox_mod
     monkeypatch.setattr(inbox_mod, "register", lambda wid: {"ok": True, "orchestrator": wid})
 
+    # Leaf-only fake (issue #494): `check_resumed` is left at its real default here (this
+    # test is about the env-var gate, not liveness confirmation), so the fake `@99` window
+    # never comes up alive and `resume()` rolls it back via `kill_window` — which defaults
+    # to `_default_kill_window`, a REAL `tmux kill-window -t @99` on the operator's default
+    # socket. `live_stores` fakes every other tmux-touching leaf but this one; fake it here
+    # too, same as CMX-361's `_resume_kit()` did for `tests/test_restore.py`.
+    monkeypatch.setattr(restore_mod, "_default_kill_window", lambda wid: None)
+
     with pytest.raises(SystemExit) as exc:
         _drive(["restore", "--resume"])
 
@@ -1840,6 +1848,13 @@ def test_chela_restore_resume_refuses_a_row_whose_task_is_still_ACTIVE(
     monkeypatch.setattr(spawn_mod, "spawn_window", lambda cwd, command=None: (
         spawned.append((cwd, command)), spawn_mod.SpawnResult(ok=True, wid="@99"))[1])
 
+    # Leaf-only fake (issue #494): the orchestrator's own MANUAL row (@1) still reaches
+    # `spawn_window` above and, with `check_resumed` left at its real default, never comes
+    # up alive — `resume()` then rolls it back via `kill_window`, which defaults to a REAL
+    # `tmux kill-window -t @99` on the operator's default socket. Same fix as the test
+    # above; unrelated to what THIS test asserts (the in-flight refusal for @5).
+    monkeypatch.setattr(restore_mod, "_default_kill_window", lambda wid: None)
+
     with pytest.raises(SystemExit):
         _drive(["restore", "--resume"])
 
@@ -1851,3 +1866,43 @@ def test_chela_restore_resume_refuses_a_row_whose_task_is_still_ACTIVE(
     )
     session_ids = json.loads((tmp_path / "chela" / "session-ids.json").read_text())
     assert "@5" in session_ids, "a refused row must be left completely untouched"
+
+
+# --- issue #494: the suite-wide tmux fence, proved directly ----------------------------
+#
+# The two tests above now stub `_default_kill_window` so they never reach real tmux at
+# all — which means neither one, on its own, still proves the fence in
+# `tests/conftest.py`'s `_no_live_tmux_mutation` actually catches the leak they used to
+# have. Prove the fence directly instead: it must survive with those stubs deleted, and
+# it must survive for ANY code path, not just `restore.py`'s.
+
+def test_the_suite_wide_tmux_fence_refuses_a_default_socket_kill_window():
+    """🔴 GUARD (issue #494): a bare `tmux kill-window` on the DEFAULT socket must be
+    refused by `tests/conftest.py`'s session-wide fence, from ANY call site — this is the
+    structural guarantee the two tests above rely on now that their own stubs no longer
+    exercise it. `@1` is a plausible LIVE window id on a host actually running chela."""
+    import subprocess as subprocess_mod
+
+    from conftest import LiveTmuxMutationEscape
+
+    with pytest.raises(LiveTmuxMutationEscape):
+        subprocess_mod.run(["tmux", "kill-window", "-t", "@1"], capture_output=True)
+
+
+def test_the_tmux_fence_still_allows_a_private_socket_kill_window():
+    """Counterweight: the fence must not become a blanket tmux blocker — a `-L` private
+    socket is exactly how a test is supposed to touch tmux for real (see
+    ``tests/test_epoch_live.py``'s ``TMUX_BIN`` helper), and must reach the real binary
+    untouched."""
+    import shutil
+    import subprocess as subprocess_mod
+
+    tmux_bin = shutil.which("tmux")
+    if tmux_bin is None:
+        pytest.skip("tmux not installed")
+    # Never raises LiveTmuxMutationEscape; tmux itself may still exit nonzero (no such
+    # window on this throwaway socket), which is not what this guard is about.
+    subprocess_mod.run(
+        [tmux_bin, "-L", "chelatest-fence-proof-issue-494", "kill-window", "-t", "@1"],
+        capture_output=True, timeout=5,
+    )

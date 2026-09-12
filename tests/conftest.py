@@ -386,3 +386,132 @@ def _no_live_pm2_restart(monkeypatch):
         return real_sh(args, cwd, timeout=timeout)
 
     monkeypatch.setattr(update, "_sh", guarded)
+
+
+# tmux is live state too, and unlike pm2 there is no single funnel to patch: at least six
+# modules (`chela/restore.py`, `chela/spawn.py`, `chela/dispatcher.py`,
+# `chela/agent_manager.py`, `chela/messenger.py`, `chela/discovery.py`) shell out to it
+# directly. Issue #494: CMX-361/#492 closed ONE instance of this — `chela.restore
+# ._default_kill_window` reached the operator's real default tmux socket via
+# `tests/test_restore.py`'s unstubbed `resume()` — by hand, giving `_resume_kit()` an
+# explicit no-op `kill_window`. The identical gap survived one file over:
+# `tests/test_restore_cli.py`'s OWN `live_stores` fixture fakes every other leaf but not
+# this one, so `test_CHELA_RESTORE_RESUME_true_env_var_alone_actually_enables_the_launch`
+# and `test_chela_restore_resume_refuses_a_row_whose_task_is_still_ACTIVE` issue a REAL
+# `tmux kill-window -t @99` on the operator's default socket (measured 2026-09: 3 calls in
+# a 3950-test run). `@99` is a plausible LIVE window id — tmux reissues low ids freely
+# after churn — so on a host where it exists, running this suite kills a live agent's
+# window. Fixing instance-by-instance is what let it recur once already; this closes the
+# SEAM instead of the leaf, so a future one can't reopen it the same way.
+#
+# A `tmux` invocation is provably harmless even on the default socket in exactly three
+# shapes: it is READ-ONLY (`display-message`, `list-windows`, `has-session`,
+# `show-environment`, `capture-pane`, …— nothing changes); it MUTATES but targets
+# `CHELA_TMUX_SESSION` (set above, at conftest import, before any module that latches
+# `TMUX_SESSION`/`config.current_session()` at import or call time can see anything else)
+# — a session name built so it can never exist, so tmux errors out on it rather than
+# touching a real window; or `argv[0]` does not actually resolve (via the PATH the call
+# will run with) to the real system `tmux` binary at all — several tests (e.g.
+# `tests/test_terminals_selfheal.py`) put a PATH-shim script named `tmux` ahead of the
+# real one that transparently injects its own `-L <scratch socket>`, so the argv this
+# fence sees never carries `-L` even though the exec that actually runs never touches the
+# default socket either. Only a call that genuinely reaches the real binary is judged on
+# its argv. Every mutating call this codebase itself makes is scoped one of these ways
+# EXCEPT `_default_kill_window`, which — by design (see its own docstring: window ids are
+# unique server-wide) — targets a bare `@N` with no session qualifier at all. That is
+# exactly the shape this fence refuses.
+_TMUX_MUTATING_SUBCOMMANDS = frozenset({
+    "kill-window", "kill-session",
+    "new-window", "new-session",
+    "send-keys", "rename-window",
+    "respawn-window", "respawn-pane",
+})
+
+# Captured at import, before any test can shadow `tmux` on `$PATH` — the fixed point
+# every PATH-shim comparison below is measured against.
+_REAL_TMUX_BIN = shutil.which("tmux")
+_REAL_TMUX_REALPATH = os.path.realpath(_REAL_TMUX_BIN) if _REAL_TMUX_BIN else None
+
+
+class LiveTmuxMutationEscape(BaseException):
+    """A test issued a MUTATING tmux subcommand against the operator's default socket.
+
+    See the comment above :data:`_TMUX_MUTATING_SUBCOMMANDS` (issue #494) for the incident
+    this closes. ``BaseException``, not ``Exception``, for the same reason as
+    :class:`LiveStateEscape`: several of the call sites this fence watches
+    (``chela.spawn._send``, ``chela.agent_manager.reconcile_window_names``) deliberately
+    swallow ``Exception`` around the tmux call so a hiccup can never wedge a live agent — a
+    guard they can catch is no guard at all.
+    """
+
+
+def _resolves_to_real_tmux(prog: str, env: dict | None) -> bool:
+    """Whether `prog`, resolved against the PATH the call will actually run with, IS the
+    real system tmux binary captured at import — as opposed to a test's own PATH-shim
+    script that merely happens to also be named ``tmux``."""
+    if _REAL_TMUX_REALPATH is None:
+        return False
+    path = (env if env is not None else os.environ).get("PATH")
+    resolved = shutil.which(prog, path=path)
+    if resolved is None:
+        return False
+    return os.path.realpath(resolved) == _REAL_TMUX_REALPATH
+
+
+def _tmux_violation(argv: list, env: dict | None) -> str | None:
+    """``None`` if `argv` is a safe tmux invocation (or isn't tmux at all); else why not."""
+    if not argv:
+        return None
+    try:
+        prog = str(os.fspath(argv[0]))
+    except TypeError:
+        return None  # not a path-like argv[0] (e.g. a shell string) — not ours to judge
+    if os.path.basename(prog) != "tmux" or not _resolves_to_real_tmux(prog, env):
+        return None
+    rest = [str(a) for a in argv[1:]]
+    if "-L" in rest or "-S" in rest:
+        return None  # an explicit/private socket — never the operator's default
+    if not rest or rest[0] not in _TMUX_MUTATING_SUBCOMMANDS:
+        return None  # read-only, or a subcommand this fence doesn't police
+    subcmd = rest[0]
+    safe_session = os.environ.get("CHELA_TMUX_SESSION", "")
+    if safe_session:
+        target = None
+        for flag in ("-t", "-s"):  # -t targets an existing window/session, -s names a new one
+            try:
+                target = rest[rest.index(flag) + 1]
+                break
+            except (ValueError, IndexError):
+                continue
+        if target is not None and (target == safe_session
+                                    or target.startswith(f"{safe_session}:")):
+            return None  # scoped to a session that can never exist
+    return (
+        f"tmux {subcmd!r} on the DEFAULT socket: argv={argv!r}. A mutating tmux "
+        "subcommand must never reach the operator's real server. Target a private "
+        "`-L`/`-S` socket (see tests/test_epoch_live.py's TMUX_BIN helper), or stub the "
+        "seam that issues it (e.g. `monkeypatch.setattr(restore_mod, "
+        "'_default_kill_window', lambda wid: None)`)."
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_live_tmux_mutation(monkeypatch):
+    """The fence: any MUTATING tmux subcommand reaching the default socket fails the test.
+
+    Patches ``subprocess.Popen.__init__`` — the one primitive ``subprocess.run``/``call``/
+    ``check_call``/``check_output`` all construct under the hood — rather than any single
+    chela module, because tmux has no funnel equivalent to ``update._sh``. A test that
+    wants the real thing overrides the SEAM (the function that calls tmux), not this fence,
+    same as :func:`_no_live_pm2_restart` documents for pm2.
+    """
+    real_init = subprocess.Popen.__init__
+
+    def guarded_init(self, args, *a, **kw):
+        if isinstance(args, (list, tuple)):
+            reason = _tmux_violation(list(args), kw.get("env"))
+            if reason is not None:
+                raise LiveTmuxMutationEscape(f"test issued a {reason}")
+        return real_init(self, args, *a, **kw)
+
+    monkeypatch.setattr(subprocess.Popen, "__init__", guarded_init)
