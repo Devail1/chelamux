@@ -1906,3 +1906,92 @@ def test_the_tmux_fence_still_allows_a_private_socket_kill_window():
         [tmux_bin, "-L", "chelatest-fence-proof-issue-494", "kill-window", "-t", "@1"],
         capture_output=True, timeout=5,
     )
+
+
+# --- CMX-362 rework: the fence's INTERNALS, proven without ever risking a live call -----
+#
+# The two tests above are the only ones that drive a REAL `subprocess.Popen` through the
+# fence, deliberately: any further corruption of the detection half (dropping a subcommand
+# from the mutating set, dead-coding the `raise`, disarming the fixture) would, if proven the
+# same way, actually let the call through to the operator's default socket — refiring the
+# exact incident (issue #494) this fence exists to prevent. See
+# docs/defeat_shapes/362-*.md. Everything below instead unit-tests the PURE classifier
+# `_tmux_violation` directly — no `Popen` involved, so there is nothing here that can ever
+# reach a real tmux server, however the classifier is corrupted.
+
+def test_the_tmux_guard_cannot_be_swallowed_by_a_writer_that_catches_Exception():
+    """`LiveTmuxMutationEscape` derives from `BaseException`, not `Exception`, for the same
+    reason as `LiveStateEscape` (tests/test_isolation.py): call sites this fence watches
+    (`chela.spawn._send`, `chela.agent_manager.reconcile_window_names`) wrap their own tmux
+    calls in `except Exception` so a tmux hiccup can never stall a live agent — a guard a
+    writer's own except clause can catch is no guard at all. Simulated here (rather than
+    through those two real functions, whose OWN except clauses happen to be narrower than
+    bare `Exception` today) so this test keeps discriminating the class hierarchy even if
+    those call sites' except clauses ever change shape."""
+    import subprocess as subprocess_mod
+
+    from conftest import LiveTmuxMutationEscape
+
+    def writer_that_swallows_exception():
+        try:
+            subprocess_mod.run(["tmux", "send-keys", "-t", "@1", "-l", "x"],
+                                capture_output=True)
+        except Exception:
+            return  # exactly the shape the real call sites above use around their tmux call
+
+    with pytest.raises(LiveTmuxMutationEscape):
+        writer_that_swallows_exception()
+
+
+def test_the_tmux_fence_classifier_exempts_a_private_socket_even_when_the_subcommand_leads():
+    """Direct unit test of `_tmux_violation`'s `-L`/`-S` exemption line. The integration test
+    above (`test_the_tmux_fence_still_allows_a_private_socket_kill_window`) puts `-L` ahead of
+    the subcommand — real tmux argv order — where `rest[0]` is `-L` itself, so the
+    subcommand-membership check alone already returns `None` for it; that test alone cannot
+    prove the explicit exemption line does anything. Feed the classifier an argv where the
+    mutating subcommand is `rest[0]` and `-L` appears LATER in `rest`, so only the exemption
+    line can be why this returns `None`."""
+    from conftest import _tmux_violation
+
+    assert _tmux_violation(
+        ["tmux", "kill-window", "-t", "@1", "-L", "private-socket"], None
+    ) is None
+
+
+def test_the_tmux_fence_classifier_exempts_a_PATH_shim_that_is_not_the_real_tmux_binary(
+    tmp_path,
+):
+    """Direct unit test of `_tmux_violation`'s `_resolves_to_real_tmux` carve-out (see the
+    block comment above `_TMUX_MUTATING_SUBCOMMANDS`): a `tmux`-named script on `PATH` that
+    is NOT the real system binary — the exact shape `tests/test_terminals_selfheal.py` uses —
+    must be exempt even when its argv looks like a mutating call on the default socket,
+    because the exec that actually runs never reaches the real tmux server."""
+    from conftest import _tmux_violation
+
+    shim = tmp_path / "tmux"
+    shim.write_text("#!/bin/sh\nexit 0\n")
+    shim.chmod(0o755)
+
+    assert _tmux_violation(
+        ["tmux", "kill-window", "-t", "@1"], {"PATH": str(tmp_path)}
+    ) is None
+
+
+_EXPECTED_TMUX_MUTATING_SUBCOMMANDS = (
+    "kill-window", "kill-session",
+    "new-window", "new-session",
+    "send-keys", "rename-window",
+    "respawn-window", "respawn-pane",
+)
+
+
+@pytest.mark.parametrize("subcmd", _EXPECTED_TMUX_MUTATING_SUBCOMMANDS)
+def test_every_mutating_tmux_subcommand_is_pinned_in_the_membership_set(subcmd):
+    """Pins `_TMUX_MUTATING_SUBCOMMANDS`'s full membership one member at a time — cf.
+    `tests/test_isolation.py::test_every_door_into_the_real_dir_is_guarded`'s door-by-door
+    parametrization. `send-keys` is the subcommand that types into a live agent's pane;
+    dropping it (or any other member) from the set must fail a specific, named case here, not
+    go unnoticed because only `kill-window` had any coverage at all."""
+    from conftest import _tmux_violation
+
+    assert _tmux_violation(["tmux", subcmd, "-t", "@1"], None) is not None
