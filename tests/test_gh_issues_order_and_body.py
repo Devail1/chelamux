@@ -86,19 +86,29 @@ def test_a_null_created_at_sorts_last(tmp_path, monkeypatch):
     empty string (a `createdAt` field present but blank). Dropping the `or None`
     normalization would let the blank string keep its empty-string sort key instead
     of being folded into the null group — since `"" < "<any non-empty date>"`, that
-    would sort it FIRST, ahead of every dated issue, not last."""
+    would sort it FIRST, ahead of every dated issue, not last.
+
+    The null group is ALSO where the third sort-key component (the `int(number)`
+    tie-breaker) gets exercised, since both issues here tie on the first two
+    components. "no date" and "blank date" are deliberately given numbers whose
+    ascending order (5, 2) is the OPPOSITE of the order they appear in `gh`'s
+    response and the opposite of the asserted output order below. A degraded
+    tie-breaker (e.g. a constant, dropped entirely) would fall back to Python's
+    stable sort and reproduce input order instead — "no date" before "blank
+    date" — which fails the assertion here instead of accidentally satisfying it
+    the way same-direction numbering would (see docs/defeat_shapes/365b-*.md)."""
     issues = [
         {"number": 1, "title": "has a date", "url": "u1", "labels": LABEL,
          "author": {"login": "a"}, "createdAt": "2026-09-01T00:00:00Z"},
-        {"number": 2, "title": "no date", "url": "u2", "labels": LABEL,
+        {"number": 5, "title": "no date", "url": "u5", "labels": LABEL,
          "author": {"login": "a"}, "createdAt": None},
-        {"number": 3, "title": "blank date", "url": "u3", "labels": LABEL,
+        {"number": 2, "title": "blank date", "url": "u2", "labels": LABEL,
          "author": {"login": "a"}, "createdAt": ""},
     ]
     _fake_gh(monkeypatch, issues)
     src = GhIssuesSource(_wf(tmp_path, require_label="ready-for-agent"))
     tasks = src.list_open_tasks()
-    assert [t.title for t in tasks] == ["has a date", "no date", "blank date"]
+    assert [t.title for t in tasks] == ["has a date", "blank date", "no date"]
 
 
 def test_the_issue_body_becomes_task_body(tmp_path, monkeypatch):
