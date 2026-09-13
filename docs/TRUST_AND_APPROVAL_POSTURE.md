@@ -22,7 +22,11 @@ and what does its output need before it changes anything real.**
   existed, the source dispatched on *every* open issue, so on a public repo anyone who
   could open an issue could run code on the operator's box. `require_label: false` is
   accepted as a recorded, deliberate opt-out, never a silent default. `trusted_authors` is
-  optional defence in depth on top of the label.
+  optional defence in depth on top of the label. That "no work" and "refusing to look" must
+  not be indistinguishable is true for the *operator* today (a `config_error` logs an ERROR
+  and surfaces in `chela doctor`); the dispatcher's own `config_error` reconcile path still
+  returns `[]`, so a failed read is indistinguishable from an empty queue there — tracked by
+  G1 / cmx-363, in flight, not this doc's job to fix.
 
 ## 2. What a dispatched agent can do (execution / sandbox)
 
@@ -67,14 +71,16 @@ comment and can never send a run back.
 **c. The merge gate** (`chela/contract.py::merge`) — the only function allowed to run
 `gh pr merge`, a pure function of `(run row, live GitHub facts)` with no `--force`:
 
-1. the base branch is the run's own dispatching workflow's declared
+1. the run exists and is `awaiting_review` — the only clause that reads the run row
+   rather than live GitHub;
+2. the base branch is the run's own dispatching workflow's declared
    `workspace.base_branch` (`dev` for chelamux itself), and is never
    `main`/`master`/`production`/… unless that workflow explicitly committed to exactly
    that branch;
-2. the judge said `clean` against the PR's *current* head commit, read live from GitHub;
-3. CI is green;
-4. GitHub reports the PR open and `MERGEABLE`;
-5. **if the actor is the auto-launched orchestrator** (`$CHELA_ACTOR ==
+3. the judge said `clean` against the PR's *current* head commit, read live from GitHub;
+4. CI is green;
+5. GitHub reports the PR open and `MERGEABLE`;
+6. **if the actor is the auto-launched orchestrator** (`$CHELA_ACTOR ==
    auto-orchestrator`), a human's attended-lease must be live. A human's own `chela merge`
    carries no actor stamp and needs no lease — the human *is* the attendance
    (`chela/personas/lease.py`).
@@ -85,7 +91,7 @@ to the event log.
 **Escalation is the fail-closed default, not an edge case.**
 `docs/ESCALATION_CONTRACT.md` sorts every orchestrator decision into AUTONOMOUS / ESCALATE
 / NEVER, and ambiguity between tiers resolves upward: "unknown" is a `cannot_verify`, and a
-`cannot_verify` always goes to a human (`chela/contract.py::_escalate`, `chela escalate`).
+`cannot_verify` always goes to a human (`chela/contract.py::escalate`, `chela escalate`).
 Merging to `main`, making the repo public, and executing agent-authored text as a command
 are all in the NEVER tier — no standing grant reaches them.
 
@@ -113,7 +119,7 @@ migrates its tracker from `markdown` to `gh_issues`.
 | Who may trigger a dispatch | `chela/sources/gh_issues.py`, `chela/sources/markdown.py` | this doc §1 |
 | What a running agent may do | `chela/dispatcher.py::resolve_agent_cmd`, `chela/workflow.py::workspace_escape`, `chela/memcap.py` | this doc §2, `RESOURCE_ISOLATION.md` |
 | What approves a merge | `chela/judge.py`, `chela/contract.py::merge` | this doc §3, `ESCALATION_CONTRACT.md` |
-| What a human must decide instead of the orchestrator | `chela/contract.py::_escalate` | `ESCALATION_CONTRACT.md`'s decision taxonomy |
+| What a human must decide instead of the orchestrator | `chela/contract.py::escalate` | `ESCALATION_CONTRACT.md`'s decision taxonomy |
 
 This is chela's answer to **SPEC 10.5** ("Each implementation MUST document its chosen
 approval, sandbox, and operator-confirmation posture") and to **SPEC 1**'s parallel
