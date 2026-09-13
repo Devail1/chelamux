@@ -3753,9 +3753,19 @@ def tick(workflow_path: str | Path) -> dict:
     open_tasks = source.list_open_tasks()
     open_ids = {t.id for t in open_tasks}
     tasks_by_id = {t.id: t for t in open_tasks}
+    # Symphony SPEC 11.1: a source can fail to read (network/API error, a missing
+    # tracker file, misconfiguration) and, with only `list_open_tasks()` to speak
+    # through, can say so only by returning `[]` — byte-for-byte what a genuinely
+    # empty queue also returns. `read_failed` is the adapter's own signal that
+    # THIS tick's `open_tasks`/`open_ids` is not trustworthy "nothing is open"
+    # evidence. Reconciliation below must not read absence-from-open_ids as
+    # completion evidence on a tick where this is True — see the two `not in
+    # open_ids` branches a few hundred lines down.
+    tracker_read_failed = getattr(source, "read_failed", False)
 
     summary = {
         "open": len(open_tasks),
+        "tracker_read_failed": tracker_read_failed,
         "reconciled_done": 0,
         "reconciled_closed": 0,
         "reconciled_failed": 0,
@@ -4016,7 +4026,7 @@ def tick(workflow_path: str | Path) -> dict:
             # a few lines below ever gets a look at it, silently recreating the exact bug
             # this feature exists to close, just with an extra row in the table.
             if (row["task_id"] not in open_ids and not _is_adopted(row)
-                    and row["status"] in REVIEW_STATUSES):
+                    and not tracker_read_failed and row["status"] in REVIEW_STATUSES):
                 # Read the agent's transcript *before* killing the window —
                 # transcript resolution maps window_name → cwd → transcript via
                 # the live tmux pane, and that mapping disappears once tmux drops

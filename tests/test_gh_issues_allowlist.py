@@ -27,9 +27,17 @@ from chela.sources import gh_issues
 from chela.sources.gh_issues import GhIssuesSource
 
 
-def _wf(tmp_path, **tracker):
-    """A WorkflowDef-alike: only `.path` and `.get('tracker', key)` are used."""
-    cfg = {"tracker": {"kind": "gh_issues", "repo": "acme/widgets", **tracker}}
+def _wf(tmp_path, *, repo="acme/widgets", **tracker):
+    """A WorkflowDef-alike: only `.path` and `.get('tracker', key)` are used.
+
+    `repo=None` omits `tracker.repo` entirely, forcing `_resolve_repo()` to fall
+    through to `gh repo view` / the git remote — needed to reach the
+    repo-unresolvable branch of `list_open_tasks()`.
+    """
+    tracker_cfg = {"kind": "gh_issues", **tracker}
+    if repo is not None:
+        tracker_cfg["repo"] = repo
+    cfg = {"tracker": tracker_cfg}
 
     def get(*keys, default=None):
         cur = cfg
@@ -112,6 +120,107 @@ def test_unconfigured_refuses_and_SAYS_SO(tmp_path, fake_gh, caplog):
     assert any("require_label" in r.getMessage() for r in caplog.records), (
         "refusing to claim work must be stated, not silent"
     )
+    # 🔴 GUARD (CMX-363): the config_error refusal is a FAILED read, not a genuinely
+    # empty tracker — the dispatcher must be able to tell the two apart (see
+    # `read_failed`'s docstring). Judge round 1 found this branch could set the flag
+    # to False and the empty-list assertion above would never notice.
+    assert src.read_failed is True
+
+
+def test_a_nonzero_gh_exit_sets_read_failed(tmp_path, monkeypatch, caplog):
+    """🔴 GUARD (CMX-363): `gh issue list` exiting non-zero (auth failure, rate limit,
+    API 5xx) is the single most likely real-world failed read. It must be reported as
+    `read_failed = True`, not silently folded into "no open issues" — see
+    `read_failed`'s docstring and `chela.dispatcher.tick()`."""
+    def run(argv, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="HTTP 500")
+
+    monkeypatch.setattr(gh_issues.subprocess, "run", run)
+    src = GhIssuesSource(_wf(tmp_path, require_label="ready-for-agent"))
+    with caplog.at_level(logging.WARNING, logger=gh_issues.log.name):
+        assert src.list_open_tasks() == []
+    assert src.read_failed is True
+
+
+def test_a_successful_read_resets_read_failed_to_false(tmp_path, fake_gh):
+    """🔴 GUARD (CMX-363 round 2): the flag must be reset on EVERY call, not just default
+    to False on a fresh instance — a `GhIssuesSource` is reused tick-to-tick, so a prior
+    failed read must not leave `read_failed` stuck `True` forever once the read recovers.
+    Preset it to `True` by hand so a mutation that hardcodes the reset to `True` (instead
+    of `False`) cannot hide behind the instance's own `__init__` default."""
+    src = GhIssuesSource(_wf(tmp_path, require_label="ready-for-agent"))
+    src.read_failed = True
+    src.list_open_tasks()
+    assert src.read_failed is False
+
+
+def test_gh_missing_or_timing_out_sets_read_failed(tmp_path, monkeypatch):
+    """🔴 GUARD (CMX-363 round 2): `gh` being absent (FileNotFoundError) or hanging past
+    its timeout (subprocess.TimeoutExpired) must report `read_failed = True` — the branch
+    the round-1 rework added the flag to but never mounted a test for."""
+    def run(argv, **kwargs):
+        raise FileNotFoundError("gh: command not found")
+
+    monkeypatch.setattr(gh_issues.subprocess, "run", run)
+    src = GhIssuesSource(_wf(tmp_path, require_label="ready-for-agent"))
+    assert src.list_open_tasks() == []
+    assert src.read_failed is True
+
+
+def _stub_repo_unresolvable(argv, **kwargs):
+    """Both `_resolve_repo()` paths fail: `gh repo view` exits non-zero, and the
+    git-remote fallback exits non-zero too — so the caller never learns a repo."""
+    return SimpleNamespace(returncode=1, stdout="", stderr="not found")
+
+
+def _stub_bad_json(argv, **kwargs):
+    return SimpleNamespace(returncode=0, stdout="not valid json {", stderr="")
+
+
+def _stub_nonzero_exit(argv, **kwargs):
+    return SimpleNamespace(returncode=1, stdout="", stderr="HTTP 500")
+
+
+def _stub_missing_gh(argv, **kwargs):
+    raise FileNotFoundError("gh: command not found")
+
+
+# 🔴 GUARD (CMX-363 round 3): the COMPLETE enumeration of the five `read_failed = True`
+# assignments in `list_open_tasks()` — repo unresolvable (:155), config_error (:162), `gh`
+# missing/timing out (:182), `gh issue list` exiting non-zero (:189), and unparseable JSON
+# (:195). Round 2 sampled two of these five and wrote the remaining two off "as a class"
+# per DEFEAT_SHAPES #311 — but 311 names the trap, it does not license stopping at a
+# sample: the judge's own mutation flipped :155 and :195 to `False` and the suite it left
+# behind (which sampled rather than enumerated) stayed green. Parametrized over every
+# branch so there is no sixth left to defeat this a fourth time.
+_READ_FAILED_TRUE_BRANCHES = [
+    pytest.param(lambda tmp_path: _wf(tmp_path), None, id="config-error-unconfigured"),
+    pytest.param(
+        lambda tmp_path: _wf(tmp_path, repo=None, require_label="ready-for-agent"),
+        _stub_repo_unresolvable, id="repo-unresolvable",
+    ),
+    pytest.param(
+        lambda tmp_path: _wf(tmp_path, require_label="ready-for-agent"),
+        _stub_missing_gh, id="gh-missing-or-timeout",
+    ),
+    pytest.param(
+        lambda tmp_path: _wf(tmp_path, require_label="ready-for-agent"),
+        _stub_nonzero_exit, id="gh-issue-list-nonzero-exit",
+    ),
+    pytest.param(
+        lambda tmp_path: _wf(tmp_path, require_label="ready-for-agent"),
+        _stub_bad_json, id="gh-issue-list-bad-json",
+    ),
+]
+
+
+@pytest.mark.parametrize("make_wf, run_stub", _READ_FAILED_TRUE_BRANCHES)
+def test_every_read_failed_true_branch_actually_sets_the_flag(tmp_path, monkeypatch, make_wf, run_stub):
+    if run_stub is not None:
+        monkeypatch.setattr(gh_issues.subprocess, "run", run_stub)
+    src = GhIssuesSource(make_wf(tmp_path))
+    assert src.list_open_tasks() == []
+    assert src.read_failed is True
 
 
 def test_unconfigured_never_calls_gh_at_all(tmp_path, fake_gh):

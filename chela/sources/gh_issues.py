@@ -69,6 +69,13 @@ class GhIssuesSource:
         self.blocked_label = wf.get("tracker", "blocked_label", default="blocked")
         self._repo: str | None = None
         self.config_error: str | None = None
+        # Set by list_open_tasks() on every call: True when the read did NOT
+        # succeed (repo unresolvable, config error, `gh` failure, bad JSON), so
+        # the dispatcher can tell "no open issues" apart from "we couldn't read
+        # the tracker" (Symphony SPEC 11.1) — see chela.dispatcher.tick(), which
+        # must not read absence-from-open_ids as completion evidence on a tick
+        # where this is True.
+        self.read_failed = False
 
         raw = wf.get("tracker", "require_label", default=_UNSET)
         self.require_label: str | None = None
@@ -142,14 +149,17 @@ class GhIssuesSource:
         return None
 
     def list_open_tasks(self) -> list[Task]:
+        self.read_failed = False
         repo = self._resolve_repo()
         if not repo:
+            self.read_failed = True
             return []
         if self.config_error:
             # ⛔ Fail CLOSED. Returning [] alone would be indistinguishable from "no
             # open issues" — the defect this whole change exists to avoid — so the
             # refusal is also stated in the log and by `chela doctor`.
             _report_once((repo, "require_label"), self.config_error)
+            self.read_failed = True
             return []
         try:
             out = subprocess.run(
@@ -166,19 +176,23 @@ class GhIssuesSource:
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             # Transient API/auth/CLI error degrades to "no open tasks" rather
-            # than crashing the dispatcher tick.
+            # than crashing the dispatcher tick — but it is a FAILED read, not
+            # a genuinely empty one; see `read_failed`.
             log.warning("gh_issues: `gh issue list` failed for %s: %s", repo, e)
+            self.read_failed = True
             return []
         if out.returncode != 0:
             log.warning(
                 "gh_issues: `gh issue list` exited %d for %s: %s",
                 out.returncode, repo, (out.stderr or "").strip(),
             )
+            self.read_failed = True
             return []
         try:
             issues = json.loads(out.stdout)
         except (json.JSONDecodeError, ValueError) as e:
             log.warning("gh_issues: bad JSON from `gh issue list` for %s: %s", repo, e)
+            self.read_failed = True
             return []
 
         tasks: list[Task] = []
