@@ -118,6 +118,7 @@ Everything lives at **[chela.pages.dev/docs](https://chela.pages.dev/docs)**:
 In-repo references: [HOOKS.md](docs/HOOKS.md) · [EVENTS.md](docs/EVENTS.md) ·
 [CONFIG.md](docs/CONFIG.md) · [RESOURCE_ISOLATION.md](docs/RESOURCE_ISOLATION.md) ·
 [AGENT_IDENTITY.md](docs/AGENT_IDENTITY.md) · [ESCALATION_CONTRACT.md](docs/ESCALATION_CONTRACT.md) ·
+[TRUST_AND_APPROVAL_POSTURE.md](docs/TRUST_AND_APPROVAL_POSTURE.md) ·
 [design notes](docs/README.md#design-records--context-not-instructions).
 
 ## Status

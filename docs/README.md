@@ -15,6 +15,7 @@ behind decisions that are otherwise invisible in the code.
 | [RESOURCE_ISOLATION.md](RESOURCE_ISOLATION.md) | The known gap: nothing bounds what an agent *consumes* |
 | [AGENT_IDENTITY.md](AGENT_IDENTITY.md) | How a window, a session and an agent are told apart |
 | [ESCALATION_CONTRACT.md](ESCALATION_CONTRACT.md) | When an agent must stop and surface to a human |
+| [TRUST_AND_APPROVAL_POSTURE.md](TRUST_AND_APPROVAL_POSTURE.md) | Who may dispatch, what a running agent may do, what approves a merge — in one place |
 | [DEFEAT_SHAPES.md](DEFEAT_SHAPES.md) + [defeat_shapes/](defeat_shapes/) | The catalogue of ways a guard passes while proving nothing — one file per shape |
 | [OKF.md](OKF.md) | Open Knowledge Format export design |
 | [ORCHESTRATOR_PERSONA.md](ORCHESTRATOR_PERSONA.md) · [PERSONA_PATTERN.md](PERSONA_PATTERN.md) | Giving an agent a stable standing role |
