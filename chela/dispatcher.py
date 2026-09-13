@@ -4766,10 +4766,10 @@ def _max_existing_task_number(repo_path: Path, project_key: str) -> int:
 def _task_brief(task: Task) -> str | None:
     """What to persist onto `runs.brief` at claim time — the task-detail modal's
     left pane. `task.body` (the markdown source's full title + dedented
-    OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation) wins when the source
-    captured one; a bare one-line task, or a source with no notion of a
-    continuation (gh_issues), falls back to `task.raw` (the bullet line / issue
-    URL), and — belt-and-suspenders, should raw itself ever be empty — `task.title`.
+    OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation, or gh_issues's issue body)
+    wins when the source captured one; a bare one-line task falls back to
+    `task.raw` (the bullet line / issue URL), and — belt-and-suspenders, should
+    raw itself ever be empty — `task.title`.
     """
     return task.body or task.raw or task.title
 
@@ -4877,8 +4877,9 @@ def _run_critic(wf: WorkflowDef, task: Task, conn: sqlite3.Connection) -> None:
     is what the human actually wrote past the title; using only ``task.raw`` (the bare
     bullet line) starved the four-field detector of everything after the first line, so it
     fired "no explicit objective/boundaries/verify" on briefs that named all three further
-    down. Falls back to ``task.raw`` for a bare one-line task or a source with no notion of
-    a continuation (gh_issues) — same fallback ``_task_brief`` uses for ``runs.brief``.
+    down. ``gh_issues`` populates ``task.body`` from the issue body, so it gets the same
+    treatment; falls back to ``task.raw`` only for a bare one-line task — same fallback
+    ``_task_brief`` uses for ``runs.brief``.
 
     Writes ``critic_notes`` ("" ⇒ ran, nothing to add) and ``critic_reviewed_at`` when the
     critic is on; a disabled critic writes NOTHING, leaving both NULL — "the critic never ran",
