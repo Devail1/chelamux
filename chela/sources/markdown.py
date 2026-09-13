@@ -1,11 +1,14 @@
 from __future__ import annotations
 import hashlib
+import logging
 import re
 import textwrap
 from pathlib import Path
 
 from chela.sources import Task
 from chela.workflow import WorkflowDef
+
+log = logging.getLogger(__name__)
 
 OPEN_RE = re.compile(r"^\s*-\s*\[\s\]\s*(.+?)\s*$")
 DONE_RE = re.compile(r"^\s*-\s*\[[xX]\]\s*(.+?)\s*$")
@@ -26,10 +29,27 @@ class MarkdownSource:
         rel = wf.get("tracker", "path", default="TODO.md")
         self.workflow_path = wf.path
         self.path = (wf.path.parent / rel).resolve()
+        # Set by list_open_tasks() on every call: True when the read did NOT
+        # succeed, so the dispatcher can tell "the tracker has no open tasks"
+        # apart from "we couldn't read the tracker" (Symphony SPEC 11.1) — see
+        # chela.dispatcher.tick(), which must not read absence-from-open_ids as
+        # completion evidence on a tick where this is True.
+        self.read_failed = False
 
     def list_open_tasks(self) -> list[Task]:
         if not self.path.exists():
+            # This tracker is gitignored, local-only state (see
+            # dispatcher._strike_merged_tasks) — a `git clean -xdf` deletes it
+            # outright. From here that is indistinguishable from "no tracker was
+            # ever created", so treat it as a failed read either way: the cost of
+            # doing so is one extra tick before a real strike is honoured, the
+            # cost of not doing so is every awaiting_review/changes_requested/
+            # needs_human row reconciling to `done` on the next tick.
+            self.read_failed = True
+            log.warning("markdown tracker %s does not exist — treating this read as "
+                        "FAILED, not an empty queue", self.path)
             return []
+        self.read_failed = False
         return self.tasks_from_text(self.path.read_text())
 
     def tasks_from_text(self, text: str) -> list[Task]:

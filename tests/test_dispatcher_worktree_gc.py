@@ -433,6 +433,35 @@ def test_tick_removes_the_worktree_when_the_tracker_line_is_struck_by_hand(ticki
     assert not wt_path.exists()
 
 
+def test_tick_does_not_reconcile_a_review_row_when_the_tracker_read_fails(ticking):
+    """🔴 GUARD (CMX-363, Symphony SPEC 11.1): a FAILED tracker read must not be read
+    as an EMPTY queue. Before this, deleting TODO.md (its gitignored-local-queue
+    accident — a `git clean -xdf` — see MarkdownSource.list_open_tasks) made `alpha`
+    vanish from `open_ids` exactly like a genuine strike would, and the very next
+    tick reconciled the live `awaiting_review` row straight to `done`, killed its
+    window and deleted its worktree — for work that never shipped.
+    """
+    repo = ticking
+    wf_path = repo / "WORKFLOW.md"
+    alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
+    worktrees_root = repo.parent / ".chela" / "worktrees"
+    wt_path = _seed_run_with_worktree(repo, wf_path, alpha, worktrees_root)
+    assert wt_path.is_dir()
+
+    (repo / "TODO.md").unlink()  # simulate the blip: the tracker file is just gone
+
+    summary = dispatcher.tick(wf_path)
+
+    assert summary["tracker_read_failed"] is True
+    assert summary["reconciled_done"] == 0
+    assert wt_path.exists()
+    with dispatcher._db() as conn:
+        status = conn.execute(
+            "SELECT status FROM runs WHERE task_id=?", (alpha,)
+        ).fetchone()["status"]
+    assert status == "awaiting_review"
+
+
 def test_cleanup_on_done_passes_the_CONFIGURED_root_not_a_permissive_one(ticking, monkeypatch, tmp_path):
     """⛔ WIRING. `worktree.py`'s root-membership guard can be present, live and fully
     unit-tested, and still protect nothing if the CALL SITE hands it a root under which
