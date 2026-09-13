@@ -10,6 +10,13 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A failed tracker read was indistinguishable from a genuinely empty queue.** Both
+  `GhIssuesSource` and `MarkdownSource` now expose `read_failed`, and `tick()` skips
+  absence-implies-completion reconciliation on a tick where the read failed instead of
+  treating a broken `gh` call or an unreadable tracker file as "no open tasks." (CMX-363)
+
 ## [0.12.1] — 2026-09-12
 
 ### Fixed

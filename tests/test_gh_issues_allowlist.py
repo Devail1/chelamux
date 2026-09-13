@@ -134,6 +134,31 @@ def test_a_nonzero_gh_exit_sets_read_failed(tmp_path, monkeypatch, caplog):
     assert src.read_failed is True
 
 
+def test_a_successful_read_resets_read_failed_to_false(tmp_path, fake_gh):
+    """🔴 GUARD (CMX-363 round 2): the flag must be reset on EVERY call, not just default
+    to False on a fresh instance — a `GhIssuesSource` is reused tick-to-tick, so a prior
+    failed read must not leave `read_failed` stuck `True` forever once the read recovers.
+    Preset it to `True` by hand so a mutation that hardcodes the reset to `True` (instead
+    of `False`) cannot hide behind the instance's own `__init__` default."""
+    src = GhIssuesSource(_wf(tmp_path, require_label="ready-for-agent"))
+    src.read_failed = True
+    src.list_open_tasks()
+    assert src.read_failed is False
+
+
+def test_gh_missing_or_timing_out_sets_read_failed(tmp_path, monkeypatch):
+    """🔴 GUARD (CMX-363 round 2): `gh` being absent (FileNotFoundError) or hanging past
+    its timeout (subprocess.TimeoutExpired) must report `read_failed = True` — the branch
+    the round-1 rework added the flag to but never mounted a test for."""
+    def run(argv, **kwargs):
+        raise FileNotFoundError("gh: command not found")
+
+    monkeypatch.setattr(gh_issues.subprocess, "run", run)
+    src = GhIssuesSource(_wf(tmp_path, require_label="ready-for-agent"))
+    assert src.list_open_tasks() == []
+    assert src.read_failed is True
+
+
 def test_unconfigured_never_calls_gh_at_all(tmp_path, fake_gh):
     """The refusal happens BEFORE the API call — a gate that only filters results still
     depends on the fetch succeeding, and a failed fetch would look identical to a refusal."""
