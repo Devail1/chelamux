@@ -58,13 +58,18 @@ LABEL = [{"name": "ready-for-agent"}]
 
 def test_oldest_issue_is_dispatched_first(tmp_path, monkeypatch):
     """THE FIX for G3. `gh` returns created-descending (its default); the source must
-    reorder to oldest-first regardless of the order it was handed."""
+    reorder to oldest-first regardless of the order it was handed.
+
+    Issue numbers are deliberately NOT monotonic with creation date (newest has the
+    lowest number). A sort that silently degrades to the `int(number)` tie-breaker —
+    e.g. dropping the createdAt key entirely — would produce the WRONG order here,
+    where a same-direction numbering would have hidden that regression."""
     issues = [
-        {"number": 30, "title": "newest", "url": "u30", "labels": LABEL,
+        {"number": 5, "title": "newest", "url": "u5", "labels": LABEL,
          "author": {"login": "a"}, "createdAt": "2026-09-03T00:00:00Z"},
-        {"number": 10, "title": "oldest", "url": "u10", "labels": LABEL,
+        {"number": 99, "title": "oldest", "url": "u99", "labels": LABEL,
          "author": {"login": "a"}, "createdAt": "2026-09-01T00:00:00Z"},
-        {"number": 20, "title": "middle", "url": "u20", "labels": LABEL,
+        {"number": 50, "title": "middle", "url": "u50", "labels": LABEL,
          "author": {"login": "a"}, "createdAt": "2026-09-02T00:00:00Z"},
     ]
     _fake_gh(monkeypatch, issues)
@@ -75,17 +80,25 @@ def test_oldest_issue_is_dispatched_first(tmp_path, monkeypatch):
 
 def test_a_null_created_at_sorts_last(tmp_path, monkeypatch):
     """SPEC 8.2: 'created_at oldest first; null sorts last' — a malformed/missing
-    timestamp must not jump the queue by sorting as an empty-string minimum."""
+    timestamp must not jump the queue by sorting as an empty-string minimum.
+
+    Covers BOTH shapes of "no usable timestamp": JSON `null` (Python `None`) and an
+    empty string (a `createdAt` field present but blank). Dropping the `or None`
+    normalization would let the blank string keep its empty-string sort key instead
+    of being folded into the null group — since `"" < "<any non-empty date>"`, that
+    would sort it FIRST, ahead of every dated issue, not last."""
     issues = [
         {"number": 1, "title": "has a date", "url": "u1", "labels": LABEL,
          "author": {"login": "a"}, "createdAt": "2026-09-01T00:00:00Z"},
         {"number": 2, "title": "no date", "url": "u2", "labels": LABEL,
          "author": {"login": "a"}, "createdAt": None},
+        {"number": 3, "title": "blank date", "url": "u3", "labels": LABEL,
+         "author": {"login": "a"}, "createdAt": ""},
     ]
     _fake_gh(monkeypatch, issues)
     src = GhIssuesSource(_wf(tmp_path, require_label="ready-for-agent"))
     tasks = src.list_open_tasks()
-    assert [t.title for t in tasks] == ["has a date", "no date"]
+    assert [t.title for t in tasks] == ["has a date", "no date", "blank date"]
 
 
 def test_the_issue_body_becomes_task_body(tmp_path, monkeypatch):
