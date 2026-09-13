@@ -233,6 +233,12 @@ doing G2, not by patching G5.**
 
 ## G6 — SPEC 1 / 10.5: the trust posture is a documented MUST, and is undocumented
 
+**CLOSED (CMX-364):** [`docs/TRUST_AND_APPROVAL_POSTURE.md`](TRUST_AND_APPROVAL_POSTURE.md)
+consolidates the dispatch-trust, sandbox, and merge-approval facts named below into one
+citable page, linked from both READMEs. Nothing described below changed; this heading and
+its body are kept as the record of what was found and why the fix was "write it down,"
+not "build something new."
+
 > **SPEC 10.5:** "**Approval, sandbox, and user-input behavior is implementation-defined.**"
 > **SPEC 10.5:** "Each implementation MUST document its chosen approval, sandbox, and operator-confirmation posture."
 > **SPEC 1:** "Implementations are expected to document their trust and safety posture explicitly. This specification does not require a single approval, sandbox, or operator-confirmation policy."
