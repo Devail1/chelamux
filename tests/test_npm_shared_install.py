@@ -9,6 +9,7 @@ worktree carries no longer matches the one the shared install was built from.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -27,9 +28,30 @@ def _make_worktree(parent: Path, name: str) -> Path:
     return wt
 
 
+def _no_venv_env() -> dict[str, str]:
+    """`uv run pytest` puts THIS repo's `.venv/bin` ahead of everything else on PATH, so the
+    script's bare `python3` call resolves to the venv interpreter — which has `chela` already
+    on it via the editable install, importable regardless of what REPO_ROOT the script
+    computes. That masks the one thing `resolves_every_declared_package` depends on
+    (`sys.path.insert(0, repo_root)` actually landing on a checkout that carries `chela/`).
+    Stripping `.venv` entries forces the script's `python3` back to a system interpreter that
+    has no ambient route to `chela`, matching how the script is actually invoked from
+    `hooks.before_run` — so REPO_ROOT correctness is the only thing that can make the import
+    succeed."""
+    env = dict(os.environ)
+    parts = [p for p in env.get("PATH", "").split(os.pathsep) if ".venv" not in p]
+    env["PATH"] = os.pathsep.join(parts)
+    return env
+
+
 def _run(worktree: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [str(SCRIPT)], cwd=worktree, capture_output=True, text=True, timeout=300,
+        [str(SCRIPT)],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=_no_venv_env(),
     )
 
 
