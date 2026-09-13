@@ -2517,8 +2517,15 @@ def mark_awaiting_review(task_id: str) -> dict:
         if row is None:
             return {"ok": False, "error": f"no run found for task_id {task_id}"}
         if row["status"] not in ("claimed", "running"):
+            # ⚖️🔀 issue #502 rework round 1: `already_settled=True` marks this refusal as
+            # BENIGN — something else (a human's `chela escalate`/`reopen`, an out-of-band
+            # merge) already moved the row off claimed/running, so the marker is stale, not
+            # wrong. This is the ONLY `ok: False` case `tick()` may treat as "drop the marker
+            # and move on" — see the `row is None` branch above, which carries no such flag
+            # and must be escalated instead of silently swallowed.
             return {
                 "ok": False,
+                "already_settled": True,
                 "error": f"run is in status {row['status']!r}, refusing to transition",
                 "task_id": task_id,
             }
@@ -4093,15 +4100,42 @@ def tick(workflow_path: str | Path) -> dict:
                 and _task_finished_request_path(row["worktree_path"]).exists()
             ):
                 applied = mark_awaiting_review(row["task_id"])
-                try:
-                    _task_finished_request_path(row["worktree_path"]).unlink()
-                except OSError:
-                    pass
+                # ⚖️🔀 issue #502 rework round 1 (hazard 3 of the brief): `ok=False` used to
+                # be ONE outcome — unlink the marker and log.warning, no matter why the
+                # transition refused. That silently strands a GENUINE failure: the row stays
+                # `running` forever, the window is never killed, and a `log.warning` on the
+                # daemon's stderr reaches nobody (the inbox wakes on `needs_human`, not on a
+                # log line). `already_settled=True` is the one case where "drop the marker
+                # and move on" is actually correct — a human (or an out-of-band merge)
+                # already moved the row off claimed/running, so there is nothing left to
+                # apply. Anything else is unexplained and must be surfaced, not swallowed —
+                # escalate through the same `needs_human` seam every other stuck-run path
+                # uses, and KEEP the marker as the agent's completion evidence for whoever
+                # picks the escalation up.
+                if applied.get("ok") or applied.get("already_settled"):
+                    try:
+                        _task_finished_request_path(row["worktree_path"]).unlink()
+                    except OSError:
+                        pass
                 if applied.get("ok"):
                     summary["task_finished_applied"] += 1
                     log.info("Task %s awaiting review (completion requested by the agent)",
                               row["task_id"])
+                elif applied.get("already_settled"):
+                    log.info(
+                        "Task %s: completion request moot (%s) — marker dropped",
+                        row["task_id"], applied.get("error"),
+                    )
                 else:
+                    _escalate(
+                        conn, row,
+                        f"the agent reported completion via `chela task-finished`, but the "
+                        f"daemon could not apply it: {applied.get('error')}. The completion "
+                        "marker in the worktree is preserved as evidence.",
+                        recommendation="Inspect the run and worktree, then `chela reopen` "
+                                       "if the work is actually done",
+                    )
+                    summary["escalated"] += 1
                     log.warning("Task %s: completion request could not be applied — %s",
                                  row["task_id"], applied.get("error"))
                 continue
