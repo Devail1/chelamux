@@ -13,9 +13,9 @@ class Task:
     raw: str              # original line as written (issue URL for gh_issues)
     # The full multi-line brief when the source can capture one — for the markdown
     # source, `title` + the bullet's indented continuation block (its OBJECTIVE/
-    # BOUNDARIES/GUARDS/VERIFY paragraphs), dedented; `None` for a bare one-line
-    # task or a source that has no notion of a continuation (gh_issues — an issue's
-    # body isn't fetched here; see chela.sources.gh_issues.GhIssuesSource).
+    # BOUNDARIES/GUARDS/VERIFY paragraphs), dedented; for gh_issues, the issue body
+    # (see chela.sources.gh_issues.GhIssuesSource); `None` for a bare one-line task
+    # or an empty/whitespace-only body.
     body: str | None = None
     # Ids of tasks this one must not be CLAIMED before — the tracker's blocking
     # edges (see chela.sources.markdown's `depends:` marker). Empty for a source

@@ -160,7 +160,9 @@ class GhIssuesSource:
                     # REST endpoint that does (`repos/{o}/{r}/issues`) also returns PULL
                     # REQUESTS — so switching there to get it would make the dispatcher
                     # claim its own PRs as tasks. `gh issue list` excludes them; stay here.
-                    "--json", "number,title,url,labels,author", "--limit", "200",
+                    # `createdAt` drives the SPEC 8.2 sort below; `body` becomes `Task.body`
+                    # so the dispatch brief is the issue text, not just its URL.
+                    "--json", "number,title,url,labels,author,createdAt,body", "--limit", "200",
                 ],
                 capture_output=True, text=True, timeout=30,
             )
@@ -181,7 +183,7 @@ class GhIssuesSource:
             log.warning("gh_issues: bad JSON from `gh issue list` for %s: %s", repo, e)
             return []
 
-        tasks: list[Task] = []
+        tasks: list[tuple[tuple[bool, str, int], Task]] = []
         for issue in issues:
             number = issue.get("number")
             if number is None:
@@ -204,19 +206,32 @@ class GhIssuesSource:
                 if login not in self.trusted_authors:
                     continue
             title = (issue.get("title") or "").strip()
-            tasks.append(Task(
-                id=_task_id(repo, number),
-                # Clean title — the issue number lives in line_number, not here.
-                title=title,
-                # Non-filesystem source: no source file. There is nothing for
-                # the dispatcher to strike either — a merged PR closes the
-                # issue, so the task leaves list_open_tasks on its own (see
-                # dispatcher._strike_merged_tasks).
-                file="",
-                line_number=int(number),
-                raw=issue.get("url") or "",
+            created_at = issue.get("createdAt") or None
+            body = issue.get("body")
+            tasks.append((
+                # SPEC 8.2: created_at oldest first, null sorts last, then an
+                # identifier tie-breaker. `gh issue list`'s default order is
+                # created-descending, so left un-sorted this is a LIFO stack —
+                # the newest issue is always claimed first and the oldest starves.
+                (created_at is None, created_at or "", int(number)),
+                Task(
+                    id=_task_id(repo, number),
+                    # Clean title — the issue number lives in line_number, not here.
+                    title=title,
+                    # Non-filesystem source: no source file. There is nothing for
+                    # the dispatcher to strike either — a merged PR closes the
+                    # issue, so the task leaves list_open_tasks on its own (see
+                    # dispatcher._strike_merged_tasks).
+                    file="",
+                    line_number=int(number),
+                    raw=issue.get("url") or "",
+                    # The dispatch brief (OBJECTIVE/BOUNDARIES/GUARDS/VERIFY, if the
+                    # issue carries them) instead of degrading to just the URL.
+                    body=body.strip() if isinstance(body, str) and body.strip() else None,
+                ),
             ))
-        return tasks
+        tasks.sort(key=lambda pair: pair[0])
+        return [task for _, task in tasks]
 
 
 def _task_id(repo: str, number: int) -> str:
