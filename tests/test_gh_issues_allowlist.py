@@ -112,6 +112,26 @@ def test_unconfigured_refuses_and_SAYS_SO(tmp_path, fake_gh, caplog):
     assert any("require_label" in r.getMessage() for r in caplog.records), (
         "refusing to claim work must be stated, not silent"
     )
+    # 🔴 GUARD (CMX-363): the config_error refusal is a FAILED read, not a genuinely
+    # empty tracker — the dispatcher must be able to tell the two apart (see
+    # `read_failed`'s docstring). Judge round 1 found this branch could set the flag
+    # to False and the empty-list assertion above would never notice.
+    assert src.read_failed is True
+
+
+def test_a_nonzero_gh_exit_sets_read_failed(tmp_path, monkeypatch, caplog):
+    """🔴 GUARD (CMX-363): `gh issue list` exiting non-zero (auth failure, rate limit,
+    API 5xx) is the single most likely real-world failed read. It must be reported as
+    `read_failed = True`, not silently folded into "no open issues" — see
+    `read_failed`'s docstring and `chela.dispatcher.tick()`."""
+    def run(argv, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="HTTP 500")
+
+    monkeypatch.setattr(gh_issues.subprocess, "run", run)
+    src = GhIssuesSource(_wf(tmp_path, require_label="ready-for-agent"))
+    with caplog.at_level(logging.WARNING, logger=gh_issues.log.name):
+        assert src.list_open_tasks() == []
+    assert src.read_failed is True
 
 
 def test_unconfigured_never_calls_gh_at_all(tmp_path, fake_gh):

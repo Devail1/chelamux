@@ -431,6 +431,12 @@ def test_tick_removes_the_worktree_when_the_tracker_line_is_struck_by_hand(ticki
 
     assert summary["reconciled_done"] == 1
     assert not wt_path.exists()
+    # 🔴 GUARD (CMX-363): this tick's tracker read SUCCEEDED, so the observability
+    # field must report False here, not just True on the failed-read tick below —
+    # the only prior assertion on this field was `is True`, so a version that always
+    # reports the literal constant `True` passed every existing test. See
+    # docs/defeat_shapes/363-observability-field-and-branch-flag-mounted-only-the-true-case.md.
+    assert summary["tracker_read_failed"] is False
 
 
 def test_tick_does_not_reconcile_a_review_row_when_the_tracker_read_fails(ticking):
