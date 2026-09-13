@@ -104,6 +104,34 @@ def test_reinstalls_when_shared_node_modules_exists_but_is_empty(tmp_path):
 
 
 @pytest.mark.skipif(not shutil.which("npm"), reason="npm is not installed")
+def test_reinstalls_when_shared_node_modules_is_partially_unpacked(tmp_path):
+    """#510: a present-and-NON-empty shared node_modules that is still missing the declared
+    package (e.g. an `npm ci` interrupted mid-unpack — #508's own issue names this as the
+    actual cause) satisfied the old `-z "$(ls -A ...)"` freshness check, since non-empty read
+    as installed even though jsdom itself was never unpacked."""
+    root = tmp_path / "worktrees"
+    root.mkdir()
+    wt = _make_worktree(root, "wt")
+
+    shared = root / ".npm-shared"
+    shared.mkdir()
+    shutil.copy(wt / "package.json", shared / "package.json")
+    shutil.copy(wt / "package-lock.json", shared / "package-lock.json")
+    node_modules = shared / "node_modules"
+    node_modules.mkdir()
+    (node_modules / "whatwg-url").mkdir()  # some OTHER package unpacked, jsdom is not
+
+    out = _run(wt)
+
+    assert out.returncode == 0, out.stderr
+    node_modules_wt = wt / "node_modules"
+    assert node_modules_wt.is_symlink()
+    assert (node_modules_wt.resolve() / "jsdom").is_dir(), (
+        "partially-unpacked shared node_modules was never repopulated"
+    )
+
+
+@pytest.mark.skipif(not shutil.which("npm"), reason="npm is not installed")
 def test_reinstalls_when_the_lockfile_actually_changes(tmp_path):
     """The staleness check has to actually work in the other direction too — a byte-different
     lockfile MUST invalidate the shared install, not reuse it forever."""
