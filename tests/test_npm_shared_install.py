@@ -80,6 +80,30 @@ def test_symlinks_into_one_shared_install_and_reuses_it(tmp_path):
 
 
 @pytest.mark.skipif(not shutil.which("npm"), reason="npm is not installed")
+def test_reinstalls_when_shared_node_modules_exists_but_is_empty(tmp_path):
+    """#508: a present-but-empty shared node_modules (e.g. an npm ci that never ran or died
+    mid-install) satisfies neither the lockfile-diff arm nor a plain `-d` existence check, so
+    the old freshness test read it as "already installed" and exited 0 having installed
+    nothing — every worktree then symlinked to a permanently-empty node_modules."""
+    root = tmp_path / "worktrees"
+    root.mkdir()
+    wt = _make_worktree(root, "wt")
+
+    shared = root / ".npm-shared"
+    shared.mkdir()
+    shutil.copy(wt / "package.json", shared / "package.json")
+    shutil.copy(wt / "package-lock.json", shared / "package-lock.json")
+    (shared / "node_modules").mkdir()  # exists, but empty — the bug state
+
+    out = _run(wt)
+
+    assert out.returncode == 0, out.stderr
+    node_modules = wt / "node_modules"
+    assert node_modules.is_symlink()
+    assert (node_modules.resolve() / "jsdom").is_dir(), "empty shared node_modules was never repopulated"
+
+
+@pytest.mark.skipif(not shutil.which("npm"), reason="npm is not installed")
 def test_reinstalls_when_the_lockfile_actually_changes(tmp_path):
     """The staleness check has to actually work in the other direction too — a byte-different
     lockfile MUST invalidate the shared install, not reuse it forever."""

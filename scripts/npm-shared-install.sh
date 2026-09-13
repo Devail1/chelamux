@@ -32,8 +32,12 @@ mkdir -p "$SHARED_ROOT"
 (
   flock -w 300 9 || { echo "npm-shared-install: timed out waiting for $LOCK_FILE" >&2; exit 1; }
 
+  # `-z "$(ls -A ...)"` (not just `-d`) because a present-but-empty node_modules — e.g. a
+  # previous npm ci that never ran or died mid-install — satisfies neither the lockfile-diff
+  # arm nor a plain existence check, so it was read as "already installed" forever (#508).
   if ! cmp -s package-lock.json "$SHARED_ROOT/package-lock.json" 2>/dev/null \
-     || [ ! -d "$SHARED_ROOT/node_modules" ]; then
+     || [ ! -d "$SHARED_ROOT/node_modules" ] \
+     || [ -z "$(ls -A "$SHARED_ROOT/node_modules" 2>/dev/null)" ]; then
     cp package.json package-lock.json "$SHARED_ROOT/"
     ( cd "$SHARED_ROOT" && npm ci --no-audit --no-fund --silent )
   fi
