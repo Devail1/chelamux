@@ -2497,12 +2497,18 @@ def check_no_new_guards(task_id: str) -> bool | None:
 def mark_awaiting_review(task_id: str) -> dict:
     """Transition a run from running → awaiting_review and kill its tmux window.
 
-    Called by the agent as its final step (via `chela task-finished <id>`)
-    once the PR is open and the in-branch strike is committed. Reads pr_url
-    from the agent's transcript *before* killing the window, since the
-    cwd/session-id mapping disappears with the window.
+    ⚖️🔒 issue #502 B1: this is now DAEMON-SIDE ONLY, called from `tick()` when it finds
+    the request marker `request_task_finished` leaves in the run's worktree — never
+    directly from the dispatched agent's own process anymore. Writing `runs` and reaching
+    the tmux control socket are exactly the two privileges a sandboxed agent must not
+    have: the first lets it rewrite every OTHER run's row, the second lets it `send-keys`
+    into ANY window (including the operator's) with no `from` attribution. Reads pr_url
+    from the agent's transcript *before* killing the window, since the cwd/session-id
+    mapping disappears with the window.
 
-    Returns a dict summary of what changed (used by the CLI for stdout).
+    Returns a dict summary of what changed (used by `tick()`'s own bookkeeping — nothing
+    downstream reads this over stdout anymore, since the CLI process that used to print it
+    is gone by the time this runs).
     """
     with _db() as conn:
         row = conn.execute(
@@ -2539,6 +2545,60 @@ def mark_awaiting_review(task_id: str) -> dict:
             "pr_state": pr_state,
             "pr_mergeable": pr_mergeable,
         }
+
+
+def _task_finished_request_path(worktree_path: str | Path) -> Path:
+    """Where a dispatched agent's `chela task-finished` drops its completion request —
+    inside its OWN worktree, a path it can already write whether or not it is sandboxed
+    (issue #502 B1). `tick()` polls for this file and applies it via
+    `mark_awaiting_review`. Same naming convention as `judge.experiments_path`, a sibling
+    per-worktree marker read cross-process."""
+    return Path(worktree_path) / ".chela-task-finished-request.json"
+
+
+def request_task_finished(task_id: str) -> dict:
+    """Record that a dispatched agent believes its work is done — called by `chela
+    task-finished`, IN PLACE OF the direct `mark_awaiting_review` call it used to make.
+
+    ⚖️🔒 issue #502 B1: `mark_awaiting_review` used to run INSIDE the dispatched agent's
+    own process and do two privileged things there — `UPDATE` the runs table and kill the
+    tmux window. Granting a sandboxed agent either of those makes the sandbox cosmetic: a
+    `~/.chela` write lets it rewrite every OTHER run's row (and the daemon's own config),
+    and the tmux control socket lets it `send-keys` into ANY window — including the
+    operator's — with no `from` attribution and therefore no cross-session banner.
+
+    So this writes a request marker into the run's OWN worktree instead (a path the agent
+    can already write, sandboxed or not) and returns immediately — the row stays
+    `claimed`/`running`. The daemon's `tick()`, unsandboxed and already polling every run,
+    picks the marker up on its next pass and calls `mark_awaiting_review` itself.
+
+    Same validation `mark_awaiting_review` used to do up front (unknown task_id, or a
+    status that isn't `claimed`/`running`, refuses) — `chela task-finished` still fails
+    those cases synchronously, in the agent's own process, exactly as before.
+    """
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM runs WHERE task_id=?", (task_id,)
+        ).fetchone()
+    if row is None:
+        return {"ok": False, "error": f"no run found for task_id {task_id}"}
+    if row["status"] not in ("claimed", "running"):
+        return {
+            "ok": False,
+            "error": f"run is in status {row['status']!r}, refusing to transition",
+            "task_id": task_id,
+        }
+    worktree_path = row["worktree_path"]
+    if not worktree_path:
+        return {
+            "ok": False,
+            "error": "run has no worktree_path on record — cannot request completion",
+            "task_id": task_id,
+        }
+    _task_finished_request_path(worktree_path).write_text(
+        json.dumps({"task_id": task_id, "requested_at": _now()}), encoding="utf-8",
+    )
+    return {"ok": True, "task_id": task_id, "requested": True}
 
 
 def mark_rework_disputed(task_id: str, reason: str) -> dict:
@@ -3769,6 +3829,7 @@ def tick(workflow_path: str | Path) -> dict:
         "reconciled_done": 0,
         "reconciled_closed": 0,
         "reconciled_failed": 0,
+        "task_finished_applied": 0,
         "dispatched": 0,
         "pr_state_refreshed": 0,
         "watchdog_renudged": 0,
@@ -4015,6 +4076,34 @@ def tick(workflow_path: str | Path) -> dict:
                 _cleanup_worktree_on_done(wf, row)
                 summary["reconciled_closed"] += 1
                 log.info("Task %s closed (PR closed without merging)", row["task_id"])
+                continue
+            # ⚖️🔒 issue #502 B1: a dispatched agent's `chela task-finished` no longer writes
+            # scheduler.db or touches tmux itself (see `request_task_finished`) — it drops a
+            # request marker in its OWN worktree, a path it can already write whether or not
+            # it is sandboxed. This is where the daemon (unsandboxed, already polling) picks
+            # the marker up and performs the actual transition + window kill on its behalf,
+            # via the same `mark_awaiting_review` the CLI used to call directly.
+            #
+            # Checked ahead of the tracker-based reconciliation below: the agent's own marker
+            # is direct completion evidence and must not wait on `open_ids`/
+            # `tracker_read_failed` — those gate "removed from the tracker", a weaker signal.
+            if (
+                row["status"] in ACTIVE_STATUSES
+                and row["worktree_path"]
+                and _task_finished_request_path(row["worktree_path"]).exists()
+            ):
+                applied = mark_awaiting_review(row["task_id"])
+                try:
+                    _task_finished_request_path(row["worktree_path"]).unlink()
+                except OSError:
+                    pass
+                if applied.get("ok"):
+                    summary["task_finished_applied"] += 1
+                    log.info("Task %s awaiting review (completion requested by the agent)",
+                              row["task_id"])
+                else:
+                    log.warning("Task %s: completion request could not be applied — %s",
+                                 row["task_id"], applied.get("error"))
                 continue
             # ⚖️🚪 CMX-276: `worktree_path IS NOT NULL` — an ADOPTED row (`adopt_pr`, a
             # hand-opened PR enrolled into this same gate) never went through `_spawn`'s
