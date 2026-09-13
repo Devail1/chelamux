@@ -1969,13 +1969,16 @@ def cmd_restore(args) -> None:
 
 
 def cmd_task_finished(args) -> None:
-    """Mark a dispatcher run as awaiting_review and kill its tmux window.
+    """Request that the dispatcher mark this run awaiting_review and kill its tmux window.
 
     Invoked by the agent as the last step of its workflow: PR is open, the
-    in-branch TODO strike is committed. chela transitions the row to
-    awaiting_review (so the dispatcher won't re-dispatch the task) and kills the
-    agent's tmux window. The row flips to `done` automatically on the next tick
-    after the user merges the PR (which removes the TODO line from the base branch).
+    in-branch TODO strike is committed. ⚖️🔒 issue #502 B1: this no longer does either
+    of those two things itself — `dispatcher.request_task_finished` drops a marker in
+    the run's own worktree (a path the agent can already write, sandboxed or not) and
+    the DAEMON applies it on its next tick, so the runs DB write and the tmux window
+    kill happen outside the dispatched agent's process. The row flips to `done`
+    automatically on the next tick after the user merges the PR (which removes the
+    TODO line from the base branch).
 
     ⚖️🔎 CMX-250: ``--self-check-experiments`` closes the gap CMX-249 left open — Done
     Criteria #3 ("run `chela judge self-check` before committing") was prose an agent could
@@ -2039,11 +2042,12 @@ def cmd_task_finished(args) -> None:
               "--self-check-experiments <path> (or --no-new-guards if this PR truly adds "
               "no guards) next time.")
 
-    result = dispatcher.mark_awaiting_review(args.task_id)
+    result = dispatcher.request_task_finished(args.task_id)
     if not result.get("ok"):
         print(f"task-finished: {result.get('error', 'unknown error')}")
         sys.exit(1)
-    print(f"Task {result['task_id']} awaiting review (pr_url={result.get('pr_url') or 'unknown'})")
+    print(f"Task {result['task_id']}: completion requested — chela will transition it to "
+          "awaiting review and close this window on its next pass.")
 
 
 def cmd_rework_disputed(args) -> None:

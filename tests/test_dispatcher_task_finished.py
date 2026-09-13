@@ -15,7 +15,7 @@ guarded, but every CLI test mocked ``dispatcher.verify_self_check`` with a canne
 neither the argument the CLI actually passes through nor an ``ok: False`` self-check ever
 met the real function. The "end-to-end" block below drives ``cmd_task_finished`` against
 the REAL ``verify_self_check`` (a real worktree, a real pytest subprocess), mocking only
-``mark_awaiting_review`` — closing that gap by construction rather than by inspection. The
+``request_task_finished`` — closing that gap by construction rather than by inspection. The
 ``check_no_new_guards`` block covers the opt-out review round 1 also asked for: a
 report-only cross-check of ``--no-new-guards`` against the run's own diff.
 """
@@ -605,7 +605,7 @@ def test_cmd_task_finished_refuses_transition_when_self_check_blocks(tmp_path, c
                        return_value={"ok": True, "blocking": 1, "cannot_verify": "",
                                      "outcomes": [{"verdict": "SURVIVED", "file": "guard.py",
                                                     "guard": "the glyph cue"}]}), \
-         patch.object(dispatcher, "mark_awaiting_review") as mark:
+         patch.object(dispatcher, "request_task_finished") as mark:
         with patch.object(sys, "argv", ["chela", "task-finished", "t1",
                                          "--self-check-experiments", str(tmp_path / "e.json")]):
             with pytest.raises(SystemExit) as exc:
@@ -628,7 +628,7 @@ def test_cmd_task_finished_refuses_transition_when_self_check_cannot_verify(tmp_
     with patch.object(dispatcher, "verify_self_check",
                        return_value={"ok": True, "blocking": 0,
                                      "cannot_verify": "the suite is NOT GREEN", "outcomes": []}), \
-         patch.object(dispatcher, "mark_awaiting_review") as mark:
+         patch.object(dispatcher, "request_task_finished") as mark:
         with patch.object(sys, "argv", ["chela", "task-finished", "t1",
                                          "--self-check-experiments", str(tmp_path / "e.json")]):
             with pytest.raises(SystemExit) as exc:
@@ -655,7 +655,7 @@ def test_cmd_task_finished_refuses_transition_when_a_required_mutation_is_missin
                                                     "guard": "an unrelated experiment"}],
                                      "missing_required": [{"guard": "the glyph cue",
                                                             "file": "guard.py"}]}), \
-         patch.object(dispatcher, "mark_awaiting_review") as mark:
+         patch.object(dispatcher, "request_task_finished") as mark:
         with patch.object(sys, "argv", ["chela", "task-finished", "t1",
                                          "--self-check-experiments", str(tmp_path / "e.json")]):
             with pytest.raises(SystemExit) as exc:
@@ -683,7 +683,7 @@ def test_cmd_task_finished_prints_every_missing_required_mutation_not_just_the_f
                                          {"guard": "the glyph cue", "file": "guard.py"},
                                          {"guard": "the hue cue", "file": "guard.py"},
                                      ]}), \
-         patch.object(dispatcher, "mark_awaiting_review") as mark:
+         patch.object(dispatcher, "request_task_finished") as mark:
         with patch.object(sys, "argv", ["chela", "task-finished", "t1",
                                          "--self-check-experiments", str(tmp_path / "e.json")]):
             with pytest.raises(SystemExit) as exc:
@@ -703,8 +703,8 @@ def test_cmd_task_finished_proceeds_when_self_check_is_clean(tmp_path, capsys):
                        return_value={"ok": True, "blocking": 0, "cannot_verify": "",
                                      "outcomes": [{"verdict": "KILLED", "file": "guard.py",
                                                     "guard": "the glyph cue"}]}), \
-         patch.object(dispatcher, "mark_awaiting_review",
-                       return_value={"ok": True, "task_id": "t1", "pr_url": "https://x/1"}):
+         patch.object(dispatcher, "request_task_finished",
+                       return_value={"ok": True, "task_id": "t1", "requested": True}):
         with patch.object(sys, "argv", ["chela", "task-finished", "t1",
                                          "--self-check-experiments", str(tmp_path / "e.json")]):
             main.main()      # falls through — no sys.exit on the clean path
@@ -721,8 +721,8 @@ def test_cmd_task_finished_no_new_guards_skips_self_check_and_proceeds(capsys):
     from chela import main
 
     with patch.object(dispatcher, "verify_self_check") as verify, \
-         patch.object(dispatcher, "mark_awaiting_review",
-                       return_value={"ok": True, "task_id": "t1", "pr_url": "https://x/1"}):
+         patch.object(dispatcher, "request_task_finished",
+                       return_value={"ok": True, "task_id": "t1", "requested": True}):
         with patch.object(sys, "argv", ["chela", "task-finished", "t1", "--no-new-guards"]):
             main.main()
     verify.assert_not_called()   # ⛔ --no-new-guards must never invoke self-check
@@ -741,8 +741,8 @@ def test_cmd_task_finished_with_neither_flag_warns_but_still_proceeds(capsys):
     from chela import main
 
     with patch.object(dispatcher, "verify_self_check") as verify, \
-         patch.object(dispatcher, "mark_awaiting_review",
-                       return_value={"ok": True, "task_id": "t1", "pr_url": "https://x/1"}):
+         patch.object(dispatcher, "request_task_finished",
+                       return_value={"ok": True, "task_id": "t1", "requested": True}):
         with patch.object(sys, "argv", ["chela", "task-finished", "t1"]):
             main.main()
     verify.assert_not_called()
@@ -761,7 +761,7 @@ def test_cmd_task_finished_with_neither_flag_warns_but_still_proceeds(capsys):
 # valid call to a mock), and whether an `ok: False` self-check truly refuses the
 # transition end to end. These drive `cmd_task_finished` against the REAL
 # `dispatcher.verify_self_check` (a real worktree, a real pytest subprocess), mocking only
-# `mark_awaiting_review` — git/tmux, not this gate.
+# `request_task_finished` — git/tmux, not this gate.
 
 
 def test_cmd_task_finished_end_to_end_blocks_on_a_surviving_guard(tmp_path, capsys):
@@ -773,7 +773,7 @@ def test_cmd_task_finished_end_to_end_blocks_on_a_surviving_guard(tmp_path, caps
     exp_path.write_text(json.dumps({"experiments": [_exp()]}))
     _insert_run("t1", root, wf)
 
-    with patch.object(dispatcher, "mark_awaiting_review") as mark:
+    with patch.object(dispatcher, "request_task_finished") as mark:
         with patch.object(sys, "argv", ["chela", "task-finished", "t1",
                                          "--self-check-experiments", str(exp_path)]):
             with pytest.raises(SystemExit) as exc:
@@ -798,9 +798,9 @@ def test_cmd_task_finished_end_to_end_proceeds_when_every_guard_holds(tmp_path, 
     exp_path.write_text(json.dumps({"experiments": [_exp()]}))
     _insert_run("t1", root, wf)
 
-    with patch.object(dispatcher, "mark_awaiting_review",
+    with patch.object(dispatcher, "request_task_finished",
                        return_value={"ok": True, "task_id": "t1",
-                                     "pr_url": "https://x/1"}) as mark:
+                                     "requested": True}) as mark:
         with patch.object(sys, "argv", ["chela", "task-finished", "t1",
                                          "--self-check-experiments", str(exp_path)]):
             main.main()
@@ -820,7 +820,7 @@ def test_cmd_task_finished_end_to_end_refuses_when_self_check_cannot_run(tmp_pat
     wf = _workflow_md(tmp_path)
     _insert_run("t1", root, wf)
 
-    with patch.object(dispatcher, "mark_awaiting_review") as mark:
+    with patch.object(dispatcher, "request_task_finished") as mark:
         with patch.object(sys, "argv", ["chela", "task-finished", "t1",
                                          "--self-check-experiments",
                                          str(tmp_path / "no-such-experiments.json")]):
@@ -845,7 +845,7 @@ def test_cmd_task_finished_reports_the_exact_error_text_when_self_check_could_no
 
     with patch.object(dispatcher, "verify_self_check",
                        return_value={"ok": False, "error": "a very specific reason"}), \
-         patch.object(dispatcher, "mark_awaiting_review") as mark:
+         patch.object(dispatcher, "request_task_finished") as mark:
         with patch.object(sys, "argv", ["chela", "task-finished", "t1",
                                          "--self-check-experiments", "e.json"]):
             with pytest.raises(SystemExit) as exc:
@@ -874,9 +874,9 @@ def test_cmd_task_finished_self_check_forwards_its_own_task_id_not_a_hardcoded_o
     with patch.object(dispatcher, "verify_self_check",
                        return_value={"ok": True, "blocking": 0, "cannot_verify": "",
                                      "outcomes": []}) as verify, \
-         patch.object(dispatcher, "mark_awaiting_review",
+         patch.object(dispatcher, "request_task_finished",
                        return_value={"ok": True, "task_id": "cmx-777",
-                                     "pr_url": "https://x/1"}):
+                                     "requested": True}):
         with patch.object(sys, "argv", ["chela", "task-finished", "cmx-777",
                                          "--self-check-experiments", "e.json"]):
             main.main()
@@ -1296,8 +1296,8 @@ def test_cmd_task_finished_no_new_guards_warns_when_diff_touches_tests(capsys):
     from chela import main
 
     with patch.object(dispatcher, "check_no_new_guards", return_value=True) as check, \
-         patch.object(dispatcher, "mark_awaiting_review",
-                       return_value={"ok": True, "task_id": "t1", "pr_url": "https://x/1"}):
+         patch.object(dispatcher, "request_task_finished",
+                       return_value={"ok": True, "task_id": "t1", "requested": True}):
         with patch.object(sys, "argv", ["chela", "task-finished", "t1", "--no-new-guards"]):
             main.main()      # ⛔ report-only: warns but still proceeds
     check.assert_called_once_with("t1")
@@ -1310,8 +1310,8 @@ def test_cmd_task_finished_no_new_guards_silent_when_diff_is_clean(capsys):
     from chela import main
 
     with patch.object(dispatcher, "check_no_new_guards", return_value=False), \
-         patch.object(dispatcher, "mark_awaiting_review",
-                       return_value={"ok": True, "task_id": "t1", "pr_url": "https://x/1"}):
+         patch.object(dispatcher, "request_task_finished",
+                       return_value={"ok": True, "task_id": "t1", "requested": True}):
         with patch.object(sys, "argv", ["chela", "task-finished", "t1", "--no-new-guards"]):
             main.main()
     out = capsys.readouterr().out
@@ -1329,8 +1329,8 @@ def test_cmd_task_finished_no_new_guards_silent_when_diff_is_unknown(capsys):
     from chela import main
 
     with patch.object(dispatcher, "check_no_new_guards", return_value=None) as check, \
-         patch.object(dispatcher, "mark_awaiting_review",
-                       return_value={"ok": True, "task_id": "t1", "pr_url": "https://x/1"}):
+         patch.object(dispatcher, "request_task_finished",
+                       return_value={"ok": True, "task_id": "t1", "requested": True}):
         with patch.object(sys, "argv", ["chela", "task-finished", "t1", "--no-new-guards"]):
             main.main()
     check.assert_called_once_with("t1")
@@ -1353,9 +1353,9 @@ def test_cmd_task_finished_no_new_guards_forwards_its_own_task_id_not_a_hardcode
     from chela import main
 
     with patch.object(dispatcher, "check_no_new_guards", return_value=False) as check, \
-         patch.object(dispatcher, "mark_awaiting_review",
+         patch.object(dispatcher, "request_task_finished",
                        return_value={"ok": True, "task_id": "cmx-777",
-                                     "pr_url": "https://x/1"}):
+                                     "requested": True}):
         with patch.object(sys, "argv", ["chela", "task-finished", "cmx-777", "--no-new-guards"]):
             main.main()
     check.assert_called_once_with("cmx-777")
@@ -1370,7 +1370,7 @@ def test_cmd_task_finished_no_new_guards_forwards_its_own_task_id_not_a_hardcode
 # has EIGHT `task-finished:` / self-check print sites (the both-flags rejection, the
 # self-check-could-not-run refusal, the guards-SURVIVED refusal, the CANNOT-VERIFY refusal,
 # the --no-new-guards tests/-touched notice, the --no-new-guards unconditional skip-line, the
-# neither-flag notice, and the mark_awaiting_review failure) — this table has one row per
+# neither-flag notice, and the request_task_finished failure) — this table has one row per
 # site.
 #
 # ⛔ Round 14: this table is HAND-MAINTAINED, deliberately, and NOT backed by an automated
@@ -1447,8 +1447,8 @@ _TASK_FINISHED_SCENARIOS = [
         argv_extra=["--no-new-guards"],
         setup=lambda: {
             "dispatcher.check_no_new_guards": dict(return_value=True),
-            "dispatcher.mark_awaiting_review": dict(return_value={
-                "ok": True, "task_id": "cmx-905", "pr_url": "https://x/1"}),
+            "dispatcher.request_task_finished": dict(return_value={
+                "ok": True, "task_id": "cmx-905", "requested": True}),
         },
         expect_exit=None,
         # ⛔ CMX-258 rework round 10 (judge finding 2): "touches tests/" and "skipping
@@ -1466,8 +1466,8 @@ _TASK_FINISHED_SCENARIOS = [
         argv_extra=["--no-new-guards"],
         setup=lambda: {
             "dispatcher.check_no_new_guards": dict(return_value=False),
-            "dispatcher.mark_awaiting_review": dict(return_value={
-                "ok": True, "task_id": "cmx-908", "pr_url": "https://x/1"}),
+            "dispatcher.request_task_finished": dict(return_value={
+                "ok": True, "task_id": "cmx-908", "requested": True}),
         },
         expect_exit=None,
         # ⛔ CMX-258 rework round 13 (judge finding 2): the unconditional "skipping
@@ -1486,8 +1486,8 @@ _TASK_FINISHED_SCENARIOS = [
         task_id="cmx-907",
         argv_extra=[],
         setup=lambda: {
-            "dispatcher.mark_awaiting_review": dict(return_value={
-                "ok": True, "task_id": "cmx-907", "pr_url": "https://x/1"}),
+            "dispatcher.request_task_finished": dict(return_value={
+                "ok": True, "task_id": "cmx-907", "requested": True}),
         },
         expect_exit=None,
         # ⛔ CMX-258 rework round 11 (judge finding 1): the neither-flag notice — the one an
@@ -1501,16 +1501,16 @@ _TASK_FINISHED_SCENARIOS = [
                       "--no-new-guards if this PR truly adds no guards"],
     ),
     dict(
-        name="mark_awaiting_review_fails",
+        name="request_task_finished_fails",
         task_id="cmx-906",
         argv_extra=[],
         setup=lambda: {
-            "dispatcher.mark_awaiting_review": dict(return_value={
+            "dispatcher.request_task_finished": dict(return_value={
                 "ok": False, "error": "run is in status 'done', refusing to transition"}),
         },
         expect_exit=1,
         must_contain=["task-finished:", "run is in status 'done', refusing to transition"],
-        forward=("dispatcher.mark_awaiting_review", ("cmx-906",)),
+        forward=("dispatcher.request_task_finished", ("cmx-906",)),
     ),
 ]
 

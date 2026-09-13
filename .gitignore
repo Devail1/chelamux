@@ -61,9 +61,17 @@ TODO.md
 *selfcheck*.json
 *scratch*experiment*.json
 
-# `chela judge` scratch file — `chela.judge.experiments_path()` always writes this exact
-# literal name inside the judge's own throwaway worktree, so unlike the self-check files
-# above there's no spelling variance to glob for. Reached a branch on cmx-314/PR #392
-# (same class as the self-check leak fixed in d77c2c4 via CMX-282): a tracked copy makes
-# the judge's worktree dirty the moment it starts, so it refuses to run at all.
-.chela-judge-experiments.json
+# Daemon/CLI-authored per-worktree marker files — `chela.judge.experiments_path()` and
+# `dispatcher._task_finished_request_path()` each write ONE fixed literal name (unlike the
+# self-check files above, there is no agent-invented spelling variance to glob for: the
+# producer is a single function, not an agent guessing a filename). Reached a branch on
+# cmx-314/PR #392 for the judge file (same class as the self-check leak fixed in d77c2c4 via
+# CMX-282): a tracked copy makes the judge's worktree dirty the moment it starts, so it
+# refuses to run at all. issue #502 rework round 1: the task-finished marker hit the exact
+# same gap — `.chela-task-finished-request.json` matched neither the self-check globs above
+# (no `self-check` in the name) nor the old judge-file's exact-literal rule (a different
+# name) — so it showed up untracked in a rework agent's worktree. One glob for the whole
+# `.chela-*.json` family, chosen over a third/fourth exact literal: every marker in this
+# family is a single-source daemon/CLI-owned filename, so nothing legitimate is meant to be
+# tracked under it, and the next one added won't need its own line here.
+.chela-*.json

@@ -61,3 +61,35 @@ def test_gitignore_matches_a_real_self_check_scratch_filename(probe):
         "(git check-ignore exit code "
         f"{result.returncode}: {result.stderr.decode(errors='replace')!r})"
     )
+
+
+# issue #502 rework round 1: `.chela-task-finished-request.json` — the completion-request
+# marker `dispatcher._task_finished_request_path()` drops in a dispatched agent's own
+# worktree — matched NEITHER of the two rules that existed for `.chela-*.json` files before
+# this list: `.chela-self-check-*.json` needs the literal "self-check", and
+# `.chela-judge-experiments.json` (itself never probed by a test until now — the same class
+# of untested literal CMX-286/337 already burned this file for) is an exact, different name.
+# So the marker showed up untracked in a REWORK agent's worktree — exactly the worktree that
+# then commits from it. Both real filenames below are single-source, daemon/CLI-owned names
+# (see the `.gitignore` comment), so — unlike the self-check family above — there is no
+# "every spelling on record" list to keep: one glob, two real names to prove it against.
+REAL_CHELA_MARKER_FILENAMES = [
+    ".chela-judge-experiments.json",
+    ".chela-task-finished-request.json",
+]
+
+
+@pytest.mark.parametrize("probe", REAL_CHELA_MARKER_FILENAMES)
+def test_gitignore_matches_a_real_chela_marker_filename(probe):
+    # A rework agent's `git add <paths>` must never be able to pick one of these up — a
+    # daemon-owned marker committed into a PR is either dead weight (the judge worktree) or,
+    # worse, a stale completion request replayed on the next clone/checkout.
+    result = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "check-ignore", "-q", "--", probe],
+        capture_output=True,
+    )
+    assert result.returncode == 0, (
+        f"{probe} is not matched by .gitignore — the .chela-*.json marker pattern is broken "
+        "(git check-ignore exit code "
+        f"{result.returncode}: {result.stderr.decode(errors='replace')!r})"
+    )
