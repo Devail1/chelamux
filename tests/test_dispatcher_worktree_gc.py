@@ -11,6 +11,7 @@ the branch (task_number collision avoidance still needs it, see
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -19,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from chela import config, dispatcher, worktree
+from chela.sources import markdown as markdown_module
 from chela.sources.markdown import MarkdownSource
 from chela.workflow import WorkflowDef
 
@@ -439,19 +441,30 @@ def test_tick_removes_the_worktree_when_the_tracker_line_is_struck_by_hand(ticki
     assert summary["tracker_read_failed"] is False
 
 
-def test_tick_does_not_reconcile_a_review_row_when_the_tracker_read_fails(ticking):
+@pytest.mark.parametrize("seeded_status", dispatcher.REVIEW_STATUSES)
+def test_tick_does_not_reconcile_a_review_row_when_the_tracker_read_fails(ticking, seeded_status):
     """🔴 GUARD (CMX-363, Symphony SPEC 11.1): a FAILED tracker read must not be read
     as an EMPTY queue. Before this, deleting TODO.md (its gitignored-local-queue
     accident — a `git clean -xdf` — see MarkdownSource.list_open_tasks) made `alpha`
     vanish from `open_ids` exactly like a genuine strike would, and the very next
-    tick reconciled the live `awaiting_review` row straight to `done`, killed its
+    tick reconciled the live REVIEW-status row straight to `done`, killed its
     window and deleted its worktree — for work that never shipped.
+
+    Parametrized over EVERY member of `REVIEW_STATUSES`, not just `awaiting_review`:
+    the gate this pins (`chela/dispatcher.py`, the `not tracker_read_failed` clause)
+    is one boolean shared by all three statuses in the same `if`, so a carve-out for
+    any one of them (e.g. `row["status"] != "awaiting_review"`) would still pass a
+    single-fixture version of this test. See
+    docs/defeat_shapes/363d-a-tuple-membership-gate-fixtured-on-one-member-carves-open-the-others.md.
     """
     repo = ticking
     wf_path = repo / "WORKFLOW.md"
     alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
     worktrees_root = repo.parent / ".chela" / "worktrees"
     wt_path = _seed_run_with_worktree(repo, wf_path, alpha, worktrees_root)
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET status=? WHERE task_id=?", (seeded_status, alpha))
+        conn.commit()
     assert wt_path.is_dir()
 
     (repo / "TODO.md").unlink()  # simulate the blip: the tracker file is just gone
@@ -465,7 +478,28 @@ def test_tick_does_not_reconcile_a_review_row_when_the_tracker_read_fails(tickin
         status = conn.execute(
             "SELECT status FROM runs WHERE task_id=?", (alpha,)
         ).fetchone()["status"]
-    assert status == "awaiting_review"
+    assert status == seeded_status
+
+
+def test_a_failed_markdown_tracker_read_logs_at_WARNING(ticking, caplog):
+    """🔴 GUARD (CMX-363): a vanished TODO.md must be reported at WARNING, not merely
+    set the `read_failed` flag silently — it is the only operator-visible signal that
+    a `git clean -xdf` (or similar) has frozen review reconciliation for this
+    workflow. Mirrors gh_issues' `test_unconfigured_refuses_and_SAYS_SO` ('refusing to
+    claim work must be stated, not silent'), which markdown lacked. See
+    docs/defeat_shapes/363d-a-tuple-membership-gate-fixtured-on-one-member-carves-open-the-others.md.
+    """
+    repo = ticking
+    src = _source(repo)
+    (repo / "TODO.md").unlink()
+
+    with caplog.at_level(logging.WARNING, logger=markdown_module.log.name):
+        assert src.list_open_tasks() == []
+
+    assert src.read_failed is True
+    assert any("does not exist" in r.getMessage() for r in caplog.records), (
+        "a failed tracker read must be stated, not silent"
+    )
 
 
 def test_cleanup_on_done_passes_the_CONFIGURED_root_not_a_permissive_one(ticking, monkeypatch, tmp_path):
