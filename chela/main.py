@@ -2050,6 +2050,35 @@ def cmd_task_finished(args) -> None:
           "awaiting review and close this window on its next pass.")
 
 
+def cmd_request_push(args) -> None:
+    """Request that the dispatcher push this run's branch (and, on a first dispatch, open
+    its PR) — issue #502 B2. Done Criteria step 5 used to run `git push` then `gh pr
+    create` in the agent's OWN process; both need the GitHub token, and masking cannot
+    rescue the push half. `gh` sends `Authorization: token <token>` verbatim, so the
+    sandbox's credential proxy substitutes it — but `git` sends `Authorization: Basic
+    base64(user:token)`, the token is never present verbatim, nothing is substituted, and
+    GitHub rejects the push (measured in docs/SANDBOX_BOUNDARY.md §5 B2). So neither command
+    runs here anymore: this writes a request marker into the run's own worktree instead —
+    `dispatcher.request_push`, a path the agent can already write, sandboxed or not — and the
+    DAEMON pushes the branch (and opens the PR) on its next tick, in its own unsandboxed
+    process, where the token never left in the first place.
+
+    ``--pr-title`` is for a FIRST dispatch, where there is no PR yet; omit it on a rework —
+    the PR already exists, and pushing new commits to the same branch updates it on its own.
+    ``--pr-body-file`` mirrors ``chela review``'s own convention: a PR body is long-form
+    markdown, and a shell argument is how one arrives mangled or truncated.
+    """
+    body = None
+    if args.pr_body_file:
+        body = sys.stdin.read() if args.pr_body_file == "-" else Path(args.pr_body_file).read_text()
+    result = dispatcher.request_push(args.task_id, pr_title=args.pr_title, pr_body=body)
+    if not result.get("ok"):
+        print(f"request-push: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    print(f"Task {result['task_id']}: push requested — chela will push the branch"
+          + (" and open the PR" if args.pr_title else "") + " on its next pass.")
+
+
 def cmd_rework_disputed(args) -> None:
     """⏳🪤 CMX-248 (re-scope of CMX-244), 🔀 CMX-251. A rework agent's escape hatch for
     "there is nothing to push."
@@ -3026,6 +3055,25 @@ def main() -> None:
              "against this run's own diff for tests/ changes.",
     )
 
+    # request-push — commit locally, then ask the DAEMON to push + open the PR
+    # (issue #502 B2)
+    p_rp = sub.add_parser(
+        "request-push",
+        help="Request that the dispatcher push this run's branch (and open its PR on a "
+             "first dispatch) instead of running git push/gh pr create yourself",
+    )
+    p_rp.add_argument("task_id")
+    p_rp.add_argument(
+        "--pr-title", default=None, metavar="TITLE",
+        help="Open a NEW PR with this title. Omit on a rework — the PR already exists "
+             "and a push alone updates it",
+    )
+    p_rp.add_argument(
+        "--pr-body-file", default=None, metavar="PATH",
+        help="Read the PR body from PATH, or from stdin with '-'. A PR body is long-form "
+             "markdown and must never be shell-quoted",
+    )
+
     # rework-disputed — the rework agent's "nothing to push" escape hatch
     # (CMX-248, re-scope of CMX-244)
     p_rd = sub.add_parser(
@@ -3113,6 +3161,8 @@ def main() -> None:
         cmd_dashboard(args)
     elif args.command == "task-finished":
         cmd_task_finished(args)
+    elif args.command == "request-push":
+        cmd_request_push(args)
     elif args.command == "rework-disputed":
         cmd_rework_disputed(args)
     elif args.command == "review":

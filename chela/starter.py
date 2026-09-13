@@ -82,9 +82,13 @@ Make your changes here, not in the main checkout.
 3. **Commit in the worktree.** Stage only the files you intentionally changed
    (`git add <paths>` — never `git add -A`). Confirm with `git status` and
    `git diff --cached --stat` before committing.
-4. **Push and open a PR.** `git push -u origin {{branch_name}}` then
-   `gh pr create --base {{base_branch}} --title "{{project_key}}-{{task_number}}: <summary>" --body ...`.
-   Put the task ID `{{task_id}}` in the body so the run is traceable.
+4. **Request the push and PR — do NOT run `git push` or `gh pr create` yourself.**
+   Neither survives a sandboxed agent process (masking the GitHub token keeps `gh`
+   working but not `git push`, which sends it Basic-encoded rather than verbatim). Write
+   your PR body to a file, then run:
+   `chela request-push {{task_id}} --pr-title "{{project_key}}-{{task_number}}: <summary>" --pr-body-file <path>`
+   (put the task ID `{{task_id}}` in the body so the run is traceable). chela pushes
+   `{{branch_name}}` and opens the PR against `{{base_branch}}` on its next pass.
 5. **Run `chela task-finished {{task_id}}` as your last step.** This marks the
    run `awaiting_review`, records the PR URL, and kills your tmux window.
 

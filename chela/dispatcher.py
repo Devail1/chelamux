@@ -51,6 +51,10 @@ log = logging.getLogger(__name__)
 DB_PATH = CHELA_DIR / "scheduler.db"
 MAX_ATTEMPTS = 3
 DONE_HISTORY_PER_WORKFLOW = 50
+# issue #502 B2: how many ticks a push/PR-open request gets to succeed before it escalates
+# to a human — a flake (a network blip) costs a retry, not an infinite silent loop pinning
+# the run's concurrency slot forever.
+PUSH_REQUEST_MAX_ATTEMPTS = 5
 
 # --- the run states, and which of them mean what -----------------------------
 #
@@ -2608,6 +2612,138 @@ def request_task_finished(task_id: str) -> dict:
     return {"ok": True, "task_id": task_id, "requested": True}
 
 
+def _push_request_path(worktree_path: str | Path) -> Path:
+    """Where a dispatched agent's `chela request-push` drops its push/PR-open request —
+    inside its OWN worktree, alongside `_task_finished_request_path` (issue #502 B2). Same
+    family, same reason: a path the agent can already write whether or not it is
+    sandboxed. `tick()` polls for this file and applies it via `_apply_push_request`,
+    checked BEFORE the task-finished marker on every pass — a PR has to actually exist
+    before `mark_awaiting_review` puts the run in front of a reviewer."""
+    return Path(worktree_path) / ".chela-push-request.json"
+
+
+def request_push(task_id: str, *, pr_title: str | None = None, pr_body: str | None = None) -> dict:
+    """Record that a dispatched agent has committed locally and wants its branch pushed
+    and — on a first dispatch — a PR opened. Called by `chela request-push`, IN PLACE OF
+    the agent running `git push` / `gh pr create` itself.
+
+    ⚖️🔒 issue #502 B2, measured in docs/SANDBOX_BOUNDARY.md §5 B2: masking the GitHub
+    token cannot rescue this Done Criteria step. `gh` sends `Authorization: token
+    <token>` verbatim, so the sandbox proxy's substring substitution catches it — but `git`
+    sends `Authorization: Basic base64(user:token)`, the token is never present verbatim in
+    that header, nothing is substituted, and GitHub rejects the push with `Invalid username
+    or token`. Moving the hop is strictly stronger than masking it harder: if the agent
+    never runs either command, the token never has to enter its process, sandboxed or not.
+
+    So this writes a request marker into the run's OWN worktree (a path the agent can
+    already write, sandboxed or not) and returns immediately — same shape as
+    `request_task_finished`. `tick()`, unsandboxed and already polling every run, picks the
+    marker up, pushes the branch, and — only when this row has no `pr_url` yet — opens the
+    PR with `pr_title`/`pr_body` verbatim. A rework calls this with neither: the PR already
+    exists, so only the push runs.
+
+    Same validation `request_task_finished` does up front: an unknown task_id, or a status
+    that isn't `claimed`/`running`, refuses; a row with no `worktree_path` on record refuses
+    too.
+    """
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM runs WHERE task_id=?", (task_id,)
+        ).fetchone()
+    if row is None:
+        return {"ok": False, "error": f"no run found for task_id {task_id}"}
+    if row["status"] not in ("claimed", "running"):
+        return {
+            "ok": False,
+            "error": f"run is in status {row['status']!r}, refusing to transition",
+            "task_id": task_id,
+        }
+    worktree_path = row["worktree_path"]
+    if not worktree_path:
+        return {
+            "ok": False,
+            "error": "run has no worktree_path on record — cannot request a push",
+            "task_id": task_id,
+        }
+    _push_request_path(worktree_path).write_text(
+        json.dumps({
+            "task_id": task_id, "requested_at": _now(),
+            "pr_title": pr_title, "pr_body": pr_body, "attempts": 0,
+        }),
+        encoding="utf-8",
+    )
+    return {"ok": True, "task_id": task_id, "requested": True}
+
+
+def _apply_push_request(conn: sqlite3.Connection, wf: WorkflowDef, row: sqlite3.Row) -> dict:
+    """Daemon-side (issue #502 B2): perform the `git push` — and, on a first dispatch, the
+    `gh pr create` — a dispatched agent used to run itself. Runs here, in the dispatcher's
+    own unsandboxed process, so the token never has to reach the agent's.
+
+    `gh pr create` fires exactly once per run, gated on `row["pr_url"]` being empty rather
+    than on anything in the marker itself — a rework's marker never carries `pr_title` (the
+    PR already exists), and a daemon restart or a retried tick between a successful push and
+    a since-failed PR-open can never open a second PR for the same branch, because the first
+    PR that succeeds is what clears the gate.
+    """
+    worktree_path = row["worktree_path"]
+    try:
+        marker = json.loads(_push_request_path(worktree_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return {"ok": False, "error": f"could not read push request marker: {e}"}
+
+    branch = row["branch_name"]
+    if not branch:
+        return {"ok": False, "error": "run has no branch_name on record"}
+
+    push = _git(Path(worktree_path), "push", "-u", "origin", branch,
+                timeout=GIT_NET_TIMEOUT_SECONDS)
+    if not _git_ok(push):
+        detail = (push.stderr or push.stdout).strip() if push is not None else (
+            "git push timed out or git is missing")
+        return {"ok": False, "error": f"git push failed: {detail}"[:500]}
+
+    pr_url = row["pr_url"]
+    pr_title = marker.get("pr_title")
+    if not pr_url and pr_title:
+        base_branch = wf.get("workspace", "base_branch", default="master")
+        try:
+            create = subprocess.run(
+                ["gh", "pr", "create", "--base", base_branch,
+                 "--title", pr_title, "--body", marker.get("pr_body") or ""],
+                cwd=str(worktree_path), capture_output=True, text=True,
+                timeout=GIT_NET_TIMEOUT_SECONDS,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            return {"ok": False, "error": f"gh pr create failed: {e}"}
+        if create.returncode != 0:
+            detail = (create.stderr or create.stdout or "gh pr create failed").strip()
+            return {"ok": False, "error": f"gh pr create failed: {detail}"[:500]}
+        pr_url = (create.stdout or "").strip().splitlines()[-1] if create.stdout.strip() else None
+        if pr_url:
+            conn.execute("UPDATE runs SET pr_url=? WHERE task_id=?", (pr_url, row["task_id"]))
+            conn.commit()
+    return {"ok": True, "pr_url": pr_url}
+
+
+def _bump_push_request_attempts(worktree_path: str | Path) -> int:
+    """Record one more failed application of the push/PR-open marker, IN the marker itself
+    — no new DB column, same self-contained shape the marker already has. Returns the new
+    attempt count so the caller can decide whether to escalate."""
+    path = _push_request_path(worktree_path)
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        marker = {}
+    attempts = int(marker.get("attempts") or 0) + 1
+    marker["attempts"] = attempts
+    try:
+        path.write_text(json.dumps(marker), encoding="utf-8")
+    except OSError:
+        pass
+    return attempts
+
+
 def mark_rework_disputed(task_id: str, reason: str) -> dict:
     """⏳🪤 CMX-248 (re-scope of CMX-244), 🔀 CMX-251. Transition a REWORK IN FLIGHT to
     ``needs_human`` — or, when the head has already moved past the disputed verdict,
@@ -3836,6 +3972,7 @@ def tick(workflow_path: str | Path) -> dict:
         "reconciled_done": 0,
         "reconciled_closed": 0,
         "reconciled_failed": 0,
+        "push_applied": 0,
         "task_finished_applied": 0,
         "dispatched": 0,
         "pr_state_refreshed": 0,
@@ -4083,6 +4220,53 @@ def tick(workflow_path: str | Path) -> dict:
                 _cleanup_worktree_on_done(wf, row)
                 summary["reconciled_closed"] += 1
                 log.info("Task %s closed (PR closed without merging)", row["task_id"])
+                continue
+            # ⚖️🔒 issue #502 B2: a dispatched agent's `chela request-push` no longer runs
+            # `git push`/`gh pr create` itself (see `request_push`) — it drops a request
+            # marker in its OWN worktree, a path it can already write whether or not it is
+            # sandboxed. This is where the daemon (unsandboxed, already polling) picks the
+            # marker up and pushes the branch (opening the PR too, on a first dispatch).
+            #
+            # Checked ahead of the task-finished marker below, on purpose: an agent commits,
+            # requests the push, then immediately requests task-finished, all before the
+            # daemon's next tick ever runs — so both markers can exist at once. Applying
+            # this one first (and `continue`-ing, deferring task-finished to a LATER tick)
+            # means `mark_awaiting_review` never fires until a real PR exists to review.
+            if (
+                row["status"] in ACTIVE_STATUSES
+                and row["worktree_path"]
+                and _push_request_path(row["worktree_path"]).exists()
+            ):
+                applied = _apply_push_request(conn, wf, row)
+                if applied.get("ok"):
+                    try:
+                        _push_request_path(row["worktree_path"]).unlink()
+                    except OSError:
+                        pass
+                    summary["push_applied"] += 1
+                    opened = applied.get("pr_url") and not row["pr_url"]
+                    log.info(
+                        "Task %s: branch %s pushed%s", row["task_id"], row["branch_name"],
+                        f" and PR opened ({applied['pr_url']})" if opened else "",
+                    )
+                else:
+                    attempts = _bump_push_request_attempts(row["worktree_path"])
+                    log.warning(
+                        "Task %s: push/PR-open request could not be applied (attempt %s/%s) — %s",
+                        row["task_id"], attempts, PUSH_REQUEST_MAX_ATTEMPTS, applied.get("error"),
+                    )
+                    if attempts >= PUSH_REQUEST_MAX_ATTEMPTS:
+                        _escalate(
+                            conn, row,
+                            f"the agent requested a push/PR-open via `chela request-push`, "
+                            f"but the daemon could not apply it after {attempts} attempt(s): "
+                            f"{applied.get('error')}. The request marker in the worktree is "
+                            "preserved as evidence.",
+                            recommendation="Inspect the worktree, push the branch and open "
+                                           "the PR by hand, then `chela reopen` if the work "
+                                           "is actually done",
+                        )
+                        summary["escalated"] += 1
                 continue
             # ⚖️🔒 issue #502 B1: a dispatched agent's `chela task-finished` no longer writes
             # scheduler.db or touches tmux itself (see `request_task_finished`) — it drops a
@@ -5267,8 +5451,10 @@ existing PR updates itself.
    file MUST include each one **verbatim** (copy the JSON, do not retype it) alongside any
    new experiments of your own: `task-finished` re-checks this and refuses if one is
    missing while the code it targets is still there to test.
-4. Stage only what you changed (`git add <paths>` — never `git add -A`), commit, and
-   `git push`.
+4. Stage only what you changed (`git add <paths>` — never `git add -A`) and commit.
+   Do NOT `git push` yourself (issue #502 B2 — the sandbox's credential masking cannot
+   rescue it): run `chela request-push {{task_id}}` instead, with no `--pr-title` — the
+   PR already exists, so this only pushes your new commit onto it.
 5. Run `chela task-finished {{task_id}}` as your last step — it puts the run back in
    `awaiting_review` and wakes the reviewer.
 

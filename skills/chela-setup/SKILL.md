@@ -108,8 +108,10 @@ from `{{base_branch}}`). Make changes here, not in the main checkout.
 2. Validate: run the project's linter/tests if they exist; fix what you broke.
 3. Commit in the worktree. Stage only files you intentionally changed
    (`git add <paths>` — never `git add -A`).
-4. Push and open a PR: `git push -u origin {{branch_name}}` then
-   `gh pr create --base {{base_branch}} --title "{{project_key}}-{{task_number}}: <summary>" --body ...`
+4. Request the push and PR — do NOT run `git push` or `gh pr create` yourself (masking
+   the GitHub token keeps `gh` working but not `git push`, which sends it Basic-encoded
+   rather than verbatim). Write the PR body to a file, then run:
+   `chela request-push {{task_id}} --pr-title "{{project_key}}-{{task_number}}: <summary>" --pr-body-file <path>`
    (put `{{task_id}}` in the body).
 5. Run `chela task-finished {{task_id}}` as your last step — marks the run
    `awaiting_review`, records the PR URL, and kills your tmux window.
