@@ -10,12 +10,36 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.12.2] — 2026-09-13
+
+### Added
+
+- **`docs/TRUST_AND_APPROVAL_POSTURE.md` — one page answering who can start an agent, what it
+  can do while running, and what its output needs before it changes anything real.** Nothing in
+  it is new behaviour: the `require_label` gate, `--permission-mode auto`, `--strict-mcp-config`,
+  the pinned judge model, `workspace_escape` and `contract.merge`'s clause list all already
+  existed, in four different places. Written to satisfy Symphony SPEC §1 / §10.5's MUST that an
+  implementation document its chosen approval, sandbox and operator-confirmation posture, so a
+  conformance reader has one citable page instead of four. States plainly what is *not* covered:
+  dispatched agents are not sandboxed, which remains the blocker on unattended operation.
+  (CMX-364)
+
 ### Fixed
 
 - **A failed tracker read was indistinguishable from a genuinely empty queue.** Both
   `GhIssuesSource` and `MarkdownSource` now expose `read_failed`, and `tick()` skips
   absence-implies-completion reconciliation on a tick where the read failed instead of
   treating a broken `gh` call or an unreadable tracker file as "no open tasks." (CMX-363)
+
+- **The `gh_issues` tracker dispatched newest-first and threw the issue body away.** `gh issue
+  list` returns created-descending and nothing re-sorted it — `_claim_order` preserves source
+  order and `_ready` only filters — so a `gh_issues` workflow was a LIFO stack in which the
+  newest issue was always claimed first and the oldest starved forever. The adapter now sorts by
+  Symphony SPEC 8.2's key: `created_at` oldest first, nulls last, with the issue number breaking
+  ties. `--json` also now requests `body`, so a dispatch brief carries the issue's actual text
+  instead of degrading to its URL — which the "review against the dispatch brief" contract
+  depends on. Both were latent: this adapter has never been the configured tracker for this
+  repo, so they would have bitten on the first day of a migration. (CMX-365)
 
 ## [0.12.1] — 2026-09-12
 
