@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -454,3 +455,34 @@ def test_the_gate_applies_when_the_tracker_lives_OUTSIDE_the_repo(repo, spawns, 
 
     assert summary["dispatched"] == 1
     assert spawns.titles == ["prerequisite task"]
+
+
+# --- A FIFTH `_claim_order` branch: a source with no tracker file at all (CMX-365) -----
+#
+# `gh_issues` reads the live API on every call, so it has none of `tasks_from_text`,
+# `closed_ids_from_text`, or `path` — `_claim_order` short-circuits straight to
+# `_ready(on_disk, set())` (see the `if ... is None: return` at its top), skipping every
+# git-fetch machinery the four branches above exercise. No test called `_claim_order`
+# directly with such a source, so a mutation reordering `on_disk` before that call
+# (`on_disk` -> `on_disk[::-1]`) shipped a whole suite green: the docstring's claim that
+# "`_claim_order` preserves whatever order the source returns" was untested for the one
+# kind of source that actually takes this branch in production. See
+# docs/defeat_shapes/365c-*.md.
+
+
+def test_claim_order_preserves_on_disk_order_for_a_pathless_source():
+    """A source with no `path`/`tasks_from_text`/`closed_ids_from_text` (gh_issues'
+    shape) must come out of `_claim_order` in EXACTLY the order it went in — that
+    early-return branch does no reordering of its own, it only filters unmet
+    dependencies. Three same-priority tasks with no dependency edges must round-trip
+    unchanged; a reversal (or any other reordering) fails this."""
+    source = SimpleNamespace()  # deliberately no path / tasks_from_text / closed_ids_from_text
+    on_disk = [
+        Task(id="a", title="oldest", file="", line_number=1, raw=""),
+        Task(id="b", title="middle", file="", line_number=2, raw=""),
+        Task(id="c", title="newest", file="", line_number=3, raw=""),
+    ]
+
+    result = dispatcher._claim_order(wf=SimpleNamespace(), source=source, on_disk=on_disk)
+
+    assert [t.title for t in result] == ["oldest", "middle", "newest"]
