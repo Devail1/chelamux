@@ -2720,9 +2720,32 @@ def _apply_push_request(conn: sqlite3.Connection, wf: WorkflowDef, row: sqlite3.
             detail = (create.stderr or create.stdout or "gh pr create failed").strip()
             return {"ok": False, "error": f"gh pr create failed: {detail}"[:500]}
         pr_url = (create.stdout or "").strip().splitlines()[-1] if create.stdout.strip() else None
-        if pr_url:
-            conn.execute("UPDATE runs SET pr_url=? WHERE task_id=?", (pr_url, row["task_id"]))
-            conn.commit()
+        if not pr_url:
+            # ⚖️ orchestrator review round 1, note 2 (RULED IN): `gh pr create` can exit 0
+            # with empty stdout — rc=0 is NOT the same as "we have the URL", and reading it
+            # as full success would unlink the marker with nothing recorded on the row,
+            # exactly the state the marker-before-task-finished ordering exists to prevent.
+            # The PR was opened (rc=0), so recover its URL rather than discard that fact.
+            try:
+                view = subprocess.run(
+                    ["gh", "pr", "view", branch, "--json", "url", "-q", ".url"],
+                    cwd=str(worktree_path), capture_output=True, text=True,
+                    timeout=GIT_NET_TIMEOUT_SECONDS,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+                return {"ok": False, "error": f"gh pr create exited 0 but gh pr view to "
+                                               f"recover its url failed: {e}"}
+            if view.returncode == 0 and view.stdout.strip():
+                pr_url = view.stdout.strip()
+            else:
+                # Recovery failed too — refuse rather than unlink the marker with no URL on
+                # record; the bounded retry takes over. A retried `gh pr create` for a
+                # branch that already has a PR is refused loudly by `gh`, not silently.
+                return {"ok": False, "error": "gh pr create exited 0 with no parseable url "
+                                               "on stdout, and gh pr view could not recover "
+                                               "one either"}
+        conn.execute("UPDATE runs SET pr_url=? WHERE task_id=?", (pr_url, row["task_id"]))
+        conn.commit()
     return {"ok": True, "pr_url": pr_url}
 
 
@@ -2742,6 +2765,26 @@ def _bump_push_request_attempts(worktree_path: str | Path) -> int:
     except OSError:
         pass
     return attempts
+
+
+def _reset_push_request_attempts(worktree_path: str | Path) -> None:
+    """⚖️ orchestrator review round 1, note 3 (RULED IN): the escalation that fires once
+    `attempts` hits :data:`PUSH_REQUEST_MAX_ATTEMPTS` keeps the marker on disk as evidence
+    — but its own recommendation tells a human to `chela reopen` if the work is actually
+    done, and a marker still pinned at the cap would escalate again on the very FIRST tick
+    after that reopen, before the run gets a single fresh attempt. Called right after that
+    escalation so a reopened run gets the full retry budget back, matching what the
+    recommendation promises."""
+    path = _push_request_path(worktree_path)
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    marker["attempts"] = 0
+    try:
+        path.write_text(json.dumps(marker), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def mark_rework_disputed(task_id: str, reason: str) -> dict:
@@ -4267,6 +4310,7 @@ def tick(workflow_path: str | Path) -> dict:
                                            "is actually done",
                         )
                         summary["escalated"] += 1
+                        _reset_push_request_attempts(row["worktree_path"])
                 continue
             # ⚖️🔒 issue #502 B1: a dispatched agent's `chela task-finished` no longer writes
             # scheduler.db or touches tmux itself (see `request_task_finished`) — it drops a

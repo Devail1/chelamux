@@ -34,6 +34,16 @@ def test_seed_creates_both_files_with_derived_key(tmp_path):
     # by the frontmatter token replacement).
     assert "{{task_title}}" in wf
     assert "{{base_branch}}" in wf
+    # ⛔ issue #502 B2 rework round 1 (THE JUDGE), finding 5: this seeded WORKFLOW.md is
+    # production code — it is the Done Criteria every adopter's dispatched agent actually
+    # reads, and step 4 is the whole reason `chela request-push` gets used at all instead
+    # of the sandboxed `git push`/`gh pr create` #502 B2 exists to remove. Pin the literal
+    # command line, not just that the template vars survive — a revert to the pre-#502-B2
+    # spelling would still pass the vars-survive checks above.
+    assert ('`chela request-push {{task_id}} --pr-title '
+            '"{{project_key}}-{{task_number}}: <summary>" --pr-body-file <path>`') in wf
+    assert "git push -u origin {{branch_name}}" not in wf
+    assert "gh pr create --base {{base_branch}}" not in wf
     assert (repo / "TODO.md").read_text().startswith("# TODO")
 
 
