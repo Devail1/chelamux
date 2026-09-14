@@ -465,6 +465,40 @@ def test_apply_push_request_errors_when_the_marker_is_missing(tmp_path):
     assert "push request marker" in applied["error"]
 
 
+def test_apply_push_request_refuses_when_the_row_has_no_branch_name(tmp_path):
+    """🔴 GUARD (PR #512 round 5, judge finding 3): every other branch of this function has a
+    dedicated test that reaches it, but nothing before this test ever calls
+    `_apply_push_request` with an empty `branch_name` — every sibling in this file hardcodes
+    `branch_name="cmx-1"`. Dead-code the check (e.g. `if False and not branch:`) and a row
+    with no `branch_name` on record falls through to `_git(..., "push", "-u", "origin",
+    None, ...)`, whose argv contains a `None` element — `subprocess.run` raises `TypeError`,
+    which `_git` does not catch (only `TimeoutExpired`/`FileNotFoundError` are), so the
+    exception escapes `_apply_push_request` into `tick()`'s row loop and takes the whole tick
+    down for every run on the workflow. The fake `subprocess.run` below raises on ANY call,
+    so this also catches a corruption that reaches the git/gh call at all rather than
+    refusing first.
+    """
+    wf = _wf(tmp_path)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".chela-push-request.json").write_text(json.dumps({
+        "task_id": "t1", "pr_title": "CMX-1: a thing", "pr_body": "body", "attempts": 0,
+    }))
+
+    def _must_not_be_called(*args, **kwargs):
+        raise AssertionError(f"subprocess.run must not be called when branch_name is empty: "
+                              f"{args!r} {kwargs!r}")
+
+    with dispatcher._db() as conn:
+        row = _row(conn, task_id="t1", status="running", worktree_path=str(wt),
+                    branch_name="", pr_url=None)
+        with patch.object(dispatcher.subprocess, "run", side_effect=_must_not_be_called):
+            applied = dispatcher._apply_push_request(conn, wf, row)
+
+    assert applied == {"ok": False, "error": "run has no branch_name on record"}
+    assert dispatcher.resolve_run("t1")["pr_url"] is None
+
+
 # --- dispatcher.tick(): applying a pending push request (daemon-side, integration) --------
 
 

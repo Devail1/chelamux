@@ -27,6 +27,20 @@ that starts with it, not the whole brief text) is what gets checked, so a brief 
 *mentions* ``--pr-title`` elsewhere (e.g. in a different, unrelated command) can't satisfy
 this by accident.
 
+⛔ PR #512 round 5 (THE JUDGE, see ``docs/defeat_shapes/368c-*.md``): round 4's own fix
+carried the same disease it cured. (a) The two absence checks it kept — ``"git push -u
+origin" not in text`` / ``"gh pr create --base" not in text`` — still pinned VOCABULARY: a
+brief that instructs ``git push origin {{branch_name}}`` (no ``-u``) satisfied both, in a
+backtick-quoted invocation the agent would actually run. Fixed by matching the INVOCATION
+SHAPE instead — any backtick-quoted ``git push``/``gh pr create`` span that carries an
+argument — rather than one specific flag spelling; a bare, argument-less ``` `git push` ```
+mention (the prohibition sentence itself says this) still doesn't match, only a span with
+something after the verb does. (b) The invocation-flags check never asserted the
+invocation's own REQUIRED POSITIONAL (``{{task_id}}``) was present, so dropping it left
+every flag assertion green while ``chela request-push --pr-title ... --pr-body-file ...``
+argparse-refuses for want of ``task_id`` — fixed by asserting the token immediately after
+``request-push`` exists and isn't itself a flag.
+
 The three original hand-named tests (in ``test_judge.py`` and ``test_starter.py``) stay:
 they pin the EXACT command line, which is more specific than the class guard here.
 """
@@ -77,6 +91,13 @@ def _rework_prompt_rendered(tmp_path: Path) -> str:
     return prompt
 
 
+# ⛔ round 5: match the INVOCATION SHAPE (a backtick-quoted span carrying an argument), not
+# one specific flag spelling — "git push origin {{branch_name}}" (no `-u`) is just as
+# forbidden as "git push -u origin ...", and a bare, argument-less mention like the
+# prohibition sentence's own `` `git push` `` must NOT trip this.
+_FORBIDDEN_GIT_PUSH_INVOCATION = re.compile(r"`git push +\S[^`]*`")
+_FORBIDDEN_GH_PR_CREATE_INVOCATION = re.compile(r"`gh pr create +\S[^`]*`")
+
 _FIRST_DISPATCH = "first_dispatch"
 _REWORK = "rework"
 
@@ -102,16 +123,22 @@ def test_every_push_brief_routes_through_chela_request_push(tmp_path, name, get_
     text = get_text(tmp_path)
     assert "chela request-push" in text, (
         f"{name}: must tell the agent to run `chela request-push`, not a bare `git push`")
-    assert "git push -u origin" not in text, (
-        f"{name}: must not instruct a bare `git push -u origin ...` — #502 B2's whole point "
-        "is that this doesn't survive a sandboxed agent process")
-    # Every correct brief SAYS the words "gh pr create" once, in the sentence prohibiting it
-    # ("do NOT run `git push` or `gh pr create` yourself") — so the guard against the
-    # reverted, bad wording must target the INVOCATION shape (`gh pr create --base ...`),
-    # not the bare phrase, or this assertion fails on every brief that is already correct.
-    assert "gh pr create --base" not in text, (
-        f"{name}: must not instruct a bare `gh pr create --base ...` invocation — that hop "
-        "belongs to the daemon now, not the agent")
+
+    # ⛔ round 5, finding 1: match the SHAPE of a runnable invocation (any backtick-quoted
+    # `git push`/`gh pr create` span carrying an argument), not one flag spelling like
+    # `-u origin` or `--base` — a brief that hands over `git push origin {{branch_name}}`
+    # (no `-u`) is just as much a violation, and every fixed-substring check would miss it.
+    # A bare, argument-less mention (e.g. the prohibition sentence's own `` `git push` ``)
+    # does not match, only a span with something after the verb does.
+    forbidden_push = _FORBIDDEN_GIT_PUSH_INVOCATION.search(text)
+    assert forbidden_push is None, (
+        f"{name}: must not hand the agent a runnable `git push ...` invocation (found "
+        f"{forbidden_push.group(0)!r}) — #502 B2's whole point is that this doesn't survive "
+        "a sandboxed agent process, regardless of which flags it's spelled with")
+    forbidden_create = _FORBIDDEN_GH_PR_CREATE_INVOCATION.search(text)
+    assert forbidden_create is None, (
+        f"{name}: must not hand the agent a runnable `gh pr create ...` invocation (found "
+        f"{forbidden_create.group(0)!r}) — that hop belongs to the daemon now, not the agent")
 
     # ⛔ round 4: pin the INVOCATION, not the vocabulary. Extract the single backtick-quoted
     # span that starts with `chela request-push` — the actual command line the brief hands
@@ -122,6 +149,22 @@ def test_every_push_brief_routes_through_chela_request_push(tmp_path, name, get_
         f"{name}: no backtick-quoted `chela request-push ...` invocation found — cannot "
         "pin its flags")
     line = invocation.group(0)
+
+    # ⛔ round 5, finding 2: the invocation's own REQUIRED positional (`task_id`) was never
+    # asserted — a brief could drop it while every flag check below stayed green. Without
+    # it, `chela request-push --pr-title ... --pr-body-file ...` argparse-refuses with "the
+    # following arguments are required: task_id", no marker is ever written, and the daemon
+    # never pushes or opens a PR. The token right after `request-push` must exist and must
+    # not itself be a flag.
+    tokens = line[1:-1].split()  # strip the enclosing backticks
+    assert tokens[:2] == ["chela", "request-push"]
+    positional = tokens[2] if len(tokens) > 2 else ""
+    assert positional and not positional.startswith("--"), (
+        f"{name}: the `chela request-push` invocation must carry the task_id as its first "
+        f"positional argument, found {line!r} — without it argparse refuses with 'the "
+        "following arguments are required: task_id', no marker is ever written, and the "
+        "daemon never pushes or opens a PR")
+
     if kind == _FIRST_DISPATCH:
         assert "--pr-title" in line, (
             f"{name}: a first-dispatch brief's `chela request-push` invocation must carry "
