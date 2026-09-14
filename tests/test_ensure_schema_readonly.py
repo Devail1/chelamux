@@ -130,6 +130,45 @@ def test_a_readonly_database_missing_a_column_raises_loudly(tmp_path):
     )
 
 
+def test_a_readonly_database_missing_a_later_column_names_that_column(tmp_path):
+    """docs/defeat_shapes/370d-*.md: the ONLY fixture that reaches the
+    ``SchemaMigrationError`` branch (``_legacy_db_missing_pr_url``) is missing exactly
+    ``pr_url`` — the FIRST column in ``ensure_schema``'s migration list — so
+    ``"pr_url" in message`` is satisfied identically whether the message interpolates
+    ``_column`` or hard-codes the literal ``"pr_url"``: for this one fixture, the
+    rendered value and the asserted literal are the same single case.
+
+    Drop a column that is NOT first in the migration list and assert the error names
+    THAT column instead — a hard-coded ``"pr_url"`` can never satisfy this, no matter
+    which real column actually failed.
+
+    Negative control: ``f"runs.{_column} is missing and ALTER TABLE failed: {e}"`` ->
+    ``f"runs.pr_url is missing and ALTER TABLE failed: {e}"`` (round 4's surviving
+    mutation) renders "pr_url" regardless of which column's ALTER actually failed —
+    this test goes RED under that mutation even though
+    ``test_a_readonly_database_missing_a_column_raises_loudly`` stays green.
+    """
+    db = tmp_path / "runs.db"
+    conn = sqlite3.connect(str(db))
+    dispatcher.ensure_schema(conn)  # migrate to current schema (every column present)
+    conn.execute("ALTER TABLE runs DROP COLUMN task_number")  # not first in the list
+    conn.commit()
+    conn.close()
+
+    ro = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        with pytest.raises(dispatcher.SchemaMigrationError) as exc_info:
+            dispatcher.ensure_schema(ro)
+    finally:
+        ro.close()
+
+    message = str(exc_info.value)
+    assert "task_number" in message, f"error must name the actually-missing column: {message!r}"
+    assert "pr_url" not in message, (
+        f"pr_url IS present in this db — it must never appear in the error: {message!r}"
+    )
+
+
 def test_a_writable_database_with_every_column_already_present_stays_silent(tmp_path):
     """MUST BE ACCEPTED — the half a strict fix could break: an already-migrated,
     writable database migrates silently and successfully, exactly as before."""
