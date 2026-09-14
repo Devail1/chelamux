@@ -635,6 +635,13 @@ def test_tick_escalates_after_the_attempt_cap_on_a_persistent_push_failure(tmp_p
     `log.warning` nobody reads. Corrupt by dropping the attempt-cap check (never escalate)
     → `summary["escalated"]` stays 0 forever → RED.
     """
+    # ⛔ DEFEAT SHAPE 05 (same remedy this file already applies to GIT_NET_TIMEOUT_SECONDS
+    # above): expressing the fixture as `PUSH_REQUEST_MAX_ATTEMPTS - 1` reads the SAME symbol
+    # a mutation would edit, so the fixture SLIDES with the constant and the bound is never
+    # pinned. Widen it to 5000 and this test still passes while a permanently-failing push
+    # burns 5000 ticks — days of a pinned concurrency slot with only a log.warning nobody
+    # reads — before a human is ever told. Assert the literal, then compare against the symbol.
+    assert dispatcher.PUSH_REQUEST_MAX_ATTEMPTS == 5, dispatcher.PUSH_REQUEST_MAX_ATTEMPTS
     wf = _wf(tmp_path)
     wt = tmp_path / "wt" / "abc123"
     wt.mkdir(parents=True)
@@ -674,6 +681,13 @@ def test_tick_resets_the_attempt_counter_on_escalation_so_a_reopen_gets_a_fresh_
     dropping the reset call → `attempts` stays at `PUSH_REQUEST_MAX_ATTEMPTS` after
     escalation → RED.
     """
+    # ⛔ DEFEAT SHAPE 05 (same remedy this file already applies to GIT_NET_TIMEOUT_SECONDS
+    # above): expressing the fixture as `PUSH_REQUEST_MAX_ATTEMPTS - 1` reads the SAME symbol
+    # a mutation would edit, so the fixture SLIDES with the constant and the bound is never
+    # pinned. Widen it to 5000 and this test still passes while a permanently-failing push
+    # burns 5000 ticks — days of a pinned concurrency slot with only a log.warning nobody
+    # reads — before a human is ever told. Assert the literal, then compare against the symbol.
+    assert dispatcher.PUSH_REQUEST_MAX_ATTEMPTS == 5, dispatcher.PUSH_REQUEST_MAX_ATTEMPTS
     wf = _wf(tmp_path)
     wt = tmp_path / "wt" / "abc123"
     wt.mkdir(parents=True)
