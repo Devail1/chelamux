@@ -1082,6 +1082,19 @@ def _write_trial_ledger(wf: WorkflowDef, conn: sqlite3.Connection) -> int:
     return len(appended)
 
 
+class SchemaMigrationError(RuntimeError):
+    """A ``runs`` column was missing and the ``ALTER TABLE`` to add it failed.
+
+    Issue #515: ``sqlite3.OperationalError`` is the SAME exception for
+    ``duplicate column name: …`` (benign — another connection already added it)
+    and ``attempt to write a readonly database`` (the migration DID NOT
+    HAPPEN — e.g. a sandboxed agent with `~/.chela` denied). Swallowing both
+    made the second case silently skip the migration for every sandboxed
+    agent, resurfacing later, elsewhere, as an inscrutable ``no such column``.
+    Raised here instead, at the one place that knows which case it is.
+    """
+
+
 def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
     """Create/migrate the ``runs`` table on ``conn``. Idempotent.
 
@@ -1110,6 +1123,20 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
     """)
     # Idempotent migrations for pre-existing DBs. A row written before a column
     # existed simply reads NULL there — never a crash: this runs unattended.
+    #
+    # ⛔ #515: check `PRAGMA table_info` for the column BEFORE attempting its DDL,
+    # rather than firing every ALTER TABLE and swallowing whatever
+    # OperationalError comes back. A read of the current columns is the primary
+    # discriminator — a column already listed here is skipped outright, no DDL
+    # attempted, so a readonly connection with a fully-migrated schema never
+    # touches `execute()` for one it doesn't need (today's accidental safety,
+    # now on purpose). A column NOT listed here that still raises on its ALTER
+    # is checked by message as a fallback, for the one case table_info can't
+    # rule out: another connection's own ALTER lands between this read and this
+    # write and wins the race — genuinely benign, same as before. Anything else
+    # (readonly database, disk full, …) is the migration having failed and says
+    # so loudly via SchemaMigrationError, instead of vanishing into `pass`.
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
     added: set[str] = set()
     for _column, ddl in (
         ("pr_url", "ALTER TABLE runs ADD COLUMN pr_url TEXT"),
@@ -1295,11 +1322,17 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("blocked_race_ack_note", "ALTER TABLE runs ADD COLUMN blocked_race_ack_note TEXT"),
         ("blocked_race_ack_sha", "ALTER TABLE runs ADD COLUMN blocked_race_ack_sha TEXT"),
     ):
+        if _column in existing_columns:
+            continue  # already migrated — no DDL attempted, nothing to fail
         try:
             conn.execute(ddl)
             added.add(_column)          # the column did NOT exist until just now
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                continue  # lost a race to another connection's own ALTER — benign
+            raise SchemaMigrationError(
+                f"runs.{_column} is missing and ALTER TABLE failed: {e}"
+            ) from e
     # ⚖️🚪 CMX-321 backfill: rows adopted BEFORE the column existed read 0 and would be
     # struck `done` on the next reconcile exactly as they were before this fix. `adopt_pr`
     # is the only writer of the `adopt-<pr_number>` task_id shape, so it identifies them.
