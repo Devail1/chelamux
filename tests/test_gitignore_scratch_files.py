@@ -76,6 +76,9 @@ def test_gitignore_matches_a_real_self_check_scratch_filename(probe):
 REAL_CHELA_MARKER_FILENAMES = [
     ".chela-judge-experiments.json",
     ".chela-task-finished-request.json",
+    # issue #502 B2: `dispatcher._push_request_path()` — the push/PR-open request a
+    # dispatched agent's `chela request-push` drops, same family, same reason.
+    ".chela-push-request.json",
 ]
 
 

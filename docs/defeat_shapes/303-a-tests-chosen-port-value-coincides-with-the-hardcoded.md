@@ -70,3 +70,18 @@ pane using the OVERRIDE's value classifies correctly while the pane using the BU
 value no longer does — the exact "differs from every fallback the code could silently
 substitute" fix this shape's guard form already prescribes, applied to a module-level accessor
 read instead of a function parameter.
+
+**Found again (CMX-368, PR #512, rework round 3):** `dispatcher._apply_push_request` reads
+`wf.get("workspace", "base_branch", default="master")` and passes it to `gh pr create --base`.
+`tests/test_dispatcher_rework.py`'s shared `_wf` fixture — reused by
+`tests/test_dispatcher_push_request.py`'s PR-open test — hardcodes `base_branch: "dev"`, and
+the assertion was `"--base" in gh_calls[0][0] and "dev" in gh_calls[0][0]`. The judge hardcoded
+the call site to the literal `base_branch = "dev"` and the suite stayed green
+(`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q`, 4041 passed): the fixture's chosen value and the
+mutation's hardcode were the same three letters, so nothing distinguished "read from `wf`" from
+"assumed to be `dev`, always". Closed by overriding the workflow's `base_branch` to
+`"release/9000-not-a-default"` (a value that is neither the fixture's usual `"dev"` nor
+production's own `"master"` fallback) in
+`test_apply_push_request_pushes_and_opens_the_pr_on_a_first_dispatch`, asserting that value
+appears in the `gh pr create` argv, and asserting `"dev"`/`"master"` do NOT — closing off a
+hardcode of either the fixture's old value or the production default at once.

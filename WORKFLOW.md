@@ -164,9 +164,14 @@ message.
 4. **Commit in the worktree.** Stage only files you intentionally changed
    (`git add <paths>` — never `git add -A`). Verify with `git status` +
    `git diff --cached --stat` before committing.
-5. **Push and open a PR.** `git push -u origin {{branch_name}}` then
-   `gh pr create --base {{base_branch}} --title "{{project_key}}-{{task_number}}: <summary>" --body ...`
-   (put `{{task_id}}` in the body).
+5. **Request the push and PR — do NOT run `git push` or `gh pr create` yourself.**
+   Neither survives the sandbox boundary (issue #502 B2, measured in
+   `docs/SANDBOX_BOUNDARY.md` §5 B2): masking the GitHub token keeps `gh` working but not
+   `git push`, since `git` sends it Basic-encoded rather than verbatim. Write your PR body
+   to a file, then run:
+   `chela request-push {{task_id}} --pr-title "{{project_key}}-{{task_number}}: <summary>" --pr-body-file <path>`
+   (put `{{task_id}}` in the body). chela pushes `{{branch_name}}` and opens the PR against
+   `{{base_branch}}` on its next pass — you do not need to wait for it before step 6.
 6. **Run `chela task-finished {{task_id}}` as your last step** — marks the run
    `awaiting_review`, records the PR URL, and kills your tmux window. ⚖️🔎 **CMX-250: pass
    ONE of these two flags — `task-finished` now enforces step 3's outcome instead of trusting
