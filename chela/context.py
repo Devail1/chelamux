@@ -16,7 +16,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from chela import config, transcripts
+from chela import config, dispatcher, transcripts
 from chela.config import CHELA_DIR, CONTEXT_CACHE_DIR
 
 # Context-window size (tokens) assumed when deriving usage from the transcript
@@ -34,15 +34,13 @@ DB_PATH = CHELA_DIR / "scheduler.db"
 CONTEXT_CHECK_INTERVAL = 60
 
 
-def _get_db() -> sqlite3.Connection:
-    # Shared file with scheduler/dispatcher — WAL there and here. Callers MUST
-    # close the returned connection (use `with closing(_get_db()) as conn:`) so
-    # we never leak fds on scheduler.db.
-    CHELA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """Create/migrate the ``context_snapshots`` table on ``conn``. Idempotent.
+
+    Split out from ``_get_db`` (and named/shaped like
+    ``chela.dispatcher.ensure_schema``) so tests can drive it directly against
+    a read-only connection.
+    """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS context_snapshots (
             id INTEGER PRIMARY KEY,
@@ -61,12 +59,55 @@ def _get_db() -> sqlite3.Connection:
             session_name TEXT
         )
     """)
-    # Migrate: add columns if missing (existing DBs won't have them)
+    # Migrate: add columns if missing (existing DBs won't have them).
+    #
+    # ⛔ #520 (same defect as #515, fixed in dispatcher.ensure_schema by CMX-370):
+    # sqlite3.OperationalError is the SAME exception for "duplicate column name: …"
+    # (benign — another connection already added it) and "attempt to write a
+    # readonly database" (the migration DID NOT HAPPEN — e.g. a sandboxed agent
+    # with `~/.chela` denied). Swallowing both meant the second case silently
+    # skipped the migration, resurfacing later as an inscrutable `no such column`.
+    #
+    # Consult PRAGMA table_info first so a column already present is never
+    # attempted at all (a readonly, fully-migrated connection issues no DDL and
+    # therefore can't fail). A column not listed there that still raises is
+    # checked by message as a fallback, for the one case table_info can't rule
+    # out: another connection's own ALTER lands between this read and this
+    # write and wins the race — genuinely benign. Anything else is the
+    # migration having failed and says so loudly via SchemaMigrationError
+    # (reused from chela.dispatcher — it must stay a RuntimeError subclass,
+    # never an OperationalError one, or this exact except-block elsewhere would
+    # re-swallow it and restore #515), chained via `raise ... from e`.
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(context_snapshots)")}
     for col, typ in [("model", "TEXT"), ("cost_usd", "REAL"), ("rate_limit_pct", "REAL"), ("rate_limit_resets_at", "INTEGER"), ("weekly_rl_pct", "REAL"), ("weekly_rl_resets_at", "INTEGER"), ("session_name", "TEXT")]:
+        if col in existing_columns:
+            continue  # already migrated — no DDL attempted, nothing to fail
         try:
             conn.execute(f"ALTER TABLE context_snapshots ADD COLUMN {col} {typ}")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                continue  # lost a race to another connection's own ALTER — benign
+            raise dispatcher.SchemaMigrationError(
+                f"context_snapshots.{col} is missing and ALTER TABLE failed: {e}"
+            ) from e
+    return conn
+
+
+def _get_db() -> sqlite3.Connection:
+    # Shared file with scheduler/dispatcher — WAL there and here. Callers MUST
+    # close the returned connection (use `with closing(_get_db()) as conn:`) so
+    # we never leak fds on scheduler.db.
+    CHELA_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    ensure_schema(conn)
+    # Kept out of ensure_schema: only _get_db's connections are ever writable,
+    # so this is the one place that can run a bare (untranslated)
+    # CREATE INDEX without risking the same inscrutable OperationalError on a
+    # readonly connection that ensure_schema's ALTER-TABLE discrimination
+    # exists to eliminate.
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_ctx_agent_ts ON context_snapshots(agent, ts DESC)
     """)
