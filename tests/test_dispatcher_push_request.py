@@ -160,7 +160,12 @@ def _gh_git_fake(calls, *, push_ok=True, gh_ok=True, pr_url="https://github.com/
         if isinstance(cmd, list) and cmd[:3] == ["gh", "pr", "create"]:
             R.returncode = 0 if gh_ok else 1
             if gh_ok:
-                R.stdout = pr_url + "\n"
+                # PR #512 round 4, judge finding 3: real `gh pr create` can print more than
+                # the URL on success (a branch-push notice, warnings) before it — a fake
+                # returning a single line makes `splitlines()[-1]` and `splitlines()[0]`
+                # indistinguishable to every assertion below. Noise line first, URL last,
+                # matching the shape the `[-1]` index exists to handle.
+                R.stdout = "remote: \nremote: Create a pull request...\n" + pr_url + "\n"
             else:
                 R.stderr = "gh: could not create pull request"
             return R()
@@ -204,6 +209,14 @@ def test_apply_push_request_pushes_and_opens_the_pr_on_a_first_dispatch(tmp_path
     # ...)` stays green.
     assert push_calls[0][0][2] == str(wt)
     assert "cmx-1" in push_calls[0][0]
+    # ⛔ PR #512 round 4, judge finding 2: `git push` runs INSIDE the daemon's tick loop and
+    # is bounded by `timeout=GIT_NET_TIMEOUT_SECONDS` precisely so a hung push can't stall
+    # every run on this workflow forever — pin the kwarg, or `timeout=None` stays green.
+    # DEFEAT_SHAPES #5: the constant comparisons below read the SAME symbol a mutation would
+    # edit, so pin the literal too, or widening/dropping the constant moves both sides
+    # together and stays green.
+    assert dispatcher.GIT_NET_TIMEOUT_SECONDS == 60, dispatcher.GIT_NET_TIMEOUT_SECONDS
+    assert push_calls[0][1].get("timeout") == dispatcher.GIT_NET_TIMEOUT_SECONDS
     gh_calls = [(c, kw) for c, kw in calls if c[:3] == ["gh", "pr", "create"]]
     assert len(gh_calls) == 1
     assert "--base" in gh_calls[0][0] and "release/9000-not-a-default" in gh_calls[0][0]
@@ -213,6 +226,8 @@ def test_apply_push_request_pushes_and_opens_the_pr_on_a_first_dispatch(tmp_path
     # ⛔ #502 B2 rework round 1, judge finding 3: `cwd` decides which repo (and therefore
     # which head branch) the PR is opened from — pin it, or `cwd=None` stays green.
     assert gh_calls[0][1].get("cwd") == str(wt)
+    # ⛔ PR #512 round 4, judge finding 2: same bound applies to `gh pr create`.
+    assert gh_calls[0][1].get("timeout") == dispatcher.GIT_NET_TIMEOUT_SECONDS
 
 
 def test_apply_push_request_skips_pr_create_when_a_pr_already_exists(tmp_path):
@@ -408,6 +423,9 @@ def test_apply_push_request_recovers_the_url_when_gh_pr_create_exits_0_with_empt
     # PR #512 round 2, finding 3: pin WHAT is asked for, not just that gh pr view ran —
     # a selector swapped to `--json number -q .number` must not read back as the URL.
     assert view_calls[0][0][-4:] == ["--json", "url", "-q", ".url"]
+    # ⛔ PR #512 round 4, judge finding 2: this recovery call is also bounded by
+    # `timeout=GIT_NET_TIMEOUT_SECONDS` — pin it too.
+    assert view_calls[0][1].get("timeout") == dispatcher.GIT_NET_TIMEOUT_SECONDS
 
 
 def test_apply_push_request_fails_when_gh_pr_create_empty_stdout_and_recovery_also_fails(
