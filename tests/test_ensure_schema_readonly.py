@@ -307,3 +307,77 @@ def test_the_adopted_backfill_runs_once_then_never_again(tmp_path):
     )
 
     conn.close()
+
+
+def _migrated_db_missing_only(path, column_to_drop):
+    """A fully-migrated ``runs`` table (every column ``ensure_schema`` knows
+    about, including ``adopted``), seeded with one ``adopt-*`` row, with exactly
+    ONE column then dropped back out. Unlike ``_legacy_db_with_adopt_row``
+    (missing every column at once, so ``pr_url`` and ``adopted`` are ALWAYS
+    added together and no assertion can tell which one the gate actually reads
+    — docs/defeat_shapes/342), this fixture makes the two columns disagree: only
+    ``column_to_drop`` is missing, so ``ensure_schema`` adds that one column and
+    nothing else."""
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE runs (task_id TEXT PRIMARY KEY, workflow_path TEXT NOT NULL, "
+        "title TEXT NOT NULL, status TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO runs (task_id, workflow_path, title, status) "
+        "VALUES ('adopt-1', 'wf', 't', 'open')"
+    )
+    conn.commit()
+    dispatcher.ensure_schema(conn)  # migrate everything, including adopted
+    conn.execute(f"ALTER TABLE runs DROP COLUMN {column_to_drop}")
+    conn.commit()
+    conn.close()
+
+
+def test_the_adopted_backfill_is_gated_on_adopted_itself_not_a_coinciding_column(tmp_path):
+    """⚖️🚪 CMX-321 / docs/defeat_shapes/342. The gate is ``if "adopted" in
+    added`` — it must read WHETHER ``adopted`` ITSELF WAS JUST ADDED, not
+    whether some other column (e.g. ``pr_url``, the first entry in the
+    migration list) happened to be added in the same call. Every existing
+    fixture is a bare pre-migration table missing BOTH columns at once, so
+    ``"adopted" in added`` and ``"pr_url" in added`` are indistinguishable to
+    any assertion built on it — the two quantities coincide in every fixture.
+    These two single-column-missing fixtures make them disagree in each
+    direction; a gate that reads the wrong column fails exactly one of the two.
+
+    Negative control: replace the gate's ``"adopted"`` with ``"pr_url"`` — the
+    first case below (pr_url missing alone) then wrongly fires the backfill,
+    and the second case (adopted missing alone) wrongly withholds it."""
+    pr_url_missing = tmp_path / "pr_url_missing.db"
+    _migrated_db_missing_only(pr_url_missing, "pr_url")
+    conn = sqlite3.connect(str(pr_url_missing))
+    wrapped = _RecordingConn(conn)
+    dispatcher.ensure_schema(wrapped)
+    assert any(
+        "ALTER TABLE runs ADD COLUMN pr_url" in s for s in wrapped.statements
+    ), f"pr_url should have been the only column missing: {wrapped.statements!r}"
+    assert not any("ADD COLUMN adopted" in s for s in wrapped.statements), (
+        f"adopted must already be present in this fixture: {wrapped.statements!r}"
+    )
+    assert not any("UPDATE runs SET adopted" in s for s in wrapped.statements), (
+        "pr_url alone being added must NOT fire the adopted backfill — "
+        f"got: {wrapped.statements!r}"
+    )
+    conn.close()
+
+    adopted_missing = tmp_path / "adopted_missing.db"
+    _migrated_db_missing_only(adopted_missing, "adopted")
+    conn = sqlite3.connect(str(adopted_missing))
+    wrapped = _RecordingConn(conn)
+    dispatcher.ensure_schema(wrapped)
+    assert any(
+        "ALTER TABLE runs ADD COLUMN adopted" in s for s in wrapped.statements
+    ), f"adopted should have been the only column missing: {wrapped.statements!r}"
+    assert not any("ADD COLUMN pr_url" in s for s in wrapped.statements), (
+        f"pr_url must already be present in this fixture: {wrapped.statements!r}"
+    )
+    assert any("UPDATE runs SET adopted" in s for s in wrapped.statements), (
+        "adopted alone being added MUST fire the backfill — "
+        f"got: {wrapped.statements!r}"
+    )
+    conn.close()
