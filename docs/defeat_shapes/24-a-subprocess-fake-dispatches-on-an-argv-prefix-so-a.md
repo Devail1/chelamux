@@ -45,3 +45,18 @@ left every `live_bound()` test green — the fakes handed back fixture data keye
 unit name regardless of which systemd property or unit type was actually requested.
 3098 tests stayed green. Closed by asserting the trailing `-p` flags and the
 `--type=slice` filter inside the fakes themselves.
+
+**Found again, a `gh` fake instead of a `systemctl` one:** CMX-368 rework round 2, PR
+#512. `_gh_view_fake` in `tests/test_dispatcher_push_request.py` (the recovery-URL
+coverage for `_apply_push_request`) matched any `gh pr view` call on `cmd[:3] == ["gh",
+"pr", "view"]` alone and handed back a fixed `view_url` regardless of what selector
+followed. The production call site asks for
+`["gh", "pr", "view", branch, "--json", "url", "-q", ".url"]`; the judge's
+required-mutation-set verdict swapped that to `--json number -q .number` (asking gh for
+the PR **number**, not its URL) and the suite stayed green — the fake couldn't tell the
+difference, so `pr_url` in the row would silently become a bare PR number instead of a
+URL. Closed by having the fake actually branch on the `-q` selector (return `view_url`
+only for `.url`, a plausible-but-wrong value like `"9"` for anything else) and by
+asserting the recovery test's captured call ends in exactly
+`["--json", "url", "-q", ".url"]`, not just that some `gh pr view <branch>` call
+happened.

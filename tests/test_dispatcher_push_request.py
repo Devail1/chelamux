@@ -330,7 +330,17 @@ def _gh_view_fake(calls, *, create_rc=0, view_ok=True,
     shape orchestrator review round 1, note 2 diagnosed: `gh pr create` CAN exit 0 while
     printing nothing, which must never be read as full success with no URL recorded.
     `gh pr view <branch> --json url -q .url` is the recovery call `_apply_push_request`
-    must fall back to."""
+    must fall back to.
+
+    PR #512 round 2, finding 3: this fake used to answer ANY `gh pr view` call with
+    `view_url`, matching on `cmd[:3]` alone — so a mutation that swapped the real call's
+    `--json url -q .url` selectors for `--json number -q .number` (asking gh for the PR
+    NUMBER instead of its URL) still got the URL back, and the test only ever asserted
+    the branch argument and cwd, never what was actually requested. Real `gh -q` prints
+    exactly the JMESPath-selected field, so this fake now does the same: it inspects the
+    `-q` selector and only returns `view_url` for `.url`; any other selector (including a
+    mutated `.number`) gets a plausible-but-wrong value instead, which fails the URL
+    assertions below instead of silently passing them."""
     def _run(cmd, *args, **kwargs):
         calls.append((cmd, kwargs))
 
@@ -347,7 +357,8 @@ def _gh_view_fake(calls, *, create_rc=0, view_ok=True,
         if isinstance(cmd, list) and cmd[:3] == ["gh", "pr", "view"]:
             R.returncode = 0 if view_ok else 1
             if view_ok:
-                R.stdout = view_url + "\n"
+                selector = cmd[cmd.index("-q") + 1] if "-q" in cmd else None
+                R.stdout = (view_url if selector == ".url" else "9") + "\n"
             else:
                 R.stderr = "gh: no pull requests found for branch"
             return R()
@@ -385,6 +396,9 @@ def test_apply_push_request_recovers_the_url_when_gh_pr_create_exits_0_with_empt
     assert len(view_calls) == 1
     assert "cmx-1" in view_calls[0][0]
     assert view_calls[0][1].get("cwd") == str(wt)
+    # PR #512 round 2, finding 3: pin WHAT is asked for, not just that gh pr view ran —
+    # a selector swapped to `--json number -q .number` must not read back as the URL.
+    assert view_calls[0][0][-4:] == ["--json", "url", "-q", ".url"]
 
 
 def test_apply_push_request_fails_when_gh_pr_create_empty_stdout_and_recovery_also_fails(

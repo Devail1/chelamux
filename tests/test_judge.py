@@ -447,6 +447,56 @@ def test_rework_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
     assert "NEW FILE to `docs/defeat_shapes/`" in prompt
 
 
+def test_rework_prompt_step_4_tells_the_agent_to_request_push_not_git_push(tmp_path):
+    """PR #512 round 2, finding 1: ``dispatcher.REWORK_PROMPT`` step 4 is the ONLY brief a
+    reworking agent reads, and it is production code rendered by ``_renudge_prompt`` /
+    ``_respawn_rework``. ``tests/test_starter.py`` pins the SEEDED copy of the equivalent
+    WORKFLOW.md prose (`starter.py`'s template), and a sibling test above pins that step 4
+    names the defeat-shapes catalog — but nothing asserted step 4's own push instruction, so
+    a revert of just that paragraph back to the pre-#502-B2 `git push` shipped a defeatable
+    guard: the mutation applied, parsed, and the suite stayed green.
+
+    Render through ``_renudge_prompt`` (the real spawn-path expression), not the
+    ``REWORK_PROMPT`` constant directly — see the docstring above on
+    ``test_rework_prompt_points_at_the_defeat_shapes_catalog`` for why the constant alone
+    can't see a wiring break.
+    """
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), rework_count=1,
+                 review_history=json.dumps([{"round": 1, "at": "t", "body": "fix the thing"}]))
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    prompt = dispatcher._renudge_prompt(wf, row, None)
+    assert prompt is not None
+    # {{task_id}} is substituted with the real task_id by the time this renders.
+    assert "run `chela request-push abc123` instead" in prompt
+    assert "Do NOT `git push` yourself" in prompt
+    # The pre-#502-B2 wording this guards against: a bare "commit, and `git push`."
+    # sentence with no `chela request-push` in sight.
+    assert "commit, and\n   `git push`." not in prompt
+    assert "commit, and `git push`." not in prompt
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_chelamuxs_own_workflow_md_tells_agents_to_request_push_not_git_push():
+    """PR #512 round 2, finding 2: chelamux's own ``WORKFLOW.md`` at the repo root is the
+    Done Criteria this repo's OWN dispatched agents read (`chela dispatch ./WORKFLOW.md`
+    hot-reloads it directly) — a DIFFERENT file from the seeded template
+    ``tests/test_starter.py`` pins (`chela/starter.py`'s copy, written into a freshly-seeded
+    adopter repo). Reverting this file's step 5 back to `git push` / `gh pr create` means no
+    agent dispatched on chelamux's own workflow ever calls `chela request-push`, and nothing
+    caught that: the mutation applied, parsed, and the suite stayed green.
+    """
+    body = (_REPO_ROOT / "WORKFLOW.md").read_text()
+    assert ('`chela request-push {{task_id}} --pr-title '
+            '"{{project_key}}-{{task_number}}: <summary>" --pr-body-file <path>`') in body
+    assert "do NOT run `git push` or `gh pr create` yourself" in body
+    assert "git push -u origin {{branch_name}}" not in body
+    assert "gh pr create --base {{base_branch}}" not in body
+
+
 def _collapse_whitespace(text: str) -> str:
     """Both prompt sites word-wrap the same sentence differently (a flat concatenated
     string in ``judge.py`` vs. a triple-quoted, indented block in ``dispatcher.py``), so a

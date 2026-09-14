@@ -61,3 +61,31 @@ registry path (`str(hooks.plugins_dir() / "known_marketplaces.json")`) in
 **Lesson:** closing shape 79 for one interpolated value in a message does not mean the
 message is closed — every distinct `{...}` render site in that message needs its own
 assertion, not just the one the current round happened to name.
+
+**Found a fourth time, across separate FILES instead of separate render sites in one
+message:** CMX-368 rework round 2, PR #512. The same "use `chela request-push`, never
+`git push` yourself" procedural instruction is independently authored in (at least) four
+places: `chela/starter.py`'s seeded `WORKFLOW.md` template (an adopter's freshly-seeded
+copy), `chela/dispatcher.REWORK_PROMPT` (the brief a reworking agent reads, rendered
+through `_renudge_prompt`/`_respawn_rework`), chelamux's own repo-root `WORKFLOW.md`
+(the hot-reloaded Done Criteria this repo's own dispatched agents read), and two more
+adopter-facing docs (`examples/WORKFLOW.md`, `skills/chela-setup/SKILL.md`). Round 1
+pinned only the first copy (`tests/test_starter.py`), on the reasoning that it was "the"
+production template; the judge's round-2 verdict reverted the REWORK_PROMPT and
+repo-root-WORKFLOW.md copies straight back to the pre-fix `git push` wording and the
+suite stayed green, because nothing read either of those two files/constants at all.
+Unlike the f-string case above, these aren't render sites of one interpolated value in
+one message — they're wholesale independent copies of the same paragraph in different
+files, each reachable only through its own call site (`_renudge_prompt` for the
+constant, a plain file read for the markdown). Closed by adding one test per remaining
+*live* copy (production code or this repo's own dogfooded config — not the two
+adopter-facing docs, which are advisory-only notes for now): `test_rework_prompt_step_4_tells_the_agent_to_request_push_not_git_push`
+renders `REWORK_PROMPT` through `_renudge_prompt` and pins the literal
+`chela request-push`/`Do NOT git push` wording;
+`test_chelamuxs_own_workflow_md_tells_agents_to_request_push_not_git_push` reads the
+repo's own `WORKFLOW.md` off disk directly and pins the same, both in `tests/test_judge.py`.
+**Lesson:** "the same guarded string, rendered more than once" is not just one message's
+multiple interpolation sites — it is also one paragraph of *prose*, hand-copied into
+every file/constant that needs to say the same thing to a different reader. Pinning the
+first copy you find does not mean the others are covered; each file that carries its own
+copy needs its own test reading *that* file, because nothing else exercises it.
