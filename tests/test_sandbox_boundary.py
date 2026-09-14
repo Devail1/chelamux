@@ -154,6 +154,24 @@ def test_sandbox_launch_arg_never_fires_for_the_judge_even_when_enabled(tmp_path
     assert sandbox.sandbox_launch_arg(wf, "coding") is not None
 
 
+def test_sandbox_launch_arg_materializes_the_settings_file(tmp_path, monkeypatch):
+    """docs/defeat_shapes/369b: a mutation that swaps `ensure_sandbox_settings_file()` for
+    the bare `sandbox_settings_path()` returns the IDENTICAL path string — the
+    `--settings <path>` flag looks unchanged — but never writes the file, so the sandbox
+    silently never applies. Assert the file exists on disk with the frozen content, not
+    just that the returned string names the right path."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    wf = _wf(tmp_path, sandbox=True)
+    path = sandbox.sandbox_settings_path()
+    assert not path.exists()
+
+    arg = sandbox.sandbox_launch_arg(wf, "coding")
+
+    assert arg == f"--settings {path}"
+    assert path.exists()
+    assert json.loads(path.read_text()) == sandbox.SANDBOX_SETTINGS
+
+
 # --- wired into _launch_agent -------------------------------------------------------
 
 def test_launch_agent_carries_settings_flag_when_workflow_opts_in(monkeypatch, tmp_path):
@@ -175,6 +193,10 @@ def test_launch_agent_carries_settings_flag_when_workflow_opts_in(monkeypatch, t
     claude_line = next(line for line in sent if line.startswith("claude"))
     expected = sandbox.sandbox_settings_path()
     assert f"--settings {expected}" in claude_line
+    # Not just the flag string: the file it points at must actually exist, or the
+    # sandbox never applies (docs/defeat_shapes/369b).
+    assert expected.exists()
+    assert json.loads(expected.read_text()) == sandbox.SANDBOX_SETTINGS
 
 
 def test_launch_agent_omits_settings_flag_when_workflow_has_not_opted_in(monkeypatch, tmp_path):
