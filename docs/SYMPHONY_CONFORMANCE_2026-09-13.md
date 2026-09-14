@@ -92,6 +92,25 @@ The mutation-testing guard is easy and real: *corrupt the adapter to return `[]`
 
 ## G2 — SPEC 11: run chelamux's own workflow on the `gh_issues` adapter (item 3)
 
+> ## ⛔ DECIDED 2026-09-14 — NOT YET. Do not re-open this as an engineering question.
+>
+> The owner's call, made on the positioning grounds this section lays out, not on cost. **Every
+> dispatch brief would become public**, and `TODO.md` is gitignored on purpose: real briefs name the
+> operator's machine, absolute paths, and neighbouring private projects. The queue also loses
+> hand-ordering and `depends:` edges, and `require_label` relocates the human hop rather than
+> removing it.
+>
+> ⚠️ The evidence FOR migrating is real and has grown — **#508 is the third issue** (after #473 and
+> #491) to sit open after its fix had already merged, because the dispatcher claims from a local
+> tracker and the issue registry never learns the work landed. That cost is being paid deliberately:
+> it is one hand-written comment per issue, against a permanent publication of every brief.
+>
+> ⭐ The condition that would change the answer: **the repo taking outside contributors**, at which
+> point public briefs stop being a cost and start being the point. Revisit then, not before.
+>
+> ⚠️ Prerequisite still undone either way: the `ready-for-agent` label does not exist on this repo
+> (verified 2026-09-14).
+
 > **SPEC 11 preamble:** "The issue tracker boundary is deliberately small: a portable read kernel for scheduling plus OPTIONAL provider-native agent tools."
 
 > **SPEC 11.2:** "Each adapter owns: … choosing a stable dispatch identity and preserving any distinct underlying IDs in `native_ref`; deriving `dispatchable` from provider-specific routing rules."

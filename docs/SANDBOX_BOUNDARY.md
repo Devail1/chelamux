@@ -165,6 +165,16 @@ returns `cannot_verify` on every PR — exactly the two-month outage CMX-80 caus
 
 ### 6.1 Sandbox the coding and rework agents. Do not sandbox the judge — yet.
 
+> ## ✅ DECIDED 2026-09-14 — option (a): ship it for coding + rework, defer the judge.
+>
+> The owner's call, taken as an explicit risk acceptance rather than an oversight: **the judge stays
+> an unsandboxed LLM agent on this machine.** The reasoning is where the exposure actually sits — a
+> coding agent takes an arbitrary task description and pushes to a public repo; the judge runs a
+> fixed command it cannot choose, against a throwaway tree, and never pushes.
+>
+> ⛔ Making the ~128 live-fleet tests socket-free is **follow-up work, not a blocker** on shipping
+> the boundary for the two roles that need it.
+
 The two roles have genuinely different threat profiles. A coding agent takes an arbitrary task
 description, writes code, and pushes it to a public repo: it is the one that benefits. The judge
 runs a fixed command from a WORKFLOW.md it cannot choose, applies mutations chela generates, in a
