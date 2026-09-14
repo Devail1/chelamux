@@ -53,6 +53,19 @@ recurred, independently, on three *other* branches the same week this was catalo
   behaviour"). Not a two-*variable* coincidence, but the same root cause: the guard proved a
   property both the correct and the wrong implementation share, instead of one that
   separates them.
+- **CMX-370** (`chela/dispatcher.py`, `ensure_schema`'s CMX-321 backfill gate, PR #519 round
+  5): the gate is `if "adopted" in added:` — it must fire only on the tick that adds the
+  `adopted` column itself. Every fixture in the PR's test file built a bare pre-migration
+  table missing **every** migrated column at once, so `"adopted" in added` and `"pr_url" in
+  added` (the first column in the migration list) were true or false together in every case
+  — the judge's mutation swapped the gate to check `pr_url` instead of `adopted` and the
+  whole suite stayed green. Not a fallback chain, a sink, or a list index — a **set-membership
+  test** where the fixture never made the checked member disagree with a sibling member of
+  the same set. Closed by two single-column-missing fixtures (built by migrating a table to
+  completion, then `ALTER TABLE ... DROP COLUMN` on exactly one column) that put `pr_url` and
+  `adopted` in each fixture without the other, so a gate reading the wrong one fails in
+  exactly one direction (`tests/test_ensure_schema_readonly.py`,
+  `test_the_adopted_backfill_is_gated_on_adopted_itself_not_a_coinciding_column`).
 
 **Guard form that survives:** ask, of any guard you are about to write — new or already
 green — **"which two names does this code read that could hold the same value in the fixture
@@ -81,7 +94,12 @@ input path to the same conceptual quantity:
   semantically-correct item is **not** first;
 - two axes varied independently across separate parametrized fixtures — add at least one
   fixture that varies **both together**, so the cell where they intersect is not only ever
-  reached with one of them held at its default.
+  reached with one of them held at its default;
+- a boolean gate written as `if <name> in <set>:` where the set is built by a loop over
+  several names — check whether every fixture reaching that line puts **every** name from
+  the set in (or out) together; if so, the gate is unfalsifiable against a mutation that
+  swaps `<name>` for any sibling in the same set (CMX-370: `if "adopted" in added:` vs.
+  `if "pr_url" in added:`, both true in every fixture that starts from a bare table).
 
 None of these require a *new kind* of test infrastructure — every fix across all nine CMX-336
 rounds, and CMX-337/338's recurrences, was "the same fixture shape, with one more value made
