@@ -66,6 +66,47 @@ def test_ensure_sandbox_settings_file_writes_the_measured_602_config(tmp_path, m
     assert on_disk == sandbox.SANDBOX_SETTINGS
 
 
+# §6.3 is a frozen contract ("verbatim. Frozen to what was measured — widen it only
+# against a fresh measurement") — the test above compares the on-disk file against
+# `sandbox.SANDBOX_SETTINGS`, the SAME object it was serialized from, so it is identity
+# under the comparison and can never disagree with itself: it catches a serialization bug,
+# never a change to the dict's content (docs/defeat_shapes/369).
+# This is the independently-written literal that closes that gap — edit it only against a
+# fresh §6 measurement, never to make a code change pass.
+_EXPECTED_SANDBOX_SETTINGS = {
+    "sandbox": {
+        "enabled": True,
+        "autoAllowBashIfSandboxed": True,
+        "allowUnsandboxedCommands": False,
+        "filesystem": {
+            "allowWrite": ["~/.cache/uv", "~/.local/share/uv"],
+        },
+        "network": {
+            "strictAllowlist": True,
+            "allowedDomains": [
+                "github.com", "*.github.com",
+                "pypi.org", "files.pythonhosted.org",
+                "registry.npmjs.org",
+            ],
+        },
+        "credentials": {
+            "files": [
+                {"path": "~/.config/gh/hosts.yml", "mode": "deny"},
+            ],
+        },
+    },
+}
+
+
+def test_sandbox_settings_dict_matches_the_frozen_602_literal_exactly():
+    """§6.3's whole-dict change detector: `SANDBOX_SETTINGS` compared against a literal
+    written out HERE, independently of `chela.sandbox`, so any edit to ANY leaf —
+    `enabled` flipped off, a path added to `allowWrite`, a host added to `allowedDomains`,
+    `allowUnsandboxedCommands` flipped, a `mask` swapped in for `deny` — turns this test
+    red, not just the leaves an earlier round happened to spot-check individually."""
+    assert sandbox.SANDBOX_SETTINGS == _EXPECTED_SANDBOX_SETTINGS
+
+
 def test_ensure_sandbox_settings_file_is_idempotent(tmp_path, monkeypatch):
     """A dispatcher tick calling this on every launch must not rewrite an unchanged file —
     same shape as workflow.py's stat-before-parse gate."""
