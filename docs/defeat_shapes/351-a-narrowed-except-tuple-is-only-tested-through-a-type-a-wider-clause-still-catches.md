@@ -50,3 +50,18 @@ on `Path.read_text`, scoped to the override path only) and
 `test_bad_regex_in_pattern_is_rejected_with_manifest_error` (an unparseable regex in a
 `[[pattern]].top` list), each of which goes red under its respective mutation and green
 without it.
+
+**Also found:** `chela/context.py`'s `ensure_schema` (CMX-371 rework round 1, PR #522) — the
+benign-race discriminator was a whitelist (`"duplicate column name" in str(e).lower()`), and
+nothing in the test suite drove the `except sqlite3.OperationalError` with a THIRD kind of
+`OperationalError` (`database is locked`, disk full, a malformed database image — #521, the
+same shape already open against `chela/dispatcher.py`). The judge's mutation inverted the
+whitelist to a blacklist (`"readonly" not in str(e).lower()`) — every existing fixture raises
+either the benign race or the readonly-database case, both still classified correctly by the
+blacklist, so `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` stayed green (4075 passed) with the
+inversion in place. Closed by
+`test_a_third_kind_of_operational_error_on_alter_table_escalates` in
+`tests/test_context_ensure_schema_readonly.py`: a `_RecordingConn.raise_on_alter` injects
+`sqlite3.OperationalError("database is locked")` on the `ALTER TABLE` and asserts it escalates
+to `SchemaMigrationError` — red under the blacklist (nothing raises), green under the
+whitelist.

@@ -90,9 +90,6 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
             raise dispatcher.SchemaMigrationError(
                 f"context_snapshots.{col} is missing and ALTER TABLE failed: {e}"
             ) from e
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_ctx_agent_ts ON context_snapshots(agent, ts DESC)
-    """)
     return conn
 
 
@@ -106,6 +103,14 @@ def _get_db() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     ensure_schema(conn)
+    # Kept out of ensure_schema: only _get_db's connections are ever writable,
+    # so this is the one place that can run a bare (untranslated)
+    # CREATE INDEX without risking the same inscrutable OperationalError on a
+    # readonly connection that ensure_schema's ALTER-TABLE discrimination
+    # exists to eliminate.
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ctx_agent_ts ON context_snapshots(agent, ts DESC)
+    """)
     conn.commit()
     return conn
 

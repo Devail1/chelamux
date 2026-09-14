@@ -45,17 +45,25 @@ class _RecordingConn:
     connection's ``table_info`` read and its write, so every column this
     connection thinks is missing is actually already there by the time its own
     ALTER runs.
+
+    ``raise_on_alter``, when set, is raised instead of delegating any
+    ``ALTER TABLE`` — models an ``OperationalError`` that is neither the
+    benign duplicate-column race nor the readonly-database fixture (#521:
+    ``database is locked``, disk full, a malformed database image, …).
     """
 
-    def __init__(self, conn, fake_empty_pragma: bool = False):
+    def __init__(self, conn, fake_empty_pragma: bool = False, raise_on_alter: Exception | None = None):
         self._conn = conn
         self.statements: list[str] = []
         self._fake_empty_pragma = fake_empty_pragma
+        self._raise_on_alter = raise_on_alter
 
     def execute(self, sql, *args, **kwargs):
         self.statements.append(sql)
         if self._fake_empty_pragma and sql.strip().upper().startswith("PRAGMA TABLE_INFO"):
             return iter(())
+        if self._raise_on_alter is not None and sql.strip().upper().startswith("ALTER TABLE"):
+            raise self._raise_on_alter
         return self._conn.execute(sql, *args, **kwargs)
 
     def __getattr__(self, name):
@@ -225,3 +233,41 @@ def test_a_duplicate_column_race_is_swallowed_for_every_column_not_just_the_firs
         f"— got only: {racing.statements!r}"
     )
     conn.close()
+
+
+def test_a_third_kind_of_operational_error_on_alter_table_escalates(tmp_path):
+    """#521 / docs/defeat_shapes/351-*.md: the benign-race check must be a
+    WHITELIST (only ``"duplicate column name"`` is swallowed), never a
+    BLACKLIST (e.g. "swallow anything that isn't 'readonly'"). ``ALTER TABLE``
+    can raise ``sqlite3.OperationalError`` for reasons that are neither the
+    benign race NOR the readonly-database fixture — ``database is locked``,
+    disk full, a malformed database image, etc. Those must ESCALATE as
+    ``SchemaMigrationError``, exactly like the readonly case, never be
+    swallowed as if they were the race.
+
+    A blacklist (``"readonly" not in str(e).lower()``) passes every OTHER
+    guard in this file — neither existing fixture drives the ``except`` with
+    anything but ``duplicate column name`` or ``readonly database`` — which is
+    exactly why this needs its own test rather than relying on the others."""
+    db = tmp_path / "scheduler.db"
+    _legacy_db_missing_every_migrated_column(db)
+
+    conn = sqlite3.connect(str(db))
+    try:
+        injecting = _RecordingConn(
+            conn, raise_on_alter=sqlite3.OperationalError("database is locked")
+        )
+        with pytest.raises(dispatcher.SchemaMigrationError) as exc_info:
+            context.ensure_schema(injecting)
+    finally:
+        conn.close()
+
+    message = str(exc_info.value)
+    assert "model" in message, f"error must name the missing column: {message!r}"
+    assert "database is locked" in message, (
+        f"error must carry the underlying sqlite reason: {message!r}"
+    )
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, sqlite3.OperationalError), (
+        f"the sqlite error must be chained via `raise ... from e`: {cause!r}"
+    )
