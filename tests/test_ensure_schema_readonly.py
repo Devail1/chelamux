@@ -178,7 +178,9 @@ def test_a_duplicate_column_race_is_swallowed_not_escalated(tmp_path):
     """The benign race (#515): another connection's own ALTER lands between this
     connection's ``PRAGMA table_info`` read and its write, so every ALTER this
     connection attempts hits 'duplicate column name' on an already-current
-    column. That must be swallowed, not escalated to SchemaMigrationError.
+    column. That must be swallowed for THAT column only — migration must keep
+    going for every column after it — and swallowing a race must never make
+    ``added`` believe the raced column was actually added by this call.
 
     Negative control (docs/defeat_shapes/370-*.md): dead-code the swallow branch
     (``if False and "duplicate column name" in str(e).lower():``) and this call
@@ -194,6 +196,28 @@ def test_a_duplicate_column_race_is_swallowed_not_escalated(tmp_path):
     assert any("ALTER TABLE" in s.upper() for s in racing.statements), (
         "the faked-empty PRAGMA must have driven ensure_schema to attempt DDL "
         "for this assertion to mean anything"
+    )
+    # Every column looks missing (the faked PRAGMA returns nothing), so every
+    # single one of them races and swallows. `blocked_race_ack_sha` is the LAST
+    # column in the migration list: it can only appear here if the loop kept
+    # migrating past the FIRST race instead of abandoning the rest.
+    # Negative control: swap the swallow's `continue` for `break` — the loop
+    # stops at the first raced column (`pr_url`) and this goes RED.
+    assert any(
+        "ALTER TABLE runs ADD COLUMN blocked_race_ack_sha" in s for s in racing.statements
+    ), (
+        "losing a race on an early column must not abandon migrating the rest "
+        f"— got only: {racing.statements!r}"
+    )
+    # `adopted` raced too (its ALTER hit 'duplicate column name', same as every
+    # other column here) — it was NOT added by THIS call, so the CMX-321
+    # backfill gated on `added` must not fire for it.
+    # Negative control: record `added` before checking the ALTER succeeded
+    # (i.e. add before execute) — a raced column enters `added` anyway and this
+    # goes RED.
+    assert not any("UPDATE runs SET adopted" in s for s in racing.statements), (
+        "adopted was raced (not genuinely added by this call) — the backfill "
+        f"must not fire: {racing.statements!r}"
     )
 
 
