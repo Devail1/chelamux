@@ -118,6 +118,24 @@ def test_ensure_sandbox_settings_file_is_idempotent(tmp_path, monkeypatch):
     assert second.stat().st_mtime_ns == mtime_before
 
 
+def test_ensure_sandbox_settings_file_refreshes_stale_content(tmp_path, monkeypatch):
+    """The negative control the idempotency test above is only the positive half of
+    (docs/defeat_shapes/369d): an existing file must be refreshed when its content is
+    STALE, not merely left alone because it exists. A chela upgrade that narrows
+    `allowWrite`, adds a `credentials` entry, or flips a leaf must reach every operator's
+    `~/.claude` on the next launch, not sit unapplied forever because the file was already
+    there from before the upgrade."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    path = sandbox.sandbox_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"sandbox": {"enabled": False}}))
+
+    result = sandbox.ensure_sandbox_settings_file()
+
+    assert result == path
+    assert json.loads(path.read_text()) == sandbox.SANDBOX_SETTINGS
+
+
 def test_allow_unsandboxed_commands_is_false():
     """⛔ Load-bearing per §6.3: without it, a blocked command retries with
     dangerouslyDisableSandbox and the boundary is advisory, not enforced."""
@@ -137,20 +155,27 @@ def test_credentials_deny_the_github_token_file():
     assert {"path": "~/.config/gh/hosts.yml", "mode": "deny"} in files
 
 
-def test_sandbox_disabled_by_default(tmp_path):
+def test_sandbox_disabled_by_default(tmp_path, monkeypatch):
     """§6.4 step 3: the per-workflow flag is OFF unless a workflow opts in — a workflow
-    that has not adopted `agent.sandbox` must see NO change in its launch command."""
+    that has not adopted `agent.sandbox` must see NO change in its launch command, which
+    includes writing NO settings file as a side effect (docs/defeat_shapes/369c)."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     wf = _wf(tmp_path)
     assert sandbox.sandbox_enabled(wf) is False
     assert sandbox.sandbox_launch_arg(wf, "coding") is None
+    assert not sandbox.sandbox_settings_path().exists()
 
 
 def test_sandbox_launch_arg_never_fires_for_the_judge_even_when_enabled(tmp_path, monkeypatch):
     """§6.1 (decided 2026-09-14): sandbox coding + rework, never the judge — this is the
-    ONE check the whole boundary between them rests on."""
+    ONE check the whole boundary between them rests on. The judge call must also launch
+    byte-identically to an unsandboxed one, which includes writing NO settings file as a
+    side effect (docs/defeat_shapes/369c) — only the later opted-in coding call may
+    materialize it."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     wf = _wf(tmp_path, sandbox=True)
     assert sandbox.sandbox_launch_arg(wf, "judge") is None
+    assert not sandbox.sandbox_settings_path().exists()
     assert sandbox.sandbox_launch_arg(wf, "coding") is not None
 
 
@@ -202,6 +227,7 @@ def test_launch_agent_carries_settings_flag_when_workflow_opts_in(monkeypatch, t
 def test_launch_agent_omits_settings_flag_when_workflow_has_not_opted_in(monkeypatch, tmp_path):
     import chela.dispatcher as dispatcher
 
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda *_a, **_k: None)
     monkeypatch.setattr(dispatcher, "_wait_for_ready", lambda *a, **k: True)
     monkeypatch.setattr(dispatcher, "_send_seed", lambda *a, **k: True)
@@ -216,6 +242,7 @@ def test_launch_agent_omits_settings_flag_when_workflow_has_not_opted_in(monkeyp
 
     claude_line = next(line for line in sent if line.startswith("claude"))
     assert "--settings" not in claude_line
+    assert not sandbox.sandbox_settings_path().exists()
 
 
 def test_spawn_judge_never_carries_the_settings_flag_even_when_the_workflow_opts_in(
