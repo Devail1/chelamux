@@ -17,6 +17,16 @@ Every guard below therefore asserts on the STATEMENTS ``ensure_schema`` actually
 issued (via ``_RecordingConn``), not merely on whether it raised — the three
 mutations that survived round 1 (the pre-check deleted, the fallback dead-coded,
 the error message blanked) each go red against the guard that targets them.
+
+docs/defeat_shapes/370c-*.md: ``"readonly" in message.lower()`` is a
+source-constant check — satisfied identically whether the message interpolates
+the real ``sqlite3.OperationalError`` or hard-codes the word "readonly", and
+blind to whether that error is actually chained via ``raise ... from e``. Round
+3's mutations (drop ``from e``; replace ``{e}`` with a hard-coded
+``"readonly database"``) both survived a full green suite. The guard asserts
+``exc_info.value.__cause__`` is the real ``sqlite3.OperationalError`` and that
+its rendered text appears in the message — pinned to the actual exception, not
+a word that happens to be true for this one case.
 """
 from __future__ import annotations
 
@@ -104,6 +114,19 @@ def test_a_readonly_database_missing_a_column_raises_loudly(tmp_path):
     assert "pr_url" in message, f"error must name the missing column: {message!r}"
     assert "readonly" in message.lower(), (
         f"error must carry the underlying sqlite reason: {message!r}"
+    )
+    # docs/defeat_shapes/370c-*.md: "readonly" in message.lower() is a source-constant
+    # check — satisfied identically by interpolating the real sqlite error and by a
+    # hard-coded "readonly database" literal, so it can't tell the two apart. Assert the
+    # exception is actually CHAINED to the underlying sqlite3.OperationalError (dropping
+    # `from e` leaves __cause__ None) and that the message renders THAT error's own text
+    # (not a constant that merely happens to be true for this one case).
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, sqlite3.OperationalError), (
+        f"the sqlite error must be chained via `raise ... from e`: {cause!r}"
+    )
+    assert str(cause) in message, (
+        f"the error must render the sqlite reason, not a constant: {message!r}"
     )
 
 
