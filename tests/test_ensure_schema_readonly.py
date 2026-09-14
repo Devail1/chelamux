@@ -128,6 +128,17 @@ def test_a_readonly_database_missing_a_column_raises_loudly(tmp_path):
     assert str(cause) in message, (
         f"the error must render the sqlite reason, not a constant: {message!r}"
     )
+    # docs/defeat_shapes/370c-*.md: SchemaMigrationError must stay a DIFFERENT type from
+    # sqlite3.OperationalError. isinstance(cause, sqlite3.OperationalError) above proves
+    # only that the chained CAUSE is an OperationalError, not that SchemaMigrationError
+    # itself is distinct from it — if SchemaMigrationError ever became a subclass of
+    # sqlite3.OperationalError, every `except sqlite3.OperationalError: pass` elsewhere
+    # (e.g. chela/context.py:68) would re-swallow it and silently restore #515.
+    assert not issubclass(dispatcher.SchemaMigrationError, sqlite3.OperationalError), (
+        "SchemaMigrationError must not be a subclass of sqlite3.OperationalError — "
+        "that separation is the whole point of raising it instead of letting the "
+        "OperationalError propagate"
+    )
 
 
 def test_a_readonly_database_missing_a_later_column_names_that_column(tmp_path):

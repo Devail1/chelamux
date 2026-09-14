@@ -35,3 +35,25 @@ human autor decided was always going to be there.
 throwaway checkout independently, got `4067 passed, 0 failed, 0 error(s)` both times,
 because the readonly test's only message assertion (`"readonly" in message.lower()`) was
 a source-constant check that never looked at `__cause__`.
+
+**Round 6 addendum — checking the CAUSE's type is blind to the EXCEPTION's own type:**
+`isinstance(cause, sqlite3.OperationalError)` proves the chained *cause* is an
+`OperationalError`. It says nothing about `SchemaMigrationError` itself — a class the fix
+depends on being a genuinely different type from `sqlite3.OperationalError`, per the class's
+own docstring ("`sqlite3.OperationalError` is the SAME exception for duplicate column name
+… and attempt to write a readonly database … Raised here instead."). Nothing in the suite
+observed that relationship, so:
+
+- **Mutation:** `class SchemaMigrationError(RuntimeError):` → `class
+  SchemaMigrationError(sqlite3.OperationalError):`. Every existing assertion — `pytest.raises
+  (SchemaMigrationError)`, `isinstance(cause, sqlite3.OperationalError)`, the message checks —
+  is satisfied identically, because a subclass instance passes `isinstance` checks for both
+  its own type and every ancestor. `4069 passed, 0 failed, 0 error(s)`, unchanged. But every
+  `except sqlite3.OperationalError: pass` elsewhere in the codebase (the exact idiom this class
+  exists to stop re-swallowing — live one module over at `chela/context.py:68`, filed as issue
+  #520) would now silently re-swallow `SchemaMigrationError` too, restoring #515.
+- **Guard form that survives:** assert the NEGATIVE relationship directly —
+  `assert not issubclass(SchemaMigrationError, sqlite3.OperationalError)` — alongside the
+  existing `isinstance(cause, ...)` check on the chained cause. An `isinstance`/`pytest.raises`
+  check on an instance can never distinguish "is this type" from "is a subclass of a type it
+  must NOT be"; only an explicit `issubclass` assertion on the class itself can.
