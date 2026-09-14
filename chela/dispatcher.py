@@ -23,6 +23,7 @@ from chela.config import (
     worktree_disk_budget_bytes,
 )
 from chela.messenger import messaging_socket_launch_arg, resend_enter, send_tmux
+from chela.sandbox import sandbox_launch_arg
 from chela.sources import Task, get_source
 from chela.transcripts import agent_transcript_summary
 from chela.tui_text import sanitize as tui_sanitize
@@ -5401,6 +5402,14 @@ def _launch_agent(
         socket_arg = messaging_socket_launch_arg(target_id)
         if socket_arg:
             agent_cmd = f"{agent_cmd} {socket_arg}"
+    # 🧱 issue #502 / docs/SANDBOX_BOUNDARY.md §6: the coding and rework roles only
+    # (never the judge — see chela.sandbox.sandbox_launch_arg), and only when the
+    # workflow has opted in with `agent.sandbox: true`. Appended here, alongside the
+    # messaging-socket flag, for the same reason that one is: never baked into
+    # resolve_agent_cmd/agent.cmd, which may not even run `claude`.
+    settings_arg = sandbox_launch_arg(wf, role)
+    if settings_arg:
+        agent_cmd = f"{agent_cmd} {settings_arg}"
     # 🧠🔒 CMX-264: put this agent (coding agent OR judge — both funnel through this one
     # function) into the SHARED memory slice, when CHELA_MEMORY_SLICE_BUDGET is on and a
     # working `systemd --user` session confirms it is ready. A no-op (returns agent_cmd
