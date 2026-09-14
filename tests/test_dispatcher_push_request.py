@@ -173,8 +173,16 @@ def test_apply_push_request_pushes_and_opens_the_pr_on_a_first_dispatch(tmp_path
     """🔴 GUARD (accept case): a row with no `pr_url` yet, whose marker carries a title,
     gets BOTH a `git push` and a `gh pr create` — and the resulting URL lands on the run
     row, since nothing downstream (task-finished) scrapes the agent's transcript for it
-    anymore once the daemon opens the PR itself."""
-    wf = _wf(tmp_path)
+    anymore once the daemon opens the PR itself.
+
+    ⛔ round 3, judge finding 3: `base_branch` is deliberately set to neither the fixture's
+    usual `"dev"` nor the production default `"master"` — a `base_branch` literal hardcoded
+    anywhere (in the dispatcher OR by coincidentally matching the fixture default) must go
+    red here. Only reading `wf.get("workspace", "base_branch", ...)` at call time survives.
+    """
+    wf = _wf(tmp_path, workspace={
+        "root": str(tmp_path / ".chela" / "wts"), "base_branch": "release/9000-not-a-default",
+    })
     wt = tmp_path / "wt"
     wt.mkdir()
     (wt / ".chela-push-request.json").write_text(json.dumps({
@@ -198,7 +206,8 @@ def test_apply_push_request_pushes_and_opens_the_pr_on_a_first_dispatch(tmp_path
     assert "cmx-1" in push_calls[0][0]
     gh_calls = [(c, kw) for c, kw in calls if c[:3] == ["gh", "pr", "create"]]
     assert len(gh_calls) == 1
-    assert "--base" in gh_calls[0][0] and "dev" in gh_calls[0][0]
+    assert "--base" in gh_calls[0][0] and "release/9000-not-a-default" in gh_calls[0][0]
+    assert "dev" not in gh_calls[0][0] and "master" not in gh_calls[0][0]
     assert "CMX-1: a thing" in gh_calls[0][0]
     assert "the body" in gh_calls[0][0]
     # ⛔ #502 B2 rework round 1, judge finding 3: `cwd` decides which repo (and therefore

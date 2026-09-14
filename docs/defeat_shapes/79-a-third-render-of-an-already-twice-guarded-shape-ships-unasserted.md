@@ -89,3 +89,32 @@ multiple interpolation sites — it is also one paragraph of *prose*, hand-copie
 every file/constant that needs to say the same thing to a different reader. Pinning the
 first copy you find does not mean the others are covered; each file that carries its own
 copy needs its own test reading *that* file, because nothing else exercises it.
+
+**Found a fifth time — closing three of five named copies is the same failure as closing
+one, it just moves the edge:** CMX-368 rework round 3, PR #512. Round 2's fix (above) pinned
+three of the five known copies with three hand-named test functions, and its own commit
+message called the two adopter-facing docs (`examples/WORKFLOW.md`,
+`skills/chela-setup/SKILL.md`) out by name as deliberately left unpinned ("advisory-only
+notes for now"). The judge's round-3 verdict reverted exactly those two, unaltered, and the
+suite stayed green — `grep -rn 'examples/WORKFLOW\|skills/' tests/` returned nothing at all.
+Three named-file assertions closed three call sites; the other two, being reachable only
+through their own file read, were exactly as unguarded as before round 2 ran. **Naming the
+narrowing in the catalog entry (as round 2's own text above did) does not close it** — a
+documented gap is still a gap.
+
+Closed differently this time, on the reviewer's explicit instruction: not a fourth and fifth
+hand-named test function (which would only re-run this same shape on copy six), but ONE
+table — `tests/test_push_briefs.py::PUSH_BRIEFS`, a list of `(name, get_text)` pairs
+covering all five copies (three file reads, two in-code renders) — and ONE parametrized test
+asserting every entry routes through `chela request-push` and contains no bare `git push -u
+origin`/`gh pr create --base` instruction. The acceptance criterion the reviewer stated
+directly: "adding a sixth copy of this brief tomorrow is covered without editing the test" —
+i.e. the guard's *closure* must not depend on a human remembering to write test number N+1
+next time a brief gets copied to a new file.
+
+**Lesson, sharpened:** when the SAME instance of this shape recurs across separate call
+sites more than twice, adding one more named test per recurrence is not converging — it is
+the shape happening again with the count incremented. The durable fix is a data structure
+that enumerates every known instance in one place, plus one guard that iterates it, so the
+next instance is an entry in a list rather than a new test function nobody is forced to
+write.
