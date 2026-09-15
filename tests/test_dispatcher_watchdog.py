@@ -176,6 +176,27 @@ def test_genuinely_idle_agent_still_fails(ticking, monkeypatch):
 
 # ---- (2) input-dialog (AskUserQuestion) recovery ---------------------------
 
+def test_first_renudge_with_a_broken_prompt_template_fails_only_this_run(ticking, monkeypatch):
+    """issue #504 / SPEC 5.5: a `{{var}}` the workflow never provides must fail only the
+    ONE stuck run being re-nudged — never crash the whole watchdog pass and leave every
+    other run in this tick unchecked. Drop the try/except around `_renudge_prompt` at the
+    call site → the raise propagates out of `tick()` uncaught → RED."""
+    repo = ticking
+    (repo / "WORKFLOW.md").write_text(
+        (repo / "WORKFLOW.md").read_text().replace("\nseed\n", "\nseed {{taks_title}}\n")
+    )
+    task_id = _seed_running(repo, nudged=None)
+    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w: _BARE_IDLE)
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w: "idle")
+
+    summary = dispatcher.tick(repo / "WORKFLOW.md")
+
+    assert summary["reconciled_failed"] == 1
+    status, err = _status_of(task_id)
+    assert status == "failed"
+    assert "taks_title" in err
+
+
 def test_waiting_agent_is_escaped_not_failed_on_first_encounter(ticking, monkeypatch):
     """A dispatched agent blocked on a dialog (status 'waiting') is Escaped so it
     falls back to its own default — not failed, not ignored. Drop the waiting

@@ -565,9 +565,17 @@ def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
         _run_row(conn, tmp_path, workflow_path=str(wf.path))
         row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
         captured = {}
+        # render_prompt (CMX-373) now FAILS on a {{var}} the vars map doesn't cover, so
+        # the stand-in has to name every var JUDGE_PROMPT actually references — an empty
+        # dict here would raise before _launch_agent is ever reached.
+        judge_vars = {
+            "pr_url": "https://x/1", "branch_name": "b", "task_id": "abc123",
+            "workspace_path": str(tmp_path), "diff_cmd": "git diff", "pr_view_cmd": "gh pr view",
+            "experiments_path": str(tmp_path / "experiments.json"), "judge_cmd": "chela judge run",
+        }
         with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
              patch.object(dispatcher, "_refresh_judge_worktree", return_value=None), \
-             patch.object(dispatcher, "_judge_vars", return_value={}), \
+             patch.object(dispatcher, "_judge_vars", return_value=judge_vars), \
              patch.object(dispatcher, "_launch_agent",
                            side_effect=lambda *a, **kw: captured.__setitem__("prompt", a[4])):
             assert dispatcher._spawn_judge(wf, row, "cafe1234", conn) is True
@@ -578,6 +586,26 @@ def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
     # too, or a revert to the pre-split wording (judge told to skim a now-empty pointer file)
     # passes silently.
     assert "docs/defeat_shapes/" in captured["prompt"]
+
+
+def test_spawn_judge_cannot_verify_on_a_broken_judge_prompt_template(tmp_path):
+    """issue #504 / SPEC 5.5: a bad `judge_prompt` template fails ONLY this judge attempt —
+    CANNOT VERIFY, same as a worktree that would not check out — never an uncaught
+    exception out of `_spawn_judge`, which nothing above it on the call site (`tick`'s
+    judge-trigger loop) catches.
+    """
+    wf = _wf(tmp_path, agent={"judge_prompt": "look at {{not_a_real_var}}"})
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path))
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+        with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
+             patch.object(dispatcher, "_refresh_judge_worktree", return_value=None), \
+             patch.object(dispatcher, "_launch_agent") as launch:
+            assert dispatcher._spawn_judge(wf, row, "cafe1234", conn) is False
+        launch.assert_not_called()
+        after = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+        assert after["judge_state"] == judge.J_CANNOT_VERIFY
+        assert "not_a_real_var" in (after["judge_detail"] or "")
 
 
 def test_defeat_shapes_catalog_documents_every_seeded_shape():

@@ -226,7 +226,36 @@ def poll_interval_seconds(wf: WorkflowDef | None, default: float) -> float:
     return max(MIN_POLL_INTERVAL_SECONDS, secs)
 
 
+class TemplateRenderError(ValueError):
+    """A prompt template referenced a ``{{var}}`` that was never provided.
+
+    Symphony SPEC 5.4: unknown variables MUST fail rendering rather than reach the
+    dispatched agent verbatim. SPEC 5.5 scopes the blast radius: this fails the ONE run
+    attempt being rendered, never the workflow file itself (that stays a parse-time
+    concern — see :func:`workflow_error`).
+    """
+
+
+# Exactly the syntax the substitution loop below recognizes: `{{name}}`, no surrounding
+# whitespace, name a plain identifier. Deliberately narrower than "any {{...}}" — prose in
+# a WORKFLOW.md that illustrates the syntax to its own reader (e.g. "wrap it like {{ this
+# }}", or a `{{taste}}`-shaped example with punctuation) does not match and is never fatal;
+# only an unresolved *reference* is.
+_VAR_REF_RE = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
+
+
 def render_prompt(template: str, vars: dict) -> str:
+    """Substitute every ``{{name}}`` in ``template`` from ``vars``.
+
+    Raises :class:`TemplateRenderError` naming every referenced ``{{name}}`` that ``vars``
+    does not provide — checked against the TEMPLATE, not the rendered output, so a
+    provided value that happens to contain literal ``{{...}}`` text can never be mistaken
+    for an unresolved reference.
+    """
+    unknown = sorted({m for m in _VAR_REF_RE.findall(template) if m not in vars})
+    if unknown:
+        names = ", ".join("{{" + n + "}}" for n in unknown)
+        raise TemplateRenderError(f"unknown template variable(s): {names}")
     out = template
     for k, v in vars.items():
         out = out.replace("{{" + k + "}}", str(v))
