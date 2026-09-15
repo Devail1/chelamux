@@ -1514,14 +1514,22 @@ def test_is_done_false_for_a_never_prompted_session(tmp_path, monkeypatch, no_na
 def test_is_done_refuses_a_shared_cwd_rather_than_crediting_a_sibling(
         tmp_path, monkeypatch, no_native_status):
     """Same CMX-191 hazard `did_work_since` guards against: @7 prompted its own agent
-    and got no reply; its SIBLING @8 (same cwd) has a fresh assistant turn. Resolving
-    by cwd would hand @7 the sibling's reply and badge it `done` for work it never did."""
+    and got no reply; its SIBLING @8 (same cwd) was prompted AND got a fresh reply of
+    its own. Resolving by cwd would hand @7 the sibling's reply and badge it `done`
+    for work it never did.
+
+    ⚠️ @8's transcript must contain its OWN user turn before its assistant reply, not
+    just a bare assistant turn — otherwise a cwd-keyed lookup that wrongly picks @8's
+    file still reads `done=False` (no user turn ⇒ no baseline), landing on the same
+    answer as the correct refusal and hiding the mutation (issue #489)."""
     cwd = "/home/x/proj"
     proj = tmp_path / transcripts.encode_cwd(cwd)
     proj.mkdir(parents=True)
     now = time.time()
-    _write_user_turn(proj / "mine.jsonl", now - 50)         # @7: prompted, no reply yet
-    _write_assistant_turn(proj / "sibling.jsonl", now)      # @8: fresh reply
+    _write_user_turn(proj / "mine.jsonl", now - 50)          # @7: prompted, no reply yet
+    sibling_path = proj / "sibling.jsonl"
+    _write_user_turn(sibling_path, now - 40, content="a different task")  # @8: its own prompt
+    _append_assistant_turn(sibling_path, now)                             # @8: its own fresh reply
 
     monkeypatch.setattr(inbox.sessions, "transcript_for_window", _REAL_TRANSCRIPT_FOR_WINDOW)
     monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", tmp_path)
@@ -1531,6 +1539,17 @@ def test_is_done_refuses_a_shared_cwd_rather_than_crediting_a_sibling(
     }
     monkeypatch.setattr(inbox.sessions, "panes", lambda force=False: pane_map)
     monkeypatch.setattr(inbox.discovery, "get_window_cwd_by_id", lambda wid: cwd)
+
+    # The two resolution strategies must genuinely diverge under this fixture, or the
+    # assertion below can't tell "correctly refused" from "coincidentally the same
+    # answer" — the exact way this guard went inert (issue #489): the wid-keyed path
+    # refuses outright (shared cwd, no stronger signal), while a cwd-keyed lookup picks
+    # @8's transcript, since its assistant record is the newest in the directory.
+    wid_keyed = sessions.transcript_for_window("@7")
+    cwd_keyed = transcripts.transcript_for_cwd(cwd, base=tmp_path)
+    assert wid_keyed is None
+    assert cwd_keyed is not None
+    assert Path(os.path.realpath(cwd_keyed)) == Path(os.path.realpath(sibling_path))
 
     assert inbox.is_done("@7") is False
 
