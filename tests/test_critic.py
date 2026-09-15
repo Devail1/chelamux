@@ -266,7 +266,9 @@ def test_critic_reviews_the_task_not_the_rendered_template(tmp_path):
     # boilerplate, so reviewing it reports "complete" for every dispatch and the critic never
     # fires. Proof in two halves:
     #   (a) the rendered template really IS field-complete (else this test proves nothing)…
-    rendered = dispatcher.render_prompt(WORKFLOW_TEMPLATE, {"task_title": "do a thing"})
+    rendered = dispatcher.render_prompt(
+        WORKFLOW_TEMPLATE, {"task_title": "do a thing", "workspace_path": "/tmp/wt"}
+    )
     assert critic.review_brief(rendered).complete is True, (
         "the WORKFLOW.md boilerplate must look complete — that is exactly what would mask a "
         "thin task if the critic reviewed the rendered prompt"

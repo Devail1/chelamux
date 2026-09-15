@@ -28,6 +28,7 @@ from chela.sources import Task, get_source
 from chela.transcripts import agent_transcript_summary
 from chela.tui_text import sanitize as tui_sanitize
 from chela.workflow import (
+    TemplateRenderError,
     WorkflowDef,
     load_workflow,
     load_workflow_cached,
@@ -4593,7 +4594,23 @@ def tick(workflow_path: str | Path) -> dict:
                     # PR" vs "you are already on your branch, your PR is open, here is
                     # the verdict"). Re-seeding the wrong one is the same lost verdict as
                     # a `failed` rework, just delivered by hand.
-                    prompt = _renudge_prompt(wf, row, task)
+                    try:
+                        prompt = _renudge_prompt(wf, row, task)
+                    except TemplateRenderError as e:
+                        # SPEC 5.5: a bad template fails only THIS run attempt, same shape
+                        # as the idle-timeout fail two branches up — never crashes the
+                        # watchdog tick for every other run it still has to check.
+                        if _is_rework(row):
+                            _rework_failed(conn, row, f"rework re-nudge: {e}")
+                        else:
+                            conn.execute(
+                                "UPDATE runs SET status='failed', ended_at=?, last_error=? "
+                                "WHERE task_id=?",
+                                (_now(), f"template render error: {e}", row["task_id"]),
+                            )
+                            summary["reconciled_failed"] += 1
+                        log.warning("Task %s: %s", row["task_id"], e)
+                        continue
                     if prompt is None:
                         continue          # task gone from the tracker; nothing to re-send
                     _send_seed(window, prompt, row["task_id"])
@@ -6094,11 +6111,11 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
         log.warning("judge: %s: %s", task_id, stale)
         return False
 
-    prompt = render_prompt(
-        wf.get("agent", "judge_prompt", default=None) or JUDGE_PROMPT,
-        _judge_vars(wf, row, worktree, sha),
-    )
     try:
+        prompt = render_prompt(
+            wf.get("agent", "judge_prompt", default=None) or JUDGE_PROMPT,
+            _judge_vars(wf, row, worktree, sha),
+        )
         _launch_agent(
             wf, task_id, judge.judge_window_name(branch), worktree, prompt, conn,
             hook_vars=_judge_vars(wf, row, worktree, sha),
