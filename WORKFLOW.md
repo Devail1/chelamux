@@ -30,6 +30,18 @@ concurrency:
                             # two heavy LEAN backtests never run in parallel (memcap/OOM).
 
 agent:
+  # 🧱 #502 §6.4 step 4 — the sandbox TRIAL ran 2026-09-15 and is REVERTED. ⛔ Do not
+  # re-enable until #513 lands. What the trial proved: the boundary itself works (the
+  # --settings flag reaches the process; ~/.chela and the gh token are denied; the
+  # daemon still pushed and opened the PR for an agent that cannot hold the token —
+  # CMX-368's hop doing its job). What blocks it: `chela task-finished` gates on a
+  # green full suite, and ~110 tests need a real tmux socket + api.telegram.org, which
+  # the boundary denies — so a sandboxed run reaches a PR and then PARKS forever.
+  # #513 was filed believing that only cost the JUDGE; the trial showed it blocks every
+  # CODING agent too. ⛔ The fix is socket-free tests, NOT granting the tmux socket
+  # (that is send-keys into any window, unattributed — rejected in the design).
+  # Re-enable with one line here once #513 lands: `sandbox: true`.
+
   # No `cmd:` here on purpose. An explicit agent.cmd is an authoritative
   # per-workflow override that SHADOWS the permission mode set in the dashboard's
   # Settings drawer (precedence: agent.cmd → Settings mode → the built-in
