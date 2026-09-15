@@ -65,3 +65,8 @@ inversion in place. Closed by
 `sqlite3.OperationalError("database is locked")` on the `ALTER TABLE` and asserts it escalates
 to `SchemaMigrationError` — red under the blacklist (nothing raises), green under the
 whitelist.
+
+**Also found (CMX-372, #521):** the same whitelist-vs-blacklist gap in `chela/dispatcher.py`'s
+`ensure_schema` (the `runs` table) — the sibling this shape was left open against. Closed the
+same way by `test_a_third_kind_of_operational_error_on_alter_table_escalates` in
+`tests/test_ensure_schema_readonly.py`.
