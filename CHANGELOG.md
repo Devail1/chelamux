@@ -10,6 +10,78 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-09-15
+
+### Added
+
+- **The sandbox boundary for coding and rework agents ships, off by default (issue #502).**
+  `docs/SANDBOX_BOUNDARY.md` §6.3's frozen config — `sandbox.enabled`, a narrow
+  `filesystem.allowWrite`, `network.strictAllowlist` with a measured `allowedDomains` list,
+  and `deny` on the GitHub token file — is now written to a chela-owned
+  `<claude config dir>/chela-sandbox.settings.json` and passed as `--settings <path>` to a
+  dispatched coding or rework agent whose workflow opts in with `agent.sandbox: true` in its
+  `WORKFLOW.md`. The judge is excluded unconditionally (`role="judge"` short-circuits before
+  the opt-in check), since it runs a fixed command in a throwaway tree and never pushes,
+  while a coding agent takes an arbitrary task description and pushes to a public repo.
+  CMX-366 (the completion hop) and CMX-368 (the push/PR-open) already moved the two
+  privileged effects that would have made this cosmetic onto the daemon; this lands the
+  config itself. A workflow that has not opted in launches byte-identically to today.
+  (CMX-369, #518)
+
+### Changed
+
+- **The completion hop is now the daemon's write, not the dispatched agent's (issue #502).**
+  `chela task-finished` used to run `UPDATE`s against `~/.chela/scheduler.db` and kill the
+  agent's tmux window *inside the agent's own process* — the single thing blocking OS-level
+  sandboxing of dispatched agents, since an agent that can write the runs DB can rewrite every
+  other run's row, and one that can reach the tmux control socket can `send-keys` into any
+  window, including the operator's, with no `from` attribution. `chela task-finished` now
+  writes a request marker into the run's own worktree (a path the agent can already write,
+  sandboxed or not); `tick()`, unsandboxed and already polling every run, picks the marker up
+  and performs the transition to `awaiting_review` and the window kill on the daemon's side. A
+  request the daemon cannot apply for an unexplained reason (not: someone else already settled
+  the row) now escalates the run to `needs_human` and keeps the marker as evidence, instead of
+  logging a warning nobody reads and leaving the row `running` forever.
+  (CMX-366)
+
+- **The push and the PR open are now the daemon's, not the dispatched agent's (issue
+  #502).** Done Criteria step 5 used to run `git push` then `gh pr create` *inside the
+  agent's own process* — the second blocker (after CMX-366's completion hop) standing
+  between OS-level sandboxing and being cosmetic. Measured with a matched unsandboxed
+  control (`docs/SANDBOX_BOUNDARY.md` §5 B2): masking the GitHub token keeps `gh` working
+  (it sends `Authorization: token <token>` verbatim, so the sandbox's substring
+  substitution catches it) but not `git push` (it sends `Authorization: Basic
+  base64(user:token)`, so the token is never present verbatim and nothing is substituted —
+  GitHub rejects the push). `chela request-push <task_id> [--pr-title T --pr-body-file P]`
+  now writes a request marker into the run's own worktree instead (a path the agent can
+  already write, sandboxed or not); `tick()`, unsandboxed and already polling every run,
+  picks the marker up, pushes the branch, and — only when the run has no `pr_url` yet —
+  opens the PR, so the token never has to enter the agent's process at all. A request that
+  keeps failing gets 5 ticks to succeed before it escalates to `needs_human`, preserving the
+  marker as evidence, instead of retrying forever and pinning the run's concurrency slot.
+  (CMX-368)
+
+### Fixed
+
+- **`npm-shared-install.sh` now checks whether the declared npm packages actually resolve,
+  not whether the shared `node_modules` is empty.** The previous freshness check
+  (`-z "$(ls -A ...)"`) still read a partially-unpacked shared install — e.g. one left by an
+  `npm ci` interrupted mid-unpack — as "already installed" if it had any content at all, so a
+  worktree could symlink into a shared `node_modules` still missing jsdom. The check now
+  reuses `chela.judge`'s own `declared_npm_packages` / `_unresolvable` helpers. (CMX-367, #510)
+
+- **`ensure_schema` now names the missing column and the underlying sqlite reason when a
+  migration genuinely fails** (a read-only connection whose schema is missing a column,
+  e.g. a sandboxed agent's denied `~/.chela` write). Anyone running chela against a database
+  they cannot write now gets a loud, specific `SchemaMigrationError` instead of an inscrutable
+  `no such column` surfacing later, elsewhere. (CMX-370, #519)
+
+- **`context.ensure_schema` now names the missing column and the underlying sqlite reason when
+  a migration genuinely fails** (a read-only connection whose `context_snapshots` schema is
+  missing a column, e.g. a sandboxed agent's denied `~/.chela` write). Anyone running chela
+  against a database it cannot write now gets a loud, specific `SchemaMigrationError` instead
+  of an inscrutable `no such column` surfacing later, elsewhere. (CMX-371, #520)
+
 ## [0.12.2] — 2026-09-13
 
 ### Added
