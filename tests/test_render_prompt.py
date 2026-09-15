@@ -59,6 +59,16 @@ def test_render_prompt_extra_provided_vars_are_fine():
     assert out == "abc123"
 
 
+def test_render_prompt_checks_the_template_not_the_rendered_output():
+    # A provided VALUE that happens to contain literal {{...}} text (verdict bodies and
+    # TODO titles in this repo routinely do, quoting the {{var}} syntax itself) must never
+    # be mistaken for an unresolved reference. This is the property the docstring claims —
+    # pin it against the mutation that reorders the check to run AFTER substitution, which
+    # would raise here on "{{b}}" even though {{b}} never appears in the template.
+    out = render_prompt("{{a}}", {"a": "{{b}}"})
+    assert out == "{{b}}"
+
+
 def test_render_prompt_does_not_flag_prose_that_only_looks_like_the_syntax():
     # A WORKFLOW.md documenting the syntax to its own reader — spaces or punctuation
     # inside the braces — must not trip a naive "any {{...}}" check.

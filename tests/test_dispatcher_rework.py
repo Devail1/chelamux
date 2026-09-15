@@ -1172,6 +1172,50 @@ def test_a_re_nudged_rework_ALSO_carries_the_REQUIRED_MUTATION_SET(tmp_path):
     assert '"file": "other_guard.py"' in sent[0]
 
 
+def test_a_stuck_rework_with_a_bad_template_is_marked_failed_not_left_running_forever(tmp_path):
+    """CMX-373: the watchdog's re-nudge branch renders the REWORK prompt fresh every time
+    (CMX-269's `latest_required_mutations` wiring can put an unrendered `{{var}}` back into
+    it). If that render raises, a REWORK row must go through `_rework_failed` — back to
+    `changes_requested`, never left `running` forever with no agent behind it and no signal
+    anywhere that it died. (The FIRST-dispatch sibling of this path already has its own UPDATE
+    `status='failed'` a few lines up; this pins the rework half of that same branch, which
+    calls `_rework_failed` instead — the two must never be swapped.)
+
+    The other free slot is held by an unrelated run (same trick as the dead-window test
+    above): if step 3b's rework-respawn loop could immediately re-claim the row this test's
+    watchdog branch just knocked back to `changes_requested`, its failure would overwrite
+    `last_error` through a DIFFERENT call site (`_respawn_rework`'s own except-clause) before
+    this test ever got to look at it — proving nothing about the branch under test."""
+    wf = _wf(tmp_path, concurrency={"max": 1})
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="running", rework_count=1,
+             window_name="test-1", started_at="2020-01-01T00:00:00+00:00",
+             review_history=json.dumps([{"round": 1, "at": "t", "body": "the wire is loose"}]))
+        _row(conn, task_id="busy", workflow_path=str(wf.path), status="running",
+             window_name="test-2", branch_name="test-2", pr_url=None, pr_state=None)
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=_Source("abc123", "busy")), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "_tmux_windows", return_value={"test-1", "test-2"}), \
+         patch.object(dispatcher, "_capture_pane", return_value=""), \
+         patch.object(dispatcher, "_pane_idle_empty_prompt", return_value=True), \
+         patch.object(dispatcher, "_agent_status", return_value="idle"), \
+         patch.object(dispatcher, "REWORK_PROMPT", "round {{rework_round}}: {{not_a_real_var}}"), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+        dispatcher.tick(wf.path)
+
+    run = dispatcher.resolve_run("abc123")
+    # ⛔ NOT 'running' (stuck forever) and NOT 'failed' (the fresh-dispatch retry path,
+    # which would let the claim loop re-spawn it with the ORIGINAL first-dispatch prompt).
+    assert run["status"] == "changes_requested"
+    assert "rework re-nudge" in run["last_error"]
+    assert "not_a_real_var" in run["last_error"]
+    # the verdict that got it here must still be readable after the failed re-nudge.
+    assert dispatcher.latest_verdict(dict(run)) == "the wire is loose"
+
+
 # --- (h) 🔴 changes_requested is not a silent state, and a HOLD must not freeze the exit ---
 
 def test_a_HOLD_pauses_the_rework_but_NEVER_the_escalation(tmp_path, monkeypatch):

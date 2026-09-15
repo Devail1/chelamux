@@ -10,6 +10,17 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`render_prompt` fails loudly on an unknown `{{var}}` instead of shipping it verbatim.**
+  A misspelled variable in a `WORKFLOW.md` prompt template (or the built-in first-dispatch and
+  rework prompts) now raises `TemplateRenderError` naming every unresolved reference, instead
+  of silently reaching the dispatched agent as literal `{{taks_title}}`-style text. A bad
+  template fails only the one run attempt (dispatch, watchdog re-nudge, or judge spawn) —
+  never the whole tick — and a rework whose re-nudge hits this returns to `changes_requested`
+  via the existing rework-failure path rather than being left `running` with no agent behind
+  it. (CMX-373, #525)
+
 ## [0.13.0] — 2026-09-15
 
 ### Added
