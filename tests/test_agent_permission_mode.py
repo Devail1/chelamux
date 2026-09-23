@@ -94,6 +94,20 @@ def test_blank_workflow_cmd_falls_through_to_settings(mods):
     assert dispatcher.resolve_agent_cmd(_wf(cmd="   "))[1] == "settings"
 
 
+def test_resolve_agent_cmd_never_carries_remote_control(mods, monkeypatch):
+    """CMX-375 guard (b): a dispatcher-launched agent/judge is an unattended worker, never
+    `--remote-control` — even with the flag that turns it on for spawn.py/autolaunch.py
+    sessions enabled. `resolve_agent_cmd` has no wiring to it at all (that flag only
+    reaches `chela/spawn.py` and `chela/personas/autolaunch.py`); this pins the absence
+    so it can't be added here by accident."""
+    config, _, dispatcher = mods
+    monkeypatch.setattr(config, "REMOTE_CONTROL_ENABLED", True)
+    cmd, _ = dispatcher.resolve_agent_cmd(_wf())
+    assert "--remote-control" not in cmd
+    cmd, _ = dispatcher.resolve_agent_cmd(_wf(), "judge")
+    assert "--remote-control" not in cmd
+
+
 # --- CMX-131: dispatched windows never inherit the operator's MCP servers ----
 #
 # `--strict-mcp-config` with no `--mcp-config` given means the launched CLI loads NO

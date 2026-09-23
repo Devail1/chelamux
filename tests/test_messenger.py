@@ -99,6 +99,18 @@ def test_paste_submitted_no_second_enter():
     assert len(enters) == 1
 
 
+def test_multiline_paste_uses_bracketed_paste():
+    """CMX-375: without `-p`, tmux replaces each embedded LF with a bare CR —
+    indistinguishable from the user pressing Enter mid-message — which is what
+    split/stranded multi-line Telegram sends in production. `-p` wraps the buffer
+    in bracketed-paste control codes so the TUI reads it as one paste."""
+    ok, cmds = _run_send("line one\nline two", _PANE_SUBMITTED)
+    assert ok is True
+    paste_cmd = cmds[2]
+    assert paste_cmd[:2] == ["tmux", "paste-buffer"]
+    assert "-p" in paste_cmd
+
+
 def test_single_line_sends_literal_text_then_separate_enter():
     ok, cmds = _run_send("just one line", _PANE_STRANDED)
     assert ok is True

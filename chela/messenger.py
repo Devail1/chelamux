@@ -182,11 +182,15 @@ def refuses_paste(window_id: str) -> str | None:
 def send_tmux(window_id: str, text: str) -> bool:
     """Send text to a tmux window. Returns True on success.
 
-    Uses load-buffer + paste-buffer for multi-line text to avoid newlines being
-    interpreted as premature Enter presses. Single-line text is sent literally
-    (``-l``) with the Enter as a SEPARATE call after a short gap, so a long blob
-    isn't read as paste input and the trailing Enter isn't absorbed as a newline
-    (which strands the message on the ``❯`` input line unsubmitted).
+    Uses load-buffer + ``paste-buffer -p`` (bracketed paste) for multi-line text so
+    Claude Code's TUI reads the whole blob as one paste instead of a run of Enter
+    presses — plain ``paste-buffer`` replaces each embedded newline with a CR, which
+    reads as the user hitting Enter mid-message (CMX-375: split a short message into
+    two prompts, and stranded a longer one unsent on the ❯ line 7/12 times in
+    production). Single-line text is sent literally (``-l``) with the Enter as a
+    SEPARATE call after a short gap, so a long blob isn't read as paste input and the
+    trailing Enter isn't absorbed as a newline (which strands the message on the ``❯``
+    input line unsubmitted).
 
     Refuses a window whose prompt is in an unsafe INPUT MODE (:func:`refuses_paste`): in
     ``!`` bash mode our text is not a message, it is a command that session's shell runs.
@@ -211,14 +215,21 @@ def send_tmux(window_id: str, text: str) -> bool:
             )
             time.sleep(1.0)
         if "\n" in text:
-            # Multi-line: use load-buffer + paste-buffer to avoid
-            # newlines acting as Enter presses mid-message
+            # Multi-line: use load-buffer + paste-buffer -p (bracketed paste) to
+            # avoid newlines acting as Enter presses mid-message. Measured
+            # (TODO.md CMX-375): plain `paste-buffer` (no `-p`) replaces each
+            # embedded LF with a CR — indistinguishable from the user pressing
+            # Enter mid-message — so a 2-line message split into two prompts, and
+            # longer ones stranded unsent on the ❯ line 7/12 times in 9 days of
+            # production traffic. `-p` wraps the buffer in bracketed-paste control
+            # codes instead, which Claude Code's TUI reads as one paste (4/4
+            # submitted in reproduction, vs 12/12 stranded without it).
             subprocess.run(
                 ["tmux", "load-buffer", "-"],
                 input=text.encode(), check=True, capture_output=True,
             )
             subprocess.run(
-                ["tmux", "paste-buffer", "-t", target],
+                ["tmux", "paste-buffer", "-p", "-t", target],
                 check=True, capture_output=True,
             )
             time.sleep(0.5)
