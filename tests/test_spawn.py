@@ -1,4 +1,5 @@
-"""``chela.spawn`` — session-id pinning at spawn time (docs/AGENT_IDENTITY.md slice 2a).
+"""``chela.spawn`` — session-id pinning at spawn time (docs/AGENT_IDENTITY.md slice 2a)
+and ``--remote-control`` insertion (CMX-375).
 
 No tmux: ``spawn_window``'s own tmux calls (``subprocess.run``, ``_send``) and its
 collaborators (``discovery.ensure_session``, ``discovery.get_all_windows``,
@@ -9,7 +10,9 @@ in the dedicated session-id store — without depending on a real tmux server (s
 """
 from __future__ import annotations
 
+import os
 import re
+import shlex
 
 import pytest
 
@@ -48,12 +51,19 @@ class _Proc:
         self.stderr = ""
 
 
-def _patch_tmux(monkeypatch, wid="@42"):
-    """Stub every tmux/agent_manager touchpoint `spawn_window` makes, recording sends."""
+def _patch_tmux(monkeypatch, wid="@42", *, remote_control=False):
+    """Stub every tmux/agent_manager touchpoint `spawn_window` makes, recording sends.
+
+    ``remote_control`` defaults OFF here so the session-id tests below (written before
+    CMX-375 added `--remote-control`) keep exercising exactly what they say they do,
+    undisturbed by a second flag landing in the same sent command; the CMX-375 tests
+    turn it on explicitly.
+    """
     monkeypatch.setattr(spawn.discovery, "ensure_session", lambda: True)
     monkeypatch.setattr(spawn.discovery, "get_all_windows", lambda: {})
     monkeypatch.setattr(spawn.agent_manager, "lock_window_name", lambda *a, **kw: None)
     monkeypatch.setattr(spawn.subprocess, "run", lambda *a, **kw: _Proc(wid))
+    monkeypatch.setattr(spawn.config, "REMOTE_CONTROL_ENABLED", remote_control)
 
     sent: list[str] = []
     monkeypatch.setattr(spawn, "_send", lambda target, text: sent.append(text))
@@ -166,4 +176,73 @@ def test_spawn_window_falls_back_to_an_unpinned_send_when_the_store_fails(
     assert result.ok                    # the window still opens either way
     launch = _launch(sent)
     assert launch == "claude"           # sent verbatim, no --session-id
+    assert "--session-id" not in launch
+
+
+# -- _add_remote_control / _remote_control_name (CMX-375) --------------------
+
+def test_add_remote_control_inserts_right_after_the_leading_claude_token():
+    assert spawn._add_remote_control("claude", "chelamux") == "claude --remote-control chelamux"
+
+
+def test_add_remote_control_inserts_before_trailing_flags_never_appends():
+    to_send = spawn._add_remote_control("claude -p 'x'", "chelamux")
+    assert to_send == "claude --remote-control chelamux -p 'x'"
+
+
+def test_add_remote_control_leaves_a_non_claude_command_untouched():
+    command = "bash -c 'echo hi'"
+    assert spawn._add_remote_control(command, "chelamux") == command
+
+
+@pytest.mark.parametrize("name", ["my project", "foo; rm -rf /", "a && b", "$(evil)"])
+def test_add_remote_control_shell_quotes_the_name_into_a_single_argv(name):
+    to_send = spawn._add_remote_control("claude", name)
+    # Round-trips through real shell parsing as ONE argv element for --remote-control,
+    # never split by a space/metacharacter inside the name.
+    assert shlex.split(to_send) == ["claude", "--remote-control", name]
+
+
+def test_remote_control_name_uses_the_cwd_basename():
+    assert spawn._remote_control_name("shell-3", "/home/liav/projects/chelamux") == "chelamux"
+
+
+def test_remote_control_name_falls_back_to_window_name_at_home_or_root():
+    home = os.path.expanduser("~")
+    assert spawn._remote_control_name("shell-1", home) == "shell-1"
+    assert spawn._remote_control_name("shell-1", "/") == "shell-1"
+
+
+def test_spawn_window_adds_remote_control_by_default(monkeypatch, tmp_path):
+    sent = _patch_tmux(monkeypatch, wid="@42", remote_control=True)
+    monkeypatch.setattr(spawn.sessionids, "set_session_id", lambda wid, sid: None)
+
+    result = spawn.spawn_window(tmp_path, command="claude")
+
+    assert result.ok
+    launch = _launch(sent)
+    assert f"--remote-control {shlex.quote(tmp_path.name)}" in launch
+
+
+def test_spawn_window_omits_remote_control_when_disabled(monkeypatch, tmp_path):
+    sent = _patch_tmux(monkeypatch, wid="@42", remote_control=False)
+    monkeypatch.setattr(spawn.sessionids, "set_session_id", lambda wid, sid: None)
+
+    result = spawn.spawn_window(tmp_path, command="claude")
+
+    assert result.ok
+    launch = _launch(sent)
+    assert "--remote-control" not in launch
+
+
+def test_spawn_window_remote_control_survives_a_command_with_no_wid(monkeypatch, tmp_path):
+    """No `wid` means session-id pinning is skipped entirely — remote-control must not
+    depend on it (unlike session-id, it needs nothing recorded)."""
+    sent = _patch_tmux(monkeypatch, wid="no-id-here", remote_control=True)
+
+    result = spawn.spawn_window(tmp_path, command="claude")
+
+    assert result.ok
+    launch = _launch(sent)
+    assert f"--remote-control {shlex.quote(tmp_path.name)}" in launch
     assert "--session-id" not in launch

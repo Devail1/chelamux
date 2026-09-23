@@ -66,6 +66,7 @@ from chela import config, event_log, inbox
 from chela.config import TMUX_SESSION
 from chela.messenger import messaging_socket_launch_arg
 from chela.personas import ORCHESTRATOR_PROMPT, lease
+from chela.spawn import _add_remote_control
 
 log = logging.getLogger(__name__)
 
@@ -266,6 +267,13 @@ def _spawn_orchestrator_window(repo_dir: str) -> str:
     # orchestrator's identity for the whole session, on top of the user's Claude Code config.
     cmd = (f"claude --permission-mode auto "
            f"--append-system-prompt \"$(cat {ORCHESTRATOR_PROMPT})\"")
+    # CMX-375: this IS a "main" session — a human attends it via the lease, it just
+    # happens to be chela-launched — so it gets --remote-control too, same as the
+    # dashboard/`/new` sessions in chela/spawn.py (never the dispatcher's unattended
+    # agents/judges). Reuses spawn's insert-after-leading-`claude` helper rather than
+    # a second copy of that discipline.
+    if config.REMOTE_CONTROL_ENABLED:
+        cmd = _add_remote_control(cmd, WINDOW_NAME)
     # CMX-223: a chela-owned, deterministic peer-messaging socket path, same as the
     # dispatcher's own agents — lets messenger.send_peer address this window without
     # guessing it from our own env. None (path would overflow the sun_path ceiling)

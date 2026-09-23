@@ -1024,6 +1024,19 @@ WALL_TILE_DISPATCHED = os.environ.get("CHELA_WALL_TILE_DISPATCHED", "false").str
 # defaults ON safely; set CHELA_INBOX_ENABLED=false to disable it outright.
 INBOX_ENABLED = os.environ.get("CHELA_INBOX_ENABLED", "true").strip().lower() not in ("false", "0", "no", "off")
 
+# Claude Code's own `--remote-control [name]` (2.1.280+): lets that session be driven
+# from claude.ai. ON by default for every window chela opens FOR THE USER — the
+# dashboard launcher, the Telegram `/new` bridge, and the auto-launched orchestrator
+# persona (`chela/spawn.py`, `chela/personas/autolaunch.py`) — so a session started
+# from a phone or the wall is reachable from claude.ai too. ⛔ NEVER applied to a
+# dispatcher-launched agent/rework/judge (`chela/dispatcher.py::resolve_agent_cmd`
+# builds those commands on its own, entirely separate from `spawn_window`) — those
+# are unattended workers, not sessions a human sits at. Set CHELA_REMOTE_CONTROL=false
+# to turn it off everywhere it would otherwise apply.
+REMOTE_CONTROL_ENABLED = os.environ.get("CHELA_REMOTE_CONTROL", "true").strip().lower() not in (
+    "false", "0", "no", "off",
+)
+
 # How long an undeliverable orchestrator address must stay dead before the inbox buzzes
 # the phone about it (chela/inbox.py `_undeliverable`). A reboot / tmux-restart / handoff
 # makes the address dangle for a few ticks and then SELF-HEALS (CMX-82) the moment the next

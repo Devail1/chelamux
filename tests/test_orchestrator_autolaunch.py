@@ -257,6 +257,37 @@ def test_the_spawned_window_exports_the_auto_orchestrator_actor_stamp(monkeypatc
     assert "CHELA_WID=@42" in export      # self-identity still exported alongside
 
 
+# --- CMX-375: --remote-control on the orchestrator persona's own launch -----------------------
+
+def _spawn_and_capture_launch(monkeypatch) -> str:
+    """Run `_spawn_orchestrator_window` against a stubbed tmux, return the `claude …` command
+    it sent (the final send-keys call, never the CHELA_WID export)."""
+    sent: list[str] = []
+
+    def fake_run(argv, *a, **k):
+        if argv[:2] == ["tmux", "new-window"]:
+            return SimpleNamespace(stdout="@42\n", returncode=0)
+        if argv[:2] == ["tmux", "send-keys"]:
+            sent.append(argv[4])
+        return SimpleNamespace(stdout="", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    autolaunch._spawn_orchestrator_window("/tmp/repo")
+    return next(s for s in sent if s.startswith("claude"))
+
+
+def test_spawn_orchestrator_window_adds_remote_control_by_default(monkeypatch):
+    monkeypatch.setattr(autolaunch.config, "REMOTE_CONTROL_ENABLED", True)
+    launch = _spawn_and_capture_launch(monkeypatch)
+    assert f"--remote-control {autolaunch.WINDOW_NAME}" in launch
+
+
+def test_spawn_orchestrator_window_omits_remote_control_when_disabled(monkeypatch):
+    monkeypatch.setattr(autolaunch.config, "REMOTE_CONTROL_ENABLED", False)
+    launch = _spawn_and_capture_launch(monkeypatch)
+    assert "--remote-control" not in launch
+
+
 # --- orchestrator_live(): maps the inbox address state ----------------------------------------
 
 @pytest.mark.parametrize("state,expected", [
