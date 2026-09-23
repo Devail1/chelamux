@@ -222,6 +222,12 @@ def test_spawn_window_adds_remote_control_by_default(monkeypatch, tmp_path):
     assert result.ok
     launch = _launch(sent)
     assert f"--remote-control {shlex.quote(tmp_path.name)}" in launch
+    # CMX-376: remote-control must be inserted into the ALREADY session-id-pinned
+    # `to_send`, never re-applied to the original unpinned `command` — that would
+    # silently discard the --session-id pin `_record_session_id` just succeeded at.
+    # Corrupt (`_add_remote_control(to_send, ...)` -> `_add_remote_control(command, ...)`
+    # in spawn_window) -> RED, since the pin would vanish from what's actually sent.
+    assert "--session-id" in launch
 
 
 def test_spawn_window_omits_remote_control_when_disabled(monkeypatch, tmp_path):

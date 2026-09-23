@@ -184,6 +184,58 @@ def test_spawn_sends_a_strict_mcp_config_command_to_tmux(mods, tmp_path):
     assert sent is not None and "--strict-mcp-config" in sent
 
 
+def test_spawn_sends_no_remote_control_even_when_enabled(mods, tmp_path, monkeypatch):
+    """CMX-375/CMX-376 guard (b), at the WIRING level: the coding agent's launch command,
+    as `_launch_agent` actually sends to tmux via send-keys, never carries
+    `--remote-control` — even with the flag enabled globally. `resolve_agent_cmd` alone
+    (test_resolve_agent_cmd_never_carries_remote_control above) cannot see a regression
+    added AFTER it returns, at the real launch site (dispatcher.py's socket/sandbox-arg
+    appends past resolve_agent_cmd) — only this end-to-end path through `_spawn` can.
+    Corrupt (append `--remote-control` onto `agent_cmd` right after `resolve_agent_cmd`
+    in `_launch_agent`) -> RED."""
+    config, _, dispatcher = mods
+    monkeypatch.setattr(config, "REMOTE_CONTROL_ENABLED", True)
+    wf = _wf()
+    task = Task(id="abc123", title="do a thing", file=str(tmp_path / "TODO.md"),
+                line_number=7, raw="- [ ] do a thing")
+    conn = _conn(dispatcher)
+    with patch.object(dispatcher, "ensure_worktree", return_value=(tmp_path / "wt", False)), \
+         patch.object(dispatcher.subprocess, "run") as run, \
+         patch.object(dispatcher, "_kill_windows_named"), \
+         patch.object(dispatcher, "_new_window", return_value="@9"), \
+         patch.object(dispatcher, "_wait_for_ready", return_value=True), \
+         patch.object(dispatcher, "_send_seed", return_value=True):
+        assert dispatcher._spawn(wf, task, attempt=1, conn=conn) is True
+    sent = _sent_claude_cmd(run)
+    assert sent is not None and "--remote-control" not in sent
+
+
+def test_spawn_judge_sends_no_remote_control_even_when_enabled(mods, tmp_path, monkeypatch):
+    """Same guard as test_spawn_sends_no_remote_control_even_when_enabled, for the judge's
+    own launch through `_spawn_judge` -> `_launch_agent`."""
+    config, _, dispatcher = mods
+    monkeypatch.setattr(config, "REMOTE_CONTROL_ENABLED", True)
+    wf = _wf()
+    conn = _conn(dispatcher)
+    conn.execute(
+        "INSERT INTO runs (task_id, workflow_path, title, status, branch_name, "
+        "task_number, pr_url) VALUES (?, ?, ?, 'awaiting_review', ?, ?, ?)",
+        ("abc123", str(wf.path), "do a thing", "cmx-1", 1, "https://x/pull/1"),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM runs WHERE task_id=?", ("abc123",)).fetchone()
+    wt = tmp_path / "judge-abc123"
+    with patch.object(dispatcher, "detached_worktree", return_value=(wt, True)), \
+         patch.object(dispatcher.subprocess, "run") as run, \
+         patch.object(dispatcher, "_kill_windows_named"), \
+         patch.object(dispatcher, "_new_window", return_value="@9"), \
+         patch.object(dispatcher, "_wait_for_ready", return_value=True), \
+         patch.object(dispatcher, "_send_seed", return_value=True):
+        assert dispatcher._spawn_judge(wf, row, "deadbeef", conn) is True
+    sent = _sent_claude_cmd(run)
+    assert sent is not None and "--remote-control" not in sent
+
+
 def test_spawn_judge_sends_a_strict_mcp_config_command_to_tmux(mods, tmp_path):
     """🔴 End to end through `_spawn_judge`: same isolation, the judge's own launch.
     Corrupt (revert AGENT_BASE_CMD to plain "claude") → RED."""
