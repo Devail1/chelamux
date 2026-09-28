@@ -475,15 +475,21 @@ _TERM_PASTE_KEY_SHIM = (
 # (same-origin — the iframe is proxied through the dashboard, so window.parent is
 # accessible). Note: this shadows readline's Ctrl+K (kill-to-end-of-line) inside
 # panes, which is the documented trade-off for a global palette hotkey.
+#
+# CMX-385: the same shim also catches Ctrl/⌘+, and calls the parent's
+# toggleSettings() (VS Code's settings key). Unlike Ctrl+K there is no shell
+# trade-off here: Ctrl+, has no readline binding, and most terminals cannot even
+# encode it (there is no C0 control for ',').
 _TERM_PALETTE_KEY_SHIM = (
     "<script>(function(){"
     "function onKey(e){"
     "if(!(e.ctrlKey||e.metaKey)||e.altKey||e.shiftKey)return;"
-    "if(e.key!=='k'&&e.key!=='K')return;"
+    "var fn=(e.key==='k'||e.key==='K')?'openPalette':(e.key===','?'toggleSettings':null);"
+    "if(!fn)return;"
     "if(!window.parent||window.parent===window)return;"
     "e.preventDefault();e.stopImmediatePropagation();"
     # Stage 0: dashboard fns moved to the window.chela namespace under ES modules.
-    "try{var c=window.parent.chela;if(c&&typeof c.openPalette==='function')c.openPalette();}"
+    "try{var c=window.parent.chela;if(c&&typeof c[fn]==='function')c[fn]();}"
     "catch(err){}}"
     "document.addEventListener('keydown',onKey,true);"
     "})();</script>"
