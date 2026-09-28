@@ -196,7 +196,15 @@ test('MUST STILL PASS: the shim leaves Ctrl+V alone (the paste shim owns it)', (
     assert.equal(ev.defaultPrevented, false, 'the palette/settings shim swallowed Ctrl+V');
 });
 
-test('the ttyd page is actually served with the shim', () => {
-    assert.match(APP_PY, /\+ _TERM_PASTE_KEY_SHIM \+ _TERM_PALETTE_KEY_SHIM/,
-        'term_http no longer injects _TERM_PALETTE_KEY_SHIM');
+// That term_http actually SERVES this shim is guarded from the rendered response in
+// tests/test_term_palette_key_shim.py — not from app.py's source text here (defeat
+// shape 05: a `[:0]` slice at the call site kept a source-substring check green).
+
+test('the shortcuts cheatsheet lists Ctrl/⌘+, for Settings', () => {
+    const doc = new JSDOM(HTML).window.document;
+    const rows = [...doc.querySelectorAll('#shortcuts-overlay .sc-row')]
+        .filter(r => r.querySelector('.sc-lbl')?.textContent.trim() === 'Open / close Settings');
+    assert.equal(rows.length, 1, 'no "Open / close Settings" row in the shortcuts cheatsheet');
+    const keys = [...rows[0].querySelectorAll('.sc-keys kbd')].map(k => k.textContent.trim());
+    assert.deepEqual(keys, ['Ctrl', '⌘', ','], `cheatsheet keys for Settings are ${JSON.stringify(keys)}`);
 });
