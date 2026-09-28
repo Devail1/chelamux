@@ -176,6 +176,72 @@ said nothing. Run `chela doctor` if you suspect it (see [CONFIG.md](CONFIG.md)).
 
 Restart an agent to pick the hooks up. A running one will not.
 
+## The merge gate (`PreToolUse` on `Bash`) — CMX-389
+
+`chela merge` refuses unless the judge is clean on the PR's current head, CI is green and the
+PR is mergeable — but nothing stopped a session from simply running `gh pr merge`, and `dev`
+carries no branch protection. So the plugin carries a **second `PreToolUse` entry**, matcher
+`Bash`, that DENIES (`hookSpecificOutput.permissionDecision: "deny"`, with a reason pointing
+at `chela merge cmx-N`) any command that merges into a repo with a chela workflow:
+
+| denied | why |
+|---|---|
+| `gh pr merge …` (incl. `--auto`, a PR URL, `-R o/r`) | a merge that skips every clause of the gate |
+| `gh api -X PUT repos/O/R/pulls/N/merge`, `POST …/merges` into a protected base, `PATCH`/`DELETE …/git/refs/heads/<protected>`, a GraphQL `mergePullRequest` | the same merge, spelled against the API |
+| `git push` to the workflow's base branch or `main`/`master`/… (a `src:dst` refspec, `HEAD` while that branch is checked out, `--all`/`--mirror`) | lands commits on the base with no PR at all |
+| `chela merge-approve`, a request to the dashboard's `/override/` | a session approving its OWN override |
+
+Never denied: `gh pr view/diff/checks/list`, `gh pr create`, `git push origin cmx-12`, a heredoc
+body that merely *mentions* `gh pr merge`, any repo without a chela workflow, and `chela merge`
+itself — whose own `gh` calls are subprocesses of chela's Python, never a Claude `Bash` tool call,
+so no hook ever sees them.
+
+The command is **parsed**, not substring-matched (`chela/mergegate.py`): `&&`/`||`/`;`/`|`
+chains, `$(…)`, `bash -c "…"`/`eval`, env prefixes and wrappers (`env`, `sudo`, `timeout`…),
+`cd x && …` (tracked, so the repo is resolved where the merge would run), `git -C`, `gh -R` /
+`GH_REPO`. The repo is resolved from `-R`/the PR URL, or from the session `cwd` — a linked
+`git worktree` (every dispatched agent's checkout) resolves to its main repo through
+`commondir`.
+
+**Why a `command` hook, and why it does not ask the daemon.** The dashboard's http route fails
+OPEN by design — a gate that lived there would vanish with the dashboard. This one runs
+`python3 -I -S "${CLAUDE_PLUGIN_ROOT}/hooks/mergegate.py"` (stdlib-only, shipped inside the
+plugin, ~25-30 ms end to end including the shell) and decides from the payload plus
+`$CHELA_DIR/mergegate.json` — the registry the dispatcher rewrites on every tick (each
+workflow's repo dir, GitHub slugs and base branch). It is **not** gated on `$CHELA_WID`: the
+rule binds every Claude session, including an orchestrator a human started by hand.
+
+**The trade-off: it fails OPEN when it cannot decide.** An unparseable command, a missing
+registry, a repo it cannot resolve, or its own crash (`2>/dev/null || true`) is an ALLOW, and
+the undecided case is appended to `$CHELA_DIR/mergegate.log` (every deny is logged there too).
+A gate that wedged unrelated work fleet-wide on a parse error would be worse than one that
+occasionally misses; what it misses, the backstop catches. It enforces discipline on a
+cooperative-but-mistaken session — it is not a sandbox against an adversarial one (a script
+file, or `curl` to the GitHub API, is out of its sight; see [SANDBOX_BOUNDARY.md](SANDBOX_BOUNDARY.md)).
+
+⚠️ **This includes the orchestrator's own `git push origin dev`.** Tracker edits pushed straight
+to the base branch from a Claude session are denied too — push them from a plain terminal.
+
+**The override.** `chela merge cmx-N --override --reason "<why>"` is the one way past the judge,
+and it is the operator's call: it opens an approval request (the gate-answer rendezvous,
+`chela.gateanswer`), pushes it over the notification channel, and waits
+`CHELA_OVERRIDE_WAIT_S` (default 300 s) for the operator to press **Approve** on the dashboard
+(`/override/<id>`) or run `chela merge-approve <id>` in a plain terminal. A timeout is a DENY.
+On approval it records `orchestrator.merge_override` (who approved, the head sha, the judge
+state it overrode, the reason) to the event log and the run's review history *before* merging,
+merges with `--match-head-commit` pinned to the approved head, and puts the reason in the
+squash body. CI red or not-mergeable still refuse — the override skips the judge only.
+
+**The backstop.** Anything the hook cannot see — a human in a plain terminal, a merge on
+github.com, a non-Claude process — is caught after the fact: the dispatcher's reconcile, on
+finding a chela PR merged with no clean judge on its merged head and no approved override,
+sets `runs.merged_outside_gate`, logs `orchestrator.merge_outside_gate`, and the inbox pushes
+`⚠️ cmx-N was merged outside chela's gate` — once.
+
+Hooks load at agent **startup**: a running session keeps its old hooks until it restarts.
+(An outer belt for non-Claude actors — GitHub branch protection on the base — is a separate,
+optional follow-up.)
+
 ## The manifest you render is not the manifest that runs
 
 `/plugin install` **copies** the plugin into Claude Code's own cache

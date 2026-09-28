@@ -300,6 +300,37 @@ def tool_event_command(event: str, port: int | None = None, host: str = "127.0.0
             "--data-binary @- "
             f"{hook_url(event, port, host)} 2>/dev/null || true")
 
+
+# CMX-389: the MERGE GATE — a second `PreToolUse` entry, on `Bash` only, that DENIES a
+# direct `gh pr merge` / `gh api …/merge` / `git push` to a protected branch in a repo
+# with a chela workflow (:mod:`chela.mergegate`). Unlike every hook above it is:
+#
+#   * NOT gated on `$CHELA_WID` — the rule binds EVERY Claude session, and the one that
+#     broke it (2026-09-28) was an orchestrator session a human started by hand;
+#   * NOT a curl to the daemon — the daemon's http route fails OPEN by design, so a gate
+#     that lived there would vanish with the dashboard. It runs the stdlib-only
+#     `mergegate.py` that `render_plugin` copies next to `hooks.json`, and decides from the
+#     payload + `$CHELA_DIR/mergegate.json` alone (~10 ms of interpreter start-up);
+#   * still fail-OPEN on its own failure: `2>/dev/null || true` means a missing
+#     `python3`, a missing script, or a crash exits 0 having printed nothing — an allow.
+#     Only a deliberate deny prints anything.
+MERGEGATE_SCRIPT = "mergegate.py"
+MERGEGATE_TIMEOUT = 5
+
+
+def mergegate_command() -> str:
+    """The ``PreToolUse``/``Bash`` command hook that runs :mod:`chela.mergegate`."""
+    return (f'python3 -I -S "${{CLAUDE_PLUGIN_ROOT}}/hooks/{MERGEGATE_SCRIPT}" '
+            "2>/dev/null || true")
+
+
+def mergegate_entry() -> dict:
+    return {"matcher": "Bash", "hooks": [{
+        "type": "command",
+        "command": mergegate_command(),
+        "timeout": MERGEGATE_TIMEOUT,
+    }]}
+
 # Event types are namespaced: `hook.pre_tool_use` says *an agent told us this*, as
 # against `run_review` / `died` / `daemon_start`, which are chela's own bookkeeping.
 TYPE_PREFIX = "hook."
@@ -388,6 +419,9 @@ def hooks_spec(port: int | None = None) -> dict:
                 "timeout": hook_timeout(event),
             }]
         hooks[event] = [entry]
+    # The merge gate rides BEHIND the ingestion hook: ingestion still records the call
+    # (a denied merge attempt is exactly the event a human wants in the log).
+    hooks["PreToolUse"].append(mergegate_entry())
     return {"hooks": hooks}
 
 
@@ -411,6 +445,10 @@ def hooks_fingerprint(port: int | None = None) -> str:
     """
     rendered = json.dumps(hooks_spec(port or config.DEFAULT_DASHBOARD_PORT), sort_keys=True)
     normalized = _PORT_RE.sub("127.0.0.1:PORT", rendered)
+    # CMX-389: the plugin now ships a SCRIPT (the merge gate) as well as a manifest, and a
+    # cached copy is refreshed on the version alone — so a change to the script's bytes has
+    # to force the same bump a manifest change does.
+    normalized += "\n" + hashlib.sha256(mergegate_source().encode("utf-8")).hexdigest()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
@@ -424,17 +462,19 @@ EXPECTED_HOOKS_FINGERPRINT: dict[str, str] = {
     "0.2.2": "0cfd26508b63a2804c0f815437e5b5c2564e1b72427bda18754692e199e8408d",
     "0.2.3": "80085a2e2953eed44c8006025ee4563987ad7d08e81f62499d33fe66d812e6b1",
     "0.2.4": "410f7597eb1ec54e59f0ebcd5d26a947ac923989a3a40a258248e9a4018b53ec",
+    "0.2.5": "263899bd7498c96fbf17e12caf9d6af9ba7c93873b1757d1edc087ad3ddcb642",
 }
 
-PLUGIN_VERSION = "0.2.4"
+PLUGIN_VERSION = "0.2.5"
 
 
 def plugin_manifest() -> dict:
     return {
         "name": "chela",
         "version": PLUGIN_VERSION,
-        "description": "Feed a chela fleet's event log from Claude Code hooks, and "
-                       "answer an AskUserQuestion from Telegram with no keystrokes.",
+        "description": "Feed a chela fleet's event log from Claude Code hooks, "
+                       "answer an AskUserQuestion from Telegram with no keystrokes, and "
+                       "deny a direct PR merge that skips chela's merge gate.",
         "author": {"name": "chela"},
         "homepage": "https://github.com/Devail1/chelamux",
         "license": "AGPL-3.0-or-later",
@@ -473,7 +513,16 @@ def render_plugin(directory: Path, port: int | None = None) -> Path:
     _write_json(directory / ".claude-plugin" / "marketplace.json",
                 marketplace_manifest(source="./"))
     _write_json(directory / "hooks" / "hooks.json", hooks_spec(port))
+    # The merge gate's script ships INSIDE the plugin: it runs from Claude Code's plugin
+    # cache, where chela itself is not importable (see chela.mergegate).
+    (directory / "hooks" / MERGEGATE_SCRIPT).write_text(
+        mergegate_source(), encoding="utf-8")
     return directory
+
+
+def mergegate_source() -> str:
+    """The exact bytes of :mod:`chela.mergegate` — the script the plugin ships."""
+    return (Path(__file__).resolve().parent / "mergegate.py").read_text(encoding="utf-8")
 
 
 def _write_json(path: Path, data: dict) -> None:

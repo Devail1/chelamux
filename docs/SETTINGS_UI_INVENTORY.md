@@ -20,7 +20,7 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**43** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+**44** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
 wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
 added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
@@ -30,7 +30,8 @@ CMX-277 added `CHELA_TERMINAL_TIMESTAMPS`, group 8 — then 41, until CMX-350 ad
 `CHELA_RESTORE_RESUME`, group 4 — then 42, until CMX-375 added `CHELA_REMOTE_CONTROL`,
 group 10 — then 43, until CMX-381 made the dashboard read `CHELA_TERM_THEME` too, group 8 —
 then 44, until CMX-382 wired `CHELA_REMOTE_CONTROL` through
-`dashboard_setting()` as the General tab's Remote Control switch — back to 43, see group 10) — every literal `CHELA_*` name a Python module in
+`dashboard_setting()` as the General tab's Remote Control switch — back to 43, see group 10 —
+then 44, until CMX-389 added `CHELA_OVERRIDE_WAIT_S`, group 4 — 44) — every literal `CHELA_*` name a Python module in
 `chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
@@ -202,7 +203,7 @@ restarted; the other seven (`chela/config.py`'s `max_reworks()`/
 `memory_slice_budget_bytes()`, `chela/gateanswer.py`'s `wait_budget()`/`max_waits()`) are
 read per call and take effect on the next tick/request.
 
-### 4. Unattended-risk switches (4) — `trust-boundary`, keep env-file-only
+### 4. Unattended-risk switches (5) — `trust-boundary`, keep env-file-only
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -210,6 +211,7 @@ read per call and take effect on the next tick/request.
 | `CHELA_AUTO_UPDATE` | `false` | Fully-unattended self-update sweep — opt-in risk, same doc |
 | `CHELA_ORCHESTRATOR` | `false` | Auto-launches the embedded orchestrator persona, which holds `chela merge` authority |
 | `CHELA_RESTORE_RESUME` | `false` | Gates `chela restore --resume` (CMX-350) — without it the flag falls back to the read-only report; unlike the other three this never fires unattended, a human still has to type the flag |
+| `CHELA_OVERRIDE_WAIT_S` | `300` | How long `chela merge --override` waits for the operator's approval before refusing — a timeout is a DENY (CMX-389). Env-only on purpose: a dashboard-writable window on the one path past the judge is a process editing its own approval boundary |
 
 The first three are the ones `userconfig.py`'s doc-comment is warning about by name. A
 checkbox is a worse UX for "I read the escalation contract and accept the risk" than a

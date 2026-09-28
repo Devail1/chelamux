@@ -51,7 +51,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from chela import config, dispatcher, event_log, notify
+from chela import config, dispatcher, event_log, gateanswer, notify
 from chela.dispatcher import CI_PASSING
 from chela.judge import J_CLEAN
 from chela.personas import lease
@@ -82,6 +82,29 @@ FORBIDDEN_BASES = frozenset({"main", "master", "production", "prod", "release", 
 # ``gh pr merge`` is a round-trip to GitHub, not a local op — share dispatcher's network
 # timeout rather than redefining it here, so the two never drift apart (CMX-262).
 GIT_TIMEOUT = dispatcher.GIT_NET_TIMEOUT_SECONDS
+
+# ⚖️🔓 CMX-389 — `chela merge --override`. The ONE way past the judge, and it is not
+# autonomous: it waits for an OPERATOR's approval (the dashboard's confirm page, or a
+# human's `chela merge-approve` in a plain terminal — both denied to a Claude session by
+# the merge-gate hook, chela.mergegate) and a timeout is a DENY. Everything else in the
+# gate still binds: the NEVER line, the base, CI green, MERGEABLE. The override is recorded
+# (who approved, the head sha, the judge state it overrode, the reason) to the event log
+# and the run's review history BEFORE the merge, and the reason rides in the squash body.
+#
+# A run a human might reasonably override is not only `awaiting_review`: a judge that
+# blocked sends the run to `changes_requested`, and one that gave up sends it to
+# `needs_human`. Those are exactly the runs an override exists for (#529).
+OVERRIDE_STATUSES = ("awaiting_review", "changes_requested", "needs_human")
+DEFAULT_OVERRIDE_WAIT_S = 300.0
+
+
+def override_wait_budget() -> float:
+    """Seconds an override waits for the operator — ``CHELA_OVERRIDE_WAIT_S``."""
+    try:
+        budget = float(os.environ.get("CHELA_OVERRIDE_WAIT_S", DEFAULT_OVERRIDE_WAIT_S))
+    except ValueError:
+        budget = DEFAULT_OVERRIDE_WAIT_S
+    return max(0.0, budget)
 
 
 def _actor(explicit: str | None = None) -> str:
@@ -197,7 +220,8 @@ def _best_effort(task_id: str | None, label: str, argv: list[str], cwd: str, tim
         log.warning("merge cleanup %s failed for %s: %s", label, task_id, e)
 
 
-def _squash_merge(run: dict, repo_dir: str, pr_url: str) -> dict:
+def _squash_merge(run: dict, repo_dir: str, pr_url: str, *, body: str | None = None,
+                  match_head: str | None = None) -> dict:
     """Squash-merge the PR, then best-effort clean up the local worktree, local branch and
     remote branch. ⛔ **Mechanics only — the gate is the caller's job** (:func:`merge`); this
     assumes every contract check already passed.
@@ -210,9 +234,16 @@ def _squash_merge(run: dict, repo_dir: str, pr_url: str) -> dict:
     """
     task_id = run.get("task_id")
     number = dispatcher._pr_number(pr_url)
+    argv = ["gh", "pr", "merge", number, "--squash"]
+    if body:
+        argv += ["--body", body]
+    if match_head:
+        # GitHub refuses the merge if the head moved since — an override is approved for
+        # ONE commit, never for whatever is pushed while the operator was deciding.
+        argv += ["--match-head-commit", match_head]
     try:
         merge = subprocess.run(
-            ["gh", "pr", "merge", number, "--squash"],
+            argv,
             cwd=repo_dir, capture_output=True, text=True, timeout=GIT_TIMEOUT,
         )
     except OSError as e:
@@ -246,7 +277,9 @@ def _squash_merge(run: dict, repo_dir: str, pr_url: str) -> dict:
     return {"ok": True, "merge_commit_sha": merge_sha}
 
 
-def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
+def merge(ident: str, *, reason: str = "", actor: str | None = None,
+          override: bool = False, approval_wait: float | None = None,
+          on_request=None) -> dict:
     """AUTONOMOUSLY merge a dispatched PR — but only if the contract's whole gate holds.
 
     Every clause is checked here and the GitHub-derived ones are read LIVE at the moment of
@@ -275,8 +308,12 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
     6. GitHub reports the PR open and ``MERGEABLE``.
 
     There is deliberately **no ``--force``**: overriding a gate is an escalation, not an
-    autonomous act, so this command cannot do it. A human who knows a failure is unrelated
-    merges by hand — that is the "explicit per-instance human act" the NEVER tier requires.
+    autonomous act. ``override=True`` (``chela merge --override --reason``, CMX-389) skips
+    clause 4 ONLY, and only after an operator approves it (:func:`_await_override`): it
+    waits up to ``approval_wait`` seconds (``CHELA_OVERRIDE_WAIT_S``) and a timeout refuses.
+    ``on_request(request_id, info)`` is called once the request is on disk, so the caller
+    can tell the human where to approve it. Clauses 1-3 and 5-6 bind an override exactly as
+    they bind any merge — CI red or not-mergeable still refuse.
 
     On success the merge is recorded to the event log with its full justification (the base,
     judge state and CI state it relied on), so a human can later ask *why did it merge that*
@@ -297,7 +334,22 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
         )
     task_id = run["task_id"]
 
-    if run["status"] != "awaiting_review":
+    if override and not reason.strip():
+        return _refuse(
+            task_id, "escalate",
+            "an override needs a --reason — it is recorded in the audit log, the run's "
+            "review history and the squash-merge body",
+            recommendation="Retry with --reason \"<why the judge's verdict is wrong or "
+                            "irrelevant here>\" — an override with no reason is refused.",
+            options=[
+                "Retry with --reason \"<why the judge's verdict is wrong or irrelevant here>\"",
+                "Drop --override and let the judge re-run on a fixed head instead",
+            ],
+        )
+
+    if override and run["status"] in OVERRIDE_STATUSES:
+        pass
+    elif run["status"] != "awaiting_review":
         return _refuse(
             task_id, "escalate",
             f"run is in status {run['status']!r}, not 'awaiting_review' — only a "
@@ -419,7 +471,7 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
 
     # 4. The judge's verdict — clean, or it is not the orchestrator's to merge.
     judge_state = run.get("judge_state")
-    if judge_state != J_CLEAN:
+    if judge_state != J_CLEAN and not override:
         shown = judge_state or "never ran"
         return _refuse(
             task_id, "escalate", judge_state=judge_state,
@@ -452,7 +504,7 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
     #    already trusted.
     ci = dispatcher._read_pr_checks(pr_url, repo_dir)
     judge_sha = run.get("judge_sha")
-    if judge_sha and ci.head_sha and judge_sha != ci.head_sha:
+    if judge_sha and ci.head_sha and judge_sha != ci.head_sha and not override:
         return _refuse(
             task_id, "escalate", judge_state=judge_state,
             error=f"the judge's clean verdict was recorded against {judge_sha[:12]!r}, but "
@@ -514,13 +566,32 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
             ],
         )
 
+    # 4′. THE OVERRIDE — the operator approves, or nothing merges.
+    body = None
+    audit = None
+    if override:
+        approved = _await_override(run, base=base, head_sha=ci.head_sha,
+                                   judge_state=judge_state, reason=reason.strip(),
+                                   actor=_actor(actor) or "human", pr_url=pr_url,
+                                   budget=approval_wait, on_request=on_request)
+        if not approved.get("ok"):
+            return approved
+        audit = approved["audit"]
+        body = (f"⚖️ Merged past the judge by an operator-approved override "
+                f"(`chela merge --override`, approved by {audit['approved_by']}; judge was "
+                f"{judge_state or 'never ran'!r} on {ci.head_sha[:12]}).\n\n"
+                f"Reason: {reason.strip()}")
+
     # THE GATE HELD. Merge, then record the decision with its justification.
-    result = _squash_merge(run, repo_dir, pr_url)
+    result = _squash_merge(run, repo_dir, pr_url, body=body,
+                           match_head=ci.head_sha if override else None)
     justification = {
         "task_id": task_id, "pr_url": pr_url, "base": base, "allowed_base": allowed_base,
         "judge_state": judge_state, "ci_state": ci.state, "pr_mergeable": mergeable,
         "reason": reason.strip(), "actor": _actor(actor) or "human",
     }
+    if audit is not None:
+        justification["override"] = audit
     if not result.get("ok"):
         event_log.append(
             "orchestrator.merge_failed",
@@ -542,7 +613,9 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
     justification["merge_commit_sha"] = result.get("merge_commit_sha")
     rec = event_log.append(
         "orchestrator.merge",
-        f"merged {task_id} → {base} (judge clean, CI green, mergeable)"
+        f"merged {task_id} → {base} "
+        + (f"(OVERRIDE approved by {audit['approved_by']}, judge {judge_state or 'never ran'!r}, "
+           "CI green, mergeable)" if audit else "(judge clean, CI green, mergeable)")
         + (f": {reason.strip()}" if reason.strip() else ""),
         payload=justification,
     )
@@ -552,7 +625,91 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None) -> dict:
         "merge_commit_sha": result.get("merge_commit_sha"),
         "branch_name": run.get("branch_name"),
         "event_seq": rec["seq"] if rec else None,
+        "override": audit,
     }
+
+
+def _await_override(run: dict, *, base: str, head_sha: str | None, judge_state: str | None,
+                    reason: str, actor: str, pr_url: str, budget: float | None,
+                    on_request=None) -> dict:
+    """Ask the operator to approve an override, wait, and on approval write the audit
+    record. ``{"ok": True, "audit": {...}}`` or a refusal. ⛔ Every non-approval path —
+    denied, timed out, a request that could not even be written — REFUSES."""
+    task_id = run["task_id"]
+    label = run.get("branch_name") or task_id
+    if not head_sha:
+        return _refuse(
+            task_id, "escalate",
+            "the PR's head commit could not be read, so an override cannot be bound to "
+            "the commit the operator is approving. Refusing.",
+            recommendation="Retry once `gh pr checks` can read the PR's head commit — an "
+                            "override is approved for one exact commit.",
+            options=["Retry once `gh pr checks` can read the PR's head commit",
+                     "Let the judge re-run instead of overriding"],
+        )
+    budget = override_wait_budget() if budget is None else max(0.0, float(budget))
+    request_id = gateanswer.new_request_id()
+    shown = judge_state or "never ran"
+    question = (f"Override-merge {label} into {base} past the judge ({shown!r} on "
+                f"{head_sha[:12]})? Reason: {reason}")
+    meta = {"task_id": task_id, "label": label, "pr_url": pr_url, "base": base,
+            "head_sha": head_sha, "judge_state": judge_state, "reason": reason,
+            "actor": actor}
+    if budget <= 0 or not gateanswer.open_approval(request_id, question, budget, meta):
+        return _refuse(
+            task_id, "escalate",
+            "the override approval request could not be opened (CHELA_OVERRIDE_WAIT_S is 0, "
+            "or chela's gates directory is not writable) — no approval, no override.",
+            recommendation="Set CHELA_OVERRIDE_WAIT_S to a positive number of seconds and "
+                            "retry `chela merge --override`.",
+            options=["Set CHELA_OVERRIDE_WAIT_S to a positive number of seconds and retry "
+                     "`chela merge --override`",
+                     "Let the judge re-run instead of overriding"],
+        )
+    event_log.append("orchestrator.merge_override_requested",
+                     f"override requested for {label}: {reason}",
+                     payload={**meta, "request_id": request_id, "budget": budget})
+    approve_hint = (f"Approve on the dashboard: /override/{request_id} — or in a plain "
+                    f"terminal: chela merge-approve {request_id}  (deny: add --deny)")
+    if notify.enabled():
+        notify.send(f"{question}\n\n{approve_hint}\nExpires in {budget:.0f}s.",
+                    title=f"chela: approve override of {label}?")
+    if on_request is not None:
+        try:
+            on_request(request_id, {"question": question, "hint": approve_hint,
+                                    "budget": budget})
+        except Exception:                        # noqa: BLE001 — display only
+            log.debug("override on_request callback failed", exc_info=True)
+
+    approved, by = gateanswer.wait_for_approval(request_id, budget)
+    if not approved:
+        why = f"DENIED by {by}" if by else f"not approved within {budget:.0f}s"
+        event_log.append("orchestrator.merge_override_denied",
+                         f"override of {label} {why}",
+                         payload={**meta, "request_id": request_id, "approved_by": by})
+        return _refuse(
+            task_id, "escalate", override_request=request_id,
+            error=f"the override was {why} — nothing was merged.",
+            recommendation="Ask the operator to approve it (dashboard /override/<id> or "
+                            "`chela merge-approve <id>` in a plain terminal), then retry "
+                            "`chela merge --override`.",
+            options=["Ask the operator to approve it (dashboard /override/<id> or "
+                     "`chela merge-approve <id>` in a plain terminal), then retry "
+                     "`chela merge --override`",
+                     "Let the judge re-run instead of overriding"],
+        )
+
+    audit = {"request_id": request_id, "approved_by": by, "head_sha": head_sha,
+             "judge_state": judge_state, "judge_sha": run.get("judge_sha"),
+             "reason": reason, "actor": actor, "at": dispatcher._now()}
+    # Recorded BEFORE the merge: the reconcile's out-of-gate detection must never see this
+    # PR merged without the override already on the row.
+    dispatcher.record_merge_override(task_id, audit)
+    event_log.append("orchestrator.merge_override",
+                     f"override of {label} APPROVED by {by} (judge {shown!r} on "
+                     f"{head_sha[:12]}): {reason}",
+                     payload={**meta, **audit})
+    return {"ok": True, "audit": audit}
 
 
 def escalate(summary: str, *, kind: str = "decision", recommendation: str = "",

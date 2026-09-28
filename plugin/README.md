@@ -10,11 +10,15 @@ is invisible to anything reading the transcript. A hook fires **before** the fac
 question reaches the log, with every option's label and description, while the agent is
 still waiting on it.
 
-## Observe-only
+## What it decides
 
-This plugin **watches**. It never answers a prompt, approves a tool, or returns a
-permission decision — the receiving endpoint replies with an empty object, deliberately.
-It cannot make a decision on your behalf.
+Almost everything here **watches**. Two hooks do more, each in a module you have to go and
+read: a `PermissionRequest` for an `AskUserQuestion` can be answered from Telegram
+(`chela/gateanswer.py`), and the **merge gate** — a `PreToolUse` hook on `Bash` running
+`hooks/mergegate.py` — DENIES a direct `gh pr merge` / `gh api …/merge` / `git push` to a
+protected branch in a repo with a chela workflow, pointing the session at `chela merge`
+instead (see `docs/HOOKS.md`, "The merge gate"). It decides locally, needs no daemon, and
+fails open when it cannot decide.
 
 ## What it needs
 

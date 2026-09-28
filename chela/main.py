@@ -2442,7 +2442,14 @@ def cmd_merge(args) -> None:
     an escalation, not an autonomous act, so this command cannot do it — merge past a gate
     by hand, or ``chela escalate`` to ask. Every merge is logged with its justification.
     """
-    result = contract.merge(args.run, reason=getattr(args, "reason", "") or "")
+    override = bool(getattr(args, "override", False))
+
+    def _asked(request_id: str, info: dict) -> None:
+        print(f"⏳ Waiting up to {info['budget']:.0f}s for the operator to approve this "
+              f"override:\n  {info['question']}\n  {info['hint']}", flush=True)
+
+    result = contract.merge(args.run, reason=getattr(args, "reason", "") or "",
+                            override=override, on_request=_asked if override else None)
     if not result.get("ok"):
         tier = result.get("tier")
         prefix = "⛔ NEVER" if tier == "never" else "merge REFUSED"
@@ -2460,7 +2467,37 @@ def cmd_merge(args) -> None:
         sys.exit(1)
     print(f"✅ Merged {result['task_id']} → {result['base']} "
           f"(sha {(result.get('merge_commit_sha') or '?')[:12]})")
-    print(f"  logged: event #{result.get('event_seq')} — CI green, judge clean, MERGEABLE")
+    if result.get("override"):
+        audit = result["override"]
+        print(f"  logged: event #{result.get('event_seq')} — OVERRIDE approved by "
+              f"{audit['approved_by']} (judge {audit.get('judge_state') or 'never ran'!r} on "
+              f"{audit['head_sha'][:12]}), CI green, MERGEABLE")
+    else:
+        print(f"  logged: event #{result.get('event_seq')} — CI green, judge clean, MERGEABLE")
+
+
+def cmd_merge_approve(args) -> None:
+    """⚖️ The operator's half of ``chela merge --override`` (CMX-389), for a plain terminal.
+
+    Lists the pending override requests when called without an id. A Claude session is
+    denied this command by chela's merge-gate hook (:mod:`chela.mergegate`): an override is
+    the OPERATOR's approval, never the requesting session's own.
+    """
+    from chela import gateanswer
+    if not args.request:
+        pending = gateanswer.pending_approvals()
+        if not pending:
+            print("No override is waiting for approval.")
+            return
+        for req in pending:
+            print(f"{req['id']}  ({req['seconds_left']:.0f}s left)\n  {req['question']}")
+        return
+    ok, why = gateanswer.answer_approval(args.request, not args.deny,
+                                         by=f"terminal:{os.environ.get('USER') or 'operator'}")
+    if not ok:
+        print(f"merge-approve: {why}")
+        sys.exit(1)
+    print(f"✅ {why}: {args.request}")
 
 
 def cmd_reopen(args) -> None:
@@ -2887,8 +2924,26 @@ def main() -> None:
     p_merge.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-84)")
     p_merge.add_argument(
         "--reason", default="",
-        help="Optional free-text justification recorded alongside the mechanical gate facts",
+        help="Free-text justification recorded alongside the mechanical gate facts "
+             "(REQUIRED with --override)",
     )
+    p_merge.add_argument(
+        "--override", action="store_true",
+        help="⚖️🔓 Merge past the judge — ONLY after the operator approves it (dashboard "
+             "/override/<id>, or `chela merge-approve <id>` in a plain terminal). Waits "
+             "CHELA_OVERRIDE_WAIT_S (default 300s); a timeout refuses. CI red or "
+             "not-mergeable still refuse. Audited.",
+    )
+
+    # merge-approve — the OPERATOR's half of `chela merge --override`
+    p_mapprove = sub.add_parser(
+        "merge-approve",
+        help="⚖️ Approve (or --deny) a pending `chela merge --override` — for a HUMAN in a "
+             "plain terminal; a Claude session is denied this by chela's merge-gate hook",
+    )
+    p_mapprove.add_argument("request", nargs="?", default=None,
+                            help="The override request id (omit to list pending requests)")
+    p_mapprove.add_argument("--deny", action="store_true", help="Deny instead of approve")
 
     # reopen — the human-takeover re-entry: needs_human back into review
     p_reopen = sub.add_parser(
@@ -3180,6 +3235,8 @@ def main() -> None:
         cmd_adopt(args)
     elif args.command == "merge":
         cmd_merge(args)
+    elif args.command == "merge-approve":
+        cmd_merge_approve(args)
     elif args.command == "reopen":
         cmd_reopen(args)
     elif args.command == "retry":
