@@ -1886,11 +1886,28 @@ function _palMove(d) {
     if (el) el.scrollIntoView({ block: 'nearest' });
 }
 
+function _isSettingsKey(e) {
+    return (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === ',';
+}
+function _settingsOpen() {
+    const modal = document.getElementById('settings-drawer');
+    return !!(modal && modal.classList.contains('open'));
+}
+
 document.addEventListener('keydown', e => {
     if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
         const ov = document.getElementById('palette');
         (ov && ov.classList.contains('open')) ? closePalette() : openPalette();
+        return;
+    }
+    // CMX-385: Ctrl/⌘+, toggles Settings, like VS Code. `e.key === ','` only, and
+    // no Shift/Alt — Shift+Ctrl+, stays free. A focused pane's keydown never
+    // reaches here; app.py's _TERM_PALETTE_KEY_SHIM catches it inside the iframe
+    // and calls chela.toggleSettings() the same way.
+    if (_isSettingsKey(e)) {
+        e.preventDefault();
+        toggleSettings();
         return;
     }
     // The shortcuts cheatsheet (CMX-121) is a plain, static overlay — Esc is its
@@ -1902,7 +1919,12 @@ document.addEventListener('keydown', e => {
         return;
     }
     const ov = document.getElementById('palette');
-    if (!ov || !ov.classList.contains('open')) return;
+    if (!ov || !ov.classList.contains('open')) {
+        // Esc closes Settings — only once the palette/cheatsheet (which can sit
+        // on top of it) are out of the way, so one Esc closes one layer.
+        if (e.key === 'Escape' && _settingsOpen()) { e.preventDefault(); toggleSettings(); }
+        return;
+    }
     if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
     else if (e.key === 'ArrowDown') { e.preventDefault(); _palMove(1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); _palMove(-1); }
