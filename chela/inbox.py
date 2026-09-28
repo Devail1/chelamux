@@ -122,6 +122,7 @@ from pathlib import Path
 from chela import agent_manager, discovery, epoch, event_log, judge, messenger, notify, sessions, transcripts
 from chela import config
 from chela.config import INBOX_ENABLED
+from chela.hold import human_duration
 from chela.tui_text import sanitize_prompt
 
 log = logging.getLogger(__name__)
@@ -1283,6 +1284,17 @@ def run_events(runs: list[dict], seen: dict[str, str],
                     "run_judge_clean",
                     f"⚖️ {label} — every guard held, clean and MERGEABLE — {ref}"
                     f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+            elif run.get("judge_retry_after"):
+                # ⚖️🌩️ CMX-379: the judge was reaped for a classifier outage, not for
+                # anything about the PR, and the dispatcher re-judges it on its own once the
+                # backoff passes — so this is news, not a request for a human look. It fires
+                # once per outage by the same `status:judge_state` mark as every verdict.
+                payload["judge_retry_after"] = run.get("judge_retry_after")
+                backoff = human_duration(config.judge_outage_backoff_seconds())
+                out.append(_event(
+                    "run_judge_cannot_verify",
+                    f"⚖️🌩️ judge for {label} hit a classifier outage — re-judging after "
+                    f"{backoff} — {ref}", payload, wid=wid))
             else:
                 detail = str(run.get("judge_detail") or "")[:140]
                 out.append(_event(

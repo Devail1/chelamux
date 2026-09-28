@@ -111,7 +111,7 @@ def _restore_latched_modules_after_every_test(monkeypatch):
 
 # --- the registry itself -----------------------------------------------------
 
-def test_registry_has_exactly_the_eleven_settings_inventory_knobs(mods):
+def test_registry_has_exactly_the_twelve_settings_inventory_knobs(mods):
     """CMX-264 added ``memory_slice_budget_bytes`` as the ``worktree_disk_budget_bytes``
     analog for memory, and CMX-278 added ``judge_max_concurrent`` (was a hardcoded ``1``
     with no knob at all) — same registry, same precedence layer, so the nine CMX-220 knobs
@@ -121,7 +121,7 @@ def test_registry_has_exactly_the_eleven_settings_inventory_knobs(mods):
         "dispatch_workflows", "max_reworks", "judge_enabled",
         "judge_max_unknown_retries", "judge_max_concurrent", "critic_enabled",
         "worktree_disk_budget_bytes", "memory_slice_budget_bytes", "merge_base",
-        "gate_wait_seconds", "gate_max_waits",
+        "gate_wait_seconds", "gate_max_waits", "judge_outage_backoff_seconds",
     }
 
 
@@ -139,7 +139,7 @@ def test_exactly_four_knobs_are_restart_required(mods):
     assert hot == {
         "max_reworks", "judge_max_unknown_retries", "judge_max_concurrent",
         "worktree_disk_budget_bytes", "memory_slice_budget_bytes",
-        "gate_wait_seconds", "gate_max_waits",
+        "gate_wait_seconds", "gate_max_waits", "judge_outage_backoff_seconds",
     }
 
 
@@ -153,13 +153,14 @@ def test_named_readers_return_their_own_knobs_stored_value(mods):
         "judge_max_unknown_retries": config.judge_max_unknown_retries,
         "judge_max_concurrent": config.judge_max_concurrent,
         "worktree_disk_budget_bytes": config.worktree_disk_budget_bytes,
+        "judge_outage_backoff_seconds": config.judge_outage_backoff_seconds,
     }
     for key, reader in readers.items():
         knob = next(k for k in config.DISPATCH_KNOBS if k.key == key)
         assert reader() == knob.default
 
     distinct = {"max_reworks": 11, "judge_max_unknown_retries": 12, "judge_max_concurrent": 3,
-                "worktree_disk_budget_bytes": 999_000}
+                "worktree_disk_budget_bytes": 999_000, "judge_outage_backoff_seconds": 42.0}
     for key, value in distinct.items():
         userconfig.set_(key, value)
     for key, reader in readers.items():
