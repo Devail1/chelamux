@@ -277,13 +277,13 @@ def _spawn_and_capture_launch(monkeypatch) -> str:
 
 
 def test_spawn_orchestrator_window_adds_remote_control_by_default(monkeypatch):
-    monkeypatch.setattr(autolaunch.config, "REMOTE_CONTROL_ENABLED", True)
+    monkeypatch.setattr(autolaunch.config, "remote_control_enabled", lambda: True)
     launch = _spawn_and_capture_launch(monkeypatch)
     assert f"--remote-control {autolaunch.WINDOW_NAME}" in launch
 
 
 def test_spawn_orchestrator_window_omits_remote_control_when_disabled(monkeypatch):
-    monkeypatch.setattr(autolaunch.config, "REMOTE_CONTROL_ENABLED", False)
+    monkeypatch.setattr(autolaunch.config, "remote_control_enabled", lambda: False)
     launch = _spawn_and_capture_launch(monkeypatch)
     assert "--remote-control" not in launch
 

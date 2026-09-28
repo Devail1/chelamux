@@ -101,7 +101,7 @@ def test_resolve_agent_cmd_never_carries_remote_control(mods, monkeypatch):
     reaches `chela/spawn.py` and `chela/personas/autolaunch.py`); this pins the absence
     so it can't be added here by accident."""
     config, _, dispatcher = mods
-    monkeypatch.setattr(config, "REMOTE_CONTROL_ENABLED", True)
+    monkeypatch.setattr(config, "remote_control_enabled", lambda: True)
     cmd, _ = dispatcher.resolve_agent_cmd(_wf())
     assert "--remote-control" not in cmd
     cmd, _ = dispatcher.resolve_agent_cmd(_wf(), "judge")
@@ -194,7 +194,7 @@ def test_spawn_sends_no_remote_control_even_when_enabled(mods, tmp_path, monkeyp
     Corrupt (append `--remote-control` onto `agent_cmd` right after `resolve_agent_cmd`
     in `_launch_agent`) -> RED."""
     config, _, dispatcher = mods
-    monkeypatch.setattr(config, "REMOTE_CONTROL_ENABLED", True)
+    monkeypatch.setattr(config, "remote_control_enabled", lambda: True)
     wf = _wf()
     task = Task(id="abc123", title="do a thing", file=str(tmp_path / "TODO.md"),
                 line_number=7, raw="- [ ] do a thing")
@@ -214,7 +214,7 @@ def test_spawn_judge_sends_no_remote_control_even_when_enabled(mods, tmp_path, m
     """Same guard as test_spawn_sends_no_remote_control_even_when_enabled, for the judge's
     own launch through `_spawn_judge` -> `_launch_agent`."""
     config, _, dispatcher = mods
-    monkeypatch.setattr(config, "REMOTE_CONTROL_ENABLED", True)
+    monkeypatch.setattr(config, "remote_control_enabled", lambda: True)
     wf = _wf()
     conn = _conn(dispatcher)
     conn.execute(

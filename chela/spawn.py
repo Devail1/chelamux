@@ -229,7 +229,7 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
       session-id store (:func:`_pin_session_id`, :func:`_record_session_id`,
       :mod:`chela.sessionids`) — recording only, for now (docs/AGENT_IDENTITY.md
       slice 2a). A record failure sends ``command`` unpinned instead;
-    * if ``command`` is given and :data:`chela.config.REMOTE_CONTROL_ENABLED`, insert
+    * if ``command`` is given and :func:`chela.config.remote_control_enabled` (read per call), insert
       Claude Code's own ``--remote-control <name>`` (:func:`_add_remote_control`) —
       every window this function opens is one chela started FOR A HUMAN (the
       dashboard launcher, Telegram ``/new``, a resumed session), so it is reachable
@@ -291,7 +291,7 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
             pinned, session_id = _pin_session_id(command, str(uuid.uuid4()))
             if session_id and _record_session_id(wid, session_id):
                 to_send = pinned
-        if config.REMOTE_CONTROL_ENABLED:
+        if config.remote_control_enabled():
             # Applied AFTER session-id pinning (on `to_send`, not `command`): both
             # insert right after the leading `claude` token regardless of what the
             # other already inserted there, so the order is harmless either way —

@@ -20,7 +20,7 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**44** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+**43** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
 wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
 added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
@@ -28,7 +28,9 @@ was never a literal read to begin with), so those 18 are no longer *literal*
 `os.environ.get("CHELA_…")` call sites — see "WIRED" under Groups 2 and 3 — then 40, until
 CMX-277 added `CHELA_TERMINAL_TIMESTAMPS`, group 8 — then 41, until CMX-350 added
 `CHELA_RESTORE_RESUME`, group 4 — then 42, until CMX-375 added `CHELA_REMOTE_CONTROL`,
-group 10 — then 43, until CMX-381 made the dashboard read `CHELA_TERM_THEME` too, group 8) — every literal `CHELA_*` name a Python module in
+group 10 — then 43, until CMX-381 made the dashboard read `CHELA_TERM_THEME` too, group 8 —
+then 44, until CMX-382 wired `CHELA_REMOTE_CONTROL` through
+`dashboard_setting()` as the General tab's Remote Control switch — back to 43, see group 10) — every literal `CHELA_*` name a Python module in
 `chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
@@ -273,7 +275,7 @@ find there, and today they don't exist in any UI or even `docs/CONFIG.md`'s tabl
 | `CHELA_COLLAB` | `true` | `hot` | Presence kill switch |
 | `CHELA_COLLAB_RELAY` | empty | `hot` | The one relay-shaped value `docs/CONFIG.md` says **is** meant to be shared across installs, unlike `CHELA_NOTIFY_URL` |
 
-### 10. Launcher / agent identity (5) — mixed
+### 10. Launcher / agent identity (4 + 1 wired) — mixed
 
 | Variable | Default | Class | Notes |
 |---|---|---|---|
@@ -281,7 +283,15 @@ find there, and today they don't exist in any UI or even `docs/CONFIG.md`'s tabl
 | `CHELA_PROJECTS_DIR` | `~/projects` | `hot` | **Already dashboard-writable today** — `userconfig.get("projects_dir")` wins over this, and it's the drawer's other live control |
 | `CHELA_IGNORE_WINDOWS` | empty | `hot` | Comma-separated window names hidden from discovery |
 | `CHELA_WID` | none | `identity` | Injected into every dispatched window's env; not a preference |
-| `CHELA_REMOTE_CONTROL` | `true` | `restart` | Claude Code's own `--remote-control [name]` on every window chela opens FOR A HUMAN (`chela/spawn.py`, `chela/personas/autolaunch.py`) — never on a dispatcher-launched agent/judge (`chela/dispatcher.py::resolve_agent_cmd`) |
+
+**WIRED (CMX-382):** `CHELA_REMOTE_CONTROL` (default `true`) — Claude Code's own
+`--remote-control [name]` on every window chela opens FOR A HUMAN (`chela/spawn.py`,
+`chela/personas/autolaunch.py`), never on a dispatcher-launched agent/judge
+(`chela/dispatcher.py::resolve_agent_cmd`). Now `config.remote_control_enabled()`, read per
+call through `dashboard_setting("remote_control", …)` — env beats `config.json` beats ON —
+and toggled from Settings → General → Remote Control (`/api/config`). `hot` for new
+sessions; a running window keeps the flag it launched with. When the env var is set the
+switch shows the effective value and is disabled.
 
 ### 11. Internal state file paths (8) — `internal-path`, low priority
 

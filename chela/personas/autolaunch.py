@@ -272,7 +272,7 @@ def _spawn_orchestrator_window(repo_dir: str) -> str:
     # dashboard/`/new` sessions in chela/spawn.py (never the dispatcher's unattended
     # agents/judges). Reuses spawn's insert-after-leading-`claude` helper rather than
     # a second copy of that discipline.
-    if config.REMOTE_CONTROL_ENABLED:
+    if config.remote_control_enabled():
         cmd = _add_remote_control(cmd, WINDOW_NAME)
     # CMX-223: a chela-owned, deterministic peer-messaging socket path, same as the
     # dispatcher's own agents — lets messenger.send_peer address this window without

@@ -845,6 +845,22 @@ function renderSettings(focus) {
             setting.</p>
         </section>
 
+        <section class="settings-section" id="settings-remote-control">
+            <h4>Remote Control</h4>
+            <p class="s-desc">Launch sessions with Claude Code's <code>--remote-control</code> so
+            they can be driven from claude.ai — windows opened from the dashboard, Telegram
+            <code>/new</code>, and the orchestrator. Applies to <strong>new</strong> sessions
+            only: a window already running keeps the flag it was launched with. Never applied
+            to dispatcher agents or judges.</p>
+            <div class="s-row">
+                <label class="s-rowlabel" for="remote-control-toggle">Remote Control — make new sessions reachable from claude.ai</label>
+                <input id="remote-control-toggle" type="checkbox" role="switch" disabled
+                       onchange="chela.setRemoteControl(this.checked)">
+            </div>
+            <div id="remote-control-msg" class="s-savemsg"></div>
+            <p class="s-desc" id="remote-control-source"></p>
+        </section>
+
         <section class="settings-section">
             <h4>Remote access</h4>
             <p class="s-desc">Zero built-in auth — the dashboard binds <code>127.0.0.1</code>.
@@ -1016,6 +1032,7 @@ function renderSettings(focus) {
     _loadCollabSetting();
     _loadAgentModeSetting();
     _loadAgentModelSetting();
+    _loadRemoteControlSetting();
     _loadTimingSettings();
     _loadDispatchSettings();
     _loadSettingsStatus();
@@ -1155,6 +1172,59 @@ async function setAgentModel(v) {
     }
     setMsg('ok', 'Saved · next dispatch launches with --model ' + (cfg.agent_model_effective || v));
     _renderAgentModelSource(cfg);
+}
+
+// Remote Control (CMX-382): `--remote-control` on NEW human-facing sessions. Same
+// env-wins presentation as the Timing tab — when CHELA_REMOTE_CONTROL is set, the
+// server resolves to it regardless of config.json, so the switch shows the effective
+// value but is disabled rather than offering an edit that would be silently discarded.
+function _renderRemoteControl(cfg) {
+    const box = document.getElementById('remote-control-toggle');
+    const src = document.getElementById('remote-control-source');
+    if (!box) return;
+    const on = !!(cfg && cfg.remote_control);
+    const locked = !!(cfg && cfg.remote_control_env_locked);
+    box.checked = on;
+    box.disabled = locked;
+    if (src) {
+        const env = escHtml((cfg && cfg.remote_control_env) || 'CHELA_REMOTE_CONTROL');
+        const from = locked ? `set by <code>${env}</code> — env wins; unset it to edit here`
+            : (cfg && cfg.remote_control_source === 'dashboard') ? 'this setting'
+            : 'the built-in default';
+        src.innerHTML = `In effect: <strong>${on ? 'On' : 'Off'}</strong> — ${from}.`;
+    }
+}
+
+async function _loadRemoteControlSetting() {
+    const box = document.getElementById('remote-control-toggle');
+    if (!box) return;
+    let cfg;
+    try {
+        cfg = await api('/api/config');
+    } catch (e) { box.disabled = true; return; }
+    _renderRemoteControl(cfg);
+}
+
+async function setRemoteControl(on) {
+    const msg = document.getElementById('remote-control-msg');
+    const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
+    setMsg('', 'Saving…');
+    let cfg;
+    try {
+        cfg = await api('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ remote_control: !!on }),
+        });
+    } catch (e) { setMsg('err', 'Save failed — unchanged.'); _loadRemoteControlSetting(); return; }
+    // api() resolves on a 4xx too — fail closed: report it and re-read what IS stored.
+    if (!cfg || cfg.error) {
+        setMsg('err', 'Rejected — unchanged.');
+        _loadRemoteControlSetting();
+        return;
+    }
+    setMsg('ok', 'Saved · new sessions launch with Remote Control ' + (cfg.remote_control ? 'on' : 'off'));
+    _renderRemoteControl(cfg);
 }
 
 // Live "Connections & Status" surface (READ-ONLY). Fetches /api/settings and
@@ -1931,4 +2001,4 @@ export { closeShortcuts, openPalette, openShortcuts, refreshRecentSessions, refr
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRemoteControl, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
