@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import subprocess
 
-from chela import config
+from chela import config, envutil
 from chela.config import IGNORE_WINDOWS
 
 log = logging.getLogger(__name__)
@@ -106,6 +106,9 @@ def ensure_session(session: str | None = None) -> bool:
         subprocess.run(
             ["tmux", "new-session", "-A", "-d", "-s", session, "-n", ANCHOR_WINDOW],
             capture_output=True, text=True, timeout=10,
+            # CMX-390: if this call STARTS the tmux server, the server's global env — which
+            # every later window inherits — is born from this one; keep pm2's IPC leak out.
+            env=envutil.child_env(),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         log.warning("tmux unreachable; could not create session '%s'", session)
