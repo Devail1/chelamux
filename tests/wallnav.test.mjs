@@ -833,6 +833,56 @@ test('the 4 status shapes match the approved mockup — triangle is needs-you, c
     assert.match(idle, /clip-path:\s*none/, 'idle must not carry a clip-path silhouette (it is a ring, not a polygon)');
 });
 
+// 11b-3 — CASCADE-RESOLVED companion to 11b/11b-2 (CMX-377 round 3,
+// defeat_shapes #377b). Both tests above only read style.css as TEXT: 11b
+// proves no `.gs-dot.<state>` or `:not(.gs-dot)`-excluded rule exists, 11b-2
+// proves the bare `.term-status-dot.<state>` rule has the right geometry. A
+// round-3 judge mutation defeated both anyway with a THIRD selector shape
+// neither anchors against: `.gs-head .term-status-dot.waiting { clip-path:
+// none; border-radius: 50%; }` — not `.gs-dot.waiting` (11b's check), not a
+// `:not(.gs-dot)` exclusion (11b's other check), and it never touches the
+// bare `.term-status-dot.waiting` rule 11b-2 reads (11b-2 still finds the
+// correct 3-point triangle there). It just outranks that bare rule inside
+// `.gs-head` on specificity (0,3,0 vs 0,2,0) and wins in a real browser —
+// exactly the "pane header keeps a second, forked shape dialect" defect 11b
+// was written to catch, reappearing through a selector shape the text guards
+// don't enumerate.
+//
+// The general comment above (line ~684) says jsdom "cannot resolve CSS
+// cascade specificity" and reserves this class of fact for manual
+// live-browser verification. That caution is correct for the FOUR colour/glow
+// cues it names (var()/color-mix() values that jsdom's CSSOM returns as
+// literal, unresolved declaration text — confirmed by
+// tests/dashboard_scale_nav_a11y.test.mjs's own --ui-font test). It does NOT
+// hold for `clip-path`/`border-radius`: both are literal keyword/shape values
+// with no var()/color-mix() involved, and jsdom's getComputedStyle resolves
+// them through the real cascade (specificity, then source order) exactly like
+// a browser would — confirmed empirically by mounting this exact mutation
+// (`.gs-head .term-status-dot.waiting` overriding the bare rule) and reading
+// the LOSING value back. So this one geometry fact — same shape in both
+// places, not the colour riding along with it — gets the honest cascade
+// check the brief's own GUARD asks for ("assert shape, not colour"), while
+// the four colour cues stay on manual verification as before.
+test('CMX-377 round 3 GUARD (cascade-resolved): the pane header (.gs-head) and the sidebar resolve the SAME clip-path/border-radius per state — never a forked shape', () => {
+    for (const state of ['working', 'waiting', 'idle', 'done']) {
+        const dom = new JSDOM(
+            `<!doctype html><html><head><style>${CSS}</style></head><body>` +
+            `<div class="sidebar"><span class="term-status-dot ${state}" id="side-dot"></span></div>` +
+            `<div class="gs-head"><span class="term-status-dot ${state}" id="head-dot"></span></div>` +
+            '</body></html>',
+            { pretendToBeVisual: true });
+        const sideCs = dom.window.getComputedStyle(dom.window.document.getElementById('side-dot'));
+        const headCs = dom.window.getComputedStyle(dom.window.document.getElementById('head-dot'));
+        assert.equal(headCs.clipPath, sideCs.clipPath,
+            `state "${state}": the pane header resolves clip-path "${headCs.clipPath}", the sidebar resolves ` +
+            `"${sideCs.clipPath}" — the pane header has forked onto a different shape dialect for this state`);
+        assert.equal(headCs.borderRadius, sideCs.borderRadius,
+            `state "${state}": the pane header resolves border-radius "${headCs.borderRadius}", the sidebar ` +
+            `resolves "${sideCs.borderRadius}" — the pane header has forked onto a different shape dialect for ` +
+            'this state');
+    }
+});
+
 // --- CMX-377: pane header is 40px, and the focus ring is a thin INSET ring, no
 // glow, no border-color change (the brief's exact wording) -------------------------
 

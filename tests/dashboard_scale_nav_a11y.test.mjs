@@ -497,6 +497,29 @@ for (const ups of [1, 2]) {
     });
 }
 
+// --- CMX-377 round 3: full-space Wall, GUARD (cascade-resolved). The brief's
+// own boundary — "the Wall takes the FULL space at every density — no outer
+// padding/margins/'airy' whitespace around panes" — names `.grid-stack`
+// itself; round 3's judge found no guard existed at all and defeated a
+// straight `.grid-stack { padding: 24px; margin: 12px; }` addition with the
+// full suite green. Read the RESOLVED computed style (the same
+// mountWithRealCss/LOGICAL_PROP_CSS machinery the airy-density guards above
+// use), not the source text, so this closes regardless of which selector
+// shape a future rule uses to add the padding/margin back (defeat_shapes
+// #377b — a source-anchored check only ever pins one selector spelling).
+test('full-space Wall (CMX-377): .grid-stack resolves ZERO padding and ZERO margin on every side', () => {
+    const win = mountWithRealCss(WALL_FIXTURE(1), '', LOGICAL_PROP_CSS);
+    const cs = win.getComputedStyle(win.document.querySelector('.grid-stack'));
+    for (const side of ['Top', 'Right', 'Bottom', 'Left']) {
+        assert.equal(cs[`padding${side}`], '0px',
+            `.grid-stack's padding-${side.toLowerCase()} is ${cs[`padding${side}`]}, not 0px — the Wall no ` +
+            'longer takes the full space (brief boundary: no outer padding/margin around panes)');
+        assert.equal(cs[`margin${side}`], '0px',
+            `.grid-stack's margin-${side.toLowerCase()} is ${cs[`margin${side}`]}, not 0px — the Wall no ` +
+            'longer takes the full space (brief boundary: no outer padding/margin around panes)');
+    }
+});
+
 // --- GUARD 3: non-hue cue, per real state family — deleting the glyph/word
 // span (or the text it carries) and leaving only the colour class must fail.
 

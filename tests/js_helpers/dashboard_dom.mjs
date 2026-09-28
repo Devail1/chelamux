@@ -151,3 +151,18 @@ export function clickOnclick(el) {
     if (!onclick) throw new Error('clickOnclick: element has no onclick attribute');
     return new Function('chela', onclick).call(el, globalThis.window.chela);
 }
+
+/** Same idiom as clickOnclick(), for an `oninput=`/`onfocus=`/... attribute —
+ * compiles the REAL attribute text off the REAL element and runs it, so a
+ * mutation that blanks the attribute (PR #529 round 3, mutation 4: typing
+ * into #sidebar-jump-input stayed "wired" only because the test called
+ * `chela.sidebarJumpInput(el)` directly, never reading the attribute the
+ * browser actually fires) fails here by construction — there is nothing to
+ * compile once the attribute is empty. `this`/`event` inside the handler are
+ * bound the same way a real DOM event dispatch would bind them. */
+export function fireInlineHandler(el, attr) {
+    if (!el) throw new Error(`fireInlineHandler: element is missing (attr=${attr})`);
+    const code = el.getAttribute(attr);
+    if (!code) throw new Error(`fireInlineHandler: element has no ${attr} attribute`);
+    return new Function('chela', 'event', code).call(el, globalThis.window.chela, { target: el, currentTarget: el });
+}

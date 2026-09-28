@@ -1,4 +1,5 @@
-// THE SIDEBAR+CANVAS SHELL GRID — CSS-SOURCE GUARD (CMX-377 round 2).
+// THE SIDEBAR+CANVAS SHELL GRID — CSS-SOURCE GUARD (CMX-377 round 2) +
+// CASCADE-RESOLVED GUARD (CMX-377 round 3, defeat_shapes #377b).
 //
 // jsdom does no layout: it happily builds a DOM for `.canvas { grid-row: 2 }`
 // and reports nothing wrong, because there is no layout engine underneath to
@@ -9,16 +10,32 @@
 // so the Wall rendered off-screen below the sidebar and the whole right side
 // of the viewport was blank. 4000+ green jsdom tests never saw it.
 //
-// So this is a SOURCE assertion, not a rendered one — the same trade this
-// repo already makes for other layout-only facts jsdom cannot see (e.g.
-// tests/sidebar.test.mjs's "expanded icon matches the collapsed rail" pair).
-// It reads the REAL style.css and asserts the actual requirement: `.canvas`
-// sits in the same grid row as `.sidebar` (row 1), in the second column.
+// Round 2's fix was a SOURCE assertion anchored to the exact top-level
+// `.canvas { ... }` rule text. Round 3's judge defeated it with a SECOND rule,
+// `.app > .canvas { grid-row: 2; }`, appended after the first: a different
+// selector string, so `_topLevelRuleBody('\\.canvas')`'s `^\.canvas\s*\{`
+// anchor never matches it, but `.app > .canvas` has HIGHER specificity
+// (0,2,0 vs `.canvas` alone's 0,1,0) and so wins the cascade in a real
+// browser regardless of source order — recreating the exact off-screen-Wall
+// bug the round-2 guard exists to catch, invisibly to a guard that only reads
+// one selector's source text (defeat_shapes #377b).
+//
+// The fix is not a longer regex (any selector shape reaching `.canvas` —
+// `.app .canvas`, `#canvas`, an attribute qualifier, `.canvas.foo` — is a new
+// string to anchor against, and the list never closes). It's asking the
+// question jsdom CAN actually answer honestly for a non-layout property like
+// `grid-row`/`grid-column`: jsdom's CSSOM resolves the CASCADE (specificity,
+// then source order) even though it never computes on-screen box positions
+// (confirmed empirically — see below). Mounting the real stylesheet against
+// the real `.app > .sidebar` + `.app > .canvas` structure and reading
+// `getComputedStyle(canvas).gridRow` answers "which rule actually wins,"
+// which is the fact round 2's source-only guard could only approximate.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const CSS = readFileSync(join(ROOT, 'static', 'style.css'), 'utf8');
@@ -51,4 +68,31 @@ test('CMX-377 round 2 GUARD: .canvas sits in the SAME grid row as .sidebar, in c
         '.canvas does not explicitly claim grid-column 2 (the column after .sidebar) — without an ' +
         'explicit column, auto-placement is one accidental removal of a leading rule away from ' +
         'putting it back in column 1, on top of the sidebar');
+});
+
+// CMX-377 round 3, defeat_shapes #377b: the CASCADE-RESOLVED companion to the
+// source guard above. Mounts the REAL style.css against the real `.app` shell
+// shape and reads the RESOLVED grid placement — the same "which declaration
+// actually wins" question a browser answers, regardless of which selector
+// string carries the winning declaration. This is what catches
+// `.app > .canvas { grid-row: 2; }`: a second, more specific rule the
+// source-only guard above never anchors against, but which jsdom's CSSOM
+// still resolves correctly (confirmed empirically: jsdom implements the
+// cascade — specificity then source order — for CSS-standard properties like
+// `grid-row`/`grid-column`; it just never computes the resulting on-screen
+// box position, which is the one thing this test does NOT need to ask).
+test('CMX-377 round 3 GUARD (cascade-resolved): .canvas RESOLVES to grid-row 1 / grid-column 2, however many rules target it', () => {
+    const dom = new JSDOM(
+        `<!doctype html><html><head><style>${CSS}</style></head><body>` +
+        '<div class="app"><aside class="sidebar"></aside><main class="canvas" id="canvas"></main></div>' +
+        '</body></html>',
+        { pretendToBeVisual: true });
+    const cs = dom.window.getComputedStyle(dom.window.document.getElementById('canvas'));
+    assert.equal(cs.gridRow, '1',
+        `.canvas resolves to grid-row "${cs.gridRow}", not "1" — some rule (however it is spelled or scoped) ` +
+        'wins the cascade and places .canvas on row 2+, recreating the off-screen-Wall bug (PR #529 round 2) ' +
+        'a source-text-only guard cannot see once the winning rule uses a different selector string');
+    assert.equal(cs.gridColumn, '2',
+        `.canvas resolves to grid-column "${cs.gridColumn}", not "2" — .canvas is not actually placed beside ` +
+        'the sidebar once the cascade is resolved');
 });

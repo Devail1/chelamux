@@ -75,7 +75,8 @@ const BODY = `
 <div class="drawer-scrim" id="sidebar-scrim" onclick="chela.closeSidebar()"></div>
 <div class="popover launch-menu" id="new-menu" style="display:none;">
   <div id="new-menu-launch"></div>
-</div>`;
+</div>
+<button class="mobile-menu-fab" id="btn-menu-mobile" aria-expanded="false" onclick="chela.toggleSidebar()"></button>`;
 
 const SIDEBAR_COLLAPSED_KEY = 'chela_sidebar_collapsed';
 
@@ -599,6 +600,32 @@ test('opening the phone drawer sets body.sidebar-open; closing it clears it', ()
     PHONE = false;
 });
 
+// CMX-377 round 3 (judge mutation 6, defeat_shapes #377b): .mobile-menu-fab's
+// aria-expanded is a11y state, not a decorative attribute — a screen reader
+// announces it as "collapsed"/"expanded". `fab.setAttribute('aria-expanded',
+// open ? 'true' : 'false')` was mutated to the constant `'false'` and stayed
+// green, because no test in this file drove `#btn-menu-mobile` through a real
+// toggleSidebar() round trip at all — the fixture didn't even mount the
+// element. Extends the SAME phone-drawer test above (same open/close round
+// trip) rather than adding a parallel one, so the two facts (body.sidebar-open
+// and the fab's own aria-expanded) can never silently drift apart again.
+test('opening/closing the phone drawer also flips #btn-menu-mobile\'s aria-expanded — it is not a constant', () => {
+    PHONE = true;
+    const fab = document.getElementById('btn-menu-mobile');
+    assert.equal(fab.getAttribute('aria-expanded'), 'false', 'sanity: the fab starts collapsed');
+
+    window.chela.toggleSidebar();
+    assert.equal(fab.getAttribute('aria-expanded'), 'true',
+        'opening the drawer left #btn-menu-mobile aria-expanded="false" — a screen reader would announce it ' +
+        'as still collapsed');
+
+    window.chela.closeSidebar();
+    assert.equal(fab.getAttribute('aria-expanded'), 'false',
+        'closing the drawer left #btn-menu-mobile aria-expanded="true" — a screen reader would announce it as ' +
+        'still expanded');
+    PHONE = false;
+});
+
 // --- 3. 🟠 the launch menu must not run off the right edge -----------------------
 
 test('the launch menu right-aligns off its MEASURED width — it stays on screen', () => {
@@ -894,12 +921,56 @@ test('CMX-377: the REAL sidebar renders a "New session" button and a jump-to-ses
     // WIRING: typing into the sidebar's own search opens the REAL palette overlay
     // and renders real results off it — reusing the existing fuzzy jump, not a
     // second implementation.
+    //
+    // CMX-377 round 3 (judge mutations 4+5, defeat_shapes #377b): this used to
+    // call `chela.sidebarJumpInput(jumpInput)` directly, which proves the
+    // FUNCTION works but never reads the `oninput`/`onfocus` attributes a real
+    // keystroke actually fires — blanking both (`onfocus="" oninput=""`) left
+    // this green. And it only checked `.open`, which stayed true even when
+    // `_renderPalette(el.value)` was mutated to `_renderPalette('')` — the
+    // overlay still opens, just never filters. Fixed by (a) compiling and
+    // running the REAL `oninput` attribute text via `fireInlineHandler` — the
+    // same attribute-compile idiom `clickOnclick` already uses for `onclick`,
+    // since jsdom never executes inline handlers off a dispatched event
+    // without `runScripts:"dangerously"` — and (b) asserting the RENDERED
+    // results actually reflect the typed query, the same way
+    // tests/wallnav.test.mjs's "typing a query drops the panes-first section"
+    // test already proves for the palette's own input.
     assert.equal(typeof chela.sidebarJumpInput, 'function', 'window.chela.sidebarJumpInput is missing');
     const overlay = document.getElementById('palette');
     assert.ok(overlay, 'no #palette overlay in the real document');
     assert.ok(!overlay.classList.contains('open'), 'sanity: the palette starts closed');
-    jumpInput.value = 'w';
-    chela.sidebarJumpInput(jumpInput);
+
+    assert.ok(jumpInput.getAttribute('oninput'),
+        '#sidebar-jump-input has no oninput attribute — typing would never reach chela.sidebarJumpInput at all');
+    assert.ok(jumpInput.getAttribute('onfocus'),
+        '#sidebar-jump-input has no onfocus attribute — focusing it while the palette is closed would never open it');
+
+    // Deterministic palette contents: no open panes (TERMINALS_ON share items and
+    // launcher favourites/recents are already absent in this file's boot fixture),
+    // no agent-session rows competing for the fuzzy match — just the view registry
+    // (Wall, Work) plus the static action rows (New shell window, Add scheduled
+    // task, Keyboard shortcuts). None of those static rows contain a 'w' at all,
+    // so "wall" can only ever fuzzy-match "Wall" — an unambiguous discriminator
+    // between "the typed query reached _renderPalette" and "it didn't" (mutation 5
+    // rendered the FULL unfiltered listing regardless of what was typed).
+    util.setAgentsCache([]);
+    jumpInput.value = 'wall';   // "Wall" is a real registered view label (same query wallnav.test.mjs's own palette test uses)
+    const { fireInlineHandler } = await import('./js_helpers/dashboard_dom.mjs');
+    fireInlineHandler(jumpInput, 'oninput');
+
     assert.ok(overlay.classList.contains('open'),
         'typing into the sidebar search did not open the real #palette overlay');
+    const rows = Array.from(document.getElementById('palette-list').children);
+    assert.ok(rows.every(r => !r.classList.contains('palette-divider')),
+        'a non-empty query must not render the panes-first divider — _renderPalette is not seeing the typed value ' +
+        '(it would still show the divider if it were called with an empty string)');
+    assert.equal(rows.length, 1,
+        `typing "wall" rendered ${rows.length} result row(s), not exactly 1 — the query never reached ` +
+        '_renderPalette (an unfiltered call would render the full listing: Wall, Work, New shell window, Add ' +
+        'scheduled task, Keyboard shortcuts)');
+    assert.equal(rows[0].querySelector('.pi-title')?.textContent, 'Wall',
+        'the one rendered result is not the "Wall" view — the typed query never reached _renderPalette');
+    assert.equal(rows[0].querySelector('.pi-sub')?.textContent, 'view',
+        'the one rendered result is not tagged as a "view" — the typed query never reached _renderPalette');
 });
