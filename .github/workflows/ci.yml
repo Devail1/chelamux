@@ -60,6 +60,22 @@ jobs:
       - name: Install jsdom (DOM test suites)
         run: npm ci
 
+      # CMX-383: tests/browser/ drives a REAL headless Chromium (playwright), because jsdom
+      # has no layout engine and a CSS-cascade emulation can never enumerate every way CSS
+      # hides or moves an element (PR #529). It runs inside Pytest below, like every other
+      # *.test.mjs, and CHELA_REQUIRE_JS_TESTS makes a browser that cannot launch a FAILURE.
+      # The download is cached on the lockfile (it pins the playwright version, which pins
+      # the Chromium revision); `--with-deps` still runs on a cache hit, since the OS
+      # libraries it apt-installs are not in the cache.
+      - name: Cache the Playwright Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Chromium (browser suite)
+        run: npx playwright install --with-deps --only-shell chromium
+
       - name: Ruff
         run: uv run ruff check chela tests
 

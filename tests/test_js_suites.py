@@ -23,6 +23,11 @@ Two fences, because the failure mode here is a check that *silently* does nothin
   DOM, and jsdom is the repo's only npm dependency (dev-only; nothing is bundled or
   shipped). No ``npm ci`` -> the suite cannot run -> loud skip, or a FAILURE under
   ``CHELA_REQUIRE_JS_TESTS``. See :func:`_jsdom_or_skip`.
+* Same rule for **Chromium** (CMX-383): ``tests/browser/*.test.mjs`` drive a real
+  headless browser through playwright. The suite itself decides whether it could launch
+  one (``tests/browser/fixture.mjs`` ``launchChromium``): under ``CHELA_REQUIRE_JS_TESTS``
+  it FAILS; otherwise node skips every test quietly and prints :data:`_BROWSER_DID_NOT_RUN`,
+  which :func:`test_js_suite` turns into a loud pytest skip instead of a green pass.
 """
 
 from __future__ import annotations
@@ -104,6 +109,10 @@ def _jsdom_or_skip(suite: Path) -> None:
     pytest.skip(msg)
 
 
+# Printed by tests/browser/fixture.mjs (its DID_NOT_RUN) when no browser could launch.
+_BROWSER_DID_NOT_RUN = "browser suite DID NOT RUN"
+
+
 @pytest.mark.parametrize("suite", _SUITES, ids=_IDS)
 def test_js_suite(suite: Path):
     node = _node_or_skip([suite])
@@ -117,3 +126,52 @@ def test_js_suite(suite: Path):
             f"{suite.relative_to(ROOT)} failed:\n"
             f"{proc.stdout.decode()[-4000:]}\n{proc.stderr.decode()[-1000:]}"
         )
+    out = proc.stdout.decode()
+    if _BROWSER_DID_NOT_RUN in out:
+        line = next(ln for ln in out.splitlines() if _BROWSER_DID_NOT_RUN in ln)
+        pytest.skip(f"{suite.relative_to(ROOT)}: {line.lstrip('# ')}")
+
+
+def test_a_browser_suite_that_could_not_launch_is_a_loud_skip_not_a_pass(monkeypatch):
+    """CMX-383: without a browser, node skips every browser test and EXITS 0 — which, read
+    by exit code alone, is a green pytest item for a suite that never ran. The suite prints
+    :data:`_BROWSER_DID_NOT_RUN`; that line must become a skip naming the cause."""
+    suite = ROOT / "tests" / "browser" / "dashboard.test.mjs"
+    out = f"{_BROWSER_DID_NOT_RUN}: Chromium could not launch\n# SKIP\n".encode()
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, out, b""),
+    )
+    with pytest.raises(pytest.skip.Exception, match="DID NOT RUN: Chromium could not launch"):
+        test_js_suite(suite)
+
+
+@pytest.mark.parametrize("required", [True, False], ids=["required-fails", "optional-skips"])
+def test_a_missing_browser_fails_under_require_and_skips_loudly_otherwise(tmp_path, required):
+    """CMX-383: the browser suite's own launch contract, exercised with a browser that
+    cannot exist (``PLAYWRIGHT_BROWSERS_PATH`` at an empty dir). Under
+    ``CHELA_REQUIRE_JS_TESTS`` ``launchChromium`` must THROW — the suite file fails, never a
+    silent green; without it, it must return the :data:`_BROWSER_DID_NOT_RUN` reason that
+    the loud pytest skip above keys on."""
+    node = _node_or_skip([ROOT / "tests" / "browser" / "fixture.mjs"])
+    if not (ROOT / "node_modules" / "playwright").is_dir():
+        pytest.skip("playwright is not installed — run `npm ci`")
+    env = _clean_env()
+    env["PLAYWRIGHT_BROWSERS_PATH"] = str(tmp_path)
+    env.pop("CHELA_REQUIRE_JS_TESTS", None)
+    if required:
+        env["CHELA_REQUIRE_JS_TESTS"] = "1"
+    script = (
+        "import('./tests/browser/fixture.mjs').then(m => m.launchChromium())"
+        ".then(r => { console.log('RESULT ' + JSON.stringify(r)); })"
+    )
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", script], capture_output=True, text=True,
+        timeout=60, cwd=str(ROOT), env=env,
+    )
+    if required:
+        assert proc.returncode != 0, proc.stdout
+        assert _BROWSER_DID_NOT_RUN in proc.stderr and "CHELA_REQUIRE_JS_TESTS" in proc.stderr
+    else:
+        assert proc.returncode == 0, proc.stderr
+        assert "RESULT " in proc.stdout and _BROWSER_DID_NOT_RUN in proc.stdout
+        assert '"browser"' not in proc.stdout

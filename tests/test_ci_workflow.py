@@ -626,6 +626,18 @@ _EXPECTED_STEPS: list[dict] = [
     },
     {"uses": "actions/setup-node@v4", "with": {"node-version": "20"}},
     {"name": "Install jsdom (DOM test suites)", "run": "npm ci"},
+    {
+        "name": "Cache the Playwright Chromium",
+        "uses": "actions/cache@v4",
+        "with": {
+            "path": "~/.cache/ms-playwright",
+            "key": "playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}",
+        },
+    },
+    {
+        "name": "Install Chromium (browser suite)",
+        "run": "npx playwright install --with-deps --only-shell chromium",
+    },
     {"name": "Ruff", "run": "uv run ruff check chela tests"},
     {
         "name": "Assert the ref state the CMX-301 guard needs",
