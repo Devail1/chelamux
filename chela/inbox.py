@@ -1208,7 +1208,22 @@ def run_events(runs: list[dict], seen: dict[str, str],
                    "pr_url": run.get("pr_url"),
                    "pr_state": run.get("pr_state"), "attempt": run.get("attempt"),
                    "started_at": run.get("started_at"), "ended_at": run.get("ended_at")}
-        if judge_state == judge.J_CANNOT_VERIFY and status != "awaiting_review":
+        if status == "done" and run.get("merged_outside_gate"):
+            # ⚖️🔒 CMX-389: the merge gate's backstop. The dispatcher's reconcile found this
+            # run's PR merged with no clean judge on its merged head and no approved override
+            # (`dispatcher.merged_outside_gate`) — a merge the PreToolUse gate never saw. The
+            # `done` mark fires once, so this does too.
+            payload["judge_state"] = judge_state
+            payload["judge_sha"] = run.get("judge_sha")
+            payload["pr_head_sha"] = run.get("pr_head_sha")
+            pr = run.get("pr_url")
+            ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+            out.append(_event(
+                "run_merged_outside_gate",
+                f"⚠️ {label} was merged outside chela's gate (judge "
+                f"{judge_state or 'never ran'!r}, no approved override) — {ref}"
+                f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+        elif judge_state == judge.J_CANNOT_VERIFY and status != "awaiting_review":
             # ⚖️🔔 CMX-229 Objective 1. `chela/judge.py`'s CAS-refused path: the run left
             # `awaiting_review` (a human merged it, CI got there first, a fresh review sent
             # it back) WHILE the judge was still working, so `request_changes`'s own CAS

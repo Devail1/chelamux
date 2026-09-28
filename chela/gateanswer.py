@@ -545,3 +545,109 @@ def answer_permission_request(body: dict, *, wid_for=None, pending=None,
         return None
     log.info("gateanswer: answered %s from Telegram with no keystrokes", gate.tool_use_id)
     return decision(questions, answers)
+
+
+# --- operator approvals (CMX-389) ----------------------------------------------------
+#
+# The same rendezvous, reused for a decision that has no agent blocked on it: an operator
+# approving `chela merge --override`. The CLI process is the waiter; the answerer is a
+# different process (the dashboard's confirm page, or a human's `chela merge-approve` in a
+# plain terminal), so the file-based rendezvous above is exactly the plumbing it needs. The
+# gate file is an ordinary `OpenGate` (one question, Approve / Deny) with `kind: approval`
+# and its `meta`, and its `wid` is `APPROVAL_WID` — never a real window, so nothing that
+# looks up a window's held gate (the Telegram card path) can ever pick it up.
+#
+# ⛔ Unlike an AskUserQuestion gate, a timeout here is a DENY, not a fail-open: nothing is
+# blocked on it but the merge itself, and an override nobody approved must not happen.
+
+APPROVE = "Approve"
+DENY = "Deny"
+APPROVAL_WID = "approval"
+
+
+def new_request_id(prefix: str = "override") -> str:
+    """An unguessable id — it is also the dashboard confirm page's URL."""
+    import secrets
+    return f"{prefix}-{secrets.token_hex(12)}"
+
+
+def open_approval(request_id: str, question: str, budget: float, meta: dict) -> bool:
+    """Put an approval request on disk for up to ``budget`` seconds. ``False`` if the id is
+    malformed or the file could not be written (the caller then refuses — no approval)."""
+    if not _TUID_RE.match(request_id or ""):
+        return False
+    return _write_atomic(_gate_path(request_id), {
+        "tool_use_id": request_id,
+        "wid": APPROVAL_WID,
+        "kind": "approval",
+        "questions": [{"question": question, "header": "Override",
+                       "options": [{"label": APPROVE}, {"label": DENY}],
+                       "multiSelect": False}],
+        "meta": meta,
+        "deadline": time.time() + budget,
+        "budget": budget,
+        "ts": time.time(),
+    })
+
+
+def pending_approvals() -> list[dict]:
+    """Every live (unexpired) approval request, oldest first — ``{id, question, meta,
+    seconds_left}``."""
+    out: list[dict] = []
+    try:
+        paths = sorted(gates_dir().glob("*.gate.json"))
+    except OSError:
+        return out
+    for path in paths:
+        data = _read_json(path)
+        if not isinstance(data, dict) or data.get("kind") != "approval":
+            continue
+        gate = _as_gate(data)
+        if gate is None or gate.expired:
+            continue
+        out.append({"id": gate.tool_use_id, "question": gate.questions[0].get("question"),
+                    "meta": data.get("meta") or {}, "seconds_left": gate.seconds_left,
+                    "ts": data.get("ts") or 0})
+    return sorted(out, key=lambda r: r["ts"])
+
+
+def approval(request_id: str) -> dict | None:
+    """One live approval request (see :func:`pending_approvals`), or None."""
+    return next((r for r in pending_approvals() if r["id"] == request_id), None)
+
+
+def answer_approval(request_id: str, approve: bool, by: str) -> tuple[bool, str]:
+    """Deliver the operator's decision. Refused (and reported) for an id with no live
+    request — an approval can never land on a request that already timed out."""
+    if approval(request_id) is None:
+        return False, "that request is no longer waiting for approval"
+    gate = open_gate(request_id)
+    if gate is None:
+        return False, "that request is no longer waiting for approval"
+    question = gate.questions[0].get("question")
+    label = APPROVE if approve else DENY
+    if not _write_atomic(_answer_path(request_id), {
+        "tool_use_id": request_id, "answers": {question: label},
+        "by": (by or "").strip() or "unknown", "ts": time.time(),
+    }):
+        return False, "could not deliver the decision"
+    return True, "approved" if approve else "denied"
+
+
+def wait_for_approval(request_id: str, budget: float, poll: float = POLL_INTERVAL,
+                      now=time.monotonic, sleep=time.sleep) -> tuple[bool, str | None]:
+    """Block until the operator decides or ``budget`` runs out. ``(approved, by)`` —
+    ``(False, None)`` on timeout, which is a DENY. Always tears the rendezvous down."""
+    deadline = now() + budget
+    path = _answer_path(request_id)
+    try:
+        while True:
+            data = _read_json(path)
+            if isinstance(data, dict) and isinstance(data.get("answers"), dict):
+                picked = list(data["answers"].values())
+                return picked == [APPROVE], str(data.get("by") or "unknown")
+            if now() >= deadline:
+                return False, None
+            sleep(min(poll, max(0.0, deadline - now())))
+    finally:
+        close_gate(request_id)

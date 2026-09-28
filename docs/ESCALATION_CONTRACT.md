@@ -155,6 +155,15 @@ green AND MERGEABLE*, reads every GitHub fact live, has **no `--force`** (overri
 escalation, not an autonomous act), and logs each merge with its justification; **`chela escalate`**
 is the *one* structured way to reach the human, recording the decision and pushing it to the phone.
 
+As of CMX-389 the bypass is closed **inside every Claude session**: chela's plugin carries a
+`PreToolUse` hook that DENIES a direct `gh pr merge` / `gh api …/merge` / `git push` to the base
+branch or `main` in any repo with a chela workflow ([HOOKS.md](HOOKS.md#the-merge-gate-pretooluse-on-bash--cmx-389)).
+The only way past the judge is `chela merge cmx-N --override --reason "…"`, which waits for the
+operator's approval (dashboard `/override/<id>` or `chela merge-approve <id>` in a plain terminal;
+a timeout is a deny), audits who/which-head/which-verdict/why, and still refuses red CI or a
+conflict. A merge the hook could not see is flagged by the reconcile (`⚠️ cmx-N was merged
+outside chela's gate`) — once.
+
 ---
 
 ## Shared-pane isolation — the blast-radius prerequisite (the other half)

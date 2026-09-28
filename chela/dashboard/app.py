@@ -2462,6 +2462,85 @@ def _session_start_recap(body: dict, explicit_wid: str | None = None):
                                            "additionalContext": text}})
 
 
+# ---------------------------------------------------------------------------
+# ⚖️🔓 CMX-389 — the operator's confirm for `chela merge --override`
+# ---------------------------------------------------------------------------
+#
+# The request id is unguessable (gateanswer.new_request_id) and IS the URL, so a page can
+# only be opened by someone the CLI/notification told. A POST from another site is refused
+# (Origin / Sec-Fetch-Site), so a page in the operator's browser cannot approve on their
+# behalf. A Claude session curling this route is denied by the merge-gate hook
+# (chela.mergegate) — the approval is the operator's to press.
+
+_OVERRIDE_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Approve override</title><style>
+:root{{--bg:#fafaf9;--fg:#1c1917;--muted:#57534e;--line:#d6d3d1;--ok:#15803d;--no:#b91c1c}}
+@media (prefers-color-scheme: dark){{:root{{--bg:#1c1917;--fg:#f5f5f4;--muted:#a8a29e;
+--line:#44403c;--ok:#22c55e;--no:#f87171}}}}
+body{{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;margin:0;
+padding:24px 16px}}main{{max-width:620px;margin:0 auto}}
+h1{{font-size:18px;margin:0 0 12px}}p,dd{{color:var(--muted)}}
+dl{{display:grid;grid-template-columns:max-content 1fr;gap:4px 12px;margin:16px 0}}
+dt{{font-weight:600}}dd{{margin:0;overflow-wrap:anywhere}}
+form{{display:flex;gap:12px;margin-top:20px}}button{{font:inherit;padding:10px 18px;
+border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--fg);
+cursor:pointer}}button.ok{{border-color:var(--ok);color:var(--ok)}}
+button.no{{border-color:var(--no);color:var(--no)}}</style></head><body><main>
+{body}</main></body></html>"""
+
+
+def _override_same_origin() -> bool:
+    if request.headers.get("Sec-Fetch-Site", "same-origin") not in ("same-origin", "none"):
+        return False
+    origin = request.headers.get("Origin")
+    if origin and origin not in ("null",):
+        from urllib.parse import urlparse
+        return urlparse(origin).netloc == request.host
+    return True
+
+
+@app.route("/override/<request_id>", methods=["GET", "POST"])
+@require_auth
+def override_confirm(request_id):
+    from html import escape
+    req = gateanswer.approval(request_id)
+    if request.method == "POST":
+        if not _override_same_origin():
+            abort(403)
+        decision = request.form.get("decision", "")
+        if decision not in ("approve", "deny"):
+            abort(400)
+        ok, why = gateanswer.answer_approval(request_id, decision == "approve",
+                                             by="dashboard")
+        body = (f"<h1>{'✅' if ok else '⌛'} {escape(why.capitalize())}</h1>"
+                "<p>The waiting <code>chela merge --override</code> picks this up on its "
+                "next poll.</p>" if ok else
+                f"<h1>⌛ {escape(why.capitalize())}</h1><p>Nothing was changed.</p>")
+        return Response(_OVERRIDE_PAGE.format(body=body), status=200 if ok else 410,
+                        mimetype="text/html")
+    if req is None:
+        body = ("<h1>⌛ No override is waiting here</h1><p>It was already decided, or it "
+                "timed out (a timeout is a deny). Nothing will merge from this page.</p>")
+        return Response(_OVERRIDE_PAGE.format(body=body), status=404, mimetype="text/html")
+    meta = req.get("meta") or {}
+    rows = "".join(
+        f"<dt>{escape(k)}</dt><dd>{escape(str(v))}</dd>" for k, v in (
+            ("Run", meta.get("label")), ("PR", meta.get("pr_url")),
+            ("Into", meta.get("base")), ("Head", meta.get("head_sha")),
+            ("Judge", meta.get("judge_state") or "never ran"),
+            ("Reason", meta.get("reason")), ("Asked by", meta.get("actor")),
+            ("Expires in", f"{req['seconds_left']:.0f}s")))
+    body = ("<h1>⚖️ Approve merging past the judge?</h1>"
+            f"<p>{escape(str(req.get('question') or ''))}</p><dl>{rows}</dl>"
+            "<p>CI is green and GitHub reports the PR mergeable — this skips ONLY the "
+            "judge, and is recorded (who, head, judge state, reason).</p>"
+            '<form method="post"><button class="ok" name="decision" value="approve">'
+            'Approve override</button><button class="no" name="decision" value="deny">'
+            "Deny</button></form>")
+    return Response(_OVERRIDE_PAGE.format(body=body), mimetype="text/html")
+
+
 @app.route("/hooks/<event>", methods=["POST"])
 @require_auth
 def api_hooks(event):

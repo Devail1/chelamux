@@ -8,7 +8,7 @@
     {
       "name": "chela",
       "source": "./plugin",
-      "description": "Feed a chela fleet's event log from Claude Code hooks, and answer an AskUserQuestion from Telegram with no keystrokes."
+      "description": "Feed a chela fleet's event log from Claude Code hooks, answer an AskUserQuestion from Telegram with no keystrokes, and deny a direct PR merge that skips chela's merge gate."
     }
   ]
 }
