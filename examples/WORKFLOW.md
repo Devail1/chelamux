@@ -80,6 +80,8 @@ You are an autonomous coding agent working on a single TODO item.
 
 > {{task_title}}
 
+{{task_body}}
+
 This run is **{{project_key}}-{{task_number}}** — use it as the PR-title prefix.
 Task ID `{{task_id}}` (stable SHA the dispatcher uses for idempotency).
 
