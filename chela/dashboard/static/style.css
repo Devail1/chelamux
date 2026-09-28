@@ -1,5 +1,36 @@
 /* chela dashboard — dark theme */
 
+/* CMX-377: Geist, vendored (fonts/Geist-Variable.woff2 + fonts/OFL-Geist.txt,
+   same convention as every other bundled font — see fonts/README.md) — NO
+   Google Fonts / CDN link, the dashboard runs offline on a tailnet. One
+   variable-weight face covers the mockup's 400/500/600 range in a single
+   @font-face, the same pattern JetBrainsMono.ttf etc already use below via
+   app.py's _TERM_FONT_CSS (that system is the TERMINAL's own font picker,
+   unrelated to this one — --ui-font is chrome-only, never injected into a
+   ttyd iframe). font-display: swap avoids a blocking web-font flash; the
+   Heebo/system-ui/sans-serif fallback chain covers Hebrew text and the brief
+   first paint before the woff2 loads. */
+@font-face {
+    font-family: 'Geist';
+    src: url('fonts/Geist-Variable.woff2') format('woff2');
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
+/* Hebrew-capable chrome fallback — the SAME already-vendored fonts/Heebo.ttf
+   app.py's _TERM_FONT_CSS offers the terminal font picker, re-declared here
+   because that system only injects into the ttyd iframe, never the dashboard
+   page itself — without this rule 'Heebo' in --ui-font's stack would never
+   resolve to anything on a machine that doesn't happen to have it installed,
+   silently defeating the fallback for every Hebrew-reading viewer. */
+@font-face {
+    font-family: 'Heebo';
+    src: url('fonts/Heebo.ttf') format('truetype');
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
+
 :root {
     --bg: #0d1117;
     --surface: #161b22;
@@ -10,6 +41,15 @@
     --green: #3fb950;
     --yellow: #d29922;
     --red: #f85149;
+    /* CMX-377: --font (monospace) is now reserved for the terminal frame and
+       genuine code/diff content — see .term-frame below. Everything else
+       (sidebar, pane headers, pane footers, modals, Work) reads --ui-font,
+       the "calm desktop app" restyle's whole point ("sans chrome"). Heebo is
+       already vendored (fonts/Heebo.ttf) as the Hebrew-capable fallback the
+       brief asks for; it is loaded on demand the same way every other
+       bundled font is (app.py's _TERM_FONT_CSS), so naming it here costs
+       nothing until Hebrew text actually needs it. */
+    --ui-font: 'Geist', 'Heebo', system-ui, -apple-system, 'Segoe UI', sans-serif;
     --font: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
     --term-ctx-bar-h: 30px;   /* .term-ctx-bar height; iframe rules reserve this much bottom space. CMX-129: the 14px № chip sits centered (same align-items: center as the branch/context text), so its bottom AND top gaps are each (bar-h - chip-h) / 2 — 8px only when bar-h = chip-h + 16 = 30px. Supersedes CMX-128's flex-end + margin-bottom scheme, which gave № its own 8px bottom inset independent of the text's center line and left it riding ~4px above it — see .gs-idx below */
     --term-bg: #0d1117;   /* the ttyd terminal's OWN xterm.js background (scripts/agent-terminals.sh TERM_THEME, tests/test_term_bg_sync.py guards the two stay identical) — NOT an arbitrary black; shared with .term-ctx-bar so the bar reads as a seamless footer, not a separate strip */
@@ -86,7 +126,7 @@ body[data-theme="rose"] {           /* Rosé Pine Moon — muted plum */
 body {
     background: var(--bg);
     color: var(--text);
-    font-family: var(--font);
+    font-family: var(--ui-font);
     font-size: 13px;
     line-height: 1.5;
 }
@@ -165,7 +205,13 @@ body {
 .panel.active { display: block; }
 
 /* ---- Embedded terminals ---- */
-.term-frame { width: 100%; border: 1px solid #333; border-radius: 6px; background: var(--term-bg); }
+/* CMX-377: font-family is otherwise a no-op here — .term-frame just wraps an
+   <iframe>, and an iframe's own document never inherits the parent page's CSS
+   — but it is pinned to --font explicitly anyway (never --ui-font) so the
+   guard that "--ui-font is used by the sidebar and NOT the terminal frame"
+   is a real, checkable fact about this stylesheet, not just true by the
+   accident of iframes not inheriting fonts. */
+.term-frame { width: 100%; border: 1px solid #333; border-radius: 6px; background: var(--term-bg); font-family: var(--font); }
 /* Single view: same header+iframe wrapper as a wall tile */
 .term-single .term-pane {
     display: flex; flex-direction: column; height: 78vh; overflow: hidden;
@@ -185,15 +231,16 @@ body {
 .term-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 10px; }
 .term-grid .term-frame { height: 42vh; }
 
-/* Focus ring: the pane whose embedded terminal currently holds browser focus
-   gets its 1px border recoloured to the accent + a soft glow. Border WIDTH is
-   unchanged (only the colour) so there's zero layout shift; the box-shadow is
-   pure decoration. Tracks the same focus tmux forwards to Claude Code via
-   focus-events. .term-focused is toggled from terminals.js (_applyTermFocus). */
-.term-pane, .grid-stack-item-content { transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+/* Focus ring (CMX-377: "a thin inset ring in --accent — no glow, no thick
+   border"): the pane whose embedded terminal currently holds browser focus
+   gets a single thin INSET box-shadow ring, nothing else — the border itself
+   stays --border and the tile's own box size never shifts (inset never adds
+   layout width, unlike the old outer glow this replaces). Tracks the same
+   focus tmux forwards to Claude Code via focus-events. .term-focused is
+   toggled from terminals.js (_applyTermFocus). */
+.term-pane, .grid-stack-item-content { transition: box-shadow 0.15s ease; }
 .term-pane.term-focused, .grid-stack-item-content.term-focused {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent), 0 0 8px -2px var(--accent);
+    box-shadow: inset 0 0 0 1.5px var(--accent);
 }
 /* Waiting on user input: yellow ring on the live pane (after .term-focused so it
    wins when a waiting pane is also focused — it's the more urgent signal). */
@@ -209,9 +256,12 @@ body {
     background: var(--term-bg); border: 1px solid var(--border); border-radius: 8px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
+/* CMX-377: 40px, sans (inherits --ui-font off body — nothing here re-pins it to
+   --font). Height is fixed, not padding-derived, matching the approved mockup's
+   own `header { height: 40px }`. */
 .gs-head {
-    flex: 0 0 auto; position: relative; display: flex; align-items: center; gap: 6px;
-    padding: 4px 9px; font-size: var(--wall-pane-font-size); color: var(--text-dim);
+    flex: 0 0 auto; position: relative; display: flex; align-items: center; gap: 8px;
+    height: 40px; padding: 0 8px 0 14px; font-size: var(--wall-pane-font-size); color: var(--text-dim);
     background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface) 82%, var(--bg)));
     border-bottom: 1px solid var(--border);
 }
@@ -258,27 +308,16 @@ body {
 
 /* --- CMX-119: pane header v2 — split the CMX-117 combined badge back apart
    now that every pane has a bottom bar to hold its numbers (see .term-ctx-bar
-   / .gs-idx below). `.gs-dot` is back to a plain circle carrying LIVE STATUS
-   BY SHAPE, not hue alone (Liav is red-weak): filled = working, hollow
-   outline = idle, filled + glow ring = waiting/wants-the-human. Driven by
-   _colorTermDots (terminals.js), which targets .term-status-dot — a class
-   this dot also wears, so the same working/waiting/idle classes that used
-   to paint the combined badge now paint just this dot. `.gs-menu-btn` is the
-   separate "⋯" (lucide more-vertical) trigger for the
-   Wire/Share/Orchestrator/Pin menu. */
+   / .gs-idx below). `.gs-dot` also wears `.term-status-dot` (below), so it
+   is painted by the SAME shape rules as the sidebar row's status mark —
+   CMX-377's whole point: one shape vocabulary, not a pane-header dialect and
+   a sidebar dialect. `.gs-dot` itself now only sets the pane header's
+   slightly larger box; the shape/colour per state lives on `.term-status-dot`
+   below. `.gs-menu-btn` is the separate "⋯" (lucide more-vertical) trigger for
+   the Wire/Share/Orchestrator/Pin menu. */
 .gs-dot {
-    flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; box-sizing: border-box;
-    border: 1.5px solid var(--text-dim); background: transparent;
+    flex: 0 0 auto; width: 10px; height: 10px; box-sizing: border-box;
     transition: background 0.3s, box-shadow 0.3s;
-}
-.gs-dot.idle { background: transparent; border-color: var(--text-dim); }
-.gs-dot.working {
-    background: var(--green); border-color: var(--green); box-shadow: 0 0 6px var(--green);
-    animation: term-status-pulse 1.2s ease-in-out infinite;
-}
-.gs-dot.waiting {
-    background: var(--yellow); border-color: var(--yellow);
-    animation: term-status-pulse-waiting 1s ease-in-out infinite;
 }
 /* Orchestrator ownership: a SEPARATE non-hue ring (an outline, not a box-shadow,
    so it never collides with the waiting-state glow above) — updated in lockstep
@@ -614,19 +653,22 @@ body {
 .res-item.res-bad .res-value { color: var(--ok-vermillion); }
 
 @media (max-width: 768px) {
-    /* Keep the numbers, drop the CPU/RAM/Disk labels — the strip must never
-       push the topbar's icon buttons off-screen on a phone. */
+    /* Keep the numbers, drop the CPU/RAM/Disk labels — the strip lives in the
+       sidebar foot (CMX-377) and must still fit next to Decisions/Menu there. */
     .res-strip { gap: 6px; }
     .res-item .res-label { display: none; }
     .res-item .res-value { font-size: 11px; }
 }
 
-/* Native status feed health marker (#status-health-warn, CMX-179) — the topbar pill
-   statushealth.js shows whenever /api/agents/status_health reports the native
-   `claude agents --json` busy/idle feed is NOT answering. VERMILLION (a real fault,
-   not an FYI) but glyph ("⚠") + the word "unavailable" carry the signal, never colour
-   alone (Liav is red-weak) — same rule as .res-item/.decisions-dot below. Hidden by
-   default; shown only on an actual outage, never on a merely-empty-but-healthy fleet. */
+/* Native status feed health marker (#status-health-warn, CMX-179) — floats in
+   `.safety-float` (CMX-377; originally a topbar pill, before the topbar was
+   removed — see index.html's comment on why it can't live in the sidebar).
+   statushealth.js shows this whenever /api/agents/status_health reports the
+   native `claude agents --json` busy/idle feed is NOT answering. VERMILLION
+   (a real fault, not an FYI) but glyph ("⚠") + the word "unavailable" carry
+   the signal, never colour alone (Liav is red-weak) — same rule as
+   .res-item/.decisions-dot below. Hidden by default; shown only on an actual
+   outage, never on a merely-empty-but-healthy fleet. */
 .status-health-warn {
     display: inline-flex; align-items: center; gap: 7px;
     height: 38px; padding: 0 13px; white-space: nowrap;
@@ -634,10 +676,14 @@ body {
     border: 1px solid color-mix(in srgb, var(--ok-vermillion) 55%, var(--border));
     color: var(--ok-vermillion); border-radius: 999px;
     font-size: 12.5px; font-weight: 600; line-height: 1;
-    /* Shrinkable like .gs-branch below — .topbar-actions must never let this pill push
-       #btn-decisions off-screen on a narrow phone (CMX-179 round-2: it did, at 375px). The
-       glyph stays fixed-width; only the word ellipsizes, so glyph + word are still both
-       present down to whatever width the topbar actually has (never colour/glyph-alone). */
+    /* Shrinkable like .gs-branch below — CMX-179 round-2: at 375px, back when
+       this pill and #btn-decisions shared one topbar row, the unshrinkable
+       pill pushed #btn-decisions off-screen. The two no longer share a row
+       (CMX-377 moved Decisions into the sidebar foot), but this stays
+       shrinkable on principle — .safety-float itself has limited width on a
+       narrow phone. The glyph stays fixed-width; only the word ellipsizes,
+       so glyph + word are still both present at whatever width is left
+       (never colour/glyph-alone). */
     flex: 0 1 auto; min-width: 0;
 }
 .status-health-warn[hidden] { display: none; }
@@ -646,8 +692,8 @@ body {
 }
 /* The narrow-viewport label is SWAPPED IN, not ellipsised. CMX-179 shipped with only
    the long label plus `text-overflow: ellipsis` on it — but nothing capped the pill's
-   width, so the ellipsis never engaged: at 375px the 202px pill overflowed
-   .topbar-actions, the body scrolled sideways (scrollWidth 466 vs clientWidth 375) and
+   width, so the ellipsis never engaged: at 375px the 202px pill overflowed its old
+   topbar row, the body scrolled sideways (scrollWidth 466 vs clientWidth 375) and
    #btn-decisions was pushed off screen. Capping the width instead would have truncated
    it to "agent statu…", cutting the one word that carries the signal — so on narrow
    screens we say a SHORTER TRUE THING rather than a clipped long one. Both variants keep
@@ -662,11 +708,11 @@ body {
     .status-health-warn .shw-text-narrow { display: inline; }
 }
 
-/* Global active-shares indicator (safety kill-switch) — a persistent topbar pill
-   shown whenever ANY session is shared, on every tab + mobile (where the pane
-   header 🔗 is hidden). AMBER, not red: the primary user is red-weak and red is
-   reserved for the Stop actions; icon + pulsing dot + text+count so it never
-   relies on hue alone. */
+/* Global active-shares indicator (safety kill-switch) — floats in
+   `.safety-float` (CMX-377), shown whenever ANY session is shared, on every
+   tab + mobile (where the pane header 🔗 is hidden). AMBER, not red: the
+   primary user is red-weak and red is reserved for the Stop actions; icon +
+   pulsing dot + text+count so it never relies on hue alone. */
 .shares-indicator {
     display: inline-flex; align-items: center; gap: 7px;
     height: 38px; padding: 0 13px; cursor: pointer; white-space: nowrap;
@@ -688,7 +734,7 @@ body {
 @keyframes sharesPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) { .shares-indicator .si-dot { animation: none; } }
 
-/* Decisions inbox topbar button — the header's #btn-decisions (icon-btn) plus
+/* Decisions inbox button — the sidebar foot's #btn-decisions (icon-btn) plus
    its state dot, colour-only decoration on top of a title tooltip (never the
    sole signal — Liav is red-weak, same rule as .decisions-chip below). */
 #btn-decisions { position: relative; }
@@ -759,7 +805,7 @@ body {
     .shares-sheet .ss-stopall { min-height: 48px; }
     .shares-sheet .tsp-in { padding: 11px 12px; font-size: 14px; }
     .shares-sheet .tsp-copy { min-height: 44px; padding: 0 16px; }
-    /* Keep the amber pill readable but compact next to the other topbar icons. */
+    /* Keep the amber pill readable but compact in .safety-float on a phone. */
     .shares-indicator { height: 38px; padding: 0 11px; }
 }
 
@@ -865,39 +911,65 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
     #panel-terminals.active #term-stage { flex: 1 1 auto; min-height: 0; }
 }
 
-/* Live session-activity dot on pane headers + dock chips. Driven by
-   `claude agents --json` status: busy = green pulse, waiting = amber (needs
-   input), idle/unknown = dim.
-   :not(.gs-dot) is load-bearing: the pane header's own status dot (.gs-dot,
-   above) also wears this class so _colorTermDots (terminals.js) can paint it,
-   but these two selectors have EQUAL specificity (single class) and this rule
-   comes later in the file — without the exclusion it wins the cascade on
-   every shared property (border-radius/background/box-shadow), filling
-   .gs-dot's idle state solid grey instead of leaving it hollow (CMX-118). */
-.term-status-dot:not(.gs-dot) {
-    flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
-    display: inline-block; background: var(--text-dim); transition: background 0.3s;
+/* Live session-activity mark — status BY SHAPE, not hue alone (Liav is
+   red-weak): the ONE vocabulary shared by the sidebar row, the pane header's
+   `.gs-dot` and dock/mobile-switcher chips alike (CMX-377, round 2 — round 1
+   shipped a `:not(.gs-dot)` split where the pane header kept its own older
+   3-state dialect (filled/hollow/glow-ring) and only the sidebar got the new
+   4 shapes, AND used the wrong shape per state — see the per-state comments
+   below). Every one of these elements wears the SAME `.term-status-dot
+   <state>` pair; _colorTermDots (terminals.js) computes `<state>` from the
+   SAME tileState() (wallmodel.js) the pane's `.gs-state` word pill already
+   used, so the dot and the pill can never disagree, and nav.js's sidebar row
+   computes the same four class names off its own status predicates. Exact
+   spec (Liav-approved mockup 2026-09-28, `renderVals()`'s palette): working =
+   filled dot (Okabe-Ito sky), needs-you/"waiting" = filled triangle (Okabe-Ito
+   orange), done = check (dim — deliberately NOT coloured; a checkmark's
+   silhouette alone is the signal, and it would otherwise be the only shape
+   here to double as a second colour cue), idle = hollow ring (dim outline).
+   Shape is reinforcement on top of the `.ar-state`/`.gs-state` WORD that
+   already carries the non-hue signal elsewhere (dashboard_scale_nav_a11y's
+   GUARD 3) — never the only cue. */
+.term-status-dot {
+    flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box;
+    display: inline-block; background: var(--text-dim); border: none; box-shadow: none;
+    transition: background 0.3s, box-shadow 0.3s, border-color 0.3s;
 }
-.term-status-dot.working:not(.gs-dot) {
-    background: var(--green); box-shadow: 0 0 6px var(--green);
+/* working — filled circle, unchanged shape (the familiar "busy" dot); the
+   soft halo is a glow, not a second silhouette. */
+.term-status-dot.working {
+    border-radius: 50%; clip-path: none;
+    background: var(--ok-sky); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok-sky) 22%, transparent);
     animation: term-status-pulse 1.2s ease-in-out infinite;
 }
-.term-status-dot.waiting:not(.gs-dot) {
-    background: var(--yellow);
+/* needs-you — filled triangle: a pointed shape for "needs a decision". This
+   was a diamond in round 1; the brief's spec reserves the triangle for THIS
+   state (round 1 gave the triangle to "done" instead — the defect the round-2
+   verdict named). */
+.term-status-dot.waiting {
+    border-radius: 1px; clip-path: polygon(50% 4%, 96% 92%, 4% 92%);
+    background: var(--ok-orange); box-shadow: none;
     animation: term-status-pulse-waiting 1s ease-in-out infinite;
 }
-.term-status-dot.idle:not(.gs-dot) { background: var(--text-dim); box-shadow: none; }
-/* Fourth sidebar state (issue #475): idle, but the agent said something since
-   you last spoke — --ok-sky, matching the wall tile's own "done" pill
-   (.gs-state-done above) so the concept reads the same colour everywhere it
-   appears. Colour is never the only cue: the row's .ar-state word ("done")
-   always renders alongside it, same as working/waiting/idle. */
-.term-status-dot.done:not(.gs-dot) { background: var(--ok-sky); box-shadow: 0 0 6px var(--ok-sky); }
+/* idle — hollow ring: a settled, static shape. This was a filled square in
+   round 1. */
+.term-status-dot.idle {
+    border-radius: 50%; clip-path: none; background: transparent;
+    border: 1.5px solid var(--text-dim); box-shadow: none;
+}
+/* done — check: a checkmark-shaped clip-path on a DIM fill (never the wall
+   tile's --ok-sky or any other hue — see the block comment above for why).
+   This was a filled triangle in round 1, colliding with needs-you's own
+   shape once round 2 moved the triangle there. */
+.term-status-dot.done {
+    border-radius: 0; background: var(--text-dim); box-shadow: none;
+    clip-path: polygon(14% 44%, 0% 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+}
 @keyframes term-status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 /* Waiting-on-input throbs its halo (stronger than the busy opacity fade). */
 @keyframes term-status-pulse-waiting {
-    0%, 100% { box-shadow: 0 0 3px var(--yellow); }
-    50% { box-shadow: 0 0 11px 2px var(--yellow); }
+    0%, 100% { filter: drop-shadow(0 0 2px var(--ok-orange)); }
+    50% { filter: drop-shadow(0 0 7px var(--ok-orange)); }
 }
 .min-chip {
     display: inline-flex; align-items: center; gap: 6px; max-width: 220px;
@@ -1583,7 +1655,7 @@ body.term-dragging { overflow: hidden; }
     border-radius: 4px;
     font-size: 10px;
     color: var(--text-dim);
-    font-family: var(--font);
+    font-family: var(--ui-font);
 }
 
 .fn-badge summary {
@@ -1656,7 +1728,7 @@ button, .btn {
     border-radius: 5px;
     padding: 4px 10px;
     font-size: 11px;
-    font-family: var(--font);
+    font-family: var(--ui-font);
     cursor: pointer;
     transition: background 0.15s;
 }
@@ -1747,7 +1819,7 @@ input[type="text"], textarea, select {
     color: var(--text);
     padding: 5px 8px;
     font-size: 12px;
-    font-family: var(--font);
+    font-family: var(--ui-font);
     outline: none;
 }
 
@@ -2159,7 +2231,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
     font-size: 11px;
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s, color 0.15s;
-    font-family: var(--font);
+    font-family: var(--ui-font);
 }
 
 .kanban-filter-chip:hover { color: var(--text); border-color: var(--accent); }
@@ -2262,7 +2334,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 
 .kanban-card-id {
-    font-family: var(--font);
+    font-family: var(--ui-font);
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 3px;
@@ -2670,7 +2742,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
         border: none;
         padding: 6px 16px;
         font-size: 12px;
-        font-family: var(--font);
+        font-family: var(--ui-font);
         cursor: pointer;
     }
     .kanban-layout-btn + .kanban-layout-btn { border-left: 1px solid var(--border); }
@@ -2706,7 +2778,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
         border-radius: 12px;
         padding: 3px 10px;
         font-size: 11px;
-        font-family: var(--font);
+        font-family: var(--ui-font);
         cursor: pointer;
         white-space: nowrap;
     }
@@ -2896,21 +2968,8 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .app {
     display: grid;
     grid-template-columns: 264px 1fr;
-    grid-template-rows: auto 1fr;
     height: 100vh;
 }
-
-/* --- Top bar --- */
-.topbar {
-    grid-column: 1 / 3;
-    display: flex; align-items: center; gap: 14px;
-    padding: 10px 16px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-}
-.topbar .brand { font-size: 16px; font-weight: 700; color: var(--accent); display: inline-flex; align-items: center; gap: 7px; }
-.topbar .brand .brand-mark { height: 22px; width: auto; display: block; }
-.topbar-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 
 .icon-btn {
     background: transparent; border: 1px solid var(--border); color: var(--text);
@@ -2925,17 +2984,94 @@ input[type="text"]:focus, textarea:focus, select:focus {
    toggleSidebar). */
 .sidebar-toggle { display: inline-flex; }
 
-/* --- Sidebar --- */
+/* --- Sidebar (CMX-377: the dashboard's only chrome — no top bar) ---
+   A flex column so the head (toggle + brand) and foot (ambient readouts +
+   Decisions/Menu) stay put while only the middle — nav + sessions + recent —
+   scrolls. Same 264px column, same off-canvas/rail behaviour as before; only
+   what used to live in a separate <header class="topbar"> moved inside it. */
 .sidebar {
-    grid-row: 2; border-right: 1px solid var(--border);
-    overflow-y: auto; padding: 8px 0; background: var(--bg);
+    display: flex; flex-direction: column;
+    border-right: 1px solid var(--border);
+    background: var(--bg); height: 100vh;
 }
+.sidebar-head {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px; border-bottom: 1px solid var(--border);
+}
+/* CMX-377: the wordmark is plain --text, not --accent — the old topbar's brand
+   was accent-tinted purely decoratively (predates this restyle); the approved
+   mockup's own wordmark renders in the default text colour (its
+   renderVals()'s `accent` prop is never referenced by the "chela" span at
+   all), and the brief's "one accent" rule reserves --accent for focus,
+   selection and the inbox unread dot. */
+.sidebar-head .brand {
+    font-size: 15px; font-weight: 700; color: var(--text);
+    display: inline-flex; align-items: center; gap: 7px; min-width: 0;
+    overflow: hidden;
+}
+.sidebar-head .brand .brand-mark { height: 20px; width: auto; display: block; flex: 0 0 auto; }
+.sidebar-head .brand span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-scroll { flex: 1 1 auto; overflow-y: auto; padding: 8px 0; }
+
+/* New session + jump-to search (CMX-377, mockup order — ahead of nav). */
+.sidebar-quick { padding: 6px 12px 8px; display: flex; flex-direction: column; gap: 8px; }
+.sidebar-new-btn {
+    height: 34px; display: flex; align-items: center; gap: 9px; padding: 0 11px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-family: var(--ui-font); font-size: 13.5px; font-weight: 500;
+    text-align: left; cursor: pointer;
+}
+.sidebar-new-btn svg { flex: 0 0 auto; }
+.sidebar-new-btn:hover { border-color: var(--accent); }
+.sidebar-jump {
+    height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 10px;
+    border: 1px solid var(--border); border-radius: 8px; color: var(--text-dim);
+}
+.sidebar-jump svg { flex: 0 0 auto; }
+.sidebar-jump input {
+    flex: 1 1 auto; min-width: 0; background: none; border: none; outline: none;
+    color: var(--text); font-family: var(--ui-font); font-size: 13px;
+}
+.sidebar-jump input::placeholder { color: var(--text-dim); }
+.sidebar-jump:focus-within { border-color: var(--accent); }
+body.sidebar-collapsed .sidebar-quick { display: none; }
+
+.sidebar-foot {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 10px 14px; border-top: 1px solid var(--border);
+}
+
+/* Phone-only floating trigger for the off-canvas drawer (CMX-377) — see the
+   mobile media query below for when it shows. Desktop never needs it: the
+   sidebar's own toggle in .sidebar-head is always on screen there. */
+.mobile-menu-fab {
+    display: none; position: fixed; z-index: 46;
+    top: max(14px, env(safe-area-inset-top)); left: max(14px, env(safe-area-inset-left));
+    width: 42px; height: 42px; border-radius: 50%;
+    align-items: center; justify-content: center; cursor: pointer;
+    background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+.mobile-menu-fab svg { width: 20px; height: 20px; display: block; }
+.mobile-menu-fab:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Always-on-top safety cluster (CMX-377) — see index.html's comment on why
+   #status-health-warn and #btn-shares live here, outside the sidebar, on
+   every breakpoint. Each pill hides itself independently via its own
+   [hidden] rule; this only positions the pair as a group. */
+.safety-float {
+    position: fixed; z-index: 47; top: max(14px, env(safe-area-inset-top)); right: max(14px, env(safe-area-inset-right));
+    display: flex; align-items: center; gap: 8px;
+}
+
 .side-section { margin-bottom: 18px; }
 .side-section:first-child { margin-top: 2px; }
+/* CMX-377 round 2: sentence-case, no letter-spacing — the uppercase/tracked
+   style (NAVIGATE, SESSIONS, RECENT SESSIONS) doesn't match the approved
+   mockup's plain dim group labels. */
 .side-head {
     display: flex; align-items: center; gap: 8px; padding: 4px 16px 7px;
-    font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em;
-    color: var(--text-dim); cursor: default;
+    font-size: 11px; color: var(--text-dim); cursor: default;
 }
 .side-head[onclick] { cursor: pointer; }
 .side-head[onclick]:hover .side-title { color: var(--text); }
@@ -2992,36 +3128,22 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .side-item.active .side-item-icon { color: var(--accent); }
 .agent-row .agent-row-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* ---- Triage cluster: sessions waiting on input, lifted above the project
-   groups. Yellow vocabulary = "needs a human", matching the wall's waiting
-   ring. The card sits inside the already-padded .side-list, so no side margin. */
-.side-triage {
-    margin: 2px 0 12px; padding: 4px;
-    border: 1px solid color-mix(in srgb, var(--yellow) 35%, var(--border));
-    border-radius: 9px;
-    background: color-mix(in srgb, var(--yellow) 8%, transparent);
-}
+/* ---- Triage cluster: Pinned / Needs you / Finished — lifted above (or,
+   for Finished, rendered after) the project groups. CMX-377 round 2: the
+   bordered, tinted card (amber for Pinned, since it shared Needs-you's
+   yellow vocabulary with no override of its own; sky-blue for Finished) is
+   gone — the approved mockup's groups are a plain dim label with no box at
+   all, same idiom as the plain project .group-head below. No side margin:
+   the card used to supply its own padding; a plain label doesn't need it. */
+.side-triage { margin: 2px 0 12px; }
 .triage-head {
     display: flex; align-items: center; gap: 7px; padding: 3px 6px 6px;
-    font-size: 10px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.08em; color: var(--yellow);
+    font-size: 11px; color: var(--text-dim);
 }
 .triage-count {
     min-width: 16px; text-align: center; padding: 0 5px; border-radius: 999px;
-    font-size: 10px; line-height: 16px;
-    background: color-mix(in srgb, var(--yellow) 22%, transparent); color: var(--yellow);
-}
-
-/* ---- Finished cluster (issue #475): same triage card, sky-blue vocabulary so
-   it never reads as "needs you" at a glance — this is unread output, not a
-   blocker. One tier below "Needs you" when both are present. */
-.side-triage.side-finished {
-    border-color: color-mix(in srgb, var(--ok-sky) 35%, var(--border));
-    background: color-mix(in srgb, var(--ok-sky) 8%, transparent);
-}
-.side-finished .triage-head { color: var(--ok-sky); }
-.side-finished .triage-count {
-    background: color-mix(in srgb, var(--ok-sky) 22%, transparent); color: var(--ok-sky);
+    font-size: 10px; font-weight: 600; line-height: 16px;
+    background: var(--surface); color: var(--text-dim);
 }
 
 /* ---- Project groups: collapsible header with a session count + working-dot
@@ -3069,12 +3191,9 @@ input[type="text"]:focus, textarea:focus, select:focus {
    Deliberately quieter than .active (a fill + rail): a 1px inset ring only. */
 .agent-row.on-wall { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 32%, var(--border)); }
 .agent-row.on-wall:hover { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 50%, var(--border)); }
-/* Window-type cue: a GLYPH (C / $ / ⚙), never colour alone. The letter carries the
-   type; the tint only reinforces it, and it comes from the Okabe-Ito colourblind-
-   safe palette (sky blue / bluish green / orange) rather than a red-green pairing.
-   Desaturate the whole row and it still reads. */
-/* 18px box / 11px letter — matches the collapsed rail (body.sidebar-collapsed
-   .ar-type) so folding the sidebar doesn't resize the type cue. */
+/* Window-type cue (recent/dispatcher rows only — CMX-377 round 2 dropped it
+   from the live agent row face; see nav.js's _agentRowHtml comment). A GLYPH,
+   never colour alone, so it still reads desaturated. */
 .ar-type {
     flex: 0 0 18px; height: 18px; margin-top: 2px;
     display: inline-flex; align-items: center; justify-content: center;
@@ -3082,11 +3201,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
     font-size: 11px; font-weight: 700; line-height: 1; border-radius: 4px;
     color: var(--text-dim); background: var(--surface);
 }
-.ar-type.claude { color: #56B4E9; background: color-mix(in srgb, #56B4E9 16%, transparent); }
-.ar-type.shell  { color: #009E73; background: color-mix(in srgb, #009E73 18%, transparent); }
-.ar-type.server { color: #E69F00; background: color-mix(in srgb, #E69F00 16%, transparent); }
-/* Recent (dead) sessions — CMX-208. Not one of the type-cue Okabe-Ito tints above
-   (claude/shell/server): this row is not a live window at all, so it reads as
+/* Recent (dead) sessions — CMX-208: not a live window, so it reads as
    dimmed/inert rather than typed. */
 .ar-type.recent { color: var(--text-dim); }
 
@@ -3119,41 +3234,21 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .ar-ctx.warn { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, transparent); }
 .ar-ctx.danger { color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); }
-/* CMX-300: session role badge. A shape — text pill or icon — never a bare dot,
-   so the cue is colourblind-safe; colour only reinforces it. Omitted entirely
-   for 'plain' sessions (the common case), so it never appears in markup or CSS. */
-.ar-role {
-    flex: 0 0 auto; font-size: var(--card-font-size); font-weight: 600; line-height: 15px;
-    padding: 0 5px; border-radius: 999px; background: var(--surface);
-}
-/* CMX-302: orchestrator (crown) and dispatched (bot, item 2, Liav 2026-08-17)
-   are both bare ICON badges, not text pills — "Orchestrator"/"Dispatched" were
-   both wide enough to truncate the session name next to them. One glyph per
-   concept (the word itself moves to the title/aria-label), sized/centred like
-   the lucide icons elsewhere rather than the .ar-role text-pill padding above
-   (kept on the base rule for any future role that DOES want a text pill). Box
-   model shared (only colour differs) — one rule, not two copies to drift apart. */
-.ar-role.dispatched, .ar-role.orchestrator {
-    display: flex; align-items: center; justify-content: center;
-    min-width: 18px; max-width: 18px;
-    width: 18px; height: 18px; padding: 0; line-height: normal;
-}
-.ar-role.dispatched { color: #0072B2; background: color-mix(in srgb, #0072B2 14%, transparent); }
-.ar-role.orchestrator { color: #CC79A7; background: color-mix(in srgb, #CC79A7 16%, transparent); }
-/* CMX-146: Claude's own auto-generated session title — its own dim line, distinct
-   from `.ar-recap` below (an occasional away_summary blurb, often absent). */
-.ar-title {
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    font-size: var(--card-font-size); line-height: var(--card-line-height); color: var(--text-dim); opacity: 0.75;
-}
 .ar-sub { display: flex; align-items: baseline; gap: 5px; min-width: 0; font-size: var(--card-font-size); line-height: var(--card-line-height); color: var(--text-dim); }
+/* CMX-377 round 2: the state word stays dim (inherits .ar-sub's colour) in
+   every state — the shape (.term-status-dot) carries the state, colour is
+   never the only cue AND is no longer a second, redundant cue here either. */
 .ar-state { flex: 0 0 auto; font-weight: 600; text-transform: capitalize; }
-.ar-state.working { color: var(--green); }
-.ar-state.waiting { color: var(--yellow); }
-.ar-state.done { color: var(--ok-sky); }
-.ar-state.idle { color: var(--text-dim); }
-.ar-age { flex: 0 0 auto; opacity: 0.8; }
+/* CMX-377: recent-sessions rows still use .ar-recap for their cwd sub-line
+   (nav.js renderRecentSessions) — the live agent row's OWN recap/ai_title
+   lines are gone (folded into the row's title tooltip; see .ar-ago below). */
 .ar-recap { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85; }
+/* CMX-377: the row's right-aligned relative time (mockup's `{{r.ago}}`) — a
+   ROW-level sibling of .ar-main, not part of it, so it sits at the row's far
+   right (comes after .ar-main's flex: 1 in source order). Vertical offset
+   matches the status dot's own margin-top so it lines up with the row's
+   first line, not its vertical center. */
+.ar-ago { flex: 0 0 auto; margin-top: 4px; font-size: var(--card-font-size); color: var(--text-dim); opacity: 0.75; white-space: nowrap; }
 
 .side-badges { display: flex; gap: 4px; }
 .badge {
@@ -3164,14 +3259,25 @@ input[type="text"]:focus, textarea:focus, select:focus {
 
 /* ---- Collapsed sidebar: the desktop icon rail --------------------------------
    Same DOM, narrower column: labels, section heads and sub-lines drop out and each
-   row keeps its glyph (a nav icon; a session's status dot + type letter). Pure CSS
-   off a body class — nothing re-renders, so collapsing cannot touch the wall's live
+   row keeps its glyph (a nav icon; a session's status-shape dot). Pure CSS off a
+   body class — nothing re-renders, so collapsing cannot touch the wall's live
    iframes. Phone-scoped rules own ≤768px, where the sidebar is a drawer instead. */
 @media (min-width: 769px) {
     /* Snap, don't animate: a transitioned grid column would relayout every live
        terminal iframe on every frame of the tween. One reflow is the kind thing. */
     body.sidebar-collapsed .app { grid-template-columns: 60px 1fr; }
     body.sidebar-collapsed .sidebar { overflow-x: hidden; }
+
+    /* Head/foot narrow along with the rail: the toggle+brand and the
+       readouts+menu buttons no longer fit side by side at 60px, so they
+       stack. The wordmark drops (mark only, matching the mobile brand
+       treatment); the resources strip drops too (a 3-metric row genuinely
+       has no room at this width) — both come back the instant the rail
+       expands, nothing here is destructive. */
+    body.sidebar-collapsed .sidebar-head,
+    body.sidebar-collapsed .sidebar-foot { flex-direction: column; padding-left: 4px; padding-right: 4px; }
+    body.sidebar-collapsed .sidebar-head .brand span { display: none; }
+    body.sidebar-collapsed #resources-strip { display: none; }
 
     body.sidebar-collapsed .side-head,
     body.sidebar-collapsed .side-empty,
@@ -3180,7 +3286,6 @@ input[type="text"]:focus, textarea:focus, select:focus {
     body.sidebar-collapsed .group-head,
     body.sidebar-collapsed .triage-head,
     body.sidebar-collapsed .agent-row .ar-main,
-    body.sidebar-collapsed .agent-row .agent-pin,
     body.sidebar-collapsed .agent-row .recent-resume { display: none; }
 
     /* The section heads are gone, so a rule stands in for the section break. */
@@ -3192,15 +3297,11 @@ input[type="text"]:focus, textarea:focus, select:focus {
 
     body.sidebar-collapsed .side-item,
     body.sidebar-collapsed .agent-row { justify-content: center; gap: 5px; padding: 8px 4px; }
-    /* With only glyphs left, the rail has room to breathe — bump the nav icon,
-       the session type letter and its status dot a notch so they read at a
-       glance. Stays well inside the 60px column (dot 10 + gap 5 + type 18). */
+    /* With only glyphs left, the rail has room to breathe — bump the nav icon
+       and the session's status dot a notch so they read at a glance. */
     body.sidebar-collapsed .side-item-icon { flex: 0 0 auto; font-size: 18px; }
     body.sidebar-collapsed .agent-row.rich { align-items: center; }
     body.sidebar-collapsed .agent-row.rich .term-status-dot { margin-top: 0; width: 10px; height: 10px; }
-    body.sidebar-collapsed .ar-type {
-        margin-top: 0; flex-basis: 18px; height: 18px; font-size: 11px;
-    }
 
     /* Grouped sessions flatten: no header to hang the nesting guide off. */
     body.sidebar-collapsed .group-rows { margin-left: 0; padding-left: 0; border-left: 0; }
@@ -3339,8 +3440,12 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .modal-sheet-head .icon-btn { flex: 0 0 auto; }
 .modal-sheet-body { flex: 1 1 auto; overflow-y: auto; padding: 14px 16px; }
 
-/* --- Canvas --- */
-.canvas { grid-row: 2; overflow-y: auto; padding: 18px 20px; }
+/* --- Canvas ---
+   CMX-377 round 2: explicit column+row, not auto-placement — the leftover
+   `grid-row: 2` from the removed topbar row shoved the canvas below the
+   sidebar (both landed in .app's only row) with nothing occupying the second
+   column, so the whole right side of the viewport went blank. */
+.canvas { grid-column: 2; grid-row: 1; overflow-y: auto; padding: 18px 20px; }
 .canvas-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
 .canvas-toolbar input[type=text] { flex: 1; }
 
@@ -3455,7 +3560,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .s-rowlabel { color: var(--text); font-size: 12px; }
 .s-select {
     background: var(--surface); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 5px 10px; font-family: var(--font); font-size: 12px;
+    border-radius: 6px; padding: 5px 10px; font-family: var(--ui-font); font-size: 12px;
     cursor: pointer;
 }
 .s-select:hover { border-color: var(--accent); }
@@ -3463,7 +3568,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .s-input {
     flex: 1 1 auto; min-width: 0;
     background: var(--surface); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 6px 10px; font-family: var(--font); font-size: 12px;
+    border-radius: 6px; padding: 6px 10px; font-family: var(--ui-font); font-size: 12px;
 }
 .s-input:focus { outline: none; border-color: var(--accent); }
 .s-savemsg { font-size: 11px; color: var(--text-dim); margin-top: 6px; min-height: 14px; }
@@ -3589,16 +3694,6 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .launch-row .lr-shell:hover, .launch-row .lr-star:hover { color: var(--accent); }
 .launch-row .lr-forget:hover { color: var(--red); }
 
-/* Pin-to-Launch star on agent rows: hover-revealed; stays lit once pinned. */
-.agent-row .agent-pin {
-    background: transparent; border: 0; cursor: pointer; padding: 0 4px;
-    color: var(--text-dim); font-size: 13px; line-height: 1;
-    opacity: 0; transition: opacity 0.12s;
-}
-.agent-row:hover .agent-pin { opacity: 1; }
-.agent-row .agent-pin:hover { color: var(--accent); }
-.agent-row .agent-pin.pinned { opacity: 1; color: var(--yellow); }
-
 /* Launcher dedup: brief flash on the pane a launch focused. */
 @keyframes pane-flash-kf {
     0%, 100% { box-shadow: inset 0 0 0 0 transparent; }
@@ -3636,28 +3731,16 @@ input[type="text"]:focus, textarea:focus, select:focus {
     /* Single column; the sidebar leaves the grid (goes position:fixed below). */
     .app { grid-template-columns: 1fr; }
 
-    /* Safe-area pad the topbar for notches (viewport-fit=cover). */
-    .topbar {
-        padding-left: max(10px, env(safe-area-inset-left));
-        padding-right: max(10px, env(safe-area-inset-right));
-        padding-top: max(7px, env(safe-area-inset-top));
-        padding-bottom: 7px;
-        gap: 8px;
-    }
-    /* Bump the action icons + logo: 30px/16px reads small and sits well under a
-       comfortable touch target. Trimming the topbar padding above keeps the bar
-       roughly the same height while the glyphs fill it. */
+    /* Bump the action icons: 30px/16px reads small and sits well under a
+       comfortable touch target. */
     .icon-btn { width: 38px; height: 38px; font-size: 18px; }
     .icon-btn svg { width: 20px; height: 20px; }
-    .topbar .brand .brand-mark { height: 26px; }
-    /* Phone topbar: logo mark only (drop the "chela" wordmark — the hamburger
-       anchors the left). Jump/New/overflow now live behind the one primary
-       menu button, plus the safety shares indicator when active. */
-    .topbar .brand span { display: none; }
-    .topbar-actions { gap: 6px; }
+    .sidebar-head .brand .brand-mark { height: 24px; }
 
     /* Off-canvas drawer: slides in over the canvas, above the scrim (z 40),
-       below the settings drawer (z 50). Full height incl. under the topbar. */
+       below the settings drawer (z 50). Full height, safe-area padding lives
+       on the head/foot flex ends rather than the sidebar itself, so the
+       scrollable middle isn't pushed around by it. */
     .sidebar {
         position: fixed;
         top: 0; left: 0; bottom: 0;
@@ -3665,13 +3748,23 @@ input[type="text"]:focus, textarea:focus, select:focus {
         z-index: 45;
         transform: translateX(-100%);
         transition: transform 0.18s ease;
-        padding-top: max(8px, env(safe-area-inset-top));
         padding-left: env(safe-area-inset-left);
     }
     .sidebar.open { transform: translateX(0); box-shadow: 0 10px 48px rgba(0,0,0,0.6); }
+    .sidebar-head { padding-top: max(12px, env(safe-area-inset-top)); }
+    .sidebar-foot { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
 
-    /* Canvas now owns the full width; ease the padding for small screens. */
-    .canvas { grid-column: 1; padding: 8px 14px max(14px, env(safe-area-inset-bottom)); }
+    /* Canvas now owns the full width; ease the padding for small screens. Extra
+       top padding clears .mobile-menu-fab/.safety-float, which float above it. */
+    .canvas { grid-column: 1; padding: 60px 14px max(14px, env(safe-area-inset-bottom)) 14px; }
+
+    /* CMX-377: the phone-only affordance that opens the off-canvas drawer —
+       the sidebar's own toggle (.sidebar-head) is unreachable while it's
+       closed. Hidden while the drawer is already open (body.sidebar-open,
+       set by nav.js's toggleSidebar) so it never doubles up with the drawer's
+       own toggle button sitting right behind it. */
+    .mobile-menu-fab { display: inline-flex; }
+    body.sidebar-open .mobile-menu-fab { display: none; }
 }
 
 /* ---- Mobile agent switcher (pill strip) ----
@@ -3685,12 +3778,12 @@ input[type="text"]:focus, textarea:focus, select:focus {
 
     /* The terminals toolbar (wall mode toggle + grid presets + "New shell") is
        desktop/wall-only — on phones it's an empty row with a bottom margin that
-       pushes the agent pills well below the topbar. Hide it so the pills sit
-       right under the header. */
+       pushes the agent pills well down the canvas. Hide it so the pills sit
+       right at the top (under .canvas's clearance for .mobile-menu-fab). */
     #panel-terminals > div:first-child { display: none; }
 
-    /* Scrollable agent-pill strip. (Starting a share moved to the topbar overflow
-       menu, so the row no longer carries its own 🔗 trigger.) */
+    /* Scrollable agent-pill strip. (Starting a share moved to the primary menu
+       in the sidebar foot, so the row no longer carries its own 🔗 trigger.) */
     .term-switcher {
         display: flex;
         gap: 6px;
@@ -3762,17 +3855,19 @@ input[type="text"]:focus, textarea:focus, select:focus {
        fullscreen is exactly when you're working in the terminal. */
     body.term-mobile-full .term-switcher,
     body.term-mobile-full .term-ctx-bar { display: none !important; }
-    /* True overlay, not just a tall box: the pane normally sits BELOW the
-       topbar (~53px) in flow, so a bare `height:100dvh` overshoots the
-       viewport and pushes the terminal's bottom rows under the fold. Pin it
-       to the viewport (fixed + top/left/right:0) so the height below is
-       measured against the whole screen — topbar included. Subtract the
-       keybar's FULL footprint (--term-keybar-h + the safe-area inset its own
-       bottom padding carries — same CMX-130 reasoning as the non-fullscreen
-       rule above) so the fixed bar sits past the pane instead of painting
-       over the terminal's bottom row. z-index 100 clears the topbar (auto);
-       the pane no longer overlaps the keybar (35) geometrically, so their
-       z-order is moot, and both stay under modals (200). */
+    /* True overlay, not just a tall box: the pane normally sits inside
+       .canvas's own top padding (CMX-377: clearance for the floating
+       .mobile-menu-fab/.safety-float, no topbar to measure against any more),
+       so a bare `height:100dvh` overshoots the viewport and pushes the
+       terminal's bottom rows under the fold. Pin it to the viewport (fixed +
+       top/left/right:0) so the height below is measured against the whole
+       screen instead. Subtract the keybar's FULL footprint (--term-keybar-h +
+       the safe-area inset its own bottom padding carries — same CMX-130
+       reasoning as the non-fullscreen rule above) so the fixed bar sits past
+       the pane instead of painting over the terminal's bottom row. z-index
+       100 clears the floating fab/safety cluster (46/47); the pane no longer
+       overlaps the keybar (35) geometrically, so their z-order is moot, and
+       both stay under modals (200). */
     body.term-mobile-full .term-single .term-pane {
         position: fixed;
         top: 0; left: 0; right: 0;
@@ -3886,7 +3981,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kn-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
 .kn-chip { background: var(--surface); border: 1px solid var(--border);
     color: var(--text); border-radius: 999px; padding: 4px 12px; font-size: 12px;
-    cursor: pointer; font-family: var(--font); }
+    cursor: pointer; font-family: var(--ui-font); }
 .kn-chip:hover { border-color: var(--accent); }
 .kn-chip-n { color: var(--accent); font-weight: 700; margin-right: 4px; }
 
@@ -3988,7 +4083,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kn-pchips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
 .kn-pchip { display: inline-flex; align-items: baseline; gap: 8px; background: var(--surface);
     border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; cursor: pointer;
-    font-family: var(--font); color: var(--text); }
+    font-family: var(--ui-font); color: var(--text); }
 .kn-pchip:hover { border-color: #a371f7; }
 .kn-pchip-name { font-weight: 600; font-size: 13px; }
 .kn-pchip .kn-dim { padding: 0; font-size: 11px; }

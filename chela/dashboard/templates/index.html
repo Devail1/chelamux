@@ -12,18 +12,119 @@
 
 <div class="app">
 
-  <!-- Top bar: brand · usage pills · actions -->
-  <header class="topbar">
+  <!-- CMX-377: the calm-desktop-app restyle drops the full-width topbar
+       (index.html used to open with <header class="topbar">, grid-column 1/3
+       above the sidebar+canvas row). Everything it held moves onto the
+       sidebar itself — a fixed head (toggle + brand) and a fixed foot
+       (ambient readouts + Decisions/Menu) around the scrollable nav — so the
+       sidebar is the ONE piece of chrome, not a bar-plus-sidebar pair. The two
+       safety-critical pills (#btn-shares, #status-health-warn) move OUT of
+       the sidebar entirely into `.safety-float` below `</main>`: the sidebar
+       is `position:fixed` + `transform`-slid on a phone when closed
+       (off-canvas drawer), and a transformed ancestor becomes the containing
+       block for any `position:fixed` descendant — trapping it off-screen too
+       — so "must always be visible" cannot live inside the sidebar on mobile.
+       `.mobile-menu-fab` is the phone-only replacement for the old hamburger:
+       the sidebar's own toggle (in `.sidebar-head` below) is unreachable while
+       the drawer is closed, exactly the same off-canvas problem. -->
+  <!-- Left sidebar: Navigate (views) · Sessions (live agents) · Recent sessions
+       (dead-but-resumable, CMX-208 — hidden when empty). No filter chips.
+       Favorites/Recent DIRECTORIES are LAUNCH affordances, not navigation — they
+       live in the "+" launch menu (#new-menu), not a sidebar section. Recent
+       SESSIONS below is a different thing entirely: resuming a specific prior
+       Claude conversation (session id), not opening a fresh window in a familiar
+       directory — see chela/restore.py. -->
+  <aside class="sidebar">
+
     <!-- ONE sidebar control, two behaviours (nav.js toggleSidebar): a phone slides
          the off-canvas drawer in over a scrim; a desktop collapses the column to an
-         icon rail (persisted). -->
-    <button class="icon-btn sidebar-toggle" id="btn-menu" title="Toggle sidebar"
-            aria-label="Toggle sidebar" aria-expanded="true" onclick="chela.toggleSidebar()">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-    </button>
-    <div class="brand"><img src="static/img/claw-mark.svg" class="brand-mark" alt=""><span>chela</span></div>
+         icon rail (persisted). Lives here (not a topbar) — on a phone it's reachable
+         only while the drawer is already open, which is fine: `.mobile-menu-fab`
+         below is the one that opens it from closed. -->
+    <div class="sidebar-head">
+      <button class="icon-btn sidebar-toggle" id="btn-menu" title="Toggle sidebar"
+              aria-label="Toggle sidebar" aria-expanded="true" onclick="chela.toggleSidebar()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+      <div class="brand"><img src="static/img/claw-mark.svg" class="brand-mark" alt=""><span>chela</span></div>
+    </div>
 
-    <div class="topbar-actions">
+    <div class="sidebar-scroll">
+
+      <!-- CMX-377: New session + jump-to search, ahead of nav (mockup order —
+           head -> New session -> jump-to search -> nav). "New session" reopens
+           the SAME #new-menu the old sidebar "+" used (chela.openNewMenu) —
+           there is only one launch surface, this is just its new prominent
+           entry point, so the old per-section "+" in Sessions below is gone
+           (redundant with this). The search input reuses the EXISTING fuzzy
+           jump (nav.js's #palette machinery, ~1507) rather than a second
+           implementation: typing here opens/drives the real #palette overlay
+           in place — global ArrowUp/ArrowDown/Enter/Escape handling already
+           works off `#palette.open`, not focus, so it needs no keydown wiring
+           of its own (see nav.js's sidebarJumpInput). -->
+      <div class="sidebar-quick">
+        <button class="sidebar-new-btn" onclick="chela.openNewMenu(event)">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+          <span>New session</span>
+        </button>
+        <label class="sidebar-jump">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input type="search" id="sidebar-jump-input" placeholder="Jump to session" aria-label="Jump to session"
+                 autocomplete="off" spellcheck="false"
+                 onfocus="chela.sidebarJumpInput(this)" oninput="chela.sidebarJumpInput(this)">
+        </label>
+      </div>
+
+      <!-- Primary navigation. NOT written here: nav.js renders these rows from the
+           view REGISTRY (static/js/views.js) — one declaration per view, so adding
+           or deleting a view is one entry there and nothing here.
+
+           CMX-279 (measured, not assumed — Liav named exactly two of the seven
+           views he actually opens): Wall and Work. CMX-230 had tried demoting the
+           other five into a quieter secondary group below this one rather than
+           deleting them (`#side-nav-more`); that group is gone along with the
+           views it held — there is only one nav list now. -->
+      <section class="side-section">
+        <div class="side-head"><span class="side-title">Navigate</span></div>
+        <div class="side-list" id="side-nav"></div>
+      </section>
+
+      <!-- Live tmux sessions. The header is a plain label; click a row to land on
+           its pane (selectAgent → focusPaneByWid). A live fleet is a handful of
+           windows and always fits the viewport, so there is no type filter — the
+           window type is a per-row cue (glyph + colour), not a way to hide rows. -->
+      <section class="side-section">
+        <div class="side-head">
+          <span class="side-title">Sessions</span>
+          <span class="side-count" id="hdr-agents">-/-</span>
+        </div>
+        <div class="side-list" id="sidebar-agents">
+          <div class="side-empty">No agents</div>
+        </div>
+      </section>
+
+      <!-- Recent (dead) sessions — CMX-208. A UI over `chela restore`'s already-tested
+           classification (chela/restore.py): a Claude session a hard tmux death (or
+           `wsl --shutdown`) orphaned, with enough on record (cwd + session id) to
+           relaunch. Hidden entirely when there is nothing to resume — this is a
+           rare-but-important recovery affordance, not a permanent fixture like
+           Navigate/Sessions above, so nav.js's renderRecentSessions toggles `hidden`
+           rather than always reserving the space. -->
+      <section class="side-section" id="side-recent-section" hidden>
+        <div class="side-head">
+          <span class="side-title">Recent sessions</span>
+          <span class="side-count" id="hdr-recent">0</span>
+        </div>
+        <div class="side-list" id="side-recent"></div>
+      </section>
+
+    </div><!-- /sidebar-scroll -->
+
+    <!-- Fixed sidebar foot: ambient readouts + the two menu buttons that used to
+         live in .topbar-actions. Not safety-critical (unlike shares/status-health
+         below `</main>`) — reachable whenever the sidebar itself is, which is
+         always on desktop and one drawer-open away on a phone. -->
+    <div class="sidebar-foot">
       <!-- Host resources strip — live CPU/RAM/Disk, sampled on-request by the
            dashboard process itself (chela/dashboard/resources.py via
            GET /api/resources — never the daemon, never a shared state file,
@@ -38,25 +139,6 @@
         <span class="res-item" id="res-mem" hidden><span class="res-label">RAM</span><span class="res-value">--%</span></span>
         <span class="res-item" id="res-disk" hidden><span class="res-label">Disk</span><span class="res-value">--%</span></span>
       </div>
-      <!-- Native status feed health marker (CMX-179's load-bearing half): the native
-           `claude agents --json` busy/idle feed died for 12 days and every pane kept
-           rendering "idle" — indistinguishable from a genuinely calm fleet — because
-           nothing said the feed itself was down. statushealth.js shows this whenever
-           /api/agents/status_health reports not-ok; glyph + word, never colour-only
-           (Liav is red-weak). Hidden by default: shown only on a real outage. -->
-      <span class="status-health-warn" id="status-health-warn" hidden
-            title="claude agents --json is not answering — every pane's busy/idle status is stale fleet-wide, not a calm fleet">
-        <span aria-hidden="true">&#9888;</span><span class="shw-text">agent status unavailable</span><span class="shw-text-narrow">status down</span>
-      </span>
-      <!-- Global active-shares indicator (safety kill-switch): shown on EVERY tab +
-           mobile whenever any session is shared, so a forgotten live share (= an
-           exposed terminal via a public link) is always one tap from Stop. NOT in
-           the menu below — it must stay visible whenever a share is live. -->
-      <button class="shares-indicator" id="btn-shares" hidden onclick="chela.openSharesSheet()"
-              title="Active shares — tap to manage or stop" aria-label="Active shares">
-        <span class="si-dot" aria-hidden="true"></span>
-        <span class="si-text">0 sharing</span>
-      </button>
       <!-- Decisions inbox — the durable, owner-independent record of every dispatch
            outcome chela/inbox.py has ever queued (CMX-171: moved out of the sidebar,
            see #decisions-menu below for why). The dot reflects the same live/nobody/
@@ -78,60 +160,6 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></svg>
       </button>
     </div>
-  </header>
-
-  <!-- Left sidebar: Navigate (views) · Sessions (live agents) · Recent sessions
-       (dead-but-resumable, CMX-208 — hidden when empty). No filter chips.
-       Favorites/Recent DIRECTORIES are LAUNCH affordances, not navigation — they
-       live in the "+" launch menu (#new-menu), not a sidebar section. Recent
-       SESSIONS below is a different thing entirely: resuming a specific prior
-       Claude conversation (session id), not opening a fresh window in a familiar
-       directory — see chela/restore.py. -->
-  <aside class="sidebar">
-
-    <!-- Primary navigation. NOT written here: nav.js renders these rows from the
-         view REGISTRY (static/js/views.js) — one declaration per view, so adding
-         or deleting a view is one entry there and nothing here.
-
-         CMX-279 (measured, not assumed — Liav named exactly two of the seven
-         views he actually opens): Wall and Work. CMX-230 had tried demoting the
-         other five into a quieter secondary group below this one rather than
-         deleting them (`#side-nav-more`); that group is gone along with the
-         views it held — there is only one nav list now. -->
-    <section class="side-section">
-      <div class="side-head"><span class="side-title">Navigate</span></div>
-      <div class="side-list" id="side-nav"></div>
-    </section>
-
-    <!-- Live tmux sessions. The header is a plain label; click a row to land on
-         its pane (selectAgent → focusPaneByWid). A live fleet is a handful of
-         windows and always fits the viewport, so there is no type filter — the
-         window type is a per-row cue (glyph + colour), not a way to hide rows. -->
-    <section class="side-section">
-      <div class="side-head">
-        <span class="side-title">Sessions</span>
-        <span class="side-count" id="hdr-agents">-/-</span>
-        <button class="side-add" title="New window" onclick="event.stopPropagation(); chela.openNewMenu(event)">+</button>
-      </div>
-      <div class="side-list" id="sidebar-agents">
-        <div class="side-empty">No agents</div>
-      </div>
-    </section>
-
-    <!-- Recent (dead) sessions — CMX-208. A UI over `chela restore`'s already-tested
-         classification (chela/restore.py): a Claude session a hard tmux death (or
-         `wsl --shutdown`) orphaned, with enough on record (cwd + session id) to
-         relaunch. Hidden entirely when there is nothing to resume — this is a
-         rare-but-important recovery affordance, not a permanent fixture like
-         Navigate/Sessions above, so nav.js's renderRecentSessions toggles `hidden`
-         rather than always reserving the space. -->
-    <section class="side-section" id="side-recent-section" hidden>
-      <div class="side-head">
-        <span class="side-title">Recent sessions</span>
-        <span class="side-count" id="hdr-recent">0</span>
-      </div>
-      <div class="side-list" id="side-recent"></div>
-    </section>
 
   </aside>
 
@@ -393,6 +421,45 @@
 
   </main>
 
+</div>
+
+<!-- Phone-only floating control that opens the off-canvas sidebar drawer
+     (CMX-377). Desktop hides it (style.css): the sidebar's own toggle in
+     .sidebar-head is always reachable there, since the sidebar never leaves
+     the layout — it only narrows to an icon rail. -->
+<button class="mobile-menu-fab" id="btn-menu-mobile" title="Menu" aria-label="Open menu"
+        aria-expanded="false" onclick="chela.toggleSidebar()">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+</button>
+
+<!-- Always-on-top safety cluster (CMX-377): the native-status-feed outage
+     warning and the active-shares kill-switch, floating above the canvas on
+     every breakpoint. These used to sit in .topbar-actions, visible on every
+     tab because the topbar was never off-canvas; the sidebar now IS off-canvas
+     on a phone (position:fixed + transform), and a transformed ancestor traps
+     any position:fixed descendant inside it instead of the viewport — so these
+     two stay OUTSIDE the sidebar entirely, not just outside the drawer's scroll
+     area, or a live share could go unseen behind a closed drawer. -->
+<div class="safety-float">
+  <!-- Native status feed health marker (CMX-179's load-bearing half): the native
+       `claude agents --json` busy/idle feed died for 12 days and every pane kept
+       rendering "idle" — indistinguishable from a genuinely calm fleet — because
+       nothing said the feed itself was down. statushealth.js shows this whenever
+       /api/agents/status_health reports not-ok; glyph + word, never colour-only
+       (Liav is red-weak). Hidden by default: shown only on a real outage. -->
+  <span class="status-health-warn" id="status-health-warn" hidden
+        title="claude agents --json is not answering — every pane's busy/idle status is stale fleet-wide, not a calm fleet">
+    <span aria-hidden="true">&#9888;</span><span class="shw-text">agent status unavailable</span><span class="shw-text-narrow">status down</span>
+  </span>
+  <!-- Global active-shares indicator (safety kill-switch): shown on EVERY tab +
+       mobile whenever any session is shared, so a forgotten live share (= an
+       exposed terminal via a public link) is always one tap from Stop. NOT in
+       the menu above — it must stay visible whenever a share is live. -->
+  <button class="shares-indicator" id="btn-shares" hidden onclick="chela.openSharesSheet()"
+          title="Active shares — tap to manage or stop" aria-label="Active shares">
+    <span class="si-dot" aria-hidden="true"></span>
+    <span class="si-text">0 sharing</span>
+  </button>
 </div>
 
 <!-- Command palette (⌘K / Ctrl-K): fuzzy jump to any agent, view, or project -->

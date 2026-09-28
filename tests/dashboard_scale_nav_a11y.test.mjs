@@ -253,6 +253,7 @@ import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py e
 import { tileState } from '../chela/dashboard/static/js/wallmodel.js';
 import { navViews } from '../chela/dashboard/static/js/viewreg.js';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
+import { cssForViewport, resolveVars } from './js_helpers/css_viewport.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const src = p => readFileSync(join(ROOT, p), 'utf8');
@@ -334,6 +335,53 @@ function _activeRailReaches(win, el) {
     }
     return false;
 }
+
+// --- CMX-377: --ui-font (chrome) vs --font (terminal frame + code). The
+// brief's own GUARD: "`--ui-font` is used by the sidebar and NOT by the
+// terminal frame. Corrupt by swapping ⇒ RED." jsdom does not expand var()
+// into a resolved font stack for font-family either (confirmed empirically —
+// getComputedStyle returns the literal winning declaration text, same
+// "declaration identity" fact the round-9 header above documents jsdom CAN
+// answer honestly), which makes this a clean, non-flaky assertion: read the
+// literal computed fontFamily string off a REAL `.sidebar` element and a REAL
+// `.term-frame` element mounted against the REAL stylesheet, and require they
+// name DIFFERENT custom properties. A judge swap (giving .term-frame
+// var(--ui-font) or the sidebar var(--font)) fails here by name, not by
+// guessing at a resolved font stack.
+test('CMX-377: --ui-font styles the sidebar chrome; --font stays pinned to the terminal frame', () => {
+    const win = mountWithRealCss(
+        '<aside class="sidebar"><span id="side-el">x</span></aside>' +
+        '<div class="grid-stack-item-content"><div class="term-frame" id="term-el">y</div></div>');
+    const sideFont = win.getComputedStyle(win.document.getElementById('side-el')).fontFamily;
+    const termFont = win.getComputedStyle(win.document.getElementById('term-el')).fontFamily;
+
+    assert.match(sideFont, /var\(--ui-font\)/,
+        `the sidebar's inherited font-family is "${sideFont}", not var(--ui-font) — CMX-377's chrome font token ` +
+        'is not reaching the sidebar (check body { font-family } in style.css)');
+    assert.doesNotMatch(sideFont, /var\(--font\)\b/,
+        `the sidebar's font-family resolves to "${sideFont}", which still names --font (monospace) — the ` +
+        'chrome sans-ification did not actually reach it');
+
+    assert.match(termFont, /var\(--font\)/,
+        `.term-frame's font-family is "${termFont}", not var(--font) — the terminal frame must stay pinned to ` +
+        'the monospace token, never the chrome sans token');
+    assert.doesNotMatch(termFont, /var\(--ui-font\)/,
+        `.term-frame's font-family resolves to "${termFont}", which names --ui-font — the terminal frame has ` +
+        'been swapped onto the chrome sans token, the exact regression this guard exists to catch');
+
+    // Round 6 (defeat_shapes #377e): NAMING var(--ui-font) is not BEING sans —
+    // `--ui-font: var(--font)` turned the whole chrome monospace with every
+    // name check above green. Resolve the token chain to the real family list.
+    const side = win.document.getElementById('side-el');
+    const term = win.document.getElementById('term-el');
+    const sideStack = resolveVars(win, side, sideFont);
+    const termStack = resolveVars(win, term, termFont);
+    assert.match(sideStack, /^['"]?Geist\b/,
+        `the sidebar's font resolves to "${sideStack}" — its first family is not the vendored Geist sans`);
+    assert.doesNotMatch(sideStack, /monospace/,
+        `the sidebar's font resolves to "${sideStack}" — a monospace stack; the chrome is not sans`);
+    assert.notEqual(sideStack, termStack, 'the sidebar and the terminal frame resolve the SAME font stack');
+});
 
 // --- TYPE SCALE (ticket claim 1) — CMX-257 round 10 (human directive on PR
 // #326, superseding round 9's jsdom-cascade framing): this used to assert the
@@ -462,6 +510,33 @@ for (const ups of [1, 2]) {
             'capped width even though max-width is unset, producing the same centred-column regression');
     });
 }
+
+// --- CMX-377 round 3: full-space Wall, GUARD (cascade-resolved). The brief's
+// own boundary — "the Wall takes the FULL space at every density — no outer
+// padding/margins/'airy' whitespace around panes" — names `.grid-stack`
+// itself; round 3's judge found no guard existed at all and defeated a
+// straight `.grid-stack { padding: 24px; margin: 12px; }` addition with the
+// full suite green. Read the RESOLVED computed style (the same
+// mountWithRealCss/LOGICAL_PROP_CSS machinery the airy-density guards above
+// use), not the source text, so this closes regardless of which selector
+// shape a future rule uses to add the padding/margin back (defeat_shapes
+// #377b — a source-anchored check only ever pins one selector spelling).
+test('full-space Wall (CMX-377): .grid-stack resolves ZERO padding and ZERO margin on every side', () => {
+    // round 5 (defeat_shapes #377d): flattened for the same 1920px desktop the vw
+    // substitution assumes — jsdom skips @supports/@media-wrapped rules otherwise.
+    // The populated-Wall variant (real panes with a real .gs-head) lives in
+    // tests/restyle_real_shell_css.test.mjs.
+    const win = mountWithRealCss(WALL_FIXTURE(1), '', cssForViewport(LOGICAL_PROP_CSS, { width: 1920, height: 1080 }));
+    const cs = win.getComputedStyle(win.document.querySelector('.grid-stack'));
+    for (const side of ['Top', 'Right', 'Bottom', 'Left']) {
+        assert.equal(cs[`padding${side}`], '0px',
+            `.grid-stack's padding-${side.toLowerCase()} is ${cs[`padding${side}`]}, not 0px — the Wall no ` +
+            'longer takes the full space (brief boundary: no outer padding/margin around panes)');
+        assert.equal(cs[`margin${side}`], '0px',
+            `.grid-stack's margin-${side.toLowerCase()} is ${cs[`margin${side}`]}, not 0px — the Wall no ` +
+            'longer takes the full space (brief boundary: no outer padding/margin around panes)');
+    }
+});
 
 // --- GUARD 3: non-hue cue, per real state family — deleting the glyph/word
 // span (or the text it carries) and leaving only the colour class must fail.

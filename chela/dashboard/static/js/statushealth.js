@@ -1,5 +1,6 @@
 // ---------------------------------------------------------------------------
-// NATIVE STATUS FEED HEALTH MARKER (CMX-179) — the topbar #status-health-warn pill.
+// NATIVE STATUS FEED HEALTH MARKER (CMX-179) — the #status-health-warn pill,
+// floating in .safety-float since CMX-377 (originally in the topbar).
 //
 // `claude agents --json` (agent_manager.py) is the ONE authority for every pane's
 // busy/idle status. It died silently for 12 days: the timeout was below its real

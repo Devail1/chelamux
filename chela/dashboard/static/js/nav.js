@@ -5,7 +5,7 @@ import { refreshSummary } from './header.js';
 import { checkContext } from './agents.js';
 import { showAddSchedule } from './schedules.js';
 import { _displayLabel, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals.js';
-import { _isFav, _launcherData, launchProject, refreshLauncher } from './launcher.js';
+import { _launcherData, launchProject, refreshLauncher } from './launcher.js';
 import { VIEWS } from './views.js';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg.js';
 import { refresh } from './main.js';
@@ -32,7 +32,9 @@ let _detailAgent = null;    // window name focused in the agent-detail view
 
 // --- Sidebar: one control, two behaviours ----------------------------------
 // PHONE (≤768px): the 264px sidebar is off-canvas (see the @media block in
-// style.css); the topbar hamburger slides it in over a scrim.
+// style.css); .mobile-menu-fab's hamburger slides it in over a scrim (CMX-377 —
+// there is no topbar; the sidebar's OWN #btn-menu toggle is unreachable while
+// the drawer is closed, which is exactly why the floating fab exists).
 // DESKTOP: the sidebar is a static grid column, so there is nothing to slide —
 // the SAME control collapses it to an icon rail instead, handing the width to the
 // canvas. The state is persisted (a collapse that forgets itself on reload is an
@@ -72,6 +74,13 @@ function toggleSidebar(force) {
     const open = (force === undefined) ? !sb.classList.contains('open') : !!force;
     sb.classList.toggle('open', open);
     if (scrim) scrim.classList.toggle('open', open);
+    // CMX-377: .mobile-menu-fab (the off-canvas drawer's phone-only opener,
+    // since the sidebar's own toggle is unreachable while it's closed) hides
+    // itself off this body class while the drawer is open, so the two
+    // triggers never render on top of each other.
+    document.body.classList.toggle('sidebar-open', open);
+    const fab = document.getElementById('btn-menu-mobile');
+    if (fab) fab.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
 // Navigating dismisses the mobile drawer. It must NOT collapse the desktop rail —
@@ -267,10 +276,11 @@ function toggleGroup(name) {
     renderSidebarAgents(_agentsCache || []);
 }
 
-// One richer agent row: status dot + name + ctx% chip, plus a sub-line with the
-// live state word, age of the last update, and a recap snippet — so you can read
-// what a session is doing without opening it. onclick reads data-agent (handler
-// is on the row, so `this` is the row no matter which child was clicked).
+// One richer agent row (CMX-377 row format: status mark · title, then a second
+// line "<state> · <ctx%> ctx", with the relative time right-aligned — the
+// approved mockup's `renderVals()` row shape). onclick reads data-agent
+// (handler is on the row, so `this` is the row no matter which child was
+// clicked).
 function _agentRowHtml(a) {
     const dot = agentDotColor(a);
     const active = a.name === _detailAgent ? ' active' : '';
@@ -300,63 +310,47 @@ function _agentRowHtml(a) {
         ctxChip = `<span class="ar-ctx ${cls}" title="context ${p}%">${p}%</span>`;
     }
 
-    // Role badge: one glyph per concept, not glyph-plus-label. 'orchestrator' is a
-    // crown ICON (CMX-302); 'dispatched' is a bot ICON (CMX-302, item 2, Liav
-    // 2026-08-17) — the old "Orchestrator"/"Dispatched" text pills were both wide
-    // enough to truncate the session name sitting next to them on a real row. A
-    // lucide icon still reads as a colourblind-safe shape (not colour alone) at a
-    // fraction of the width, with the word itself moved to the title/aria-label
-    // (lucideIcon hardcodes aria-hidden on the <svg> itself, so the accessible
-    // name has to live on the wrapping span). 'plain' (the common case) renders
-    // nothing at all. `bot` was already vendored in _LUCIDE and referenced by
-    // nothing — claiming it here adds no new icon path and collides with no
-    // existing meaning.
-    const role = _agentRole(a);
-    const roleChip = role === 'orchestrator'
-        ? `<span class="ar-role orchestrator" title="Orchestrator session" aria-label="Orchestrator session">${lucideIcon('crown', 12)}</span>`
-        : role === 'dispatched'
-            ? `<span class="ar-role dispatched" title="Dispatched session" aria-label="Dispatched session">${lucideIcon('bot', 12)}</span>`
-            : '';
-
+    // CMX-377: the row's right-aligned relative time. recap_ts is the only
+    // per-agent timestamp the API carries (the same field the pre-restyle row
+    // used for its inline age) — reused here as the row's "ago", not
+    // re-derived. Absent (no recap yet) -> no time shown, not a fabricated one.
     let age = '';
     if (a.recap_ts) age = ageStr((Date.now() - new Date(a.recap_ts)) / 1000).replace(' ago', '');
-    const recap = a.recap ? `<span class="ar-recap" title="${attrEsc(a.recap)}">${escHtml(a.recap)}</span>` : '';
+    const ago = age ? `<span class="ar-ago">${escHtml(age)}</span>` : '';
 
-    // CMX-146: Claude's own auto-generated session title — a different record
-    // than the recap above (which is an occasional away_summary, often absent).
-    // Shown as its own dim line so it never gets read as the recap.
-    const aiTitle = a.ai_title
-        ? `<div class="ar-title" title="${attrEsc(a.ai_title)}">${escHtml(a.ai_title)}</div>` : '';
-
+    // Second line: "<state> · <ctx%> ctx" — .ar-state and .ar-ctx keep their
+    // exact pre-existing markup (tests/dashboard_scale_nav_a11y.test.mjs's
+    // non-hue-cue GUARD 3b/GUARD 4 assert those two spans verbatim), just
+    // recomposed together instead of ctx% living on the top line.
     const sub = `<span class="ar-state ${stCls}">${stWord}</span>`
-        + (age ? `<span class="ar-age">· ${age}</span>` : '')
-        + (recap ? ` ${recap}` : '');
-
-    const canPin = TERMINALS_ON && a.cwd;
-    const faved = canPin && typeof _isFav === 'function' && _isFav(a.cwd);
-    const pin = canPin
-        ? `<button class="agent-pin${faved ? ' pinned' : ''}" data-cwd="${attrEsc(a.cwd)}"
-             title="${faved ? 'Unpin from Launch favorites' : 'Pin this directory to Launch favorites'}"
-             onclick="event.stopPropagation(); chela.toggleFavCwd(this.dataset.cwd)">${faved ? '&#9733;' : '&#9734;'}</button>`
-        : '';
+        + (ctxChip ? ` · ${ctxChip} ctx` : '');
 
     const type = _agentType(a);
+    // Whatever CMX-146's ai_title / the occasional away_summary recap used to
+    // add as extra lines now rides the row's own tooltip instead of a third
+    // rendered line, so the data is not silently lost by the 2-line row format
+    // the mockup specifies — just no longer competing for vertical space.
+    const extra = [a.ai_title, a.recap].filter(Boolean).join(' — ');
+    const rowTitle = extra ? `${label}\n${extra}` : label;
 
-    const wallTitle = onWall ? ' title="Open on the wall"' : '';
-    return `<div class="agent-row rich${active}${wallCls}" data-agent="${attrEsc(a.name)}"${wallTitle}
+    const wallSuffix = onWall ? ' — open on the wall' : '';
+    // CMX-377 round 2: the row is exactly status mark · title · "state · ctx" ·
+    // time, per the approved mockup — the .ar-type harness-letter badge, the
+    // .ar-role crown/bot icon, and the .agent-pin favorite star are all dropped
+    // from the row face (verdict on PR #529 round 2). Role is conveyed by
+    // grouping alone (the orchestrator's own Pinned cluster); pinning a cwd to
+    // Launch favorites still lives in the "+" launch menu, its other surface.
+    // _agentType/_typeGlyph/_agentRole are unchanged and still back the dead/
+    // dispatcher recent-session rows (renderRecentSessions), a different,
+    // out-of-mockup surface.
+    return `<div class="agent-row rich${active}${wallCls}" data-agent="${attrEsc(a.name)}" title="${attrEsc(rowTitle + wallSuffix)}"
         onclick="chela.selectAgent(this.dataset.agent)">
         <span class="term-status-dot ${stCls}" title="${attrEsc(type)} · ${stWord}"></span>
-        <span class="ar-type ${attrEsc(type)}" title="${attrEsc(type)} window">${escHtml(_typeGlyph(type))}</span>
         <div class="ar-main">
-            <div class="ar-top">
-                <span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span>
-                ${roleChip}
-                ${ctxChip}
-            </div>
-            ${aiTitle}
+            <span class="agent-row-name">${escHtml(label)}</span>
             <div class="ar-sub">${sub}</div>
         </div>
-        ${pin}
+        ${ago}
     </div>`;
 }
 
@@ -371,30 +365,43 @@ function renderSidebarAgents(agents) {
         return;
     }
 
+    // CMX-377: Pinned — the ONE session holding the decisions-inbox slot
+    // (orchestratorState().wid, the same fact _agentRole already reads for the
+    // crown badge), lifted into its own top cluster — the mockup's "Pinned"
+    // group (its sample data's single Pinned row is literally the orchestrator
+    // session). Reuses the existing orchestrator concept rather than inventing
+    // a new pin feature with its own backend state; "if any" per the brief —
+    // the cluster simply doesn't render when nothing is subscribed.
+    const orchWid = orchestratorState().wid;
+    const pinned = orchWid ? rows.filter(a => a.window_id === orchWid) : [];
+    const pinnedNames = new Set(pinned.map(a => a.name));
+    const unpinned = rows.filter(a => !pinnedNames.has(a.name));
+
     // Triage: agents waiting on input float into a "Needs you" cluster above the
     // project groups. Each agent shows in exactly one place — lifted out of its
     // group while it's blocked, like a starred item. `done` sessions get the same
-    // treatment one tier down (issue #475's actual payoff — the badge alone can't
-    // be scanned at a glance the way a cluster can): idle-with-unread-output
-    // floats into its own "Finished" cluster, so it decays back into the project
-    // groups the moment you prompt it again (the next poll sees a.done go false).
-    const waiting = rows.filter(wantsHuman)
+    // treatment (issue #475's actual payoff — the badge alone can't be scanned at
+    // a glance the way a cluster can): idle-with-unread-output floats into its own
+    // "Finished" cluster — per the brief's group order, LAST, after the project
+    // groups — so it decays back among them the moment you prompt it again (the
+    // next poll sees a.done go false).
+    const waiting = unpinned.filter(wantsHuman)
         .sort((a, b) => a.name.localeCompare(b.name));
-    const finished = rows.filter(a => !wantsHuman(a) && isDone(a))
+    const finished = unpinned.filter(a => !wantsHuman(a) && isDone(a))
         .sort((a, b) => a.name.localeCompare(b.name));
-    const rest = rows.filter(a => !wantsHuman(a) && !isDone(a));
+    const rest = unpinned.filter(a => !wantsHuman(a) && !isDone(a));
 
     let html = '';
+    if (pinned.length) {
+        html += `<div class="side-triage side-pinned">
+            <div class="triage-head">Pinned <span class="triage-count">${pinned.length}</span></div>
+            ${pinned.map(_agentRowHtml).join('')}
+        </div>`;
+    }
     if (waiting.length) {
         html += `<div class="side-triage">
             <div class="triage-head">Needs you <span class="triage-count">${waiting.length}</span></div>
             ${waiting.map(_agentRowHtml).join('')}
-        </div>`;
-    }
-    if (finished.length) {
-        html += `<div class="side-triage side-finished">
-            <div class="triage-head">Finished <span class="triage-count">${finished.length}</span></div>
-            ${finished.map(_agentRowHtml).join('')}
         </div>`;
     }
 
@@ -434,6 +441,15 @@ function renderSidebarAgents(agents) {
                 <span class="group-count">${e.list.length}</span>
             </div>
             <div class="group-rows">${e.list.map(_agentRowHtml).join('')}</div>
+        </div>`;
+    }
+
+    // Finished renders LAST (brief's group order: Pinned, then per-project, then
+    // Finished) — after the project groups, not ahead of them.
+    if (finished.length) {
+        html += `<div class="side-triage side-finished">
+            <div class="triage-head">Finished <span class="triage-count">${finished.length}</span></div>
+            ${finished.map(_agentRowHtml).join('')}
         </div>`;
     }
 
@@ -1565,11 +1581,12 @@ function hideNewMenu() {
     if (m) m.style.display = 'none';
 }
 
-// Topbar primary menu (Lucide more-vertical): folds the three former topbar
-// primaries — Jump to… (#btn-palette), New… (#btn-new), overflow (#btn-overflow)
-// — behind ONE button (CMX-109 / CMX-108 Part A re-filed; cmx-108/#122's WALL
-// toolbar fold — grid presets + lock behind openLayoutMenu — was reverted in
-// CMX-111: Liav never asked for that one folded, only this topbar). Jump to…
+// Primary menu (Lucide more-vertical, in the sidebar foot since CMX-377 —
+// originally a topbar button): folds the three former topbar primaries — Jump
+// to… (#btn-palette), New… (#btn-new), overflow (#btn-overflow) — behind ONE
+// button (CMX-109 / CMX-108 Part A re-filed; cmx-108/#122's WALL toolbar fold —
+// grid presets + lock behind openLayoutMenu — was reverted in CMX-111: Liav
+// never asked for that one folded, only this one). Jump to…
 // and the old overflow's secondary actions (Share current, Notifications,
 // Settings) plus the usage/updated readouts are flat items here; New… reopens
 // the existing #new-menu (openNewMenuFromPrimary below) rather than duplicating
@@ -1818,6 +1835,24 @@ function openPalette() {
     setTimeout(() => inp && inp.focus(), 0);
 }
 function closePalette() { const ov = document.getElementById('palette'); if (ov) ov.classList.remove('open'); }
+
+// CMX-377: the sidebar's own "Jump to session" input (index.html, ahead of nav —
+// the mockup's own placement). Reuses the EXISTING fuzzy-jump machinery
+// (#palette/_renderPalette/_palItems) rather than a second implementation —
+// this is deliberately NOT openPalette(): that clears #palette-input and steals
+// focus into it on every call, which would fight the sidebar input for focus on
+// every keystroke. Instead this opens the SAME overlay in place (idempotent —
+// only forces it open, never re-clears an already-open one) and renders
+// straight off the sidebar input's own live value; the global keydown listener
+// below (ArrowUp/ArrowDown/Enter/Escape) is gated on `#palette.open`, not on
+// which element has focus, so navigating the results needs no extra wiring —
+// typing stays in the sidebar field the whole time.
+function sidebarJumpInput(el) {
+    const ov = document.getElementById('palette');
+    if (!ov) return;
+    if (!ov.classList.contains('open')) { ov.classList.add('open'); _palSel = 0; }
+    _renderPalette(el.value);
+}
 function _palHover(i) { _palSel = i; _palPaint(); }
 function _palPaint() {
     document.querySelectorAll('#palette-list .palette-item').forEach((el, i) => el.classList.toggle('sel', i === _palSel));
@@ -1876,4 +1911,4 @@ export { closeShortcuts, openPalette, openShortcuts, refreshRecentSessions, refr
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
