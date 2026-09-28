@@ -128,9 +128,9 @@ export async function launchChromium() {
         return { browser: await chromium.launch() };
     } catch (e) {
         why = e.code === 'ERR_MODULE_NOT_FOUND'
-            ? 'the playwright package is not installed — run `npm ci`'
+            ? 'the playwright package is not installed — run `pnpm install`'
             : `Chromium could not launch (${String(e.message).split('\n')[0]}) — run ` +
-              '`npx playwright install --only-shell chromium`';
+              '`pnpm exec playwright install --only-shell chromium`';
     }
     const msg = `${DID_NOT_RUN}: ${why}`;
     if (process.env.CHELA_REQUIRE_JS_TESTS) {

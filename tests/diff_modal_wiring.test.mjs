@@ -46,7 +46,7 @@
 // runs every .test.mjs inside pytest, by discovery).
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 import { clickOnclick, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
 // Sliced straight out of the REAL templates/index.html — not a hand-typed

@@ -26,12 +26,16 @@ uv sync --all-extras          # see the note below — always --all-extras
 Before opening a PR, run exactly what CI runs:
 
 ```bash
+pnpm install --frozen-lockfile    # jsdom + playwright, dev-only (once, and after the lockfile moves)
+pnpm exec playwright install --only-shell chromium   # the browser suite's Chromium (once)
 uv run ruff check chela tests     # lint — CI gates on this
 uv run pytest -q                  # tests (parallel via pytest-xdist: `-n 4 --dist loadfile`)
 ```
 
 The JS suites (`*.test.mjs`) run inside pytest via `tests/test_js_suites.py`, so
-`pytest` covers them too — no separate `npm test` step.
+`pytest` covers them too — no separate `pnpm test` step. The repo uses **pnpm**, pinned
+by `package.json`'s `packageManager` (a 10.x — pnpm 11 needs a newer Node than the pinned
+20); `corepack enable` picks that version up for you.
 
 ## Guard discipline (the one hard rule)
 

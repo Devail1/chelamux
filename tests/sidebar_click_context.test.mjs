@@ -16,7 +16,7 @@
 // against the SAME live module state the sidebar and wall themselves use.
 //
 // Run: node --test tests/sidebar_click_context.test.mjs (pytest runs it via
-// tests/test_js_suites.py; needs `npm ci` for jsdom.)
+// tests/test_js_suites.py; needs `pnpm install` for jsdom.)
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';

@@ -14,7 +14,7 @@
 //      its own per-wid /share-info round trip to have anything to show.
 //
 // Run: node --test tests/share_sheet.test.mjs (pytest runs it via
-// tests/test_js_suites.py; needs `npm ci` for jsdom).
+// tests/test_js_suites.py; needs `pnpm install` for jsdom).
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';

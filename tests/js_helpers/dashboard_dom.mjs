@@ -27,7 +27,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 const HELPERS_DIR = dirname(fileURLToPath(import.meta.url));
 const DASHBOARD_ROOT = join(HELPERS_DIR, '..', '..', 'chela', 'dashboard');

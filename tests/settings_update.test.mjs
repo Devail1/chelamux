@@ -17,11 +17,11 @@
 //      enable the button" would also satisfy property 1.
 //
 // Run: node --test tests/settings_update.test.mjs (pytest runs it via
-// tests/test_js_suites.py; needs `npm ci` for jsdom — CHELA_REQUIRE_JS_TESTS makes a
+// tests/test_js_suites.py; needs `pnpm install` for jsdom — CHELA_REQUIRE_JS_TESTS makes a
 // missing jsdom a FAILURE.)
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 const BODY = `
 <div class="drawer-scrim" id="drawer-scrim" onclick="chela.toggleSettings()"></div>

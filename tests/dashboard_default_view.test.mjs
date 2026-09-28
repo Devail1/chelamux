@@ -26,7 +26,7 @@
 // (work.js:174) lets pollWork() through.
 //
 // Run: node --test tests/dashboard_default_view.test.mjs (pytest via
-// tests/test_js_suites.py; needs `npm ci` for jsdom).
+// tests/test_js_suites.py; needs `pnpm install` for jsdom).
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';

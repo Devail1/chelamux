@@ -265,7 +265,7 @@ def test_closed_run_travels_ledger_api_and_board_from_one_real_tick(ticking, mon
     if not node:
         pytest.skip("node not available for the JS board-render layer")
     if not (ROOT / "node_modules" / "jsdom").is_dir():
-        msg = "jsdom is not installed — the JS board-render layer DID NOT RUN. Run `npm ci`."
+        msg = "jsdom is not installed — the JS board-render layer DID NOT RUN. Run `pnpm install`."
         if os.environ.get("CHELA_REQUIRE_JS_TESTS"):
             pytest.fail(msg + " (CHELA_REQUIRE_JS_TESTS is set: a silent skip is not green)")
         pytest.skip(msg)

@@ -16,10 +16,10 @@
 // test is the one that goes red.
 //
 // Run: node --test tests/decisions_seed.test.mjs (tests/test_js_suites.py runs every
-// .test.mjs inside pytest; needs `npm ci` for jsdom).
+// .test.mjs inside pytest; needs `pnpm install` for jsdom).
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 const PANEL = `
 <div class="panel" id="panel-terminals">
