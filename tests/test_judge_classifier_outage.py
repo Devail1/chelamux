@@ -134,14 +134,42 @@ def test_an_outage_followed_by_a_successful_judge_run_is_not_an_outage(tmp_path)
     assert not dispatcher._transcript_shows_classifier_outage(path)
 
 
+def _eisdir_record() -> list[dict]:
+    """A LATER tool call that failed for an ordinary reason (a Read of a directory).
+
+    It is an error, but not the outage — so it proves nothing got through, and the outage
+    before it is still the most recent deciding result.
+    """
+    return [
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_read_dir", "name": "Read",
+             "input": {"file_path": "/repo/chela"}}]},
+         "uuid": "u-read", "timestamp": "2026-09-28T11:41:00.000Z"},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_read_dir", "is_error": True,
+             "content": "EISDIR: illegal operation on a directory, read"}]},
+         "uuid": "u-read-res", "timestamp": "2026-09-28T11:41:01.000Z"},
+    ]
+
+
+def test_a_later_ordinary_error_does_not_hide_the_outage_before_it(tmp_path):
+    """A non-outage ERROR after the outage settles nothing — only a SUCCESS ends the walk as
+    not-outage. Corrupt the `is_error` check to let any block answer False ⇒ RED."""
+    path = tmp_path / "t.jsonl"
+    path.write_text(FIXTURE.read_text() + "".join(json.dumps(r) + "\n" for r in _eisdir_record()))
+    assert dispatcher._transcript_shows_classifier_outage(path)
+
+
 # --- the watchdog arm --------------------------------------------------------------------
 
 def test_an_idle_judge_stuck_on_a_classifier_outage_is_reaped_uncounted(
         tmp_path, projects, monkeypatch):
     """Reaped like the login-expired arm: CANNOT VERIFY, `judge_no_verdict=1`, retry budget
-    untouched, window killed, worktree removed, and a backoff stamped from the knob."""
+    untouched, window killed, worktree removed, and a backoff stamped from the knob.
+
+    The knob is set OFF its 600s default, so a stamp that ignored it cannot pass."""
     monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
-    monkeypatch.setenv("CHELA_JUDGE_OUTAGE_BACKOFF_S", "600")
+    monkeypatch.setenv("CHELA_JUDGE_OUTAGE_BACKOFF_S", "123")
     wf = _wf(tmp_path)
     with dispatcher._db() as conn:
         _run_row(conn, tmp_path, workflow_path=str(wf.path))
@@ -159,7 +187,7 @@ def test_an_idle_judge_stuck_on_a_classifier_outage_is_reaped_uncounted(
     assert r["judge_detail"] == REASON
     retry_after = dispatcher._parse_ts(r["judge_retry_after"])
     now = dispatcher._parse_ts(dispatcher._now())
-    assert timedelta(seconds=590) <= retry_after - now <= timedelta(seconds=600)
+    assert timedelta(seconds=113) <= retry_after - now <= timedelta(seconds=123)
 
     # Re-launching the SAME sha is the first real attempt, not a retry.
     _spawn(wf)
@@ -272,11 +300,12 @@ def _run_dict(**over):
 
 
 def test_the_outage_is_surfaced_once_on_the_inbox(monkeypatch):
-    monkeypatch.setenv("CHELA_JUDGE_OUTAGE_BACKOFF_S", "600")
+    # Off the 600s default, so the wording must come from the knob.
+    monkeypatch.setenv("CHELA_JUDGE_OUTAGE_BACKOFF_S", "1200")
     seen = {"abc123": "awaiting_review:running"}
     events, seen = inbox.run_events([_run_dict()], seen)
     assert [e["summary"] for e in events] == [
-        "⚖️🌩️ judge for cmx-9 hit a classifier outage — re-judging after 10m — "
+        "⚖️🌩️ judge for cmx-9 hit a classifier outage — re-judging after 20m — "
         "PR #91 — https://github.com/o/r/pull/91"
     ]
     # The next tick, and the one after: nothing new.
@@ -294,12 +323,16 @@ def test_an_ordinary_cannot_verify_keeps_its_human_look_wording():
     assert "🌩️" not in events[0]["summary"]
 
 
-def test_any_later_judge_state_write_clears_the_outage_stamp(tmp_path):
+@pytest.mark.parametrize("sha", [None, "cafe1234"])
+def test_any_later_judge_state_write_clears_the_outage_stamp(tmp_path, sha):
     """`judge_retry_after` means "the CURRENT cannot_verify is an outage" — so a later
     verdict (or any other `set_judge_state`) must clear it, or a real cannot_verify after it
-    would be misreported on the inbox as an outage with no human look needed."""
+    would be misreported on the inbox as an outage with no human look needed.
+
+    Both branches: every verdict `chela judge run` publishes passes ``sha=``, and that is a
+    separate UPDATE statement from the no-sha one."""
     wf = _wf(tmp_path)
     now = dispatcher._parse_ts(dispatcher._now())
     _outage_row(tmp_path, wf, now + timedelta(minutes=5))
-    dispatcher.set_judge_state("abc123", judge.J_CANNOT_VERIFY, "a real flake")
+    dispatcher.set_judge_state("abc123", judge.J_CANNOT_VERIFY, "a real flake", sha=sha)
     assert dispatcher.resolve_run("abc123")["judge_retry_after"] is None
