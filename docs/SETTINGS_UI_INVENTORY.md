@@ -20,7 +20,7 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**43** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+**44** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
 wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
 added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
@@ -28,7 +28,7 @@ was never a literal read to begin with), so those 18 are no longer *literal*
 `os.environ.get("CHELA_…")` call sites — see "WIRED" under Groups 2 and 3 — then 40, until
 CMX-277 added `CHELA_TERMINAL_TIMESTAMPS`, group 8 — then 41, until CMX-350 added
 `CHELA_RESTORE_RESUME`, group 4 — then 42, until CMX-375 added `CHELA_REMOTE_CONTROL`,
-group 10) — every literal `CHELA_*` name a Python module in
+group 10 — then 43, until CMX-381 made the dashboard read `CHELA_TERM_THEME` too, group 8) — every literal `CHELA_*` name a Python module in
 `chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
@@ -68,12 +68,14 @@ scan, and matter to a redesign precisely because they're invisible to it:
   from any settings surface: it's an actor stamp a launched orchestrator process exports
   into its own window, never a human preference (see `[[feedback_orchestrator...]]`-style
   guidance in `chela/config.py:345-352`).
-- **Seven ttyd/terminal-wall knobs read only by `scripts/agent-terminals.sh`** (shell, not
+- **Six ttyd/terminal-wall knobs read only by `scripts/agent-terminals.sh`** (shell, not
   Python, so the Python-side grep never sees them): `CHELA_TERM_BASE`, `CHELA_TERM_POLL`,
-  `CHELA_TERM_MAX_CLIENTS`, `CHELA_TERM_FONT`, `CHELA_TERM_FONTSIZE`, `CHELA_TERM_THEME`,
-  `CHELA_TERM_BACKOFF_MAX`. A "Terminal wall" tab that only covers the 5 Python-side knobs
-  (`CHELA_TERMINALS_ENABLED/EXPOSE/TERM_COLS/TERM_ROWS/WALL_TILE_DISPATCHED`) would still
-  be missing the port range, font, theme, and client cap the supervisor itself reads.
+  `CHELA_TERM_MAX_CLIENTS`, `CHELA_TERM_FONT`, `CHELA_TERM_FONTSIZE`,
+  `CHELA_TERM_BACKOFF_MAX`. A "Terminal wall" tab that only covers the Python-side knobs
+  (`CHELA_TERMINALS_ENABLED/EXPOSE/TERM_COLS/TERM_ROWS/TERM_THEME/WALL_TILE_DISPATCHED`)
+  would still be missing the port range, font, and client cap the supervisor itself reads.
+  (`CHELA_TERM_THEME` was the seventh until CMX-381: the dashboard now reads it too, so
+  it is in the table under group 8.)
 
 Neither group is in the 58, and neither should be added to the count above (that count is
 useful precisely because it's grep-reproducible from one place); they're called out here so
@@ -247,7 +249,7 @@ Status section already does for other facts), not a write control.
 host." A dashboard writing its own bind host is a process editing the boundary that makes
 "loopback + no-auth" a safe default in the first place.
 
-### 8. Terminal wall (6 of the 58; +7 shell-only, see above) — mixed
+### 8. Terminal wall (7 of the 58; +6 shell-only, see above) — mixed
 
 | Variable | Default | Class | Notes |
 |---|---|---|---|
@@ -257,9 +259,10 @@ host." A dashboard writing its own bind host is a process editing the boundary t
 | `CHELA_TERM_ROWS` | `30` | `hot` | Shared collab grid geometry (rows) |
 | `CHELA_TERMINAL_TIMESTAMPS` | `false` | `hot` | Prepend a local-time marker inline into each assistant reply via the `MessageDisplay` hook's `displayContent` (CMX-285, superseding CMX-277's separate-line `systemMessage`) — OFF by default (adopter-facing, needs Claude Code 2.1.152+); opt in per-install |
 | `CHELA_WALL_TILE_DISPATCHED` | `false` | `hot` | Give dispatcher-spawned agents a full tile eagerly vs minimized |
+| `CHELA_TERM_THEME` | unset | `restart` | Operator override for the terminals' xterm palette (a JSON ITheme). Read by BOTH `scripts/agent-terminals.sh` (ttyd's launch theme) and the dashboard (`chela/dashboard/term_themes.py`), where it wins over every Settings > Appearance theme's per-theme terminal palette (CMX-381) |
 
 A "Terminal wall" tab is the clearest case where scoping to the Python-side 58 alone would
-under-deliver: the shell-only 7 (font, theme, port base, poll interval, backoff, max
+under-deliver: the shell-only 6 (font, port base, poll interval, backoff, max
 clients) are exactly the kind of thing a person opening a "Terminal wall" tab expects to
 find there, and today they don't exist in any UI or even `docs/CONFIG.md`'s table.
 

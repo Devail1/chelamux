@@ -949,7 +949,7 @@ function renderSettings(focus) {
             <div class="s-row">
                 <span class="s-rowlabel">Appearance</span>
                 <select id="theme-select" class="s-select" onchange="chela.setTheme(this.value)">
-                    ${['dark','dim','midnight','nord','gruvbox','solarized','rose']
+                    ${THEMES
                         .map(t => `<option value="${t}"${theme === t ? ' selected' : ''}>${THEME_LABELS[t]}</option>`)
                         .join('')}
                 </select>
@@ -1484,14 +1484,34 @@ async function saveDispatch() {
     _renderDispatchRows(body.knobs);
 }
 
+// The Settings > Appearance picker, in order. Each key needs a style.css
+// `body[data-theme=…]` block (except `dark`, the :root default) AND a terminal
+// palette in chela/dashboard/term_themes.py — tests/test_term_bg_sync.py fails
+// if the three lists drift.
 const THEME_LABELS = {
     dark: 'Dark', dim: 'Dim', midnight: 'Midnight', nord: 'Nord',
-    gruvbox: 'Gruvbox', solarized: 'Solarized', rose: 'Rosé Pine',
+    gruvbox: 'Gruvbox', solarized: 'Solarized', rose: 'Rosé Pine', warm: 'Warm',
 };
+const THEMES = Object.keys(THEME_LABELS);
 
+// CMX-381: a theme covers the terminals too. Each ttyd iframe carries every
+// theme's xterm palette (app.py _term_theme_shim) and reads `chela_theme` from
+// the same-origin localStorage. Writing it fires a `storage` event in each
+// iframe (the shim listens), but we ALSO poke every open terminal directly for
+// instant feedback, same as the font prefs below — live, no ttyd restart.
 function setTheme(t) {
     localStorage.setItem('chela_theme', t);
     document.body.dataset.theme = t;
+    applyTermThemeToIframes();
+}
+
+function applyTermThemeToIframes() {
+    document.querySelectorAll('iframe').forEach(f => {
+        try {
+            const w = f.contentWindow;
+            if (w && typeof w.chelaApplyTermTheme === 'function') w.chelaApplyTermTheme();
+        } catch (e) { /* not-yet-loaded — its shim reads chela_theme on load */ }
+    });
 }
 
 // Terminal font options. Keys are stored in localStorage and mapped to real

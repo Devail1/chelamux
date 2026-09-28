@@ -70,37 +70,58 @@
 }
 
 /* Themes — each re-declares the palette variables; everything else cascades.
-   `dark` is the :root default (no override block needed). `--font` is shared. */
+   `dark` is the :root default (no override block needed). `--font` is shared.
+   CMX-381: each also declares `--term-bg` — its terminals' xterm background
+   (chela/dashboard/term_themes.py, applied live inside every ttyd iframe), so
+   the frame + context bar around a terminal match what it paints. Guarded per
+   theme by tests/test_term_bg_sync.py. */
 body[data-theme="dim"] {            /* GitHub Dim — softer, lower contrast */
     --bg: #1c2128; --surface: #22272e; --border: #373e47;
     --text: #adbac7; --text-dim: #768390; --accent: #539bf5;
     --green: #57ab5a; --yellow: #c69026; --red: #e5534b;
+    --term-bg: #1c2128;   /* == term_themes.py dim xterm background */
 }
 body[data-theme="midnight"] {       /* deep navy/indigo */
     --bg: #0b1021; --surface: #151b33; --border: #28304f;
     --text: #c4ccf0; --text-dim: #7d87b3; --accent: #7aa2f7;
     --green: #9ece6a; --yellow: #e0af68; --red: #f7768e;
+    --term-bg: #0b1021;   /* == term_themes.py midnight xterm background */
 }
 body[data-theme="nord"] {           /* Nord */
     --bg: #2e3440; --surface: #3b4252; --border: #434c5e;
     --text: #e5e9f0; --text-dim: #81a1c1; --accent: #88c0d0;
     --green: #a3be8c; --yellow: #ebcb8b; --red: #bf616a;
+    --term-bg: #2e3440;   /* == term_themes.py nord xterm background */
 }
 body[data-theme="gruvbox"] {        /* Gruvbox dark, warm */
     --bg: #282828; --surface: #32302f; --border: #504945;
     --text: #ebdbb2; --text-dim: #a89984; --accent: #83a598;
     --green: #b8bb26; --yellow: #fabd2f; --red: #fb4934;
+    --term-bg: #282828;   /* == term_themes.py gruvbox xterm background */
 }
 body[data-theme="solarized"] {      /* Solarized Dark */
     --bg: #002b36; --surface: #073642; --border: #0e4b59;
     --text: #93a1a1; --text-dim: #657b83; --accent: #268bd2;
     --green: #859900; --yellow: #b58900; --red: #dc322f;
+    --term-bg: #002b36;   /* == term_themes.py solarized xterm background */
 }
 body[data-theme="rose"] {           /* Rosé Pine Moon — muted plum */
     --bg: #232136; --surface: #2a273f; --border: #393552;
     --text: #e0def4; --text-dim: #908caa; --accent: #c4a7e7;
     --green: #9ccfd8; --yellow: #f6c177; --red: #eb6f92;
+    --term-bg: #232136;   /* == term_themes.py rose xterm background */
 }
+body[data-theme="warm"] {           /* warm greys, off-white accent (CMX-381) */
+    --bg: #262624; --surface: #1f1e1d; --border: #35332f;
+    --text: #eceae4; --text-dim: #a39f95; --accent: #e9e4d8;
+    /* status: Okabe-Ito sky / orange / vermillion — never red-vs-green alone */
+    --green: #56b4e9; --yellow: #e69f00; --red: #d55e00;
+    --term-bg: #1c1b19;   /* == term_themes.py warm xterm background */
+}
+/* warm's accent is off-white: the one hover that paints #fff text ON the accent
+   would vanish, so it takes the dark ink the other on-accent rules already use. */
+body[data-theme="warm"] .pane-overflow-menu button.popover-item:hover,
+body[data-theme="warm"] .pane-overflow-menu button.popover-item:hover .ov-ic { color: #1c1b19; }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 

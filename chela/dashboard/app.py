@@ -28,7 +28,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
 from chela import agent_manager, capabilities, collab, collab_stream, context, diffsurface, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, spawn, starter, tasklists, transcripts, update, userconfig
-from chela.dashboard import resources
+from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
@@ -527,9 +527,11 @@ _TERM_SCROLL_SHIM = (
 # Scrollbar CSS injected into ttyd's HTML (see term_http). The dashboard's global
 # `*{scrollbar-…}` rule can't cross the iframe boundary into the ttyd document, so
 # the terminal panes would otherwise show the OS default scrollbar. This mirrors
-# the dashboard's scrollbar (style.css :root --border #21262d, hover #30363d) so the
-# wall's scrollbars match the rest of the UI. Literal hex — the ttyd page has no
-# CSS vars.
+# the dashboard's scrollbar (style.css --border) so the wall's scrollbars match the
+# rest of the UI. CMX-381: the colours are CSS vars that `_term_theme_shim` sets on
+# the ttyd document from the viewer's theme (term_themes.py); the hex fallbacks are
+# the default `dark` theme's. The same shim var paints html/body in the terminal's
+# own background, so ttyd's page padding around the xterm canvas matches it too.
 # Bundled fonts, served from /static and injected as @font-face rules into the
 # ttyd page so xterm.js resolves every glyph on ANY viewer — no device-side font
 # install needed. URLs are same-origin absolute (/static/...) so they resolve
@@ -599,16 +601,74 @@ _TERM_FONT_CSS = (
 
 _TERM_SCROLLBAR_CSS = (
     "<style>"
-    "*{scrollbar-width:thin;scrollbar-color:#21262d transparent}"
-    "*:hover{scrollbar-color:#30363d transparent}"
+    "html,body{background:var(--chela-term-bg,#0d1117)}"
+    "*{scrollbar-width:thin;scrollbar-color:var(--chela-sb,#21262d) transparent}"
+    "*:hover{scrollbar-color:var(--chela-sb-hover,#30363d) transparent}"
     "::-webkit-scrollbar{width:8px;height:8px}"
     "::-webkit-scrollbar-track{background:transparent}"
-    "::-webkit-scrollbar-thumb{background:#21262d;border-radius:8px;"
+    "::-webkit-scrollbar-thumb{background:var(--chela-sb,#21262d);border-radius:8px;"
     "border:2px solid transparent;background-clip:content-box}"
-    "::-webkit-scrollbar-thumb:hover{background:#30363d;background-clip:content-box}"
+    "::-webkit-scrollbar-thumb:hover{background:var(--chela-sb-hover,#30363d);"
+    "background-clip:content-box}"
     "::-webkit-scrollbar-corner{background:transparent}"
     "</style>"
 )
+
+# Terminal-theme shim (CMX-381). A dashboard theme used to stop at the chrome: ttyd
+# paints the one xterm theme it was launched with (agent-terminals.sh TERM_THEME),
+# so any non-default theme framed GitHub-dark terminals — a seam. This injects every
+# theme's terminal palette (term_themes.py) and applies the one for the viewer's
+# `chela_theme` (localStorage, same-origin with the dashboard):
+#   * synchronously, in <head>: the CSS vars `_TERM_SCROLLBAR_CSS` reads (page
+#     background + scrollbar), so a freshly opened pane never shows the default;
+#   * on `window.term`: `options.theme` — the moment ttyd assigns window.term (a
+#     setter hook, before its first render), then every animation frame for the
+#     first seconds (ttyd re-applies its launch client-options, theme included,
+#     when the WebSocket connects — reconciling in rAF lands our palette in the
+#     same frame, before xterm repaints), then on a slow interval (a WS reconnect
+#     re-applies them again). Only a mismatching palette is re-set — a no-op tick
+#     costs a few string compares.
+#   * live: `window.chelaApplyTermTheme` (the dashboard's setTheme pokes it in
+#     every iframe) + a `storage` listener on `chela_theme` for other tabs.
+# `CHELA_TERM_THEME`, when set, is the operator override: it replaces every theme's
+# xterm palette (read per request, so it tracks the dashboard's env).
+def _term_theme_shim() -> str:
+    cfg = json.dumps({
+        "themes": term_themes.TERM_THEMES,
+        "fallback": term_themes.DEFAULT_THEME,
+        "override": term_themes.operator_override(),
+    }).replace("</", "<\\/")
+    return (
+        "<script>(function(){"
+        "var C=" + cfg + ";"
+        "function want(){var n=null;try{n=localStorage.getItem('chela_theme');}catch(e){}"
+        "var p=C.themes[n]||C.themes[C.fallback];"
+        "return{x:C.override||p.xterm,sb:p.scrollbar,sbh:p.scrollbarHover};}"
+        "function same(o,x){if(!o)return false;"
+        "for(var k in x){if(o[k]!==x[k])return false;}return true;}"
+        "function apply(){var w=want();"
+        "try{var s=document.documentElement.style;"
+        "s.setProperty('--chela-term-bg',w.x.background||'');"
+        "s.setProperty('--chela-sb',w.sb);s.setProperty('--chela-sb-hover',w.sbh);}catch(e){}"
+        "var t=window.term;if(!t)return;"
+        "try{var o=t.options?t.options.theme:(t.getOption?t.getOption('theme'):undefined);"
+        "if(same(o,w.x))return;"
+        "var th={};for(var k in w.x)th[k]=w.x[k];"
+        "if(t.options)t.options.theme=th;else if(t.setOption)t.setOption('theme',th);"
+        "}catch(e){}}"
+        "window.chelaApplyTermTheme=apply;"
+        "try{var cur=window.term;Object.defineProperty(window,'term',{configurable:true,"
+        "get:function(){return cur;},set:function(v){cur=v;apply();}});}catch(e){}"
+        "apply();"
+        "var t0=Date.now();"
+        "function frame(){apply();if(Date.now()-t0<5000){"
+        "if(window.requestAnimationFrame)requestAnimationFrame(frame);else setTimeout(frame,16);}"
+        "else setInterval(apply,1000);}"
+        "frame();"
+        "window.addEventListener('storage',function(e){"
+        "if(!e.key||e.key==='chela_theme')apply();});"
+        "})();</script>"
+    )
 
 # Font-preference shim. Two jobs in one:
 #   (1) Apply the user's Settings > Terminal font choice (family + size) to this
@@ -771,7 +831,8 @@ def term_http(wid, rest):
     ctype = (resp.headers.get("Content-Type") or "")
     if "text/html" in ctype.lower():
         html = body.decode("utf-8", "replace")
-        shims = (_TERM_FONT_CSS + _TERM_FONT_PREF_SHIM + _term_presence_shim(wid)
+        shims = (_term_theme_shim() + _TERM_FONT_CSS + _TERM_FONT_PREF_SHIM
+                 + _term_presence_shim(wid)
                  + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM + _TERM_PALETTE_KEY_SHIM
                  + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS)
         html = (html.replace("</head>", shims + "</head>", 1)
