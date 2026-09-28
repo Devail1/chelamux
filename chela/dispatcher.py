@@ -3524,8 +3524,65 @@ def approve(ident: str, body: str = "", force: bool = False) -> dict:
     }
 
 
+# 🧊🔓 CMX-387: the statuses `reopen` accepts. `done` only under `_done_reopen_refusal`.
+REOPENABLE_STATUSES = ("needs_human", "done")
+
+
+def _done_reopen_refusal(run: dict) -> str | None:
+    """Why a ``done`` run may NOT be reopened — or None when it may.
+
+    🧊🔓 CMX-387. A ``done`` row whose PR is still OPEN and whose head has moved (the
+    stuck-``done`` trap, hit live on #395) had no in-contract exit: ``merge`` refuses
+    ``done`` and ``reopen`` used to refuse everything but ``needs_human``. ``done`` is
+    otherwise terminal, so the bar is higher than for ``needs_human`` — the new-commit
+    gate in :func:`reopen` still applies on top of this. Every "cannot tell" is a
+    REFUSAL here, never a pass:
+
+    * the PR must be live-read from GitHub as OPEN — a merged PR has shipped and a closed
+      one was walked away from; neither comes back through this door. An unreadable state
+      is refused too.
+    * the task must not be struck ``- [x]`` in its tracker — the dispatcher strikes only on
+      merge, so a struck line says this task is finished whatever the PR says. A tracker
+      this cannot read (or a tracker kind with no notion of a struck line) is refused.
+    """
+    wf_path = run.get("workflow_path")
+    repo_dir = str(Path(wf_path).parent) if wf_path else None
+    pr_state, _mergeable = _read_pr_status(run.get("pr_url"), repo_dir)
+    if pr_state is None:
+        return ("run is `done` and its PR's state could not be read from GitHub — refusing "
+                "to reopen a `done` run without knowing its PR is still open. Make sure `gh` "
+                "can reach this PR, and try again.")
+    if pr_state != "open":
+        return (f"run is `done` and its PR is {pr_state.upper()} — only a `done` run whose PR "
+                "is still OPEN can be reopened; a merged or closed PR stays closed.")
+    try:
+        source = get_source(load_workflow(wf_path))
+    except Exception as e:  # noqa: BLE001 — any failure to read the tracker is a refusal
+        return (f"run is `done` and its tracker could not be loaded ({e}) — refusing to reopen "
+                "without knowing whether the task was struck done.")
+    closed_ids_from_text = getattr(source, "closed_ids_from_text", None)
+    tracker = getattr(source, "path", None)
+    if closed_ids_from_text is None or tracker is None:
+        return ("run is `done` and its tracker kind has no struck-line to check — refusing to "
+                "reopen a `done` run whose task may already be closed.")
+    try:
+        text = Path(tracker).read_text()
+    except OSError as e:
+        return (f"run is `done` and its tracker could not be read ({e}) — refusing to reopen "
+                "without knowing whether the task was struck done.")
+    if run["task_id"] in closed_ids_from_text(text):
+        return ("run is `done` and its task is struck `- [x]` in the tracker — the task is "
+                "finished; reopening it would put closed work back under review.")
+    return None
+
+
 def reopen(ident: str, reason: str = "") -> dict:
     """Put a ``needs_human`` run BACK under review — the human-takeover re-entry.
+
+    🧊🔓 CMX-387: also a ``done`` run whose PR is still OPEN, whose head moved past
+    ``judge_sha``, and whose task is not struck ``- [x]`` (see
+    :func:`_done_reopen_refusal`) — otherwise a stuck ``done`` row had no exit short of a
+    hand edit of the runs DB. It re-enters ``awaiting_review`` exactly as below.
 
     ``needs_human`` is terminal everywhere else in this file: the rework loop gave up on
     it (CMX-68), and ``request_changes``/``approve`` both refuse anything that is not
@@ -3566,12 +3623,20 @@ def reopen(ident: str, reason: str = "") -> dict:
     if run is None:
         return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
     task_id = run["task_id"]
-    if run["status"] != "needs_human":
+    from_status = run["status"]
+    if from_status not in REOPENABLE_STATUSES:
         return {
             "ok": False, "task_id": task_id,
-            "error": f"run is in status {run['status']!r}, not 'needs_human' — only a run "
-                     "the rework loop actually gave up on can be reopened",
+            "error": f"run is in status {from_status!r}, not 'needs_human' or 'done' — only a "
+                     "run the rework loop actually gave up on, or a `done` run whose PR is "
+                     "still open, can be reopened",
         }
+    if from_status == "done":
+        # 🧊🔓 CMX-387: the stuck-`done` exit. Refused BEFORE the new-commit gate so a
+        # merged/closed PR or a struck task never costs a head read it cannot use.
+        refusal = _done_reopen_refusal(run)
+        if refusal:
+            return {"ok": False, "task_id": task_id, "error": refusal}
 
     # ⛔ GUARD: the new-commit gate. The dispatcher judges ONE PASS PER HEAD COMMIT
     # (`pr_head_sha` vs `judge_sha` — see the cap check around line 2200). Reopening an
@@ -3616,14 +3681,15 @@ def reopen(ident: str, reason: str = "") -> dict:
 
     with _db() as conn:
         # Same COMPARE-AND-SWAP discipline as request_changes: the row must still be the
-        # needs_human row this call read, or a concurrent reconcile (a human merged the
+        # needs_human (or done) row this call read, or a concurrent reconcile (a human merged the
         # stale PR directly, in the gap between the read above and this write) would be
         # resurrected out of `done`.
         cur = conn.execute(
             "UPDATE runs SET status='awaiting_review', review_history=?, last_error=NULL, "
             "pr_head_sha=?, reopen_count=?, first_reopen_head_sha=? "
-            "WHERE task_id=? AND status='needs_human'",
-            (json.dumps(reviews), ci.head_sha, new_reopen_count, first_reopen_sha, task_id),
+            "WHERE task_id=? AND status=?",
+            (json.dumps(reviews), ci.head_sha, new_reopen_count, first_reopen_sha, task_id,
+             from_status),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -3649,7 +3715,8 @@ def reopen(ident: str, reason: str = "") -> dict:
     if not posted:
         log.warning("reopen: %s is awaiting_review again, but the PR comment did not post "
                     "(%s)", task_id, detail)
-    log.info("reopen: %s (needs_human) → awaiting_review (reopen %d)", task_id, new_reopen_count)
+    log.info("reopen: %s (%s) → awaiting_review (reopen %d)", task_id, from_status,
+             new_reopen_count)
 
     # ⭐ THE NUDGE. Advisory only — see the docstring. Only worth asking GitHub about past
     # the 3rd reopen (rounds 1-2 are never enough signal, and every round below that would
