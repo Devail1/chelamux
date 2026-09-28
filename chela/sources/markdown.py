@@ -19,9 +19,18 @@ DEPENDS_RE = re.compile(r"<!--\s*depends:\s*(.+?)\s*-->", re.IGNORECASE)
 BLOCKED_REASON_RE = re.compile(r"<!--\s*blocked\s*:\s*(.*?)\s*-->", re.IGNORECASE)
 # Strips a bullet's own trailing `<!-- ... -->` marker(s) down to its bare, human-visible
 # title — the same string a `depends: "..."` reference names (see `_resolve_depends`),
-# and what a PARKED bullet's id must hash off too (see `parked_tasks_from_text`): a
-# human writes the bare title, never the raw marker-attached line.
+# and what EVERY bullet's id hashes off (see `_bare_title`): open, parked and struck
+# alike. A human writes the bare title, never the raw marker-attached line.
+#
+# ⛔ CMX-384: open bullets used to hash the RAW line, marker included, while a
+# `depends:` reference hashed the bare title — so a task that itself carried a
+# `depends:` could never be depended on, and chains longer than one hop blocked
+# forever, silently. `legacy_raw_ids` maps the old raw-line ids so the dispatcher can
+# re-key a run that was claimed under one.
 _TRAILING_COMMENT_RE = re.compile(r"\s*<!--.*?-->\s*")
+# An inline code span (`` `...` `` / ``` ``...`` ```). A `depends:` marker QUOTED inside
+# one is prose about the syntax, not a marker — see `_find_depends`.
+_INLINE_CODE_RE = re.compile(r"(`+)(?!`).*?(?<!`)\1(?!`)")
 
 
 class MarkdownSource:
@@ -61,7 +70,8 @@ class MarkdownSource:
         ids are unchanged by the detour: an id is the hash of (tracker FILENAME, title),
         so the same line yields the same id whatever blob it came from — and, for the same
         reason, MOVING a line does not re-key it. Reordering the queue can therefore never
-        orphan an in-flight run.
+        orphan an in-flight run. The title hashed is the BARE one (``<!-- ... -->``
+        markers stripped), exactly what a ``depends:`` reference names.
         """
         lines = text.splitlines()
         tasks: list[Task] = []
@@ -72,7 +82,7 @@ class MarkdownSource:
             title = m.group(1).strip()
             if BLOCKED_RE.search(title):
                 continue
-            tid = _task_id(self.path, title)
+            tid = _task_id(self.path, _bare_title(title))
             tasks.append(Task(
                 id=tid,
                 title=title,
@@ -83,6 +93,10 @@ class MarkdownSource:
                 depends=_resolve_depends(self.path.name, title),
             ))
         return tasks
+
+    def legacy_raw_ids(self, tasks: list[Task]) -> dict[str, str]:
+        """See module-level :func:`legacy_raw_ids` — the dispatcher's CMX-384 re-key map."""
+        return legacy_raw_ids(self.path.name, tasks)
 
     def list_parked_tasks(self) -> list[Task]:
         if not self.path.exists():
@@ -113,7 +127,7 @@ class MarkdownSource:
             title = m.group(1).strip()
             if not BLOCKED_RE.search(title):
                 continue
-            bare = _TRAILING_COMMENT_RE.sub(" ", title).strip()
+            bare = _bare_title(title)
             reason_m = BLOCKED_REASON_RE.search(title)
             reason = reason_m.group(1).strip() if reason_m else ""
             tasks.append(Task(
@@ -138,7 +152,7 @@ class MarkdownSource:
         for raw in text.splitlines():
             m = DONE_RE.match(raw)
             if m:
-                ids.add(_task_id(self.path, m.group(1).strip()))
+                ids.add(_task_id(self.path, _bare_title(m.group(1))))
         return ids
 
     def close_tasks(self, task_ids: list[str], *, at: Path | None = None) -> dict[str, str]:
@@ -195,7 +209,7 @@ def strike_lines(
         line = raw.rstrip("\r\n")
         m = OPEN_RE.match(line)
         if m:
-            tid = _title_id(filename, m.group(1))
+            tid = _title_id(filename, _bare_title(m.group(1)))
             if tid in wanted:
                 # OPEN_RE anchored "[ ]" to the bullet, so the first occurrence
                 # is the checkbox — a bounded replace can't touch the title.
@@ -205,7 +219,7 @@ def strike_lines(
         else:
             d = DONE_RE.match(line)
             if d:
-                tid = _title_id(filename, d.group(1))
+                tid = _title_id(filename, _bare_title(d.group(1)))
                 if tid in wanted:
                     results[tid] = "already"
         out.append(raw)
@@ -302,10 +316,48 @@ def _resolve_depends(filename: str, title: str) -> tuple[str, ...]:
     real id regardless of where in the file it lives or what order the two are
     claimed in.
     """
-    m = DEPENDS_RE.search(title)
-    if not m:
+    payload = _find_depends(title)
+    if payload is None:
         return ()
-    return tuple(_title_id(filename, t) for t in _parse_depends(m.group(1)))
+    return tuple(_title_id(filename, t) for t in _parse_depends(payload))
+
+
+def _find_depends(title: str) -> str | None:
+    """The payload of `title`'s first `depends:` marker OUTSIDE inline code, or None.
+
+    A bullet whose prose quotes the syntax in backticks is talking ABOUT a marker, not
+    carrying one — read as real, it names a task called "…" that never exists and the
+    bullet blocks forever (this happened to the very bullet that fixed it, CMX-384).
+    Code spans are blanked to same-length filler so match offsets still index `title`.
+    """
+    masked = _INLINE_CODE_RE.sub(lambda m: " " * len(m.group(0)), title)
+    m = DEPENDS_RE.search(masked)
+    if not m:
+        return None
+    return title[m.start(1):m.end(1)]
+
+
+def _bare_title(title: str) -> str:
+    """`title` with its `<!-- ... -->` marker(s) stripped — the string a task's id hashes.
+
+    Identity for a title with no marker: an unmarked task's id is byte-for-byte what it
+    has always been.
+    """
+    return _TRAILING_COMMENT_RE.sub(" ", title).strip()
+
+
+def legacy_raw_ids(filename: str, tasks: list[Task]) -> dict[str, str]:
+    """``{raw-line id: current id}`` for each of `tasks` whose id changed in CMX-384.
+
+    Before CMX-384 an open task's id hashed its RAW title, marker included. Only a
+    marker-carrying task differs between the two; an unmarked one is absent here.
+    """
+    out: dict[str, str] = {}
+    for t in tasks:
+        raw_id = _title_id(filename, t.title)
+        if raw_id != t.id:
+            out[raw_id] = t.id
+    return out
 
 
 def _title_id(filename: str, title: str) -> str:
