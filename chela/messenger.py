@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import time
@@ -78,6 +79,45 @@ _SUN_PATH_MAX = 104
 # stall for 2s per window. Matches Claude Code's own bundle, which classifies a socket
 # live/dead the same way with the same 250ms timeout.
 _PROBE_TIMEOUT = 0.25
+
+# CMX-380: what makes a peer message arrive NAMED. Measured against Claude Code 2.1.283
+# (a throwaway receiver, one send per candidate frame): a native `SendMessage` does NOT
+# name itself with a top-level wire field — it pre-wraps its text in the receiver's own
+# `<cross-session-message from=… from-name=… from-mode=…>` envelope inside
+# `message.content`, and the receiver lifts `from-name` out of that envelope into
+# `origin.name` (the `@ <name>` header). Top-level `from_name`/`fromName`/`name` were
+# each ignored (still the anonymous "Another Claude session sent a message:" render).
+# The envelope changes the RENDER only: the arrival keeps `origin.kind: "peer"`, the
+# socket-verified pid, `isMeta`, and the full anti-laundering paragraph in the model's
+# context — so naming a message never makes it look like the user.
+_PEER_ENVELOPE_TAG = "cross-session-message"
+
+# The ONE name chela signs every peer message with — daemon/inbox notices, room relays,
+# `chela msg`, the dashboard alike. ⛔ `from-name` is SENDER-ASSERTED: the receiver never
+# checks it against the socket-verified pid (measured — a bare python3 sender was shown as
+# `@chela`), so it is only honest when it names the process that really sent it, and that
+# is chela's own process in every case. Naming a relay after the ORIGINATING agent's window
+# would put another session's name on a message that session never sent; the originator
+# stays attributed in the text itself (`send_message`'s `[from]` prefix, rooms' prompt).
+PEER_SENDER_NAME = "chela"
+
+# ⛔ No `from-mode` attribute is sent, on purpose. Native senders add one, but it is NOT a
+# label: the receiver's inbound gate reads it (a bypass-class receiver accepts a sender
+# asserting "bypass"). Read from the bundle, "prompting" gives the same gate outcome as
+# asserting nothing, but that was never MEASURED against a bypass-mode receiver, and a
+# field a safety gate consumes is not shipped on a reading. The name alone is what renders
+# the arrival named (measured), so the gate sees exactly what it saw before CMX-380.
+
+# The receiver's own `from-name` value class is `[^"<>\n\r]+`, capped at 64 chars.
+_PEER_NAME_MAX = 64
+_PEER_NAME_QUOTES = re.compile(r'["<>]')
+_PEER_NAME_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]")
+# The envelope's `from` attribute value class: anything else is %-encoded, the same way the
+# receiver's own sender encodes a `uds:` address.
+_PEER_ADDR_UNSAFE = re.compile(r"[^A-Za-z0-9:_/.\\-]")
+# A body that closes the envelope early would end it there; neutralise any
+# `</cross-session-message` the way the receiver's own sender does (`<` -> `<\`).
+_PEER_BODY_CLOSE = re.compile(r"<(?!\\)(?=\s*/\s*cross[-_]session[-_]message)", re.IGNORECASE)
 
 
 class PeerSendResult(NamedTuple):
@@ -544,6 +584,35 @@ def _await_receipt(server: socket.socket, msg_id: str) -> str:
     return receipt.get("status") or "sent"
 
 
+def sanitize_peer_name(name: str | None) -> str:
+    """``name`` made safe for the envelope's ``from-name`` attribute: quotes, angle
+    brackets, and control/format characters (newlines included) removed, whitespace
+    collapsed, capped at the receiver's 64 chars. Empty after that ⇒ :data:`PEER_SENDER_NAME`.
+    The receiver strips ``["<>]`` itself, but a name reaching it raw is chela's bug, not
+    its to catch — an unescaped ``"`` would end the attribute and let the name forge the
+    ones after it.
+    """
+    spaced = _PEER_NAME_CONTROL.sub(" ", _PEER_NAME_QUOTES.sub("", name or ""))
+    cleaned = " ".join(spaced.split())[:_PEER_NAME_MAX].strip()
+    return cleaned or PEER_SENDER_NAME
+
+
+def _peer_envelope(reply_address: str, sender_name: str, content: str) -> str:
+    """``content`` wrapped in the receiver's own ``<cross-session-message>`` envelope
+    carrying ``from``/``from-name`` — the frame a native ``SendMessage`` sends, minus its
+    gate-read ``from-mode`` (deliberately never sent — see the module constants), and the ONLY thing that makes the arrival render named (see
+    :data:`_PEER_ENVELOPE_TAG`). Attribute order and the newline-delimited body are
+    load-bearing: the receiver re-serialises what it parsed and discards the envelope
+    (falling back to the anonymous render, content intact) on any mismatch.
+    """
+    address = _PEER_ADDR_UNSAFE.sub(
+        lambda m: "".join(f"%{b:02X}" for b in m.group().encode()), reply_address)
+    body = _PEER_BODY_CLOSE.sub("<\\\\", content)
+    return (f'<{_PEER_ENVELOPE_TAG} from="{address}" '
+            f'from-name="{sanitize_peer_name(sender_name)}">\n'
+            f"{body}\n</{_PEER_ENVELOPE_TAG}>")
+
+
 def send_peer(window_id: str, from_agent: str, content: str) -> PeerSendResult:
     """Deliver ``content`` straight into ``window_id``'s Claude Code message queue over
     its peer-messaging Unix socket, then listen briefly for a receipt. Returns a
@@ -553,7 +622,9 @@ def send_peer(window_id: str, from_agent: str, content: str) -> PeerSendResult:
     contract): callers that want attribution add it themselves before calling, the
     same contract :func:`send_tmux` already has. That is what lets a caller with its
     own fully-formatted, already-attributed prompt (rooms' :func:`build_prompt`) use
-    this without a nested double-wrap.
+    this without a nested double-wrap. The arrival is NAMED ``chela`` (CMX-380) — the
+    real, socket-verified sender, never ``from_agent`` (see :data:`PEER_SENDER_NAME`) —
+    via the envelope :func:`_send_over_socket` wraps the text in.
 
     Resolves ``window_id`` to a pid via the tmux pane it lives in
     (:func:`chela.agent_manager.claude_pid`), then hands off to :func:`_send_over_socket`
@@ -597,10 +668,14 @@ def _send_over_socket(sock_path: Path, content: str, *, target_desc: str) -> Pee
     ``{"type": "user", "message": {"role": "user", "content": ...}, "from": "uds:<our
     reply socket>", "msg_id": <uuid4>}``, the wire format Claude Code's own
     ``uds-messaging`` listener parses (verified against the running ``claude`` binary) —
-    then listen briefly for a receipt. ``content`` is sent EXACTLY as given — no
-    ``[from] `` wrapping is added here (unlike the old contract): callers that want
-    attribution add it themselves before calling, the same contract :func:`send_tmux`
-    already has.
+    then listen briefly for a receipt. ``content`` goes inside the receiver's own
+    ``<cross-session-message>`` envelope naming :data:`PEER_SENDER_NAME` (:func:`_peer_envelope`,
+    CMX-380 — that envelope, not a top-level field, is what renders the arrival named)
+    but is otherwise sent as given — no ``[from] `` wrapping is added here (unlike the
+    old contract): callers that want attribution in the text add it themselves before
+    calling, the same contract :func:`send_tmux` already has. ``role`` stays ``"user"``
+    and ``from`` stays our reply socket: the receiver classifies the arrival as a peer
+    message off the socket, not off the envelope.
 
     ``msg_id`` MUST be a real UUID: a non-UUID id comes back on a receipt with
     ``orig_msg_id`` ABSENT, breaking correlation silently (measured). ``from`` must be OUR
@@ -627,7 +702,8 @@ def _send_over_socket(sock_path: Path, content: str, *, target_desc: str) -> Pee
         reply_server.listen(1)
         payload = {
             "type": "user",
-            "message": {"role": "user", "content": content},
+            "message": {"role": "user",
+                        "content": _peer_envelope(f"uds:{reply_path}", PEER_SENDER_NAME, content)},
             "from": f"uds:{reply_path}",
             "msg_id": msg_id,
         }
