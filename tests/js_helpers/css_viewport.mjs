@@ -293,13 +293,44 @@ export function resolveVars(win, el, value, depth = 0) {
 const _SHAPE_PROPS = ['clip-path', 'mask-image',
     ...['top-left', 'top-right', 'bottom-right', 'bottom-left'].map(c => `border-${c}-radius`),
     ..._SIDES.flatMap(s => [`border-${s}-width`, `border-${s}-style`]), 'background-image'];
-const _isTransparent = v => /^(transparent|rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)|none|)$/i.test(v.trim());
+// Any fully transparent colour, in every syntax a browser accepts: `transparent`,
+// legacy `rgba(r, g, b, 0)` / `hsla(…, 0)`, space syntax `rgb(0 0 0 / 0)` or `/ 0%`,
+// and 4/8-digit hex with a zero alpha (#0000, #00000000). Judge round 6 made the
+// header working dot see-through with `rgb(0 0 0 / 0)`, which the old regex missed.
+const _isTransparent = v => {
+    const s = v.trim().toLowerCase();
+    if (s === '' || s === 'none' || s === 'transparent') return true;
+    if (/^(rgb|hsl)a?\(.*,\s*0*\.?0+%?\s*\)$/.test(s)) return true;
+    if (/^(rgb|hsl)a?\(.*\/\s*0*\.?0+%?\s*\)$/.test(s)) return true;
+    return /^#([0-9a-f]{3}0|[0-9a-f]{6}00)$/.test(s);
+};
+// A box-shadow's GEOMETRY (inset or not, offsets, blur, spread) with its colour
+// stripped: an `inset 0 0 0 4px` shadow fills a hollow ring into a disc, which is a
+// silhouette change (judge round 6), while the halo's colour is not shape.
+const _shadowGeometry = v => v.split(/,(?![^(]*\))/).map(part => part
+    .replace(/(rgba?|hsla?|color-mix|color|oklch|oklab|lab|lch|hwb)\([^()]*(\([^()]*\)[^()]*)*\)/gi, '')
+    .replace(/#[0-9a-f]{3,8}\b/gi, '')
+    .replace(/\b(transparent|currentcolor|black|white)\b/gi, '')
+    .trim().replace(/\s+/g, ' ')).join(', ');
+// Whether the mark is rendered at all: hiding the header's needs-you mark with
+// `display: none` (judge round 6) kept every shape property identical. Walks the
+// ancestors too, since a hidden wrapper hides the mark just the same.
+function _rendered(win, el) {
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+        const cs = win.getComputedStyle(n);
+        if (cs.display === 'none') return false;
+        if (n === el && (cs.visibility === 'hidden' || cs.visibility === 'collapse')) return false;
+    }
+    return true;
+}
 export function shapeSignature(win, el) {
     const cs = win.getComputedStyle(el);
     const sig = {};
     for (const p of _SHAPE_PROPS) sig[p] = resolveVars(win, el, cs.getPropertyValue(p));
     const bg = resolveVars(win, el, cs.getPropertyValue('background-color'));
     sig.filled = !_isTransparent(bg);
+    sig.shadow = _shadowGeometry(resolveVars(win, el, cs.getPropertyValue('box-shadow')));
+    sig.rendered = _rendered(win, el);
     return sig;
 }
 
