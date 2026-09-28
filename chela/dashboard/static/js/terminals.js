@@ -1282,26 +1282,30 @@ function _statusDot(wid) {
     return `<span class="term-status-dot" data-status-for="${attrEsc(wid)}" title="…"></span>`;
 }
 
-const _STATUS_CLASS = { busy: 'working', waiting: 'waiting', idle: 'idle' };
-const _STATUS_TITLE = { busy: 'Working', waiting: 'Waiting for input', idle: 'Idle' };
+// CMX-377: the dot's class vocabulary is working/waiting/idle/done — tileState()'s
+// own cls names ('needs-you'/'unknown') are remapped onto it so the pane header's
+// dot, the taskbar dock chips and the mobile switcher pills all share the EXACT
+// same shape/colour rules as the sidebar row (style.css's `.term-status-dot.*`) —
+// 'unknown' (claude_running but no resolved session_status) reads as the idle
+// shape rather than inventing a fifth silhouette the brief never asked for.
+const _TILE_CLS_TO_DOT = { 'needs-you': 'waiting', working: 'working', done: 'done', unknown: 'idle', idle: 'idle' };
 
-// Colour the live status dots (pane headers + taskbar chips) from /api/agents.
-// "Waiting" is the shared wantsHuman() predicate, NOT session_status alone: a
-// dispatched worker stopped at a Bash PERMISSION gate is `busy` to `claude agents
-// --json` and blocked in fact, and it is the pane probe (needs_human) that says so.
-// Amber it — it is the same agent the wall is about to pop out of the dock.
+// Colour the live status marks (pane headers + taskbar chips) from /api/agents.
+// Reuses tileState() (wallmodel.js) — the SAME source _applyWallTileFrame's
+// `.gs-state` word pill draws from — so a pane's dot and its state pill can
+// never disagree about which of the four states it's in.
 function _colorTermDots(agents) {
     if (!agents) return;
     const by = {};
     agents.forEach(a => { if (a.window_id) by[a.window_id] = a; });
     document.querySelectorAll('#panel-terminals .term-status-dot').forEach(dot => {
         const a = by[dot.dataset.statusFor];
-        const st = a ? a.session_status : null;
         const wants = wantsHuman(a);
-        dot.classList.remove('working', 'waiting', 'idle');
-        dot.classList.add(wants ? 'waiting' : (_STATUS_CLASS[st] || 'idle'));
-        dot.title = wants ? _STATUS_TITLE.waiting
-            : (_STATUS_TITLE[st] || (a && a.claude_running ? 'Idle' : 'No Claude session'));
+        const s = tileState(a, wants);
+        const cls = _TILE_CLS_TO_DOT[s.cls] || 'idle';
+        dot.classList.remove('working', 'waiting', 'idle', 'done');
+        dot.classList.add(cls);
+        dot.title = s.word.charAt(0).toUpperCase() + s.word.slice(1);
         // Flag the host surface (live pane OR taskbar chip) so a "waiting for
         // input" pane gets a yellow border even when minimized to the dock.
         const host = dot.closest('.grid-stack-item-content, .term-pane, .min-chip');

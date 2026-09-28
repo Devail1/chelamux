@@ -1,6 +1,6 @@
 # Bundled terminal fonts — attribution & licenses
 
-These fonts are bundled and served (via `@font-face` in `app.py`
+Most fonts here are bundled and served (via `@font-face` in `app.py`
 `_TERM_FONT_CSS`) so the web terminal renders correctly on **any** viewer,
 regardless of what's installed locally. They power the **Settings › Terminal
 font** picker (English/Latin face × Hebrew face × size). Only the *selected*
@@ -11,6 +11,20 @@ this repository and served verbatim. Bundling them does **not** place the
 chelamux source (AGPLv3) under their licenses. All are permissive **OFL-1.1** except
 Miriam Mono CLM (**GPL-2**), which is the only freely-licensed *monospace* Hebrew
 font — see its note below.
+
+## Dashboard chrome (not the terminal picker)
+
+`Geist-Variable.woff2` and the Heebo face below it are declared via their own
+`@font-face` rules directly in `style.css` (`--ui-font`), not through `app.py`'s
+`_TERM_FONT_CSS` — that system only injects into the ttyd iframe. `--ui-font`
+is the sans face for the sidebar, pane headers/footers, modals and Work
+(CMX-377's "calm desktop app" restyle); `--font` (the picker above) stays for
+terminals and code.
+
+| Font | Files | License | Copyright / source |
+|------|-------|---------|--------------------|
+| Geist | `Geist-Variable.woff2` | OFL-1.1 (`OFL-Geist.txt`) | © 2024 The Geist Project Authors — https://github.com/vercel/geist-font |
+| Heebo | `Heebo.ttf` (already vendored above, re-declared for the dashboard page) | OFL-1.1 (`OFL-Heebo.txt`) | © The Heebo Project Authors (Oded Ezer) |
 
 ## Icons
 

@@ -260,3 +260,38 @@ test('#btn-shares is never a descendant of #primary-menu', () => {
     assert.equal(pm.contains(shares), false, '#btn-shares moved INSIDE the primary menu — the kill-switch must always be visible');
     assert.equal(document.getElementById('primary-menu').contains(document.getElementById('btn-shares')), false);
 });
+
+// --- 4. 🔴 CMX-377's own required GUARD — rendered-DOM (jsdom) wiring, against the
+// REAL index.html, not a source-grep: the top bar is GONE, and each of the four
+// controls it used to hold (inbox/decisions, the "chela" wordmark, the CPU/RAM/
+// Disk readouts, and the settings entry point) is present SOMEWHERE inside the
+// real `<aside class="sidebar">` — not merely still in the file, which a
+// source-grep could satisfy even if a control got orphaned outside the sidebar
+// by a future edit. Mounts the REAL `.app` block straight out of index.html
+// (sliceTemplate — the same technique tests/dashboard_default_view.test.mjs
+// uses), not a hand-typed mirror, so a judge mutation that re-adds
+// `<header class="topbar">` or moves one of the four controls back out of
+// `.sidebar` fails here directly.
+test('CMX-377: the REAL rendered DOM has no <header class="topbar">, and inbox/wordmark/CPU-RAM-Disk/settings all live inside .sidebar', async () => {
+    const { bootDashboardDom, sliceTemplate } = await import('./js_helpers/dashboard_dom.mjs');
+    const APP_HTML = sliceTemplate('<div class="app">', '</main>\n\n</div>');
+    await bootDashboardDom({ body: APP_HTML });
+
+    assert.equal(document.querySelector('header.topbar'), null,
+        'a <header class="topbar"> element still exists in the real rendered DOM — CMX-377 must remove it entirely');
+    assert.equal(document.querySelector('.topbar'), null,
+        'a .topbar element still exists somewhere in the real rendered DOM');
+
+    const sidebar = document.querySelector('.sidebar');
+    assert.ok(sidebar, 'no <aside class="sidebar"> found in the real rendered DOM');
+
+    assert.ok(sidebar.querySelector('#btn-decisions'),
+        'the Decisions inbox button (#btn-decisions) is not inside .sidebar');
+    const brand = sidebar.querySelector('.brand');
+    assert.ok(brand && /chela/i.test(brand.textContent),
+        'the "chela" wordmark (.brand) is not inside .sidebar, or lost its text');
+    assert.ok(sidebar.querySelector('#res-cpu') && sidebar.querySelector('#res-mem') && sidebar.querySelector('#res-disk'),
+        'the CPU/RAM/Disk readouts (#res-cpu/#res-mem/#res-disk) are not all inside .sidebar');
+    assert.ok(sidebar.querySelector('#btn-primary-menu'),
+        'the menu button that reaches Settings (#btn-primary-menu) is not inside .sidebar');
+});

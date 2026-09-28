@@ -335,6 +335,40 @@ function _activeRailReaches(win, el) {
     return false;
 }
 
+// --- CMX-377: --ui-font (chrome) vs --font (terminal frame + code). The
+// brief's own GUARD: "`--ui-font` is used by the sidebar and NOT by the
+// terminal frame. Corrupt by swapping ⇒ RED." jsdom does not expand var()
+// into a resolved font stack for font-family either (confirmed empirically —
+// getComputedStyle returns the literal winning declaration text, same
+// "declaration identity" fact the round-9 header above documents jsdom CAN
+// answer honestly), which makes this a clean, non-flaky assertion: read the
+// literal computed fontFamily string off a REAL `.sidebar` element and a REAL
+// `.term-frame` element mounted against the REAL stylesheet, and require they
+// name DIFFERENT custom properties. A judge swap (giving .term-frame
+// var(--ui-font) or the sidebar var(--font)) fails here by name, not by
+// guessing at a resolved font stack.
+test('CMX-377: --ui-font styles the sidebar chrome; --font stays pinned to the terminal frame', () => {
+    const win = mountWithRealCss(
+        '<aside class="sidebar"><span id="side-el">x</span></aside>' +
+        '<div class="grid-stack-item-content"><div class="term-frame" id="term-el">y</div></div>');
+    const sideFont = win.getComputedStyle(win.document.getElementById('side-el')).fontFamily;
+    const termFont = win.getComputedStyle(win.document.getElementById('term-el')).fontFamily;
+
+    assert.match(sideFont, /var\(--ui-font\)/,
+        `the sidebar's inherited font-family is "${sideFont}", not var(--ui-font) — CMX-377's chrome font token ` +
+        'is not reaching the sidebar (check body { font-family } in style.css)');
+    assert.doesNotMatch(sideFont, /var\(--font\)\b/,
+        `the sidebar's font-family resolves to "${sideFont}", which still names --font (monospace) — the ` +
+        'chrome sans-ification did not actually reach it');
+
+    assert.match(termFont, /var\(--font\)/,
+        `.term-frame's font-family is "${termFont}", not var(--font) — the terminal frame must stay pinned to ` +
+        'the monospace token, never the chrome sans token');
+    assert.doesNotMatch(termFont, /var\(--ui-font\)/,
+        `.term-frame's font-family resolves to "${termFont}", which names --ui-font — the terminal frame has ` +
+        'been swapped onto the chrome sans token, the exact regression this guard exists to catch');
+});
+
 // --- TYPE SCALE (ticket claim 1) — CMX-257 round 10 (human directive on PR
 // #326, superseding round 9's jsdom-cascade framing): this used to assert the
 // --wall-pane-*/--card-* tokens' RESOLVED font-size/line-height via jsdom's

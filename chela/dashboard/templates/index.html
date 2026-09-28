@@ -51,6 +51,30 @@
 
     <div class="sidebar-scroll">
 
+      <!-- CMX-377: New session + jump-to search, ahead of nav (mockup order —
+           head -> New session -> jump-to search -> nav). "New session" reopens
+           the SAME #new-menu the old sidebar "+" used (chela.openNewMenu) —
+           there is only one launch surface, this is just its new prominent
+           entry point, so the old per-section "+" in Sessions below is gone
+           (redundant with this). The search input reuses the EXISTING fuzzy
+           jump (nav.js's #palette machinery, ~1507) rather than a second
+           implementation: typing here opens/drives the real #palette overlay
+           in place — global ArrowUp/ArrowDown/Enter/Escape handling already
+           works off `#palette.open`, not focus, so it needs no keydown wiring
+           of its own (see nav.js's sidebarJumpInput). -->
+      <div class="sidebar-quick">
+        <button class="sidebar-new-btn" onclick="chela.openNewMenu(event)">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+          <span>New session</span>
+        </button>
+        <label class="sidebar-jump">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input type="search" id="sidebar-jump-input" placeholder="Jump to session" aria-label="Jump to session"
+                 autocomplete="off" spellcheck="false"
+                 onfocus="chela.sidebarJumpInput(this)" oninput="chela.sidebarJumpInput(this)">
+        </label>
+      </div>
+
       <!-- Primary navigation. NOT written here: nav.js renders these rows from the
            view REGISTRY (static/js/views.js) — one declaration per view, so adding
            or deleting a view is one entry there and nothing here.
@@ -73,7 +97,6 @@
         <div class="side-head">
           <span class="side-title">Sessions</span>
           <span class="side-count" id="hdr-agents">-/-</span>
-          <button class="side-add" title="New window" onclick="event.stopPropagation(); chela.openNewMenu(event)">+</button>
         </div>
         <div class="side-list" id="sidebar-agents">
           <div class="side-empty">No agents</div>

@@ -1,5 +1,36 @@
 /* chela dashboard — dark theme */
 
+/* CMX-377: Geist, vendored (fonts/Geist-Variable.woff2 + fonts/OFL-Geist.txt,
+   same convention as every other bundled font — see fonts/README.md) — NO
+   Google Fonts / CDN link, the dashboard runs offline on a tailnet. One
+   variable-weight face covers the mockup's 400/500/600 range in a single
+   @font-face, the same pattern JetBrainsMono.ttf etc already use below via
+   app.py's _TERM_FONT_CSS (that system is the TERMINAL's own font picker,
+   unrelated to this one — --ui-font is chrome-only, never injected into a
+   ttyd iframe). font-display: swap avoids a blocking web-font flash; the
+   Heebo/system-ui/sans-serif fallback chain covers Hebrew text and the brief
+   first paint before the woff2 loads. */
+@font-face {
+    font-family: 'Geist';
+    src: url('fonts/Geist-Variable.woff2') format('woff2');
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
+/* Hebrew-capable chrome fallback — the SAME already-vendored fonts/Heebo.ttf
+   app.py's _TERM_FONT_CSS offers the terminal font picker, re-declared here
+   because that system only injects into the ttyd iframe, never the dashboard
+   page itself — without this rule 'Heebo' in --ui-font's stack would never
+   resolve to anything on a machine that doesn't happen to have it installed,
+   silently defeating the fallback for every Hebrew-reading viewer. */
+@font-face {
+    font-family: 'Heebo';
+    src: url('fonts/Heebo.ttf') format('truetype');
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
+
 :root {
     --bg: #0d1117;
     --surface: #161b22;
@@ -10,6 +41,15 @@
     --green: #3fb950;
     --yellow: #d29922;
     --red: #f85149;
+    /* CMX-377: --font (monospace) is now reserved for the terminal frame and
+       genuine code/diff content — see .term-frame below. Everything else
+       (sidebar, pane headers, pane footers, modals, Work) reads --ui-font,
+       the "calm desktop app" restyle's whole point ("sans chrome"). Heebo is
+       already vendored (fonts/Heebo.ttf) as the Hebrew-capable fallback the
+       brief asks for; it is loaded on demand the same way every other
+       bundled font is (app.py's _TERM_FONT_CSS), so naming it here costs
+       nothing until Hebrew text actually needs it. */
+    --ui-font: 'Geist', 'Heebo', system-ui, -apple-system, 'Segoe UI', sans-serif;
     --font: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
     --term-ctx-bar-h: 30px;   /* .term-ctx-bar height; iframe rules reserve this much bottom space. CMX-129: the 14px № chip sits centered (same align-items: center as the branch/context text), so its bottom AND top gaps are each (bar-h - chip-h) / 2 — 8px only when bar-h = chip-h + 16 = 30px. Supersedes CMX-128's flex-end + margin-bottom scheme, which gave № its own 8px bottom inset independent of the text's center line and left it riding ~4px above it — see .gs-idx below */
     --term-bg: #0d1117;   /* the ttyd terminal's OWN xterm.js background (scripts/agent-terminals.sh TERM_THEME, tests/test_term_bg_sync.py guards the two stay identical) — NOT an arbitrary black; shared with .term-ctx-bar so the bar reads as a seamless footer, not a separate strip */
@@ -86,7 +126,7 @@ body[data-theme="rose"] {           /* Rosé Pine Moon — muted plum */
 body {
     background: var(--bg);
     color: var(--text);
-    font-family: var(--font);
+    font-family: var(--ui-font);
     font-size: 13px;
     line-height: 1.5;
 }
@@ -165,7 +205,13 @@ body {
 .panel.active { display: block; }
 
 /* ---- Embedded terminals ---- */
-.term-frame { width: 100%; border: 1px solid #333; border-radius: 6px; background: var(--term-bg); }
+/* CMX-377: font-family is otherwise a no-op here — .term-frame just wraps an
+   <iframe>, and an iframe's own document never inherits the parent page's CSS
+   — but it is pinned to --font explicitly anyway (never --ui-font) so the
+   guard that "--ui-font is used by the sidebar and NOT the terminal frame"
+   is a real, checkable fact about this stylesheet, not just true by the
+   accident of iframes not inheriting fonts. */
+.term-frame { width: 100%; border: 1px solid #333; border-radius: 6px; background: var(--term-bg); font-family: var(--font); }
 /* Single view: same header+iframe wrapper as a wall tile */
 .term-single .term-pane {
     display: flex; flex-direction: column; height: 78vh; overflow: hidden;
@@ -185,15 +231,16 @@ body {
 .term-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 10px; }
 .term-grid .term-frame { height: 42vh; }
 
-/* Focus ring: the pane whose embedded terminal currently holds browser focus
-   gets its 1px border recoloured to the accent + a soft glow. Border WIDTH is
-   unchanged (only the colour) so there's zero layout shift; the box-shadow is
-   pure decoration. Tracks the same focus tmux forwards to Claude Code via
-   focus-events. .term-focused is toggled from terminals.js (_applyTermFocus). */
-.term-pane, .grid-stack-item-content { transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+/* Focus ring (CMX-377: "a thin inset ring in --accent — no glow, no thick
+   border"): the pane whose embedded terminal currently holds browser focus
+   gets a single thin INSET box-shadow ring, nothing else — the border itself
+   stays --border and the tile's own box size never shifts (inset never adds
+   layout width, unlike the old outer glow this replaces). Tracks the same
+   focus tmux forwards to Claude Code via focus-events. .term-focused is
+   toggled from terminals.js (_applyTermFocus). */
+.term-pane, .grid-stack-item-content { transition: box-shadow 0.15s ease; }
 .term-pane.term-focused, .grid-stack-item-content.term-focused {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent), 0 0 8px -2px var(--accent);
+    box-shadow: inset 0 0 0 1.5px var(--accent);
 }
 /* Waiting on user input: yellow ring on the live pane (after .term-focused so it
    wins when a waiting pane is also focused — it's the more urgent signal). */
@@ -209,9 +256,12 @@ body {
     background: var(--term-bg); border: 1px solid var(--border); border-radius: 8px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
+/* CMX-377: 40px, sans (inherits --ui-font off body — nothing here re-pins it to
+   --font). Height is fixed, not padding-derived, matching the approved mockup's
+   own `header { height: 40px }`. */
 .gs-head {
-    flex: 0 0 auto; position: relative; display: flex; align-items: center; gap: 6px;
-    padding: 4px 9px; font-size: var(--wall-pane-font-size); color: var(--text-dim);
+    flex: 0 0 auto; position: relative; display: flex; align-items: center; gap: 8px;
+    height: 40px; padding: 0 8px 0 14px; font-size: var(--wall-pane-font-size); color: var(--text-dim);
     background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface) 82%, var(--bg)));
     border-bottom: 1px solid var(--border);
 }
@@ -258,27 +308,16 @@ body {
 
 /* --- CMX-119: pane header v2 — split the CMX-117 combined badge back apart
    now that every pane has a bottom bar to hold its numbers (see .term-ctx-bar
-   / .gs-idx below). `.gs-dot` is back to a plain circle carrying LIVE STATUS
-   BY SHAPE, not hue alone (Liav is red-weak): filled = working, hollow
-   outline = idle, filled + glow ring = waiting/wants-the-human. Driven by
-   _colorTermDots (terminals.js), which targets .term-status-dot — a class
-   this dot also wears, so the same working/waiting/idle classes that used
-   to paint the combined badge now paint just this dot. `.gs-menu-btn` is the
-   separate "⋯" (lucide more-vertical) trigger for the
-   Wire/Share/Orchestrator/Pin menu. */
+   / .gs-idx below). `.gs-dot` also wears `.term-status-dot` (below), so it
+   is painted by the SAME shape rules as the sidebar row's status mark —
+   CMX-377's whole point: one shape vocabulary, not a pane-header dialect and
+   a sidebar dialect. `.gs-dot` itself now only sets the pane header's
+   slightly larger box; the shape/colour per state lives on `.term-status-dot`
+   below. `.gs-menu-btn` is the separate "⋯" (lucide more-vertical) trigger for
+   the Wire/Share/Orchestrator/Pin menu. */
 .gs-dot {
-    flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; box-sizing: border-box;
-    border: 1.5px solid var(--text-dim); background: transparent;
+    flex: 0 0 auto; width: 10px; height: 10px; box-sizing: border-box;
     transition: background 0.3s, box-shadow 0.3s;
-}
-.gs-dot.idle { background: transparent; border-color: var(--text-dim); }
-.gs-dot.working {
-    background: var(--green); border-color: var(--green); box-shadow: 0 0 6px var(--green);
-    animation: term-status-pulse 1.2s ease-in-out infinite;
-}
-.gs-dot.waiting {
-    background: var(--yellow); border-color: var(--yellow);
-    animation: term-status-pulse-waiting 1s ease-in-out infinite;
 }
 /* Orchestrator ownership: a SEPARATE non-hue ring (an outline, not a box-shadow,
    so it never collides with the waiting-state glow above) — updated in lockstep
@@ -872,56 +911,65 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
     #panel-terminals.active #term-stage { flex: 1 1 auto; min-height: 0; }
 }
 
-/* Live session-activity dot on pane headers + dock chips. Driven by
-   `claude agents --json` status: busy = green pulse, waiting = amber (needs
-   input), idle/unknown = dim.
-   :not(.gs-dot) is load-bearing: the pane header's own status dot (.gs-dot,
-   above) also wears this class so _colorTermDots (terminals.js) can paint it,
-   but these two selectors have EQUAL specificity (single class) and this rule
-   comes later in the file — without the exclusion it wins the cascade on
-   every shared property (border-radius/background/box-shadow), filling
-   .gs-dot's idle state solid grey instead of leaving it hollow (CMX-118). */
-/* CMX-377: shape-coded status. Each state was a plain circle, colour-only —
-   working/waiting/idle/done differed by hue and glow alone, on top of the
-   `.ar-state`/`.gs-state` WORD that already carries the non-hue signal
-   elsewhere (tests/dashboard_scale_nav_a11y.test.mjs's GUARD 3). A distinct
-   silhouette is a second, glance-speed channel that survives a photo of the
-   screen or a hue-blind rendering the word text doesn't (it's small and often
-   trimmed at low widths): circle (working, unchanged — the familiar "busy"
-   shape), diamond (waiting — a pointed shape for "needs a decision"), square
-   (idle — a settled, static shape), triangle (done — a checkmark-adjacent
-   point). Shape is reinforcement on top of the existing colour+word, per the
-   same rule as everywhere else in this file: never the only cue, never a
-   replacement for one that already works. */
-.term-status-dot:not(.gs-dot) {
-    flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
-    display: inline-block; background: var(--text-dim); transition: background 0.3s;
+/* Live session-activity mark — status BY SHAPE, not hue alone (Liav is
+   red-weak): the ONE vocabulary shared by the sidebar row, the pane header's
+   `.gs-dot` and dock/mobile-switcher chips alike (CMX-377, round 2 — round 1
+   shipped a `:not(.gs-dot)` split where the pane header kept its own older
+   3-state dialect (filled/hollow/glow-ring) and only the sidebar got the new
+   4 shapes, AND used the wrong shape per state — see the per-state comments
+   below). Every one of these elements wears the SAME `.term-status-dot
+   <state>` pair; _colorTermDots (terminals.js) computes `<state>` from the
+   SAME tileState() (wallmodel.js) the pane's `.gs-state` word pill already
+   used, so the dot and the pill can never disagree, and nav.js's sidebar row
+   computes the same four class names off its own status predicates. Exact
+   spec (Liav-approved mockup 2026-09-28, `renderVals()`'s palette): working =
+   filled dot (Okabe-Ito sky), needs-you/"waiting" = filled triangle (Okabe-Ito
+   orange), done = check (dim — deliberately NOT coloured; a checkmark's
+   silhouette alone is the signal, and it would otherwise be the only shape
+   here to double as a second colour cue), idle = hollow ring (dim outline).
+   Shape is reinforcement on top of the `.ar-state`/`.gs-state` WORD that
+   already carries the non-hue signal elsewhere (dashboard_scale_nav_a11y's
+   GUARD 3) — never the only cue. */
+.term-status-dot {
+    flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box;
+    display: inline-block; background: var(--text-dim); border: none; box-shadow: none;
+    transition: background 0.3s, box-shadow 0.3s, border-color 0.3s;
 }
-.term-status-dot.working:not(.gs-dot) {
-    border-radius: 50%;
-    background: var(--green); box-shadow: 0 0 6px var(--green);
+/* working — filled circle, unchanged shape (the familiar "busy" dot); the
+   soft halo is a glow, not a second silhouette. */
+.term-status-dot.working {
+    border-radius: 50%; clip-path: none;
+    background: var(--ok-sky); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok-sky) 22%, transparent);
     animation: term-status-pulse 1.2s ease-in-out infinite;
 }
-.term-status-dot.waiting:not(.gs-dot) {
-    border-radius: 1px; clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
-    background: var(--yellow);
+/* needs-you — filled triangle: a pointed shape for "needs a decision". This
+   was a diamond in round 1; the brief's spec reserves the triangle for THIS
+   state (round 1 gave the triangle to "done" instead — the defect the round-2
+   verdict named). */
+.term-status-dot.waiting {
+    border-radius: 1px; clip-path: polygon(50% 4%, 96% 92%, 4% 92%);
+    background: var(--ok-orange); box-shadow: none;
     animation: term-status-pulse-waiting 1s ease-in-out infinite;
 }
-.term-status-dot.idle:not(.gs-dot) { border-radius: 2px; background: var(--text-dim); box-shadow: none; }
-/* Fourth sidebar state (issue #475): idle, but the agent said something since
-   you last spoke — --ok-sky, matching the wall tile's own "done" pill
-   (.gs-state-done above) so the concept reads the same colour everywhere it
-   appears. Colour is never the only cue: the row's .ar-state word ("done")
-   always renders alongside it, same as working/waiting/idle. */
-.term-status-dot.done:not(.gs-dot) {
-    border-radius: 0; clip-path: polygon(50% 0%, 100% 100%, 0% 100%);
-    background: var(--ok-sky); box-shadow: 0 0 6px var(--ok-sky);
+/* idle — hollow ring: a settled, static shape. This was a filled square in
+   round 1. */
+.term-status-dot.idle {
+    border-radius: 50%; clip-path: none; background: transparent;
+    border: 1.5px solid var(--text-dim); box-shadow: none;
+}
+/* done — check: a checkmark-shaped clip-path on a DIM fill (never the wall
+   tile's --ok-sky or any other hue — see the block comment above for why).
+   This was a filled triangle in round 1, colliding with needs-you's own
+   shape once round 2 moved the triangle there. */
+.term-status-dot.done {
+    border-radius: 0; background: var(--text-dim); box-shadow: none;
+    clip-path: polygon(14% 44%, 0% 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
 }
 @keyframes term-status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 /* Waiting-on-input throbs its halo (stronger than the busy opacity fade). */
 @keyframes term-status-pulse-waiting {
-    0%, 100% { box-shadow: 0 0 3px var(--yellow); }
-    50% { box-shadow: 0 0 11px 2px var(--yellow); }
+    0%, 100% { filter: drop-shadow(0 0 2px var(--ok-orange)); }
+    50% { filter: drop-shadow(0 0 7px var(--ok-orange)); }
 }
 .min-chip {
     display: inline-flex; align-items: center; gap: 6px; max-width: 220px;
@@ -1607,7 +1655,7 @@ body.term-dragging { overflow: hidden; }
     border-radius: 4px;
     font-size: 10px;
     color: var(--text-dim);
-    font-family: var(--font);
+    font-family: var(--ui-font);
 }
 
 .fn-badge summary {
@@ -1680,7 +1728,7 @@ button, .btn {
     border-radius: 5px;
     padding: 4px 10px;
     font-size: 11px;
-    font-family: var(--font);
+    font-family: var(--ui-font);
     cursor: pointer;
     transition: background 0.15s;
 }
@@ -1771,7 +1819,7 @@ input[type="text"], textarea, select {
     color: var(--text);
     padding: 5px 8px;
     font-size: 12px;
-    font-family: var(--font);
+    font-family: var(--ui-font);
     outline: none;
 }
 
@@ -2183,7 +2231,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
     font-size: 11px;
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s, color 0.15s;
-    font-family: var(--font);
+    font-family: var(--ui-font);
 }
 
 .kanban-filter-chip:hover { color: var(--text); border-color: var(--accent); }
@@ -2286,7 +2334,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 
 .kanban-card-id {
-    font-family: var(--font);
+    font-family: var(--ui-font);
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 3px;
@@ -2694,7 +2742,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
         border: none;
         padding: 6px 16px;
         font-size: 12px;
-        font-family: var(--font);
+        font-family: var(--ui-font);
         cursor: pointer;
     }
     .kanban-layout-btn + .kanban-layout-btn { border-left: 1px solid var(--border); }
@@ -2730,7 +2778,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
         border-radius: 12px;
         padding: 3px 10px;
         font-size: 11px;
-        font-family: var(--font);
+        font-family: var(--ui-font);
         cursor: pointer;
         white-space: nowrap;
     }
@@ -2950,14 +2998,44 @@ input[type="text"]:focus, textarea:focus, select:focus {
     flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
     padding: 12px 14px; border-bottom: 1px solid var(--border);
 }
+/* CMX-377: the wordmark is plain --text, not --accent — the old topbar's brand
+   was accent-tinted purely decoratively (predates this restyle); the approved
+   mockup's own wordmark renders in the default text colour (its
+   renderVals()'s `accent` prop is never referenced by the "chela" span at
+   all), and the brief's "one accent" rule reserves --accent for focus,
+   selection and the inbox unread dot. */
 .sidebar-head .brand {
-    font-size: 15px; font-weight: 700; color: var(--accent);
+    font-size: 15px; font-weight: 700; color: var(--text);
     display: inline-flex; align-items: center; gap: 7px; min-width: 0;
     overflow: hidden;
 }
 .sidebar-head .brand .brand-mark { height: 20px; width: auto; display: block; flex: 0 0 auto; }
 .sidebar-head .brand span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-scroll { flex: 1 1 auto; overflow-y: auto; padding: 8px 0; }
+
+/* New session + jump-to search (CMX-377, mockup order — ahead of nav). */
+.sidebar-quick { padding: 6px 12px 8px; display: flex; flex-direction: column; gap: 8px; }
+.sidebar-new-btn {
+    height: 34px; display: flex; align-items: center; gap: 9px; padding: 0 11px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-family: var(--ui-font); font-size: 13.5px; font-weight: 500;
+    text-align: left; cursor: pointer;
+}
+.sidebar-new-btn svg { flex: 0 0 auto; }
+.sidebar-new-btn:hover { border-color: var(--accent); }
+.sidebar-jump {
+    height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 10px;
+    border: 1px solid var(--border); border-radius: 8px; color: var(--text-dim);
+}
+.sidebar-jump svg { flex: 0 0 auto; }
+.sidebar-jump input {
+    flex: 1 1 auto; min-width: 0; background: none; border: none; outline: none;
+    color: var(--text); font-family: var(--ui-font); font-size: 13px;
+}
+.sidebar-jump input::placeholder { color: var(--text-dim); }
+.sidebar-jump:focus-within { border-color: var(--accent); }
+body.sidebar-collapsed .sidebar-quick { display: none; }
+
 .sidebar-foot {
     flex: 0 0 auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     padding: 10px 14px; border-top: 1px solid var(--border);
@@ -3196,20 +3274,23 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .ar-role.dispatched { color: #0072B2; background: color-mix(in srgb, #0072B2 14%, transparent); }
 .ar-role.orchestrator { color: #CC79A7; background: color-mix(in srgb, #CC79A7 16%, transparent); }
-/* CMX-146: Claude's own auto-generated session title — its own dim line, distinct
-   from `.ar-recap` below (an occasional away_summary blurb, often absent). */
-.ar-title {
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    font-size: var(--card-font-size); line-height: var(--card-line-height); color: var(--text-dim); opacity: 0.75;
-}
 .ar-sub { display: flex; align-items: baseline; gap: 5px; min-width: 0; font-size: var(--card-font-size); line-height: var(--card-line-height); color: var(--text-dim); }
 .ar-state { flex: 0 0 auto; font-weight: 600; text-transform: capitalize; }
 .ar-state.working { color: var(--green); }
 .ar-state.waiting { color: var(--yellow); }
 .ar-state.done { color: var(--ok-sky); }
 .ar-state.idle { color: var(--text-dim); }
-.ar-age { flex: 0 0 auto; opacity: 0.8; }
+/* CMX-377: recent-sessions rows still use .ar-recap for their cwd sub-line
+   (nav.js renderRecentSessions) — the live agent row's OWN recap/ai_title
+   lines are gone (folded into the row's title tooltip; see .ar-ago below). */
 .ar-recap { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85; }
+/* CMX-377: the row's right-aligned relative time (mockup's `{{r.ago}}`) — a
+   ROW-level sibling of .ar-main, not part of it, so it sits at the row's far
+   right the same way .agent-pin already does (both simply come after
+   .ar-main's flex: 1 in source order). Vertical offset matches the status
+   dot's own margin-top so it lines up with the row's first line, not its
+   vertical center. */
+.ar-ago { flex: 0 0 auto; margin-top: 4px; font-size: var(--card-font-size); color: var(--text-dim); opacity: 0.75; white-space: nowrap; }
 
 .side-badges { display: flex; gap: 4px; }
 .badge {
@@ -3522,7 +3603,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .s-rowlabel { color: var(--text); font-size: 12px; }
 .s-select {
     background: var(--surface); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 5px 10px; font-family: var(--font); font-size: 12px;
+    border-radius: 6px; padding: 5px 10px; font-family: var(--ui-font); font-size: 12px;
     cursor: pointer;
 }
 .s-select:hover { border-color: var(--accent); }
@@ -3530,7 +3611,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .s-input {
     flex: 1 1 auto; min-width: 0;
     background: var(--surface); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 6px 10px; font-family: var(--font); font-size: 12px;
+    border-radius: 6px; padding: 6px 10px; font-family: var(--ui-font); font-size: 12px;
 }
 .s-input:focus { outline: none; border-color: var(--accent); }
 .s-savemsg { font-size: 11px; color: var(--text-dim); margin-top: 6px; min-height: 14px; }
@@ -3953,7 +4034,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kn-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
 .kn-chip { background: var(--surface); border: 1px solid var(--border);
     color: var(--text); border-radius: 999px; padding: 4px 12px; font-size: 12px;
-    cursor: pointer; font-family: var(--font); }
+    cursor: pointer; font-family: var(--ui-font); }
 .kn-chip:hover { border-color: var(--accent); }
 .kn-chip-n { color: var(--accent); font-weight: 700; margin-right: 4px; }
 
@@ -4055,7 +4136,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kn-pchips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
 .kn-pchip { display: inline-flex; align-items: baseline; gap: 8px; background: var(--surface);
     border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; cursor: pointer;
-    font-family: var(--font); color: var(--text); }
+    font-family: var(--ui-font); color: var(--text); }
 .kn-pchip:hover { border-color: #a371f7; }
 .kn-pchip-name { font-weight: 600; font-size: 13px; }
 .kn-pchip .kn-dim { padding: 0; font-size: 11px; }

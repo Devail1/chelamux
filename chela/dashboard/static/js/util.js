@@ -53,6 +53,10 @@ const _LUCIDE = {
     // _ctxBarHTML), opening the per-session changed-files/diff modal
     // (diffpanel.js, CMX-299).
     'git-compare': '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/>',
+    // `plus` — the sidebar's "New session" button (CMX-377, index.html).
+    'plus': '<path d="M5 12h14"/><path d="M12 5v14"/>',
+    // `search` — the sidebar's jump-to-session input (CMX-377, index.html).
+    'search': '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
 };
 function lucideIcon(name, size = 16) {
     if (!(name in _LUCIDE)) throw new Error(`lucideIcon: unknown icon "${name}" — not in _LUCIDE`);

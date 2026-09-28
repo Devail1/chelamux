@@ -740,26 +740,125 @@ test('the pane-menu ON-state fill rules repeat the `.pane-overflow-menu button` 
         'a stale `.gs-keys button.popover-item` base rule must not exist — .gs-keys no longer wraps the menu');
 });
 
-// 11b — THE PANE HEADER'S OWN STATUS DOT MUST NEVER LOSE ITS HOLLOW-IDLE STYLING TO
-// THE STANDALONE-DOT RULE (CMX-118 fix 1, CMX-119 rescoped the badge onto `.gs-dot`).
-// `.term-status-dot`'s generic 8px-round-dot geometry/fill rules and `.gs-dot`'s own
-// idle/working/waiting/orch rules are equal specificity (single class each);
-// `:not(.gs-dot)` is what keeps the generic rule from winning on source order alone
-// (see the comment above test 11's block). jsdom can't resolve which of two
-// equal-specificity rules a browser applies, but it CAN prove the static text fact
-// that only the excluded form exists — the same kind of guard test 11 already uses.
-test('every generic .term-status-dot geometry/fill rule carries :not(.gs-dot); a bare form does not exist', () => {
-    ['', '.working', '.waiting', '.idle'].forEach(suffix => {
-        const guarded = new RegExp(String.raw`^\.term-status-dot${suffix}:not\(\.gs-dot\)\s*\{`, 'm');
-        assert.ok(guarded.test(CSS),
-            `.term-status-dot${suffix}:not(.gs-dot) { ... } must exist`);
-
+// 11b — THE PANE HEADER'S STATUS DOT MUST SHARE THE SIDEBAR'S EXACT SHAPE RULES,
+// NOT A SEPARATE DIALECT (CMX-377 round 2, superseding CMX-118 fix 1 / CMX-119's
+// `:not(.gs-dot)` split). Round 1 kept `.gs-dot` painted by ITS OWN idle/working/
+// waiting rules (filled/hollow/glow-ring — no triangle, no check, no "done" state
+// at all) while only the sidebar's non-`.gs-dot` dots got the new 4-shape
+// vocabulary — the exact defect the round-2 verdict named ("the pane header
+// keeps its old shape system entirely"). The fix is for `.gs-dot` to wear
+// PLAIN `.term-status-dot` with no exclusion, so the bare `.term-status-dot.
+// <state>` rules style it identically to every other status mark on the page —
+// this is the OPPOSITE invariant from the old test 11b, and the same jsdom
+// static-text technique proves it (jsdom cannot resolve which of two
+// equal-specificity rules a browser would apply, but it CAN prove no
+// `:not(.gs-dot)` exclusion exists to fork the two apart).
+test('the bare .term-status-dot<state> rules exist with NO :not(.gs-dot) exclusion — one shape vocabulary, not two', () => {
+    ['', '.working', '.waiting', '.idle', '.done'].forEach(suffix => {
         const bare = new RegExp(String.raw`^\.term-status-dot${suffix}\s*\{`, 'm');
-        assert.ok(!bare.test(CSS),
-            `a bare .term-status-dot${suffix} { ... } rule must not exist — equal specificity to .gs-dot ` +
-            'and later in the file, so it would win the cascade and override the header dot\'s own idle/working ' +
-            '/waiting styling (idle: fill it grey instead of leaving it hollow)');
+        assert.ok(bare.test(CSS),
+            `.term-status-dot${suffix} { ... } must exist as a BARE rule (no :not(.gs-dot)) — the pane header's ` +
+            '.gs-dot must be painted by the same rule the sidebar row uses');
+
+        const excluded = new RegExp(String.raw`^\.term-status-dot${suffix}:not\(\.gs-dot\)\s*\{`, 'm');
+        assert.ok(!excluded.test(CSS),
+            `a :not(.gs-dot)-excluded .term-status-dot${suffix} rule must not exist — that split is exactly the ` +
+            'CMX-377 round-1 defect (pane header kept its own separate shape dialect) the round-2 fix removes');
     });
+
+    // .gs-dot itself must carry no per-state colour/shape rules of its own —
+    // those would re-fork the vocabulary even without a :not() exclusion, by
+    // simply outranking .term-status-dot.<state> on source order (both are
+    // single/double-class selectors of equal specificity).
+    ['idle', 'working', 'waiting', 'done'].forEach(state => {
+        const stale = new RegExp(String.raw`^\.gs-dot\.${state}\s*\{`, 'm');
+        assert.ok(!stale.test(CSS),
+            `.gs-dot.${state} { ... } must not exist — a state-specific .gs-dot rule would re-fork the pane ` +
+            'header away from the shared .term-status-dot.<state> shape rules, the exact CMX-377 round-1 defect');
+    });
+});
+
+// 11b-2 — THE 4 SHAPES ARE ACTUALLY DISTINCT FROM EACH OTHER, PER THE APPROVED
+// MOCKUP'S SPEC (working = filled dot, needs-you = filled TRIANGLE, done = CHECK,
+// idle = hollow ring). Round 1 shipped all four classes but with the WRONG shapes
+// on two of them — done got the triangle (clip-path a 3-point polygon) that the
+// spec reserves for needs-you/waiting, and needs-you got a diamond (a 4-point
+// polygon) that appears nowhere in the spec at all; idle was a filled rounded
+// square instead of a hollow ring. Test 11b above only proves the four rules EXIST
+// as bare selectors — it would stay green even with the shapes swapped right back
+// to round 1's mapping (existence is not correctness). This pins the actual
+// geometry each state must resolve to, so a re-swap fails here specifically.
+test('the 4 status shapes match the approved mockup — triangle is needs-you, check is done, ring is idle, dot is working', () => {
+    const rule = state => {
+        const m = CSS.match(new RegExp(String.raw`^\.term-status-dot\.${state}\s*\{([^}]*)\}`, 'm'));
+        assert.ok(m, `.term-status-dot.${state} rule not found`);
+        return m[1];
+    };
+
+    // working: a filled CIRCLE (border-radius: 50%, no clip-path cutting a
+    // silhouette into it) — the one shape allowed to keep the round dot form.
+    const working = rule('working');
+    assert.match(working, /border-radius:\s*50%/, 'working must stay a circle (border-radius: 50%)');
+    assert.match(working, /clip-path:\s*none/, 'working must not carry a clip-path silhouette');
+
+    // needs-you ("waiting" class): a filled TRIANGLE — clip-path with exactly 3 points.
+    const waiting = rule('waiting');
+    const waitingPts = (waiting.match(/clip-path:\s*polygon\(([^)]*)\)/) || [, ''])[1];
+    const waitingPtCount = waitingPts ? waitingPts.split(',').length : 0;
+    assert.equal(waitingPtCount, 3,
+        `needs-you's clip-path has ${waitingPtCount} points, not 3 — it must be a TRIANGLE (the spec's shape ` +
+        'for needs-you), not a diamond (4 points, round 1\'s mistake) or anything else');
+
+    // done: a CHECK — clip-path with more than 3 points (a checkmark silhouette),
+    // and it must be a DIFFERENT polygon than needs-you's triangle (round 1's
+    // actual defect: done got the 3-point triangle that belongs to needs-you).
+    const done = rule('done');
+    const donePts = (done.match(/clip-path:\s*polygon\(([^)]*)\)/) || [, ''])[1];
+    const donePtCount = donePts ? donePts.split(',').length : 0;
+    assert.ok(donePtCount >= 5,
+        `done's clip-path has ${donePtCount} points — a checkmark silhouette needs several vertices, not a ` +
+        'simple 3-point triangle (that shape belongs to needs-you)');
+    assert.notEqual(donePts.replace(/\s/g, ''), waitingPts.replace(/\s/g, ''),
+        "done and needs-you must not share the same clip-path polygon — that IS round 1's defect (done got " +
+        'needs-you\'s triangle)');
+    // Spec: "Done = check (dim)" — never coloured like the sky/orange states.
+    assert.doesNotMatch(done, /var\(--ok-sky\)|var\(--ok-orange\)|var\(--green\)|var\(--yellow\)/,
+        'done must stay dim (var(--text-dim)) — the spec explicitly says "check (dim)", not a coloured check');
+
+    // idle: a HOLLOW ring — a real border, transparent fill, no clip-path (round 1
+    // gave idle a filled rounded square instead: solid background, no border).
+    const idle = rule('idle');
+    assert.match(idle, /border:\s*1\.5px solid var\(--text-dim\)/, 'idle must be a hollow ring (a real border)');
+    assert.match(idle, /background:\s*transparent/, 'idle must be unfilled (transparent), not a solid square');
+    assert.match(idle, /clip-path:\s*none/, 'idle must not carry a clip-path silhouette (it is a ring, not a polygon)');
+});
+
+// --- CMX-377: pane header is 40px, and the focus ring is a thin INSET ring, no
+// glow, no border-color change (the brief's exact wording) -------------------------
+
+test('CMX-377: .gs-head resolves to a fixed 40px height, not a padding-derived one', () => {
+    const m = CSS.match(/^\.gs-head\s*\{([^}]*)\}/m);
+    assert.ok(m, '.gs-head rule not found');
+    assert.match(m[1], /height:\s*40px/, '.gs-head must declare height: 40px');
+});
+
+test('CMX-377: the focused pane gets a thin INSET ring only — no glow, no border-color change', () => {
+    const m = CSS.match(/\.term-pane\.term-focused,\s*\.grid-stack-item-content\.term-focused\s*\{([^}]*)\}/);
+    assert.ok(m, '.term-focused rule not found');
+    const body = m[1];
+    assert.doesNotMatch(body, /border-color/,
+        '.term-focused must not recolour border-color — the spec is a ring ON TOP, not a border-colour change');
+    // Exactly one box-shadow layer: an outer glow (the round-1/pre-existing
+    // treatment this replaces) is a SECOND, blurred box-shadow layer — a comma
+    // inside the declared value. A single inset ring has none.
+    const shadowDecl = (body.match(/box-shadow:\s*([^;]+);/) || [, ''])[1];
+    assert.match(shadowDecl, /^inset\s/, '.term-focused\'s box-shadow must be INSET, not an outer ring/glow');
+    assert.doesNotMatch(shadowDecl, /,/,
+        `.term-focused's box-shadow has more than one layer ("${shadowDecl}") — that is a glow, which the spec ` +
+        'explicitly excludes ("no glow, no thick border")');
+    // "Thin": a blur radius of 0 (no soft edge) and a spread in the 1-2px range,
+    // not the old glow's 8px blur.
+    assert.doesNotMatch(shadowDecl, /8px/, '.term-focused must not carry the old glow\'s 8px blur radius');
 });
 
 // 11c — THE CTX-BAR RESERVATION AND THE BAR'S OWN HEIGHT MUST SHARE ONE VARIABLE
@@ -833,6 +932,88 @@ test('the header dot is painted by live status (working vs idle carry different 
     delete AGENTS[0].session_status;   // leave the fixture as later tests expect it
     await terminals.termTick();
     assert.ok(badge.classList.contains('idle'), 'reverting session_status must repaint the dot back to idle');
+});
+
+// 12a-2 — CMX-377: THE PANE HEADER DOT REACHES 'done' TOO, NOT JUST WORKING/WAITING/IDLE.
+// Round 1's _colorTermDots only ever assigned three classes (busy/waiting/idle →
+// working/waiting/idle) — the pane header dot could never become 'done' at all, no
+// matter how finished the pane was, because the function it was painted by didn't
+// know that state existed. tileState() (wallmodel.js) is the one source that DOES —
+// it is what the pane's OWN `.gs-state` pill already draws from — so _colorTermDots
+// now reads it too. Drives a real termTick() with a finished (idle + open PR) agent
+// and reads the dot's class back, the same technique test 12 uses for working/idle.
+test("CMX-377: the header dot reaches the 'done' class for a finished pane, not just working/waiting/idle", async () => {
+    const wid = '@1';
+    const badge = tile(wid).querySelector('.gs-dot');
+
+    AGENTS[0].session_status = 'idle';
+    AGENTS[0].pr = { url: 'https://github.com/x/y/pull/1' };
+    await terminals.termTick();
+    assert.ok(badge.classList.contains('done'),
+        "a finished pane (idle + open PR, tileState's own 'done' condition) must paint the header dot 'done' — " +
+        "not idle, and not stuck on the old working/waiting/idle-only vocabulary");
+    assert.ok(!badge.classList.contains('idle'));
+
+    delete AGENTS[0].session_status;
+    delete AGENTS[0].pr;
+    await terminals.termTick();
+    assert.ok(badge.classList.contains('idle'), 'reverting must repaint the dot back to idle, leaving no stray done class');
+});
+
+// 12a-3 — CMX-377: THE SIDEBAR ROW AND THE PANE HEADER SHARE THE SAME CLASS
+// VOCABULARY. The round-2 verdict's actual defect: round 1 gave the sidebar row the
+// new 4-class vocabulary (working/waiting/idle/done) but left the pane header
+// painted by a DIFFERENT, older function that only ever produced three of those
+// four classes and never agreed on which shape meant what. This drives BOTH real
+// renderers — nav.js's renderSidebarAgents() (a real `#sidebar-agents` list) and
+// terminals.js's termTick() (the real wall, already built by `before()` above) —
+// off agent records built to hit each of the 4 states, and asserts both surfaces'
+// `.term-status-dot` lands on the SAME class name. A class mismatch (e.g. the pane
+// header still calling it "busy" while the sidebar calls it "working", or the pane
+// header never reaching "done" at all — test 12a-2's regression) fails here.
+test('CMX-377: sidebar row and pane header dot use the SAME class for each of the 4 states', async () => {
+    const nav = await import('../chela/dashboard/static/js/nav.js');
+
+    // A throwaway sidebar host — renderSidebarAgents only ever needs #sidebar-agents
+    // to exist; it is not part of the shared PANEL fixture the wall tests mount.
+    let host = document.getElementById('sidebar-agents');
+    if (!host) {
+        host = document.createElement('div');
+        host.id = 'sidebar-agents';
+        document.body.appendChild(host);
+    }
+
+    const CASES = [
+        { label: 'working', row: { name: 'w1', window_id: '@w1', session_status: 'busy' },
+          pane: { session_status: 'busy' } },
+        { label: 'waiting (needs you)', row: { name: 'w2', window_id: '@w2', needs_human: true },
+          pane: { needs_human: true } },
+        { label: 'done', row: { name: 'w3', window_id: '@w3', session_status: 'idle', done: true },
+          pane: { session_status: 'idle', pr: { url: 'https://github.com/x/y/pull/1' } } },
+        { label: 'idle', row: { name: 'w4', window_id: '@w4' }, pane: {} },
+    ];
+
+    for (const c of CASES) {
+        nav.renderSidebarAgents([c.row]);
+        const sideDot = host.querySelector('.term-status-dot');
+        assert.ok(sideDot, `${c.label}: sidebar row did not render a .term-status-dot`);
+        const sideCls = ['working', 'waiting', 'idle', 'done'].find(k => sideDot.classList.contains(k));
+        assert.ok(sideCls, `${c.label}: sidebar dot carries none of working/waiting/idle/done`);
+
+        Object.assign(AGENTS[0], { session_status: undefined, pr: undefined, needs_human: undefined }, c.pane);
+        await terminals.termTick();
+        const paneDot = tile('@1').querySelector('.gs-dot');
+        const paneCls = ['working', 'waiting', 'idle', 'done'].find(k => paneDot.classList.contains(k));
+        assert.ok(paneCls, `${c.label}: pane header dot carries none of working/waiting/idle/done`);
+
+        assert.equal(paneCls, sideCls,
+            `${c.label}: sidebar dot is "${sideCls}" but the pane header dot is "${paneCls}" — the two surfaces ` +
+            'disagree on which shape this state gets');
+    }
+
+    // Leave the shared AGENTS[0] fixture idle for any test that runs after this one.
+    delete AGENTS[0].session_status; delete AGENTS[0].pr; delete AGENTS[0].needs_human;
+    await terminals.termTick();
 });
 
 // 12b — THE .gs-state PILL'S WORD ACTUALLY REPAINTS ON A LIVE STATE CHANGE, NOT JUST
@@ -1351,22 +1532,35 @@ test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and 
         assert.ok(m, `--${name} not declared as a px value on :root`);
         return parseFloat(m[1]);
     };
-    const dims = (body) => {
-        const pad = body.match(/padding:\s*([0-9.]+)px\s+([0-9.]+)px/);
+    // CMX-377: the desktop rule moved from a padding-derived height to a FIXED
+    // `height: 40px` (the brief's own spec) — vertical padding is no longer a
+    // meaningful "how tall is the bar" proxy for it, so the desktop side reads
+    // `height` directly instead of padding's first number. Mobile keeps its
+    // own pre-existing padding-derived compact bar (CMX-133, untouched by this
+    // restyle) — its total is approximated as 2×vertical-padding + font-size
+    // (a single-line bar's content-box height), a reasonable proxy this file
+    // already used for the pre-CMX-377 desktop rule.
+    const fontSize = (body) => {
         const fsLiteral = body.match(/font-size:\s*([0-9.]+)px/);
         const fsVar = body.match(/font-size:\s*var\(--([\w-]+)\)/);
-        assert.ok(pad, 'each .gs-head rule must declare padding: Npx Npx');
         assert.ok(fsLiteral || fsVar, 'each .gs-head rule must declare font-size: Npx or font-size: var(--token)');
-        const fs = fsLiteral ? parseFloat(fsLiteral[1]) : rootTokenPx(fsVar[1]);
-        return { v: parseFloat(pad[1]), h: parseFloat(pad[2]), fs };
+        return fsLiteral ? parseFloat(fsLiteral[1]) : rootTokenPx(fsVar[1]);
     };
-    const desktop = dims(gsHeadBlocks[0].body);
-    const mobile = dims(gsHeadBlocks[1].body);
-    assert.ok(mobile.v < desktop.v && mobile.h < desktop.h,
-        `the mobile .gs-head padding (${mobile.v}px ${mobile.h}px) must be smaller than desktop's ` +
-        `(${desktop.v}px ${desktop.h}px) on both axes — this is the "shorter bar" the PR claims`);
-    assert.ok(mobile.fs < desktop.fs,
-        `the mobile .gs-head font-size (${mobile.fs}px) must be smaller than desktop's (${desktop.fs}px)`);
+    const desktopHeight = (() => {
+        const m = gsHeadBlocks[0].body.match(/height:\s*([0-9.]+)px/);
+        assert.ok(m, 'the desktop .gs-head rule must declare a fixed height: Npx');
+        return parseFloat(m[1]);
+    })();
+    const desktopFs = fontSize(gsHeadBlocks[0].body);
+    const mobilePad = gsHeadBlocks[1].body.match(/padding:\s*([0-9.]+)px\s+([0-9.]+)px/);
+    assert.ok(mobilePad, 'the mobile .gs-head override must declare padding: Npx Npx');
+    const mobileFs = fontSize(gsHeadBlocks[1].body);
+    const mobileHeightEstimate = 2 * parseFloat(mobilePad[1]) + mobileFs;
+    assert.ok(mobileHeightEstimate < desktopHeight,
+        `the mobile .gs-head's estimated height (${mobileHeightEstimate}px, from its own padding+font-size) must ` +
+        `be smaller than desktop's fixed height (${desktopHeight}px) — this is the "shorter bar" the PR claims`);
+    assert.ok(mobileFs < desktopFs,
+        `the mobile .gs-head font-size (${mobileFs}px) must be smaller than desktop's (${desktopFs}px)`);
 
     // CMX-133: `.gs-keys` — and its `.gs-win-ctl` wrapper, which is where min/max/kill
     // actually live — must NOT be hidden on mobile any more, by any route. Hiding

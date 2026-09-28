@@ -1057,3 +1057,103 @@ test('CMX-359: "Needs you" outranks "Finished" — a row can only ever appear in
         'a waiting agent must render in the "Needs you" cluster');
     assert.ok(!finished, 'a row already claimed by "Needs you" must not also spawn a "Finished" cluster');
 });
+
+// --- CMX-377: the mockup's group order — Pinned (if any), then per-project, then
+// Finished last -----------------------------------------------------------------
+
+test('CMX-377: the orchestrator session renders inside a "Pinned" cluster, lifted out of every other group', async () => {
+    const rows = [
+        agent('orch', { window_id: '@1', cwd: '/home/x/proj-a' }),
+        agent('teammate', { window_id: '@2', cwd: '/home/x/proj-a' }),
+    ];
+    util.setAgentsCache(rows);
+    nav.renderSidebarAgents(rows);
+    assert.equal(document.querySelector('#sidebar-agents .side-pinned'), null,
+        'a "Pinned" cluster rendered before anything ever held the orchestrator/decisions-inbox slot');
+
+    await orchestrator.orchestratorSubscribe('@1');
+
+    const pinned = document.querySelector('#sidebar-agents .side-pinned');
+    assert.ok(pinned, 'subscribing the orchestrator did not produce a "Pinned" cluster ("if any" — it must appear once one exists)');
+    assert.ok(pinned.querySelector('.agent-row[data-agent="orch"]'),
+        'the orchestrator row is not inside the "Pinned" cluster');
+    assert.equal(document.querySelectorAll('#sidebar-agents .agent-row[data-agent="orch"]').length, 1,
+        'the orchestrator row rendered more than once — it must be lifted OUT of its project group ' +
+        'once pinned, not merely copied into both');
+    assert.ok(!pinned.contains(document.querySelector('.agent-row[data-agent="teammate"]')),
+        'a non-orchestrator row leaked into the "Pinned" cluster');
+});
+
+test('CMX-377: "Finished" renders AFTER the project groups in the actual DOM order, not before them', () => {
+    nav.renderSidebarAgents([
+        agent('done-one', { window_id: '@2', session_status: 'idle', done: true, cwd: '/home/x/proj-b' }),
+        agent('plain-one', { window_id: '@3', session_status: 'idle', cwd: '/home/x/proj-b' }),
+        agent('plain-two', { window_id: '@4', session_status: 'idle', cwd: '/home/x/proj-b' }),
+    ]);
+    const host = document.getElementById('sidebar-agents');
+    const finishedIdx = [...host.children].findIndex(el => el.classList.contains('side-finished'));
+    const groupIdx = [...host.children].findIndex(el => el.classList.contains('side-group'));
+    assert.ok(finishedIdx >= 0, 'no "Finished" cluster rendered');
+    assert.ok(groupIdx >= 0, 'no project group rendered (fixture needs 2+ sessions sharing a project)');
+    assert.ok(finishedIdx > groupIdx,
+        `"Finished" (child ${finishedIdx}) must come AFTER the project groups (child ${groupIdx}) in DOM order — ` +
+        'the mockup\'s group order is Pinned, per-project, then Finished last');
+});
+
+// --- CMX-377: New session button + jump-to search, ahead of nav (rendered-DOM,
+// against the REAL index.html, not a source-grep) -------------------------------
+//
+// Reuses the SAME already-booted module graph + jsdom `window` the file's own
+// `before()` set up (not a second `bootDashboardDom()` call): main.js's module
+// graph only ever executes its top-level side effects ONCE per process (ES
+// module caching) — a second boot call would hand back a FRESH, empty
+// `window.chela` on the new jsdom window that nav.js's already-run
+// `Object.assign(window.chela, {...})` never populates. Grafting the real
+// sidebar-quick markup onto the EXISTING mounted sidebar sidesteps that trap
+// entirely and is honest about it: `chela.sidebarJumpInput` below is the SAME
+// live function the rest of this file's tests already exercise.
+test('CMX-377: the REAL sidebar renders a "New session" button and a jump-to-session search, wired to real functions', async () => {
+    const { sliceTemplate } = await import('./js_helpers/dashboard_dom.mjs');
+    const QUICK_HTML = sliceTemplate('<div class="sidebar-quick">', '\n      </div>\n\n      <!-- Primary navigation.')
+        .replace(/\n\n      <!-- Primary navigation\.$/, '');
+    document.querySelector('.sidebar').insertAdjacentHTML('afterbegin', QUICK_HTML);
+    // This file's own BODY fixture (top of file) has no #palette overlay —
+    // graft the real one on too, so the WIRING check below can drive it for real.
+    if (!document.getElementById('palette')) {
+        const PALETTE_HTML = sliceTemplate('<div class="palette-overlay" id="palette"', '</div>\n\n<!-- Keyboard shortcuts');
+        document.body.insertAdjacentHTML('beforeend', PALETTE_HTML.replace(/\n\n<!-- Keyboard shortcuts$/, ''));
+    }
+    const chela = window.chela;
+
+    const newBtn = document.querySelector('.sidebar .sidebar-new-btn');
+    assert.ok(newBtn, 'no "New session" button (.sidebar-new-btn) inside the real .sidebar');
+    assert.match(newBtn.textContent, /New session/i, '.sidebar-new-btn has no "New session" text');
+    assert.match(newBtn.getAttribute('onclick') || '', /chela\.openNewMenu\(event\)/,
+        '.sidebar-new-btn is not wired to chela.openNewMenu — the SAME launch surface the old sidebar "+" used');
+
+    const jumpInput = document.getElementById('sidebar-jump-input');
+    assert.ok(jumpInput, 'no jump-to-session input (#sidebar-jump-input) inside the real .sidebar');
+    assert.ok(document.querySelector('.sidebar .sidebar-quick').contains(jumpInput),
+        '#sidebar-jump-input is not inside .sidebar-quick');
+
+    // Order: New session button comes before the jump-to search, both come before
+    // the Navigate (Wall/Work) nav — the mockup's own order.
+    const quick = document.querySelector('.sidebar .sidebar-quick');
+    const nav1 = document.querySelector('.sidebar #side-nav');
+    assert.ok(quick.contains(newBtn) && quick.querySelector('.sidebar-jump').contains(jumpInput));
+    assert.ok(
+        quick.compareDocumentPosition(nav1) & Node.DOCUMENT_POSITION_FOLLOWING,
+        '.sidebar-quick (New session + jump search) must come BEFORE #side-nav (Wall/Work), not after');
+
+    // WIRING: typing into the sidebar's own search opens the REAL palette overlay
+    // and renders real results off it — reusing the existing fuzzy jump, not a
+    // second implementation.
+    assert.equal(typeof chela.sidebarJumpInput, 'function', 'window.chela.sidebarJumpInput is missing');
+    const overlay = document.getElementById('palette');
+    assert.ok(overlay, 'no #palette overlay in the real document');
+    assert.ok(!overlay.classList.contains('open'), 'sanity: the palette starts closed');
+    jumpInput.value = 'w';
+    chela.sidebarJumpInput(jumpInput);
+    assert.ok(overlay.classList.contains('open'),
+        'typing into the sidebar search did not open the real #palette overlay');
+});
