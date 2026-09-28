@@ -106,6 +106,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { cssForViewport, DESKTOP } from './js_helpers/css_viewport.mjs';
 
 const CSS = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
@@ -866,7 +867,7 @@ test('the 4 status shapes match the approved mockup — triangle is needs-you, c
 test('CMX-377 round 3 GUARD (cascade-resolved): the pane header (.gs-head) and the sidebar resolve the SAME clip-path/border-radius per state — never a forked shape', () => {
     for (const state of ['working', 'waiting', 'idle', 'done']) {
         const dom = new JSDOM(
-            `<!doctype html><html><head><style>${CSS}</style></head><body>` +
+            `<!doctype html><html><head><style>${cssForViewport(CSS, DESKTOP)}</style></head><body>` +
             `<div class="sidebar"><span class="term-status-dot ${state}" id="side-dot"></span></div>` +
             `<div class="gs-head"><span class="term-status-dot ${state}" id="head-dot"></span></div>` +
             '</body></html>',

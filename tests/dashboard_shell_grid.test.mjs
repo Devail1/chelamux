@@ -36,6 +36,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { cssForViewport, DESKTOP } from './js_helpers/css_viewport.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const CSS = readFileSync(join(ROOT, 'static', 'style.css'), 'utf8');
@@ -83,7 +84,10 @@ test('CMX-377 round 2 GUARD: .canvas sits in the SAME grid row as .sidebar, in c
 // box position, which is the one thing this test does NOT need to ask).
 test('CMX-377 round 3 GUARD (cascade-resolved): .canvas RESOLVES to grid-row 1 / grid-column 2, however many rules target it', () => {
     const dom = new JSDOM(
-        `<!doctype html><html><head><style>${CSS}</style></head><body>` +
+        // round 5 (defeat_shapes #377d): flattened for a 1440px browser — jsdom skips
+        // @supports/@media-wrapped rules, so the raw CSS hid `@supports (display: grid)
+        // { .app > .canvas { grid-row: 2; } }` from this guard.
+        `<!doctype html><html><head><style>${cssForViewport(CSS, DESKTOP)}</style></head><body>` +
         '<div class="app"><aside class="sidebar"></aside><main class="canvas" id="canvas"></main></div>' +
         '</body></html>',
         { pretendToBeVisual: true });

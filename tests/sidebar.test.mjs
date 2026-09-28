@@ -955,8 +955,21 @@ test('CMX-377: the REAL sidebar renders a "New session" button and a jump-to-ses
     // between "the typed query reached _renderPalette" and "it didn't" (mutation 5
     // rendered the FULL unfiltered listing regardless of what was typed).
     util.setAgentsCache([]);
-    jumpInput.value = 'wall';   // "Wall" is a real registered view label (same query wallnav.test.mjs's own palette test uses)
     const { fireInlineHandler } = await import('./js_helpers/dashboard_dom.mjs');
+
+    // CMX-377 round 4 (judge mutation 4): the onfocus attribute was only checked
+    // for being non-empty, so `onfocus="void chela"` stayed green. RUN it — a
+    // real focus on the closed palette must open it — then close it again so
+    // the oninput leg below proves its own wiring from the same closed start.
+    jumpInput.value = '';
+    fireInlineHandler(jumpInput, 'onfocus');
+    assert.ok(overlay.classList.contains('open'),
+        'running #sidebar-jump-input\'s REAL onfocus attribute did not open the #palette overlay — focusing the ' +
+        'sidebar search while the palette is closed would do nothing');
+    chela.closePalette();
+    assert.ok(!overlay.classList.contains('open'), 'sanity: closePalette() closed the overlay again');
+
+    jumpInput.value = 'wall';   // "Wall" is a real registered view label (same query wallnav.test.mjs's own palette test uses)
     fireInlineHandler(jumpInput, 'oninput');
 
     assert.ok(overlay.classList.contains('open'),

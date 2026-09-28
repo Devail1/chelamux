@@ -253,6 +253,7 @@ import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py e
 import { tileState } from '../chela/dashboard/static/js/wallmodel.js';
 import { navViews } from '../chela/dashboard/static/js/viewreg.js';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
+import { cssForViewport } from './js_helpers/css_viewport.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const src = p => readFileSync(join(ROOT, p), 'utf8');
@@ -508,7 +509,11 @@ for (const ups of [1, 2]) {
 // shape a future rule uses to add the padding/margin back (defeat_shapes
 // #377b — a source-anchored check only ever pins one selector spelling).
 test('full-space Wall (CMX-377): .grid-stack resolves ZERO padding and ZERO margin on every side', () => {
-    const win = mountWithRealCss(WALL_FIXTURE(1), '', LOGICAL_PROP_CSS);
+    // round 5 (defeat_shapes #377d): flattened for the same 1920px desktop the vw
+    // substitution assumes — jsdom skips @supports/@media-wrapped rules otherwise.
+    // The populated-Wall variant (real panes with a real .gs-head) lives in
+    // tests/restyle_real_shell_css.test.mjs.
+    const win = mountWithRealCss(WALL_FIXTURE(1), '', cssForViewport(LOGICAL_PROP_CSS, { width: 1920, height: 1080 }));
     const cs = win.getComputedStyle(win.document.querySelector('.grid-stack'));
     for (const side of ['Top', 'Right', 'Bottom', 'Left']) {
         assert.equal(cs[`padding${side}`], '0px',
