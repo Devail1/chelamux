@@ -432,6 +432,17 @@
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
 </button>
 
+<!-- Phone-only "+" beside the menu fab (CMX-386): New session was two taps deep
+     on a phone once #529 removed the topbar (open the drawer, then its "New
+     session" button). This opens the SAME #new-menu directly, with the drawer
+     left CLOSED. It must live out here, not in the sidebar: the off-canvas
+     sidebar's `transform` would trap it off-screen (see .safety-float below).
+     Desktop hides it — .sidebar-new-btn is always on screen there. -->
+<button class="mobile-new-fab" id="btn-new-mobile" title="New session" aria-label="New session"
+        onclick="chela.openNewMenu(event)">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+</button>
+
 <!-- Always-on-top safety cluster (CMX-377): the native-status-feed outage
      warning and the active-shares kill-switch, floating above the canvas on
      every breakpoint. These used to sit in .topbar-actions, visible on every
