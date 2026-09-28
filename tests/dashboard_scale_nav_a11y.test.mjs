@@ -253,7 +253,7 @@ import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py e
 import { tileState } from '../chela/dashboard/static/js/wallmodel.js';
 import { navViews } from '../chela/dashboard/static/js/viewreg.js';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
-import { cssForViewport } from './js_helpers/css_viewport.mjs';
+import { cssForViewport, resolveVars } from './js_helpers/css_viewport.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const src = p => readFileSync(join(ROOT, p), 'utf8');
@@ -368,6 +368,19 @@ test('CMX-377: --ui-font styles the sidebar chrome; --font stays pinned to the t
     assert.doesNotMatch(termFont, /var\(--ui-font\)/,
         `.term-frame's font-family resolves to "${termFont}", which names --ui-font — the terminal frame has ` +
         'been swapped onto the chrome sans token, the exact regression this guard exists to catch');
+
+    // Round 6 (defeat_shapes #377e): NAMING var(--ui-font) is not BEING sans —
+    // `--ui-font: var(--font)` turned the whole chrome monospace with every
+    // name check above green. Resolve the token chain to the real family list.
+    const side = win.document.getElementById('side-el');
+    const term = win.document.getElementById('term-el');
+    const sideStack = resolveVars(win, side, sideFont);
+    const termStack = resolveVars(win, term, termFont);
+    assert.match(sideStack, /^['"]?Geist\b/,
+        `the sidebar's font resolves to "${sideStack}" — its first family is not the vendored Geist sans`);
+    assert.doesNotMatch(sideStack, /monospace/,
+        `the sidebar's font resolves to "${sideStack}" — a monospace stack; the chrome is not sans`);
+    assert.notEqual(sideStack, termStack, 'the sidebar and the terminal frame resolve the SAME font stack');
 });
 
 // --- TYPE SCALE (ticket claim 1) — CMX-257 round 10 (human directive on PR

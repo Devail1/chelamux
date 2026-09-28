@@ -106,7 +106,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
-import { cssForViewport, DESKTOP } from './js_helpers/css_viewport.mjs';
+import { cssForViewport, shapeSignature, DESKTOP } from './js_helpers/css_viewport.mjs';
 
 const CSS = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
@@ -872,15 +872,14 @@ test('CMX-377 round 3 GUARD (cascade-resolved): the pane header (.gs-head) and t
             `<div class="gs-head"><span class="term-status-dot ${state}" id="head-dot"></span></div>` +
             '</body></html>',
             { pretendToBeVisual: true });
-        const sideCs = dom.window.getComputedStyle(dom.window.document.getElementById('side-dot'));
-        const headCs = dom.window.getComputedStyle(dom.window.document.getElementById('head-dot'));
-        assert.equal(headCs.clipPath, sideCs.clipPath,
-            `state "${state}": the pane header resolves clip-path "${headCs.clipPath}", the sidebar resolves ` +
-            `"${sideCs.clipPath}" — the pane header has forked onto a different shape dialect for this state`);
-        assert.equal(headCs.borderRadius, sideCs.borderRadius,
-            `state "${state}": the pane header resolves border-radius "${headCs.borderRadius}", the sidebar ` +
-            `resolves "${sideCs.borderRadius}" — the pane header has forked onto a different shape dialect for ` +
-            'this state');
+        // round 6 (defeat_shapes #377e): the whole silhouette — clip, four radii
+        // (longhands), fill-or-not, per-side border — not just clip-path +
+        // border-radius, which a filled-in idle ring passes unchanged.
+        const w = dom.window;
+        assert.deepEqual(shapeSignature(w, w.document.getElementById('head-dot')),
+            shapeSignature(w, w.document.getElementById('side-dot')),
+            `state "${state}": the pane header resolves a different silhouette from the sidebar — the pane header ` +
+            'has forked onto a different shape dialect for this state');
     }
 });
 

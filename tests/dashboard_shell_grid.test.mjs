@@ -36,7 +36,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
-import { cssForViewport, DESKTOP } from './js_helpers/css_viewport.mjs';
+import { cssForViewport, DESKTOP, DESKTOP_DARK } from './js_helpers/css_viewport.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const CSS = readFileSync(join(ROOT, 'static', 'style.css'), 'utf8');
@@ -83,20 +83,29 @@ test('CMX-377 round 2 GUARD: .canvas sits in the SAME grid row as .sidebar, in c
 // `grid-row`/`grid-column`; it just never computes the resulting on-screen
 // box position, which is the one thing this test does NOT need to ask).
 test('CMX-377 round 3 GUARD (cascade-resolved): .canvas RESOLVES to grid-row 1 / grid-column 2, however many rules target it', () => {
-    const dom = new JSDOM(
-        // round 5 (defeat_shapes #377d): flattened for a 1440px browser — jsdom skips
-        // @supports/@media-wrapped rules, so the raw CSS hid `@supports (display: grid)
-        // { .app > .canvas { grid-row: 2; } }` from this guard.
-        `<!doctype html><html><head><style>${cssForViewport(CSS, DESKTOP)}</style></head><body>` +
-        '<div class="app"><aside class="sidebar"></aside><main class="canvas" id="canvas"></main></div>' +
-        '</body></html>',
-        { pretendToBeVisual: true });
-    const cs = dom.window.getComputedStyle(dom.window.document.getElementById('canvas'));
-    assert.equal(cs.gridRow, '1',
-        `.canvas resolves to grid-row "${cs.gridRow}", not "1" — some rule (however it is spelled or scoped) ` +
-        'wins the cascade and places .canvas on row 2+, recreating the off-screen-Wall bug (PR #529 round 2) ' +
-        'a source-text-only guard cannot see once the winning rule uses a different selector string');
-    assert.equal(cs.gridColumn, '2',
-        `.canvas resolves to grid-column "${cs.gridColumn}", not "2" — .canvas is not actually placed beside ` +
-        'the sidebar once the cascade is resolved');
+    // round 6 (defeat_shapes #377e): read the LONGHANDS, under both colour schemes.
+    // jsdom never folds `grid-row-start: 2` back into `gridRow`, so round 5's
+    // shorthand read stayed "1" under a longhand override every browser applies;
+    // cssForViewport expands the shorthands so the cascade compares like with like.
+    for (const vp of [DESKTOP, DESKTOP_DARK]) {
+        const dom = new JSDOM(
+            // round 5 (defeat_shapes #377d): flattened for a 1440px browser — jsdom skips
+            // @supports/@media-wrapped rules, so the raw CSS hid `@supports (display: grid)
+            // { .app > .canvas { grid-row: 2; } }` from this guard.
+            `<!doctype html><html><head><style>${cssForViewport(CSS, vp)}</style></head><body>` +
+            '<div class="app"><aside class="sidebar"></aside><main class="canvas" id="canvas"></main></div>' +
+            '</body></html>',
+            { pretendToBeVisual: true });
+        const cs = dom.window.getComputedStyle(dom.window.document.getElementById('canvas'));
+        const [rs, re, cs0, ce] = ['grid-row-start', 'grid-row-end', 'grid-column-start', 'grid-column-end'].map(p => cs.getPropertyValue(p));
+        const at = vp.colorScheme || 'light';
+        assert.equal(rs, '1',
+            `[${at}] .canvas resolves grid-row-start "${rs}", not "1" — some rule (however it is spelled, scoped, ` +
+            'wrapped or written as a longhand) wins the cascade and places .canvas on row 2+, recreating the ' +
+            'off-screen-Wall bug (PR #529 round 2)');
+        assert.match(re, /^(auto|2|span 1)$/, `[${at}] .canvas resolves grid-row-end "${re}" — no longer exactly row 1`);
+        assert.equal(cs0, '2',
+            `[${at}] .canvas resolves grid-column-start "${cs0}", not "2" — .canvas is not actually placed beside the sidebar`);
+        assert.match(ce, /^(auto|3|span 1)$/, `[${at}] .canvas resolves grid-column-end "${ce}" — no longer exactly column 2`);
+    }
 });

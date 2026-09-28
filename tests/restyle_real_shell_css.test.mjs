@@ -27,7 +27,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { bootDashboardDom, sliceTemplate, flush } from './js_helpers/dashboard_dom.mjs';
-import { cssForViewport, DESKTOP } from './js_helpers/css_viewport.mjs';
+import { cssForViewport, resolveVars, shapeSignature, DESKTOP, DESKTOP_DARK } from './js_helpers/css_viewport.mjs';
 
 const CSS = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
 
@@ -78,21 +78,40 @@ before(async () => {
     await terminals.renderTerminals();   // real paneHead() markup, real status tick
     nav.renderSidebarAgents(AGENTS);     // real sidebar rows
     await flush();
-    const style = win.document.createElement('style');
-    style.textContent = cssForViewport(CSS, DESKTOP);
-    win.document.head.appendChild(style);
+    sheet = win.document.createElement('style');
+    win.document.head.appendChild(sheet);
 });
 
-test('real shell @1440: .canvas RESOLVES to grid-row 1 / grid-column 2 — at-rule-wrapped overrides included', () => {
+// Round 6: every guard below runs under BOTH colour schemes — an override
+// wrapped in `@media (prefers-color-scheme: dark)` is exactly as real as one in
+// `@supports`, and a light-only mount would drop it (judge note, round 5).
+let sheet;
+const SCHEMES = [['light', DESKTOP], ['dark', DESKTOP_DARK]];
+function applyScheme(vp) { sheet.textContent = cssForViewport(CSS, vp); }
+
+test('real shell @1440: .canvas RESOLVES to grid row 1 / column 2 (LONGHANDS) — at-rule-wrapped overrides included, both schemes', () => {
     const canvas = win.document.getElementById('canvas');
     assert.ok(canvas.closest('.app') && win.document.querySelector('.app > .sidebar'),
         'sanity: the real .app > .sidebar + .canvas shell did not mount');
-    const cs = win.getComputedStyle(canvas);
-    assert.equal(cs.gridRow, '1',
-        `.canvas resolves to grid-row "${cs.gridRow}" in a 1440px browser, not "1" — some rule (possibly inside an ` +
-        '@supports/@media block) places it on row 2+: the Wall renders off-screen below the sidebar (PR #529 round 2)');
-    assert.equal(cs.gridColumn, '2',
-        `.canvas resolves to grid-column "${cs.gridColumn}" in a 1440px browser, not "2" — it is not beside the sidebar`);
+    // Round 6 (defeat_shapes #377e): read the LONGHANDS. jsdom never folds a
+    // `grid-row-start: 2` override back into `gridRow`, so the shorthand read
+    // "1" while every browser placed the Wall on row 2. cssForViewport expands
+    // every grid-row/-column/-area shorthand, so the cascade compares like with like.
+    for (const [scheme, vp] of SCHEMES) {
+        applyScheme(vp);
+        const cs = win.getComputedStyle(canvas);
+        const at = `${scheme} scheme, 1440px`;
+        assert.equal(cs.getPropertyValue('grid-row-start'), '1',
+            `[${at}] .canvas resolves grid-row-start "${cs.getPropertyValue('grid-row-start')}", not "1" — some rule ` +
+            '(a longhand, or one inside an @supports/@media block) places it on row 2+: the Wall renders off-screen ' +
+            'below the sidebar (PR #529 round 2)');
+        assert.match(cs.getPropertyValue('grid-row-end'), /^(auto|2|span 1)$/,
+            `[${at}] .canvas resolves grid-row-end "${cs.getPropertyValue('grid-row-end')}" — it no longer occupies exactly row 1`);
+        assert.equal(cs.getPropertyValue('grid-column-start'), '2',
+            `[${at}] .canvas resolves grid-column-start "${cs.getPropertyValue('grid-column-start')}", not "2" — it is not beside the sidebar`);
+        assert.match(cs.getPropertyValue('grid-column-end'), /^(auto|3|span 1)$/,
+            `[${at}] .canvas resolves grid-column-end "${cs.getPropertyValue('grid-column-end')}" — it no longer occupies exactly column 2`);
+    }
 });
 
 test('real Wall @1440: the POPULATED .grid-stack (real panes, real .gs-head) resolves zero padding and zero margin', () => {
@@ -100,29 +119,72 @@ test('real Wall @1440: the POPULATED .grid-stack (real panes, real .gs-head) res
     assert.ok(grid, 'sanity: the real renderTerminals did not build #term-stage > .grid-stack');
     assert.equal(grid.querySelectorAll('.grid-stack-item .gs-head').length, AGENTS.length,
         'sanity: the Wall under test is not populated with one real pane header per agent');
-    const cs = win.getComputedStyle(grid);
-    for (const side of ['Top', 'Right', 'Bottom', 'Left']) {
-        assert.equal(cs[`padding${side}`], '0px',
-            `the real Wall's .grid-stack padding-${side.toLowerCase()} is ${cs[`padding${side}`]} — no longer full-space`);
-        assert.equal(cs[`margin${side}`], '0px',
-            `the real Wall's .grid-stack margin-${side.toLowerCase()} is ${cs[`margin${side}`]} — no longer full-space`);
+    for (const [scheme, vp] of SCHEMES) {
+        applyScheme(vp);
+        const cs = win.getComputedStyle(grid);
+        for (const side of ['top', 'right', 'bottom', 'left']) {
+            for (const box of ['padding', 'margin']) {
+                const v = resolveVars(win, grid, cs.getPropertyValue(`${box}-${side}`));
+                assert.match(v, /^0(px)?$/,
+                    `[${scheme}] the real Wall's .grid-stack ${box}-${side} is "${v}" — no longer full-space`);
+            }
+        }
     }
 });
 
-test('real DOM @1440: each state\'s REAL pane-header dot resolves the SAME clip-path/border-radius as its REAL sidebar row dot', () => {
-    for (const [wid, state] of Object.entries(STATE_OF)) {
-        const name = AGENTS.find(a => a.window_id === wid).name;
-        const head = win.document.querySelector(`.grid-stack-item .gs-head .term-status-dot[data-wid="${wid}"]`);
-        const row = win.document.querySelector(`#sidebar-agents .agent-row[data-agent="${name}"] > .term-status-dot`);
-        assert.ok(head, `sanity: no real pane-header dot for ${wid}`);
-        assert.ok(row, `sanity: no real sidebar row dot for ${name}`);
-        assert.ok(head.classList.contains(state), `sanity: the real status tick did not put "${state}" on ${wid}'s header dot (${head.className})`);
-        assert.ok(row.classList.contains(state), `sanity: the real sidebar did not put "${state}" on ${name}'s row dot (${row.className})`);
-        const h = win.getComputedStyle(head);
-        const r = win.getComputedStyle(row);
-        assert.equal(h.clipPath, r.clipPath,
-            `state "${state}": pane header resolves clip-path "${h.clipPath}", sidebar "${r.clipPath}" — the header forked its shape`);
-        assert.equal(h.borderRadius, r.borderRadius,
-            `state "${state}": pane header resolves border-radius "${h.borderRadius}", sidebar "${r.borderRadius}" — the header forked its shape`);
+test('real DOM @1440: each state\'s REAL pane-header dot resolves the SAME silhouette (clip, radii, fill, outline) as its REAL sidebar row dot', () => {
+    // Round 6 (defeat_shapes #377e): clip-path + border-radius alone is not the
+    // silhouette. Idle's hollow RING is `background: transparent` + a border;
+    // a header-scoped `background: var(--text-dim); border: none` fills it into
+    // working's solid dot with both of those unchanged. shapeSignature compares
+    // clip, all four radii (longhands), fill-or-not and per-side border
+    // width/style — shape, still not colour.
+    for (const [scheme, vp] of SCHEMES) {
+        applyScheme(vp);
+        for (const [wid, state] of Object.entries(STATE_OF)) {
+            const name = AGENTS.find(a => a.window_id === wid).name;
+            const head = win.document.querySelector(`.grid-stack-item .gs-head .term-status-dot[data-wid="${wid}"]`);
+            const row = win.document.querySelector(`#sidebar-agents .agent-row[data-agent="${name}"] > .term-status-dot`);
+            assert.ok(head, `sanity: no real pane-header dot for ${wid}`);
+            assert.ok(row, `sanity: no real sidebar row dot for ${name}`);
+            assert.ok(head.classList.contains(state), `sanity: the real status tick did not put "${state}" on ${wid}'s header dot (${head.className})`);
+            assert.ok(row.classList.contains(state), `sanity: the real sidebar did not put "${state}" on ${name}'s row dot (${row.className})`);
+            assert.deepEqual(shapeSignature(win, head), shapeSignature(win, row),
+                `[${scheme}] state "${state}": the pane header's status mark resolves a different silhouette from the ` +
+                'sidebar row\'s — the header forked its shape');
+        }
+    }
+});
+
+test('real DOM @1440: the four states resolve four DISTINCT silhouettes (a greyscale capture can tell them apart)', () => {
+    applyScheme(DESKTOP);
+    const sigs = Object.entries(STATE_OF).map(([wid, state]) => [state, JSON.stringify(shapeSignature(win,
+        win.document.querySelector(`.grid-stack-item .gs-head .term-status-dot[data-wid="${wid}"]`)))]);
+    for (let a = 0; a < sigs.length; a++) {
+        for (let b = a + 1; b < sigs.length; b++) {
+            assert.notEqual(sigs[a][1], sigs[b][1],
+                `states "${sigs[a][0]}" and "${sigs[b][0]}" resolve the SAME silhouette — without colour they are indistinguishable`);
+        }
+    }
+});
+
+test('real DOM @1440: --ui-font RESOLVES to a sans stack on the sidebar, distinct from the terminal frame\'s monospace', () => {
+    // Round 6 (defeat_shapes #377e): naming var(--ui-font) is not being sans —
+    // `--ui-font: var(--font)` made the whole chrome monospace with the name
+    // check green. Resolve the token chain to the actual family list.
+    const frame = win.document.querySelector('.grid-stack-item .term-frame');
+    const side = win.document.querySelector('#sidebar-agents .agent-row');
+    assert.ok(frame, 'sanity: no real .term-frame rendered');
+    assert.ok(side, 'sanity: no real sidebar row rendered');
+    for (const [scheme, vp] of SCHEMES) {
+        applyScheme(vp);
+        const sideFam = resolveVars(win, side, win.getComputedStyle(side).fontFamily);
+        const termFam = resolveVars(win, frame, win.getComputedStyle(frame).fontFamily);
+        assert.match(sideFam, /^['"]?Geist\b/,
+            `[${scheme}] the sidebar's font resolves to "${sideFam}" — its first family is not the vendored Geist sans`);
+        assert.match(sideFam, /\bsans-serif\s*$/, `[${scheme}] the sidebar's font stack "${sideFam}" does not end in a sans-serif generic`);
+        assert.doesNotMatch(sideFam, /monospace/, `[${scheme}] the sidebar's font stack "${sideFam}" is monospace — chrome is not sans`);
+        assert.match(termFam, /monospace\s*$/, `[${scheme}] .term-frame's font stack "${termFam}" is not a monospace stack`);
+        assert.notEqual(sideFam, termFam, `[${scheme}] the sidebar and the terminal frame resolve the SAME font stack`);
     }
 });
