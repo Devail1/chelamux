@@ -4087,6 +4087,40 @@ def _refused(error: str | None, refused: bool = False) -> dict:
 # Workflows currently refused by the workspace fence — so the ERROR is logged on the
 # EDGE, not once per tick forever (a 60s drumbeat is how an operator learns to skip logs).
 _escaped: set[str] = set()
+# Workflows whose CMX-384 re-key has run in this process — see `_rekey_legacy_raw_ids`.
+_rekeyed: set[str] = set()
+
+
+def _rekey_legacy_raw_ids(conn: sqlite3.Connection, workflow_path: str, mapping: dict[str, str]) -> int:
+    """CMX-384 migration: move each ``runs`` row keyed by a still-open task's OLD raw-line id
+    onto its bare-title id, in ONE transaction. Returns the number of rows re-keyed.
+
+    Before CMX-384 a marker-carrying open bullet hashed its raw line (``<!-- depends: … -->``
+    included). A run claimed under that id, left alone, would read as "removed from source"
+    on the first tick after the upgrade and be struck ``done`` while the same bullet — now
+    under its new id — got claimed a second time. Only rows of THIS workflow move; a row
+    already sitting on the new id is left as it is (never overwritten) and logged.
+    """
+    if not mapping:
+        return 0
+    moved = 0
+    with conn:
+        for old, new in sorted(mapping.items()):
+            row = conn.execute(
+                "SELECT status FROM runs WHERE task_id=? AND workflow_path=?", (old, workflow_path)
+            ).fetchone()
+            if row is None:
+                continue
+            if conn.execute("SELECT 1 FROM runs WHERE task_id=?", (new,)).fetchone():
+                log.warning("CMX-384 re-key: run %s NOT moved to %s — a row already holds that id",
+                            old, new)
+                continue
+            conn.execute("UPDATE runs SET task_id=? WHERE task_id=? AND workflow_path=?",
+                         (new, old, workflow_path))
+            log.warning("CMX-384 re-key: run %s (%s) → %s (open-task ids now hash the bare title)",
+                        old, row[0], new)
+            moved += 1
+    return moved
 
 
 def tick(workflow_path: str | Path) -> dict:
@@ -4180,6 +4214,14 @@ def tick(workflow_path: str | Path) -> dict:
     merged_in_tick = 0  # awaiting_review → done transitions; fires hooks.after_done
 
     with _db() as conn:
+        # CMX-384, once per process per workflow and only off a GOOD read: an in-flight run
+        # keyed by an open task's pre-CMX-384 raw-line id must move to its new id BEFORE
+        # anything below reads absence-from-open_ids as "removed from source".
+        legacy = getattr(source, "legacy_raw_ids", None)
+        if legacy is not None and not tracker_read_failed and str(wf.path) not in _rekeyed:
+            _rekey_legacy_raw_ids(conn, str(wf.path), legacy(open_tasks))
+            _rekeyed.add(str(wf.path))
+
         # 0. Refresh pr_state + pr_mergeable for any row whose PR could still
         # change. Skips rows whose pr_state is already terminal
         # ('merged'/'closed') — gh's GraphQL is cheap but not free, and the

@@ -112,3 +112,78 @@ def test_depends_does_not_disturb_the_blocked_marker(tmp_path):
     text = "- [ ] a task <!-- blocked: reason -->\n"
     tasks = _source(tmp_path).tasks_from_text(text)
     assert tasks == []
+
+
+# ── CMX-384: every bullet's id hashes its BARE title ─────────────────────────────
+
+
+def test_an_unmarked_tasks_id_is_byte_for_byte_the_raw_title_hash(tmp_path):
+    # ⭐ The case that must be ACCEPTED: no mass re-key. An unmarked bullet's id is
+    # exactly what it was before CMX-384 — the hash of its (whole) title.
+    tasks = _source(tmp_path).tasks_from_text("- [ ] a plain task\n")
+    assert tasks[0].id == _id("a plain task")
+
+
+def test_a_marker_carrying_tasks_id_is_its_bare_title_hash(tmp_path):
+    raw = 'follow-up task <!-- depends: "prerequisite task" -->'
+    tasks = _source(tmp_path).tasks_from_text(f"- [ ] {raw}\n- [ ] prerequisite task\n")
+    follow_up = next(t for t in tasks if t.title.startswith("follow-up"))
+    assert follow_up.id == _id("follow-up task")
+    assert follow_up.id != _id(raw)
+
+
+def test_a_three_hop_chain_resolves_each_edge_to_a_real_task(tmp_path):
+    text = (
+        "- [ ] task A\n"
+        '- [ ] task B <!-- depends: "task A" -->\n'
+        '- [ ] task C <!-- depends: "task B" -->\n'
+    )
+    by_title = {t.title.split(" <!--")[0]: t for t in _source(tmp_path).tasks_from_text(text)}
+    assert by_title["task B"].depends == (by_title["task A"].id,)
+    assert by_title["task C"].depends == (by_title["task B"].id,)
+
+
+def test_a_struck_marker_carrying_task_is_closed_under_its_bare_id(tmp_path):
+    # C's `depends: "task B"` is satisfied only if B's `[x]` line yields B's bare id.
+    closed = _source(tmp_path).closed_ids_from_text('- [x] task B <!-- depends: "task A" -->\n')
+    assert closed == {_id("task B")}
+
+
+def test_strike_lines_finds_a_marker_carrying_task_by_its_bare_id():
+    from chela.sources.markdown import strike_lines
+
+    text = '- [ ] task B <!-- depends: "task A" -->\n'
+    new, results = strike_lines(text, TRACKER, [_id("task B")])
+    assert results == {_id("task B"): "struck"}
+    assert new == '- [x] task B <!-- depends: "task A" -->\n'
+
+
+def test_a_depends_marker_quoted_in_inline_code_is_not_a_marker(tmp_path):
+    # The CMX-384 bullet itself quoted the syntax in backticks and was parsed as naming a
+    # task called "…" — blocked forever. Prose about a marker is not a marker.
+    text = '- [ ] document the `<!-- depends: "…" -->` syntax\n'
+    assert _source(tmp_path).tasks_from_text(text)[0].depends == ()
+
+
+def test_a_real_marker_after_a_quoted_one_still_counts(tmp_path):
+    text = '- [ ] explain `<!-- depends: "x" -->` <!-- depends: "real one" -->\n'
+    assert _source(tmp_path).tasks_from_text(text)[0].depends == (_id("real one"),)
+
+
+def test_legacy_raw_ids_maps_only_marker_carrying_tasks(tmp_path):
+    raw = 'task B <!-- depends: "task A" -->'
+    src = _source(tmp_path)
+    tasks = src.tasks_from_text(f"- [ ] task A\n- [ ] {raw}\n")
+    assert src.legacy_raw_ids(tasks) == {_id(raw): _id("task B")}
+
+
+def test_strike_lines_reports_an_already_struck_marker_carrying_task_under_its_bare_id():
+    # 🔴 GUARD (judge round 1, mutation 1): the `[x]` branch of strike_lines must hash the
+    # BARE title too. Corrupt it back to the raw line → the bare id is never matched, so
+    # closing an already-struck marker-carrying task reports nothing for it → RED.
+    from chela.sources.markdown import strike_lines
+
+    text = '- [x] task B <!-- depends: "task A" -->\n'
+    new, results = strike_lines(text, TRACKER, [_id("task B")])
+    assert results == {_id("task B"): "already"}
+    assert new == text
