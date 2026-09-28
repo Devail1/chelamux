@@ -562,3 +562,53 @@ def test_rekey_is_scoped_to_its_workflow_and_never_overwrites(repo, monkeypatch)
         ids = {r[0] for r in conn.execute("SELECT task_id FROM runs")}
     assert moved == 1
     assert ids == {"new1", "old2", "new2", "old3"}
+
+
+def test_a_failed_tracker_read_does_not_burn_the_once_per_process_rekey(repo, spawns, monkeypatch):
+    # 🔴 GUARD (judge round 1, mutation 2): the re-key is once per process, so it must run
+    # only off a GOOD read. Corrupt by dropping `not tracker_read_failed and` → the failed
+    # first tick (open_tasks == [], so an EMPTY mapping) spends the slot, the good second
+    # tick never re-keys, and the run under B's raw-line id reconciles away as "removed"
+    # while B is claimed a second time under its new id → RED.
+    from chela.sources.markdown import _title_id
+
+    monkeypatch.setattr(dispatcher, "_rekeyed", set())
+    raw = 'task B <!-- depends: "task A" -->'
+    _seed(repo, f"- [x] task A\n- [ ] {raw}\n")
+    wf_path = str((repo / "WORKFLOW.md").resolve())
+    old, new = _title_id("TODO.md", raw), _title_id("TODO.md", "task B")
+    with dispatcher._db() as conn:
+        _insert_run(conn, old, wf_path)
+
+    real_get_source = dispatcher.get_source
+    reads = {"n": 0}
+
+    def get_source(wf):
+        src = real_get_source(wf)
+        reads["n"] += 1
+        if reads["n"] == 1:                       # the FIRST tick's read fails
+            def failed_read():
+                src.read_failed = True
+                return []
+            src.list_open_tasks = failed_read
+        return src
+
+    # `_claim_order` re-reads origin and would claim on the failed tick anyway — hold it
+    # there, so this test sees only the re-key's effect.
+    real_claim_order = dispatcher._claim_order
+
+    def claim_order(wf, source, on_disk):
+        return [] if reads["n"] == 1 else real_claim_order(wf, source, on_disk)
+
+    monkeypatch.setattr(dispatcher, "get_source", get_source)
+    monkeypatch.setattr(dispatcher, "_claim_order", claim_order)
+    assert dispatcher.tick(repo / "WORKFLOW.md")["tracker_read_failed"] is True
+    with dispatcher._db() as conn:                # nothing moved off a failed read
+        assert {r[0] for r in conn.execute("SELECT task_id FROM runs")} == {old}
+
+    assert dispatcher.tick(repo / "WORKFLOW.md")["tracker_read_failed"] is False
+
+    with dispatcher._db() as conn:
+        ids = {r[0]: r[1] for r in conn.execute("SELECT task_id, status FROM runs")}
+    assert ids == {new: "running"}
+    assert spawns.titles == []

@@ -175,3 +175,15 @@ def test_legacy_raw_ids_maps_only_marker_carrying_tasks(tmp_path):
     src = _source(tmp_path)
     tasks = src.tasks_from_text(f"- [ ] task A\n- [ ] {raw}\n")
     assert src.legacy_raw_ids(tasks) == {_id(raw): _id("task B")}
+
+
+def test_strike_lines_reports_an_already_struck_marker_carrying_task_under_its_bare_id():
+    # 🔴 GUARD (judge round 1, mutation 1): the `[x]` branch of strike_lines must hash the
+    # BARE title too. Corrupt it back to the raw line → the bare id is never matched, so
+    # closing an already-struck marker-carrying task reports nothing for it → RED.
+    from chela.sources.markdown import strike_lines
+
+    text = '- [x] task B <!-- depends: "task A" -->\n'
+    new, results = strike_lines(text, TRACKER, [_id("task B")])
+    assert results == {_id("task B"): "already"}
+    assert new == text
