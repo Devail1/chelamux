@@ -210,6 +210,56 @@ def test_a_done_run_whose_tracker_cannot_be_read_is_refused(tmp_path):
     result = _reopen(_gh(head="freshfix0002"))
 
     assert result["ok"] is False
+    assert "tracker could not be read" in result["error"]
+    assert dispatcher.resolve_run(TASK_ID)["status"] == "done"
+
+
+# Every fixture above is a loadable MARKDOWN workflow, so the two arms below were never
+# reached: had either refusal been folded into `return None`, the run would have fallen
+# straight through to the new-commit gate — which the moved head PASSES — and reopened.
+# So each fixture here also moves the head: `ok is True` is the result a missing arm gives.
+
+GH_ISSUES_WORKFLOW = """---
+project_key: CMX
+tracker:
+  kind: gh_issues
+  repo: o/r
+  require_label: ready-for-agent
+workspace:
+  root: {root}
+  base_branch: dev
+---
+seed
+"""
+
+
+def test_a_done_run_on_a_tracker_kind_with_no_struck_line_is_refused(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "WORKFLOW.md").write_text(GH_ISSUES_WORKFLOW.format(root=tmp_path / "wt"))
+    with dispatcher._db() as conn:
+        _row(conn, repo)
+    result = _reopen(_gh(head="freshfix0002"))
+
+    assert result["ok"] is False, result
+    assert "no struck-line" in result["error"]
+    assert dispatcher.resolve_run(TASK_ID)["status"] == "done"
+
+
+@pytest.mark.parametrize("breakage", ["missing", "unknown-kind"])
+def test_a_done_run_whose_workflow_cannot_be_loaded_is_refused(tmp_path, breakage):
+    repo = _repo(tmp_path)
+    wf = repo / "WORKFLOW.md"
+    if breakage == "missing":
+        wf.unlink()
+    else:
+        wf.write_text(WORKFLOW.format(root=tmp_path / "wt").replace("kind: markdown",
+                                                                    "kind: jira"))
+    with dispatcher._db() as conn:
+        _row(conn, repo)
+    result = _reopen(_gh(head="freshfix0002"))
+
+    assert result["ok"] is False, result
+    assert "tracker could not be loaded" in result["error"]
     assert dispatcher.resolve_run(TASK_ID)["status"] == "done"
 
 
