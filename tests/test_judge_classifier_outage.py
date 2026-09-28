@@ -134,6 +134,25 @@ def test_an_outage_followed_by_a_successful_judge_run_is_not_an_outage(tmp_path)
     assert not dispatcher._transcript_shows_classifier_outage(path)
 
 
+def test_list_form_tool_result_content_is_read_too(tmp_path):
+    """Tool results may carry their text as a list of parts, not a string. The outage in
+    that form must still be seen; otherwise the judge falls back to the 60-min timeout."""
+    sig = ("The server-side auto mode classifier gave no verdict (error), so auto mode "
+           "cannot determine the safety of Bash.")
+    recs = [
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_list", "name": "Bash", "input": {"command": "ls"}}]},
+         "uuid": "u-l", "timestamp": "2026-09-28T11:40:00.000Z"},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_list", "is_error": True,
+             "content": [{"type": "text", "text": sig}]}]},
+         "uuid": "u-l-res", "timestamp": "2026-09-28T11:40:01.000Z"},
+    ]
+    path = tmp_path / "t.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    assert dispatcher._transcript_shows_classifier_outage(path)
+
+
 def _eisdir_record() -> list[dict]:
     """A LATER tool call that failed for an ordinary reason (a Read of a directory).
 
@@ -259,6 +278,42 @@ def test_a_live_judge_lock_still_holds_an_outage_reap(tmp_path, projects):
     assert handed == 0
     kill.assert_not_called()
     assert _state() == (judge.J_RUNNING, 0, 0)
+
+
+@pytest.mark.parametrize("arm", ["timeout", "login_expired", "vanished"])
+def test_every_other_reap_arm_writes_no_backoff_stamp(tmp_path, arm):
+    """Only the outage arm stamps `judge_retry_after`. A stamp on any other arm would make
+    the inbox call it an outage and the trigger back it off. Each arm is proven to have
+    actually FIRED (handed == 1, its own reason and no-verdict bit), so a NULL here is the
+    arm's own write, not a row the watchdog never touched. Corrupt the stamp's condition to
+    `if now is not None` ⇒ RED on all three."""
+    wf = _wf(tmp_path)
+    now = dispatcher._parse_ts(dispatcher._now())
+    started = now - timedelta(seconds=dispatcher.JUDGE_TIMEOUT_SECONDS + 60) \
+        if arm == "timeout" else now
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), judge_state=judge.J_RUNNING,
+                 judge_sha="cafe1234", judge_started_at=started.isoformat(),
+                 judge_window_id=JUDGE_WID)
+    window = judge.judge_window_name("test-1")
+    pane = "Login expired · Please run /login\n❯ " if arm == "login_expired" else "❯ "
+    live = set() if arm == "vanished" else {window}
+    with dispatcher._db() as conn:
+        with patch.object(dispatcher, "_capture_pane", return_value=pane), \
+             patch.object(dispatcher, "_agent_status", return_value="idle"), \
+             patch.object(dispatcher, "_judge_hit_classifier_outage", return_value=False), \
+             patch.object(dispatcher, "_kill_windows_named"), \
+             patch.object(dispatcher, "remove_worktree", return_value=True), \
+             patch.object(judge, "judge_lock_live", return_value=False):
+            handed = dispatcher._judge_watchdog(conn, wf, live_windows=live)
+        conn.commit()
+
+    assert handed == 1
+    r = dispatcher.resolve_run("abc123")
+    assert r["judge_state"] == judge.J_CANNOT_VERIFY
+    assert r["judge_no_verdict"] == (0 if arm == "timeout" else 1)
+    assert r["judge_detail"] != REASON
+    assert r["judge_retry_after"] is None
 
 
 # --- the backoff at the trigger -----------------------------------------------------------
