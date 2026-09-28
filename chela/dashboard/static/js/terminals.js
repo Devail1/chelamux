@@ -501,13 +501,14 @@ function _seedSharedFromAgents(agents) {
 }
 
 // --- global active-shares indicator + kill-switch --------------------------
-// A persistent topbar pill (#btn-shares) shown on EVERY tab + mobile whenever any
-// session is shared — because a forgotten share is an exposed live terminal behind
-// a public link (SAFETY). Tapping opens a sheet listing each active share with a
-// prominent Stop + a Stop-All, wired to the existing _stopShare(). The topbar
-// button is best-effort (driven by _sharedWids, so once shown it persists across
-// tabs); opening the sheet reconciles against the server truth (/api/term/shared)
-// so the kill list is always accurate at the moment it matters.
+// A persistent pill (#btn-shares, floating in .safety-float — CMX-377) shown on
+// EVERY tab + mobile whenever any session is shared — because a forgotten share
+// is an exposed live terminal behind a public link (SAFETY). Tapping opens a
+// sheet listing each active share with a prominent Stop + a Stop-All, wired to
+// the existing _stopShare(). The button is best-effort (driven by _sharedWids, so
+// once shown it persists across tabs); opening the sheet reconciles against the
+// server truth (/api/term/shared) so the kill list is always accurate at the
+// moment it matters.
 function _renderSharesIndicator() {
     const btn = document.getElementById('btn-shares');
     if (!btn) return;

@@ -32,7 +32,9 @@ let _detailAgent = null;    // window name focused in the agent-detail view
 
 // --- Sidebar: one control, two behaviours ----------------------------------
 // PHONE (≤768px): the 264px sidebar is off-canvas (see the @media block in
-// style.css); the topbar hamburger slides it in over a scrim.
+// style.css); .mobile-menu-fab's hamburger slides it in over a scrim (CMX-377 —
+// there is no topbar; the sidebar's OWN #btn-menu toggle is unreachable while
+// the drawer is closed, which is exactly why the floating fab exists).
 // DESKTOP: the sidebar is a static grid column, so there is nothing to slide —
 // the SAME control collapses it to an icon rail instead, handing the width to the
 // canvas. The state is persisted (a collapse that forgets itself on reload is an
@@ -72,6 +74,13 @@ function toggleSidebar(force) {
     const open = (force === undefined) ? !sb.classList.contains('open') : !!force;
     sb.classList.toggle('open', open);
     if (scrim) scrim.classList.toggle('open', open);
+    // CMX-377: .mobile-menu-fab (the off-canvas drawer's phone-only opener,
+    // since the sidebar's own toggle is unreachable while it's closed) hides
+    // itself off this body class while the drawer is open, so the two
+    // triggers never render on top of each other.
+    document.body.classList.toggle('sidebar-open', open);
+    const fab = document.getElementById('btn-menu-mobile');
+    if (fab) fab.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
 // Navigating dismisses the mobile drawer. It must NOT collapse the desktop rail —
@@ -1565,11 +1574,12 @@ function hideNewMenu() {
     if (m) m.style.display = 'none';
 }
 
-// Topbar primary menu (Lucide more-vertical): folds the three former topbar
-// primaries — Jump to… (#btn-palette), New… (#btn-new), overflow (#btn-overflow)
-// — behind ONE button (CMX-109 / CMX-108 Part A re-filed; cmx-108/#122's WALL
-// toolbar fold — grid presets + lock behind openLayoutMenu — was reverted in
-// CMX-111: Liav never asked for that one folded, only this topbar). Jump to…
+// Primary menu (Lucide more-vertical, in the sidebar foot since CMX-377 —
+// originally a topbar button): folds the three former topbar primaries — Jump
+// to… (#btn-palette), New… (#btn-new), overflow (#btn-overflow) — behind ONE
+// button (CMX-109 / CMX-108 Part A re-filed; cmx-108/#122's WALL toolbar fold —
+// grid presets + lock behind openLayoutMenu — was reverted in CMX-111: Liav
+// never asked for that one folded, only this one). Jump to…
 // and the old overflow's secondary actions (Share current, Notifications,
 // Settings) plus the usage/updated readouts are flat items here; New… reopens
 // the existing #new-menu (openNewMenuFromPrimary below) rather than duplicating

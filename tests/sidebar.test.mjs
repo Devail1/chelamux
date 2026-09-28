@@ -857,6 +857,28 @@ test('on a phone the SAME control slides the drawer, and leaves the rail class a
     PHONE = false;
 });
 
+// CMX-377: body.sidebar-open is what hides .mobile-menu-fab (style.css) while
+// the off-canvas drawer is already open — without it, the fab and the
+// drawer's own #btn-menu toggle would both render, stacked on top of each
+// other. This is the JS half; the CSS half (the fab actually disappearing) is
+// a rendered-pixel fact this suite cannot observe (jsdom has no layout
+// engine, same limitation tests/dashboard_scale_nav_a11y.test.mjs documents
+// at length) — verified instead by looking at the live dashboard.
+test('opening the phone drawer sets body.sidebar-open; closing it clears it', () => {
+    PHONE = true;
+    assert.equal(document.body.classList.contains('sidebar-open'), false,
+        'sidebar-open was already set before the drawer opened');
+
+    window.chela.toggleSidebar();
+    assert.ok(document.body.classList.contains('sidebar-open'),
+        'opening the drawer did not set body.sidebar-open — .mobile-menu-fab would stay visible on top of it');
+
+    window.chela.closeSidebar();
+    assert.equal(document.body.classList.contains('sidebar-open'), false,
+        'closing the drawer left body.sidebar-open set — .mobile-menu-fab would stay hidden with the drawer closed');
+    PHONE = false;
+});
+
 // --- 3. 🟠 the launch menu must not run off the right edge -----------------------
 
 test('the launch menu right-aligns off its MEASURED width — it stays on screen', () => {
@@ -915,8 +937,14 @@ test('the sidebar is two sections — Launch folded into the launch menu', () =>
         assert.ok(LAUNCHER.includes(fn), `${fn} was lost in the move`));
     assert.ok(LAUNCHER.includes("getElementById('new-menu-launch')"),
         'the launcher does not render into the launch menu');
-    // One toggle in the markup, not two.
-    assert.equal(HTML.match(/toggleSidebar\(\)/g).length, 1, 'a second sidebar toggle appeared');
+    // Two toggles in the markup, not three: #btn-menu (the sidebar's own,
+    // inside .sidebar-head) and #btn-menu-mobile (CMX-377's floating
+    // .mobile-menu-fab — the sidebar's own toggle is unreachable while the
+    // off-canvas drawer is closed, which is why a second trigger exists at
+    // all). A third would mean a stray control crept back in, e.g. a
+    // resurrected Launch section.
+    assert.equal(HTML.match(/toggleSidebar\(\)/g).length, 2,
+        'expected exactly #btn-menu + #btn-menu-mobile to call toggleSidebar() — a toggle was added or removed');
 });
 
 // --- CMX-230, round 2: GUARD 3b / GUARD 4 in tests/dashboard_scale_nav_a11y.test.mjs

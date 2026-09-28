@@ -1,5 +1,15 @@
 // TOPBAR PRIMARIES → ONE MENU, IN A REAL DOM (CMX-109 / CMX-108 Part A re-filed).
 //
+// CMX-377 moved the container this menu's trigger lives in from a full-width
+// <header class="topbar"> into the sidebar's fixed foot (.sidebar-foot,
+// index.html) — the "calm desktop app" restyle drops the topbar entirely. The
+// three invariants below are unchanged; only the "REAL index.html" assertion
+// that reads the container's markup (originally anchored on
+// `.topbar-actions...</header>`) is re-anchored on `.sidebar-foot`, and
+// #btn-shares — which used to sit in that same row — moved OUT into the
+// always-on-top `.safety-float` (see index.html's own comment on why), so it
+// no longer appears in .sidebar-foot's button list at all.
+//
 // cmx-108/PR #122 folded the WALL toolbar's grid-preset picker + lock button behind
 // one "Layout" menu (tests/wallnav.test.mjs) — a different, valid consolidation from
 // the one this task asks for. This is the MAIN topbar: three separate primaries
@@ -17,8 +27,8 @@
 // Three properties, each a regression that would ship silently:
 //
 //   1. 🔴 ONE TRIGGER, NOT THREE. #btn-primary-menu is the only primary-action
-//      button left in .topbar-actions; the old #btn-palette/#btn-new/#btn-overflow
-//      ids are gone from index.html.
+//      button left in .sidebar-foot (CMX-377: was .topbar-actions); the old
+//      #btn-palette/#btn-new/#btn-overflow ids are gone from index.html.
 //   2. 🔴 THE MENU ACTUALLY EXPOSES JUMP / NEW / OVERFLOW. Opening #primary-menu
 //      renders rows wired to openPalette, openNewMenuFromPrimary, and the three old
 //      overflow actions (Share current session / Notifications / Settings) — drop
@@ -40,16 +50,16 @@ import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py e
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const HTML = readFileSync(join(ROOT, 'templates', 'index.html'), 'utf8');
 
-// The topbar + the two popovers, as index.html emits them (only the ids nav.js
-// reaches for). #new-menu is unchanged from before this fold — still the sidebar
-// "+" trigger's popover too — so it stays minimal here.
+// The sidebar foot + the two popovers, as index.html emits them (only the ids
+// nav.js reaches for). #new-menu is unchanged from before this fold — still the
+// sidebar "+" trigger's popover too — so it stays minimal here.
 const BODY = `
-<header class="topbar">
-  <div class="topbar-actions">
-    <button class="shares-indicator" id="btn-shares" hidden></button>
-    <button class="icon-btn" id="btn-primary-menu" aria-haspopup="true" onclick="chela.openPrimaryMenu(event)"></button>
-  </div>
-</header>
+<div class="sidebar-foot">
+  <button class="icon-btn" id="btn-primary-menu" aria-haspopup="true" onclick="chela.openPrimaryMenu(event)"></button>
+</div>
+<div class="safety-float">
+  <button class="shares-indicator" id="btn-shares" hidden></button>
+</div>
 <div class="popover launch-menu" id="new-menu" style="display:none;">
   <div id="new-menu-launch"></div>
 </div>
@@ -121,11 +131,25 @@ test('the topbar has ONE primary button, not the old three', () => {
 // sidebar) as a fourth, deliberate topbar button — a distinct standalone action,
 // not a leftover from the #btn-palette/#btn-new/#btn-overflow fold this test
 // guards against regressing. The set is now fixed at exactly these three.
-test('.topbar-actions in the REAL index.html has exactly one primary button', () => {
-    const topbar = HTML.match(/<div class="topbar-actions">[\s\S]*?<\/div>\s*<\/header>/)[0];
-    const buttonIds = [...topbar.matchAll(/<button[^>]*\bid="([^"]+)"/g)].map(m => m[1]);
-    assert.deepEqual(buttonIds, ['btn-shares', 'btn-decisions', 'btn-primary-menu'],
-        `.topbar-actions has unexpected buttons: ${buttonIds.join(', ')}`);
+test('.sidebar-foot in the REAL index.html has exactly one primary button', () => {
+    // CMX-377: this container used to be `.topbar-actions` inside a full-width
+    // <header class="topbar">, holding btn-shares/btn-decisions/btn-primary-menu
+    // together. The topbar is gone; #btn-shares moved OUT into the always-on-top
+    // `.safety-float` (see index.html's own comment on why — an off-canvas
+    // sidebar traps a position:fixed descendant behind its own transform), so
+    // it is deliberately NOT one of the two buttons left here.
+    const foot = HTML.match(/<div class="sidebar-foot">[\s\S]*?\n    <\/div>/)[0];
+    const buttonIds = [...foot.matchAll(/<button[^>]*\bid="([^"]+)"/g)].map(m => m[1]);
+    assert.deepEqual(buttonIds, ['btn-decisions', 'btn-primary-menu'],
+        `.sidebar-foot has unexpected buttons: ${buttonIds.join(', ')}`);
+});
+
+test('#btn-shares lives in .safety-float, not .sidebar-foot, in the REAL index.html', () => {
+    const foot = HTML.match(/<div class="sidebar-foot">[\s\S]*?\n    <\/div>/)[0];
+    assert.ok(!foot.includes('btn-shares'), '#btn-shares is inside .sidebar-foot — it must stay in .safety-float');
+    const safetyFloat = HTML.match(/<div class="safety-float">[\s\S]*?\n<\/div>/);
+    assert.ok(safetyFloat, '.safety-float block not found in index.html');
+    assert.ok(safetyFloat[0].includes('id="btn-shares"'), '#btn-shares is missing from .safety-float');
 });
 
 test('#btn-shares is never nested inside #primary-menu in the REAL index.html', () => {
