@@ -13,7 +13,8 @@
 //
 // jsdom does no layout, so the pixel check ("the + is visible and the menu is
 // on-screen at 390px") belongs to the real-browser (Playwright) suite; here the
-// menu placement is checked off openNewMenu's arithmetic with the fab's rect.
+// menu placement is checked off openNewMenu's arithmetic, fed the fab's rect and
+// the menu's min/max-width as RESOLVED from style.css at 390px — never typed in.
 //
 // Run: node --test tests/mobile_new_fab.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `npm ci` for jsdom).
@@ -103,26 +104,84 @@ test('@390: the "+" is displayed while the drawer is closed, and hides with the 
     reset();
 });
 
+// Evaluate a RESOLVED CSS length at a viewport, the way a browser would: px, vw,
+// env() (0 — no notch in the emulated phone), and calc()/max()/min() over those.
+// `none`/`auto` resolve to `fallback`. Anything else THROWS (fail closed), so a new
+// unit or function can never slip past as a silently-wrong number.
+function cssLen(v, vp, fallback) {
+    let s = String(v).trim();
+    if (s === '' || s === 'none' || s === 'auto') {
+        if (fallback === undefined) throw new Error(`cssLen: ${JSON.stringify(v)} has no length here`);
+        return fallback;
+    }
+    // jsdom's cssstyle re-serializes `max(a, b)` inside calc() as `max(a * , * b)`.
+    s = s.replace(/\s*\*\s*,\s*\*\s*/g, ', ')
+        .replace(/env\([^()]*\)/g, '0px')
+        .replace(/(-?\d+(?:\.\d+)?)vw\b/g, (_, n) => String(Number(n) * vp.width / 100))
+        .replace(/(-?\d+(?:\.\d+)?)px\b/g, '$1')
+        .replace(/\bcalc\(/g, '(').replace(/\bmax\(/g, 'Math.max(').replace(/\bmin\(/g, 'Math.min(');
+    if (!/^[\d\s.+\-*/(),]*$/.test(s.replace(/Math\.(max|min)/g, '')))
+        throw new Error(`cssLen: cannot evaluate ${JSON.stringify(v)} (${s})`);
+    try { return Function(`return (${s});`)(); } catch (e) { throw new Error(`cssLen: cannot evaluate ${JSON.stringify(v)} (${s})`); }
+}
+
+// The width a browser gives the menu: its content's natural width, clamped by
+// the RESOLVED min-width and max-width. Neither bound is typed into this test.
+function menuWidth(menu, natural, vp) {
+    const cs = win.getComputedStyle(menu);
+    const min = cssLen(cs.minWidth, vp, 0);
+    const max = cssLen(cs.maxWidth, vp, Infinity);
+    return Math.max(min, Math.min(natural, max));
+}
+
+// Open the menu from the "+" at PHONE with a given natural content width, the
+// fab's rect derived from its RESOLVED top/left/width/height — so moving the "+"
+// or dropping the menu's max-width in style.css turns this red.
+function openFromPlus(natural) {
+    const plus = doc.getElementById('btn-new-mobile');
+    const menu = doc.getElementById('new-menu');
+    const cs = win.getComputedStyle(plus);
+    // jsdom's cssstyle DROPS a bare `top: max(14px, env(...))` (it resolves `auto`),
+    // so top comes off the fabs' shared source rule; left/width/height resolve.
+    const topDecl = CSS.match(/\.mobile-menu-fab,\s*\.mobile-new-fab\s*{[^}]*?\btop:\s*([^;]+);/)[1];
+    const left = cssLen(cs.left, PHONE), top = cssLen(topDecl, PHONE);
+    const w = cssLen(cs.width, PHONE), h = cssLen(cs.height, PHONE);
+    plus.getBoundingClientRect = () => ({ top, bottom: top + h, left, right: left + w, width: w, height: h });
+    const width = menuWidth(menu, natural, PHONE);
+    Object.defineProperty(menu, 'offsetWidth', { value: width, configurable: true });
+    click(plus);
+    return { menu, width, fabBottom: top + h };
+}
+
 test('@390: tapping the "+" opens #new-menu with the drawer left CLOSED, on-screen', () => {
     mount(PHONE);
     reset();
-    const plus = doc.getElementById('btn-new-mobile');
     const menu = doc.getElementById('new-menu');
     assert.equal(menu.closest('.sidebar'), null, '#new-menu moved into the sidebar');
     assert.equal(transformedAncestor(menu), null, '#new-menu sits inside a transformed ancestor');
-    // The fab's box at 390px: top 14, left 14 + 50 (style.css), 42px square.
-    plus.getBoundingClientRect = () => ({ top: 14, bottom: 56, left: 64, right: 106, width: 42, height: 42 });
-    Object.defineProperty(menu, 'offsetWidth', { value: 232, configurable: true });   // .launch-menu min-width
 
-    click(plus);
+    const { width, fabBottom } = openFromPlus(0);   // short labels: the min-width wins
 
     assert.equal(menu.style.display, 'block', 'the "+" did not open #new-menu');
     assert.equal(doc.body.classList.contains('sidebar-open'), false,
         'the "+" opened the drawer — the menu must appear with the drawer CLOSED');
     assert.equal(doc.querySelector('.sidebar').classList.contains('open'), false);
     const left = parseFloat(menu.style.left), top = parseFloat(menu.style.top);
-    assert.ok(left >= 0 && left + 232 <= PHONE.width, `menu x ${left}..${left + 232} is off a ${PHONE.width}px screen`);
-    assert.ok(top > 56 && top < PHONE.height, `menu top ${top} is not just under the fab`);
+    assert.ok(left >= 0 && left + width <= PHONE.width, `menu x ${left}..${left + width} is off a ${PHONE.width}px screen`);
+    assert.ok(top > fabBottom && top < PHONE.height, `menu top ${top} is not just under the fab (bottom ${fabBottom})`);
+    reset();
+});
+
+test('@390: a menu with a LONG project label still never runs off the right edge', () => {
+    // A nowrap label can size the popover far past a phone; only .launch-menu's
+    // phone max-width keeps it on-screen. Resolved from style.css at 390px.
+    mount(PHONE);
+    reset();
+    const { menu, width } = openFromPlus(900);
+    const left = parseFloat(menu.style.left);
+    assert.ok(width < 900, `nothing caps the menu's width at ${PHONE.width}px (it resolved to ${width}px)`);
+    assert.ok(left >= 0 && left + width <= PHONE.width,
+        `a long-label menu runs off the ${PHONE.width}px screen: x ${left}..${left + width}`);
     reset();
 });
 
