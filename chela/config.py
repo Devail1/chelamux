@@ -427,6 +427,8 @@ DISPATCH_KNOBS: tuple[DispatchKnob, ...] = (
                  "Judge cannot-verify retries", floor=0),
     DispatchKnob("judge_max_concurrent", "CHELA_JUDGE_MAX_CONCURRENT", 1, int,
                  "Judge max concurrent (per workflow)", floor=1),
+    DispatchKnob("judge_outage_backoff_seconds", "CHELA_JUDGE_OUTAGE_BACKOFF_S", 600.0, float,
+                 "Judge classifier-outage backoff", unit="s", floor=0),
     DispatchKnob("critic_enabled", "CHELA_CRITIC", True, _cast_bool,
                  "Critic (pre-dispatch review)", kind="bool", restart_required=True),
     DispatchKnob("worktree_disk_budget_bytes", "CHELA_WORKTREE_DISK_BUDGET", 0, _cast_size,
@@ -820,6 +822,24 @@ def judge_max_concurrent() -> int:
     knob (CMX-220) — see DISPATCH_KNOBS above.
     """
     return max(1, dispatch_value("judge_max_concurrent"))
+
+
+def judge_outage_backoff_seconds() -> float:
+    """How long a run waits before it is judged again after its judge was reaped for a
+    Claude Code auto-mode classifier outage (``_CLASSIFIER_OUTAGE_SIGNATURE`` in
+    ``dispatcher.py``).
+
+    ⚖️🌩️ CMX-379. The outage is an environment failure, like CMX-282's expired login: it
+    is not a verdict and costs no ``judge_cannot_verify_tries`` retry. Re-spawning on the
+    very next tick would put a fresh judge straight back into the same live outage and
+    hold the only judge slot again (``judge_max_concurrent`` defaults to 1), so the run
+    sits out this long first. Other awaiting-review PRs are judged in the meantime. ``0``
+    re-judges on the next tick.
+
+    Read per call, never latched at import. A garbage value degrades to the default. A
+    Dispatch-tab knob (CMX-220), see DISPATCH_KNOBS above.
+    """
+    return max(0.0, dispatch_value("judge_outage_backoff_seconds"))
 # ⚖️ The judge (see chela.judge) — the adversarial pass on a PR that reached
 # awaiting_review. The fleet-wide kill switch; a workflow turns it off for itself with
 # `judge: {enabled: false}`, and it is off anyway for any workflow with no `judge.test_cmd`

@@ -7,7 +7,7 @@ import sqlite3
 import subprocess
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
@@ -19,12 +19,14 @@ from chela.config import (
     human_size,
     judge_max_concurrent,
     judge_max_unknown_retries,
+    judge_outage_backoff_seconds,
     max_reworks,
     worktree_disk_budget_bytes,
 )
 from chela.messenger import messaging_socket_launch_arg, resend_enter, send_tmux
 from chela.sandbox import sandbox_launch_arg
 from chela.sources import Task, get_source
+from chela import transcripts
 from chela.transcripts import agent_transcript_summary
 from chela.tui_text import sanitize as tui_sanitize
 from chela.workflow import (
@@ -177,6 +179,15 @@ _WORK_LINE_RE = re.compile(
 # Nothing else in this pane's vocabulary produces this string, so a substring match is
 # enough; no need for the trailing "· Please run /login" half, which is free to reword.
 _LOGIN_EXPIRED_SIGNATURE = "Login expired"
+
+# Auto-mode classifier outage signature (see _transcript_shows_classifier_outage). ⚖️🌩️
+# CMX-379: measured 2026-09-28, twice on PR #529 — every Bash call a judge made came back as
+# a tool_result reading "The server-side auto mode classifier gave no verdict (error), so
+# auto mode cannot determine the safety of Bash. …", and after the harness's 10-in-a-row
+# limit the turn stopped and the judge sat idle with no verdict. Matched against the
+# TRANSCRIPT's tool results, not the pane (the pane is not authority). Only the stable core
+# of the sentence is matched; the advice around it is free to reword.
+_CLASSIFIER_OUTAGE_SIGNATURE = "auto mode classifier gave no verdict"
 
 _PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:[/?#]|$)")
 _PR_REPO_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/\d+")
@@ -1235,6 +1246,13 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # back to 0 on every other write, so it always describes the CURRENT `judge_state`,
         # never a stale prior one.
         ("judge_no_verdict", "ALTER TABLE runs ADD COLUMN judge_no_verdict INTEGER"),
+        # ⚖️🌩️ CMX-379. Not before this ISO timestamp may the judge trigger re-judge the run.
+        # Set ONLY by `_judge_watchdog`'s classifier-outage arm (now + the
+        # `judge_outage_backoff_seconds` knob), so the next tick does not spawn a fresh judge
+        # straight back into the same live outage. Cleared by `_spawn_judge` and by
+        # `set_judge_state`, so a non-NULL value always means "the CURRENT `cannot_verify`
+        # is a classifier outage" (the inbox reads it that way too).
+        ("judge_retry_after", "ALTER TABLE runs ADD COLUMN judge_retry_after TEXT"),
         # 🤫 CMX-97. The judge's OWN tmux window — `_spawn_judge` calls `_launch_agent` with
         # `judge_window=True` (the run's `window_id` must stay the RUN's window, not a
         # judge that will be gone in twenty minutes; see `_launch_agent`'s docstring), which
@@ -1461,6 +1479,88 @@ def _pane_shows_login_expired(pane: str) -> bool:
     on a state that will never resolve itself.
     """
     return _LOGIN_EXPIRED_SIGNATURE in pane
+
+
+def _tool_result_text(block: dict) -> str:
+    """The text of one ``tool_result`` content block (a string, or a list of text parts)."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(part.get("text") or "") for part in content if isinstance(part, dict)
+        )
+    return ""
+
+
+def _outage_verdict(record: dict) -> bool | None:
+    """Does this transcript record settle the classifier-outage question, and which way?
+
+    Walks the record's ``tool_result`` blocks newest-first. A block carrying
+    :data:`_CLASSIFIER_OUTAGE_SIGNATURE` answers True. A block that succeeded (not
+    ``is_error``) answers False, because a tool call got through after any earlier outage.
+    Any other error (a failed Read, say) settles nothing and the walk goes on to older
+    results. None means this record holds no deciding tool result.
+    """
+    message = record.get("message") if record.get("type") == "user" else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return None
+    for block in reversed(content):
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        if _CLASSIFIER_OUTAGE_SIGNATURE in _tool_result_text(block):
+            return True
+        if not block.get("is_error"):
+            return False
+    return None
+
+
+def _transcript_shows_classifier_outage(path: Path) -> bool:
+    """True when the MOST RECENT deciding tool results in ``path`` are a classifier outage.
+
+    ⚖️🌩️ CMX-379. Only the tail counts: a judge that hit the outage EARLIER and then got a
+    tool call through (a successful ``chela judge run`` is the case that matters) is not
+    stuck on it, and reaping it would throw away a real verdict in flight. So the scan runs
+    newest-first and stops at the first tool result that decides (see :func:`_outage_verdict`)
+    instead of looking for the signature anywhere in the file.
+    """
+    record = transcripts.latest_record(path, lambda o: _outage_verdict(o) is not None)
+    return bool(record) and _outage_verdict(record) is True
+
+
+def _judge_transcript(wf: WorkflowDef, row: sqlite3.Row) -> Path | None:
+    """The transcript the CURRENT judge on ``row`` is writing, or None.
+
+    Resolved from the judge worktree's cwd (``~/.claude/projects/<encoded-cwd>/``). That
+    directory keeps every earlier judge's transcript for the same task too, since the
+    worktree path is reused, so a file whose last write predates this judge's
+    ``judge_started_at`` is an older judge's and is ignored: an old outage must never reap a
+    new judge.
+    """
+    path = transcripts.transcript_for_cwd(str(judge.judge_worktree_path(wf, row["task_id"])))
+    started = _parse_ts(row["judge_started_at"])
+    if path is None or started is None:
+        return None
+    try:
+        if path.stat().st_mtime < started.timestamp():
+            return None
+    except OSError:
+        return None
+    return path
+
+
+def _judge_hit_classifier_outage(wf: WorkflowDef, row: sqlite3.Row) -> bool:
+    """⚖️🌩️ CMX-379: an IDLE judge whose transcript ends on a classifier outage.
+
+    Idle comes from the native session status (``_agent_status``), not a pane scrape. A busy
+    judge is left alone whatever its transcript says, since it may be retrying right now, and
+    an unreadable status (None) is not idle either.
+    """
+    if _agent_status(row["judge_window_id"] or "") != "idle":
+        return False
+    path = _judge_transcript(wf, row)
+    return path is not None and _transcript_shows_classifier_outage(path)
 
 
 def _dismiss_input_block(window_id: str) -> None:
@@ -3709,13 +3809,13 @@ def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | No
         if sha:
             conn.execute(
                 "UPDATE runs SET judge_state=?, judge_detail=?, judge_sha=?, "
-                "judge_no_verdict=? WHERE task_id=?",
+                "judge_no_verdict=?, judge_retry_after=NULL WHERE task_id=?",
                 (state, (detail or "")[:2000], sha, int(no_verdict), task_id),
             )
         else:
             conn.execute(
-                "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=? "
-                "WHERE task_id=?",
+                "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=?, "
+                "judge_retry_after=NULL WHERE task_id=?",
                 (state, (detail or "")[:2000], int(no_verdict), task_id),
             )
         conn.commit()
@@ -5004,6 +5104,8 @@ def tick(workflow_path: str | Path) -> dict:
                 (str(wf.path), *JUDGE_TRIGGER_CHECKS,
                  judge.J_CANNOT_VERIFY, judge_max_unknown_retries()),
             ).fetchall():
+                if _judge_backoff_pending(row):
+                    continue     # ⚖️🌩️ CMX-379: sitting out a classifier outage
                 if judging >= judge_max_concurrent():
                     break        # it waits a tick; each judge re-runs a whole test suite
                 if _spawn_judge(wf, row, row["pr_head_sha"], conn, tasks_by_id.get(row["task_id"])):
@@ -6116,7 +6218,8 @@ def _spawn_judge(
     tries = prior + 1 if retried_unknown else prior
     conn.execute(
         "UPDATE runs SET judge_sha=?, judge_state=?, judge_started_at=?, judge_detail=?, "
-        "judge_cannot_verify_tries=?, judge_no_verdict=0 WHERE task_id=?",
+        "judge_cannot_verify_tries=?, judge_no_verdict=0, judge_retry_after=NULL "
+        "WHERE task_id=?",
         (sha, judge.J_RUNNING, _now(), "", tries, task_id),
     )
     conn.commit()
@@ -6176,6 +6279,17 @@ def _spawn_judge(
     return True
 
 
+def _judge_backoff_pending(row: sqlite3.Row) -> bool:
+    """⚖️🌩️ CMX-379: is ``row`` still inside its classifier-outage backoff?
+
+    True while ``judge_retry_after`` lies in the future. Unset or unparseable means no
+    backoff, so a bad value can never strand a run unjudged.
+    """
+    retry_after = _parse_ts(row["judge_retry_after"])
+    now = _parse_ts(_now())
+    return retry_after is not None and now is not None and now < retry_after
+
+
 def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set[str]) -> int:
     """A judge that stopped without a verdict is CANNOT VERIFY — never a pass, never a fail.
 
@@ -6208,7 +6322,17 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         # never widens what already reaps without it: `alive and timed_out` reaped before
         # this existed, and a dead window reaps via the lock cross-check below either way.
         login_expired = alive and _pane_shows_login_expired(_capture_pane(window))
-        if alive and not timed_out and not login_expired:
+        # ⚖️🌩️ CMX-379: the auto-mode classifier outage is the same kind of never-got-a-
+        # chance failure. Measured 2026-09-28 on PR #529: every Bash call failed, the judge
+        # stopped after the harness's 10-in-a-row limit and sat idle, holding the only judge
+        # slot. Checked only on a live window that no other arm already reaps. Unlike
+        # `login_expired` it does NOT bypass the lock cross-check below, because a live judge
+        # lock means `chela judge run` is executing, which is a verdict in flight.
+        classifier_outage = (
+            alive and not timed_out and not login_expired
+            and _judge_hit_classifier_outage(wf, row)
+        )
+        if alive and not timed_out and not login_expired and not classifier_outage:
             continue
         # ⚖️🕳️ CMX-229 Objective 2: `alive` is ONE signal (this tick's tmux snapshot) and
         # it can be wrong — measured live on CMX-227, a judge SIGKILLed (exit 137) mid-
@@ -6237,7 +6361,16 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
             "not thinking" if timed_out else
             "the judge's session login expired mid-run (\"Login expired · Please run "
             "/login\") — not a verdict on the PR" if login_expired else
+            "the judge hit a Claude Code auto-mode classifier outage (every tool call came "
+            "back \"classifier gave no verdict\") — classifier outage, not a verdict on the "
+            "PR" if classifier_outage else
             "the judge's window disappeared before it published a verdict"
+        )
+        # ⚖️🌩️ CMX-379: sit the outage out before this run is judged again (see
+        # `judge_retry_after`'s column comment). Every other arm writes NULL.
+        retry_after = (
+            (now + timedelta(seconds=judge_outage_backoff_seconds())).isoformat()
+            if classifier_outage and now is not None else None
         )
         # ⚖️🕳️ CMX-253 Objective 2: a TIMEOUT judge got a chance to run and stayed stuck —
         # that is still a counted unknown, same as CMX-81 always treated it. A judge whose
@@ -6247,8 +6380,9 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         # kind of never-got-a-chance environment hiccup — `int(not timed_out)` already
         # covers it, since `login_expired` only reaps here while `timed_out` is False.
         conn.execute(
-            "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=? WHERE task_id=?",
-            (judge.J_CANNOT_VERIFY, reason, int(not timed_out), row["task_id"]),
+            "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=?, "
+            "judge_retry_after=? WHERE task_id=?",
+            (judge.J_CANNOT_VERIFY, reason, int(not timed_out), retry_after, row["task_id"]),
         )
         conn.commit()
         if alive:
@@ -6261,6 +6395,12 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         except NotAWorktree as e:                      # CMX-320 — never crash the reaper
             log.error("judge reap for %s: REFUSED to remove %s", row["task_id"], e)
         handed_over += 1
+        if classifier_outage:
+            log.warning(
+                "judge: %s → CANNOT VERIFY (not counted): %s. Re-judging after %ds.",
+                row["task_id"], reason, int(judge_outage_backoff_seconds()),
+            )
+            continue
         # ⛔ Loud. The run stays exactly where it was (`awaiting_review`), which is the ONLY
         # safe answer — but a judge that silently never ran is indistinguishable from a judge
         # that found nothing, and that is precisely the confusion this whole feature exists
