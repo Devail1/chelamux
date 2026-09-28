@@ -2542,7 +2542,7 @@ def test_the_judge_fires_ONCE_per_head_sha(tmp_path):
 
     spawns: list[str] = []
 
-    def spawn(w, row, sha, conn):
+    def spawn(w, row, sha, conn, task=None):
         spawns.append(sha)
         conn.execute("UPDATE runs SET judge_sha=?, judge_state=? WHERE task_id=?",
                      (sha, judge.J_RUNNING, row["task_id"]))
@@ -2587,7 +2587,7 @@ def test_a_cannot_verify_is_a_bounded_RETRY_not_a_permanent_retirement(tmp_path,
 
     spawns: list[str] = []
 
-    def spawn(w, row, sha, conn):
+    def spawn(w, row, sha, conn, task=None):
         # Mirror _spawn_judge's per-commit counter, then simulate the judge finishing with a
         # flake — the exact row state the real cycle leaves behind (verified independently in
         # test_spawn_judge_resets_the_unknown_count_on_a_new_sha_and_bumps_it_on_a_retry).
@@ -2619,7 +2619,7 @@ def test_only_cannot_verify_re_fires_a_real_verdict_and_a_spent_budget_do_not(tm
     wf = _wf(tmp_path)
     fired: list[str] = []
 
-    def spawn(w, row, sha, conn):
+    def spawn(w, row, sha, conn, task=None):
         fired.append(row["task_id"])
         return True
 
@@ -2657,7 +2657,7 @@ def test_a_cannot_verify_past_budget_escalates_instead_of_stranding_silently(tmp
     monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
     wf = _wf(tmp_path)
 
-    def spawn(w, row, sha, conn):
+    def spawn(w, row, sha, conn, task=None):
         return True    # never reached — the budget is already spent
 
     with dispatcher._db() as conn:
@@ -2685,7 +2685,7 @@ def test_a_row_already_moved_on_is_not_re_escalated_every_tick(tmp_path, monkeyp
     monkeypatch.setenv("CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "2")
     wf = _wf(tmp_path)
 
-    def spawn(w, row, sha, conn):
+    def spawn(w, row, sha, conn, task=None):
         return True    # never reached — status is not awaiting_review
 
     with dispatcher._db() as conn:
@@ -2727,7 +2727,7 @@ def test_a_HELD_workflow_still_escalates_a_stranded_judge_unknown(tmp_path, monk
                  judge_sha="cafe1234", judge_state=judge.J_CANNOT_VERIFY,
                  judge_cannot_verify_tries=2, judge_detail="a flake")
 
-    def spawn(w, row, sha, conn):
+    def spawn(w, row, sha, conn, task=None):
         return True    # never reached — the budget is already spent, and the queue is held
 
     from chela.workflow import WorkflowStatus
@@ -2791,7 +2791,7 @@ def test_a_BLOCKED_workflow_still_escalates_a_stranded_judge_unknown(tmp_path, m
                  judge_sha="cafe1234", judge_state=judge.J_CANNOT_VERIFY,
                  judge_cannot_verify_tries=2, judge_detail="a flake")
 
-    def spawn(w, row, sha, conn):
+    def spawn(w, row, sha, conn, task=None):
         return True    # never reached — the budget is already spent, and dispatch is blocked
 
     from chela.workflow import WorkflowStatus
@@ -2858,7 +2858,7 @@ def test_a_running_judge_at_the_retry_bound_is_not_escalated_mid_run(tmp_path, m
                  judge_sha="cafe1234", judge_state=judge.J_RUNNING,
                  judge_cannot_verify_tries=2, judge_detail="")
 
-    def spawn(w, row, sha, conn):
+    def spawn(w, row, sha, conn, task=None):
         return True    # never reached — the queue has no fresh work to dispatch this tick
 
     # The judge's window stays alive across the tick — this is a judge that is genuinely still
@@ -2881,7 +2881,7 @@ def test_a_fresh_commit_resets_the_budget_instead_of_escalating(tmp_path, monkey
 
     spawned: list[str] = []
 
-    def spawn(w, row, sha, conn):
+    def spawn(w, row, sha, conn, task=None):
         spawned.append(sha)
         conn.execute("UPDATE runs SET judge_sha=?, judge_state=? WHERE task_id=?",
                      (sha, judge.J_RUNNING, row["task_id"]))
@@ -3443,7 +3443,7 @@ def test_judge_max_concurrent_gates_how_many_spawn_per_tick(tmp_path):
                  window_name="test-2", branch_name="test-2")
 
     spawns: list[str] = []
-    summary = _tick(wf, lambda w, row, sha, conn: (spawns.append(row["task_id"]), True)[1],
+    summary = _tick(wf, lambda w, row, sha, conn, task=None: (spawns.append(row["task_id"]), True)[1],
                      open_ids=("abc123", "def456"))
 
     assert summary["judged"] == 1
@@ -3464,7 +3464,7 @@ def test_judge_max_concurrent_env_raises_the_per_tick_gate(tmp_path, monkeypatch
                  window_name="test-2", branch_name="test-2")
 
     spawns: list[str] = []
-    summary = _tick(wf, lambda w, row, sha, conn: (spawns.append(row["task_id"]), True)[1],
+    summary = _tick(wf, lambda w, row, sha, conn, task=None: (spawns.append(row["task_id"]), True)[1],
                      open_ids=("abc123", "def456"))
 
     assert summary["judged"] == 2

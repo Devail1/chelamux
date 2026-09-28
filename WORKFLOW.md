@@ -125,6 +125,8 @@ repo (a public AGPL-3.0-or-later project: a tmux-driven orchestrator for Claude 
 
 > {{task_title}}
 
+{{task_body}}
+
 This run is **{{project_key}}-{{task_number}}** — use it as the PR-title prefix.
 Task ID `{{task_id}}`.
 

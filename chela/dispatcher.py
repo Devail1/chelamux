@@ -1620,6 +1620,11 @@ def _prompt_vars(
     return {
         "task_id": task.id,
         "task_title": task.title,
+        # 📭🧾 CMX-378. The multi-line OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation a
+        # markdown bullet (or a gh_issues body) can carry — `task_title` alone is just the
+        # bullet line. `""` for a bare one-line task, never `None` (render_prompt stringifies
+        # whatever it's given, and `str(None)` would ship the literal word "None").
+        "task_body": task.body or "",
         "task_file": task.file,
         "task_line_number": task.line_number,
         "workspace_path": str(worktree_path),
@@ -5001,7 +5006,7 @@ def tick(workflow_path: str | Path) -> dict:
             ).fetchall():
                 if judging >= judge_max_concurrent():
                     break        # it waits a tick; each judge re-runs a whole test suite
-                if _spawn_judge(wf, row, row["pr_head_sha"], conn):
+                if _spawn_judge(wf, row, row["pr_head_sha"], conn, tasks_by_id.get(row["task_id"])):
                     judging += 1
                     summary["judged"] += 1
 
@@ -5037,7 +5042,7 @@ def tick(workflow_path: str | Path) -> dict:
             # RECONCILE_MERGE_STATUSES_WITH_RUNNING once a rework is `running` (see the
             # comment above that tuple's definition).
             try:
-                if _respawn_rework(wf, row, conn):
+                if _respawn_rework(wf, row, conn, tasks_by_id.get(row["task_id"])):
                     active += 1
                     summary["reworked"] += 1
             except Exception as e:
@@ -5530,6 +5535,10 @@ You are back in your ORIGINAL worktree (`{{workspace_path}}`) on your ORIGINAL b
 ⛔ Do NOT open a second PR and do NOT branch again — push to `{{branch_name}}` and the
 existing PR updates itself.
 
+## Your original task
+
+{{task_body}}
+
 ## The verdict
 
 {{verdict}}
@@ -5604,7 +5613,7 @@ def _required_mutations_section(mutations: list[dict]) -> str:
 
 def _rework_vars(
     wf: WorkflowDef, row: sqlite3.Row, worktree: Path | str, verdict: str, rework_round: int,
-    mutations: list[dict] | None = None,
+    mutations: list[dict] | None = None, task: Task | None = None,
 ) -> dict:
     """The ``{{...}}`` map a rework renders from — the prompt AND the worktree hooks.
 
@@ -5613,11 +5622,21 @@ def _rework_vars(
     ``before_run`` command has to render in BOTH paths, and it can only do that if it sees
     the same names. ``base_branch`` is here for the same reason and nothing else — a rework
     never forks from it.
+
+    ``task`` is the live tracker entry (``tasks_by_id.get(row["task_id"])`` at the call
+    site) — the task is still `- [ ]` in the tracker at rework time (the dispatcher only
+    strikes it on merge), so it is normally available; `None` only when the caller has no
+    such lookup in hand (a legacy/bare re-nudge). 📭🧾 CMX-378: reworking an agent that has
+    forgotten its own OBJECTIVE/BOUNDARIES/GUARDS reads the verdict with no way to check it
+    against what was actually asked. Deliberately NOT ``row["brief"]`` — that column falls
+    back to ``raw``/``title`` (see ``_task_brief``), which would make ``task_body`` non-empty
+    even for a bare one-line task and defeat the "renders cleanly with an empty body" case.
     """
     number = _pr_number(row["pr_url"])
     return {
         "task_id": row["task_id"],
         "task_title": row["title"] or "",
+        "task_body": (task.body if task else None) or "",
         "branch_name": row["branch_name"] or "",
         "workspace_path": str(worktree),
         "base_branch": wf.get("workspace", "base_branch", default="master"),
@@ -5697,7 +5716,7 @@ def _renudge_prompt(wf: WorkflowDef, row: sqlite3.Row, task: Task | None) -> str
             _rework_vars(
                 wf, row, row["worktree_path"] or "",
                 latest_verdict(dict(row)), row["rework_count"] or 0,
-                latest_required_mutations(dict(row)),
+                latest_required_mutations(dict(row)), task,
             ),
         )
     if task is None:
@@ -5762,7 +5781,9 @@ def _is_rework(row: sqlite3.Row) -> bool:
     return (row["rework_count"] or 0) > 0
 
 
-def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection) -> bool:
+def _respawn_rework(
+    wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection, task: Task | None = None,
+) -> bool:
     """Re-spawn a ``changes_requested`` run IN ITS OWN WORKTREE, ON ITS OWN BRANCH.
 
     The branch history, the open PR and the agent's own work are all preserved — which is
@@ -5772,6 +5793,9 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
     Worktree gone (cleaned up) → re-attached from the branch. BRANCH gone → there is
     nothing to rework and :func:`_escalate` hands it to a human. The caller has already
     checked the concurrency slot and the rework cap.
+
+    ``task`` (the caller's ``tasks_by_id.get(row["task_id"])``) is threaded straight through
+    to :func:`_rework_vars` for ``task_body`` — see that function's docstring.
     """
     task_id = row["task_id"]
     repo_path = wf.path.parent
@@ -5838,7 +5862,7 @@ def _respawn_rework(wf: WorkflowDef, row: sqlite3.Row, conn: sqlite3.Connection)
     rework_round = (row["rework_count"] or 0) + 1
     verdict = latest_verdict(dict(row))
     hook_vars = _rework_vars(
-        wf, row, worktree, verdict, rework_round, latest_required_mutations(dict(row)),
+        wf, row, worktree, verdict, rework_round, latest_required_mutations(dict(row)), task,
     )
     prompt = render_prompt(
         wf.get("agent", "rework_prompt", default=None) or REWORK_PROMPT, hook_vars
@@ -5953,13 +5977,19 @@ command with `"experiments": []` — that is recorded as **CANNOT VERIFY**, not 
 """
 
 
-def _judge_vars(wf: WorkflowDef, row: sqlite3.Row, worktree: Path, sha: str) -> dict:
+def _judge_vars(
+    wf: WorkflowDef, row: sqlite3.Row, worktree: Path, sha: str, task: Task | None = None,
+) -> dict:
     number = _pr_number(row["pr_url"])
     base = wf.get("workspace", "base_branch", default="master")
     exp_path = judge.experiments_path(worktree)
     return {
         "task_id": row["task_id"],
         "task_title": row["title"] or "",
+        # 📭🧾 CMX-378: kept for parity with the other `_prompt_vars`-style maps even though
+        # JUDGE_PROMPT does not render it today — see `_rework_vars` for why this is `task`'s
+        # own body, never `row["brief"]`.
+        "task_body": (task.body if task else None) or "",
         "branch_name": row["branch_name"] or "",
         "base_branch": base,
         "workspace_path": str(worktree),
@@ -6050,7 +6080,10 @@ def _refresh_judge_worktree(repo: Path, worktree: Path, base: str) -> str:
     )
 
 
-def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Connection) -> bool:
+def _spawn_judge(
+    wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Connection,
+    task: Task | None = None,
+) -> bool:
     """Put a judge on this PR's head — in a throwaway worktree, on a detached HEAD.
 
     ⛔ The sha is burned FIRST, before tmux is touched. A judge that fails to launch must not
@@ -6114,11 +6147,11 @@ def _spawn_judge(wf: WorkflowDef, row: sqlite3.Row, sha: str, conn: sqlite3.Conn
     try:
         prompt = render_prompt(
             wf.get("agent", "judge_prompt", default=None) or JUDGE_PROMPT,
-            _judge_vars(wf, row, worktree, sha),
+            _judge_vars(wf, row, worktree, sha, task),
         )
         _launch_agent(
             wf, task_id, judge.judge_window_name(branch), worktree, prompt, conn,
-            hook_vars=_judge_vars(wf, row, worktree, sha),
+            hook_vars=_judge_vars(wf, row, worktree, sha, task),
             fresh_worktree=created,
             # 🤫 CMX-97 (race closed CMX-136). The judge is NOT this run's agent — `window_id`
             # is the run's own window (the Feed keys its lane on it, the inbox addresses
@@ -6394,6 +6427,7 @@ def dry_run(workflow_path: str | Path) -> list[dict]:
         prompt = render_prompt(wf.prompt_template, {
             "task_id": task.id,
             "task_title": task.title,
+            "task_body": task.body or "",
             "task_file": task.file,
             "task_line_number": task.line_number,
             "workspace_path": str(worktree),
