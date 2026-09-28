@@ -5,7 +5,7 @@ import { refreshSummary } from './header.js';
 import { checkContext } from './agents.js';
 import { showAddSchedule } from './schedules.js';
 import { _displayLabel, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals.js';
-import { _isFav, _launcherData, launchProject, refreshLauncher } from './launcher.js';
+import { _launcherData, launchProject, refreshLauncher } from './launcher.js';
 import { VIEWS } from './views.js';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg.js';
 import { refresh } from './main.js';
@@ -310,24 +310,6 @@ function _agentRowHtml(a) {
         ctxChip = `<span class="ar-ctx ${cls}" title="context ${p}%">${p}%</span>`;
     }
 
-    // Role badge: one glyph per concept, not glyph-plus-label. 'orchestrator' is a
-    // crown ICON (CMX-302); 'dispatched' is a bot ICON (CMX-302, item 2, Liav
-    // 2026-08-17) — the old "Orchestrator"/"Dispatched" text pills were both wide
-    // enough to truncate the session name sitting next to them on a real row. A
-    // lucide icon still reads as a colourblind-safe shape (not colour alone) at a
-    // fraction of the width, with the word itself moved to the title/aria-label
-    // (lucideIcon hardcodes aria-hidden on the <svg> itself, so the accessible
-    // name has to live on the wrapping span). 'plain' (the common case) renders
-    // nothing at all. `bot` was already vendored in _LUCIDE and referenced by
-    // nothing — claiming it here adds no new icon path and collides with no
-    // existing meaning.
-    const role = _agentRole(a);
-    const roleChip = role === 'orchestrator'
-        ? `<span class="ar-role orchestrator" title="Orchestrator session" aria-label="Orchestrator session">${lucideIcon('crown', 12)}</span>`
-        : role === 'dispatched'
-            ? `<span class="ar-role dispatched" title="Dispatched session" aria-label="Dispatched session">${lucideIcon('bot', 12)}</span>`
-            : '';
-
     // CMX-377: the row's right-aligned relative time. recap_ts is the only
     // per-agent timestamp the API carries (the same field the pre-restyle row
     // used for its inline age) — reused here as the row's "ago", not
@@ -343,14 +325,6 @@ function _agentRowHtml(a) {
     const sub = `<span class="ar-state ${stCls}">${stWord}</span>`
         + (ctxChip ? ` · ${ctxChip} ctx` : '');
 
-    const canPin = TERMINALS_ON && a.cwd;
-    const faved = canPin && typeof _isFav === 'function' && _isFav(a.cwd);
-    const pin = canPin
-        ? `<button class="agent-pin${faved ? ' pinned' : ''}" data-cwd="${attrEsc(a.cwd)}"
-             title="${faved ? 'Unpin from Launch favorites' : 'Pin this directory to Launch favorites'}"
-             onclick="event.stopPropagation(); chela.toggleFavCwd(this.dataset.cwd)">${faved ? '&#9733;' : '&#9734;'}</button>`
-        : '';
-
     const type = _agentType(a);
     // Whatever CMX-146's ai_title / the occasional away_summary recap used to
     // add as extra lines now rides the row's own tooltip instead of a third
@@ -360,24 +334,23 @@ function _agentRowHtml(a) {
     const rowTitle = extra ? `${label}\n${extra}` : label;
 
     const wallSuffix = onWall ? ' — open on the wall' : '';
-    // .ar-type stays a ROW-level sibling of .ar-main (not nested inside it), same
-    // as before this restyle: body.sidebar-collapsed hides .ar-main wholesale
-    // (style.css) to fold the row down to its icon rail, and .ar-type has its
-    // OWN collapsed-rail override rule specifically so the type glyph survives
-    // that collapse — nesting it inside .ar-main would hide it too.
+    // CMX-377 round 2: the row is exactly status mark · title · "state · ctx" ·
+    // time, per the approved mockup — the .ar-type harness-letter badge, the
+    // .ar-role crown/bot icon, and the .agent-pin favorite star are all dropped
+    // from the row face (verdict on PR #529 round 2). Role is conveyed by
+    // grouping alone (the orchestrator's own Pinned cluster); pinning a cwd to
+    // Launch favorites still lives in the "+" launch menu, its other surface.
+    // _agentType/_typeGlyph/_agentRole are unchanged and still back the dead/
+    // dispatcher recent-session rows (renderRecentSessions), a different,
+    // out-of-mockup surface.
     return `<div class="agent-row rich${active}${wallCls}" data-agent="${attrEsc(a.name)}" title="${attrEsc(rowTitle + wallSuffix)}"
         onclick="chela.selectAgent(this.dataset.agent)">
         <span class="term-status-dot ${stCls}" title="${attrEsc(type)} · ${stWord}"></span>
-        <span class="ar-type ${attrEsc(type)}" title="${attrEsc(type)} window">${escHtml(_typeGlyph(type))}</span>
         <div class="ar-main">
-            <div class="ar-top">
-                <span class="agent-row-name">${escHtml(label)}</span>
-                ${roleChip}
-            </div>
+            <span class="agent-row-name">${escHtml(label)}</span>
             <div class="ar-sub">${sub}</div>
         </div>
         ${ago}
-        ${pin}
     </div>`;
 }
 

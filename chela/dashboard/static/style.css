@@ -3066,10 +3066,12 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
 
 .side-section { margin-bottom: 18px; }
 .side-section:first-child { margin-top: 2px; }
+/* CMX-377 round 2: sentence-case, no letter-spacing — the uppercase/tracked
+   style (NAVIGATE, SESSIONS, RECENT SESSIONS) doesn't match the approved
+   mockup's plain dim group labels. */
 .side-head {
     display: flex; align-items: center; gap: 8px; padding: 4px 16px 7px;
-    font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em;
-    color: var(--text-dim); cursor: default;
+    font-size: 11px; color: var(--text-dim); cursor: default;
 }
 .side-head[onclick] { cursor: pointer; }
 .side-head[onclick]:hover .side-title { color: var(--text); }
@@ -3126,36 +3128,22 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
 .side-item.active .side-item-icon { color: var(--accent); }
 .agent-row .agent-row-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* ---- Triage cluster: sessions waiting on input, lifted above the project
-   groups. Yellow vocabulary = "needs a human", matching the wall's waiting
-   ring. The card sits inside the already-padded .side-list, so no side margin. */
-.side-triage {
-    margin: 2px 0 12px; padding: 4px;
-    border: 1px solid color-mix(in srgb, var(--yellow) 35%, var(--border));
-    border-radius: 9px;
-    background: color-mix(in srgb, var(--yellow) 8%, transparent);
-}
+/* ---- Triage cluster: Pinned / Needs you / Finished — lifted above (or,
+   for Finished, rendered after) the project groups. CMX-377 round 2: the
+   bordered, tinted card (amber for Pinned, since it shared Needs-you's
+   yellow vocabulary with no override of its own; sky-blue for Finished) is
+   gone — the approved mockup's groups are a plain dim label with no box at
+   all, same idiom as the plain project .group-head below. No side margin:
+   the card used to supply its own padding; a plain label doesn't need it. */
+.side-triage { margin: 2px 0 12px; }
 .triage-head {
     display: flex; align-items: center; gap: 7px; padding: 3px 6px 6px;
-    font-size: 10px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.08em; color: var(--yellow);
+    font-size: 11px; color: var(--text-dim);
 }
 .triage-count {
     min-width: 16px; text-align: center; padding: 0 5px; border-radius: 999px;
-    font-size: 10px; line-height: 16px;
-    background: color-mix(in srgb, var(--yellow) 22%, transparent); color: var(--yellow);
-}
-
-/* ---- Finished cluster (issue #475): same triage card, sky-blue vocabulary so
-   it never reads as "needs you" at a glance — this is unread output, not a
-   blocker. One tier below "Needs you" when both are present. */
-.side-triage.side-finished {
-    border-color: color-mix(in srgb, var(--ok-sky) 35%, var(--border));
-    background: color-mix(in srgb, var(--ok-sky) 8%, transparent);
-}
-.side-finished .triage-head { color: var(--ok-sky); }
-.side-finished .triage-count {
-    background: color-mix(in srgb, var(--ok-sky) 22%, transparent); color: var(--ok-sky);
+    font-size: 10px; font-weight: 600; line-height: 16px;
+    background: var(--surface); color: var(--text-dim);
 }
 
 /* ---- Project groups: collapsible header with a session count + working-dot
@@ -3203,12 +3191,9 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
    Deliberately quieter than .active (a fill + rail): a 1px inset ring only. */
 .agent-row.on-wall { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 32%, var(--border)); }
 .agent-row.on-wall:hover { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 50%, var(--border)); }
-/* Window-type cue: a GLYPH (C / $ / ⚙), never colour alone. The letter carries the
-   type; the tint only reinforces it, and it comes from the Okabe-Ito colourblind-
-   safe palette (sky blue / bluish green / orange) rather than a red-green pairing.
-   Desaturate the whole row and it still reads. */
-/* 18px box / 11px letter — matches the collapsed rail (body.sidebar-collapsed
-   .ar-type) so folding the sidebar doesn't resize the type cue. */
+/* Window-type cue (recent/dispatcher rows only — CMX-377 round 2 dropped it
+   from the live agent row face; see nav.js's _agentRowHtml comment). A GLYPH,
+   never colour alone, so it still reads desaturated. */
 .ar-type {
     flex: 0 0 18px; height: 18px; margin-top: 2px;
     display: inline-flex; align-items: center; justify-content: center;
@@ -3216,11 +3201,7 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
     font-size: 11px; font-weight: 700; line-height: 1; border-radius: 4px;
     color: var(--text-dim); background: var(--surface);
 }
-.ar-type.claude { color: #56B4E9; background: color-mix(in srgb, #56B4E9 16%, transparent); }
-.ar-type.shell  { color: #009E73; background: color-mix(in srgb, #009E73 18%, transparent); }
-.ar-type.server { color: #E69F00; background: color-mix(in srgb, #E69F00 16%, transparent); }
-/* Recent (dead) sessions — CMX-208. Not one of the type-cue Okabe-Ito tints above
-   (claude/shell/server): this row is not a live window at all, so it reads as
+/* Recent (dead) sessions — CMX-208: not a live window, so it reads as
    dimmed/inert rather than typed. */
 .ar-type.recent { color: var(--text-dim); }
 
@@ -3253,43 +3234,20 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
 }
 .ar-ctx.warn { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, transparent); }
 .ar-ctx.danger { color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); }
-/* CMX-300: session role badge. A shape — text pill or icon — never a bare dot,
-   so the cue is colourblind-safe; colour only reinforces it. Omitted entirely
-   for 'plain' sessions (the common case), so it never appears in markup or CSS. */
-.ar-role {
-    flex: 0 0 auto; font-size: var(--card-font-size); font-weight: 600; line-height: 15px;
-    padding: 0 5px; border-radius: 999px; background: var(--surface);
-}
-/* CMX-302: orchestrator (crown) and dispatched (bot, item 2, Liav 2026-08-17)
-   are both bare ICON badges, not text pills — "Orchestrator"/"Dispatched" were
-   both wide enough to truncate the session name next to them. One glyph per
-   concept (the word itself moves to the title/aria-label), sized/centred like
-   the lucide icons elsewhere rather than the .ar-role text-pill padding above
-   (kept on the base rule for any future role that DOES want a text pill). Box
-   model shared (only colour differs) — one rule, not two copies to drift apart. */
-.ar-role.dispatched, .ar-role.orchestrator {
-    display: flex; align-items: center; justify-content: center;
-    min-width: 18px; max-width: 18px;
-    width: 18px; height: 18px; padding: 0; line-height: normal;
-}
-.ar-role.dispatched { color: #0072B2; background: color-mix(in srgb, #0072B2 14%, transparent); }
-.ar-role.orchestrator { color: #CC79A7; background: color-mix(in srgb, #CC79A7 16%, transparent); }
 .ar-sub { display: flex; align-items: baseline; gap: 5px; min-width: 0; font-size: var(--card-font-size); line-height: var(--card-line-height); color: var(--text-dim); }
+/* CMX-377 round 2: the state word stays dim (inherits .ar-sub's colour) in
+   every state — the shape (.term-status-dot) carries the state, colour is
+   never the only cue AND is no longer a second, redundant cue here either. */
 .ar-state { flex: 0 0 auto; font-weight: 600; text-transform: capitalize; }
-.ar-state.working { color: var(--green); }
-.ar-state.waiting { color: var(--yellow); }
-.ar-state.done { color: var(--ok-sky); }
-.ar-state.idle { color: var(--text-dim); }
 /* CMX-377: recent-sessions rows still use .ar-recap for their cwd sub-line
    (nav.js renderRecentSessions) — the live agent row's OWN recap/ai_title
    lines are gone (folded into the row's title tooltip; see .ar-ago below). */
 .ar-recap { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85; }
 /* CMX-377: the row's right-aligned relative time (mockup's `{{r.ago}}`) — a
    ROW-level sibling of .ar-main, not part of it, so it sits at the row's far
-   right the same way .agent-pin already does (both simply come after
-   .ar-main's flex: 1 in source order). Vertical offset matches the status
-   dot's own margin-top so it lines up with the row's first line, not its
-   vertical center. */
+   right (comes after .ar-main's flex: 1 in source order). Vertical offset
+   matches the status dot's own margin-top so it lines up with the row's
+   first line, not its vertical center. */
 .ar-ago { flex: 0 0 auto; margin-top: 4px; font-size: var(--card-font-size); color: var(--text-dim); opacity: 0.75; white-space: nowrap; }
 
 .side-badges { display: flex; gap: 4px; }
@@ -3301,8 +3259,8 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
 
 /* ---- Collapsed sidebar: the desktop icon rail --------------------------------
    Same DOM, narrower column: labels, section heads and sub-lines drop out and each
-   row keeps its glyph (a nav icon; a session's status dot + type letter). Pure CSS
-   off a body class — nothing re-renders, so collapsing cannot touch the wall's live
+   row keeps its glyph (a nav icon; a session's status-shape dot). Pure CSS off a
+   body class — nothing re-renders, so collapsing cannot touch the wall's live
    iframes. Phone-scoped rules own ≤768px, where the sidebar is a drawer instead. */
 @media (min-width: 769px) {
     /* Snap, don't animate: a transitioned grid column would relayout every live
@@ -3328,7 +3286,6 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
     body.sidebar-collapsed .group-head,
     body.sidebar-collapsed .triage-head,
     body.sidebar-collapsed .agent-row .ar-main,
-    body.sidebar-collapsed .agent-row .agent-pin,
     body.sidebar-collapsed .agent-row .recent-resume { display: none; }
 
     /* The section heads are gone, so a rule stands in for the section break. */
@@ -3340,15 +3297,11 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
 
     body.sidebar-collapsed .side-item,
     body.sidebar-collapsed .agent-row { justify-content: center; gap: 5px; padding: 8px 4px; }
-    /* With only glyphs left, the rail has room to breathe — bump the nav icon,
-       the session type letter and its status dot a notch so they read at a
-       glance. Stays well inside the 60px column (dot 10 + gap 5 + type 18). */
+    /* With only glyphs left, the rail has room to breathe — bump the nav icon
+       and the session's status dot a notch so they read at a glance. */
     body.sidebar-collapsed .side-item-icon { flex: 0 0 auto; font-size: 18px; }
     body.sidebar-collapsed .agent-row.rich { align-items: center; }
     body.sidebar-collapsed .agent-row.rich .term-status-dot { margin-top: 0; width: 10px; height: 10px; }
-    body.sidebar-collapsed .ar-type {
-        margin-top: 0; flex-basis: 18px; height: 18px; font-size: 11px;
-    }
 
     /* Grouped sessions flatten: no header to hang the nesting guide off. */
     body.sidebar-collapsed .group-rows { margin-left: 0; padding-left: 0; border-left: 0; }
@@ -3487,8 +3440,12 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
 .modal-sheet-head .icon-btn { flex: 0 0 auto; }
 .modal-sheet-body { flex: 1 1 auto; overflow-y: auto; padding: 14px 16px; }
 
-/* --- Canvas --- */
-.canvas { grid-row: 2; overflow-y: auto; padding: 18px 20px; }
+/* --- Canvas ---
+   CMX-377 round 2: explicit column+row, not auto-placement — the leftover
+   `grid-row: 2` from the removed topbar row shoved the canvas below the
+   sidebar (both landed in .app's only row) with nothing occupying the second
+   column, so the whole right side of the viewport went blank. */
+.canvas { grid-column: 2; grid-row: 1; overflow-y: auto; padding: 18px 20px; }
 .canvas-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
 .canvas-toolbar input[type=text] { flex: 1; }
 
@@ -3736,16 +3693,6 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
 .launch-row:hover .lr-forget { opacity: 1; }
 .launch-row .lr-shell:hover, .launch-row .lr-star:hover { color: var(--accent); }
 .launch-row .lr-forget:hover { color: var(--red); }
-
-/* Pin-to-Launch star on agent rows: hover-revealed; stays lit once pinned. */
-.agent-row .agent-pin {
-    background: transparent; border: 0; cursor: pointer; padding: 0 4px;
-    color: var(--text-dim); font-size: 13px; line-height: 1;
-    opacity: 0; transition: opacity 0.12s;
-}
-.agent-row:hover .agent-pin { opacity: 1; }
-.agent-row .agent-pin:hover { color: var(--accent); }
-.agent-row .agent-pin.pinned { opacity: 1; color: var(--yellow); }
 
 /* Launcher dedup: brief flash on the pane a launch focused. */
 @keyframes pane-flash-kf {
