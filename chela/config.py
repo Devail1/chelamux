@@ -1032,10 +1032,43 @@ INBOX_ENABLED = os.environ.get("CHELA_INBOX_ENABLED", "true").strip().lower() no
 # dispatcher-launched agent/rework/judge (`chela/dispatcher.py::resolve_agent_cmd`
 # builds those commands on its own, entirely separate from `spawn_window`) — those
 # are unattended workers, not sessions a human sits at. Set CHELA_REMOTE_CONTROL=false
-# to turn it off everywhere it would otherwise apply.
-REMOTE_CONTROL_ENABLED = os.environ.get("CHELA_REMOTE_CONTROL", "true").strip().lower() not in (
-    "false", "0", "no", "off",
-)
+# to turn it off everywhere it would otherwise apply, or flip it from the dashboard's
+# Settings (CMX-382) — env beats ``~/.chela/config.json`` beats the ON default.
+#
+# CMX-382: read PER CALL through :func:`dashboard_setting`, never latched at import —
+# the dashboard, the Telegram bridge and the daemon are three separate processes, and
+# a Settings toggle must reach all three without a restart. It only affects windows
+# launched AFTER the change; a running session keeps the flag it was launched with.
+REMOTE_CONTROL_KEY = "remote_control"
+REMOTE_CONTROL_ENV = "CHELA_REMOTE_CONTROL"
+_BOOL_TRUE = ("true", "1", "yes", "on")
+_BOOL_FALSE = ("false", "0", "no", "off")
+
+
+def cast_strict_bool(raw) -> bool:
+    """A bool from a real bool or one of true/false/1/0/yes/no/on/off (any case). Any
+    other value raises ``ValueError`` so :func:`dashboard_setting` treats it as absent
+    and falls through to the next level instead of guessing."""
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in _BOOL_TRUE:
+        return True
+    if text in _BOOL_FALSE:
+        return False
+    raise ValueError(f"not a boolean: {raw!r}")
+
+
+def remote_control_setting() -> tuple[bool, str]:
+    """``(enabled, source)`` — ``source`` is ``"env"``, ``"dashboard"`` or ``"default"``,
+    the level that actually won (the Settings UI locks the toggle when it is ``"env"``)."""
+    return _resolve_dashboard_setting(
+        REMOTE_CONTROL_KEY, REMOTE_CONTROL_ENV, True, cast_strict_bool)
+
+
+def remote_control_enabled() -> bool:
+    """Whether a window chela opens FOR A HUMAN gets ``--remote-control``. Read per call."""
+    return dashboard_setting(REMOTE_CONTROL_KEY, REMOTE_CONTROL_ENV, True, cast_strict_bool)
 
 # How long an undeliverable orchestrator address must stay dead before the inbox buzzes
 # the phone about it (chela/inbox.py `_undeliverable`). A reboot / tmux-restart / handoff

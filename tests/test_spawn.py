@@ -63,7 +63,7 @@ def _patch_tmux(monkeypatch, wid="@42", *, remote_control=False):
     monkeypatch.setattr(spawn.discovery, "get_all_windows", lambda: {})
     monkeypatch.setattr(spawn.agent_manager, "lock_window_name", lambda *a, **kw: None)
     monkeypatch.setattr(spawn.subprocess, "run", lambda *a, **kw: _Proc(wid))
-    monkeypatch.setattr(spawn.config, "REMOTE_CONTROL_ENABLED", remote_control)
+    monkeypatch.setattr(spawn.config, "remote_control_enabled", lambda: remote_control)
 
     sent: list[str] = []
     monkeypatch.setattr(spawn, "_send", lambda target, text: sent.append(text))
