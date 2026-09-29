@@ -3546,6 +3546,24 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
 .settings-modal-foot a { color: var(--text-dim); text-decoration: underline; }
 .settings-modal-foot a:hover { color: var(--text); }
 .settings-tabpanels code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+/* CMX-396: search across every tab. While a query is active (.searching) every
+   panel with a hit shows at once, each under its tab's name, and the rest of
+   the markup is only hidden by nav.js's .s-search-hide — never re-rendered. */
+.settings-search { flex: 0 0 auto; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+.settings-search-input { width: 100%; box-sizing: border-box; }
+.settings-search-empty { margin: 8px 0 0; font-size: 12.5px; color: var(--text-dim); }
+.settings-search-empty[hidden] { display: none; }
+.settings-modal.searching .settings-tabpanel { display: none; }
+.settings-modal.searching .settings-tabpanel.s-search-hit { display: flex; }
+.settings-modal.searching .settings-tabpanel.s-search-hit + .settings-tabpanel.s-search-hit { margin-top: 18px; }
+.settings-tabpanel .s-search-hide { display: none; }
+.settings-search-group {
+    margin: 0; font-size: 12px; font-weight: 600; color: var(--text-dim);
+}
+.sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 
 @media (max-width: 640px) {
     /* No room for a side rail on a phone — the tabs become a horizontal
