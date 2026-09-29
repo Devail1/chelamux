@@ -108,7 +108,11 @@ def test_with_no_recorded_identity_the_heal_does_nothing_and_the_alarm_fires(tmp
 def _proc(root: Path, pid: int, ticks: str) -> None:
     d = root / str(pid)
     d.mkdir(parents=True, exist_ok=True)
-    (d / "stat").write_text(f"{pid} (claude) S " + " ".join(["0"] * 18 + [ticks]) + "\n")
+    # A REALISTIC 52-field stat line (proc(5)): starttime is field 22, and fields 23-52
+    # follow it (vsize, rss, … exit_code). A fixture with the ticks LAST let a reader taking
+    # the last field pass every test and refuse every real registry entry (judge, d500fb1).
+    (d / "stat").write_text(f"{pid} (claude) S " + " ".join(
+        [str(4000 + i) for i in range(18)] + [ticks] + [str(9000 + i) for i in range(30)]) + "\n")
 
 
 def _claude_registry_dir() -> Path:
