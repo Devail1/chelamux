@@ -82,10 +82,14 @@ class MarkdownSource:
             title = m.group(1).strip()
             if BLOCKED_RE.search(title):
                 continue
-            tid = _task_id(self.path, _bare_title(title))
+            # ⛔ CMX-392: `Task.title` is the BARE title — what run rows, inbox notices,
+            # the dashboard and the prompt's `task_title` show. The marker-carrying text
+            # stays in `Task.raw` (see `raw_title`); `depends` and `body` are parsed from
+            # it here, and the strike matches the tracker line by id, never by title.
+            bare = _bare_title(title)
             tasks.append(Task(
-                id=tid,
-                title=title,
+                id=_task_id(self.path, bare),
+                title=bare,
                 file=str(self.path),
                 line_number=i,
                 raw=raw,
@@ -346,6 +350,17 @@ def _bare_title(title: str) -> str:
     return _TRAILING_COMMENT_RE.sub(" ", title).strip()
 
 
+def raw_title(task: Task) -> str:
+    """`task`'s title AS WRITTEN, `<!-- ... -->` markers included — re-read from `task.raw`.
+
+    `Task.title` is the bare title (CMX-392); a reader that must see the markers — to
+    re-parse a `depends:` payload, or to recompute a pre-CMX-384 raw-line id — reads
+    this instead. Falls back to `task.title` for a `raw` that is not a checkbox bullet.
+    """
+    m = OPEN_RE.match(task.raw)
+    return m.group(1).strip() if m else task.title
+
+
 def legacy_raw_ids(filename: str, tasks: list[Task]) -> dict[str, str]:
     """``{raw-line id: current id}`` for each of `tasks` whose id changed in CMX-384.
 
@@ -354,7 +369,7 @@ def legacy_raw_ids(filename: str, tasks: list[Task]) -> dict[str, str]:
     """
     out: dict[str, str] = {}
     for t in tasks:
-        raw_id = _title_id(filename, t.title)
+        raw_id = _title_id(filename, raw_title(t))
         if raw_id != t.id:
             out[raw_id] = t.id
     return out
