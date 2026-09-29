@@ -257,6 +257,22 @@ def test_provision_reports_a_failing_pnpm_install_with_its_exit_code(tmp_path, m
     assert problem.startswith(f"`pnpm install --frozen-lockfile` failed in {tmp_path} (exit 1")
 
 
+def test_provision_names_pnpm_not_npm_when_the_installer_binary_is_missing(
+        tmp_path, monkeypatch):
+    """A pnpm tree on a machine without pnpm must say PNPM is missing. ⛔ ``"npm" in problem``
+    cannot pin this — "pnpm" contains "npm" — so the assertion anchors the whole phrase."""
+    def _no_binary(argv, **_kw):
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr(judge.subprocess, "run", _no_binary)
+    _js_tree(tmp_path, "pnpm-lock.yaml")
+
+    problem = judge.provision_suite_env(tmp_path)
+
+    assert " and pnpm is not on this machine's PATH" in problem, problem
+    assert " npm is not on" not in problem, problem
+
+
 def test_provision_drops_a_legacy_shared_symlink_before_pnpm_writes(tmp_path, monkeypatch):
     """A worktree a pre-CMX-388 hook built has ``node_modules`` symlinked into the SHARED
     npm install. Running pnpm through that link would rewrite the directory every other
