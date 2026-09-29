@@ -10,7 +10,13 @@
 //     unrelated rows; clearing the query restores the tab you were on.
 //   - a keyword-only term (in data-keywords, not in the label or help) matches.
 //   - Esc clears the query first, and a second Esc closes the drawer.
-//   - rows rendered AFTER the query was typed (Timing loads async) are filtered too.
+//   - rows rendered AFTER the query was typed (Timing AND Dispatch load async) are
+//     filtered too, and the section's unlabelled Save row stays visible.
+//   - a section whose OWN heading / help text / data-keywords match shows whole
+//     (Remote access has no labelled rows — this is its only way in), and the live
+//     count counts every labelled row of a whole-matched section.
+//   - multi-word queries are AND.
+//   - Ctrl+, does NOT focus the box on a touch (pointer: coarse) screen.
 //   - empty state + the live count.
 //   - ⭐ MUST BE ACCEPTED: an empty query leaves the drawer byte-for-byte as rendered.
 //
@@ -39,6 +45,8 @@ ${HTML.slice(SETTINGS_START, SETTINGS_END)}`;
 // Per-test API responses; a value that is a function is called for a (possibly
 // deferred) body.
 let routes = {};
+// Flip to true to make matchMedia('(pointer: coarse)') match (a touch screen).
+let coarsePointer = false;
 
 function flush() {
     return new Promise(resolve => setTimeout(resolve, 0));
@@ -55,7 +63,7 @@ before(async () => {
         });
     }
     dom.window.matchMedia = q => ({
-        media: q, matches: false,
+        media: q, matches: coarsePointer && /pointer:\s*coarse/.test(q),
         addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
     });
     globalThis.fetch = (url) => {
@@ -114,6 +122,7 @@ async function openDrawer() {
 
 beforeEach(() => {
     routes = {};
+    coarsePointer = false;
     if (settingsOpen()) window.chela.toggleSettings();
     window.chela.closePalette();
     window.chela.selectSettingsTab('general');
@@ -205,6 +214,91 @@ test('rows that render AFTER the query was typed are filtered too (Timing loads 
     assert.equal(rows.length, 2, 'setup: timing rows did not render');
     assert.equal(visible(rows[0]), true, 'the late-rendered matching row is hidden');
     assert.equal(visible(rows[1]), false, 'a late-rendered row escaped the active filter');
+    const save = document.querySelector('#settings-timing button[onclick="chela.saveTiming()"]');
+    assert.equal(visible(save), true, 'the unlabelled Save row was hidden — a filtered Timing row cannot be saved');
+    assert.equal($('#settings-search-status').textContent, '1 setting', 'the Save row was counted as a setting');
+});
+
+test('Dispatch rows that render AFTER the query was typed are filtered too', async () => {
+    let release;
+    routes['/api/config/dispatch'] = () => new Promise(r => { release = r; });
+    await openDrawer();
+    type('zebra');
+    assert.ok(release, 'setup: opening Settings did not request /api/config/dispatch');
+    assert.doesNotMatch(sectionTitled('Dispatch').textContent.toLowerCase(), /zebra/, 'setup: "zebra" is in the Dispatch section already');
+    release({ knobs: [
+        { key: 'z', label: 'Zebra limit', kind: 'number', unit: '', default: 3, stored: '', effective: 3, source: 'default' },
+        { key: 'o', label: 'Something unrelated', kind: 'number', unit: '', default: 1, stored: '', effective: 1, source: 'default' },
+    ] });
+    await flush();
+    await flush();
+    const rows = [...document.querySelectorAll('#dispatch-rows .s-row')];
+    assert.equal(rows.length, 2, 'setup: dispatch rows did not render');
+    assert.equal(visible(rows[0]), true, 'the late-rendered matching Dispatch row is hidden');
+    assert.equal(visible(rows[1]), false, 'a late-rendered Dispatch row escaped the active filter');
+    const save = document.querySelector('#settings-dispatch button[onclick="chela.saveDispatch()"]');
+    assert.equal(visible(save), true, 'the unlabelled Dispatch Save row was hidden');
+});
+
+test('a section-level data-keywords term shows that whole section (Remote access has no labelled rows)', async () => {
+    await openDrawer();
+    window.chela.selectSettingsTab('appearance');
+    const sec = sectionTitled('Remote access');
+    assert.ok(sec, 'setup: no Remote access section');
+    assert.equal(sec.querySelectorAll('.s-rowlabel').length, 0, 'setup: Remote access gained labelled rows');
+    assert.doesNotMatch(sec.textContent.toLowerCase(), /\bvpn\b/, 'setup: "vpn" is not keyword-only any more');
+    assert.match(sec.dataset.keywords, /\bvpn\b/, 'setup: Remote access lost its "vpn" keyword');
+
+    type('vpn');
+    assert.equal(visible(sec), true, 'a section data-keywords term did not show its section');
+    assert.equal($('#settings-search-status').textContent, '1 setting');
+    assert.equal(visible(rowOf('#remote-control-toggle')), false, 'unrelated Remote Control row shown for "vpn"');
+});
+
+test('a section help-text term (.s-desc) shows that whole section', async () => {
+    await openDrawer();
+    const sec = sectionTitled('Remote access');
+    const desc = [...sec.querySelectorAll('.s-desc')].map(e => e.textContent.toLowerCase()).join(' ');
+    assert.match(desc, /termius/, 'setup: "termius" left the Remote access help text');
+    assert.doesNotMatch(sec.querySelector('h4').textContent.toLowerCase() + ' ' + sec.dataset.keywords, /termius/,
+        'setup: "termius" is not help-text-only any more');
+
+    type('termius');
+    assert.equal(visible(sec), true, 'a help-text-only term did not show its section');
+    assert.equal($('#settings-search-status').textContent, '1 setting');
+});
+
+test('a whole-matched section counts every labelled row it shows', async () => {
+    await openDrawer();
+    const sec = sectionTitled('Terminal font');
+    const labelled = [...sec.querySelectorAll('.s-row')].filter(r => r.querySelector('.s-rowlabel'));
+    assert.equal(labelled.length, 3, 'setup: Terminal font no longer has 3 labelled rows');
+
+    type('terminal font');
+    for (const r of labelled) assert.equal(visible(r), true, 'a row of the whole-matched section is hidden');
+    const shown = [...document.querySelectorAll('#drawer-body .s-row')]
+        .filter(r => r.querySelector('.s-rowlabel') && visible(r));
+    assert.equal(shown.length, 3, 'setup: "terminal font" shows rows outside Terminal font');
+    assert.equal($('#settings-search-status').textContent, '3 settings', 'the live count is not the number of rows shown');
+});
+
+test('multi-word queries are AND, not OR', async () => {
+    await openDrawer();
+    type('remote phone');
+    assert.equal(visible(rowOf('#remote-control-toggle')), true, '"remote phone" did not match Remote Control');
+    type('remote zzqqxx');
+    assert.equal(visible(rowOf('#remote-control-toggle')), false, 'a query with a non-matching word still matched (OR, not AND)');
+    assert.equal($('#settings-search-status').textContent, "No settings match 'remote zzqqxx'");
+});
+
+test('Ctrl+, on a touch (pointer: coarse) screen opens Settings WITHOUT focusing the search box', async () => {
+    coarsePointer = true;
+    document.activeElement?.blur?.();
+    assert.notEqual(document.activeElement, input(), 'setup: the search box is still focused from an earlier test');
+    key({ key: ',', ctrlKey: true });
+    await flush();
+    assert.equal(settingsOpen(), true, 'Ctrl+, did not open Settings');
+    assert.notEqual(document.activeElement, input(), 'the search box was focused on a touch screen (keyboard covers the drawer)');
 });
 
 test('⭐ MUST BE ACCEPTED: an empty query leaves the drawer byte-for-byte as rendered', async () => {
