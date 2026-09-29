@@ -347,3 +347,27 @@ def test_a_takeover_of_a_live_pin_with_no_recorded_identity_is_still_announced(
 
     assert inbox.load()["orchestrator"] == "@45"
     assert [e["payload"]["reason"] for e in _moved_records()] == ["taken_over"]
+
+
+def test_a_dispatch_watch_that_takes_the_pin_from_a_LIVE_orchestrator_is_announced(
+        store, monkeypatch):
+    """The `chela watch <wid>` path (``watch(wid, by=...)``, what every dispatch runs), not the
+    bare `chela watch` (``register``): `@45` watches `@60` and in doing so takes the pin from the
+    still-live `@8`. That is the same takeover, and it must be announced the same way.
+    (Control: `@8` itself watching `@60` re-registers its own pin — no notice.)"""
+    monkeypatch.setattr(inbox.discovery, "get_windows_by_id",
+                        lambda: {"@8": "liav", "@45": "liav", "@60": "worker"})
+    monkeypatch.setattr(inbox.sessions, "session_of_window",
+                        lambda wid, pane_map=None: {"@8": S8, "@45": S45}.get(wid))
+    _pinned()
+    assert inbox.watch("@60", "control", by="@8")["ok"]
+    assert _moved_records() == [] and inbox.load()["queue"] == [], "control"
+
+    _pinned()
+    assert inbox.watch("@60", "dispatch", by="@45")["ok"]
+
+    store_now = inbox.load()
+    assert store_now["orchestrator"] == "@45"
+    moved = [e for e in store_now["queue"] if e["kind"] == inbox.MOVED_KIND]
+    assert [e["payload"]["reason"] for e in moved] == ["taken_over"]
+    assert [(e["payload"]["old"], e["payload"]["new"]) for e in _moved_records()] == [("@8", "@45")]
