@@ -666,3 +666,68 @@ describe('CMX-393 phone 390×844: the drawer foot is one row, the "+" opens the 
             `#btn-decisions ${JSON.stringify(inbox)} is not inside the drawer head ${JSON.stringify(head)}`);
     });
 });
+
+// CMX-398 — the Settings/menu popover opened from the sidebar FOOT. The old
+// topbar math (`top = r.bottom + 6`) opened it below a button at the bottom of
+// the screen: measured live at 1920×916, top=912 for a 324px menu. The whole
+// menu must be inside the viewport — above the gear, since there is no room
+// below it — and so must #new-menu reopened from its "New…" row.
+async function assertInViewport(page, selector, vp) {
+    const b = await box(page, selector);
+    assert.ok(b.width > 0 && b.height > 0 && b.x >= -px && b.y >= -px
+        && b.x + b.width <= vp.width + px && b.y + b.height <= vp.height + px,
+        `${selector} ${JSON.stringify(b)} is not wholly inside the ${vp.width}×${vp.height} viewport`);
+    return b;
+}
+
+for (const vp of [{ width: 1920, height: 916 }, { width: 1440, height: 900 }]) {
+    describe(`CMX-398 desktop ${vp.width}×${vp.height}: the foot's menu opens wholly on screen`, { skip: why }, () => {
+        let page, context;
+        const ready = setup(async () => {
+            ({ page, context } = await openDashboard(browser, vp));
+            await settle(page);
+            await waitForReadouts(page);
+            await stable(page);
+        });
+        after(() => context && context.close());
+
+        test('#primary-menu is inside the viewport, above the gear', async () => {
+            ready();
+            await page.locator('#btn-primary-menu').click();
+            await page.waitForSelector('#primary-menu', { state: 'visible', timeout: 5000 });
+            const menu = await assertInViewport(page, '#primary-menu', vp);
+            const gear = await box(page, '#btn-primary-menu');
+            assert.ok(menu.y + menu.height <= gear.y + px,
+                `#primary-menu ${JSON.stringify(menu)} is not above the foot gear ${JSON.stringify(gear)}`);
+        });
+
+        test('New… from that menu opens #new-menu inside the viewport too', async () => {
+            ready();
+            if (!await page.locator('#primary-menu').isVisible()) await page.locator('#btn-primary-menu').click();
+            await page.locator('#primary-menu .popover-item', { hasText: 'New…' }).click({ timeout: 5000 });
+            await page.waitForSelector('#new-menu', { state: 'visible', timeout: 5000 });
+            await assertInViewport(page, '#new-menu', vp);
+            await page.evaluate(() => window.chela.hideNewMenu());
+        });
+    });
+}
+
+describe('CMX-398 phone 390×844: the "+" New-session menu is still wholly on screen', { skip: why }, () => {
+    const vp = { width: 390, height: 844 };
+    let page, context;
+    const ready = setup(async () => {
+        ({ page, context } = await openDashboard(browser, vp));
+        await page.waitForSelector('.agent-row', { state: 'attached', timeout: 15000 });
+        await stable(page);
+    });
+    after(() => context && context.close());
+
+    test('#new-menu from #btn-new-mobile is inside the 390×844 viewport, below the "+"', async () => {
+        ready();
+        await page.locator('#btn-new-mobile').click();
+        await page.waitForSelector('#new-menu', { state: 'visible', timeout: 5000 });
+        const menu = await assertInViewport(page, '#new-menu', vp);
+        const plus = await box(page, '#btn-new-mobile');
+        assert.ok(menu.y >= plus.y + plus.height - px, `#new-menu ${JSON.stringify(menu)} is not below the "+"`);
+    });
+});
