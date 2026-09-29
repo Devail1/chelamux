@@ -443,6 +443,24 @@ def address_state(store: dict, statuses: dict[str, str],
     return ADDR_OK, ""
 
 
+def live_holder(store: dict, statuses: dict[str, str], now_epoch: str | None,
+                caller: str | None) -> str | None:
+    """The OTHER live orchestrator a ``chela watch --if-unclaimed`` must not displace — or None.
+
+    None means the caller may claim: the pin is empty, it is undeliverable (``UNDELIVERABLE`` —
+    a dead window or a stale tmux epoch), or it already names ``caller``. Anything else —
+    ``ok``, and ``unstamped`` too, since :func:`address_state` still delivers to it — is a
+    live holder, and its ``@N`` is returned. There is deliberately no second liveness rule
+    here: an empty ``statuses`` map reads as live, exactly as it does for delivery, so a
+    ``claude agents`` hiccup can never let a SessionStart hook steal the slot (CMX-394).
+    """
+    wid = orchestrator_wid(store)
+    if not wid or wid == caller:
+        return None
+    state, _ = address_state(store, statuses, now_epoch)
+    return None if state in UNDELIVERABLE else wid
+
+
 # --- watches: the orchestrator registers interest when it delegates -------------
 
 def watch(wid: str, note: str = "", *, by: str | None = None) -> dict:

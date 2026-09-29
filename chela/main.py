@@ -531,6 +531,18 @@ def cmd_watch(args) -> None:
     is no pane to paste into).
     """
     self_wid = orchestrator.self_wid()
+    if getattr(args, "if_unclaimed", False):
+        # CMX-399: the SessionStart-hook form. It may only ever FILL an empty or dead slot —
+        # a bare `chela watch` in that hook moved the pin to a restarted peer (CMX-394).
+        if args.wid:
+            print("--if-unclaimed only registers this session; it takes no window",
+                  file=sys.stderr)
+            sys.exit(2)
+        holder = inbox.live_holder(inbox.load(), inbox.status_snapshot(), epoch.current(),
+                                   self_wid)
+        if holder:
+            print(f"orchestrator is {holder} (live) — not claiming")
+            return
     if not args.wid:
         if not self_wid:
             peer = orchestrator.self_peer()
@@ -2626,6 +2638,11 @@ def main() -> None:
                               "this session as the orchestrator and nothing else — the "
                               "recovery path after tmux restarts and renumbers the fleet.")
     p_watch.add_argument("--note", help="What you asked it to do (echoed back to you)")
+    p_watch.add_argument("--if-unclaimed", action="store_true",
+                         help="Register this session ONLY if no live orchestrator holds the "
+                              "pin (empty, dead window, stale tmux epoch, or already you); "
+                              "otherwise change nothing and exit 0. Safe for a SessionStart "
+                              "hook.")
 
     p_unwatch = sub.add_parser("unwatch", help="Stop watching a window")
     p_unwatch.add_argument("wid", help="Window to stop watching (@N or N)")

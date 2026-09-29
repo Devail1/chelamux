@@ -527,6 +527,39 @@ printing nothing at all.
 > `/plugin uninstall chela@chela` + `/plugin install chela@chela`. Hooks are read at agent
 > **startup**: a running agent keeps the old set until it restarts.
 
+## Auto-claiming the orchestrator slot after a reboot (`chela watch --if-unclaimed`)
+
+After a reboot the inbox's orchestrator address is **dangling** (issued by a dead tmux
+server) and it holds its queue until a session says "I am here" with `chela watch`. It is
+tempting to have a `SessionStart` hook say it for you — but a bare `chela watch` there
+registers *every* session it runs in, so the first restarted peer takes the slot from the
+live orchestrator (CMX-394). Use `--if-unclaimed` instead. It registers the calling session
+exactly like `chela watch` only when the recorded pin is:
+
+* **empty** — nobody has registered;
+* **undeliverable** — `inbox.UNDELIVERABLE`: the window runs no claude any more (`gone`), or
+  the address was issued by a tmux server that has since restarted (`dangling`);
+* **already this session** — a no-op that succeeds.
+
+Otherwise it changes nothing, exits 0, and prints one line:
+`orchestrator is @N (live) — not claiming`. "Live" is exactly what the inbox delivers to
+(`inbox.address_state`, so an `unstamped` or env-pinned address counts as live, and an empty
+status map from a `claude agents` hiccup never reads as a death). It takes no window
+argument. This is an operator-side hook in your own `~/.claude/settings.json` — chela does
+not ship it. The line, scoped to sessions started in tmux from your home directory:
+
+```json
+{"hooks": {"SessionStart": [{"hooks": [{"type": "command",
+  "command": "[ -n \"$TMUX\" ] && [ \"$PWD\" = \"$HOME\" ] && chela watch --if-unclaimed 2>/dev/null; true",
+  "timeout": 10}]}]}}
+```
+
+Its stdout (the one-line verdict) lands in the new session's context, which is the point:
+the session learns whether it is the orchestrator. `; true` keeps a missing `chela` or a
+non-tmux session from failing the hook. Two sessions starting in the same instant after a
+reboot can both see a dead pin; the later registration wins, and neither ever displaces an
+orchestrator that was live when it checked.
+
 ## Event types in the log
 
 A hook event is namespaced — `hook.pre_tool_use`, `hook.permission_request` — so *an agent
