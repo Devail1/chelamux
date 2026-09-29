@@ -548,6 +548,17 @@
     <span>Settings</span>
     <button class="icon-btn" onclick="chela.toggleSettings()">✕</button>
   </div>
+  <!-- CMX-396: VS Code-style search across EVERY tab. nav.js settingsSearch()
+       filters #drawer-body's sections/rows in place (hide classes only — the
+       rows are never re-rendered, so clearing the query leaves the modal exactly
+       as it was). The status span is the screen-reader live count. -->
+  <div class="settings-search">
+    <input id="settings-search" class="s-input settings-search-input" type="search"
+           placeholder="Search settings" aria-label="Search settings" aria-controls="drawer-body"
+           autocomplete="off" spellcheck="false" oninput="chela.settingsSearch(this.value)">
+    <p class="settings-search-empty" id="settings-search-empty" hidden></p>
+    <span class="sr-only" id="settings-search-status" role="status" aria-live="polite"></span>
+  </div>
   <div class="settings-modal-body">
     <nav class="settings-tabs" id="settings-tabs">
       <!-- populated by nav.js renderSettings() -->
