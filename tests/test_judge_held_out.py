@@ -263,6 +263,58 @@ def test_the_consistency_sample_rechecks_SURVIVORS_first(tmp_path):
     assert report.outcomes[1].flaky
 
 
+def test_an_INVALID_rerun_is_NOT_a_flip_and_the_stable_survivor_still_BLOCKS(tmp_path):
+    """A re-run whose suite could not run (timeout, collection crash) proved NOTHING — it is
+    not the other fact. Treating SURVIVED→INVALID as a flip would launder a real survivor
+    into ``flaky`` and unblock it, which is exactly the weakening the brief forbids."""
+    root = _project(tmp_path / "repo", guard_test=REAL_GUARD_TEST)
+    timed_out = judge.SuiteResult(ok=False, exit_code=-1, passed=0, failed=0, errors=0,
+                                  tail="", detail="timed out")
+    runs = iter([_suite(0), _suite(0), timed_out])    # baseline, first pass, the re-run
+    with patch.object(judge, "provision_suite_env", return_value=""), \
+         patch.object(judge, "run_suite", side_effect=lambda *a, **k: next(runs)):
+        report = judge.run_experiments(root, TEST_CMD, {"experiments": [_glyph()]},
+                                       timeout=120, consistency_sample=1)
+    (o,) = report.outcomes
+    assert o.verdict == judge.SURVIVED and o.rerun_verdict == judge.INVALID
+    assert not o.flaky
+    assert report.flaky == []
+    assert report.consistency == {"sampled": 1, "flipped": 0, "flip_rate": 0.0}
+    assert [b.experiment.guard for b in report.blocking] == ["the colourblind glyph cue"]
+    assert report.state == judge.J_BLOCKED
+
+
+def test_a_consistency_rerun_that_cannot_RESTORE_its_file_is_CANNOT_VERIFY(tmp_path):
+    """The re-run mutates the worktree a second time; if it can't put the file back, every
+    finding — including the stable survivor measured before it — is about code nobody wrote.
+    Without the contamination return, this report would come out BLOCKED instead."""
+    root = _project(tmp_path / "repo", guard_test=REAL_GUARD_TEST)
+    calls = {"n": 0}
+
+    def scripted_suite(*a, **k):
+        calls["n"] += 1
+        return _suite(0)                    # baseline green; SURVIVED both passes (stable)
+
+    real_write = Path.write_text
+
+    def write_text(self, data, *a, **k):
+        # Only the re-run's RESTORE fails: suite calls are baseline(1), first pass(2),
+        # re-run(3) — the restore after call 3 writes the original back.
+        if calls["n"] >= 3 and self.name == "guard.py" and GLYPH_BEFORE in data:
+            raise OSError("disk full (scripted)")
+        return real_write(self, data, *a, **k)
+
+    with patch.object(judge, "provision_suite_env", return_value=""), \
+         patch.object(judge, "run_suite", side_effect=scripted_suite), \
+         patch.object(Path, "write_text", write_text):
+        report = judge.run_experiments(root, TEST_CMD, {"experiments": [_glyph()]},
+                                       timeout=120, consistency_sample=1)
+    assert calls["n"] == 3                  # the re-run really happened
+    assert "could NOT be restored" in report.cannot_verify
+    assert "disk full (scripted)" in report.cannot_verify
+    assert report.state == judge.J_CANNOT_VERIFY
+
+
 def test_a_held_out_flaky_experiment_is_counted_never_named(tmp_path):
     report = _flaky_run(tmp_path, [_sentinel()], [0, 1])
     assert report.outcomes[0].flaky
@@ -318,6 +370,24 @@ def test_the_judge_prompt_asks_for_held_out_tags(tmp_path):
         dispatcher._judge_vars(wf, row, judge.judge_worktree_path(wf, "ho-prompt"), "cafe"),
     )
     assert '"held_out": true' in rendered and "about\n     30% of your" in rendered
+
+
+def test_the_judge_prompt_held_out_floor_follows_HELD_OUT_MIN_EXPERIMENTS(
+    tmp_path, monkeypatch,
+):
+    """The "at least 1 once you propose N or more" floor the judge reads must be the SAME
+    constant ``held_out_quota`` enforces — pinned at a NON-default value so neither a literal
+    ``0`` nor a literal ``3`` at the ``_judge_vars`` call site can pass (DEFEAT_SHAPES #2)."""
+    monkeypatch.setattr(judge, "HELD_OUT_MIN_EXPERIMENTS", 7)
+    repo = _workflow_repo(tmp_path, "ho-floor", REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, "ho-floor")
+    wf = workflow.load_workflow(repo / "WORKFLOW.md")
+    row = dispatcher.resolve_run("ho-floor")
+    jv = dispatcher._judge_vars(wf, row, judge.judge_worktree_path(wf, "ho-floor"), "cafe")
+    assert jv["held_out_min"] == 7
+    rendered = dispatcher.render_prompt(dispatcher.JUDGE_PROMPT, jv)
+    assert "at least 1 once you propose\n     7 or more" in rendered
 
 
 def _set_judge_knobs(repo: Path, **knobs) -> None:
