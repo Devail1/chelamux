@@ -21,6 +21,15 @@ that the same fixture minus the defect resolves — so the red comes from that c
 from a fixture that was broken some other way. A fixture helper that cannot produce a
 dishonest record cannot test a check for dishonesty.
 
+**Round 2 — the same shape, one level wider:** round 1's fix armed exactly the two clauses the
+verdict named, and the judge then found four siblings no fixture could reach: the `sessionId`
+format check (every helper-written id is well-formed), the `if claims:` early return (no
+fixture ever had two `--resume` claimants, so falling through to the registry was never
+tried), and both halves of `if old_session and old_session == new_session` in the takeover
+check (no test had the SAME session watch from a new window while the old one was still
+listed, or had an unknown identity on both sides). Fix the shape, not the finding: list
+EVERY clause of the validator and write its one-clause-only record in the same pass.
+
 **Related:** shape 57 (a not-found arm never armed) is the same blindness for a missing
 record; this is it for a present-but-lying one. Shape 308 (two gating conditions only armed
 together) is the multi-clause cousin.

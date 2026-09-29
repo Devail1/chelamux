@@ -179,6 +179,33 @@ def test_two_panes_whose_registry_entries_claim_one_session_resolve_to_none(flee
     assert sessions.wid_claiming_session(S8, both) is None
 
 
+def test_a_registry_file_whose_sessionId_is_not_a_session_id_is_refused(fleet, tmp_path):
+    """`808.json` with its `pid` and `procStart` honest but a `sessionId` that is not a
+    well-formed session id (a path, a shell word) is not a session claim: refused. Only the
+    sessionId field differs from the accepted control."""
+    reg = sessions.claude_sessions_dir()
+    good = json.loads((reg / "808.json").read_text())
+    assert sessions.registry_session(808) == S8, "control: the honest file is accepted"
+    (reg / "808.json").write_text(json.dumps({**good, "sessionId": "../not a session"}))
+    assert sessions.registry_entry(808) is None
+    assert sessions.registry_session(808) is None
+    assert sessions.session_of_window("@8") is None
+
+
+def test_ambiguous_resume_claims_never_fall_through_to_the_registry(fleet, tmp_path):
+    """Two panes' command lines BOTH say `--resume S8`, and only @8's registry entry names S8.
+    The command line is the stronger signal and it is ambiguous, so the answer is None — the
+    registry must not be consulted to break the tie. (Control: with one `--resume` claimant
+    that claimant wins; with none, the registry names @8.)"""
+    _proc(tmp_path / "proc", 909, "7777")
+    _registry(909, S45, "@9", "7777")
+    p8 = sessions.Pane("@8", HOME, "claude", 808, HOME, S8, 1.0)
+    p9 = sessions.Pane("@9", HOME, "claude", 909, HOME, S8, 1.0)
+    assert sessions.wid_claiming_session(S8, {"@9": p9}) == "@9", "control: one claimant"
+    assert sessions.wid_claiming_session(S8, {"@8": fleet["@8"]}) == "@8", "control: registry"
+    assert sessions.wid_claiming_session(S8, {"@8": p8, "@9": p9}) is None
+
+
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_INBOX_FILE", str(tmp_path / "inbox.json"))
@@ -289,3 +316,34 @@ def test_chela_restore_readdressing_the_pin_is_announced(store, monkeypatch):
 
     assert [e["payload"]["reason"] for e in _moved_records()] == ["restore"]
     assert [e["kind"] for e in inbox.load()["queue"]] == [inbox.MOVED_KIND]
+
+
+def test_the_same_session_watching_from_a_new_window_is_not_a_takeover(store, monkeypatch):
+    """`@8` is still listed (not yet reaped), and the orchestrator's OWN session S8 runs
+    `chela watch` from `@60` after a resume into a new window. Same identity ⇒ no notice.
+    (Control: a DIFFERENT session doing the same from `@45` is announced.)"""
+    monkeypatch.setattr(inbox.discovery, "get_windows_by_id",
+                        lambda: {"@8": "liav", "@45": "liav", "@60": "liav"})
+    monkeypatch.setattr(inbox.sessions, "session_of_window",
+                        lambda wid, pane_map=None: {"@8": S8, "@45": S45, "@60": S8}.get(wid))
+    _pinned()
+    inbox.register("@60")
+    assert inbox.load()["orchestrator"] == "@60"
+    assert _moved_records() == [] and inbox.load()["queue"] == []
+
+    _pinned()
+    inbox.register("@45")
+    assert [e["payload"]["reason"] for e in _moved_records()] == ["taken_over"], "control"
+
+
+def test_a_takeover_of_a_live_pin_with_no_recorded_identity_is_still_announced(
+        store, monkeypatch):
+    """The pin on live `@8` carries NO recorded session, and `@45`'s identity is unknown too.
+    Two unknowns are not the same session: `@45` taking the pin is a takeover, announced."""
+    monkeypatch.setattr(inbox.sessions, "session_of_window", lambda wid, pane_map=None: None)
+    _pinned(session=None)
+
+    inbox.register("@45")
+
+    assert inbox.load()["orchestrator"] == "@45"
+    assert [e["payload"]["reason"] for e in _moved_records()] == ["taken_over"]
