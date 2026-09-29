@@ -410,3 +410,111 @@ def test_the_private_held_out_record_is_owner_only(tmp_path):
     assert path is not None
     assert path.stat().st_mode & 0o777 == 0o600
     assert path.parent.stat().st_mode & 0o777 == 0o700
+
+
+# --- round 2: the three `judge_run` call-site wirings nothing pinned ----------------------
+
+def _spy_run_experiments(calls: list[dict], n_killed: int = 0):
+    """Stand-in for `run_experiments` that records the kwargs `judge_run` handed it and
+    returns ``n_killed`` KILLED outcomes — the WIRING is under test here, not the battery."""
+    def spy(worktree, test_cmd, raw, **kw):
+        calls.append(kw)
+        exp = judge.Experiment(**{k: v for k, v in _glyph().items()})
+        return judge.Report(outcomes=[judge.Outcome(exp, judge.KILLED, "killed")
+                                      for _ in range(n_killed)])
+    return spy
+
+
+@pytest.mark.parametrize("reprovision", [False, True], ids=["worktree-present", "reprovisioned"])
+def test_judge_run_passes_a_NON_default_consistency_sample_on_BOTH_worktree_paths(
+    tmp_path, reprovision,
+):
+    """`judge_run` calls `run_experiments` from TWO branches — the worktree already on disk,
+    and one it just rebuilt with `_reprovision_worktree`. Round 2's survivor hardcoded
+    ``consistency_sample=0`` on the rebuilt branch only: the end-to-end knob test above never
+    reaches it (its worktree always exists). Parametrised so each branch is read back."""
+    task_id = f"ho-rp-{int(reprovision)}"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    _set_judge_knobs(repo, consistency_sample=5)
+    assert judge.CONSISTENCY_SAMPLE != 5
+    wt = judge.judge_worktree_path(workflow.load_workflow(repo / "WORKFLOW.md"), task_id)
+    if reprovision:
+        import shutil
+        shutil.rmtree(wt)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_glyph()]}))
+    calls: list[dict] = []
+    reprov_calls: list[tuple] = []
+
+    def fake_reprovision(*a):
+        reprov_calls.append(a)
+        return ""                                  # "" = rebuilt fine, go ahead
+
+    with patch.object(judge, "run_experiments", side_effect=_spy_run_experiments(calls)), \
+         patch.object(judge, "_reprovision_worktree", side_effect=fake_reprovision), \
+         patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        judge.judge_run(task_id, exp_file, cleanup=False)
+    assert bool(reprov_calls) is reprovision       # the branch under test really ran
+    assert len(calls) == 1
+    assert calls[0]["consistency_sample"] == 5
+
+
+def test_a_STALE_head_round_is_recorded_stale_privately_and_metrics_skip_it(tmp_path):
+    """The verdict is for `oldsha…`, the PR's live head is `newsha…` ⇒ the private record
+    says ``stale: true``, so `chela judge show` does not count it as a round. Corrupt the
+    call site to ``stale=False`` and the stale round inflates rounds-to-clean."""
+    task_id = "ho-stale"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha="oldsha000001", pr_head_sha="newsha000002")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_glyph()]}))
+    with patch.object(dispatcher, "pr_live_head_sha", return_value="newsha000002"), \
+         patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+    assert result["state"] == judge.J_STALE_HEAD
+    rec = judge.load_private(task_id)[-1]
+    assert rec["stale"] is True and rec["sha"] == "oldsha000001"
+    assert judge.private_metrics([rec])["rounds"] == 0
+
+
+def test_a_FRESH_head_round_is_recorded_NOT_stale(tmp_path):
+    """Control for the test above: the same round on a head that did not move is a real round
+    — without this, ``stale=True`` hardcoded at the call site would pass."""
+    task_id = "ho-fresh"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_sha="oldsha000001", pr_head_sha="oldsha000001")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_glyph()]}))
+    with patch.object(dispatcher, "pr_live_head_sha", return_value="oldsha000001"), \
+         patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+    assert result["state"] != judge.J_STALE_HEAD
+    rec = judge.load_private(task_id)[-1]
+    assert rec["stale"] is False
+    assert judge.private_metrics([rec])["rounds"] == 1
+
+
+def test_judge_run_records_the_held_out_quota_from_a_NON_default_fraction(tmp_path):
+    """judge.held_out_fraction: 0.55 over 3 experiments ⇒ quota round(1.65) = 2, where the
+    30% default gives round(0.9) = 1. The quota in the private record must follow the knob,
+    not ``HELD_OUT_FRACTION`` — the number the operator reads to see the judge under-tagged."""
+    assert judge.held_out_quota(3, judge.HELD_OUT_FRACTION) == 1
+    assert judge.held_out_quota(3, 0.55) == 2
+    task_id = "ho-quota"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    _set_judge_knobs(repo, held_out_fraction=0.55)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_glyph()] * 3}))
+    calls: list[dict] = []
+    with patch.object(judge, "run_experiments",
+                      side_effect=_spy_run_experiments(calls, n_killed=3)), \
+         patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        judge.judge_run(task_id, exp_file, cleanup=False)
+    rec = judge.load_private(task_id)[-1]
+    assert rec["held_out"]["quota"] == 2
