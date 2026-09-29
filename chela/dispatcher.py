@@ -1760,9 +1760,16 @@ def _read_pr_status(pr_url: str | None, repo_dir: str | None) -> tuple[str | Non
     if not m:
         return None, None
     pr_number = m.group(1)
+    argv = ["gh", "pr", "view", pr_number]
+    # ⛔ CMX-391: ask about the PR the URL NAMES. By number alone `gh` resolves it in
+    # repo_dir's repo — `https://github.com/o/r/pull/5` (a test fixture's URL, lifted
+    # from a transcript) was read as THIS repo's merged PR #5, and a live run was closed.
+    owner_repo = _pr_owner_repo(pr_url)
+    if owner_repo:
+        argv += ["--repo", "/".join(owner_repo)]
     try:
         out = subprocess.run(
-            ["gh", "pr", "view", pr_number, "--json", "state,mergeable"],
+            argv + ["--json", "state,mergeable"],
             cwd=repo_dir, capture_output=True, text=True, timeout=15,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -2320,11 +2327,33 @@ _PR: {pr_url or "(no url on the run row)"} — posted by the dispatcher's CI gat
 """
 
 
-def _read_pr_url(window_name: str | None) -> str | None:
+def _pr_url_in_repo(url: str, repo_dir: str | None) -> bool:
+    """True only when ``url`` is a PR of one of ``repo_dir``'s own GitHub remotes.
+
+    ⛔ CMX-391: a transcript's ``pr-link`` record is written by Claude Code whenever a PR
+    URL shows up in the session — including a TEST FIXTURE's fake URL echoed by pytest or a
+    smoke test. CMX-389's transcript held 23 ``https://github.com/o/r/pull/5`` records and no
+    real one; the daemon recorded that fake PR, saw it "merged" and closed the run. A PR in
+    some other repo is never this run's PR, so no known slug (no repo, no GitHub remote) is
+    a NO, not a pass.
+    """
+    m = mergegate._PR_URL_RE.search(url or "")
+    if not m or not repo_dir:
+        return False
+    slug = f"{m.group(1)}/{m.group(2)}".lower()
+    return slug in {s.lower() for s in mergegate.repo_slugs(repo_dir)}
+
+
+def _read_pr_url(window_name: str | None, repo_dir: str | None = None) -> str | None:
     """Best-effort read of the latest pr-link URL from the agent's transcript.
 
     Returns None on any failure — pr_url is optional; a missing URL leaves the
     Done card unlinked rather than blocking the run from being marked done.
+
+    ⛔ CMX-391: the transcript is evidence of what the session SAW, not of what it opened.
+    A URL outside ``repo_dir``'s own remotes is dropped (see :func:`_pr_url_in_repo`), and
+    callers prefer a ``pr_url`` already on the row — recorded daemon-side by
+    ``request-push`` — over anything read here.
     """
     if not window_name:
         return None
@@ -2337,7 +2366,10 @@ def _read_pr_url(window_name: str | None) -> str | None:
     if isinstance(pr, dict):
         url = pr.get("url")
         if isinstance(url, str) and url:
-            return url
+            if _pr_url_in_repo(url, repo_dir):
+                return url
+            log.warning("Ignoring transcript PR %s for window %s: not a PR of %s",
+                        url, window_name, repo_dir)
     return None
 
 
@@ -2681,11 +2713,13 @@ def mark_awaiting_review(task_id: str) -> dict:
                 "error": f"run is in status {row['status']!r}, refusing to transition",
                 "task_id": task_id,
             }
-        pr_url = _read_pr_url(row["window_name"])
         window_name = row["window_name"]
-        effective_pr_url = pr_url or row["pr_url"]
         wf_path = row["workflow_path"]
         repo_dir = str(Path(wf_path).parent) if wf_path else None
+        # ⛔ CMX-391: the row's own pr_url (recorded daemon-side by request-push) wins; the
+        # transcript is only a fallback — it once handed back a test fixture's fake PR.
+        pr_url = row["pr_url"] or _read_pr_url(window_name, repo_dir)
+        effective_pr_url = pr_url
         pr_state, pr_mergeable = _read_pr_status(effective_pr_url, repo_dir)
         conn.execute(
             "UPDATE runs SET status='awaiting_review', ended_at=?, "
@@ -4668,7 +4702,9 @@ def tick(workflow_path: str | Path) -> dict:
                 # legacy self-strike) is legitimate done-evidence here. Preserve
                 # the original ended_at so the timestamp reflects when the agent
                 # finished, not when the human merged the PR.
-                pr_url = _read_pr_url(row["window_name"])
+                wf_path = row["workflow_path"]
+                pr_url = row["pr_url"] or _read_pr_url(
+                    row["window_name"], str(Path(wf_path).parent) if wf_path else None)
                 if row["window_name"]:
                     _kill_window(row["window_name"])
                 conn.execute(
@@ -4691,10 +4727,10 @@ def tick(workflow_path: str | Path) -> dict:
                 # the window-gone→failed check below (reused, not duplicated) if its window
                 # is dead, or is left alone — still running/claimed — for the watchdog if
                 # its window is still alive. Don't kill a window we haven't proven finished.
-                pr_url = _read_pr_url(row["window_name"])
-                effective_pr_url = pr_url or row["pr_url"]
                 wf_path = row["workflow_path"]
                 repo_dir = str(Path(wf_path).parent) if wf_path else None
+                pr_url = row["pr_url"] or _read_pr_url(row["window_name"], repo_dir)
+                effective_pr_url = pr_url
                 pr_state = row["pr_state"]
                 if pr_state != "merged" and effective_pr_url:
                     pr_state, _mergeable = _read_pr_status(effective_pr_url, repo_dir)

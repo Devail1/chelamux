@@ -51,7 +51,9 @@ import atexit
 import builtins
 import io
 import os
+import pwd
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 from pathlib import Path
@@ -67,6 +69,12 @@ REAL_CHELA_DIRS: tuple[Path, ...] = tuple({
     Path(p).expanduser().resolve()
     for p in (os.environ.get("CHELA_DIR"), Path.home() / ".chela")
     if p
+})
+# The operator's real home ``.chela`` — by the passwd entry as well as ``$HOME``, so a suite
+# spawned with a borrowed ``HOME`` still knows whose install it must never point at.
+REAL_HOME_CHELA_DIRS: tuple[Path, ...] = tuple({
+    (Path(h) / ".chela").resolve()
+    for h in (str(Path.home()), pwd.getpwuid(os.getuid()).pw_dir)
 })
 # Claude Code's own config dir, for the same reason (CLAUDE_CONFIG_DIR is isolated per
 # test, but code that hardcodes ~/.claude — transcripts.py did — bypasses that).
@@ -270,6 +278,54 @@ def _isolate_chela_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CHELA_DIR", scratch)
 
 
+class LiveChelaDirEscape(BaseException):
+    """``CHELA_DIR`` resolves to the operator's real ``~/.chela`` inside a test.
+
+    ⛔ CMX-391: the suite runs from a dispatched agent's shell (``chela task-finished
+    --self-check-experiments``) and from the judge, both of which carry the LIVE
+    ``CHELA_DIR``. Every redirect above is what stands between a test and the real
+    ``scheduler.db``; this is the check that the redirect actually held.
+    """
+
+
+def _refuse_real_chela_dir(value) -> None:
+    """Raise :class:`LiveChelaDirEscape` if ``value`` resolves to a real home ``.chela``."""
+    if value is None or str(value) == "":
+        return
+    resolved = Path(os.fspath(value)).expanduser().resolve()
+    if resolved in REAL_HOME_CHELA_DIRS:
+        raise LiveChelaDirEscape(
+            f"CHELA_DIR resolves to the operator's REAL chela dir ({resolved}) inside a "
+            "test run. Tests must run against a scratch CHELA_DIR (tests/conftest.py "
+            "redirects it at import and per test) — refusing to run against live state."
+        )
+
+
+# At import too: a conftest that failed to redirect must stop the run before any test
+# module imports chela and latches the live dir.
+_refuse_real_chela_dir(os.environ.get("CHELA_DIR"))
+
+
+@pytest.fixture(autouse=True)
+def _chela_dir_is_never_the_real_one(_isolate_chela_dir):
+    """Fails every test whose ``CHELA_DIR`` (env or ``config.CHELA_DIR``) is the real one."""
+    from chela import config
+
+    _refuse_real_chela_dir(os.environ.get("CHELA_DIR"))
+    _refuse_real_chela_dir(config.CHELA_DIR)
+
+
+def _sqlite_target(database) -> object:
+    """The filesystem path a ``sqlite3.connect`` target names (``file:`` URIs included)."""
+    if isinstance(database, str):
+        if database in ("", ":memory:"):
+            return None
+        if database.startswith("file:"):
+            path = database[len("file:"):].split("?", 1)[0]
+            return None if path in ("", ":memory:") else path
+    return database
+
+
 @pytest.fixture(autouse=True)
 def _no_live_state(monkeypatch):
     """The fence: opening anything under the real ``~/.chela`` / ``~/.claude`` fails.
@@ -295,11 +351,29 @@ def _no_live_state(monkeypatch):
     # Three doors, not one: ``Path.open`` (and so ``read_text``/``write_text``) goes
     # through ``io.open``, which is a *separate reference* to the same function that
     # ``builtins.open`` names — patching one leaves the other wide open. ``os.open`` is
-    # the low-level door (``os.mkdir``/sqlite bypass all three, but the state files that
-    # escaped are JSON and JSONL).
+    # the low-level door (``os.mkdir``/sqlite bypass all three — sqlite gets its own door
+    # below).
     monkeypatch.setattr(builtins, "open", guard(builtins.open))
     monkeypatch.setattr(io, "open", guard(io.open))
     monkeypatch.setattr(os, "open", guard(os.open))
+
+    # ⛔ CMX-391: the fourth door. ``sqlite3.connect`` opens its file in C, past every
+    # door above — and ``scheduler.db`` (the runs table the daemon acts on) is exactly the
+    # state a test must never reach.
+    real_connect = sqlite3.connect
+
+    def guarded_connect(database, *args, **kwargs):
+        target = _sqlite_target(database)
+        if target is not None and _is_live_state(target):
+            raise LiveStateEscape(
+                f"test opened a LIVE chela database: {database}\n"
+                "Tests must never read or write the developer's real ~/.chela. Point the "
+                "code at the per-test scratch dir (the CHELA_DIR fixtures in "
+                "tests/conftest.py), or hand it the path you want it to use."
+            )
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", guarded_connect)
 
 
 @pytest.fixture(autouse=True)
