@@ -114,6 +114,10 @@ def test_a_held_out_survivor_BLOCKS_but_never_reaches_the_PR_the_row_or_the_rewo
     # The review history (what the rework reads back) and the run row.
     _assert_no_leak(json.dumps(dispatcher.reviews_of(run)), "the review history")
     _assert_no_leak(str(run.get("judge_detail") or ""), "the run row's judge_detail")
+    # …but the row still COUNTS it: the visible guard by name, the held-out one by number.
+    assert run["judge_detail"] == (
+        "the colourblind glyph cue: SURVIVED; 1 held-out guard(s): SURVIVED"
+    )
     assert dispatcher.latest_required_mutations(run) == [
         {k: v for k, v in _glyph().items()}
     ]
@@ -176,6 +180,8 @@ def test_a_held_out_survivor_ALONE_blocks_and_the_block_body_names_nothing(tmp_p
     body = judge.block_body(report, "https://github.com/o/r/pull/1", TEST_CMD)
     assert "1 held-out guard(s) also survived" in body
     _assert_no_leak(body, "the block body")
+    # The run row's judge_detail for a held-out-ONLY block must still give a reason.
+    assert judge._blocked_detail(report) == "1 held-out guard(s): SURVIVED"
 
 
 def test_the_clean_comment_counts_held_out_experiments_without_naming_them(tmp_path):
@@ -241,7 +247,26 @@ def test_a_survivor_that_FLIPS_on_its_rerun_is_flaky_and_does_not_block(tmp_path
     assert report.state == judge.J_CANNOT_VERIFY
     assert "FLAKY" in report.cannot_verify and "the colourblind glyph cue" in report.cannot_verify
     body = judge.comment_body(report, None, TEST_CMD)
-    assert "🎲 flaky" in body
+    # Two separate renders — the section heading AND the table cell — pinned separately.
+    assert "### 🎲 flaky — excluded from blocking" in body
+    assert f"**{judge.SURVIVED}** 🎲 flaky (re-run: {judge.KILLED})" in body
+
+
+def test_a_KILLED_then_SURVIVED_flip_is_flaky_too_and_the_report_is_NOT_clean(tmp_path):
+    """A flip is flaky in BOTH directions. A guard KILLED on its first run and SURVIVED on
+    its re-run does not hold — its first-pass KILLED would otherwise pass as clean."""
+    # glyph: KILLED, then SURVIVED on its re-run. No other experiment, so nothing else blocks.
+    report = _flaky_run(tmp_path, [_glyph()], [1, 0])
+    (o,) = report.outcomes
+    assert o.verdict == judge.KILLED and o.rerun_verdict == judge.SURVIVED
+    assert o.flaky
+    assert report.flaky == [o]
+    assert report.consistency == {"sampled": 1, "flipped": 1, "flip_rate": 1.0}
+    assert report.blocking == []
+    assert report.state == judge.J_CANNOT_VERIFY           # ⛔ not J_CLEAN
+    assert "FLAKY" in report.cannot_verify and "the colourblind glyph cue" in report.cannot_verify
+    assert f"**{judge.KILLED}** 🎲 flaky (re-run: {judge.SURVIVED})" in judge.comment_body(
+        report, None, TEST_CMD)
 
 
 def test_a_flaky_experiment_is_excluded_but_a_STABLE_survivor_still_blocks(tmp_path):
