@@ -316,6 +316,15 @@
             <button id="term-mode-wall" onclick="chela.setTermMode('wall')" style="display:none;">Wall</button>
             <select id="term-agent" onchange="chela.renderTerminals()" style="display:none;"></select>
             <span id="term-wall-grid" style="display:none; gap:6px; align-items:center;">
+                <!-- CMX-397: the layout toolbar collapses to ONE control — the current
+                     layout/mode's glyph + a chevron. Clicking it expands the row below
+                     inline; choosing a preset/mode, clicking outside or Esc collapses
+                     it again. terminals.js owns the state (_gridRowCollapsed). -->
+                <button id="term-grid-toggle" class="gl-btn" type="button"
+                        aria-expanded="true" aria-controls="term-grid-row"
+                        onclick="chela.toggleGridRow()" title="Wall layout"
+                        aria-label="Wall layout — show the layout presets"></button>
+                <span id="term-grid-row">
                 <span style="color:var(--text-dim); font-size:11px;">Grid:</span>
                 <span id="term-grid-presets" style="display:inline-flex; gap:4px; align-items:center;"></span>
                 <button id="term-lock-btn" class="gl-btn" onclick="chela.toggleWallLock(this)"
@@ -335,6 +344,7 @@
                 <button id="term-focus-btn" class="gl-btn" onclick="chela.toggleWallFocus(this)"
                         title="Focus — one pane large, the rest a strip" aria-label="Focus"
                         style="margin-left:6px;"></button>
+                </span>
             </span>
             <button id="term-new-shell" onclick="chela.spawnShell(this)" title="Spawn a new plain-shell window" style="margin-left:auto;">+ New shell</button>
         </div>
@@ -547,6 +557,17 @@
   <div class="settings-modal-head">
     <span>Settings</span>
     <button class="icon-btn" onclick="chela.toggleSettings()">✕</button>
+  </div>
+  <!-- CMX-396: VS Code-style search across EVERY tab. nav.js settingsSearch()
+       filters #drawer-body's sections/rows in place (hide classes only — the
+       rows are never re-rendered, so clearing the query leaves the modal exactly
+       as it was). The status span is the screen-reader live count. -->
+  <div class="settings-search">
+    <input id="settings-search" class="s-input settings-search-input" type="search"
+           placeholder="Search settings" aria-label="Search settings" aria-controls="drawer-body"
+           autocomplete="off" spellcheck="false" oninput="chela.settingsSearch(this.value)">
+    <p class="settings-search-empty" id="settings-search-empty" hidden></p>
+    <span class="sr-only" id="settings-search-status" role="status" aria-live="polite"></span>
   </div>
   <div class="settings-modal-body">
     <nav class="settings-tabs" id="settings-tabs">

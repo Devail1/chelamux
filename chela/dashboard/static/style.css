@@ -506,6 +506,17 @@ body {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
+/* CMX-397: the collapsible layout toolbar. Collapsed, only #term-grid-toggle
+   shows (the current layout/mode glyph + a chevron); open, the full row sits
+   inline beside it and the chevron turns up. The toggle is as tall as the
+   presets' segmented track (32px) so collapsing never changes the toolbar
+   row's height — the Wall below does not jump. */
+#term-grid-row { display: inline-flex; gap: 6px; align-items: center; }
+#term-grid-row[hidden] { display: none; }
+#term-grid-toggle { gap: 4px; padding: 0 7px; height: 32px; border-radius: 9px; background: var(--surface); }
+#term-grid-toggle .grid-chevron { display: inline-flex; transition: transform .15s ease; }
+#term-grid-toggle.grid-open .grid-chevron { transform: rotate(180deg); }
+
 /* Pane title: rename target. Subtle dotted underline on hover hints it's
    editable; the inline edit input matches the dark header. */
 .pane-title { cursor: text; }
@@ -921,10 +932,16 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
 /* Always-on taskbar below the stage: one chip per wall pane (visible = accent
    border, minimized = dimmed). Click toggles min/restore. Shown whenever there
    are panes in wall mode; its height is subtracted from the wall fill geometry
-   (_wallFill) so the wall never overflows the viewport. */
+   (_wallFill) so the wall never overflows the viewport.
+   CMX-397: one row of chips costs ~30px, not ~38px. The negative bottom
+   margin pulls the dock down into .canvas's 18px bottom padding so only ~8px
+   is left under it — without touching .canvas's own padding, so the Wall's
+   top/left/right gutters and the no-dock case are exactly as before. _wallFill
+   reads BOTH margins off the computed style, so the panes still end 4px
+   (the margin-top) above the dock. */
 #term-min-dock {
     display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
-    margin-top: 8px; padding: 6px 8px;
+    margin-top: 4px; margin-bottom: -10px; padding: 2px 8px;
     background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
 }
 .min-dock-label { color: var(--text-dim); font-size: 11px; margin-right: 2px; }
@@ -1001,7 +1018,8 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
 }
 .min-chip {
     display: inline-flex; align-items: center; gap: 6px; max-width: 220px;
-    font: inherit; font-size: 12px; line-height: 1; padding: 5px 9px;
+    font: inherit; font-size: 12px; line-height: 1; padding: 3px 9px;
+    min-height: 24px;   /* CMX-397: a slimmer chip, but still a 24px click target */
     color: var(--text); background: var(--bg);
     border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
 }
@@ -3546,6 +3564,24 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
 .settings-modal-foot a { color: var(--text-dim); text-decoration: underline; }
 .settings-modal-foot a:hover { color: var(--text); }
 .settings-tabpanels code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+/* CMX-396: search across every tab. While a query is active (.searching) every
+   panel with a hit shows at once, each under its tab's name, and the rest of
+   the markup is only hidden by nav.js's .s-search-hide — never re-rendered. */
+.settings-search { flex: 0 0 auto; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+.settings-search-input { width: 100%; box-sizing: border-box; }
+.settings-search-empty { margin: 8px 0 0; font-size: 12.5px; color: var(--text-dim); }
+.settings-search-empty[hidden] { display: none; }
+.settings-modal.searching .settings-tabpanel { display: none; }
+.settings-modal.searching .settings-tabpanel.s-search-hit { display: flex; }
+.settings-modal.searching .settings-tabpanel.s-search-hit + .settings-tabpanel.s-search-hit { margin-top: 18px; }
+.settings-tabpanel .s-search-hide { display: none; }
+.settings-search-group {
+    margin: 0; font-size: 12px; font-weight: 600; color: var(--text-dim);
+}
+.sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 
 @media (max-width: 640px) {
     /* No room for a side rail on a phone — the tabs become a horizontal

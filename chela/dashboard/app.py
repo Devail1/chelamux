@@ -3294,7 +3294,7 @@ def api_orchestrator_subscribe():
     wid = (data.get("wid") or "").strip()
     if not wid:
         return jsonify({"ok": False, "error": "wid required"}), 400
-    result = inbox.register(wid)
+    result = inbox.register(wid, source="dashboard")
     if not result.get("ok"):
         return jsonify(result), 404
     return jsonify({**result, **_orchestrator_status_payload()})

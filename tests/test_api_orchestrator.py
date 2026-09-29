@@ -21,7 +21,7 @@ import itertools
 
 import pytest
 
-from chela import agent_manager, epoch, inbox
+from chela import agent_manager, epoch, event_log, inbox
 from chela.dashboard import app as dash
 
 PANE_A = "@11"
@@ -32,6 +32,7 @@ PANE_B = "@12"
 def store_file(tmp_path, monkeypatch):
     """Never the real ``~/.chela/inbox.json``."""
     monkeypatch.setenv("CHELA_INBOX_FILE", str(tmp_path / "inbox.json"))
+    monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
     monkeypatch.delenv("CHELA_ORCHESTRATOR_WID", raising=False)
     monkeypatch.setattr(inbox, "INBOX_ENABLED", True)
 
@@ -108,6 +109,20 @@ def test_a_second_subscribe_is_an_atomic_takeover_not_two_owners(client, windows
     status = _status(client)
     assert status["wid"] == PANE_B
     assert status["wid"] != PANE_A
+
+
+def test_a_dashboard_takeover_is_announced_as_moved_by_the_dashboard(client, windows):
+    """CMX-394: the dashboard's subscribe is not `chela watch` run from that window, so the move
+    is announced with reason ``dashboard`` — never as a window's own ``taken_over``. Drop the
+    route's ``source="dashboard"`` and the reason reads ``taken_over`` (PANE_A is still live)."""
+    _subscribe(client, PANE_A)
+    _subscribe(client, PANE_B)
+
+    moved = [e["payload"] for e in event_log.read()["events"]
+             if e["type"] == inbox.MOVED_KIND]
+    assert [(p["old"], p["new"], p["reason"]) for p in moved] == [(PANE_A, PANE_B, "dashboard")]
+    assert [e["payload"]["reason"] for e in inbox.load()["queue"]
+            if e["kind"] == inbox.MOVED_KIND] == ["dashboard"]
 
 
 def test_subscribe_refuses_a_dead_window(client, windows):

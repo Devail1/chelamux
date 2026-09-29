@@ -3,7 +3,7 @@ import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, at
 import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
-import { actionBarKind, costView, ctxLevel, focusLayout, prChip, rankOrder, recapView, tileState } from './wallmodel.js';
+import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, tileState } from './wallmodel.js';
 // Side-effect only: registers window.chela.openDiffModal/closeDiffModal for the
 // "Files" chip below (_ctxBarHTML) and the #modal-diff close button in index.html.
 import './diffpanel.js';
@@ -2455,12 +2455,18 @@ function _wallFill() {
         const padB = parseFloat(getComputedStyle(canvas).paddingBottom) || 0;
         floorY = Math.min(window.innerHeight, cr.bottom) - padB;
     }
-    // The dock lives below the stage, so its height (+ its 8px top-margin gap)
-    // eats into the space the wall may fill. Subtract it when it's showing.
-    // Phones force single mode (no wall, no dock), so skip the measurement there.
+    // The dock lives below the stage, so its height (+ its top margin gap, and
+    // its NEGATIVE bottom margin that sinks it into the canvas padding —
+    // CMX-397) eats into the space the wall may fill. Subtract its margin box
+    // when it's showing, read off the computed style so the CSS owns the
+    // numbers. Phones force single mode (no wall, no dock), so skip it there.
     const dock = $('#term-min-dock');
-    const dockH = (!_isMobileTerm() && dock && dock.style.display !== 'none')
-        ? dock.getBoundingClientRect().height + 8 : 0;
+    let dockH = 0;
+    if (!_isMobileTerm() && dock && dock.style.display !== 'none') {
+        const ds = getComputedStyle(dock);
+        dockH = dock.getBoundingClientRect().height
+            + (parseFloat(ds.marginTop) || 0) + (parseFloat(ds.marginBottom) || 0);
+    }
     const avail = Math.max(240, floorY - top - dockH - 4);  // leave a hair at the bottom
     const rows = Math.max(3, Math.floor(avail / WALL_CELL_H));
     const cellPx = Math.max(40, Math.floor(avail / rows));      // exact divisor -> fills
@@ -2536,7 +2542,74 @@ function _buildGridPicker() {
     _reflectLockBtn();
     _reflectAutoBtn();
     _reflectFocusBtn();
+    if (_gridRowOpen === null) {
+        let stored = null;
+        try { stored = localStorage.getItem(GRID_ROW_KEY); } catch (e) { /* storage unavailable */ }
+        _gridRowOpen = !gridRowCollapsed(stored, _wallFocus);
+    }
+    _reflectGridRow();
 }
+
+// ---- Collapsible layout toolbar (CMX-397) ----------------------------------
+// The row of presets + lock/auto/focus collapses to ONE control: the glyph of
+// the CURRENT layout or mode plus a chevron. It rests collapsed while Focus is
+// on (wallmodel.js's gridRowCollapsed), unless the user's explicit choice —
+// a click on that control — is on record in GRID_ROW_KEY. Choosing a preset or
+// mode, clicking outside, or Esc collapses it again WITHOUT rewriting that
+// choice: those are transient, only the toggle is a stated preference.
+const GRID_ROW_KEY = 'pc_wall_grid_collapsed';
+let _gridRowOpen = null;          // null until first built: the rest state is read once
+
+// The glyph of what currently owns the layout: Focus, then auto-arrange, then
+// the active preset (the default 2-column one if none is recorded).
+function _currentLayoutGlyph() {
+    if (_wallFocus) return { glyph: _focusGlyph(), label: 'Focus' };
+    if (_wallAuto) return { glyph: _autoGlyph(), label: 'Auto-arrange' };
+    const p = WALL_PRESETS.find(q => _wallPreset && q.cols === _wallPreset.cols && q.rows === _wallPreset.rows)
+        || WALL_PRESETS[1];
+    return { glyph: _gridGlyph(p.cols, p.rows), label: p.label };
+}
+
+function _reflectGridRow() {
+    const row = $('#term-grid-row'), tog = $('#term-grid-toggle');
+    if (!row || !tog) return;
+    const open = !!_gridRowOpen;
+    row.hidden = !open;
+    tog.classList.toggle('grid-open', open);
+    tog.setAttribute('aria-expanded', String(open));
+    const { glyph, label } = _currentLayoutGlyph();
+    tog.innerHTML = `${glyph}<span class="grid-chevron" aria-hidden="true">${lucideIcon('chevron-down', 12)}</span>`;
+    tog.title = open ? `Layout: ${label} — hide the layout toolbar` : `Layout: ${label} — show the layout toolbar`;
+    tog.setAttribute('aria-label', tog.title);
+}
+
+// The toggle itself: an explicit choice, so it is remembered per browser.
+function toggleGridRow() {
+    _gridRowOpen = !_gridRowOpen;
+    try { localStorage.setItem(GRID_ROW_KEY, _gridRowOpen ? '0' : '1'); } catch (e) { /* storage unavailable */ }
+    _reflectGridRow();
+}
+
+// A transient collapse (a preset/mode was chosen, a click landed outside, Esc).
+function _collapseGridRow() {
+    if (!_gridRowOpen) return;
+    _gridRowOpen = false;
+    _reflectGridRow();
+}
+
+document.addEventListener('pointerdown', e => {
+    if (!_gridRowOpen) return;
+    const bar = $('#term-wall-grid');
+    if (bar && !bar.contains(e.target)) _collapseGridRow();
+});
+document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape' || !_gridRowOpen) return;
+    const bar = $('#term-wall-grid');
+    if (!bar || bar.style.display === 'none') return;   // single mode: no toolbar
+    _collapseGridRow();
+    const tog = $('#term-grid-toggle');
+    if (tog && bar.contains(document.activeElement)) tog.focus();
+});
 
 // ---- Layout lock (swap-on-drop) --------------------------------------------
 // GridStack's native swap only fires for equal-sized, touching tiles, so it
@@ -2624,6 +2697,8 @@ function toggleWallAuto(btn) {
     if (_wallAuto) _applyAutoArrange(_agentsCache);
     else _restoreManualLayout();
     if (btn) btn.blur();
+    _collapseGridRow();
+    _reflectGridRow();
 }
 
 // Focus layout toggle: one pane large (_focusWid), the rest a right-side
@@ -2649,6 +2724,8 @@ function toggleWallFocus(btn) {
         _restoreManualLayout();
     }
     if (btn) btn.blur();
+    _collapseGridRow();
+    _reflectGridRow();
 }
 
 // Capture each live tile's pre-drag geometry, keyed by wid.
@@ -2997,6 +3074,10 @@ function applyGridLayout(cols, rows, btn) {
     // is viewport-relative, so a different screen / window size needs a recompute).
     _wallPreset = { cols, rows };
     localStorage.setItem('pc_wall_preset', JSON.stringify(_wallPreset));   // persist for reloads + resize re-fit
+    // A preset CLICK (btn) is a choice made from the expanded toolbar: fold it
+    // back to the one glyph, now showing that preset. A resize re-fit is not.
+    if (btn) _collapseGridRow();
+    _reflectGridRow();
     if (!_grid) return;
     // Focus owns the layout while it's on (fixed 8/4 split, not a column
     // count) — a preset click or a viewport resize (this fn's other caller)
@@ -3373,4 +3454,4 @@ export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _ord
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, termScrollToggle, toggleDockChip, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, termScrollToggle, toggleDockChip, toggleGridRow, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });

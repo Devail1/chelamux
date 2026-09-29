@@ -748,7 +748,12 @@ function toggleSettings(focus) {
     const open = !modal.classList.contains('open');
     modal.classList.toggle('open', open);
     if (scrim) scrim.classList.toggle('open', open);
-    if (open) renderSettings(focus);
+    if (open) {
+        // renderSettings → selectSettingsTab drops any query left from the last
+        // visit: a stale filter would read as settings having vanished.
+        renderSettings(focus);
+        _focusSettingsSearch();
+    }
 }
 
 // focus: 'notify' opens straight to the Notifications tab (the popover's
@@ -756,10 +761,128 @@ function toggleSettings(focus) {
 // tab was last selected, defaulting to General on first open.
 function selectSettingsTab(tab) {
     if (!SETTINGS_TABS.some(t => t.id === tab)) return;
+    // Picking a tab mid-search means "take me there": drop the query first.
+    if (_settingsQuery) clearSettingsSearch();
     _settingsTab = tab;
+    _paintSettingsTab(tab);
+    if (tab === 'cost') refreshCost();
+}
+
+function _paintSettingsTab(tab) {
     $$('.settings-tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
     $$('.settings-tabpanel').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
-    if (tab === 'cost') refreshCost();
+}
+
+// --- Settings search (CMX-396) ---------------------------------------------
+//
+// Liav: "add a search box to the Settings drawer: type to filter every setting
+// across all tabs, VS Code style". Filtering is purely ADDITIVE classes on the
+// rows renderSettings already drew — nothing is re-rendered or moved — so an
+// empty query is the drawer exactly as it was, and clearing one strips every
+// mark it made and repaints the tab the user was on (_settingsTab never changes
+// while searching).
+//
+// The unit is a labelled `.s-row` (one knob). A section whose OWN text — its
+// heading, help text (.s-desc / .s-examples) or `data-keywords` — matches shows
+// whole; otherwise it shows only the labelled rows whose label or row
+// `data-keywords` match. Unlabelled rows (Save buttons, the update button) stay
+// with any section that shows, so a filtered Timing row can still be saved.
+let _settingsQuery = '';
+const _S_HIDE = 's-search-hide';
+const _S_HIT = 's-search-hit';
+
+function _sNorm(s) { return String(s || '').replace(/\s+/g, ' ').toLowerCase(); }
+
+function _sMatches(text, terms) {
+    const t = _sNorm(text);
+    return terms.every(q => t.includes(q));
+}
+
+function _sSectionText(sec) {
+    const h = sec.querySelector('h4');
+    const own = [...sec.querySelectorAll('.s-desc, .s-examples')].map(el => el.textContent);
+    return [h ? h.textContent : '', sec.dataset.keywords || '', ...own].join(' ');
+}
+
+function _sRowText(row) {
+    const label = row.querySelector('.s-rowlabel');
+    return (label ? label.textContent : '') + ' ' + (row.dataset.keywords || '');
+}
+
+function _sLabelledRows(sec) {
+    return [...sec.querySelectorAll('.s-row')].filter(r => r.querySelector('.s-rowlabel'));
+}
+
+function _applySettingsSearch() {
+    const body = document.getElementById('drawer-body');
+    const modal = document.getElementById('settings-drawer');
+    if (!body) return;
+    body.querySelectorAll('.' + _S_HIDE).forEach(el => el.classList.remove(_S_HIDE));
+    body.querySelectorAll('.' + _S_HIT).forEach(el => el.classList.remove(_S_HIT));
+    body.querySelectorAll('.settings-search-group').forEach(el => el.remove());
+    const terms = _sNorm(_settingsQuery).trim().split(' ').filter(Boolean);
+    const empty = document.getElementById('settings-search-empty');
+    const status = document.getElementById('settings-search-status');
+    if (!terms.length) {
+        if (modal) modal.classList.remove('searching');
+        _paintSettingsTab(_settingsTab);
+        if (empty) { empty.hidden = true; empty.textContent = ''; }
+        if (status) status.textContent = '';
+        return;
+    }
+    if (modal) modal.classList.add('searching');
+    // No tab is "the" tab while results span all of them.
+    $$('.settings-tab').forEach(el => el.classList.remove('active'));
+    let count = 0;
+    body.querySelectorAll('.settings-tabpanel').forEach(panel => {
+        let hits = 0;
+        panel.querySelectorAll('.settings-section').forEach(sec => {
+            const rows = _sLabelledRows(sec);
+            if (_sMatches(_sSectionText(sec), terms)) { hits += Math.max(rows.length, 1); return; }
+            const rowHits = rows.filter(r => _sMatches(_sRowText(r), terms));
+            if (!rowHits.length) { sec.classList.add(_S_HIDE); return; }
+            rows.forEach(r => { if (!rowHits.includes(r)) r.classList.add(_S_HIDE); });
+            hits += rowHits.length;
+        });
+        if (!hits) return;
+        panel.classList.add(_S_HIT);
+        const tab = SETTINGS_TABS.find(t => t.id === panel.dataset.tab);
+        const head = document.createElement('h3');
+        head.className = 'settings-search-group';
+        head.textContent = tab ? tab.label : panel.dataset.tab;
+        panel.prepend(head);
+        count += hits;
+    });
+    if (empty) {
+        empty.hidden = count > 0;
+        empty.textContent = count ? '' : `No settings match '${_settingsQuery.trim()}'`;
+    }
+    if (status) {
+        status.textContent = count
+            ? `${count} setting${count === 1 ? '' : 's'}`
+            : `No settings match '${_settingsQuery.trim()}'`;
+    }
+}
+
+// oninput of #settings-search.
+function settingsSearch(q) {
+    _settingsQuery = String(q || '');
+    _applySettingsSearch();
+}
+
+function clearSettingsSearch() {
+    const inp = document.getElementById('settings-search');
+    if (inp) inp.value = '';
+    settingsSearch('');
+}
+
+// Ctrl/⌘+, (either wire) lands in the search box, like VS Code. Not on a touch
+// screen: focusing would throw the on-screen keyboard over the drawer on open.
+function _focusSettingsSearch() {
+    const inp = document.getElementById('settings-search');
+    if (!inp) return;
+    const coarse = typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
+    if (!coarse) inp.focus();
 }
 
 function renderSettings(focus) {
@@ -780,12 +903,12 @@ function renderSettings(focus) {
     const runToastsMuted = localStorage.getItem('chela_mute_run_toasts') === '1';
     body.innerHTML = `
         <div class="settings-tabpanel" data-tab="general">
-        <section class="settings-section" id="settings-status">
+        <section class="settings-section" id="settings-status" data-keywords="health connected daemon telegram services">
             <h4>Connections &amp; Status</h4>
             <div class="s-status-list"><div class="s-desc">Loading…</div></div>
         </section>
 
-        <section class="settings-section" id="settings-update">
+        <section class="settings-section" id="settings-update" data-keywords="upgrade version git pull restart pm2">
             <h4>Update</h4>
             <div class="s-status-row" id="update-status-row">
                 <span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>Checking…</span>
@@ -801,7 +924,7 @@ function renderSettings(focus) {
             <div id="update-apply-msg" class="s-savemsg"></div>
         </section>
 
-        <section class="settings-section">
+        <section class="settings-section" data-keywords="repos repositories directory path launcher">
             <h4>Projects folder</h4>
             <p class="s-desc">Scanned for git repos to suggest in the <strong>+</strong> launch
             menu. Defaults to <code>~/projects</code> (or the <code>CHELA_PROJECTS_DIR</code>
@@ -821,7 +944,7 @@ function renderSettings(focus) {
             Applies to the <strong>next</strong> dispatch — an agent already running keeps the
             mode it started with. Only the mode is settable; the rest of the launch command is
             fixed in code.</p>
-            <div class="s-row">
+            <div class="s-row" data-keywords="bypass approve prompts auto">
                 <span class="s-rowlabel">Permission mode</span>
                 <select id="agent-mode-select" class="s-select"
                         onchange="chela.setAgentPermissionMode(this.value)">
@@ -830,7 +953,7 @@ function renderSettings(focus) {
             </div>
             <div id="agent-mode-msg" class="s-savemsg"></div>
             <p class="s-desc" id="agent-mode-source"></p>
-            <div class="s-row">
+            <div class="s-row" data-keywords="sonnet opus haiku llm coding agent">
                 <span class="s-rowlabel">Model</span>
                 <select id="agent-model-select" class="s-select"
                         onchange="chela.setAgentModel(this.value)">
@@ -852,7 +975,7 @@ function renderSettings(focus) {
             <code>/new</code>, and the orchestrator. Applies to <strong>new</strong> sessions
             only: a window already running keeps the flag it was launched with. Never applied
             to dispatcher agents or judges.</p>
-            <div class="s-row">
+            <div class="s-row" data-keywords="claude.ai remote phone mobile anywhere">
                 <label class="s-rowlabel" for="remote-control-toggle">Remote Control — make new sessions reachable from claude.ai</label>
                 <input id="remote-control-toggle" type="checkbox" role="switch" disabled
                        onchange="chela.setRemoteControl(this.checked)">
@@ -861,7 +984,7 @@ function renderSettings(focus) {
             <p class="s-desc" id="remote-control-source"></p>
         </section>
 
-        <section class="settings-section">
+        <section class="settings-section" data-keywords="tailscale ssh tunnel vpn auth security">
             <h4>Remote access</h4>
             <p class="s-desc">Zero built-in auth — the dashboard binds <code>127.0.0.1</code>.
             Put it behind a tailnet or SSH tunnel; that is the trust boundary.</p>
@@ -875,7 +998,7 @@ function renderSettings(focus) {
         </div>
 
         <div class="settings-tabpanel" data-tab="timing">
-        <section class="settings-section" id="settings-timing">
+        <section class="settings-section" id="settings-timing" data-keywords="interval cadence tick poll seconds daemon">
             <h4>Timing</h4>
             <p class="s-desc">Daemon and dispatcher cadences. Blank a field to fall back to
             its <code>CHELA_*</code> env var (or the built-in default, shown as its
@@ -892,7 +1015,7 @@ function renderSettings(focus) {
         </div>
 
         <div class="settings-tabpanel" data-tab="dispatch">
-        <section class="settings-section" id="settings-dispatch">
+        <section class="settings-section" id="settings-dispatch" data-keywords="judge critic merge workflow concurrency retries">
             <h4>Dispatch</h4>
             <p class="s-desc">Dispatcher, judge, and critic policy. Blank a field to fall back
             to its <code>CHELA_*</code> env var (or the built-in default, shown as its
@@ -912,11 +1035,11 @@ function renderSettings(focus) {
         </div>
 
         <div class="settings-tabpanel" data-tab="notifications">
-        <section class="settings-section">
+        <section class="settings-section" data-keywords="ntfy telegram webhook push alert ping">
             <h4>Needs-input notifications</h4>
             <p class="s-desc">Fires a one-shot ping when an agent's pane enters
             <code>waiting</code> (blocked on a prompt or question).</p>
-            <div class="s-row">
+            <div class="s-row" data-keywords="notifications popup alert mute awaiting_review">
                 <span class="s-rowlabel">Review toasts</span>
                 <select id="run-toasts-select" class="s-select" onchange="chela.setRunToastsMuted(this.value)">
                     <option value="show"${runToastsMuted ? '' : ' selected'}>Show</option>
@@ -937,7 +1060,7 @@ function renderSettings(focus) {
         </div>
 
         <div class="settings-tabpanel" data-tab="cost">
-        <section class="settings-section" id="settings-cost">
+        <section class="settings-section" id="settings-cost" data-keywords="spend money usd dollars budget billing tokens">
             <h4>Cost</h4>
             <p class="s-desc">Fleet spend from the cost each agent's statusLine hook already
             reports (<code>cost.total_cost_usd</code>) — no separate accounting, just a read
@@ -962,7 +1085,7 @@ function renderSettings(focus) {
         <div class="settings-tabpanel" data-tab="appearance">
         <section class="settings-section">
             <h4>Theme</h4>
-            <div class="s-row">
+            <div class="s-row" data-keywords="theme dark light colour color mode">
                 <span class="s-rowlabel">Appearance</span>
                 <select id="theme-select" class="s-select" onchange="chela.setTheme(this.value)">
                     ${THEMES
@@ -978,7 +1101,7 @@ function renderSettings(focus) {
             Pick the <strong>English</strong> (monospace) and <strong>Hebrew</strong> faces
             independently. Only <strong>Miriam Mono</strong> keeps Hebrew on the grid — the
             other Hebrew faces are proportional: nicer letters, slight drift in the fixed cells.</p>
-            <div class="s-row">
+            <div class="s-row" data-keywords="terminal typeface monospace latin">
                 <span class="s-rowlabel">English font</span>
                 <select id="term-latin-select" class="s-select" onchange="chela.setTermLatin(this.value)">
                     ${Object.keys(TERM_LATIN_LABELS)
@@ -986,7 +1109,7 @@ function renderSettings(focus) {
                         .join('')}
                 </select>
             </div>
-            <div class="s-row">
+            <div class="s-row" data-keywords="terminal typeface rtl">
                 <span class="s-rowlabel">Hebrew font</span>
                 <select id="term-font-select" class="s-select" onchange="chela.setTermFont(this.value)">
                     ${Object.keys(TERM_FONT_LABELS)
@@ -994,7 +1117,7 @@ function renderSettings(focus) {
                         .join('')}
                 </select>
             </div>
-            <div class="s-row">
+            <div class="s-row" data-keywords="terminal font size zoom px">
                 <span class="s-rowlabel">Size</span>
                 <select id="term-size-select" class="s-select" onchange="chela.setTermSize(this.value)">
                     ${['8', '10', '12', '13', '14', '15', '16', '18']
@@ -1011,13 +1134,13 @@ function renderSettings(focus) {
             <p class="s-desc">Your display name in shared terminals (presence pills +
             the pane facepile). Leave blank for a stable auto-name. Saved per browser,
             applies live.</p>
-            <div class="s-row">
+            <div class="s-row" data-keywords="nickname username presence share identity">
                 <span class="s-rowlabel">Display name</span>
                 <input id="collab-name" class="s-input" type="text" maxlength="24"
                        autocomplete="off" placeholder="${escHtml(collabAuto)}"
                        value="${attrEsc(collabName)}" oninput="chela.setCollabName(this.value)">
             </div>
-            <div class="s-row">
+            <div class="s-row" data-keywords="e2e encrypted server worker">
                 <span class="s-rowlabel">Relay</span>
                 <code id="collab-relay" style="word-break:break-all;font-size:11px">…</code>
             </div>
@@ -1425,6 +1548,7 @@ function _renderTimingRows(knobs) {
             <span class="s-rowunit">${escHtml(k.unit || '')}</span>
         </div>`;
     }).join('');
+    if (_settingsQuery) _applySettingsSearch();
 }
 
 async function _loadTimingSettings() {
@@ -1513,6 +1637,7 @@ function _renderDispatchRows(knobs) {
             <span class="s-rowunit">${escHtml(k.unit || '')}</span>
         </div>`;
     }).join('');
+    if (_settingsQuery) _applySettingsSearch();
 }
 
 async function _loadDispatchSettings() {
@@ -1642,6 +1767,65 @@ function applyTermPrefsToIframes() {
     });
 }
 
+// --- Popover placement (CMX-398) ---------------------------------------------
+
+// The margin every anchored popover keeps from each viewport edge.
+const POPOVER_MARGIN = 8;
+// Open popovers placed by placePopover, re-placed on window resize. Keyed by
+// the popover; an entry drops out once its popover is hidden or detached.
+const _placedPopovers = new Map();
+
+function _popoverOpen(m) {
+    return m.isConnected && !m.hidden && m.style.display !== 'none';
+}
+
+// Anchor a position:fixed popover to a control: BELOW it when it fits,
+// otherwise ABOVE it (`top = r.top - gap - h`) — the sidebar-foot gear
+// (#btn-primary-menu, CMX-377) sits at the bottom of the screen, where the old
+// topbar's "always below" math opened the menu almost entirely off-screen.
+// Horizontally right-aligned to the anchor (`align: 'center'` centres it
+// instead), and clamped inside the viewport with POPOVER_MARGIN on every side.
+// A popover taller than the viewport allows gets a max-height and scrolls
+// (.popover already has overflow-y:auto) instead of overflowing. The popover
+// must be displayed before this is called — a display:none element has no
+// size to measure.
+function placePopover(m, anchor, { gap = 6, align = 'right' } = {}) {
+    if (!m || !anchor) return;
+    const M = POPOVER_MARGIN;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    // Measure the popover's own height, not a max-height a previous (smaller)
+    // viewport left behind.
+    m.style.maxHeight = '';
+    m.style.overflowY = '';
+    const room = Math.max(0, vh - 2 * M);
+    let h = m.offsetHeight;
+    if (h > room) {
+        m.style.maxHeight = room + 'px';
+        m.style.overflowY = 'auto';
+        h = room;
+    }
+    const w = m.offsetWidth;
+    const r = anchor.getBoundingClientRect();
+    let top;
+    if (r.bottom + gap + h <= vh - M) top = r.bottom + gap;       // below
+    else if (r.top - gap - h >= M) top = r.top - gap - h;         // above
+    // Neither side has room: on the roomier side, pushed back inside.
+    else top = (vh - r.bottom >= r.top) ? r.bottom + gap : r.top - gap - h;
+    top = Math.max(M, Math.min(top, vh - M - h));
+    let left = align === 'center' ? r.left + r.width / 2 - w / 2 : r.right - w;
+    left = Math.max(M, Math.min(left, vw - M - w));
+    m.style.top = top + 'px';
+    m.style.left = left + 'px';
+    _placedPopovers.set(m, { anchor, opts: { gap, align } });
+}
+
+window.addEventListener('resize', () => {
+    for (const [m, { anchor, opts }] of _placedPopovers) {
+        if (_popoverOpen(m) && anchor.isConnected) placePopover(m, anchor, opts);
+        else _placedPopovers.delete(m);
+    }
+});
+
 // --- "+ new" popover -------------------------------------------------------
 
 // The "+" menu is also the LAUNCH menu: Favorites + Recent live in it (launcher.js
@@ -1655,14 +1839,12 @@ function openNewMenu(ev) {
     const anchor = (ev && ev.currentTarget) || document.getElementById('btn-new');
     // Show it BEFORE measuring: a display:none element has no offsetWidth.
     m.style.display = 'block';
-    const r = anchor.getBoundingClientRect();
-    m.style.top = (r.bottom + 4) + 'px';
-    // Right-align to the button off the MEASURED width, and clamp so it never runs
-    // off the left edge. A hardcoded width here (it used to be 160, from the old
-    // popover) silently sends the menu off the RIGHT edge the moment the CSS gets
-    // wider than the guess — which .launch-menu's 232px min-width did, on a button
-    // that sits ~55px from the viewport edge.
-    m.style.left = Math.max(8, r.right - m.offsetWidth) + 'px';
+    // Right-aligned to the button off the MEASURED width (placePopover). A
+    // hardcoded width here (it used to be 160, from the old popover) silently
+    // sent the menu off the RIGHT edge the moment the CSS got wider than the
+    // guess — which .launch-menu's 232px min-width did, on a button that sits
+    // ~55px from the viewport edge.
+    placePopover(m, anchor, { gap: 4 });
     setTimeout(() => document.addEventListener('click', hideNewMenu, { once: true }), 0);
 }
 
@@ -1690,10 +1872,9 @@ function openPrimaryMenu(ev) {
     if (!m) return;
     const anchor = (ev && ev.currentTarget) || document.getElementById('btn-primary-menu');
     m.style.display = 'block';
-    const r = anchor.getBoundingClientRect();
-    m.style.top = (r.bottom + 6) + 'px';
-    // Right-align to the button; clamp so it never runs off the left edge.
-    m.style.left = Math.max(8, r.right - m.offsetWidth) + 'px';
+    // CMX-398: the button sits in the sidebar FOOT now, so "below it" is off
+    // the bottom of the screen — placePopover flips the menu above it.
+    placePopover(m, anchor, { gap: 6 });
     setTimeout(() => document.addEventListener('click', hidePrimaryMenu, { once: true }), 0);
 }
 
@@ -1742,13 +1923,10 @@ async function newShellWindow() {
         tipEl.className = 'tap-tip';
         tipEl.textContent = text;
         document.body.appendChild(tipEl);
-        const r = target.getBoundingClientRect();
-        // Centre under the target, clamped to the viewport.
-        const tw = tipEl.offsetWidth;
-        let left = r.left + r.width / 2 - tw / 2;
-        left = Math.max(6, Math.min(left, window.innerWidth - tw - 6));
-        tipEl.style.left = left + 'px';
-        tipEl.style.top = (r.bottom + 6) + 'px';
+        // Centred under the target — or above it when the target sits at the
+        // bottom of the screen (the sidebar foot's CPU/RAM/Disk readouts) —
+        // clamped to the viewport.
+        placePopover(tipEl, target, { gap: 6, align: 'center' });
         hideTimer = setTimeout(hideTip, 4000);
     }
 
@@ -1831,6 +2009,13 @@ function _paletteItems(skipWids) {
     // this is the ONLY entry point (palette-only, deliberately no dedicated global
     // keybind — see index.html's #shortcuts-overlay comment).
     items.push({ icon: lucideIcon('keyboard'), title: 'Keyboard shortcuts', sub: 'help', run: () => openShortcuts() });
+    // CMX-401: on a phone the sidebar's "Jump to session" box is the palette, and
+    // there is no Ctrl+, to reach Settings — this row is the way in. Open-only:
+    // toggleSettings() on an already-open drawer would close it.
+    items.push({ icon: lucideIcon('settings'), title: 'Settings', sub: 'action', run: () => {
+        const d = document.getElementById('settings-drawer');
+        if (!(d && d.classList.contains('open'))) toggleSettings();
+    } });
     return items;
 }
 
@@ -1992,7 +2177,13 @@ document.addEventListener('keydown', e => {
     if (!ov || !ov.classList.contains('open')) {
         // Esc closes Settings — only once the palette/cheatsheet (which can sit
         // on top of it) are out of the way, so one Esc closes one layer.
-        if (e.key === 'Escape' && _settingsOpen()) { e.preventDefault(); toggleSettings(); }
+        // CMX-396: with a query in the search box, the first Esc clears it; only
+        // an Esc on an empty query closes the drawer.
+        if (e.key === 'Escape' && _settingsOpen()) {
+            e.preventDefault();
+            if (_settingsQuery) clearSettingsSearch();
+            else toggleSettings();
+        }
         return;
     }
     if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
@@ -2023,4 +2214,4 @@ export { closeShortcuts, openPalette, openShortcuts, refreshRecentSessions, refr
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _palRun, _renderPalette, applyUpdate, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRemoteControl, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { applyUpdate, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRemoteControl, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
