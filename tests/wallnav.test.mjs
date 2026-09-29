@@ -1089,27 +1089,32 @@ test('CMX-230: the .gs-state pill\'s WORD text actually repaints on a live state
     assert.equal(word.textContent, 'idle', 'reverting session_status must repaint the word back to idle too');
 });
 
-// 12c — THE .gs-state PILL'S GLYPH ACTUALLY REPAINTS ON A LIVE STATE CHANGE TOO
-// (CMX-230, round 2). A judge round found 12b only covers the WORD half of
-// _applyWallTileFrame's repaint — GUARD 3a in tests/dashboard_scale_nav_a11y.test.mjs
-// still only source-text-matches `g.textContent = s.glyph`, which stays green even
-// when that statement is dead-coded (`if (false && g) g.textContent = s.glyph;`),
-// the exact same hole 12b was written to close for the word span one line below.
-// This drives the REAL function through a REAL live state transition and reads the
-// GLYPH text back off the node, so dead-coding the glyph repaint goes red here too.
-test('CMX-230: the .gs-state pill\'s GLYPH text actually repaints on a live state change, not just its colour class', async () => {
+// 12c — CMX-393: THE HEADER DRAWS THE STATE ONCE. Liav (2026-09-28): the pane title
+// bar drew every state TWICE — the `.gs-dot` shape at the far left, then a pill that
+// repeated the same glyph before the word (`● ● working`). The fix keeps ONE shape
+// (`.gs-dot`) plus the WORD. This drives a live state change through the REAL
+// _applyWallTileFrame and reads the pill back: its text is exactly the word, with no
+// glyph node and no glyph character, and the header still carries exactly ONE
+// status-shape element whose class follows the same state.
+test('CMX-393: a pane header shows ONE status shape, and its pill is the word only (no glyph)', async () => {
     const wid = '@1';
-    const glyph = tile(wid).querySelector('.gs-state-glyph');
-    assert.equal(glyph.textContent, '○', 'sanity: an agent with no session_status paints the idle glyph');
-
-    AGENTS[0].session_status = 'busy';
-    await terminals.termTick();
-    assert.equal(glyph.textContent, '●',
-        '_applyWallTileFrame must repaint .gs-state-glyph\'s TEXT on a live state change, not just recolour the pill');
-
+    const head = tile(wid).querySelector('.gs-head');
+    const GLYPHS = /[○●◆✓?]/;
+    for (const [status, word] of [[undefined, 'idle'], ['busy', 'working']]) {
+        if (status) AGENTS[0].session_status = status; else delete AGENTS[0].session_status;
+        await terminals.termTick();
+        const pill = head.querySelector('.gs-state');
+        assert.equal(pill.textContent.trim(), word, `the pill reads "${pill.textContent.trim()}", not just the word "${word}"`);
+        assert.ok(!GLYPHS.test(pill.textContent), `the pill repeats a status glyph: "${pill.textContent}"`);
+        assert.equal(pill.querySelectorAll('.gs-state-glyph, .term-status-dot').length, 0,
+            'the pill carries its own shape element — the state would be drawn twice');
+        const shapes = head.querySelectorAll('.term-status-dot');
+        assert.equal(shapes.length, 1, `the header has ${shapes.length} status shapes, want exactly 1`);
+        assert.ok(shapes[0].classList.contains(status ? 'working' : 'idle'),
+            `the header's one shape is "${shapes[0].className}", not the ${word} shape`);
+    }
     delete AGENTS[0].session_status;   // leave the fixture as later tests expect it
     await terminals.termTick();
-    assert.equal(glyph.textContent, '○', 'reverting session_status must repaint the glyph back to idle too');
 });
 
 // 12d — THE .gs-state PILL'S OWN COLOUR CLASS ACTUALLY REPAINTS ON A LIVE STATE

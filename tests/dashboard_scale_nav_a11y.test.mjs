@@ -561,24 +561,20 @@ test('non-hue cue — wall .gs-state pill: every tileState() result carries a gl
     }
 });
 
-test('non-hue cue — wall .gs-state pill: both the initial paint AND every live repaint set the glyph + word text nodes', () => {
+test('non-hue cue — wall .gs-state pill: both the initial paint AND every live repaint set the word text node', () => {
     // Initial paint: paneHead's own literal markup (terminals.js), before the
-    // first live repaint ever runs.
-    // GUARD 3a round 9: `[^<]*` matches ZERO characters too, so an emptied
-    // glyph (colour-only) satisfies this — the same "blank a live-repainted
-    // value" hole rounds 2-4 closed for _applyWallTileFrame's three statements,
-    // one instance earlier in the initial markup. Require at least one
-    // character between the tags.
-    assert.match(TERMINALS, /gs-state-glyph[^>]*>[^<]+<\/span><span class="gs-state-word">idle<\/span>/,
-        'paneHead\'s initial .gs-state markup no longer carries both a non-empty glyph and the word "idle"');
-    // Live repaint: _applyWallTileFrame must write BOTH text nodes from
+    // first live repaint ever runs. `[^<]+`-style: the word must be non-empty.
+    // CMX-393: the pill is the WORD only — its shape partner is the header's
+    // `.gs-dot` (a glyph in here drew every state twice); tests/wallnav.test.mjs
+    // 12c guards that the pill stays glyph-free through a live repaint.
+    assert.match(TERMINALS, /<span class="gs-state gs-state-idle"[^>]*><span class="gs-state-word">idle<\/span><\/span>/,
+        'paneHead\'s initial .gs-state markup no longer carries the word "idle" (and only it)');
+    // Live repaint: _applyWallTileFrame must write the word text node from
     // tileState()'s result, not just recolour the pill via className.
     const frame = TERMINALS.slice(TERMINALS.indexOf('function _applyWallTileFrame'));
     const body = frame.slice(0, frame.indexOf('\nfunction ', 10));
     assert.match(body, /el\.className\s*=\s*'gs-state gs-state-'\s*\+\s*s\.cls/,
         '_applyWallTileFrame must still recolour the pill from tileState().cls');
-    assert.match(body, /g\.textContent\s*=\s*s\.glyph/,
-        '_applyWallTileFrame no longer repaints the glyph text node — a live state change would go hue-only');
     assert.match(body, /w\.textContent\s*=\s*s\.word/,
         '_applyWallTileFrame no longer repaints the word text node — a live state change would go hue-only');
 });

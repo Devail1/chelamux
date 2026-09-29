@@ -391,3 +391,240 @@ describe('fonts: Geist chrome, monospace terminal', { skip: why }, () => {
         assert.doesNotMatch(family, /Geist/, `terminal frame font-family is ${family}`);
     });
 });
+
+// ---- CMX-393: restyle fine-tunes -------------------------------------------
+// Liav, 2026-09-28, on the live restyle: the sidebar foot was two rows (stats +
+// inbox, then a ⋮ alone and left-aligned), and every pane title bar drew its
+// state TWICE (a shape, then a pill repeating the same glyph before the word).
+
+const ROW = 4;   // "the same row": vertical centres within this many CSS px
+
+// Every rendered control in the sidebar foot, with its box. A control that is
+// display:none/hidden has no box and is left out; the caller asserts the count.
+function footControls(page) {
+    return page.evaluate(() => [...document.querySelectorAll('.sidebar-foot .res-item, .sidebar-foot button')]
+        .map(e => ({ id: e.id, r: e.getBoundingClientRect() }))
+        .filter(c => c.r.width > 0 && c.r.height > 0)
+        .map(c => ({ id: c.id, x: c.r.x, y: c.r.y, w: c.r.width, h: c.r.height, cy: c.r.y + c.r.height / 2 })));
+}
+
+// One row = every control's vertical centre within ROW px of every other's,
+// AND every pair's boxes overlap vertically (a centre test alone would pass two
+// rows of very tall controls). Centre rather than top: a 12px readout and a
+// 38px button that share a centred row have tops ~10px apart by design.
+function assertOneRow(controls, where) {
+    const cys = controls.map(c => c.cy);
+    const spread = Math.max(...cys) - Math.min(...cys);
+    assert.ok(spread <= ROW, `${where}: controls span ${spread.toFixed(1)}px vertically — not one row: ` +
+        JSON.stringify(controls.map(c => [c.id, Math.round(c.y), Math.round(c.h)])));
+    for (const a of controls) for (const b of controls) {
+        assert.ok(a.y < b.y + b.h && b.y < a.y + a.h, `${where}: ${a.id} and ${b.id} do not share a row`);
+    }
+}
+
+async function waitForReadouts(page) {
+    await page.waitForFunction(() => document.querySelectorAll('.sidebar-foot .res-item:not([hidden])').length === 3,
+        null, { timeout: 15000 });
+}
+
+describe('CMX-393 desktop 1440: one-row sidebar foot, inbox in the head, one state shape per pane header', { skip: why }, () => {
+    let page, context;
+    const ready = setup(async () => {
+        ({ page, context } = await openDashboard(browser, { width: 1440, height: 900 }));
+        await settle(page);
+        await waitForReadouts(page);
+        await stable(page);
+    });
+    after(() => context && context.close());
+
+    test('the sidebar foot is ONE row: the three readouts on the left, the one menu control on the right', async () => {
+        ready();
+        const controls = await footControls(page);
+        const ids = controls.map(c => c.id);
+        assert.deepEqual(ids, ['res-cpu', 'res-mem', 'res-disk', 'btn-primary-menu'],
+            `the foot's rendered controls are ${ids.join(', ')}`);
+        assertOneRow(controls, 'sidebar foot');
+        // Stats left, menu right: the menu is the rightmost control and sits at
+        // the foot's right content edge, not tucked beside the readouts.
+        const foot = await page.evaluate(() => {
+            const f = document.querySelector('.sidebar-foot');
+            const r = f.getBoundingClientRect(), cs = getComputedStyle(f);
+            return { left: r.left + parseFloat(cs.paddingLeft), right: r.right - parseFloat(cs.paddingRight) };
+        });
+        const menu = controls.at(-1), disk = controls.at(-2);
+        assert.ok(Math.abs(menu.x + menu.w - foot.right) <= 2,
+            `the menu control's right edge ${menu.x + menu.w} is not at the foot's right edge ${foot.right}`);
+        assert.ok(Math.abs(controls[0].x - foot.left) <= 6,
+            `the readouts start at ${controls[0].x}, not at the foot's left edge ${foot.left}`);
+        assert.ok(menu.x - (disk.x + disk.w) >= 12,
+            'the menu control sits right against the readouts instead of at the far right');
+    });
+
+    test('the Decisions inbox button is inside the sidebar HEAD, on screen, not in the foot', async () => {
+        ready();
+        const r = await page.evaluate(() => {
+            const b = document.getElementById('btn-decisions');
+            const head = document.querySelector('.sidebar-head');
+            const bb = b.getBoundingClientRect(), hb = head.getBoundingClientRect();
+            const hit = document.elementFromPoint(bb.x + bb.width / 2, bb.y + bb.height / 2);
+            return {
+                inHeadDom: !!b.closest('.sidebar-head'), inFootDom: !!b.closest('.sidebar-foot'),
+                b: [bb.x, bb.y, bb.width, bb.height], h: [hb.x, hb.y, hb.width, hb.height],
+                hit: !!(hit && hit.closest('#btn-decisions')),
+            };
+        });
+        assert.ok(r.inHeadDom && !r.inFootDom, '#btn-decisions is not a descendant of .sidebar-head');
+        const [bx, by, bw, bh] = r.b, [hx, hy, hw, hh] = r.h;
+        assert.ok(bw > 0 && bh > 0, '#btn-decisions has no layout box');
+        assert.ok(bx >= hx - px && by >= hy - px && bx + bw <= hx + hw + px && by + bh <= hy + hh + px,
+            `#btn-decisions ${JSON.stringify(r.b)} is not drawn inside .sidebar-head ${JSON.stringify(r.h)}`);
+        assert.ok(r.hit, '#btn-decisions is covered or not hit-testable at its centre');
+        // …and it shares the head's row with the sidebar toggle.
+        const toggle = await box(page, '#btn-menu');
+        assert.ok(Math.abs((toggle.y + toggle.height / 2) - (by + bh / 2)) <= ROW,
+            '#btn-decisions is not on the same row as the sidebar toggle');
+    });
+
+    test('every pane header draws its state ONCE: one status shape, and a pill with the WORD only', async () => {
+        ready();
+        const heads = await page.evaluate(() => [...document.querySelectorAll('#term-stage .gs-head')].map(h => {
+            const pill = h.querySelector('.gs-state');
+            return {
+                wid: (h.querySelector('[data-status-for]') || {}).dataset?.statusFor,
+                shapes: h.querySelectorAll('.term-status-dot, .gs-state-glyph').length,
+                shapeCls: (h.querySelector('.term-status-dot') || {}).className || '',
+                pill: pill ? pill.innerText.trim() : null,
+                pillKids: pill ? pill.querySelectorAll('.term-status-dot, .gs-state-glyph').length : -1,
+            };
+        }));
+        assert.equal(heads.length, AGENTS.length, 'expected one pane header per fixture agent');
+        const WORD = { working: 'working', waiting: 'needs you', idle: 'idle', done: 'done' };
+        for (const h of heads) {
+            const state = STATE_OF[h.wid];
+            assert.equal(h.shapes, 1, `${h.wid}: the header carries ${h.shapes} status-shape elements, want exactly 1`);
+            assert.match(h.shapeCls, new RegExp(`\\b${state}\\b`), `${h.wid}: its one shape is "${h.shapeCls}", not ${state}`);
+            assert.equal(h.pillKids, 0, `${h.wid}: the pill carries its own shape element`);
+            assert.equal(h.pill, WORD[state], `${h.wid}: the pill reads "${h.pill}", want the word "${WORD[state]}" alone`);
+            assert.doesNotMatch(h.pill, /[○●◆✓▲?]/, `${h.wid}: the pill repeats a status glyph: "${h.pill}"`);
+        }
+    });
+
+    test('pane header order is the mockup\'s: shape · title · pill · icon buttons', async () => {
+        ready();
+        const order = await page.evaluate(() => [...document.querySelectorAll('#term-stage .gs-head')].map(h => {
+            const x = s => { const e = h.querySelector(s); const r = e && e.getBoundingClientRect(); return r && r.width ? r.x : null; };
+            return { dot: x('.gs-dot'), title: x('.pane-title'), pill: x('.gs-state'), menu: x('.gs-menu-btn'), max: x('.gs-max-btn') };
+        }));
+        for (const [i, o] of order.entries()) {
+            for (const k of Object.keys(o)) assert.ok(o[k] !== null, `pane ${i}: ${k} is not rendered`);
+            assert.ok(o.dot < o.title && o.title < o.pill && o.pill < o.menu && o.menu < o.max,
+                `pane ${i}: header order is not shape · title · pill · buttons: ${JSON.stringify(o)}`);
+        }
+    });
+});
+
+// The judge on #529: only the sidebar's font was guarded, while the pane
+// headers, the pane footers and the modals were CLAIMED sans. Computed family,
+// read off the live elements (and a modal really opened by its real button).
+describe('CMX-393 fonts: pane headers, pane footers and modals are the Geist chrome font', { skip: why }, () => {
+    let page, context;
+    const ready = setup(async () => {
+        ({ page, context } = await openDashboard(browser, { width: 1440, height: 900 }));
+        await settle(page);
+    });
+    after(() => context && context.close());
+    const GEIST = /^\s*["']?Geist["']?\s*,/;
+
+    async function familyOf(selector) {
+        const loc = page.locator(selector).first();
+        assert.ok(await loc.count(), `${selector} is not in the page`);
+        return loc.evaluate(el => getComputedStyle(el).fontFamily);
+    }
+
+    for (const sel of ['.gs-head .pane-title', '.gs-head .gs-state', '.term-ctx-bar']) {
+        test(`${sel} resolves to the Geist stack`, async () => {
+            ready();
+            const f = await familyOf(`#term-stage ${sel}`);
+            assert.match(f, GEIST, `${sel} font-family is ${f}`);
+        });
+    }
+
+    test('the Decisions modal, opened from the head\'s inbox button, is the Geist stack', async () => {
+        ready();
+        await page.locator('#btn-decisions').click();
+        await page.waitForSelector('#decisions-menu.open .modal-sheet', { state: 'visible', timeout: 5000 });
+        for (const sel of ['#decisions-menu .modal-sheet-head', '#decisions-menu .modal-sheet-body']) {
+            const f = await familyOf(sel);
+            assert.match(f, GEIST, `${sel} font-family is ${f}`);
+        }
+        await page.keyboard.press('Escape');
+    });
+
+    test('the settings/menu popover, opened from the foot\'s gear, is the Geist stack', async () => {
+        ready();
+        await page.evaluate(() => window.chela.hideDecisionsMenu && window.chela.hideDecisionsMenu());
+        await page.locator('#btn-primary-menu').click();
+        await page.waitForSelector('#primary-menu', { state: 'visible', timeout: 5000 });
+        const f = await familyOf('#primary-menu .popover-item');
+        assert.match(f, GEIST, `#primary-menu font-family is ${f}`);
+    });
+});
+
+describe('CMX-393 phone 390×844: the drawer foot is one row, the "+" opens the launch menu with the drawer closed', { skip: why }, () => {
+    let page, context;
+    const ready = setup(async () => {
+        ({ page, context } = await openDashboard(browser, { width: 390, height: 844 }));
+        await page.waitForSelector('.agent-row', { state: 'attached', timeout: 15000 });
+        await waitForReadouts(page);
+        await stable(page);
+    });
+    after(() => context && context.close());
+
+    test('the phone "+" is on screen with the drawer closed and opens the launch menu', async () => {
+        ready();
+        const side = await box(page, '.sidebar');
+        assert.ok(side.x + side.width <= px, 'the drawer is not closed at the start of this test');
+        const plus = await box(page, '#btn-new-mobile');
+        assert.ok(plus.x >= 0 && plus.y >= 0 && plus.x + plus.width <= 390 && plus.y + plus.height <= 844,
+            `#btn-new-mobile ${JSON.stringify(plus)} is not inside the viewport`);
+        await page.locator('#btn-new-mobile').click();
+        await page.waitForSelector('#new-menu', { state: 'visible', timeout: 5000 });
+        const menu = await box(page, '#new-menu');
+        assert.ok(menu.width > 0 && menu.x >= 0 && menu.x + menu.width <= 390 + px,
+            `#new-menu ${JSON.stringify(menu)} is not on screen`);
+        const closed = await box(page, '.sidebar');
+        assert.ok(closed.x + closed.width <= px, 'opening the launch menu also opened the drawer');
+        await page.mouse.click(380, 830);   // light-dismiss
+        await page.waitForSelector('#new-menu', { state: 'hidden', timeout: 5000 });
+    });
+
+    test('.safety-float is still on screen with the drawer closed', async () => {
+        ready();
+        const b = await box(page, '.safety-float');
+        assert.ok(b.width > 0 && b.height > 0 && b.x >= 0 && b.y >= 0 && b.x + b.width <= 390 && b.y + b.height <= 844,
+            `.safety-float ${JSON.stringify(b)} is not inside the 390×844 viewport`);
+    });
+
+    test('opened drawer: its foot is one row, and the inbox sits in its head', async () => {
+        ready();
+        await page.locator('#btn-menu-mobile').click();
+        await page.waitForFunction(() => {
+            const r = document.querySelector('.sidebar').getBoundingClientRect();
+            return r.left >= -1 && r.width > 0;
+        }, null, { timeout: 5000 });
+        await stable(page);
+        const controls = await footControls(page);
+        assert.deepEqual(controls.map(c => c.id), ['res-cpu', 'res-mem', 'res-disk', 'btn-primary-menu']);
+        assertOneRow(controls, 'drawer foot');
+        const side = await box(page, '.sidebar');
+        for (const c of controls) {
+            assert.ok(c.x >= side.x - px && c.x + c.w <= side.x + side.width + px,
+                `${c.id} overflows the drawer (${c.x}..${c.x + c.w} vs ${side.x}..${side.x + side.width})`);
+        }
+        const inbox = await box(page, '#btn-decisions');
+        const head = await box(page, '.sidebar-head');
+        assert.ok(inbox.y >= head.y - px && inbox.y + inbox.height <= head.y + head.height + px
+            && inbox.x + inbox.width <= side.x + side.width + px,
+            `#btn-decisions ${JSON.stringify(inbox)} is not inside the drawer head ${JSON.stringify(head)}`);
+    });
+});

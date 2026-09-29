@@ -875,9 +875,11 @@ function paneHead(wid, draggable) {
     // pane № (Alt+N jump target) moved OUT of the header entirely, down to
     // the bottom bar — see _ctxBarHTML.
     const dot = `<span class="gs-dot term-status-dot" data-status-for="${attrEsc(wid)}" data-wid="${attrEsc(wid)}" title="…"></span>`;
-    // Wall redesign slice 1 (docs/wall-redesign.md): the header's state pill —
-    // glyph + word ALWAYS carry the state (Liav is red-weak; colour is
-    // decoration on top, see .gs-state-* in style.css). Wall-only, like the
+    // Wall redesign slice 1 (docs/wall-redesign.md): the header's state pill.
+    // CMX-393: the WORD only — the SHAPE is `.gs-dot` at the head's far left,
+    // and a glyph in here drew every state twice (`● ● working`). Shape + word
+    // still carry the state together (Liav is red-weak; colour is decoration
+    // on top, see .gs-state-* in style.css). Wall-only, like the
     // min/pin buttons above — single mode renders nothing here at all, so
     // mobile's forced single mode (< 768px) is untouched by construction.
     // Rendered idle/neutral here (mirrors .gs-dot's own "starts neutral" build
@@ -885,9 +887,7 @@ function paneHead(wid, draggable) {
     // wall is built — see renderTerminals) fills the real state before the
     // browser ever paints it.
     const state = draggable
-        ? `<span class="gs-state gs-state-idle" data-state-for="${attrEsc(wid)}" title="idle">
-             <span class="gs-state-glyph" aria-hidden="true">○</span><span class="gs-state-word">idle</span>
-           </span>` : '';
+        ? `<span class="gs-state gs-state-idle" data-state-for="${attrEsc(wid)}" title="idle"><span class="gs-state-word">idle</span></span>` : '';
     const menu = `<span class="gs-menu-wrap">
         <button class="gs-menu-btn" onclick="chela.togglePaneOverflow(event, this)"
                 aria-haspopup="true" aria-expanded="false" title="Session actions">${lucideIcon('more-vertical', 14)}</button>
@@ -898,13 +898,16 @@ function paneHead(wid, draggable) {
           ${pin}
         </div>
       </span>`;
+    // CMX-393: the approved mockup's order — shape · title · dim subtitle ·
+    // soft word pill · icon buttons. The label flex-grows, so the pill and
+    // everything after it sit at the right.
     return `<div class="gs-head">
       ${dot}
-      ${state}
-      ${menu}
       ${label}
       ${roomBadge}
       <span class="gs-presence" data-presence-for="${attrEsc(wid)}"></span>
+      ${state}
+      ${menu}
       <span class="gs-keys">
         <span class="gs-win-ctl">
           ${min}
@@ -2178,9 +2181,8 @@ function _applyWallTileFrame(agents) {
         const s = tileState(a, wantsHuman(a));
         el.className = 'gs-state gs-state-' + s.cls;
         el.title = s.word;
-        const g = el.querySelector('.gs-state-glyph');
+        // CMX-393: no glyph in the pill — `.gs-dot` carries the shape.
         const w = el.querySelector('.gs-state-word');
-        if (g) g.textContent = s.glyph;
         if (w) w.textContent = s.word;
     });
 

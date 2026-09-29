@@ -59,6 +59,9 @@ function apiBody(path) {
     if (path === '/api/rooms') return { rooms: {}, pending: [] };
     if (path === '/api/term/ready') return { ready: true };
     if (path === '/api/term/shared') return { shared: ['@2'] };
+    // The sidebar foot's CPU/RAM/Disk strip stays hidden until a sample lands;
+    // CMX-393's one-row footer guard needs it drawn.
+    if (path === '/api/resources') return { cpu_pct: 8, mem_pct: 13, disk_pct: 31 };
     return {};
 }
 
