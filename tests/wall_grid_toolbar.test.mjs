@@ -11,8 +11,7 @@
 // tests/test_js_suites.py; it needs `pnpm install` for jsdom).
 import { before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
-import { renderShell } from './browser/fixture.mjs';
+import { bootWall } from './wall_grid_toolbar_env.mjs';   // needs `pnpm install` for jsdom
 import { gridRowCollapsed } from '../chela/dashboard/static/js/wallmodel.js';
 
 describe('gridRowCollapsed: the toolbar\'s resting state', () => {
@@ -26,33 +25,6 @@ describe('gridRowCollapsed: the toolbar\'s resting state', () => {
     });
 });
 
-// The terminals panel exactly as the real template ships it.
-const PANEL = new JSDOM(renderShell()).window.document.getElementById('panel-terminals').outerHTML;
-
-const AGENTS = ['@1', '@2', '@3'].map((wid, i) => ({
-    name: `a${i}`, window_id: wid, online: true, session_status: 'idle', claude_running: true,
-}));
-
-function fakeFetch(url) {
-    const path = String(url);
-    const body = path.endsWith('/api/agents') ? AGENTS
-        : path.endsWith('/api/rooms') ? { rooms: {}, pending: [] }
-            : path.startsWith('/api/term/ready') ? { ready: true } : {};
-    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
-}
-
-function fakeGridStack() {
-    const grid = {
-        on() {}, off() {}, save: () => [], destroy() {},
-        removeWidget(el, removeDOM) { if (removeDOM !== false) el.remove(); },
-        addWidget: el => el, makeWidget: el => el, enableMove() {}, enableResize() {},
-        update() {}, batchUpdate() {}, commit() {}, cellHeight() {}, column() {},
-        getGridItems: () => [], removeAll() {}, float() {}, engine: { nodes: [] },
-    };
-    return { init: () => grid };
-}
-
-let dom;
 const $ = s => document.querySelector(s);
 const toggle = () => $('#term-grid-toggle');
 const row = () => $('#term-grid-row');
@@ -63,40 +35,8 @@ const shownControls = () => [...$('#term-wall-grid').querySelectorAll('button')]
 const storedPreset = () => JSON.parse(localStorage.getItem('pc_wall_preset'));
 
 before(async () => {
-    dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
-        // runScripts so the template's INLINE onclick attributes really fire — a
-        // preset click must reach chela.applyGridLayout the way a browser's does.
-        // The panel carries no <script>, so nothing else is evaluated.
-        { url: 'http://localhost:5005/', pretendToBeVisual: true, runScripts: 'dangerously' });
-    dom.window.TERMINALS_ENABLED = true;
-    for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
-        'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
-        'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
-        Object.defineProperty(globalThis, k, { value: dom.window[k], writable: true, configurable: true });
-    }
     // Liav's default: Focus ON, and NO stored expand/collapse choice.
-    localStorage.setItem('pc_term_mode', 'wall');
-    localStorage.setItem('pc_wall_focus', '1');
-    localStorage.removeItem('pc_wall_grid_collapsed');
-    globalThis.GridStack = fakeGridStack();
-    globalThis.fetch = fakeFetch;
-    dom.window.document.elementFromPoint = () => null;
-    dom.window.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, {
-        get: (_t, k) => (k === 'canvas' ? null : () => {}),
-    });
-    dom.window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,';
-    dom.window.matchMedia = q => ({
-        media: q, matches: false, addEventListener() {}, removeEventListener() {},
-        addListener() {}, removeListener() {},
-    });
-    globalThis.window.chela = globalThis.window.chela || {};
-    globalThis.setInterval = () => 0;
-    await import('../chela/dashboard/static/js/main.js');
-    const util = await import('../chela/dashboard/static/js/util.js');
-    const terminals = await import('../chela/dashboard/static/js/terminals.js');
-    util.setCurrentTab('terminals');
-    util.setAgentsCache(AGENTS);
-    await terminals.renderTerminals();
+    await bootWall({ pc_wall_focus: '1', pc_wall_grid_collapsed: null });
 });
 
 describe('the collapsible Wall layout toolbar', () => {
@@ -156,6 +96,32 @@ describe('the collapsible Wall layout toolbar', () => {
         assert.ok(row().hidden, 'choosing a mode collapses the row too');
         const active = document.querySelector('#term-grid-presets .gl-btn.active svg');
         assert.equal(toggle().querySelector('svg').outerHTML, active.outerHTML);
+    });
+
+    test('choosing Auto-arrange collapses the row, and the control shows the AUTO glyph', () => {
+        window.chela.toggleGridRow();
+        assert.ok(!row().hidden);
+        window.chela.toggleWallAuto($('#term-auto-btn'));   // on
+        assert.ok(row().hidden, 'choosing Auto-arrange collapses the row');
+        assert.equal(toggle().getAttribute('aria-expanded'), 'false');
+        const auto = $('#term-auto-btn').querySelector('svg').outerHTML;
+        assert.equal(toggle().querySelector('svg').outerHTML, auto,
+            'Auto-arrange owns the layout, so the collapsed control shows its glyph');
+        // Not vacuous: the preset glyph it would otherwise fall back to differs.
+        const preset = document.querySelector('#term-grid-presets .gl-btn.active svg');
+        assert.notEqual(preset.outerHTML, auto);
+        window.chela.toggleWallAuto($('#term-auto-btn'));   // off again
+        assert.equal(toggle().querySelector('svg').outerHTML, preset.outerHTML);
+    });
+
+    test('Esc hands keyboard focus back to the toggle, not a now-hidden preset', () => {
+        window.chela.toggleGridRow();
+        const preset = document.querySelector('#term-grid-presets .gl-btn');
+        preset.focus();
+        assert.equal(document.activeElement, preset, 'focus starts inside the expanded row');
+        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        assert.ok(row().hidden);
+        assert.equal(document.activeElement, toggle(), 'Esc returns focus to the toggle');
     });
 
     test('Esc collapses an expanded row', () => {
