@@ -238,8 +238,9 @@ def test_reopen_refuses_when_the_current_head_cannot_be_read_from_github(tmp_pat
 
 # --- (b) ONLY needs_human can be reopened -----------------------------------------------
 
+# `done` is reopenable under its own conditions (CMX-387) — see test_dispatcher_reopen_done.py.
 @pytest.mark.parametrize("status", ["running", "awaiting_review", "changes_requested",
-                                     "done", "failed", "claimed"])
+                                     "failed", "claimed", "closed"])
 def test_reopen_refuses_every_status_that_is_not_needs_human(tmp_path, status):
     with dispatcher._db() as conn:
         _row(conn, status=status)

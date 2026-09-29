@@ -83,6 +83,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
+from chela import envutil
+
 log = logging.getLogger(__name__)
 
 # --- verdicts, per experiment ------------------------------------------------
@@ -366,6 +368,7 @@ def parse_check(path: Path) -> tuple[bool, str]:
             out = subprocess.run(
                 ["node", "--check", str(path)],
                 capture_output=True, text=True, errors="replace", timeout=60,
+                env=envutil.child_env(),
             )
         except (OSError, subprocess.TimeoutExpired) as e:
             return True, f"no parse check ran (node unavailable: {e})"
@@ -463,7 +466,7 @@ def _no_color_env() -> dict[str, str]:
     """
     from chela import config
 
-    env = dict(os.environ)
+    env = envutil.child_env()       # CMX-390: NODE_CHANNEL_*, NODE_UNIQUE_ID, pm2 bookkeeping
     env.pop("FORCE_COLOR", None)
     env.pop("NODE_CHANNEL_FD", None)
     env.pop("NODE_CHANNEL_SERIALIZATION_MODE", None)
@@ -683,6 +686,7 @@ def _provision_python_env(worktree: Path, timeout: float = 600.0) -> str:
         out = subprocess.run(
             ["uv", "sync", "--all-extras", "--quiet"],
             cwd=str(worktree), capture_output=True, text=True, errors="replace", timeout=timeout,
+            env=envutil.child_env(),
         )
     except subprocess.TimeoutExpired:
         return f"`uv sync` did not finish in {timeout:.0f}s in {worktree}"
@@ -732,7 +736,7 @@ def provision_suite_env(worktree: Path, timeout: float = 600.0) -> str:
         out = subprocess.run(
             ["npm", "ci", "--no-audit", "--no-fund", "--silent"],
             cwd=str(worktree), capture_output=True, text=True,
-            errors="replace", timeout=timeout,
+            errors="replace", timeout=timeout, env=envutil.child_env(),
         )
     except FileNotFoundError:
         return (f"{', '.join(missing)} is not installed in {worktree}/node_modules and npm is "

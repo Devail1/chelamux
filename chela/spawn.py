@@ -33,7 +33,7 @@ import subprocess
 import uuid
 from dataclasses import dataclass
 
-from chela import agent_manager, config, discovery, sessionids
+from chela import agent_manager, config, discovery, envutil, sessionids
 
 log = logging.getLogger(__name__)
 
@@ -264,7 +264,7 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
         proc = subprocess.run(
             ["tmux", "new-window", "-t", f"{session}:", "-n", name, "-c", real,
              "-P", "-F", "#{window_id}"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, env=envutil.child_env(),
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         return SpawnResult(ok=False, error=str(e))
