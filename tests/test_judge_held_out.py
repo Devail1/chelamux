@@ -613,3 +613,62 @@ def test_judge_run_records_the_held_out_quota_from_a_NON_default_fraction(tmp_pa
         judge.judge_run(task_id, exp_file, cleanup=False)
     rec = judge.load_private(task_id)[-1]
     assert rec["held_out"]["quota"] == 2
+
+
+# --- round 5: four wirings nothing pinned ---------------------------------------------------
+
+def test_an_INVALID_first_pass_does_not_consume_a_consistency_rerun_slot(tmp_path):
+    """Only a FACT (KILLED/SURVIVED) is worth re-running. An experiment whose mutation did not
+    apply is INVALID on the first pass — sampling it would count a re-run that proved nothing,
+    so ``sampled`` must be 1 here (the glyph survivor), not 2."""
+    report = _flaky_run(
+        tmp_path, [_glyph(before="    this line is not in guard.py"), _glyph()], [0, 0],
+        sample=2,
+    )
+    assert [o.verdict for o in report.outcomes] == [judge.INVALID, judge.SURVIVED]
+    assert report.outcomes[0].rerun_verdict == ""
+    assert report.consistency == {"sampled": 1, "flipped": 0, "flip_rate": 0.0}
+
+
+def test_metrics_ignore_a_STALE_rounds_consistency_flips():
+    """A stale round is not a round — its flips/samples must not reach the flip rate either."""
+    recs = [
+        {"state": "blocked", "consistency": {"sampled": 2, "flipped": 1}},
+        {"state": "blocked", "stale": True, "consistency": {"sampled": 5, "flipped": 3}},
+    ]
+    assert judge.private_metrics(recs)["flips"] == (1, 2)
+
+
+def test_the_private_record_keeps_a_BLOCKED_state_and_reports_no_rounds_to_clean(tmp_path):
+    report = judge.Report(outcomes=[
+        judge.Outcome(judge.Experiment(**_glyph()), judge.SURVIVED, "survived"),
+    ])
+    assert report.state == judge.J_BLOCKED
+    judge.record_private("ho-blocked", report, {"experiments": [_glyph()]})
+    recs = judge.load_private("ho-blocked")
+    assert recs[-1]["state"] == judge.J_BLOCKED
+    assert judge.private_metrics(recs)["rounds_to_clean"] is None
+
+
+@pytest.mark.parametrize("task_id", ["../../escape", "a/b", "/abs/path"])
+def test_the_private_record_stays_inside_judge_heldout_whatever_the_task_id(tmp_path, task_id):
+    report = judge.Report(outcomes=[])
+    path = judge.record_private(task_id, report, {"experiments": []})
+    assert path is not None
+    root = (config.CHELA_DIR / "judge-heldout").resolve()
+    assert path.resolve().parent == root
+    assert judge.load_private(task_id)             # reads back from the same sanitised path
+
+
+def test_a_MALFORMED_held_out_experiment_stays_held_out_and_unnamed(tmp_path):
+    root = _project(tmp_path / "repo", guard_test=REAL_GUARD_TEST)
+    broken = _sentinel()
+    del broken["after"]
+    report = judge.run_experiments(root, TEST_CMD, {"experiments": [_glyph(), broken]},
+                                   timeout=120)
+    assert report.outcomes[1].verdict == judge.INVALID
+    assert report.outcomes[1].held_out
+    assert all(not o.held_out for o in report.visible_outcomes)
+    _assert_no_leak(judge.comment_body(report, None, TEST_CMD), "the comment (malformed)")
+    _assert_no_leak(json.dumps([o.as_dict() for o in report.visible_outcomes]),
+                    "the visible outcomes (malformed)")

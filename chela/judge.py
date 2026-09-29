@@ -1326,8 +1326,13 @@ def _apply_experiments(
     for raw_exp in items:
         exp, why = Experiment.parse(raw_exp)
         if exp is None:
+            # A malformed HELD-OUT experiment stays held out: its raw repr carries the guard
+            # text and the start of its diff, which must never reach the visible comment.
+            hidden = isinstance(raw_exp, dict) and raw_exp.get("held_out") is True
             outcomes.append(Outcome(
-                Experiment(guard=str(raw_exp)[:120], file="?", before="", after=""),
+                Experiment(guard="(a malformed held-out experiment)" if hidden
+                           else str(raw_exp)[:120], file="?", before="", after="",
+                           held_out=hidden),
                 INVALID, f"the experiment is malformed ({why})", baseline, None, "",
             ))
             continue
