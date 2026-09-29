@@ -318,3 +318,95 @@ def test_the_judge_prompt_asks_for_held_out_tags(tmp_path):
         dispatcher._judge_vars(wf, row, judge.judge_worktree_path(wf, "ho-prompt"), "cafe"),
     )
     assert '"held_out": true' in rendered and "about\n     30% of your" in rendered
+
+
+def _set_judge_knobs(repo: Path, **knobs) -> None:
+    """Add ``judge.<knob>: <value>`` lines to the fixture WORKFLOW.md's judge block.
+
+    Round 1's two knob guards were parked on the defaults (DEFEAT_SHAPES #2): with no knob
+    set, ``judge_held_out_fraction(wf)`` IS ``HELD_OUT_FRACTION`` and
+    ``judge_consistency_sample(wf)`` IS ``CONSISTENCY_SAMPLE``, so hardcoding the constant at
+    the call site was invisible. Every value below is deliberately NOT the default.
+    """
+    md = repo / "WORKFLOW.md"
+    extra = "".join(f"  {k}: {json.dumps(v)}\n" for k, v in knobs.items())
+    md.write_text(md.read_text().replace("  suite_timeout_seconds: 120\n",
+                                         "  suite_timeout_seconds: 120\n" + extra, 1))
+
+
+def test_the_judge_prompt_held_out_pct_follows_a_NON_default_knob(tmp_path):
+    """judge.held_out_fraction: 0.55 ⇒ the rendered prompt asks for 55%, not the 30% default."""
+    assert judge.HELD_OUT_FRACTION != 0.55
+    repo = _workflow_repo(tmp_path, "ho-knob", REAL_GUARD_TEST)
+    _set_judge_knobs(repo, held_out_fraction=0.55)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, "ho-knob")
+    wf = workflow.load_workflow(repo / "WORKFLOW.md")
+    row = dispatcher.resolve_run("ho-knob")
+    jv = dispatcher._judge_vars(wf, row, judge.judge_worktree_path(wf, "ho-knob"), "cafe")
+    assert jv["held_out_pct"] == 55
+    rendered = dispatcher.render_prompt(dispatcher.JUDGE_PROMPT, jv)
+    assert "about\n     55% of your" in rendered
+    assert "30% of your" not in rendered
+
+
+def test_judge_suite_config_carries_NON_default_held_out_and_consistency_knobs(tmp_path):
+    """The per-workflow knobs reach the ONE config `run_judge` reads — not the constants."""
+    assert judge.CONSISTENCY_SAMPLE != 5 and judge.HELD_OUT_FRACTION != 0.55
+    repo = _workflow_repo(tmp_path, "ho-cfg", REAL_GUARD_TEST)
+    _set_judge_knobs(repo, held_out_fraction=0.55, consistency_sample=5)
+    cfg = judge.judge_suite_config(workflow.load_workflow(repo / "WORKFLOW.md"))
+    assert cfg.consistency_sample == 5
+    assert cfg.held_out_fraction == 0.55
+
+
+def test_judge_run_honours_a_NON_default_consistency_sample_end_to_end(tmp_path):
+    """judge.consistency_sample: 1 ⇒ a real `chela judge run` re-runs ONE survivor, not the
+    default two — the knob, not CONSISTENCY_SAMPLE, reaches `run_experiments`."""
+    assert judge.CONSISTENCY_SAMPLE != 1
+    task_id = "ho-fwd"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    _set_judge_knobs(repo, consistency_sample=1)
+    wt = judge.judge_worktree_path(workflow.load_workflow(repo / "WORKFLOW.md"), task_id)
+    _add_sentinel_module(wt)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_glyph(), _sentinel()]}))
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+    assert result["state"] == judge.J_BLOCKED
+    assert result["consistency"]["sampled"] == 1
+
+
+@pytest.mark.parametrize("raw,want", [
+    (0.55, 0.55), (0, 0.0), (1, 1.0), (1.7, 1.0), (-0.2, 0.0), ("lots", judge.HELD_OUT_FRACTION),
+])
+def test_judge_held_out_fraction_parses_and_clamps(raw, want):
+    class _Wf:
+        def get(self, *keys, default=None):
+            return raw if keys == ("judge", "held_out_fraction") else default
+    assert judge.judge_held_out_fraction(_Wf()) == want
+
+
+@pytest.mark.parametrize("raw,want", [
+    (5, 5), (0, 0), (-3, 0), ("7", 7), ("many", judge.CONSISTENCY_SAMPLE),
+])
+def test_judge_consistency_sample_parses_and_clamps(raw, want):
+    class _Wf:
+        def get(self, *keys, default=None):
+            return raw if keys == ("judge", "consistency_sample") else default
+    assert judge.judge_consistency_sample(_Wf()) == want
+
+
+def test_the_private_held_out_record_is_owner_only(tmp_path):
+    """The store is 0o600 in a 0o700 directory — nobody but the operator's user reads it."""
+    report = judge.Report(outcomes=[
+        judge.Outcome(judge.Experiment(**{k: v for k, v in _sentinel().items()
+                                          if k != "held_out"}, held_out=True),
+                      judge.SURVIVED, "survived"),
+    ])
+    path = judge.record_private("ho-mode", report, {"experiments": [_sentinel()]})
+    assert path is not None
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
