@@ -221,3 +221,14 @@ export function focusLayout(orderedWids, focusWid, totalRows) {
     });
     return layout;
 }
+
+// CMX-397: does the Wall's layout toolbar REST collapsed (one glyph + chevron)?
+// `stored` is the raw pc_wall_grid_collapsed value — the user's explicit
+// expand/collapse choice, '1' or '0' — and wins whenever it is set. With no
+// choice on record the row follows the view: collapsed while Focus is on (the
+// presets are noise there), expanded otherwise.
+export function gridRowCollapsed(stored, focusOn) {
+    if (stored === '1') return true;
+    if (stored === '0') return false;
+    return !!focusOn;
+}
