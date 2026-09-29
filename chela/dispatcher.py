@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import critic, epoch, event_log, hold, judge, memcap
+from chela import critic, envutil, epoch, event_log, hold, judge, memcap
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -2412,7 +2412,7 @@ def _new_window(window_name: str, cwd: str) -> str:
     out = subprocess.run(
         ["tmux", "new-window", "-t", f"{TMUX_SESSION}:", "-n", window_name,
          "-c", cwd, "-P", "-F", "#{window_id}"],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, env=envutil.child_env(),
     )
     wid = out.stdout.strip() if isinstance(out.stdout, str) else ""
     return wid if re.fullmatch(r"@\d+", wid) else window_name
@@ -2438,6 +2438,7 @@ def _fire_after_done(wf: WorkflowDef) -> None:
             cmd,
             shell=True,
             cwd=str(wf.path.parent),
+            env=envutil.child_env(),
             start_new_session=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -5626,13 +5627,15 @@ def _launch_agent(
             log.info("Running after_create hook for %s", task_id)
             subprocess.run(
                 render_prompt(after_create, hook_vars),
-                shell=True, cwd=worktree, check=True,
+                shell=True, cwd=worktree, check=True, env=envutil.child_env(),
             )
 
     before = wf.get("hooks", "before_run")
     if before:
         log.info("Running before_run hook for %s", task_id)
-        subprocess.run(before, shell=True, cwd=worktree, check=True)
+        # CMX-390: never the daemon's raw environ — pm2's NODE_CHANNEL_FD makes any Node
+        # program the hook runs (pnpm) abort 134 before the agent ever launches.
+        subprocess.run(before, shell=True, cwd=worktree, check=True, env=envutil.child_env())
 
     _kill_windows_named(window_name)
     target_id = _new_window(window_name, str(worktree))
