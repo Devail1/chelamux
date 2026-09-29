@@ -485,6 +485,29 @@ describe('CMX-393 desktop 1440: one-row sidebar foot, inbox in the head, one sta
             '#btn-decisions is not on the same row as the sidebar toggle');
     });
 
+    // "Inside the head" is containment, and containment passes wherever in the
+    // head the button lands — `.sidebar-head-actions { margin-left: 0 }` parked
+    // it right after the wordmark and stayed green (judge on #545, round 1).
+    // The claim is POSITION: the head's right content edge, with the toggle
+    // and the brand to its left and clear space between them.
+    test('the Decisions inbox sits at the sidebar head\'s RIGHT end, clear of the wordmark', async () => {
+        ready();
+        const g = await page.evaluate(() => {
+            const head = document.querySelector('.sidebar-head');
+            const hr = head.getBoundingClientRect(), cs = getComputedStyle(head);
+            const r = s => { const b = document.querySelector(s).getBoundingClientRect(); return { x: b.x, w: b.width }; };
+            return { right: hr.right - parseFloat(cs.paddingRight), inbox: r('#btn-decisions'),
+                toggle: r('#btn-menu'), brand: r('.sidebar-head .brand') };
+        });
+        const inboxRight = g.inbox.x + g.inbox.w;
+        assert.ok(Math.abs(inboxRight - g.right) <= 2,
+            `#btn-decisions ends at ${inboxRight}, not at the head's right content edge ${g.right}`);
+        assert.ok(g.toggle.x < g.brand.x && g.brand.x < g.inbox.x,
+            `head order is not toggle · brand · inbox: ${JSON.stringify(g)}`);
+        assert.ok(g.inbox.x - (g.brand.x + g.brand.w) >= 24,
+            `#btn-decisions sits ${(g.inbox.x - (g.brand.x + g.brand.w)).toFixed(1)}px after the wordmark — tucked beside it, not at the far right`);
+    });
+
     test('every pane header draws its state ONCE: one status shape, and a pill with the WORD only', async () => {
         ready();
         const heads = await page.evaluate(() => [...document.querySelectorAll('#term-stage .gs-head')].map(h => {
@@ -509,16 +532,31 @@ describe('CMX-393 desktop 1440: one-row sidebar foot, inbox in the head, one sta
         }
     });
 
-    test('pane header order is the mockup\'s: shape · title · pill · icon buttons', async () => {
+    // The subtitle is IN the claimed order, and on the title's line: the fixture
+    // gives every agent an ai_title so it renders (without one the header has no
+    // subtitle, and flex-direction:column on .gs-grip survived — judge on #545).
+    test('pane header order is the mockup\'s: shape · title · dim subtitle · pill · icon buttons, on ONE line', async () => {
         ready();
         const order = await page.evaluate(() => [...document.querySelectorAll('#term-stage .gs-head')].map(h => {
-            const x = s => { const e = h.querySelector(s); const r = e && e.getBoundingClientRect(); return r && r.width ? r.x : null; };
-            return { dot: x('.gs-dot'), title: x('.pane-title'), pill: x('.gs-state'), menu: x('.gs-menu-btn'), max: x('.gs-max-btn') };
+            const b = s => { const e = h.querySelector(s); const r = e && e.getBoundingClientRect();
+                return r && r.width && r.height ? { x: r.x, w: r.width, y: r.y, h: r.height, cy: r.y + r.height / 2 } : null; };
+            return { dot: b('.gs-dot'), title: b('.pane-title'), sub: b('.pane-subtitle'), pill: b('.gs-state'),
+                menu: b('.gs-menu-btn'), max: b('.gs-max-btn') };
         }));
+        assert.equal(order.length, AGENTS.length, 'expected one pane header per fixture agent');
         for (const [i, o] of order.entries()) {
             for (const k of Object.keys(o)) assert.ok(o[k] !== null, `pane ${i}: ${k} is not rendered`);
-            assert.ok(o.dot < o.title && o.title < o.pill && o.pill < o.menu && o.menu < o.max,
-                `pane ${i}: header order is not shape · title · pill · buttons: ${JSON.stringify(o)}`);
+            const seq = [o.dot, o.title, o.sub, o.pill, o.menu, o.max];
+            for (let j = 1; j < seq.length; j++) {
+                assert.ok(seq[j - 1].x < seq[j].x,
+                    `pane ${i}: header order is not shape · title · subtitle · pill · buttons: ${JSON.stringify(o)}`);
+            }
+            // Title and subtitle: side by side (the subtitle starts after the
+            // title ends) and on one line (centres within ROW, boxes overlap).
+            assert.ok(o.sub.x >= o.title.x + o.title.w - px,
+                `pane ${i}: the subtitle starts at ${o.sub.x}, inside the title (ends ${o.title.x + o.title.w}) — stacked, not side by side`);
+            assert.ok(Math.abs(o.sub.cy - o.title.cy) <= ROW && o.sub.y < o.title.y + o.title.h && o.title.y < o.sub.y + o.sub.h,
+                `pane ${i}: title (y ${o.title.y}, h ${o.title.h}) and subtitle (y ${o.sub.y}, h ${o.sub.h}) are not on one line`);
         }
     });
 });
