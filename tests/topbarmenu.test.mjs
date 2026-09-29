@@ -138,10 +138,19 @@ test('.sidebar-foot in the REAL index.html has exactly one primary button', () =
     // `.safety-float` (see index.html's own comment on why — an off-canvas
     // sidebar traps a position:fixed descendant behind its own transform), so
     // it is deliberately NOT one of the two buttons left here.
+    // CMX-393: #btn-decisions moved up into .sidebar-head (the mockup's order),
+    // leaving the foot ONE row — readouts + this single menu control.
     const foot = HTML.match(/<div class="sidebar-foot">[\s\S]*?\n    <\/div>/)[0];
     const buttonIds = [...foot.matchAll(/<button[^>]*\bid="([^"]+)"/g)].map(m => m[1]);
-    assert.deepEqual(buttonIds, ['btn-decisions', 'btn-primary-menu'],
+    assert.deepEqual(buttonIds, ['btn-primary-menu'],
         `.sidebar-foot has unexpected buttons: ${buttonIds.join(', ')}`);
+});
+
+test('#btn-decisions lives in .sidebar-head in the REAL index.html (CMX-393)', () => {
+    const head = HTML.match(/<div class="sidebar-head">[\s\S]*?\n    <\/div>/)[0];
+    const buttonIds = [...head.matchAll(/<button[^>]*\bid="([^"]+)"/g)].map(m => m[1]);
+    assert.deepEqual(buttonIds, ['btn-menu', 'btn-decisions'],
+        `.sidebar-head has unexpected buttons: ${buttonIds.join(', ')}`);
 });
 
 test('#btn-shares lives in .safety-float, not .sidebar-foot, in the REAL index.html', () => {

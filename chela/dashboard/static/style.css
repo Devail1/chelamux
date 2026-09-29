@@ -286,12 +286,15 @@ body {
     background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface) 82%, var(--bg)));
     border-bottom: 1px solid var(--border);
 }
+/* CMX-393: title and dim subtitle on ONE line, as in the mockup — the title
+   keeps its width, the subtitle takes what is left and ellipsises. */
 .gs-grip, .gs-label {
     flex: 1 1 auto; min-width: 0; user-select: none;
-    display: flex; flex-direction: column; justify-content: center; overflow: hidden;
+    display: flex; flex-direction: row; align-items: baseline; gap: 8px; overflow: hidden;
 }
 .gs-grip { cursor: move; }
-.pane-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gs-label .pane-subtitle, .gs-grip .pane-subtitle { flex: 1 1 0; min-width: 0; }
 /* CMX-146: Claude's own auto-generated session title, dim and small under the
    pane name — a distinct record from the name itself (which is the tmux window
    name / rename), so it rides alongside it rather than replacing it. */
@@ -347,21 +350,25 @@ body {
 
 /* --- Wall redesign slice 1 (docs/wall-redesign.md): the header's state pill.
    Wall-only (paneHead's `draggable` gate — single mode renders none of this,
-   so mobile's forced single mode at <768px is untouched). GLYPH + WORD always
-   carry the state (Liav is red-weak); the Okabe-Ito colour below is
-   decoration on top, never the sole signal. `tileState` (wallmodel.js) is the
-   one source of the glyph/word/class triple; this file only paints it. */
+   so mobile's forced single mode at <768px is untouched). The WORD here plus
+   the `.gs-dot` SHAPE carry the state (Liav is red-weak); the Okabe-Ito
+   colour below is decoration on top, never the sole signal. `tileState`
+   (wallmodel.js) is the one source of the word/class pair; this file only
+   paints it.
+   CMX-393: a SOFT pill with the WORD only (the mockup's) — a tint of the
+   state colour behind it, no border and no glyph. The shape lives once, on
+   `.gs-dot` at the head's left; shape + word is the non-hue pair. */
 .gs-state {
-    flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px;
-    padding: 1px 6px; border-radius: 999px; border: 1px solid currentColor;
-    font-size: var(--wall-pane-font-size-sm); font-weight: 700; line-height: 1.5; white-space: nowrap;
+    flex: 0 0 auto; display: inline-flex; align-items: center;
+    padding: 2px 8px; border-radius: 999px; border: 1px solid transparent;
+    background: color-mix(in srgb, currentColor 14%, transparent);
+    font-size: var(--wall-pane-font-size-sm); font-weight: 600; line-height: 1.5; white-space: nowrap;
 }
-.gs-state-glyph { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .gs-state-working { color: var(--ok-green); }
 .gs-state-needs-you { color: var(--ok-orange); }
 .gs-state-done { color: var(--ok-sky); }
 .gs-state-idle { color: var(--text-dim); opacity: 0.85; }
-.gs-state-unknown { color: var(--text-dim); opacity: 0.85; border-style: dashed; }
+.gs-state-unknown { color: var(--text-dim); opacity: 0.85; border: 1px dashed currentColor; }
 
 .gs-menu-wrap { position: relative; flex: 0 0 auto; }
 .gs-menu-btn {
@@ -675,7 +682,7 @@ body {
 
 @media (max-width: 768px) {
     /* Keep the numbers, drop the CPU/RAM/Disk labels — the strip lives in the
-       sidebar foot (CMX-377) and must still fit next to Decisions/Menu there. */
+       sidebar foot (CMX-377) and must still fit beside the menu gear there. */
     .res-strip { gap: 6px; }
     .res-item .res-label { display: none; }
     .res-item .res-value { font-size: 11px; }
@@ -755,7 +762,7 @@ body {
 @keyframes sharesPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) { .shares-indicator .si-dot { animation: none; } }
 
-/* Decisions inbox button — the sidebar foot's #btn-decisions (icon-btn) plus
+/* Decisions inbox button — the sidebar head's #btn-decisions (icon-btn) plus
    its state dot, colour-only decoration on top of a title tooltip (never the
    sole signal — Liav is red-weak, same rule as .decisions-chip below). */
 #btn-decisions { position: relative; }
@@ -3057,9 +3064,18 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .sidebar-jump:focus-within { border-color: var(--accent); }
 body.sidebar-collapsed .sidebar-quick { display: none; }
 
+/* CMX-393: ONE row — readouts on the left, the single settings/menu gear pushed
+   to the right. No wrap: the inbox that used to crowd this row lives in the head
+   now, and at phone width the readouts already drop their labels. */
 .sidebar-foot {
-    flex: 0 0 auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px; flex-wrap: nowrap;
     padding: 10px 14px; border-top: 1px solid var(--border);
+}
+.sidebar-foot .res-strip { min-width: 0; }
+.sidebar-foot #btn-primary-menu { margin-left: auto; flex: 0 0 auto; }
+/* The head's right end: the Decisions inbox (CMX-393, moved up from the foot). */
+.sidebar-head-actions {
+    margin-left: auto; flex: 0 0 auto; display: flex; align-items: center; gap: 2px;
 }
 
 /* Phone-only floating trigger for the off-canvas drawer (CMX-377) — see the
@@ -3300,6 +3316,8 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
        expands, nothing here is destructive. */
     body.sidebar-collapsed .sidebar-head,
     body.sidebar-collapsed .sidebar-foot { flex-direction: column; padding-left: 4px; padding-right: 4px; }
+    body.sidebar-collapsed .sidebar-head-actions,
+    body.sidebar-collapsed .sidebar-foot #btn-primary-menu { margin-left: 0; }
     body.sidebar-collapsed .sidebar-head .brand span { display: none; }
     body.sidebar-collapsed #resources-strip { display: none; }
 

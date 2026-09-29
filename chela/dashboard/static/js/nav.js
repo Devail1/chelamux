@@ -1671,8 +1671,8 @@ function hideNewMenu() {
     if (m) m.style.display = 'none';
 }
 
-// Primary menu (Lucide more-vertical, in the sidebar foot since CMX-377 —
-// originally a topbar button): folds the three former topbar primaries — Jump
+// Primary menu (a settings gear at the right of the sidebar foot's one row since
+// CMX-393 — a ⋮ in the foot since CMX-377, originally a topbar button): folds the three former topbar primaries — Jump
 // to… (#btn-palette), New… (#btn-new), overflow (#btn-overflow) — behind ONE
 // button (CMX-109 / CMX-108 Part A re-filed; cmx-108/#122's WALL toolbar fold —
 // grid presets + lock behind openLayoutMenu — was reverted in CMX-111: Liav
