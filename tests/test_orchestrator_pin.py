@@ -318,6 +318,22 @@ def test_chela_restore_readdressing_the_pin_is_announced(store, monkeypatch):
     assert [e["kind"] for e in inbox.load()["queue"]] == [inbox.MOVED_KIND]
 
 
+def test_a_restore_that_re_stamps_the_SAME_window_is_not_announced(store, monkeypatch):
+    """A tmux restart reissued `@8` to the orchestrator's own session, so `chela restore
+    --apply` re-addresses `@8` to `@8` under a fresh epoch. The pin did not move: no
+    "moved @8 to @8" notice, in the queue or the Feed. (Control: the same restore to a
+    DIFFERENT window is announced — `test_chela_restore_readdressing_the_pin_is_announced`.)"""
+    monkeypatch.setattr(inbox.sessions, "session_of_window", lambda wid, pane_map=None: S8)
+    monkeypatch.setattr(inbox.epoch, "current", lambda: "2-2")
+    _pinned()
+
+    out = inbox.readdress("@8", "1-1", "@8")
+
+    assert out["ok"] and out["orchestrator"] == "@8" and out["epoch"] == "2-2"
+    assert inbox.load()["orchestrator_epoch"] == "2-2", "the re-stamp itself happened"
+    assert _moved_records() == [] and inbox.load()["queue"] == []
+
+
 def test_the_same_session_watching_from_a_new_window_is_not_a_takeover(store, monkeypatch):
     """`@8` is still listed (not yet reaped), and the orchestrator's OWN session S8 runs
     `chela watch` from `@60` after a resume into a new window. Same identity ⇒ no notice.
