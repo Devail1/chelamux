@@ -3271,7 +3271,10 @@ def latest_required_mutations(run: dict) -> list[dict]:
         if r.get("verdict") in ("retry", "override"):
             continue
         raw = r.get("mutations")
-        return [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+        # ⚖️🙈 CMX-395: belt-and-braces — the judge never stores a held-out experiment here,
+        # but this list is pasted verbatim into the rework prompt, so refuse one regardless.
+        return ([m for m in raw if isinstance(m, dict) and not m.get("held_out")]
+                if isinstance(raw, list) else [])
     return []
 
 
@@ -6313,6 +6316,14 @@ failures, a whole production wiring that could be REVERTED with 1112 passed.
      differently". They are posted as a comment and can never send a PR back. ⛔ Do not
      smuggle an opinion into an experiment: **you are allowed to be useless. You are not
      allowed to be wrong.**
+   - 🙈 **HOLD SOME OUT — you choose which.** Add `"held_out": true` to about
+     {{held_out_pct}}% of your experiments (at least 1 once you propose
+     {{held_out_min}} or more) — pick ones that test the same invariants in a different way
+     from the visible ones, not throwaways. chela runs them like any other and a held-out
+     survivor still BLOCKS, but the PR comment and the rework prompt only ever say HOW MANY
+     held-out guards survived, never which. That is what stops a rework from patching just
+     the listed cases instead of fixing the guard. ⛔ Never mention a held-out experiment in
+     `notes` — notes are posted to the PR.
 
 4. Run **`{{judge_cmd}}`** — your last step. It publishes the verdict, cleans up, and closes
    this window.
@@ -6346,6 +6357,9 @@ def _judge_vars(
         "experiments_path": str(exp_path),
         "judge_cmd": f"chela judge run {row['task_id']} --experiments {exp_path}",
         "test_cmd": judge.judge_test_cmd(wf) or "(none)",
+        # ⚖️🙈 CMX-395: the held-out quota the judge is asked to meet.
+        "held_out_pct": round(judge.judge_held_out_fraction(wf) * 100),
+        "held_out_min": judge.HELD_OUT_MIN_EXPERIMENTS,
         "diff_cmd": f"git diff origin/{base}...HEAD",
         "pr_view_cmd": (f"gh pr view {number} --comments" if number
                         else "gh pr view --comments   # no PR url on the run row"),
