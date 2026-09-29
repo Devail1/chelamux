@@ -25,13 +25,13 @@
 // `.wire-target` rule (and vice versa).
 //
 // Run: node --test tests/wire_live_css.test.mjs  (pytest runs it via
-// tests/test_js_suites.py; needs `npm ci` for jsdom).
+// tests/test_js_suites.py; needs `pnpm install` for jsdom).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const staticDir = path.join(here, '..', 'chela', 'dashboard', 'static');

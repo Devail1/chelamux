@@ -99,13 +99,13 @@
 // question jsdom cannot see.
 //
 // Run: node --test tests/wallnav.test.mjs (pytest runs it via tests/test_js_suites.py;
-// it needs `npm ci` for jsdom — CHELA_REQUIRE_JS_TESTS makes a missing jsdom a FAILURE.)
+// it needs `pnpm install` for jsdom — CHELA_REQUIRE_JS_TESTS makes a missing jsdom a FAILURE.)
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 import { cssForViewport, shapeSignature, DESKTOP } from './js_helpers/css_viewport.mjs';
 
 const CSS = readFileSync(

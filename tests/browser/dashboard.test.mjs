@@ -17,7 +17,7 @@
 // layout as bounding boxes.
 //
 // Harness: tests/browser/fixture.mjs (real shell, stubbed API, no network, no
-// daemon, no tmux, no ttyd). Local: `npm run test:browser`. CI runs it inside
+// daemon, no tmux, no ttyd). Local: `pnpm run test:browser`. CI runs it inside
 // pytest (tests/test_js_suites.py discovers every *.test.mjs), under
 // CHELA_REQUIRE_JS_TESTS=1 — a browser that cannot launch is a FAILURE there.
 import { after, before, describe, test } from 'node:test';

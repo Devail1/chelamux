@@ -19,7 +19,7 @@
 // ⛔ It FAILS CLOSED: an at-rule or media feature it does not know how to
 // evaluate throws, rather than being silently kept or dropped — a new wrapper
 // shape must be taught here, never slip past every guard that mounts through it.
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 export const DESKTOP = Object.freeze({ width: 1440, height: 900 });
 export const PHONE = Object.freeze({ width: 390, height: 844 });

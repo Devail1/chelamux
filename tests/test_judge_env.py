@@ -7,7 +7,8 @@ all — it was two lines of ``WORKFLOW.md`` that disagreed with each other:
 
 * ``judge.test_cmd`` sets ``CHELA_REQUIRE_JS_TESTS=1``, which (deliberately, and this is the
   right call) turns a JS suite that CANNOT RUN from a silent skip into a FAILURE;
-* ``hooks.before_run`` synced the venv and never ran ``npm ci``, so jsdom was absent from
+* ``hooks.before_run`` synced the venv and never installed jsdom (then ``npm ci``, now
+  ``pnpm install``), so it was absent from
   every fresh worktree and the two real-DOM suites could not run.
 
 So the judge's BASELINE — the suite as the PR ships it, before any mutation — was red in
@@ -62,7 +63,8 @@ _NODE_BUILTINS = {
     "module", "os", "path", "process", "stream", "test", "timers", "url", "util", "worker_threads",
 }
 
-# Whatever installs the declared dependencies. `npm ci` is the one the repo (and CI) uses;
+# Whatever installs the declared dependencies. `pnpm install` is the one the repo (and CI)
+# uses (CMX-388; it was `npm ci` before);
 # an equivalent install is fine — an absent one is the bug.
 _INSTALLS = ("npm ci", "npm install", "npm i ", "pnpm install", "yarn install")
 
@@ -108,9 +110,10 @@ def test_every_npm_package_a_js_suite_imports_is_declared():
 
 
 def _hook_text_including_scripts(before_run: str) -> str:
-    """``before_run`` plus the text of any repo script it delegates to (CMX-151: the actual
-    ``npm ci`` moved out of the inline hook and into ``scripts/npm-shared-install.sh``, so a
-    literal search of the hook string alone would go blind to it). One level of indirection
+    """``before_run`` plus the text of any repo script it delegates to (CMX-151 moved the
+    install out of the inline hook into a script; CMX-388 moved it back inline, but a
+    delegating hook must still be followed, or a literal search goes blind to it). One level
+    of indirection
     only — enough to follow the hook to the script that does the installing, not a general
     shell interpreter."""
     text = before_run
@@ -158,11 +161,12 @@ def test_the_judge_provisions_its_own_worktree_and_does_not_trust_the_hook():
 
 
 def test_provision_installs_a_declared_package_that_is_missing(tmp_path):
-    """The real thing, offline: a worktree with a lockfile but no node_modules comes back
-    with node_modules — which is exactly the state every judge worktree launches in."""
-    if not shutil.which("npm"):
-        pytest.skip("npm is not installed")
-    for name in ("package.json", "package-lock.json"):
+    """The real thing: a worktree with a lockfile but no node_modules comes back with
+    node_modules — which is exactly the state every judge worktree launches in. (pnpm
+    hardlinks from its store, so on a warm machine this is offline and quick.)"""
+    if not shutil.which("pnpm"):
+        pytest.skip("pnpm is not installed")
+    for name in ("package.json", "pnpm-lock.yaml"):
         shutil.copy(ROOT / name, tmp_path / name)
     assert not (tmp_path / "node_modules").exists()
 
@@ -170,7 +174,120 @@ def test_provision_installs_a_declared_package_that_is_missing(tmp_path):
 
     assert problem == "", f"provisioning failed: {problem}"
     for pkg in judge.declared_npm_packages(tmp_path):
-        assert (tmp_path / "node_modules" / pkg).is_dir(), f"{pkg} still missing after npm ci"
+        assert (tmp_path / "node_modules" / pkg).is_dir(), f"{pkg} still missing after pnpm install"
+
+
+# ⛔ CMX-388 — which installer runs is decided by the LOCKFILE, and that decision is faked
+# only at the `subprocess.run` boundary: `provision_suite_env` itself runs for real, so the
+# detection, the argv and the post-install re-check are all the production code's own.
+
+_TWO_DEPS = {"devDependencies": {"jsdom": "^29.1.1", "playwright": "1.63.0"}}
+
+
+def _js_tree(root: Path, *lockfiles: str) -> Path:
+    (root / "package.json").write_text(json.dumps(_TWO_DEPS))
+    for lf in lockfiles:
+        (root / lf).write_text("# lockfile\n")
+    return root
+
+
+def _fake_installer(monkeypatch, *, installs: bool, returncode: int = 0) -> list:
+    """Record every argv; when ``installs``, lay down what a real install would."""
+    calls: list = []
+
+    def _run(argv, cwd=None, **_kw):
+        calls.append(list(argv))
+        if installs:
+            for pkg in _TWO_DEPS["devDependencies"]:
+                (Path(cwd) / "node_modules" / pkg).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(argv, returncode, stdout="", stderr="")
+
+    monkeypatch.setattr(judge.subprocess, "run", _run)
+    return calls
+
+
+def test_provision_uses_pnpm_on_a_pnpm_tree(tmp_path, monkeypatch):
+    calls = _fake_installer(monkeypatch, installs=True)
+    _js_tree(tmp_path, "pnpm-lock.yaml")
+
+    assert judge.provision_suite_env(tmp_path) == ""
+    assert calls == [["pnpm", "install", "--frozen-lockfile"]]
+
+
+def test_provision_prefers_pnpm_when_a_tree_carries_both_lockfiles(tmp_path, monkeypatch):
+    calls = _fake_installer(monkeypatch, installs=True)
+    _js_tree(tmp_path, "pnpm-lock.yaml", "package-lock.json")
+
+    assert judge.provision_suite_env(tmp_path) == ""
+    assert calls == [["pnpm", "install", "--frozen-lockfile"]]
+
+
+def test_provision_falls_back_to_npm_ci_on_a_still_npm_tree(tmp_path, monkeypatch):
+    """⛔ The migration window: a branch forked before CMX-388 carries only
+    ``package-lock.json``, and the SAME judge has to provision it."""
+    calls = _fake_installer(monkeypatch, installs=True)
+    _js_tree(tmp_path, "package-lock.json")
+
+    assert judge.provision_suite_env(tmp_path) == ""
+    assert len(calls) == 1 and calls[0][:2] == ["npm", "ci"], calls
+
+
+def test_provision_rechecks_after_a_pnpm_install_that_exits_0_but_installs_nothing(
+        tmp_path, monkeypatch):
+    """Exit 0 is not evidence. A declared package that still does not resolve must be named,
+    with the command and the cwd, in the same "STILL not" shape as before CMX-388."""
+    calls = _fake_installer(monkeypatch, installs=False)
+    _js_tree(tmp_path, "pnpm-lock.yaml")
+
+    problem = judge.provision_suite_env(tmp_path)
+
+    assert calls == [["pnpm", "install", "--frozen-lockfile"]]
+    assert "`pnpm install --frozen-lockfile` exited 0" in problem
+    assert "STILL not" in problem
+    assert "jsdom" in problem and "playwright" in problem
+    assert str(tmp_path) in problem
+
+
+def test_provision_reports_a_failing_pnpm_install_with_its_exit_code(tmp_path, monkeypatch):
+    _fake_installer(monkeypatch, installs=False, returncode=1)
+    _js_tree(tmp_path, "pnpm-lock.yaml")
+
+    problem = judge.provision_suite_env(tmp_path)
+
+    assert problem.startswith(f"`pnpm install --frozen-lockfile` failed in {tmp_path} (exit 1")
+
+
+def test_provision_names_pnpm_not_npm_when_the_installer_binary_is_missing(
+        tmp_path, monkeypatch):
+    """A pnpm tree on a machine without pnpm must say PNPM is missing. ⛔ ``"npm" in problem``
+    cannot pin this — "pnpm" contains "npm" — so the assertion anchors the whole phrase."""
+    def _no_binary(argv, **_kw):
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr(judge.subprocess, "run", _no_binary)
+    _js_tree(tmp_path, "pnpm-lock.yaml")
+
+    problem = judge.provision_suite_env(tmp_path)
+
+    assert " and pnpm is not on this machine's PATH" in problem, problem
+    assert " npm is not on" not in problem, problem
+
+
+def test_provision_drops_a_legacy_shared_symlink_before_pnpm_writes(tmp_path, monkeypatch):
+    """A worktree a pre-CMX-388 hook built has ``node_modules`` symlinked into the SHARED
+    npm install. Running pnpm through that link would rewrite the directory every other
+    still-npm worktree reads — the link must go, and its target must be left untouched."""
+    shared = tmp_path / "shared-npm" / "node_modules"
+    (shared / "left-pad").mkdir(parents=True)
+    (tmp_path / "wt").mkdir()
+    wt = _js_tree(tmp_path / "wt", "pnpm-lock.yaml")
+    (wt / "node_modules").symlink_to(shared)
+    calls = _fake_installer(monkeypatch, installs=True)
+
+    assert judge.provision_suite_env(wt) == ""
+    assert calls == [["pnpm", "install", "--frozen-lockfile"]]
+    assert not (wt / "node_modules").is_symlink(), "pnpm ran THROUGH the shared symlink"
+    assert sorted(p.name for p in shared.iterdir()) == ["left-pad"], "the shared install was written to"
 
 
 def test_provision_is_a_no_op_when_there_is_nothing_to_install(tmp_path):
@@ -183,7 +300,7 @@ def test_provision_names_the_package_and_the_cwd_when_it_cannot_install(tmp_path
     AND the directory it is missing from is a shrug: for three weeks the judge said only
     "exited 1" while the suite one pipe away was saying "jsdom is not installed"."""
     (tmp_path / "package.json").write_text(json.dumps({"devDependencies": {"jsdom": "^29"}}))
-    # no package-lock.json → `npm ci` has nothing to install from, and cannot be run at all
+    # no lockfile at all → neither pnpm nor npm has anything to install from
     problem = judge.provision_suite_env(tmp_path)
 
     assert "jsdom" in problem
@@ -291,6 +408,6 @@ def test_the_judges_suite_still_makes_an_unrunnable_js_suite_a_failure():
     test_cmd = judge.judge_test_cmd(_wf())
     assert "CHELA_REQUIRE_JS_TESTS" in test_cmd, (
         f"WORKFLOW.md's `judge.test_cmd` ({test_cmd!r}) no longer sets CHELA_REQUIRE_JS_TESTS, "
-        "so a missing `node` or a missing `npm ci` makes the .mjs suites SKIP — silently, and "
+        "so a missing `node` or a missing `pnpm install` makes the .mjs suites SKIP — silently, and "
         "green. The judge would then measure its mutations against a suite that never ran."
     )

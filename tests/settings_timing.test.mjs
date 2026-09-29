@@ -24,7 +24,7 @@
 //      rest of the group.
 //
 // Run: node --test tests/settings_timing.test.mjs (pytest runs it via
-// tests/test_js_suites.py; needs `npm ci` for jsdom.)
+// tests/test_js_suites.py; needs `pnpm install` for jsdom.)
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';

@@ -24,10 +24,10 @@
 //      wid that is no longer dispatched is disowned — and un-hidden.
 //
 // Run: node --test tests/walldock.test.mjs  (pytest runs it via tests/test_js_suites.py;
-// it needs `npm ci` for jsdom — CHELA_REQUIRE_JS_TESTS makes a missing jsdom a FAILURE.)
+// it needs `pnpm install` for jsdom — CHELA_REQUIRE_JS_TESTS makes a missing jsdom a FAILURE.)
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 // The terminals panel, as index.html emits it (only the ids terminals.js reaches for).
 const PANEL = `

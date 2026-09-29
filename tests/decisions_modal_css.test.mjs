@@ -33,13 +33,13 @@
 // one side, a rule that only exists in a fixture on the other — has nowhere left to hide.
 //
 // Run: node --test tests/decisions_modal_css.test.mjs (tests/test_js_suites.py runs every
-// .test.mjs inside pytest; needs `npm ci` for jsdom).
+// .test.mjs inside pytest; needs `pnpm install` for jsdom).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const staticDir = path.join(here, '..', 'chela', 'dashboard', 'static');

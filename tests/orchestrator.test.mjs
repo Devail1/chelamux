@@ -10,7 +10,7 @@
 // .test.mjs inside pytest).
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 let orchestrator;
 let RESPONSES;   // path -> response body

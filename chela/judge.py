@@ -680,7 +680,7 @@ def provision_suite_env(worktree: Path, timeout: float = 600.0) -> str:
     ``hooks.before_run`` TO BUILD ITS ENVIRONMENT. ``_launch_agent`` runs that hook out of
     the WorkflowDef the DAEMON loaded — ``runs.workflow_path``, the WORKFLOW.md at the REPO
     ROOT, on the default branch. It is NEVER the copy on the PR branch under judgment. So a
-    PR whose whole content is "before_run must also run npm ci" is judged by a worktree
+    PR whose whole content is "before_run must also install jsdom" is judged by a worktree
     built with the OLD before_run, watches its own DOM suites fail for want of jsdom, and
     reports CANNOT VERIFY on itself. A config fix cannot fix the thing that runs before the
     config is merged; only code in the judged tree can, and this is it.
@@ -702,30 +702,53 @@ def provision_suite_env(worktree: Path, timeout: float = 600.0) -> str:
     if not missing:
         return ""
 
-    if not (worktree / "package-lock.json").is_file():
+    installer = _js_installer(worktree)
+    if installer is None:
         return (f"{', '.join(missing)} is not installed in {worktree}/node_modules and there "
-                "is no package-lock.json to install it from")
+                "is no pnpm-lock.yaml or package-lock.json to install it from")
+    argv, label = installer
+    if argv[0] == "pnpm" and (worktree / "node_modules").is_symlink():
+        # A pre-CMX-388 hook symlinked node_modules into the SHARED npm install every other
+        # still-npm worktree reads; pnpm would rewrite THAT directory in place. Drop the
+        # link (never its target) and let pnpm build this worktree its own node_modules.
+        (worktree / "node_modules").unlink()
     try:
         out = subprocess.run(
-            ["npm", "ci", "--no-audit", "--no-fund", "--silent"],
-            cwd=str(worktree), capture_output=True, text=True,
+            argv, cwd=str(worktree), capture_output=True, text=True,
             errors="replace", timeout=timeout, env=envutil.child_env(),
         )
     except FileNotFoundError:
-        return (f"{', '.join(missing)} is not installed in {worktree}/node_modules and npm is "
-                "not on this machine's PATH, so the judge could not install it either")
+        return (f"{', '.join(missing)} is not installed in {worktree}/node_modules and "
+                f"{argv[0]} is not on this machine's PATH, so the judge could not install it "
+                "either")
     except subprocess.TimeoutExpired:
-        return f"`npm ci` did not finish in {timeout:.0f}s in {worktree}"
+        return f"`{label}` did not finish in {timeout:.0f}s in {worktree}"
     if out.returncode != 0:
         why = _last_meaningful_line((out.stdout or "") + (out.stderr or ""))
-        return f"`npm ci` failed in {worktree} (exit {out.returncode}{': ' + why if why else ''})"
+        return f"`{label}` failed in {worktree} (exit {out.returncode}{': ' + why if why else ''})"
 
     still = _unresolvable(worktree, names)
     if still:
-        return (f"`npm ci` exited 0 in {worktree} but {', '.join(still)} is STILL not in "
+        return (f"`{label}` exited 0 in {worktree} but {', '.join(still)} is STILL not in "
                 "node_modules — the suite that needs it cannot run")
-    log.info("judge: suite env provisioned in %s (npm ci installed %s)", worktree, missing)
+    log.info("judge: suite env provisioned in %s (%s installed %s)", worktree, label, missing)
     return ""
+
+
+def _js_installer(worktree: Path) -> tuple[list[str], str] | None:
+    """``(argv, label)`` that installs this tree's LOCKED JS deps, or None with no lockfile.
+
+    ⛔ CMX-388, the migration window. The repo moved npm → pnpm, and a PR is judged by the
+    daemon's CURRENT judge — so for as long as any branch forked before that move is still in
+    flight, this has to provision BOTH shapes of tree. Detect by lockfile: ``pnpm-lock.yaml``
+    wins (a tree carrying both is mid-migration and pnpm is where it is going), and
+    ``package-lock.json`` alone still gets the ``npm ci`` it always did.
+    """
+    if (worktree / "pnpm-lock.yaml").is_file():
+        return (["pnpm", "install", "--frozen-lockfile"], "pnpm install --frozen-lockfile")
+    if (worktree / "package-lock.json").is_file():
+        return (["npm", "ci", "--no-audit", "--no-fund", "--silent"], "npm ci")
+    return None
 
 
 def _diagnose_red_baseline(

@@ -61,7 +61,7 @@ agent:
 # rework round. Opinions can only ever become a PR comment.
 #
 # ⚠️ CHELA_REQUIRE_JS_TESTS=1 IS LOAD-BEARING, NOT DECORATION. Without it a missing `node`
-# or a missing `npm ci` makes the .mjs suites SKIP — silently, and green. The judge would
+# or a missing `pnpm install` makes the .mjs suites SKIP — silently, and green. The judge would
 # then mutate `terminals.js`, watch the suite pass, and send a GOOD PR back on the strength
 # of a suite that never ran. A judge is only ever as trustworthy as the suite it measures
 # against, so the suite must be the one that CANNOT quietly do nothing.
@@ -95,12 +95,21 @@ hooks:
   # `uv sync --all-extras`: dashboard/telegram tests false-fail on a default-only sync (a
   # `uv run` in a fresh worktree auto-syncs WITHOUT extras — the CMX-21 trap), and
   # `--extra X` DROPS the other extras, so it must be `--all-extras`.
-  # `scripts/npm-shared-install.sh`: installs jsdom, the repo's one npm dep (dev-only,
-  # nothing is bundled or shipped) — what CI installs, in the same breath, for the same
-  # reason, but via ONE shared node_modules symlinked into every worktree rather than a
-  # fresh `npm ci` copying 27M into each (CMX-151: unlike `uv sync`, which hardlinks from
-  # its own cache, `npm ci` always unpacks real files, and N concurrent worktrees were
-  # paying for N identical copies of the same dep).
+  # `pnpm install --frozen-lockfile`: installs jsdom + playwright, the repo's only npm deps
+  # (dev-only, nothing is bundled or shipped) — what CI installs, in the same breath, for the
+  # same reason. pnpm (CMX-388) because its content-addressed store HARDLINKS one copy of
+  # each package into every worktree, the way `uv sync` does from its cache — N concurrent
+  # worktrees no longer pay for N unpacked copies (CMX-151 hand-built that for npm with a
+  # symlinked shared node_modules; #508 was that design's outage).
+  #
+  # ⚠️ THE MIGRATION WINDOW (delete the two marked lines once no pre-CMX-388 branch is in
+  # flight). This hook runs on EVERY launch, including reworks of branches forked while the
+  # repo was still npm — those carry `package-lock.json` and their OWN
+  # `scripts/npm-shared-install.sh`, and `pnpm install --frozen-lockfile` with no
+  # pnpm-lock.yaml fails the hook (`check=True`) and so the whole launch. And a worktree that
+  # a pre-CMX-388 hook built has `node_modules` as a SYMLINK into that shared npm install:
+  # pnpm would rewrite the shared directory every other still-npm worktree reads, so the link
+  # is dropped first (the link only — `rm` without `-r` never follows it).
   #
   # ⚠️ Docker-based builds: run the container as your own uid or the worktree becomes
   # UNRECLAIMABLE. A step like `docker run ... build` writes root-owned files into the
@@ -111,9 +120,17 @@ hooks:
   #
   # Heavy ecosystems: point the build cache at ONE shared location instead of N per-worktree
   # copies — `CARGO_TARGET_DIR`, a pnpm store, `CCACHE_DIR` — the generalisation of the
-  # shared node_modules above. A per-worktree `target/`/`node_modules` is what fills the
+  # pnpm store above. A per-worktree `target/`/`node_modules` is what fills the
   # disk (see `CHELA_WORKTREE_DISK_BUDGET`).
-  before_run: uv sync --all-extras --quiet && scripts/npm-shared-install.sh
+  before_run: |
+    set -e
+    uv sync --all-extras --quiet
+    if [ -L node_modules ]; then rm node_modules; fi
+    if [ -f pnpm-lock.yaml ]; then
+      pnpm install --frozen-lockfile
+    elif [ -f package-lock.json ]; then                      # migration window — delete
+      scripts/npm-shared-install.sh                          # migration window — delete
+    fi
 ---
 
 # Autonomous coding agent — chelamux

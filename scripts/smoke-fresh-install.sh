@@ -88,7 +88,7 @@ git clone --quiet "$SOURCE" "$CLONE"
 
 # Isolate the app-level state an install reads/writes — NOT $HOME wholesale: leaving $HOME
 # alone lets `uv sync` reuse the real machine's package cache (hardlink, not re-download —
-# see scripts/npm-shared-install.sh's header for why that matters), and lets `git` keep
+# see the `hooks.before_run` comment in WORKFLOW.md for why that matters), and lets `git` keep
 # using the real user's config.
 #
 # On a box that already runs a live chela install (e.g. this project's own dev machine),

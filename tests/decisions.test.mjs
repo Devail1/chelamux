@@ -16,13 +16,13 @@
 //      noise the Feed filters client-side.
 //
 // Run: node --test tests/decisions.test.mjs (tests/test_js_suites.py runs every
-// .test.mjs inside pytest; needs `npm ci` for jsdom).
+// .test.mjs inside pytest; needs `pnpm install` for jsdom).
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 const REAL_HTML = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'templates', 'index.html'), 'utf8');

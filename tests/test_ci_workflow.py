@@ -252,7 +252,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml"
+ROOT = Path(__file__).resolve().parent.parent
+WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 
 
 @pytest.fixture(scope="module")
@@ -625,18 +626,22 @@ _EXPECTED_STEPS: list[dict] = [
         "run": "uv sync --extra dev --extra dashboard --python ${{ matrix.python-version }}",
     },
     {"uses": "actions/setup-node@v4", "with": {"node-version": "20"}},
-    {"name": "Install jsdom (DOM test suites)", "run": "npm ci"},
+    {"name": "Install pnpm", "uses": "pnpm/action-setup@v4"},
+    {
+        "name": "Install jsdom + playwright (DOM and browser suites)",
+        "run": "pnpm install --frozen-lockfile",
+    },
     {
         "name": "Cache the Playwright Chromium",
         "uses": "actions/cache@v4",
         "with": {
             "path": "~/.cache/ms-playwright",
-            "key": "playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}",
+            "key": "playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}",
         },
     },
     {
         "name": "Install Chromium (browser suite)",
-        "run": "npx playwright install --with-deps --only-shell chromium",
+        "run": "pnpm exec playwright install --with-deps --only-shell chromium",
     },
     {"name": "Ruff", "run": "uv run ruff check chela tests"},
     {
@@ -1089,3 +1094,34 @@ def test_the_workflows_root_keys_are_pinned_exactly(workflow):
         "it is invisible to every other test in this file and must be caught here instead"
     )
 
+
+
+# CMX-388 — the npm → pnpm move. The exact-table pin above already catches these; the two
+# tests below say WHICH property broke, in words, instead of a whole-table diff.
+
+def _step_named(steps, name: str) -> dict:
+    matches = [s for s in steps if s.get("name") == name]
+    assert len(matches) == 1, f"expected exactly one step named {name!r}, found {len(matches)}"
+    return matches[0]
+
+
+def test_the_js_install_is_frozen_to_the_pnpm_lockfile(steps):
+    """A pnpm install without ``--frozen-lockfile`` re-resolves ``package.json``'s ranges
+    (jsdom is ``^29.1.1``) and silently tests a DIFFERENT tree than the one every worktree
+    and the judge install from ``pnpm-lock.yaml``."""
+    run = _step_named(steps, "Install jsdom + playwright (DOM and browser suites)")["run"]
+    assert run.split() == ["pnpm", "install", "--frozen-lockfile"], (
+        f"the JS install step runs {run!r} — it must be exactly `pnpm install "
+        "--frozen-lockfile`, so CI installs the locked tree or fails"
+    )
+
+
+def test_the_playwright_cache_is_keyed_on_the_pnpm_lockfile(steps):
+    """The lockfile pins playwright, which pins the Chromium revision. A key hashing a file
+    that no longer exists (``package-lock.json``) hashes to the SAME empty value forever, so
+    a playwright bump would restore the OLD browser and never re-key."""
+    key = _step_named(steps, "Cache the Playwright Chromium")["with"]["key"]
+    assert "hashFiles('pnpm-lock.yaml')" in key, (
+        f"the Playwright cache key {key!r} does not hash pnpm-lock.yaml"
+    )
+    assert (ROOT / "pnpm-lock.yaml").is_file(), "the file the cache key hashes does not exist"

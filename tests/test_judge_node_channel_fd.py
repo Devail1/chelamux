@@ -24,14 +24,14 @@ way under a bare ``uv run pytest -q``, whether or not a judge is involved at all
 
 ⚠️ SIBLING TRAP (found reworking CMX-277, 2026-08-13): this exact test —
 ``test_run_suite_survives_a_leaked_node_channel_fd`` — can ALSO fail on a clean env with a
-completely unrelated cause: a fresh dispatch worktree that never ran ``npm ci``. The pytest
+completely unrelated cause: a fresh dispatch worktree that never ran ``pnpm install``. The pytest
 summary line ("1 failed") is identical to the real SIGABRT regression; only the printed
 ``result.tail`` tells them apart —
 
     # NODE_CHANNEL_FD SIGABRT (the bug this file guards):
     # node:internal/child_process:753 … Assertion failed … or a bare abort, before "TAP version 13"
 
-    # missing `npm ci` (unrelated — see package.json's own docstring, "Run `npm ci` before
+    # missing `pnpm install` (unrelated — see package.json's own docstring, "Run `pnpm install --frozen-lockfile` before
     # `pytest`"):
     # node:internal/modules/esm/resolve:873
     #   throw new ERR_MODULE_NOT_FOUND(packageName, fileURLToPath(base), null);
@@ -41,8 +41,8 @@ Two prior rework rounds on unrelated tickets (CMX-276, then CMX-277's own first 
 called this "one unrelated pre-existing failure … a local node/ESM resolution issue" in a PR
 body without pasting the actual node output — a plausible-sounding guess in roughly the right
 direction (it IS node/ESM, it IS local) that happened to be wrong both times: on re-run in a
-clean worktree with ``npm ci`` applied, the suite goes fully green. **Before writing either
-"pre-existing" or "NODE_CHANNEL_FD" into a PR body, run ``npm ci`` and re-run the test; if it
+clean worktree with ``pnpm install`` applied, the suite goes fully green. **Before writing either
+"pre-existing" or "NODE_CHANNEL_FD" into a PR body, run ``pnpm install`` and re-run the test; if it
 now passes, the honest sentence is "worktree was missing node_modules," not a claim about
 what's on base_branch.**
 """

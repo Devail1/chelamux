@@ -60,7 +60,7 @@ violation — which is what the guard in §7 asserts.
 | `~/.cache/uv` | all three | `uv sync` / `uv run` package cache | ❌ **`allowWrite`** |
 | `~/.local/share/uv` | all three | uv-managed interpreters | ❌ **`allowWrite`** |
 | `~/.chela/` — the whole directory | coding + rework | `chela task-finished` writes `scheduler.db` (**plus `-wal`/`-shm` siblings, so the grant must be on the directory, not the file**), and any `chela` subcommand appends `events.jsonl` and rewrites `inbox.json` / `roster.json` / `session-ids.json` | ❌ **and this is blocker B1, §5** |
-| `<workspace.root>/.npm-shared/` | nobody inside the sandbox | `hooks.before_run` builds it, and hooks run in the **dispatcher's** process, outside any sandbox | n/a |
+| the pnpm store (`pnpm store path`) | nobody inside the sandbox | `hooks.before_run` runs `pnpm install`, which hardlinks from it, and hooks run in the **dispatcher's** process, outside any sandbox (it replaced the pre-CMX-388 `<workspace.root>/.npm-shared/`) | n/a |
 
 ⛔ **Nothing in the agent's job requires writing `~/.claude`.** `mark_awaiting_review` *reads*
 `~/.claude/projects/**` to recover the PR URL from the transcript, and reads are already allowed.
@@ -73,7 +73,7 @@ violation — which is what the guard in §7 asserts.
 | `github.com` | coding, rework | `git push`, `git fetch` |
 | `api.github.com` | coding, rework, judge | `gh pr create` / `view` / `list`, and `_read_pr_status` |
 | `pypi.org`, `files.pythonhosted.org` | all three | `uv sync`, and any `uv run` that finds the venv stale |
-| `registry.npmjs.org` | `before_run` (outside the sandbox); an agent only if it re-runs the install | jsdom |
+| `registry.npmjs.org` | `before_run` (outside the sandbox); an agent only if it re-runs the install | jsdom, playwright (via pnpm) |
 | **`api.telegram.org`** | **the test suite** | ⚠️ measured: three outbound attempts during one suite run, blocked by the sandbox. Unsandboxed they leave the box. Worth its own issue — a unit suite should not be dialling a real API |
 
 ## 5. Three blockers config cannot solve

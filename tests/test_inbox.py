@@ -880,7 +880,7 @@ _SUPERSEDING_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
 _LONG_DETAIL = (
-    "the suite could not be provisioned: npm ci failed after three attempts, so the two "
+    "the suite could not be provisioned: pnpm install failed after three attempts, so the two "
     "real-DOM suites would have SKIPPED silently and every mutation would have looked "
     "survivable — this string is deliberately longer than the 140-char summary truncation"
 )

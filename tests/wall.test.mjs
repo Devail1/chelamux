@@ -27,11 +27,11 @@
 //      self-heal (`buildWall` only runs when the fleet changes).
 //
 // Run: node --test tests/wall.test.mjs  (pytest runs it via tests/test_js_suites.py;
-// it needs `npm ci` for jsdom — CI does that, and CHELA_REQUIRE_JS_TESTS makes a
+// it needs `pnpm install` for jsdom — CI does that, and CHELA_REQUIRE_JS_TESTS makes a
 // missing jsdom a FAILURE, never a silent pass.)
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 // The terminals panel, as index.html emits it (only the ids terminals.js reaches for).
 const PANEL = `

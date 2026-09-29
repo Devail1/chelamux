@@ -26,14 +26,14 @@
 //      not just documented as true.
 //
 // Run: node --test tests/shortcuts.test.mjs (pytest runs it via
-// tests/test_js_suites.py; needs `npm ci` for jsdom — CHELA_REQUIRE_JS_TESTS makes
+// tests/test_js_suites.py; needs `pnpm install` for jsdom — CHELA_REQUIRE_JS_TESTS makes
 // a missing jsdom a FAILURE.)
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const HTML = readFileSync(join(ROOT, 'templates', 'index.html'), 'utf8');

@@ -14,13 +14,13 @@
 // identical class of bug (a `position` override silently clobbered by cascade).
 //
 // Run: node --test tests/gs_files_pointer_events_css.test.mjs (tests/test_js_suites.py
-// runs every .test.mjs inside pytest, by discovery; needs `npm ci` for jsdom).
+// runs every .test.mjs inside pytest, by discovery; needs `pnpm install` for jsdom).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const styleCss = fs.readFileSync(path.join(here, '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');

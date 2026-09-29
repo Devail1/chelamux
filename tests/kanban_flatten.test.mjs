@@ -13,13 +13,13 @@
 // rendered card/column HTML, not a source grep.
 //
 // Run: node --test tests/kanban_flatten.test.mjs (pytest runs it via
-// tests/test_js_suites.py; needs `npm ci` for jsdom.)
+// tests/test_js_suites.py; needs `pnpm install` for jsdom.)
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { JSDOM } from 'jsdom';   // needs `npm ci` — tests/test_js_suites.py enforces it
+import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 import { KANBAN_LANE_LABELS } from '../chela/dashboard/static/js/kanbanlanemodel.js';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 

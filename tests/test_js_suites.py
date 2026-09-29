@@ -21,7 +21,7 @@ Two fences, because the failure mode here is a check that *silently* does nothin
   CI must never report green on a suite it never executed.
 * Same rule for **jsdom**: ``tests/wall.test.mjs`` runs the real dashboard JS in a real
   DOM, and jsdom is the repo's only npm dependency (dev-only; nothing is bundled or
-  shipped). No ``npm ci`` -> the suite cannot run -> loud skip, or a FAILURE under
+  shipped). No ``pnpm install`` -> the suite cannot run -> loud skip, or a FAILURE under
   ``CHELA_REQUIRE_JS_TESTS``. See :func:`_jsdom_or_skip`.
 * Same rule for **Chromium** (CMX-383): ``tests/browser/*.test.mjs`` drive a real
   headless browser through playwright. The suite itself decides whether it could launch
@@ -93,7 +93,7 @@ def _jsdom_or_skip(suite: Path) -> None:
     """A DOM suite without jsdom DID NOT RUN — the same rule as a missing ``node``.
 
     ``tests/wall.test.mjs`` runs the real dashboard JS in a real DOM, which is the only
-    thing in this repo that needs an npm install (``npm ci``; jsdom is the one dep, and
+    thing in this repo that needs an npm install (``pnpm install``; jsdom is the one dep, and
     it is dev-only). If it is absent the suite cannot run, and a suite that cannot run
     must never be reported as green — CI sets ``CHELA_REQUIRE_JS_TESTS`` and gets a
     failure; a laptop gets a skip that says exactly what to type.
@@ -103,7 +103,7 @@ def _jsdom_or_skip(suite: Path) -> None:
     if (ROOT / "node_modules" / "jsdom").is_dir():
         return
     msg = (f"jsdom is not installed — {suite.relative_to(ROOT)} (the real-DOM suite) "
-           f"DID NOT RUN. Run `npm ci` in {ROOT}.")
+           f"DID NOT RUN. Run `pnpm install` in {ROOT}.")
     if os.environ.get("CHELA_REQUIRE_JS_TESTS"):
         pytest.fail(msg + " (CHELA_REQUIRE_JS_TESTS is set: a silent skip is not green)")
     pytest.skip(msg)
@@ -154,7 +154,7 @@ def test_a_missing_browser_fails_under_require_and_skips_loudly_otherwise(tmp_pa
     the loud pytest skip above keys on."""
     node = _node_or_skip([ROOT / "tests" / "browser" / "fixture.mjs"])
     if not (ROOT / "node_modules" / "playwright").is_dir():
-        pytest.skip("playwright is not installed — run `npm ci`")
+        pytest.skip("playwright is not installed — run `pnpm install`")
     env = _clean_env()
     env["PLAYWRIGHT_BROWSERS_PATH"] = str(tmp_path)
     env.pop("CHELA_REQUIRE_JS_TESTS", None)

@@ -20,7 +20,7 @@
 // the sidebar-only guard in sidebar.test.mjs would not catch it.
 //
 // Run: node --test tests/sidebar_agent_detail_orchestrator_wiring.test.mjs
-// (pytest via tests/test_js_suites.py; needs `npm ci` for jsdom).
+// (pytest via tests/test_js_suites.py; needs `pnpm install` for jsdom).
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
