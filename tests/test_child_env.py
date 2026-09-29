@@ -209,6 +209,29 @@ def test_judge_uv_sync_provisioning_gets_the_sanitised_env(monkeypatch, tmp_path
     _assert_clean(_effective(uv[0]))
 
 
+def test_judge_parse_check_node_check_gets_the_sanitised_env(monkeypatch, tmp_path, leaky_env):
+    """The mutated-JS parse check runs ``node --check`` — the one Node child the judge spawns
+    per mutation. Under the leak it would treat fd 3 as IPC and abort, turning every JS
+    mutation INVALID."""
+    import chela.judge as judge
+
+    js = tmp_path / "mutated.js"
+    js.write_text("let x = 1;\n")
+    seen: list[tuple] = []
+
+    def fake_run(argv, **k):
+        seen.append((argv, k))
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(judge.subprocess, "run", fake_run)
+    ok, _ = judge.parse_check(js)
+    assert ok
+    node = [k for argv, k in seen if argv[:2] == ["node", "--check"]]
+    assert len(node) == 1
+    _assert_clean(_effective(node[0]))
+    assert _effective(node[0])["PM2_HOME"] == _KEEP["PM2_HOME"]
+
+
 # --- (b) the other tmux launches: a human's window, and the server itself ---
 
 def test_spawn_window_new_window_gets_the_sanitised_env(monkeypatch, tmp_path, leaky_env):
