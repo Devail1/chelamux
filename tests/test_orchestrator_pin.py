@@ -105,8 +105,15 @@ def _proc(root: Path, pid: int, ticks: str) -> None:
     (d / "stat").write_text(f"{pid} (claude) S " + " ".join(["0"] * 18 + [ticks]) + "\n")
 
 
+def _claude_registry_dir() -> Path:
+    """Claude Code's REAL registry layout, ``$CLAUDE_CONFIG_DIR/sessions``, spelled out here —
+    NOT via :func:`sessions.claude_sessions_dir`. A fixture that writes through the helper
+    under test follows it into any wrong directory, so the reader always finds the file."""
+    return Path(os.environ["CLAUDE_CONFIG_DIR"]) / "sessions"
+
+
 def _registry(pid: int, sid: str, wid: str, ticks: str) -> None:
-    reg = sessions.claude_sessions_dir()
+    reg = _claude_registry_dir()
     reg.mkdir(parents=True, exist_ok=True)
     (reg / f"{pid}.json").write_text(json.dumps({
         "pid": pid, "sessionId": sid, "cwd": HOME, "procStart": ticks,
@@ -142,6 +149,15 @@ def test_the_registry_names_a_plain_claude_windows_session_despite_a_shared_cwd(
     assert hooks.wid_for_session(S45, None) == "@45"
 
 
+def test_the_registry_is_read_from_claude_codes_own_sessions_directory(fleet, tmp_path):
+    """Claude Code writes ``<config dir>/sessions/<pid>.json``. The path is built here from
+    ``$CLAUDE_CONFIG_DIR`` by hand, so a reader looking anywhere else finds nothing."""
+    real = tmp_path / "claude-config" / "sessions" / "808.json"
+    assert real.is_file(), "fixture: the entry sits where Claude Code puts it"
+    assert sessions.claude_sessions_dir() == real.parent
+    assert sessions.registry_session(808) == S8
+
+
 def test_a_registry_entry_left_by_a_recycled_pid_is_refused(fleet, tmp_path):
     """The file says `procStart` 5656 but the pid now started at another tick: a different
     process got the pid. Its stale entry must not lend it the dead session's identity."""
@@ -155,7 +171,7 @@ def test_a_registry_file_whose_own_pid_field_disagrees_is_refused(fleet, tmp_pat
     """`808.json` must describe pid 808. A file under that name whose own ``pid`` field says
     4545 — procStart and sessionId otherwise valid for 808 — is not 808's claim about itself,
     and must not name @8's session. (Control: the same file with ``pid: 808`` does.)"""
-    reg = sessions.claude_sessions_dir()
+    reg = _claude_registry_dir()
     good = json.loads((reg / "808.json").read_text())
     assert sessions.registry_session(808) == S8, "control: the honest file is accepted"
     (reg / "808.json").write_text(json.dumps({**good, "pid": 4545}))
@@ -183,7 +199,7 @@ def test_a_registry_file_whose_sessionId_is_not_a_session_id_is_refused(fleet, t
     """`808.json` with its `pid` and `procStart` honest but a `sessionId` that is not a
     well-formed session id (a path, a shell word) is not a session claim: refused. Only the
     sessionId field differs from the accepted control."""
-    reg = sessions.claude_sessions_dir()
+    reg = _claude_registry_dir()
     good = json.loads((reg / "808.json").read_text())
     assert sessions.registry_session(808) == S8, "control: the honest file is accepted"
     (reg / "808.json").write_text(json.dumps({**good, "sessionId": "../not a session"}))

@@ -30,8 +30,9 @@ def _proc(root: Path, pid: int, ticks: str) -> None:
 
 
 def _registry(pid: int, sid: str, wid: str, ticks: str) -> None:
-    from chela import sessions
-    reg = sessions.claude_sessions_dir()
+    import os
+    # Claude Code's real layout, spelled out — never via the helper under test (CMX-394 r5).
+    reg = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "sessions"
     reg.mkdir(parents=True, exist_ok=True)
     (reg / f"{pid}.json").write_text(json.dumps({
         "pid": pid, "sessionId": sid, "cwd": HOME, "procStart": ticks,
