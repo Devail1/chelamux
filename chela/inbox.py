@@ -372,11 +372,71 @@ def _identity_of(wid: str | None) -> str | None:
     if not wid:
         return None
     try:
-        return sessions.session_of_window(wid)
+        session = sessions.session_of_window(wid)
+        if session:
+            return session
+        # CMX-394: the caller registering ITS OWN window (`chela watch` from inside it,
+        # `$CHELA_WID` naming it) is a descendant of that window's claude process, so its
+        # own ancestry finds the pid and Claude Code's session registry names the session —
+        # accepted only when that registry entry ALSO says it runs in `wid` (a stale,
+        # inherited `$CHELA_WID` naming some other window is refused, CMX-192).
+        if wid == (os.environ.get("CHELA_WID") or "").strip():
+            entry = sessions.registry_entry(sessions.own_claude_pid())
+            if entry and sessions.registry_wid(entry) == wid:
+                return entry["sessionId"]
+        return None
     except Exception:
         log.debug("inbox: could not resolve the orchestrator's session for %s", wid,
                   exc_info=True)
         return None
+
+
+# --- the pin moved: say so, once (CMX-394) ------------------------------------------
+
+MOVED_KIND = "orchestrator.moved"
+
+_MOVED_WHY = {
+    "self_heal": "the old address stopped being deliverable and self-heal re-resolved the "
+                 "SAME session identity to a new window",
+    "restore": "`chela restore --apply` re-addressed it",
+    "dashboard": "it was registered from the dashboard, not by a `chela watch` from that window",
+    "autolaunch": "chela auto-launched an orchestrator persona there",
+    "taken_over": "that window ran `chela watch` while the previous orchestrator's window was "
+                  "STILL LIVE — the pin was taken over, not recovered. A SessionStart hook that "
+                  "runs `chela watch` does this for every session that starts in its directory",
+}
+
+
+def _moved_event(old: str | None, new: str, reason: str, *, old_session: str | None,
+                 new_session: str | None) -> dict | None:
+    """The one-shot ``orchestrator.moved`` notice — None when the pin did not actually move.
+
+    Queued into the inbox so the session that now holds the pin is told exactly once (it is
+    popped on delivery), and appended to the event log by the caller, OUTSIDE the store lock,
+    so the Feed shows it too. 2026-09-29: the pin moved from the orchestrator to a sibling
+    window sharing its cwd and NOTHING said so until a merge verdict landed in the wrong
+    session.
+    """
+    if not old or old == new:
+        return None
+    why = _MOVED_WHY.get(reason, reason)
+    summary = (f"🧭 the orchestrator pin moved {old} to {new} · {why} · the decisions inbox "
+               f"now delivers to {new}. If that is wrong, run `chela watch` from the session "
+               "that should orchestrate.")
+    payload = {"old": old, "new": new, "reason": reason,
+               "old_session": old_session, "new_session": new_session}
+    return _event(MOVED_KIND, summary, payload, wid=new)
+
+
+def _publish_moved(event: dict | None) -> None:
+    """The durable half of a move notice — call OUTSIDE the store lock."""
+    if not event:
+        return
+    payload = event["payload"]
+    log.warning("inbox: orchestrator pin moved %s -> %s (%s)",
+                payload["old"], payload["new"], payload["reason"])
+    event_log.append(MOVED_KIND, event["summary"], payload, wid=payload["new"],
+                     session_id=payload.get("new_session"))
 
 
 def address_state(store: dict, statuses: dict[str, str],
@@ -485,8 +545,10 @@ def watch(wid: str, note: str = "", *, by: str | None = None) -> dict:
     # The orchestrator's stable identity, resolved OUTSIDE the lock (tmux + /proc): this is what
     # a renumbered address re-resolves to (CMX-82). Only meaningful when we are (re)registering.
     session = _identity_of(by) if by else None
+    moved = None
     with locked_store() as store:                  # ...so a concurrent daemon tick can't
         if by:                                     #    clobber the watch we are writing
+            moved = _taken_over(store, by, session, names, now)
             store["orchestrator"] = by
             store["orchestrator_epoch"] = now
             store["orchestrator_session"] = session
@@ -494,23 +556,63 @@ def watch(wid: str, note: str = "", *, by: str | None = None) -> dict:
             _clear_address_alarm(store)            # a fresh address: any old alarm is spent
         target = orchestrator_wid(store)
         if target and wid == target:
-            return {"ok": False, "error": "refusing to watch the orchestrator's own window"}
-        # `since` is the completion evidence line: work the transcript shows AFTER this
-        # instant is work this dispatch caused (see agent_events). `name` outlives the
-        # window itself and is what links it back to its run row (see run_for_window).
-        # `epoch` is what makes the id itself trustworthy a day later.
-        store["watches"][wid] = {"note": note.strip(), "since": time.time(),
-                                 "name": names[wid], "epoch": now}
+            refused = True
+        else:
+            refused = False
+            # `since` is the completion evidence line: work the transcript shows AFTER this
+            # instant is work this dispatch caused (see agent_events). `name` outlives the
+            # window itself and is what links it back to its run row (see run_for_window).
+            # `epoch` is what makes the id itself trustworthy a day later.
+            store["watches"][wid] = {"note": note.strip(), "since": time.time(),
+                                     "name": names[wid], "epoch": now}
+    _publish_moved(moved)
+    if refused:
+        return {"ok": False, "error": "refusing to watch the orchestrator's own window"}
     return {"ok": True, "wid": wid, "note": note.strip(), "orchestrator": target,
             "epoch": now, "session": session}
 
 
-def register(by: str) -> dict:
+def _taken_over(store: dict, new: str, new_session: str | None, names: dict[str, str],
+                now: str | None, source: str = "watch") -> dict | None:
+    """The move notice for a registration that is about to overwrite the pin — or None.
+
+    ``source="watch"`` is ``chela watch`` run from ``new`` itself: the normal way an
+    orchestrator claims (or re-claims) the pin, so it is NOT news when the previous address
+    was already dead (the recovery path) or held the same session (a resume into a new
+    window). It IS news when the previous orchestrator's window is still live and ran a
+    different session: that is a takeover, and on 2026-09-29 one happened silently — a
+    SessionStart hook ran ``chela watch`` for a sibling session sharing the orchestrator's
+    cwd. Any other ``source`` (the dashboard, the auto-launcher) is not a ``chela watch``
+    from that window, so any change of address is announced. Queued here, under the lock.
+    """
+    old = store.get("orchestrator")
+    if not old or old == new:
+        return None
+    old_session = store.get("orchestrator_session")
+    reason = source
+    if source == "watch":
+        if old not in names or epoch.is_dangling(store.get("orchestrator_epoch"), now):
+            return None                              # a dead address being recovered
+        if old_session and old_session == new_session:
+            return None                              # the same session, in a new window
+        reason = "taken_over"
+    event = _moved_event(old, new, reason, old_session=old_session, new_session=new_session)
+    if event:
+        store["queue"].append(event)
+    return event
+
+
+def register(by: str, *, source: str = "watch") -> dict:
     """Register ``by`` as THE orchestrator without watching anything.
 
     The recovery command (``chela watch`` with no window): after tmux restarts, the stored
     address is dangling and the inbox is holding a queue it refuses to misdeliver. This
     re-stamps it — from the session that runs it, so it is still never a guess.
+
+    ``source`` says who is registering: ``"watch"`` (``chela watch`` from ``by`` itself — the
+    default) or another caller (``"dashboard"``, ``"autolaunch"``). A change of address that
+    is not the window claiming itself is announced as ``orchestrator.moved`` (CMX-394), see
+    :func:`_taken_over`.
     """
     names = discovery.get_windows_by_id()
     if by not in names:
@@ -518,12 +620,14 @@ def register(by: str) -> dict:
     now = epoch.current()
     session = _identity_of(by)                      # the identity self-heal re-resolves to (CMX-82)
     with locked_store() as store:
+        moved = _taken_over(store, by, session, names, now, source)
         store["orchestrator"] = by
         store["orchestrator_epoch"] = now
         store["orchestrator_session"] = session
         store["orchestrator_name"] = names.get(by)
         _clear_address_alarm(store)
         queued = len(store["queue"])
+    _publish_moved(moved)
     return {"ok": True, "orchestrator": by, "epoch": now, "session": session, "queued": queued}
 
 
@@ -648,11 +752,16 @@ def readdress(old_wid: str, old_epoch: str | None, new_wid: str) -> dict:
     with locked_store() as store:
         if store.get("orchestrator") != old_wid or store.get("orchestrator_epoch") != old_epoch:
             return {"ok": False, "error": "orchestrator address moved on since classification"}
+        moved = _moved_event(old_wid, new_wid, "restore",
+                             old_session=store.get("orchestrator_session"), new_session=session)
+        if moved:
+            store["queue"].append(moved)
         store["orchestrator"] = new_wid
         store["orchestrator_epoch"] = now
         store["orchestrator_session"] = session
         store["orchestrator_name"] = names.get(new_wid)
         _clear_address_alarm(store)
+    _publish_moved(moved)
     return {"ok": True, "orchestrator": new_wid, "epoch": now, "session": session}
 
 
@@ -2007,6 +2116,12 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
 
     with locked_store() as store:
         healed_from = _apply_heal(store, heal, statuses, now_epoch, windows) if heal else None
+        # CMX-394: a self-heal moved the pin with no `chela watch` from the new window, so the
+        # session now holding it is told once (queued here) and the Feed records it (below).
+        moved = (_moved_event(healed_from, heal[1], "self_heal", old_session=heal[0],
+                              new_session=heal[0]) if healed_from is not None else None)
+        if moved:
+            store["queue"].append(moved)
         events = agent_events(prev, statuses, store, runs, windows=windows,
                               now_epoch=now_epoch)
         r_events, store["runs_seen"] = run_events(runs, store.get("runs_seen", {}),
@@ -2039,6 +2154,7 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
     # in the same tick, now that `deliver` sees the healed address — is already on its way.
     if healed_from is not None:
         _announce_heal(healed_from, heal[1], heal[0])
+    _publish_moved(moved)
     # The durable record. Written OUTSIDE the store lock — an append is another file's
     # I/O, and locked_store()'s one rule is that nothing slow happens inside it. EVERY
     # event is logged, including the `silent` ones (a watch retired because the work

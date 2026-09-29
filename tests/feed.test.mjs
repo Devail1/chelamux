@@ -58,6 +58,9 @@ test('a gate is a gate, a tool call is the firehose, an unknown type is shown', 
     // ...and its recovery (CMX-82) is a lifecycle event: the address self-healed from the
     // orchestrator's session identity, no human in the loop.
     assert.equal(classOf('inbox_self_healed'), 'lifecycle');
+    // CMX-394: the pin moving to another window is lifecycle too — unmapped it falls to
+    // `other` and the one notice that says "your verdicts now go elsewhere" reads as a `·`.
+    assert.equal(classOf('orchestrator.moved'), 'lifecycle');
     assert.ok(DEFAULT_CLASSES.includes('gate'));
     // An unknown type is `other` — and `other` is ON by default. The safe default for
     // "I have never heard of this" is to show it, not to swallow it.
