@@ -8,12 +8,14 @@ Three guards:
   private window name, or a ``/home/`` path — checked on the raw BYTES of every file,
   so a path baked into a GIF comment or MP4 metadata is caught as well as one in HTML;
 * the demo recorder (``scripts/demo/fleet.py``) must build its fleet on its own tmux
-  server (``tmux -L``) with a temp ``HOME`` + ``CHELA_DIR`` and a from-scratch env —
-  the property that keeps the operator's real fleet out of the recordings.
+  server (``tmux -L``) with its own ``HOME`` + ``CHELA_DIR`` under a fixed demo root
+  (never ``$TMPDIR``) and a from-scratch env — the property that keeps the operator's
+  real fleet out of the recordings.
 """
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 from pathlib import Path
@@ -80,33 +82,87 @@ def _fleet():
 def test_demo_fleet_tmux_shim_pins_its_own_server(tmp_path):
     fleet = _fleet()
     fleet.write_shims(tmp_path)
-    shim = (tmp_path / "bin" / "tmux").read_text()
+    shim = (tmp_path / ".local" / "bin" / "tmux").read_text()
     assert f"-L {fleet.TMUX_SOCKET}" in shim
     assert fleet.TMUX_SOCKET and fleet.TMUX_SOCKET != "default"
 
 
 def test_demo_fleet_env_is_temp_and_from_scratch(tmp_path, monkeypatch):
-    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1,0")
-    monkeypatch.setenv("TMUX_PANE", "%1")
-    monkeypatch.setenv("CHELA_SECRET_PROBE", "must-not-leak")
+    # Anything the operator's shell carries must stay out — tmux pointers, chela config,
+    # tokens, agent sockets, locale overrides alike.
+    leaky = {"TMUX": "/tmp/tmux-1000/default,1,0", "TMUX_PANE": "%1",
+             "CHELA_SECRET_PROBE": "must-not-leak", "GH_TOKEN": "ghp_probe",
+             "ANTHROPIC_API_KEY": "sk-probe", "SSH_AUTH_SOCK": "/tmp/ssh-probe",
+             "LC_ALL": "C.probe", "XDG_RUNTIME_DIR": "/run/user/probe", "USER": "probe-user"}
+    for k, v in leaky.items():
+        monkeypatch.setenv(k, v)
+    # ...and EVERY variable already set: a value that reaches the demo env is inherited.
+    for k in list(os.environ):
+        if k not in leaky and k not in ("PATH", "LANG"):
+            monkeypatch.setenv(k, f"probe-{k}")
     fleet = _fleet()
     env = fleet.demo_env(tmp_path, 5999, 6400)
 
-    for key in ("CHELA_DIR", "HOME", "CHELA_DEMO_STATUS_DIR", "PYTHONPATH"):
+    for key in ("CHELA_DIR", "HOME", "CHELA_DEMO_STATUS_DIR", "PYTHONPATH",
+                "CHELA_DISPATCH_WORKFLOWS"):
         assert Path(env[key]).is_relative_to(tmp_path), f"{key}={env[key]} escapes the demo root"
     real_chela = Path(os.path.expanduser("~")) / ".chela"
     assert Path(env["CHELA_DIR"]) != real_chela
     # The shim dir comes first, so every `tmux` the demo runs is the pinned one.
-    assert env["PATH"].split(":")[0] == str(tmp_path / "bin")
-    assert "TMUX" not in env and "TMUX_PANE" not in env
-    assert "CHELA_SECRET_PROBE" not in env
+    assert env["PATH"].split(":")[0] == str(tmp_path / ".local" / "bin")
+    # From scratch: no probe key, and no value copied from the operator's env except
+    # the two it is built on (PATH is prefixed, LANG is the locale).
+    assert not set(leaky) & set(env), set(leaky) & set(env)
+    assert "probe" not in "".join(env.values())
+    # git in the demo never reads the operator's config (their name/email would show).
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["HOME"] == str(tmp_path)
 
 
-def test_demo_fleet_root_is_a_fresh_temp_dir():
+def test_demo_fleet_root_is_fixed_and_ignores_tmpdir(monkeypatch):
+    """The root is /tmp/demo (or $CHELA_DEMO_ROOT) — NOT $TMPDIR, which on the
+    operator's machine is a scratch dir named after them, and NOT a random suffix
+    the Work view would print verbatim."""
+    monkeypatch.setenv("TMPDIR", "/tmp/claude-1000/-home-someone-projects")
+    monkeypatch.delenv("CHELA_DEMO_ROOT", raising=False)
     fleet = _fleet()
-    root = fleet.make_root()
+    assert fleet.DEFAULT_ROOT == Path("/tmp/demo")
+    import tempfile
+    tempfile.tempdir = None  # make gettempdir() re-read the patched TMPDIR
     try:
-        assert root.name.startswith("chela-demo-")
-        assert str(root).startswith("/tmp/")
+        made = []
+        monkeypatch.setattr(fleet.Path, "mkdir", lambda self, **kw: made.append(self))
+        monkeypatch.setattr(fleet.Path, "write_text", lambda self, *a, **kw: None)
+        monkeypatch.setattr(fleet.Path, "exists", lambda self: False)
+        assert fleet.make_root() == Path("/tmp/demo")
+        assert made == [Path("/tmp/demo")]
     finally:
-        root.rmdir()
+        tempfile.tempdir = None
+
+
+def test_demo_fleet_root_refuses_what_it_did_not_build(tmp_path):
+    fleet = _fleet()
+    foreign = tmp_path / "somebody-elses"
+    foreign.mkdir()
+    (foreign / "precious.txt").write_text("keep me")
+    with pytest.raises(SystemExit):
+        fleet.make_root(foreign)
+    assert (foreign / "precious.txt").read_text() == "keep me"
+
+    with pytest.raises(SystemExit):
+        fleet.make_root(Path(os.path.expanduser("~")) / "demo")
+
+    ours = fleet.make_root(tmp_path / "demo")
+    (ours / "stale").write_text("from a previous run")
+    again = fleet.make_root(tmp_path / "demo")
+    assert (again / fleet.MARKER).is_file() and not (again / "stale").exists()
+
+
+def test_demo_fleet_seeds_the_launcher_with_demo_projects(tmp_path):
+    fleet = _fleet()
+    env = fleet.demo_env(tmp_path, 5999, 6400)
+    Path(env["CHELA_DIR"]).mkdir(parents=True)
+    fleet.seed_launcher(env)
+    store = json.loads((Path(env["CHELA_DIR"]) / "launcher.json").read_text())
+    paths = [e["path"] for e in store["favorites"] + store["recent"]]
+    assert sorted(Path(p).name for p in paths) == sorted(n for n, _ in fleet.AGENTS)
+    assert all(Path(p).is_relative_to(tmp_path) for p in paths)

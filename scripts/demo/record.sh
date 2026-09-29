@@ -5,8 +5,9 @@
 #   DEMO_ONLY=mobile scripts/demo/record.sh
 #
 # 1. fleet.py up    — a throwaway fleet on its own tmux server (`tmux -L chela-demo`),
-#                     its own HOME + CHELA_DIR under a temp dir, its own dashboard on a
-#                     free loopback port. Nothing of your real fleet is reachable.
+#                     its own HOME + CHELA_DIR under a fixed demo root (/tmp/demo, or
+#                     $CHELA_DEMO_ROOT), its own daemon and dashboard on a free loopback
+#                     port. Nothing of your real fleet is reachable.
 # 2. record.mjs     — Playwright drives it: desktop 1440×900 (Wall → Work → Ctrl+,
 #                     Settings), phone 390×844 (pill switcher → "+" New session → keybar).
 # 3. ffmpeg         — MP4 for the landing page, palette GIF (≤ 8 MB) for the README,
