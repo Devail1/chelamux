@@ -116,7 +116,13 @@ test('clicking Share mints a share and opens the Active shares sheet, not a popo
     await flush();   // togglePaneOverflow arms its outside-click listener via setTimeout
 
     await terminals.shareBtnClick(shareBtn, '@1');
+    // CMX-403: an unshared pane first opens the share DIALOG (access choice, view only
+    // by default); confirming it is what mints the share.
+    const go = document.querySelector('#share-dialog-backdrop .sd-share');
+    assert.ok(go, 'Share must open the access dialog before minting');
+    go.click();
     await flush();   // let the /share POST + openSharesSheet's own reconcile fetch resolve
+    await flush();
 
     assert.equal(document.querySelector('.term-share-pop'), null,
         'the per-pane popover must be gone — Share now opens the sheet directly');

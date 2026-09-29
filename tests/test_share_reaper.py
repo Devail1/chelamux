@@ -160,19 +160,22 @@ def test_hello_sizes_joiner_and_requests_reattach(monkeypatch):
     assert sent == [cs.e2e.T_META]             # joiner sized; no grant frame anymore
 
 
-def test_input_forwarded_without_grant(monkeypatch):
-    """Full-access: a decrypted T_INPUT frame from any paired joiner is forwarded to
-    the pty — no grant plane. (The token bucket is the only limiter.)"""
+def test_input_dropped_by_default(monkeypatch):
+    """CMX-403 replaced full-access: a share is VIEW ONLY by default, so a decrypted
+    T_INPUT frame from a paired joiner is dropped (the full gate is covered in
+    tests/test_share_typing_gate.py)."""
     from chela import collab_stream as cs
 
+    monkeypatch.delenv("CHELA_SHARE_TYPING", raising=False)
     b = cs.Bridge("@9")
     forwarded = []
     monkeypatch.setattr(b, "_forward_input", lambda data: forwarded.append(data))
+    monkeypatch.setattr(b, "_seal_send", lambda typ, pt: None)
 
     frame = cs.e2e.Session(b.secret, b.room, role="joiner").seal(cs.e2e.T_INPUT, b"ls -la\r")
     b._handle_relay(frame)
 
-    assert forwarded == [b"ls -la\r"]          # typed straight through, un-gated
+    assert forwarded == []
 
 
 def test_stop_broadcasts_ended_frame(monkeypatch):

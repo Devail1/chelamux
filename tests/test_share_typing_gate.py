@@ -1,0 +1,483 @@
+"""🔐 CMX-403 — the guest-typing gate on the HOST side of a shared terminal.
+
+A share is VIEW ONLY unless (a) the ``share_typing`` setting is on, (b) the share was
+created with typing allowed, and (c) the window verifies LIVE as a sandboxed session —
+re-checked at least every ``SANDBOX_RECHECK_INTERVAL``, never cached from share creation.
+The one exception is the trusted-peer UNSANDBOXED override: per share, typed-name
+confirmation, time-boxed, bound to one joiner, audited, killed by the share kill switch.
+
+No real container, tmux, ``/proc`` or token is touched: ``share_sandbox``'s probes
+(``_pane_root`` / ``_proc_shape`` / ``_inspect``) and the pane writer
+(``Bridge._forward_input``) are stubbed, time is a fake clock, and conftest gives every
+test its own scratch ``CHELA_DIR`` (so the audit events land in a temp ``events.jsonl``).
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+import pytest
+
+from chela import collab_stream as cs
+from chela import config, event_log, share_sandbox
+from chela.dashboard import app as dash
+
+UID, GID = os.getuid(), os.getgid()
+SID = "0123456789ab"
+WORKSPACE = "/tmp"   # any existing absolute dir; verify_container realpaths it
+
+
+class Clock:
+    def __init__(self, t: float = 1000.0) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+
+# --- a stubbed LIVE sandbox: the pane, /proc and docker inspect ---------------------
+
+def _good_argv():
+    return ["/usr/bin/python3", "-m", share_sandbox.LAUNCH_MODULE, "run", "--id", SID,
+            os.path.realpath(WORKSPACE)]
+
+
+def _good_container():
+    net = share_sandbox.network_name(SID)
+    info = {
+        "State": {"Running": True},
+        "Config": {"Labels": {share_sandbox.LABEL: SID}, "User": f"{UID}:{GID}"},
+        "HostConfig": {"CapDrop": ["ALL"], "CapAdd": None, "Privileged": False,
+                       "ReadonlyRootfs": True, "SecurityOpt": ["no-new-privileges"],
+                       "Memory": 2 << 30, "PidsLimit": 512, "NetworkMode": net},
+        "NetworkSettings": {"Networks": {net: {}}},
+        "Mounts": [
+            {"Type": "bind", "Source": os.path.realpath(WORKSPACE),
+             "Destination": share_sandbox.GUEST_WORKDIR, "RW": True},
+            {"Type": "bind", "Source": "/usr/bin/true",
+             "Destination": share_sandbox.CLAUDE_MOUNT, "RW": False},
+        ],
+    }
+    network = {"Internal": True,
+               "Options": {"com.docker.network.bridge.inhibit_ipv4": "true"}}
+    return info, network
+
+
+@pytest.fixture
+def sandbox(monkeypatch):
+    """A window that verifies as a sandboxed session; mutate ``state`` to break it."""
+    state = {"argv": _good_argv(), "parent": "tmux: server", "kids": ["docker"],
+             "proc_error": None, "inspect": _good_container()}
+
+    def proc_shape(pid):
+        if state["proc_error"]:
+            raise state["proc_error"]
+        return state["argv"], state["parent"], state["kids"]
+
+    monkeypatch.setattr(share_sandbox, "_pane_root", lambda wid: 4242)
+    monkeypatch.setattr(share_sandbox, "_proc_shape", proc_shape)
+    monkeypatch.setattr(share_sandbox, "_inspect", lambda sid: state["inspect"])
+    return state
+
+
+@pytest.fixture
+def typing_on(monkeypatch):
+    monkeypatch.setenv("CHELA_SHARE_TYPING", "true")
+
+
+@pytest.fixture
+def typing_off(monkeypatch):
+    monkeypatch.setenv("CHELA_SHARE_TYPING", "false")
+
+
+def _bridge(monkeypatch, **kw):
+    """A Bridge whose pane writer and relay sends are captured, on a fake clock."""
+    clock = Clock()
+    b = cs.Bridge("@9", clock=clock, wallclock=lambda: 1_700_000_000.0 + clock.t, **kw)
+    forwarded, sent = [], []
+    monkeypatch.setattr(b, "_forward_input", lambda data: forwarded.append(data))
+    monkeypatch.setattr(b, "_seal_send", lambda typ, pt: sent.append((typ, pt)))
+    return b, clock, forwarded, sent
+
+
+def _joiner(b, stream_id=None):
+    return cs.e2e.Session(b.secret, b.room, role="joiner", stream_id=stream_id)
+
+
+def _type(b, joiner, data=b"ls\r"):
+    b._handle_relay(joiner.seal(cs.e2e.T_INPUT, data))
+
+
+def _notices(sent):
+    return [pt for typ, pt in sent if typ == cs.e2e.T_CTL and b'"notice"' in pt]
+
+
+# --- the setting ---------------------------------------------------------------------
+
+def test_share_typing_defaults_off(monkeypatch):
+    monkeypatch.delenv("CHELA_SHARE_TYPING", raising=False)
+    assert config.share_typing_enabled() is False
+    assert config.share_typing_setting() == (False, "default")
+
+
+def test_setting_off_drops_input_even_for_a_verified_sandbox(monkeypatch, sandbox, typing_off):
+    assert share_sandbox.check_share_session("@9") == (True, "")   # the sandbox IS fine
+    b, _clock, forwarded, sent = _bridge(monkeypatch, allow_typing=True)
+    _type(b, _joiner(b))
+    assert forwarded == []
+    assert len(_notices(sent)) == 1
+
+
+# --- ⭐ the case that must be ACCEPTED -------------------------------------------------
+
+def test_typing_on_share_allows_and_check_passes_forwards(monkeypatch, sandbox, typing_on):
+    b, _clock, forwarded, sent = _bridge(monkeypatch, allow_typing=True)
+    _type(b, _joiner(b), b"ls -la\r")
+    assert forwarded == [b"ls -la\r"]
+    assert _notices(sent) == []
+
+
+def test_share_created_view_only_drops_input(monkeypatch, sandbox, typing_on):
+    b, _clock, forwarded, sent = _bridge(monkeypatch)   # allow_typing defaults False
+    _type(b, _joiner(b))
+    assert forwarded == []
+    assert b"does not allow typing" in _notices(sent)[0]
+
+
+# --- fail closed on every failing check ---------------------------------------------
+
+@pytest.mark.parametrize("breakage", [
+    "shell_parent", "wrong_argv", "unreadable_proc", "inspect_error", "container_not_isolated",
+])
+def test_failing_check_drops_input(monkeypatch, sandbox, typing_on, breakage):
+    if breakage == "shell_parent":
+        sandbox["parent"] = "bash"
+    elif breakage == "wrong_argv":
+        sandbox["argv"] = ["/bin/bash", "-l"]
+    elif breakage == "unreadable_proc":
+        sandbox["proc_error"] = PermissionError("/proc/4242/cmdline")
+    elif breakage == "inspect_error":
+        sandbox["inspect"] = "docker is unreachable"
+    else:
+        info, net = _good_container()
+        net["Internal"] = False
+        sandbox["inspect"] = (info, net)
+    ok, why = share_sandbox.check_share_session("@9")
+    assert ok is False and why
+    b, _clock, forwarded, sent = _bridge(monkeypatch, allow_typing=True)
+    _type(b, _joiner(b))
+    assert forwarded == []
+    assert b"could not verify" in _notices(sent)[0]
+
+
+def test_process_swap_after_share_creation_stops_input_within_recheck(monkeypatch, sandbox, typing_on):
+    b, clock, forwarded, _sent = _bridge(monkeypatch, allow_typing=True)
+    j = _joiner(b)
+    _type(b, j, b"a")
+    assert forwarded == [b"a"]
+    # The pane's process is swapped for a shell after the share was created.
+    sandbox["argv"], sandbox["parent"] = ["/bin/bash"], "bash"
+    clock.t += cs.SANDBOX_RECHECK_INTERVAL + 0.01
+    _type(b, j, b"b")
+    assert forwarded == [b"a"]            # the re-check caught it
+
+
+def test_sandbox_verdict_is_rechecked_not_latched(monkeypatch, typing_on):
+    calls = []
+    monkeypatch.setattr(share_sandbox, "check_share_session",
+                        lambda wid: calls.append(wid) or (True, ""))
+    b, clock, forwarded, _sent = _bridge(monkeypatch, allow_typing=True)
+    j = _joiner(b)
+    _type(b, j, b"a")
+    clock.t += cs.SANDBOX_RECHECK_INTERVAL
+    _type(b, j, b"b")
+    assert len(calls) == 2 and forwarded == [b"a", b"b"]
+
+
+def test_view_only_notice_is_rate_limited(monkeypatch, typing_off):
+    b, clock, forwarded, sent = _bridge(monkeypatch, allow_typing=True)
+    j = _joiner(b)
+    for _ in range(5):
+        _type(b, j)
+    assert forwarded == [] and len(_notices(sent)) == 1
+    clock.t += cs.VIEW_ONLY_NOTICE_INTERVAL
+    _type(b, j)
+    assert len(_notices(sent)) == 2
+
+
+# --- trusted-peer UNSANDBOXED override ----------------------------------------------
+
+def _not_sandboxed(monkeypatch):
+    monkeypatch.setattr(share_sandbox, "check_share_session",
+                        lambda wid: (False, "the window is not running the sandboxed-session launcher"))
+
+
+def _grant(b, ttl_s=1800.0):
+    return b.grant_unsandboxed(granted_by="op@example", window="shell-3", ttl_s=ttl_s)
+
+
+def _events(kind):
+    return [e for e in event_log.read()["events"] if e["type"] == kind]
+
+
+def test_override_forwards_paired_joiner_input_to_a_non_sandboxed_pane(monkeypatch, typing_on):
+    """⭐ ACCEPTED: within the window, the paired joiner types into a real shell."""
+    _not_sandboxed(monkeypatch)
+    b, _clock, forwarded, _sent = _bridge(monkeypatch)
+    _grant(b)
+    _type(b, _joiner(b), b"whoami\r")
+    assert forwarded == [b"whoami\r"]
+    assert b.mode() == cs.MODE_UNSANDBOXED
+
+
+def test_no_override_means_a_non_sandboxed_pane_stays_view_only(monkeypatch, typing_on):
+    _not_sandboxed(monkeypatch)
+    b, _clock, forwarded, _sent = _bridge(monkeypatch)
+    _type(b, _joiner(b), b"whoami\r")
+    assert forwarded == []
+
+
+def test_override_expires_on_the_fake_clock(monkeypatch, typing_on):
+    _not_sandboxed(monkeypatch)
+    b, clock, forwarded, sent = _bridge(monkeypatch)
+    _grant(b, ttl_s=60.0)
+    j = _joiner(b)
+    clock.t += 59.0
+    _type(b, j, b"a")
+    assert forwarded == [b"a"]
+    clock.t += 1.0                        # the deadline
+    _type(b, j, b"b")
+    assert forwarded == [b"a"]
+    assert b.mode() == cs.MODE_VIEW       # reverted on its own
+    assert any(b"expired" in n for n in _notices(sent))
+    assert len(_events("share.unsandboxed_expired")) == 1
+
+
+def test_override_expiry_reverts_without_any_input(monkeypatch, typing_on):
+    b, clock, _forwarded, _sent = _bridge(monkeypatch)
+    _grant(b, ttl_s=60.0)
+    clock.t += 61.0
+    b._expire_override_if_due()           # what the control loop runs every tick
+    assert b.state() == {"mode": cs.MODE_VIEW, "expires_at": None}
+
+
+def test_second_joiner_stays_view_only(monkeypatch, typing_on):
+    _not_sandboxed(monkeypatch)
+    b, _clock, forwarded, sent = _bridge(monkeypatch)
+    _grant(b)
+    first, second = _joiner(b, b"\x01\x01\x01\x01"), _joiner(b, b"\x02\x02\x02\x02")
+    first_hello = first.seal(cs.e2e.T_CTL, b'{"t":"hello"}')
+    monkeypatch.setattr(cs, "_window_dims", lambda wid: (80, 24))
+    b._handle_relay(first_hello)          # the paired joiner binds on hello
+    _type(b, second, b"rm\r")
+    _type(b, first, b"ok\r")
+    assert forwarded == [b"ok\r"]
+    assert any(b"one paired guest" in n for n in _notices(sent))
+
+
+def test_setting_off_also_disables_the_override(monkeypatch, typing_off):
+    _not_sandboxed(monkeypatch)
+    b, _clock, forwarded, _sent = _bridge(monkeypatch)
+    _grant(b)
+    _type(b, _joiner(b))
+    assert forwarded == []
+
+
+def test_override_grant_and_revoke_are_audited(monkeypatch, typing_on):
+    b, _clock, _f, _s = _bridge(monkeypatch)
+    _grant(b, ttl_s=1800.0)
+    g = _events("share.unsandboxed_granted")
+    assert len(g) == 1
+    p = g[0]["payload"]
+    assert p["granted_by"] == "op@example" and p["window"] == "shell-3" and p["wid"] == "@9"
+    assert p["expires_at"] - p["started_at"] == 1800.0
+    b.stop()
+    r = _events("share.unsandboxed_revoked")
+    assert len(r) == 1 and r[0]["payload"]["reason"] == "share stopped"
+    assert "revoked_at" in r[0]["payload"]
+
+
+# --- app.py: the share route + the kill switch ---------------------------------------
+
+@pytest.fixture
+def share_app(monkeypatch):
+    dash._SHARED.clear()
+    dash._share_info.clear()
+    monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
+    monkeypatch.setattr(dash, "_require_terminals", lambda: None)
+    monkeypatch.setattr(dash.config, "COLLAB_RELAY", "wss://relay.example")
+    monkeypatch.setattr(dash, "_window_name", lambda wid: "shell-3")
+    monkeypatch.setattr(cs, "_window_dims", lambda wid: (80, 24))
+    started = []
+
+    def start(wid, on_revoke=None, **policy):
+        started.append(policy)
+        return "CODE"
+
+    monkeypatch.setattr(dash.collab_stream, "start_bridge", start)
+    monkeypatch.setattr(dash.collab_stream, "join_url", lambda wid: "https://relay/j/r")
+    monkeypatch.setattr(dash.collab_stream, "stop_bridge", lambda wid: None)
+    yield started
+    dash._SHARED.clear()
+    dash._share_info.clear()
+
+
+def _post(body):
+    return dash.app.test_client().post("/api/term/@9/share", json={"on": True, **body})
+
+
+def test_override_without_typed_confirmation_is_not_granted(monkeypatch, share_app, typing_on):
+    _not_sandboxed(monkeypatch)
+    for body in ({"mode": "unsandboxed"}, {"mode": "unsandboxed", "confirm": "shell-4"}):
+        r = _post(body)
+        assert r.status_code == 403
+    assert share_app == [] and "@9" not in dash._SHARED
+
+
+def test_override_with_typed_confirmation_is_granted(monkeypatch, share_app, typing_on):
+    _not_sandboxed(monkeypatch)
+    r = _post({"mode": "unsandboxed", "confirm": "shell-3"})
+    assert r.status_code == 200
+    (policy,) = share_app
+    assert policy["unsandboxed"]["window"] == "shell-3"
+    assert policy["unsandboxed"]["ttl_s"] == config.share_unsandboxed_minutes() * 60.0
+
+
+def test_override_is_not_offered_with_the_setting_off(monkeypatch, share_app, typing_off):
+    _not_sandboxed(monkeypatch)
+    r = _post({"mode": "unsandboxed", "confirm": "shell-3"})
+    assert r.status_code == 403 and share_app == []
+
+
+def test_typing_share_refused_on_a_non_sandboxed_window(monkeypatch, share_app, typing_on):
+    _not_sandboxed(monkeypatch)
+    r = _post({"mode": "typing"})
+    assert r.status_code == 403
+    assert r.get_json()["error"] == dash.NOT_SANDBOXED_REASON
+    assert share_app == []
+
+
+def test_typing_share_accepted_on_a_sandboxed_window(monkeypatch, share_app, sandbox, typing_on):
+    r = _post({"mode": "typing"})
+    assert r.status_code == 200
+    assert share_app == [{"allow_typing": True}]
+
+
+def test_default_share_is_view_only(share_app, typing_on):
+    assert _post({}).status_code == 200
+    assert share_app == [{}]
+
+
+def test_kill_switch_revokes_the_override(monkeypatch, typing_on):
+    """The #btn-shares Stop → POST share {on:false} → _revoke_share → stop_bridge →
+    Bridge.stop, which ends the override (audited) — later input is dropped."""
+    _not_sandboxed(monkeypatch)
+    monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
+    monkeypatch.setattr(dash, "_require_terminals", lambda: None)
+    b, _clock, forwarded, _sent = _bridge(monkeypatch)
+    _grant(b)
+    j = _joiner(b)
+    _type(b, j, b"a")
+    assert forwarded == [b"a"]
+    cs._bridges["@9"] = b
+    dash._SHARED["@9"] = {"cols": 80, "rows": 24}
+    try:
+        r = dash.app.test_client().post("/api/term/@9/share", json={"on": False})
+        assert r.status_code == 200
+    finally:
+        cs._bridges.pop("@9", None)
+        dash._SHARED.clear()
+    _type(b, j, b"b")
+    assert forwarded == [b"a"]
+    assert b.mode() == cs.MODE_VIEW
+    assert len(_events("share.unsandboxed_revoked")) == 1
+
+
+def test_shared_report_carries_the_mode(monkeypatch, typing_on):
+    monkeypatch.setattr(dash, "_require_terminals", lambda: None)
+    b, _clock, _f, _s = _bridge(monkeypatch)
+    _grant(b)
+    cs._bridges["@9"] = b
+    dash._SHARED["@9"] = {"cols": 80, "rows": 24}
+    try:
+        got = dash.app.test_client().get("/api/term/shared").get_json()
+    finally:
+        cs._bridges.pop("@9", None)
+        dash._SHARED.clear()
+    assert got["@9"]["mode"] == cs.MODE_UNSANDBOXED and got["@9"]["expires_at"]
+
+
+def test_share_options_reasons(monkeypatch, typing_off):
+    monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
+    monkeypatch.setattr(dash, "_require_terminals", lambda: None)
+    monkeypatch.setattr(dash, "_window_name", lambda wid: "shell-3")
+    _not_sandboxed(monkeypatch)
+    o = dash.app.test_client().get("/api/term/@9/share-options").get_json()
+    assert o["typing_allowed"] is False and o["typing_reason"] == dash.TYPING_OFF_REASON
+    assert o["unsandboxed_offered"] is False
+    monkeypatch.setenv("CHELA_SHARE_TYPING", "true")
+    o = dash.app.test_client().get("/api/term/@9/share-options").get_json()
+    assert o["typing_reason"] == dash.NOT_SANDBOXED_REASON and o["unsandboxed_offered"] is True
+
+
+def test_config_api_round_trips_share_typing(monkeypatch):
+    monkeypatch.delenv("CHELA_SHARE_TYPING", raising=False)
+    c = dash.app.test_client()
+    assert c.get("/api/config").get_json()["share_typing"] is False
+    got = c.post("/api/config", json={"share_typing": True}).get_json()
+    assert got["share_typing"] is True and got["share_typing_source"] == "dashboard"
+    assert config.share_typing_enabled() is True
+    assert c.post("/api/config", json={"share_typing": "maybe"}).status_code == 400
+
+
+# --- the launcher --------------------------------------------------------------------
+
+def test_spawn_sandbox_window_execs_the_launcher_with_no_shell(monkeypatch, tmp_path):
+    from chela import spawn
+    calls = []
+
+    class P:
+        returncode, stdout, stderr = 0, "@17\n", ""
+
+    monkeypatch.setattr(share_sandbox, "preflight", lambda cwd: None)
+    monkeypatch.setattr(spawn.discovery, "ensure_session", lambda: True)
+    monkeypatch.setattr(spawn.discovery, "get_all_windows", lambda: ["sandbox-1"])
+    monkeypatch.setattr(spawn.agent_manager, "lock_window_name", lambda t: None)
+    monkeypatch.setattr(spawn, "_send", lambda *a: calls.append(("send",) + a))
+    monkeypatch.setattr(spawn.subprocess, "run", lambda argv, **kw: calls.append(argv) or P())
+    r = spawn.spawn_sandbox_window(str(tmp_path))
+    assert r.ok and r.wid == "@17" and r.name == "sandbox-2"
+    (argv,) = calls                       # one tmux call, no send-keys at all
+    cmd = argv[argv.index("--") + 1:]
+    assert cmd[:2] == [sys.executable, "-m"]
+    assert share_sandbox.verify_pane(cmd, "tmux: server", []) == (cmd[5], str(tmp_path.resolve()))
+
+
+def test_spawn_sandbox_window_refuses_before_opening_anything(monkeypatch, tmp_path):
+    from chela import spawn
+    calls = []
+    monkeypatch.setattr(share_sandbox, "preflight", lambda cwd: "docker is not installed")
+    monkeypatch.setattr(spawn.subprocess, "run", lambda argv, **kw: calls.append(argv))
+    r = spawn.spawn_sandbox_window(str(tmp_path))
+    assert not r.ok and "docker" in r.error and calls == []
+
+
+def test_cli_share_session_refuses_a_missing_project(tmp_path):
+    import subprocess
+    env = {k: v for k, v in os.environ.items() if not k.startswith("TMUX")}
+    env.update(CHELA_DIR=str(tmp_path / ".chela"), CHELA_ENV_FILE="",
+               CHELA_PROJECTS_DIR=str(tmp_path))
+    p = subprocess.run([sys.executable, "-m", "chela.main", "share-session", "nope-not-here"],
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert p.returncode == 1 and "no such project directory" in p.stderr
+
+
+def test_spawn_sandboxed_route_uses_the_launcher(monkeypatch, tmp_path):
+    from chela import spawn
+    monkeypatch.setattr(dash, "_require_terminals", lambda: None)
+    seen = []
+    monkeypatch.setattr(spawn, "spawn_sandbox_window",
+                        lambda cwd: seen.append(cwd) or spawn.SpawnResult(ok=True, name="sandbox-1", wid="@3", cwd=cwd))
+    monkeypatch.setattr(dash.launcher, "record_recent", lambda p: None)
+    r = dash.app.test_client().post("/api/agents/spawn-sandboxed", json={"cwd": str(tmp_path)})
+    assert r.status_code == 200 and seen == [str(tmp_path)]

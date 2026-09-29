@@ -303,3 +303,58 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
     log.info("spawned window %s (%s) in %s%s", name, wid or "no-id", real,
              f" running {command!r}" if command else "")
     return SpawnResult(ok=True, name=name, wid=wid if have_wid else None, cwd=real)
+
+
+def next_sandbox_name(existing: set[str]) -> str:
+    """Smallest ``sandbox-N`` (N >= 1) not already a live window name."""
+    n = 1
+    while f"sandbox-{n}" in existing:
+        n += 1
+    return f"sandbox-{n}"
+
+
+def spawn_sandbox_window(cwd: str | os.PathLike) -> SpawnResult:
+    """Open ONE window running a sandboxed share session (CMX-403) in ``cwd``.
+
+    Unlike :func:`spawn_window` there is NO shell: the window's command is
+    :func:`chela.share_sandbox.launcher_argv` itself, handed to tmux as separate argv
+    elements so tmux execs it directly — exactly the shape
+    :func:`chela.share_sandbox.verify_pane` accepts (parent = the tmux server, no shell in
+    between), and when the guest's Claude exits the pane closes with it. Nothing is
+    ``send-keys``'d into it, so no ``CHELA_WID`` export and no ``--session-id`` pin: the
+    guest container has its own throwaway HOME and never sees chela.
+
+    Fails closed BEFORE opening anything: :func:`chela.share_sandbox.preflight` refuses a
+    workspace that would expose secrets, or a host without docker / the image / the
+    claude binary / the token file — each a refusal, never an unsandboxed fallback.
+    """
+    from chela import share_sandbox
+
+    real = os.path.realpath(os.path.expanduser(str(cwd)))
+    why = share_sandbox.preflight(real)
+    if why:
+        return SpawnResult(ok=False, error=why)
+    if not discovery.ensure_session():
+        return SpawnResult(
+            ok=False, error="tmux is unreachable — cannot create the chela session")
+    session = config.current_session()
+    name = next_sandbox_name(set(discovery.get_all_windows()))
+    if not _WINDOW_NAME_RE.match(name):
+        return SpawnResult(ok=False, error=f"invalid window name: {name}")
+    argv = share_sandbox.launcher_argv(share_sandbox.new_session_id(), real)
+    try:
+        proc = subprocess.run(
+            ["tmux", "new-window", "-t", f"{session}:", "-n", name, "-c", real,
+             "-P", "-F", "#{window_id}", "--", *argv],
+            capture_output=True, text=True, timeout=10, env=envutil.child_env(),
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return SpawnResult(ok=False, error=str(e))
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "tmux new-window failed").strip()
+        return SpawnResult(ok=False, error=err)
+    wid = (proc.stdout or "").strip()
+    have_wid = bool(_WID_RE.fullmatch(wid))
+    agent_manager.lock_window_name(wid if have_wid else f"{session}:{name}")
+    log.info("spawned sandboxed session %s (%s) in %s", name, wid or "no-id", real)
+    return SpawnResult(ok=True, name=name, wid=wid if have_wid else None, cwd=real)

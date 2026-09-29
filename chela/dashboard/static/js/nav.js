@@ -1149,6 +1149,21 @@ function renderSettings(focus) {
             browser from the pairing code). It does see room names + traffic timing (metadata) —
             run your own relay for full metadata privacy.</p>
         </section>
+        <section class="settings-section" id="settings-share-typing">
+            <h4>Guest typing</h4>
+            <p class="s-desc">Shares are <strong>view only</strong> unless this is on. With it on,
+            a share may let the guest type — but only into a <strong>sandboxed session</strong>
+            (New session → Sandboxed: a container that sees only the project), checked live on
+            every keystroke. Turning it off stops typing on live shares at once. See
+            <code>docs/SHARE_SANDBOX.md</code> and run its checklist first.</p>
+            <div class="s-row" data-keywords="share typing keyboard input write guest sandbox sandboxed container view only unsandboxed full access">
+                <label class="s-rowlabel" for="share-typing-toggle">Guest typing — let share guests type into sandboxed sessions</label>
+                <input id="share-typing-toggle" type="checkbox" role="switch" disabled
+                       onchange="chela.setShareTyping(this.checked)">
+            </div>
+            <div id="share-typing-msg" class="s-savemsg"></div>
+            <p class="s-desc" id="share-typing-source"></p>
+        </section>
         </div>`;
     selectSettingsTab(focus === 'notify' ? 'notifications' : _settingsTab);
     _loadProjectsSetting();
@@ -1156,6 +1171,7 @@ function renderSettings(focus) {
     _loadAgentModeSetting();
     _loadAgentModelSetting();
     _loadRemoteControlSetting();
+    _loadShareTypingSetting();
     _loadTimingSettings();
     _loadDispatchSettings();
     _loadSettingsStatus();
@@ -1348,6 +1364,56 @@ async function setRemoteControl(on) {
     }
     setMsg('ok', 'Saved · new sessions launch with Remote Control ' + (cfg.remote_control ? 'on' : 'off'));
     _renderRemoteControl(cfg);
+}
+
+// Guest typing (CMX-403): the `share_typing` switch. Same env-wins presentation as
+// Remote Control above — CHELA_SHARE_TYPING set ⇒ shown, but disabled.
+function _renderShareTyping(cfg) {
+    const box = document.getElementById('share-typing-toggle');
+    const src = document.getElementById('share-typing-source');
+    if (!box) return;
+    const on = !!(cfg && cfg.share_typing);
+    const locked = !!(cfg && cfg.share_typing_env_locked);
+    box.checked = on;
+    box.disabled = locked;
+    if (src) {
+        const env = escHtml((cfg && cfg.share_typing_env) || 'CHELA_SHARE_TYPING');
+        const from = locked ? `set by <code>${env}</code> — env wins; unset it to edit here`
+            : (cfg && cfg.share_typing_source === 'dashboard') ? 'this setting'
+            : 'the built-in default';
+        src.innerHTML = `In effect: <strong>${on ? 'On' : 'Off'}</strong> — ${from}.`;
+    }
+}
+
+async function _loadShareTypingSetting() {
+    const box = document.getElementById('share-typing-toggle');
+    if (!box) return;
+    let cfg;
+    try {
+        cfg = await api('/api/config');
+    } catch (e) { box.disabled = true; return; }
+    _renderShareTyping(cfg);
+}
+
+async function setShareTyping(on) {
+    const msg = document.getElementById('share-typing-msg');
+    const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
+    setMsg('', 'Saving…');
+    let cfg;
+    try {
+        cfg = await api('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ share_typing: !!on }),
+        });
+    } catch (e) { setMsg('err', 'Save failed — unchanged.'); _loadShareTypingSetting(); return; }
+    if (!cfg || cfg.error) {
+        setMsg('err', 'Rejected — unchanged.');
+        _loadShareTypingSetting();
+        return;
+    }
+    setMsg('ok', 'Saved · guest typing ' + (cfg.share_typing ? 'allowed into sandboxed sessions' : 'off — every share is view only'));
+    _renderShareTyping(cfg);
 }
 
 // Live "Connections & Status" surface (READ-ONLY). Fetches /api/settings and
@@ -1905,6 +1971,30 @@ async function newShellWindow() {
     }
 }
 
+// New session → Sandboxed (CMX-403): a window running the container launcher
+// (chela.share_sandbox) — the only kind of window a share guest may type into. Asks
+// for the project directory, pre-filled with the most recent launch target; the server
+// refuses $HOME, secret dirs, or a host without docker/image/token, and says why.
+async function newSandboxedSession() {
+    const recent = (_launcherData.favorites || []).concat(_launcherData.recent || []);
+    const guess = recent.length ? recent[0].path : '';
+    const cwd = (window.prompt('Sandboxed session — project directory (the guest sees ONLY this):', guess) || '').trim();
+    if (!cwd) return;
+    try {
+        const res = await api('/api/agents/spawn-sandboxed', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cwd }),
+        });
+        if (!res || !res.ok) { alert('Sandboxed session refused: ' + ((res && res.error) || 'unknown error')); return; }
+        setAgentsCache([]);
+        selectView('terminals');
+        refreshSidebar();
+        refreshLauncher();
+    } catch (e) {
+        alert('Sandboxed session failed: ' + e);
+    }
+}
+
 // Touch-friendly tooltips. Native `title` only surfaces on hover, so on a
 // phone the rate-limit pills (and any other titled pill) have no tooltip at
 // all. Tapping a titled element pops a floating bubble; tapping elsewhere or
@@ -2207,4 +2297,4 @@ export { closeShortcuts, openPalette, openShortcuts, refreshRecentSessions, refr
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyUpdate, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRemoteControl, setRunToastsMuted, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { applyUpdate, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
