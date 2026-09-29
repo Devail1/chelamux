@@ -703,3 +703,46 @@ def test_record_private_swallows_a_BUILD_failure_and_returns_none(monkeypatch, c
         out = judge.record_private("ho-build-fail", _one_survivor_report(), {"experiments": []})
     assert out is None
     assert "synthetic build failure" in caplog.text
+
+
+# --- final round (orchestrator): the two wirings the judge on 2e26e75 found unpinned -----
+
+def test_judge_run_survives_a_private_record_that_cannot_be_written(tmp_path, monkeypatch):
+    """🔴 GUARD: `judge_run` must call the GUARDED `record_private`, not the raw builder —
+    a record that cannot be written must never take the verdict down. End to end: point the
+    private store under a regular file so the write raises, and the verdict still lands."""
+    task_id = "ho-rec-fail"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    wt = judge.judge_worktree_path(workflow.load_workflow(repo / "WORKFLOW.md"), task_id)
+    _add_sentinel_module(wt)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x")
+    monkeypatch.setattr(judge, "heldout_store_path", lambda tid: blocker / "sub" / "r.jsonl")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_glyph(), _sentinel()]}))
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+    assert result["state"] == judge.J_BLOCKED
+    assert dispatcher.resolve_run(task_id)["status"] == "changes_requested"
+
+
+def test_the_consistency_rerun_reruns_the_SAME_experiment_it_attributes_the_verdict_to(
+        tmp_path, monkeypatch):
+    """🔴 GUARD: with a sample of one, the SURVIVOR (index 1) is re-run, so the re-run batch
+    must be exactly ``[items[1]]``. Handing it any other item attributes a second verdict to
+    an experiment that was never re-run."""
+    a, b = _glyph(), _sentinel(held_out=False)
+    outcomes = [judge.Outcome(judge.Experiment(**a), judge.KILLED, "killed"),
+                judge.Outcome(judge.Experiment(**b), judge.SURVIVED, "survived")]
+    seen: list[list] = []
+
+    def spy(*args, **kwargs):
+        seen.append(list(args[2]))
+        return [judge.Outcome(outcomes[1].experiment, judge.SURVIVED, "survived")], ""
+
+    monkeypatch.setattr(judge, "_apply_experiments", spy)
+    report = judge.Report(outcomes=outcomes)
+    judge._check_consistency(tmp_path, TEST_CMD, [a, b], outcomes, None, 60.0, 1, report)
+    assert seen == [[b]]
