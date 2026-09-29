@@ -178,3 +178,64 @@ def test_pr_status_still_reads_the_runs_own_pr(tmp_path, repo, monkeypatch):
     run, _ = _gh_like("acme/widgets", merged={"acme/widgets#541"})
     monkeypatch.setattr(dispatcher.subprocess, "run", run)
     assert dispatcher._read_pr_status(REAL_PR, str(repo)) == ("merged", "UNKNOWN")
+
+
+# --- the same order, at the daemon's two reconcile-to-done sites in `tick` ---------------
+# `mark_awaiting_review` is one of THREE `row["pr_url"] or _read_pr_url(...)` sites. The
+# other two are where a run is CLOSED — the incident's last hop — and each needs its own
+# guard: a test of one site says nothing about a sibling written the same way.
+
+OTHER_PR = "https://github.com/acme/widgets/pull/7"   # in-repo: the slug check can't mask it
+
+
+def _tick_off_the_tracker(tmp_path, *, status, tmux_windows):
+    """One `tick` with the run's task gone from the tracker, the row carrying the real PR,
+    and the transcript offering another PR of the same repo. Returns the row and every URL
+    the tick asked GitHub about."""
+    from tests.test_dispatcher_rework import _FakeTmux, _Source, _status, _wf
+
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status=status, window_name="test-1",
+             pr_url=REAL_PR, pr_state="open" if status == "awaiting_review" else None,
+             started_at=dispatcher._now())
+    asked: list = []
+
+    def fake_status(url, repo_dir):
+        asked.append(url)
+        return ("merged" if url == OTHER_PR else "open"), None
+
+    fake = _FakeTmux()
+    fake.windows = [("@1", w) for w in tmux_windows]
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=_Source()), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "_tmux_windows", return_value=set(tmux_windows)), \
+         patch.object(dispatcher, "_read_pr_url", return_value=OTHER_PR), \
+         patch.object(dispatcher, "_read_pr_status", side_effect=fake_status), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run):
+        dispatcher.tick(wf.path)
+    return dispatcher.resolve_run("abc123"), asked
+
+
+def test_reconcile_to_done_keeps_the_recorded_pr_over_the_transcript(tmp_path):
+    """🔴 GUARD — the review-status reconcile (task left the tracker ⇒ done). The row it
+    closes must keep the PR chela recorded, not whatever the transcript last saw. Corrupt
+    by letting the transcript win at that site (`_read_pr_url(...) or row["pr_url"]`) ⇒
+    the closed row carries `acme/widgets/pull/7` ⇒ RED."""
+    row, _ = _tick_off_the_tracker(tmp_path, status="awaiting_review", tmux_windows=[])
+    assert row["status"] == "done"          # the branch under test really ran
+    assert row["pr_url"] == REAL_PR
+
+
+def test_a_transcript_pr_cannot_close_a_running_row(tmp_path):
+    """🔴 GUARD — the incident's closing path: a running row whose task left the tracker is
+    closed ONLY on a merged PR, and that PR must be the row's own. Here the transcript's PR
+    reads merged and the row's does not. Corrupt by letting the transcript win at that site
+    (`_read_pr_url(...) or row["pr_url"]`) ⇒ the live run is marked done, its window
+    killed ⇒ RED."""
+    row, asked = _tick_off_the_tracker(tmp_path, status="running", tmux_windows=["test-1"])
+    assert OTHER_PR not in asked
+    assert REAL_PR in asked                 # the merged-check really ran, on the right PR
+    assert row["status"] == "running"
+    assert row["pr_url"] == REAL_PR

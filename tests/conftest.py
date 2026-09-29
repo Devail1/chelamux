@@ -306,13 +306,21 @@ def _refuse_real_chela_dir(value) -> None:
 _refuse_real_chela_dir(os.environ.get("CHELA_DIR"))
 
 
-@pytest.fixture(autouse=True)
-def _chela_dir_is_never_the_real_one(_isolate_chela_dir):
-    """Fails every test whose ``CHELA_DIR`` (env or ``config.CHELA_DIR``) is the real one."""
+def _check_chela_dir_now() -> None:
+    """Both views of ``CHELA_DIR`` a test can reach — the env (subprocesses, lazy readers)
+    and ``config.CHELA_DIR`` (per-call readers). They are checked separately because they
+    are set separately: a test that ``monkeypatch.setattr(config, "CHELA_DIR", …)`` moves
+    only the attribute."""
     from chela import config
 
     _refuse_real_chela_dir(os.environ.get("CHELA_DIR"))
     _refuse_real_chela_dir(config.CHELA_DIR)
+
+
+@pytest.fixture(autouse=True)
+def _chela_dir_is_never_the_real_one(_isolate_chela_dir):
+    """Fails every test whose ``CHELA_DIR`` (env or ``config.CHELA_DIR``) is the real one."""
+    _check_chela_dir_now()
 
 
 def _sqlite_target(database) -> object:
