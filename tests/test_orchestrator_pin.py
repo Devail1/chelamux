@@ -151,6 +151,34 @@ def test_a_registry_entry_left_by_a_recycled_pid_is_refused(fleet, tmp_path):
     assert sessions.wid_for_session(S8) is None
 
 
+def test_a_registry_file_whose_own_pid_field_disagrees_is_refused(fleet, tmp_path):
+    """`808.json` must describe pid 808. A file under that name whose own ``pid`` field says
+    4545 — procStart and sessionId otherwise valid for 808 — is not 808's claim about itself,
+    and must not name @8's session. (Control: the same file with ``pid: 808`` does.)"""
+    reg = sessions.claude_sessions_dir()
+    good = json.loads((reg / "808.json").read_text())
+    assert sessions.registry_session(808) == S8, "control: the honest file is accepted"
+    (reg / "808.json").write_text(json.dumps({**good, "pid": 4545}))
+    assert sessions.registry_entry(808) is None
+    assert sessions.registry_session(808) is None
+    assert sessions.session_of_window("@8") is None
+
+
+def test_two_panes_whose_registry_entries_claim_one_session_resolve_to_none(fleet, tmp_path):
+    """No `--resume` anywhere, and two live claude pids both register session S8. Picking
+    either would file one agent's events under the other: ambiguity is None, never the
+    first match. (Control: with only one claimant the same call names it.)"""
+    _proc(tmp_path / "proc", 909, "7777")
+    _registry(909, S8, "@9", "7777")
+    both = {
+        "@8": sessions.Pane("@8", HOME, "claude", 808, HOME, None, 1.0),
+        "@9": sessions.Pane("@9", HOME, "claude", 909, HOME, None, 1.0),
+    }
+    assert sessions.wid_claiming_session(S8, {"@8": both["@8"]}) == "@8", "control"
+    assert sessions.wid_claiming_session(S8, {"@9": both["@9"]}) == "@9", "control"
+    assert sessions.wid_claiming_session(S8, both) is None
+
+
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_INBOX_FILE", str(tmp_path / "inbox.json"))
