@@ -15,6 +15,10 @@ Delete conftest's isolation and this file goes red.
 """
 import io
 import os
+import pwd
+import sqlite3
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -25,7 +29,10 @@ from chela import config, event_log, gateanswer, hold, inbox
 # conftest as a TOP-LEVEL module. Spelling it the other way imports a SECOND copy — with a
 # second sandbox and a second exception class — and every assertion below silently passes
 # against the wrong module.
-from conftest import REAL_CHELA_DIRS, SANDBOX_CHELA_DIR, LiveStateEscape
+from conftest import (
+    REAL_CHELA_DIRS, REAL_HOME_CHELA_DIRS, SANDBOX_CHELA_DIR, LiveChelaDirEscape,
+    LiveStateEscape, _refuse_real_chela_dir,
+)
 
 REAL_CHELA_DIR = REAL_CHELA_DIRS[0]
 REAL_LOG = REAL_CHELA_DIR / "events.jsonl"
@@ -130,3 +137,158 @@ def test_an_agent_worktree_is_source_not_live_state(tmp_path):
     worktree_file = REAL_CHELA_DIR / "worktrees" / "nothing-here.txt"
     with pytest.raises(FileNotFoundError):           # reached the filesystem, not the fence
         open(worktree_file)
+
+
+# --- CMX-391: the runs DB, and a CHELA_DIR that IS the real one --------------------------
+
+REAL_HOME_CHELA = REAL_HOME_CHELA_DIRS[0]
+
+
+@pytest.fixture
+def stand_in_live(tmp_path, monkeypatch):
+    """The fence, aimed at a STAND-IN live dir. A test proving the fence must not use the
+    real ``~/.chela`` as its target: under the self-check's corruption (fence removed) the
+    connect — and ``dispatcher._db()``'s schema migration — would then run for real against
+    the operator's runs DB. The fence reads ``conftest.REAL_CHELA_DIRS`` per call, so
+    re-pointing it exercises the exact code path at a harmless address."""
+    import conftest
+
+    live = tmp_path / "live-chela"
+    live.mkdir()
+    monkeypatch.setattr(conftest, "REAL_CHELA_DIRS", (live,))
+    monkeypatch.setattr(conftest, "_EXEMPT", (live / "worktrees",))
+    return live
+
+
+@pytest.mark.parametrize("form", ["str", "path", "uri"])
+def test_opening_the_live_runs_db_fails_the_test(stand_in_live, form):
+    """🔴 GUARD — ``sqlite3.connect`` opens its file in C, past every Python ``open`` door,
+    and ``scheduler.db`` is the one file the daemon ACTS on. Corrupt the fence (drop the
+    ``sqlite3.connect`` patch) ⇒ this connects ⇒ RED."""
+    db = stand_in_live / "scheduler.db"
+    target = {"str": str(db), "path": db, "uri": f"file:{db}?mode=rwc"}[form]
+    with pytest.raises(LiveStateEscape, match="LIVE chela database"):
+        sqlite3.connect(target, uri=True)
+    assert not db.exists()
+
+
+def test_the_dispatcher_cannot_reach_the_live_runs_db(stand_in_live, monkeypatch):
+    """The same fence, through the product code that writes run rows."""
+    from chela import dispatcher
+
+    monkeypatch.setattr(dispatcher, "DB_PATH", stand_in_live / "scheduler.db")
+    with pytest.raises(LiveStateEscape):
+        with dispatcher._db():
+            pass
+    assert not (stand_in_live / "scheduler.db").exists()
+
+
+def test_a_scratch_and_an_in_memory_db_still_open(tmp_path):
+    """⭐ The accept case: the fence stops the live DB, not sqlite."""
+    sqlite3.connect(":memory:").close()
+    sqlite3.connect(tmp_path / "x.db").close()
+    sqlite3.connect(f"file:{tmp_path / 'y.db'}", uri=True).close()
+
+
+def test_a_chela_dir_that_resolves_to_the_real_home_one_is_refused(tmp_path):
+    """🔴 GUARD — the check the per-test autouse fixture and conftest's import both run.
+    Corrupt it (compare against the wrong dir, or return early) ⇒ RED."""
+    with pytest.raises(LiveChelaDirEscape, match="REAL chela dir"):
+        _refuse_real_chela_dir(REAL_HOME_CHELA)
+    with pytest.raises(LiveChelaDirEscape):
+        _refuse_real_chela_dir(str(REAL_HOME_CHELA / "worktrees" / ".."))
+    _refuse_real_chela_dir(tmp_path / ".chela")          # a scratch dir is fine
+    _refuse_real_chela_dir(None)
+
+
+def test_the_per_test_check_refuses_a_real_config_chela_dir_on_its_own(monkeypatch):
+    """🔴 GUARD — the env and ``config.CHELA_DIR`` are set separately, so they can drift:
+    a test that moves only the attribute leaves the env on its scratch dir. The per-test
+    check must read the attribute itself. Corrupt it (check the env twice, or pass
+    ``None``) ⇒ the env alone is scratch ⇒ nothing raises ⇒ RED. Only a ``Path`` is
+    compared — nothing is opened."""
+    import conftest
+
+    monkeypatch.setattr(config, "CHELA_DIR", REAL_HOME_CHELA)
+    assert os.environ["CHELA_DIR"] != str(REAL_HOME_CHELA)     # the env really is scratch
+    with pytest.raises(LiveChelaDirEscape):
+        conftest._check_chela_dir_now()
+
+
+def test_every_test_runs_behind_the_real_chela_dir_check(tmp_path):
+    """The per-test fixture, as a test sees it: this very test's env and config are the
+    scratch dir, and would have been refused otherwise."""
+    assert os.environ["CHELA_DIR"] == str(tmp_path / ".chela")
+    assert config.CHELA_DIR not in REAL_HOME_CHELA_DIRS
+
+
+@pytest.mark.parametrize("home", ["own", "borrowed"])
+def test_a_suite_pointed_at_the_real_dir_refuses_to_run(tmp_path, home):
+    """End to end: a child pytest whose conftest redirect is DISABLED (so CHELA_DIR stays
+    the operator's real one) must stop before running a test — never against live state.
+    Runs a throwaway suite that imports this conftest with its redirect neutralised.
+
+    🔴 ``borrowed``: the child runs with ``HOME`` pointed elsewhere and ``CHELA_DIR`` at the
+    PASSWD home's ``.chela``. ``Path.home()`` then names the borrowed dir, so only the
+    passwd lookup still knows the real one. In every ordinary run the two homes are equal,
+    which is why nothing else can tell them apart. Corrupt ``REAL_HOME_CHELA_DIRS`` to
+    ``Path.home()`` twice ⇒ the child runs its test ⇒ RED."""
+    root = Path(__file__).resolve().parent
+    suite = tmp_path / "suite"
+    suite.mkdir()
+    (suite / "conftest.py").write_text(
+        "import importlib.util, os, sys\n"
+        f"sys.path.insert(0, {str(root.parent)!r})\n"
+        f"src = open({str(root / 'conftest.py')!r}).read()\n"
+        "src = src.replace('os.environ[\"CHELA_DIR\"] = str(SANDBOX_CHELA_DIR)', 'pass')\n"
+        "exec(compile(src, 'conftest_under_test', 'exec'))\n"
+    )
+    (suite / "test_x.py").write_text("def test_x():\n    pass\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CHELA_")}
+    env["CHELA_DIR"] = str(REAL_HOME_CHELA)
+    if home == "borrowed":
+        borrowed = tmp_path / "borrowed-home"
+        borrowed.mkdir()
+        env["HOME"] = str(borrowed)
+        env["CHELA_DIR"] = str(Path(pwd.getpwuid(os.getuid()).pw_dir) / ".chela")
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:xdist",
+         "--rootdir", str(suite), str(suite)],
+        cwd=str(suite), env=env, capture_output=True, text=True, timeout=120,
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    assert "LiveChelaDirEscape" in out and "1 passed" not in out, out
+
+
+def test_a_test_whose_config_chela_dir_is_the_real_one_is_refused_at_setup(tmp_path):
+    """🔴 GUARD — the per-test autouse fixture, end to end. A child suite runs this conftest
+    unchanged except that its per-test isolation moves ONLY ``config.CHELA_DIR`` to the real
+    home ``.chela`` (the env stays on the scratch sandbox). The guard fixture must refuse the
+    test at setup. Corrupt the fixture (drop its check, or stop reading
+    ``config.CHELA_DIR``) ⇒ the child test runs ⇒ RED. Only the attribute is moved; the
+    fence still blocks every open under the real dir."""
+    root = Path(__file__).resolve().parent
+    suite = tmp_path / "suite"
+    suite.mkdir()
+    (suite / "conftest.py").write_text(
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "import pytest\n"
+        f"sys.path.insert(0, {str(root.parent)!r})\n"
+        f"exec(compile(open({str(root / 'conftest.py')!r}).read(), 'conftest_under_test', 'exec'))\n"
+        "@pytest.fixture\n"
+        "def _isolate_chela_dir(monkeypatch):\n"
+        "    from chela import config\n"
+        f"    monkeypatch.setattr(config, 'CHELA_DIR', Path({str(REAL_HOME_CHELA)!r}))\n"
+    )
+    (suite / "test_x.py").write_text("def test_x():\n    pass\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CHELA_")}
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:xdist",
+         "--rootdir", str(suite), str(suite)],
+        cwd=str(suite), env=env, capture_output=True, text=True, timeout=120,
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    assert "LiveChelaDirEscape" in out and "1 passed" not in out, out

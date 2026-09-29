@@ -168,7 +168,17 @@ def test_judge_suite_subprocess_gets_the_sanitised_env(monkeypatch, tmp_path, le
     monkeypatch.setattr(judge.subprocess, "run", fake_run)
     judge.run_suite("true", tmp_path)
     assert len(seen) == 1
-    _assert_clean(_effective(seen[0]))
+    env = _effective(seen[0])
+    # The suite env is STRICTER than child_env: CMX-391's `_suite_env` also strips every
+    # `CHELA_*` var (then points CHELA_DIR at a scratch dir), so a test run can never reach
+    # the live install or the live tmux session. Assert the pm2 leak is gone and the
+    # non-chela survivors pass through; `CHELA_TMUX_SESSION` must NOT reach a suite.
+    leaked = sorted(set(_LEAK) & set(env))
+    assert not leaked, f"suite env still carries pm2's IPC leak: {leaked}"
+    assert env.get("PATH") == os.environ["PATH"]
+    assert env.get("HOME") == os.environ["HOME"]
+    assert env.get("PM2_HOME") == _KEEP["PM2_HOME"]
+    assert "CHELA_TMUX_SESSION" not in env
 
 
 def test_judge_npm_ci_provisioning_gets_the_sanitised_env(monkeypatch, tmp_path, leaky_env):

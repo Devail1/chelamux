@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import critic, envutil, epoch, event_log, hold, judge, memcap
+from chela import critic, envutil, epoch, event_log, hold, judge, memcap, mergegate
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -1321,6 +1321,14 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # budget), reset to 0 the moment CI is next seen passing (see the pr_checks refresh
         # in `tick`) — it counts a STREAK, not a lifetime total.
         ("ci_infra_streak", "ALTER TABLE runs ADD COLUMN ci_infra_streak INTEGER DEFAULT 0"),
+        # ⚖️🔒 CMX-389. The merge gate's BACKSTOP: set on the reconcile tick that finds a
+        # run's PR MERGED without a clean judge on its merged head and without an audited
+        # override (`merged_outside_gate`) — a human in a plain terminal, a non-Claude
+        # process, anything the PreToolUse hook could not see. Set once, on the same
+        # transition to `done` that fires only once, and read by `inbox.run_events` to
+        # announce it exactly once.
+        ("merged_outside_gate",
+         "ALTER TABLE runs ADD COLUMN merged_outside_gate INTEGER NOT NULL DEFAULT 0"),
         # 🧊 CMX-336. `_blocked_race_resolved` (chela/runtime_truth.py) clears a
         # `J_BLOCKED_RACE` row on exactly one condition — `judge_sha != pr_head_sha`, i.e.
         # the PR's head moved past the judged commit. That is unreachable once the PR is
@@ -1752,9 +1760,16 @@ def _read_pr_status(pr_url: str | None, repo_dir: str | None) -> tuple[str | Non
     if not m:
         return None, None
     pr_number = m.group(1)
+    argv = ["gh", "pr", "view", pr_number]
+    # ⛔ CMX-391: ask about the PR the URL NAMES. By number alone `gh` resolves it in
+    # repo_dir's repo — `https://github.com/o/r/pull/5` (a test fixture's URL, lifted
+    # from a transcript) was read as THIS repo's merged PR #5, and a live run was closed.
+    owner_repo = _pr_owner_repo(pr_url)
+    if owner_repo:
+        argv += ["--repo", "/".join(owner_repo)]
     try:
         out = subprocess.run(
-            ["gh", "pr", "view", pr_number, "--json", "state,mergeable"],
+            argv + ["--json", "state,mergeable"],
             cwd=repo_dir, capture_output=True, text=True, timeout=15,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -2312,11 +2327,33 @@ _PR: {pr_url or "(no url on the run row)"} — posted by the dispatcher's CI gat
 """
 
 
-def _read_pr_url(window_name: str | None) -> str | None:
+def _pr_url_in_repo(url: str, repo_dir: str | None) -> bool:
+    """True only when ``url`` is a PR of one of ``repo_dir``'s own GitHub remotes.
+
+    ⛔ CMX-391: a transcript's ``pr-link`` record is written by Claude Code whenever a PR
+    URL shows up in the session — including a TEST FIXTURE's fake URL echoed by pytest or a
+    smoke test. CMX-389's transcript held 23 ``https://github.com/o/r/pull/5`` records and no
+    real one; the daemon recorded that fake PR, saw it "merged" and closed the run. A PR in
+    some other repo is never this run's PR, so no known slug (no repo, no GitHub remote) is
+    a NO, not a pass.
+    """
+    m = mergegate._PR_URL_RE.search(url or "")
+    if not m or not repo_dir:
+        return False
+    slug = f"{m.group(1)}/{m.group(2)}".lower()
+    return slug in {s.lower() for s in mergegate.repo_slugs(repo_dir)}
+
+
+def _read_pr_url(window_name: str | None, repo_dir: str | None = None) -> str | None:
     """Best-effort read of the latest pr-link URL from the agent's transcript.
 
     Returns None on any failure — pr_url is optional; a missing URL leaves the
     Done card unlinked rather than blocking the run from being marked done.
+
+    ⛔ CMX-391: the transcript is evidence of what the session SAW, not of what it opened.
+    A URL outside ``repo_dir``'s own remotes is dropped (see :func:`_pr_url_in_repo`), and
+    callers prefer a ``pr_url`` already on the row — recorded daemon-side by
+    ``request-push`` — over anything read here.
     """
     if not window_name:
         return None
@@ -2329,7 +2366,10 @@ def _read_pr_url(window_name: str | None) -> str | None:
     if isinstance(pr, dict):
         url = pr.get("url")
         if isinstance(url, str) and url:
-            return url
+            if _pr_url_in_repo(url, repo_dir):
+                return url
+            log.warning("Ignoring transcript PR %s for window %s: not a PR of %s",
+                        url, window_name, repo_dir)
     return None
 
 
@@ -2674,11 +2714,13 @@ def mark_awaiting_review(task_id: str) -> dict:
                 "error": f"run is in status {row['status']!r}, refusing to transition",
                 "task_id": task_id,
             }
-        pr_url = _read_pr_url(row["window_name"])
         window_name = row["window_name"]
-        effective_pr_url = pr_url or row["pr_url"]
         wf_path = row["workflow_path"]
         repo_dir = str(Path(wf_path).parent) if wf_path else None
+        # ⛔ CMX-391: the row's own pr_url (recorded daemon-side by request-push) wins; the
+        # transcript is only a fallback — it once handed back a test fixture's fake PR.
+        pr_url = row["pr_url"] or _read_pr_url(window_name, repo_dir)
+        effective_pr_url = pr_url
         pr_state, pr_mergeable = _read_pr_status(effective_pr_url, repo_dir)
         conn.execute(
             "UPDATE runs SET status='awaiting_review', ended_at=?, "
@@ -3125,6 +3167,74 @@ def reviews_of(run: dict) -> list[dict]:
     return [r for r in parsed if isinstance(r, dict)] if isinstance(parsed, list) else []
 
 
+def merge_overrides(run: dict) -> list[dict]:
+    """⚖️🔒 CMX-389. The operator-approved overrides recorded on this run's review history
+    by ``chela merge --override`` — oldest first."""
+    return [r for r in reviews_of(run) if r.get("verdict") == "override"]
+
+
+def record_merge_override(task_id: str, audit: dict) -> bool:
+    """Append an operator-approved override to the run's review history (CMX-389) — the
+    entry :func:`merged_outside_gate` reads. ``False`` if the run row is gone."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT review_history FROM runs WHERE task_id=?", (task_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        reviews = reviews_of(dict(row))
+        reviews.append({
+            "round": len(reviews) + 1, "at": audit.get("at") or _now(),
+            "verdict": "override",
+            "body": f"merge override approved by {audit.get('approved_by')}: "
+                    f"{audit.get('reason') or ''}",
+            **{k: audit.get(k) for k in ("request_id", "approved_by", "head_sha",
+                                         "judge_state", "judge_sha", "reason", "actor")},
+        })
+        conn.execute("UPDATE runs SET review_history=? WHERE task_id=?",
+                     (json.dumps(reviews), task_id))
+        conn.commit()
+    return True
+
+
+def merged_outside_gate(run: dict) -> bool:
+    """Did this (merged) run's PR land WITHOUT going through chela's merge gate?
+
+    Through the gate means one of: the judge said ``clean`` on the head that merged (the
+    same ``judge_sha == pr_head_sha`` test :func:`chela.contract.merge` applies — an unset
+    sha on either side is not a positive mismatch, exactly as there), or an operator
+    approved an override for that head (:func:`merge_overrides`). Anything else — a
+    ``gh pr merge`` from a plain terminal, a merge on github.com, a judge that was blocked
+    or never ran — is a merge the gate never saw.
+    """
+    judge_sha = run.get("judge_sha")
+    head = run.get("pr_head_sha")
+    if run.get("judge_state") == judge.J_CLEAN and not (judge_sha and head and judge_sha != head):
+        return False
+    for override in merge_overrides(run):
+        sha = override.get("head_sha")
+        if not sha or not head or sha == head:
+            return False
+    return True
+
+
+def _record_merge_outside_gate(run: dict) -> None:
+    """The durable record of an out-of-gate merge — the inbox announces it separately
+    (``inbox.run_events``, off ``runs.merged_outside_gate``)."""
+    label = run.get("branch_name") or run.get("task_id")
+    shown = run.get("judge_state") or "never ran"
+    event_log.append(
+        "orchestrator.merge_outside_gate",
+        f"⚠️ {label} was merged outside chela's gate (judge {shown!r} on the merged head, "
+        "no approved override)",
+        payload={"task_id": run.get("task_id"), "pr_url": run.get("pr_url"),
+                 "judge_state": run.get("judge_state"), "judge_sha": run.get("judge_sha"),
+                 "pr_head_sha": run.get("pr_head_sha")},
+    )
+    log.warning("Task %s was merged OUTSIDE chela's gate (judge %r, no override)",
+                run.get("task_id"), shown)
+
+
 def latest_verdict(run: dict) -> str:
     """The most recent SUBSTANTIVE verdict body — what a rework prompt tells the agent to fix.
 
@@ -3138,7 +3248,7 @@ def latest_verdict(run: dict) -> str:
     """
     reviews = reviews_of(run)
     for r in reversed(reviews):
-        if r.get("verdict") == "retry":
+        if r.get("verdict") in ("retry", "override"):
             continue
         return str(r.get("body") or "")
     return ""
@@ -3158,7 +3268,7 @@ def latest_required_mutations(run: dict) -> list[dict]:
     """
     reviews = reviews_of(run)
     for r in reversed(reviews):
-        if r.get("verdict") == "retry":
+        if r.get("verdict") in ("retry", "override"):
             continue
         raw = r.get("mutations")
         return [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
@@ -4236,6 +4346,14 @@ def tick(workflow_path: str | Path) -> dict:
             log.error("Dispatch REFUSED — %s", escape)
         return _refused(escape, refused=True)
     _escaped.discard(str(workflow_path))
+    # ⚖️🔒 CMX-389: keep the merge gate's registry current — the `PreToolUse` hook
+    # (chela.mergegate) decides from this file alone, so it must know every repo chela
+    # dispatches, its GitHub slug and its base branch without asking a running daemon.
+    # Writes only when the entry changed; never raises.
+    mergegate.register(
+        wf.path, [wf.get("workspace", "base_branch", default=None) or "dev"],
+        env={"CHELA_DIR": str(CHELA_DIR)},
+    )
     blocked = status.error is not None
     source = get_source(wf)
     open_tasks = source.list_open_tasks()
@@ -4443,6 +4561,9 @@ def tick(workflow_path: str | Path) -> dict:
                 # never replaces what did. The `done` transition itself stays
                 # unconditional either way — judging a merged head is moot (its commit
                 # cannot change), never a gate on reaching `done`.
+                # ⚖️🔒 CMX-389: did this merge go through the gate? Decided BEFORE the
+                # unjudged stamp below rewrites `judge_state`.
+                outside = merged_outside_gate(dict(row))
                 unjudged = not row["judge_state"]
                 judge_detail = None
                 if unjudged:
@@ -4464,7 +4585,15 @@ def tick(workflow_path: str | Path) -> dict:
                     conn.execute(
                         "UPDATE runs SET status='done' WHERE task_id=?", (row["task_id"],)
                     )
+                if outside:
+                    conn.execute(
+                        "UPDATE runs SET merged_outside_gate=1 WHERE task_id=?",
+                        (row["task_id"],),
+                    )
                 conn.commit()
+                if outside:
+                    _record_merge_outside_gate(dict(row))
+                    summary["merged_outside_gate"] = summary.get("merged_outside_gate", 0) + 1
                 _cleanup_worktree_on_done(wf, row)
                 merged_in_tick += 1
                 summary["reconciled_done"] += 1
@@ -4641,7 +4770,9 @@ def tick(workflow_path: str | Path) -> dict:
                 # legacy self-strike) is legitimate done-evidence here. Preserve
                 # the original ended_at so the timestamp reflects when the agent
                 # finished, not when the human merged the PR.
-                pr_url = _read_pr_url(row["window_name"])
+                wf_path = row["workflow_path"]
+                pr_url = row["pr_url"] or _read_pr_url(
+                    row["window_name"], str(Path(wf_path).parent) if wf_path else None)
                 if row["window_name"]:
                     _kill_window(row["window_name"])
                 conn.execute(
@@ -4664,10 +4795,10 @@ def tick(workflow_path: str | Path) -> dict:
                 # the window-gone→failed check below (reused, not duplicated) if its window
                 # is dead, or is left alone — still running/claimed — for the watchdog if
                 # its window is still alive. Don't kill a window we haven't proven finished.
-                pr_url = _read_pr_url(row["window_name"])
-                effective_pr_url = pr_url or row["pr_url"]
                 wf_path = row["workflow_path"]
                 repo_dir = str(Path(wf_path).parent) if wf_path else None
+                pr_url = row["pr_url"] or _read_pr_url(row["window_name"], repo_dir)
+                effective_pr_url = pr_url
                 pr_state = row["pr_state"]
                 if pr_state != "merged" and effective_pr_url:
                     pr_state, _mergeable = _read_pr_status(effective_pr_url, repo_dir)

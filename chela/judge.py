@@ -77,6 +77,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -477,6 +478,31 @@ def _no_color_env() -> dict[str, str]:
     return env
 
 
+# tmux's own identity vars. `TMUX_PANE` is how `config.current_session()` auto-derives a
+# session and `chela whoami` a window, so a suite that inherits it can act as that pane.
+SUITE_STRIPPED_TMUX_VARS = ("TMUX", "TMUX_PANE")
+
+
+def _suite_env(chela_dir: Path) -> dict[str, str]:
+    """:func:`_no_color_env`, cut off from the live install: EVERY ``CHELA_*`` var and
+    tmux's identity vars removed, then ``CHELA_DIR`` pointed at ``chela_dir`` (a fresh
+    temp dir the caller owns).
+
+    ⛔ CMX-391: the judge, ``chela judge self-check`` and ``chela task-finished
+    --self-check-experiments`` run a repo's suite from a DISPATCHED AGENT'S shell or the
+    daemon's, both of which carry the live ``CHELA_DIR`` and the agent's ``CHELA_WID``.
+    Passed through, the suite's own conftest is the only thing between a test and the
+    operator's real ``scheduler.db`` — and it can only fence what it knows about. A suite
+    must be unable to reach live state or impersonate the live window by construction,
+    whatever repo it belongs to. Removed, not ``setdefault``-ed: an inherited ``CHELA_DIR``
+    outranks a ``setdefault``, which is exactly how the live dir leaks.
+    """
+    env = {k: v for k, v in _no_color_env().items()
+           if not k.startswith("CHELA_") and k not in SUITE_STRIPPED_TMUX_VARS}
+    env["CHELA_DIR"] = str(chela_dir)
+    return env
+
+
 def run_suite(test_cmd: str, cwd: Path, timeout: float = SUITE_TIMEOUT_SECONDS) -> SuiteResult:
     """Run the repo's OWN test command and read its exit code. Never raises.
 
@@ -491,10 +517,11 @@ def run_suite(test_cmd: str, cwd: Path, timeout: float = SUITE_TIMEOUT_SECONDS) 
     costs nothing.
     """
     try:
-        out = subprocess.run(
-            test_cmd, shell=True, cwd=str(cwd), env=_no_color_env(),
-            capture_output=True, text=True, errors="replace", timeout=timeout,
-        )
+        with tempfile.TemporaryDirectory(prefix="chela-suite-") as scratch:
+            out = subprocess.run(
+                test_cmd, shell=True, cwd=str(cwd), env=_suite_env(Path(scratch)),
+                capture_output=True, text=True, errors="replace", timeout=timeout,
+            )
     except subprocess.TimeoutExpired:
         return SuiteResult(False, -1, 0, 0, 0, "", f"the suite did not finish in {timeout:.0f}s")
     except OSError as e:
