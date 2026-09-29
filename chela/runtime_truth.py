@@ -85,6 +85,7 @@ from chela.sources.markdown import (
     OPEN_RE,
     _parse_depends,
     _title_id,
+    raw_title,
     _TRAILING_COMMENT_RE,
 )
 from chela.workflow import load_workflow
@@ -2831,11 +2832,12 @@ def _unresolved_depends_scan() -> list[dict]:
             unresolved_ids = sorted(set(t.depends) - known_ids)
             if not unresolved_ids:
                 continue
-            # `t.title` still carries its own `depends:` marker verbatim — re-parse it
-            # (never re-hash — `_title_id` stays the single authority) to map each
-            # unresolved id back to the exact title text a human typed, so the finding
-            # names something a person can go fix rather than a hash they cannot.
-            m = DEPENDS_RE.search(t.title)
+            # `raw_title(t)` still carries its own `depends:` marker verbatim (`t.title`
+            # is bare since CMX-392) — re-parse it (never re-hash — `_title_id` stays the
+            # single authority) to map each unresolved id back to the exact title text a
+            # human typed, so the finding names something a person can go fix rather
+            # than a hash they cannot.
+            m = DEPENDS_RE.search(raw_title(t))
             raw_titles = _parse_depends(m.group(1)) if m else ()
             by_id = {_title_id(filename, raw): raw for raw in raw_titles}
             unresolved_titles = [by_id.get(uid, uid) for uid in unresolved_ids]
