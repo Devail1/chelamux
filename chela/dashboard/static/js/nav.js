@@ -2009,6 +2009,13 @@ function _paletteItems(skipWids) {
     // this is the ONLY entry point (palette-only, deliberately no dedicated global
     // keybind — see index.html's #shortcuts-overlay comment).
     items.push({ icon: lucideIcon('keyboard'), title: 'Keyboard shortcuts', sub: 'help', run: () => openShortcuts() });
+    // CMX-401: on a phone the sidebar's "Jump to session" box is the palette, and
+    // there is no Ctrl+, to reach Settings — this row is the way in. Open-only:
+    // toggleSettings() on an already-open drawer would close it.
+    items.push({ icon: lucideIcon('settings'), title: 'Settings', sub: 'action', run: () => {
+        const d = document.getElementById('settings-drawer');
+        if (!(d && d.classList.contains('open'))) toggleSettings();
+    } });
     return items;
 }
 
