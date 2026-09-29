@@ -632,6 +632,11 @@ describe('CMX-393 phone 390×844: the drawer foot is one row, the "+" opens the 
             `#new-menu ${JSON.stringify(menu)} is not on screen`);
         const closed = await box(page, '.sidebar');
         assert.ok(closed.x + closed.width <= px, 'opening the launch menu also opened the drawer');
+        // openNewMenu arms its light-dismiss listener in a setTimeout(0). CDP input
+        // can outrun that timer on a loaded runner (CI 3.11, PR #555), so the click
+        // landed before the listener existed and the menu never closed. A later
+        // setTimeout(0) fires after the earlier one, so awaiting one means armed.
+        await page.evaluate(() => new Promise(r => setTimeout(r, 0)));
         await page.mouse.click(380, 830);   // light-dismiss
         await page.waitForSelector('#new-menu', { state: 'hidden', timeout: 5000 });
     });
