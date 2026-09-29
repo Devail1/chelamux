@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import critic, epoch, event_log, hold, judge, memcap
+from chela import critic, envutil, epoch, event_log, hold, judge, memcap
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -2412,7 +2412,7 @@ def _new_window(window_name: str, cwd: str) -> str:
     out = subprocess.run(
         ["tmux", "new-window", "-t", f"{TMUX_SESSION}:", "-n", window_name,
          "-c", cwd, "-P", "-F", "#{window_id}"],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, env=envutil.child_env(),
     )
     wid = out.stdout.strip() if isinstance(out.stdout, str) else ""
     return wid if re.fullmatch(r"@\d+", wid) else window_name
@@ -2438,6 +2438,7 @@ def _fire_after_done(wf: WorkflowDef) -> None:
             cmd,
             shell=True,
             cwd=str(wf.path.parent),
+            env=envutil.child_env(),
             start_new_session=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -3524,8 +3525,65 @@ def approve(ident: str, body: str = "", force: bool = False) -> dict:
     }
 
 
+# 🧊🔓 CMX-387: the statuses `reopen` accepts. `done` only under `_done_reopen_refusal`.
+REOPENABLE_STATUSES = ("needs_human", "done")
+
+
+def _done_reopen_refusal(run: dict) -> str | None:
+    """Why a ``done`` run may NOT be reopened — or None when it may.
+
+    🧊🔓 CMX-387. A ``done`` row whose PR is still OPEN and whose head has moved (the
+    stuck-``done`` trap, hit live on #395) had no in-contract exit: ``merge`` refuses
+    ``done`` and ``reopen`` used to refuse everything but ``needs_human``. ``done`` is
+    otherwise terminal, so the bar is higher than for ``needs_human`` — the new-commit
+    gate in :func:`reopen` still applies on top of this. Every "cannot tell" is a
+    REFUSAL here, never a pass:
+
+    * the PR must be live-read from GitHub as OPEN — a merged PR has shipped and a closed
+      one was walked away from; neither comes back through this door. An unreadable state
+      is refused too.
+    * the task must not be struck ``- [x]`` in its tracker — the dispatcher strikes only on
+      merge, so a struck line says this task is finished whatever the PR says. A tracker
+      this cannot read (or a tracker kind with no notion of a struck line) is refused.
+    """
+    wf_path = run.get("workflow_path")
+    repo_dir = str(Path(wf_path).parent) if wf_path else None
+    pr_state, _mergeable = _read_pr_status(run.get("pr_url"), repo_dir)
+    if pr_state is None:
+        return ("run is `done` and its PR's state could not be read from GitHub — refusing "
+                "to reopen a `done` run without knowing its PR is still open. Make sure `gh` "
+                "can reach this PR, and try again.")
+    if pr_state != "open":
+        return (f"run is `done` and its PR is {pr_state.upper()} — only a `done` run whose PR "
+                "is still OPEN can be reopened; a merged or closed PR stays closed.")
+    try:
+        source = get_source(load_workflow(wf_path))
+    except Exception as e:  # noqa: BLE001 — any failure to read the tracker is a refusal
+        return (f"run is `done` and its tracker could not be loaded ({e}) — refusing to reopen "
+                "without knowing whether the task was struck done.")
+    closed_ids_from_text = getattr(source, "closed_ids_from_text", None)
+    tracker = getattr(source, "path", None)
+    if closed_ids_from_text is None or tracker is None:
+        return ("run is `done` and its tracker kind has no struck-line to check — refusing to "
+                "reopen a `done` run whose task may already be closed.")
+    try:
+        text = Path(tracker).read_text()
+    except OSError as e:
+        return (f"run is `done` and its tracker could not be read ({e}) — refusing to reopen "
+                "without knowing whether the task was struck done.")
+    if run["task_id"] in closed_ids_from_text(text):
+        return ("run is `done` and its task is struck `- [x]` in the tracker — the task is "
+                "finished; reopening it would put closed work back under review.")
+    return None
+
+
 def reopen(ident: str, reason: str = "") -> dict:
     """Put a ``needs_human`` run BACK under review — the human-takeover re-entry.
+
+    🧊🔓 CMX-387: also a ``done`` run whose PR is still OPEN, whose head moved past
+    ``judge_sha``, and whose task is not struck ``- [x]`` (see
+    :func:`_done_reopen_refusal`) — otherwise a stuck ``done`` row had no exit short of a
+    hand edit of the runs DB. It re-enters ``awaiting_review`` exactly as below.
 
     ``needs_human`` is terminal everywhere else in this file: the rework loop gave up on
     it (CMX-68), and ``request_changes``/``approve`` both refuse anything that is not
@@ -3566,12 +3624,20 @@ def reopen(ident: str, reason: str = "") -> dict:
     if run is None:
         return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
     task_id = run["task_id"]
-    if run["status"] != "needs_human":
+    from_status = run["status"]
+    if from_status not in REOPENABLE_STATUSES:
         return {
             "ok": False, "task_id": task_id,
-            "error": f"run is in status {run['status']!r}, not 'needs_human' — only a run "
-                     "the rework loop actually gave up on can be reopened",
+            "error": f"run is in status {from_status!r}, not 'needs_human' or 'done' — only a "
+                     "run the rework loop actually gave up on, or a `done` run whose PR is "
+                     "still open, can be reopened",
         }
+    if from_status == "done":
+        # 🧊🔓 CMX-387: the stuck-`done` exit. Refused BEFORE the new-commit gate so a
+        # merged/closed PR or a struck task never costs a head read it cannot use.
+        refusal = _done_reopen_refusal(run)
+        if refusal:
+            return {"ok": False, "task_id": task_id, "error": refusal}
 
     # ⛔ GUARD: the new-commit gate. The dispatcher judges ONE PASS PER HEAD COMMIT
     # (`pr_head_sha` vs `judge_sha` — see the cap check around line 2200). Reopening an
@@ -3616,14 +3682,15 @@ def reopen(ident: str, reason: str = "") -> dict:
 
     with _db() as conn:
         # Same COMPARE-AND-SWAP discipline as request_changes: the row must still be the
-        # needs_human row this call read, or a concurrent reconcile (a human merged the
+        # needs_human (or done) row this call read, or a concurrent reconcile (a human merged the
         # stale PR directly, in the gap between the read above and this write) would be
         # resurrected out of `done`.
         cur = conn.execute(
             "UPDATE runs SET status='awaiting_review', review_history=?, last_error=NULL, "
             "pr_head_sha=?, reopen_count=?, first_reopen_head_sha=? "
-            "WHERE task_id=? AND status='needs_human'",
-            (json.dumps(reviews), ci.head_sha, new_reopen_count, first_reopen_sha, task_id),
+            "WHERE task_id=? AND status=?",
+            (json.dumps(reviews), ci.head_sha, new_reopen_count, first_reopen_sha, task_id,
+             from_status),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -3649,7 +3716,8 @@ def reopen(ident: str, reason: str = "") -> dict:
     if not posted:
         log.warning("reopen: %s is awaiting_review again, but the PR comment did not post "
                     "(%s)", task_id, detail)
-    log.info("reopen: %s (needs_human) → awaiting_review (reopen %d)", task_id, new_reopen_count)
+    log.info("reopen: %s (%s) → awaiting_review (reopen %d)", task_id, from_status,
+             new_reopen_count)
 
     # ⭐ THE NUDGE. Advisory only — see the docstring. Only worth asking GitHub about past
     # the 3rd reopen (rounds 1-2 are never enough signal, and every round below that would
@@ -4087,6 +4155,40 @@ def _refused(error: str | None, refused: bool = False) -> dict:
 # Workflows currently refused by the workspace fence — so the ERROR is logged on the
 # EDGE, not once per tick forever (a 60s drumbeat is how an operator learns to skip logs).
 _escaped: set[str] = set()
+# Workflows whose CMX-384 re-key has run in this process — see `_rekey_legacy_raw_ids`.
+_rekeyed: set[str] = set()
+
+
+def _rekey_legacy_raw_ids(conn: sqlite3.Connection, workflow_path: str, mapping: dict[str, str]) -> int:
+    """CMX-384 migration: move each ``runs`` row keyed by a still-open task's OLD raw-line id
+    onto its bare-title id, in ONE transaction. Returns the number of rows re-keyed.
+
+    Before CMX-384 a marker-carrying open bullet hashed its raw line (``<!-- depends: … -->``
+    included). A run claimed under that id, left alone, would read as "removed from source"
+    on the first tick after the upgrade and be struck ``done`` while the same bullet — now
+    under its new id — got claimed a second time. Only rows of THIS workflow move; a row
+    already sitting on the new id is left as it is (never overwritten) and logged.
+    """
+    if not mapping:
+        return 0
+    moved = 0
+    with conn:
+        for old, new in sorted(mapping.items()):
+            row = conn.execute(
+                "SELECT status FROM runs WHERE task_id=? AND workflow_path=?", (old, workflow_path)
+            ).fetchone()
+            if row is None:
+                continue
+            if conn.execute("SELECT 1 FROM runs WHERE task_id=?", (new,)).fetchone():
+                log.warning("CMX-384 re-key: run %s NOT moved to %s — a row already holds that id",
+                            old, new)
+                continue
+            conn.execute("UPDATE runs SET task_id=? WHERE task_id=? AND workflow_path=?",
+                         (new, old, workflow_path))
+            log.warning("CMX-384 re-key: run %s (%s) → %s (open-task ids now hash the bare title)",
+                        old, row[0], new)
+            moved += 1
+    return moved
 
 
 def tick(workflow_path: str | Path) -> dict:
@@ -4180,6 +4282,14 @@ def tick(workflow_path: str | Path) -> dict:
     merged_in_tick = 0  # awaiting_review → done transitions; fires hooks.after_done
 
     with _db() as conn:
+        # CMX-384, once per process per workflow and only off a GOOD read: an in-flight run
+        # keyed by an open task's pre-CMX-384 raw-line id must move to its new id BEFORE
+        # anything below reads absence-from-open_ids as "removed from source".
+        legacy = getattr(source, "legacy_raw_ids", None)
+        if legacy is not None and not tracker_read_failed and str(wf.path) not in _rekeyed:
+            _rekey_legacy_raw_ids(conn, str(wf.path), legacy(open_tasks))
+            _rekeyed.add(str(wf.path))
+
         # 0. Refresh pr_state + pr_mergeable for any row whose PR could still
         # change. Skips rows whose pr_state is already terminal
         # ('merged'/'closed') — gh's GraphQL is cheap but not free, and the
@@ -5517,13 +5627,15 @@ def _launch_agent(
             log.info("Running after_create hook for %s", task_id)
             subprocess.run(
                 render_prompt(after_create, hook_vars),
-                shell=True, cwd=worktree, check=True,
+                shell=True, cwd=worktree, check=True, env=envutil.child_env(),
             )
 
     before = wf.get("hooks", "before_run")
     if before:
         log.info("Running before_run hook for %s", task_id)
-        subprocess.run(before, shell=True, cwd=worktree, check=True)
+        # CMX-390: never the daemon's raw environ — pm2's NODE_CHANNEL_FD makes any Node
+        # program the hook runs (pnpm) abort 134 before the agent ever launches.
+        subprocess.run(before, shell=True, cwd=worktree, check=True, env=envutil.child_env())
 
     _kill_windows_named(window_name)
     target_id = _new_window(window_name, str(worktree))

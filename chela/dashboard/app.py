@@ -475,15 +475,21 @@ _TERM_PASTE_KEY_SHIM = (
 # (same-origin — the iframe is proxied through the dashboard, so window.parent is
 # accessible). Note: this shadows readline's Ctrl+K (kill-to-end-of-line) inside
 # panes, which is the documented trade-off for a global palette hotkey.
+#
+# CMX-385: the same shim also catches Ctrl/⌘+, and calls the parent's
+# toggleSettings() (VS Code's settings key). Unlike Ctrl+K there is no shell
+# trade-off here: Ctrl+, has no readline binding, and most terminals cannot even
+# encode it (there is no C0 control for ',').
 _TERM_PALETTE_KEY_SHIM = (
     "<script>(function(){"
     "function onKey(e){"
     "if(!(e.ctrlKey||e.metaKey)||e.altKey||e.shiftKey)return;"
-    "if(e.key!=='k'&&e.key!=='K')return;"
+    "var fn=(e.key==='k'||e.key==='K')?'openPalette':(e.key===','?'toggleSettings':null);"
+    "if(!fn)return;"
     "if(!window.parent||window.parent===window)return;"
     "e.preventDefault();e.stopImmediatePropagation();"
     # Stage 0: dashboard fns moved to the window.chela namespace under ES modules.
-    "try{var c=window.parent.chela;if(c&&typeof c.openPalette==='function')c.openPalette();}"
+    "try{var c=window.parent.chela;if(c&&typeof c[fn]==='function')c[fn]();}"
     "catch(err){}}"
     "document.addEventListener('keydown',onKey,true);"
     "})();</script>"
@@ -1862,8 +1868,9 @@ def api_config():
     projects_dir plus the effective dir the launcher will scan (after env/default
     fallback), the dispatcher's agent permission mode, and the coding-agent model
     (each stored + effective + the closed enum of valid values + any WORKFLOW.md
-    that overrides them). POST {projects_dir}, {agent_permission_mode}, and/or
-    {agent_model} sets or (empty) clears them.
+    that overrides them), plus the Remote Control switch (effective value + whether
+    ``CHELA_REMOTE_CONTROL`` locks it). POST {projects_dir}, {agent_permission_mode},
+    {agent_model}, and/or {remote_control} sets or (empty) clears them.
 
     ``agent_permission_mode`` and ``agent_model`` are validated against
     dispatcher.PERMISSION_MODES / dispatcher.AGENT_MODELS HERE, server-side — the
@@ -1893,8 +1900,23 @@ def api_config():
             userconfig.set_(dispatcher.AGENT_MODEL_KEY, model)
         if "projects_dir" in data:
             userconfig.set_("projects_dir", (data.get("projects_dir") or "").strip())
+        if "remote_control" in data:
+            # CMX-382: stored as a real JSON bool; null/"" clears back to env/default.
+            # Validated here, like the enums above — anything that isn't a boolean
+            # spelling is rejected 400 and the stored value is left untouched.
+            raw = data.get("remote_control")
+            if raw in (None, ""):
+                userconfig.set_(config.REMOTE_CONTROL_KEY, None)
+            else:
+                try:
+                    enabled = config.cast_strict_bool(raw)
+                except ValueError:
+                    return jsonify({"error": "invalid remote_control",
+                                    "valid": [True, False]}), 400
+                userconfig.set_(config.REMOTE_CONTROL_KEY, enabled)
     stored_mode = dispatcher.settings_permission_mode()
     stored_model = dispatcher.settings_agent_model()
+    remote_control, rc_source = config.remote_control_setting()
     return jsonify({
         "projects_dir": userconfig.get("projects_dir", ""),
         "projects_dir_effective": str(launcher._projects_dir()),
@@ -1911,6 +1933,13 @@ def api_config():
         "agent_model_default": dispatcher.DEFAULT_AGENT_MODEL,
         "agent_models": list(dispatcher.AGENT_MODELS),
         "agent_cmd_overrides": _agent_cmd_overrides(),
+        # CMX-382: `--remote-control` on NEW human-facing windows (never dispatcher
+        # agents). `remote_control_env_locked` = CHELA_REMOTE_CONTROL is set and wins,
+        # so the Settings toggle shows the effective value but is disabled.
+        "remote_control": remote_control,
+        "remote_control_source": rc_source,
+        "remote_control_env_locked": rc_source == "env",
+        "remote_control_env": config.REMOTE_CONTROL_ENV,
     })
 
 

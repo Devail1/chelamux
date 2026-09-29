@@ -2472,6 +2472,9 @@ def cmd_reopen(args) -> None:
     commit to it — it flips the row back to ``awaiting_review`` so ``chela judge run`` and
     ``chela merge`` can pick up the fixed head exactly like a fresh PR. It does not touch
     the branch, the worktree, or the PR; those were already preserved when the run escalated.
+
+    🧊🔓 CMX-387: a ``done`` run is accepted too, but only while its PR is still OPEN and
+    its task is not struck ``- [x]`` — the exit from the stuck-``done`` trap.
     """
     result = dispatcher.reopen(args.run, reason=getattr(args, "reason", "") or "")
     if not result.get("ok"):
@@ -2893,8 +2896,9 @@ def main() -> None:
     # reopen — the human-takeover re-entry: needs_human back into review
     p_reopen = sub.add_parser(
         "reopen",
-        help="🔓 Put a needs_human run back into awaiting_review — after YOU fixed the "
-             "branch and pushed a new commit — so judge/review/merge can re-verify it",
+        help="🔓 Put a needs_human run (or a done run whose PR is still OPEN and whose task "
+             "is not struck) back into awaiting_review — after YOU pushed a new commit — so "
+             "judge/review/merge can re-verify it",
     )
     p_reopen.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-84)")
     p_reopen.add_argument(

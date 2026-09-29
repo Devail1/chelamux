@@ -3065,7 +3065,7 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
 /* Phone-only floating trigger for the off-canvas drawer (CMX-377) — see the
    mobile media query below for when it shows. Desktop never needs it: the
    sidebar's own toggle in .sidebar-head is always on screen there. */
-.mobile-menu-fab {
+.mobile-menu-fab, .mobile-new-fab {
     display: none; position: fixed; z-index: 46;
     top: max(14px, env(safe-area-inset-top)); left: max(14px, env(safe-area-inset-left));
     width: 42px; height: 42px; border-radius: 50%;
@@ -3073,8 +3073,11 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
     background: var(--surface); border: 1px solid var(--border); color: var(--text);
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
 }
-.mobile-menu-fab svg { width: 20px; height: 20px; display: block; }
-.mobile-menu-fab:hover { border-color: var(--accent); color: var(--accent); }
+/* CMX-386: the "+" (New session) sits one fab-width + an 8px gap to the right
+   of the ☰, off the same safe-area inset. */
+.mobile-new-fab { left: calc(max(14px, env(safe-area-inset-left)) + 50px); }
+.mobile-menu-fab svg, .mobile-new-fab svg { width: 20px; height: 20px; display: block; }
+.mobile-menu-fab:hover, .mobile-new-fab:hover { border-color: var(--accent); color: var(--accent); }
 
 /* Always-on-top safety cluster (CMX-377) — see index.html's comment on why
    #status-health-warn and #btn-shares live here, outside the sidebar, on
@@ -3786,6 +3789,15 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
        own toggle button sitting right behind it. */
     .mobile-menu-fab { display: inline-flex; }
     body.sidebar-open .mobile-menu-fab { display: none; }
+    /* CMX-386: its "+" sibling opens #new-menu with the drawer closed. It
+       hides with the ☰ while the drawer is open — the drawer's own "New
+       session" button is right there, and the "+" would float over it. */
+    .mobile-new-fab { display: inline-flex; }
+    body.sidebar-open .mobile-new-fab { display: none; }
+    /* ...and the menu it opens (anchored under it by openNewMenu, clamped to
+       the 8px left edge) never runs off the right: a long nowrap project label
+       would otherwise size the popover past a 390px screen. */
+    .launch-menu { max-width: calc(100vw - 16px); }
 }
 
 /* ---- Mobile agent switcher (pill strip) ----

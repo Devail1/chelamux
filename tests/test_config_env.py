@@ -94,21 +94,19 @@ def test_missing_file_falls_back_to_defaults(chela_dir, monkeypatch):
 
 
 def test_remote_control_env_default_is_on(chela_dir, monkeypatch):
-    """CMX-375/CMX-376: every `--remote-control` test elsewhere (test_spawn.py,
-    test_orchestrator_autolaunch.py, test_agent_permission_mode.py) monkeypatches
-    `config.REMOTE_CONTROL_ENABLED` directly, so none of them read what the module-level
-    `os.environ.get("CHELA_REMOTE_CONTROL", "true")` call itself produces — a corrupted
-    default string ("true" -> "false") would go unnoticed (DEFEAT_SHAPES 352c shape).
-    Reload against a clean environment and read the constant it actually produced."""
+    """CMX-375/CMX-376, re-pointed at CMX-382's per-call resolver: the real
+    `config.remote_control_enabled()` against a clean environment and no config.json
+    (most `--remote-control` tests elsewhere monkeypatch the resolver itself, so they
+    never read its built-in default — DEFEAT_SHAPES 352c shape)."""
+    from chela import userconfig
     monkeypatch.delenv("CHELA_REMOTE_CONTROL", raising=False)
-    importlib.reload(config)
-    assert config.REMOTE_CONTROL_ENABLED is True
+    monkeypatch.setattr(userconfig, "_PATH", chela_dir / "no-such-config.json")
+    assert config.remote_control_enabled() is True
 
 
 def test_remote_control_env_var_turns_it_off(chela_dir, monkeypatch):
     monkeypatch.setenv("CHELA_REMOTE_CONTROL", "false")
-    importlib.reload(config)
-    assert config.REMOTE_CONTROL_ENABLED is False
+    assert config.remote_control_enabled() is False
 
 
 def test_chela_dir_never_resolves_to_a_real_tmux_session(chela_dir):
