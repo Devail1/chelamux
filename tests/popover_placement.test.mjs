@@ -120,6 +120,34 @@ test('a menu taller than the space both ways is clamped at 8px and scrolls', () 
     hideAll();
 });
 
+// The menu FITS the viewport but neither above nor below its anchor: it goes on
+// the ROOMIER side, pushed back inside. The menu must be shorter than the
+// viewport's room — the too-tall test above caps it there, so both sides clamp
+// to the same top=8 and cannot tell the roomier side from the other one. Both
+// directions are pinned, so a flipped comparison is RED either way.
+test('neither side has room: the menu goes on the ROOMIER side, clamped inside', () => {
+    hideAll();
+    viewport(1440, 900);
+    const btn = doc.getElementById('btn-primary-menu');
+    const m = doc.getElementById('primary-menu');
+    size(m, 210, 500);   // < 900 − 16, so no max-height: it fits the viewport
+
+    // More room below (462) than above (400): below, clamped to 900 − 8 − 500.
+    rect(btn, { top: 400, left: 400, width: 38, height: 38 });
+    click(btn);
+    assert.equal(m.style.maxHeight, '', 'precondition: the 500px menu fits the viewport');
+    assert.equal(placed(m).top, 900 - 8 - 500,
+        `roomier side is BELOW (462 vs 400) but the menu top is ${placed(m).top}, not 392`);
+    hideAll();
+
+    // More room above (470) than below (392): above, clamped to the 8px margin.
+    rect(btn, { top: 470, left: 400, width: 38, height: 38 });
+    click(btn);
+    assert.equal(placed(m).top, 8,
+        `roomier side is ABOVE (470 vs 392) but the menu top is ${placed(m).top}, not 8`);
+    hideAll();
+});
+
 test('the menu never runs off the RIGHT edge either', () => {
     hideAll();
     viewport(1440, 900);
