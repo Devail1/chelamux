@@ -3038,7 +3038,13 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .sidebar {
     display: flex; flex-direction: column;
     border-right: 1px solid var(--border);
-    background: var(--bg); height: 100vh;
+    background: var(--bg);
+    /* CMX-404: 100dvh, NOT bare vh. On iOS Safari 100vh includes the strip under
+       the browser's bottom toolbar, so the foot (readouts + the Settings/menu
+       button) rendered behind it and Settings was unreachable on a phone. The
+       vh line is the fallback for a browser without dvh (it drops the second). */
+    height: 100vh;
+    height: 100dvh;
 }
 .sidebar-head {
     flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
@@ -3080,7 +3086,6 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .sidebar-jump input::placeholder { color: var(--text-dim); }
 .sidebar-jump:focus-within { border-color: var(--accent); }
-body.sidebar-collapsed .sidebar-quick { display: none; }
 
 /* CMX-393: ONE row — readouts on the left, the single settings/menu gear pushed
    to the right. No wrap: the inbox that used to crowd this row lives in the head
@@ -3338,6 +3343,10 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
     body.sidebar-collapsed .sidebar-foot #btn-primary-menu { margin-left: 0; }
     body.sidebar-collapsed .sidebar-head .brand span { display: none; }
     body.sidebar-collapsed #resources-strip { display: none; }
+    /* CMX-404: inside this desktop block, like every other rail rule. The class is
+       persisted per browser, so an unscoped hide leaked into the phone drawer and
+       took the New session + Jump row with it. */
+    body.sidebar-collapsed .sidebar-quick { display: none; }
 
     body.sidebar-collapsed .side-head,
     body.sidebar-collapsed .side-empty,
