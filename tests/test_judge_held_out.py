@@ -672,3 +672,34 @@ def test_a_MALFORMED_held_out_experiment_stays_held_out_and_unnamed(tmp_path):
     _assert_no_leak(judge.comment_body(report, None, TEST_CMD), "the comment (malformed)")
     _assert_no_leak(json.dumps([o.as_dict() for o in report.visible_outcomes]),
                     "the visible outcomes (malformed)")
+
+
+# --- rework 6 (orchestrator): record_private never raises -------------------------------
+
+def _one_survivor_report():
+    return judge.Report(outcomes=[
+        judge.Outcome(judge.Experiment(**_glyph()), judge.SURVIVED, "survived"),
+    ])
+
+
+def test_record_private_swallows_a_WRITE_failure_and_returns_none(tmp_path, monkeypatch, caplog):
+    """🔴 GUARD (judge on 28dca1b): a private record that cannot be written must not take the
+    verdict down with it. Point the store under a regular FILE so mkdir raises an OSError."""
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x")
+    monkeypatch.setattr(judge, "heldout_store_path", lambda task_id: blocker / "sub" / "x.jsonl")
+    with caplog.at_level("WARNING"):
+        out = judge.record_private("ho-write-fail", _one_survivor_report(), {"experiments": []})
+    assert out is None
+    assert "could not record the private held-out round" in caplog.text
+
+
+def test_record_private_swallows_a_BUILD_failure_and_returns_none(monkeypatch, caplog):
+    """The same contract when assembling the record fails, not just the write."""
+    def boom(*a, **k):
+        raise ValueError("synthetic build failure")
+    monkeypatch.setattr(judge, "held_out_quota", boom)
+    with caplog.at_level("WARNING"):
+        out = judge.record_private("ho-build-fail", _one_survivor_report(), {"experiments": []})
+    assert out is None
+    assert "synthetic build failure" in caplog.text

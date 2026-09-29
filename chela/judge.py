@@ -2191,7 +2191,21 @@ def record_private(
     sha: str | None = None, stale: bool = False, pr_url: str | None = None,
 ) -> Path | None:
     """Append this round to the operator's private record. Never raises — a record that
-    could not be written must not take a verdict down with it; it is logged instead."""
+    could not be written (or even assembled) must not take a verdict down with it; it is
+    logged instead. The guard is the whole body, not just the write: a failure while
+    building the record is the same "no record" outcome."""
+    try:
+        return _record_private(task_id, report, raw, held_out_fraction,
+                               sha=sha, stale=stale, pr_url=pr_url)
+    except Exception as e:  # noqa: BLE001 — by contract, nothing escapes into the verdict
+        log.warning("judge: %s: could not record the private held-out round: %s", task_id, e)
+        return None
+
+
+def _record_private(
+    task_id: str, report: Report, raw: dict, held_out_fraction: float, *,
+    sha: str | None, stale: bool, pr_url: str | None,
+) -> Path | None:
     items = raw.get("experiments") if isinstance(raw, dict) else None
     proposed = len(items) if isinstance(items, list) else 0
     ran = len(report.outcomes)
@@ -2222,15 +2236,11 @@ def record_private(
         ]),
     }
     path = heldout_store_path(task_id)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "a") as fh:
-            fh.write(json.dumps(rec) + "\n")
-    except OSError as e:
-        log.warning("judge: %s: could not write the private held-out record %s: %s",
-                    task_id, path, e)
-        return None
+    # No local except: record_private's single guard owns every failure (write or build).
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a") as fh:
+        fh.write(json.dumps(rec) + "\n")
     return path
 
 
