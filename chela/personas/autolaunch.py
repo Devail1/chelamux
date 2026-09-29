@@ -301,7 +301,7 @@ def wake(repo_dir: str | None = None) -> dict:
     repo_dir = repo_dir or _orchestrator_repo_dir()
     wid = _spawn_orchestrator_window(repo_dir)
     record_launch(wid)
-    registered = inbox.register(wid)
+    registered = inbox.register(wid, source="autolaunch")
     event_log.append(
         "orchestrator.autolaunch",
         f"auto-launched the orchestrator persona in {wid} (inbox-woken, under an attended-lease)",

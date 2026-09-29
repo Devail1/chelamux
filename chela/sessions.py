@@ -145,6 +145,7 @@ read-modify-write, skipped once the pin already agrees): :mod:`chela.hooks` neve
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -523,6 +524,72 @@ def _resumed_session(pid: int) -> str | None:
     return None
 
 
+def claude_sessions_dir() -> Path:
+    """Claude Code's live-session registry: ``<config dir>/sessions/<pid>.json``.
+
+    Read per call (not latched at import) so ``$CLAUDE_CONFIG_DIR`` relocates it, exactly as
+    it relocates the transcript tree (:func:`chela.transcripts.claude_config_dir`).
+    """
+    return transcripts.claude_config_dir() / "sessions"
+
+
+def _proc_start_ticks(pid: int) -> str | None:
+    """The pid's start time in clock ticks since boot (``/proc/<pid>/stat`` field 22), as
+    the raw string Claude Code records it under ``procStart`` in its session registry."""
+    try:
+        stat = (PROC / str(pid) / "stat").read_text()
+        return stat[stat.rindex(")") + 1:].split()[19]
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def registry_entry(pid: int | None) -> dict | None:
+    """CMX-394: Claude Code's OWN record of what session a live pid is running.
+
+    Every interactive Claude Code process writes ``<config dir>/sessions/<pid>.json`` with its
+    ``sessionId`` (and its ``tmux`` pane, ``<session>:@wid.%pane``). That is a claim the
+    process makes about ITSELF, so unlike the cwd it cannot confuse two agents that share a
+    directory — which is exactly the case every other tier here refuses or gets wrong: a
+    window launched with a plain ``claude`` (no ``--resume``) whose hooks all ride without
+    ``$CHELA_WID`` and whose SessionStart record has aged out of the event log.
+
+    Bounded against pid reuse the same way tier 1 is: the file's ``procStart`` must equal the
+    pid's CURRENT start time (``/proc/<pid>/stat``). A leftover file from a dead process whose
+    pid was recycled is refused. Unknown is not a pass — no ``procStart``, or no readable
+    ``/proc`` to check it against, returns None. Returns the validated entry, else None.
+    """
+    if not pid:
+        return None
+    try:
+        data = json.loads((claude_sessions_dir() / f"{pid}.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("pid") != pid:
+        return None
+    sid = data.get("sessionId")
+    if not isinstance(sid, str) or not SESSION_RE.match(sid):
+        return None
+    recorded = data.get("procStart")
+    if recorded is None or str(recorded) != _proc_start_ticks(pid):
+        return None
+    return data
+
+
+def registry_session(pid: int | None) -> str | None:
+    """The ``sessionId`` of :func:`registry_entry`, or None."""
+    entry = registry_entry(pid)
+    return entry["sessionId"] if entry else None
+
+
+def registry_wid(entry: dict | None) -> str | None:
+    """The ``@N`` window a registry entry says its process runs in (``<sess>:@N.%P``)."""
+    tmux = (entry or {}).get("tmux")
+    if not isinstance(tmux, str):
+        return None
+    m = re.search(r":(@\d+)\.%\d+$", tmux)
+    return m.group(1) if m else None
+
+
 def proc_started(pid: int) -> float | None:
     """Epoch seconds the process started — the floor under a stale ``wid`` mapping.
 
@@ -622,8 +689,16 @@ def wid_claiming_session(session_id: str | None,
     """
     if not session_id:
         return None
-    claims = [p.wid for p in (panes() if pane_map is None else pane_map).values()
-              if p.resumed == session_id]
+    pane_map = panes() if pane_map is None else pane_map
+    claims = [p.wid for p in pane_map.values() if p.resumed == session_id]
+    if claims:
+        return claims[0] if len(claims) == 1 else None
+    # CMX-394: a pane launched with a plain `claude` (no `--resume`) claims its session in
+    # Claude Code's own registry instead — keyed by the pane's claude PID, so two windows
+    # sharing a directory are still told apart. Only consulted when no command line claims
+    # the session, so it never overrides that stronger signal; ambiguity is still None.
+    claims = [p.wid for p in pane_map.values()
+              if p.claude_pid and registry_session(p.claude_pid) == session_id]
     return claims[0] if len(claims) == 1 else None
 
 
@@ -646,6 +721,13 @@ def session_of_window(wid: str | None,
         sid = _session_from_log(wid, since=pane.started)
         if sid:
             return sid
+    # CMX-394: the process's own registry entry. Without it a plain `claude` window that
+    # shares its cwd with another agent had NO identity once its SessionStart record aged
+    # out of the ring — every later hook is filed `wid: null` for exactly that ambiguity —
+    # and `chela watch` recorded the orchestrator with self-heal disarmed.
+    sid = registry_session(pane.claude_pid) if pane else None
+    if sid:
+        return sid
     if pane and pane.resumed:
         return pane.resumed
     return None

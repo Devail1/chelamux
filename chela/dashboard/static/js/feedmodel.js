@@ -87,6 +87,9 @@ const TYPE_CLASS = {
     // session identity and the held queue is flowing again — a lifecycle event, the good-news
     // counterpart to inbox_undeliverable, done with no human in the loop.
     inbox_self_healed: 'lifecycle',
+    // CMX-394: the orchestrator pin changed hands without that window's own `chela watch`
+    // (a self-heal, `chela restore`, the dashboard) — or a watch took it from a live one.
+    'orchestrator.moved': 'lifecycle',
     watch_epoch_lost: 'lifecycle',          // the watched agent died with the tmux server
     'hook.user_prompt_submit': 'prompt',
     'hook.pre_tool_use': 'tool',

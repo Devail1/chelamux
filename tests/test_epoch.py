@@ -367,10 +367,15 @@ def test_self_heal_delivers_the_whole_backlog_across_ticks(store, sends, monkeyp
 
     inbox.tick({}, runs=_runs(2))
     inbox.tick({}, runs=_runs(2))
+    inbox.tick({}, runs=_runs(2))
 
-    assert [wid for wid, _ in sends] == ["@6", "@6"]
+    # The two held events, then the one-shot CMX-394 `orchestrator.moved` notice the heal
+    # queued behind them — each delivered exactly once, to the healed address.
+    assert [wid for wid, _ in sends] == ["@6", "@6", "@6"]
+    assert sum("orchestrator pin moved" in text for _, text in sends) == 1
     assert inbox.load()["queue"] == []
     assert _kinds().count("inbox_self_healed") == 1, "recovery announced once, not per tick"
+    assert _kinds().count(inbox.MOVED_KIND) == 1, "the move is recorded once, not per tick"
 
 
 def test_no_identity_recorded_stays_loud_and_never_guesses(store, sends, monkeypatch, caplog):
