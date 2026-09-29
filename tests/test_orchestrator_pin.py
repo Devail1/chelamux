@@ -80,6 +80,12 @@ def test_the_orchestrators_OWN_session_in_a_new_window_is_healed_to(tmp_path):
     assert out["orchestrator"] == "@60", out
     assert [wid for wid, _ in out["sent"]] == ["@60", "@60"], "held verdict + move notice"
     assert sum("orchestrator pin moved @8 to @60" in text for _, text in out["sent"]) == 1
+    # The move notice must be labelled as a SELF-HEAL — its own why-text — and never as
+    # another source (judge on b79a0de: relabelling the heal as "restore" stayed green).
+    notice = [text for _, text in out["sent"] if "orchestrator pin moved @8 to @60" in text][0]
+    assert inbox._MOVED_WHY["self_heal"] in notice, notice
+    for other in ("restore", "dashboard", "autolaunch", "taken_over"):
+        assert inbox._MOVED_WHY[other] not in notice, (other, notice)
     assert "inbox_self_healed" in out["kinds"]
     assert out["kinds"].count(inbox.MOVED_KIND) == 1
     assert out["queued"] == []
