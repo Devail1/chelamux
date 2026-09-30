@@ -64,6 +64,7 @@ def test_public_pages_name_no_removed_view(page):
 
 def _public_files() -> list[Path]:
     files = [p for d in ("docs/img", "landing") for p in (ROOT / d).rglob("*") if p.is_file()]
+    files.append(ROOT / "README.md")   # the README is the most public page of all
     assert files, "no files found under docs/img or landing — the guard would check nothing"
     return files
 
@@ -522,3 +523,50 @@ def test_demo_fleet_re_up_tears_the_previous_demo_down_FIRST(tmp_path, monkeypat
     with pytest.raises(SystemExit):
         fleet.up()
     assert order == ["make_root"]
+
+
+@pytest.mark.parametrize("bad", ["demo", "./demo", "../demo"])
+def test_demo_fleet_root_refuses_a_RELATIVE_root_and_creates_nothing(tmp_path, monkeypatch, bad):
+    """A relative root resolves inside the cwd — this checkout, whose path names the
+    operator, and the Work view prints demo paths verbatim."""
+    fleet = _fleet()
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit, match="must be absolute"):
+        fleet.make_root(Path(bad))
+    assert list(tmp_path.iterdir()) == []
+
+
+def _fake_repo_for_record_sh(tmp_path: Path, up_exit: int, node_exit: int) -> tuple[Path, Path]:
+    """A throwaway REPO layout around a COPY of record.sh: its python and node are stubs
+    that log their argv, so the script runs for real but touches nothing."""
+    repo = tmp_path / "repo"
+    (repo / "scripts" / "demo").mkdir(parents=True)
+    real = Path(__file__).resolve().parent.parent / "scripts" / "demo" / "record.sh"
+    (repo / "scripts" / "demo" / "record.sh").write_text(real.read_text())
+    log = tmp_path / "calls.log"
+    py = repo / ".venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text(f'#!/bin/sh\necho "python $*" >> {log}\n'
+                  f'case "$2" in up) echo http://127.0.0.1:1/; exit {up_exit};; esac\nexit 0\n')
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "node").write_text(f'#!/bin/sh\necho "node $*" >> {log}\nexit {node_exit}\n')
+    for f in (py, bin_dir / "node"):
+        f.chmod(0o755)
+    return repo, log
+
+
+@pytest.mark.parametrize("up_exit,node_exit", [(1, 0), (0, 1), (0, 0)])
+def test_record_sh_ALWAYS_tears_the_fleet_down(tmp_path, up_exit, node_exit):
+    """Step 4 of record.sh: `fleet.py down` runs on EVERY exit — a failed `up`, a failed
+    recording, and success — or the demo daemon, dashboard and tmux server outlive it.
+    EXECUTED with stubbed python/node, not grepped."""
+    repo, log = _fake_repo_for_record_sh(tmp_path, up_exit, node_exit)
+    env = {"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "HOME": str(tmp_path),
+           "OUT": str(tmp_path / "out")}
+    r = _RUN(["bash", str(repo / "scripts" / "demo" / "record.sh")], env=env,
+             capture_output=True, text=True, timeout=60)
+    calls = log.read_text().splitlines()
+    downs = [c for c in calls if c.endswith("fleet.py down")]
+    assert len(downs) == 1 and calls[-1] == downs[0], (r.returncode, calls, r.stderr[-400:])
+    assert (r.returncode != 0) == bool(up_exit or node_exit)
