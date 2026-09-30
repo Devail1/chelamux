@@ -19,7 +19,9 @@ import json
 import os
 import re
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -144,7 +146,11 @@ def test_demo_fleet_env_is_temp_and_from_scratch(tmp_path, monkeypatch):
             monkeypatch.setenv(k, f"probe-{k}")
     fleet = _fleet()
     env = fleet.demo_env(tmp_path, 5999, 6400)
+    assert not set(leaky) & set(env), set(leaky) & set(env)
+    _assert_demo_env_is_from_scratch(tmp_path, env)
 
+
+def _assert_demo_env_is_from_scratch(tmp_path, env) -> None:
     for key in ("CHELA_DIR", "HOME", "CHELA_DEMO_STATUS_DIR", "PYTHONPATH",
                 "CHELA_DISPATCH_WORKFLOWS"):
         assert Path(env[key]).is_relative_to(tmp_path), f"{key}={env[key]} escapes the demo root"
@@ -154,7 +160,6 @@ def test_demo_fleet_env_is_temp_and_from_scratch(tmp_path, monkeypatch):
     assert env["PATH"].split(":")[0] == str(tmp_path / ".local" / "bin")
     # From scratch: no probe key, and no value copied from the operator's env except
     # the two it is built on (PATH is prefixed, LANG is the locale).
-    assert not set(leaky) & set(env), set(leaky) & set(env)
     assert "probe" not in "".join(env.values())
     # git in the demo never reads the operator's config (their name/email would show).
     assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["HOME"] == str(tmp_path)
@@ -167,6 +172,35 @@ def test_demo_fleet_env_is_temp_and_from_scratch(tmp_path, monkeypatch):
     # identity from it) inherits as its `os.environ.get(..., "")` fallback and carries
     # no sentinel. Any key outside this list is an inheritance, set or not.
     assert set(env) == DEMO_ENV_KEYS, sorted(set(env) ^ DEMO_ENV_KEYS)
+
+
+class _ProbeEnviron(Mapping):
+    """A stand-in for ``os.environ`` in which EVERY variable is set — to ``probe-<name>``
+    — except the two the demo env is built on. Planting sentinels on names only covers
+    the names someone thought of (shape 402d: git reads ``$EMAIL`` too); here any
+    ``os.environ[...]`` / ``.get(name, default)`` read of any name carries a probe, so
+    no fallback default can mask an inheritance."""
+
+    _REAL = ("PATH", "LANG")
+
+    def __getitem__(self, k):
+        return os.environ[k] if k in self._REAL and k in os.environ else f"probe-{k}"
+
+    def __iter__(self):
+        return iter(os.environ)
+
+    def __len__(self):
+        return len(os.environ)
+
+
+def test_demo_fleet_env_reads_no_operator_var_of_any_name(tmp_path, monkeypatch):
+    fleet = _fleet()
+    # Only fleet's view of `os` changes; the rest of the process keeps the real one.
+    monkeypatch.setattr(fleet, "os", SimpleNamespace(
+        **{**{n: getattr(os, n) for n in dir(os) if not n.startswith("__")},
+           "environ": _ProbeEnviron()}))
+    env = fleet.demo_env(tmp_path, 5999, 6400)
+    _assert_demo_env_is_from_scratch(tmp_path, env)
 
 
 def test_demo_fleet_env_inherits_no_var_unset_on_the_test_machine(tmp_path, monkeypatch):
@@ -298,6 +332,9 @@ def test_demo_fleet_up_wires_every_step(tmp_path, monkeypatch):
     assert {k: v for k, v in daemon.items() if k != "CHELA_DISPATCH_WORKFLOWS"} == \
         {k: v for k, v in env.items() if k != "CHELA_DISPATCH_WORKFLOWS"}
     assert by_cmd["dashboard"]["env"] is env
+    # agent-terminals.sh too: without the demo PATH its `tmux` is the operator's own,
+    # and ttyd would put the REAL chela session on camera.
+    assert by_cmd[str(fleet.REPO / "scripts" / "agent-terminals.sh")]["env"] is env
     assert by_cmd["dashboard"]["cwd"] == str(root / "api-server")
     assert json.loads((tmp_path / "state.json").read_text())["root"] == str(root)
 
@@ -324,3 +361,19 @@ def test_demo_fleet_down_never_deletes_a_root_it_did_not_build(tmp_path, monkeyp
     ours = fleet.make_root(tmp_path / "demo")
     _down_with_state(fleet, tmp_path, monkeypatch, ours)
     assert not ours.exists()
+
+
+def test_demo_fleet_down_kills_only_the_demo_tmux_server(tmp_path, monkeypatch):
+    """`tmux kill-server` without the demo env would kill the operator's REAL server —
+    every agent. It must run on the state's env, whose PATH puts the pinned shim first."""
+    fleet = _fleet()
+    monkeypatch.setattr(fleet, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(fleet.time, "sleep", lambda s: None)
+    env = fleet.demo_env(tmp_path / "demo", 5999, 6400)
+    (tmp_path / "state.json").write_text(json.dumps({"root": "", "pids": {}, "env": env}))
+    runs = []
+    monkeypatch.setattr(fleet.subprocess, "run", lambda args, **kw: runs.append((list(args), kw)))
+    fleet.down()
+    kills = [kw for a, kw in runs if a == ["tmux", "kill-server"]]
+    assert len(kills) == 1 and kills[0].get("env") == env
+    assert kills[0]["env"]["PATH"].split(":")[0] == str(tmp_path / "demo" / ".local" / "bin")
