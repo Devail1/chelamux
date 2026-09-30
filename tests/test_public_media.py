@@ -326,10 +326,13 @@ def test_demo_fleet_up_wires_every_step(tmp_path, monkeypatch):
         runs.append((list(args), kw))
         return fleet.subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
+    popen_pids = []
+
     class FakePopen:
         def __init__(self, args, **kw):
             popens.append((list(args), kw))
             self.pid = 10**6 + len(popens)
+            popen_pids.append(self.pid)
 
     monkeypatch.setattr(fleet.subprocess, "run", fake_run)
     monkeypatch.setattr(fleet.subprocess, "Popen", FakePopen)
@@ -377,7 +380,26 @@ def test_demo_fleet_up_wires_every_step(tmp_path, monkeypatch):
     assert by_cmd["run"]["cwd"] == str(root / ".cache" / "chela-demo" / "idle")
     for svc in ("run", "dashboard"):
         assert not Path(by_cmd[svc]["cwd"]).resolve().is_relative_to(fleet.REPO.resolve()), svc
-    assert json.loads((tmp_path / "state.json").read_text())["root"] == str(root)
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["root"] == str(root)
+    # The invariants, over EVERY call — not a hand-picked few:
+    # (a) the state file records every service up() started, so down() can reach it.
+    started = {k: p for k, p in zip(("daemon", "terminals", "dashboard"), popen_pids)}
+    assert saved["pids"] == started and len(set(started.values())) == 3
+    # (b) every service leads its OWN process group — down() signals the group (killpg),
+    #     so a service that shares ours is never reached.
+    assert all(kw.get("start_new_session") is True for a, kw in popens)
+    # (c) every subprocess (git, tmux, seed, services) runs on the demo env — never the
+    #     inherited one, which carries the operator's git identity, tmux socket and CHELA_DIR.
+    for a, kw in runs + popens:
+        assert kw.get("env") is not None, a
+        assert {k: v for k, v in kw["env"].items() if k != "CHELA_DISPATCH_WORKFLOWS"} == \
+            {k: v for k, v in env.items() if k != "CHELA_DISPATCH_WORKFLOWS"}, a
+    # (d) nothing that imports chela runs from THIS checkout (`python -m` / `-c` put the
+    #     cwd ahead of PYTHONPATH).
+    for a, kw in runs + popens:
+        if a[0] == env["PYTHON"]:
+            assert not Path(kw["cwd"]).resolve().is_relative_to(fleet.REPO.resolve()), a
 
 
 def test_demo_fleet_app_remote_is_its_own_bare_clone(tmp_path):
@@ -475,3 +497,28 @@ def test_record_mjs_refuses_anything_but_a_loopback_demo_dashboard(tmp_path):
                  text=True, timeout=30, cwd=str(script.parent.parent.parent))
         assert r.returncode == 2 and "refusing" in r.stderr, (url, r.returncode, r.stderr[-300:])
     assert not (tmp_path / "out").exists()
+
+
+def test_demo_fleet_re_up_tears_the_previous_demo_down_FIRST(tmp_path, monkeypatch):
+    """A second `up` must stop the previous demo (services + demo tmux server) BEFORE it
+    rebuilds the root — else it rmtrees a root under processes that are still running."""
+    fleet = _fleet()
+    monkeypatch.setattr(fleet, "STATE_FILE", tmp_path / "state.json")
+    (tmp_path / "state.json").write_text(json.dumps({"root": "", "pids": {}, "env": {}}))
+    order = []
+    monkeypatch.setattr(fleet, "down", lambda: order.append("down"))
+
+    def stop(*a, **k):
+        order.append("make_root")
+        raise SystemExit(0)
+    monkeypatch.setattr(fleet, "make_root", stop)
+    with pytest.raises(SystemExit):
+        fleet.up()
+    assert order == ["down", "make_root"]
+
+    # Positive control: with no previous state, up() does not call down().
+    (tmp_path / "state.json").unlink()
+    order.clear()
+    with pytest.raises(SystemExit):
+        fleet.up()
+    assert order == ["make_root"]

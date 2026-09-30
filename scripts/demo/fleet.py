@@ -258,7 +258,9 @@ scheduler.add_task("worker", "cron", "0 3 * * *", "Run the nightly flaky-test sw
 scheduler.add_task("docs-site", "interval", "6h", "Check for broken links and fix them.")
 scheduler.add_task("infra", "cron", "0 9 * * 1-5", "Summarise yesterday's error budget.")
 """
-    subprocess.run([env["PYTHON"], "-c", code], env=env, cwd=str(REPO), check=True)
+    # cwd is the demo HOME: `python -c` puts the cwd first on sys.path, so a cwd here would
+    # import THIS checkout's chela instead of the demo copy on PYTHONPATH.
+    subprocess.run([env["PYTHON"], "-c", code], env=env, cwd=str(home), check=True)
 
 
 def make_app(env: dict[str, str]) -> None:
