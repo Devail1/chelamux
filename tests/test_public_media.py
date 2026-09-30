@@ -18,6 +18,7 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,9 @@ PUBLIC_PAGES = [ROOT / "README.md", ROOT / "landing" / "index.html", ROOT / "lan
 # Case-sensitive on purpose: these are view NAMES. "zero-knowledge relay" and
 # "feed" as a verb are ordinary words, not a nav view.
 REMOVED_VIEWS = ["Feed", "Knowledge", "Personas", "Cost"]
+
+# The real subprocess entry points, kept before any test stubs the module attributes.
+_RUN, _POPEN = subprocess.run, subprocess.Popen
 
 PRIVATE_NEEDLES = [b"liavedunix", b"tradeplan", b"/home/"]
 
@@ -88,12 +92,38 @@ def _fleet():
     return mod
 
 
-def test_demo_fleet_tmux_shim_pins_its_own_server(tmp_path):
-    fleet = _fleet()
-    fleet.write_shims(tmp_path)
-    shim = (tmp_path / ".local" / "bin" / "tmux").read_text()
-    assert f"-L {fleet.TMUX_SOCKET}" in shim
+def _argv_echo(path: Path) -> Path:
+    """A stand-in for a real binary that prints the argv it was exec'd with."""
+    path.write_text('#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n')
+    path.chmod(0o755)
+    return path
+
+
+def _assert_shims_pin_the_demo(bin_dir: Path, fleet) -> None:
+    """EXECUTE the shims (a substring check would pass for a flag in a comment): the
+    tmux one must exec the real tmux with ``-L <demo socket>`` ahead of the caller's
+    args, and pgrep must not find the host's own chela services."""
+    out = _RUN([str(bin_dir / "tmux"), "list-windows", "-t", "chela"],
+                         capture_output=True, text=True, check=True).stdout.splitlines()
+    assert out == ["-L", fleet.TMUX_SOCKET, "list-windows", "-t", "chela"], out
     assert fleet.TMUX_SOCKET and fleet.TMUX_SOCKET != "default"
+    hidden = _RUN([str(bin_dir / "pgrep"), "-f", "chela run"], capture_output=True, text=True)
+    assert hidden.returncode == 1 and hidden.stdout == ""
+    other = _RUN([str(bin_dir / "pgrep"), "-f", "ttyd"], capture_output=True, text=True)
+    assert other.stdout.splitlines() == ["-f", "ttyd"]  # anything else reaches the real pgrep
+
+
+def _fake_which(tmp_path: Path):
+    real = {"tmux": _argv_echo(tmp_path / "real-tmux"), "pgrep": _argv_echo(tmp_path / "real-pgrep")}
+    return lambda name, *a, **kw: str(real[name]) if name in real else None
+
+
+def test_demo_fleet_tmux_shim_pins_its_own_server(tmp_path, monkeypatch):
+    fleet = _fleet()
+    monkeypatch.setattr(fleet.shutil, "which", _fake_which(tmp_path))
+    root = tmp_path / "root"
+    fleet.write_shims(root)
+    _assert_shims_pin_the_demo(root / ".local" / "bin", fleet)
 
 
 def test_demo_fleet_env_is_temp_and_from_scratch(tmp_path, monkeypatch):
@@ -106,7 +136,10 @@ def test_demo_fleet_env_is_temp_and_from_scratch(tmp_path, monkeypatch):
     for k, v in leaky.items():
         monkeypatch.setenv(k, v)
     # ...and EVERY variable already set: a value that reaches the demo env is inherited.
-    for k in list(os.environ):
+    # Plus every key the demo env itself emits, set or not on this machine: a sentinel
+    # only lands on a SET variable, so `os.environ.get("GIT_AUTHOR_EMAIL", default)`
+    # would otherwise read the unset var and return the very default we expect.
+    for k in set(os.environ) | DEMO_ENV_KEYS:
         if k not in leaky and k not in ("PATH", "LANG"):
             monkeypatch.setenv(k, f"probe-{k}")
     fleet = _fleet()
@@ -125,6 +158,10 @@ def test_demo_fleet_env_is_temp_and_from_scratch(tmp_path, monkeypatch):
     assert "probe" not in "".join(env.values())
     # git in the demo never reads the operator's config (their name/email would show).
     assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["HOME"] == str(tmp_path)
+    # The identity on the demo's commits is the neutral one, exactly.
+    assert {k: env[k] for k in env if k.startswith("GIT_") and k != "GIT_CONFIG_NOSYSTEM"} == {
+        "GIT_AUTHOR_NAME": "chela demo", "GIT_AUTHOR_EMAIL": "demo@example.com",
+        "GIT_COMMITTER_NAME": "chela demo", "GIT_COMMITTER_EMAIL": "demo@example.com"}
     # The KEY SET is exact. A sentinel only lands on a variable that is SET on the test
     # machine; one that is unset here (XDG_CONFIG_HOME, say — git reads the operator's
     # identity from it) inherits as its `os.environ.get(..., "")` fallback and carries
@@ -212,6 +249,7 @@ def test_demo_fleet_up_wires_every_step(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_DEMO_ROOT", str(tmp_path / "demo"))
     monkeypatch.setattr(fleet, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(fleet, "_wait_http", lambda port: None)
+    monkeypatch.setattr(fleet.shutil, "which", _fake_which(tmp_path))
     runs, popens = [], []
 
     def fake_run(args, **kw):
@@ -246,6 +284,10 @@ def test_demo_fleet_up_wires_every_step(tmp_path, monkeypatch):
     # Every tmux call went through the demo env (whose PATH puts the pinned shim first).
     tmux_calls = [kw for a, kw in runs if a[0] == "tmux"]
     assert tmux_calls and all(kw["env"] is env for kw in tmux_calls)
+    # ...and up() really installed that shim there: a bare `tmux` on this PATH would
+    # otherwise be the operator's own server. (Real subprocess back, to execute it.)
+    monkeypatch.setattr(fleet.subprocess, "Popen", _POPEN)
+    _assert_shims_pin_the_demo(Path(env["PATH"].split(":")[0]), fleet)
     # The three services, each on the demo env; the daemon on the INERT idle workflow.
     by_cmd = {a[-1] if a[0] == "bash" else a[3]: kw for a, kw in popens}
     assert set(by_cmd) == {"run", str(fleet.REPO / "scripts" / "agent-terminals.sh"), "dashboard"}
@@ -258,3 +300,27 @@ def test_demo_fleet_up_wires_every_step(tmp_path, monkeypatch):
     assert by_cmd["dashboard"]["env"] is env
     assert by_cmd["dashboard"]["cwd"] == str(root / "api-server")
     assert json.loads((tmp_path / "state.json").read_text())["root"] == str(root)
+
+
+def _down_with_state(fleet, tmp_path, monkeypatch, root: Path) -> None:
+    monkeypatch.setattr(fleet, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(fleet.time, "sleep", lambda s: None)
+    (tmp_path / "state.json").write_text(json.dumps({"root": str(root), "pids": {}, "env": {}}))
+    fleet.down()
+    assert not (tmp_path / "state.json").exists()
+
+
+def test_demo_fleet_down_never_deletes_a_root_it_did_not_build(tmp_path, monkeypatch):
+    """`down` rmtrees the root named in its state file only if that root carries MARKER,
+    so a hand-edited state or a mistyped CHELA_DEMO_ROOT can never take real data."""
+    fleet = _fleet()
+    foreign = tmp_path / "somebody-elses"
+    foreign.mkdir()
+    (foreign / "precious.txt").write_text("keep me")
+    _down_with_state(fleet, tmp_path, monkeypatch, foreign)
+    assert (foreign / "precious.txt").read_text() == "keep me"
+
+    # Positive control: the same call does remove a root fleet.py built.
+    ours = fleet.make_root(tmp_path / "demo")
+    _down_with_state(fleet, tmp_path, monkeypatch, ours)
+    assert not ours.exists()
