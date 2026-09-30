@@ -247,6 +247,69 @@ def test_remove_worktree_is_opt_in(tmp_path, remove):
     assert wt.is_dir()                   # the stubbed cleanup never touched the disk
 
 
+# --- pr_state NULL is OPEN, never "nothing to close" ---------------------------------------
+
+def test_pr_is_open_counts_an_unrefreshed_null_pr_state_as_open():
+    """A PR the tick has not refreshed yet (``pr_state`` NULL) is not known to be settled."""
+    assert dispatcher.pr_is_open({"pr_url": "https://x/pull/80", "pr_state": None}) is True
+    assert dispatcher.pr_is_open({"pr_url": "https://x/pull/80", "pr_state": "open"}) is True
+    # counterweights: settled, or no PR at all
+    assert dispatcher.pr_is_open({"pr_url": "https://x/pull/80", "pr_state": "closed"}) is False
+    assert dispatcher.pr_is_open({"pr_url": "https://x/pull/80", "pr_state": "merged"}) is False
+    assert dispatcher.pr_is_open({"pr_url": None, "pr_state": None}) is False
+
+
+def test_close_pr_on_a_run_whose_pr_state_is_still_null_closes_that_pr(tmp_path):
+    """End to end through close_run: an unrefreshed PR still gets ``gh pr close --comment``."""
+    _seed(tmp_path, status="awaiting_review", pr_state=None)
+    assert dispatcher.resolve_run("abc123")["pr_url"]          # the fixture carries a PR
+    fake = _fake()
+    with patch.object(dispatcher.subprocess, "run", side_effect=fake.run):
+        result = dispatcher.close_run("abc123", "superseded by cmx-403", close_pr=True)
+
+    assert result["ok"] is True
+    assert result["pr_open"] is True and result["pr_closed"] is True
+    gh = [c for c in fake.calls if isinstance(c, list) and c[:1] == ["gh"]]
+    assert [c[:3] for c in gh] == [["gh", "pr", "close"]]
+
+
+# --- compare-and-swap: a tick that moved the row meanwhile WINS -------------------------
+
+def test_a_row_moved_by_a_tick_between_read_and_write_is_left_alone(tmp_path):
+    """close_run reads the row as ``failed``; before its UPDATE lands, a tick re-claims it.
+    The write must NOT land on top of that — status, reason, history and events untouched."""
+    _seed(tmp_path, pr_url=None, pr_state=None)
+    real_liveness = dispatcher._close_liveness
+
+    def _tick_moves_it(run):
+        with dispatcher._db() as conn:
+            conn.execute("UPDATE runs SET status='running' WHERE task_id=?", (run["task_id"],))
+            conn.commit()
+        return real_liveness(run)
+
+    with patch.object(dispatcher.subprocess, "run", side_effect=_fake().run), \
+         patch.object(dispatcher, "_close_liveness", side_effect=_tick_moves_it):
+        result = dispatcher.close_run("abc123", "superseded by cmx-403")
+
+    assert result["ok"] is False
+    assert "'running'" in result["error"]
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "running"
+    assert run["close_reason"] is None
+    assert _closed_events() == []
+
+
+def test_the_same_path_with_no_intervening_tick_does_close(tmp_path):
+    """NEGATIVE CONTROL for the race test: the identical patched path, minus the tick's
+    write, closes — so the refusal above is the CAS, not the patch breaking close_run."""
+    _seed(tmp_path, pr_url=None, pr_state=None)
+    with patch.object(dispatcher.subprocess, "run", side_effect=_fake().run), \
+         patch.object(dispatcher, "_close_liveness", side_effect=dispatcher._close_liveness):
+        result = dispatcher.close_run("abc123", "superseded by cmx-403")
+    assert result["ok"] is True
+    assert dispatcher.resolve_run("abc123")["status"] == "closed"
+
+
 # --- a closed run is NEVER re-claimed -----------------------------------------------------
 
 def test_a_closed_run_is_never_re_claimed_by_the_next_tick(tmp_path):
