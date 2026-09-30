@@ -10,6 +10,199 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-09-30
+
+### Added
+
+- **`--remote-control` on the sessions chela opens for a human.** Windows started by
+  `spawn_window` (Telegram `/new`, the dashboard launcher, resumed sessions) and the
+  orchestrator persona now launch with Claude Code's `--remote-control <project>`, so they
+  are reachable from claude.ai too. Dispatched agents, reworks and judges never get it.
+  Default on; set `CHELA_REMOTE_CONTROL=false` to disable. (CMX-375, #526; guards hardened
+  in CMX-376, #527)
+
+- **A `warm` dashboard theme** (Settings > Appearance): warm greys, an off-white accent,
+  Okabe-Ito sky/orange status colours, and a matching warm terminal palette whose 16 ANSI
+  colours each keep their own hue family. (CMX-381)
+
+- **Settings → General → Remote Control: an on/off switch for `--remote-control` on new
+  sessions.** `CHELA_REMOTE_CONTROL` was an import-time constant, so turning it off meant
+  editing the env and restarting the dashboard, Telegram bridge and daemon. It is now
+  `config.remote_control_enabled()`, read per call through `dashboard_setting()` — env beats
+  `~/.chela/config.json` (`remote_control`) beats the unchanged ON default — so a toggle in
+  the dashboard reaches every process without a restart. It applies to NEW windows only
+  (dashboard launcher, Telegram `/new`, the orchestrator persona); a running session keeps
+  the flag it launched with, and dispatcher agents/judges still never get it. When
+  `CHELA_REMOTE_CONTROL` is set, the switch shows the effective value, is disabled, and says
+  so. `examples/chela.env` no longer exports it by default, since an exported value locks the
+  switch. (CMX-382)
+
+- **A real-browser suite for the dashboard's layout, status shapes and fonts**
+  (`tests/browser/`, Playwright + headless Chromium). jsdom has no layout engine, so the
+  CMX-377 restyle's cascade-emulating guards kept missing one more CSS way to break the look
+  (`grid-row: 2`, `.app` not a grid, `opacity: 0`, `scale(0)`, a transparent ring border,
+  an inset shadow filling the idle ring). The new suite boots the real `index.html` shell
+  against stubbed API fixtures (no daemon, no tmux, no network) and asserts what a user
+  sees: bounding boxes at 1440×900 and 390×844, each status mark's greyscale painted
+  silhouette (same in the sidebar row and the pane header, four states pairwise different,
+  never empty), and that Geist actually loads. `npm run test:browser` locally; CI caches
+  Chromium and runs it inside `pytest`, where `CHELA_REQUIRE_JS_TESTS=1` makes a browser
+  that cannot launch a failure. (CMX-383)
+
+- **Ctrl+, (⌘, on macOS) opens and closes Settings**, like VS Code — from the dashboard
+  and from inside a focused terminal pane (the same pane shim that carries Ctrl+K), and
+  Esc now closes Settings too. Listed in the keyboard-shortcuts cheatsheet. macOS Chrome
+  may keep ⌘, for its own preferences. Needs `pm2 restart chela-dashboard` to pick up the
+  pane shim. (CMX-385)
+
+- **The merge rule is enforced inside chela: a direct `gh pr merge` is denied in every Claude session.** chela's plugin (0.2.5) carries a second `PreToolUse` hook on `Bash` (`chela/mergegate.py`, a stdlib-only `command` hook that decides locally from `$CHELA_DIR/mergegate.json` — no dashboard needed) that DENIES `gh pr merge`, `gh api …/pulls/N/merge` and a `git push` to the workflow's base branch or `main` in any repo with a chela workflow, pointing the session at `chela merge cmx-N`. The command is parsed (chains, `bash -c`, `cd x &&`, `-R`, worktrees), and the hook fails open — logged to `$CHELA_DIR/mergegate.log` — when it cannot decide. ⚠️ Restart every agent and orchestrator session (and `claude plugin update chela@chela`) to load it; the orchestrator's own `git push origin dev` is now denied too. (CMX-389)
+- **`chela merge cmx-N --override --reason "…"` — the one way past the judge, operator-approved and audited.** It waits `CHELA_OVERRIDE_WAIT_S` (default 300s) for the operator to approve on the dashboard (`/override/<id>`) or with `chela merge-approve <id>` in a plain terminal; a timeout is a deny. The approval (who, head sha, overridden judge state, reason) goes to the event log and the run's review history before the merge, the merge is pinned to the approved head, and the reason rides in the squash body. CI red or not-mergeable still refuse. (CMX-389)
+- **Out-of-gate merges are flagged.** When the reconcile finds a chela PR merged without a clean judge on its merged head and without an approved override, it sets `runs.merged_outside_gate` and the inbox pushes `⚠️ cmx-N was merged outside chela's gate` — once. (CMX-389)
+
+- **The judge holds some experiments out, and runs a sample twice.** The judge agent now
+  tags about 30% of its mutation experiments `"held_out": true` (at least one once it
+  proposes three or more; set per workflow with `judge.held_out_fraction`). They run like
+  any other, and a held-out survivor still sends the PR back. The PR comment, the review
+  history and the rework prompt only ever say how many held-out guards survived, never
+  which, so a rework has to fix the guard itself instead of patching the listed cases.
+  Separately, up to two experiments (survivors first; `judge.consistency_sample`) are run a
+  second time. One whose KILLED/SURVIVED outcome flips is marked `flaky` in the comment and
+  does not count toward blocking. If nothing else blocks, the verdict is `cannot_verify` and
+  the operator decides. Each round is recorded privately under
+  `$CHELA_DIR/judge-heldout/`. The new `chela judge show <run>` prints rounds-to-clean,
+  visible vs held-out survival rates and the flip rate; add `--held-out` to see each
+  held-out experiment in full. Needs a `chela-daemon` restart to pick up. (CMX-395)
+
+- **Search in Settings.** A search box at the top of the Settings drawer filters every
+  setting across all tabs, VS Code style. It matches a setting's label, its help text and
+  hidden keywords (for example, "phone" or "mobile" finds Remote Control). While you
+  search, the matching rows are grouped under their tab name and no tab is selected.
+  Clearing the search returns you to the tab you were on. Ctrl/⌘+, opens the drawer with
+  the search box focused. Esc clears the query first, and a second Esc closes the drawer.
+  A query with no results says "No settings match '…'", and screen readers hear the live
+  count ("3 settings"). No setting's behaviour, storage or API changed. Needs a
+  `chela-dashboard` restart to pick up. (CMX-396)
+
+- **`chela watch --if-unclaimed` — a SessionStart hook can re-claim the orchestrator slot
+  after a reboot without ever stealing it.** It registers the calling session exactly like
+  `chela watch` only when the pin is empty, undeliverable (dead window or stale tmux epoch —
+  the inbox's own `address_state`), or already the caller's; otherwise it changes nothing,
+  exits 0 and prints `orchestrator is @N (live) — not claiming`. Plain `chela watch` is
+  unchanged. The recommended hook line is in `docs/HOOKS.md`. (CMX-399)
+
+- **"Settings" is now a row in the Ctrl/⌘+K palette — and so in the phone sidebar's
+  "Jump to session" box, which drives the same list.** On a phone there is no Ctrl+,, so
+  this was the missing way into Settings. Type "sett" (or "settings") and pick it; it
+  opens the Settings drawer. Restart `chela-dashboard` to pick it up. (CMX-401)
+
+- **`scripts/demo/record.sh` re-records both demos.** It runs `scripts/demo/fleet.py`, a throwaway fleet on its own tmux server (`tmux -L chela-demo`) with its own `HOME` and `CHELA_DIR` under a fixed demo root (`/tmp/demo`) and a from-scratch environment. The fleet's panes are scripted, and its `claude` only reports their statuses. It looks like a healthy install on camera: chela runs from a git checkout with an upstream (Update reads "up to date"), the demo's own daemon is running, and the "+" menu's Favorites and Recent list the demo projects. Playwright then records the fleet, and ffmpeg writes the MP4s and GIFs over the published files. `tests/test_public_media.py` fails if a README or landing page names a removed view, if any file under `docs/img/` or `landing/` contains the operator's user name, a private window name or a `/home/` path, or if the recorder's environment stops being isolated. (CMX-402)
+
+- **Shared terminals are view only by default; guests can type only into a verified
+  sandboxed session.** A new **Guest typing** setting (Settings → Collaboration,
+  `CHELA_SHARE_TYPING`, off by default) gates all guest input on the host. With it on, a
+  share can allow typing only into a window that verifies LIVE as a sandboxed session,
+  checked from the process tree and `docker inspect` at least every 2 s. Refused input
+  is dropped, and the guest gets a rate-limited "view only" notice. Start a sandboxed
+  session from **New session → Sandboxed session…** (desktop and phone) or with
+  `chela share-session <project>`. The new share dialog defaults to *View only* and
+  shows why *Allow typing* is disabled. The share pill shows 👁 or ⌨. See
+  `docs/SHARE_SANDBOX.md`. (CMX-403)
+- **Trusted-peer "Full access — UNSANDBOXED" override**, one share at a time: you type
+  the window name to confirm it, it expires after `CHELA_SHARE_UNSANDBOXED_MINUTES`
+  (default 30), it's bound to one joiner, it shows a red banner on the pane and the
+  share pill, the share kill switch revokes it, and the event log records the grant,
+  expiry and revocation. (CMX-403)
+
+- **Per-task risk levels (`high` / `normal` / `low`) that size the judge's search and the
+  rework budget.** Mark a TODO bullet `<!-- risk: low -->` (or give a GitHub issue a
+  `risk:low` label); unmarked tasks are `normal`, or `high` when the brief's BOUNDARIES touch
+  the dispatcher, judge, merge gate, sandbox, inbox or secrets. The judge runs at most 12 / 8
+  / 4 experiments and a run gets 5 / 4 / 3 rework rounds by level — all Settings → Dispatch
+  knobs. The judge still always runs, and a surviving mutation still blocks at every level.
+  The level shows on the Work card, the task modal and the judge's verdict. See
+  `docs/RISK_LEVELS.md`. Restart `chela-daemon` and `chela-dashboard` to pick it up. (CMX-405)
+
+### Changed
+
+- **Dashboard restyle: calm desktop-app look — no top bar, shape-coded status, sans chrome.**
+  The full-width `<header class="topbar">` is gone; its contents (wordmark, inbox, CPU/RAM/Disk,
+  settings) moved into the sidebar's own fixed head/foot, and the two safety-critical pills
+  (active-shares kill-switch, native-status-feed warning) now float above the canvas on every
+  breakpoint so they stay reachable even while the sidebar is off-canvas on a phone. Chrome type
+  is now sans (Geist, vendored, with a Hebrew-capable Heebo fallback — `--ui-font`), while
+  terminals and code keep the monospace `--font`. Status is shape-coded, not colour-only
+  (Liav is red-weak): Working = filled dot, Needs you = filled triangle, Done = check, Idle =
+  hollow ring — the SAME shapes in the sidebar rows, the pane headers, and the taskbar/mobile
+  dock. The sidebar gained a prominent "New session" button and a jump-to-session search (reusing
+  the existing ⌘K fuzzy jump), and its session list now groups Pinned (the orchestrator session,
+  if any) → per-project → Finished (moved last), with each row reading `status mark · title` then
+  `state · ctx% ctx`, relative time right-aligned. Pane headers are a fixed 40px; the focused pane
+  gets a thin inset accent ring instead of the old outer glow. `--accent` is now reserved for
+  focus, selection and the inbox unread dot — the sidebar wordmark is no longer accent-tinted.
+  Session rows carry only their status shape, title, "state · ctx" and time — no per-row
+  harness-letter badge, orchestrator/dispatched icon or favourite star, and no coloured state
+  word; group headers (Pinned/per-project/Finished/Navigate/Sessions) are plain, sentence-case,
+  uncoloured labels with no bordered/tinted box. The Wall still fills the full space at every
+  density and the pane footer keeps every field (model · branch · context · tokens · cost); no
+  theme palette or terminal colour changed.
+  (CMX-377, #529)
+
+- **chela's peer messages now arrive NAMED (`Message from @chela`) instead of as an
+  anonymous "Another Claude session sent a message:" block.** Measured against Claude Code
+  2.1.283 with a throwaway receiver: top-level `from_name` / `fromName` / `name` /
+  `from_mode` fields are ignored. A native `SendMessage` names itself by wrapping its text
+  in the receiver's own `<cross-session-message from=… from-name=… from-mode=…>` envelope
+  inside `message.content`, so `send_peer` and `send_peer_to_pid` now do the same. Only the
+  rendering changes. The arrival keeps `origin.kind: "peer"`, the socket-verified sender
+  pid, `isMeta`, and the full anti-laundering paragraph in the receiver's context. `role`
+  stays `"user"`, `from` stays the reply socket, and `msg_id` stays a uuid4. The name is
+  always `chela`, including for relays of another agent's message. `from-name` is
+  sender-asserted and the receiver never checks it against the verified pid, so the only
+  honest value is the process that really sent the message. The originating agent is still
+  attributed in the message text. No `from-mode` is sent, although native senders send
+  one. The receiver's inbound gate reads that field, its effect on a bypass-mode receiver
+  was never measured, and the name alone is enough to render the message named. After
+  merging, restart the PM2 services that import
+  `chela.messenger`: `chela-daemon`, `chela-dashboard` and `chela-telegram`. (CMX-380)
+
+- **The repo's JS dev tooling is pnpm, not npm.** `pnpm-lock.yaml` replaces
+  `package-lock.json` (same 41 resolved versions; playwright still exactly `1.63.0`), and
+  `package.json`'s `packageManager` pins pnpm `10.34.5` — a 10.x, because pnpm 11 crashes on
+  the pinned Node 20. pnpm's content-addressed store hardlinks one copy of each package into
+  every worktree, which replaces the hand-built shared, symlinked `node_modules` of
+  `scripts/npm-shared-install.sh` (CMX-151, #508). CI installs with
+  `pnpm install --frozen-lockfile` and keys its Chromium cache on `pnpm-lock.yaml`;
+  `hooks.before_run` runs the same install. The judge provisions a pnpm tree with pnpm and,
+  for branches forked before the move, still falls back to `npm ci` on a `package-lock.json`
+  tree. Run `pnpm install --frozen-lockfile` in your checkout after pulling. (CMX-388)
+
+- **Dashboard restyle fine-tunes.** The sidebar foot is one row again: the CPU/RAM/Disk
+  readouts on the left and a single settings gear on the right. The gear opens the same
+  menu the ⋮ did, so every action is still one click away. The Decisions inbox moved up
+  to the sidebar head. Each Wall pane's title bar now draws its state once, in the
+  mockup's order: status shape · title · dim subtitle · a soft pill carrying only the
+  word (`working`, `idle`, `done`, `needs you`) · icon buttons. Shape plus word remain the
+  non-colour cue. The real-browser suite now guards all of this, plus the chrome font
+  on pane headers, pane footers and modals and the phone "+" / `.safety-float` at 390px.
+  Needs a `chela-dashboard` restart to pick up. (CMX-393)
+
+- **The Wall's Minimized dock is slimmer and sits lower**: one row of chips is now ~30px
+  tall (was ~38px) and ~8px off the bottom of the window (was 18px), and the panes still
+  fill exactly down to it. Chips keep their 12px text and a 24px click target. (CMX-397)
+- **The Wall's "Grid:" layout toolbar collapses** to one button that shows the current
+  layout (or Focus / Auto-arrange) plus a chevron. Click it to show the full row. Picking
+  a preset or mode, clicking outside, or pressing Esc folds it back. It starts collapsed
+  while Focus is on and expanded otherwise, and remembers your own expand/collapse choice
+  in this browser. Needs `pm2 restart chela-dashboard`. (CMX-397)
+
+- **The README and landing-page demos are re-recorded for the new design, from a synthetic fleet.** The desktop clip shows the Wall with one agent in each state (working, needs you, done, idle), then Work's board, runs and schedules, then Settings opened with Ctrl+,. The phone clip shows the pill switcher, the "+" New session menu and the keybar. The README, `landing/index.html` and `landing/docs.html` no longer mention the removed Feed view, and each gains one line per recent feature: the judge-enforced merge gate, Remote Control per session, themes that reach the terminals (plus `warm`), the phone "+", named `@chela` peer messages and Ctrl+, for Settings. (CMX-402)
+
+- A paired share guest can no longer type by default. Earlier shares gave full access to
+  anyone holding the code. (CMX-403)
+
+- `CHELA_MAX_REWORKS` (default raised 2 → 5) is now the ceiling over the per-level rework
+  caps rather than the cap itself. (CMX-405)
+
 ### Fixed
 
 - **`render_prompt` fails loudly on an unknown `{{var}}` instead of shipping it verbatim.**
@@ -20,6 +213,130 @@ history lives in `git log`.
   never the whole tick — and a rework whose re-nudge hits this returns to `changes_requested`
   via the existing rework-failure path rather than being left `running` with no agent behind
   it. (CMX-373, #525)
+
+- **Multi-line Telegram messages no longer strand unsent on the prompt (or split in two).**
+  `messenger.send_tmux` pasted multi-line text with a plain `tmux paste-buffer`, which turns
+  each newline into a bare CR: Claude Code read a short message as two separate prompts and
+  left a longer one sitting unsubmitted on the `❯` line. Measured on 9 days of bridge traffic
+  (single-line 225/226 delivered, multi-line 7/12 stranded) and reproduced on an isolated
+  tmux server (12/12 stranded at 0.5s, 2s and 5s Enter gaps). It now uses bracketed paste
+  (`paste-buffer -p`): 4/4 delivered. (CMX-375, #526)
+
+- **A dispatched agent's first prompt only ever carried the TODO bullet's title — every
+  OBJECTIVE/BOUNDARIES/GUARDS/VERIFY continuation line was silently dropped.** `_prompt_vars`
+  (spawn), `dispatcher.dry_run`'s own prompt preview, and `_rework_vars` (rework) rendered
+  only `{{task_title}}`; `Task.body` — the markdown source's title plus its dedented
+  continuation block, or a `gh_issues` issue body — reached `runs.brief` for the task-detail
+  modal but no template var ever carried it into a prompt an agent actually reads. Measured
+  on CMX-377 (#529): the agent's first user turn held the title only, while `runs.brief` held
+  the full 5.9KB body. A `task_body` var (`task.body or ""`, never the literal `None`) now
+  reaches WORKFLOW.md (both the repo's own copy and `examples/WORKFLOW.md`), the `--dry-run`
+  preview, and the rework prompt — a bare one-line task still renders cleanly with an empty
+  body. (CMX-378)
+
+- **A judge stopped by a Claude Code auto-mode classifier outage no longer holds the judge
+  slot for an hour or spends a retry.** When every tool call comes back "the server-side
+  auto mode classifier gave no verdict", the judge stops and sits idle with no verdict.
+  The judge watchdog now spots that case: the judge's native session status is idle and the
+  most recent tool results in its transcript carry the outage error. It reaps the judge
+  early as an uncounted `cannot_verify`, like CMX-282's expired login. The run is not
+  re-judged until a backoff passes, so it does not walk straight back into the same outage.
+  The backoff is the new Dispatch knob `judge_outage_backoff_seconds`
+  (`CHELA_JUDGE_OUTAGE_BACKOFF_S`, default 600s). The inbox reports it once as
+  `⚖️🌩️ judge for <branch> hit a classifier outage — re-judging after <backoff>`. Restart
+  `chela-daemon` after upgrading. (CMX-379)
+
+- **Themes stopped at the chrome — the terminals kept GitHub-dark colours whatever theme
+  you picked.** Each theme now carries its own terminal palette (`chela/dashboard/term_themes.py`:
+  full xterm theme + scrollbar colours) and its own `--term-bg`, applied live inside every
+  open terminal on theme change (no ttyd restart, no reload); a newly opened pane comes up
+  in the current theme. `CHELA_TERM_THEME` stays the operator override and wins over every
+  theme. Needs `pm2 restart chela-dashboard` to pick up. (CMX-381)
+
+- **`depends:` chains longer than one hop blocked forever, silently.** An open task's id
+  hashed its raw bullet, `<!-- depends: … -->` marker included, while a `depends:`
+  reference hashed the bare title, so no task could depend on a task that itself carried a
+  marker. Every task id (open, struck and parked) now hashes the bare title. An unmarked
+  task's id is unchanged. A task that carries a marker gets a new id, and on its first
+  tick the dispatcher re-keys any in-flight run still under the old id (one transaction,
+  logged). Also, a `depends:` marker quoted inside inline code (`` ` ``) no longer counts
+  as a real marker. Needs `pm2 restart chela-daemon` to pick up. (CMX-384)
+
+- **On a phone, New session was two taps deep** (open the ☰ drawer, then its "New session"
+  button) once the topbar went away in CMX-377. A round "+" now sits beside the ☰ fab at
+  phone widths and opens the same New-session menu (Favorites / Recent projects, Init a
+  repo, Scheduled task, Shell window) with the drawer left closed. Desktop is unchanged.
+  Needs `pm2 restart chela-dashboard` to pick up. (CMX-386)
+
+- **A `done` run whose PR was still open had no way back.** `chela reopen` refused anything
+  but `needs_human` and `chela merge` refuses `done`, so the only exit was a hand edit of
+  the runs DB. `chela reopen` now also accepts a `done` run — but only when its PR is
+  live-read from GitHub as OPEN, its head has moved past the judged commit, and its task is
+  not struck `- [x]` in the tracker; anything it cannot read is a refusal. It re-enters
+  `awaiting_review` exactly like a `needs_human` reopen, on the fresh head. Needs a
+  `chela-daemon` restart to pick up. (CMX-387)
+
+- `package.json`'s `license` said `MIT`; the project is, and always was, `AGPL-3.0-or-later`.
+  (CMX-388)
+
+- **A Node program in a workflow hook aborted with exit 134 under pm2.** pm2 forks
+  `chela-daemon` through Node's `child_process.fork`, so the daemon carries
+  `NODE_CHANNEL_FD` / `NODE_CHANNEL_SERIALIZATION_MODE`, and every hook inherited them. Any
+  Node program the hook ran (`pnpm --version` was the measured case) treated fd 3 as its IPC
+  channel and dumped core, which failed `before_run` and with it every agent and judge
+  launch. A new `chela.envutil.child_env()` drops Node's IPC markers (`NODE_CHANNEL_*`,
+  `NODE_UNIQUE_ID`) and pm2's bookkeeping vars (`pm_*`, `PM2_*` except `PM2_HOME`,
+  `NODE_APP_INSTANCE`). It is now the env for the `after_create` / `before_run` /
+  `after_done` hooks, the agent/judge/human `tmux new-window`, the `tmux new-session` that can
+  start the server, and the judge's suite, `uv sync`, `npm ci` and `node --check`. Needs
+  `pm2 restart chela-daemon chela-dashboard` to pick up. (CMX-390)
+
+- **A PR URL seen in an agent's transcript can no longer replace the run's real PR.** Claude Code writes a `pr-link` record whenever a PR URL appears in a session, including a test fixture's fake one echoed by pytest. The daemon's completion hop used to prefer the transcript's latest `pr-link` over the `pr_url` already on the row. A run then recorded `https://github.com/o/r/pull/5`, saw it "merged", and was closed, struck and had its worktree deleted. The row's own `pr_url` (recorded daemon-side by `request-push`) now wins, and a transcript URL is used only when it is a PR of the run repo's own GitHub remotes. The daemon also now reads a PR's state from the repo the URL names (`gh pr view N --repo owner/repo`). By number alone, `o/r/pull/5` resolved to this repo's own long-merged PR #5. (CMX-391)
+
+- **A task whose bullet carries a `depends:` marker showed that raw HTML comment as its
+  name** in run rows, the Work view and every inbox notice. `Task.title` is now the bare
+  visible title (every `<!-- ... -->` marker stripped); `Task.raw` keeps the whole line,
+  and the readers that need the marker (depends parsing, the CMX-384 legacy-id re-key,
+  `chela doctor`'s unresolved-depends check) read it from there. Task ids are unchanged,
+  and the merge strike still finds the line. Needs `pm2 restart chela-daemon` to pick up.
+  (CMX-392)
+
+- **The orchestrator pin no longer changes hands silently.** Two Claude sessions sharing one
+  directory could swap the decisions-inbox pin, and merge verdicts went to the wrong
+  session. The trigger was a `chela watch` that a SessionStart hook ran in the other
+  session. Now any pin change that is not the window's own `chela watch` is announced once
+  as an `orchestrator.moved` event: a self-heal, `chela restore`, a dashboard or
+  auto-launch registration. So is a `chela watch` that takes the pin from an orchestrator
+  whose window is still live. The notice goes to the Feed and is delivered once to
+  whichever session now holds the pin.
+- **A plain `claude` window that shares its directory now has an identity.** chela reads
+  Claude Code's own session registry (`<config dir>/sessions/<pid>.json`) and checks its
+  `procStart` against the live pid. A window started without `--resume` next to another
+  agent in the same directory now resolves to its session. Its hook events carry its
+  window instead of `wid: null`, `chela watch` records its identity so self-heal works,
+  and the self-heal can find it again in a new window. The self-heal still rebinds only
+  to the recorded session identity, never to "a session in that directory". With no
+  identity it does nothing and the undeliverable alarm fires. Needs a `chela-daemon`
+  restart, plus `chela-dashboard` for hook attribution. (CMX-394)
+
+- **The sidebar-foot Settings/menu popover opens on screen.** Since the menu button
+  moved from the old top bar to the sidebar foot, the menu still opened *below* it,
+  mostly off the bottom of the window. Popovers anchored to a sidebar or footer control
+  (the Settings menu, the New-session menu and the tap tooltips) now share one placement:
+  below the control when there is room, otherwise above it. They stay 8px inside the
+  viewport on every side, scroll when taller than the window, and follow a window resize
+  while open. The phone "+" menu is unchanged. Needs a `chela-dashboard` restart to pick
+  up. (CMX-398)
+
+- **The phone sidebar drawer is whole again on iOS Safari.** Its footer (with the Settings
+  button) no longer hides behind Safari's bottom toolbar, because the drawer is now `100dvh`
+  tall with a `100vh` fallback. The New session + Jump row also shows even when this browser
+  once collapsed the desktop sidebar to its icon rail: every collapsed-rail rule is now
+  desktop-only. Restart `chela-dashboard` to pick it up. (CMX-404)
+
+### Security
+
+- **A suite chela runs can no longer reach live state or act as the live window.** The judge, `chela judge self-check` and `chela task-finished --self-check-experiments` all run the suite with `CHELA_DIR` set to a fresh temp dir, and with every `CHELA_*` variable, `TMUX` and `TMUX_PANE` removed. chelamux's own test suite now also fences `sqlite3.connect` on the real `~/.chela`, and it refuses to run if `CHELA_DIR` resolves to the operator's real one. (CMX-391)
 
 ## [0.13.0] — 2026-09-15
 
