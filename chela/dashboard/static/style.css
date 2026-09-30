@@ -4348,3 +4348,18 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .cost-agent-row td:nth-child(2) { color: var(--text-dim); }
 .cost-total-row { font-weight: 700; }
 .cost-total-row td { border-bottom: none; border-top: 2px solid var(--border); }
+
+/* CMX-409 — iOS Safari auto-zooms the whole page when a focused input,
+   textarea or select computes under 16px, and the zoom sticks until the user
+   pinches back out. Touch devices get 16px on every text control; the desktop
+   (fine-pointer) look keeps its smaller sizes. `!important` because the
+   controls' own class rules (.s-input, .palette-input, .sidebar-jump input…)
+   out-specify a type selector. `textarea` also covers xterm's hidden
+   `.xterm-helper-textarea`; the ttyd terminal iframes (which this sheet never
+   reaches) get the same rule from static/term-touch.css.
+   ⛔ Never "fix" this with maximum-scale=1 / user-scalable=no on the viewport
+   meta — that kills pinch-zoom (Android too), an accessibility regression.
+   tests/ios_focus_zoom.test.mjs guards both. */
+@media (pointer: coarse) {
+    input, textarea, select { font-size: 16px !important; }
+}

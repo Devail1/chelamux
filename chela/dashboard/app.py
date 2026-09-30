@@ -622,6 +622,16 @@ _TERM_SCROLLBAR_CSS = (
     "</style>"
 )
 
+# CMX-409: iOS focus-zoom guard for the ttyd page (xterm's hidden helper
+# textarea computes ~13px, so tapping a terminal zoomed the whole dashboard in).
+# Lives in static/term-touch.css so tests/ios_focus_zoom.test.mjs resolves the
+# exact bytes served here.
+_TERM_TOUCH_CSS = (
+    "<style>"
+    + (Path(__file__).parent / "static" / "term-touch.css").read_text(encoding="utf-8")
+    + "</style>"
+)
+
 # Terminal-theme shim (CMX-381). A dashboard theme used to stop at the chrome: ttyd
 # paints the one xterm theme it was launched with (agent-terminals.sh TERM_THEME),
 # so any non-default theme framed GitHub-dark terminals — a seam. This injects every
@@ -842,7 +852,7 @@ def term_http(wid, rest):
         shims = (_term_theme_shim() + _TERM_FONT_CSS + _TERM_FONT_PREF_SHIM
                  + _term_presence_shim(wid)
                  + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM + _TERM_PALETTE_KEY_SHIM
-                 + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS)
+                 + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS + _TERM_TOUCH_CSS)
         html = (html.replace("</head>", shims + "</head>", 1)
                 if "</head>" in html else html + shims)
         body = html.encode("utf-8")
