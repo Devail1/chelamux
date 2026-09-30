@@ -42,9 +42,18 @@ keys. The bridge is the HOST peer:
   keyframe) reaches the joiner via the OUTPUT pump. A wrong pairing code fails the
   first GCM tag → we log and drop, never emit garbage.
 
-Full-access: any paired joiner (they hold the code) may type — decrypted T_INPUT is
-forwarded to the pty, capped by a token bucket. A flood of hellos can't spam ttyd
-reattaches (rate-limited by REATTACH_DEBOUNCE).
+🔐 Typing is GATED on the host (CMX-403, docs/SHARE_SANDBOX.md) — never in the relay,
+which cannot read a frame. A share is VIEW ONLY unless all of these hold, checked on
+every decrypted T_INPUT (``Bridge._input_refusal``):
+  * the ``share_typing`` setting is on (``config.share_typing_enabled``, read per frame);
+  * the share was created with typing allowed; and
+  * the window verifies LIVE as a sandboxed session (``share_sandbox.check_share_session``,
+    re-run at least every SANDBOX_RECHECK_INTERVAL — never trusted from share creation).
+The one exception is the trusted-peer UNSANDBOXED override: an explicit, per-share,
+time-boxed grant bound to ONE joiner stream id, audited in the event log, that skips only
+the sandbox check (the setting still gates it). Refused input is dropped and the guest
+gets one rate-limited T_CTL notice. Allowed input is still capped by a token bucket. A
+flood of hellos can't spam ttyd reattaches (rate-limited by REATTACH_DEBOUNCE).
 
 Runs standalone for the spike::  python -m chela.collab_stream <wid>
 and exposes start_bridge(wid) / stop_bridge(wid) for app.py to call from the
@@ -59,7 +68,7 @@ import subprocess
 import threading
 import time
 
-from chela import collab, config, e2e
+from chela import collab, config, e2e, event_log, share_sandbox
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +99,17 @@ INPUT_MAX_FRAME = 4096
 # keeps a dead — or worse, recycled — session nominally "shared". A brief absence
 # (transient discovery hiccup, respawn) under the grace is tolerated as a blip.
 DEATH_GRACE = 8.0             # s the wid may be absent before we fail closed
+# 🔐 Typing gate (CMX-403). The sandbox verdict is re-read from the LIVE process tree +
+# `docker inspect` at least this often while a guest types, so a window whose process is
+# swapped after the share was created stops accepting input within this interval.
+SANDBOX_RECHECK_INTERVAL = 2.0  # s
+# At most one "view only" notice per this interval, however fast the guest types.
+VIEW_ONLY_NOTICE_INTERVAL = 10.0  # s
+
+# Share access modes, as reported to the dashboard (share pill 👁 / ⌨ / UNSANDBOXED).
+MODE_VIEW = "view"
+MODE_TYPING = "typing"            # typing allowed into a verified sandboxed session
+MODE_UNSANDBOXED = "unsandboxed"  # trusted-peer override, time-boxed, one joiner
 
 
 def _port_map() -> dict:
@@ -123,7 +143,8 @@ class Bridge:
     to the relay come from both the pump thread (DATA) and the control thread
     (keyframes), so relay writes are serialised under a lock."""
 
-    def __init__(self, wid: str, secret: bytes | None = None, on_revoke=None) -> None:
+    def __init__(self, wid: str, secret: bytes | None = None, on_revoke=None, *,
+                 allow_typing: bool = False, clock=time.monotonic, wallclock=time.time) -> None:
         self.wid = wid
         self.room = collab.room_id(wid) + "-tty"   # isolated from the presence room
         # E2E: owner-minted pairing secret → host session. The joiner pastes the
@@ -148,14 +169,27 @@ class Bridge:
         # Called once when the bridge fails closed on session death, so the caller
         # can revoke the share (app.py: pop _SHARED[wid]). None in standalone use.
         self._on_revoke = on_revoke
-        # Full-access: the live ttyd socket (owned by the output-pump thread, read by
-        # the control thread to forward INPUT). Any paired joiner holds the pairing
-        # code, so any paired joiner may type — a token bucket caps forwarded input
-        # bytes/sec so no joiner can flood the pty.
+        # The live ttyd socket (owned by the output-pump thread, read by the control
+        # thread to forward INPUT that passed the typing gate). A token bucket caps
+        # forwarded input bytes/sec so no joiner can flood the pty.
         self._ttyd = None
         self._ttyd_lock = threading.Lock()
         self._input_tokens = float(INPUT_BURST_BYTES)
         self._input_tokens_ts = time.monotonic()
+        # 🔐 Typing gate (see module docstring). `allow_typing` is what the share was
+        # created with; it is necessary, never sufficient. `_clock` is injectable so the
+        # expiry/re-check guards run on a fake clock.
+        self.allow_typing = bool(allow_typing)
+        self._clock = clock
+        self._wallclock = wallclock
+        self._policy_lock = threading.Lock()
+        self._sandbox_verdict: tuple[bool, str] = (False, "not checked yet")
+        self._sandbox_checked_at: float | None = None
+        self._last_notice = float("-inf")
+        # Trusted-peer UNSANDBOXED override: None, or {"until": monotonic deadline,
+        # "joiner": bound stream id (None until the first hello/input), "audit": the
+        # granted-event payload}. Guarded by _policy_lock.
+        self._override: dict | None = None
 
     # --- relay send helpers ------------------------------------------------
     def _seal_send(self, typ: int, plaintext: bytes) -> None:
@@ -169,7 +203,99 @@ class Bridge:
             except Exception:
                 pass
 
-    # --- input forwarding (full-access) ------------------------------------
+    # --- typing gate (CMX-403) ----------------------------------------------
+    def grant_unsandboxed(self, *, granted_by: str, window: str, ttl_s: float) -> dict:
+        """Arm the trusted-peer UNSANDBOXED override for ``ttl_s`` seconds, bound to the
+        first joiner that says hello (or types) after this, and audit the grant. The
+        caller (app.py) has already checked the typed window-name confirmation."""
+        started = self._wallclock()
+        audit = {"wid": self.wid, "window": window, "granted_by": granted_by,
+                 "started_at": started, "expires_at": started + ttl_s}
+        with self._policy_lock:
+            self._override = {"until": self._clock() + ttl_s, "joiner": None, "audit": audit}
+        event_log.append("share.unsandboxed_granted",
+                         f"UNSANDBOXED typing granted on {window} ({self.wid}) by {granted_by}",
+                         audit, wid=self.wid)
+        return audit
+
+    def revoke_unsandboxed(self, reason: str, *, event: str = "share.unsandboxed_revoked") -> bool:
+        """End the override now (kill switch / share stop / expiry). Audited; True if one
+        was active."""
+        with self._policy_lock:
+            ov, self._override = self._override, None
+        if ov is None:
+            return False
+        payload = dict(ov["audit"], revoked_at=self._wallclock(), reason=reason,
+                       joiner=ov["joiner"].hex() if ov["joiner"] else None)
+        event_log.append(event, f"UNSANDBOXED typing ended on {payload['window']} "
+                         f"({self.wid}): {reason}", payload, wid=self.wid)
+        return True
+
+    def _expire_override_if_due(self) -> None:
+        with self._policy_lock:
+            due = self._override is not None and self._clock() >= self._override["until"]
+        if due and self.revoke_unsandboxed("expired", event="share.unsandboxed_expired"):
+            self._notice("Full access expired — this share is view only now.", force=True)
+
+    def mode(self) -> str:
+        self._expire_override_if_due()
+        with self._policy_lock:
+            if self._override is not None:
+                return MODE_UNSANDBOXED
+        return MODE_TYPING if self.allow_typing else MODE_VIEW
+
+    def state(self) -> dict:
+        """What the dashboard shows: the mode, and the override's wall-clock expiry."""
+        m = self.mode()
+        with self._policy_lock:
+            exp = self._override["audit"]["expires_at"] if self._override else None
+        return {"mode": m, "expires_at": exp}
+
+    def _bind_joiner(self, stream_id: bytes) -> None:
+        with self._policy_lock:
+            if self._override is not None and self._override["joiner"] is None:
+                self._override["joiner"] = stream_id
+
+    def _sandbox_ok(self) -> tuple[bool, str]:
+        """The LIVE sandbox verdict, re-checked at least every SANDBOX_RECHECK_INTERVAL."""
+        now = self._clock()
+        if self._sandbox_checked_at is None or now - self._sandbox_checked_at >= SANDBOX_RECHECK_INTERVAL:
+            try:
+                self._sandbox_verdict = share_sandbox.check_share_session(self.wid)
+            except Exception:  # noqa: BLE001 — fail closed
+                self._sandbox_verdict = (False, "the sandbox could not be verified")
+            self._sandbox_checked_at = now
+        return self._sandbox_verdict
+
+    def _input_refusal(self, stream_id: bytes) -> str | None:
+        """None when this joiner's keystrokes may reach the pane; otherwise the notice to
+        send them. Order matters: the setting gates EVERYTHING, the override included."""
+        if not config.share_typing_enabled():
+            return "View only — typing is turned off on the host."
+        self._expire_override_if_due()
+        with self._policy_lock:
+            ov = self._override
+            if ov is not None:
+                if ov["joiner"] is None:
+                    ov["joiner"] = stream_id
+                if ov["joiner"] == stream_id:
+                    return None
+                return "View only — typing is limited to one paired guest."
+        if not self.allow_typing:
+            return "View only — this share does not allow typing."
+        ok, _why = self._sandbox_ok()
+        return None if ok else "View only — the host could not verify the sandboxed session."
+
+    def _notice(self, msg: str, *, force: bool = False) -> None:
+        """One encrypted T_CTL notice to the guest, rate-limited to one per
+        VIEW_ONLY_NOTICE_INTERVAL (``force`` for one-off state changes like expiry)."""
+        now = self._clock()
+        if not force and now - self._last_notice < VIEW_ONLY_NOTICE_INTERVAL:
+            return
+        self._last_notice = now
+        self._seal_send(e2e.T_CTL, json.dumps({"t": "notice", "msg": msg}).encode("utf-8"))
+
+    # --- input forwarding --------------------------------------------------
     def _allow_input(self, n: int) -> bool:
         """Token-bucket admission for n input bytes (called under no lock; only the
         control thread touches the bucket)."""
@@ -330,6 +456,7 @@ class Bridge:
             try:
                 while not self._stop.is_set():
                     msg = self._relay.receive(timeout=1.0)
+                    self._expire_override_if_due()   # revert to view-only on time, idle or not
                     if msg is None:
                         continue   # idle receive timeout, NOT a close — stay connected
                                    # (a real relay close raises → caught below → reconnect)
@@ -372,9 +499,14 @@ class Bridge:
             return
         except e2e.E2EError:
             return
+        # The sender's stream id — authenticated: the header is GCM additional data.
+        sender = bytes(msg[2:2 + e2e.STREAM_ID_LEN])
         if typ == e2e.T_INPUT:
-            # Full-access: any paired joiner may type (they hold the code). The token
-            # bucket in _forward_input is the only limiter.
+            # 🔐 The typing gate — HOST-side, per frame (see _input_refusal).
+            refusal = self._input_refusal(sender)
+            if refusal is not None:
+                self._notice(refusal)
+                return
             self._forward_input(bytes(pt))
             return
         if typ == e2e.T_CTL:
@@ -383,6 +515,7 @@ class Bridge:
             except Exception:
                 return
             if obj.get("t") == "hello":
+                self._bind_joiner(sender)   # an armed override binds to the first joiner
                 # Cold join: size the joiner (T_META), then cycle ttyd so tmux paints
                 # it a correct full-state repaint.
                 self._send_meta()
@@ -410,6 +543,9 @@ class Bridge:
                 log.exception("collab_stream: on_revoke hook failed for %s", self.wid)
 
     def stop(self) -> None:
+        # The share is going away, so an armed UNSANDBOXED override ends with it — audited
+        # (the #btn-shares kill switch lands here via app.py _revoke_share).
+        self.revoke_unsandboxed("share stopped")
         # Proactively tell connected joiners the share is over (encrypted, so only
         # paired joiners read it) BEFORE tearing the socket down — they show a clean
         # "ended" state instead of hanging. Best-effort: a joiner that misses it
@@ -436,20 +572,34 @@ _bridges: dict[str, Bridge] = {}
 _bridges_lock = threading.Lock()
 
 
-def start_bridge(wid: str, secret: bytes | None = None, on_revoke=None) -> str | None:
+def start_bridge(wid: str, secret: bytes | None = None, on_revoke=None, *,
+                 allow_typing: bool = False, unsandboxed: dict | None = None) -> str | None:
     """Start a bridge for a shared wid and return its base32 pairing code (or the
     existing bridge's code if already running). on_revoke(wid) fires if the bridge
     fails closed on session death — app.py passes a hook that pops _SHARED[wid] so
     the share is revoked automatically (the dashboard reaper is the belt-and-braces
-    complement: reconcile _SHARED against the live agent/port map each poll)."""
+    complement: reconcile _SHARED against the live agent/port map each poll).
+
+    ``allow_typing`` / ``unsandboxed`` (``{"granted_by", "window", "ttl_s"}``) set the
+    share's access policy (CMX-403); both only take effect on a NEW bridge — an existing
+    share keeps the policy it was created with."""
     if not config.COLLAB_RELAY:
         return None
     with _bridges_lock:
         if wid in _bridges:
             return _bridges[wid].pairing_code
-        b = Bridge(wid, secret=secret, on_revoke=on_revoke).start()
+        b = Bridge(wid, secret=secret, on_revoke=on_revoke, allow_typing=allow_typing)
+        if unsandboxed:
+            b.grant_unsandboxed(**unsandboxed)
+        b.start()
         _bridges[wid] = b
         return b.pairing_code
+
+
+def share_state(wid: str) -> dict | None:
+    """``{"mode", "expires_at"}`` of a running share, or None."""
+    b = _bridges.get(wid)
+    return b.state() if b else None
 
 
 def stop_bridge(wid: str) -> None:

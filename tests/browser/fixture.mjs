@@ -148,15 +148,17 @@ export async function launchChromium() {
 }
 
 /** A fresh context + page on the fixture at `viewport`, the Wall in a 2×2
- * preset, booted and settled. */
-export async function openDashboard(browser, { width, height, deviceScaleFactor = 1 }) {
+ * preset, booted and settled. `storage` adds localStorage keys set before the
+ * page's own scripts run (e.g. a persisted desktop sidebar collapse). */
+export async function openDashboard(browser, { width, height, deviceScaleFactor = 1, storage = {} }) {
     const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor });
-    await context.addInitScript(() => {
+    await context.addInitScript(extra => {
         try {
             localStorage.setItem('pc_term_mode', 'wall');
             localStorage.setItem('pc_wall_preset', JSON.stringify({ cols: 2, rows: 2 }));
+            for (const [k, v] of Object.entries(extra)) localStorage.setItem(k, v);
         } catch (e) { /* storage unavailable — the defaults still boot the wall */ }
-    });
+    }, storage);
     const misses = await routeFixture(context);
     const page = await context.newPage();
     const errors = [];

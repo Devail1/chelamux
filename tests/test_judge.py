@@ -573,6 +573,7 @@ def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
             "workspace_path": str(tmp_path), "diff_cmd": "git diff", "pr_view_cmd": "gh pr view",
             "experiments_path": str(tmp_path / "experiments.json"), "judge_cmd": "chela judge run",
             "held_out_pct": 30, "held_out_min": 3,     # ⚖️🙈 CMX-395
+            "risk": "normal", "max_experiments": 8, "risk_guidance": "focused",
         }
         with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
              patch.object(dispatcher, "_refresh_judge_worktree", return_value=None), \

@@ -419,8 +419,25 @@ DISPATCH_KNOBS: tuple[DispatchKnob, ...] = (
     DispatchKnob("dispatch_workflows", "CHELA_DISPATCH_WORKFLOWS", "", str,
                  "Dispatch workflows (colon-separated WORKFLOW.md paths)",
                  kind="text", restart_required=True),
-    DispatchKnob("max_reworks", "CHELA_MAX_REWORKS", 2, int,
-                 "Max reworks before escalation", floor=0),
+    # ⚖️🎚️ CMX-405: the rework budget is PER RISK LEVEL (the three knobs below); this one
+    # is the global CEILING over all of them — `0` still turns the loop off entirely.
+    DispatchKnob("max_reworks", "CHELA_MAX_REWORKS", 5, int,
+                 "Max reworks before escalation (ceiling, every risk level)", floor=0),
+    DispatchKnob("max_reworks_high", "CHELA_MAX_REWORKS_HIGH", 5, int,
+                 "Max reworks — risk: high", floor=0),
+    DispatchKnob("max_reworks_normal", "CHELA_MAX_REWORKS_NORMAL", 4, int,
+                 "Max reworks — risk: normal", floor=0),
+    DispatchKnob("max_reworks_low", "CHELA_MAX_REWORKS_LOW", 3, int,
+                 "Max reworks — risk: low", floor=0),
+    # ⚖️🎚️ CMX-405: how many experiments the judge may RUN per risk level. `high` is the
+    # pre-CMX-405 behaviour (judge.MAX_EXPERIMENTS). ⛔ It scales the SEARCH only — every
+    # experiment that does run is adjudicated identically, and a survivor BLOCKS at every level.
+    DispatchKnob("judge_experiments_high", "CHELA_JUDGE_EXPERIMENTS_HIGH", 12, int,
+                 "Judge experiments — risk: high", floor=1),
+    DispatchKnob("judge_experiments_normal", "CHELA_JUDGE_EXPERIMENTS_NORMAL", 8, int,
+                 "Judge experiments — risk: normal", floor=1),
+    DispatchKnob("judge_experiments_low", "CHELA_JUDGE_EXPERIMENTS_LOW", 4, int,
+                 "Judge experiments — risk: low", floor=1),
     DispatchKnob("judge_enabled", "CHELA_JUDGE", True, _cast_bool,
                  "Judge (adversarial review)", kind="bool", restart_required=True),
     DispatchKnob("judge_max_unknown_retries", "CHELA_JUDGE_MAX_UNKNOWN_RETRIES", 2, int,
@@ -775,6 +792,28 @@ def max_reworks() -> int:
     return max(0, dispatch_value("max_reworks"))
 
 
+def max_reworks_for(risk: object) -> int:
+    """⚖️🎚️ CMX-405. The rework cap for a run of this RISK level: that level's own knob
+    (``max_reworks_<level>``: high 5, normal 4, low 3 by default), never above the global
+    :func:`max_reworks` ceiling. An unknown/NULL risk (a pre-CMX-405 row, an adopted PR)
+    is ``normal``. Reaching it escalates to ``needs_human`` exactly as the global cap did.
+    """
+    from chela.sources import run_risk
+    level = run_risk(risk)
+    return min(max(0, dispatch_value(f"max_reworks_{level}")), max_reworks())
+
+
+def judge_max_experiments(risk: object) -> int:
+    """⚖️🎚️ CMX-405. How many of the judge's proposed experiments are RUN at this RISK
+    level (``judge_experiments_<level>``: high 12, normal 8, low 4 by default); the rest
+    are dropped OUT LOUD, exactly as ``judge.MAX_EXPERIMENTS`` always dropped them. An
+    unknown/NULL risk is ``normal``. Never below 1 — a judge that may run nothing is not
+    a judge.
+    """
+    from chela.sources import run_risk
+    return max(1, dispatch_value(f"judge_experiments_{run_risk(risk)}"))
+
+
 def judge_max_unknown_retries() -> int:
     """How many times a judge that came back CANNOT VERIFY may be RE-RUN on the SAME commit.
 
@@ -1089,6 +1128,43 @@ def remote_control_setting() -> tuple[bool, str]:
 def remote_control_enabled() -> bool:
     """Whether a window chela opens FOR A HUMAN gets ``--remote-control``. Read per call."""
     return dashboard_setting(REMOTE_CONTROL_KEY, REMOTE_CONTROL_ENV, True, cast_strict_bool)
+
+
+# 🔐 Guest typing into a shared terminal (CMX-403, docs/SHARE_SANDBOX.md). OFF by default:
+# with it off, collab_stream drops every decrypted guest keystroke, whatever the share was
+# created with. On, a share may allow typing ONLY into a window that verifies live as a
+# sandboxed session (chela.share_sandbox) — or, per share, the trusted-peer UNSANDBOXED
+# override below. Read per call on every keystroke, so turning it off in Settings stops
+# typing on a live share at once.
+SHARE_TYPING_KEY = "share_typing"
+SHARE_TYPING_ENV = "CHELA_SHARE_TYPING"
+
+
+def share_typing_setting() -> tuple[bool, str]:
+    """``(enabled, source)`` — same shape as :func:`remote_control_setting`."""
+    return _resolve_dashboard_setting(
+        SHARE_TYPING_KEY, SHARE_TYPING_ENV, False, cast_strict_bool)
+
+
+def share_typing_enabled() -> bool:
+    """Whether guest typing is allowed at all. Default False. Read per call."""
+    return dashboard_setting(SHARE_TYPING_KEY, SHARE_TYPING_ENV, False, cast_strict_bool)
+
+
+# How long a trusted-peer UNSANDBOXED typing override lasts before the share reverts to
+# view-only on its own (CMX-403). Env-only on purpose — it bounds an explicit per-share
+# opt-in, so it is not a dashboard toggle. Clamped to [1, 240] minutes.
+SHARE_UNSANDBOXED_MINUTES_ENV = "CHELA_SHARE_UNSANDBOXED_MINUTES"
+SHARE_UNSANDBOXED_MINUTES_DEFAULT = 30
+
+
+def share_unsandboxed_minutes() -> int:
+    try:
+        v = int(os.environ.get("CHELA_SHARE_UNSANDBOXED_MINUTES", "").strip()
+                or SHARE_UNSANDBOXED_MINUTES_DEFAULT)
+    except ValueError:
+        v = SHARE_UNSANDBOXED_MINUTES_DEFAULT
+    return max(1, min(240, v))
 
 # How long an undeliverable orchestrator address must stay dead before the inbox buzzes
 # the phone about it (chela/inbox.py `_undeliverable`). A reboot / tmux-restart / handoff

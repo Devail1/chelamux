@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chela import dispatcher, event_log
+from chela import config, dispatcher, event_log
 
 
 @pytest.fixture(autouse=True)
@@ -544,7 +544,8 @@ def test_cmd_reopen_prints_the_reopen_count_and_the_nudge(tmp_path, capsys):
     from chela import main
 
     with dispatcher._db() as conn:
-        # ⛔ rework_count=1 so it DIFFERS from max_reworks (2). With both equal — as the
+        # ⛔ rework_count=1 so it DIFFERS from the run's rework cap (4 — an unmarked run is
+        # `normal`, CMX-405). With both equal — as the
         # default fixture has them — rendering `rework_count/rework_count` is invisible,
         # and the denominator could stop being the budget entirely.
         _row(conn, judge_sha="j0", pr_head_sha="j0", reopen_count=2,
@@ -579,7 +580,7 @@ def test_cmd_reopen_prints_the_reopen_count_and_the_nudge(tmp_path, capsys):
     # measure; the operator-facing line is where it would be read.
     # Three DISTINCT numbers — spent 1, budget 2, reopen #3 — so no two slots can be
     # swapped or aliased without the line changing visibly.
-    assert "rework 1/2" in out, f"the rework budget must render its OWN count. Got: {out!r}"
+    assert "rework 1/4" in out, f"the rework budget must render its OWN count. Got: {out!r}"
     assert "reopen #3" in out, f"the reopen count must render its own. Got: {out!r}"
     assert "no production change" in out
 
@@ -1041,7 +1042,8 @@ def test_reopen_returns_the_SPENT_rework_budget_not_the_reopen_count(tmp_path):
     )
     assert r["reopen_count"] == 3
     assert r["rework_count"] != r["reopen_count"], "two different facts, two different numbers"
-    assert r["max_reworks"] == dispatcher.max_reworks()
+    # ⚖️🎚️ CMX-405: the budget is the run's own risk level's cap (an unmarked row → normal).
+    assert r["max_reworks"] == config.max_reworks_for("normal")
 
 
 def test_the_EVIDENCE_string_names_the_range_it_measured(monkeypatch):

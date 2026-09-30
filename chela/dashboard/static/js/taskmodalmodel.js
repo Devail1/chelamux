@@ -80,3 +80,17 @@ export function timelineSteps(reviewHistoryJson) {
             detail: typeof r.body === 'string' ? r.body : '',
         }));
 }
+
+// ⚖️🎚️ CMX-405 — a run's RISK level (chela.sources.RISK_LEVELS), as the word the Work
+// card and the task modal show plus a colour modifier. The WORD carries the meaning (Liav is
+// red-weak); the class only agrees with it. `null` for anything that is not a run carrying a
+// known level (an open/backlog item, a pre-CMX-405 row) — render nothing, never a guess.
+// `reason` is the run row's `risk_reason` (marker / label / inferred: … / default), the
+// chip's tooltip, so an inferred `high` says why.
+const _RISK_CLS = { high: 'risk-high', normal: 'risk-normal', low: 'risk-low' };
+
+export function riskChip(item) {
+    const level = item && typeof item.risk === 'string' ? item.risk.toLowerCase() : '';
+    if (!_RISK_CLS[level]) return null;
+    return { label: `risk: ${level}`, cls: _RISK_CLS[level], reason: item.risk_reason || '' };
+}

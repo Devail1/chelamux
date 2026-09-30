@@ -20,12 +20,13 @@ from chela.config import (
     judge_max_concurrent,
     judge_max_unknown_retries,
     judge_outage_backoff_seconds,
-    max_reworks,
+    max_reworks_for,
+    judge_max_experiments,
     worktree_disk_budget_bytes,
 )
 from chela.messenger import messaging_socket_launch_arg, resend_enter, send_tmux
 from chela.sandbox import sandbox_launch_arg
-from chela.sources import Task, get_source
+from chela.sources import Task, get_source, run_risk
 from chela import transcripts
 from chela.transcripts import agent_transcript_summary
 from chela.tui_text import sanitize as tui_sanitize
@@ -1329,6 +1330,13 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # announce it exactly once.
         ("merged_outside_gate",
          "ALTER TABLE runs ADD COLUMN merged_outside_gate INTEGER NOT NULL DEFAULT 0"),
+        # ⚖️🎚️ CMX-405. The task's RISK level (high/normal/low) and why it has it — copied
+        # from the TRACKER at claim time (a marker/label, the BOUNDARIES inference, or the
+        # default) and never written by anything an agent can call. It scales the judge's
+        # experiment cap and this run's rework cap (see `_rework_cap`); NULL (a row from
+        # before this, an adopted PR) reads as `normal` via `sources.run_risk`.
+        ("risk", "ALTER TABLE runs ADD COLUMN risk TEXT"),
+        ("risk_reason", "ALTER TABLE runs ADD COLUMN risk_reason TEXT"),
         # 🧊 CMX-336. `_blocked_race_resolved` (chela/runtime_truth.py) clears a
         # `J_BLOCKED_RACE` row on exactly one condition — `judge_sha != pr_head_sha`, i.e.
         # the PR's head moved past the judged commit. That is unreachable once the PR is
@@ -3076,7 +3084,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
         if head_moved:
             new_status = "awaiting_review"
             text = (
-                f"🔀 Rework round {rework_count}/{max_reworks()} disputed by the agent, "
+                f"🔀 Rework round {rework_count}/{_rework_cap(fresh)} disputed by the agent, "
                 f"but the PR's head already moved past the disputed verdict "
                 f"(`{judge_sha[:12]}` → `{ci.head_sha[:12]}`) — routed back to automatic "
                 f"review instead of a human; the new head still goes through the judge "
@@ -3090,7 +3098,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
         else:
             new_status = "needs_human"
             text = _format_escalation(
-                f"🔁🚫 Rework round {rework_count}/{max_reworks()} disputed by the agent — "
+                f"🔁🚫 Rework round {rework_count}/{_rework_cap(fresh)} disputed by the agent — "
                 f"nothing was pushed: {reason}",
                 recommendation="Read the agent's reasoning against the verdict. If it's right, "
                                 "`chela retry` to send the same head through the loop again "
@@ -3136,7 +3144,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
     return {
         "ok": True, "task_id": task_id, "status": new_status,
         "branch_name": row.get("branch_name"), "pr_url": pr_url,
-        "rework_count": rework_count, "max_reworks": max_reworks(),
+        "rework_count": rework_count, "max_reworks": _rework_cap(row),
         "comment_posted": posted, "comment_detail": detail,
         "head_moved": head_moved,
     }
@@ -3569,7 +3577,7 @@ def request_changes(
         "ok": True, "task_id": task_id, "status": "changes_requested",
         "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
         "round": len(reviews), "rework_count": run.get("rework_count") or 0,
-        "max_reworks": max_reworks(), "comment_posted": posted, "comment_detail": detail,
+        "max_reworks": _rework_cap(run), "comment_posted": posted, "comment_detail": detail,
         # The CLI checks that SOMETHING will actually come and pick this run up before it
         # tells the reviewer so (main._rework_prospects). It needs the workflow to check.
         "workflow_path": wf_path,
@@ -3858,7 +3866,7 @@ def reopen(ident: str, reason: str = "") -> dict:
     result = {
         "ok": True, "task_id": task_id, "status": "awaiting_review",
         "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
-        "rework_count": run.get("rework_count") or 0, "max_reworks": max_reworks(),
+        "rework_count": run.get("rework_count") or 0, "max_reworks": _rework_cap(run),
         "reopen_count": new_reopen_count,
         "comment_posted": posted, "comment_detail": detail,
     }
@@ -3947,7 +3955,7 @@ def retry(ident: str, reason: str = "") -> dict:
     if not posted:
         log.warning("retry: %s is changes_requested again, but the PR comment did not post "
                     "(%s)", task_id, detail)
-    cap = max_reworks()
+    cap = _rework_cap(run)
     log.info(
         "retry: %s (needs_human) → changes_requested (rework %d/%d, retry #%d)",
         task_id, run.get("rework_count") or 0, cap + new_retry_count, new_retry_count,
@@ -5065,7 +5073,7 @@ def tick(workflow_path: str | Path) -> dict:
                 # tick; a crash after costs at most one missed comment, and the next tick's
                 # log.warning still says so.
                 streak = (row["ci_infra_streak"] or 0) + 1
-                cap = max_reworks()
+                cap = _rework_cap(row)
                 conn.execute(
                     "UPDATE runs SET ci_failed_sha=?, ci_infra_streak=? WHERE task_id=?",
                     (sha, streak, task_id),
@@ -5190,11 +5198,13 @@ def tick(workflow_path: str | Path) -> dict:
         # meant a paused queue also paused the ONE transition that says "the loop gave up,
         # come look" — and a hold that is forgotten is exactly when you need that said. A
         # broken WORKFLOW.md must not silence it either: `needs_human` is how it gets fixed.
-        cap = max_reworks()
         for row in conn.execute(
             "SELECT * FROM runs WHERE workflow_path=? AND status='changes_requested'",
             (str(wf.path),),
         ).fetchall():
+            # ⚖️🎚️ CMX-405: the cap is THIS run's risk level's (high 5 / normal 4 / low 3),
+            # not one global number — reaching it escalates exactly as the global one did.
+            cap = _rework_cap(row)
             # 🔁🚪 CMX-237. A `chela retry` grants extra rounds ON TOP of the automatic
             # budget — never folded into `cap` itself, so a run with no grant escalates at
             # EXACTLY `cap`, same as before this existed.
@@ -5527,6 +5537,23 @@ def _task_brief(task: Task) -> str | None:
     return task.body or task.raw or task.title
 
 
+def _row_risk(row) -> str:
+    """⚖️🎚️ CMX-405. The risk level recorded on a run row (``normal`` for NULL, garbage,
+    or a row read before the column existed — a hand-built dict in a test, an old Row)."""
+    try:
+        keys = row.keys()
+    except AttributeError:
+        keys = row
+    return run_risk(row["risk"] if "risk" in keys else None)
+
+
+def _rework_cap(row) -> int:
+    """⚖️🎚️ CMX-405. THIS run's automatic rework budget — its risk level's cap (high 5,
+    normal 4, low 3 by default, under the global ``CHELA_MAX_REWORKS`` ceiling). Every
+    place that used to read the one global cap for a specific run reads this instead."""
+    return max_reworks_for(_row_risk(row))
+
+
 def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) -> bool:
     repo_path = wf.path.parent
     base_branch = wf.get("workspace", "base_branch", default="master")
@@ -5570,16 +5597,23 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     # conflict: leaving attempt 1's id would point the next run_review at a corpse
     # (or, worse, at whatever window tmux later recycled that id onto).
     conn.execute(
-        """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number, brief)
-           VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?)
+        """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number, brief, risk, risk_reason)
+           VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(task_id) DO UPDATE SET
              status='claimed', window_name=excluded.window_name,
              worktree_path=excluded.worktree_path, branch_name=excluded.branch_name,
              started_at=excluded.started_at, attempt=excluded.attempt, last_error=NULL,
              task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL,
-             window_epoch=NULL, brief=excluded.brief""",
-        (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt, task_number, _task_brief(task)),
+             window_epoch=NULL, brief=excluded.brief, risk=excluded.risk,
+             risk_reason=excluded.risk_reason""",
+        (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt,
+         task_number, _task_brief(task), run_risk(task.risk), task.risk_reason),
     )
+    if task.risk_reason.startswith("inferred"):
+        # ⚖️🎚️ CMX-405: the tracker gave no level, so the BOUNDARIES fallback chose one —
+        # said out loud, so an orchestrator who disagrees knows to mark the bullet.
+        log.info("Task %s: risk %s (%s) — no explicit risk marker on the tracker entry",
+                 task.id, task.risk, task.risk_reason)
     conn.commit()
 
     prompt = render_prompt(wf.prompt_template, hook_vars)
@@ -5998,7 +6032,7 @@ def _rework_vars(
         ),
         "verdict": verdict,
         "rework_round": rework_round,
-        "max_reworks": max_reworks(),
+        "max_reworks": _rework_cap(row),
         "required_mutations_section": _required_mutations_section(mutations or []),
     }
 
@@ -6115,7 +6149,7 @@ def _rework_failed(conn: sqlite3.Connection, row: sqlite3.Row, error: str) -> No
     conn.commit()
     log.warning(
         "Task %s: rework round %d FAILED (%s) — back to changes_requested, verdict intact "
-        "(cap %d)", task_id, spent, error, max_reworks(),
+        "(cap %d)", task_id, spent, error, _rework_cap(row),
     )
 
 
@@ -6238,7 +6272,7 @@ def _respawn_rework(
     )
     log.info(
         "Task %s: rework round %d/%d spawned in %s on %s (PR %s)",
-        task_id, rework_round, max_reworks(), worktree, branch, row["pr_url"] or "?",
+        task_id, rework_round, _rework_cap(row), worktree, branch, row["pr_url"] or "?",
     )
     return True
 
@@ -6273,6 +6307,15 @@ guarded state folded back in, a colourblind cue whose glyph could be emptied wit
 failures, a whole production wiring that could be REVERTED with 1112 passed.
 
 **A guard that survives deliberate corruption is not a guard.** That is what you hunt.
+
+## Stakes: risk {{risk}} — at most {{max_experiments}} experiments
+
+{{risk_guidance}}
+
+chela RUNS at most **{{max_experiments}}** of your experiments (any past that are dropped,
+and the verdict says so), so put the ones that matter first. ⛔ The level sizes your SEARCH,
+nothing else: every experiment that does run is judged exactly the same way, and a mutation
+that SURVIVES **blocks this PR at every risk level** — it is never downgraded to a note.
 
 ## Do this, in order
 
@@ -6339,7 +6382,13 @@ def _judge_vars(
     number = _pr_number(row["pr_url"])
     base = wf.get("workspace", "base_branch", default="master")
     exp_path = judge.experiments_path(worktree)
+    risk = _row_risk(row)
     return {
+        # ⚖️🎚️ CMX-405: the run's risk level (from the tracker, via the run row) and what
+        # it buys — the experiment cap `chela judge run` enforces, and how to spend it.
+        "risk": risk,
+        "max_experiments": judge_max_experiments(risk),
+        "risk_guidance": judge.RISK_GUIDANCE[risk],
         "task_id": row["task_id"],
         "task_title": row["title"] or "",
         # 📭🧾 CMX-378: kept for parity with the other `_prompt_vars`-style maps even though

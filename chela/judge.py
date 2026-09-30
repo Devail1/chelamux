@@ -156,6 +156,31 @@ HELD_OUT_MIN_EXPERIMENTS = 3   # below this, holding one out would starve the vi
 # ``judge.consistency_sample``; ``0`` switches the re-run off.
 CONSISTENCY_SAMPLE = 2
 
+# ⚖️🎚️ CMX-405. How widely the judge SEARCHES, per task risk level — rendered into the judge
+# prompt beside that level's experiment cap (`config.judge_max_experiments`; `high` is the
+# pre-CMX-405 battery, MAX_EXPERIMENTS). ⛔ Risk scales the SEARCH and nothing else: every
+# experiment that does run is adjudicated exactly as before, and a SURVIVED one BLOCKS at
+# every level — it is never downgraded to a note. A lower level is a smaller battery aimed
+# at likelier breakage, not a softer verdict.
+RISK_GUIDANCE = {
+    "high": (
+        "**The full battery.** Corrupt every guard and invariant this PR adds, adversarial "
+        "edge cases included — contrived corruptions are in scope at this level."
+    ),
+    "normal": (
+        "**A focused battery.** Spend your experiments on REALISTIC regressions and on "
+        "WIRING (revert the production call-site): the breakage a normal future edit could "
+        "plausibly introduce. Skip contrived, hand-targeted corruptions no ordinary edit "
+        "would ever produce."
+    ),
+    "low": (
+        "**Only the likeliest regressions.** Propose only corruptions a plausible future "
+        "edit would introduce — a flipped condition, a dropped call, an emptied value on the "
+        "main path. Contrived, targeted corruptions that no normal edit would produce do "
+        "NOT count at this level; do not propose them."
+    ),
+}
+
 # Each experiment re-runs the whole suite, so the timeout is per suite run, not per judge.
 SUITE_TIMEOUT_SECONDS = 900
 
@@ -305,9 +330,13 @@ class Report:
     notes: list[dict] = field(default_factory=list)
     baseline: SuiteResult | None = None
     cannot_verify: str = ""     # non-empty ⇒ NOTHING here may block. Unknown is not a fail.
-    dropped: int = 0            # experiments past MAX_EXPERIMENTS — said out loud, never silent
+    dropped: int = 0            # experiments past `cap` — said out loud, never silent
     # ⚖️🎲 CMX-395: {"sampled": n, "flipped": k, "flip_rate": k/n} — empty when not run.
     consistency: dict = field(default_factory=dict)
+    # ⚖️🎚️ CMX-405: the task's risk level and the experiment cap it bought. Shown in the
+    # verdict header; ⛔ read by NOTHING on the blocking path (`blocking`/`state` below).
+    risk: str = ""
+    cap: int = MAX_EXPERIMENTS
 
     @property
     def blocking(self) -> list[Outcome]:
@@ -1135,8 +1164,15 @@ def run_experiments(
     timeout: float = SUITE_TIMEOUT_SECONDS,
     base_branch: str = "",
     consistency_sample: int = 0,
+    max_experiments: int = MAX_EXPERIMENTS,
+    risk: str = "",
 ) -> Report:
     """Execute every proposed experiment IN THIS WORKTREE and adjudicate each one.
+
+    ⚖️🎚️ CMX-405: ``max_experiments`` is the task's risk-level cap (see
+    ``config.judge_max_experiments``) — proposals past it are dropped OUT LOUD, as
+    :data:`MAX_EXPERIMENTS` always dropped them. ⛔ It bounds how many run, never what a
+    run one means: a SURVIVED outcome blocks at every ``risk``.
 
     The worktree is a throwaway detached checkout of the PR head — never the branch's own
     worktree, which a rework agent will later commit from. A mutation that escaped into
@@ -1180,7 +1216,7 @@ def run_experiments(
     never clean, because a flip is an unknown, and the operator decides. ``0`` (the default)
     skips it; ``judge_run`` passes the workflow's ``judge.consistency_sample``.
     """
-    report = Report()
+    report = Report(risk=risk, cap=max(1, int(max_experiments)))
     items = raw.get("experiments") if isinstance(raw, dict) else None
     notes = raw.get("notes") if isinstance(raw, dict) else None
     report.notes = [n for n in notes if isinstance(n, dict)] if isinstance(notes, list) else []
@@ -1213,9 +1249,9 @@ def run_experiments(
             )
         return report
 
-    if len(items) > MAX_EXPERIMENTS:
-        report.dropped = len(items) - MAX_EXPERIMENTS
-        items = items[:MAX_EXPERIMENTS]
+    if len(items) > report.cap:
+        report.dropped = len(items) - report.cap
+        items = items[:report.cap]
 
     # ⛔ CMX-80: PROVISION BEFORE MEASURING. A missing dependency and a broken guard both
     # come out of the suite as "exit 1", and the judge used to report the first as the
@@ -1578,6 +1614,16 @@ def _flaky_section(report: Report) -> str:
     return "\n".join(lines) + "\n"
 
 
+def risk_line(report: Report) -> list[str]:
+    """⚖️🎚️ CMX-405: the verdict header's stakes line — ``risk: low — 4 experiments`` — or
+    nothing for a report that carries no risk (a self-check, a pre-CMX-405 caller)."""
+    if not report.risk:
+        return []
+    ran = len(report.outcomes)
+    return [f"**risk: {report.risk} — {report.cap} experiments** (cap for this level; "
+            f"{ran} run)", ""]
+
+
 def block_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
     """The verdict a SURVIVED mutation writes — stated as the fact it is.
 
@@ -1587,6 +1633,7 @@ def block_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
     parts = [
         "## ⚖️ THE JUDGE — a guard on this PR SURVIVED DELIBERATE CORRUPTION",
         "",
+        *risk_line(report),
         "This is not a review of your code, and it is not an opinion. Each finding below is "
         "a **mutation chela applied itself**, in a throwaway checkout of this PR's head: the "
         "file really changed (read back from disk), it still parsed, and "
@@ -1659,6 +1706,7 @@ def comment_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
         head = [
             "## ⚖️ THE JUDGE — ⚠️ CANNOT VERIFY (this is NOT an approval)",
             "",
+            *risk_line(report),
             f"**{report.cannot_verify}**",
             "",
             "Nothing was sent back and nothing was cleared: an unknown is never a pass, and "
@@ -1671,6 +1719,7 @@ def comment_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
         head = [
             "## ⚖️ THE JUDGE — every guard held",
             "",
+            *risk_line(report),
             f"chela corrupted each guard this PR adds and re-ran `{test_cmd}` "
             f"(baseline: {_suite_line(report.baseline)}). **Every mutation made the suite go "
             "red** — the guards guard.",
@@ -1698,7 +1747,7 @@ def comment_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
         head += ["", _flaky_section(report).rstrip()]
     if report.dropped:
         head += ["", f"⚠️ {report.dropped} further experiment(s) were proposed and **not run** "
-                     f"(the cap is {MAX_EXPERIMENTS} — each one re-runs the whole suite)."]
+                     f"(the cap is {report.cap} — each one re-runs the whole suite)."]
     head += ["", f"_PR: {pr_url or '(none on the run row)'} — posted by the dispatcher's judge._"]
     return "\n".join(head) + _notes_section(report.notes)
 
@@ -1898,7 +1947,8 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
     ⛔ It never merges and never approves. A clean run is left in ``awaiting_review``, where
     the orchestrator finds it.
     """
-    from chela import dispatcher, event_log, workflow
+    from chela import config, dispatcher, event_log, workflow
+    from chela.sources import run_risk
 
     run = dispatcher.resolve_run(ident)
     if run is None:
@@ -1922,6 +1972,10 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
     judge_cfg = judge_suite_config(wf)
     test_cmd = judge_cfg.test_cmd
     worktree = judge_worktree_path(wf, task_id)
+    # ⚖️🎚️ CMX-405: the stakes come from the RUN ROW (copied from the tracker at claim),
+    # never from anything the judged agent wrote. They size the battery only.
+    risk = run_risk(run.get("risk"))
+    exp_cap = config.judge_max_experiments(risk)
     repo_dir = str(wf.path.parent)
     pr_url = run.get("pr_url")
 
@@ -1958,12 +2012,15 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
                 report = run_experiments(
                     worktree, test_cmd, raw, timeout=judge_cfg.suite_timeout_seconds,
                     base_branch=base_branch, consistency_sample=judge_cfg.consistency_sample,
+                    max_experiments=exp_cap, risk=risk,
                 )
         else:
             report = run_experiments(
                 worktree, test_cmd, raw, timeout=judge_cfg.suite_timeout_seconds,
                 base_branch=base_branch, consistency_sample=judge_cfg.consistency_sample,
+                max_experiments=exp_cap, risk=risk,
             )
+        report.risk, report.cap = risk, exp_cap
         # A worktree this call rebuilt was checked out at the run's CURRENT head — stamp
         # `judge_sha` to match so the DB record of what was judged is never stale, and the
         # automatic per-sha trigger does not immediately re-spawn a redundant judge on the

@@ -984,6 +984,34 @@ def _report_installed_plugin(directory: Path, port: int) -> None:
               "`claude plugin update chela@<marketplace>`)")
 
 
+def resolve_project_dir(project: str) -> str | None:
+    """A ``share-session`` project argument → a directory: a path as given, else a name
+    under the launcher's projects dir (``CHELA_PROJECTS_DIR``). None if neither exists."""
+    from chela import launcher
+    p = os.path.expanduser(project)
+    if os.path.isdir(p):
+        return os.path.realpath(p)
+    under = launcher._projects_dir() / project
+    return os.path.realpath(under) if under.is_dir() else None
+
+
+def cmd_share_session(args) -> None:
+    """Open a sandboxed share session (CMX-403) — the only kind of window a share guest
+    may type into. Same launcher as the dashboard's New session → Sandboxed."""
+    cwd = resolve_project_dir(args.project)
+    if cwd is None:
+        print(f"no such project directory: {args.project}", file=sys.stderr)
+        sys.exit(1)
+    from chela import spawn
+    result = spawn.spawn_sandbox_window(cwd)
+    if not result.ok:
+        print(f"refusing to start a sandboxed session: {result.error}", file=sys.stderr)
+        sys.exit(1)
+    print(f"sandboxed session {result.name} ({result.wid or 'no id'}) in {result.cwd}")
+    print("share it from the dashboard; guest typing also needs Settings → Collaboration → "
+          "Guest typing")
+
+
 def cmd_whoami(args) -> None:
     """Print this agent's own window id (CHELA_WID / derived from tmux)."""
     wid = orchestrator.self_wid()
@@ -2683,6 +2711,10 @@ def main() -> None:
 
     # --- orchestrator toolkit (agent-facing: observe + drive siblings) ---
     sub.add_parser("whoami", help="Print this agent's own window id ($CHELA_WID)")
+    p_ss = sub.add_parser(
+        "share-session",
+        help="Open a sandboxed session (container) a share guest may type into")
+    p_ss.add_argument("project", help="project directory, or a name under CHELA_PROJECTS_DIR")
 
     p_peek = sub.add_parser(
         "peek", help="Filtered status view of a window (status + recap + cwd + health)")
@@ -3252,6 +3284,8 @@ def main() -> None:
         cmd_broadcast(args)
     elif args.command == "plugin":
         cmd_plugin(args)
+    elif args.command == "share-session":
+        cmd_share_session(args)
     elif args.command == "whoami":
         cmd_whoami(args)
     elif args.command == "peek":
