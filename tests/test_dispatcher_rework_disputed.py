@@ -90,8 +90,10 @@ def test_dispute_flips_a_rework_to_needs_human_and_posts_a_comment(
     # Two cases, and every quantity that varies (numerator, denominator, prior-review
     # count, resulting round) is distinct within a case AND across both cases — so no
     # hardcoded literal (a headline fraction, a review round) can satisfy both.
-    monkeypatch.setenv("CHELA_MAX_REWORKS", max_reworks_env)
-    # CMX-405: the row is unmarked → `normal`, whose own cap sits under the ceiling above.
+    # CMX-405: the row is unmarked → `normal`. The global ceiling sits well ABOVE the
+    # normal cap, and high's default (5) differs from both cases' caps — so the headline
+    # denominator is measurably the run's OWN level, not the ceiling or another level.
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "20")
     monkeypatch.setenv("CHELA_MAX_REWORKS_NORMAL", max_reworks_env)
     prior_reviews = [
         {"round": r, "at": f"t{r}", "body": f"prior issue #{r}", "verdict": "changes_requested"}
@@ -342,6 +344,27 @@ def test_dispute_with_a_moved_head_routes_to_awaiting_review_not_needs_human():
     assert run["last_error"] is None
     assert run["rework_count"] == 1               # unchanged — the round was already spent
     assert dispatcher.reviews_of(dict(run))[-1]["verdict"] == "disputed"
+
+
+@pytest.mark.parametrize("risk,cap", [("low", 3), ("normal", 4), ("high", 5)])
+def test_a_moved_head_dispute_headline_names_the_runs_own_level_cap(monkeypatch, risk, cap):
+    # CMX-405: the 🔀 branch is its own render of `round/cap` — the needs_human test above
+    # never reaches it. The ceiling sits far above every level, and each level's default cap
+    # differs from the others', so the denominator can only come from THIS run's level.
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "20")
+    for lv in ("HIGH", "NORMAL", "LOW"):
+        monkeypatch.delenv(f"CHELA_MAX_REWORKS_{lv}", raising=False)
+    with dispatcher._db() as conn:
+        _row(conn, judge_sha="a" * 40, risk=risk)
+    posted: list[str] = []
+    with patch.object(dispatcher.subprocess, "run",
+                       side_effect=_gh_router_head("b" * 40)), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]), \
+         patch.object(dispatcher, "_kill_window"):
+        result = dispatcher.mark_rework_disputed("abc123", "already pushed a fix")
+    assert result["head_moved"] is True
+    assert f"🔀 Rework round 1/{cap} disputed" in posted[0]
 
 
 def test_dispute_races_a_status_change_and_the_cas_refuses_the_stale_row():

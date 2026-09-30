@@ -29,8 +29,20 @@ from chela.sources import Task, apply_risk, infer_risk
 from chela.sources.gh_issues import GhIssuesSource
 from chela.sources.markdown import MarkdownSource
 from chela.workflow import WorkflowDef
+from tests.test_dispatcher_ci import _check_run, _FakeGh
+from tests.test_dispatcher_ci import _row as _ci_row
+from tests.test_dispatcher_ci import _tick as _ci_tick
+from tests.test_dispatcher_ci import _wf as _ci_wf
 from tests.test_dispatcher_rework import _FakeTmux, _row, _Source, _status, _wf
-from tests.test_judge import FAKE_GUARD_TEST, REAL_GUARD_TEST, _exp, _workflow_repo
+from tests.test_judge import (
+    FAKE_GUARD_TEST,
+    REAL_GUARD_TEST,
+    _exp,
+    _git_workflow_repo,
+    _judge_worktree_path,
+    _run_row,
+    _workflow_repo,
+)
 
 _KNOB_ENVS = (
     "CHELA_MAX_REWORKS", "CHELA_MAX_REWORKS_HIGH", "CHELA_MAX_REWORKS_NORMAL",
@@ -145,6 +157,28 @@ def test_an_unmarked_brief_touching_judge_py_is_high(tmp_path):
     assert t.risk_reason.startswith("inferred") and "judge.py" in t.risk_reason
 
 
+@pytest.mark.parametrize("boundary,hit", [
+    ("`chela/dispatcher.py`", "dispatcher.py"),
+    ("`chela/judge.py`", "judge.py"),
+    ("`chela/contract.py`", "contract.py"),
+    ("`chela/mergegate.py`", "mergegate.py"),
+    ("`chela/inbox.py`", "inbox.py"),
+    ("`chela/sandbox.py`", "sandbox"),
+    ("`chela/share_sandbox.py`", "sandbox"),
+    ("the secrets store", "secret"),
+    ("the relay token", "token"),
+])
+def test_every_advertised_trigger_infers_high(boundary, hit):
+    # Each path/word WORKFLOW.md and docs/RISK_LEVELS.md advertise, ALONE in BOUNDARIES
+    # (next to a path that is not a trigger), infers `high` — dropping any one from the
+    # regex turns its own case red, not just the judge.py one.
+    body = _BRIEF.format(boundaries=f"{boundary}, `chela/dashboard/static/js/work.js`.")
+    assert infer_risk(body) is not None and infer_risk(body).lower() == hit
+    t = apply_risk(Task(id="x", title="t", file="", line_number=1, raw="", body=body),
+                   None, "marker")
+    assert t.risk == "high"
+
+
 def test_the_fallback_reads_only_the_boundaries_paragraph():
     # `judge.py` appears in OBJECTIVE, not BOUNDARIES → no inference.
     assert infer_risk(_BRIEF.format(boundaries="`chela/dashboard/static/js/work.js`.")) is None
@@ -247,6 +281,28 @@ def test_at_low_the_judge_runs_only_the_low_cap(tmp_path):
     assert result["state"] == judge.J_CLEAN
     assert "risk: low — 4 experiments" in posted[0]
     assert "2 further experiment(s)" in posted[0]
+    # The 'not run' line names THIS level's cap — not the old global MAX_EXPERIMENTS (12),
+    # which the header line alone would never expose.
+    assert "(the cap is 4 — each one re-runs the whole suite)" in posted[0]
+    assert f"(the cap is {judge.MAX_EXPERIMENTS} —" not in posted[0]
+
+
+def test_a_rebuilt_worktree_runs_only_the_low_cap_too(tmp_path, monkeypatch):
+    """The reprovisioned-worktree path (CMX-201) is a SECOND `run_experiments` call site —
+    it must pass the run's cap too. The report's header is re-stamped with the level's cap
+    AFTER the run, so only the number of outcomes actually run tells the paths apart."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+    repo, sha = _git_workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    assert not _judge_worktree_path(tmp_path, task_id).exists()   # the REBUILD path
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, pr_head_sha=sha, risk="low")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()] * 6}))
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+    assert result["state"] == judge.J_CLEAN
+    assert len(result["outcomes"]) == 4
 
 
 def test_at_low_a_surviving_mutation_STILL_BLOCKS(tmp_path):
@@ -305,6 +361,28 @@ def _tick_changes_requested(tmp_path, risk, rework_count) -> str:
 ])
 def test_the_rework_cap_is_the_runs_own_risk_level(tmp_path, risk, spent, expected):
     assert _tick_changes_requested(tmp_path, risk, spent) == expected
+
+
+@pytest.mark.parametrize("risk,streak,expected", [
+    ("low", 2, "awaiting_review"),
+    ("low", 3, "needs_human"),
+    ("high", 4, "awaiting_review"),
+    ("high", 5, "needs_human"),
+])
+def test_the_ci_infra_escalation_cap_is_the_runs_own_risk_level(tmp_path, risk, streak,
+                                                                 expected):
+    """A run red at CI INFRASTRUCTURE escalates on its own streak, capped at THIS run's
+    rework cap — low escalates on the 3rd red, high survives the 4th. No global env knob is
+    set, so the default ceiling (above every level) can't stand in for the per-level cap."""
+    wf = _ci_wf(tmp_path)
+    with dispatcher._db() as conn:
+        _ci_row(conn, workflow_path=str(wf.path), risk=risk, ci_infra_streak=streak - 1,
+                ci_failed_sha="sha-before")
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="STARTUP_FAILURE")], sha="sha-now")
+    _ci_tick(wf, fake)
+    run = dispatcher.resolve_run("abc123")
+    assert (run["ci_infra_streak"] or 0) == streak
+    assert run["status"] == expected
 
 
 # --- the claim: the level lands on the run row, from the tracker -------------------------
