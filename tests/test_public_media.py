@@ -113,6 +113,35 @@ def _assert_shims_pin_the_demo(bin_dir: Path, fleet) -> None:
     assert hidden.returncode == 1 and hidden.stdout == ""
     other = _RUN([str(bin_dir / "pgrep"), "-f", "ttyd"], capture_output=True, text=True)
     assert other.stdout.splitlines() == ["-f", "ttyd"]  # anything else reaches the real pgrep
+    _assert_stubs_answer_for_the_demo(bin_dir, tmp=bin_dir.parent)
+
+
+DEMO_SHIMS = {"tmux", "claude", "gh", "crontab", "pgrep", "pm2"}
+
+
+def _assert_stubs_answer_for_the_demo(bin_dir: Path, tmp: Path) -> None:
+    """EXECUTE every other shim too — each stands between a view on camera and the
+    operator's real account: crontab is per-USER (the demo HOME does not isolate it) and
+    the Schedules view runs ``crontab -l``; Settings runs ``gh auth status``; the Wall
+    asks ``claude agents --json``. A missing or renamed shim lets the real one answer."""
+    assert {p.name for p in bin_dir.iterdir()} == DEMO_SHIMS
+    empty = tmp / "no-status"
+    empty.mkdir(exist_ok=True)
+    env = {"PATH": "/usr/bin:/bin", "CHELA_DEMO_STATUS_DIR": str(empty)}
+
+    def run(*argv: str):
+        return _RUN([str(bin_dir / argv[0]), *argv[1:]], capture_output=True, text=True, env=env)
+
+    cron = run("crontab", "-l")
+    assert (cron.returncode, cron.stdout) == (0, ""), cron  # an EMPTY crontab, not the user's
+    gh = run("gh", "auth", "status")
+    assert gh.returncode == 1 and gh.stdout == "" and "chela demo: gh is stubbed" in gh.stderr, gh
+    agents = run("claude", "agents", "--json")
+    assert (agents.returncode, json.loads(agents.stdout)) == (0, []), agents
+    other = run("claude", "-p", "hello")  # nothing else reaches a model or an account
+    assert other.returncode == 2 and "fake claude implements only" in other.stderr, other
+    pm2 = run("pm2", "jlist")
+    assert (pm2.returncode, json.loads(pm2.stdout)) == (0, []), pm2
 
 
 def _fake_which(tmp_path: Path):
@@ -158,6 +187,9 @@ def _assert_demo_env_is_from_scratch(tmp_path, env) -> None:
     assert Path(env["CHELA_DIR"]) != real_chela
     # The shim dir comes first, so every `tmux` the demo runs is the pinned one.
     assert env["PATH"].split(":")[0] == str(tmp_path / ".local" / "bin")
+    # The dashboard stays on loopback during a recording, with Remote Control off.
+    assert env["CHELA_DASH_HOST"] == "127.0.0.1"
+    assert env["CHELA_REMOTE_CONTROL"] == "false"
     # From scratch: no probe key, and no value copied from the operator's env except
     # the two it is built on (PATH is prefixed, LANG is the locale).
     assert "probe" not in "".join(env.values())
@@ -337,6 +369,31 @@ def test_demo_fleet_up_wires_every_step(tmp_path, monkeypatch):
     assert by_cmd[str(fleet.REPO / "scripts" / "agent-terminals.sh")]["env"] is env
     assert by_cmd["dashboard"]["cwd"] == str(root / "api-server")
     assert json.loads((tmp_path / "state.json").read_text())["root"] == str(root)
+
+
+def test_demo_fleet_app_remote_is_its_own_bare_clone(tmp_path):
+    """make_app with REAL git: the demo app's origin is the local bare clone beside it —
+    never this checkout, whose path names the operator and would show in Settings'
+    Update section — and nothing in its git config points back at the real repo."""
+    fleet = _fleet()
+    root = tmp_path / "demo"
+    env = fleet.demo_env(root, 5999, 6400)
+    env["PATH"] = os.environ.get("PATH", "/usr/bin:/bin")  # the real git; no shims here
+    Path(env["HOME"]).mkdir(parents=True)
+    fleet.make_app(env)
+    app = Path(env["PYTHONPATH"])
+
+    def git(*args: str) -> str:
+        return _RUN(["git", *args], env=env, cwd=str(app), capture_output=True,
+                    text=True, check=True).stdout.strip()
+
+    origin = app.parent / "chela-origin.git"
+    assert git("remote") == "origin"
+    assert Path(git("remote", "get-url", "origin")) == origin
+    assert (origin / "HEAD").is_file()
+    assert git("rev-parse", "--abbrev-ref", "main@{upstream}") == "origin/main"
+    config = (app / ".git" / "config").read_text()
+    assert str(fleet.REPO) not in config and str(ROOT) not in config, config
 
 
 def _down_with_state(fleet, tmp_path, monkeypatch, root: Path) -> None:
