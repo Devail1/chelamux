@@ -3715,11 +3715,11 @@ def test_self_check_on_a_red_baseline_does_not_touch_git(tmp_path):
     assert report.outcomes == []
 
 
-def _workflow_md(tmp_path: Path, test_cmd: str) -> Path:
+def _workflow_md(tmp_path: Path, test_cmd: str, extra: str = "") -> Path:
     p = tmp_path / "WORKFLOW.md"
     p.write_text(
         "---\nproject_key: TEST\njudge:\n  test_cmd: " + json.dumps(test_cmd) +
-        "\n  suite_timeout_seconds: 120\n---\nbody\n"
+        "\n  suite_timeout_seconds: 120\n" + extra + "---\nbody\n"
     )
     return p
 
@@ -3745,15 +3745,17 @@ def test_run_self_check_forwards_the_ENTIRE_judge_config_in_one_call(tmp_path, m
     the old "each field sourced by hand, one call site at a time" shape — where a future
     field can silently stop reaching :func:`judge.self_check` — fails HERE, in one place,
     instead of waiting for the judge to find each dropped field on its own round."""
-    wf_path = _workflow_md(tmp_path, "some-distinctive-cmd")
+    # ⚡ CMX-407: `select_tests: false` is NOT the default, so a dropped forward reads True.
+    wf_path = _workflow_md(tmp_path, "some-distinctive-cmd", "  select_tests: false\n")
     exp_path = tmp_path / "experiments.json"
     exp_path.write_text(json.dumps({"experiments": [_exp()]}))
 
     captured = {}
 
-    def fake_self_check(worktree, test_cmd, raw, *, timeout):
+    def fake_self_check(worktree, test_cmd, raw, *, timeout, select_tests):
         captured["test_cmd"] = test_cmd
         captured["timeout"] = timeout
+        captured["select_tests"] = select_tests
         return judge.Report()
 
     monkeypatch.setattr(judge, "self_check", fake_self_check)
@@ -3766,6 +3768,7 @@ def test_run_self_check_forwards_the_ENTIRE_judge_config_in_one_call(tmp_path, m
     # module default (or vice versa).
     assert captured["test_cmd"] == "some-distinctive-cmd"
     assert captured["timeout"] == 120
+    assert captured["select_tests"] is False
 
 
 def test_run_self_check_explicit_test_cmd_wins_over_the_workflow(tmp_path):
