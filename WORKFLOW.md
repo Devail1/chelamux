@@ -67,6 +67,13 @@ agent:
 # against, so the suite must be the one that CANNOT quietly do nothing.
 #
 # `enabled: false` turns it off for this workflow; CHELA_JUDGE=0 turns it off fleet-wide.
+#
+# ⚖️🎚️ RISK (CMX-405). Each TODO bullet may carry `<!-- risk: high|normal|low -->` (a
+# gh_issues tracker: a `risk:<level>` label). Unmarked is `normal` — or `high` when the
+# brief's BOUNDARIES touch dispatcher/judge/contract/mergegate/sandbox/inbox/secrets/tokens.
+# The level scales ONLY the judge's search (experiments run: 12 / 8 / 4) and the rework cap
+# (5 / 4 / 3) — Settings → Dispatch knobs. ⛔ The judge always runs at every level, and a
+# surviving mutation always BLOCKS. See docs/RISK_LEVELS.md.
 judge:
   test_cmd: CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q
   suite_timeout_seconds: 900

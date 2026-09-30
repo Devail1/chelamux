@@ -3,7 +3,7 @@ import { $, BASE_PATH, attrEsc, escHtml } from './util.js';
 import { _runDisplayId, _runPrCell, _taskProgressChip } from './dispatcher.js';
 import { pollWork, postWorkDelete } from './work.js';
 import { openTaskModal } from './taskmodal.js';
-import { displayTitle } from './taskmodalmodel.js';
+import { displayTitle, riskChip } from './taskmodalmodel.js';
 import { knInline } from './knowledge.js';
 import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from './kanbanlanemodel.js';
 
@@ -233,6 +233,11 @@ function _kCard(card) {
     // Progress inside the run's own task list (issue #462) — see _taskProgressChip;
     // renders nothing when card.tasks is null (no session to join, or no task dir).
     const taskChip = _taskProgressChip(card.tasks);
+    // ⚖️🎚️ CMX-405: the run's risk level — what sized its judge battery and rework cap.
+    const riskMeta = riskChip(card);
+    const risk = riskMeta
+        ? `<span class="kanban-risk-chip ${riskMeta.cls}" title="${attrEsc(riskMeta.reason || riskMeta.label)}">${escHtml(riskMeta.label)}</span>`
+        : '';
     // Merge button rides next to the PR badge on Awaiting Review cards —
     // that's where cards with open, unmerged PRs live. dispatcher.tick()
     // refreshes pr_state via `gh pr view` for any row carrying a pr_url, so the
@@ -273,6 +278,7 @@ function _kCard(card) {
             <span class="kanban-card-id" title="${tid}">${displayId}</span>
             ${branchOrLine}
             ${stateChip}
+            ${risk}
             ${taskChip}
             ${pr}
             ${ci}

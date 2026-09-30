@@ -91,6 +91,8 @@ def test_dispute_flips_a_rework_to_needs_human_and_posts_a_comment(
     # count, resulting round) is distinct within a case AND across both cases — so no
     # hardcoded literal (a headline fraction, a review round) can satisfy both.
     monkeypatch.setenv("CHELA_MAX_REWORKS", max_reworks_env)
+    # CMX-405: the row is unmarked → `normal`, whose own cap sits under the ceiling above.
+    monkeypatch.setenv("CHELA_MAX_REWORKS_NORMAL", max_reworks_env)
     prior_reviews = [
         {"round": r, "at": f"t{r}", "body": f"prior issue #{r}", "verdict": "changes_requested"}
         for r in prior_rounds

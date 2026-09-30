@@ -5,7 +5,7 @@ import re
 import textwrap
 from pathlib import Path
 
-from chela.sources import Task
+from chela.sources import Task, apply_risk, normalize_risk
 from chela.workflow import WorkflowDef
 
 log = logging.getLogger(__name__)
@@ -14,6 +14,10 @@ OPEN_RE = re.compile(r"^\s*-\s*\[\s\]\s*(.+?)\s*$")
 DONE_RE = re.compile(r"^\s*-\s*\[[xX]\]\s*(.+?)\s*$")
 BLOCKED_RE = re.compile(r"<!--\s*blocked", re.IGNORECASE)
 DEPENDS_RE = re.compile(r"<!--\s*depends:\s*(.+?)\s*-->", re.IGNORECASE)
+# ⚖️🎚️ CMX-405: `<!-- risk: high|normal|low -->`. Like every marker it is stripped from the
+# bare title (`_bare_title`), so it never changes the task id; read by `_find_risk`, which
+# (like `_find_depends`) ignores a marker quoted inside inline code.
+RISK_RE = re.compile(r"<!--\s*risk\s*:\s*([A-Za-z]*)\s*-->", re.IGNORECASE)
 # The optional human-readable "why" a PARKED bullet carries — `<!-- blocked -->` alone,
 # with no colon, is valid too; it just has no reason text to show.
 BLOCKED_REASON_RE = re.compile(r"<!--\s*blocked\s*:\s*(.*?)\s*-->", re.IGNORECASE)
@@ -87,7 +91,7 @@ class MarkdownSource:
             # stays in `Task.raw` (see `raw_title`); `depends` and `body` are parsed from
             # it here, and the strike matches the tracker line by id, never by title.
             bare = _bare_title(title)
-            tasks.append(Task(
+            tasks.append(apply_risk(Task(
                 id=_task_id(self.path, bare),
                 title=bare,
                 file=str(self.path),
@@ -95,7 +99,7 @@ class MarkdownSource:
                 raw=raw,
                 body=_task_body(title, lines, i),
                 depends=_resolve_depends(self.path.name, title),
-            ))
+            ), _find_risk(title), "marker"))
         return tasks
 
     def legacy_raw_ids(self, tasks: list[Task]) -> dict[str, str]:
@@ -339,6 +343,23 @@ def _find_depends(title: str) -> str | None:
     if not m:
         return None
     return title[m.start(1):m.end(1)]
+
+
+def _find_risk(title: str) -> str | None:
+    """The level of `title`'s first `<!-- risk: ... -->` marker OUTSIDE inline code, or None.
+
+    An unrecognised level (`<!-- risk: extreme -->`) is logged and treated as NO marker —
+    the task then falls back to the BOUNDARIES inference / the default, never to a guess.
+    """
+    masked = _INLINE_CODE_RE.sub(lambda m: " " * len(m.group(0)), title)
+    m = RISK_RE.search(masked)
+    if not m:
+        return None
+    level = normalize_risk(m.group(1))
+    if level is None:
+        log.warning("markdown tracker: ignoring unknown risk level %r on %r",
+                    m.group(1), _bare_title(title)[:80])
+    return level
 
 
 def _bare_title(title: str) -> str:

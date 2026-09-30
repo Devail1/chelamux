@@ -2,7 +2,7 @@
 import { $, escHtml, closeModal, shortTime, showModal } from './util.js';
 import { _runDisplayId, _runPrCell } from './dispatcher.js';
 import { runStatusBadgeClass } from './runstate.js';
-import { briefHtml, briefSource, displayTitle, timelineSteps } from './taskmodalmodel.js';
+import { briefHtml, briefSource, displayTitle, riskChip, timelineSteps } from './taskmodalmodel.js';
 import { knMd, knInline } from './knowledge.js';
 
 // ---------------------------------------------------------------------------
@@ -87,6 +87,14 @@ function _judgeHtml(item) {
     return `<span class="badge ${cls}">${escHtml(item.judge_state)}</span>${detail}`;
 }
 
+// ⚖️🎚️ CMX-405: the run's risk level, with WHY it has it (marker / label / inferred / default).
+function _riskHtml(item) {
+    const meta = riskChip(item);
+    if (!meta) return '';
+    const why = meta.reason ? ` <span class="ts">${escHtml(meta.reason)}</span>` : '';
+    return `<span class="kanban-risk-chip ${meta.cls}">${escHtml(meta.label)}</span>${why}`;
+}
+
 function _sideRow(label, valueHtml) {
     if (valueHtml == null || valueHtml === '') return '';
     return `<div class="task-modal-row"><div class="task-modal-row-label">${escHtml(label)}</div><div class="task-modal-row-value">${valueHtml}</div></div>`;
@@ -135,6 +143,7 @@ function _sideRows(item) {
         _sideRow('Model', item.model ? escHtml(item.model) : ''),
         _sideRow('PR', _prRow(item)),
         _sideRow('Attempt', item.attempt != null ? escHtml(String(item.attempt)) : ''),
+        _sideRow('Risk', _riskHtml(item)),
         _sideRow('Reworks', item.rework_count ? escHtml(String(item.rework_count)) : ''),
         _sideRow('Judge', _judgeHtml(item)),
         _sideRow('Started', item.started_at ? escHtml(shortTime(item.started_at)) : ''),

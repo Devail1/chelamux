@@ -572,6 +572,7 @@ def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
             "pr_url": "https://x/1", "branch_name": "b", "task_id": "abc123",
             "workspace_path": str(tmp_path), "diff_cmd": "git diff", "pr_view_cmd": "gh pr view",
             "experiments_path": str(tmp_path / "experiments.json"), "judge_cmd": "chela judge run",
+            "risk": "normal", "max_experiments": 8, "risk_guidance": "focused",
         }
         with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
              patch.object(dispatcher, "_refresh_judge_worktree", return_value=None), \

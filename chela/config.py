@@ -419,8 +419,25 @@ DISPATCH_KNOBS: tuple[DispatchKnob, ...] = (
     DispatchKnob("dispatch_workflows", "CHELA_DISPATCH_WORKFLOWS", "", str,
                  "Dispatch workflows (colon-separated WORKFLOW.md paths)",
                  kind="text", restart_required=True),
-    DispatchKnob("max_reworks", "CHELA_MAX_REWORKS", 2, int,
-                 "Max reworks before escalation", floor=0),
+    # ⚖️🎚️ CMX-405: the rework budget is PER RISK LEVEL (the three knobs below); this one
+    # is the global CEILING over all of them — `0` still turns the loop off entirely.
+    DispatchKnob("max_reworks", "CHELA_MAX_REWORKS", 5, int,
+                 "Max reworks before escalation (ceiling, every risk level)", floor=0),
+    DispatchKnob("max_reworks_high", "CHELA_MAX_REWORKS_HIGH", 5, int,
+                 "Max reworks — risk: high", floor=0),
+    DispatchKnob("max_reworks_normal", "CHELA_MAX_REWORKS_NORMAL", 4, int,
+                 "Max reworks — risk: normal", floor=0),
+    DispatchKnob("max_reworks_low", "CHELA_MAX_REWORKS_LOW", 3, int,
+                 "Max reworks — risk: low", floor=0),
+    # ⚖️🎚️ CMX-405: how many experiments the judge may RUN per risk level. `high` is the
+    # pre-CMX-405 behaviour (judge.MAX_EXPERIMENTS). ⛔ It scales the SEARCH only — every
+    # experiment that does run is adjudicated identically, and a survivor BLOCKS at every level.
+    DispatchKnob("judge_experiments_high", "CHELA_JUDGE_EXPERIMENTS_HIGH", 12, int,
+                 "Judge experiments — risk: high", floor=1),
+    DispatchKnob("judge_experiments_normal", "CHELA_JUDGE_EXPERIMENTS_NORMAL", 8, int,
+                 "Judge experiments — risk: normal", floor=1),
+    DispatchKnob("judge_experiments_low", "CHELA_JUDGE_EXPERIMENTS_LOW", 4, int,
+                 "Judge experiments — risk: low", floor=1),
     DispatchKnob("judge_enabled", "CHELA_JUDGE", True, _cast_bool,
                  "Judge (adversarial review)", kind="bool", restart_required=True),
     DispatchKnob("judge_max_unknown_retries", "CHELA_JUDGE_MAX_UNKNOWN_RETRIES", 2, int,
@@ -773,6 +790,28 @@ def max_reworks() -> int:
     rather than crash the tick. A Dispatch-tab knob (CMX-220) — see DISPATCH_KNOBS above.
     """
     return max(0, dispatch_value("max_reworks"))
+
+
+def max_reworks_for(risk: object) -> int:
+    """⚖️🎚️ CMX-405. The rework cap for a run of this RISK level: that level's own knob
+    (``max_reworks_<level>``: high 5, normal 4, low 3 by default), never above the global
+    :func:`max_reworks` ceiling. An unknown/NULL risk (a pre-CMX-405 row, an adopted PR)
+    is ``normal``. Reaching it escalates to ``needs_human`` exactly as the global cap did.
+    """
+    from chela.sources import run_risk
+    level = run_risk(risk)
+    return min(max(0, dispatch_value(f"max_reworks_{level}")), max_reworks())
+
+
+def judge_max_experiments(risk: object) -> int:
+    """⚖️🎚️ CMX-405. How many of the judge's proposed experiments are RUN at this RISK
+    level (``judge_experiments_<level>``: high 12, normal 8, low 4 by default); the rest
+    are dropped OUT LOUD, exactly as ``judge.MAX_EXPERIMENTS`` always dropped them. An
+    unknown/NULL risk is ``normal``. Never below 1 — a judge that may run nothing is not
+    a judge.
+    """
+    from chela.sources import run_risk
+    return max(1, dispatch_value(f"judge_experiments_{run_risk(risk)}"))
 
 
 def judge_max_unknown_retries() -> int:
