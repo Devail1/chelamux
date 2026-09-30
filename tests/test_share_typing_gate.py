@@ -481,3 +481,150 @@ def test_spawn_sandboxed_route_uses_the_launcher(monkeypatch, tmp_path):
     monkeypatch.setattr(dash.launcher, "record_recent", lambda p: None)
     r = dash.app.test_client().post("/api/agents/spawn-sandboxed", json={"cwd": str(tmp_path)})
     assert r.status_code == 200 and seen == [str(tmp_path)]
+
+
+# --- every verify_container refusal, one field flipped at a time (judge round 1) ------
+# Each breakage flips exactly ONE field of an otherwise-good inspect, so no other refusal
+# can mask the one under test. The untouched fixture verifying (True, "") is the
+# negative control that proves the table can pass at all.
+
+def _flip_privileged(info, net):
+    # CapAdd stays None and CapDrop stays ["ALL"], so ONLY Privileged can refuse this.
+    info["HostConfig"]["Privileged"] = True
+
+
+def _flip_rw_rootfs(info, net):
+    info["HostConfig"]["ReadonlyRootfs"] = False
+
+
+def _flip_no_nnp(info, net):
+    info["HostConfig"]["SecurityOpt"] = []
+
+
+def _flip_root_user(info, net):
+    info["Config"]["User"] = "0:0"
+
+
+def _flip_extra_network(info, net):
+    # NetworkMode is still the isolated one — only the attached-network SET is wrong.
+    info["NetworkSettings"]["Networks"]["bridge"] = {}
+
+
+def _flip_no_inhibit(info, net):
+    # Internal stays True — only the host-address inhibit is missing.
+    net["Options"] = {}
+
+
+def _flip_ssh_mount(info, net):
+    info["Mounts"].append({"Type": "bind", "Source": os.path.expanduser("~/.ssh"),
+                           "Destination": "/home/guest/.ssh", "RW": False})
+
+
+@pytest.mark.parametrize("flip, why", [
+    (_flip_privileged, "extra privileges"),
+    (_flip_rw_rootfs, "root filesystem is writable"),
+    (_flip_no_nnp, "privilege escalation"),
+    (_flip_root_user, "does not run as the host user"),
+    (_flip_extra_network, "not on its isolated network"),
+    (_flip_no_inhibit, "can reach the host"),
+    (_flip_ssh_mount, "unexpected mount"),
+])
+def test_each_container_refusal_fails_closed(monkeypatch, sandbox, typing_on, flip, why):
+    assert share_sandbox.check_share_session("@9") == (True, "")   # negative control
+    info, net = _good_container()
+    flip(info, net)
+    sandbox["inspect"] = (info, net)
+    ok, reason = share_sandbox.check_share_session("@9")
+    assert ok is False and why in reason
+    b, _clock, forwarded, _sent = _bridge(monkeypatch, allow_typing=True)
+    _type(b, _joiner(b))
+    assert forwarded == []
+
+
+def test_a_non_docker_child_under_the_launcher_fails_closed(monkeypatch, sandbox, typing_on):
+    assert share_sandbox.check_share_session("@9") == (True, "")   # negative control
+    sandbox["kids"] = ["docker", "bash"]
+    ok, reason = share_sandbox.check_share_session("@9")
+    assert ok is False and "unexpected process" in reason
+    b, _clock, forwarded, _sent = _bridge(monkeypatch, allow_typing=True)
+    _type(b, _joiner(b))
+    assert forwarded == []
+
+
+def test_an_exception_from_the_check_fails_closed_in_the_gate(monkeypatch, typing_on):
+    def boom(wid):
+        raise RuntimeError("docker client exploded")
+
+    monkeypatch.setattr(share_sandbox, "check_share_session", boom)
+    b, _clock, forwarded, sent = _bridge(monkeypatch, allow_typing=True)
+    _type(b, _joiner(b))
+    assert forwarded == []
+    assert b._sandbox_verdict[0] is False
+    assert b"could not verify" in _notices(sent)[0]
+    # negative control: the same bridge forwards once the check stops raising
+    monkeypatch.setattr(share_sandbox, "check_share_session", lambda wid: (True, ""))
+    b2, _c2, forwarded2, _s2 = _bridge(monkeypatch, allow_typing=True)
+    _type(b2, _joiner(b2))
+    assert forwarded2 == [b"ls\r"]
+
+
+@pytest.mark.parametrize("raw, want", [("10000", 240), ("241", 240), ("240", 240),
+                                       ("0", 1), ("-5", 1), ("45", 45), ("junk", None)])
+def test_unsandboxed_minutes_is_clamped(monkeypatch, raw, want):
+    monkeypatch.setenv("CHELA_SHARE_UNSANDBOXED_MINUTES", raw)
+    got = config.share_unsandboxed_minutes()
+    assert got == (config.SHARE_UNSANDBOXED_MINUTES_DEFAULT if want is None else want)
+
+
+# --- start_bridge arms the REAL Bridge (route tests stub start_bridge) ----------------
+
+@pytest.fixture
+def real_bridges(monkeypatch):
+    """The real start_bridge/Bridge, with only the pump threads stubbed out."""
+    monkeypatch.setattr(config, "COLLAB_RELAY", "wss://relay.example")
+    monkeypatch.setattr(cs.Bridge, "start", lambda self: self)
+    monkeypatch.setattr(cs.Bridge, "_forward_input", lambda self, data: self.__dict__.setdefault("fwd", []).append(data))
+    monkeypatch.setattr(cs.Bridge, "_seal_send", lambda self, typ, pt: None)
+    cs._bridges.pop("@9", None)
+    yield
+    cs._bridges.pop("@9", None)
+
+
+def test_start_bridge_carries_allow_typing_to_the_real_bridge(real_bridges, sandbox, typing_on):
+    cs.start_bridge("@9", allow_typing=True)
+    b = cs._bridges["@9"]
+    assert b.allow_typing is True and b.mode() == cs.MODE_TYPING
+    _type(b, _joiner(b))
+    assert b.fwd == [b"ls\r"]
+    cs._bridges.pop("@9")
+    cs.start_bridge("@9")                       # negative control: the default is view only
+    assert cs._bridges["@9"].mode() == cs.MODE_VIEW
+
+
+def test_start_bridge_arms_the_unsandboxed_override(monkeypatch, real_bridges, typing_on):
+    _not_sandboxed(monkeypatch)
+    cs.start_bridge("@9", unsandboxed={"granted_by": "op@example", "window": "shell-3",
+                                       "ttl_s": 1800.0})
+    b = cs._bridges["@9"]
+    assert b.mode() == cs.MODE_UNSANDBOXED
+    _type(b, _joiner(b), b"whoami\r")
+    assert b.fwd == [b"whoami\r"]
+    assert len(_events("share.unsandboxed_granted")) == 1
+
+
+def test_share_route_arms_the_real_bridge(monkeypatch, real_bridges, typing_on):
+    """End to end through app.py with the REAL start_bridge: the typed confirmation
+    reaches the Bridge as an armed override."""
+    _not_sandboxed(monkeypatch)
+    dash._SHARED.clear()
+    dash._share_info.clear()
+    monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
+    monkeypatch.setattr(dash, "_require_terminals", lambda: None)
+    monkeypatch.setattr(dash, "_window_name", lambda wid: "shell-3")
+    monkeypatch.setattr(cs, "_window_dims", lambda wid: (80, 24))
+    try:
+        assert _post({"mode": "unsandboxed", "confirm": "shell-3"}).status_code == 200
+        assert cs._bridges["@9"].mode() == cs.MODE_UNSANDBOXED
+    finally:
+        dash._SHARED.clear()
+        dash._share_info.clear()
