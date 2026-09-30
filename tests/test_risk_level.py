@@ -152,6 +152,21 @@ def test_the_fallback_reads_only_the_boundaries_paragraph():
     assert infer_risk("no boundaries here, judge.py") is None
 
 
+@pytest.mark.parametrize("heading", ["WHY", "OBJECTIVE", "GUARDS", "VERIFY", "NOTE", "NOTES"])
+@pytest.mark.parametrize("form", ["**{h}.**", "{h}."])
+def test_the_fallback_stops_at_the_next_heading_after_boundaries(heading, form):
+    # The END of the paragraph: a high-risk path named only in a heading that FOLLOWS
+    # BOUNDARIES (real GUARDS name the files they pin) must not be read as a boundary.
+    # Each heading, in both the bold and the bare line-start form, is its own terminator.
+    head = form.format(h=heading)
+    safe = f"**BOUNDARIES.** `chela/dashboard/static/js/work.js`.\n\n{head} Pin `judge.py`.\n"
+    assert infer_risk(safe) is None
+    # Positive control: the same brief with the path moved INTO BOUNDARIES does infer, so
+    # the None above is the terminator working, not the regex missing the path altogether.
+    hot = f"**BOUNDARIES.** `chela/judge.py`.\n\n{head} Pin `work.js`.\n"
+    assert infer_risk(hot) == "judge.py"
+
+
 def test_an_explicit_marker_beats_the_fallback(tmp_path):
     body = _BRIEF.format(boundaries="`chela/judge.py`.")
     t = apply_risk(Task(id="x", title="t", file="", line_number=1, raw="", body=body),
