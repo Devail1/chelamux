@@ -31,6 +31,15 @@ REMOVED_VIEWS = ["Feed", "Knowledge", "Personas", "Cost"]
 
 PRIVATE_NEEDLES = [b"liavedunix", b"tradeplan", b"/home/"]
 
+# Every key demo_env() may emit. Adding one is a deliberate, reviewed change here.
+DEMO_ENV_KEYS = {
+    "PATH", "HOME", "LANG", "TERM", "CHELA_DIR", "CHELA_TMUX_SESSION",
+    "CHELA_DASHBOARD_PORT", "CHELA_DASH_HOST", "CHELA_TERM_BASE", "CHELA_TERM_POLL",
+    "CHELA_TERMINALS_ENABLED", "CHELA_REMOTE_CONTROL", "CHELA_DISPATCH_WORKFLOWS",
+    "CHELA_DEMO_STATUS_DIR", "PYTHON", "PYTHONPATH", "GIT_CONFIG_NOSYSTEM",
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+}
+
 
 def _text(path: Path) -> str:
     """The page's prose: HTML tags and comments dropped, so an attribute or a
@@ -116,19 +125,40 @@ def test_demo_fleet_env_is_temp_and_from_scratch(tmp_path, monkeypatch):
     assert "probe" not in "".join(env.values())
     # git in the demo never reads the operator's config (their name/email would show).
     assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["HOME"] == str(tmp_path)
+    # The KEY SET is exact. A sentinel only lands on a variable that is SET on the test
+    # machine; one that is unset here (XDG_CONFIG_HOME, say — git reads the operator's
+    # identity from it) inherits as its `os.environ.get(..., "")` fallback and carries
+    # no sentinel. Any key outside this list is an inheritance, set or not.
+    assert set(env) == DEMO_ENV_KEYS, sorted(set(env) ^ DEMO_ENV_KEYS)
 
 
-def test_demo_fleet_root_is_fixed_and_ignores_tmpdir(monkeypatch):
+def test_demo_fleet_env_inherits_no_var_unset_on_the_test_machine(tmp_path, monkeypatch):
+    # The shape-402 hole from the other side: variables ABSENT from os.environ.
+    for k in ("XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_DIR", "GNUPGHOME"):
+        monkeypatch.delenv(k, raising=False)
+    env = _fleet().demo_env(tmp_path, 5999, 6400)
+    assert not {"XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_DIR", "GNUPGHOME"} & set(env)
+    assert set(env) == DEMO_ENV_KEYS
+
+
+def test_demo_fleet_root_is_fixed_and_ignores_tmpdir(tmp_path, monkeypatch):
     """The root is /tmp/demo (or $CHELA_DEMO_ROOT) — NOT $TMPDIR, which on the
     operator's machine is a scratch dir named after them, and NOT a random suffix
     the Work view would print verbatim."""
-    monkeypatch.setenv("TMPDIR", "/tmp/claude-1000/-home-someone-projects")
+    # TMPDIR must be a REAL writable dir: gettempdir() silently skips one that does not
+    # exist and falls back to /tmp — so a made-up path makes `gettempdir()/"demo"` equal
+    # /tmp/demo, and the guard cannot tell the two roots apart.
+    scratch = tmp_path / "claude-1000" / "-home-someone-projects"
+    scratch.mkdir(parents=True)
+    monkeypatch.setenv("TMPDIR", str(scratch))
     monkeypatch.delenv("CHELA_DEMO_ROOT", raising=False)
     fleet = _fleet()
     assert fleet.DEFAULT_ROOT == Path("/tmp/demo")
     import tempfile
     tempfile.tempdir = None  # make gettempdir() re-read the patched TMPDIR
     try:
+        # Precondition: the fixture really moved the temp dir, or nothing below can fail.
+        assert Path(tempfile.gettempdir()) == scratch
         made = []
         monkeypatch.setattr(fleet.Path, "mkdir", lambda self, **kw: made.append(self))
         monkeypatch.setattr(fleet.Path, "write_text", lambda self, *a, **kw: None)
@@ -148,8 +178,14 @@ def test_demo_fleet_root_refuses_what_it_did_not_build(tmp_path):
         fleet.make_root(foreign)
     assert (foreign / "precious.txt").read_text() == "keep me"
 
-    with pytest.raises(SystemExit):
-        fleet.make_root(Path(os.path.expanduser("~")) / "demo")
+    # A HOME of our own, so a disabled refusal writes into tmp_path, never the real ~.
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("HOME", str(fake_home))
+        with pytest.raises(SystemExit):
+            fleet.make_root(fake_home / "demo")
+    assert not (fake_home / "demo").exists()
 
     ours = fleet.make_root(tmp_path / "demo")
     (ours / "stale").write_text("from a previous run")
@@ -166,3 +202,59 @@ def test_demo_fleet_seeds_the_launcher_with_demo_projects(tmp_path):
     paths = [e["path"] for e in store["favorites"] + store["recent"]]
     assert sorted(Path(p).name for p in paths) == sorted(n for n, _ in fleet.AGENTS)
     assert all(Path(p).is_relative_to(tmp_path) for p in paths)
+
+
+def test_demo_fleet_up_wires_every_step(tmp_path, monkeypatch):
+    """up() end to end, with every process stubbed: the helpers above are only worth
+    something if up() actually calls them — launcher seeded, app built as a git
+    checkout, and the daemon on the INERT idle workflow, never api-server's."""
+    fleet = _fleet()
+    monkeypatch.setenv("CHELA_DEMO_ROOT", str(tmp_path / "demo"))
+    monkeypatch.setattr(fleet, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(fleet, "_wait_http", lambda port: None)
+    runs, popens = [], []
+
+    def fake_run(args, **kw):
+        runs.append((list(args), kw))
+        return fleet.subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    class FakePopen:
+        def __init__(self, args, **kw):
+            popens.append((list(args), kw))
+            self.pid = 10**6 + len(popens)
+
+    monkeypatch.setattr(fleet.subprocess, "run", fake_run)
+    monkeypatch.setattr(fleet.subprocess, "Popen", FakePopen)
+    state = fleet.up()
+
+    env = state["env"]
+    root = tmp_path / "demo"
+    assert state["root"] == str(root)
+    # seed_launcher ran: the "+" menu offers the demo projects.
+    store = json.loads((Path(env["CHELA_DIR"]) / "launcher.json").read_text())
+    assert sorted(Path(e["path"]).name for e in store["favorites"] + store["recent"]) == \
+        sorted(n for n, _ in fleet.AGENTS)
+    # make_app ran: the package was copied and committed into its own repo with an upstream.
+    app = Path(env["PYTHONPATH"])
+    assert (app / "chela" / "__init__.py").is_file()
+    git = [a[1:] for a, kw in runs if a[0] == "git"]
+    assert ["init", "-q", "-b", "main"] in git
+    assert ["branch", "-q", "--set-upstream-to=origin/main", "main"] in git
+    assert all(kw["cwd"] in (str(app), str(app.parent)) for a, kw in runs if a[0] == "git")
+    # seed ran inside the demo env.
+    assert any(a[0] == env["PYTHON"] and a[1] == "-c" and kw["env"] is env for a, kw in runs)
+    # Every tmux call went through the demo env (whose PATH puts the pinned shim first).
+    tmux_calls = [kw for a, kw in runs if a[0] == "tmux"]
+    assert tmux_calls and all(kw["env"] is env for kw in tmux_calls)
+    # The three services, each on the demo env; the daemon on the INERT idle workflow.
+    by_cmd = {a[-1] if a[0] == "bash" else a[3]: kw for a, kw in popens}
+    assert set(by_cmd) == {"run", str(fleet.REPO / "scripts" / "agent-terminals.sh"), "dashboard"}
+    daemon = by_cmd["run"]["env"]
+    idle = root / ".cache" / "chela-demo" / "idle" / "WORKFLOW.md"
+    assert daemon["CHELA_DISPATCH_WORKFLOWS"] == str(idle) != env["CHELA_DISPATCH_WORKFLOWS"]
+    assert idle.is_file() and (idle.parent / "TODO.md").read_text() == "# TODO\n"
+    assert {k: v for k, v in daemon.items() if k != "CHELA_DISPATCH_WORKFLOWS"} == \
+        {k: v for k, v in env.items() if k != "CHELA_DISPATCH_WORKFLOWS"}
+    assert by_cmd["dashboard"]["env"] is env
+    assert by_cmd["dashboard"]["cwd"] == str(root / "api-server")
+    assert json.loads((tmp_path / "state.json").read_text())["root"] == str(root)

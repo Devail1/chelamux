@@ -29,3 +29,12 @@ conftest's `CHELA_DIR` equalled the demo's, and that check false-failed.
 `scripts/demo/fleet.py`'s `demo_env`. Closed by probing every variable, plus a named-danger
 list. Negative controls: inheriting all of `os.environ`, inheriting just `LC_ALL`, and flipping
 `GIT_CONFIG_NOSYSTEM` each turn the test red.
+
+**⚠️ Round 2 — the sentinel sweep is not enough on its own.** A sentinel lands only on a variable
+that is SET on the test machine. Inheriting one that is unset there, such as
+`"XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", "")` (git reads the operator's global
+identity from it), copies the empty fallback. The value carries no sentinel, so the sweep stays
+green. The judge's round-2 experiment on CMX-402 SURVIVED this way. **Also assert the exact KEY
+SET of the built env against a reviewed allowlist** (`set(env) == DEMO_ENV_KEYS`). Then any extra
+key is an inheritance, whether or not the test machine sets it. Closed in
+`tests/test_public_media.py` by `DEMO_ENV_KEYS`, plus a test that `delenv`s the git/XDG names first.
