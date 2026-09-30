@@ -984,6 +984,22 @@ function renderSettings(focus) {
             <p class="s-desc" id="remote-control-source"></p>
         </section>
 
+        <section class="settings-section" id="settings-file-drop">
+            <h4>File drop into terminals</h4>
+            <p class="s-desc">Drop a file on a Wall terminal — or paste one, e.g. a screenshot —
+            and it is saved to that session's <code>uploads/</code> folder and its
+            <code>@uploads/&lt;name&gt;</code> is typed into the prompt (not sent). Works from
+            your phone too. Never overwrites; <span id="file-drop-cap">25</span> MB per file.
+            Share guests can never upload. A pane picks up a change when it reloads.</p>
+            <div class="s-row" data-keywords="upload drag drop paste file image screenshot attach uploads phone">
+                <label class="s-rowlabel" for="file-drop-toggle">File drop into terminals — save dropped or pasted files into the session</label>
+                <input id="file-drop-toggle" type="checkbox" role="switch" disabled
+                       onchange="chela.setFileDrop(this.checked)">
+            </div>
+            <div id="file-drop-msg" class="s-savemsg"></div>
+            <p class="s-desc" id="file-drop-source"></p>
+        </section>
+
         <section class="settings-section" data-keywords="tailscale ssh tunnel vpn auth security">
             <h4>Remote access</h4>
             <p class="s-desc">Zero built-in auth — the dashboard binds <code>127.0.0.1</code>.
@@ -1172,6 +1188,7 @@ function renderSettings(focus) {
     _loadAgentModelSetting();
     _loadRemoteControlSetting();
     _loadShareTypingSetting();
+    _loadFileDropSetting();
     _loadTimingSettings();
     _loadDispatchSettings();
     _loadSettingsStatus();
@@ -1414,6 +1431,58 @@ async function setShareTyping(on) {
     }
     setMsg('ok', 'Saved · guest typing ' + (cfg.share_typing ? 'allowed into sandboxed sessions' : 'off — every share is view only'));
     _renderShareTyping(cfg);
+}
+
+// File drop into terminals (CMX-412): the `file_drop` switch. ON by default; same
+// env-wins presentation as Remote Control — CHELA_FILE_DROP set ⇒ shown, but disabled.
+function _renderFileDrop(cfg) {
+    const box = document.getElementById('file-drop-toggle');
+    const src = document.getElementById('file-drop-source');
+    const cap = document.getElementById('file-drop-cap');
+    if (!box) return;
+    const on = !!(cfg && cfg.file_drop);
+    const locked = !!(cfg && cfg.file_drop_env_locked);
+    box.checked = on;
+    box.disabled = locked;
+    if (cap && cfg && cfg.upload_max_mb) cap.textContent = String(cfg.upload_max_mb);
+    if (src) {
+        const env = escHtml((cfg && cfg.file_drop_env) || 'CHELA_FILE_DROP');
+        const from = locked ? `set by <code>${env}</code> — env wins; unset it to edit here`
+            : (cfg && cfg.file_drop_source === 'dashboard') ? 'this setting'
+            : 'the built-in default';
+        src.innerHTML = `In effect: <strong>${on ? 'On' : 'Off'}</strong> — ${from}.`;
+    }
+}
+
+async function _loadFileDropSetting() {
+    const box = document.getElementById('file-drop-toggle');
+    if (!box) return;
+    let cfg;
+    try {
+        cfg = await api('/api/config');
+    } catch (e) { box.disabled = true; return; }
+    _renderFileDrop(cfg);
+}
+
+async function setFileDrop(on) {
+    const msg = document.getElementById('file-drop-msg');
+    const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
+    setMsg('', 'Saving…');
+    let cfg;
+    try {
+        cfg = await api('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file_drop: !!on }),
+        });
+    } catch (e) { setMsg('err', 'Save failed — unchanged.'); _loadFileDropSetting(); return; }
+    if (!cfg || cfg.error) {
+        setMsg('err', 'Rejected — unchanged.');
+        _loadFileDropSetting();
+        return;
+    }
+    setMsg('ok', 'Saved · file drop into terminals ' + (cfg.file_drop ? 'on' : 'off'));
+    _renderFileDrop(cfg);
 }
 
 // Live "Connections & Status" surface (READ-ONLY). Fetches /api/settings and
@@ -2304,4 +2373,4 @@ export { closeShortcuts, openPalette, openShortcuts, refreshRecentSessions, refr
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyUpdate, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { applyUpdate, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
