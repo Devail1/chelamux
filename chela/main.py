@@ -2933,6 +2933,8 @@ def main() -> None:
         "--cwd", metavar="DIR", default=".",
         help="Worktree to mutate in place (default: the current directory)",
     )
+    from chela.judge_eval import cli as judge_eval_cli
+    judge_eval_cli.add_parser(judge_sub)
     p_jack = judge_sub.add_parser(
         "ack-blocked-race",
         help="🧊 Acknowledge a blocked_race verdict that can never resolve on its own "
@@ -3284,6 +3286,9 @@ def main() -> None:
             cmd_judge_self_check(args)
         elif args.judge_cmd == "ack-blocked-race":
             cmd_judge_ack_blocked_race(args)
+        elif args.judge_cmd == "eval":
+            from chela.judge_eval import cli as judge_eval_cli
+            judge_eval_cli.main(args)
         else:
             p_judge.print_help()
     elif args.command == "adopt":
