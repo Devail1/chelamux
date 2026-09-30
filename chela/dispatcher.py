@@ -4131,8 +4131,10 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
 
     # Everything below is a PROJECTION of the row just written — best-effort, reported,
     # never a reason to undo the close.
+    window_killed = False
     if run.get("window_name") and live_wid:
         _kill_windows_named(run["window_name"])
+        window_killed = True
 
     wf_path = run.get("workflow_path")
     repo_dir = str(Path(wf_path).parent) if wf_path else None
@@ -4177,7 +4179,7 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
         "reason": reason, "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
         "pr_open": pr_open, "pr_closed": pr_closed,
         "comment_posted": comment_posted, "comment_detail": comment_detail,
-        "window_killed": bool(live_wid), "forced": bool(force and refusal),
+        "window_killed": window_killed, "forced": bool(force and refusal),
         "worktree_path": run.get("worktree_path"), "worktree_removed": worktree_removed,
         "worktree_detail": worktree_detail,
     }

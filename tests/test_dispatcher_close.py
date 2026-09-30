@@ -180,6 +180,10 @@ def test_a_running_run_with_an_idle_agent_closes_and_its_window_goes(tmp_path):
          patch.object(dispatcher, "_agent_status", return_value="idle"):
         result = dispatcher.close_run("abc123", "superseded")
     assert result["ok"] is True and result["forced"] is False
+    # The KILL itself, not only the reported flag: an idle close must take the window down
+    # without --force (DEFEAT_SHAPES #406b — a flag computed from the precondition, not the act).
+    kills = [c for c in fake.calls if isinstance(c, list) and c[:2] == ["tmux", "kill-window"]]
+    assert [c[-1].rsplit(":", 1)[-1] for c in kills] == ["@7"]
     assert result["window_killed"] is True
     assert dispatcher.resolve_run("abc123")["status"] == "closed"
 
