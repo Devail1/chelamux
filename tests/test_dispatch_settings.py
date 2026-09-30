@@ -122,6 +122,9 @@ def test_registry_has_exactly_the_twelve_settings_inventory_knobs(mods):
         "judge_max_unknown_retries", "judge_max_concurrent", "critic_enabled",
         "worktree_disk_budget_bytes", "memory_slice_budget_bytes", "merge_base",
         "gate_wait_seconds", "gate_max_waits", "judge_outage_backoff_seconds",
+        # ⚖️🎚️ CMX-405: the per-risk-level rework caps and judge experiment caps.
+        "max_reworks_high", "max_reworks_normal", "max_reworks_low",
+        "judge_experiments_high", "judge_experiments_normal", "judge_experiments_low",
     }
 
 
@@ -140,6 +143,8 @@ def test_exactly_four_knobs_are_restart_required(mods):
         "max_reworks", "judge_max_unknown_retries", "judge_max_concurrent",
         "worktree_disk_budget_bytes", "memory_slice_budget_bytes",
         "gate_wait_seconds", "gate_max_waits", "judge_outage_backoff_seconds",
+        "max_reworks_high", "max_reworks_normal", "max_reworks_low",
+        "judge_experiments_high", "judge_experiments_normal", "judge_experiments_low",
     }
 
 
@@ -174,16 +179,17 @@ def test_named_readers_return_their_own_knobs_stored_value(mods):
 
 def test_precedence_env_beats_userconfig_beats_default(mods, monkeypatch):
     config, userconfig = mods
-    assert config.max_reworks() == 2
-
-    userconfig.set_("max_reworks", 5)
+    # CMX-405 raised the default ceiling 2 → 5 (the `high` level's cap).
     assert config.max_reworks() == 5
+
+    userconfig.set_("max_reworks", 7)
+    assert config.max_reworks() == 7
 
     monkeypatch.setenv("CHELA_MAX_REWORKS", "1")
     assert config.max_reworks() == 1
 
     monkeypatch.delenv("CHELA_MAX_REWORKS", raising=False)
-    assert config.max_reworks() == 5
+    assert config.max_reworks() == 7
 
 
 # --- GUARD 2: zero is valid for three knobs, not for a fourth -----------------
@@ -456,8 +462,8 @@ def test_get_reports_stored_default_and_effective(mods, client):
     assert set(knobs) == {k.key for k in mods[0].DISPATCH_KNOBS}
     row = knobs["max_reworks"]
     assert row["stored"] == ""
-    assert row["default"] == 2
-    assert row["effective"] == 2
+    assert row["default"] == 5
+    assert row["effective"] == 5
     assert row["env"] == "CHELA_MAX_REWORKS"
     assert row["source"] == "default"
     assert row["restart_required"] is False
@@ -520,12 +526,12 @@ def test_a_partial_batch_rejects_the_whole_write(mods, client):
 
 def test_post_empty_clears_back_to_default(mods, client):
     config, userconfig = mods
-    userconfig.set_("max_reworks", 5)
+    userconfig.set_("max_reworks", 7)
     resp = client.post("/api/config/dispatch", json={"max_reworks": ""})
     assert resp.status_code == 200
     knobs = {k["key"]: k for k in resp.get_json()["knobs"]}
     assert knobs["max_reworks"]["stored"] == ""
-    assert knobs["max_reworks"]["effective"] == 2
+    assert knobs["max_reworks"]["effective"] == 5
     assert "max_reworks" not in _stored(config)
 
 

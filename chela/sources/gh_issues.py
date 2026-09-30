@@ -4,7 +4,7 @@ import json
 import logging
 import subprocess
 
-from chela.sources import Task
+from chela.sources import Task, apply_risk, highest_risk
 from chela.workflow import WorkflowDef
 
 log = logging.getLogger(__name__)
@@ -45,6 +45,8 @@ class GhIssuesSource:
         blocked_label:  blocked      (optional — issues carrying this label are
                         skipped, mirroring the markdown source's <!-- blocked
                         marker)
+    A ``risk:high`` / ``risk:normal`` / ``risk:low`` label sets ``Task.risk`` (CMX-405),
+    the counterpart of the markdown source's ``<!-- risk: ... -->`` marker.
         trusted_authors: [login, ...] (optional — defence in depth)
 
     ⛔ **`require_label` is a SECURITY control, not a convenience.** Every task this
@@ -220,6 +222,13 @@ class GhIssuesSource:
                 if login not in self.trusted_authors:
                     continue
             title = (issue.get("title") or "").strip()
+            # ⚖️🎚️ CMX-405: a `risk:<level>` label — applying one needs write/triage
+            # permission, so, like `require_label`, it is set by the tracker's owners and
+            # never by the agent. Several risk labels resolve to the HIGHEST of them.
+            risk = highest_risk(
+                str(lbl)[len("risk:"):] for lbl in labels
+                if isinstance(lbl, str) and lbl.lower().startswith("risk:")
+            )
             created_at = issue.get("createdAt") or None
             body = issue.get("body")
             tasks.append((
@@ -228,7 +237,7 @@ class GhIssuesSource:
                 # created-descending, so left un-sorted this is a LIFO stack —
                 # the newest issue is always claimed first and the oldest starves.
                 (created_at is None, created_at or "", int(number)),
-                Task(
+                apply_risk(Task(
                     id=_task_id(repo, number),
                     # Clean title — the issue number lives in line_number, not here.
                     title=title,
@@ -242,7 +251,7 @@ class GhIssuesSource:
                     # The dispatch brief (OBJECTIVE/BOUNDARIES/GUARDS/VERIFY, if the
                     # issue carries them) instead of degrading to just the URL.
                     body=body.strip() if isinstance(body, str) and body.strip() else None,
-                ),
+                ), risk, "label"),
             ))
         tasks.sort(key=lambda pair: pair[0])
         return [task for _, task in tasks]

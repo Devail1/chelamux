@@ -278,7 +278,7 @@ def test_a_needs_human_reopen_is_unchanged_no_pr_state_read_no_tracker_read(tmp_
     assert result == {
         "ok": True, "task_id": TASK_ID, "status": "awaiting_review",
         "branch_name": "cmx-1", "pr_url": PR_URL,
-        "rework_count": 1, "max_reworks": dispatcher.max_reworks(),
+        "rework_count": 1, "max_reworks": dispatcher._rework_cap(dispatcher.resolve_run(TASK_ID)),
         "reopen_count": 1, "comment_posted": True, "comment_detail": result["comment_detail"],
     }
     assert [c[:4] for c in calls] == [
