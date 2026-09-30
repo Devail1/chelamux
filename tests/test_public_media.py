@@ -109,8 +109,12 @@ def _assert_shims_pin_the_demo(bin_dir: Path, fleet) -> None:
                          capture_output=True, text=True, check=True).stdout.splitlines()
     assert out == ["-L", fleet.TMUX_SOCKET, "list-windows", "-t", "chela"], out
     assert fleet.TMUX_SOCKET and fleet.TMUX_SOCKET != "default"
-    hidden = _RUN([str(bin_dir / "pgrep"), "-f", "chela run"], capture_output=True, text=True)
-    assert hidden.returncode == 1 and hidden.stdout == ""
+    # Every chela service the dashboard probes, not only the daemon — Settings asks
+    # `pgrep -f "chela telegram"` (app.py), and a hit there puts the operator's REAL
+    # bridge on camera as "connected".
+    for svc in ("chela run", "chela telegram", "chela dashboard"):
+        hidden = _RUN([str(bin_dir / "pgrep"), "-f", svc], capture_output=True, text=True)
+        assert hidden.returncode == 1 and hidden.stdout == "", svc
     other = _RUN([str(bin_dir / "pgrep"), "-f", "ttyd"], capture_output=True, text=True)
     assert other.stdout.splitlines() == ["-f", "ttyd"]  # anything else reaches the real pgrep
     _assert_stubs_answer_for_the_demo(bin_dir, tmp=bin_dir.parent)
@@ -368,6 +372,11 @@ def test_demo_fleet_up_wires_every_step(tmp_path, monkeypatch):
     # and ttyd would put the REAL chela session on camera.
     assert by_cmd[str(fleet.REPO / "scripts" / "agent-terminals.sh")]["env"] is env
     assert by_cmd["dashboard"]["cwd"] == str(root / "api-server")
+    # Both `python -m chela.main` services start OUTSIDE this checkout: `-m` puts the cwd
+    # ahead of PYTHONPATH, so a cwd here would import the REAL repo's chela, not the copy.
+    assert by_cmd["run"]["cwd"] == str(root / ".cache" / "chela-demo" / "idle")
+    for svc in ("run", "dashboard"):
+        assert not Path(by_cmd[svc]["cwd"]).resolve().is_relative_to(fleet.REPO.resolve()), svc
     assert json.loads((tmp_path / "state.json").read_text())["root"] == str(root)
 
 
@@ -434,3 +443,35 @@ def test_demo_fleet_down_kills_only_the_demo_tmux_server(tmp_path, monkeypatch):
     kills = [kw for a, kw in runs if a == ["tmux", "kill-server"]]
     assert len(kills) == 1 and kills[0].get("env") == env
     assert kills[0]["env"]["PATH"].split(":")[0] == str(tmp_path / "demo" / ".local" / "bin")
+
+
+def test_demo_fleet_down_kills_every_recorded_service_group(tmp_path, monkeypatch):
+    """`down` must SIGTERM the process group of every service `up` recorded — otherwise the
+    demo daemon, ttyd and dashboard outlive the demo and keep its port."""
+    fleet = _fleet()
+    monkeypatch.setattr(fleet, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(fleet.time, "sleep", lambda s: None)
+    monkeypatch.setattr(fleet.subprocess, "run", lambda *a, **kw: None)
+    pids = {"daemon": 424201, "terminals": 424202, "dashboard": 424203}
+    (tmp_path / "state.json").write_text(json.dumps({"root": "", "pids": pids, "env": {}}))
+    killed = []
+    monkeypatch.setattr(fleet.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    fleet.down()
+    assert sorted(killed) == sorted((pid, fleet.signal.SIGTERM) for pid in pids.values())
+
+
+def test_record_mjs_refuses_anything_but_a_loopback_demo_dashboard(tmp_path):
+    """record.mjs must never record the operator's real dashboard: a non-loopback URL is
+    refused before any browser starts. EXECUTED, not grepped."""
+    import shutil as _sh
+    node = _sh.which("node")
+    if not node:
+        if os.environ.get("CHELA_REQUIRE_JS_TESTS") == "1":
+            pytest.fail("node is required (CHELA_REQUIRE_JS_TESTS=1)")
+        pytest.skip("node not installed")
+    script = Path(__file__).resolve().parent.parent / "scripts" / "demo" / "record.mjs"
+    for url in ("http://localhost:1/", "http://10.0.0.1:5001/", "https://127.0.0.1:1/"):
+        r = _RUN([node, str(script), url, str(tmp_path / "out")], capture_output=True,
+                 text=True, timeout=30, cwd=str(script.parent.parent.parent))
+        assert r.returncode == 2 and "refusing" in r.stderr, (url, r.returncode, r.stderr[-300:])
+    assert not (tmp_path / "out").exists()
