@@ -1090,6 +1090,43 @@ def remote_control_enabled() -> bool:
     """Whether a window chela opens FOR A HUMAN gets ``--remote-control``. Read per call."""
     return dashboard_setting(REMOTE_CONTROL_KEY, REMOTE_CONTROL_ENV, True, cast_strict_bool)
 
+
+# 🔐 Guest typing into a shared terminal (CMX-403, docs/SHARE_SANDBOX.md). OFF by default:
+# with it off, collab_stream drops every decrypted guest keystroke, whatever the share was
+# created with. On, a share may allow typing ONLY into a window that verifies live as a
+# sandboxed session (chela.share_sandbox) — or, per share, the trusted-peer UNSANDBOXED
+# override below. Read per call on every keystroke, so turning it off in Settings stops
+# typing on a live share at once.
+SHARE_TYPING_KEY = "share_typing"
+SHARE_TYPING_ENV = "CHELA_SHARE_TYPING"
+
+
+def share_typing_setting() -> tuple[bool, str]:
+    """``(enabled, source)`` — same shape as :func:`remote_control_setting`."""
+    return _resolve_dashboard_setting(
+        SHARE_TYPING_KEY, SHARE_TYPING_ENV, False, cast_strict_bool)
+
+
+def share_typing_enabled() -> bool:
+    """Whether guest typing is allowed at all. Default False. Read per call."""
+    return dashboard_setting(SHARE_TYPING_KEY, SHARE_TYPING_ENV, False, cast_strict_bool)
+
+
+# How long a trusted-peer UNSANDBOXED typing override lasts before the share reverts to
+# view-only on its own (CMX-403). Env-only on purpose — it bounds an explicit per-share
+# opt-in, so it is not a dashboard toggle. Clamped to [1, 240] minutes.
+SHARE_UNSANDBOXED_MINUTES_ENV = "CHELA_SHARE_UNSANDBOXED_MINUTES"
+SHARE_UNSANDBOXED_MINUTES_DEFAULT = 30
+
+
+def share_unsandboxed_minutes() -> int:
+    try:
+        v = int(os.environ.get("CHELA_SHARE_UNSANDBOXED_MINUTES", "").strip()
+                or SHARE_UNSANDBOXED_MINUTES_DEFAULT)
+    except ValueError:
+        v = SHARE_UNSANDBOXED_MINUTES_DEFAULT
+    return max(1, min(240, v))
+
 # How long an undeliverable orchestrator address must stay dead before the inbox buzzes
 # the phone about it (chela/inbox.py `_undeliverable`). A reboot / tmux-restart / handoff
 # makes the address dangle for a few ticks and then SELF-HEALS (CMX-82) the moment the next

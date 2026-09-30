@@ -598,6 +598,11 @@
   {% endif %}
   <div class="popover-item" onclick="chela.hideNewMenu(); chela.openInitRepo()">Init a repo</div>
   <div class="popover-item" onclick="chela.hideNewMenu(); chela.showAddSchedule()">Scheduled task</div>
+  <!-- CMX-403: the ONLY kind of window a share guest may type into (a container that
+       sees just the project — docs/SHARE_SANDBOX.md). Both the sidebar "New session"
+       and the phone "+" open this same #new-menu, so it is in both. -->
+  <div class="popover-item" id="new-sandbox-item" title="A container that sees only the project — the only kind of window a share guest may type into"
+       onclick="chela.hideNewMenu(); chela.newSandboxedSession()">Sandboxed session…</div>
   <div class="popover-item" id="new-shell-item" onclick="chela.hideNewMenu(); chela.newShellWindow()">Shell window</div>
 </div>
 

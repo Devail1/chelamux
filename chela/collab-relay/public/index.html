@@ -453,7 +453,13 @@
       else if (typ === T_META) {
         try { const m = JSON.parse(dec.decode(pt)); applyGrid(m.cols, m.rows); if (m.title) titleEl.textContent = m.title; } catch (_) {}
       } else if (typ === T_CTL) {
-        try { const m = JSON.parse(dec.decode(pt)); if (m.t === 'ended') showEnded('This share has ended.'); } catch (_) {}
+        try {
+          const m = JSON.parse(dec.decode(pt));
+          if (m.t === 'ended') showEnded('This share has ended.');
+          // CMX-403: the host dropped our keystrokes (view-only share, typing off, or an
+          // expired full-access window) and says why — shown in the status line.
+          else if (m.t === 'notice' && typeof m.msg === 'string') setDot('up', m.msg.slice(0, 120));
+        } catch (_) {}
       }
     };
     const connect = () => {

@@ -771,6 +771,48 @@ body {
     animation: sharesPulse 1.6s ease-in-out infinite;
 }
 @keyframes sharesPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+/* CMX-403: a trusted-peer UNSANDBOXED override is armed — the pill turns RED and says
+   so in words (⚠ + text, never hue alone: the primary user is red-weak). */
+.shares-indicator.si-unsandboxed {
+    color: #fff; background: var(--ok-vermillion, #d55e00);
+    border-color: var(--ok-vermillion, #d55e00);
+}
+.shares-indicator.si-unsandboxed .si-dot { background: #fff; box-shadow: none; }
+
+/* The same override, on the pane header itself. */
+.gs-unsafe-banner {
+    flex: 0 0 auto; padding: 2px 8px; border-radius: 4px; white-space: nowrap;
+    background: var(--ok-vermillion, #d55e00); color: #fff;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.02em;
+}
+.gs-unsafe-banner[hidden] { display: none; }
+
+/* Share dialog (CMX-403) — reuses the Active-shares sheet chrome. */
+.share-dialog .sd-opt {
+    display: flex; gap: 10px; align-items: flex-start; cursor: pointer;
+    padding: 10px; margin: 8px 0; border: 1px solid var(--border); border-radius: 8px;
+}
+.share-dialog .sd-opt input { margin-top: 2px; }
+.share-dialog .sd-opt > span { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; }
+.share-dialog .sd-desc { color: var(--text-dim); font-size: 11.5px; }
+.share-dialog .sd-reason { color: var(--warn, #d29922); font-size: 11.5px; }
+.share-dialog .sd-disabled { cursor: not-allowed; opacity: 0.7; }
+.share-dialog .sd-unsafe { border-color: var(--ok-vermillion, #d55e00); }
+.share-dialog .sd-confirm { margin: 4px 0 8px; }
+.share-dialog .sd-confirm .tsp-in { width: 100%; box-sizing: border-box; }
+.share-dialog .sd-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.share-dialog .sd-actions button {
+    cursor: pointer; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font-size: 12.5px; padding: 7px 14px;
+}
+.share-dialog .sd-share { border-color: var(--accent); }
+.share-dialog .sd-share.sd-danger { background: var(--ok-vermillion, #d55e00); border-color: var(--ok-vermillion, #d55e00); color: #fff; }
+.share-dialog .sd-share:disabled { opacity: 0.5; cursor: not-allowed; }
+.shares-sheet .ss-mode { font-size: 12px; }
+.shares-sheet .ss-mode-unsafe {
+    background: var(--ok-vermillion, #d55e00); color: #fff; border-radius: 4px;
+    padding: 1px 6px; font-size: 10.5px; font-weight: 700;
+}
 @media (prefers-reduced-motion: reduce) { .shares-indicator .si-dot { animation: none; } }
 
 /* Decisions inbox button — the sidebar head's #btn-decisions (icon-btn) plus
