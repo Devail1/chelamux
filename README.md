@@ -32,15 +32,28 @@ or the **live terminal-wall dashboard**.
 <table align="center">
   <tr>
     <td align="center" valign="top">
-      <img src="docs/img/chela-demo-desktop.gif" alt="chela on desktop — the live terminal wall plus the Dispatch board, Kanban and Schedules" width="600"><br>
-      <sub>Desktop — the live wall, Dispatch, Kanban &amp; Schedules</sub>
+      <img src="docs/img/chela-demo-desktop.gif" alt="chela on desktop — the live terminal Wall with one agent in each state, the Work view's board, runs and schedules, then Settings opened with Ctrl+," width="600"><br>
+      <sub>Desktop — the Wall, Work (board, runs, schedules) &amp; Settings on <kbd>Ctrl</kbd>+<kbd>,</kbd></sub>
     </td>
     <td align="center" valign="top">
-      <img src="docs/img/chela-demo-mobile.gif" alt="chela on a phone — single-pane wall, agent pill switcher and keybar" width="150"><br>
-      <sub>Phone — single-pane, pill switcher, keybar</sub>
+      <img src="docs/img/chela-demo-mobile.gif" alt="chela on a phone — single-pane wall, agent pill switcher, the + New session menu and the keybar" width="150"><br>
+      <sub>Phone — pill switcher, “+” New session, keybar</sub>
     </td>
   </tr>
 </table>
+
+<p align="center"><sub>Recorded from a synthetic demo fleet (<a href="scripts/demo/"><code>scripts/demo/</code></a>) — re-record with <code>scripts/demo/record.sh</code>.</sub></p>
+
+The dashboard has two views — **Wall** (every agent's live terminal, each marked
+working / needs you / done / idle) and **Work** (the dispatch board, runs and schedules) —
+plus Settings. Recently shipped:
+
+- **Merges go through the judge.** A PreToolUse hook denies a direct `gh pr merge`; `chela merge` lands only a PR the judge passed on its current head, and `--override` waits for your approval and is audited.
+- **Remote Control per session.** New sessions launch with `--remote-control`, and a Settings switch turns that off without a restart.
+- **Themes reach the terminals.** Every theme — including the new `warm` — recolours the live terminals too, not just the chrome.
+- **One-tap New session on a phone.** A "+" beside the menu button opens the New-session menu.
+- **Named peer messages.** chela's messages arrive in a session as *Message from @chela*, not as an anonymous block.
+- **<kbd>Ctrl</kbd>+<kbd>,</kbd> opens Settings** (<kbd>⌘</kbd>+<kbd>,</kbd> on macOS), and a search box filters every setting.
 
 <p align="center"><strong><a href="https://chela.pages.dev/docs">📖 Full documentation →</a></strong></p>
 
@@ -67,7 +80,7 @@ fleet therefore runs as **one Claude account** and shares its 5h / 7d rate limit
 
 **Recommended:** add the hooks plugin — one line inside Claude Code
 (`/plugin marketplace add Devail1/chelamux`). It is what makes blocked-agent handling,
-answering from your phone, and the live Feed work well.
+answering from your phone, and the needs-you signal work well.
 
 ## Quickstart
 

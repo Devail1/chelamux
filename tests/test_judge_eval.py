@@ -404,6 +404,61 @@ def test_design_prompt_renders_the_live_prompt_at_each_level():
     assert len(set(prompts.values())) == 3
 
 
+def test_eval_prompt_vars_are_exactly_the_live_judge_vars(tmp_path, monkeypatch):
+    """📏 The eval renders the design prompt with the SAME keys ``dispatcher._judge_vars``
+    passes the live judge (both go through ``dispatcher.judge_prompt_vars``) and the SAME
+    workflow knob values — pinned at a NON-default ``held_out_fraction`` (0.55) and
+    ``HELD_OUT_MIN_EXPERIMENTS`` (7) so a literal default at either call site cannot pass
+    (DEFEAT_SHAPES #2 / #395). Drop any one variable ⇒ the live prompt refuses to render."""
+    from chela import config, dispatcher, workflow
+    from tests.test_judge import REAL_GUARD_TEST, _run_row, _workflow_repo
+    from tests.test_judge_held_out import _set_judge_knobs
+
+    monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path / "chela-dir")
+    monkeypatch.setattr(judge, "HELD_OUT_MIN_EXPERIMENTS", 7)
+    wrepo = _workflow_repo(tmp_path, "ev-vars", REAL_GUARD_TEST)
+    _set_judge_knobs(wrepo, held_out_fraction=0.55)
+    with dispatcher._db() as conn:
+        _run_row(conn, wrepo, "ev-vars")
+    wf = workflow.load_workflow(wrepo / "WORKFLOW.md")
+    live = dispatcher._judge_vars(wf, dispatcher.resolve_run("ev-vars"),
+                                  judge.judge_worktree_path(wf, "ev-vars"), "cafe")
+    case = ds.Case(id="c", pr=1, kind=ds.SEEDED, title="t", base_sha="b", head_sha="h",
+                   split=ds.TRAIN)
+    ev = design.design_vars(case, "normal", wf)
+    assert set(ev) == set(live)
+    assert (ev["held_out_pct"], ev["held_out_min"]) == (live["held_out_pct"],
+                                                        live["held_out_min"]) == (55, 7)
+    text = design.render_design_prompt(case, "normal", wf=wf)
+    assert "about\n     55% of your" in text and "at least 1 once you propose\n     7 or more" in text
+    for k in ("held_out_pct", "held_out_min", "risk_guidance"):
+        with pytest.raises(Exception, match=k):
+            dispatcher.render_prompt(dispatcher.JUDGE_PROMPT,
+                                     {kk: v for kk, v in ev.items() if kk != k})
+
+
+def test_a_held_out_tag_changes_no_score(repo):
+    """⚖️🙈 CMX-395's ``held_out`` tag is still a real experiment the judge runs: tagging
+    every experiment must leave the cap, recall, validity and contrived counts identical."""
+    r, base, head = repo
+    plan = [NEAR_MISS, HIT, {**HIT, "after": "    if checked_at is None or:"}]
+    tagged = [{**e, "held_out": True} for e in plan]
+
+    def scores(res):
+        return (res.proposed, res.considered, res.valid, res.seeded_hits, res.seeded_targets,
+                res.decoy_hits, res.contrived, res.realistic, res.misses)
+
+    for rk in evaluate.RISKS:
+        case = _case(base, head, _pr_on(ds.TRAIN))
+        plain = evaluate.score_case(r, case, rk, FakeDesign(plan), FakeGrader())
+        held = evaluate.score_case(r, case, rk, FakeDesign(tagged), FakeGrader())
+        assert scores(plain) == scores(held)
+        assert held.seeded_hits == 1 and held.valid == 2
+    assert "held_out" in design.EXPERIMENTS_SCHEMA["properties"]["experiments"]["items"][
+        "properties"]
+
+
 def test_a_candidate_template_replaces_the_live_one():
     case = ds.Case(id="c", pr=1, kind=ds.SEEDED, title="t", base_sha="b", head_sha="h",
                    split=ds.TRAIN)

@@ -77,6 +77,14 @@ def _risks(raw: str) -> tuple[str, ...]:
     return levels
 
 
+def _workflow(repo: Path):
+    """The repo's own WORKFLOW.md — the same ``judge.*`` knobs (e.g. ``held_out_fraction``)
+    the live judge renders its prompt with. None (defaults) when there is none."""
+    from chela.workflow import load_workflow
+    p = repo / "WORKFLOW.md"
+    return load_workflow(p) if p.is_file() else None
+
+
 def main(args) -> None:
     from chela.judge_eval import evaluate, mine
     from chela.judge_eval.runner import ClaudeCLIRunner
@@ -146,7 +154,7 @@ def main(args) -> None:
         repo, selected, split=args.split, risks=risks, runner=runner, grader_runner=grader,
         model=args.model, grader_model=args.grader_model, confirm=args.yes, template=template,
         template_name=template_name, max_cost=args.max_cost, jobs=args.jobs,
-        out=lambda line: print(line, flush=True),
+        out=lambda line: print(line, flush=True), wf=_workflow(repo),
     )
     if payload is None:
         return

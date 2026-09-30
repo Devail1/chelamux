@@ -19,7 +19,6 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chela import config, judge
 from chela.judge_eval import dataset as ds
 from chela.workflow import render_prompt
 
@@ -51,6 +50,10 @@ EXPERIMENTS_SCHEMA = {
                     "file": {"type": "string"},
                     "before": {"type": "string"},
                     "after": {"type": "string"},
+                    # CMX-395's tag. Accepted so the live prompt's ask can be honoured, and
+                    # IGNORED by every score (see evaluate.py) — a held-out experiment is
+                    # still an experiment for recall, contrived rate and validity.
+                    "held_out": {"type": "boolean"},
                 },
                 "required": ["guard", "file", "before", "after"],
             },
@@ -70,34 +73,38 @@ def live_template() -> str:
     return dispatcher.JUDGE_PROMPT
 
 
-def design_vars(case: ds.Case, risk: str) -> dict:
-    """The same keys ``dispatcher._judge_vars`` renders — a template that references any of
-    them renders here too (``render_prompt`` refuses an unknown one)."""
-    return {
-        "risk": risk,
-        "max_experiments": config.judge_max_experiments(risk),
-        "risk_guidance": judge.RISK_GUIDANCE[risk],
-        "task_id": case.id,
-        "task_title": case.title,
-        "task_body": "",
-        "branch_name": f"pr-{case.pr}",
-        "base_branch": "dev",
-        "workspace_path": ".",
-        "repo_path": ".",
-        "project_key": "chelamux",
-        "task_number": case.pr,
-        "pr_url": f"#{case.pr} ({case.title})",
-        "head_sha": case.head_sha,
-        "experiments_path": "(offline eval — return the JSON as your structured output)",
-        "judge_cmd": "(offline eval — nothing to run; return the JSON as your structured output)",
-        "test_cmd": "(offline eval — no suite runs)",
-        "diff_cmd": f"the Read tool on `{EVAL_DIR}/PR_DIFF.patch` (this PR's full diff)",
-        "pr_view_cmd": f"the Read tool on `{EVAL_DIR}/PR.md` (its title and commit messages)",
-    }
+def design_vars(case: ds.Case, risk: str, wf=None) -> dict:
+    """The live judge's variables via ``dispatcher.judge_prompt_vars`` — the SAME builder
+    ``dispatcher._judge_vars`` calls, so every key the live prompt renders (CMX-405's cap
+    and guidance, CMX-395's held-out quota, anything added later) is here too. Only the
+    values that would reach outside an offline run are swapped. ``wf`` is the workflow whose
+    ``judge.*`` knobs to read (the repo's own WORKFLOW.md in a CLI run); None = defaults."""
+    from chela import dispatcher
+    return dispatcher.judge_prompt_vars(
+        wf=wf,
+        risk=risk,
+        task_id=case.id,
+        task_title=case.title,
+        task_body="",
+        branch_name=f"pr-{case.pr}",
+        base_branch="dev",
+        workspace_path=".",
+        repo_path=".",
+        project_key="chelamux",
+        task_number=case.pr,
+        pr_url=f"#{case.pr} ({case.title})",
+        head_sha=case.head_sha,
+        experiments_path="(offline eval — return the JSON as your structured output)",
+        judge_cmd="(offline eval — nothing to run; return the JSON as your structured output)",
+        test_cmd="(offline eval — no suite runs)",
+        diff_cmd=f"the Read tool on `{EVAL_DIR}/PR_DIFF.patch` (this PR's full diff)",
+        pr_view_cmd=f"the Read tool on `{EVAL_DIR}/PR.md` (its title and commit messages)",
+    )
 
 
-def render_design_prompt(case: ds.Case, risk: str, template: str | None = None) -> str:
-    return render_prompt(template or live_template(), design_vars(case, risk)) + OFFLINE_ADDENDUM
+def render_design_prompt(case: ds.Case, risk: str, template: str | None = None,
+                         wf=None) -> str:
+    return render_prompt(template or live_template(), design_vars(case, risk, wf)) + OFFLINE_ADDENDUM
 
 
 @dataclass
@@ -118,12 +125,12 @@ def prepare_tree(repo: Path, case: ds.Case, dest: Path, full_diff: str) -> None:
 
 
 def run_design(repo: Path, case: ds.Case, risk: str, runner, full_diff: str,
-               template: str | None = None) -> Design:
+               template: str | None = None, wf=None) -> Design:
     """One design call. The tree is a throwaway extraction, deleted afterwards."""
     tmp = Path(tempfile.mkdtemp(prefix=f"chela-judge-eval-{case.id}-"))
     try:
         prepare_tree(repo, case, tmp, full_diff)
-        res = runner.run(render_design_prompt(case, risk, template), cwd=tmp,
+        res = runner.run(render_design_prompt(case, risk, template, wf), cwd=tmp,
                          schema=EXPERIMENTS_SCHEMA)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -36,6 +36,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # wrangler-action picks its package manager from the lockfile, and the repo is on
+      # pnpm since CMX-388 — without pnpm on PATH it fails before deploying anything
+      # ("Unable to locate executable file: pnpm", 0.14.0's landing deploy). No
+      # `version:` — the action reads package.json's `packageManager`, as in ci.yml.
+      - uses: pnpm/action-setup@v4
+
       - name: Publish landing/ to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:

@@ -76,7 +76,10 @@ def select_cases(cases: list[ds.Case], split: str, *, ids: list[str] | None = No
 
 
 def score_case(repo: Path, case: ds.Case, risk: str, runner, grader_runner,
-               template: str | None = None) -> report.CaseResult:
+               template: str | None = None, wf=None) -> report.CaseResult:
+    """⚖️🙈 CMX-395's ``held_out`` tag is IGNORED by every score here: a held-out experiment
+    is still an experiment the live judge runs, so it counts toward the cap, recall,
+    contrived rate and validity exactly like a visible one (it is only echoed in the detail)."""
     cap = config.judge_max_experiments(risk)
     r = report.CaseResult(case_id=case.id, pr=case.pr, kind=case.kind, split=case.split,
                           risk=risk, cap=cap)
@@ -84,7 +87,7 @@ def score_case(repo: Path, case: ds.Case, risk: str, runner, grader_runner,
         r.error = f"head {case.head_sha[:12]} or base not reachable"
         return r
     full_diff = ds.diff(repo, case.base_sha, case.head_sha)
-    d = design.run_design(repo, case, risk, runner, full_diff, template)
+    d = design.run_design(repo, case, risk, runner, full_diff, template, wf)
     r.cost_usd += d.cost_usd
     if d.error:
         r.error = d.error
@@ -111,6 +114,7 @@ def score_case(repo: Path, case: ds.Case, risk: str, runner, grader_runner,
         r.llm_graded += g.tier == "llm"
         r.flips += g.flipped
         detail.append({**{k: exp.get(k, "") for k in ("guard", "kind", "file", "before", "after")},
+                       "held_out": bool(exp.get("held_out")),
                        "valid": ok, "validity": why, "label": g.label, "shape": g.shape,
                        "grade_reason": g.reason, "grade_tier": g.tier, "flipped": g.flipped})
     for t in case.targets:
@@ -138,7 +142,7 @@ def score_case(repo: Path, case: ds.Case, risk: str, runner, grader_runner,
 def run_eval(repo: Path, cases: list[ds.Case], *, split: str, risks: tuple[str, ...],
              runner, grader_runner, model: str, grader_model: str, confirm: bool,
              template: str | None = None, template_name: str = "live JUDGE_PROMPT",
-             max_cost: float = 50.0, jobs: int = 3, out=print) -> dict | None:
+             max_cost: float = 50.0, jobs: int = 3, out=print, wf=None) -> dict | None:
     """The whole eval over already-selected ``cases``. Returns the results payload, or None
     for a dry run (``confirm`` false) — in which case NO model call was made."""
     est = estimate(len(cases), len(risks), model, grader_model)
@@ -161,7 +165,7 @@ def run_eval(repo: Path, cases: list[ds.Case], *, split: str, risks: tuple[str, 
             nxt = next(pending, None)
             if nxt is not None:
                 futures[pool.submit(score_case, repo, nxt[0], nxt[1], runner, grader_runner,
-                                    template)] = nxt
+                                    template, wf)] = nxt
             return nxt is not None
 
         for _ in range(max(1, jobs)):

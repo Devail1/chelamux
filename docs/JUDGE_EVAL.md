@@ -60,6 +60,17 @@ the line next to the weakness is a miss, the same edit in another file is a miss
 experiment the judge would refuse (an ambiguous anchor, a parse break) can never score a
 hit.
 
+**Held-out tags (CMX-395) do not change any score.** The live prompt asks the judge to tag
+about `held_out_pct`% of its experiments `"held_out": true`. A held-out experiment is still
+one the live judge runs, so the eval scores it exactly like a visible one: it counts toward
+the cap, recall, the contrived rate and validity. The tag is only echoed in the per-case
+detail. (`test_a_held_out_tag_changes_no_score` is the guard.)
+
+**The prompt variables are the live judge's, by construction.** The eval renders the design
+prompt through `dispatcher.judge_prompt_vars`, the same builder `dispatcher._judge_vars`
+calls, and reads the `judge.*` knobs (e.g. `held_out_fraction`) from the repo's own
+`WORKFLOW.md`. A variable added to the live prompt reaches the eval without a second edit.
+
 Every rate comes with a 95% interval. Seeded recall uses a Wilson interval, since each case
 has one target. The pooled rates use a cluster bootstrap that resamples **cases**, because
 experiments written in the same model call are correlated.
@@ -156,7 +167,8 @@ contaminates it.
 
 ## Baseline
 
-The live `JUDGE_PROMPT` at `056ca48` (CMX-405), with `opus` for design and
+The live `JUDGE_PROMPT` at `056ca48` (CMX-405), before CMX-395 added the held-out ask to
+it, with `opus` for design and
 `claude-opus-5-5` as the grader. The runs used `--limit`, so they are **small samples and
 the intervals are wide**. A full run is the operator's call.
 
