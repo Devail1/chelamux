@@ -50,7 +50,9 @@ REPO = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 TMUX_SOCKET = "chela-demo"
 SESSION = "chela"
-STATE_FILE = Path(tempfile.gettempdir()) / "chela-demo-fleet.json"
+# record.mjs reads the SAME path to refuse any dashboard that is not this demo's.
+STATE_FILE = Path(os.environ.get("CHELA_DEMO_STATE")
+                  or Path(tempfile.gettempdir()) / "chela-demo-fleet.json")
 DEFAULT_ROOT = Path("/tmp/demo")
 # Written into every root fleet.py builds; `down` (and a re-`up`) only ever deletes a
 # directory that carries it, so a mistyped CHELA_DEMO_ROOT can never rmtree real data.

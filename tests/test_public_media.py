@@ -483,20 +483,66 @@ def test_demo_fleet_down_kills_every_recorded_service_group(tmp_path, monkeypatc
     assert sorted(killed) == sorted((pid, fleet.signal.SIGTERM) for pid in pids.values())
 
 
-def test_record_mjs_refuses_anything_but_a_loopback_demo_dashboard(tmp_path):
-    """record.mjs must never record the operator's real dashboard: a non-loopback URL is
-    refused before any browser starts. EXECUTED, not grepped."""
+def _node_or_skip() -> str:
     import shutil as _sh
     node = _sh.which("node")
     if not node:
         if os.environ.get("CHELA_REQUIRE_JS_TESTS") == "1":
             pytest.fail("node is required (CHELA_REQUIRE_JS_TESTS=1)")
         pytest.skip("node not installed")
-    script = Path(__file__).resolve().parent.parent / "scripts" / "demo" / "record.mjs"
-    for url in ("http://localhost:1/", "http://10.0.0.1:5001/", "https://127.0.0.1:1/"):
-        r = _RUN([node, str(script), url, str(tmp_path / "out")], capture_output=True,
-                 text=True, timeout=30, cwd=str(script.parent.parent.parent))
+    return node
+
+
+_RECORD_MJS = Path(__file__).resolve().parent.parent / "scripts" / "demo" / "record.mjs"
+
+
+def _record_mjs(url: str, tmp_path: Path, state: dict | None):
+    """Run record.mjs's FENCE for real (CHELA_DEMO_CHECK_ONLY stops it before a browser)."""
+    state_path = tmp_path / "state.json"
+    if state is not None:
+        state_path.write_text(json.dumps(state))
+    env = {**os.environ, "CHELA_DEMO_STATE": str(state_path), "CHELA_DEMO_CHECK_ONLY": "1"}
+    return _RUN([_node_or_skip(), str(_RECORD_MJS), url, str(tmp_path / "out")], env=env,
+                capture_output=True, text=True, timeout=30, cwd=str(_RECORD_MJS.parents[2]))
+
+
+def _live_demo(tmp_path: Path, url: str) -> dict:
+    root = tmp_path / "demo"
+    root.mkdir(exist_ok=True)
+    (root / _fleet().MARKER).write_text("x")
+    return {"root": str(root), "url": url, "pids": {}, "env": {}}
+
+
+def test_record_mjs_records_ONLY_the_running_demo_fleets_own_dashboard(tmp_path):
+    """record.mjs must never record the operator's real dashboard — which is ALSO on
+    loopback. It accepts exactly the URL a live demo fleet (marker-carrying root) wrote to
+    its state file; everything else is refused before any browser starts. EXECUTED."""
+    demo = "http://127.0.0.1:5999/"
+    live = _live_demo(tmp_path, demo)
+    # ⭐ ACCEPTED: the demo's own URL (with or without the trailing slash).
+    for url in (demo, demo.rstrip("/")):
+        r = _record_mjs(url, tmp_path, live)
+        assert r.returncode == 0, (url, r.stderr[-300:])
+    refused = {
+        # the operator's REAL dashboard: loopback, but not the demo's
+        "http://127.0.0.1:5001/": live,
+        # not loopback at all / not http / userinfo trick / trailing path
+        "http://localhost:5999/": live,
+        "http://10.0.0.1:5999/": live,
+        "https://127.0.0.1:5999/": live,
+        "http://127.0.0.1:5999@10.0.0.1:5999/": {**live, "url": "http://127.0.0.1:5999@10.0.0.1:5999/"},
+        "http://127.0.0.1:5999/../x": {**live, "url": "http://127.0.0.1:5999/../x"},
+    }
+    for url, state in refused.items():
+        r = _record_mjs(url, tmp_path, state)
         assert r.returncode == 2 and "refusing" in r.stderr, (url, r.returncode, r.stderr[-300:])
+    # no demo running (no state file), or a root fleet.py did not build (no marker)
+    (tmp_path / "state.json").unlink()
+    r = _record_mjs(demo, tmp_path, None)
+    assert r.returncode == 2 and "refusing" in r.stderr
+    (tmp_path / "demo" / _fleet().MARKER).unlink()
+    r = _record_mjs(demo, tmp_path, live)
+    assert r.returncode == 2 and "refusing" in r.stderr
     assert not (tmp_path / "out").exists()
 
 

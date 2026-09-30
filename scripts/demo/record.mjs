@@ -9,10 +9,13 @@
 // that smears terminal text, and text is the whole picture here.
 //
 // ⛔ Point it ONLY at a dashboard fleet.py started. It refuses anything that is
-// not a loopback URL, and record.sh passes it the URL fleet.py printed.
+// not a loopback URL AND the exact URL a live demo fleet recorded in its state
+// file (whose root carries fleet.py's marker) — the operator's REAL dashboard is
+// on loopback too, so loopback alone would let it on camera.
 import { chromium } from 'playwright';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { join, isAbsolute } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const [url, outDir] = process.argv.slice(2);
 if (!url || !outDir) {
@@ -23,6 +26,19 @@ if (!/^http:\/\/127\.0\.0\.1:\d+\/?$/.test(url)) {
     console.error(`record.mjs: refusing ${url} — only a loopback demo dashboard (fleet.py) may be recorded`);
     process.exit(2);
 }
+// Same path fleet.py writes (its STATE_FILE: $CHELA_DEMO_STATE, else <tmpdir>/chela-demo-fleet.json).
+const statePath = process.env.CHELA_DEMO_STATE || join(tmpdir(), 'chela-demo-fleet.json');
+let state = null;
+try { state = JSON.parse(readFileSync(statePath, 'utf8')); } catch { state = null; }
+const slash = (u) => String(u).replace(/\/?$/, '/');
+if (!state || typeof state.url !== 'string' || typeof state.root !== 'string'
+        || !isAbsolute(state.root) || !existsSync(join(state.root, '.chela-demo-fleet'))
+        || slash(state.url) !== slash(url)) {
+    console.error(`record.mjs: refusing ${url} — it is not the dashboard of a running demo fleet `
+        + `(${statePath}); start one with fleet.py up (record.sh does)`);
+    process.exit(2);
+}
+if (process.env.CHELA_DEMO_CHECK_ONLY === '1') process.exit(0);   // tests: the fence, no browser
 
 const THEME = 'warm';   // CMX-381's theme; any theme is fine for the media (Liav)
 
