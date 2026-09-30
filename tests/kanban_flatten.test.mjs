@@ -554,3 +554,37 @@ test('renderKanban: the parked card\'s 🔒 reason chip is actually VISIBLE unde
 // ⛔ Do not "fix" this by adding an eighth property assertion. If someone wants the
 // outcome guarded for real, the honest project is a Playwright-sized one, exactly as
 // docs/SPIKE_WALL_FILLS_STAGE.md sizes it — not another line here.
+
+// --- 🗂️✖️ CMX-406 — a run closed by hand (`chela close --reason`) shows WHY -----------
+//
+// The card used to render `last_error` for every run, so a superseded run whose idle
+// window the orchestrator closed read "tmux window disappeared" forever. A closed run
+// with a `close_reason` shows "Closed — <reason>" INSTEAD — and never as a red error.
+
+test('renderKanban: a hand-closed run shows "Closed — <reason>", not its stale error', () => {
+    renderKanban(_payload([_run({
+        status: 'closed', pr_state: null, close_reason: 'superseded by cmx-403',
+        last_error: 'tmux window disappeared',
+    })]));
+
+    const card = document.querySelector('.kanban-col-archived .kanban-card-closed');
+    assert.ok(card, 'the hand-closed run never reached the archived column');
+    const note = card.querySelector('.kanban-card-closed-note');
+    assert.ok(note, 'the hand-closed card has no .kanban-card-closed-note line');
+    assert.equal(note.textContent, 'Closed — superseded by cmx-403');
+    assert.ok(!card.textContent.includes('tmux window disappeared'),
+        'the stale last_error still renders on a hand-closed card');
+    assert.equal(card.querySelector('.kanban-card-error'), null,
+        'a hand-closed reason was styled as an error');
+});
+
+// ⭐ NEGATIVE CONTROL: a FAILED run keeps showing its error — the note is not a blanket
+// "hide every last_error" change.
+test('renderKanban: a failed run still shows its error line', () => {
+    renderKanban(_payload([_run({
+        status: 'failed', pr_state: null, last_error: 'tmux window disappeared',
+    })]));
+    const err = document.querySelector('.kanban-card-failed .kanban-card-error');
+    assert.ok(err, 'a failed run lost its error line');
+    assert.equal(err.textContent, 'tmux window disappeared');
+});

@@ -6,6 +6,7 @@ import { openTaskModal } from './taskmodal.js';
 import { displayTitle } from './taskmodalmodel.js';
 import { knInline } from './knowledge.js';
 import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from './kanbanlanemodel.js';
+import { runCardNote } from './runstate.js';
 
 // ---------------------------------------------------------------------------
 // Render: the Board segment of WORK (the global cross-workflow kanban)
@@ -200,8 +201,10 @@ function _kCard(card) {
     }
     const tid = escHtml(card.task_id);
     const displayId = escHtml(_runDisplayId(card));
-    const err = card.last_error
-        ? `<div class="kanban-card-error" title="${attrEsc(card.last_error)}">${escHtml(card.last_error.slice(0, 120))}</div>`
+    // A hand-closed run shows WHY it was closed (CMX-406), never its stale error — runCardNote.
+    const note = runCardNote(card);
+    const err = note
+        ? `<div class="${note.closed ? 'kanban-card-closed-note' : 'kanban-card-error'}" title="${attrEsc(note.text)}">${escHtml(note.text.slice(0, 120))}</div>`
         : '';
     // Under the project-key scheme the branch is just the lowercase display id
     // (e.g. PCLW-11 → pclw-11), so a branch chip would duplicate kanban-card-id.

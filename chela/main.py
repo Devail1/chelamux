@@ -2565,6 +2565,57 @@ def cmd_retry(args) -> None:
               "the authority, so it retries regardless, but nothing landed on the PR.")
 
 
+def cmd_close(args) -> None:
+    """🗂️✖️ Mark an abandoned or superseded run ``closed``, with a reason (CMX-406).
+
+    A run walked away from — superseded by a successor ticket, or its idle window closed to
+    free the slot — otherwise sits on the Work view as a FAILED card. This closes it the way
+    reconcile closes a run whose PR was closed on GitHub: terminal, never re-claimed, slot
+    freed — and the card reads "Closed — <reason>". The branch is never deleted; the worktree
+    is kept unless ``--remove-worktree``. A live, non-idle agent is refused without ``--force``.
+
+    An OPEN PR gets the reason as a comment. Whether to close it too is ``--close-pr`` /
+    ``--keep-pr``; with neither, an interactive terminal is asked, anything else keeps it open.
+    """
+    close_pr = args.close_pr
+    if not close_pr and not args.keep_pr:
+        run = dispatcher.resolve_run(args.run)
+        if run is not None and dispatcher.pr_is_open(run) and sys.stdin.isatty():
+            try:
+                answer = input(f"{run.get('pr_url')} is still open — close it too? [y/N] ")
+            except EOFError:
+                answer = ""
+            close_pr = answer.strip().lower() in ("y", "yes")
+    result = dispatcher.close_run(
+        args.run, args.reason, force=args.force, close_pr=close_pr,
+        remove_worktree=args.remove_worktree,
+        by=f"terminal:{os.environ.get('USER') or 'operator'}",
+    )
+    if not result.get("ok"):
+        print(f"close: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    forced = " (forced)" if result.get("forced") else ""
+    print(f"🗂️✖️ Run {result['task_id']} ({result.get('branch_name') or '?'}) "
+          f"{result.get('from_status')} → closed{forced} — {result['reason']}")
+    if result.get("window_killed"):
+        print("  window killed")
+    if result.get("pr_open"):
+        if result.get("pr_closed"):
+            print(f"  PR closed with the reason as its comment: {result.get('pr_url')}")
+        elif result.get("comment_posted"):
+            print(f"  PR left OPEN, reason posted as a comment: {result.get('pr_url')} "
+                  "(pass --close-pr to close it)")
+        else:
+            print(f"  ⚠ PR {'close' if close_pr else 'comment'} did NOT take "
+                  f"({result.get('comment_detail')}) — the run is closed regardless.")
+    if result.get("worktree_removed"):
+        print(f"  worktree removed: {result.get('worktree_path')}")
+    elif result.get("worktree_detail"):
+        print(f"  ⚠ worktree NOT removed ({result['worktree_detail']})")
+    elif result.get("worktree_path"):
+        print(f"  worktree kept: {result.get('worktree_path')} (branch kept too)")
+
+
 def cmd_escalate(args) -> None:
     """Hand a decision to the human — the ONE structured escalation path (``chela.contract``).
 
@@ -2995,6 +3046,32 @@ def main() -> None:
              "a human made the call",
     )
 
+    # close — walk away from a run on purpose, with a reason the Work card shows (CMX-406)
+    p_close = sub.add_parser(
+        "close",
+        help="🗂️✖️ Mark an abandoned or superseded run CLOSED with a visible reason, instead "
+             "of leaving it as a FAILED card. Never re-claimed; slot freed; branch kept",
+    )
+    p_close.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-84)")
+    p_close.add_argument(
+        "--reason", required=True,
+        help="Why (e.g. 'superseded by cmx-403') — stored on the run, recorded in its review "
+             "history, shown on the Work card and posted on an open PR",
+    )
+    p_close.add_argument(
+        "--force", action="store_true",
+        help="Close a running/claimed run even though its agent is not idle (its window is "
+             "killed)",
+    )
+    pr_group = p_close.add_mutually_exclusive_group()
+    pr_group.add_argument("--close-pr", action="store_true",
+                          help="Also close the run's open PR, with the reason as its comment")
+    pr_group.add_argument("--keep-pr", action="store_true",
+                          help="Leave an open PR open without asking (the reason is still "
+                               "posted as a comment)")
+    p_close.add_argument("--remove-worktree", action="store_true",
+                         help="Also remove the run's worktree (default: kept)")
+
     # escalate — the ONE structured way to hand a decision to the human
     p_esc = sub.add_parser(
         "escalate",
@@ -3262,6 +3339,8 @@ def main() -> None:
         cmd_reopen(args)
     elif args.command == "retry":
         cmd_retry(args)
+    elif args.command == "close":
+        cmd_close(args)
     elif args.command == "escalate":
         cmd_escalate(args)
     elif args.command == "update":
