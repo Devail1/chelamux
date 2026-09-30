@@ -318,3 +318,91 @@ def test_the_block_body_says_which_suite_decided_each_survivor(tmp_path):
 
     assert "confirmed on the full suite" in body
     assert "⏱️" in body.split("\n\n", 2)[1]
+
+
+# --- CMX-395 × CMX-407: held-out experiments and the consistency re-run --------------------
+
+
+def _held(file: str, before: str, after: str, guard: str) -> dict:
+    return dict(_exp(file, before, after, guard), held_out=True)
+
+
+def test_a_held_out_subset_survivor_is_confirmed_on_the_full_suite_before_it_blocks(
+    tmp_path, calls,
+):
+    """GUARD: a held-out experiment takes the SAME subset → full-suite path as a visible one.
+    The broken ``cue`` is subset-green (only the weak test imports it) and full-suite red: it
+    must NOT block, not even as an anonymous held-out count. The unguarded ``unused()`` is
+    green on both and MUST block — as a count only, never by name."""
+    root = _repo(tmp_path / "repo")
+    report = judge.run_experiments(
+        root, TEST_CMD, {"experiments": [
+            _held("pkg/widget.py", "x * 2", "x * 3", "SECRET-cue"),
+            _held("pkg/widget.py", "return 1", "return 2", "SECRET-unused"),
+        ]}, timeout=120,
+    )
+
+    assert not report.cannot_verify, report.cannot_verify
+    cue, unused = report.outcomes
+    assert cue.held_out and cue.confirmed_full and cue.subset_verdict == judge.SURVIVED
+    assert cue.verdict == judge.KILLED, cue.reason          # the full suite killed it
+    assert unused.verdict == judge.SURVIVED and unused.confirmed_full
+    assert report.blocking == [unused] and report.held_out_blocking == [unused]
+    assert report.visible_blocking == [] and report.state == judge.J_BLOCKED
+    assert calls[1:] == [                                   # subset, FULL — for each one
+        js.extend(TEST_CMD, ["test_direct.py"]), TEST_CMD,
+        js.extend(TEST_CMD, ["test_direct.py"]), TEST_CMD,
+    ]
+    public = judge.block_body(report, None, TEST_CMD) + judge.comment_body(report, None, TEST_CMD)
+    assert "SECRET" not in public and "1 held-out guard(s) also survived" in public
+
+
+def test_the_consistency_re_run_replays_the_first_runs_own_selection(tmp_path, calls):
+    """GUARD: a subset first run must be re-run on the SAME subset. Re-running it on the full
+    suite would compare two different experiments and call the difference a flip."""
+    root = _repo(tmp_path / "repo")
+    report = judge.run_experiments(
+        root, TEST_CMD, {"experiments": [_exp("pkg/gauge.py", "return 5", "return 6")]},
+        timeout=120, consistency_sample=1,
+    )
+
+    [o] = report.outcomes
+    assert o.verdict == judge.KILLED and o.rerun_verdict == judge.KILLED and not o.flaky
+    subset = js.extend(TEST_CMD, ["test_gauge.py"])
+    assert calls[1:] == [subset, subset], calls
+    assert report.consistency["sampled"] == 1
+
+
+def test_a_confirmed_survivor_is_re_run_through_subset_then_full(tmp_path, calls):
+    """⭐ ACCEPTED: a subset-green AND full-green survivor is sampled first, re-run the same
+    way, stays SURVIVED — and still BLOCKS."""
+    root = _repo(tmp_path / "repo")
+    report = judge.run_experiments(
+        root, TEST_CMD, {"experiments": [_exp("pkg/widget.py", "return 1", "return 2")]},
+        timeout=120, consistency_sample=1,
+    )
+
+    [o] = report.outcomes
+    assert o.rerun_verdict == judge.SURVIVED and not o.flaky
+    assert report.blocking == [o]
+    subset = js.extend(TEST_CMD, ["test_direct.py"])
+    assert calls[1:] == [subset, TEST_CMD, subset, TEST_CMD], calls
+
+
+def test_a_survivor_the_full_suite_killed_is_never_sampled_for_consistency(tmp_path, calls):
+    """GUARD — the order. subset SURVIVED → full-suite KILLED is not a survivor, and its two
+    measurements disagreed by design (narrow selection), not by flake: it is never re-run and
+    can never be marked flaky. Only the ordinary KILLED experiment is sampled."""
+    root = _repo(tmp_path / "repo")
+    report = judge.run_experiments(
+        root, TEST_CMD, {"experiments": [
+            _exp("pkg/widget.py", "x * 2", "x * 3", "cue"),
+            _exp("pkg/gauge.py", "return 5", "return 6", "gauge"),
+        ]}, timeout=120, consistency_sample=5,
+    )
+
+    cue, gauge = report.outcomes
+    assert cue.verdict == judge.KILLED and cue.subset_verdict == judge.SURVIVED
+    assert cue.rerun_verdict == "" and not cue.flaky
+    assert gauge.rerun_verdict == judge.KILLED
+    assert report.consistency["sampled"] == 1

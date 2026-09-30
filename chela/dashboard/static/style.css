@@ -2531,6 +2531,20 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kanban-state-chip.st-done         { color: var(--text-dim); }
 .kanban-state-chip.st-closed-unmerged { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }
 
+/* ⚖️🎚️ CMX-405 — the run's RISK level (kanban.js / taskmodal.js via riskChip). The WORD
+   ("risk: high") carries it; the colour only agrees. */
+.kanban-risk-chip {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 10px;
+    padding: 0 8px;
+    font-size: 10px;
+    white-space: nowrap;
+}
+.kanban-risk-chip.risk-high { color: var(--red); border-color: rgba(248, 81, 73, 0.5); font-weight: 600; }
+.kanban-risk-chip.risk-low  { color: var(--text-dim); border-style: dashed; }
+
 /* The CI chip (CMX-69): what GitHub's checks say about this card's PR. The glyph and the
    WORD carry the state; the colour only agrees with them. A red-weak reader must be able
    to answer "can this ship?" from the text alone — and a green chip is the only one that

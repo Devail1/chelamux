@@ -236,12 +236,12 @@ def test_judge_run_hands_run_experiments_the_real_base_branch(tmp_path, monkeypa
     seen: list[object] = []
     real = judge_mod.run_experiments
 
-    def spy(worktree, test_cmd, raw, *, timeout=None, base_branch=None, select_tests=True):
+    def spy(worktree, test_cmd, raw, *, timeout=None, base_branch=None, **kw):
         # ⛔ Record the VALUE, not that a call happened: the defect is a kwarg quietly
         # defaulting to "", which a call-count spy cannot tell from a real base branch.
+        # `**kw` carries CMX-405's risk cap through untouched.
         seen.append(base_branch)
-        return real(worktree, test_cmd, raw, timeout=timeout, base_branch=base_branch,
-                    select_tests=select_tests)
+        return real(worktree, test_cmd, raw, timeout=timeout, base_branch=base_branch, **kw)
 
     monkeypatch.setattr(judge_mod, "run_experiments", spy)
 

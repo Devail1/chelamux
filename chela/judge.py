@@ -137,6 +137,50 @@ J_UNJUDGED_MERGED = "unjudged_merged"
 # truncation reads as "everything was checked" when it was not.
 MAX_EXPERIMENTS = 12
 
+# ⚖️🙈 CMX-395 — HELD-OUT experiments: the train/test split, ported from "Automating eval
+# design and hillclimbing". PR #529 (CMX-377) went 7 judge rounds because every verdict
+# listed the exact surviving mutations and every rework patched THOSE mutations — the rework
+# loop was optimising against its own test set. The judge tags this fraction of what it
+# proposes as ``"held_out": true``; ``chela judge run`` runs them like any other, but a
+# held-out experiment's guard, file and diff NEVER reach the PR comment, the rework prompt or
+# the review history — only the COUNT of held-out survivors does, and that count still blocks.
+# The details go to ``$CHELA_DIR/judge-heldout/<task>.jsonl`` for the operator.
+# Overridable per workflow with ``judge.held_out_fraction``.
+HELD_OUT_FRACTION = 0.30
+HELD_OUT_MIN_EXPERIMENTS = 3   # below this, holding one out would starve the visible set
+
+# ⚖️🎲 CMX-395 — CONSISTENCY: run the grader twice. This many already-adjudicated experiments
+# (survivors first — they are the ones that would block) are re-run a second time; an outcome
+# that flips KILLED↔SURVIVED is FLAKY (a stale ``.pyc``, an order-dependent test, a timing
+# race) and is excluded from blocking — the operator decides. Overridable per workflow with
+# ``judge.consistency_sample``; ``0`` switches the re-run off.
+CONSISTENCY_SAMPLE = 2
+
+# ⚖️🎚️ CMX-405. How widely the judge SEARCHES, per task risk level — rendered into the judge
+# prompt beside that level's experiment cap (`config.judge_max_experiments`; `high` is the
+# pre-CMX-405 battery, MAX_EXPERIMENTS). ⛔ Risk scales the SEARCH and nothing else: every
+# experiment that does run is adjudicated exactly as before, and a SURVIVED one BLOCKS at
+# every level — it is never downgraded to a note. A lower level is a smaller battery aimed
+# at likelier breakage, not a softer verdict.
+RISK_GUIDANCE = {
+    "high": (
+        "**The full battery.** Corrupt every guard and invariant this PR adds, adversarial "
+        "edge cases included — contrived corruptions are in scope at this level."
+    ),
+    "normal": (
+        "**A focused battery.** Spend your experiments on REALISTIC regressions and on "
+        "WIRING (revert the production call-site): the breakage a normal future edit could "
+        "plausibly introduce. Skip contrived, hand-targeted corruptions no ordinary edit "
+        "would ever produce."
+    ),
+    "low": (
+        "**Only the likeliest regressions.** Propose only corruptions a plausible future "
+        "edit would introduce — a flipped condition, a dropped call, an emptied value on the "
+        "main path. Contrived, targeted corruptions that no normal edit would produce do "
+        "NOT count at this level; do not propose them."
+    ),
+}
+
 # Each experiment re-runs the whole suite, so the timeout is per suite run, not per judge.
 SUITE_TIMEOUT_SECONDS = 900
 
@@ -216,6 +260,8 @@ class Experiment:
     before: str
     after: str
     kind: str = "mutation"       # "mutation" | "wiring" — adjudicated identically
+    # ⚖️🙈 CMX-395: chosen by the JUDGE, never by chela and never visible to the coding agent.
+    held_out: bool = False
 
     @classmethod
     def parse(cls, raw: object) -> tuple["Experiment | None", str]:
@@ -230,12 +276,16 @@ class Experiment:
         kind = raw.get("kind")
         kind = kind if kind in ("mutation", "wiring") else "mutation"
         return cls(guard=vals["guard"].strip(), file=vals["file"].strip(),
-                   before=vals["before"], after=vals["after"], kind=kind), ""
+                   before=vals["before"], after=vals["after"], kind=kind,
+                   held_out=raw.get("held_out") is True), ""
 
     def as_dict(self) -> dict:
         """The same ``{guard, file, before, after, kind}`` shape :meth:`parse` reads back —
         round-trips through JSON so a SURVIVED experiment can be handed forward, verbatim,
-        as a REQUIRED MUTATION SET (see :func:`chela.dispatcher.request_changes`)."""
+        as a REQUIRED MUTATION SET (see :func:`chela.dispatcher.request_changes`).
+
+        ⛔ ``held_out`` is deliberately NOT in this shape: it is what a rework agent is handed,
+        and only visible experiments ever are (see :attr:`Report.visible_blocking`)."""
         return {"guard": self.guard, "file": self.file, "before": self.before,
                 "after": self.after, "kind": self.kind}
 
@@ -257,10 +307,24 @@ class Outcome:
     confirmed_full: bool = False
     selection: str = ""
     seconds: float = 0.0
+    # The SUBSET's own verdict when a full-suite run followed it ("" otherwise), and the exact
+    # selection the first run used — the consistency re-run (CMX-395) re-runs THAT, never a
+    # freshly computed one: a subset re-run compared against a full-suite first run is not
+    # the same experiment.
+    subset_verdict: str = ""
+    plan: "judge_select.Selection | None" = field(default=None, repr=False, compare=False)
+    # ⚖️🎲 CMX-395: the verdict of the consistency re-run ("" = not sampled), and whether it
+    # FLIPPED between KILLED and SURVIVED. A flaky outcome never blocks — the operator decides.
+    rerun_verdict: str = ""
+    flaky: bool = False
+
+    @property
+    def held_out(self) -> bool:
+        return self.experiment.held_out
 
     @property
     def blocking(self) -> bool:
-        return self.verdict == SURVIVED
+        return self.verdict == SURVIVED and not self.flaky
 
     @property
     def measured_by(self) -> str:
@@ -268,7 +332,8 @@ class Outcome:
         if self.selected is None:
             how = "full suite"
         elif self.confirmed_full:
-            how = f"{self.selected} selected test(s) green → confirmed on the full suite"
+            first = "green" if self.subset_verdict == SURVIVED else "inconclusive"
+            how = f"{self.selected} selected test(s) {first} → confirmed on the full suite"
         else:
             how = f"{self.selected} selected test(s)"
         return f"{how}, {_duration(self.seconds)}"
@@ -281,6 +346,8 @@ class Outcome:
             "mutated": self.mutated.as_dict() if self.mutated else None,
             "selected": self.selected, "confirmed_full": self.confirmed_full,
             "selection": self.selection, "seconds": round(self.seconds, 1),
+            "held_out": self.held_out, "rerun_verdict": self.rerun_verdict,
+            "flaky": self.flaky,
         }
 
 
@@ -291,21 +358,51 @@ class Report:
     notes: list[dict] = field(default_factory=list)
     baseline: SuiteResult | None = None
     cannot_verify: str = ""     # non-empty ⇒ NOTHING here may block. Unknown is not a fail.
-    dropped: int = 0            # experiments past MAX_EXPERIMENTS — said out loud, never silent
+    dropped: int = 0            # experiments past `cap` — said out loud, never silent
     # ⚡ CMX-407: wall-clock of the mutation battery (baseline + every experiment), and — when
     # the caller knows when the judge LAUNCHED — of the whole judge, agent time included.
     battery_seconds: float = 0.0
     total_seconds: float | None = None
     selection: str = ""         # why per-mutation test selection was on, or why it was off
+    # ⚖️🎲 CMX-395: {"sampled": n, "flipped": k, "flip_rate": k/n} — empty when not run.
+    consistency: dict = field(default_factory=dict)
+    # ⚖️🎚️ CMX-405: the task's risk level and the experiment cap it bought. Shown in the
+    # verdict header; ⛔ read by NOTHING on the blocking path (`blocking`/`state` below).
+    risk: str = ""
+    cap: int = MAX_EXPERIMENTS
 
     @property
     def blocking(self) -> list[Outcome]:
         # ⛔ The single choke point. A cannot-verify report blocks NOTHING, whatever its
         # outcomes look like — a mutation run against a suite that was already red, or in a
         # worktree with unknown edits in it, is not evidence of anything.
+        # ⚖️🙈 CMX-395: held-out survivors are IN this list — they block exactly as a visible
+        # one does. Only what is SHOWN about them differs (see ``visible_blocking``).
         if self.cannot_verify:
             return []
         return [o for o in self.outcomes if o.blocking]
+
+    @property
+    def visible_blocking(self) -> list[Outcome]:
+        """The survivors a PR comment, the rework prompt and the review history may NAME."""
+        return [o for o in self.blocking if not o.held_out]
+
+    @property
+    def held_out_blocking(self) -> list[Outcome]:
+        """The survivors that block but are only ever COUNTED in public — never named."""
+        return [o for o in self.blocking if o.held_out]
+
+    @property
+    def visible_outcomes(self) -> list[Outcome]:
+        return [o for o in self.outcomes if not o.held_out]
+
+    @property
+    def held_out_outcomes(self) -> list[Outcome]:
+        return [o for o in self.outcomes if o.held_out]
+
+    @property
+    def flaky(self) -> list[Outcome]:
+        return [o for o in self.outcomes if o.flaky]
 
     @property
     def state(self) -> str:
@@ -1197,8 +1294,16 @@ def run_experiments(
     timeout: float = SUITE_TIMEOUT_SECONDS,
     base_branch: str = "",
     select_tests: bool = True,
+    consistency_sample: int = 0,
+    max_experiments: int = MAX_EXPERIMENTS,
+    risk: str = "",
 ) -> Report:
     """Execute every proposed experiment IN THIS WORKTREE and adjudicate each one.
+
+    ⚖️🎚️ CMX-405: ``max_experiments`` is the task's risk-level cap (see
+    ``config.judge_max_experiments``) — proposals past it are dropped OUT LOUD, as
+    :data:`MAX_EXPERIMENTS` always dropped them. ⛔ It bounds how many run, never what a
+    run one means: a SURVIVED outcome blocks at every ``risk``.
 
     The worktree is a throwaway detached checkout of the PR head — never the branch's own
     worktree, which a rework agent will later commit from. A mutation that escaped into
@@ -1239,10 +1344,18 @@ def run_experiments(
     ⚡ CMX-407: ``select_tests`` (``judge.select_tests``, default on) runs each mutation
     against only the tests that can observe its file, confirming every subset survivor on the
     full suite — see :func:`run_baseline` and :func:`_measure`.
+
+    ⚖️🎲 CMX-395: ``consistency_sample`` > 0 re-runs that many adjudicated experiments a
+    second time (see :func:`_check_consistency`). A flipped outcome is FLAKY and blocks
+    nothing; a report whose ONLY survivors are flaky becomes CANNOT VERIFY, naming them —
+    never clean, because a flip is an unknown, and the operator decides. ``0`` (the default)
+    skips it; ``judge_run`` passes the workflow's ``judge.consistency_sample``.
     """
     started = time.monotonic()
     report = _run_experiments(worktree, test_cmd, raw, timeout=timeout,
-                              base_branch=base_branch, select_tests=select_tests)
+                              base_branch=base_branch, select_tests=select_tests,
+                              consistency_sample=consistency_sample,
+                              max_experiments=max_experiments, risk=risk)
     report.battery_seconds = time.monotonic() - started
     log.info("judge: mutation battery took %s (%d experiment(s))",
              _duration(report.battery_seconds), len(report.outcomes))
@@ -1251,9 +1364,9 @@ def run_experiments(
 
 def _run_experiments(
     worktree: Path, test_cmd: str, raw: dict, *, timeout: float, base_branch: str,
-    select_tests: bool,
+    select_tests: bool, consistency_sample: int, max_experiments: int, risk: str,
 ) -> Report:
-    report = Report()
+    report = Report(risk=risk, cap=max(1, int(max_experiments)))
     items = raw.get("experiments") if isinstance(raw, dict) else None
     notes = raw.get("notes") if isinstance(raw, dict) else None
     report.notes = [n for n in notes if isinstance(n, dict)] if isinstance(notes, list) else []
@@ -1286,9 +1399,9 @@ def _run_experiments(
             )
         return report
 
-    if len(items) > MAX_EXPERIMENTS:
-        report.dropped = len(items) - MAX_EXPERIMENTS
-        items = items[:MAX_EXPERIMENTS]
+    if len(items) > report.cap:
+        report.dropped = len(items) - report.cap
+        items = items[:report.cap]
 
     # ⛔ CMX-80: PROVISION BEFORE MEASURING. A missing dependency and a broken guard both
     # come out of the suite as "exit 1", and the judge used to report the first as the
@@ -1338,6 +1451,25 @@ def _run_experiments(
         report.cannot_verify = contamination
         return report
 
+    if consistency_sample > 0:
+        contamination = _check_consistency(
+            worktree, test_cmd, items, outcomes, baseline, timeout, consistency_sample, report,
+        )
+        if contamination:
+            report.cannot_verify = contamination
+            return report
+        if report.flaky and not any(o.blocking for o in outcomes):
+            # ⚖️🎲 Nothing blocks ONLY because a survivor flipped. That is not a clean bill of
+            # health either — it is a guard nobody can say holds. The operator decides.
+            report.cannot_verify = (
+                f"⚖️🎲 FLAKY: {_flaky_phrase(report.flaky)} flipped between KILLED and "
+                "SURVIVED when the same mutation was run twice, so it was NOT counted toward "
+                "blocking — and nothing else blocked. A flip is an unknown (a stale `.pyc`, an "
+                "order-dependent test, a timing race), never a pass: this is the operator's "
+                "call, not a clean verdict."
+            )
+            return report
+
     # ⚖️🕳️ CMX-271: a report with no SURVIVED outcome is not automatically a clean bill of
     # health — every outcome could be a KILLED guard the diff's own deletion never touched
     # (see cmx-268, #338: six experiments, all KILLED, none of them related to what was
@@ -1367,6 +1499,7 @@ def _run_experiments(
 def _apply_experiments(
     worktree: Path, test_cmd: str, items: list, baseline: SuiteResult, timeout: float,
     selector: "judge_select.Selector | None" = None,
+    pinned: "list[judge_select.Selection | None] | None" = None,
 ) -> tuple[list[Outcome], str]:
     """Apply, adjudicate, and restore every ``items`` entry against an already-green
     ``baseline``. Shared by :func:`run_experiments` (the judge's PR pass, a throwaway
@@ -1381,14 +1514,21 @@ def _apply_experiments(
     and are returned anyway, but nothing after it is trustworthy.
 
     ⚡ CMX-407: given a ``selector`` (from :func:`run_baseline`), each mutation first runs only
-    the tests that can observe its file — see :func:`_measure`.
+    the tests that can observe its file — see :func:`_measure`. ``pinned`` (parallel to
+    ``items``) replays each experiment's FIRST-run selection instead of computing one — the
+    consistency re-run's contract.
     """
     outcomes: list[Outcome] = []
-    for raw_exp in items:
+    for n, raw_exp in enumerate(items):
         exp, why = Experiment.parse(raw_exp)
         if exp is None:
+            # A malformed HELD-OUT experiment stays held out: its raw repr carries the guard
+            # text and the start of its diff, which must never reach the visible comment.
+            hidden = isinstance(raw_exp, dict) and raw_exp.get("held_out") is True
             outcomes.append(Outcome(
-                Experiment(guard=str(raw_exp)[:120], file="?", before="", after=""),
+                Experiment(guard="(a malformed held-out experiment)" if hidden
+                           else str(raw_exp)[:120], file="?", before="", after="",
+                           held_out=hidden),
                 INVALID, f"the experiment is malformed ({why})", baseline, None, "",
             ))
             continue
@@ -1409,12 +1549,16 @@ def _apply_experiments(
             parses, parse_detail = parse_check(path) if applied else (True, "")
             if applied:
                 outcome = _measure(worktree, test_cmd, exp, reason, parses, parse_detail,
-                                   baseline, timeout, selector)
+                                   baseline, timeout, selector,
+                                   pinned[n] if pinned is not None else _SELECT)
             else:
                 outcome = adjudicate(exp, applied, reason, parses, parse_detail, baseline, None)
             outcome.seconds = time.monotonic() - started
-            log.info("judge: %s: %s — %s (%s)", exp.file, exp.guard[:60], outcome.verdict,
-                     outcome.measured_by)
+            # ⚖️🙈 CMX-395: a held-out experiment is never named, not even in the daemon log.
+            log.info("judge: %s — %s (%s)",
+                     "a held-out experiment" if exp.held_out
+                     else f"{exp.file}: {exp.guard[:60]}",
+                     outcome.verdict, outcome.measured_by)
             outcomes.append(outcome)
         finally:
             # ⛔ ALWAYS. The next experiment's baseline is this file, unmutated.
@@ -1466,7 +1610,7 @@ def _apply_experiments(
 def _measure(
     worktree: Path, test_cmd: str, exp: Experiment, reason: str, parses: bool,
     parse_detail: str, baseline: SuiteResult, timeout: float,
-    selector: "judge_select.Selector | None",
+    selector: "judge_select.Selector | None", pinned: object = None,
 ) -> Outcome:
     """⚡ CMX-407: run one APPLIED mutation against the tests that can observe its file, and
     adjudicate it WITHOUT changing what any verdict means.
@@ -1480,24 +1624,114 @@ def _measure(
       collapsed proves nothing either way, and the full suite is what used to decide it.)
     * **No selection** (no selector, an unknown file type, a ``conftest.py``, nothing
       observes the file) runs the full suite from the start. ⛔ Never skip testing a mutation.
+
+    ``pinned`` is the selection to replay (a :class:`~chela.judge_select.Selection`, or
+    ``None`` for the full suite); the default ``_SELECT`` computes it from ``selector``.
+    Held-out experiments take exactly this path — confirmation is not a visibility feature.
     """
-    sel = selector.select(exp.file) if selector is not None else None
+    if pinned is _SELECT:
+        sel = selector.select(exp.file) if selector is not None else None
+    else:
+        sel = pinned  # type: ignore[assignment]
     if sel is None or sel.full:
         mutated = run_suite(test_cmd, worktree, timeout)
         outcome = adjudicate(exp, True, reason, parses, parse_detail, baseline, mutated)
         outcome.selection = sel.why if sel is not None else ""
+        outcome.plan = sel
         return outcome
     subset = run_suite(judge_select.extend(test_cmd, sel.nodes), worktree, timeout)
     outcome = adjudicate(exp, True, reason, parses, parse_detail, _subset_baseline(sel), subset)
-    outcome.selected, outcome.selection = sel.expected, sel.why
+    outcome.selected, outcome.selection, outcome.plan = sel.expected, sel.why, sel
     if outcome.verdict == KILLED or not parses:
         # Final. A broken parse is INVALID whatever the suite says — no full run can change it.
         return outcome
     full = run_suite(test_cmd, worktree, timeout)
     confirmed = adjudicate(exp, True, reason, parses, parse_detail, baseline, full)
-    confirmed.selected, confirmed.selection = sel.expected, sel.why
+    confirmed.selected, confirmed.selection, confirmed.plan = sel.expected, sel.why, sel
     confirmed.confirmed_full = True
+    confirmed.subset_verdict = outcome.verdict
     return confirmed
+
+
+_SELECT = object()   # _measure's "no pinned selection — compute one" sentinel
+
+
+def _check_consistency(
+    worktree: Path, test_cmd: str, items: list, outcomes: list[Outcome],
+    baseline: SuiteResult, timeout: float, sample: int, report: Report,
+) -> str:
+    """⚖️🎲 CMX-395: run the grader twice. Re-run up to ``sample`` experiments whose first
+    verdict was a FACT (KILLED or SURVIVED — an INVALID one proved nothing either time), and
+    mark each whose second verdict is the OTHER fact ``flaky``. Survivors are sampled first:
+    they are the ones a flip would wrongly turn into a rework round (memory records exactly
+    that — a "survived" that was a stale ``.pyc``). Fills ``report.consistency`` and returns
+    ``_apply_experiments``' contamination string (``""`` when the re-run restored cleanly).
+
+    ``outcomes[i]`` is the adjudication of ``items[i]`` — :func:`_apply_experiments` emits
+    exactly one outcome per item unless it hit contamination, which the caller returned on.
+
+    ⚡ CMX-407 — ORDER: subset SURVIVED → full-suite confirmation (inside
+    :func:`_measure`, before this runs) → only then sampled here. So:
+
+    * a sampled survivor is one the FULL suite already confirmed;
+    * a subset survivor the full suite KILLED was never a survivor — it is not sampled at all,
+      so it can never be re-run and never be flaky (its two runs already disagreed by
+      design: narrow selection, not a flip);
+    * each re-run replays that experiment's OWN first-run selection (``Outcome.plan``) through
+      the same subset → confirm path, so first run and re-run are the same experiment.
+    """
+    facts = (KILLED, SURVIVED)
+    ranked = sorted(
+        (i for i, o in enumerate(outcomes) if o.verdict in facts
+         and not (o.subset_verdict == SURVIVED and o.verdict != SURVIVED)),
+        key=lambda i: (outcomes[i].verdict != SURVIVED, i),
+    )
+    picked = ranked[:sample]
+    if not picked:
+        report.consistency = {"sampled": 0, "flipped": 0, "flip_rate": 0.0}
+        return ""
+    reruns, contamination = _apply_experiments(
+        worktree, test_cmd, [items[i] for i in picked], baseline, timeout,
+        pinned=[outcomes[i].plan for i in picked],
+    )
+    flipped = 0
+    for i, again in zip(picked, reruns):
+        first = outcomes[i]
+        first.rerun_verdict = again.verdict
+        if again.verdict in facts and again.verdict != first.verdict:
+            first.flaky = True
+            flipped += 1
+            log.warning("judge: %s flipped %s → %s on its consistency re-run — FLAKY",
+                        "a held-out experiment" if first.held_out else first.experiment.guard,
+                        first.verdict, again.verdict)
+    sampled = len(reruns)
+    report.consistency = {
+        "sampled": sampled, "flipped": flipped,
+        "flip_rate": round(flipped / sampled, 3) if sampled else 0.0,
+    }
+    return contamination
+
+
+def _flaky_phrase(flaky: list[Outcome]) -> str:
+    """Name the visible flaky experiments; only COUNT the held-out ones (CMX-395)."""
+    named = [f"`{o.experiment.guard}`" for o in flaky if not o.held_out]
+    hidden = sum(1 for o in flaky if o.held_out)
+    parts = []
+    if named:
+        parts.append(f"{len(named)} experiment(s) ({', '.join(named)})")
+    if hidden:
+        parts.append(f"{hidden} held-out experiment(s) (withheld by design)")
+    return " and ".join(parts) or "no experiment"
+
+
+def held_out_quota(n: int, fraction: float = HELD_OUT_FRACTION) -> int:
+    """⚖️🙈 CMX-395: how many of ``n`` experiments the judge is asked to hold out — at least
+    1 once there are :data:`HELD_OUT_MIN_EXPERIMENTS`, else none (holding out one of two would
+    leave the rework almost nothing to read). Recorded against what the judge actually tagged;
+    chela never re-tags on the judge's behalf — the held-out choice is the judge's."""
+    if n < HELD_OUT_MIN_EXPERIMENTS:
+        return 0
+    return max(1, round(n * max(0.0, min(1.0, fraction))))
 
 
 # --- the verdict: what gets written, and where -------------------------------
@@ -1583,13 +1817,72 @@ def _timing_line(report: Report) -> str:
     return line
 
 
+def _held_out_section(report: Report) -> str:
+    """⚖️🙈 CMX-395: the ONLY thing a held-out survivor contributes to anything public — a
+    count. ⛔ No guard name, no file, no diff: this string reaches the PR comment, the review
+    history and (through both) the rework prompt, and naming the case would turn the held-out
+    set back into one more list for the rework to patch — the overfitting it exists to catch."""
+    n = len(report.held_out_blocking)
+    if not n:
+        return ""
+    return "\n".join([
+        f"### 🙈 {n} held-out guard(s) also survived — strengthen the guards in general, "
+        "not the listed cases",
+        "",
+        "The judge kept some of its experiments back on purpose, and this PR is not told "
+        "which. They were run exactly like the ones above — applied, read back, parsed, "
+        "suite re-run — and at least one guard stayed green under a corruption it should "
+        "have caught. ⛔ This blocks on its own. Patching only the cases listed above will "
+        "not clear it: make each guard assert the invariant itself, so that ANY violation of "
+        "it goes red.",
+        "",
+    ])
+
+
+def _flaky_section(report: Report) -> str:
+    """⚖️🎲 CMX-395: experiments whose outcome FLIPPED between two identical runs."""
+    if not report.flaky:
+        return ""
+    lines = [
+        "### 🎲 flaky — excluded from blocking; the operator decides",
+        "",
+        "chela ran these mutations a second time and got the OTHER verdict. A flip is an "
+        "unknown (a stale `.pyc`, an order-dependent test, a timing race), so it counts "
+        "neither for nor against this PR.",
+        "",
+    ]
+    for o in report.flaky:
+        if o.held_out:
+            lines.append(f"- a held-out experiment (withheld by design): "
+                         f"**{o.verdict}** then **{o.rerun_verdict}**")
+        else:
+            lines.append(f"- `{o.experiment.guard}` (`{o.experiment.file}`): "
+                         f"**{o.verdict}** then **{o.rerun_verdict}**")
+    return "\n".join(lines) + "\n"
+
+
+def risk_line(report: Report) -> list[str]:
+    """⚖️🎚️ CMX-405: the verdict header's stakes line — ``risk: low — 4 experiments`` — or
+    nothing for a report that carries no risk (a self-check, a pre-CMX-405 caller)."""
+    if not report.risk:
+        return []
+    ran = len(report.outcomes)
+    return [f"**risk: {report.risk} — {report.cap} experiments** (cap for this level; "
+            f"{ran} run)", ""]
+
+
 def block_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
-    """The verdict a SURVIVED mutation writes — stated as the fact it is."""
+    """The verdict a SURVIVED mutation writes — stated as the fact it is.
+
+    ⚖️🙈 CMX-395: it NAMES only ``visible_blocking``. A held-out survivor appears as a count
+    and nothing else (:func:`_held_out_section`) — this body is what ``request_changes``
+    stores and what the rework prompt quotes back."""
     timing = _timing_line(report)
     parts = [
         "## ⚖️ THE JUDGE — a guard on this PR SURVIVED DELIBERATE CORRUPTION",
         "",
         *([timing, ""] if timing else []),
+        *risk_line(report),
         "This is not a review of your code, and it is not an opinion. Each finding below is "
         "a **mutation chela applied itself**, in a throwaway checkout of this PR's head: the "
         "file really changed (read back from disk), it still parsed, and "
@@ -1601,7 +1894,7 @@ def block_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
         "it from the next change.",
         "",
     ]
-    for i, o in enumerate(report.blocking, 1):
+    for i, o in enumerate(report.visible_blocking, 1):
         label = "WIRING" if o.experiment.kind == "wiring" else "MUTATION"
         parts += [
             f"### {i}. [{label}] {o.experiment.guard}",
@@ -1619,6 +1912,12 @@ def block_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
             f"* measured by: {o.measured_by}",
             "",
         ]
+    held = _held_out_section(report)
+    if held:
+        parts.append(held)
+    flaky = _flaky_section(report)
+    if flaky:
+        parts.append(flaky)
     parts += [
         "### What to do",
         "",
@@ -1659,6 +1958,7 @@ def comment_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
             "## ⚖️ THE JUDGE — ⚠️ CANNOT VERIFY (this is NOT an approval)",
             "",
             *([timing, ""] if timing else []),
+            *risk_line(report),
             f"**{report.cannot_verify}**",
             "",
             "Nothing was sent back and nothing was cleared: an unknown is never a pass, and "
@@ -1672,6 +1972,7 @@ def comment_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
             "## ⚖️ THE JUDGE — every guard held",
             "",
             *([timing, ""] if timing else []),
+            *risk_line(report),
             f"chela corrupted each guard this PR adds and re-ran `{test_cmd}` "
             f"(baseline: {_suite_line(report.baseline)}). **Every mutation made the suite go "
             "red** — the guards guard.",
@@ -1679,18 +1980,29 @@ def comment_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
             "⛔ This is not an approval and it is not a merge: the judge only ever reports "
             "whether the PR's own proof can fail. The merge is still the orchestrator's call.",
         ]
-    if report.outcomes:
+    # ⚖️🙈 CMX-395: the table names VISIBLE experiments only; held-out ones are counted.
+    visible = report.visible_outcomes
+    if visible:
         head += ["", "| experiment | file | verdict | why | measured by |",
                  "|---|---|---|---|---|"]
-        for o in report.outcomes:
+        for o in visible:
             why = o.reason.replace("|", "\\|").replace("\n", " ")
+            verdict = f"**{o.verdict}**"
+            if o.flaky:
+                verdict += f" 🎲 flaky (re-run: {o.rerun_verdict})"
             head.append(
-                f"| {o.experiment.guard[:60]} | `{o.experiment.file}` | **{o.verdict}** | {why} "
+                f"| {o.experiment.guard[:60]} | `{o.experiment.file}` | {verdict} | {why} "
                 f"| {o.measured_by} |"
             )
+    hidden = report.held_out_outcomes
+    if hidden:
+        head += ["", f"🙈 {len(hidden)} held-out experiment(s) also ran — kept out of this "
+                     "comment by design, so a rework cannot tune itself to them."]
+    if report.flaky:
+        head += ["", _flaky_section(report).rstrip()]
     if report.dropped:
         head += ["", f"⚠️ {report.dropped} further experiment(s) were proposed and **not run** "
-                     f"(the cap is {MAX_EXPERIMENTS} — each one re-runs the suite)."]
+                     f"(the cap is {report.cap} — each one re-runs the whole suite)."]
     head += ["", f"_PR: {pr_url or '(none on the run row)'} — posted by the dispatcher's judge._"]
     return "\n".join(head) + _notes_section(report.notes)
 
@@ -1923,7 +2235,8 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
     ⛔ It never merges and never approves. A clean run is left in ``awaiting_review``, where
     the orchestrator finds it.
     """
-    from chela import dispatcher, event_log, workflow
+    from chela import config, dispatcher, event_log, workflow
+    from chela.sources import run_risk
 
     run = dispatcher.resolve_run(ident)
     if run is None:
@@ -1947,6 +2260,10 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
     judge_cfg = judge_suite_config(wf)
     test_cmd = judge_cfg.test_cmd
     worktree = judge_worktree_path(wf, task_id)
+    # ⚖️🎚️ CMX-405: the stakes come from the RUN ROW (copied from the tracker at claim),
+    # never from anything the judged agent wrote. They size the battery only.
+    risk = run_risk(run.get("risk"))
+    exp_cap = config.judge_max_experiments(risk)
     repo_dir = str(wf.path.parent)
     pr_url = run.get("pr_url")
 
@@ -1983,12 +2300,17 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
                 report = run_experiments(
                     worktree, test_cmd, raw, timeout=judge_cfg.suite_timeout_seconds,
                     base_branch=base_branch, select_tests=judge_cfg.select_tests,
+                    consistency_sample=judge_cfg.consistency_sample,
+                    max_experiments=exp_cap, risk=risk,
                 )
         else:
             report = run_experiments(
                 worktree, test_cmd, raw, timeout=judge_cfg.suite_timeout_seconds,
                 base_branch=base_branch, select_tests=judge_cfg.select_tests,
+                consistency_sample=judge_cfg.consistency_sample,
+                max_experiments=exp_cap, risk=risk,
             )
+        report.risk, report.cap = risk, exp_cap
         report.total_seconds = _since(run.get("judge_started_at"))
         # A worktree this call rebuilt was checked out at the run's CURRENT head — stamp
         # `judge_sha` to match so the DB record of what was judged is never stale, and the
@@ -2006,8 +2328,14 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
         verified_sha = judged_sha or run.get("judge_sha") or run.get("pr_head_sha")
 
         blocking = report.blocking
+        # ⚖️🙈 CMX-395: `outcomes` names VISIBLE experiments only — held-out ones are counted
+        # here and written, in full, to the operator's private record below, nowhere else.
         result = {"ok": True, "task_id": task_id, "state": report.state,
-                  "blocking": len(blocking), "outcomes": [o.as_dict() for o in report.outcomes],
+                  "blocking": len(blocking),
+                  "outcomes": [o.as_dict() for o in report.visible_outcomes],
+                  "held_out": {"total": len(report.held_out_outcomes),
+                               "survived": len(report.held_out_blocking)},
+                  "flaky": len(report.flaky), "consistency": report.consistency,
                   "cannot_verify": report.cannot_verify, "notes": len(report.notes),
                   "battery_seconds": round(report.battery_seconds, 1),
                   "total_seconds": (round(report.total_seconds, 1)
@@ -2037,6 +2365,11 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
         row_head = (live_run or {}).get("pr_head_sha")
         live_head = dispatcher.pr_live_head_sha(pr_url, repo_dir) or row_head
         stale_head = bool(verified_sha and live_head and verified_sha != live_head)
+
+        record_private(
+            task_id, report, raw if isinstance(raw, dict) else {}, judge_cfg.held_out_fraction,
+            sha=verified_sha, stale=stale_head, pr_url=pr_url,
+        )
 
         if stale_head:
             log.warning(
@@ -2097,9 +2430,12 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
                                      "spent")
                 result["comment_posted"] = posted
                 return result
+            # ⚖️🙈 CMX-395: the REQUIRED MUTATION SET is the VISIBLE survivors only — it is
+            # pasted verbatim into the rework prompt. A held-out survivor still blocks (it is
+            # in `blocking`), but never becomes a case the rework can copy and patch.
             verdict = dispatcher.request_changes(
                 task_id, body, post_comment=False,
-                mutations=[o.experiment.as_dict() for o in blocking],
+                mutations=[o.experiment.as_dict() for o in report.visible_blocking],
             )
             if not verdict.get("ok"):
                 # ⚖️🧊 CMX-239: The CAS refused it: the row moved under us (a human merged it,
@@ -2140,9 +2476,7 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
                 result.update(ok=False, state=J_BLOCKED_RACE, error=verdict.get("error"))
             else:
                 dispatcher.set_judge_state(
-                    task_id, J_BLOCKED,
-                    "; ".join(f"{o.experiment.guard}: SURVIVED" for o in blocking)[:500],
-                    sha=judged_sha,
+                    task_id, J_BLOCKED, _blocked_detail(report)[:500], sha=judged_sha,
                 )
                 log.warning("judge: %s SENT BACK — %d guard(s) survived corruption",
                             task_id, len(blocking))
@@ -2179,6 +2513,123 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
         _release_judge_slot(worktree)
         if cleanup:
             _cleanup(wf, task_id, run.get("branch_name") or "", judge_epoch)
+
+
+def _blocked_detail(report: Report) -> str:
+    """The run row's ``judge_detail`` for a block — visible guards by name, held-out by count."""
+    parts = [f"{o.experiment.guard}: SURVIVED" for o in report.visible_blocking]
+    if report.held_out_blocking:
+        parts.append(f"{len(report.held_out_blocking)} held-out guard(s): SURVIVED")
+    return "; ".join(parts)
+
+
+# --- ⚖️🙈 CMX-395: the operator's PRIVATE record of every judge round ---------------------
+#
+# One JSON line per `judge run`, under $CHELA_DIR — never the repo, never a worktree, never
+# the PR. It is the only place a held-out experiment's guard/file/diff is written down, and
+# what `chela judge show` reads its metrics from (rounds-to-clean, survival rates, flips).
+
+
+def heldout_store_path(task_id: str) -> Path:
+    from chela import config
+
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", task_id) or "_"
+    return config.CHELA_DIR / "judge-heldout" / f"{safe}.jsonl"
+
+
+def record_private(
+    task_id: str, report: Report, raw: dict, held_out_fraction: float = HELD_OUT_FRACTION, *,
+    sha: str | None = None, stale: bool = False, pr_url: str | None = None,
+) -> Path | None:
+    """Append this round to the operator's private record. Never raises — a record that
+    could not be written (or even assembled) must not take a verdict down with it; it is
+    logged instead. The guard is the whole body, not just the write: a failure while
+    building the record is the same "no record" outcome."""
+    try:
+        return _record_private(task_id, report, raw, held_out_fraction,
+                               sha=sha, stale=stale, pr_url=pr_url)
+    except Exception as e:  # noqa: BLE001 — by contract, nothing escapes into the verdict
+        log.warning("judge: %s: could not record the private held-out round: %s", task_id, e)
+        return None
+
+
+def _record_private(
+    task_id: str, report: Report, raw: dict, held_out_fraction: float, *,
+    sha: str | None, stale: bool, pr_url: str | None,
+) -> Path | None:
+    items = raw.get("experiments") if isinstance(raw, dict) else None
+    proposed = len(items) if isinstance(items, list) else 0
+    ran = len(report.outcomes)
+    tagged = len(report.held_out_outcomes)
+    quota = held_out_quota(ran, held_out_fraction)
+    if tagged < quota:
+        log.warning("judge: %s: the judge held out %d of %d experiment(s), below the quota of "
+                    "%d — the held-out check is weaker this round", task_id, tagged, ran, quota)
+    visible = report.visible_outcomes
+    rec = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "task_id": task_id, "sha": sha or "", "pr_url": pr_url or "",
+        "state": report.state, "stale": bool(stale),
+        "cannot_verify": report.cannot_verify,
+        "proposed": proposed,
+        "visible": {"total": len(visible),
+                    "survived": sum(1 for o in visible if o.verdict == SURVIVED)},
+        "held_out": {
+            "total": tagged, "quota": quota,
+            "survived": sum(1 for o in report.held_out_outcomes if o.verdict == SURVIVED),
+            "outcomes": [dict(o.as_dict(), before=o.experiment.before,
+                              after=o.experiment.after)
+                         for o in report.held_out_outcomes],
+        },
+        "consistency": dict(report.consistency or {}, flips=[
+            {"guard": o.experiment.guard, "held_out": o.held_out,
+             "first": o.verdict, "rerun": o.rerun_verdict} for o in report.flaky
+        ]),
+    }
+    path = heldout_store_path(task_id)
+    # No local except: record_private's single guard owns every failure (write or build).
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a") as fh:
+        fh.write(json.dumps(rec) + "\n")
+    return path
+
+
+def load_private(task_id: str) -> list[dict]:
+    path = heldout_store_path(task_id)
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
+def private_metrics(records: list[dict]) -> dict:
+    """⚖️ CMX-395 metrics for ``chela judge show``. A STALE round (its verdict was discarded
+    for a newer head) is not a round: it spent nothing and judged a commit nobody ships."""
+    rounds = [r for r in records if not r.get("stale")]
+    to_clean = next((i for i, r in enumerate(rounds, 1) if r.get("state") == J_CLEAN), None)
+
+    def rate(key: str) -> tuple[int, int]:
+        s = sum(int((r.get(key) or {}).get("survived") or 0) for r in rounds)
+        t = sum(int((r.get(key) or {}).get("total") or 0) for r in rounds)
+        return s, t
+
+    flipped = sum(int((r.get("consistency") or {}).get("flipped") or 0) for r in rounds)
+    sampled = sum(int((r.get("consistency") or {}).get("sampled") or 0) for r in rounds)
+    return {
+        "rounds": len(rounds), "rounds_to_clean": to_clean,
+        "visible": rate("visible"), "held_out": rate("held_out"),
+        "flips": (flipped, sampled),
+    }
 
 
 def _judge_lock_path(worktree: Path) -> Path:
@@ -2392,6 +2843,9 @@ class JudgeSuiteConfig:
 
     test_cmd: str
     suite_timeout_seconds: float
+    # ⚖️🙈🎲 CMX-395 — see HELD_OUT_FRACTION / CONSISTENCY_SAMPLE.
+    held_out_fraction: float = HELD_OUT_FRACTION
+    consistency_sample: int = CONSISTENCY_SAMPLE
     select_tests: bool = True
 
 
@@ -2401,11 +2855,28 @@ def judge_select_tests(wf) -> bool:
     return wf.get("judge", "select_tests", default=True) is not False
 
 
+def judge_held_out_fraction(wf) -> float:
+    try:
+        f = float(wf.get("judge", "held_out_fraction", default=HELD_OUT_FRACTION))
+    except (TypeError, ValueError):
+        return HELD_OUT_FRACTION
+    return min(1.0, max(0.0, f))
+
+
+def judge_consistency_sample(wf) -> int:
+    try:
+        return max(0, int(wf.get("judge", "consistency_sample", default=CONSISTENCY_SAMPLE)))
+    except (TypeError, ValueError):
+        return CONSISTENCY_SAMPLE
+
+
 def judge_suite_config(wf) -> JudgeSuiteConfig:
     """The run's whole judge suite config, read from WORKFLOW.md in one call."""
     return JudgeSuiteConfig(
         test_cmd=judge_test_cmd(wf), suite_timeout_seconds=judge_suite_timeout(wf),
         select_tests=judge_select_tests(wf),
+        held_out_fraction=judge_held_out_fraction(wf),
+        consistency_sample=judge_consistency_sample(wf),
     )
 
 
