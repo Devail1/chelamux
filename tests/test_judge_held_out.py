@@ -279,6 +279,18 @@ def test_a_flaky_experiment_is_excluded_but_a_STABLE_survivor_still_blocks(tmp_p
     assert "🎲 flaky" in body and SENTINEL_GUARD in body
 
 
+def test_a_flaky_VISIBLE_experiment_beside_a_STABLE_HELD_OUT_survivor_still_BLOCKS(tmp_path):
+    """🔴 GUARD (judge on f90440d): a held-out survivor blocks exactly as a visible one does —
+    so a flip elsewhere must not turn the report into CANNOT VERIFY while it stands."""
+    # glyph (visible): SURVIVED then KILLED. sentinel (held out): SURVIVED then SURVIVED.
+    report = _flaky_run(tmp_path, [_glyph(), _sentinel()], [0, 0, 1, 0])
+    assert [o.flaky for o in report.outcomes] == [True, False]
+    assert [o.experiment.guard for o in report.blocking] == [SENTINEL_GUARD]
+    assert report.blocking[0].held_out
+    assert not report.cannot_verify
+    assert report.state == judge.J_BLOCKED
+
+
 def test_the_consistency_sample_rechecks_SURVIVORS_first(tmp_path):
     """A survivor is what a flip would wrongly turn into a rework round — so with a sample of
     one, the survivor is re-run, not the earlier KILLED experiment."""
@@ -703,6 +715,23 @@ def test_record_private_swallows_a_BUILD_failure_and_returns_none(monkeypatch, c
         out = judge.record_private("ho-build-fail", _one_survivor_report(), {"experiments": []})
     assert out is None
     assert "synthetic build failure" in caplog.text
+
+
+class _NotAnOSError(Exception):
+    """Neither OSError nor ValueError — the guard's contract is EVERY exception."""
+
+
+@pytest.mark.parametrize("exc", [RuntimeError, KeyError, TypeError, _NotAnOSError])
+def test_record_private_swallows_ANY_exception_type_not_just_io_ones(monkeypatch, caplog, exc):
+    """🔴 GUARD (judge on f90440d): narrowing the catch to the types the other tests raise
+    (OSError, ValueError) must go RED — nothing may escape into the verdict."""
+    def boom(*a, **k):
+        raise exc("synthetic non-io failure")
+    monkeypatch.setattr(judge, "held_out_quota", boom)
+    with caplog.at_level("WARNING"):
+        out = judge.record_private("ho-any-exc", _one_survivor_report(), {"experiments": []})
+    assert out is None
+    assert "could not record the private held-out round" in caplog.text
 
 
 # --- final round (orchestrator): the two wirings the judge on 2e26e75 found unpinned -----
