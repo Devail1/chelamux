@@ -24,7 +24,7 @@ All of these are zero-config — the session is auto-derived from your own pane.
 | `chela peek <wid>` | **Filtered** status of one agent: `session_status` (busy/idle/waiting) + recap + cwd + health + context usage. The cheap default — call it often. Add `--json` for programmatic use. |
 | `chela read <wid> [--tail N \| --query Q \| --all]` | **Distilled** read of a sibling's transcript. `--tail N` = recent turns; `--query Q` = turns matching terms; `--all` = full. Escalate to this only when `peek` isn't enough. |
 | `chela drive <wid> <message>` | Send a message/instruction to a sibling window. |
-| `chela dispatch --pause` / `--resume` | **HOLD the queue** while you reorder the tracker — the dispatcher claims nothing until you release. See the gotcha below. |
+| `chela dispatch --pause` / `--resume` | **HOLD the queue** while you reorder the tracker — no new claims, judges or rework re-spawns until you release; running agents and judges finish. See the gotcha below. |
 
 `peek` and `read` are the **two observation tiers**: filtered by default, full-detail on
 demand. `drive` is how you act.
@@ -81,9 +81,13 @@ chela dispatch --resume                                      # next tick claims 
 
 Three things worth knowing:
 
-- The hold pauses **claims only**. Reconciliation keeps running, so a merged PR still
-  closes out its run and frees its slot while you rewrite — which is exactly the state you
-  want when you release.
+- The hold starts **no new agent of any kind**: no new claims, no new judges, no rework
+  re-spawns. It **stops nothing already running** — a claimed/running agent and a judge
+  mid-verdict both finish, and `--pause` / `--hold-status` list them
+  (`Still finishing: N agent(s), M judge(s)`, each with its `CMX-N` and elapsed time).
+  A PR that goes green while held simply waits; the first tick after `--resume` judges it.
+- Reconciliation keeps running, so a merged PR still closes out its run and frees its slot
+  while you rewrite — which is exactly the state you want when you release.
 - It **expires** (30m by default, `--ttl 2h` to extend). A hold cannot strand the fleet if
   you crash mid-rewrite; it self-releases and says so loudly.
 - The dispatcher claims from **`origin/<base_branch>`**, not from a working tree. An edit

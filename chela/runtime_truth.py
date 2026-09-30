@@ -2134,10 +2134,19 @@ def _hold_report(_declared: None, obs: Observation) -> list[Finding]:
             "rewritten, so the top item may not be the one that was intended. "
             f"File: {hold.path()}",
         )]
+    # CMX-413: what the hold stops and what it lets finish, from the runs table. Imported
+    # here, not at module top: dispatcher is the heavy module doctor otherwise never loads.
+    try:
+        from chela import dispatcher
+        head, *items = dispatcher.hold_inflight_lines()
+    except Exception as e:  # noqa: BLE001 — an unreadable DB must not hide the hold itself
+        head, items = f"Still finishing: unknown — the runs table could not be read ({e})", []
     return [Finding(
         WARN, f"the queue is HELD — dispatch is claiming NOTHING ({held.summary()})",
+        f"{head}{': ' + '; '.join(items) if items else ''}. "
         "This is deliberate: someone is rewriting the queue and does not want a task "
-        "claimed out from under the reorder. Reconciliation still runs (merged PRs close "
+        "claimed out from under the reorder. Running agents and judges are not stopped. "
+        "Reconciliation still runs (merged PRs close "
         "out and free their slot). Release with `chela dispatch --resume`; it also "
         "self-releases at its expiry, loudly.",
     )]

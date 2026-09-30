@@ -35,7 +35,10 @@ Three properties this hold must have, and the reasons they are not negotiable:
 * **It pauses CLAIMS ONLY — never reconciliation.** CMX-53's lesson was that dispatch and
   reconcile ride the same tick and went dark together. Pausing dispatch must not also stop
   merged PRs from closing out their runs and freeing their slots, or the hold would jam
-  the very slot the orchestrator is trying to fill.
+  the very slot the orchestrator is trying to fill. "Claims" means every NEW agent the
+  tick would start: fresh claims, judges (step 3a′) and rework re-spawns (3b) all sit
+  below the hold return. Nothing already running is stopped — every hold surface lists
+  what is still finishing (``dispatcher.hold_inflight_lines``, CMX-413).
 
 **Preemption is OUT OF SCOPE, by decision.** A run that has already been claimed is NOT
 killed and re-dispatched when a higher-priority task lands seconds later. Killing a live

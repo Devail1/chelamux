@@ -1144,6 +1144,12 @@ def cmd_wait(args) -> None:
 def _print_hold(held, prefix: str = "") -> None:
     print(f"{prefix}Dispatch is HELD — no task will be claimed until it is released.")
     print(f"  {held.summary()}")
+    # CMX-413: say what the hold stops (judges and rework re-spawns too, not only claims)
+    # and what it deliberately lets finish — from the runs table, never a guess.
+    head, *items = dispatcher.hold_inflight_lines()
+    print(f"  {head}")
+    for line in items:
+        print(f"    {line}")
     print("  Reconciliation keeps running: a merged PR still closes out its run and "
           "frees its slot.")
     print("  Release: chela dispatch --resume")
@@ -2889,8 +2895,10 @@ def main() -> None:
     # the daemon that honours it is not the process that takes it.
     p_disp.add_argument(
         "--pause", action="store_true",
-        help="HOLD the queue: claim no new task until --resume (reconciliation continues). "
-             "Take this BEFORE reordering the tracker.",
+        help="HOLD the queue until --resume: no new claims, no new judges, no rework "
+             "re-spawns. Agents and judges already running are NOT stopped — they finish "
+             "(the output lists them). Reconciliation continues. Take this BEFORE "
+             "reordering the tracker.",
     )
     p_disp.add_argument("--resume", action="store_true", help="Release the queue hold")
     p_disp.add_argument(
