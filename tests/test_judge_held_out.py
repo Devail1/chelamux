@@ -606,6 +606,40 @@ def test_judge_run_forwards_the_select_tests_kill_switch_on_BOTH_worktree_paths(
     assert calls[0]["select_tests"] is (knob is not False)
 
 
+@pytest.mark.parametrize("minutes", [7, 23])
+def test_judge_run_reports_the_whole_judges_wall_clock_in_the_verdict(tmp_path, minutes):
+    """⚡ CMX-407 GUARD, end to end: `judge_run` turns the run row's ``judge_started_at`` into
+    ``total_seconds`` — in its result AND in the verdict header posted on the PR. Rendering was
+    only tested off a hand-built Report, so a call site that dropped the value stayed green.
+    Two start times, so no constant can stand in for the measurement."""
+    from datetime import datetime, timedelta, timezone
+
+    task_id = f"ho-total-{minutes}"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    started = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_started_at=started)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_glyph()]}))
+
+    def spy(worktree, test_cmd, raw, **kw):
+        report = _one_survivor_report()
+        report.battery_seconds = 65
+        return report
+
+    posted: list[str] = []
+    with patch.object(judge, "run_experiments", side_effect=spy), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["ok"], result
+    assert minutes * 60 <= result["total_seconds"] < minutes * 60 + 60
+    assert result["battery_seconds"] == 65
+    assert any(f"judge took **{minutes}m " in b and "mutation battery 1m 05s" in b
+               for b in posted), posted
+
+
 def test_a_STALE_head_round_is_recorded_stale_privately_and_metrics_skip_it(tmp_path):
     """The verdict is for `oldsha…`, the PR's live head is `newsha…` ⇒ the private record
     says ``stale: true``, so `chela judge show` does not count it as a round. Corrupt the

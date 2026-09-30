@@ -547,3 +547,173 @@ def test_has_pytest_cov_asks_the_JUDGED_trees_own_interpreter(tmp_path):
     assert judge._has_pytest_cov(root) is False
     (libs / "pytest_cov.py").write_text("")
     assert judge._has_pytest_cov(root) is True
+
+
+# --- rework r3: the four survivors of round 2, and the invariants around them --------------
+
+
+def test_a_subset_that_COLLAPSED_is_re_run_on_the_full_suite_never_final(tmp_path, calls):
+    """GUARD: only a KILLED subset is final. A module-level ``raise`` takes ``test_gauge.py``
+    down at collection — the subset is INVALID (it errored, it did not trip a guard), which
+    proves nothing either way, so the FULL suite must decide it. Treating every non-SURVIVED
+    subset as final would skip that run."""
+    root = _repo(tmp_path / "repo")
+    report = judge.run_experiments(
+        root, TEST_CMD, {"experiments": [
+            _exp("pkg/gauge.py", "def level():", "raise RuntimeError('down')\n\n\ndef level():"),
+        ]}, timeout=120,
+    )
+
+    [o] = report.outcomes
+    assert o.subset_verdict == judge.INVALID, o.reason
+    assert o.confirmed_full
+    assert calls[1:] == [js.extend(TEST_CMD, ["test_gauge.py"]), TEST_CMD], calls
+    assert "inconclusive → confirmed on the full suite" in o.measured_by
+
+
+def test_every_measured_verdict_but_KILLED_is_confirmed_on_the_full_suite(tmp_path, calls):
+    """The invariant itself, over all three subset outcomes in ONE battery: KILLED is the
+    only verdict a subset may settle; SURVIVED and INVALID both cost a full run."""
+    root = _repo(tmp_path / "repo")
+    report = judge.run_experiments(
+        root, TEST_CMD, {"experiments": [
+            _exp("pkg/gauge.py", "return 5", "return 6", "killed"),
+            _exp("pkg/widget.py", "return 1", "return 2", "survived"),
+            _exp("pkg/gauge.py", "def level():", "raise RuntimeError('x')\ndef level():",
+                 "invalid"),
+        ]}, timeout=120,
+    )
+
+    killed, survived, invalid = report.outcomes
+    assert (killed.verdict, killed.confirmed_full) == (judge.KILLED, False)
+    assert survived.confirmed_full and survived.subset_verdict == judge.SURVIVED
+    assert invalid.confirmed_full and invalid.subset_verdict == judge.INVALID
+    assert calls.count(TEST_CMD) == 2              # the two confirmations, nothing else
+
+
+def test_a_dirty_worktree_never_caches_a_coverage_map_under_HEADs_sha(tmp_path, fake_cov):
+    """GUARD: a self-check runs on a worktree with UNCOMMITTED edits. Its coverage belongs to
+    that tree, not to HEAD — caching it under HEAD's sha would hand the next clean judge of
+    that commit a map of code that was never committed. And with nothing cached, a second
+    dirty baseline must build its map afresh (under coverage), not read one back."""
+    root = _repo(tmp_path / "repo")
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True,
+                         text=True, check=True).stdout.strip()
+    assert judge._head_sha(root) == sha                   # clean ⇒ the real sha
+    (root / "test_unrelated.py").write_text("def test_nothing():\n    assert 1 == 1\n")
+    assert judge._head_sha(root) == ""                    # dirty ⇒ no sha at all
+
+    b1, s1, _ = judge.run_baseline(root, TEST_CMD, 120, tmp_path)
+    b2, s2, why2 = judge.run_baseline(root, TEST_CMD, 120, tmp_path)
+
+    assert b1.green and b2.green and s1 is not None and s2 is not None
+    assert js.load_cached_coverage(sha) is None
+    assert not (tmp_path / "cov-cache").exists() or not list((tmp_path / "cov-cache").iterdir())
+    assert [env for _, env in fake_cov["runs"]] == [COV_ENV, COV_ENV]
+    assert "cached" not in why2
+
+
+def test_untracked_files_do_not_make_a_worktree_dirty_for_the_cache(tmp_path):
+    root = _repo(tmp_path / "repo")
+    (root / "scratch.txt").write_text("junk")
+    assert judge._head_sha(root) != ""
+
+
+@pytest.mark.parametrize("rel,src,want", [
+    ("pkg/test_x.py", "from . import widget", {"pkg", "pkg.widget"}),
+    ("pkg/test_x.py", "from .widget import cue", {"pkg.widget", "pkg.widget.cue"}),
+    ("pkg/sub/test_x.py", "from ..widget import cue", {"pkg.widget", "pkg.widget.cue"}),
+    ("pkg/sub/deep/test_x.py", "from ... import gauge", {"pkg", "pkg.gauge"}),
+    ("pkg/sub/test_x.py", "from .. import widget", {"pkg", "pkg.widget"}),
+])
+def test_relative_imports_resolve_against_the_importers_package(rel, src, want):
+    """GUARD: a relative import names its module RELATIVE to the importing file. Read as
+    absolute, ``from .widget import cue`` becomes a top-level ``widget`` that no module is."""
+    got = js.py_imports(rel, src)
+    assert want <= got, got
+    assert "widget" not in got and "widget.cue" not in got and "gauge" not in got
+
+
+def test_absolute_and_function_local_imports_are_all_seen():
+    got = js.py_imports("t.py", (
+        "import a.b\nfrom c import d\n\n\ndef f():\n    import e.f\n    from g.h import i\n"
+    ))
+    assert {"a.b", "c", "c.d", "e.f", "g.h", "g.h.i"} <= got
+
+
+def test_a_relative_importer_is_selected_end_to_end(tmp_path):
+    """GUARD, end to end: ``pkg/tests/test_rel.py`` reaches ``pkg/gauge.py`` ONLY through
+    ``from ..gauge import level`` — it never names ``gauge.py`` or ``pkg.gauge`` as text."""
+    root = _repo(tmp_path / "repo", {
+        **FILES,
+        "pkg/tests/__init__.py": "",
+        "pkg/tests/test_rel.py": (
+            "from ..gauge import level\n\n\ndef test_rel():\n    assert level() == 5\n"
+        ),
+    })
+    sel = js.Selector(root, _cases(root)).select("pkg/gauge.py")
+
+    assert "pkg/tests/test_rel.py" in sel.nodes, sel.nodes
+
+
+def test_module_names_cover_packages_and_tests_helpers():
+    assert js.module_names("chela/judge.py") == {"chela.judge"}
+    assert js.module_names("chela/__init__.py") == {"chela"}
+    assert js.module_names("tests/helpers.py") == {"tests.helpers", "helpers"}
+
+
+def test_a_skipped_or_failed_baseline_case_is_not_counted_as_expected(tmp_path):
+    """The subset's collapse baseline counts only cases that PASSED in the baseline."""
+    root = _repo(tmp_path / "repo", {**FILES, "test_gauge.py": (
+        "import pytest\nfrom pkg import gauge\n\n\ndef test_level():\n"
+        "    assert gauge.level() == 5\n\n\n@pytest.mark.skip\ndef test_skipped():\n"
+        "    assert gauge.level() == 5\n"
+    )})
+    cases = _cases(root)
+    assert [c.passed for c in cases if c.file == "test_gauge.py"] == [True, False]
+    sel = js.Selector(root, cases).select("pkg/gauge.py")
+    assert sel.nodes == ["test_gauge.py"] and sel.expected == 1
+
+
+# --- timing: per experiment, per battery, per judge ----------------------------------------
+
+
+def test_each_experiment_and_the_battery_record_their_own_time(tmp_path, caplog):
+    """GUARD: the time per experiment and the battery's total are MEASURED — every one of them
+    ran a real pytest, so none can be zero, and the battery (baseline included) takes at least
+    as long as its experiments together."""
+    root = _repo(tmp_path / "repo")
+    with caplog.at_level("INFO", logger="chela.judge"):
+        report = judge.run_experiments(
+            root, TEST_CMD, {"experiments": [
+                _exp("pkg/gauge.py", "return 5", "return 6", "gauge"),
+                _exp("style.css", "color", "colour", "css"),
+            ]}, timeout=120,
+        )
+
+    gauge, css = report.outcomes
+    assert gauge.seconds > 0 and css.seconds > 0
+    assert report.battery_seconds >= gauge.seconds + css.seconds > 0
+    assert gauge.as_dict()["selected"] == 1 and css.as_dict()["selected"] is None
+    assert gauge.as_dict()["seconds"] == round(gauge.seconds, 1)
+    assert "1 selected test(s)" in caplog.text and "mutation battery took" in caplog.text
+
+
+@pytest.mark.parametrize("selected,confirmed,subset,want", [
+    (None, False, "", "full suite, 7s"),
+    (3, False, "", "3 selected test(s), 7s"),
+    (3, True, judge.SURVIVED, "3 selected test(s) green → confirmed on the full suite, 7s"),
+    (3, True, judge.INVALID,
+     "3 selected test(s) inconclusive → confirmed on the full suite, 7s"),
+])
+def test_measured_by_names_the_suite_that_decided_it(selected, confirmed, subset, want):
+    o = judge.Outcome(judge.Experiment(guard="g", file="f.py", before="a", after="b"),
+                      judge.KILLED, "r")
+    o.selected, o.confirmed_full, o.subset_verdict, o.seconds = selected, confirmed, subset, 7
+    assert o.measured_by == want
+
+
+def test_the_header_omits_timing_that_was_never_measured():
+    assert judge._timing_line(judge.Report()) == ""
+    only_battery = judge._timing_line(judge.Report(battery_seconds=5))
+    assert "judge took" not in only_battery and "mutation battery 5s" in only_battery
