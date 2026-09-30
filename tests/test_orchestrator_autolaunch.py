@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chela import config, inbox
+from chela import config, epoch, event_log, inbox
 from chela.personas import autolaunch, lease
 
 
@@ -255,6 +255,29 @@ def test_the_spawned_window_exports_the_auto_orchestrator_actor_stamp(monkeypatc
     export = next((s for s in sent if "export CHELA_WID" in s), "")
     assert f"{config.ACTOR_ENV}={config.AUTO_ORCHESTRATOR_ACTOR}" in export, sent
     assert "CHELA_WID=@42" in export      # self-identity still exported alongside
+
+
+def test_wake_announces_the_pin_it_takes_as_an_autolaunch_move(tmp_path, monkeypatch):
+    """CMX-394: an auto-launched persona taking the pin from a still-live orchestrator is not
+    that window running `chela watch`, so the move is announced with reason ``autolaunch``.
+    Drop wake()'s ``source="autolaunch"`` and it reads ``taken_over`` instead."""
+    monkeypatch.setenv("CHELA_INBOX_FILE", str(tmp_path / "inbox.json"))
+    monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
+    monkeypatch.delenv("CHELA_ORCHESTRATOR_WID", raising=False)
+    monkeypatch.setattr(epoch, "current", lambda: "1-1")
+    monkeypatch.setattr(inbox.discovery, "get_windows_by_id",
+                        lambda: {"@8": "liav", "@42": autolaunch.WINDOW_NAME})
+    monkeypatch.setattr(inbox.sessions, "session_of_window", lambda wid, pane_map=None: None)
+    monkeypatch.setattr(autolaunch, "_spawn_orchestrator_window", lambda repo_dir: "@42")
+    monkeypatch.setattr(autolaunch, "record_launch", lambda wid, now=None: None)
+    inbox.save({**inbox._empty(), "orchestrator": "@8", "orchestrator_epoch": "1-1",
+                "orchestrator_session": None, "orchestrator_name": "liav"})
+
+    assert autolaunch.wake("/tmp/repo")["registered"]["ok"]
+
+    moved = [e["payload"] for e in event_log.read()["events"]
+             if e["type"] == inbox.MOVED_KIND]
+    assert [(p["old"], p["new"], p["reason"]) for p in moved] == [("@8", "@42", "autolaunch")]
 
 
 # --- CMX-375: --remote-control on the orchestrator persona's own launch -----------------------

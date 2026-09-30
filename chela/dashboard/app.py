@@ -27,7 +27,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, diffsurface, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, spawn, starter, tasklists, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, diffsurface, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, share_sandbox, spawn, starter, tasklists, transcripts, update, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -239,6 +239,8 @@ def api_agents():
             "online": True,
             "window_id": window_id,
             "shared": window_id in _SHARED,
+            # 👁 / ⌨ / UNSANDBOXED for the share pill (CMX-403); None when not shared.
+            "share_mode": _share_mode(window_id),
             "window_type": win_type,
             "claude_running": claude_running,
             "thinking": sess_status == "busy",
@@ -1181,6 +1183,66 @@ def _revoke_share(wid: str) -> None:
     collab_stream.stop_bridge(wid)
 
 
+def _share_mode(wid: str) -> str | None:
+    if wid not in _SHARED:
+        return None
+    st = collab_stream.share_state(wid)
+    return st["mode"] if st else collab_stream.MODE_VIEW
+
+
+def _window_name(wid: str) -> str | None:
+    """The live tmux window name — what the UNSANDBOXED confirmation must match."""
+    try:
+        p = subprocess.run(["tmux", "display-message", "-p", "-t", wid, "#{window_name}"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    name = p.stdout.strip()
+    return name if p.returncode == 0 and name else None
+
+
+def _granted_by() -> str:
+    """Who is granting, for the audit event. There is no built-in auth; a tailnet
+    front (``tailscale serve``) names the user in a header, else the peer address."""
+    who = (request.headers.get("Tailscale-User-Login") or "").strip()
+    return who or f"dashboard@{request.remote_addr or 'unknown'}"
+
+
+# The share dialog's copy for why "Allow typing" is disabled (CMX-403). The JS renders
+# exactly these strings; tests pin both ends.
+TYPING_OFF_REASON = "Typing is disabled in Settings"
+NOT_SANDBOXED_REASON = "Not a sandboxed session — start one from New session → Sandboxed"
+
+
+def _share_options(wid: str) -> dict:
+    """What the share dialog may offer for ``wid``, from LIVE state: the setting, and a
+    fresh sandbox check of the window (never a stored flag)."""
+    typing_on = config.share_typing_enabled()
+    sandboxed, why = share_sandbox.check_share_session(wid)
+    reason = TYPING_OFF_REASON if not typing_on else (None if sandboxed else NOT_SANDBOXED_REASON)
+    return {
+        "share_typing": typing_on,
+        "sandboxed": sandboxed,
+        "sandbox_detail": why,
+        "typing_allowed": typing_on and sandboxed,
+        "typing_reason": reason,
+        # The trusted-peer override is offered only while the setting is on, and only
+        # where it means something (a window that is NOT already sandboxed).
+        "unsandboxed_offered": typing_on and not sandboxed,
+        "unsandboxed_minutes": config.share_unsandboxed_minutes(),
+        "window_name": _window_name(wid),
+    }
+
+
+@app.route("/api/term/<wid>/share-options")
+@require_auth
+def api_term_share_options(wid):
+    _require_terminals()
+    if wid not in _terminals_port_map():
+        abort(404)
+    return jsonify(_share_options(wid))
+
+
 @app.route("/api/term/<wid>/share", methods=["POST"])
 @require_auth
 def api_term_share(wid):
@@ -1188,7 +1250,13 @@ def api_term_share(wid):
     bridge (pumps the terminal, encrypted, into a per-share relay room) and return
     its join URL + base32 pairing code — the joiner pastes the code to derive keys.
     Off: fully revoke — stop the bridge, abandon the room, restore the grid. The
-    pane's iframe is reloaded client-side to re-serve the page with the new flag."""
+    pane's iframe is reloaded client-side to re-serve the page with the new flag.
+
+    ``mode`` (CMX-403): ``"view"`` (default) · ``"typing"`` — refused unless the
+    ``share_typing`` setting is on AND the window verifies as a sandboxed session ·
+    ``"unsandboxed"`` — the trusted-peer override, refused unless the setting is on and
+    ``confirm`` equals the live window name. The bridge re-enforces all of it per
+    keystroke; these refusals only keep the dialog honest."""
     _require_terminals()
     if wid not in _terminals_port_map():
         abort(404)
@@ -1197,6 +1265,9 @@ def api_term_share(wid):
     if not on:
         _revoke_share(wid)
         return jsonify({"ok": True, "shared": False})
+    mode = (data.get("mode") or collab_stream.MODE_VIEW).strip()
+    if mode not in (collab_stream.MODE_VIEW, collab_stream.MODE_TYPING, collab_stream.MODE_UNSANDBOXED):
+        return jsonify({"ok": False, "error": f"unknown share mode: {mode}"}), 400
     if not config.COLLAB_RELAY:
         # No relay configured — collab_stream.start_bridge would just return None
         # and leave us with a "shared" flag pointing at a bridge that never started.
@@ -1210,15 +1281,33 @@ def api_term_share(wid):
     # the stream instead of drifting (e.g. advertising 120x30 while streaming 110-
     # wide). The joiner then follows the live size via T_META. Sharing NEVER resizes
     # the owner's window — a live workflow must stream undisturbed.
+    policy: dict = {}
+    if mode != collab_stream.MODE_VIEW:
+        if wid in _SHARED:
+            # An existing share keeps the policy it was created with — never upgrade it
+            # silently. Stop it and share again to change access.
+            return jsonify({"ok": False, "error": "already shared — stop it first to change access"}), 409
+        if not config.share_typing_enabled():
+            return jsonify({"ok": False, "error": TYPING_OFF_REASON}), 403
+        if mode == collab_stream.MODE_TYPING:
+            ok, _why = share_sandbox.check_share_session(wid)
+            if not ok:
+                return jsonify({"ok": False, "error": NOT_SANDBOXED_REASON}), 403
+            policy = {"allow_typing": True}
+        else:
+            name = _window_name(wid)
+            if not name or (data.get("confirm") or "").strip() != name:
+                return jsonify({"ok": False, "error": "type the window name to confirm full access"}), 403
+            policy = {"unsandboxed": {"granted_by": _granted_by(), "window": name,
+                                      "ttl_s": config.share_unsandboxed_minutes() * 60.0}}
     cols, rows = collab_stream._window_dims(wid)
     _SHARED[wid] = {"cols": cols, "rows": rows}
     # Start the E2E stream bridge; on_revoke fires if it fails closed on session
     # death, so a share can never outlive its terminal (see collab_stream).
-    code = collab_stream.start_bridge(wid, on_revoke=_revoke_share)
-    # Full access: a paired joiner (they hold the code) can type + scroll — no grant.
+    code = collab_stream.start_bridge(wid, on_revoke=_revoke_share, **policy)
     info = {"pairing_code": code, "join_url": collab_stream.join_url(wid)} if code else {}
     _share_info[wid] = info
-    return jsonify({"ok": True, "shared": True, **info})
+    return jsonify({"ok": True, "shared": True, **info, **(collab_stream.share_state(wid) or {})})
 
 
 @app.route("/api/term/<wid>/share-info")
@@ -1235,9 +1324,11 @@ def api_term_share_info(wid):
 def api_term_shared():
     """Currently-shared window ids → their master dims, so the wall restores
     share-button state on load / across reloads. Pairing codes are deliberately
-    NOT here — they live only in _share_info (owner-only)."""
+    NOT here — they live only in _share_info (owner-only). Each entry also carries
+    its access ``mode`` + override ``expires_at`` (CMX-403) for the share pill."""
     _require_terminals()
-    return jsonify(_SHARED)
+    return jsonify({wid: {**dims, **(collab_stream.share_state(wid) or {"mode": collab_stream.MODE_VIEW, "expires_at": None})}
+                    for wid, dims in list(_SHARED.items())})
 
 
 _TERM_PASTE_MAX = 64 * 1024  # reject pastes larger than 64 KB
@@ -1646,6 +1737,28 @@ def api_agents_spawn():
     return jsonify({"ok": True, "name": result.name, "cwd": result.cwd})
 
 
+@app.route("/api/agents/spawn-sandboxed", methods=["POST"])
+@require_auth
+def api_agents_spawn_sandboxed():
+    """New session → Sandboxed (CMX-403): open a window running a sandboxed share
+    session (:func:`chela.spawn.spawn_sandbox_window`) in ``cwd`` — the ONLY kind of
+    window a share guest may type into. Body: ``{cwd}`` (required — a project directory;
+    $HOME and secret directories are refused by the launcher's preflight)."""
+    _require_terminals()
+    body = request.get_json(silent=True) or {}
+    cwd_arg = (body.get("cwd") or "").strip()
+    if not cwd_arg:
+        return jsonify({"ok": False, "error": "pick a project directory for the sandboxed session"}), 400
+    result = spawn.spawn_sandbox_window(cwd_arg)
+    if not result.ok:
+        return jsonify({"ok": False, "error": result.error}), 400
+    try:
+        launcher.record_recent(result.cwd)
+    except Exception:  # noqa: BLE001 — a store hiccup must never fail the spawn
+        log.warning("launcher.record_recent failed for %s", result.cwd, exc_info=True)
+    return jsonify({"ok": True, "name": result.name, "wid": result.wid, "cwd": result.cwd})
+
+
 # ---------------------------------------------------------------------------
 # API: Restore (CMX-208) — the sidebar's "Recent sessions" one-click resume
 #
@@ -1914,9 +2027,23 @@ def api_config():
                     return jsonify({"error": "invalid remote_control",
                                     "valid": [True, False]}), 400
                 userconfig.set_(config.REMOTE_CONTROL_KEY, enabled)
+        if "share_typing" in data:
+            # CMX-403: same strict-bool rule as remote_control. Turning it OFF takes
+            # effect on live shares at once — collab_stream reads it per keystroke.
+            raw = data.get("share_typing")
+            if raw in (None, ""):
+                userconfig.set_(config.SHARE_TYPING_KEY, None)
+            else:
+                try:
+                    enabled = config.cast_strict_bool(raw)
+                except ValueError:
+                    return jsonify({"error": "invalid share_typing",
+                                    "valid": [True, False]}), 400
+                userconfig.set_(config.SHARE_TYPING_KEY, enabled)
     stored_mode = dispatcher.settings_permission_mode()
     stored_model = dispatcher.settings_agent_model()
     remote_control, rc_source = config.remote_control_setting()
+    share_typing, st_source = config.share_typing_setting()
     return jsonify({
         "projects_dir": userconfig.get("projects_dir", ""),
         "projects_dir_effective": str(launcher._projects_dir()),
@@ -1940,6 +2067,12 @@ def api_config():
         "remote_control_source": rc_source,
         "remote_control_env_locked": rc_source == "env",
         "remote_control_env": config.REMOTE_CONTROL_ENV,
+        # CMX-403: guest typing into shared terminals — OFF by default.
+        "share_typing": share_typing,
+        "share_typing_source": st_source,
+        "share_typing_env_locked": st_source == "env",
+        "share_typing_env": config.SHARE_TYPING_ENV,
+        "share_unsandboxed_minutes": config.share_unsandboxed_minutes(),
     })
 
 
@@ -3294,7 +3427,7 @@ def api_orchestrator_subscribe():
     wid = (data.get("wid") or "").strip()
     if not wid:
         return jsonify({"ok": False, "error": "wid required"}), 400
-    result = inbox.register(wid)
+    result = inbox.register(wid, source="dashboard")
     if not result.get("ok"):
         return jsonify(result), 404
     return jsonify({**result, **_orchestrator_status_payload()})

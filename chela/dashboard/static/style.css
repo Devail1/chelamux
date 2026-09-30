@@ -771,6 +771,48 @@ body {
     animation: sharesPulse 1.6s ease-in-out infinite;
 }
 @keyframes sharesPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+/* CMX-403: a trusted-peer UNSANDBOXED override is armed — the pill turns RED and says
+   so in words (⚠ + text, never hue alone: the primary user is red-weak). */
+.shares-indicator.si-unsandboxed {
+    color: #fff; background: var(--ok-vermillion, #d55e00);
+    border-color: var(--ok-vermillion, #d55e00);
+}
+.shares-indicator.si-unsandboxed .si-dot { background: #fff; box-shadow: none; }
+
+/* The same override, on the pane header itself. */
+.gs-unsafe-banner {
+    flex: 0 0 auto; padding: 2px 8px; border-radius: 4px; white-space: nowrap;
+    background: var(--ok-vermillion, #d55e00); color: #fff;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.02em;
+}
+.gs-unsafe-banner[hidden] { display: none; }
+
+/* Share dialog (CMX-403) — reuses the Active-shares sheet chrome. */
+.share-dialog .sd-opt {
+    display: flex; gap: 10px; align-items: flex-start; cursor: pointer;
+    padding: 10px; margin: 8px 0; border: 1px solid var(--border); border-radius: 8px;
+}
+.share-dialog .sd-opt input { margin-top: 2px; }
+.share-dialog .sd-opt > span { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; }
+.share-dialog .sd-desc { color: var(--text-dim); font-size: 11.5px; }
+.share-dialog .sd-reason { color: var(--warn, #d29922); font-size: 11.5px; }
+.share-dialog .sd-disabled { cursor: not-allowed; opacity: 0.7; }
+.share-dialog .sd-unsafe { border-color: var(--ok-vermillion, #d55e00); }
+.share-dialog .sd-confirm { margin: 4px 0 8px; }
+.share-dialog .sd-confirm .tsp-in { width: 100%; box-sizing: border-box; }
+.share-dialog .sd-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.share-dialog .sd-actions button {
+    cursor: pointer; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font-size: 12.5px; padding: 7px 14px;
+}
+.share-dialog .sd-share { border-color: var(--accent); }
+.share-dialog .sd-share.sd-danger { background: var(--ok-vermillion, #d55e00); border-color: var(--ok-vermillion, #d55e00); color: #fff; }
+.share-dialog .sd-share:disabled { opacity: 0.5; cursor: not-allowed; }
+.shares-sheet .ss-mode { font-size: 12px; }
+.shares-sheet .ss-mode-unsafe {
+    background: var(--ok-vermillion, #d55e00); color: #fff; border-radius: 4px;
+    padding: 1px 6px; font-size: 10.5px; font-weight: 700;
+}
 @media (prefers-reduced-motion: reduce) { .shares-indicator .si-dot { animation: none; } }
 
 /* Decisions inbox button — the sidebar head's #btn-decisions (icon-btn) plus
@@ -2489,6 +2531,20 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kanban-state-chip.st-done         { color: var(--text-dim); }
 .kanban-state-chip.st-closed-unmerged { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }
 
+/* ⚖️🎚️ CMX-405 — the run's RISK level (kanban.js / taskmodal.js via riskChip). The WORD
+   ("risk: high") carries it; the colour only agrees. */
+.kanban-risk-chip {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 10px;
+    padding: 0 8px;
+    font-size: 10px;
+    white-space: nowrap;
+}
+.kanban-risk-chip.risk-high { color: var(--red); border-color: rgba(248, 81, 73, 0.5); font-weight: 600; }
+.kanban-risk-chip.risk-low  { color: var(--text-dim); border-style: dashed; }
+
 /* The CI chip (CMX-69): what GitHub's checks say about this card's PR. The glyph and the
    WORD carry the state; the colour only agrees with them. A red-weak reader must be able
    to answer "can this ship?" from the text alone — and a green chip is the only one that
@@ -3038,7 +3094,13 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .sidebar {
     display: flex; flex-direction: column;
     border-right: 1px solid var(--border);
-    background: var(--bg); height: 100vh;
+    background: var(--bg);
+    /* CMX-404: 100dvh, NOT bare vh. On iOS Safari 100vh includes the strip under
+       the browser's bottom toolbar, so the foot (readouts + the Settings/menu
+       button) rendered behind it and Settings was unreachable on a phone. The
+       vh line is the fallback for a browser without dvh (it drops the second). */
+    height: 100vh;
+    height: 100dvh;
 }
 .sidebar-head {
     flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
@@ -3080,7 +3142,6 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .sidebar-jump input::placeholder { color: var(--text-dim); }
 .sidebar-jump:focus-within { border-color: var(--accent); }
-body.sidebar-collapsed .sidebar-quick { display: none; }
 
 /* CMX-393: ONE row — readouts on the left, the single settings/menu gear pushed
    to the right. No wrap: the inbox that used to crowd this row lives in the head
@@ -3338,6 +3399,10 @@ body.sidebar-collapsed .sidebar-quick { display: none; }
     body.sidebar-collapsed .sidebar-foot #btn-primary-menu { margin-left: 0; }
     body.sidebar-collapsed .sidebar-head .brand span { display: none; }
     body.sidebar-collapsed #resources-strip { display: none; }
+    /* CMX-404: inside this desktop block, like every other rail rule. The class is
+       persisted per browser, so an unscoped hide leaked into the phone drawer and
+       took the New session + Jump row with it. */
+    body.sidebar-collapsed .sidebar-quick { display: none; }
 
     body.sidebar-collapsed .side-head,
     body.sidebar-collapsed .side-empty,

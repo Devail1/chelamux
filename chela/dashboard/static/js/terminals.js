@@ -466,6 +466,13 @@ function _termFrameSrc(wid) { return _termSrc(wid) + '?cid=' + _newCid(); }
 // and the latest header-facepile presence (from the in-iframe chelaPresence hook).
 const _sharedWids = new Set();
 const _presenceByWid = new Map();
+// Per-wid share ACCESS mode (CMX-403): 'view' | 'typing' | 'unsandboxed' — from the
+// share POST, /api/term/shared and /api/agents .share_mode. Drives the 👁 / ⌨ share
+// pill and the red UNSANDBOXED banner. Display only: the host enforces the gate.
+const _shareModes = new Map();
+function _noteShareModes(shared) {
+    Object.entries(shared || {}).forEach(([w, v]) => _shareModes.set(w, (v && v.mode) || 'view'));
+}
 
 // Owner-presence parent client (ES module: holds the pairing secret + crypto — the
 // iframe shim never does; see static/collab/presence-owner.js). Loaded lazily and
@@ -488,6 +495,7 @@ if (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) _ownerPresence();
 if (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) {
     api('/api/term/shared').then(shared => {
         Object.keys(shared || {}).forEach(w => _sharedWids.add(w));
+        _noteShareModes(shared);
         _renderSharesIndicator();
     }).catch(() => {});
 }
@@ -495,7 +503,14 @@ if (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) {
 function _seedSharedFromAgents(agents) {
     (agents || []).forEach(a => {
         if (!a.window_id) return;
-        if (a.shared) _sharedWids.add(a.window_id); else _sharedWids.delete(a.window_id);
+        if (a.shared) {
+            _sharedWids.add(a.window_id);
+            _shareModes.set(a.window_id, a.share_mode || 'view');
+        } else {
+            _sharedWids.delete(a.window_id);
+            _shareModes.delete(a.window_id);
+        }
+        _updateShareBtns(a.window_id);
     });
     _renderSharesIndicator();
 }
@@ -514,10 +529,21 @@ function _renderSharesIndicator() {
     if (!btn) return;
     const n = _sharedWids.size;
     btn.hidden = n === 0;
+    // The most permissive live mode wins the pill (CMX-403): 👁 view only · ⌨ typing
+    // (sandboxed) · a red UNSANDBOXED banner while a trusted-peer override is armed.
+    const modes = [..._sharedWids].map(w => _shareModes.get(w) || 'view');
+    const unsafe = modes.includes('unsandboxed');
+    const typing = modes.includes('typing');
+    btn.classList.toggle('si-unsandboxed', unsafe);
+    btn.dataset.mode = unsafe ? 'unsandboxed' : typing ? 'typing' : 'view';
     if (n > 0) {
         const txt = btn.querySelector('.si-text');
-        if (txt) txt.textContent = n + ' sharing';
-        btn.setAttribute('aria-label', n + ' active share' + (n === 1 ? '' : 's') + ' — tap to manage or stop');
+        const icon = typing || unsafe ? '⌨' : '👁';
+        if (txt) txt.textContent = unsafe ? '⚠ UNSANDBOXED — guest can type'
+            : icon + ' ' + n + ' sharing';
+        btn.setAttribute('aria-label', (unsafe ? 'UNSANDBOXED — a guest can type into a real shell. ' : '')
+            + n + ' active share' + (n === 1 ? '' : 's') + (typing || unsafe ? ' (typing allowed)' : ' (view only)')
+            + ' — tap to manage or stop');
     }
     // Keep an open sheet in sync with the live set (e.g. the reaper stopped one).
     if (document.getElementById('shares-sheet-backdrop')) _buildSharesSheet();
@@ -530,6 +556,7 @@ async function openSharesSheet() {
         const shared = await api('/api/term/shared');
         _sharedWids.clear();
         Object.keys(shared || {}).forEach(w => _sharedWids.add(w));
+        _noteShareModes(shared);
         _renderedWids.forEach(_updateShareBtns);
     } catch (_) { /* offline / transient → fall back to the best-effort set */ }
     _buildSharesSheet();
@@ -570,7 +597,7 @@ async function _buildSharesSheet() {
     const rows = wids.map((wid, i) => `
         <div class="ss-row" data-wid="${attrEsc(wid)}">
           <div class="ss-row-hd">
-            <span class="ss-label">${escHtml(_paneTitle(wid))} <span class="ss-wid">${escHtml(wid)}</span></span>
+            <span class="ss-label">${_shareModeBadge(wid)} ${escHtml(_paneTitle(wid))} <span class="ss-wid">${escHtml(wid)}</span></span>
             <button class="ss-stop" type="button" data-wid="${attrEsc(wid)}">Stop</button>
           </div>
           <div class="ss-row-body">${_shareInfoRowsHTML(infos[i], 'Link unavailable — reopen this sheet to retry.')}</div>
@@ -578,7 +605,7 @@ async function _buildSharesSheet() {
     sheet.innerHTML =
         `<div class="ss-hd"><span class="ss-hd-ic">${lucideIcon('share-2', 15)}</span> Active shares
            <button class="ss-close" type="button" aria-label="Close">&times;</button></div>
-         <div class="ss-sub">Anyone with the link + code can watch and type. Stop a share to revoke it — the link dies and the code rotates.</div>
+         <div class="ss-sub">Anyone with the link + code can watch; typing reaches the pane only where it says ⌨. Stop a share to revoke it — the link dies and the code rotates.</div>
          <div class="ss-list">${rows || '<div class="ss-empty">No active shares.</div>'}</div>
          ${wids.length ? `<button class="ss-stopall" type="button">Stop all sharing (${wids.length})</button>` : ''}`;
     backdrop.appendChild(sheet);
@@ -644,7 +671,92 @@ async function shareBtnClick(btn, wid) {
         openSharesSheet();
         return;
     }
-    const body = { on: true };
+    await openShareDialog(btn, wid);
+}
+
+// --- share dialog (CMX-403) -------------------------------------------------
+// Picks the share's ACCESS before minting it: "View only" (the default), "Allow typing"
+// (enabled only when the setting is on AND the window verifies LIVE as a sandboxed
+// session — else the reason is shown), and — only while the setting is on, on a window
+// that is NOT sandboxed — the trusted-peer "Full access — UNSANDBOXED" override, which
+// needs the window name TYPED to arm. The server re-checks every one of these, and the
+// host bridge re-checks per keystroke; this dialog only keeps the choice honest.
+const SHARE_TYPING_OFF_REASON = 'Typing is disabled in Settings';
+const SHARE_NOT_SANDBOXED_REASON = 'Not a sandboxed session — start one from New session → Sandboxed';
+
+function closeShareDialog() {
+    const bd = document.getElementById('share-dialog-backdrop');
+    if (bd) bd.remove();
+}
+
+async function openShareDialog(btn, wid) {
+    let opts = null;
+    try { opts = await api('/api/term/' + encodeURIComponent(wid) + '/share-options'); } catch (_) {}
+    opts = opts || {};
+    closeShareDialog();
+    const typingOk = !!opts.typing_allowed;
+    const reason = typingOk ? '' : (opts.share_typing ? SHARE_NOT_SANDBOXED_REASON : SHARE_TYPING_OFF_REASON);
+    const offerUnsafe = !!(opts.share_typing && !opts.sandboxed && opts.unsandboxed_offered && opts.window_name);
+    const name = opts.window_name || '';
+    const mins = opts.unsandboxed_minutes || 30;
+    const backdrop = document.createElement('div');
+    backdrop.id = 'share-dialog-backdrop';
+    backdrop.className = 'shares-backdrop';
+    backdrop.onclick = (e) => { if (e.target === backdrop) closeShareDialog(); };
+    backdrop.innerHTML = `
+      <div class="shares-sheet share-dialog" role="dialog" aria-modal="true" aria-label="Share this session">
+        <div class="ss-hd"><span class="ss-hd-ic">${lucideIcon('share-2', 15)}</span> Share ${escHtml(_paneTitle(wid))}
+          <button class="ss-close" type="button" aria-label="Close">&times;</button></div>
+        <label class="sd-opt"><input type="radio" name="sd-mode" value="view" checked>
+          <span><strong>👁 View only</strong><span class="sd-desc">The guest watches. Nothing they type reaches this machine.</span></span></label>
+        <label class="sd-opt${typingOk ? '' : ' sd-disabled'}"><input type="radio" name="sd-mode" value="typing"${typingOk ? '' : ' disabled'}>
+          <span><strong>⌨ Allow typing</strong><span class="sd-desc">Into this sandboxed session only — a container that sees just the project, re-verified on every keystroke.</span>
+          ${reason ? `<span class="sd-reason">${escHtml(reason)}</span>` : ''}</span></label>
+        ${offerUnsafe ? `
+        <label class="sd-opt sd-unsafe"><input type="radio" name="sd-mode" value="unsandboxed">
+          <span><strong>⚠ Full access — UNSANDBOXED: the guest can type into a real shell on this machine</strong>
+          <span class="sd-desc">For a very trusted peer only. Bound to the first guest who joins, ends after ${escHtml(String(mins))} min, audited. Stop the share to revoke it at once.</span></span></label>
+        <div class="sd-confirm" hidden>
+          <label class="tsp-lbl" for="sd-confirm-in">Type <code>${escHtml(name)}</code> to confirm</label>
+          <input id="sd-confirm-in" class="tsp-in" autocomplete="off" spellcheck="false" placeholder="${attrEsc(name)}">
+        </div>` : ''}
+        <div class="sd-actions">
+          <button class="sd-cancel" type="button">Cancel</button>
+          <button class="sd-share" type="button">Share</button>
+        </div>
+      </div>`;
+    document.body.appendChild(backdrop);
+    const sheet = backdrop.querySelector('.share-dialog');
+    const shareB = sheet.querySelector('.sd-share');
+    const confirmBox = sheet.querySelector('.sd-confirm');
+    const confirmIn = sheet.querySelector('#sd-confirm-in');
+    const chosen = () => (sheet.querySelector('input[name="sd-mode"]:checked') || {}).value || 'view';
+    const sync = () => {
+        const m = chosen();
+        if (confirmBox) confirmBox.hidden = m !== 'unsandboxed';
+        // Without the typed window name the override is not even requestable.
+        shareB.disabled = m === 'unsandboxed' && (!confirmIn || confirmIn.value.trim() !== name);
+        shareB.classList.toggle('sd-danger', m === 'unsandboxed');
+    };
+    sheet.querySelectorAll('input[name="sd-mode"]').forEach(r => r.onchange = sync);
+    if (confirmIn) confirmIn.oninput = sync;
+    sheet.querySelector('.ss-close').onclick = closeShareDialog;
+    sheet.querySelector('.sd-cancel').onclick = closeShareDialog;
+    shareB.onclick = async () => {
+        const m = chosen();
+        const confirm = m === 'unsandboxed' && confirmIn ? confirmIn.value.trim() : '';
+        if (m === 'unsandboxed' && confirm !== name) return;
+        shareB.disabled = true;
+        closeShareDialog();
+        await _mintShare(btn, wid, m, confirm);
+    };
+    sync();
+    return sheet;
+}
+
+async function _mintShare(btn, wid, mode, confirm) {
+    const body = { on: true, mode: mode || 'view' };
+    if (confirm) body.confirm = confirm;
     const d = _paneTermDims(wid);
     if (d) { body.cols = d.cols; body.rows = d.rows; }
     let resp;
@@ -656,6 +768,7 @@ async function shareBtnClick(btn, wid) {
     } catch (e) { _termShareToast(btn, 'Share failed'); return; }
     if (!resp || !resp.ok) { _termShareToast(btn, (resp && resp.error) || 'Share failed'); return; }
     _sharedWids.add(wid);
+    _shareModes.set(wid, resp.mode || 'view');
     _ownerPresence().then(m => m && m.startOwnerPresence(wid, resp.join_url, resp.pairing_code));
     _reloadPaneFrame(wid);
     _updateShareBtns(wid);
@@ -670,7 +783,7 @@ async function _stopShare(wid) {
             body: JSON.stringify({ on: false }),
         });
     } catch (_) {}
-    _sharedWids.delete(wid); _presenceByWid.delete(wid); _renderFacepile(wid);
+    _sharedWids.delete(wid); _shareModes.delete(wid); _presenceByWid.delete(wid); _renderFacepile(wid);
     _ownerPresence().then(m => m && m.stopOwnerPresence(wid));
     _reloadPaneFrame(wid); _updateShareBtns(wid); _renderSharesIndicator();
 }
@@ -739,8 +852,19 @@ function _renderFacepile(wid) {
     slots.forEach(s => { s.innerHTML = dots.join(''); });
 }
 
+function _shareModeBadge(wid) {
+    const m = _shareModes.get(wid) || 'view';
+    if (m === 'unsandboxed') return '<span class="ss-mode ss-mode-unsafe" title="UNSANDBOXED — guest can type">⚠ UNSANDBOXED</span>';
+    if (m === 'typing') return '<span class="ss-mode" title="Guest may type (sandboxed session)">⌨</span>';
+    return '<span class="ss-mode" title="View only">👁</span>';
+}
+
 function _updateShareBtns(wid) {
     const shared = _sharedWids.has(wid);
+    // The red UNSANDBOXED banner on the pane itself (CMX-403) — shown exactly while a
+    // trusted-peer override is armed on this window.
+    const unsafe = shared && _shareModes.get(wid) === 'unsandboxed';
+    document.querySelectorAll('.gs-unsafe-banner[data-banner-for="' + _cssEsc(wid) + '"]').forEach(b => { b.hidden = !unsafe; });
     document.querySelectorAll('.gs-share-btn[data-wid="' + _cssEsc(wid) + '"]').forEach(btn => {
         btn.classList.toggle('on', shared);
         btn.setAttribute('aria-pressed', shared ? 'true' : 'false');
@@ -906,6 +1030,7 @@ function paneHead(wid, draggable) {
       ${label}
       ${roomBadge}
       <span class="gs-presence" data-presence-for="${attrEsc(wid)}"></span>
+      <span class="gs-unsafe-banner" data-banner-for="${attrEsc(wid)}" role="status"${_sharedWids.has(wid) && _shareModes.get(wid) === 'unsandboxed' ? '' : ' hidden'}>⚠ UNSANDBOXED — guest can type</span>
       ${state}
       ${menu}
       <span class="gs-keys">
@@ -3450,7 +3575,7 @@ if (window.visualViewport) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _sharedWids, _stopReadyPoll, _stopShare, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareModes, _sharedWids, _stopReadyPoll, _stopShare, closeShareDialog, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
