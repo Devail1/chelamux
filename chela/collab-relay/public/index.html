@@ -36,6 +36,12 @@
     background:radial-gradient(1200px 620px at 50% 32%,#151a23,#0a0c11); overflow:hidden; }
   #term { box-shadow:0 0 0 1px rgba(255,255,255,.06), 0 12px 48px rgba(0,0,0,.55); border-radius:6px; }
   .xterm { padding:6px; }
+  /* CMX-409: iOS Safari auto-zooms the page when a focused control computes
+     under 16px — including xterm's invisible helper textarea (~13px default),
+     which takes focus whenever the terminal is tapped. Coarse-pointer only. */
+  @media (pointer: coarse) {
+    input, textarea, select { font-size:16px !important; }
+  }
   /* Match the chela dashboard scrollbar: thin, track-less, subtle thumb that
      brightens on hover (the xterm viewport + the mobile pan-fallback stage). */
   .xterm-viewport, #stage { scrollbar-width:thin; scrollbar-color:var(--border) transparent; }
