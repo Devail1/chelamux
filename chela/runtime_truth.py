@@ -987,6 +987,52 @@ def _blocked_race_report(_declared: None, obs: Observation) -> list[Finding]:
     return out
 
 
+# --- fact: a judge battery running right now (CMX-411) --------------------------------
+#
+# `chela judge run --detach` runs outside every window, so nothing on the Wall shows it.
+# This is where an operator sees it: which task, how long it has run (from its OWN start),
+# and how far through its experiments it is.
+
+def _judge_runs_read() -> Observation:
+    from chela import judge
+
+    return observed(judge.live_judge_runs())
+
+
+def _fmt_elapsed(seconds: float | None) -> str:
+    if seconds is None:
+        return "?"
+    m, sec = divmod(int(seconds), 60)
+    return f"{m // 60}h{m % 60:02d}m" if m >= 60 else f"{m}m{sec:02d}s"
+
+
+def _judge_runs_report(_declared: None, obs: Observation) -> list[Finding]:
+    runs: list[dict] = obs.value or []
+    if not runs:
+        return [Finding(OK, "no judge run in flight")]
+    from chela.dispatcher import JUDGE_TIMEOUT_SECONDS
+
+    out: list[Finding] = []
+    for r in runs:
+        total = r.get("total")
+        progress = (f"experiment {r.get('done', 0)}/{total}" if total
+                    else "baseline / setup (no experiment started yet)")
+        how = "detached" if r.get("detached") else "foreground"
+        elapsed = r.get("elapsed")
+        # Past the wall, the watchdog should already have stopped it: a run still going
+        # is one nothing is bounding any more (a daemon that is down, a stop that failed).
+        over = elapsed is not None and elapsed >= JUDGE_TIMEOUT_SECONDS
+        out.append(Finding(
+            WARN if over else OK,
+            f"judge for {r.get('task_id')} running ({how}) — "
+            f"{_fmt_elapsed(r.get('elapsed'))} elapsed, {progress}",
+            (f"PAST the {JUDGE_TIMEOUT_SECONDS // 60}min judge wall — the watchdog should "
+             "have stopped it; is the daemon running? " if over else "")
+            + f"pid {r.get('pid')}" + (f", log {r['log']}" if r.get("log") else ""),
+        ))
+    return out
+
+
 # --- fact: the port the dashboard actually BOUND -------------------------------------
 
 def _port_read() -> Observation:
@@ -3152,6 +3198,15 @@ def facts() -> list[Fact]:
             declare=lambda: None,
             read_back=_blocked_race_read,
             report=_blocked_race_report,
+        ),
+        Fact(
+            name="judge.live_runs",
+            declared_by="nothing — a judge run is either executing or it isn't (CMX-411)",
+            owned_by="the kernel — the run's pid and /proc start time, recorded in "
+                     "$CHELA_DIR/judge-logs/<task>.json by `chela judge run` itself",
+            declare=lambda: None,
+            read_back=_judge_runs_read,
+            report=_judge_runs_report,
         ),
         Fact(
             name="relay.transcripts",

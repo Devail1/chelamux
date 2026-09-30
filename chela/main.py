@@ -2267,7 +2267,18 @@ def cmd_judge(args) -> None:
 
     ⛔ It never merges and never approves: a clean PR stays ``awaiting_review``.
     """
-    result = judge.judge_run(args.run, args.experiments, cleanup=not args.no_cleanup)
+    if getattr(args, "detach", False):
+        # ⏱️ CMX-411: the battery outlives the caller's shell — see judge.detach_judge_run.
+        started = judge.detach_judge_run(args.run, args.experiments, cleanup=not args.no_cleanup)
+        if not started.get("ok"):
+            print(f"judge: {started.get('error', 'unknown error')}")
+            sys.exit(1)
+        print(f"⚖️ {started['task_id']}: judge run started DETACHED (pid {started['pid']}) — "
+              "it publishes the verdict and closes the judge window by itself.")
+        print(f"  log: {started['log']}   progress: `chela doctor`")
+        return
+    result = judge.judge_run(args.run, args.experiments, cleanup=not args.no_cleanup,
+                             detached=getattr(args, "detached_child", False))
     if not result.get("ok") and "task_id" not in result:
         print(f"judge: {result.get('error', 'unknown error')}")
         sys.exit(1)
@@ -2969,6 +2980,14 @@ def main() -> None:
         "--no-cleanup", action="store_true",
         help="Keep the judge worktree and the tmux window (debugging a judge run by hand)",
     )
+    p_jrun.add_argument(
+        "--detach", action="store_true",
+        help="Run the battery in its own session (setsid), logging to "
+             "$CHELA_DIR/judge-logs/<task>.log, and return at once. A second run on the "
+             "same task while one is live is refused",
+    )
+    # The child `--detach` re-execs — it owns its own process group. Not for humans.
+    p_jrun.add_argument("--detached-child", action="store_true", help=argparse.SUPPRESS)
     p_jcheck = judge_sub.add_parser(
         "self-check",
         help="⚖️🔎 Run the judge's own mutation mechanics against YOUR OWN worktree, before "
