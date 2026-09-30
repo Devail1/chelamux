@@ -406,3 +406,144 @@ def test_a_survivor_the_full_suite_killed_is_never_sampled_for_consistency(tmp_p
     assert cue.rerun_verdict == "" and not cue.flaky
     assert gauge.rerun_verdict == judge.KILLED
     assert report.consistency["sampled"] == 1
+
+
+# --- the baseline's coverage path ----------------------------------------------------------
+#
+# pytest-cov is not a dependency here, so these stand coverage in with an env var: the
+# "coverage" args are none, the "coverage" env is FAKE_COV=1, and `test_cov_sensitive.py`
+# goes red whenever it is set — i.e. a suite that is red ONLY under coverage.
+
+COV_ENV = {"FAKE_COV": "1"}
+COV_SENSITIVE = {
+    "test_cov_sensitive.py": (
+        "import os\n\n\ndef test_plain_only():\n    assert 'FAKE_COV' not in os.environ\n"
+    ),
+}
+
+
+@pytest.fixture
+def fake_cov(monkeypatch, tmp_path):
+    """pytest-cov "installed", its args swapped for COV_ENV, the per-sha cache in tmp, and
+    every (cmd, env) run_baseline ran recorded along with every coverage-map read."""
+    runs: list[tuple[str, dict]] = []
+    parsed: list[Path] = []
+    real = judge.run_suite
+
+    def spy(test_cmd, cwd, timeout=judge.SUITE_TIMEOUT_SECONDS, extra_env=None):
+        runs.append((test_cmd, dict(extra_env or {})))
+        return real(test_cmd, cwd, timeout, extra_env)
+
+    monkeypatch.setattr(judge, "run_suite", spy)
+    monkeypatch.setattr(judge, "_has_pytest_cov", lambda wt: True)
+    monkeypatch.setattr(js, "coverage_args", lambda data_file: ([], dict(COV_ENV)))
+    monkeypatch.setattr(js, "_cache_dir", lambda: tmp_path / "cov-cache")
+    state = {"map": {"pkg/widget.py": ["test_indirect.py"]}}
+
+    def parse(root, data_file):
+        parsed.append(data_file)
+        return dict(state["map"])
+
+    monkeypatch.setattr(js, "parse_coverage", parse)
+    return {"runs": runs, "parsed": parsed, "state": state}
+
+
+def test_a_baseline_red_only_under_coverage_is_re_run_plain_never_CANNOT_VERIFY(
+    tmp_path, fake_cov,
+):
+    """GUARD: coverage is an optimisation. A suite green plain but red under coverage must be
+    re-run WITHOUT coverage and judged on that — a CANNOT VERIFY here would stall every PR in
+    a repo whose suite dislikes coverage. The plain re-run wrote no coverage data, so the map
+    must not be read off it either."""
+    root = _repo(tmp_path / "repo", {**FILES, **COV_SENSITIVE})
+    baseline, selector, why = judge.run_baseline(root, TEST_CMD, 120, tmp_path)
+
+    assert baseline.green, baseline.tail
+    assert selector is not None, why
+    assert [env for _, env in fake_cov["runs"]] == [COV_ENV, {}]
+    assert fake_cov["parsed"] == []                  # nothing read off the plain re-run
+    assert selector.coverage == {}
+    assert f"over the baseline's {len(js.parse_junit(root, tmp_path / 'baseline-junit.xml'))}" \
+        in why
+
+
+def test_a_baseline_red_even_plain_is_red_and_selects_nothing(tmp_path, fake_cov):
+    """Control for the re-run: a suite that is red WITHOUT coverage stays red — the re-run is
+    for coverage-only reds, it must not launder a genuinely red baseline."""
+    root = _repo(tmp_path / "repo", {**FILES, "test_red.py": "def test_red():\n    assert 0\n"})
+    baseline, selector, _ = judge.run_baseline(root, TEST_CMD, 120, tmp_path)
+
+    assert not baseline.green and selector is None
+    assert [env for _, env in fake_cov["runs"]] == [COV_ENV, {}]
+
+
+def test_a_red_baseline_WITHOUT_coverage_is_not_re_run(tmp_path, fake_cov, monkeypatch):
+    """GUARD: the plain re-run is only for a run that HAD coverage on. A plain red is final —
+    re-running it costs a full suite and can only flake it green."""
+    monkeypatch.setattr(judge, "_has_pytest_cov", lambda wt: False)
+    root = _repo(tmp_path / "repo", {**FILES, "test_red.py": "def test_red():\n    assert 0\n"})
+    baseline, selector, _ = judge.run_baseline(root, TEST_CMD, 120, tmp_path)
+
+    assert not baseline.green and selector is None
+    assert [env for _, env in fake_cov["runs"]] == [{}]
+
+
+def test_a_green_coverage_baseline_builds_the_map_and_caches_it_per_head_sha(
+    tmp_path, fake_cov,
+):
+    """GUARD: the map is built ONCE per head sha. The first baseline runs under coverage,
+    reads the map and caches it; a second baseline at the same sha runs plain and uses the
+    cached map; a new sha builds its own."""
+    root = _repo(tmp_path / "repo")
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True,
+                         text=True, check=True).stdout.strip()
+
+    b1, s1, why1 = judge.run_baseline(root, TEST_CMD, 120, tmp_path)
+    assert b1.green and s1 is not None
+    assert s1.coverage == {"pkg/widget.py": ["test_indirect.py"]}
+    assert fake_cov["parsed"] == [tmp_path / ".coverage"] and "coverage map: 1 file(s)" in why1
+    assert js.load_cached_coverage(sha) == s1.coverage
+
+    fake_cov["state"]["map"] = {"pkg/gauge.py": ["test_gauge.py"]}   # a re-parse would show
+    b2, s2, why2 = judge.run_baseline(root, TEST_CMD, 120, tmp_path)
+    assert b2.green and s2.coverage == {"pkg/widget.py": ["test_indirect.py"]}
+    assert "coverage map: cached" in why2
+    assert [env for _, env in fake_cov["runs"]] == [COV_ENV, {}]     # the 2nd ran plain
+    assert len(fake_cov["parsed"]) == 1
+
+    (root / "test_unrelated.py").write_text("def test_nothing():\n    assert 1\n")
+    _git(root, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "next")
+    b3, s3, _ = judge.run_baseline(root, TEST_CMD, 120, tmp_path)
+    assert s3.coverage == {"pkg/gauge.py": ["test_gauge.py"]}        # a new sha, a new map
+    assert fake_cov["runs"][-1][1] == COV_ENV
+
+
+def test_the_coverage_map_reaches_the_selection_of_a_mutation(tmp_path, fake_cov):
+    """GUARD, end to end: the static graph selects only ``test_direct.py`` for
+    ``pkg/widget.py``; the coverage map adds ``test_indirect.py``, which KILLS a broken
+    ``cue`` on the subset — no full-suite confirmation needed."""
+    root = _repo(tmp_path / "repo")
+    report = judge.run_experiments(
+        root, TEST_CMD, {"experiments": [_exp("pkg/widget.py", "x * 2", "x * 3")]}, timeout=120,
+    )
+
+    [o] = report.outcomes
+    assert o.verdict == judge.KILLED and not o.confirmed_full, o.reason
+    assert o.selected == 2
+    assert "coverage map: 1 file(s)" in report.selection
+
+
+def test_has_pytest_cov_asks_the_JUDGED_trees_own_interpreter(tmp_path):
+    """GUARD: pytest-cov is detected in the judged tree's ``.venv``, not the judge's own
+    interpreter — and with no ``.venv`` there is no coverage run at all."""
+    root = tmp_path / "wt"
+    assert judge._has_pytest_cov(root) is False
+    libs = tmp_path / "libs"
+    libs.mkdir()
+    py = judge._venv_python(root)
+    py.parent.mkdir(parents=True)
+    py.write_text(f'#!/bin/sh\nPYTHONPATH="{libs}" exec "{sys.executable}" "$@"\n')
+    py.chmod(0o755)
+    assert judge._has_pytest_cov(root) is False
+    (libs / "pytest_cov.py").write_text("")
+    assert judge._has_pytest_cov(root) is True

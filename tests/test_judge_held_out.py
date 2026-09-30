@@ -568,6 +568,44 @@ def test_judge_run_passes_a_NON_default_consistency_sample_on_BOTH_worktree_path
     assert calls[0]["consistency_sample"] == 5
 
 
+@pytest.mark.parametrize("knob", [False, True, None], ids=["off", "on", "unset"])
+@pytest.mark.parametrize("reprovision", [False, True], ids=["worktree-present", "reprovisioned"])
+def test_judge_run_forwards_the_select_tests_kill_switch_on_BOTH_worktree_paths(
+    tmp_path, reprovision, knob,
+):
+    """⚡ CMX-407: ``judge.select_tests`` is the operator's kill switch for per-mutation
+    selection, and `judge_run` must hand `run_experiments` exactly what WORKFLOW.md says, on
+    both branches that call it. Round 1's survivor hardcoded ``select_tests=True`` at a call
+    site: nothing drove `judge_run` with the switch OFF, so the default hid it (DEFEAT_SHAPES
+    #2). ``off`` catches a hardcoded True, ``on``/``unset`` catch a hardcoded False."""
+    task_id = f"ho-sel-{int(reprovision)}-{knob}"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    if knob is not None:
+        _set_judge_knobs(repo, select_tests=knob)
+    wt = judge.judge_worktree_path(workflow.load_workflow(repo / "WORKFLOW.md"), task_id)
+    if reprovision:
+        import shutil
+        shutil.rmtree(wt)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_glyph()]}))
+    calls: list[dict] = []
+    reprov_calls: list[tuple] = []
+
+    def fake_reprovision(*a):
+        reprov_calls.append(a)
+        return ""
+
+    with patch.object(judge, "run_experiments", side_effect=_spy_run_experiments(calls)), \
+         patch.object(judge, "_reprovision_worktree", side_effect=fake_reprovision), \
+         patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        judge.judge_run(task_id, exp_file, cleanup=False)
+    assert bool(reprov_calls) is reprovision
+    assert len(calls) == 1
+    assert calls[0]["select_tests"] is (knob is not False)
+
+
 def test_a_STALE_head_round_is_recorded_stale_privately_and_metrics_skip_it(tmp_path):
     """The verdict is for `oldsha…`, the PR's live head is `newsha…` ⇒ the private record
     says ``stale: true``, so `chela judge show` does not count it as a round. Corrupt the
