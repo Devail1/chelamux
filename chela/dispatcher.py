@@ -159,6 +159,10 @@ SEED_RESEND_SETTLE_SECONDS = float(os.environ.get("CHELA_SEED_RESEND_SETTLE_SECO
 # default `--permission-mode auto` does not render it).
 _READY_FOOTER = "bypass permissions"
 _PROMPT_CHAR = "❯"  # ❯
+# `capture-pane -e` escapes (see _drop_ghost_suggestion): SGR, and every CSI to strip.
+_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_BOX_EDGE = "│"
 
 # Active-work signature (see _pane_shows_activity). The Claude Code TUI draws its
 # working spinner (a cycling star glyph) + a live "(<elapsed> · ↓ <n> tokens)" /
@@ -1424,13 +1428,87 @@ def _parse_ts(ts: str | None) -> datetime | None:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
-def _capture_pane(window_name: str) -> str:
-    """Return the visible text of a tmux window's pane (empty string on error)."""
-    out = subprocess.run(
-        ["tmux", "capture-pane", "-p", "-t", f"{TMUX_SESSION}:{window_name}"],
-        capture_output=True, text=True,
-    )
+def _capture_pane(window_name: str, *, ansi: bool = False) -> str:
+    """Return the visible text of a tmux window's pane (empty string on error).
+
+    ``ansi=True`` adds tmux's ``-e`` so SGR escapes ride along. The watchdog needs them:
+    a plain capture strips the one attribute (SGR 2, faint) that tells Claude Code's ghost
+    suggestion apart from a typed draft (see :func:`_drop_ghost_suggestion`).
+    """
+    cmd = ["tmux", "capture-pane", "-p", "-t", f"{TMUX_SESSION}:{window_name}"]
+    if ansi:
+        cmd.insert(2, "-e")
+    out = subprocess.run(cmd, capture_output=True, text=True)
     return out.stdout if out.returncode == 0 else ""
+
+
+def _sgr_faint(params: str, faint: bool) -> bool:
+    """The faint (SGR 2) state after applying one ``ESC[<params>m`` to ``faint``.
+
+    Walks the parameters rather than substring-matching "2": ``38;5;2`` is colour 2 and
+    ``38;2;r;g;b`` is truecolour, neither of them faint.
+    """
+    codes = params.split(";") if params else ["0"]
+    i = 0
+    while i < len(codes):
+        c = codes[i] or "0"
+        if c in ("38", "48", "58"):
+            # Extended colour: `5;n` (256) or `2;r;g;b` (truecolour) — skip its operands.
+            i += 3 if i + 1 < len(codes) and codes[i + 1] == "5" else 5
+            continue
+        if c == "0" or c == "22":
+            faint = False
+        elif c == "2":
+            faint = True
+        i += 1
+    return faint
+
+
+def _input_is_ghost_only(segment: str, faint: bool) -> bool:
+    """True when every visible glyph of ``segment`` (the input line after `❯`) is faint.
+
+    ``faint`` is the SGR 2 state carried in from earlier on the line. Whitespace and the
+    input box's `│` border don't count as input, so an empty prompt is ghost-only too.
+    """
+    pos = 0
+    for m in _SGR_RE.finditer(segment):
+        if not _visible_all_faint(segment[pos:m.start()], faint):
+            return False
+        faint = _sgr_faint(m.group(1), faint)
+        pos = m.end()
+    return _visible_all_faint(segment[pos:], faint)
+
+
+def _visible_all_faint(text: str, faint: bool) -> bool:
+    text = _CSI_RE.sub("", text)
+    return faint or not text.replace(_BOX_EDGE, "").strip()
+
+
+def _drop_ghost_suggestion(pane: str) -> str:
+    """Plain text of an ``-e`` capture, with Claude Code's ghost suggestion removed.
+
+    👻 CMX-410: Claude Code draws a grey SUGGESTION into an EMPTY prompt
+    (``❯ Try "fix lint errors"``). It is the input's placeholder, so it is faint (SGR 2) by
+    construction, and it is shown ONLY while the input is empty (anthropics/claude-code
+    #23859) — so seeing it proves the prompt is empty. A plain capture strips the SGR and
+    the ghost reads as a typed draft: cmx-408 sat stranded ~8h because of that.
+
+    The discriminator is SGR 2 on the INPUT line right after `❯`. Claude's recap is dim
+    too (italic + grey 246) but it lives elsewhere on screen, and it is not SGR 2 anyway.
+    A typed draft has no SGR 2 and is kept. Everything else is returned with its escapes
+    stripped, so the plain-text heuristics read it exactly as before.
+    """
+    out = []
+    for line in pane.splitlines():
+        if _PROMPT_CHAR in line:
+            head, tail = line.split(_PROMPT_CHAR, 1)
+            faint = False
+            for m in _SGR_RE.finditer(head):
+                faint = _sgr_faint(m.group(1), faint)
+            if _input_is_ghost_only(tail, faint):
+                line = head + _PROMPT_CHAR
+        out.append(_CSI_RE.sub("", line))
+    return "\n".join(out) + ("\n" if pane.endswith("\n") else "")
 
 
 def _pane_ready(pane: str) -> bool:
@@ -4862,7 +4940,9 @@ def tick(workflow_path: str | Path) -> dict:
                 )
                 if idle_age_ok:
                     window = row["window_name"]
-                    pane = _capture_pane(window)
+                    # 👻 CMX-410: captured WITH escapes so the ghost suggestion (faint text
+                    # in an empty prompt) can be told from a typed draft, then flattened.
+                    pane = _drop_ghost_suggestion(_capture_pane(window, ansi=True))
                     status = _agent_status(window)
                     task = tasks_by_id.get(row["task_id"])
                     nudged = _parse_ts(row["idle_nudged_at"])
