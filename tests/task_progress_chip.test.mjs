@@ -183,3 +183,31 @@ test('a kanban card with no task data renders no chip at all — the counterweig
     assert.equal(card.querySelector('.task-progress-chip'), null,
         'a card whose run has tasks:null must render no chip at all — never "0/0"');
 });
+
+// --- dispatcher.js's runs table: the Error column's "Closed — <reason>" (CMX-406) --------
+// runCardNote is unit-tested in runstate.test.mjs and the kanban card renders it, but THIS
+// call site is its own wiring: swapping `_runNoteCell(r)` back to the raw last_error would
+// show a hand-closed run as its stale "tmux window disappeared" and no other test would see it.
+
+test('the dispatcher runs table shows "Closed — <reason>" for a hand-closed run, not its stale last_error', () => {
+    renderDispatcher(_dispatcherPayload(_run({
+        task_id: 't-closed', status: 'closed', close_reason: 'superseded by cmx-403',
+        last_error: 'tmux window disappeared',
+    })));
+
+    const cell = document.querySelector('.dispatcher-table tbody tr td[data-label="Error"]');
+    assert.ok(cell, 'the Error column cell is missing');
+    assert.equal(cell.textContent.trim(), 'Closed — superseded by cmx-403');
+    assert.doesNotMatch(cell.textContent, /tmux window disappeared/,
+        'a closed run must not show its stale last_error in the runs table');
+});
+
+test('the dispatcher runs table still shows last_error for a run that was NOT closed — the counterweight', () => {
+    renderDispatcher(_dispatcherPayload(_run({
+        task_id: 't-failed', status: 'failed', close_reason: null,
+        last_error: 'tmux window disappeared',
+    })));
+
+    const cell = document.querySelector('.dispatcher-table tbody tr td[data-label="Error"]');
+    assert.equal(cell.textContent.trim(), 'tmux window disappeared');
+});
