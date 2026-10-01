@@ -400,3 +400,69 @@ test('adopt-first scrolls the existing share\'s row into view', async () => {
     }
     assert.ok(scrolled.includes(freshRow()), 'the focused share must be scrolled to');
 });
+
+
+// --- judge round 3: the pill's FIRST render, pinned against the updated state ----------
+
+// The pane's Share row as _shareBtnHTML renders it — before any _updateShareBtns runs.
+function freshPill(wid) {
+    const host = document.createElement('div');
+    host.innerHTML = terminals._shareBtnHTML(wid);
+    document.body.appendChild(host);
+    const btn = host.querySelector('.gs-share-btn');
+    const g = btn.querySelector('.gs-share-mode');
+    const snap = () => ({ glyph: g.textContent, hidden: g.hidden, title: g.title || '',
+                          mode: btn.dataset.mode, pressed: btn.getAttribute('aria-pressed'),
+                          on: btn.classList.contains('on') });
+    return { host, snap };
+}
+
+test('the pane pill carries the mode from its FIRST render, identical to after an update', async () => {
+    const want = {
+        view: { glyph: '👁', title: '👁 View only' },
+        typing: { glyph: '⌨', title: '⌨ Allow typing' },
+        unsandboxed: { glyph: '⚠', title: '⚠ Full access — UNSANDBOXED' },
+    };
+    for (const [m, w] of Object.entries(want)) {
+        terminals._sharedWids.add('@7');
+        terminals._shareModes.set('@7', m);
+        const { host, snap } = freshPill('@7');
+        const first = snap();
+        assert.deepEqual(first, { glyph: w.glyph, hidden: false, title: w.title, mode: m, pressed: 'true', on: true },
+            `a ${m} share's pill must show its mode on first render`);
+        terminals._updateShareBtns('@7');
+        assert.deepEqual(snap(), first, `first render and update must agree (${m})`);
+        host.remove();
+    }
+    // Unshared: no glyph, hidden, no mode — and again identical after an update.
+    terminals._sharedWids.delete('@7');
+    terminals._shareModes.delete('@7');
+    const { host, snap } = freshPill('@7');
+    const first = snap();
+    assert.deepEqual(first, { glyph: '', hidden: true, title: '', mode: '', pressed: 'false', on: false });
+    terminals._updateShareBtns('@7');
+    assert.deepEqual(snap(), first);
+    host.remove();
+});
+
+test('a shared pane with no recorded mode renders as View only, never typing', async () => {
+    terminals._sharedWids.add('@7');
+    terminals._shareModes.delete('@7');
+    const { host, snap } = freshPill('@7');
+    assert.equal(snap().glyph, '👁');
+    assert.equal(snap().mode, 'view');
+    host.remove();
+    terminals._sharedWids.delete('@7');
+});
+
+test('the UNSANDBOXED confirmation defaults to the 30-minute time box', async () => {
+    const row = await openSheet('view', { ...ALL_OFFERS });   // no unsandboxed_minutes
+    opt(row, 'unsandboxed').click();
+    assert.match(row.querySelector('.ss-unsafe-confirm label').textContent, /for 30 min/);
+});
+
+test('only the UNSANDBOXED option wears the danger style', async () => {
+    const row = await openSheet('view', { ...ALL_OFFERS });
+    const unsafe = [...row.querySelectorAll('.ss-mode-opt-unsafe')].map(b => b.dataset.mode);
+    assert.deepEqual(unsafe, ['unsandboxed']);
+});

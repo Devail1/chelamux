@@ -316,7 +316,8 @@ def test_route_audits_the_requester_and_the_configured_expiry(monkeypatch, live_
     assert ev["payload"]["by"] == "liav@example" and ev["payload"]["window"] == "shell-3"
     r = dash.app.test_client().post("/api/term/@9/share-mode", json={"mode": "view"},
                                     headers={"Tailscale-User-Login": "liav@example"})
-    assert [e["payload"]["by"] for e in _events("share.mode_changed")] == ["liav@example"] * 2
+    assert [(e["payload"]["by"], e["payload"]["window"]) for e in _events("share.mode_changed")] \
+        == [("liav@example", "shell-3")] * 2, "a downgrade names who and which window too"
 
 
 def test_mode_change_on_an_unknown_window_is_404(live_share, sandbox, typing_on):

@@ -1085,7 +1085,7 @@ function _shareBtnHTML(wid) {
     const on = _sharedWids.has(wid);
     const mode = on ? (_shareModes.get(wid) || 'view') : null;
     return `<button class="gs-share-btn popover-item ov-item${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
-      onclick="chela.shareBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
+      onclick="chela.shareBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}" data-mode="${mode || ''}"
       title="Share this session"><span class="ov-ic">${lucideIcon('share-2', 14)}</span><span>Share current session</span><span class="gs-share-mode"${mode ? ` title="${attrEsc(SHARE_MODE_UI[mode].label)}"` : ' hidden'}>${mode ? SHARE_MODE_GLYPH[mode] : ''}</span><span class="gs-share-count" hidden></span></button>`;
 }
 
@@ -3836,7 +3836,7 @@ if (window.visualViewport) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareExpiry, _shareModes, _sharedWids, _stopReadyPoll, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
