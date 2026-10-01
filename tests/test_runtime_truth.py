@@ -44,6 +44,7 @@ from chela import (
     messenger,
     runtime_truth,
     sessions,
+    share_sandbox,
     transcripts,
     update,
 )
@@ -204,6 +205,9 @@ def fleet(tmp_path, monkeypatch, request):
     monkeypatch.setattr(transcripts, "CLAUDE_PROJECTS_DIR", projects)
     monkeypatch.setattr(sessions, "panes", lambda force=False: {"@1": sessions.Pane(
         wid="@1", path=agent_cwd, command="claude", claude_pid=1, launched_in=agent_cwd)})
+    # …and @1 is an ordinary window, not a sandboxed session (CMX-420) — answered here so
+    # the relay fact never asks the developer's real tmux / docker.
+    monkeypatch.setattr(share_sandbox, "share_session_id", lambda wid: None)
 
     # peer.transport: @1 was launched with --messaging-socket-path, and its Claude Code
     # session is really listening there — a live AF_UNIX socket, not just a file, since

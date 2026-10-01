@@ -59,7 +59,7 @@ def test_inventory_matches_env_reads():
     )
 
 
-def test_inventory_count_is_51():
+def test_inventory_count_is_52():
     # The number CMX-207's ticket and the doc's own prose both cite (58, until CMX-217
     # wired the 9-strong Daemon-intervals group through config.dashboard_setting() and
     # they stopped being literal os.environ.get("CHELA_...") call sites — see the doc's
@@ -70,8 +70,9 @@ def test_inventory_count_is_51():
     # until CMX-381 made the dashboard read CHELA_TERM_THEME, then 44, until
     # CMX-382 wired CHELA_REMOTE_CONTROL through config.dashboard_setting() — back to 43,
     # then 44, until CMX-389 added CHELA_OVERRIDE_WAIT_S, then 51, until CMX-403 added the
-    # seven sandboxed-share knobs). A change
+    # seven sandboxed-share knobs, then 52, until CMX-420 added CHELA_PROXY_SESSION_DIR).
+    # A change
     # here without a change to the doc's stated count is exactly the kind of drift this
     # file exists to catch — pinned as its own assertion so a future diff has to touch the
     # prose too.
-    assert len(_scan_env_reads()) == 51
+    assert len(_scan_env_reads()) == 52

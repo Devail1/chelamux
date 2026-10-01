@@ -20,7 +20,7 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**51** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+**52** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
 wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
 added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
@@ -32,7 +32,8 @@ group 10 — then 43, until CMX-381 made the dashboard read `CHELA_TERM_THEME` t
 then 44, until CMX-382 wired `CHELA_REMOTE_CONTROL` through
 `dashboard_setting()` as the General tab's Remote Control switch — back to 43, see group 10 —
 then 44, until CMX-389 added `CHELA_OVERRIDE_WAIT_S`, group 4 — then 51, until CMX-403
-added the seven sandboxed-share knobs, group 9 — 51) — every literal `CHELA_*` name a Python module in
+added the seven sandboxed-share knobs, group 9 — then 52, until CMX-420 added the proxy's
+`CHELA_PROXY_SESSION_DIR`, group 9) — every literal `CHELA_*` name a Python module in
 `chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
@@ -284,6 +285,7 @@ find there, and today they don't exist in any UI or even `docs/CONFIG.md`'s tabl
 | `CHELA_PROXY_TOKEN_FILE` | none | `internal-path` | Read by `chela/share_proxy.py` INSIDE the sidecar; set by the launcher, not by an operator |
 | `CHELA_PROXY_UPSTREAM` | `https://api.anthropic.com` | `internal-path` | Same — the sidecar's copy of `CHELA_SHARE_PROXY_UPSTREAM` |
 | `CHELA_PROXY_PORT` | `8080` | `internal-path` | Same — the sidecar's listen port |
+| `CHELA_PROXY_SESSION_DIR` | none | `internal-path` | Same — where the sidecar writes the session's Telegram outbox (CMX-420) |
 
 **WIRED (CMX-403):** `CHELA_SHARE_TYPING` (default `false`) — whether a share guest may
 type at all. `config.share_typing_enabled()`, read per keystroke through
