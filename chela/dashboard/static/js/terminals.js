@@ -271,22 +271,69 @@ async function termKey(key) { return termKeyFor($('#term-agent').value, key); }
 
 // Paste the device clipboard into the active pane. xterm.js can't surface iOS's
 // native "Paste" callout inside its hidden textarea, so phones had no reliable
-// paste path; this reads the clipboard on tap (the gesture unlocks readText() on
+// paste path; this reads the clipboard on tap (the gesture unlocks the read on
 // iOS) and ships it to /api/term/paste, which delivers a bracketed paste at the
-// tmux layer. No-op where the Clipboard API is unavailable or permission denied.
+// tmux layer.
+//
+// CMX-423: ONE clipboard.read() where it exists, like the in-pane Ctrl/Cmd+V shim. An
+// image (a screenshot is the usual phone clipboard) takes the image path
+// (/api/term/paste-image, then its path typed) so Claude attaches it; readText() alone
+// came back empty for it and the tap silently did nothing. readText() stays the
+// fallback (read() refused or absent). Every no-op now says why on the button.
+function _pasteFlash(btn, label) {
+    if (!btn) return;
+    const orig = btn.dataset.label || btn.textContent;
+    btn.dataset.label = orig;
+    btn.textContent = label;
+    clearTimeout(btn._pasteFlash);
+    btn._pasteFlash = setTimeout(() => { btn.textContent = orig; }, 1500);
+}
+
+async function _pasteTextTo(wid, text, btn) {
+    if (!text) { _pasteFlash(btn, 'Empty'); return; }
+    await api('/api/term/paste', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent: wid, text }),
+    });
+}
+
+async function _pasteImageTo(wid, blob, btn) {
+    const fd = new FormData();
+    fd.append('agent', wid);
+    fd.append('image', blob, blob.name || 'paste');
+    const j = await api('/api/term/paste-image', { method: 'POST', body: fd, credentials: 'same-origin' });
+    if (!j || !j.path) { _pasteFlash(btn, 'Failed'); return; }
+    await _pasteTextTo(wid, j.path, btn);
+}
+
 async function termPaste(btn) {
     const wid = $('#term-agent').value;
-    if (!wid || !navigator.clipboard || !navigator.clipboard.readText) return;
-    let text = '';
-    try { text = await navigator.clipboard.readText(); } catch (e) { return; }
-    if (!text) return;
+    const cb = navigator.clipboard;
+    if (!wid) return;
+    if (!cb || (!cb.read && !cb.readText)) { _pasteFlash(btn, 'No clipboard'); return; }
     try {
-        await api('/api/term/paste', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ agent: wid, text }),
-        });
-    } catch (e) { console.error('termPaste', e); }
+        let items = null;
+        if (cb.read) {
+            try { items = await cb.read(); } catch (e) { items = null; }
+        }
+        if (items) {
+            for (const it of items) {
+                const t = (it.types || []).find(x => x.indexOf('image/') === 0);
+                if (t) { await _pasteImageTo(wid, await it.getType(t), btn); return; }
+            }
+            for (const it of items) {
+                if ((it.types || []).indexOf('text/plain') >= 0) {
+                    await _pasteTextTo(wid, await (await it.getType('text/plain')).text(), btn);
+                    return;
+                }
+            }
+            if (!cb.readText) { _pasteFlash(btn, 'Empty'); return; }
+        }
+        let text = '';
+        try { text = await cb.readText(); } catch (e) { _pasteFlash(btn, 'Denied'); return; }
+        await _pasteTextTo(wid, text, btn);
+    } catch (e) { console.error('termPaste', e); _pasteFlash(btn, 'Failed'); }
 }
 
 function termScrollToggle() {
