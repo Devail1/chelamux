@@ -12,6 +12,7 @@ import { refreshOrchestratorStatus } from './orchestrator.js';
 import { enterDecisions, tickDecisions } from './decisions.js';
 import { enterResources, tickResources } from './resources.js';
 import { enterStatusHealth, tickStatusHealth } from './statushealth.js';
+import { checkForUpdate } from './version.js';
 
 // ---------------------------------------------------------------------------
 // Refresh loop
@@ -23,6 +24,9 @@ import { enterStatusHealth, tickStatusHealth } from './statushealth.js';
 // ---------------------------------------------------------------------------
 
 async function refresh() {
+    // CMX-426: a deploy since this page loaded? Offer a reload (never forces one). First
+    // and outside the try: a later poll that throws must not hide a new build.
+    checkForUpdate().catch(() => {});
     try {
         await refreshSummary();
         // The sidebar (agent list + WORK badges + the Decisions section) is always

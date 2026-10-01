@@ -23,7 +23,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from flask import abort, Flask, jsonify, render_template, request, Response
+from flask import abort, Flask, jsonify, render_template, request, Response, send_from_directory
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
@@ -107,14 +107,86 @@ def _require_terminals() -> None:
 # Page route
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# CMX-426: versioned static assets
+#
+# A deploy restarts chela-dashboard, but an open browser kept serving its cached ES
+# modules and CSS, so recent UI looked missing until a hard refresh. Every asset the page
+# loads is now served from ``static/v/<ASSET_VERSION>/…``: a new deploy is a new URL, so a
+# reload can never mix old modules with new ones, and the versioned copy may be cached for
+# good. Relative ES imports (``./util.js``) resolve against the module's own URL, so they
+# inherit the version with no import map. Unversioned ``static/…`` keeps working.
+#
+# The version is a hash of the CONTENT that reaches the browser (JS, CSS, templates),
+# computed ONCE at import. Not the git sha: an installed wheel has no .git, and a deploy
+# that only touches Python must not ask every open page to reload.
+# ---------------------------------------------------------------------------
+
+_STATIC_DIR = Path(__file__).parent / "static"
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+_VERSIONED_SUFFIXES = {".js", ".mjs", ".css", ".html", ".svg"}
+
+
+def compute_asset_version(roots: tuple[Path, ...] = (_STATIC_DIR, _TEMPLATES_DIR)) -> str:
+    """A short content hash over every browser-facing text asset under ``roots``.
+
+    Deterministic: same files, same bytes → same version (no reload storm within a deploy).
+    """
+    h = hashlib.sha256()
+    for root in roots:
+        for p in sorted(root.rglob("*")):
+            if p.is_file() and p.suffix in _VERSIONED_SUFFIXES:
+                h.update(p.relative_to(root).as_posix().encode())
+                h.update(b"\0")
+                h.update(p.read_bytes())
+                h.update(b"\0")
+    return h.hexdigest()[:12]
+
+
+ASSET_VERSION = compute_asset_version()
+
+
+def asset_path(path: str) -> str:
+    """``static/v/<ASSET_VERSION>/<path>`` — relative, like the template's other URLs, so
+    a dashboard behind a path prefix still resolves it."""
+    return f"static/v/{ASSET_VERSION}/{path}"
+
+
+@app.route("/static/v/<ver>/<path:filename>")
+def static_versioned(ver, filename):
+    resp = send_from_directory(app.static_folder, filename)
+    if ver == ASSET_VERSION:
+        # This exact URL can only ever mean these bytes: cache it for good.
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    else:
+        # A page from an older deploy asking for its old version: the bytes are the
+        # CURRENT ones, so they must not be cached under the old URL.
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@app.route("/api/version")
+@require_auth
+def api_version():
+    """The running deploy's asset version; an open page compares it with its own."""
+    resp = jsonify({"version": ASSET_VERSION})
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 @app.route("/")
 @require_auth
 def index():
-    return render_template(
+    resp = app.make_response(render_template(
         "index.html",
         terminals_enabled=config.TERMINALS_ENABLED,
         wall_tile_dispatched=config.WALL_TILE_DISPATCHED,
-    )
+        asset_version=ASSET_VERSION,
+        asset_path=asset_path,
+    ))
+    # The HTML names the versioned assets, so it must be revalidated on every load.
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -810,7 +882,7 @@ def _term_upload_shim() -> str:
     route re-checks it per upload, so a pane opened before a switch-off is still refused)."""
     on = "true" if config.file_drop_enabled() else "false"
     return ("<script>window.__CHELA_FILE_DROP__=" + on + ";</script>"
-            '<script src="/static/term-upload.js"></script>')
+            '<script src="/' + asset_path("term-upload.js") + '"></script>')
 
 
 def _term_presence_shim(wid: str) -> str:
@@ -822,7 +894,7 @@ def _term_presence_shim(wid: str) -> str:
         "shared": wid in _SHARED,
     })
     return ("<script>window.__CHELA_COLLAB__=" + cfg + ";</script>"
-            '<script type="module" src="/static/collab/presence-shim.js"></script>')
+            '<script type="module" src="/' + asset_path("collab/presence-shim.js") + '"></script>')
 
 
 @app.route("/term/<wid>/", defaults={"rest": ""}, methods=["GET", "POST"])
