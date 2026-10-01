@@ -102,6 +102,21 @@ def test_a_name_with_spaces_is_cleaned_so_the_mention_stays_one_token(ws):
     assert ws["calls"][-1][-1] == "@uploads/my_screen_shot.png "
 
 
+def test_a_failed_send_keys_still_saves_and_reports_typed_false(ws, monkeypatch):
+    import subprocess
+
+    def fail(argv, *a, **k):
+        ws["calls"].append(list(argv))
+        raise subprocess.CalledProcessError(1, argv)
+    monkeypatch.setattr(app_mod.subprocess, "run", fail)
+    r = _post("notes.txt", b"hi")
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j["ok"] is True and j["typed"] is False and j["path"] == "uploads/notes.txt"
+    assert (ws["cwd"] / "uploads" / "notes.txt").read_bytes() == b"hi"
+    assert _events("upload.saved")[-1]["payload"]["typed"] is False
+
+
 # ── collisions ────────────────────────────────────────────────────────────────
 
 def test_a_name_collision_gets_a_suffix_and_the_original_is_untouched(ws):
@@ -173,6 +188,58 @@ def test_contained_accepts_a_direct_child_only(tmp_path):
     assert uploads._contained(tmp_path / "a.txt", up) is False
 
 
+def test_contained_refuses_a_nested_path_inside_uploads(tmp_path):
+    """Direct child only: ``uploads/sub/a.txt`` is inside the tree but not a child of it."""
+    up = tmp_path / "uploads"
+    (up / "sub").mkdir(parents=True)
+    assert uploads._contained(up / "sub" / "a.txt", up) is False
+
+
+def test_the_write_itself_never_follows_a_planted_symlink(ws, monkeypatch):
+    """O_NOFOLLOW is the race guard: a symlink planted AFTER the containment check (simulated
+    by stubbing the check open) must still not be written through."""
+    up = ws["cwd"] / "uploads"
+    up.mkdir()
+    victim = ws["outside"] / "victim.txt"
+    victim.write_bytes(b"VICTIM")
+    os.symlink(victim, up / "notes.txt")
+    monkeypatch.setattr(uploads, "_contained", lambda p, u: True)
+    r = _post("notes.txt", b"evil")
+    assert victim.read_bytes() == b"VICTIM"
+    assert r.status_code in (403, 500) or r.get_json()["name"] != "notes.txt", r.get_json()
+
+
+def test_an_extensionless_collision_gets_a_plain_suffix(ws):
+    up = ws["cwd"] / "uploads"
+    up.mkdir()
+    (up / "README").write_bytes(b"ORIGINAL")
+    r = _post("README", b"new")
+    assert r.get_json()["name"] == "README-1"
+    assert (up / "README").read_bytes() == b"ORIGINAL"
+    assert (up / "README-1").read_bytes() == b"new"
+
+
+def test_a_long_name_is_truncated_and_keeps_its_extension(ws):
+    r = _post("a" * 300 + ".png", b"x")
+    assert r.status_code == 200
+    name = r.get_json()["name"]
+    assert uploads._MAX_NAME == 120
+    assert len(name) == 120 and name.endswith(".png")
+    assert (ws["cwd"] / "uploads" / name).read_bytes() == b"x"
+
+
+def test_a_full_suffix_range_is_refused_not_overwritten(ws, monkeypatch):
+    monkeypatch.setattr(uploads, "_MAX_SUFFIX", 2)
+    up = ws["cwd"] / "uploads"
+    up.mkdir()
+    for n in ("a.txt", "a-1.txt", "a-2.txt"):
+        (up / n).write_bytes(b"KEEP")
+    r = _post("a.txt", b"new")
+    assert r.status_code == 409 and r.get_json()["reason"] == "name_taken"
+    assert all((up / n).read_bytes() == b"KEEP" for n in ("a.txt", "a-1.txt", "a-2.txt"))
+    assert ws["calls"] == []
+
+
 # ── size / rate caps ──────────────────────────────────────────────────────────
 
 def test_over_the_size_cap_is_refused_and_nothing_is_written(ws, monkeypatch):
@@ -185,6 +252,18 @@ def test_over_the_size_cap_is_refused_and_nothing_is_written(ws, monkeypatch):
     assert ws["calls"] == []
     # Negative control: exactly at the cap is accepted.
     assert _post("ok.bin", b"\0" * (1024 * 1024)).status_code == 200
+
+
+def test_an_oversized_request_is_refused_before_the_body_is_read(ws, monkeypatch):
+    """The Content-Length pre-check: refused without ever calling the writer."""
+    monkeypatch.setenv("CHELA_UPLOAD_MAX_MB", "1")
+
+    def boom(*a, **k):
+        raise AssertionError("uploads.save must not run for an oversized request")
+    monkeypatch.setattr(uploads, "save", boom)
+    r = _post("big.bin", b"\0" * (1024 * 1024 + 128 * 1024))
+    assert r.status_code == 413 and r.get_json()["reason"] == "too_large"
+    assert ws["calls"] == []
 
 
 def test_the_size_cap_defaults_to_25_mb(monkeypatch):

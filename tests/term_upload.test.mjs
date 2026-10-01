@@ -62,6 +62,29 @@ test('a dropped file is uploaded with the pane window id and its saved name toas
     assert.deepEqual(toasts(w), [{ kind: 'ok', text: 'Saved uploads/notes.txt' }]);
 });
 
+test('a saved-but-not-typed upload tells the user to type the @path', async () => {
+    const { w } = page({ respond: () => ({ status: 200,
+        body: { ok: true, name: 'a.txt', path: 'uploads/a.txt', typed: false } }) });
+    fire(w, 'drop', 'dataTransfer', { files: [new w.File(['x'], 'a.txt')], types: ['Files'] });
+    await flush(); await flush();
+    assert.deepEqual(toasts(w), [{ kind: 'ok', text: 'Saved uploads/a.txt (type its @path yourself)' }]);
+});
+
+test('a network failure shows an error toast naming the file', async () => {
+    const { w } = page();
+    w.fetch = async () => { throw new Error('offline'); };
+    fire(w, 'drop', 'dataTransfer', { files: [new w.File(['x'], 'a.txt')], types: ['Files'] });
+    await flush(); await flush();
+    assert.deepEqual(toasts(w), [{ kind: 'err', text: 'Upload failed — a.txt was not saved' }]);
+});
+
+test('every dropped file is uploaded, in order', async () => {
+    const { w, calls } = page();
+    fire(w, 'drop', 'dataTransfer', { files: [new w.File(['1'], 'one.txt'), new w.File(['2'], 'two.txt')], types: ['Files'] });
+    for (let i = 0; i < 6; i++) await flush();
+    assert.deepEqual(calls.map(c => c.opts.body.get('file').name), ['one.txt', 'two.txt']);
+});
+
 test('a refused upload shows an error toast with the server reason', async () => {
     const { w } = page({ respond: () => ({ status: 403, body: { ok: false, error: 'Share guests cannot upload files.' } }) });
     fire(w, 'drop', 'dataTransfer', { files: [new w.File(['x'], 'a.txt')], types: ['Files'] });
