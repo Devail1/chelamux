@@ -18,6 +18,7 @@ import http.client
 import json
 import os
 import socket
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -146,6 +147,18 @@ def test_operator_denylist_and_allowlist():
     assert allow.check(PUBLIC_IP, 443)[1]           # an IP literal can't dodge an allowlist
 
 
+def test_operator_domain_lists_match_on_a_label_boundary():
+    """``jobs.example`` covers its subdomains, never a different registrable name that
+    merely ENDS in the same characters (``notjobs.example``)."""
+    res = _stub_resolver({"notjobs.example": [PUBLIC_IP], "a.jobs.example": [PUBLIC_IP],
+                          "evillinkedin.com": [PUBLIC_IP]})
+    allow = wp.Policy(resolver=res, allow=wp.parse_domains("jobs.example"))
+    assert allow.check("a.jobs.example", 443)[1] is None
+    assert allow.check("notjobs.example", 443)[1]
+    deny = wp.Policy(resolver=res, deny=wp.parse_domains("linkedin.com"))
+    assert deny.check("evillinkedin.com", 443)[1] is None
+
+
 def test_an_unresolvable_or_malformed_host_is_refused():
     pol = wp.Policy(resolver=_stub_resolver({}))
     assert pol.check("nope.example", 443)[1]
@@ -231,8 +244,7 @@ class _Backend(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-@pytest.fixture
-def wire(monkeypatch, tmp_path):
+def _serve(monkeypatch, tmp_path, *, max_wait=0.0, sleep=lambda s: None):
     """A real proxy + a real backend on loopback. The proxy's policy uses a stubbed
     resolver; its dialer maps (PUBLIC_IP, 80/443) to the backend and refuses anything
     else, recording every dial."""
@@ -256,16 +268,21 @@ def wire(monkeypatch, tmp_path):
             "jobs.example": [PUBLIC_IP], "intranet.example": ["192.168.1.10"],
             "rebind.example": ["10.0.0.9"]}))
         limiter = wp.RateLimiter(host_rps=1.0, host_burst=2, global_rps=100,
-                                 global_burst=100, max_wait=0.0)
+                                 global_burst=100, max_wait=max_wait)
         reqlog = wp.RequestLog(str(log_path), stream=open(os.devnull, "w"))
-        sleep = staticmethod(lambda s: None)
 
+    H.sleep = staticmethod(sleep)
     proxy = ThreadingHTTPServer(("127.0.0.1", 0), H)
     threading.Thread(target=proxy.serve_forever, args=(0.05,), daemon=True).start()
     state = {"port": proxy.server_address[1], "dials": dials, "log": log_path}
+    return state, lambda: (proxy.shutdown(), backend.shutdown())
+
+
+@pytest.fixture
+def wire(monkeypatch, tmp_path):
+    state, stop = _serve(monkeypatch, tmp_path)
     yield state
-    proxy.shutdown()
-    backend.shutdown()
+    stop()
 
 
 def _proxy_socket(state):
@@ -360,6 +377,30 @@ def test_the_rate_limit_holds_over_the_wire(wire):
     assert len(wire["dials"]) == 2
 
 
+def test_the_rate_limit_waits_over_the_wire_before_dialling(monkeypatch, tmp_path):
+    """The handler HONOURS the limiter's wait: a request inside the burst is held for the
+    reserved time BEFORE the proxy dials — not forwarded at once, not refused."""
+    events = []
+
+    def sleep(s):
+        events.append(("sleep", s, len(dials_ref[0])))
+
+    state, stop = _serve(monkeypatch, tmp_path, max_wait=60.0, sleep=sleep)
+    dials_ref = [state["dials"]]
+    try:
+        statuses = []
+        for _ in range(4):
+            s, head = _connect(state, "jobs.example:443")
+            statuses.append(head.split(b" ", 2)[1])
+            s.close()
+    finally:
+        stop()
+    assert statuses == [b"200"] * 4 and len(state["dials"]) == 4
+    # burst 2 at 1 rps: the 3rd waits ~1s and the 4th ~2s, each before ITS dial
+    assert [round(w) for _, w, _ in events] == [1, 2]
+    assert [n for _, _, n in events] == [2, 3]
+
+
 def test_a_direct_request_to_the_proxy_is_refused(wire):
     c = http.client.HTTPConnection("127.0.0.1", wire["port"], timeout=10)
     c.request("GET", "/")
@@ -443,6 +484,75 @@ def test_the_web_sidecar_holds_no_token_and_runs_locked_down(monkeypatch):
     assert "198.51.100.7" in envs["CHELA_WEB_DENY_NETS"]
     assert envs["CHELA_WEB_DENY"] == "evil.example"
     assert "-p" not in argv and "--network" not in argv
+
+
+_IP_O_ADDR = """\
+1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever
+1: lo    inet6 ::1/128 scope host noprefixroute \\       valid_lft forever preferred_lft forever
+2: eth0    inet 203.0.113.44/24 brd 203.0.113.255 scope global eth0\\       valid_lft forever
+2: eth0    inet6 2001:db8:5::7/64 scope global dynamic \\       valid_lft 86000sec
+3: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\\       valid_lft forever
+"""
+
+
+def test_host_deny_nets_parses_every_interface_address(monkeypatch):
+    """The host's own addresses — including a PUBLIC one, which the private-range check
+    alone would let through — all reach the sidecar's deny list."""
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=_IP_O_ADDR, stderr="")
+
+    monkeypatch.setattr(sb.subprocess, "run", run)
+    assert calls == [] and sb.host_deny_nets() == sorted(
+        ["127.0.0.1", "::1", "203.0.113.44", "2001:db8:5::7", "172.17.0.1"])
+    assert calls == [["ip", "-o", "addr", "show"]]
+    monkeypatch.setenv("CHELA_SHARE_WEB_DENY_CIDRS", "")
+    envs = dict(e.split("=", 1) for e in _opt(sb.web_proxy_run_argv(SID, UID, GID), "-e"))
+    assert "203.0.113.44" in envs["CHELA_WEB_DENY_NETS"].split(",")
+    assert "2001:db8:5::7" in envs["CHELA_WEB_DENY_NETS"].split(",")
+
+
+def test_host_deny_nets_survives_a_missing_ip_tool(monkeypatch):
+    def run(argv, **kw):
+        raise FileNotFoundError("ip")
+    monkeypatch.setattr(sb.subprocess, "run", run)
+    assert sb.host_deny_nets() == []
+
+
+def test_api_agents_reports_share_net_for_a_sandboxed_window():
+    """The 🌐 chip's wiring: ``/api/agents`` carries the launcher's mode on a
+    ``sandbox-*`` row, and never asks for a non-sandbox window."""
+    from unittest.mock import patch
+    from chela.dashboard import app as dash
+    live = {"orchestrator": "@1", "sandbox-aaron": "@5", "sandbox-cv": "@6"}
+    pids = {wid: 1000 + i for i, wid in enumerate(live.values())}
+    asked = []
+
+    def net_mode(wid):
+        asked.append(wid)
+        return {"@5": "web", "@6": "none"}[wid]
+
+    with (
+        patch("chela.discovery.get_all_windows", return_value=dict(live)),
+        patch("chela.dispatcher.list_runs", return_value=[]),
+        patch("chela.agent_manager.session_status_map",
+              return_value={"by_pid": {p: "idle" for p in pids.values()}, "cwd_by_pid": {}}),
+        patch("chela.agent_manager.claude_pid", side_effect=lambda wid: pids.get(wid)),
+        patch("chela.agent_manager.window_type", return_value="claude"),
+        patch("chela.scheduler.list_tasks", return_value=[]),
+        patch("chela.transcripts.agent_transcript_summary",
+              return_value={"recap": None, "recap_ts": None, "pr": None, "ai_title": None}),
+        patch("chela.messenger.capture_pane", return_value=""),
+        patch("chela.inbox.is_done", return_value=False),
+        patch.object(sb, "window_net_mode", side_effect=net_mode),
+    ):
+        rows = {a["window_id"]: a for a in dash.app.test_client().get("/api/agents").get_json()}
+    assert rows["@5"]["share_net"] == "web"
+    assert rows["@6"]["share_net"] == "none"
+    assert rows["@1"]["share_net"] is None
+    assert "@1" not in asked
 
 
 def test_preflight_requires_the_browser_image_only_for_web(monkeypatch, tmp_path):
@@ -633,12 +743,52 @@ def _web_sidecar_other_session(info, net, web):
     web["Config"]["Labels"][sb.LABEL] = "ffffffffffff"
 
 
+def _web_sidecar_script_writable(info, net, web):
+    web["Mounts"][0]["RW"] = True
+
+
+def _web_sidecar_script_other_source(info, net, web):
+    web["Mounts"][0]["Source"] = "/tmp/evil_proxy.py"
+
+
+def _web_sidecar_log_elsewhere(info, net, web):
+    web["Mounts"][1]["Source"] = os.path.expanduser("~/.ssh")
+
+
+def _web_sidecar_caps_kept(info, net, web):
+    web["HostConfig"]["CapDrop"] = None
+
+
+def _web_sidecar_caps_partly_dropped(info, net, web):
+    web["HostConfig"]["CapDrop"] = ["NET_RAW"]
+
+
+def _web_sidecar_cap_added(info, net, web):
+    web["HostConfig"]["CapAdd"] = ["NET_ADMIN"]
+
+
+def _web_sidecar_new_privileges(info, net, web):
+    web["HostConfig"]["SecurityOpt"] = []
+
+
+def _web_sidecar_other_user(info, net, web):
+    web["Config"]["User"] = "0:0"
+
+
+def _web_sidecar_not_web_label(info, net, web):
+    web["Config"]["Labels"][sb.NET_LABEL] = "none"
+
+
 @pytest.mark.parametrize("flip", [_web_net_not_internal, _web_net_host_address,
                                   _web_guest_extra_network, _web_guest_no_proxy_env,
                                   _web_guest_proxy_elsewhere, _web_sidecar_missing_member,
                                   _web_sidecar_privileged, _web_sidecar_docker_sock,
                                   _web_sidecar_other_cmd, _web_sidecar_writable_root,
-                                  _web_sidecar_other_session])
+                                  _web_sidecar_other_session, _web_sidecar_script_writable,
+                                  _web_sidecar_script_other_source, _web_sidecar_log_elsewhere,
+                                  _web_sidecar_caps_kept, _web_sidecar_caps_partly_dropped,
+                                  _web_sidecar_cap_added, _web_sidecar_new_privileges,
+                                  _web_sidecar_other_user, _web_sidecar_not_web_label])
 def test_each_web_session_breakage_fails(flip):
     info, net, web = _guest("web"), _network("web"), _web_sidecar()
     assert _verify(info, net, "web", web) is None        # negative control
