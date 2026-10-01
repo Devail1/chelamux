@@ -12,6 +12,13 @@
 //     typed), never a silent no-op;
 //   - an empty clipboard says so on the button and posts nothing.
 //
+// CMX-428 (iPhone Safari showed "Empty" over a full clipboard):
+//   - ONE clipboard call per tap: a readText() that throws once read() ran (iOS's
+//     one-read-per-activation rule) is never reached; read()'s items are pasted;
+//   - a refused read() says "Denied" and does NOT retry through readText();
+//   - text/html-only and text/uri-list-only clipboards (what iOS hands over for rich
+//     text and links) deliver their text, not "Empty".
+//
 // Run: node --test tests/keybar_paste.test.mjs (pytest runs it via tests/test_js_suites.py).
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -113,10 +120,75 @@ test('⭐ tapping Paste with text via clipboard.read() delivers it to /api/term/
     assert.deepEqual(pastes(), [{ agent: '@1', text: 'ls -la' }]);
 });
 
-test('a refused clipboard.read() falls back to readText()', async () => {
-    setClipboard({ read: async () => { throw new Error('NotAllowedError'); }, readText: async () => 'fallback' });
+// iOS WebKit: the tap's activation covers ONE clipboard read. This stub's readText()
+// throws once read() has run, exactly like the second read on a real iPhone.
+function oneReadClipboard(items) {
+    const state = { readCalled: false, readTextCalls: 0 };
+    setClipboard({
+        read: async () => { state.readCalled = true; return items; },
+        readText: async () => {
+            state.readTextCalls++;
+            if (state.readCalled) throw new Error('NotAllowedError: activation already consumed');
+            return '';
+        },
+    });
+    return state;
+}
+
+const item = (type, data) => ({ types: [type], getType: async () => new Blob([data], { type }) });
+
+test('a refused clipboard.read() says Denied and never retries via readText()', async () => {
+    let readTextCalls = 0;
+    setClipboard({
+        read: async () => { throw new Error('NotAllowedError'); },
+        readText: async () => { readTextCalls++; return 'second read'; },
+    });
     await window.chela.termPaste(btn());
-    assert.deepEqual(pastes(), [{ agent: '@1', text: 'fallback' }]);
+    assert.deepEqual(calls, []);
+    assert.equal(readTextCalls, 0);
+    assert.equal(btn().textContent, 'Denied');
+});
+
+test('ONE clipboard call per tap: read()\'s items paste, readText() is never touched', async () => {
+    const state = oneReadClipboard([item('text/uri-list', 'https://example.com/one-read')]);
+    await window.chela.termPaste(btn());
+    assert.deepEqual(pastes(), [{ agent: '@1', text: 'https://example.com/one-read' }]);
+    assert.equal(state.readTextCalls, 0);
+});
+
+test('a text/html-only clipboard delivers its plain text', async () => {
+    oneReadClipboard([item('text/html', '<b>hi</b>')]);
+    await window.chela.termPaste(btn());
+    assert.deepEqual(pastes(), [{ agent: '@1', text: 'hi' }]);
+});
+
+test('text/html is stripped, entity-decoded and whitespace-collapsed', async () => {
+    oneReadClipboard([item('text/html',
+        '<meta charset="utf-8"><style>p{color:red}</style><p>a  &amp;\n b</p><div>c&lt;d&gt;&nbsp;</div>')]);
+    await window.chela.termPaste(btn());
+    assert.deepEqual(pastes(), [{ agent: '@1', text: 'a & b\nc<d>' }]);
+});
+
+test('a text/uri-list clipboard delivers its first URL, skipping comments', async () => {
+    oneReadClipboard([item('text/uri-list', '# copied link\r\nhttps://example.com/a\r\nhttps://example.com/b')]);
+    await window.chela.termPaste(btn());
+    assert.deepEqual(pastes(), [{ agent: '@1', text: 'https://example.com/a' }]);
+});
+
+test('text/plain wins over text/html and text/uri-list', async () => {
+    oneReadClipboard([{
+        types: ['text/html', 'text/uri-list', 'text/plain'],
+        getType: async t => new Blob([{ 'text/html': '<i>rich</i>', 'text/uri-list': 'https://x', 'text/plain': 'plain' }[t]], { type: t }),
+    }]);
+    await window.chela.termPaste(btn());
+    assert.deepEqual(pastes(), [{ agent: '@1', text: 'plain' }]);
+});
+
+test('a read() with no usable entry says Empty and posts nothing', async () => {
+    oneReadClipboard([item('application/x-unknown', 'zzz'), item('text/html', '<img src=x>')]);
+    await window.chela.termPaste(btn());
+    assert.deepEqual(calls, []);
+    assert.equal(btn().textContent, 'Empty');
 });
 
 test('an image on the clipboard takes the image path and types its path', async () => {

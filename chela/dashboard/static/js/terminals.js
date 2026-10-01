@@ -278,9 +278,14 @@ async function termKey(key) { return termKeyFor($('#term-agent').value, key); }
 //
 // CMX-423: ONE clipboard.read() where it exists, like the in-pane Ctrl/Cmd+V shim. An
 // image (a screenshot is the usual phone clipboard) takes the image path
-// (/api/term/paste-image, then its path typed) so Claude attaches it; readText() alone
-// came back empty for it and the tap silently did nothing. readText() stays the
-// fallback (read() refused or absent). Every no-op now says why on the button.
+// (/api/term/paste-image, then its path typed) so Claude attaches it. Every no-op says
+// why on the button.
+//
+// CMX-428: exactly ONE clipboard call per tap — read() if it exists, else readText(),
+// never both. On iOS WebKit the tap's user activation covers a single read, so a
+// readText() after an awaited read() came back '' (or threw) and the button said
+// "Empty" over a full clipboard. iOS also often hands copied text over as
+// text/uri-list or text/html with no text/plain entry, so those are accepted too.
 function _pasteFlash(btn, label) {
     if (!btn) return;
     const orig = btn.dataset.label || btn.textContent;
@@ -308,32 +313,66 @@ async function _pasteImageTo(wid, blob, btn) {
     await _pasteTextTo(wid, j.path, btn);
 }
 
+// Plain text from a text/html clipboard entry: drop script/style, fold source
+// whitespace (HTML newlines are just spaces), break lines at <br> and block ends, strip tags, decode entities (a <textarea>'s innerHTML parses as RCDATA, so no
+// markup is ever instantiated), then collapse whitespace.
+function _htmlToText(html) {
+    const stripped = String(html)
+        .replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, '')
+        .replace(/\s+/g, ' ')
+        .replace(/<br\b[^>]*>|<\/(p|div|li|tr|h[1-6]|pre|blockquote)\s*>/gi, '\n')
+        .replace(/<[^>]*>/g, '');
+    const ta = document.createElement('textarea');
+    ta.innerHTML = stripped;
+    return ta.value.split('\n')
+        .map(l => l.replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .join('\n');
+}
+
+// text/uri-list: first line that is neither blank nor a '#' comment (RFC 2483).
+function _uriListToText(list) {
+    return String(list).split(/\r?\n/).map(l => l.trim()).find(l => l && l[0] !== '#') || '';
+}
+
+const _PASTE_TEXT_TYPES = [
+    ['text/plain', t => t],
+    ['text/uri-list', _uriListToText],
+    ['text/html', _htmlToText],
+];
+
+// Best text out of clipboard.read()'s items: text/plain, then text/uri-list, then
+// text/html. '' when none of them yields anything.
+async function _clipboardItemsText(items) {
+    for (const [type, conv] of _PASTE_TEXT_TYPES) {
+        for (const it of items) {
+            if ((it.types || []).indexOf(type) < 0) continue;
+            const text = conv(await (await it.getType(type)).text());
+            if (text) return text;
+        }
+    }
+    return '';
+}
+
 async function termPaste(btn) {
     const wid = $('#term-agent').value;
     const cb = navigator.clipboard;
     if (!wid) return;
     if (!cb || (!cb.read && !cb.readText)) { _pasteFlash(btn, 'No clipboard'); return; }
     try {
-        let items = null;
-        if (cb.read) {
-            try { items = await cb.read(); } catch (e) { items = null; }
+        if (!cb.read) {
+            let text = '';
+            try { text = await cb.readText(); } catch (e) { _pasteFlash(btn, 'Denied'); return; }
+            await _pasteTextTo(wid, text, btn);
+            return;
         }
-        if (items) {
-            for (const it of items) {
-                const t = (it.types || []).find(x => x.indexOf('image/') === 0);
-                if (t) { await _pasteImageTo(wid, await it.getType(t), btn); return; }
-            }
-            for (const it of items) {
-                if ((it.types || []).indexOf('text/plain') >= 0) {
-                    await _pasteTextTo(wid, await (await it.getType('text/plain')).text(), btn);
-                    return;
-                }
-            }
-            if (!cb.readText) { _pasteFlash(btn, 'Empty'); return; }
+        let items;
+        try { items = await cb.read(); } catch (e) { _pasteFlash(btn, 'Denied'); return; }
+        for (const it of items || []) {
+            const t = (it.types || []).find(x => x.indexOf('image/') === 0);
+            if (t) { await _pasteImageTo(wid, await it.getType(t), btn); return; }
         }
-        let text = '';
-        try { text = await cb.readText(); } catch (e) { _pasteFlash(btn, 'Denied'); return; }
-        await _pasteTextTo(wid, text, btn);
+        await _pasteTextTo(wid, await _clipboardItemsText(items || []), btn);
     } catch (e) { console.error('termPaste', e); _pasteFlash(btn, 'Failed'); }
 }
 
