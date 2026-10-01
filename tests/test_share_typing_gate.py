@@ -628,3 +628,159 @@ def test_share_route_arms_the_real_bridge(monkeypatch, real_bridges, typing_on):
     finally:
         dash._SHARED.clear()
         dash._share_info.clear()
+
+
+# --- 🕶️ CMX-416: a typing share's OUTPUT is gated on the same live check -------------
+#
+# Driven through the REAL ttyd pump (``Bridge._pump_ttyd_to_relay``) with a fake ttyd
+# socket that yields a scripted list of frames; a callable in the script runs between
+# frames (the swap). Nothing real is opened: the port map, the window size and the
+# websocket client are stubbed, and every relay send is captured.
+
+class _FakeTtyd:
+    def __init__(self, bridge, script):
+        self.bridge, self.script = bridge, list(script)
+
+    def send(self, data):
+        pass
+
+    def close(self):
+        pass
+
+    def receive(self, timeout=None):
+        while self.script:
+            item = self.script.pop(0)
+            if callable(item):
+                item()
+                continue
+            return item
+        self.bridge._stop.set()
+        raise ConnectionError("script exhausted")
+
+
+def _pump(monkeypatch, script, **kw):
+    """Run the real ttyd→relay pump over ``script``; returns (output payloads, CTL
+    payloads, revoked wids, bridge)."""
+    import simple_websocket
+    b, clock, _fwd, sent = _bridge(monkeypatch, **kw)
+    revoked = []
+    b._on_revoke = revoked.append
+    monkeypatch.setattr(cs, "_port_map", lambda: {"@9": 7681})
+    monkeypatch.setattr(cs, "_window_dims", lambda wid: (80, 24))
+    monkeypatch.setattr(cs, "RECONNECT_DELAY", 0)
+    monkeypatch.setattr(simple_websocket, "Client", lambda *a, **k: _FakeTtyd(b, script))
+    b._pump_ttyd_to_relay()
+    out = [pt for typ, pt in sent if typ == cs.e2e.T_OUTPUT]
+    ctl = [pt for typ, pt in sent if typ == cs.e2e.T_CTL]
+    return out, ctl, revoked, b, clock
+
+
+def _frame(text):
+    return b"0" + text.encode()
+
+
+def _swap_to_host_shell(sandbox):
+    def swap():
+        sandbox["argv"], sandbox["parent"], sandbox["kids"] = ["/bin/bash"], "tmux: server", []
+    return swap
+
+
+def test_typing_share_streams_normally_while_the_check_passes(monkeypatch, sandbox, typing_on):
+    """⭐ The case that must be ACCEPTED."""
+    out, ctl, revoked, b, _clock = _pump(
+        monkeypatch, [_frame("one"), _frame("two"), _frame("three")], allow_typing=True)
+    assert out == [b"one", b"two", b"three"]
+    assert not any(b'"ended"' in p for p in ctl) and revoked == []
+    assert b._sandbox_lost is None
+
+
+def test_process_swap_stops_output_before_the_next_frame(monkeypatch, sandbox, typing_on):
+    out, ctl, revoked, b, _clock = _pump(monkeypatch, [
+        _frame("sandbox$ "), _swap_to_host_shell(sandbox),
+        _frame("op@example.com eu-west-1 $ "), _frame("more host output"),
+    ], allow_typing=True)
+    assert out == [b"sandbox$ "]        # nothing produced after the swap reached the guest
+    ended = [p for p in ctl if b'"ended"' in p]
+    assert ended and cs.SANDBOX_LOST_REASON.encode() in ended[0]
+    assert revoked == ["@9"]            # the share itself ends
+    assert len(_events("share.sandbox_lost")) == 1
+
+
+def test_a_different_launcher_in_the_pane_also_stops_output(monkeypatch, sandbox, typing_on):
+    """The swap is caught by the pane's IDENTITY, not only its shape: a new, equally
+    well-formed launcher (new pane pid) is still not the session the share verified."""
+    def respawn():
+        monkeypatch.setattr(share_sandbox, "_pane_root", lambda wid: 5151)
+    out, _ctl, revoked, _b, _clock = _pump(
+        monkeypatch, [_frame("a"), respawn, _frame("b")], allow_typing=True)
+    assert out == [b"a"] and revoked == ["@9"]
+
+
+@pytest.mark.parametrize("unknown", ["unreadable_proc", "exception"])
+def test_an_unknown_check_stops_output_too(monkeypatch, sandbox, typing_on, unknown):
+    def flip():
+        if unknown == "unreadable_proc":
+            sandbox["proc_error"] = PermissionError("/proc/4242/cmdline")
+        else:
+            def boom(wid):
+                raise RuntimeError("tmux exploded")
+            monkeypatch.setattr(share_sandbox, "pane_identity", boom)
+    out, _ctl, revoked, b, _clock = _pump(
+        monkeypatch, [_frame("a"), flip, _frame("b"), _frame("c")], allow_typing=True)
+    assert out == [b"a"] and revoked == ["@9"]
+    assert b._sandbox_lost
+
+
+@pytest.mark.parametrize("bad_pane", ["host_shell", "exception"])
+def test_the_per_frame_pane_read_refuses_on_its_own(monkeypatch, sandbox, typing_on, bad_pane):
+    """The very first frame, before any identity is bound, with the (cached, slower) full
+    check still saying OK: the per-frame pane read alone must refuse — a bad shape and an
+    exception (UNKNOWN) both count as failed."""
+    monkeypatch.setattr(share_sandbox, "check_share_session", lambda wid: (True, ""))
+    if bad_pane == "host_shell":
+        sandbox["argv"], sandbox["parent"], sandbox["kids"] = ["/bin/bash"], "tmux: server", []
+    else:
+        def boom(wid):
+            raise RuntimeError("tmux exploded")
+        monkeypatch.setattr(share_sandbox, "pane_identity", boom)
+    out, _ctl, revoked, _b, _clock = _pump(
+        monkeypatch, [_frame("op@example.com $ ")], allow_typing=True)
+    assert out == [] and revoked == ["@9"]
+
+
+def test_a_failed_container_recheck_stops_output(monkeypatch, sandbox, typing_on):
+    clock_box = {}
+
+    def container_gone():
+        sandbox["inspect"] = "the sandbox container is not running"
+        clock_box["b"]._clock.t += cs.SANDBOX_RECHECK_INTERVAL + 0.01
+
+    real_bridge = cs.Bridge
+
+    def capture(*a, **k):
+        b = real_bridge(*a, **k)
+        clock_box["b"] = b
+        return b
+    monkeypatch.setattr(cs, "Bridge", capture)
+    out, _ctl, revoked, _b, _clock = _pump(
+        monkeypatch, [_frame("a"), container_gone, _frame("b")], allow_typing=True)
+    assert out == [b"a"] and revoked == ["@9"]
+
+
+def test_input_is_refused_once_the_sandbox_is_lost(monkeypatch, sandbox, typing_on):
+    out, _ctl, _revoked, b, _clock = _pump(
+        monkeypatch, [_frame("a"), _swap_to_host_shell(sandbox), _frame("b")], allow_typing=True)
+    sandbox["argv"], sandbox["parent"], sandbox["kids"] = _good_argv(), "tmux: server", ["docker"]
+    assert b._input_refusal(b"\x00" * cs.e2e.STREAM_ID_LEN) is not None
+
+
+def test_view_only_share_of_a_normal_window_streams_unchanged(monkeypatch, typing_on):
+    _not_sandboxed(monkeypatch)
+
+    def never(wid):
+        raise AssertionError("a view-only share must not run the sandbox check")
+    monkeypatch.setattr(share_sandbox, "pane_identity", never)
+    out, ctl, revoked, _b, _clock = _pump(
+        monkeypatch, [_frame("plain shell $ "), _frame("ls")])   # allow_typing defaults False
+    assert out == [b"plain shell $ ", b"ls"]
+    assert not any(b'"ended"' in p for p in ctl) and revoked == []
