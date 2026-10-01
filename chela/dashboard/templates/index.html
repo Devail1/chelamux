@@ -603,6 +603,10 @@
        and the phone "+" open this same #new-menu, so it is in both. -->
   <div class="popover-item" id="new-sandbox-item" title="A container that sees only the project — the only kind of window a share guest may type into"
        onclick="chela.hideNewMenu(); chela.newSandboxedSession()">Sandboxed session…</div>
+  <!-- CMX-418: the same container, opted in to web access (public hosts only, through a
+       filtering + rate-limited + logged egress proxy, with a headless browser). -->
+  <div class="popover-item" id="new-sandbox-web-item" title="A sandboxed session that may also read PUBLIC web pages — never your host or LAN; every request is logged"
+       onclick="chela.hideNewMenu(); chela.newSandboxedSession(true)">Sandboxed session · allow web access…</div>
   <div class="popover-item" id="new-shell-item" onclick="chela.hideNewMenu(); chela.newShellWindow()">Shell window</div>
 </div>
 

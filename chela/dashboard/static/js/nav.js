@@ -1975,15 +1975,23 @@ async function newShellWindow() {
 // (chela.share_sandbox) — the only kind of window a share guest may type into. Asks
 // for the project directory, pre-filled with the most recent launch target; the server
 // refuses $HOME, secret dirs, or a host without docker/image/token, and says why.
-async function newSandboxedSession() {
+// `web` (CMX-418, the "· allow web access…" entry) opts THIS session into web access:
+// public hosts only, through the filtering egress proxy — confirmed before launch.
+async function newSandboxedSession(web) {
+    web = web === true;
     const recent = (_launcherData.favorites || []).concat(_launcherData.recent || []);
     const guess = recent.length ? recent[0].path : '';
-    const cwd = (window.prompt('Sandboxed session — project directory (the guest sees ONLY this):', guess) || '').trim();
+    const label = web ? 'Sandboxed session with WEB ACCESS' : 'Sandboxed session';
+    const cwd = (window.prompt(label + ' — project directory (the guest sees ONLY this):', guess) || '').trim();
     if (!cwd) return;
+    if (web && !window.confirm('Allow web access for this session?\n\n'
+            + 'It can fetch any PUBLIC web page (never your host or LAN), rate-limited, and every '
+            + 'request is logged. A web page can also make it SEND workspace contents to a public '
+            + 'site, so keep only the guest\'s own material in ' + cwd + '.')) return;
     try {
         const res = await api('/api/agents/spawn-sandboxed', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cwd }),
+            body: JSON.stringify(web ? { cwd, web: true } : { cwd }),
         });
         if (!res || !res.ok) { alert('Sandboxed session refused: ' + ((res && res.error) || 'unknown error')); return; }
         setAgentsCache([]);

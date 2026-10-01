@@ -1002,12 +1002,15 @@ def cmd_share_session(args) -> None:
     if cwd is None:
         print(f"no such project directory: {args.project}", file=sys.stderr)
         sys.exit(1)
-    from chela import spawn
-    result = spawn.spawn_sandbox_window(cwd)
+    from chela import share_sandbox, spawn
+    net = share_sandbox.NET_WEB if getattr(args, "web", False) else share_sandbox.NET_NONE
+    result = spawn.spawn_sandbox_window(cwd, net=net)
     if not result.ok:
         print(f"refusing to start a sandboxed session: {result.error}", file=sys.stderr)
         sys.exit(1)
-    print(f"sandboxed session {result.name} ({result.wid or 'no id'}) in {result.cwd}")
+    print(f"sandboxed session {result.name} ({result.wid or 'no id'}) in {result.cwd}"
+          + (" — 🌐 web access on (public hosts only, rate-limited, every request logged)"
+             if net == share_sandbox.NET_WEB else ""))
     print("share it from the dashboard; guest typing also needs Settings → Collaboration → "
           "Guest typing")
 
@@ -2721,6 +2724,11 @@ def main() -> None:
         "share-session",
         help="Open a sandboxed session (container) a share guest may type into")
     p_ss.add_argument("project", help="project directory, or a name under CHELA_PROJECTS_DIR")
+    p_ss.add_argument(
+        "--web", action="store_true",
+        help="opt in to web access: public HTTP(S) hosts only, through a filtering, "
+             "rate-limited, logged egress proxy, plus a headless browser in the guest "
+             "(see docs/SHARE_SANDBOX.md)")
 
     p_peek = sub.add_parser(
         "peek", help="Filtered status view of a window (status + recap + cwd + health)")
