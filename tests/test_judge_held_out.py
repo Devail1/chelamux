@@ -546,8 +546,9 @@ def test_judge_run_passes_a_NON_default_consistency_sample_on_BOTH_worktree_path
     assert judge.CONSISTENCY_SAMPLE != 5
     wt = judge.judge_worktree_path(workflow.load_workflow(repo / "WORKFLOW.md"), task_id)
     if reprovision:
-        import shutil
-        shutil.rmtree(wt)
+        # Rename, never rmtree: the fixture's `git commit` can leave a detached auto-maintenance
+        # child holding `.git/maintenance.lock`, and rmtree racing it went red on CI (#558).
+        wt.rename(tmp_path / f"gone-{task_id}")
     with dispatcher._db() as conn:
         _run_row(conn, repo, task_id)
     exp_file = tmp_path / "experiments.json"
@@ -566,6 +567,79 @@ def test_judge_run_passes_a_NON_default_consistency_sample_on_BOTH_worktree_path
     assert bool(reprov_calls) is reprovision       # the branch under test really ran
     assert len(calls) == 1
     assert calls[0]["consistency_sample"] == 5
+
+
+@pytest.mark.parametrize("knob", [False, True, None], ids=["off", "on", "unset"])
+@pytest.mark.parametrize("reprovision", [False, True], ids=["worktree-present", "reprovisioned"])
+def test_judge_run_forwards_the_select_tests_kill_switch_on_BOTH_worktree_paths(
+    tmp_path, reprovision, knob,
+):
+    """⚡ CMX-407: ``judge.select_tests`` is the operator's kill switch for per-mutation
+    selection, and `judge_run` must hand `run_experiments` exactly what WORKFLOW.md says, on
+    both branches that call it. Round 1's survivor hardcoded ``select_tests=True`` at a call
+    site: nothing drove `judge_run` with the switch OFF, so the default hid it (DEFEAT_SHAPES
+    #2). ``off`` catches a hardcoded True, ``on``/``unset`` catch a hardcoded False."""
+    task_id = f"ho-sel-{int(reprovision)}-{knob}"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    if knob is not None:
+        _set_judge_knobs(repo, select_tests=knob)
+    wt = judge.judge_worktree_path(workflow.load_workflow(repo / "WORKFLOW.md"), task_id)
+    if reprovision:
+        # Rename, never rmtree: the fixture's `git commit` can leave a detached auto-maintenance
+        # child holding `.git/maintenance.lock`, and rmtree racing it went red on CI (#558).
+        wt.rename(tmp_path / f"gone-{task_id}")
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_glyph()]}))
+    calls: list[dict] = []
+    reprov_calls: list[tuple] = []
+
+    def fake_reprovision(*a):
+        reprov_calls.append(a)
+        return ""
+
+    with patch.object(judge, "run_experiments", side_effect=_spy_run_experiments(calls)), \
+         patch.object(judge, "_reprovision_worktree", side_effect=fake_reprovision), \
+         patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        judge.judge_run(task_id, exp_file, cleanup=False)
+    assert bool(reprov_calls) is reprovision
+    assert len(calls) == 1
+    assert calls[0]["select_tests"] is (knob is not False)
+
+
+@pytest.mark.parametrize("minutes", [7, 23])
+def test_judge_run_reports_the_whole_judges_wall_clock_in_the_verdict(tmp_path, minutes):
+    """⚡ CMX-407 GUARD, end to end: `judge_run` turns the run row's ``judge_started_at`` into
+    ``total_seconds`` — in its result AND in the verdict header posted on the PR. Rendering was
+    only tested off a hand-built Report, so a call site that dropped the value stayed green.
+    Two start times, so no constant can stand in for the measurement."""
+    from datetime import datetime, timedelta, timezone
+
+    task_id = f"ho-total-{minutes}"
+    repo = _workflow_repo(tmp_path, task_id, FAKE_GUARD_TEST)
+    started = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id, judge_started_at=started)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_glyph()]}))
+
+    def spy(worktree, test_cmd, raw, **kw):
+        report = _one_survivor_report()
+        report.battery_seconds = 65
+        return report
+
+    posted: list[str] = []
+    with patch.object(judge, "run_experiments", side_effect=spy), \
+         patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run(task_id, exp_file, cleanup=False)
+
+    assert result["ok"], result
+    assert minutes * 60 <= result["total_seconds"] < minutes * 60 + 60
+    assert result["battery_seconds"] == 65
+    assert any(f"judge took **{minutes}m " in b and "mutation battery 1m 05s" in b
+               for b in posted), posted
 
 
 def test_a_STALE_head_round_is_recorded_stale_privately_and_metrics_skip_it(tmp_path):
