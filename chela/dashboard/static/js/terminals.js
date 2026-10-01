@@ -7,6 +7,7 @@ import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChi
 // Side-effect only: registers window.chela.openDiffModal/closeDiffModal for the
 // "Files" chip below (_ctxBarHTML) and the #modal-diff close button in index.html.
 import './diffpanel.js';
+import { windowIdQuery } from './windowid.js';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -271,22 +272,69 @@ async function termKey(key) { return termKeyFor($('#term-agent').value, key); }
 
 // Paste the device clipboard into the active pane. xterm.js can't surface iOS's
 // native "Paste" callout inside its hidden textarea, so phones had no reliable
-// paste path; this reads the clipboard on tap (the gesture unlocks readText() on
+// paste path; this reads the clipboard on tap (the gesture unlocks the read on
 // iOS) and ships it to /api/term/paste, which delivers a bracketed paste at the
-// tmux layer. No-op where the Clipboard API is unavailable or permission denied.
+// tmux layer.
+//
+// CMX-423: ONE clipboard.read() where it exists, like the in-pane Ctrl/Cmd+V shim. An
+// image (a screenshot is the usual phone clipboard) takes the image path
+// (/api/term/paste-image, then its path typed) so Claude attaches it; readText() alone
+// came back empty for it and the tap silently did nothing. readText() stays the
+// fallback (read() refused or absent). Every no-op now says why on the button.
+function _pasteFlash(btn, label) {
+    if (!btn) return;
+    const orig = btn.dataset.label || btn.textContent;
+    btn.dataset.label = orig;
+    btn.textContent = label;
+    clearTimeout(btn._pasteFlash);
+    btn._pasteFlash = setTimeout(() => { btn.textContent = orig; }, 1500);
+}
+
+async function _pasteTextTo(wid, text, btn) {
+    if (!text) { _pasteFlash(btn, 'Empty'); return; }
+    await api('/api/term/paste', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent: wid, text }),
+    });
+}
+
+async function _pasteImageTo(wid, blob, btn) {
+    const fd = new FormData();
+    fd.append('agent', wid);
+    fd.append('image', blob, blob.name || 'paste');
+    const j = await api('/api/term/paste-image', { method: 'POST', body: fd, credentials: 'same-origin' });
+    if (!j || !j.path) { _pasteFlash(btn, 'Failed'); return; }
+    await _pasteTextTo(wid, j.path, btn);
+}
+
 async function termPaste(btn) {
     const wid = $('#term-agent').value;
-    if (!wid || !navigator.clipboard || !navigator.clipboard.readText) return;
-    let text = '';
-    try { text = await navigator.clipboard.readText(); } catch (e) { return; }
-    if (!text) return;
+    const cb = navigator.clipboard;
+    if (!wid) return;
+    if (!cb || (!cb.read && !cb.readText)) { _pasteFlash(btn, 'No clipboard'); return; }
     try {
-        await api('/api/term/paste', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ agent: wid, text }),
-        });
-    } catch (e) { console.error('termPaste', e); }
+        let items = null;
+        if (cb.read) {
+            try { items = await cb.read(); } catch (e) { items = null; }
+        }
+        if (items) {
+            for (const it of items) {
+                const t = (it.types || []).find(x => x.indexOf('image/') === 0);
+                if (t) { await _pasteImageTo(wid, await it.getType(t), btn); return; }
+            }
+            for (const it of items) {
+                if ((it.types || []).indexOf('text/plain') >= 0) {
+                    await _pasteTextTo(wid, await (await it.getType('text/plain')).text(), btn);
+                    return;
+                }
+            }
+            if (!cb.readText) { _pasteFlash(btn, 'Empty'); return; }
+        }
+        let text = '';
+        try { text = await cb.readText(); } catch (e) { _pasteFlash(btn, 'Denied'); return; }
+        await _pasteTextTo(wid, text, btn);
+    } catch (e) { console.error('termPaste', e); _pasteFlash(btn, 'Failed'); }
 }
 
 function termScrollToggle() {
@@ -518,6 +566,21 @@ function _seedSharedFromAgents(agents) {
         _updateShareBtns(a.window_id);
     });
     _renderSharesIndicator();
+    _syncOwnerPresenceFromAgents(agents);
+}
+
+// Re-key (or drop) owner presence when a share was stopped / re-created — possibly
+// from ANOTHER page, so this page never ran _stopShare/_mintShare (CMX-427). Only
+// wids that already have a presence session are touched; the module is a no-op for
+// an unchanged share_epoch, so this costs nothing per poll on a steady share.
+function _syncOwnerPresenceFromAgents(agents) {
+    if (!_ownerPresenceP) return;
+    _ownerPresenceP.then(m => {
+        if (!m || !m.syncOwnerPresence) return;
+        (agents || []).forEach(a => {
+            if (a.window_id) m.syncOwnerPresence(a.window_id, !!a.shared, a.share_epoch);
+        });
+    });
 }
 
 // --- global active-shares indicator + kill-switch --------------------------
@@ -530,25 +593,31 @@ function _seedSharedFromAgents(agents) {
 // server truth (/api/term/shared) so the kill list is always accurate at the
 // moment it matters.
 function _renderSharesIndicator() {
-    const btn = document.getElementById('btn-shares');
-    if (!btn) return;
+    // Two copies of one pill (CMX-422): #btn-shares floats in .safety-float on
+    // every tab; #term-shares sits IN the Wall's toolbar row, in normal flow left
+    // of "+ New shell", and the stylesheet hides the floating copy only while the
+    // Wall shows the in-row one — the float used to be drawn on top of the button.
+    const btns = ['btn-shares', 'term-shares'].map(id => document.getElementById(id)).filter(Boolean);
+    if (!btns.length) return;
     const n = _sharedWids.size;
-    btn.hidden = n === 0;
     // The most permissive live mode wins the pill (CMX-403): 👁 view only · ⌨ typing
     // (sandboxed) · a red UNSANDBOXED banner while a trusted-peer override is armed.
     const modes = [..._sharedWids].map(w => _shareModes.get(w) || 'view');
     const unsafe = modes.includes('unsandboxed');
     const typing = modes.includes('typing');
-    btn.classList.toggle('si-unsandboxed', unsafe);
-    btn.dataset.mode = unsafe ? 'unsandboxed' : typing ? 'typing' : 'view';
-    if (n > 0) {
-        const txt = btn.querySelector('.si-text');
-        const icon = typing || unsafe ? '⌨' : '👁';
-        if (txt) txt.textContent = unsafe ? '⚠ UNSANDBOXED — guest can type'
-            : icon + ' ' + n + ' sharing';
-        btn.setAttribute('aria-label', (unsafe ? 'UNSANDBOXED — a guest can type into a real shell. ' : '')
-            + n + ' active share' + (n === 1 ? '' : 's') + (typing || unsafe ? ' (typing allowed)' : ' (view only)')
-            + ' — tap to manage or stop');
+    for (const btn of btns) {
+        btn.hidden = n === 0;
+        btn.classList.toggle('si-unsandboxed', unsafe);
+        btn.dataset.mode = unsafe ? 'unsandboxed' : typing ? 'typing' : 'view';
+        if (n > 0) {
+            const txt = btn.querySelector('.si-text');
+            const icon = typing || unsafe ? '⌨' : '👁';
+            if (txt) txt.textContent = unsafe ? '⚠ UNSANDBOXED — guest can type'
+                : icon + ' ' + n + ' sharing';
+            btn.setAttribute('aria-label', (unsafe ? 'UNSANDBOXED — a guest can type into a real shell. ' : '')
+                + n + ' active share' + (n === 1 ? '' : 's') + (typing || unsafe ? ' (typing allowed)' : ' (view only)')
+                + ' — tap to manage or stop');
+        }
     }
     // Keep an open sheet in sync with the live set (e.g. the reaper stopped one).
     if (document.getElementById('shares-sheet-backdrop')) _buildSharesSheet();
@@ -792,7 +861,7 @@ async function shareBtnClick(btn, wid) {
     try { info = (await api('/api/term/' + encodeURIComponent(wid) + '/share-info')) || {}; } catch (_) {}
     if (info && info.pairing_code) {
         _sharedWids.add(wid); _updateShareBtns(wid); _renderSharesIndicator();
-        _ownerPresence().then(m => m && m.startOwnerPresence(wid, info.join_url, info.pairing_code));
+        _ownerPresence().then(m => m && m.startOwnerPresence(wid, info.join_url, info.pairing_code, info.share_epoch));
         // Never re-mint — but point the sheet at THIS share, so its mode and the
         // control to change it are what you see (CMX-421).
         openSharesSheet(wid);
@@ -896,7 +965,7 @@ async function _mintShare(btn, wid, mode, confirm) {
     if (!resp || !resp.ok) { _termShareToast(btn, (resp && resp.error) || 'Share failed'); return; }
     _sharedWids.add(wid);
     _shareModes.set(wid, resp.mode || 'view');
-    _ownerPresence().then(m => m && m.startOwnerPresence(wid, resp.join_url, resp.pairing_code));
+    _ownerPresence().then(m => m && m.startOwnerPresence(wid, resp.join_url, resp.pairing_code, resp.share_epoch));
     _reloadPaneFrame(wid);
     _updateShareBtns(wid);
     _renderSharesIndicator();
@@ -2526,7 +2595,16 @@ function _ctxBarHTML(wid, draggable) {
     const widArg = escHtml(wid).replace(/'/g, "\\'");
     const filesChip = `<button type="button" class="gs-files" title="Changed files"
       onclick="event.stopPropagation(); chela.openDiffModal('${widArg}')">${lucideIcon('git-compare', 12)}</button>`;
+    // CMX-417: the pane's tmux window id (`@N`) — the address the orchestrator,
+    // `chela peek @N` and peer messages use — leads the bar on EVERY surface.
+    // Static, like the Files chip: the bar is built per wid, so no poll writes
+    // it. A <button> so it punches through the bar's `pointer-events: none`
+    // (see .gs-wid) and takes a click: copy to the clipboard + a "copied" toast.
+    const widChip = windowIdQuery(wid)
+        ? `<button type="button" class="gs-wid" data-wid="${attrEsc(wid)}" title="tmux window ${attrEsc(wid)} — click to copy"
+      onclick="event.stopPropagation(); chela.copyWindowId(this)">${escHtml(wid)}</button>` : '';
     return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —">
+      ${widChip}
       ${modelChip}
       ${meta}
       <span class="gs-branch" hidden></span>
@@ -2535,6 +2613,47 @@ function _ctxBarHTML(wid, draggable) {
       ${idxNum}
       <i class="term-ctx-fill"></i>
     </div>`;
+}
+
+// CMX-417: click on a footer's `@N` chip. The clipboard API needs a secure
+// context; on a plain-http dashboard fall back to a selected <textarea> +
+// execCommand('copy'), so the click still copies rather than silently not.
+function copyWindowId(btn) {
+    const wid = btn && btn.dataset.wid;
+    if (!wid) return;
+    const done = ok => _widToast(btn, ok ? `Copied ${wid}` : `Copy failed — ${wid}`);
+    const legacy = () => {
+        const ta = document.createElement('textarea');
+        ta.value = wid;
+        ta.setAttribute('readonly', '');
+        ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+        document.body.appendChild(ta);
+        ta.select();
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { /* unsupported */ }
+        ta.remove();
+        done(ok);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(wid).then(() => done(true), legacy);
+    } else {
+        legacy();
+    }
+}
+
+// The brief "copied" bubble, anchored just ABOVE the footer chip (the footer
+// sits on the pane's bottom edge, so .term-share-toast's below-the-anchor
+// placement would fall off the tile).
+function _widToast(btn, msg) {
+    const bar = btn.closest('.term-ctx-bar');
+    if (!bar) return;
+    bar.querySelectorAll('.gs-wid-toast').forEach(t => t.remove());
+    const t = document.createElement('div');
+    t.className = 'gs-wid-toast';
+    t.setAttribute('role', 'status');
+    t.textContent = msg;
+    bar.appendChild(t);
+    setTimeout(() => t.remove(), 1500);
 }
 
 function buildWall(wids) {
@@ -3721,4 +3840,4 @@ export { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, _absorbFreshTermin
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, termScrollToggle, toggleDockChip, toggleGridRow, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, copyWindowId, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, termScrollToggle, toggleDockChip, toggleGridRow, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });

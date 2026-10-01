@@ -7,7 +7,7 @@
 // tests/test_js_suites.py)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runStatusBadgeClass, RUN_STATUSES, UNKNOWN_BADGE } from '../chela/dashboard/static/js/runstate.js';
+import { runCardNote, runStatusBadgeClass, RUN_STATUSES, UNKNOWN_BADGE } from '../chela/dashboard/static/js/runstate.js';
 
 test('needs_human is the LOUDEST badge — never the unknown-status grey', () => {
   const cls = runStatusBadgeClass('needs_human');
@@ -45,4 +45,26 @@ test('closed (CMX-265, a PR closed without merging) is NOT badge-done', () => {
 test('an unknown status still renders (grey), and never throws', () => {
   assert.equal(runStatusBadgeClass('who_knows'), UNKNOWN_BADGE);
   assert.equal(runStatusBadgeClass(undefined), UNKNOWN_BADGE);
+});
+
+// --- 🗂️✖️ CMX-406 — runCardNote: a hand-closed run's card reads "Closed — <reason>" ---
+
+test('runCardNote: a closed run with a reason shows the reason, not its last_error', () => {
+  assert.deepEqual(
+    runCardNote({ status: 'closed', close_reason: 'superseded by cmx-403',
+                  last_error: 'tmux window disappeared' }),
+    { text: 'Closed — superseded by cmx-403', closed: true });
+});
+
+test('runCardNote: a failed run (or a reason on a non-closed row) keeps its error', () => {
+  assert.deepEqual(runCardNote({ status: 'failed', last_error: 'boom' }),
+                   { text: 'boom', closed: false });
+  assert.deepEqual(runCardNote({ status: 'failed', close_reason: 'x', last_error: 'boom' }),
+                   { text: 'boom', closed: false });
+});
+
+test('runCardNote: a reconcile-closed run (no reason) falls back; nothing → null', () => {
+  assert.deepEqual(runCardNote({ status: 'closed', close_reason: null, last_error: 'e' }),
+                   { text: 'e', closed: false });
+  assert.equal(runCardNote({ status: 'done' }), null);
 });

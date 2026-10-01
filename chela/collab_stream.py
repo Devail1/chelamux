@@ -52,7 +52,16 @@ every decrypted T_INPUT (``Bridge._input_refusal``):
 The one exception is the trusted-peer UNSANDBOXED override: an explicit, per-share,
 time-boxed grant bound to ONE joiner stream id, audited in the event log, that skips only
 the sandbox check (the setting still gates it). Refused input is dropped and the guest
-gets one rate-limited T_CTL notice. Allowed input is still capped by a token bucket. A
+gets one rate-limited T_CTL notice.
+
+🕶️ A typing share's OUTPUT is gated too (CMX-416, ``Bridge._output_refusal``): it claimed
+to show a sandbox, so every ttyd OUTPUT frame is held until the pane still verifies — the
+pane's identity (tmux pane pid + launcher shape, read per frame) must be the one first
+seen, and the full container check must pass (re-run every SANDBOX_RECHECK_INTERVAL). The
+first failed or UNKNOWN verdict drops that frame and ends the share with a reason the guest
+sees. View-only shares never claimed a sandbox and stream unchanged.
+
+Allowed input is still capped by a token bucket. A
 flood of hellos can't spam ttyd reattaches (rate-limited by REATTACH_DEBOUNCE).
 
 Runs standalone for the spike::  python -m chela.collab_stream <wid>
@@ -105,6 +114,9 @@ DEATH_GRACE = 8.0             # s the wid may be absent before we fail closed
 SANDBOX_RECHECK_INTERVAL = 2.0  # s
 # At most one "view only" notice per this interval, however fast the guest types.
 VIEW_ONLY_NOTICE_INTERVAL = 10.0  # s
+
+# What the guest is told when a typing share ends because its pane stopped verifying.
+SANDBOX_LOST_REASON = "the session stopped being a verified sandbox"
 
 # Share access modes, as reported to the dashboard (share pill 👁 / ⌨ / UNSANDBOXED).
 MODE_VIEW = "view"
@@ -186,6 +198,10 @@ class Bridge:
         self._sandbox_verdict: tuple[bool, str] = (False, "not checked yet")
         self._sandbox_checked_at: float | None = None
         self._last_notice = float("-inf")
+        # 🕶️ Output gate (CMX-416): the pane identity bound on the first verified frame,
+        # and why the session stopped verifying (set once; the share then ends).
+        self._output_identity: tuple | None = None
+        self._sandbox_lost: str | None = None
         # Trusted-peer UNSANDBOXED override: None, or {"until": monotonic deadline,
         # "joiner": bound stream id (None until the first hello/input), "audit": the
         # granted-event payload}. Guarded by _policy_lock.
@@ -295,6 +311,54 @@ class Bridge:
             self._sandbox_checked_at = now
         return self._sandbox_verdict
 
+    def _output_refusal(self) -> str | None:
+        """None when the next OUTPUT frame may reach the guest; otherwise why not. Only a
+        share created with typing allowed is gated — it claimed to show a verified sandbox.
+        Every call re-reads the pane's identity (cheap: one tmux query + /proc), so a
+        process swapped into the pane is caught before its first frame is relayed: tmux
+        records the new pane pid before the new process can write anything. The full
+        container check rides ``_sandbox_ok`` (every SANDBOX_RECHECK_INTERVAL). Any
+        exception or unreadable state is a refusal — unknown never reads as OK."""
+        if not self.allow_typing:
+            return None
+        if self._sandbox_lost is not None:
+            return self._sandbox_lost
+        try:
+            ident = share_sandbox.pane_identity(self.wid)
+        except Exception:  # noqa: BLE001 — fail closed
+            ident = "the sandbox could not be verified"
+        if isinstance(ident, str):
+            return ident
+        if self._output_identity is None:
+            self._output_identity = ident
+        elif ident != self._output_identity:
+            return "the pane's process changed"
+        ok, why = self._sandbox_ok()
+        return None if ok else (why or "the sandbox could not be verified")
+
+    def _relay_output(self, payload: bytes) -> bool:
+        """Relay one ttyd OUTPUT payload, unless the output gate refuses — then the frame
+        is DROPPED and the share ends. False means the bridge has stopped."""
+        why = self._output_refusal()
+        if why is not None:
+            self._end_unverified(why)
+            return False
+        self._seal_send(e2e.T_OUTPUT, payload)
+        return True
+
+    def _end_unverified(self, why: str) -> None:
+        """A typing share's pane stopped verifying as a sandbox: no further frame, then
+        end the share with a reason the guest sees. Idempotent."""
+        if self._sandbox_lost is not None and self._stop.is_set():
+            return
+        self._sandbox_lost = why
+        log.warning("collab_stream: %s stopped verifying as a sandbox (%s) — ending the share",
+                    self.wid, why)
+        event_log.append("share.sandbox_lost",
+                         f"share of {self.wid} ended: the session stopped being a verified "
+                         f"sandbox ({why})", {"wid": self.wid, "reason": why}, wid=self.wid)
+        self._fail_closed(f"sandbox lost: {why}", guest_reason=SANDBOX_LOST_REASON)
+
     def _input_refusal(self, stream_id: bytes) -> str | None:
         """None when this joiner's keystrokes may reach the pane; otherwise the notice to
         send them. Order matters: the setting gates EVERYTHING, the override included."""
@@ -311,6 +375,8 @@ class Bridge:
                 return "View only — typing is limited to one paired guest."
         if not self.allow_typing:
             return "View only — this share does not allow typing."
+        if self._sandbox_lost is not None:
+            return "View only — " + SANDBOX_LOST_REASON + "."
         ok, _why = self._sandbox_ok()
         return None if ok else "View only — the host could not verify the sandboxed session."
 
@@ -437,14 +503,21 @@ class Bridge:
                         next_resize_check = now + RESIZE_POLL_INTERVAL
                         self._maybe_resize()
                     if msg is None:
-                        continue   # idle receive timeout, NOT a close — stay connected
-                                   # (a real ttyd close raises → caught below → reconnect)
+                        # idle receive timeout, NOT a close — stay connected (a real
+                        # ttyd close raises → caught below → reconnect). A typing share
+                        # still re-verifies while idle, so a swapped pane ends the share
+                        # even before it prints anything.
+                        why = self._output_refusal()
+                        if why is not None:
+                            self._end_unverified(why)
+                            return
+                        continue
                     if isinstance(msg, str):
                         msg = msg.encode("utf-8", "replace")
                     if not msg:
                         continue
-                    if msg[0] == OUTPUT:
-                        self._seal_send(e2e.T_OUTPUT, bytes(msg[1:]))
+                    if msg[0] == OUTPUT and not self._relay_output(bytes(msg[1:])):
+                        return   # 🕶️ gate refused: frame dropped, share ended
                     # SET_WINDOW_TITLE / SET_PREFERENCES intentionally ignored.
             except Exception:
                 pass
@@ -558,11 +631,11 @@ class Bridge:
         log.info("collab_stream: bridge up for %s → room %s", self.wid, self.room)
         return self
 
-    def _fail_closed(self, reason: str) -> None:
+    def _fail_closed(self, reason: str, *, guest_reason: str | None = None) -> None:
         """Session died — stop the bridge and fire the revoke hook exactly once,
         so the share can't outlive the terminal it points at."""
         log.info("collab_stream: bridge for %s failing closed (%s) — revoking", self.wid, reason)
-        self.stop()
+        self.stop(guest_reason=guest_reason)
         cb, self._on_revoke = self._on_revoke, None
         if cb:
             try:
@@ -570,7 +643,7 @@ class Bridge:
             except Exception:
                 log.exception("collab_stream: on_revoke hook failed for %s", self.wid)
 
-    def stop(self) -> None:
+    def stop(self, *, guest_reason: str | None = None) -> None:
         # The share is going away, so an armed UNSANDBOXED override ends with it — audited
         # (the #btn-shares kill switch lands here via app.py _revoke_share).
         self.revoke_unsandboxed("share stopped")
@@ -580,7 +653,8 @@ class Bridge:
         # (relay mid-reconnect) falls back to the SPA's pairing timeout. The relay
         # holds no history, so nothing lingers for a later joiner to decrypt.
         try:
-            self._seal_send(e2e.T_CTL, json.dumps({"t": "ended"}).encode("utf-8"))
+            ended = {"t": "ended", "reason": guest_reason} if guest_reason else {"t": "ended"}
+            self._seal_send(e2e.T_CTL, json.dumps(ended).encode("utf-8"))
             time.sleep(0.15)   # let the frame flush to the relay before we tear the socket down
         except Exception:
             pass

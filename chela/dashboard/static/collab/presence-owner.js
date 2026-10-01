@@ -44,11 +44,16 @@ function parseJoin(joinUrl) {
 }
 
 class Session {
-  constructor(wid, room, wsUrl, secret) {
+  constructor(wid, room, wsUrl, secret, code, joinUrl, epoch) {
     this.wid = wid;
     this.room = room;
     this.wsUrl = wsUrl;
     this.secret = secret;
+    // What this session was keyed from (CMX-427): a re-created share mints a NEW
+    // code, and a session left on the old key can no longer open a guest frame.
+    this.code = code;
+    this.joinUrl = joinUrl;
+    this.epoch = epoch == null ? null : epoch;
     this.me = identity(room);   // { peerId (persisted per-room), name (may be '') }
     this.peers = new PeerStore();
     this.ws = null;
@@ -181,17 +186,32 @@ async function fetchShareInfo(wid) {
   } catch (_) { return {}; }
 }
 
-// Ensure a live session for a shared wid. Idempotent: returns the existing session
-// or starts a new one from its owner-only join_url + pairing_code.
-async function ensure(wid, joinUrl, code) {
-  if (sessions.has(wid)) return sessions.get(wid);
+// Ensure a live session for a shared wid, keyed from THIS join_url + pairing_code.
+// Idempotent for the same share: returns the existing session. A DIFFERENT code
+// or room means the share was stopped and re-created (CMX-427) — the old session
+// holds a key that can't open the new share's frames, so it is torn down and a
+// new one started.
+async function ensure(wid, joinUrl, code, epoch) {
+  const cur = sessions.get(wid);
+  if (cur && (!joinUrl || !code || (cur.code === code && cur.joinUrl === joinUrl))) {
+    if (epoch != null) cur.epoch = epoch;
+    return cur;
+  }
   if (!joinUrl || !code) return null;
   let parsed, secret;
   try { parsed = parseJoin(joinUrl); secret = secretFromCode(code); }
   catch (e) { console.warn('[chela-owner-presence] bad share info for', wid, e); return null; }
-  const sess = new Session(wid, parsed.room, parsed.wsUrl, secret);
+  if (cur) { cur.stop(); sessions.delete(wid); }
+  const sess = new Session(wid, parsed.room, parsed.wsUrl, secret, code, joinUrl, epoch);
+  // Keep the shim link across a re-key so peer pointers resume without waiting
+  // for its next periodic 'ready'.
+  if (cur) sess.iframeWin = cur.iframeWin;
   sessions.set(wid, sess);
-  try { await sess.start(); } catch (e) { console.warn('[chela-owner-presence] start failed', wid, e); sessions.delete(wid); return null; }
+  try { await sess.start(); } catch (e) {
+    console.warn('[chela-owner-presence] start failed', wid, e);
+    if (sessions.get(wid) === sess) sessions.delete(wid);
+    return null;
+  }
   return sess;
 }
 
@@ -200,7 +220,37 @@ async function ensureFromShareInfo(wid) {
   if (sessions.has(wid) || noShare.has(wid)) return sessions.get(wid) || null;
   const info = await fetchShareInfo(wid);
   if (!info || !info.pairing_code) { noShare.add(wid); return null; }
-  return ensure(wid, info.join_url, info.pairing_code);
+  return ensure(wid, info.join_url, info.pairing_code, info.share_epoch);
+}
+
+// wids with a /share-info reconcile in flight, so a slow fetch can't stack up
+// behind the 4s agents poll.
+const syncing = new Set();
+
+// Reconcile one wid's owner presence against the agents poll (CMX-427), on EVERY
+// dashboard page — not just the one that stopped + re-created the share:
+//   - not shared any more → stop the session (no ghost avatars);
+//   - shared, but under a different share_epoch than the session was keyed for →
+//     re-read /share-info and re-key onto the new pairing code;
+//   - shared under the same epoch → nothing: an unchanged share keeps ONE session,
+//     with no fetch and no reconnect on each poll.
+// A wid with no session is left to the shim's 'ready' (only rendered panes need one);
+// it just stops being remembered as unshared, so that 'ready' refetches.
+export async function syncOwnerPresence(wid, shared, epoch) {
+  const sess = sessions.get(wid);
+  if (!shared) {
+    if (sess) { sess.stop(); sessions.delete(wid); }
+    return null;
+  }
+  noShare.delete(wid);
+  if (!sess || epoch == null || sess.epoch === epoch || syncing.has(wid)) return sess || null;
+  syncing.add(wid);
+  try {
+    const info = await fetchShareInfo(wid);
+    if (sessions.get(wid) !== sess) return sessions.get(wid) || null;   // replaced meanwhile
+    if (!info || !info.pairing_code) { sess.stop(); sessions.delete(wid); return null; }
+    return await ensure(wid, info.join_url, info.pairing_code, info.share_epoch);
+  } finally { syncing.delete(wid); }
 }
 
 let _wired = false;
@@ -225,9 +275,9 @@ export function initOwnerPresence() {
 
 // Called by terminals.js when a share is minted (it already holds join_url + code)
 // so presence starts without waiting for a /share-info round-trip.
-export function startOwnerPresence(wid, joinUrl, code) {
+export function startOwnerPresence(wid, joinUrl, code, epoch) {
   noShare.delete(wid);
-  return ensure(wid, joinUrl, code);
+  return ensure(wid, joinUrl, code, epoch);
 }
 
 // Called by terminals.js on un-share / pane kill.

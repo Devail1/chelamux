@@ -140,7 +140,11 @@ escape-probe scripts; this list is the test.
    and `docker network ls | grep chela-share` are empty.
 9. Share the sandboxed window with **Allow typing** to a second browser of your own, and
    type. Then swap the pane's process (for example `tmux respawn-pane -k -t <wid> bash`)
-   and type again. Input stops within a couple of seconds.
+   and type again. Input stops within a couple of seconds, and the guest's view never
+   shows the new shell: the share checks the pane before every frame it streams, drops
+   the first frame from a process that isn't the sandbox, and ends with "the session
+   stopped being a verified sandbox". (A view-only share of an ordinary window is not
+   checked; it never claimed to show a sandbox.)
 
 ## The trusted-peer override (UNSANDBOXED)
 

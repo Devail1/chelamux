@@ -5,7 +5,10 @@
 //   - a dropped file is POSTed to /api/term/upload with this pane's window id, the drop is
 //     claimed (preventDefault), and the saved name is toasted;
 //   - a refusal shows an ERROR toast carrying the server's reason;
-//   - a pasted image is uploaded, a TEXT paste falls through untouched;
+//   - a TEXT paste falls through untouched;
+//   - CMX-423: a pasted/dropped IMAGE takes the pre-CMX-412 image path (/api/term/paste-image,
+//     then its path typed via /api/term/paste), never uploads/; a mixed drop sends each file
+//     to its own path in order; a refusal on the image path shows an error toast;
 //   - with the Settings switch off (window.__CHELA_FILE_DROP__ = false) nothing is claimed.
 //
 // Run: node --test tests/term_upload.test.mjs (pytest runs it via tests/test_js_suites.py).
@@ -27,10 +30,12 @@ function page({ enabled = true, respond } = {}) {
     const calls = [];
     w.fetch = async (url, opts) => {
         calls.push({ url: String(url), opts });
-        const { status, body } = respond ? respond(opts) : {
+        const { status, body } = respond ? respond(opts, String(url)) : String(url) === '/api/term/upload' ? {
             status: 200,
             body: { ok: true, name: opts.body.get('file').name, path: 'uploads/' + opts.body.get('file').name, typed: true },
-        };
+        } : String(url) === '/api/term/paste-image' ? {
+            status: 200, body: { path: '/tmp/chela-paste-images/abc.png' },
+        } : { status: 200, body: { pasted: 1 } };
         return { ok: status < 400, status, json: async () => body };
     };
     w.__CHELA_FILE_DROP__ = enabled;
@@ -92,28 +97,70 @@ test('a refused upload shows an error toast with the server reason', async () =>
     assert.deepEqual(toasts(w), [{ kind: 'err', text: 'Not uploaded: Share guests cannot upload files.' }]);
 });
 
-test('a pasted image is uploaded; a text paste falls through untouched', async () => {
+test('a pasted image takes the old image path (typed /tmp path), never uploads/', async () => {
     const { w, calls } = page();
     const img = new w.File(['png'], 'image.png', { type: 'image/png' });
     const ev = fire(w, 'paste', 'clipboardData',
         { files: [], items: [{ kind: 'file', type: 'image/png', getAsFile: () => img }] });
-    await flush(); await flush();
+    for (let i = 0; i < 6; i++) await flush();
     assert.equal(ev.defaultPrevented, true);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].opts.body.get('file').name, 'image.png');
+    assert.deepEqual(calls.map(c => c.url), ['/api/term/paste-image', '/api/term/paste']);
+    assert.equal(calls[0].opts.body.get('agent'), '@1');
+    assert.equal(calls[0].opts.body.get('image').name, 'image.png');
+    assert.equal(calls[0].opts.body.get('file'), null);
+    assert.deepEqual(JSON.parse(calls[1].opts.body), { agent: '@1', text: '/tmp/chela-paste-images/abc.png' });
+    assert.deepEqual(toasts(w), [], 'the image path is silent on success, as before CMX-412');
+});
 
+test('a text paste falls through untouched', async () => {
+    const { w, calls } = page();
     const txt = fire(w, 'paste', 'clipboardData',
         { files: [], items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }] });
     await flush();
     assert.equal(txt.defaultPrevented, false, 'a text paste must reach xterm.js');
-    assert.equal(calls.length, 1, 'a text paste must not upload anything');
+    assert.equal(calls.length, 0, 'a text paste must not upload anything');
 });
 
-test('the Ctrl+V key shim hook names a nameless clipboard blob', async () => {
+test('a pasted nameless PDF goes to uploads/ under a generated name', async () => {
     const { w, calls } = page();
-    assert.equal(typeof w.__chelaUpload, 'function');
-    await w.__chelaUpload(new w.Blob(['png'], { type: 'image/png' }));
-    assert.match(calls[0].opts.body.get('file').name, /^paste-\d{8}-\d{6}\.png$/);
+    const pdf = new w.Blob(['%PDF'], { type: 'application/pdf' });
+    fire(w, 'paste', 'clipboardData',
+        { files: [], items: [{ kind: 'file', type: 'application/pdf', getAsFile: () => pdf }] });
+    for (let i = 0; i < 4; i++) await flush();
+    assert.deepEqual(calls.map(c => c.url), ['/api/term/upload']);
+    assert.match(calls[0].opts.body.get('file').name, /^paste-\d{8}-\d{6}\.pdf$/);
+});
+
+test('⭐ a mixed drop (png then pdf, and back) sends each to its own path, in order', async () => {
+    const { w, calls } = page();
+    const files = [new w.File(['p'], 'a.png', { type: 'image/png' }),
+        new w.File(['d'], 'b.pdf', { type: 'application/pdf' }),
+        new w.File(['j'], 'c.JPG', { type: 'image/jpeg' })];
+    const ev = fire(w, 'drop', 'dataTransfer', { files, types: ['Files'] });
+    for (let i = 0; i < 12; i++) await flush();
+    assert.equal(ev.defaultPrevented, true);
+    assert.deepEqual(calls.map(c => c.url), ['/api/term/paste-image', '/api/term/paste',
+        '/api/term/upload', '/api/term/paste-image', '/api/term/paste']);
+    assert.equal(calls[0].opts.body.get('image').name, 'a.png');
+    assert.equal(calls[2].opts.body.get('file').name, 'b.pdf');
+    assert.equal(calls[3].opts.body.get('image').name, 'c.JPG');
+    assert.deepEqual(toasts(w), [{ kind: 'ok', text: 'Saved uploads/b.pdf' }]);
+});
+
+test('an image type outside the old allowlist (svg) goes to uploads/', async () => {
+    const { w, calls } = page();
+    fire(w, 'drop', 'dataTransfer', { files: [new w.File(['<svg/>'], 'x.svg', { type: 'image/svg+xml' })], types: ['Files'] });
+    for (let i = 0; i < 4; i++) await flush();
+    assert.deepEqual(calls.map(c => c.url), ['/api/term/upload']);
+});
+
+test('a refused image paste (share guest) types nothing and shows an error toast', async () => {
+    const { w, calls } = page({ respond: () => ({ status: 403,
+        body: { ok: false, error: 'Share guests cannot paste images.', reason: 'share_guest' } }) });
+    fire(w, 'drop', 'dataTransfer', { files: [new w.File(['p'], 'a.png', { type: 'image/png' })], types: ['Files'] });
+    for (let i = 0; i < 6; i++) await flush();
+    assert.deepEqual(calls.map(c => c.url), ['/api/term/paste-image']);
+    assert.deepEqual(toasts(w), [{ kind: 'err', text: 'Image not pasted: Share guests cannot paste images.' }]);
 });
 
 test('with the Settings switch off nothing is claimed', async () => {
@@ -122,5 +169,4 @@ test('with the Settings switch off nothing is claimed', async () => {
     await flush();
     assert.equal(ev.defaultPrevented, false);
     assert.equal(calls.length, 0);
-    assert.equal(w.__chelaUpload, undefined);
 });

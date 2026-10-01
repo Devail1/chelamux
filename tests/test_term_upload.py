@@ -282,6 +282,41 @@ def test_the_per_minute_count_cap_refuses_the_next_upload(ws, monkeypatch):
 
 # ── ⛔ share guests ───────────────────────────────────────────────────────────
 
+def _post_image(headers, data=b"\x89PNG fake", wid="@1"):
+    body = {"agent": wid, "image": (io.BytesIO(data), "shot.png", "image/png")}
+    return app_mod.app.test_client().post(
+        "/api/term/paste-image", data=body, content_type="multipart/form-data", headers=headers)
+
+
+def test_owner_image_paste_is_saved_under_the_image_dir_and_returns_its_path(ws, monkeypatch):
+    """CMX-423: the image path (not uploads/) still accepts the owner's paste."""
+    img_dir = ws["outside"] / "paste-images"
+    monkeypatch.setattr(app_mod, "_PASTE_IMAGE_DIR", img_dir)
+    r = _post_image({"Sec-Fetch-Site": "same-origin"})
+    assert r.status_code == 200, r.get_json()
+    path = r.get_json()["path"]
+    assert path.startswith(str(img_dir)) and path.endswith(".png")
+    assert not (ws["cwd"] / "uploads").exists()
+
+
+@pytest.mark.parametrize("headers", [
+    {"Origin": "https://relay.example.workers.dev"},
+    {"Referer": "https://relay.example.workers.dev/j/room-tty"},
+    {"Sec-Fetch-Site": "cross-site"},
+])
+def test_a_share_guest_image_paste_is_refused_on_the_image_path(ws, monkeypatch, headers):
+    """CMX-423: images go to /api/term/paste-image again, so the owner-only rule must hold there."""
+    img_dir = ws["outside"] / "paste-images"
+    monkeypatch.setattr(app_mod, "_PASTE_IMAGE_DIR", img_dir)
+    monkeypatch.setenv("CHELA_SHARE_TYPING", "1")
+    r = _post_image(headers)
+    assert r.status_code == 403, r.get_json()
+    assert r.get_json()["reason"] == "share_guest"
+    assert not img_dir.exists() or not any(img_dir.iterdir())
+    ev = _events("upload.refused")
+    assert ev and ev[-1]["payload"]["reason"] == "share_guest"
+
+
 @pytest.mark.parametrize("headers", [
     {"Origin": "https://relay.example.workers.dev"},
     {"Referer": "https://relay.example.workers.dev/j/room-tty"},
@@ -354,7 +389,6 @@ def test_the_served_pane_loads_the_upload_shim_before_the_legacy_paste_shim(monk
     assert head.count(tag) == 1
     assert "window.__CHELA_FILE_DROP__=true;" in head
     assert head.index(tag) < head.index(app_mod._TERM_PASTE_SHIM)
-    assert "window.__chelaUpload" in app_mod._TERM_PASTE_KEY_SHIM
 
 
 def test_the_served_pane_carries_the_switch_off(monkeypatch):
