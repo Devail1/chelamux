@@ -32,7 +32,35 @@ read a frame, so it can't enforce anything.
 
 When input is dropped, the guest gets one "view only" notice, at most once every 10 s.
 
-The share pill shows **👁** for a view-only share and **⌨** when typing is allowed.
+The share pill and the pane's *Share current session* row show **👁** for a view-only
+share, **⌨** when typing is allowed, and **⚠** while the UNSANDBOXED override is on.
+
+## Changing a live share's mode
+
+You don't have to stop a share to change who can type. **Active shares** (the
+**#btn-shares** pill, or *Share current session* on a window that is already shared)
+lists each share with its mode as three buttons: **👁 View only**, **⌨ Allow typing** and,
+where the override is offered, **⚠ Full access — UNSANDBOXED**. Each row also says what
+that share allows. The link and pairing code stay the same, and a guest who already
+joined keeps the connection, so nobody needs a new invite.
+
+- **Down** (to View only) applies at once, with no confirmation. The next keystroke
+  the guest sends is dropped.
+- **Up** passes the same checks as creating a share with that mode
+  (`app._access_gate`, used by both routes). Allow typing needs *Guest typing* on and a
+  window that verifies as sandboxed; when it's refused, the row shows the same reason as
+  the share dialog. UNSANDBOXED needs the typed window name. Its expiry and one-joiner
+  binding start at the upgrade, so the first guest to type after it is the one bound.
+- The server route is `POST /api/term/<wid>/share-mode` with `{"mode", "confirm"?}`.
+  The bridge (`Bridge.set_mode`) applies the change in place.
+- Every change writes a `share.mode_changed` event with `from`, `to` and `by`. An
+  upgrade to UNSANDBOXED also writes `share.unsandboxed_granted`, and leaving it writes
+  `share.unsandboxed_revoked`.
+- The guest's status line says **"You can type now."** or **"View only now."**
+
+Clicking *Share current session* on a window that's already shared never creates a new
+share, because that would rotate the code. It opens Active shares with that share's row
+highlighted, so you can change its mode there.
 
 ## Starting a sandboxed session
 
