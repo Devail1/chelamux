@@ -39,6 +39,8 @@ let MODE = 'view';     // the server's live mode for @1
 let OPTIONS = {};      // GET /share-options
 let modePosts = [];    // POST /share-mode bodies
 let mintPosts = [];    // POST /share bodies
+let REFUSE = null;     // when set, POST /share-mode answers {ok:false, error: REFUSE}
+let SERVER_MODE = null; // when set, the mode the server reports back (it is the truth)
 const EXPIRES = 1.9e9; // the UNSANDBOXED override's wall-clock end (epoch seconds)
 const endsAt = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
@@ -55,9 +57,10 @@ function fakeFetch(url, opts) {
     else if (path.endsWith('/share-mode') && method === 'POST') {
         const b = JSON.parse(opts.body);
         modePosts.push(b);
+        if (REFUSE) return Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({ ok: false, error: REFUSE }) });
         const from = MODE;
-        MODE = b.mode;
-        body = { ok: true, shared: true, ...INFO, from, to: b.mode, mode: b.mode, expires_at: b.mode === 'unsandboxed' ? 1e9 : null };
+        MODE = SERVER_MODE || b.mode;
+        body = { ok: true, shared: true, ...INFO, from, to: MODE, mode: MODE, expires_at: MODE === 'unsandboxed' ? 1e9 : null };
     } else if (/\/share$/.test(path) && method === 'POST') {
         mintPosts.push(JSON.parse(opts.body));
         body = { ok: true, shared: true, ...INFO, mode: 'view' };
@@ -106,7 +109,7 @@ before(async () => {
 beforeEach(() => {
     terminals.closeSharesSheet();
     terminals.closeShareDialog();
-    modePosts = []; mintPosts = [];
+    modePosts = []; mintPosts = []; REFUSE = null; SERVER_MODE = null;
     terminals._sharedWids.clear();
     terminals._sharedWids.add('@1');
 });
@@ -234,4 +237,166 @@ test('Share on an already-shared pane mints nothing and points the sheet at that
     assert.ok(row.classList.contains('ss-row-focus'), 'the existing share must be the highlighted row');
     assert.match(row.querySelector('.ss-already').textContent, /already shared/);
     assert.ok(opt(row, 'typing'), 'the control to change its mode is right there');
+});
+
+
+// --- invariants pinned whole (judge round 2: held-out survivors) -----------------------
+
+const ALL_OFFERS = { share_typing: true, sandboxed: false, typing_allowed: false, unsandboxed_offered: true, window_name: 'shell-1' };
+
+test('the UNSANDBOXED override is offered ONLY when every condition holds', async () => {
+    // Each condition dropped alone must hide it — as the share dialog does.
+    for (const [why, o] of [
+        ['window is sandboxed', { ...ALL_OFFERS, sandboxed: true, typing_allowed: true }],
+        ['server does not offer it', { ...ALL_OFFERS, unsandboxed_offered: false }],
+        ['no window name to confirm', { ...ALL_OFFERS, window_name: '' }],
+        ['setting off', { ...ALL_OFFERS, share_typing: false }],
+    ]) {
+        const row = await openSheet('view', o);
+        assert.equal(opt(row, 'unsandboxed'), null, `override must not be offered: ${why}`);
+        assert.equal(row.querySelector('.ss-unsafe-confirm'), null, `no confirm box: ${why}`);
+        terminals.closeSharesSheet();
+    }
+    const row = await openSheet('view', ALL_OFFERS);
+    assert.ok(opt(row, 'unsandboxed'), 'offered when all hold');
+});
+
+test('a live UNSANDBOXED share always shows its pressed mode, never a re-grant box', async () => {
+    // Even when the options no longer offer it (window since sandboxed / setting off).
+    const row = await openSheet('unsandboxed', { share_typing: false, sandboxed: true, typing_allowed: false, window_name: 'shell-1' });
+    assert.deepEqual(pressed(row), ['unsandboxed']);
+    assert.equal(row.querySelector('.ss-unsafe-confirm'), null);
+});
+
+test('a refused change shows the server\'s reason and leaves the mode as it was', async () => {
+    const row = await openSheet('view', { share_typing: true, sandboxed: true, typing_allowed: true, window_name: 'shell-1' });
+    REFUSE = 'Not a sandboxed session — start one from New session → Sandboxed';
+    opt(row, 'typing').click();
+    await settle();
+    assert.deepEqual(modePosts, [{ mode: 'typing' }]);
+    const err = row.querySelector('.ss-mode-err');
+    assert.equal(err.hidden, false, 'the refusal must be visible');
+    assert.equal(err.textContent, REFUSE);
+    assert.deepEqual(pressed(row), ['view']);
+    assert.equal(terminals._shareModes.get('@1'), 'view', 'a refusal must not move the local mode');
+    assert.equal(document.querySelector('.gs-share-btn[data-wid="@1"] .gs-share-mode').textContent, '👁');
+});
+
+test('the mode shown after a change is what the SERVER reports, not what was asked', async () => {
+    const row = await openSheet('view', { share_typing: true, sandboxed: true, typing_allowed: true, window_name: 'shell-1' });
+    SERVER_MODE = 'view';
+    opt(row, 'typing').click();
+    await settle();
+    assert.equal(terminals._shareModes.get('@1'), 'view');
+    assert.deepEqual(pressed(freshRow()), ['view']);
+});
+
+test('clicking the mode already in force POSTs nothing', async () => {
+    const row = await openSheet('typing', { share_typing: true, sandboxed: true, typing_allowed: true, window_name: 'shell-1' });
+    opt(row, 'typing').click();
+    await settle();
+    assert.deepEqual(modePosts, []);
+});
+
+test('the grant handler itself refuses a wrong name (not only the disabled button)', async () => {
+    const row = await openSheet('view', ALL_OFFERS);
+    opt(row, 'unsandboxed').click();
+    const input = row.querySelector('.ss-confirm-in');
+    const go = row.querySelector('.ss-confirm-go');
+    input.value = 'shell-2';
+    go.onclick();
+    await settle();
+    assert.deepEqual(modePosts, [], 'a wrong name must never POST, whatever the button state');
+    input.value = 'shell-1'; input.oninput();
+    go.onclick();
+    assert.equal(go.disabled, true, 'the grant button locks while the request is in flight');
+    await settle();
+    assert.deepEqual(modePosts, [{ mode: 'unsandboxed', confirm: 'shell-1' }]);
+});
+
+test('the UNSANDBOXED confirmation names the window and the time box, and takes focus', async () => {
+    const row = await openSheet('view', { ...ALL_OFFERS, unsandboxed_minutes: 45 });
+    opt(row, 'unsandboxed').click();
+    assert.match(row.querySelector('.ss-unsafe-confirm label').textContent, /shell-1.*45 min/);
+    assert.equal(document.activeElement, row.querySelector('.ss-confirm-in'));
+});
+
+test('the "why not" reason is shown only where typing is unavailable and not in force', async () => {
+    let row = await openSheet('view', { share_typing: true, sandboxed: true, typing_allowed: true, window_name: 'shell-1' });
+    assert.equal(row.querySelector('.ss-mode-reason'), null);
+    terminals.closeSharesSheet();
+    // A typing share whose window just stopped verifying: still pressed, still downgradable.
+    row = await openSheet('typing', { share_typing: true, sandboxed: false, typing_allowed: false, window_name: 'shell-1' });
+    assert.equal(row.querySelector('.ss-mode-reason'), null);
+    assert.equal(opt(row, 'typing').disabled, false, 'the live mode stays shown as live, not greyed out');
+    assert.equal(opt(row, 'view').disabled, false);
+});
+
+test('the expiry is forgotten when the share leaves UNSANDBOXED or stops', async () => {
+    const row = await openSheet('unsandboxed', { ...ALL_OFFERS });
+    assert.equal(terminals._shareExpiry.get('@1'), EXPIRES);
+    opt(row, 'view').click();                 // the change response carries no expiry
+    await settle();
+    assert.equal(terminals._shareExpiry.has('@1'), false, 'a downgrade must drop the end time');
+    await openSheet('unsandboxed', { ...ALL_OFFERS });
+    assert.equal(terminals._shareExpiry.get('@1'), EXPIRES);
+    MODE = 'view';                            // /api/term/shared now reports no expiry
+    await window.chela.openSharesSheet();
+    await settle();
+    assert.equal(terminals._shareExpiry.has('@1'), false, 'a reconcile without an expiry must drop it');
+    MODE = 'unsandboxed';
+    await window.chela.openSharesSheet();
+    await settle();
+    await terminals._stopShare('@1');
+    assert.equal(terminals._shareExpiry.has('@1'), false, 'stopping the share must drop it');
+});
+
+test('the sheet forgets its focused share on close', async () => {
+    MODE = 'view';
+    OPTIONS = { share_typing: true, sandboxed: true, typing_allowed: true, window_name: 'shell-1' };
+    await terminals.shareBtnClick(null, '@1');
+    await settle();
+    assert.ok(freshRow().classList.contains('ss-row-focus'));
+    terminals.closeSharesSheet();
+    await window.chela.openSharesSheet();
+    await settle();
+    assert.equal(freshRow().classList.contains('ss-row-focus'), false, 'a plain reopen highlights nothing');
+    assert.equal(document.querySelector('.ss-already'), null);
+});
+
+test('a focus on a share that is no longer listed highlights nothing', async () => {
+    await window.chela.openSharesSheet('@404');
+    await settle();
+    assert.equal(document.querySelector('.ss-row-focus'), null);
+    assert.equal(document.querySelector('.ss-already'), null);
+});
+
+test('the pane pill carries the mode as glyph, title and data-mode, and hides when unshared', async () => {
+    await openSheet('typing', { share_typing: true, sandboxed: true, typing_allowed: true, window_name: 'shell-1' });
+    const btn = document.querySelector('.gs-share-btn[data-wid="@1"]');
+    const g = btn.querySelector('.gs-share-mode');
+    assert.equal(g.hidden, false);
+    assert.equal(g.title, '⌨ Allow typing');
+    assert.equal(btn.dataset.mode, 'typing');
+    await terminals._stopShare('@1');
+    assert.equal(g.hidden, true, 'an unshared pane shows no mode');
+    assert.equal(g.textContent, '');
+    assert.equal(btn.dataset.mode, '');
+});
+
+test('adopt-first scrolls the existing share\'s row into view', async () => {
+    MODE = 'view';
+    OPTIONS = { share_typing: true, sandboxed: true, typing_allowed: true, window_name: 'shell-1' };
+    const scrolled = [];
+    const proto = window.HTMLElement.prototype;
+    const had = Object.prototype.hasOwnProperty.call(proto, 'scrollIntoView');
+    const prev = proto.scrollIntoView;
+    proto.scrollIntoView = function () { scrolled.push(this); };
+    try {
+        await terminals.shareBtnClick(null, '@1');
+        await settle();
+    } finally {
+        if (had) proto.scrollIntoView = prev; else delete proto.scrollIntoView;
+    }
+    assert.ok(scrolled.includes(freshRow()), 'the focused share must be scrolled to');
 });

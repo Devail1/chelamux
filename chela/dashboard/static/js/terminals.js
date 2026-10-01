@@ -3717,7 +3717,7 @@ if (window.visualViewport) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareModes, _sharedWids, _stopReadyPoll, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareExpiry, _shareModes, _sharedWids, _stopReadyPoll, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
