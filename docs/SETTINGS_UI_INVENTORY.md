@@ -277,7 +277,7 @@ find there, and today they don't exist in any UI or even `docs/CONFIG.md`'s tabl
 |---|---|---|---|
 | `CHELA_COLLAB` | `true` | `hot` | Presence kill switch |
 | `CHELA_COLLAB_RELAY` | empty | `hot` | The one relay-shaped value `docs/CONFIG.md` says **is** meant to be shared across installs, unlike `CHELA_NOTIFY_URL` |
-| `CHELA_SHARE_UNSANDBOXED_MINUTES` | `30` | `trust-boundary` | Lifetime of the trusted-peer UNSANDBOXED typing override (CMX-403, `docs/SHARE_SANDBOX.md`), clamped 1–240. Env-only on purpose: it bounds an explicit per-share opt-in |
+| `CHELA_SHARE_UNSANDBOXED_MINUTES` | `30` | `trust-boundary` | Lifetime of the trusted-peer UNSANDBOXED typing override (CMX-403, `docs/SHARE_SANDBOX.md`) — the default the share dialog's duration picker preselects (CMX-419), clamped 1–20160 (14 days). Env-only on purpose: it bounds an explicit per-share opt-in |
 | `CHELA_SHARE_SANDBOX_IMAGE` | `python:3.12-slim` | `hot` | Image for a sandboxed share session's guest + proxy containers (`chela/share_sandbox.py`) |
 | `CHELA_SHARE_SANDBOX_TOKEN_FILE` | Claude Code's `.credentials.json` | `trust-boundary` | The token file mounted into the proxy sidecar ONLY — never the guest |
 | `CHELA_SHARE_PROXY_UPSTREAM` | `https://api.anthropic.com` | `trust-boundary` | The proxy's one fixed upstream |

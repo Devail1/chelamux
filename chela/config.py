@@ -1153,9 +1153,20 @@ def share_typing_enabled() -> bool:
 
 # How long a trusted-peer UNSANDBOXED typing override lasts before the share reverts to
 # view-only on its own (CMX-403). Env-only on purpose — it bounds an explicit per-share
-# opt-in, so it is not a dashboard toggle. Clamped to [1, 240] minutes.
+# opt-in, so it is not a dashboard toggle. The env var is the DEFAULT the share dialog's
+# duration picker preselects (CMX-419); the operator may pick any length in the range.
+# Clamped to [1, 20160] minutes (14 days). A pick longer than
+# SHARE_UNSANDBOXED_LONG_MINUTES needs a second typed confirmation.
 SHARE_UNSANDBOXED_MINUTES_ENV = "CHELA_SHARE_UNSANDBOXED_MINUTES"
 SHARE_UNSANDBOXED_MINUTES_DEFAULT = 30
+SHARE_UNSANDBOXED_MINUTES_MAX = 20160
+SHARE_UNSANDBOXED_LONG_MINUTES = 240
+# The dialog's picker: 30 min · 4 h · 1 day · 7 days · 14 days.
+SHARE_UNSANDBOXED_CHOICES = (30, 240, 1440, 10080, 20160)
+
+
+def clamp_unsandboxed_minutes(v: int) -> int:
+    return max(1, min(SHARE_UNSANDBOXED_MINUTES_MAX, v))
 
 
 def share_unsandboxed_minutes() -> int:
@@ -1164,7 +1175,7 @@ def share_unsandboxed_minutes() -> int:
                 or SHARE_UNSANDBOXED_MINUTES_DEFAULT)
     except ValueError:
         v = SHARE_UNSANDBOXED_MINUTES_DEFAULT
-    return max(1, min(240, v))
+    return clamp_unsandboxed_minutes(v)
 
 # How long an undeliverable orchestrator address must stay dead before the inbox buzzes
 # the phone about it (chela/inbox.py `_undeliverable`). A reboot / tmux-restart / handoff

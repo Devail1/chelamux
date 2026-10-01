@@ -9,6 +9,10 @@
 //     (the accepted case, and the negative control for the two disabled ones);
 //   - the UNSANDBOXED override is offered only with the setting on AND a non-sandboxed
 //     window, and Share stays disabled until the window name is TYPED exactly;
+//   - CMX-419: the override's duration picker preselects the configured default and its
+//     choice is POSTed as `minutes`; a pick above 4 h keeps Share disabled until the
+//     window name is typed a SECOND time; the time left shows on the red banner and in
+//     Active shares;
 //   - the share pill reads 👁 for view only, and the red "UNSANDBOXED — guest can type"
 //     banner shows on the pill AND the pane while an override is live — and not otherwise.
 //
@@ -36,6 +40,7 @@ const AGENTS = [{ name: 'shell', window_id: '@1', online: true }];
 
 let OPTIONS = {};      // GET /api/term/<wid>/share-options
 let MINT_MODE = 'view';
+let MINT_EXPIRES = null;   // the override's expires_at (epoch s) the mint returns
 let posts = [];
 
 function fakeFetch(url, opts) {
@@ -47,10 +52,10 @@ function fakeFetch(url, opts) {
     else if (path.startsWith('/api/term/ready')) body = { ready: true };
     else if (path.endsWith('/share-options')) body = OPTIONS;
     else if (path.endsWith('/share-info')) body = {};
-    else if (path.endsWith('/api/term/shared')) body = posts.length ? { '@1': { cols: 80, rows: 24, mode: MINT_MODE } } : {};
+    else if (path.endsWith('/api/term/shared')) body = posts.length ? { '@1': { cols: 80, rows: 24, mode: MINT_MODE, expires_at: MINT_EXPIRES } } : {};
     else if (/\/share$/.test(path) && method === 'POST') {
         posts.push(JSON.parse(opts.body));
-        body = { ok: true, shared: true, join_url: 'https://relay.test/j/abc', pairing_code: 'P', mode: MINT_MODE };
+        body = { ok: true, shared: true, join_url: 'https://relay.test/j/abc', pairing_code: 'P', mode: MINT_MODE, expires_at: MINT_EXPIRES };
     }
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
 }
@@ -94,6 +99,7 @@ before(async () => {
 
 beforeEach(async () => {
     MINT_MODE = 'view';
+    MINT_EXPIRES = null;
     terminals.closeShareDialog();
     window.chela.closeSharesSheet && window.chela.closeSharesSheet();
     if (terminals._sharedWids.has('@1')) await terminals._stopShare('@1');
@@ -195,4 +201,84 @@ test('negative control: a view-only share shows 👁 and no UNSANDBOXED banner',
     assert.match(pill.querySelector('.si-text').textContent, /👁/);
     assert.equal(pill.classList.contains('si-unsandboxed'), false);
     assert.equal(document.querySelector('.gs-unsafe-banner[data-banner-for="@1"]').hidden, true);
+});
+
+
+// --- CMX-419: the override's duration picker ------------------------------------------
+const UNSAFE_OPTS = { share_typing: true, sandboxed: false, typing_allowed: false, unsandboxed_offered: true,
+    unsandboxed_minutes: 30, unsandboxed_choices: [30, 240, 1440, 10080, 20160],
+    unsandboxed_long_minutes: 240, window_name: 'shell-1' };
+
+function pickUnsafe() {
+    radio('unsandboxed').checked = true; radio('unsandboxed').onchange();
+}
+function typeIn(sel, v) { const el = dialog().querySelector(sel); el.value = v; el.oninput(); }
+function pickDur(n) { const s = dialog().querySelector('#sd-dur'); s.value = String(n); s.onchange(); }
+
+test('⭐ the picker preselects the configured default and the default mints as before', async () => {
+    await open(UNSAFE_OPTS);
+    pickUnsafe();
+    const sel = dialog().querySelector('#sd-dur');
+    assert.deepEqual([...sel.options].map(o => o.textContent), ['30 min', '4 h', '1 day', '7 days', '14 days']);
+    assert.equal(sel.value, '30');
+    assert.equal(dialog().querySelector('.sd-confirm-long').hidden, true, 'no second confirmation at 30 min');
+    typeIn('#sd-confirm-in', 'shell-1');
+    assert.equal(dialog().querySelector('.sd-share').disabled, false);
+    MINT_MODE = 'unsandboxed';
+    dialog().querySelector('.sd-share').click();
+    await flush(); await flush();
+    assert.equal(posts[0].minutes, 30);
+    assert.equal('confirm_long' in posts[0], false);
+});
+
+test('the picker preselects a non-30 configured default', async () => {
+    await open({ ...UNSAFE_OPTS, unsandboxed_minutes: 240 });
+    assert.equal(dialog().querySelector('#sd-dur').value, '240');
+});
+
+test('a 7-day pick needs the window name typed twice, and POSTs minutes:10080', async () => {
+    await open(UNSAFE_OPTS);
+    pickUnsafe();
+    pickDur(10080);
+    const share = dialog().querySelector('.sd-share');
+    assert.equal(dialog().querySelector('.sd-confirm-long').hidden, false, '>4 h shows the second confirmation');
+    typeIn('#sd-confirm-in', 'shell-1');
+    assert.equal(share.disabled, true, 'one confirmation must not arm a >4 h grant');
+    typeIn('#sd-confirm-long-in', 'shell-2');
+    assert.equal(share.disabled, true, 'a WRONG second name must not arm it');
+    typeIn('#sd-confirm-long-in', 'shell-1');
+    assert.equal(share.disabled, false);
+    MINT_MODE = 'unsandboxed';
+    share.click();
+    await flush(); await flush();
+    assert.deepEqual([posts[0].minutes, posts[0].confirm, posts[0].confirm_long], [10080, 'shell-1', 'shell-1']);
+});
+
+test('time left reads "12d 4h left" on the red banner and in Active shares', async () => {
+    await open(UNSAFE_OPTS);
+    pickUnsafe(); pickDur(20160);
+    typeIn('#sd-confirm-in', 'shell-1'); typeIn('#sd-confirm-long-in', 'shell-1');
+    MINT_MODE = 'unsandboxed';
+    MINT_EXPIRES = Date.now() / 1000 + (12 * 1440 + 4 * 60) * 60 + 30;
+    dialog().querySelector('.sd-share').click();
+    await flush(); await flush(); await flush();
+    const banner = document.querySelector('.gs-unsafe-banner[data-banner-for="@1"]');
+    assert.equal(banner.hidden, false);
+    assert.match(banner.textContent, /UNSANDBOXED — guest can type · 12d 4h left/);
+    const row = document.querySelector('#shares-sheet-backdrop .ss-row[data-wid="@1"]');
+    assert.ok(row, 'Active shares must list the share');
+    assert.match(row.textContent, /12d 4h left/);
+    await terminals._stopShare('@1');
+});
+
+test('time-left formatting', () => {
+    const now = 1_700_000_000_000;
+    terminals._shareExpires.set('@x', now / 1000 + 3 * 3600 + 5 * 60 + 10);
+    assert.equal(terminals._shareTimeLeft('@x', now), '3h 5m left');
+    terminals._shareExpires.set('@x', now / 1000 + 25 * 60 + 10);
+    assert.equal(terminals._shareTimeLeft('@x', now), '25m left');
+    terminals._shareExpires.set('@x', now / 1000 + 20);
+    assert.equal(terminals._shareTimeLeft('@x', now), '<1m left');
+    terminals._shareExpires.delete('@x');
+    assert.equal(terminals._shareTimeLeft('@x', now), '');
 });
