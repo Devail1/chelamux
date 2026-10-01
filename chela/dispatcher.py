@@ -1366,6 +1366,12 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("blocked_race_ack_at", "ALTER TABLE runs ADD COLUMN blocked_race_ack_at TEXT"),
         ("blocked_race_ack_note", "ALTER TABLE runs ADD COLUMN blocked_race_ack_note TEXT"),
         ("blocked_race_ack_sha", "ALTER TABLE runs ADD COLUMN blocked_race_ack_sha TEXT"),
+        # 🗂️✖️ CMX-406. Why a human closed this run by hand (`chela close`) — the one
+        # operator path to `status='closed'` besides reconcile's closed-PR branch. Its own
+        # column, not a `last_error` rewrite: the error that made a `failed` run fail is
+        # still true, and the Work card shows this reason INSTEAD of it, not on top of it.
+        # NULL on every reconcile-closed row (a PR closed on GitHub carries no reason here).
+        ("close_reason", "ALTER TABLE runs ADD COLUMN close_reason TEXT"),
     ):
         if _column in existing_columns:
             continue  # already migrated — no DDL attempted, nothing to fail
@@ -4051,6 +4057,226 @@ def retry(ident: str, reason: str = "") -> dict:
         "rework_count": run.get("rework_count") or 0, "max_reworks": cap,
         "retry_count": new_retry_count,
         "comment_posted": posted, "comment_detail": detail,
+    }
+
+
+# 🗂️✖️ CMX-406. The statuses `chela close` accepts. `done` (shipped) and `closed` (already
+# terminal) are the only two left out — every other status is a run a human may decide to
+# walk away from. The ACTIVE pair is gated further, on the agent actually being quiet (see
+# `_close_liveness`).
+CLOSABLE_STATUSES = (*ACTIVE_STATUSES, *REVIEW_STATUSES, "failed")
+
+
+def _live_window_id(window_name: str | None) -> str | None:
+    """The ``@N`` of the live tmux window named ``window_name`` — None when there is none.
+
+    By NAME, because that is what reconcile's closed branch kills by (``_kill_window``);
+    an id recorded on the row may belong to an older tmux server (CMX-77), a name that is
+    live right now cannot.
+    """
+    if not window_name:
+        return None
+    out = subprocess.run(
+        ["tmux", "list-windows", "-t", TMUX_SESSION, "-F", "#{window_id} #{window_name}"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0 or not isinstance(out.stdout, str):
+        return None
+    for line in out.stdout.splitlines():
+        wid, _, name = line.strip().partition(" ")
+        if name == window_name and wid:
+            return wid
+    return None
+
+
+def _close_liveness(run: dict) -> tuple[str | None, str | None]:
+    """``(live_window_id, refusal)`` for closing ``run`` — refusal is None when it may close.
+
+    ⛔ Never kills a working agent silently. The window is either GONE (nothing to kill), or
+    it holds an agent whose native status reads ``idle``. ``busy``, ``waiting`` (a permission
+    prompt is a human's question, not idleness) and an unreadable status (None — "can't
+    tell" is never evidence of idleness, same rule as ``_agent_status``'s other callers) all
+    refuse. So does a ``claimed`` row with no window recorded yet: ``_spawn`` is mid-flight
+    and about to create one. ``--force`` is the only way past any of these.
+    """
+    name = run.get("window_name")
+    if not name:
+        if run.get("status") == "claimed":
+            return None, ("it is 'claimed' with no window recorded yet — the dispatcher may be "
+                          "spawning its agent right now")
+        return None, None
+    wid = _live_window_id(name)
+    if wid is None:
+        return None, None          # the window is gone — nothing is working
+    state = _agent_status(wid)
+    if state == "idle":
+        return wid, None
+    shown = state or "unreadable"
+    return wid, f"its agent in window {name} ({wid}) is {shown!r}, not idle"
+
+
+def _gh_pr_close(pr_url: str | None, repo_dir: str | None, body: str) -> tuple[bool, str]:
+    """``gh pr close <n> --comment <body>`` — the PR closes AND carries the reason."""
+    number = _pr_number(pr_url)
+    if not number or not repo_dir:
+        return False, "no PR number on the run row"
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "close", number, "--comment", body],
+            cwd=repo_dir, capture_output=True, text=True, timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return False, f"gh pr close failed: {e}"
+    if out.returncode != 0:
+        return False, (out.stderr or out.stdout or "gh pr close failed").strip()
+    return True, (out.stdout or "").strip()
+
+
+def pr_is_open(run: dict) -> bool:
+    """Does this run carry a PR that is (as far as the row knows) still open?
+
+    ``pr_state`` NULL counts as open: a row whose PR the tick has not refreshed yet is not
+    known to be settled, and "not known" must never read as "nothing to close".
+    """
+    return bool(run.get("pr_url")) and run.get("pr_state") not in ("merged", "closed")
+
+
+def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = False,
+              remove_worktree: bool = False, by: str | None = None) -> dict:
+    """🗂️✖️ Mark an abandoned or superseded run ``closed``, with a reason a human can read.
+
+    Before this, the one path to ``status='closed'`` was reconcile's closed-PR branch in
+    :func:`dispatch_tick`, so a run walked away from any other way — superseded by a
+    successor ticket, its idle window closed to free the slot — was left as a ``failed``
+    card ("tmux window disappeared"): true, and misleading. The operator must not hand-edit
+    the daemon-owned ``scheduler.db`` to fix that, so this is the in-contract exit.
+
+    It does what reconcile's closed branch does — ``status='closed'`` (terminal, in
+    :data:`NOT_CLAIMABLE`, so never re-claimed or retried), slot freed by leaving
+    :data:`ACTIVE_STATUSES`, the run's window killed — plus the reason: stored in
+    ``close_reason``, appended to ``review_history``, carried by a ``run_closed`` event and
+    shown on the Work card as "Closed — <reason>".
+
+    Deliberately NOT what reconcile does: the branch is never deleted, and the worktree is
+    kept unless ``remove_worktree`` — a walked-away-from run may still be worth reading.
+
+    A PR that is still open gets the reason as a comment; ``close_pr`` closes it with that
+    comment instead (``gh pr close --comment``). A MERGED PR refuses outright: that run
+    shipped, and reconcile marks it ``done`` on its own.
+
+    Same compare-and-swap discipline as :func:`retry`: the write only lands if the row is
+    STILL in the status this read saw, so a tick that moved it meanwhile wins, and nothing
+    is changed.
+    """
+    reason = (reason or "").strip()
+    if not reason:
+        return {"ok": False, "error": "a reason is required — it is what the Work card shows"}
+    run = resolve_run(ident)
+    if run is None:
+        return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
+    task_id = run["task_id"]
+    status = run["status"]
+    if status not in CLOSABLE_STATUSES:
+        return {
+            "ok": False, "task_id": task_id,
+            "error": f"run is in status {status!r} — only {', '.join(CLOSABLE_STATUSES)} "
+                     "can be closed",
+        }
+    if run.get("pr_state") == "merged":
+        return {
+            "ok": False, "task_id": task_id,
+            "error": "its PR is MERGED — that run shipped; the next dispatcher tick marks it "
+                     "'done'. Nothing was changed.",
+        }
+
+    live_wid, refusal = _close_liveness(run)
+    if refusal and not force:
+        return {
+            "ok": False, "task_id": task_id,
+            "error": f"refusing to close {task_id}: {refusal}. Wait for it to go idle, or "
+                     "pass --force to close it anyway (its window is killed).",
+        }
+
+    reviews = reviews_of(run)
+    entry = {"round": len(reviews) + 1, "at": _now(), "verdict": "closed", "body": reason,
+             "from_status": status}
+    if by:
+        entry["by"] = by
+    reviews.append(entry)
+
+    with _db() as conn:
+        cur = conn.execute(
+            "UPDATE runs SET status='closed', close_reason=?, review_history=?, "
+            "ended_at=COALESCE(ended_at, ?) WHERE task_id=? AND status=?",
+            (reason, json.dumps(reviews), _now(), task_id, status),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            now = conn.execute(
+                "SELECT status FROM runs WHERE task_id=?", (task_id,)
+            ).fetchone()
+            current = now["status"] if now else "gone"
+            log.warning("close: %s moved to %r before it could be closed", task_id, current)
+            return {
+                "ok": False, "task_id": task_id,
+                "error": f"run moved to {current!r} while this was being written (a tick "
+                         "reconciled it, or someone else acted on it first) — nothing was "
+                         "changed. Re-read it and decide again.",
+            }
+
+    # Everything below is a PROJECTION of the row just written — best-effort, reported,
+    # never a reason to undo the close.
+    window_killed = False
+    if run.get("window_name") and live_wid:
+        _kill_windows_named(run["window_name"])
+        window_killed = True
+
+    wf_path = run.get("workflow_path")
+    repo_dir = str(Path(wf_path).parent) if wf_path else None
+    pr_open = pr_is_open(run)
+    pr_closed = False
+    comment_posted, comment_detail = False, "no open PR"
+    if pr_open:
+        body = f"🗂️✖️ Run closed by chela: {reason}"
+        if close_pr:
+            pr_closed, comment_detail = _gh_pr_close(run.get("pr_url"), repo_dir, body)
+            comment_posted = pr_closed
+        else:
+            comment_posted, comment_detail = _post_pr_comment(
+                run.get("pr_url"), repo_dir,
+                body + "\n\nThe PR is left open — close it by hand if it is not wanted.",
+            )
+        if not comment_posted:
+            log.warning("close: %s is closed, but the PR %s did not take (%s)", task_id,
+                        "close" if close_pr else "comment", comment_detail)
+
+    worktree_removed = False
+    worktree_detail = ""
+    if remove_worktree and run.get("worktree_path"):
+        try:
+            _cleanup_worktree_on_done(load_workflow(Path(wf_path)), run)
+            worktree_removed = not Path(run["worktree_path"]).is_dir()
+        except Exception as e:  # noqa: BLE001 — the close already landed; report, never raise
+            worktree_detail = f"{type(e).__name__}: {e}"
+
+    label = run.get("branch_name") or task_id
+    event_log.append(
+        "run_closed",
+        f"🗂️✖️ {label} closed ({status} → closed) — {reason}",
+        payload={"task_id": task_id, "branch_name": run.get("branch_name"),
+                 "pr_url": run.get("pr_url"), "from_status": status, "reason": reason,
+                 "forced": bool(force and refusal), "pr_closed": pr_closed,
+                 "worktree_removed": worktree_removed, "by": by},
+    )
+    log.info("close: %s (%s) → closed — %s", task_id, status, reason)
+    return {
+        "ok": True, "task_id": task_id, "status": "closed", "from_status": status,
+        "reason": reason, "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
+        "pr_open": pr_open, "pr_closed": pr_closed,
+        "comment_posted": comment_posted, "comment_detail": comment_detail,
+        "window_killed": window_killed, "forced": bool(force and refusal),
+        "worktree_path": run.get("worktree_path"), "worktree_removed": worktree_removed,
+        "worktree_detail": worktree_detail,
     }
 
 

@@ -152,7 +152,9 @@ def test_the_judge_provisions_its_own_worktree_and_does_not_trust_the_hook():
     pushed — and it must be CALLED, before the baseline is measured.
     """
     src = (ROOT / "chela" / "judge.py").read_text()
-    before_baseline = src.split("baseline = run_suite(", 1)[0]
+    # ⚡ CMX-407: the baseline is measured through `run_baseline` (which also records the
+    # per-mutation selection universe); the FIRST call site is run_experiments'.
+    before_baseline = src.split("baseline, selector, report.selection = run_baseline(", 1)[0]
     assert "provision_suite_env(worktree)" in before_baseline, (
         "run_experiments measures the baseline without provisioning the worktree first. A "
         "missing npm dependency then surfaces as `the suite is NOT GREEN` — an accusation "
