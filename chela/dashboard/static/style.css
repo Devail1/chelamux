@@ -468,6 +468,30 @@ body {
 }
 .gs-pr:hover { text-decoration: underline; }
 
+/* CMX-417: the pane's tmux window id (`@N`), leading the bar on every
+   surface — small, dim, monospace, so it reads as an address rather than one
+   more number. `flex: 0 0 auto` + nowrap: it never shrinks or wraps, however
+   long the branch next to it is (`.gs-branch` is the bar's one shrinkable
+   chip). A <button>, so it takes `pointer-events: auto` to punch through the
+   bar's blanket `pointer-events: none`, same as .gs-files/.gs-pr. */
+.gs-wid {
+    flex: 0 0 auto; padding: 0; margin: 0; border: none; background: none;
+    font-family: var(--font);
+    font-size: 10px; font-weight: 500; line-height: 1; white-space: nowrap;
+    font-variant-numeric: tabular-nums; color: var(--text-dim); opacity: 0.75;
+    cursor: copy; pointer-events: auto;
+}
+.gs-wid:hover, .gs-wid:focus-visible { opacity: 1; color: var(--text); }
+/* The "Copied @N" bubble: above the bar (the bar sits on the pane's bottom
+   edge, so below would fall off the tile), left-aligned over the chip. */
+.gs-wid-toast {
+    position: absolute; left: 6px; bottom: calc(100% + 4px); z-index: 20;
+    padding: 4px 8px; border-radius: 6px;
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--accent); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+    font-size: 11px; white-space: nowrap; pointer-events: none;
+}
+
 /* Pane № (Alt+N jump target) — CMX-119 originally tucked it at the far right
    of the bottom bar, after the context numbers; CMX-124 moved it to the FAR
    LEFT instead; CMX-127 (Liav changed his mind: № reads better far-right)
@@ -3403,6 +3427,9 @@ input[type="text"]:focus, textarea:focus, select:focus {
    every state — the shape (.term-status-dot) carries the state, colour is
    never the only cue AND is no longer a second, redundant cue here either. */
 .ar-state { flex: 0 0 auto; font-weight: 600; text-transform: capitalize; }
+/* CMX-417: the row's tmux window id ("idle · 74% ctx · @32") — the same dim,
+   monospace `@N` the pane footer's .gs-wid shows, never shrunk or wrapped. */
+.ar-wid { flex: 0 0 auto; font-family: var(--font); font-size: 0.95em; white-space: nowrap; opacity: 0.85; }
 /* CMX-377: recent-sessions rows still use .ar-recap for their cwd sub-line
    (nav.js renderRecentSessions) — the live agent row's OWN recap/ai_title
    lines are gone (folded into the row's title tooltip; see .ar-ago below). */

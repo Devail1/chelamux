@@ -10,6 +10,7 @@ import { VIEWS } from './views.js';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg.js';
 import { refresh } from './main.js';
 import { refreshCost } from './cost.js';
+import { resolveWindowId } from './windowid.js';
 
 // ---------------------------------------------------------------------------
 // Sidebar + canvas navigation (replaces the old tab bar)
@@ -322,8 +323,12 @@ function _agentRowHtml(a) {
     // exact pre-existing markup (tests/dashboard_scale_nav_a11y.test.mjs's
     // non-hue-cue GUARD 3b/GUARD 4 assert those two spans verbatim), just
     // recomposed together instead of ctx% living on the top line.
+    // CMX-417: then the tmux window id ("idle · 74% ctx · @32"), so a row can be
+    // matched to the `@N` that `chela peek`, inbox notices and peer messages use
+    // without opening the pane. Same id the pane footer shows (_ctxBarHTML).
     const sub = `<span class="ar-state ${stCls}">${stWord}</span>`
-        + (ctxChip ? ` · ${ctxChip} ctx` : '');
+        + (ctxChip ? ` · ${ctxChip} ctx` : '')
+        + (a.window_id ? ` · <span class="ar-wid">${escHtml(a.window_id)}</span>` : '');
 
     const type = _agentType(a);
     // Whatever CMX-146's ai_title / the occasional away_summary recap used to
@@ -331,7 +336,8 @@ function _agentRowHtml(a) {
     // rendered line, so the data is not silently lost by the 2-line row format
     // the mockup specifies — just no longer competing for vertical space.
     const extra = [a.ai_title, a.recap].filter(Boolean).join(' — ');
-    const rowTitle = extra ? `${label}\n${extra}` : label;
+    const head = a.window_id ? `${label} · ${a.window_id}` : label;
+    const rowTitle = extra ? `${head}\n${extra}` : head;
 
     const wallSuffix = onWall ? ' — open on the wall' : '';
     // CMX-377 round 2: the row is exactly status mark · title · "state · ctx" ·
@@ -2131,8 +2137,12 @@ function _paletteItems(skipWids) {
     (_agentsCache || []).forEach(a => {
         if (skipWids && a.window_id && skipWids.has(a.window_id)) return;
         const word = _AGENT_STATUS_WORD[agentDotColor(a)] || 'idle';
-        items.push({ dot: _SIDEBAR_DOT_CLASS[agentDotColor(a)] || 'idle', title: _agentLabel(a),
-                     sub: 'session · ' + word, run: () => selectAgent(a.name) });
+        // CMX-417: the window id rides the sub-line, so it shows on the row, and
+        // `wid` is scored on its own in _renderPalette ("@3" lists @3, @31, @32…
+        // however long the session's name is).
+        items.push({ wid: a.window_id, dot: _SIDEBAR_DOT_CLASS[agentDotColor(a)] || 'idle', title: _agentLabel(a),
+                     sub: 'session · ' + word + (a.window_id ? ' · ' + a.window_id : ''),
+                     run: () => selectAgent(a.name) });
     });
 
     // Share / Stop sharing per live session (same server flag as the pane button).
@@ -2226,16 +2236,48 @@ function _openPaneItems() {
     });
 }
 
+// CMX-417: a query that is exactly an open window's id ("@32") → one row that
+// JUMPS to that window, pinned above the fuzzy matches (which would otherwise
+// rank @320 alongside it). Jumps, never toggles: selectAgent minimizes a pane
+// that is already open, which is the wrong answer to "take me to @32". Any open
+// window counts — a plain shell has no /api/agents row but is still `@N`.
+function _windowIdItem(q) {
+    const known = (_agentsCache || []).map(a => a.window_id).filter(Boolean);
+    const rendered = (TERMINALS_ON && typeof _renderedWids !== 'undefined') ? _renderedWids : [];
+    const wid = resolveWindowId(q, known.concat(rendered));
+    if (!wid) return null;
+    const a = (_agentsCache || []).find(x => x.window_id === wid);
+    return {
+        wid, dot: a ? (_SIDEBAR_DOT_CLASS[agentDotColor(a)] || 'idle') : 'idle',
+        title: a ? _agentLabel(a) : wid,
+        sub: 'window · ' + wid,
+        run: () => {
+            if (TERMINALS_ON && typeof focusPaneByWid === 'function') {
+                if (!isWallVisible()) setTermMode('wall');
+                focusPaneByWid(wid);
+            } else if (a) {
+                showAgentDetail(a.name);
+            }
+        },
+    };
+}
+
 function _renderPalette(q) {
     const list = document.getElementById('palette-list');
     if (!list) return;
     let items, paneCount = 0;
     if (q) {
+        // CMX-417: a row's window id is scored on its own too — inside the full
+        // "title sub" haystack, a long name's first-match penalty would push an
+        // "@3" match below zero and drop it.
+        const exact = _windowIdItem(q);
         items = _paletteItems()
-            .map(it => ({ it, sc: _fuzzyScore(q, it.title + ' ' + it.sub) }))
+            .filter(it => !(exact && it.wid === exact.wid))   // the exact row below replaces it
+            .map(it => ({ it, sc: Math.max(_fuzzyScore(q, it.title + ' ' + it.sub), it.wid ? _fuzzyScore(q, it.wid) : -1) }))
             .filter(x => x.sc >= 0)
             .sort((a, b) => b.sc - a.sc)
             .map(x => x.it);
+        if (exact) items.unshift(exact);
     } else {
         const panes = _openPaneItems();
         paneCount = panes.length;
