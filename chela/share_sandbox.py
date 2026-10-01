@@ -54,11 +54,13 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
 
 from chela import config
+from chela.share_proxy import read_token
 from chela.transcripts import claude_config_dir
 
 log = logging.getLogger(__name__)
@@ -74,7 +76,12 @@ CLAUDE_MOUNT = "/usr/local/bin/claude"
 PROXY_ALIAS = "chela-proxy"
 PROXY_PORT = 8080
 PROXY_SCRIPT_MOUNT = "/run/chela/share_proxy.py"
-PROXY_TOKEN_MOUNT = "/run/chela/token"
+# A DIRECTORY, never a single file: a single-file bind mount pins the inode it was
+# started with, so a token replaced by rename on the host is never seen (CMX-433).
+PROXY_TOKEN_DIR = "/run/chela/token.d"
+TOKEN_NAME = "token"
+PROXY_TOKEN_FILE = f"{PROXY_TOKEN_DIR}/{TOKEN_NAME}"
+TOKEN_POLL_SECONDS = 2.0
 DEFAULT_IMAGE = "python:3.12-slim"
 GUEST_MEMORY = "2g"
 GUEST_PIDS = "512"
@@ -124,6 +131,68 @@ def token_file() -> Path:
     ``<config dir>/.credentials.json`` (Linux/WSL; macOS keeps it in the keychain)."""
     raw = os.environ.get("CHELA_SHARE_SANDBOX_TOKEN_FILE", "").strip()
     return Path(raw).expanduser() if raw else claude_config_dir() / ".credentials.json"
+
+
+def token_mirror_dir(sid: str) -> Path:
+    """The per-session directory the proxy sidecar mounts (read-only) to read the token."""
+    return Path(config.CHELA_DIR) / "share-token" / sid
+
+
+class TokenMirror:
+    """Keeps ``dst_dir/token`` holding the CURRENT access token from ``src`` (CMX-433).
+
+    Claude Code refreshes its OAuth token by renaming a new ``.credentials.json`` over the
+    old one, and the refresh revokes the old token. The proxy sidecar mounts ``dst_dir`` —
+    a directory, so a file renamed into it is seen — and reads ``token`` by name per
+    request. Only the bare access token is copied: the refresh token and the rest of
+    ``~/.claude`` never enter the sidecar, and the guest container mounts none of it."""
+
+    def __init__(self, src: Path, dst_dir: Path):
+        self.src, self.dir = Path(src), Path(dst_dir)
+        self._seen: tuple[int, int, int] | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def path(self) -> Path:
+        return self.dir / TOKEN_NAME
+
+    def sync(self) -> bool:
+        """Copy the source's token into the mirror when the source changed (inode, mtime
+        or size) since the last copy. True when the mirror now holds a token."""
+        try:
+            st = os.stat(self.src)
+        except OSError:
+            return self.path.is_file()
+        sig = (st.st_ino, st.st_mtime_ns, st.st_size)
+        if sig == self._seen:
+            return True
+        tok = read_token(str(self.src))
+        if not tok:
+            return self.path.is_file()      # mid-write or unreadable: retried next poll
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = self.dir / f".{TOKEN_NAME}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(tok)
+        os.replace(tmp, self.path)          # atomic: the proxy never reads half a token
+        self._seen = sig
+        return True
+
+    def _loop(self, interval: float) -> None:
+        while not self._stop.wait(interval):
+            try:
+                self.sync()
+            except OSError as e:
+                log.warning("share sandbox: token mirror sync failed: %s", e)
+
+    def start(self, interval: float = TOKEN_POLL_SECONDS) -> None:
+        self._thread = threading.Thread(target=self._loop, args=(interval,), daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        shutil.rmtree(self.dir, ignore_errors=True)
 
 
 def proxy_upstream() -> str:
@@ -238,8 +307,8 @@ def proxy_run_argv(sid: str, uid: int, gid: int) -> list[str]:
             "--security-opt", "no-new-privileges", "--read-only",
             "--memory", PROXY_MEMORY, "--pids-limit", "64",
             "-v", f"{proxy_src}:{PROXY_SCRIPT_MOUNT}:ro",
-            "-v", f"{token_file()}:{PROXY_TOKEN_MOUNT}:ro",
-            "-e", f"CHELA_PROXY_TOKEN_FILE={PROXY_TOKEN_MOUNT}",
+            "-v", f"{token_mirror_dir(sid)}:{PROXY_TOKEN_DIR}:ro",
+            "-e", f"CHELA_PROXY_TOKEN_FILE={PROXY_TOKEN_FILE}",
             "-e", f"CHELA_PROXY_UPSTREAM={proxy_upstream()}",
             "-e", f"CHELA_PROXY_PORT={PROXY_PORT}",
             image(), "python", PROXY_SCRIPT_MOUNT]
@@ -424,10 +493,15 @@ def run(sid: str, cwd: str, net: str = NET_NONE) -> int:
     signal.signal(signal.SIGHUP, _term)
     signal.signal(signal.SIGTERM, _term)
     uid, gid = os.getuid(), os.getgid()
+    mirror = TokenMirror(token_file(), token_mirror_dir(sid))
     steps = [network_create_argv(sid), proxy_run_argv(sid, uid, gid),
              ["docker", "network", "connect", "--alias", PROXY_ALIAS,
               network_name(sid), proxy_name(sid)]]
     try:
+        if not mirror.sync():
+            _hold(f"refusing to start — no token could be read from {token_file()}")
+            return 1
+        mirror.start()
         if net == NET_WEB:
             _prepare_web_log(sid)
             steps += _web_steps(sid, uid, gid)
@@ -441,6 +515,7 @@ def run(sid: str, cwd: str, net: str = NET_NONE) -> int:
                   flush=True)
         return subprocess.call(guest_run_argv(sid, cwd, uid, gid, claude_bin, net))
     finally:
+        mirror.stop()
         cleanup(sid)
 
 
