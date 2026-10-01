@@ -452,6 +452,10 @@ _TERM_PASTE_KEY_SHIM = (
     "var r=await fetch('/api/term/paste-image',{method:'POST',body:fd,"
     "credentials:'same-origin'});"
     "if(!r.ok)return;var j=await r.json();if(j&&j.path)await pasteText(j.path);}"
+    # CMX-412: with file drop on, term-upload.js owns images (→ <cwd>/uploads/).
+    "async function pasteClipImage(blob){"
+    "if(typeof window.__chelaUpload==='function'){await window.__chelaUpload(blob);return;}"
+    "await pasteImage(blob);}"
     "async function onKey(e){"
     "if(!(e.ctrlKey||e.metaKey)||e.shiftKey||e.altKey)return;"
     "if(e.key!=='v'&&e.key!=='V')return;"
@@ -462,7 +466,7 @@ _TERM_PASTE_KEY_SHIM = (
     "var items=await navigator.clipboard.read();"
     "for(var i=0;i<items.length;i++){"
     "var t=(items[i].types||[]).filter(function(x){return x.indexOf('image/')===0;})[0];"
-    "if(t){await pasteImage(await items[i].getType(t));return;}}"
+    "if(t){await pasteClipImage(await items[i].getType(t));return;}}"
     "for(var n=0;n<items.length;n++){"
     "if((items[n].types||[]).indexOf('text/plain')>=0){"
     "await pasteText(await (await items[n].getType('text/plain')).text());return;}}"
@@ -803,6 +807,14 @@ _TERM_FONT_PREF_SHIM = (
 # postMessage to the parent, and draws the peers the parent sends back. So only the
 # non-secret {shared, wid} is injected here (the old relay/prefix/grid injection is
 # gone — the parent derives all of that from the owner-only /share-info).
+def _term_upload_shim() -> str:
+    """CMX-412: the file drop/paste shim, with the Settings switch read at serve time (the
+    route re-checks it per upload, so a pane opened before a switch-off is still refused)."""
+    on = "true" if config.file_drop_enabled() else "false"
+    return ("<script>window.__CHELA_FILE_DROP__=" + on + ";</script>"
+            '<script src="/static/term-upload.js"></script>')
+
+
 def _term_presence_shim(wid: str) -> str:
     """Per-wid shim config + client. Carries only this window's live "shared" flag
     and its wid; the shim gates solely on the flag and talks coordinates (never the
@@ -855,6 +867,7 @@ def term_http(wid, rest):
         html = body.decode("utf-8", "replace")
         shims = (_term_theme_shim() + _TERM_FONT_CSS + _TERM_FONT_PREF_SHIM
                  + _term_presence_shim(wid)
+                 + _term_upload_shim()
                  + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM + _TERM_PALETTE_KEY_SHIM
                  + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS + _TERM_TOUCH_CSS)
         html = (html.replace("</head>", shims + "</head>", 1)
@@ -1465,6 +1478,129 @@ def api_term_paste_image():
     return jsonify({"path": str(out), "sha256": digest, "bytes": len(data)})
 
 
+# ---------------------------------------------------------------------------
+# 📎 File drop into a Wall terminal (CMX-412) — OWNER ONLY
+#
+# A drop or paste on a pane (see _TERM_UPLOAD_SHIM) POSTs the file here with the pane's
+# window id. It is written to <session cwd>/uploads/<name> (chela.uploads holds every
+# containment rule) and `@uploads/<name> ` is typed into the pane — no Enter.
+#
+# ⛔ Share guests may NOT upload, whatever `share_typing` says. A guest's page is the
+# relay-served joiner (a different origin), so a request whose Origin/Referer is the relay
+# — or any cross-site request at all — is refused before a byte is read. Guest upload is a
+# separate, later task (sandboxed sessions only, behind share_typing, cut by the kill switch).
+# ---------------------------------------------------------------------------
+
+from chela import uploads  # noqa: E402
+
+_UPLOAD_TIMES: list[float] = []
+_UPLOAD_LOCK = threading.Lock()
+FILE_DROP_OFF_REASON = "File drop into terminals is off in Settings"
+
+
+def _origin_of(url: str) -> str:
+    from urllib.parse import urlsplit
+    try:
+        p = urlsplit(url)
+    except ValueError:
+        return ""
+    return f"{p.scheme}://{p.netloc}".lower() if p.scheme and p.netloc else ""
+
+
+def _share_guest_request() -> bool:
+    """True when this request comes from a share guest rather than the owner's dashboard.
+
+    The dashboard has no built-in auth (the tailnet is the boundary), so "authenticated as
+    a guest" is decided by where the request comes FROM: a guest only ever holds the
+    relay-served joiner page, so an Origin or Referer on the relay's origin is a guest. A
+    request the browser marks ``Sec-Fetch-Site: cross-site`` is treated the same way — the
+    owner's own panes are same-origin iframes, so nothing legitimate is cross-site here.
+    (Deliberately NOT "Origin != request.host_url": behind a TLS front — Caddy, `tailscale
+    serve` — the scheme/host Flask sees differ from the browser's, and that would refuse the
+    owner.)"""
+    if (request.headers.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
+        return True
+    relay = config.COLLAB_RELAY or ""
+    relay_origin = _origin_of(relay.replace("wss://", "https://", 1).replace("ws://", "http://", 1))
+    for h in ("Origin", "Referer"):
+        v = (request.headers.get(h) or "").strip()
+        if not v:
+            continue
+        if relay_origin and _origin_of(v) == relay_origin:
+            return True
+    return False
+
+
+def _upload_rate_ok() -> bool:
+    """Sliding one-minute window over accepted uploads (``CHELA_UPLOAD_PER_MINUTE``)."""
+    now = time.monotonic()
+    with _UPLOAD_LOCK:
+        _UPLOAD_TIMES[:] = [t for t in _UPLOAD_TIMES if now - t < 60.0]
+        if len(_UPLOAD_TIMES) >= config.upload_per_minute():
+            return False
+        _UPLOAD_TIMES.append(now)
+        return True
+
+
+def _upload_refused(wid: str, name: str, size: int | None, reason: str, message: str, status: int):
+    event_log.append("upload.refused", f"upload refused ({reason}): {name or '?'}",
+                     {"window": wid, "name": name, "size": size, "reason": reason},
+                     wid=wid if wid.startswith("@") else None)
+    log.info("upload refused wid=%s name=%r reason=%s", wid, name, reason)
+    return jsonify({"ok": False, "error": message, "reason": reason}), status
+
+
+@app.route("/api/term/upload", methods=["POST"])
+@require_auth
+def api_term_upload():
+    """Save a dropped/pasted file into the pane's session workspace and type its @path.
+
+    Multipart: ``agent`` (the pane's window id, ``@N``) + ``file``. Refusals are 4xx with
+    ``{error, reason}`` and an ``upload.refused`` event; success is ``{ok, name, path,
+    size}`` plus an ``upload.saved`` event, after ``@uploads/<name> `` was typed."""
+    _require_terminals()
+    wid = (request.form.get("agent") or "").strip()
+    f = request.files.get("file")
+    raw_name = (f.filename if f is not None else "") or ""
+    size_hint = request.content_length
+    if _share_guest_request():
+        return _upload_refused(wid, raw_name, size_hint, "share_guest",
+                               "Share guests cannot upload files.", 403)
+    if not config.file_drop_enabled():
+        return _upload_refused(wid, raw_name, size_hint, "disabled", FILE_DROP_OFF_REASON, 403)
+    if not wid.startswith("@") or wid not in _terminals_port_map():
+        return _upload_refused(wid, raw_name, size_hint, "unknown_window",
+                               "That terminal is not on the Wall.", 404)
+    if f is None:
+        return _upload_refused(wid, raw_name, size_hint, "no_file", "No file in the request.", 400)
+    max_bytes = config.upload_max_bytes()
+    if size_hint is not None and size_hint > max_bytes + 64 * 1024:
+        return _upload_refused(wid, raw_name, size_hint, "too_large",
+                               f"File is over the {max_bytes // (1024 * 1024)} MB upload limit.", 413)
+    if not _upload_rate_ok():
+        return _upload_refused(wid, raw_name, size_hint, "rate_limited",
+                               "Too many uploads — wait a minute.", 429)
+    cwd = discovery.get_window_cwd_by_id(wid)
+    try:
+        if not cwd:
+            raise uploads.UploadRefused("no_workspace", "The session has no working directory.", 409)
+        name, size = uploads.save(cwd, raw_name, f.stream, max_bytes)
+    except uploads.UploadRefused as e:
+        return _upload_refused(wid, raw_name, size_hint, e.reason, e.message, e.status)
+    mention = f"@{uploads.UPLOADS_DIRNAME}/{name} "
+    typed = True
+    try:
+        subprocess.run(["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{wid}", "-l", mention],
+                       check=True, capture_output=True, timeout=5)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        typed = False
+        log.warning("upload saved but typing into %s failed: %s", wid, e)
+    event_log.append("upload.saved", f"uploaded {name} ({size} bytes) into {wid}",
+                     {"window": wid, "name": name, "size": size, "typed": typed}, wid=wid)
+    return jsonify({"ok": True, "name": name, "path": f"{uploads.UPLOADS_DIRNAME}/{name}",
+                    "size": size, "typed": typed})
+
+
 @app.route("/api/agents/trigger", methods=["POST"])
 @require_auth
 def api_agents_trigger():
@@ -2060,10 +2196,23 @@ def api_config():
                     return jsonify({"error": "invalid share_typing",
                                     "valid": [True, False]}), 400
                 userconfig.set_(config.SHARE_TYPING_KEY, enabled)
+        if "file_drop" in data:
+            # CMX-412: same strict-bool rule. Read per upload, so it applies at once.
+            raw = data.get("file_drop")
+            if raw in (None, ""):
+                userconfig.set_(config.FILE_DROP_KEY, None)
+            else:
+                try:
+                    enabled = config.cast_strict_bool(raw)
+                except ValueError:
+                    return jsonify({"error": "invalid file_drop",
+                                    "valid": [True, False]}), 400
+                userconfig.set_(config.FILE_DROP_KEY, enabled)
     stored_mode = dispatcher.settings_permission_mode()
     stored_model = dispatcher.settings_agent_model()
     remote_control, rc_source = config.remote_control_setting()
     share_typing, st_source = config.share_typing_setting()
+    file_drop, fd_source = config.file_drop_setting()
     return jsonify({
         "projects_dir": userconfig.get("projects_dir", ""),
         "projects_dir_effective": str(launcher._projects_dir()),
@@ -2093,6 +2242,12 @@ def api_config():
         "share_typing_env_locked": st_source == "env",
         "share_typing_env": config.SHARE_TYPING_ENV,
         "share_unsandboxed_minutes": config.share_unsandboxed_minutes(),
+        # CMX-412: drop/paste a file on an owner's Wall pane → <cwd>/uploads/. ON by default.
+        "file_drop": file_drop,
+        "file_drop_source": fd_source,
+        "file_drop_env_locked": fd_source == "env",
+        "file_drop_env": config.FILE_DROP_ENV,
+        "upload_max_mb": config.upload_max_bytes() // (1024 * 1024),
     })
 
 

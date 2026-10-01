@@ -96,6 +96,7 @@ def design_vars(case: ds.Case, risk: str, wf=None) -> dict:
         head_sha=case.head_sha,
         experiments_path="(offline eval — return the JSON as your structured output)",
         judge_cmd="(offline eval — nothing to run; return the JSON as your structured output)",
+        judge_log="(offline eval — no judge log)",
         test_cmd="(offline eval — no suite runs)",
         diff_cmd=f"the Read tool on `{EVAL_DIR}/PR_DIFF.patch` (this PR's full diff)",
         pr_view_cmd=f"the Read tool on `{EVAL_DIR}/PR.md` (its title and commit messages)",

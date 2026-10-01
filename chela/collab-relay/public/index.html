@@ -461,7 +461,9 @@
       } else if (typ === T_CTL) {
         try {
           const m = JSON.parse(dec.decode(pt));
-          if (m.t === 'ended') showEnded('This share has ended.');
+          // CMX-416: a typing share also says WHY it ended (its pane stopped verifying).
+          if (m.t === 'ended') showEnded(typeof m.reason === 'string' && m.reason
+            ? 'This share has ended — ' + m.reason.slice(0, 120) + '.' : 'This share has ended.');
           // CMX-403: the host dropped our keystrokes (view-only share, typing off, or an
           // expired full-access window) and says why — shown in the status line.
           else if (m.t === 'notice' && typeof m.msg === 'string') setDot('up', m.msg.slice(0, 120));

@@ -1223,6 +1223,12 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("judge_sha", "ALTER TABLE runs ADD COLUMN judge_sha TEXT"),
         ("judge_state", "ALTER TABLE runs ADD COLUMN judge_state TEXT"),
         ("judge_started_at", "ALTER TABLE runs ADD COLUMN judge_started_at TEXT"),
+        # ⏱️ CMX-411. When `chela judge run` itself STARTED (its own marker, written right
+        # after it claims the slot) — distinct from `judge_started_at`, which is when the
+        # judge AGENT was spawned. The watchdog's wall measures the battery from here once it
+        # exists: an agent's design time must not be charged to the run. NULL until the run
+        # starts; `_spawn_judge` clears it on every new judge.
+        ("judge_run_started_at", "ALTER TABLE runs ADD COLUMN judge_run_started_at TEXT"),
         ("judge_detail", "ALTER TABLE runs ADD COLUMN judge_detail TEXT"),
         # ⚖️ CMX-81. How many times the judge has been RE-RUN on the CURRENT `judge_sha` after
         # coming back CANNOT VERIFY. `cannot_verify` is an UNKNOWN (a flake, a gh timeout, a
@@ -1360,6 +1366,12 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("blocked_race_ack_at", "ALTER TABLE runs ADD COLUMN blocked_race_ack_at TEXT"),
         ("blocked_race_ack_note", "ALTER TABLE runs ADD COLUMN blocked_race_ack_note TEXT"),
         ("blocked_race_ack_sha", "ALTER TABLE runs ADD COLUMN blocked_race_ack_sha TEXT"),
+        # 🗂️✖️ CMX-406. Why a human closed this run by hand (`chela close`) — the one
+        # operator path to `status='closed'` besides reconcile's closed-PR branch. Its own
+        # column, not a `last_error` rewrite: the error that made a `failed` run fail is
+        # still true, and the Work card shows this reason INSTEAD of it, not on top of it.
+        # NULL on every reconcile-closed row (a PR closed on GitHub carries no reason here).
+        ("close_reason", "ALTER TABLE runs ADD COLUMN close_reason TEXT"),
     ):
         if _column in existing_columns:
             continue  # already migrated — no DDL attempted, nothing to fail
@@ -4048,6 +4060,234 @@ def retry(ident: str, reason: str = "") -> dict:
     }
 
 
+# 🗂️✖️ CMX-406. The statuses `chela close` accepts. `done` (shipped) and `closed` (already
+# terminal) are the only two left out — every other status is a run a human may decide to
+# walk away from. The ACTIVE pair is gated further, on the agent actually being quiet (see
+# `_close_liveness`).
+CLOSABLE_STATUSES = (*ACTIVE_STATUSES, *REVIEW_STATUSES, "failed")
+
+
+def _live_window_id(window_name: str | None) -> str | None:
+    """The ``@N`` of the live tmux window named ``window_name`` — None when there is none.
+
+    By NAME, because that is what reconcile's closed branch kills by (``_kill_window``);
+    an id recorded on the row may belong to an older tmux server (CMX-77), a name that is
+    live right now cannot.
+    """
+    if not window_name:
+        return None
+    out = subprocess.run(
+        ["tmux", "list-windows", "-t", TMUX_SESSION, "-F", "#{window_id} #{window_name}"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0 or not isinstance(out.stdout, str):
+        return None
+    for line in out.stdout.splitlines():
+        wid, _, name = line.strip().partition(" ")
+        if name == window_name and wid:
+            return wid
+    return None
+
+
+def _close_liveness(run: dict) -> tuple[str | None, str | None]:
+    """``(live_window_id, refusal)`` for closing ``run`` — refusal is None when it may close.
+
+    ⛔ Never kills a working agent silently. The window is either GONE (nothing to kill), or
+    it holds an agent whose native status reads ``idle``. ``busy``, ``waiting`` (a permission
+    prompt is a human's question, not idleness) and an unreadable status (None — "can't
+    tell" is never evidence of idleness, same rule as ``_agent_status``'s other callers) all
+    refuse. So does a ``claimed`` row with no window recorded yet: ``_spawn`` is mid-flight
+    and about to create one. ``--force`` is the only way past any of these.
+    """
+    name = run.get("window_name")
+    if not name:
+        if run.get("status") == "claimed":
+            return None, ("it is 'claimed' with no window recorded yet — the dispatcher may be "
+                          "spawning its agent right now")
+        return None, None
+    wid = _live_window_id(name)
+    if wid is None:
+        return None, None          # the window is gone — nothing is working
+    state = _agent_status(wid)
+    if state == "idle":
+        return wid, None
+    shown = state or "unreadable"
+    return wid, f"its agent in window {name} ({wid}) is {shown!r}, not idle"
+
+
+def _gh_pr_close(pr_url: str | None, repo_dir: str | None, body: str) -> tuple[bool, str]:
+    """``gh pr close <n> --comment <body>`` — the PR closes AND carries the reason."""
+    number = _pr_number(pr_url)
+    if not number or not repo_dir:
+        return False, "no PR number on the run row"
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "close", number, "--comment", body],
+            cwd=repo_dir, capture_output=True, text=True, timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return False, f"gh pr close failed: {e}"
+    if out.returncode != 0:
+        return False, (out.stderr or out.stdout or "gh pr close failed").strip()
+    return True, (out.stdout or "").strip()
+
+
+def pr_is_open(run: dict) -> bool:
+    """Does this run carry a PR that is (as far as the row knows) still open?
+
+    ``pr_state`` NULL counts as open: a row whose PR the tick has not refreshed yet is not
+    known to be settled, and "not known" must never read as "nothing to close".
+    """
+    return bool(run.get("pr_url")) and run.get("pr_state") not in ("merged", "closed")
+
+
+def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = False,
+              remove_worktree: bool = False, by: str | None = None) -> dict:
+    """🗂️✖️ Mark an abandoned or superseded run ``closed``, with a reason a human can read.
+
+    Before this, the one path to ``status='closed'`` was reconcile's closed-PR branch in
+    :func:`dispatch_tick`, so a run walked away from any other way — superseded by a
+    successor ticket, its idle window closed to free the slot — was left as a ``failed``
+    card ("tmux window disappeared"): true, and misleading. The operator must not hand-edit
+    the daemon-owned ``scheduler.db`` to fix that, so this is the in-contract exit.
+
+    It does what reconcile's closed branch does — ``status='closed'`` (terminal, in
+    :data:`NOT_CLAIMABLE`, so never re-claimed or retried), slot freed by leaving
+    :data:`ACTIVE_STATUSES`, the run's window killed — plus the reason: stored in
+    ``close_reason``, appended to ``review_history``, carried by a ``run_closed`` event and
+    shown on the Work card as "Closed — <reason>".
+
+    Deliberately NOT what reconcile does: the branch is never deleted, and the worktree is
+    kept unless ``remove_worktree`` — a walked-away-from run may still be worth reading.
+
+    A PR that is still open gets the reason as a comment; ``close_pr`` closes it with that
+    comment instead (``gh pr close --comment``). A MERGED PR refuses outright: that run
+    shipped, and reconcile marks it ``done`` on its own.
+
+    Same compare-and-swap discipline as :func:`retry`: the write only lands if the row is
+    STILL in the status this read saw, so a tick that moved it meanwhile wins, and nothing
+    is changed.
+    """
+    reason = (reason or "").strip()
+    if not reason:
+        return {"ok": False, "error": "a reason is required — it is what the Work card shows"}
+    run = resolve_run(ident)
+    if run is None:
+        return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
+    task_id = run["task_id"]
+    status = run["status"]
+    if status not in CLOSABLE_STATUSES:
+        return {
+            "ok": False, "task_id": task_id,
+            "error": f"run is in status {status!r} — only {', '.join(CLOSABLE_STATUSES)} "
+                     "can be closed",
+        }
+    if run.get("pr_state") == "merged":
+        return {
+            "ok": False, "task_id": task_id,
+            "error": "its PR is MERGED — that run shipped; the next dispatcher tick marks it "
+                     "'done'. Nothing was changed.",
+        }
+
+    live_wid, refusal = _close_liveness(run)
+    if refusal and not force:
+        return {
+            "ok": False, "task_id": task_id,
+            "error": f"refusing to close {task_id}: {refusal}. Wait for it to go idle, or "
+                     "pass --force to close it anyway (its window is killed).",
+        }
+
+    reviews = reviews_of(run)
+    entry = {"round": len(reviews) + 1, "at": _now(), "verdict": "closed", "body": reason,
+             "from_status": status}
+    if by:
+        entry["by"] = by
+    reviews.append(entry)
+
+    with _db() as conn:
+        cur = conn.execute(
+            "UPDATE runs SET status='closed', close_reason=?, review_history=?, "
+            "ended_at=COALESCE(ended_at, ?) WHERE task_id=? AND status=?",
+            (reason, json.dumps(reviews), _now(), task_id, status),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            now = conn.execute(
+                "SELECT status FROM runs WHERE task_id=?", (task_id,)
+            ).fetchone()
+            current = now["status"] if now else "gone"
+            log.warning("close: %s moved to %r before it could be closed", task_id, current)
+            return {
+                "ok": False, "task_id": task_id,
+                "error": f"run moved to {current!r} while this was being written (a tick "
+                         "reconciled it, or someone else acted on it first) — nothing was "
+                         "changed. Re-read it and decide again.",
+            }
+
+    # Everything below is a PROJECTION of the row just written — best-effort, reported,
+    # never a reason to undo the close.
+    window_killed = False
+    if run.get("window_name") and live_wid:
+        _kill_windows_named(run["window_name"])
+        window_killed = True
+
+    wf_path = run.get("workflow_path")
+    repo_dir = str(Path(wf_path).parent) if wf_path else None
+    pr_open = pr_is_open(run)
+    pr_closed = False
+    comment_posted, comment_detail = False, "no open PR"
+    if pr_open:
+        body = f"🗂️✖️ Run closed by chela: {reason}"
+        if close_pr:
+            pr_closed, comment_detail = _gh_pr_close(run.get("pr_url"), repo_dir, body)
+            comment_posted = pr_closed
+        else:
+            comment_posted, comment_detail = _post_pr_comment(
+                run.get("pr_url"), repo_dir,
+                body + "\n\nThe PR is left open — close it by hand if it is not wanted.",
+            )
+        if not comment_posted:
+            log.warning("close: %s is closed, but the PR %s did not take (%s)", task_id,
+                        "close" if close_pr else "comment", comment_detail)
+
+    worktree_removed = False
+    worktree_detail = ""
+    if remove_worktree and run.get("worktree_path"):
+        try:
+            _cleanup_worktree_on_done(load_workflow(Path(wf_path)), run)
+            worktree_removed = not Path(run["worktree_path"]).is_dir()
+        except Exception as e:  # noqa: BLE001 — the close already landed; report, never raise
+            worktree_detail = f"{type(e).__name__}: {e}"
+
+    label = run.get("branch_name") or task_id
+    event_log.append(
+        "run_closed",
+        f"🗂️✖️ {label} closed ({status} → closed) — {reason}",
+        payload={"task_id": task_id, "branch_name": run.get("branch_name"),
+                 "pr_url": run.get("pr_url"), "from_status": status, "reason": reason,
+                 "forced": bool(force and refusal), "pr_closed": pr_closed,
+                 "worktree_removed": worktree_removed, "by": by},
+    )
+    log.info("close: %s (%s) → closed — %s", task_id, status, reason)
+    return {
+        "ok": True, "task_id": task_id, "status": "closed", "from_status": status,
+        "reason": reason, "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
+        "pr_open": pr_open, "pr_closed": pr_closed,
+        "comment_posted": comment_posted, "comment_detail": comment_detail,
+        "window_killed": window_killed, "forced": bool(force and refusal),
+        "worktree_path": run.get("worktree_path"), "worktree_removed": worktree_removed,
+        "worktree_detail": worktree_detail,
+    }
+
+
+def mark_judge_run_started(task_id: str) -> None:
+    """⏱️ CMX-411: stamp ``judge_run_started_at`` — the moment ``chela judge run`` itself
+    began, which is where the watchdog's wall starts counting (see ``_judge_watchdog``)."""
+    with _db() as conn:
+        conn.execute("UPDATE runs SET judge_run_started_at=? WHERE task_id=?", (_now(), task_id))
+        conn.commit()
+
+
 def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | None = None,
                      no_verdict: bool = False) -> None:
     """Record what the judge concluded on this run. ⛔ It writes NOTHING ELSE (besides ``sha``).
@@ -6448,8 +6688,11 @@ that SURVIVES **blocks this PR at every risk level** — it is never downgraded 
      the listed cases instead of fixing the guard. ⛔ Never mention a held-out experiment in
      `notes` — notes are posted to the PR.
 
-4. Run **`{{judge_cmd}}`** — your last step. It publishes the verdict, cleans up, and closes
-   this window.
+4. Run **`{{judge_cmd}}`** — your last step. `--detach` starts the battery in its own
+   process group and returns AT ONCE (it can take far longer than your Bash tool allows);
+   it publishes the verdict, cleans up, and closes this window by itself. Its log is
+   `{{judge_log}}`. ⛔ **Then stop.** Do not re-run it, and do not wait on it with a
+   foreground command — a second run on this task is refused, never restarted from zero.
 
 If you genuinely cannot find a guard to corrupt, say so in `notes` and still run the
 command with `"experiments": []` — that is recorded as **CANNOT VERIFY**, not as a pass.
@@ -6460,7 +6703,7 @@ def judge_prompt_vars(
     *, wf: WorkflowDef | None, risk: str, task_id: str, task_title: str, task_body: str,
     branch_name: str, base_branch: str, workspace_path: str, repo_path: str,
     project_key: str, task_number, pr_url: str, head_sha: str, experiments_path: str,
-    judge_cmd: str, test_cmd: str, diff_cmd: str, pr_view_cmd: str,
+    judge_cmd: str, judge_log: str, test_cmd: str, diff_cmd: str, pr_view_cmd: str,
 ) -> dict:
     """📏 CMX-408. EVERY variable :data:`JUDGE_PROMPT` renders with — the one map both the
     live judge (:func:`_judge_vars`) and the offline eval (``chela.judge_eval.design``)
@@ -6489,6 +6732,7 @@ def judge_prompt_vars(
         "head_sha": head_sha,
         "experiments_path": experiments_path,
         "judge_cmd": judge_cmd,
+        "judge_log": judge_log,
         "test_cmd": test_cmd,
         # ⚖️🙈 CMX-395: the held-out quota the judge is asked to meet.
         "held_out_pct": round((judge.judge_held_out_fraction(wf) if wf is not None
@@ -6520,7 +6764,9 @@ def _judge_vars(
         pr_url=row["pr_url"] or "(no PR link on the run row)",
         head_sha=sha,
         experiments_path=str(exp_path),
-        judge_cmd=f"chela judge run {row['task_id']} --experiments {exp_path}",
+        # ⏱️ CMX-411: `--detach` — the battery must not live inside the agent's Bash tool.
+        judge_cmd=f"chela judge run {row['task_id']} --experiments {exp_path} --detach",
+        judge_log=str(judge.judge_log_path(row["task_id"])),
         test_cmd=judge.judge_test_cmd(wf) or "(none)",
         diff_cmd=f"git diff origin/{base}...HEAD",
         pr_view_cmd=(f"gh pr view {number} --comments" if number
@@ -6637,8 +6883,8 @@ def _spawn_judge(
     tries = prior + 1 if retried_unknown else prior
     conn.execute(
         "UPDATE runs SET judge_sha=?, judge_state=?, judge_started_at=?, judge_detail=?, "
-        "judge_cannot_verify_tries=?, judge_no_verdict=0, judge_retry_after=NULL "
-        "WHERE task_id=?",
+        "judge_cannot_verify_tries=?, judge_no_verdict=0, judge_retry_after=NULL, "
+        "judge_run_started_at=NULL WHERE task_id=?",
         (sha, judge.J_RUNNING, _now(), "", tries, task_id),
     )
     conn.commit()
@@ -6727,7 +6973,11 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         (str(wf.path), judge.J_RUNNING),
     ).fetchall():
         window = judge.judge_window_name(row["branch_name"] or "")
-        started = _parse_ts(row["judge_started_at"])
+        # ⏱️ CMX-411: the wall measures the RUN, from its own start marker, once there is
+        # one — not the agent's design time before it. Until the run starts, the agent's
+        # spawn time bounds the agent instead, so a judge that never runs is still reaped.
+        run_started = _parse_ts(row["judge_run_started_at"])
+        started = run_started or _parse_ts(row["judge_started_at"])
         timed_out = (
             started is not None and now is not None
             and (now - started).total_seconds() >= JUDGE_TIMEOUT_SECONDS
@@ -6740,7 +6990,12 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         # gone) and this is a THIRD, affirmative reason to reap on top of `timed_out` — it
         # never widens what already reaps without it: `alive and timed_out` reaped before
         # this existed, and a dead window reaps via the lock cross-check below either way.
-        login_expired = alive and _pane_shows_login_expired(_capture_pane(window))
+        # ⏱️ CMX-411: once the run has started, it runs detached and needs nothing more
+        # from the agent's session — an expired login there is not a reason to reap it.
+        login_expired = (
+            alive and run_started is None
+            and _pane_shows_login_expired(_capture_pane(window))
+        )
         # ⚖️🌩️ CMX-379: the auto-mode classifier outage is the same kind of never-got-a-
         # chance failure. Measured 2026-09-28 on PR #529: every Bash call failed, the judge
         # stopped after the harness's 10-in-a-row limit and sat idle, holding the only judge
@@ -6806,6 +7061,9 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         conn.commit()
         if alive:
             _kill_windows_named(window)
+        # ⏱️ CMX-411: a detached run is out of the window's reach, so a timed-out one is
+        # stopped here, before its worktree is deleted out from under it.
+        judge.stop_judge_run(judge.judge_worktree_path(wf, row["task_id"]))
         try:
             remove_worktree(
                 wf.path.parent, judge.judge_worktree_path(wf, row["task_id"]),
