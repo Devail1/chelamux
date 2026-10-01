@@ -572,6 +572,7 @@ def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
             "pr_url": "https://x/1", "branch_name": "b", "task_id": "abc123",
             "workspace_path": str(tmp_path), "diff_cmd": "git diff", "pr_view_cmd": "gh pr view",
             "experiments_path": str(tmp_path / "experiments.json"), "judge_cmd": "chela judge run",
+            "judge_log": str(tmp_path / "judge.log"),            # ⏱️ CMX-411
             "held_out_pct": 30, "held_out_min": 3,     # ⚖️🙈 CMX-395
             "risk": "normal", "max_experiments": 8, "risk_guidance": "focused",
         }

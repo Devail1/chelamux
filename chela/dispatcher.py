@@ -1223,6 +1223,12 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("judge_sha", "ALTER TABLE runs ADD COLUMN judge_sha TEXT"),
         ("judge_state", "ALTER TABLE runs ADD COLUMN judge_state TEXT"),
         ("judge_started_at", "ALTER TABLE runs ADD COLUMN judge_started_at TEXT"),
+        # ⏱️ CMX-411. When `chela judge run` itself STARTED (its own marker, written right
+        # after it claims the slot) — distinct from `judge_started_at`, which is when the
+        # judge AGENT was spawned. The watchdog's wall measures the battery from here once it
+        # exists: an agent's design time must not be charged to the run. NULL until the run
+        # starts; `_spawn_judge` clears it on every new judge.
+        ("judge_run_started_at", "ALTER TABLE runs ADD COLUMN judge_run_started_at TEXT"),
         ("judge_detail", "ALTER TABLE runs ADD COLUMN judge_detail TEXT"),
         # ⚖️ CMX-81. How many times the judge has been RE-RUN on the CURRENT `judge_sha` after
         # coming back CANNOT VERIFY. `cannot_verify` is an UNKNOWN (a flake, a gh timeout, a
@@ -4048,6 +4054,14 @@ def retry(ident: str, reason: str = "") -> dict:
     }
 
 
+def mark_judge_run_started(task_id: str) -> None:
+    """⏱️ CMX-411: stamp ``judge_run_started_at`` — the moment ``chela judge run`` itself
+    began, which is where the watchdog's wall starts counting (see ``_judge_watchdog``)."""
+    with _db() as conn:
+        conn.execute("UPDATE runs SET judge_run_started_at=? WHERE task_id=?", (_now(), task_id))
+        conn.commit()
+
+
 def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | None = None,
                      no_verdict: bool = False) -> None:
     """Record what the judge concluded on this run. ⛔ It writes NOTHING ELSE (besides ``sha``).
@@ -6448,8 +6462,11 @@ that SURVIVES **blocks this PR at every risk level** — it is never downgraded 
      the listed cases instead of fixing the guard. ⛔ Never mention a held-out experiment in
      `notes` — notes are posted to the PR.
 
-4. Run **`{{judge_cmd}}`** — your last step. It publishes the verdict, cleans up, and closes
-   this window.
+4. Run **`{{judge_cmd}}`** — your last step. `--detach` starts the battery in its own
+   process group and returns AT ONCE (it can take far longer than your Bash tool allows);
+   it publishes the verdict, cleans up, and closes this window by itself. Its log is
+   `{{judge_log}}`. ⛔ **Then stop.** Do not re-run it, and do not wait on it with a
+   foreground command — a second run on this task is refused, never restarted from zero.
 
 If you genuinely cannot find a guard to corrupt, say so in `notes` and still run the
 command with `"experiments": []` — that is recorded as **CANNOT VERIFY**, not as a pass.
@@ -6460,7 +6477,7 @@ def judge_prompt_vars(
     *, wf: WorkflowDef | None, risk: str, task_id: str, task_title: str, task_body: str,
     branch_name: str, base_branch: str, workspace_path: str, repo_path: str,
     project_key: str, task_number, pr_url: str, head_sha: str, experiments_path: str,
-    judge_cmd: str, test_cmd: str, diff_cmd: str, pr_view_cmd: str,
+    judge_cmd: str, judge_log: str, test_cmd: str, diff_cmd: str, pr_view_cmd: str,
 ) -> dict:
     """📏 CMX-408. EVERY variable :data:`JUDGE_PROMPT` renders with — the one map both the
     live judge (:func:`_judge_vars`) and the offline eval (``chela.judge_eval.design``)
@@ -6489,6 +6506,7 @@ def judge_prompt_vars(
         "head_sha": head_sha,
         "experiments_path": experiments_path,
         "judge_cmd": judge_cmd,
+        "judge_log": judge_log,
         "test_cmd": test_cmd,
         # ⚖️🙈 CMX-395: the held-out quota the judge is asked to meet.
         "held_out_pct": round((judge.judge_held_out_fraction(wf) if wf is not None
@@ -6520,7 +6538,9 @@ def _judge_vars(
         pr_url=row["pr_url"] or "(no PR link on the run row)",
         head_sha=sha,
         experiments_path=str(exp_path),
-        judge_cmd=f"chela judge run {row['task_id']} --experiments {exp_path}",
+        # ⏱️ CMX-411: `--detach` — the battery must not live inside the agent's Bash tool.
+        judge_cmd=f"chela judge run {row['task_id']} --experiments {exp_path} --detach",
+        judge_log=str(judge.judge_log_path(row["task_id"])),
         test_cmd=judge.judge_test_cmd(wf) or "(none)",
         diff_cmd=f"git diff origin/{base}...HEAD",
         pr_view_cmd=(f"gh pr view {number} --comments" if number
@@ -6637,8 +6657,8 @@ def _spawn_judge(
     tries = prior + 1 if retried_unknown else prior
     conn.execute(
         "UPDATE runs SET judge_sha=?, judge_state=?, judge_started_at=?, judge_detail=?, "
-        "judge_cannot_verify_tries=?, judge_no_verdict=0, judge_retry_after=NULL "
-        "WHERE task_id=?",
+        "judge_cannot_verify_tries=?, judge_no_verdict=0, judge_retry_after=NULL, "
+        "judge_run_started_at=NULL WHERE task_id=?",
         (sha, judge.J_RUNNING, _now(), "", tries, task_id),
     )
     conn.commit()
@@ -6727,7 +6747,11 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         (str(wf.path), judge.J_RUNNING),
     ).fetchall():
         window = judge.judge_window_name(row["branch_name"] or "")
-        started = _parse_ts(row["judge_started_at"])
+        # ⏱️ CMX-411: the wall measures the RUN, from its own start marker, once there is
+        # one — not the agent's design time before it. Until the run starts, the agent's
+        # spawn time bounds the agent instead, so a judge that never runs is still reaped.
+        run_started = _parse_ts(row["judge_run_started_at"])
+        started = run_started or _parse_ts(row["judge_started_at"])
         timed_out = (
             started is not None and now is not None
             and (now - started).total_seconds() >= JUDGE_TIMEOUT_SECONDS
@@ -6740,7 +6764,12 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         # gone) and this is a THIRD, affirmative reason to reap on top of `timed_out` — it
         # never widens what already reaps without it: `alive and timed_out` reaped before
         # this existed, and a dead window reaps via the lock cross-check below either way.
-        login_expired = alive and _pane_shows_login_expired(_capture_pane(window))
+        # ⏱️ CMX-411: once the run has started, it runs detached and needs nothing more
+        # from the agent's session — an expired login there is not a reason to reap it.
+        login_expired = (
+            alive and run_started is None
+            and _pane_shows_login_expired(_capture_pane(window))
+        )
         # ⚖️🌩️ CMX-379: the auto-mode classifier outage is the same kind of never-got-a-
         # chance failure. Measured 2026-09-28 on PR #529: every Bash call failed, the judge
         # stopped after the harness's 10-in-a-row limit and sat idle, holding the only judge
@@ -6806,6 +6835,9 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         conn.commit()
         if alive:
             _kill_windows_named(window)
+        # ⏱️ CMX-411: a detached run is out of the window's reach, so a timed-out one is
+        # stopped here, before its worktree is deleted out from under it.
+        judge.stop_judge_run(judge.judge_worktree_path(wf, row["task_id"]))
         try:
             remove_worktree(
                 wf.path.parent, judge.judge_worktree_path(wf, row["task_id"]),
