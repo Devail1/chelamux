@@ -18,6 +18,7 @@ import signal
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -332,9 +333,12 @@ def test_a_run_longer_than_30_minutes_still_publishes_its_verdict(tmp_path, monk
 
 # --- chela doctor shows a live run --------------------------------------------------------
 
-def test_doctor_shows_a_live_run_with_elapsed_time_and_progress(tmp_path, monkeypatch):
+@pytest.mark.parametrize("detached", [True, False])
+def test_doctor_shows_a_live_run_with_elapsed_time_and_progress(tmp_path, monkeypatch, detached):
     """A live judge run is listed with its elapsed time (from its OWN start) and k/N — the
-    status `judge_run` writes as each experiment starts. Real run, real progress file."""
+    status `judge_run` writes as each experiment starts. Real run, real progress file.
+    Both ways round: a detached run says so and names its log; a foreground one says
+    `foreground` and names none (it has no log of its own — its output is the caller's)."""
     monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
     logs = tmp_path / "judge-logs"
     monkeypatch.setattr(judge, "judge_logs_dir", lambda: logs)
@@ -354,15 +358,20 @@ def test_doctor_shows_a_live_run_with_elapsed_time_and_progress(tmp_path, monkey
         def _spy(done, total):
             progress(done, total)
             findings = runtime_truth.audit(runtime_truth.fact("judge.live_runs"))
-            seen.append([f.title for f in findings])
+            seen.append([(f.title, f.detail) for f in findings])
         return real_apply(*a, progress=_spy, **kw)
 
     monkeypatch.setattr(judge, "_apply_experiments", _apply)
     with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
-        judge.judge_run(task_id, exp_file, cleanup=True, detached=True)
+        judge.judge_run(task_id, exp_file, cleanup=True, detached=detached)
 
-    assert any("judge for abc123 running (detached)" in t and "experiment 1/2" in t
-               and "elapsed" in t for titles in seen for t in titles), seen
+    how = "detached" if detached else "foreground"
+    hits = [(t, d) for found in seen for t, d in found
+            if f"judge for abc123 running ({how})" in t and "experiment 1/2" in t
+            and "elapsed" in t]
+    assert hits, seen
+    log_detail = f"log {logs / 'abc123.log'}"
+    assert all((log_detail in d) is detached for _, d in hits), hits
     # …and gone once the run released its slot.
     assert [f.title for f in runtime_truth.audit(runtime_truth.fact("judge.live_runs"))] == [
         "no judge run in flight"]
@@ -426,13 +435,19 @@ def test_cli_detached_child_marks_its_claim_detached(tmp_path, monkeypatch):
     assert _run()["detached"] is False
 
 
+@pytest.mark.parametrize("extra, want_cleanup", [((), True), (("--no-cleanup",), False)])
 def test_cli_detach_takes_the_detach_path_and_never_runs_the_battery_inline(
-    tmp_path, monkeypatch, capsys,
+    tmp_path, monkeypatch, capsys, extra, want_cleanup,
 ):
     """`chela judge run --detach` spawns the detached child and returns — it must NEVER run
     the battery in the caller's own process (that is the Bash-tool kill all over again).
     Real argparse; the only thing faked is the process spawn. Seen to go red:
-    `if getattr(args, "detach", False):` → `if False and …` in `cmd_judge`."""
+    `if getattr(args, "detach", False):` → `if False and …` in `cmd_judge`.
+
+    ⛔ The child's argv is pinned EXACTLY, both ways round on `--no-cleanup`: every flag the
+    caller gave must reach the re-exec'd child, since the child — not this process — is the
+    one that cleans up (DEFEAT_SHAPES 411b). Seen to go red: `cleanup=not args.no_cleanup`
+    → `cleanup=True` on the `detach_judge_run` call in `cmd_judge`."""
     from chela import main
 
     repo = _workflow_repo(tmp_path, "abc123", REAL_GUARD_TEST)
@@ -446,14 +461,41 @@ def test_cli_detach_takes_the_detach_path_and_never_runs_the_battery_inline(
     monkeypatch.setattr(judge, "judge_run", lambda *a, **kw: inline.append(a) or {})
 
     with patch.object(sys, "argv", ["chela", "judge", "run", "abc123",
-                                    "--experiments", str(exp_file), "--detach"]):
+                                    "--experiments", str(exp_file), "--detach", *extra]):
         main.main()
 
     assert inline == []                                   # ⛔ no battery in this process
-    assert len(spawned) == 1 and "--detached-child" in spawned[0]
+    assert spawned == [[sys.executable, "-m", "chela.main", "judge", "run", "abc123",
+                        "--experiments", str(exp_file.resolve()), "--detached-child",
+                        *(() if want_cleanup else ("--no-cleanup",))]]
     out = capsys.readouterr().out
     assert "started DETACHED (pid 4242)" in out
     assert str(judge.judge_log_path("abc123")) in out
+
+
+@pytest.mark.parametrize("flags, want", [
+    ((), {"cleanup": True, "detached": False}),
+    (("--no-cleanup",), {"cleanup": False, "detached": False}),
+    (("--detached-child",), {"cleanup": True, "detached": True}),
+    (("--detached-child", "--no-cleanup"), {"cleanup": False, "detached": True}),
+])
+def test_cli_run_hands_both_flags_to_judge_run(monkeypatch, flags, want):
+    """The OTHER end of the re-exec: the child's `--detached-child` / `--no-cleanup` must
+    arrive at `judge_run` as `detached=` / `cleanup=` — all four combinations, so neither
+    flag can be dropped or pinned without one row going red. Seen to go red:
+    `cleanup=not args.no_cleanup` → `cleanup=True` on the `judge_run` call in `cmd_judge`."""
+    from chela import main
+
+    calls = []
+    monkeypatch.setattr(judge, "detach_judge_run",
+                        lambda *a, **kw: pytest.fail("a non---detach run took the detach path"))
+    monkeypatch.setattr(judge, "judge_run",
+                        lambda *a, **kw: calls.append((a, kw)) or {"ok": True, "task_id": "t"})
+    with patch.object(sys, "argv", ["chela", "judge", "run", "abc123",
+                                    "--experiments", "x.json", *flags]):
+        main.main()
+
+    assert calls == [(("abc123", "x.json"), want)]
 
 
 def test_cli_detach_refused_exits_nonzero_and_spawns_nothing(tmp_path, monkeypatch, capsys):
@@ -601,4 +643,8 @@ def test_detached_argv_carries_no_cleanup_and_a_safe_log_name():
     of `judge-logs/`."""
     assert "--no-cleanup" in judge.detached_argv("t", "x.json", cleanup=False)
     assert "--no-cleanup" not in judge.detached_argv("t", "x.json")
+    # The experiments path is handed over ABSOLUTE — a relative one names whatever file the
+    # child's cwd happens to hold.
+    argv = judge.detached_argv("t", "x.json")
+    assert argv[argv.index("--experiments") + 1] == str((Path.cwd() / "x.json").resolve())
     assert judge.judge_log_path("../../etc/x").parent == judge.judge_logs_dir()
