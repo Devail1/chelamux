@@ -32,6 +32,17 @@ class Task:
     # BOUNDARIES (see :func:`infer_risk`). `risk_reason` records which of those it was.
     risk: str = "normal"
     risk_reason: str = "default"
+    # 📐🔗 CMX-432 — set only by a tracker that owns its own numbering and branch names
+    # (Linear). `task_number` is the tracker's own number (`CMX-12` → 12) and `branch`
+    # its suggested branch name (`cmx-12-tighten-top-row`); `_spawn` uses them instead of
+    # minting `{project_key}-{MAX+1}`. None for markdown/gh_issues: nothing changes there.
+    task_number: int | None = None
+    branch: str | None = None
+    # The tracker's own verdict on a task it was asked about BY ID (``fetch_by_ids``):
+    # None while it is open, ``"done"`` / ``"canceled"`` once it is terminal. A tracker
+    # that archives finished work (Linear) reports an ARCHIVED issue as terminal, never as
+    # absent — absence is what a reconcile reads as "gone", and archived is not gone.
+    terminal_state: str | None = None
 
 
 # ⚖️🎚️ CMX-405 — ordered LOWEST to HIGHEST stakes; `highest_risk` relies on the order.
@@ -115,4 +126,7 @@ def get_source(wf: WorkflowDef):
     if kind == "gh_issues":
         from chela.sources.gh_issues import GhIssuesSource
         return GhIssuesSource(wf)
+    if kind == "linear":
+        from chela.sources.linear import LinearSource
+        return LinearSource(wf)
     raise ValueError(f"Unknown tracker.kind: {kind!r}")
