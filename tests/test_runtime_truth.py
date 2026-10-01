@@ -565,16 +565,21 @@ def _break_judge_blocked_race(tmp_path, monkeypatch):
 def _break_judge_live_runs(tmp_path, monkeypatch):
     """CMX-411: a detached judge run is still going PAST the judge wall — nothing is
     bounding it any more (the daemon is down, or the watchdog's stop failed). This test
-    process stands in for the run, so the pid + /proc start-time liveness check passes."""
-    from chela import judge, sessions
+    process stands in for the run, so the pid + /proc start-time liveness check passes.
+
+    ⏱️ CMX-424: the owner fields come from `judge.owner_identity` — the one builder `chela
+    judge run` itself writes and the liveness check reads — never re-derived here. A
+    hand-built wall-clock `started` went stale under a host whose clock was being stepped
+    (WSL2), and the check then rightly called this live process dead: green locally, red in
+    every judge baseline for an afternoon."""
+    from chela import judge
     from chela.dispatcher import JUDGE_TIMEOUT_SECONDS
 
     logs = tmp_path / "judge-logs"
     logs.mkdir()
     monkeypatch.setattr(judge, "judge_logs_dir", lambda: logs)
-    pid = os.getpid()
     (logs / "CMX-411.json").write_text(json.dumps({
-        "pid": pid, "started": sessions.proc_started(pid), "task_id": "CMX-411",
+        **judge.owner_identity(os.getpid()), "task_id": "CMX-411",
         "run_started_at": time.time() - JUDGE_TIMEOUT_SECONDS - 60, "detached": True,
         "done": 3, "total": 8,
     }))
@@ -663,6 +668,40 @@ def test_corrupting_the_owned_value_makes_doctor_say_so(name, fleet, monkeypatch
     assert reported, (
         f"corrupting the value {name} REALLY runs on did not make doctor report it at "
         f"{level}. A check that cannot be seen to go red is not a check.")
+
+
+# A host whose wall clock is being STEPPED (WSL2's time sync): the kernel recomputes btime on
+# every step, so every read of it here lands on a later one.
+_CLOCK_STEP_PLUGIN = """
+def pytest_configure(config):
+    from chela import sessions
+
+    real, steps = sessions._boot_time, [0]
+
+    def stepping():
+        steps[0] += 1
+        return real() + 2.0 * steps[0]
+
+    sessions._boot_time = stepping
+"""
+
+
+def test_the_live_runs_corruption_goes_red_under_the_judges_own_suite_env(tmp_path):
+    """⏱️ CMX-424: `[judge.live_runs]` above passed 3/3 run directly and failed in 4 of 5
+    judge baselines on 2026-10-01 — the window in which WSL2 was stepping this host's clock
+    every ~34s. Run it the way the judge does (`judge.run_suite`: the judge's suite env, a
+    fresh CHELA_DIR, no CHELA_*/tmux vars) on a clock stepped between every read, and it
+    must still see its own live run and WARN."""
+    from chela import judge
+
+    (tmp_path / "chela_clock_step.py").write_text(_CLOCK_STEP_PLUGIN)
+    node = f"{Path(__file__).resolve()}::test_corrupting_the_owned_value_makes_doctor_say_so" \
+           "[judge.live_runs]"
+    cmd = (f"{sys.executable} -m pytest -q -n0 -p no:cacheprovider -p chela_clock_step "
+           f"'{node}'")
+    res = judge.run_suite(cmd, Path(__file__).resolve().parent.parent,
+                          extra_env={"PYTHONPATH": str(tmp_path)})
+    assert res.green and "1 passed" in res.tail, res.tail[-3000:]
 
 
 def test_hooks_rejected_wid_teardown_is_ok_not_warn(fleet, monkeypatch):

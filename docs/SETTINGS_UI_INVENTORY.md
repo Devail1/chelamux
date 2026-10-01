@@ -20,7 +20,7 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**52** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+**58** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
 wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
 added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
@@ -32,8 +32,9 @@ group 10 — then 43, until CMX-381 made the dashboard read `CHELA_TERM_THEME` t
 then 44, until CMX-382 wired `CHELA_REMOTE_CONTROL` through
 `dashboard_setting()` as the General tab's Remote Control switch — back to 43, see group 10 —
 then 44, until CMX-389 added `CHELA_OVERRIDE_WAIT_S`, group 4 — then 51, until CMX-403
-added the seven sandboxed-share knobs, group 9 — then 52, until CMX-420 added the proxy's
-`CHELA_PROXY_SESSION_DIR`, group 9) — every literal `CHELA_*` name a Python module in
+added the seven sandboxed-share knobs, group 9 — then 57, until CMX-418 added the six
+web-mode knobs, group 9 — then 58, until CMX-420 added the proxy's `CHELA_PROXY_SESSION_DIR`,
+group 9) — every literal `CHELA_*` name a Python module in
 `chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
@@ -272,7 +273,7 @@ under-deliver: the shell-only 6 (font, port base, poll interval, backoff, max
 clients) are exactly the kind of thing a person opening a "Terminal wall" tab expects to
 find there, and today they don't exist in any UI or even `docs/CONFIG.md`'s table.
 
-### 9. Collaboration (9 + 1 wired) — mixed
+### 9. Collaboration (15 + 1 wired) — mixed
 
 | Variable | Default | Class | Notes |
 |---|---|---|---|
@@ -286,6 +287,17 @@ find there, and today they don't exist in any UI or even `docs/CONFIG.md`'s tabl
 | `CHELA_PROXY_UPSTREAM` | `https://api.anthropic.com` | `internal-path` | Same — the sidecar's copy of `CHELA_SHARE_PROXY_UPSTREAM` |
 | `CHELA_PROXY_PORT` | `8080` | `internal-path` | Same — the sidecar's listen port |
 | `CHELA_PROXY_SESSION_DIR` | none | `internal-path` | Same — where the sidecar writes the session's Telegram outbox (CMX-420) |
+| `CHELA_SHARE_SANDBOX_WEB_IMAGE` | `chela-share-web:latest` | `hot` | Web-mode guest image with headless Chromium (CMX-418), built locally from `chela/assets/share-sandbox-web/` |
+| `CHELA_SHARE_WEB_DENY` | empty | `trust-boundary` | Web mode: domains (and subdomains) the egress proxy always refuses |
+| `CHELA_SHARE_WEB_ALLOW` | empty (= any public host) | `trust-boundary` | Web mode: if set, the ONLY domains the egress proxy admits |
+| `CHELA_SHARE_WEB_HOST_RPS` | `1` | `trust-boundary` | Web mode: per-site request rate (burst 3) |
+| `CHELA_SHARE_WEB_GLOBAL_RPS` | `8` | `trust-boundary` | Web mode: request rate across all sites (burst 20) |
+| `CHELA_SHARE_WEB_DENY_CIDRS` | empty | `trust-boundary` | Web mode: extra address ranges refused on top of every private range and the host's own addresses |
+
+The web egress sidecar's own `CHELA_WEB_*` variables (`_LOG`, `_PORT`, `_DENY_NETS`,
+`_DENY`, `_ALLOW`, `_HOST_RPS`, `_GLOBAL_RPS`) are `internal-path`: the launcher sets them
+from the knobs above, and `chela/share_web_proxy.py` reads them from the mapping it is
+handed, not with a literal `os.environ` read, so they are not counted.
 
 **WIRED (CMX-403):** `CHELA_SHARE_TYPING` (default `false`) — whether a share guest may
 type at all. `config.share_typing_enabled()`, read per keystroke through

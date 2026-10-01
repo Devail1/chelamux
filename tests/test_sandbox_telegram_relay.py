@@ -201,7 +201,10 @@ def test_verify_container_refuses_the_outbox_dir_mounted_into_the_guest(tmp_path
             {"Type": "bind", "Source": "/usr/bin/true", "Destination": share_sandbox.CLAUDE_MOUNT, "RW": False},
         ],
     }
-    network = {"Internal": True, "Options": {"com.docker.network.bridge.inhibit_ipv4": "true"}}
+    # CMX-418: the session network must hold exactly the guest and its token proxy.
+    network = {"Internal": True, "Options": {"com.docker.network.bridge.inhibit_ipv4": "true"},
+               "Containers": {"a": {"Name": share_sandbox.container_name(SID)},
+                              "b": {"Name": share_sandbox.proxy_name(SID)}}}
     assert share_sandbox.verify_container(info, network, SID, real, UID, GID) is None  # control
     info["Mounts"].append({"Type": "bind", "Source": str(share_sandbox.session_dir(SID)),
                            "Destination": "/home/guest/outbox", "RW": False})
