@@ -1151,6 +1151,47 @@ def share_typing_enabled() -> bool:
     return dashboard_setting(SHARE_TYPING_KEY, SHARE_TYPING_ENV, False, cast_strict_bool)
 
 
+# 📎 File drop into Wall terminals (CMX-412): a file dropped or pasted on the OWNER's pane
+# is saved to ``<session cwd>/uploads/`` and its ``@uploads/<name>`` typed into the prompt.
+# ON by default — it only ever serves the operator's own dashboard; share guests are refused
+# by the route whatever this says. Read per call, so the Settings switch takes effect at once.
+FILE_DROP_KEY = "file_drop"
+FILE_DROP_ENV = "CHELA_FILE_DROP"
+
+
+def file_drop_setting() -> tuple[bool, str]:
+    """``(enabled, source)`` — same shape as :func:`remote_control_setting`."""
+    return _resolve_dashboard_setting(FILE_DROP_KEY, FILE_DROP_ENV, True, cast_strict_bool)
+
+
+def file_drop_enabled() -> bool:
+    """Whether a drop/paste on a Wall pane may upload. Default True. Read per call."""
+    return dashboard_setting(FILE_DROP_KEY, FILE_DROP_ENV, True, cast_strict_bool)
+
+
+# Upload caps (CMX-412). Env-only: bounds, not preferences.
+UPLOAD_MAX_MB_DEFAULT = 25
+UPLOAD_PER_MINUTE_DEFAULT = 20
+
+
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        v = int(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        v = default
+    return max(lo, min(hi, v))
+
+
+def upload_max_bytes() -> int:
+    """Largest single file a Wall drop may upload (``CHELA_UPLOAD_MAX_MB``, default 25)."""
+    return _env_int("CHELA_UPLOAD_MAX_MB", UPLOAD_MAX_MB_DEFAULT, 1, 1024) * 1024 * 1024
+
+
+def upload_per_minute() -> int:
+    """Uploads accepted per rolling minute (``CHELA_UPLOAD_PER_MINUTE``, default 20)."""
+    return _env_int("CHELA_UPLOAD_PER_MINUTE", UPLOAD_PER_MINUTE_DEFAULT, 1, 1000)
+
+
 # How long a trusted-peer UNSANDBOXED typing override lasts before the share reverts to
 # view-only on its own (CMX-403). Env-only on purpose — it bounds an explicit per-share
 # opt-in, so it is not a dashboard toggle. The env var is the DEFAULT the share dialog's

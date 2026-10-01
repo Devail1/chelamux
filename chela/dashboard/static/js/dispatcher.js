@@ -1,7 +1,7 @@
 // --- Stage 0: ES-module imports ---
 import { $, api, attrEsc, escHtml, shortTime, showModal } from './util.js';
 import { _launcherData } from './launcher.js';
-import { runStatusBadgeClass } from './runstate.js';
+import { runCardNote, runStatusBadgeClass } from './runstate.js';
 import { pollWork, postWorkDelete } from './work.js';
 
 // ---------------------------------------------------------------------------
@@ -150,10 +150,16 @@ function _renderRunsTable(runs, label) {
             _cell('Ended', shortTime(r.ended_at), 'ts') +
             _cell('Attempt', r.attempt || '') +
             _cell('PR', _runPrCell(r.pr_url)) +
-            _cell('Error', r.last_error ? `<span title="${attrEsc(r.last_error)}">${escHtml(r.last_error.slice(0, 60))}</span>` : '') +
+            _cell('Error', _runNoteCell(r)) +
             _cell('Delete', _runDeleteBtn(r)) +
         '</tr>').join('') +
         '</tbody></table></div>';
+}
+
+// The Error cell — or, for a run closed by hand, "Closed — <reason>" instead (CMX-406).
+function _runNoteCell(r) {
+    const note = runCardNote(r);
+    return note ? `<span title="${attrEsc(note.text)}">${escHtml(note.text.slice(0, 60))}</span>` : '';
 }
 
 function _renderOpenTasks(tasks) {

@@ -10,6 +10,7 @@ import { VIEWS } from './views.js';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg.js';
 import { refresh } from './main.js';
 import { refreshCost } from './cost.js';
+import { resolveWindowId } from './windowid.js';
 
 // ---------------------------------------------------------------------------
 // Sidebar + canvas navigation (replaces the old tab bar)
@@ -322,8 +323,12 @@ function _agentRowHtml(a) {
     // exact pre-existing markup (tests/dashboard_scale_nav_a11y.test.mjs's
     // non-hue-cue GUARD 3b/GUARD 4 assert those two spans verbatim), just
     // recomposed together instead of ctx% living on the top line.
+    // CMX-417: then the tmux window id ("idle · 74% ctx · @32"), so a row can be
+    // matched to the `@N` that `chela peek`, inbox notices and peer messages use
+    // without opening the pane. Same id the pane footer shows (_ctxBarHTML).
     const sub = `<span class="ar-state ${stCls}">${stWord}</span>`
-        + (ctxChip ? ` · ${ctxChip} ctx` : '');
+        + (ctxChip ? ` · ${ctxChip} ctx` : '')
+        + (a.window_id ? ` · <span class="ar-wid">${escHtml(a.window_id)}</span>` : '');
 
     const type = _agentType(a);
     // Whatever CMX-146's ai_title / the occasional away_summary recap used to
@@ -331,7 +336,8 @@ function _agentRowHtml(a) {
     // rendered line, so the data is not silently lost by the 2-line row format
     // the mockup specifies — just no longer competing for vertical space.
     const extra = [a.ai_title, a.recap].filter(Boolean).join(' — ');
-    const rowTitle = extra ? `${label}\n${extra}` : label;
+    const head = a.window_id ? `${label} · ${a.window_id}` : label;
+    const rowTitle = extra ? `${head}\n${extra}` : head;
 
     const wallSuffix = onWall ? ' — open on the wall' : '';
     // CMX-377 round 2: the row is exactly status mark · title · "state · ctx" ·
@@ -984,6 +990,22 @@ function renderSettings(focus) {
             <p class="s-desc" id="remote-control-source"></p>
         </section>
 
+        <section class="settings-section" id="settings-file-drop">
+            <h4>File drop into terminals</h4>
+            <p class="s-desc">Drop a file on a Wall terminal — or paste one, e.g. a screenshot —
+            and it is saved to that session's <code>uploads/</code> folder and its
+            <code>@uploads/&lt;name&gt;</code> is typed into the prompt (not sent). Works from
+            your phone too. Never overwrites; <span id="file-drop-cap">25</span> MB per file.
+            Share guests can never upload. A pane picks up a change when it reloads.</p>
+            <div class="s-row" data-keywords="upload drag drop paste file image screenshot attach uploads phone">
+                <label class="s-rowlabel" for="file-drop-toggle">File drop into terminals — save dropped or pasted files into the session</label>
+                <input id="file-drop-toggle" type="checkbox" role="switch" disabled
+                       onchange="chela.setFileDrop(this.checked)">
+            </div>
+            <div id="file-drop-msg" class="s-savemsg"></div>
+            <p class="s-desc" id="file-drop-source"></p>
+        </section>
+
         <section class="settings-section" data-keywords="tailscale ssh tunnel vpn auth security">
             <h4>Remote access</h4>
             <p class="s-desc">Zero built-in auth — the dashboard binds <code>127.0.0.1</code>.
@@ -1172,6 +1194,7 @@ function renderSettings(focus) {
     _loadAgentModelSetting();
     _loadRemoteControlSetting();
     _loadShareTypingSetting();
+    _loadFileDropSetting();
     _loadTimingSettings();
     _loadDispatchSettings();
     _loadSettingsStatus();
@@ -1414,6 +1437,58 @@ async function setShareTyping(on) {
     }
     setMsg('ok', 'Saved · guest typing ' + (cfg.share_typing ? 'allowed into sandboxed sessions' : 'off — every share is view only'));
     _renderShareTyping(cfg);
+}
+
+// File drop into terminals (CMX-412): the `file_drop` switch. ON by default; same
+// env-wins presentation as Remote Control — CHELA_FILE_DROP set ⇒ shown, but disabled.
+function _renderFileDrop(cfg) {
+    const box = document.getElementById('file-drop-toggle');
+    const src = document.getElementById('file-drop-source');
+    const cap = document.getElementById('file-drop-cap');
+    if (!box) return;
+    const on = !!(cfg && cfg.file_drop);
+    const locked = !!(cfg && cfg.file_drop_env_locked);
+    box.checked = on;
+    box.disabled = locked;
+    if (cap && cfg && cfg.upload_max_mb) cap.textContent = String(cfg.upload_max_mb);
+    if (src) {
+        const env = escHtml((cfg && cfg.file_drop_env) || 'CHELA_FILE_DROP');
+        const from = locked ? `set by <code>${env}</code> — env wins; unset it to edit here`
+            : (cfg && cfg.file_drop_source === 'dashboard') ? 'this setting'
+            : 'the built-in default';
+        src.innerHTML = `In effect: <strong>${on ? 'On' : 'Off'}</strong> — ${from}.`;
+    }
+}
+
+async function _loadFileDropSetting() {
+    const box = document.getElementById('file-drop-toggle');
+    if (!box) return;
+    let cfg;
+    try {
+        cfg = await api('/api/config');
+    } catch (e) { box.disabled = true; return; }
+    _renderFileDrop(cfg);
+}
+
+async function setFileDrop(on) {
+    const msg = document.getElementById('file-drop-msg');
+    const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
+    setMsg('', 'Saving…');
+    let cfg;
+    try {
+        cfg = await api('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file_drop: !!on }),
+        });
+    } catch (e) { setMsg('err', 'Save failed — unchanged.'); _loadFileDropSetting(); return; }
+    if (!cfg || cfg.error) {
+        setMsg('err', 'Rejected — unchanged.');
+        _loadFileDropSetting();
+        return;
+    }
+    setMsg('ok', 'Saved · file drop into terminals ' + (cfg.file_drop ? 'on' : 'off'));
+    _renderFileDrop(cfg);
 }
 
 // Live "Connections & Status" surface (READ-ONLY). Fetches /api/settings and
@@ -2062,8 +2137,12 @@ function _paletteItems(skipWids) {
     (_agentsCache || []).forEach(a => {
         if (skipWids && a.window_id && skipWids.has(a.window_id)) return;
         const word = _AGENT_STATUS_WORD[agentDotColor(a)] || 'idle';
-        items.push({ dot: _SIDEBAR_DOT_CLASS[agentDotColor(a)] || 'idle', title: _agentLabel(a),
-                     sub: 'session · ' + word, run: () => selectAgent(a.name) });
+        // CMX-417: the window id rides the sub-line, so it shows on the row, and
+        // `wid` is scored on its own in _renderPalette ("@3" lists @3, @31, @32…
+        // however long the session's name is).
+        items.push({ wid: a.window_id, dot: _SIDEBAR_DOT_CLASS[agentDotColor(a)] || 'idle', title: _agentLabel(a),
+                     sub: 'session · ' + word + (a.window_id ? ' · ' + a.window_id : ''),
+                     run: () => selectAgent(a.name) });
     });
 
     // Share / Stop sharing per live session (same server flag as the pane button).
@@ -2157,16 +2236,48 @@ function _openPaneItems() {
     });
 }
 
+// CMX-417: a query that is exactly an open window's id ("@32") → one row that
+// JUMPS to that window, pinned above the fuzzy matches (which would otherwise
+// rank @320 alongside it). Jumps, never toggles: selectAgent minimizes a pane
+// that is already open, which is the wrong answer to "take me to @32". Any open
+// window counts — a plain shell has no /api/agents row but is still `@N`.
+function _windowIdItem(q) {
+    const known = (_agentsCache || []).map(a => a.window_id).filter(Boolean);
+    const rendered = (TERMINALS_ON && typeof _renderedWids !== 'undefined') ? _renderedWids : [];
+    const wid = resolveWindowId(q, known.concat(rendered));
+    if (!wid) return null;
+    const a = (_agentsCache || []).find(x => x.window_id === wid);
+    return {
+        wid, dot: a ? (_SIDEBAR_DOT_CLASS[agentDotColor(a)] || 'idle') : 'idle',
+        title: a ? _agentLabel(a) : wid,
+        sub: 'window · ' + wid,
+        run: () => {
+            if (TERMINALS_ON && typeof focusPaneByWid === 'function') {
+                if (!isWallVisible()) setTermMode('wall');
+                focusPaneByWid(wid);
+            } else if (a) {
+                showAgentDetail(a.name);
+            }
+        },
+    };
+}
+
 function _renderPalette(q) {
     const list = document.getElementById('palette-list');
     if (!list) return;
     let items, paneCount = 0;
     if (q) {
+        // CMX-417: a row's window id is scored on its own too — inside the full
+        // "title sub" haystack, a long name's first-match penalty would push an
+        // "@3" match below zero and drop it.
+        const exact = _windowIdItem(q);
         items = _paletteItems()
-            .map(it => ({ it, sc: _fuzzyScore(q, it.title + ' ' + it.sub) }))
+            .filter(it => !(exact && it.wid === exact.wid))   // the exact row below replaces it
+            .map(it => ({ it, sc: Math.max(_fuzzyScore(q, it.title + ' ' + it.sub), it.wid ? _fuzzyScore(q, it.wid) : -1) }))
             .filter(x => x.sc >= 0)
             .sort((a, b) => b.sc - a.sc)
             .map(x => x.it);
+        if (exact) items.unshift(exact);
     } else {
         const panes = _openPaneItems();
         paneCount = panes.length;
@@ -2304,4 +2415,4 @@ export { closeShortcuts, openPalette, openShortcuts, refreshRecentSessions, refr
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyUpdate, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { applyUpdate, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });

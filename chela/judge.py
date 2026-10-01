@@ -76,14 +76,16 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-from chela import envutil
+from chela import envutil, judge_select
 
 log = logging.getLogger(__name__)
 
@@ -299,6 +301,20 @@ class Outcome:
     baseline: SuiteResult | None = None
     mutated: SuiteResult | None = None
     parse_detail: str = ""
+    # ⚡ CMX-407: how this experiment was measured. `selected` is the number of
+    # baseline-passing tests the SUBSET covered (None ⇒ it ran the full suite from the
+    # start); `confirmed_full` ⇒ the subset stayed green and the verdict above is the FULL
+    # suite's, re-run with the mutation still in place.
+    selected: int | None = None
+    confirmed_full: bool = False
+    selection: str = ""
+    seconds: float = 0.0
+    # The SUBSET's own verdict when a full-suite run followed it ("" otherwise), and the exact
+    # selection the first run used — the consistency re-run (CMX-395) re-runs THAT, never a
+    # freshly computed one: a subset re-run compared against a full-suite first run is not
+    # the same experiment.
+    subset_verdict: str = ""
+    plan: "judge_select.Selection | None" = field(default=None, repr=False, compare=False)
     # ⚖️🎲 CMX-395: the verdict of the consistency re-run ("" = not sampled), and whether it
     # FLIPPED between KILLED and SURVIVED. A flaky outcome never blocks — the operator decides.
     rerun_verdict: str = ""
@@ -312,12 +328,26 @@ class Outcome:
     def blocking(self) -> bool:
         return self.verdict == SURVIVED and not self.flaky
 
+    @property
+    def measured_by(self) -> str:
+        """One line: which tests decided this verdict, and how long the experiment took."""
+        if self.selected is None:
+            how = "full suite"
+        elif self.confirmed_full:
+            first = "green" if self.subset_verdict == SURVIVED else "inconclusive"
+            how = f"{self.selected} selected test(s) {first} → confirmed on the full suite"
+        else:
+            how = f"{self.selected} selected test(s)"
+        return f"{how}, {_duration(self.seconds)}"
+
     def as_dict(self) -> dict:
         return {
             "guard": self.experiment.guard, "file": self.experiment.file,
             "kind": self.experiment.kind, "verdict": self.verdict, "reason": self.reason,
             "parse": self.parse_detail,
             "mutated": self.mutated.as_dict() if self.mutated else None,
+            "selected": self.selected, "confirmed_full": self.confirmed_full,
+            "selection": self.selection, "seconds": round(self.seconds, 1),
             "held_out": self.held_out, "rerun_verdict": self.rerun_verdict,
             "flaky": self.flaky,
         }
@@ -331,6 +361,11 @@ class Report:
     baseline: SuiteResult | None = None
     cannot_verify: str = ""     # non-empty ⇒ NOTHING here may block. Unknown is not a fail.
     dropped: int = 0            # experiments past `cap` — said out loud, never silent
+    # ⚡ CMX-407: wall-clock of the mutation battery (baseline + every experiment), and — when
+    # the caller knows when the judge LAUNCHED — of the whole judge, agent time included.
+    battery_seconds: float = 0.0
+    total_seconds: float | None = None
+    selection: str = ""         # why per-mutation test selection was on, or why it was off
     # ⚖️🎲 CMX-395: {"sampled": n, "flipped": k, "flip_rate": k/n} — empty when not run.
     consistency: dict = field(default_factory=dict)
     # ⚖️🎚️ CMX-405: the task's risk level and the experiment cap it bought. Shown in the
@@ -593,7 +628,10 @@ def _suite_env(chela_dir: Path) -> dict[str, str]:
     return env
 
 
-def run_suite(test_cmd: str, cwd: Path, timeout: float = SUITE_TIMEOUT_SECONDS) -> SuiteResult:
+def run_suite(
+    test_cmd: str, cwd: Path, timeout: float = SUITE_TIMEOUT_SECONDS,
+    extra_env: dict[str, str] | None = None,
+) -> SuiteResult:
     """Run the repo's OWN test command and read its exit code. Never raises.
 
     ⛔ The command comes from WORKFLOW.md (``judge.test_cmd``), never from the agent under
@@ -608,8 +646,10 @@ def run_suite(test_cmd: str, cwd: Path, timeout: float = SUITE_TIMEOUT_SECONDS) 
     """
     try:
         with tempfile.TemporaryDirectory(prefix="chela-suite-") as scratch:
+            env = _suite_env(Path(scratch))
+            env.update(extra_env or {})
             out = subprocess.run(
-                test_cmd, shell=True, cwd=str(cwd), env=_suite_env(Path(scratch)),
+                test_cmd, shell=True, cwd=str(cwd), env=env,
                 capture_output=True, text=True, errors="replace", timeout=timeout,
             )
     except subprocess.TimeoutExpired:
@@ -620,6 +660,98 @@ def run_suite(test_cmd: str, cwd: Path, timeout: float = SUITE_TIMEOUT_SECONDS) 
     passed, failed, errors = _counts(text)
     tail = text[-SUITE_TAIL_CHARS:] if len(text) > SUITE_TAIL_CHARS else text
     return SuiteResult(True, out.returncode, passed, failed, errors, tail)
+
+
+def _duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    m, s = divmod(seconds, 60)
+    return f"{m}m {s:02d}s" if m else f"{s}s"
+
+
+def _head_sha(worktree: Path) -> str:
+    """The commit a CLEAN worktree is at, for the coverage cache; "" when it carries
+    uncommitted edits (a self-check) — its tree is not that commit, so nothing is cached."""
+    try:
+        if _git_dirty(worktree):
+            return ""
+        out = subprocess.run(["git", "-C", str(worktree), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def _has_pytest_cov(worktree: Path) -> bool:
+    py = _venv_python(worktree)
+    if not py.exists():
+        return False
+    try:
+        return subprocess.run([str(py), "-c", "import pytest_cov"], capture_output=True,
+                              timeout=60, env=envutil.child_env()).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def run_baseline(
+    worktree: Path, test_cmd: str, timeout: float, scratch: Path, *, select_tests: bool = True,
+) -> tuple[SuiteResult, "judge_select.Selector | None", str]:
+    """⚡ CMX-407: THE baseline — one full-suite run on the unmutated tree, exactly as before —
+    that also records what per-mutation selection needs. Returns ``(baseline, selector, why)``;
+    ``selector`` is ``None`` whenever selection is off or cannot be built, and every mutation
+    then runs the FULL suite (``why`` says which).
+
+    What it records, and only for a ``test_cmd`` that is ONE pytest invocation
+    (:func:`chela.judge_select.extendable`):
+
+    * a JUnit report — the exact universe of tests the baseline RAN and PASSED. Selection
+      never reaches outside it (a test the baseline did not run cannot vouch for a KILL);
+    * when ``pytest-cov`` is installed in the judged tree and no map is cached for this head
+      sha, per-test coverage contexts: the coverage-derived "which test touched which file"
+      map. If the suite is red ONLY under coverage, the baseline is re-run plain — coverage is
+      an optimisation and may never turn a green baseline into a CANNOT VERIFY.
+    """
+    if not select_tests:
+        return run_suite(test_cmd, worktree, timeout), None, "selection is off (judge.select_tests)"
+    if not judge_select.extendable(test_cmd):
+        return (run_suite(test_cmd, worktree, timeout), None,
+                "`judge.test_cmd` is not a single pytest invocation — every mutation runs the "
+                "full suite")
+    junit = scratch / "baseline-junit.xml"
+    args = [f"--junitxml={junit}"]
+    sha = _head_sha(worktree)
+    cov = judge_select.load_cached_coverage(sha)
+    cov_note = "coverage map: cached" if cov else ""
+    extra_env: dict[str, str] = {}
+    cov_file = scratch / ".coverage"
+    if cov is None and _has_pytest_cov(worktree):
+        cov_args, extra_env = judge_select.coverage_args(cov_file)
+        args += cov_args
+    baseline = run_suite(judge_select.extend(test_cmd, args), worktree, timeout, extra_env)
+    if not baseline.green and extra_env:
+        log.warning("judge: the baseline is red UNDER COVERAGE — re-running it plain")
+        extra_env = {}
+        baseline = run_suite(judge_select.extend(test_cmd, [f"--junitxml={junit}"]),
+                             worktree, timeout)
+    if not baseline.green:
+        return baseline, None, ""
+    if extra_env:
+        cov = judge_select.parse_coverage(worktree, cov_file)
+        judge_select.save_cached_coverage(sha, cov)
+        cov_note = f"coverage map: {len(cov)} file(s)" if cov else ""
+    cases = judge_select.parse_junit(worktree, junit)
+    if cases is None:
+        return (baseline, None, "the baseline wrote no readable JUnit report — every mutation "
+                                "runs the full suite")
+    selector = judge_select.Selector(worktree, cases, cov or {})
+    why = f"per-mutation selection over the baseline's {len(cases)} test(s)"
+    return baseline, selector, why + (f"; {cov_note}" if cov_note else "")
+
+
+def _subset_baseline(sel: "judge_select.Selection") -> SuiteResult:
+    """What the SELECTED tests did on the unmutated tree — read off the baseline's JUnit
+    report, never re-run. It is what :func:`adjudicate`'s collapse check compares a red subset
+    against: a subset that ran far fewer tests than it covers was taken down, not tripped."""
+    return SuiteResult(True, 0, sel.expected, 0, 0, "")
 
 
 def adjudicate(
@@ -1163,11 +1295,17 @@ def run_experiments(
     *,
     timeout: float = SUITE_TIMEOUT_SECONDS,
     base_branch: str = "",
+    select_tests: bool = True,
     consistency_sample: int = 0,
     max_experiments: int = MAX_EXPERIMENTS,
     risk: str = "",
+    progress=None,
 ) -> Report:
     """Execute every proposed experiment IN THIS WORKTREE and adjudicate each one.
+
+    ⏱️ CMX-411: ``progress``, when given, is called ``progress(done, total)`` as each
+    experiment starts and once more when they are all done — what ``chela doctor`` reads to
+    show a live judge's ``k/N``. It observes; it never changes an outcome.
 
     ⚖️🎚️ CMX-405: ``max_experiments`` is the task's risk-level cap (see
     ``config.judge_max_experiments``) — proposals past it are dropped OUT LOUD, as
@@ -1210,12 +1348,33 @@ def run_experiments(
     the deletion-heavy check above) an otherwise-clean report — pass "" (the default) when it
     is not known, and the report says so instead of guessing.
 
+    ⚡ CMX-407: ``select_tests`` (``judge.select_tests``, default on) runs each mutation
+    against only the tests that can observe its file, confirming every subset survivor on the
+    full suite — see :func:`run_baseline` and :func:`_measure`.
+
     ⚖️🎲 CMX-395: ``consistency_sample`` > 0 re-runs that many adjudicated experiments a
     second time (see :func:`_check_consistency`). A flipped outcome is FLAKY and blocks
     nothing; a report whose ONLY survivors are flaky becomes CANNOT VERIFY, naming them —
     never clean, because a flip is an unknown, and the operator decides. ``0`` (the default)
     skips it; ``judge_run`` passes the workflow's ``judge.consistency_sample``.
     """
+    started = time.monotonic()
+    report = _run_experiments(worktree, test_cmd, raw, timeout=timeout,
+                              base_branch=base_branch, select_tests=select_tests,
+                              consistency_sample=consistency_sample,
+                              max_experiments=max_experiments, risk=risk,
+                              progress=progress)
+    report.battery_seconds = time.monotonic() - started
+    log.info("judge: mutation battery took %s (%d experiment(s))",
+             _duration(report.battery_seconds), len(report.outcomes))
+    return report
+
+
+def _run_experiments(
+    worktree: Path, test_cmd: str, raw: dict, *, timeout: float, base_branch: str,
+    select_tests: bool, consistency_sample: int, max_experiments: int, risk: str,
+    progress=None,
+) -> Report:
     report = Report(risk=risk, cap=max(1, int(max_experiments)))
     items = raw.get("experiments") if isinstance(raw, dict) else None
     notes = raw.get("notes") if isinstance(raw, dict) else None
@@ -1270,7 +1429,9 @@ def run_experiments(
         return report
 
     # THE BASELINE — the suite as the PR actually ships it, before anything is touched.
-    baseline = run_suite(test_cmd, worktree, timeout)
+    with tempfile.TemporaryDirectory(prefix="chela-judge-select-") as scratch:
+        baseline, selector, report.selection = run_baseline(
+            worktree, test_cmd, timeout, Path(scratch), select_tests=select_tests)
     report.baseline = baseline
     if not baseline.green:
         # ⛔ CMX-80: name the CAUSE, not just the exit code. `judge_detail` (this string) is
@@ -1292,7 +1453,9 @@ def run_experiments(
         )
         return report
 
-    outcomes, contamination = _apply_experiments(worktree, test_cmd, items, baseline, timeout)
+    outcomes, contamination = _apply_experiments(
+        worktree, test_cmd, items, baseline, timeout, selector, progress=progress,
+    )
     report.outcomes.extend(outcomes)
     if contamination:
         report.cannot_verify = contamination
@@ -1345,6 +1508,9 @@ def run_experiments(
 
 def _apply_experiments(
     worktree: Path, test_cmd: str, items: list, baseline: SuiteResult, timeout: float,
+    selector: "judge_select.Selector | None" = None,
+    pinned: "list[judge_select.Selection | None] | None" = None,
+    *, progress=None,
 ) -> tuple[list[Outcome], str]:
     """Apply, adjudicate, and restore every ``items`` entry against an already-green
     ``baseline``. Shared by :func:`run_experiments` (the judge's PR pass, a throwaway
@@ -1357,9 +1523,16 @@ def _apply_experiments(
     not be restored, in which case it names why and the caller must treat the WHOLE report as
     ``cannot_verify`` — the outcomes already collected were measured before the contamination
     and are returned anyway, but nothing after it is trustworthy.
+
+    ⚡ CMX-407: given a ``selector`` (from :func:`run_baseline`), each mutation first runs only
+    the tests that can observe its file — see :func:`_measure`. ``pinned`` (parallel to
+    ``items``) replays each experiment's FIRST-run selection instead of computing one — the
+    consistency re-run's contract.
     """
     outcomes: list[Outcome] = []
-    for raw_exp in items:
+    for n, raw_exp in enumerate(items):
+        if progress is not None:
+            progress(n, len(items))
         exp, why = Experiment.parse(raw_exp)
         if exp is None:
             # A malformed HELD-OUT experiment stays held out: its raw repr carries the guard
@@ -1385,11 +1558,21 @@ def _apply_experiments(
 
         applied, reason, original = apply_mutation(path, exp.before, exp.after)
         try:
+            started = time.monotonic()
             parses, parse_detail = parse_check(path) if applied else (True, "")
-            mutated = run_suite(test_cmd, worktree, timeout) if applied else None
-            outcomes.append(
-                adjudicate(exp, applied, reason, parses, parse_detail, baseline, mutated)
-            )
+            if applied:
+                outcome = _measure(worktree, test_cmd, exp, reason, parses, parse_detail,
+                                   baseline, timeout, selector,
+                                   pinned[n] if pinned is not None else _SELECT)
+            else:
+                outcome = adjudicate(exp, applied, reason, parses, parse_detail, baseline, None)
+            outcome.seconds = time.monotonic() - started
+            # ⚖️🙈 CMX-395: a held-out experiment is never named, not even in the daemon log.
+            log.info("judge: %s — %s (%s)",
+                     "a held-out experiment" if exp.held_out
+                     else f"{exp.file}: {exp.guard[:60]}",
+                     outcome.verdict, outcome.measured_by)
+            outcomes.append(outcome)
         finally:
             # ⛔ ALWAYS. The next experiment's baseline is this file, unmutated.
             restored = True
@@ -1434,7 +1617,58 @@ def _apply_experiments(
                 "blocked and nothing was cleared."
             )
 
+    if progress is not None:
+        progress(len(items), len(items))
     return outcomes, ""
+
+
+def _measure(
+    worktree: Path, test_cmd: str, exp: Experiment, reason: str, parses: bool,
+    parse_detail: str, baseline: SuiteResult, timeout: float,
+    selector: "judge_select.Selector | None", pinned: object = None,
+) -> Outcome:
+    """⚡ CMX-407: run one APPLIED mutation against the tests that can observe its file, and
+    adjudicate it WITHOUT changing what any verdict means.
+
+    * **KILLED on the subset is final.** Those tests are in the full suite, so a red subset is
+      a red full suite — re-running it would only re-prove it.
+    * **SURVIVED on the subset is NOT final.** The tests that would have caught the mutation
+      may simply not have been selected, so it is re-run against the FULL suite, mutation
+      still in place, and THAT verdict is the one reported. A survivor only blocks if the
+      full suite is also green. (INVALID on the subset is re-run the same way: a subset that
+      collapsed proves nothing either way, and the full suite is what used to decide it.)
+    * **No selection** (no selector, an unknown file type, a ``conftest.py``, nothing
+      observes the file) runs the full suite from the start. ⛔ Never skip testing a mutation.
+
+    ``pinned`` is the selection to replay (a :class:`~chela.judge_select.Selection`, or
+    ``None`` for the full suite); the default ``_SELECT`` computes it from ``selector``.
+    Held-out experiments take exactly this path — confirmation is not a visibility feature.
+    """
+    if pinned is _SELECT:
+        sel = selector.select(exp.file) if selector is not None else None
+    else:
+        sel = pinned  # type: ignore[assignment]
+    if sel is None or sel.full:
+        mutated = run_suite(test_cmd, worktree, timeout)
+        outcome = adjudicate(exp, True, reason, parses, parse_detail, baseline, mutated)
+        outcome.selection = sel.why if sel is not None else ""
+        outcome.plan = sel
+        return outcome
+    subset = run_suite(judge_select.extend(test_cmd, sel.nodes), worktree, timeout)
+    outcome = adjudicate(exp, True, reason, parses, parse_detail, _subset_baseline(sel), subset)
+    outcome.selected, outcome.selection, outcome.plan = sel.expected, sel.why, sel
+    if outcome.verdict == KILLED or not parses:
+        # Final. A broken parse is INVALID whatever the suite says — no full run can change it.
+        return outcome
+    full = run_suite(test_cmd, worktree, timeout)
+    confirmed = adjudicate(exp, True, reason, parses, parse_detail, baseline, full)
+    confirmed.selected, confirmed.selection, confirmed.plan = sel.expected, sel.why, sel
+    confirmed.confirmed_full = True
+    confirmed.subset_verdict = outcome.verdict
+    return confirmed
+
+
+_SELECT = object()   # _measure's "no pinned selection — compute one" sentinel
 
 
 def _check_consistency(
@@ -1450,10 +1684,21 @@ def _check_consistency(
 
     ``outcomes[i]`` is the adjudication of ``items[i]`` — :func:`_apply_experiments` emits
     exactly one outcome per item unless it hit contamination, which the caller returned on.
+
+    ⚡ CMX-407 — ORDER: subset SURVIVED → full-suite confirmation (inside
+    :func:`_measure`, before this runs) → only then sampled here. So:
+
+    * a sampled survivor is one the FULL suite already confirmed;
+    * a subset survivor the full suite KILLED was never a survivor — it is not sampled at all,
+      so it can never be re-run and never be flaky (its two runs already disagreed by
+      design: narrow selection, not a flip);
+    * each re-run replays that experiment's OWN first-run selection (``Outcome.plan``) through
+      the same subset → confirm path, so first run and re-run are the same experiment.
     """
     facts = (KILLED, SURVIVED)
     ranked = sorted(
-        (i for i, o in enumerate(outcomes) if o.verdict in facts),
+        (i for i, o in enumerate(outcomes) if o.verdict in facts
+         and not (o.subset_verdict == SURVIVED and o.verdict != SURVIVED)),
         key=lambda i: (outcomes[i].verdict != SURVIVED, i),
     )
     picked = ranked[:sample]
@@ -1462,6 +1707,7 @@ def _check_consistency(
         return ""
     reruns, contamination = _apply_experiments(
         worktree, test_cmd, [items[i] for i in picked], baseline, timeout,
+        pinned=[outcomes[i].plan for i in picked],
     )
     flipped = 0
     for i, again in zip(picked, reruns):
@@ -1570,6 +1816,22 @@ def _stale_head_notice(judged_sha: str, live_head: str) -> str:
     )
 
 
+def _timing_line(report: Report) -> str:
+    """⚡ CMX-407: how long the judge took — said in the verdict header, so a slow judge is
+    visible on the PR itself, not only in the daemon's log."""
+    if report.total_seconds is None and not report.battery_seconds:
+        return ""
+    parts = []
+    if report.total_seconds is not None:
+        parts.append(f"judge took **{_duration(report.total_seconds)}**")
+    if report.battery_seconds:
+        parts.append(f"mutation battery {_duration(report.battery_seconds)}")
+    line = "⏱️ " + " · ".join(parts)
+    if report.selection:
+        line += f" — {report.selection}"
+    return line
+
+
 def _held_out_section(report: Report) -> str:
     """⚖️🙈 CMX-395: the ONLY thing a held-out survivor contributes to anything public — a
     count. ⛔ No guard name, no file, no diff: this string reaches the PR comment, the review
@@ -1630,9 +1892,11 @@ def block_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
     ⚖️🙈 CMX-395: it NAMES only ``visible_blocking``. A held-out survivor appears as a count
     and nothing else (:func:`_held_out_section`) — this body is what ``request_changes``
     stores and what the rework prompt quotes back."""
+    timing = _timing_line(report)
     parts = [
         "## ⚖️ THE JUDGE — a guard on this PR SURVIVED DELIBERATE CORRUPTION",
         "",
+        *([timing, ""] if timing else []),
         *risk_line(report),
         "This is not a review of your code, and it is not an opinion. Each finding below is "
         "a **mutation chela applied itself**, in a throwaway checkout of this PR's head: the "
@@ -1660,6 +1924,7 @@ def block_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
             "* the mutation applied: **yes** (the file on disk changed)",
             f"* the file still parses: **yes** ({o.parse_detail})",
             f"* the suite under the mutation: **{_suite_line(o.mutated)}** → **STILL GREEN**",
+            f"* measured by: {o.measured_by}",
             "",
         ]
     held = _held_out_section(report)
@@ -1702,10 +1967,12 @@ def comment_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
     rule and the CI gate's ``unknown`` rule, and it is the same rule: a thing nobody could
     evaluate is never green.
     """
+    timing = _timing_line(report)
     if report.cannot_verify:
         head = [
             "## ⚖️ THE JUDGE — ⚠️ CANNOT VERIFY (this is NOT an approval)",
             "",
+            *([timing, ""] if timing else []),
             *risk_line(report),
             f"**{report.cannot_verify}**",
             "",
@@ -1719,6 +1986,7 @@ def comment_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
         head = [
             "## ⚖️ THE JUDGE — every guard held",
             "",
+            *([timing, ""] if timing else []),
             *risk_line(report),
             f"chela corrupted each guard this PR adds and re-ran `{test_cmd}` "
             f"(baseline: {_suite_line(report.baseline)}). **Every mutation made the suite go "
@@ -1730,14 +1998,16 @@ def comment_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
     # ⚖️🙈 CMX-395: the table names VISIBLE experiments only; held-out ones are counted.
     visible = report.visible_outcomes
     if visible:
-        head += ["", "| experiment | file | verdict | why |", "|---|---|---|---|"]
+        head += ["", "| experiment | file | verdict | why | measured by |",
+                 "|---|---|---|---|---|"]
         for o in visible:
             why = o.reason.replace("|", "\\|").replace("\n", " ")
             verdict = f"**{o.verdict}**"
             if o.flaky:
                 verdict += f" 🎲 flaky (re-run: {o.rerun_verdict})"
             head.append(
-                f"| {o.experiment.guard[:60]} | `{o.experiment.file}` | {verdict} | {why} |"
+                f"| {o.experiment.guard[:60]} | `{o.experiment.file}` | {verdict} | {why} "
+                f"| {o.measured_by} |"
             )
     hidden = report.held_out_outcomes
     if hidden:
@@ -1783,6 +2053,7 @@ def load_experiments(path: str | Path) -> tuple[dict, str]:
 
 def self_check(
     worktree: Path, test_cmd: str, raw: dict, *, timeout: float = SUITE_TIMEOUT_SECONDS,
+    select_tests: bool = True,
 ) -> Report:
     """Run the judge's own mutation mechanics against YOUR OWN worktree, before you commit.
 
@@ -1806,7 +2077,20 @@ def self_check(
     suite env, and the apply/parse/run/restore/adjudicate loop itself — is the same mechanism
     :func:`run_experiments` uses, because a guard that can't discriminate doesn't discriminate
     any less for being caught early.
+
+    ⚡ CMX-407: per-mutation test selection too (``select_tests``) — the same
+    :func:`run_baseline` / :func:`_measure` pair, so a self-check that comes back clean was
+    decided exactly the way the judge will decide it.
     """
+    started = time.monotonic()
+    report = _self_check(worktree, test_cmd, raw, timeout=timeout, select_tests=select_tests)
+    report.battery_seconds = time.monotonic() - started
+    return report
+
+
+def _self_check(
+    worktree: Path, test_cmd: str, raw: dict, *, timeout: float, select_tests: bool,
+) -> Report:
     report = Report()
     items = raw.get("experiments") if isinstance(raw, dict) else None
     notes = raw.get("notes") if isinstance(raw, dict) else None
@@ -1832,7 +2116,9 @@ def self_check(
         )
         return report
 
-    baseline = run_suite(test_cmd, worktree, timeout)
+    with tempfile.TemporaryDirectory(prefix="chela-judge-select-") as scratch:
+        baseline, selector, report.selection = run_baseline(
+            worktree, test_cmd, timeout, Path(scratch), select_tests=select_tests)
     report.baseline = baseline
     if not baseline.green:
         why = baseline.detail or _last_meaningful_line(baseline.tail)
@@ -1846,7 +2132,8 @@ def self_check(
         )
         return report
 
-    outcomes, contamination = _apply_experiments(worktree, test_cmd, items, baseline, timeout)
+    outcomes, contamination = _apply_experiments(
+        worktree, test_cmd, items, baseline, timeout, selector)
     report.outcomes.extend(outcomes)
     if contamination:
         report.cannot_verify = contamination
@@ -1874,6 +2161,7 @@ def run_self_check(
 
     cmd = test_cmd.strip() if isinstance(test_cmd, str) and test_cmd.strip() else None
     to = timeout
+    select = True
     if workflow_path and (cmd is None or to is None):
         from chela import workflow as workflow_mod
 
@@ -1885,19 +2173,21 @@ def run_self_check(
         cfg = judge_suite_config(wf)
         cmd = cmd or cfg.test_cmd
         to = to if to is not None else cfg.suite_timeout_seconds
+        select = cfg.select_tests
     if not cmd:
         return {"ok": False, "error": "no suite to run — pass --test-cmd, or --workflow "
                                        "pointing at a WORKFLOW.md with `judge.test_cmd` set"}
     if to is None:
         to = SUITE_TIMEOUT_SECONDS
 
-    report = self_check(worktree, cmd, raw, timeout=to)
+    report = self_check(worktree, cmd, raw, timeout=to, select_tests=select)
     blocking = report.blocking
     return {
         "ok": True, "state": report.state, "blocking": len(blocking),
         "outcomes": [o.as_dict() for o in report.outcomes],
         "cannot_verify": report.cannot_verify, "notes": len(report.notes),
-        "dropped": report.dropped,
+        "dropped": report.dropped, "seconds": round(report.battery_seconds, 1),
+        "selection": report.selection,
     }
 
 
@@ -1931,7 +2221,22 @@ def _reprovision_worktree(wf, worktree: Path, sha: str, base_branch: str) -> str
     return dispatcher._refresh_judge_worktree(wf.path.parent, worktree, base_branch)
 
 
-def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True) -> dict:
+def _since(ts: str | None) -> float | None:
+    """Seconds since a run-row timestamp (``judge_started_at``: when the judge LAUNCHED, agent
+    time included), or ``None`` if it is missing or unreadable."""
+    from datetime import datetime, timezone
+
+    from chela import dispatcher
+
+    started = dispatcher._parse_ts(ts)
+    if started is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
+
+
+def judge_run(
+    ident: str, experiments_path: str | Path, *, cleanup: bool = True, detached: bool = False,
+) -> dict:
     """Execute the judge's experiments and PUBLISH the verdict. The judge agent's last step.
 
     ⛔ It drives the EXISTING carrier — ``dispatcher.request_changes`` — and adds no second
@@ -1984,10 +2289,23 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
     # documented way an operator clears a stale verdict) land on the identical worktree and
     # would mutate/restore each other's files concurrently. Claim the slot BEFORE touching
     # anything; a live claim held by someone else REFUSES loudly instead of racing them.
-    claim_error = _claim_judge_slot(worktree, task_id)
+    claim_error = _claim_judge_slot(worktree, task_id, detached=detached)
     if claim_error:
         log.warning("judge: %s: refusing to start — %s", task_id, claim_error)
         return {"ok": False, "task_id": task_id, "error": claim_error}
+
+    # ⏱️ CMX-411: THE RUN'S OWN START MARKER. The watchdog's wall measures the battery from
+    # here, not from when the judge agent was spawned — its design time is not the run's.
+    run_started = time.time()
+    dispatcher.mark_judge_run_started(task_id)
+    status = {"pid": os.getpid(), "started": _proc_started_self(), "task_id": task_id,
+              "run_started_at": run_started, "detached": detached, "done": 0, "total": None,
+              "log": str(judge_log_path(task_id)) if detached else None}
+    _write_run_status(task_id, status)
+
+    def _progress(done: int, total: int) -> None:
+        status.update(done=done, total=total)
+        _write_run_status(task_id, status)
 
     # ⛔ CMX-164: the judge worktree already exists on disk by this point (`_spawn_judge`
     # created it before this ever ran), and MUST be reaped whether this call finishes or
@@ -2011,16 +2329,19 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
                 reprovisioned = True
                 report = run_experiments(
                     worktree, test_cmd, raw, timeout=judge_cfg.suite_timeout_seconds,
-                    base_branch=base_branch, consistency_sample=judge_cfg.consistency_sample,
-                    max_experiments=exp_cap, risk=risk,
+                    base_branch=base_branch, select_tests=judge_cfg.select_tests,
+                    consistency_sample=judge_cfg.consistency_sample,
+                    max_experiments=exp_cap, risk=risk, progress=_progress,
                 )
         else:
             report = run_experiments(
                 worktree, test_cmd, raw, timeout=judge_cfg.suite_timeout_seconds,
-                base_branch=base_branch, consistency_sample=judge_cfg.consistency_sample,
-                max_experiments=exp_cap, risk=risk,
+                base_branch=base_branch, select_tests=judge_cfg.select_tests,
+                consistency_sample=judge_cfg.consistency_sample,
+                max_experiments=exp_cap, risk=risk, progress=_progress,
             )
         report.risk, report.cap = risk, exp_cap
+        report.total_seconds = _since(run.get("judge_started_at"))
         # A worktree this call rebuilt was checked out at the run's CURRENT head — stamp
         # `judge_sha` to match so the DB record of what was judged is never stale, and the
         # automatic per-sha trigger does not immediately re-spawn a redundant judge on the
@@ -2045,7 +2366,10 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
                   "held_out": {"total": len(report.held_out_outcomes),
                                "survived": len(report.held_out_blocking)},
                   "flaky": len(report.flaky), "consistency": report.consistency,
-                  "cannot_verify": report.cannot_verify, "notes": len(report.notes)}
+                  "cannot_verify": report.cannot_verify, "notes": len(report.notes),
+                  "battery_seconds": round(report.battery_seconds, 1),
+                  "total_seconds": (round(report.total_seconds, 1)
+                                    if report.total_seconds is not None else None)}
 
         # ⚖️⏱️ CMX-246: a judge takes minutes to run its mutation battery. A NEW commit can
         # land on the PR in that window (the per-sha trigger already re-spawns a fresh judge
@@ -2217,6 +2541,7 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
         return result
     finally:
         _release_judge_slot(worktree)
+        _clear_run_status(task_id)
         if cleanup:
             _cleanup(wf, task_id, run.get("branch_name") or "", judge_epoch)
 
@@ -2394,7 +2719,7 @@ def _judge_lock_owner_alive(lock: dict) -> bool:
     return abs(live_started - started) < 1.0
 
 
-def _claim_judge_slot(worktree: Path, task_id: str) -> str | None:
+def _claim_judge_slot(worktree: Path, task_id: str, *, detached: bool = False) -> str | None:
     """Claim the judge slot for ``task_id`` before touching its worktree. ``None`` on
     success; an error string, meant to be returned to the caller verbatim, if someone else
     holds it live right now.
@@ -2414,22 +2739,55 @@ def _claim_judge_slot(worktree: Path, task_id: str) -> str | None:
     A stale claim (the owning process is gone) is taken over silently, not refused forever —
     a crashed judge that never released its slot must not wedge every future judge on this
     task; that would trade one bug for a worse one.
+
+    ⏱️ CMX-411: the claim is made with ``O_EXCL``, so two ``chela judge run --detach``
+    children started a moment apart cannot both read "no lock" and both write one — the
+    second is REFUSED, never a from-zero restart racing the first. ``detached`` is recorded
+    so the watchdog knows it may stop this process's own group on a timeout (and never a
+    process it did not launch).
     """
-    lock_path = _judge_lock_path(worktree)
-    existing = _read_judge_lock(lock_path)
-    if existing is not None and _judge_lock_owner_alive(existing):
-        return (f"a judge (pid {existing.get('pid')}) is already running for {task_id} in "
-                f"this worktree — refusing to share it. If that process is actually gone, "
-                f"its claim will be taken over automatically on the next attempt.")
     from chela import sessions
 
-    pid = os.getpid()
+    lock_path = _judge_lock_path(worktree)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.write_text(json.dumps({
+    pid = os.getpid()
+    payload = json.dumps({
         "pid": pid, "started": sessions.proc_started(pid), "task_id": task_id,
-        "claimed_at": time.time(),
-    }))
-    return None
+        "claimed_at": time.time(), "detached": bool(detached),
+    })
+    for _ in range(3):
+        try:
+            fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            existing = _read_judge_lock(lock_path)
+            if existing is not None and _judge_lock_owner_alive(existing):
+                return (f"a judge (pid {existing.get('pid')}) is already running for "
+                        f"{task_id} in this worktree — refusing to share it. If that process "
+                        "is actually gone, its claim will be taken over automatically on the "
+                        "next attempt.")
+            if existing is None and _lock_is_fresh(lock_path):
+                # Created a moment ago and not written yet: another claimer is mid-claim.
+                return (f"another judge is claiming {task_id} right now — refusing to "
+                        "start a second one")
+            lock_path.unlink(missing_ok=True)          # stale: its owner is gone
+            continue
+        with os.fdopen(fd, "w") as f:
+            f.write(payload)
+        return None
+    return f"could not claim the judge slot for {task_id} (the lock kept changing under us)"
+
+
+def _proc_started_self() -> float | None:
+    from chela import sessions
+
+    return sessions.proc_started(os.getpid())
+
+
+def _lock_is_fresh(lock_path: Path, window: float = 5.0) -> bool:
+    try:
+        return time.time() - lock_path.stat().st_mtime < window
+    except OSError:
+        return False
 
 
 def _release_judge_slot(worktree: Path) -> None:
@@ -2461,6 +2819,145 @@ def judge_lock_live(worktree: Path) -> bool:
     """
     lock = _read_judge_lock(_judge_lock_path(worktree))
     return lock is not None and _judge_lock_owner_alive(lock)
+
+
+# --- ⏱️ CMX-411: the judge's battery runs DETACHED from the agent that proposed it --------
+#
+# Measured on #556 (cmx-406), 2026-09-30: the judge agent ran `chela judge run` through its
+# Bash tool, the tool moved it to the background at 10 min and KILLED it at its 30-min
+# background limit, the agent re-ran the whole battery from zero, and the daemon's 60-min
+# judge wall fired first — CANNOT VERIFY, on a battery that never got to finish. The agent's
+# tool limit was the binding constraint, not the wall or the CMX-405 caps. So the agent now
+# runs `chela judge run --detach`: the command re-execs itself in a NEW SESSION (its own
+# process group — not a descendant of the agent's shell, out of reach of that shell's kill,
+# of its tmux window's SIGHUP), writes to its own log, and returns at once.
+
+
+def judge_logs_dir() -> Path:
+    from chela import config
+
+    return config.CHELA_DIR / "judge-logs"
+
+
+def _safe_task(task_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", task_id) or "_"
+
+
+def judge_log_path(task_id: str) -> Path:
+    """``$CHELA_DIR/judge-logs/<task>.log`` — a detached run's stdout/stderr, appended."""
+    return judge_logs_dir() / f"{_safe_task(task_id)}.log"
+
+
+def judge_status_path(task_id: str) -> Path:
+    """``$CHELA_DIR/judge-logs/<task>.json`` — a live run's pid, start and ``k/N``, for
+    ``chela doctor``. Written by :func:`judge_run` after it claims the slot, removed when it
+    releases it; a file left by a crashed run is ignored because its pid is gone."""
+    return judge_logs_dir() / f"{_safe_task(task_id)}.json"
+
+
+def _write_run_status(task_id: str, status: dict) -> None:
+    try:
+        path = judge_status_path(task_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(status))
+        tmp.replace(path)
+    except OSError:
+        log.debug("judge: could not write the run status for %s", task_id, exc_info=True)
+
+
+def _clear_run_status(task_id: str) -> None:
+    path = judge_status_path(task_id)
+    existing = _read_judge_lock(path)
+    if existing is not None and existing.get("pid") == os.getpid():
+        path.unlink(missing_ok=True)
+
+
+def live_judge_runs() -> list[dict]:
+    """Every ``chela judge run`` executing RIGHT NOW (pid + ``/proc`` start time still
+    match), with ``elapsed`` seconds since its own start and its experiment progress."""
+    out = []
+    d = judge_logs_dir()
+    if not d.is_dir():
+        return out
+    now = time.time()
+    for path in sorted(d.glob("*.json")):
+        status = _read_judge_lock(path)
+        if status is None or not _judge_lock_owner_alive(status):
+            continue
+        started = status.get("run_started_at")
+        status["elapsed"] = max(0.0, now - started) if isinstance(started, (int, float)) else None
+        out.append(status)
+    return out
+
+
+def detached_argv(ident: str, experiments: str | Path, *, cleanup: bool = True) -> list[str]:
+    """The child a ``--detach`` re-execs: the SAME ``chela judge run``, minus ``--detach``,
+    plus the hidden marker that tells the child it owns its own process group."""
+    argv = [sys.executable, "-m", "chela.main", "judge", "run", ident,
+            "--experiments", str(Path(experiments).resolve()), "--detached-child"]
+    if not cleanup:
+        argv.append("--no-cleanup")
+    return argv
+
+
+def spawn_detached(argv: list[str], log_path: Path) -> int:
+    """Start ``argv`` in a NEW SESSION with its output appended to ``log_path``; return its
+    pid without waiting. ⛔ ``start_new_session`` is the whole point: it is ``setsid()`` in
+    the child, so the run is no longer in the agent shell's process group or session and
+    nothing that kills them — the Bash tool's limit, the window's hangup — reaches it."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "ab") as out:
+        child = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+            start_new_session=True, close_fds=True,
+        )
+    return child.pid
+
+
+def detach_judge_run(ident: str, experiments: str | Path, *, cleanup: bool = True) -> dict:
+    """``chela judge run --detach``: refuse if a run for this task is already live (the
+    CMX-221 lock), else launch the detached child and return at once."""
+    from chela import dispatcher, workflow
+
+    run = dispatcher.resolve_run(ident)
+    if run is None:
+        return {"ok": False, "error": f"no run matches {ident!r}"}
+    task_id = run["task_id"]
+    wf_path = run.get("workflow_path")
+    try:
+        wf = workflow.load_workflow(wf_path) if wf_path else None
+    except Exception:                  # judge_run itself records the unreadable workflow
+        wf = None
+    if wf is not None:
+        lock = _read_judge_lock(_judge_lock_path(judge_worktree_path(wf, task_id)))
+        if lock is not None and _judge_lock_owner_alive(lock):
+            return {"ok": False, "task_id": task_id, "error": (
+                f"a judge (pid {lock.get('pid')}) is already running for {task_id} — "
+                "refusing to start a second one. Watch it with `chela doctor` or "
+                f"`tail -f {judge_log_path(task_id)}`; do not re-run it.")}
+    log_path = judge_log_path(task_id)
+    pid = spawn_detached(detached_argv(task_id, experiments, cleanup=cleanup), log_path)
+    return {"ok": True, "task_id": task_id, "pid": pid, "log": str(log_path)}
+
+
+def stop_judge_run(worktree: Path) -> bool:
+    """Stop a DETACHED judge run that still holds this worktree's slot — the watchdog's
+    timeout reap, which would otherwise delete the worktree out from under a process that
+    no window-kill can reach any more. Only a claim marked ``detached`` (a process group
+    ``--detach`` itself created) is signalled, and never this process: a manual,
+    foreground run is left to whoever started it."""
+    lock = _read_judge_lock(_judge_lock_path(worktree))
+    if lock is None or not lock.get("detached") or not _judge_lock_owner_alive(lock):
+        return False
+    pid = lock.get("pid")
+    if not isinstance(pid, int) or pid == os.getpid():
+        return False
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    return True
 
 
 def _cleanup(wf, task_id: str, branch: str, judge_epoch: str | None) -> None:
@@ -2552,6 +3049,13 @@ class JudgeSuiteConfig:
     # ⚖️🙈🎲 CMX-395 — see HELD_OUT_FRACTION / CONSISTENCY_SAMPLE.
     held_out_fraction: float = HELD_OUT_FRACTION
     consistency_sample: int = CONSISTENCY_SAMPLE
+    select_tests: bool = True
+
+
+def judge_select_tests(wf) -> bool:
+    """⚡ CMX-407: per-mutation test selection. On unless ``judge.select_tests: false`` — the
+    kill switch that puts every mutation back on the full suite."""
+    return wf.get("judge", "select_tests", default=True) is not False
 
 
 def judge_held_out_fraction(wf) -> float:
@@ -2573,6 +3077,7 @@ def judge_suite_config(wf) -> JudgeSuiteConfig:
     """The run's whole judge suite config, read from WORKFLOW.md in one call."""
     return JudgeSuiteConfig(
         test_cmd=judge_test_cmd(wf), suite_timeout_seconds=judge_suite_timeout(wf),
+        select_tests=judge_select_tests(wf),
         held_out_fraction=judge_held_out_fraction(wf),
         consistency_sample=judge_consistency_sample(wf),
     )

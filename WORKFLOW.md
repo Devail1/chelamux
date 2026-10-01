@@ -74,6 +74,13 @@ agent:
 # The level scales ONLY the judge's search (experiments run: 12 / 8 / 4) and the rework cap
 # (5 / 4 / 3) — Settings → Dispatch knobs. ⛔ The judge always runs at every level, and a
 # surviving mutation always BLOCKS. See docs/RISK_LEVELS.md.
+#
+# ⚡ CMX-407: each mutation runs only the tests that can observe the mutated file (its
+# importers, Python and JS; tests that name it; a per-test coverage map when pytest-cov is
+# installed), scoped to what the baseline's own JUnit report says it ran. A green subset is
+# never trusted on its own: every subset survivor is re-run on the FULL suite before it can
+# block. An unknown file type, a conftest.py, or a test_cmd that is not one pytest invocation
+# runs the full suite. `select_tests: false` puts every mutation back on the full suite.
 judge:
   test_cmd: CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q
   suite_timeout_seconds: 900

@@ -7,6 +7,7 @@ import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChi
 // Side-effect only: registers window.chela.openDiffModal/closeDiffModal for the
 // "Files" chip below (_ctxBarHTML) and the #modal-diff close button in index.html.
 import './diffpanel.js';
+import { windowIdQuery } from './windowid.js';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -2449,7 +2450,16 @@ function _ctxBarHTML(wid, draggable) {
     const widArg = escHtml(wid).replace(/'/g, "\\'");
     const filesChip = `<button type="button" class="gs-files" title="Changed files"
       onclick="event.stopPropagation(); chela.openDiffModal('${widArg}')">${lucideIcon('git-compare', 12)}</button>`;
+    // CMX-417: the pane's tmux window id (`@N`) — the address the orchestrator,
+    // `chela peek @N` and peer messages use — leads the bar on EVERY surface.
+    // Static, like the Files chip: the bar is built per wid, so no poll writes
+    // it. A <button> so it punches through the bar's `pointer-events: none`
+    // (see .gs-wid) and takes a click: copy to the clipboard + a "copied" toast.
+    const widChip = windowIdQuery(wid)
+        ? `<button type="button" class="gs-wid" data-wid="${attrEsc(wid)}" title="tmux window ${attrEsc(wid)} — click to copy"
+      onclick="event.stopPropagation(); chela.copyWindowId(this)">${escHtml(wid)}</button>` : '';
     return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —">
+      ${widChip}
       ${modelChip}
       ${meta}
       <span class="gs-branch" hidden></span>
@@ -2458,6 +2468,47 @@ function _ctxBarHTML(wid, draggable) {
       ${idxNum}
       <i class="term-ctx-fill"></i>
     </div>`;
+}
+
+// CMX-417: click on a footer's `@N` chip. The clipboard API needs a secure
+// context; on a plain-http dashboard fall back to a selected <textarea> +
+// execCommand('copy'), so the click still copies rather than silently not.
+function copyWindowId(btn) {
+    const wid = btn && btn.dataset.wid;
+    if (!wid) return;
+    const done = ok => _widToast(btn, ok ? `Copied ${wid}` : `Copy failed — ${wid}`);
+    const legacy = () => {
+        const ta = document.createElement('textarea');
+        ta.value = wid;
+        ta.setAttribute('readonly', '');
+        ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+        document.body.appendChild(ta);
+        ta.select();
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { /* unsupported */ }
+        ta.remove();
+        done(ok);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(wid).then(() => done(true), legacy);
+    } else {
+        legacy();
+    }
+}
+
+// The brief "copied" bubble, anchored just ABOVE the footer chip (the footer
+// sits on the pane's bottom edge, so .term-share-toast's below-the-anchor
+// placement would fall off the tile).
+function _widToast(btn, msg) {
+    const bar = btn.closest('.term-ctx-bar');
+    if (!bar) return;
+    bar.querySelectorAll('.gs-wid-toast').forEach(t => t.remove());
+    const t = document.createElement('div');
+    t.className = 'gs-wid-toast';
+    t.setAttribute('role', 'status');
+    t.textContent = msg;
+    bar.appendChild(t);
+    setTimeout(() => t.remove(), 1500);
 }
 
 function buildWall(wids) {
@@ -3644,4 +3695,4 @@ export { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, _absorbFreshTermin
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, termScrollToggle, toggleDockChip, toggleGridRow, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, copyWindowId, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, termScrollToggle, toggleDockChip, toggleGridRow, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });

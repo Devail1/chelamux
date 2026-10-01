@@ -558,6 +558,25 @@ def _break_judge_blocked_race(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_judge_live_runs(tmp_path, monkeypatch):
+    """CMX-411: a detached judge run is still going PAST the judge wall — nothing is
+    bounding it any more (the daemon is down, or the watchdog's stop failed). This test
+    process stands in for the run, so the pid + /proc start-time liveness check passes."""
+    from chela import judge, sessions
+    from chela.dispatcher import JUDGE_TIMEOUT_SECONDS
+
+    logs = tmp_path / "judge-logs"
+    logs.mkdir()
+    monkeypatch.setattr(judge, "judge_logs_dir", lambda: logs)
+    pid = os.getpid()
+    (logs / "CMX-411.json").write_text(json.dumps({
+        "pid": pid, "started": sessions.proc_started(pid), "task_id": "CMX-411",
+        "run_started_at": time.time() - JUDGE_TIMEOUT_SECONDS - 60, "detached": True,
+        "done": 3, "total": 8,
+    }))
+    return doctor.WARN
+
+
 def _break_update_apply_lock(tmp_path, monkeypatch):
     """CMX-226: the dashboard's update-apply lock has been held far longer than any
     honest `update.apply()` run can take — the process holding it (this test process
@@ -614,6 +633,7 @@ CORRUPTIONS = {
     "restore.dead_epoch_rows": _break_restore_dead_epoch,
     "dispatch.unresolved_depends": _break_unresolved_depends,
     "judge.blocked_race": _break_judge_blocked_race,
+    "judge.live_runs": _break_judge_live_runs,
 }
 
 

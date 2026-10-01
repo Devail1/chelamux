@@ -45,3 +45,16 @@ export function runStatusBadgeClass(status) {
 // REVIEW_STATUSES + done/closed/failed). The test asserts each one has a badge — that is
 // the guard.
 export const RUN_STATUSES = Object.keys(BADGE_CLASS);
+
+// 🗂️✖️ CMX-406. The one-line note a run's card (and runs-table row) carries under its title.
+// A run a human closed with `chela close --reason` reads "Closed — <reason>" — NOT its old
+// `last_error`, which is exactly the misleading "FAILED — tmux window disappeared" line the
+// close exists to replace. Everything else keeps showing its error, as before. `closed`
+// tells the renderer to style it as a note, not as an error (red would re-tell the lie).
+// Returns null when there is nothing to show.
+export function runCardNote(run) {
+    const reason = run && run.status === 'closed' ? String(run.close_reason || '').trim() : '';
+    if (reason) return { text: `Closed — ${reason}`, closed: true };
+    const err = run && run.last_error ? String(run.last_error) : '';
+    return err ? { text: err, closed: false } : null;
+}

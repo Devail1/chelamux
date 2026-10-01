@@ -55,7 +55,8 @@ export function renderShell() {
     return html;
 }
 
-function apiBody(path) {
+function apiBody(path, api = {}) {
+    if (Object.prototype.hasOwnProperty.call(api, path)) return api[path];
     if (path === '/api/agents') return AGENTS;
     if (path === '/api/agents/context') return [];
     if (path === '/api/summary') return { windows_total: AGENTS.length };
@@ -76,8 +77,10 @@ function staticFile(rel) {
 }
 
 /** Route every request of `context` to the fixture. Returns the list of
- * requests it had to 404 or abort, so a test can assert none were unexpected. */
-export async function routeFixture(context) {
+ * requests it had to 404 or abort, so a test can assert none were unexpected.
+ * `api` maps an /api/ path to the body it answers with instead of the default
+ * (e.g. a fleet with long names, or a filled /api/agents/context). */
+export async function routeFixture(context, api = {}) {
     const misses = [];
     await context.route('**/*', async route => {
         const url = new URL(route.request().url());
@@ -112,7 +115,7 @@ export async function routeFixture(context) {
             return route.fulfill({ status: 204, body: '' });
         }
         if (path.startsWith('/api/') || path.startsWith('/hooks/')) {
-            return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(apiBody(path)) });
+            return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(apiBody(path, api)) });
         }
         misses.push(`404 ${path}`);
         return route.fulfill({ status: 404, body: '' });
@@ -149,8 +152,9 @@ export async function launchChromium() {
 
 /** A fresh context + page on the fixture at `viewport`, the Wall in a 2×2
  * preset, booted and settled. `storage` adds localStorage keys set before the
- * page's own scripts run (e.g. a persisted desktop sidebar collapse). */
-export async function openDashboard(browser, { width, height, deviceScaleFactor = 1, storage = {} }) {
+ * page's own scripts run (e.g. a persisted desktop sidebar collapse); `api`
+ * overrides /api/ responses (see routeFixture). */
+export async function openDashboard(browser, { width, height, deviceScaleFactor = 1, storage = {}, api = {} }) {
     const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor });
     await context.addInitScript(extra => {
         try {
@@ -159,7 +163,7 @@ export async function openDashboard(browser, { width, height, deviceScaleFactor 
             for (const [k, v] of Object.entries(extra)) localStorage.setItem(k, v);
         } catch (e) { /* storage unavailable — the defaults still boot the wall */ }
     }, storage);
-    const misses = await routeFixture(context);
+    const misses = await routeFixture(context, api);
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', e => errors.push(String(e)));

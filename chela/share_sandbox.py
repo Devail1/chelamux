@@ -423,21 +423,32 @@ def _inspect(sid: str) -> tuple[dict, dict] | str:
         return "docker inspect returned nothing usable"
 
 
+def pane_identity(wid: str) -> tuple[int, str, str] | str:
+    """``(pane pid, sid, cwd)`` when the window's pane is the sandboxed-session launcher
+    (the cheap half of :func:`check_share_session`: one tmux query + /proc, no docker);
+    otherwise the reason it is not. ``collab_stream`` reads this before EVERY output frame
+    of a typing share, so a swapped pane process is caught before its first frame leaves."""
+    root = _pane_root(wid)
+    if isinstance(root, str):
+        return root
+    try:
+        argv, parent, kids = _proc_shape(root)
+    except (OSError, ValueError, IndexError):
+        return "the pane's process can't be read"
+    shape = verify_pane(argv, parent, kids)
+    if isinstance(shape, str):
+        return shape
+    return root, shape[0], shape[1]
+
+
 def check_share_session(wid: str) -> tuple[bool, str]:
     """``(True, "")`` only when the LIVE window verifies as a sandboxed session; otherwise
     ``(False, reason)``. Every unknown — no tmux, unreadable /proc, docker down — is False."""
     try:
-        root = _pane_root(wid)
-        if isinstance(root, str):
-            return False, root
-        try:
-            argv, parent, kids = _proc_shape(root)
-        except (OSError, ValueError, IndexError):
-            return False, "the pane's process can't be read"
-        shape = verify_pane(argv, parent, kids)
-        if isinstance(shape, str):
-            return False, shape
-        sid, cwd = shape
+        ident = pane_identity(wid)
+        if isinstance(ident, str):
+            return False, ident
+        _root, sid, cwd = ident
         got = _inspect(sid)
         if isinstance(got, str):
             return False, got
