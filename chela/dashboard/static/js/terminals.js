@@ -1,5 +1,5 @@
 // --- Stage 0: ES-module imports ---
-import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, updateTabSignal, wantsHuman } from './util.js';
+import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, staticUrl, updateTabSignal, wantsHuman } from './util.js';
 import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
@@ -529,7 +529,7 @@ function _noteShareModes(shared) {
 let _ownerPresenceP = null;
 function _ownerPresence() {
     if (!_ownerPresenceP) {
-        _ownerPresenceP = import(BASE_PATH + '/static/collab/presence-owner.js')
+        _ownerPresenceP = import(staticUrl('collab/presence-owner.js'))
             .then(m => { try { m.initOwnerPresence(); } catch (_) {} return m; })
             .catch(e => { console.warn('[chela] owner-presence load failed', e); _ownerPresenceP = null; return null; });
     }

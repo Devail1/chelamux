@@ -3,9 +3,10 @@
 // every injected <script> running for real, then fires ONE user action and prints which
 // dashboard routes the page called, in order, as JSON.
 //
-// The external `<script src="/static/term-upload.js">` tag is swapped for the file's source
-// at the SAME position (jsdom cannot fetch it). If term_http stops serving the tag, nothing
-// is swapped and the upload shim does not run — exactly as in a browser.
+// The external `<script src="/static/v/<ver>/term-upload.js">` tag (CMX-426: versioned) is
+// swapped for the file's source at the SAME position (jsdom cannot fetch it). If term_http
+// stops serving the tag, nothing is swapped and the upload shim does not run — exactly as in
+// a browser.
 //
 // Usage: node term_upload_harness.mjs <servedHtmlPath> <action>
 //   action: keyV-image | keyV-text | paste-image | paste-text | paste-pdf | drop-file | drop-mixed
@@ -17,9 +18,9 @@ import { JSDOM, VirtualConsole } from 'jsdom';
 const [, , htmlPath, action] = process.argv;
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const UPLOAD_JS = readFileSync(join(ROOT, 'chela', 'dashboard', 'static', 'term-upload.js'), 'utf8');
-const TAG = '<script src="/static/term-upload.js"></script>';
+const TAG = /<script src="\/static\/(?:v\/[^/"]+\/)?term-upload\.js"><\/script>/;
 let html = readFileSync(htmlPath, 'utf8');
-if (html.includes(TAG)) html = html.replace(TAG, '<script>' + UPLOAD_JS + '</script>');
+html = html.replace(TAG, () => '<script>' + UPLOAD_JS + '</script>');
 
 const calls = [];
 const errors = [];
