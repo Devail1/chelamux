@@ -518,6 +518,13 @@ const _presenceByWid = new Map();
 // share POST, /api/term/shared and /api/agents .share_mode. Drives the 👁 / ⌨ share
 // pill and the red UNSANDBOXED banner. Display only: the host enforces the gate.
 const _shareModes = new Map();
+// Per-wid sandbox network mode (CMX-418), from /api/agents .share_net: 'web' shows the
+// "🌐 web" chip on the pane header. Display only — the host's live check is the gate.
+const _netModes = new Map();
+function _updateNetBadges(wid) {
+    const web = _netModes.get(wid) === 'web';
+    document.querySelectorAll('.gs-net-badge[data-net-for="' + _cssEsc(wid) + '"]').forEach(b => { b.hidden = !web; });
+}
 function _noteShareModes(shared) {
     Object.entries(shared || {}).forEach(([w, v]) => _shareModes.set(w, (v && v.mode) || 'view'));
 }
@@ -559,6 +566,8 @@ function _seedSharedFromAgents(agents) {
             _shareModes.delete(a.window_id);
         }
         _updateShareBtns(a.window_id);
+        if (a.share_net) _netModes.set(a.window_id, a.share_net); else _netModes.delete(a.window_id);
+        _updateNetBadges(a.window_id);
     });
     _renderSharesIndicator();
     _syncOwnerPresenceFromAgents(agents);
@@ -1099,6 +1108,7 @@ function paneHead(wid, draggable) {
       ${label}
       ${roomBadge}
       <span class="gs-presence" data-presence-for="${attrEsc(wid)}"></span>
+      <span class="gs-net-badge" data-net-for="${attrEsc(wid)}" title="Sandboxed session with web access — public hosts only, rate-limited, every request logged"${_netModes.get(wid) === 'web' ? '' : ' hidden'}>🌐 web</span>
       <span class="gs-unsafe-banner" data-banner-for="${attrEsc(wid)}" role="status"${_sharedWids.has(wid) && _shareModes.get(wid) === 'unsandboxed' ? '' : ' hidden'}>⚠ UNSANDBOXED — guest can type</span>
       ${state}
       ${menu}

@@ -233,8 +233,8 @@ def test_human_spawn_window_scrubs_tmux_secrets(monkeypatch, tmp_path, secret_en
 def test_share_sandbox_window_scrubs_tmux_secrets(monkeypatch, tmp_path, secret_env):
     from chela import agent_manager, discovery, share_sandbox, spawn
 
-    monkeypatch.setattr(share_sandbox, "preflight", lambda real: "")
-    monkeypatch.setattr(share_sandbox, "launcher_argv", lambda sid, real: ["docker", "run"])
+    monkeypatch.setattr(share_sandbox, "preflight", lambda real, net="none": "")
+    monkeypatch.setattr(share_sandbox, "launcher_argv", lambda sid, real, *a, **k: ["docker", "run"])
     monkeypatch.setattr(discovery, "ensure_session", lambda *a, **k: True)
     monkeypatch.setattr(discovery, "get_all_windows", lambda: {})
     monkeypatch.setattr(agent_manager, "lock_window_name", lambda *a, **k: None)

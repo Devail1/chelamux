@@ -865,6 +865,14 @@ body {
 }
 .gs-unsafe-banner[hidden] { display: none; }
 
+/* A web-mode sandboxed session (CMX-418): the pane can reach public web hosts. */
+.gs-net-badge {
+    flex: 0 0 auto; padding: 1px 6px; border-radius: 4px; white-space: nowrap;
+    border: 1px solid var(--border, #444); color: var(--text, inherit);
+    font-size: 11px; font-weight: 600;
+}
+.gs-net-badge[hidden] { display: none; }
+
 /* Share dialog (CMX-403) — reuses the Active-shares sheet chrome. */
 .share-dialog .sd-opt {
     display: flex; gap: 10px; align-items: flex-start; cursor: pointer;

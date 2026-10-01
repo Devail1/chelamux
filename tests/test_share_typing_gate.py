@@ -39,14 +39,15 @@ class Clock:
 
 def _good_argv():
     return ["/usr/bin/python3", "-m", share_sandbox.LAUNCH_MODULE, "run", "--id", SID,
-            os.path.realpath(WORKSPACE)]
+            "--net", "none", os.path.realpath(WORKSPACE)]
 
 
 def _good_container():
     net = share_sandbox.network_name(SID)
     info = {
         "State": {"Running": True},
-        "Config": {"Labels": {share_sandbox.LABEL: SID}, "User": f"{UID}:{GID}"},
+        "Config": {"Labels": {share_sandbox.LABEL: SID, share_sandbox.NET_LABEL: "none"},
+                   "User": f"{UID}:{GID}", "Env": ["HOME=/home/guest", "LANG=C.UTF-8"]},
         "HostConfig": {"CapDrop": ["ALL"], "CapAdd": None, "Privileged": False,
                        "ReadonlyRootfs": True, "SecurityOpt": ["no-new-privileges"],
                        "Memory": 2 << 30, "PidsLimit": 512, "NetworkMode": net},
@@ -59,8 +60,10 @@ def _good_container():
         ],
     }
     network = {"Internal": True,
-               "Options": {"com.docker.network.bridge.inhibit_ipv4": "true"}}
-    return info, network
+               "Options": {"com.docker.network.bridge.inhibit_ipv4": "true"},
+               "Containers": {"c1": {"Name": share_sandbox.container_name(SID)},
+                              "c2": {"Name": share_sandbox.proxy_name(SID)}}}
+    return info, network, None
 
 
 @pytest.fixture
@@ -159,9 +162,9 @@ def test_failing_check_drops_input(monkeypatch, sandbox, typing_on, breakage):
     elif breakage == "inspect_error":
         sandbox["inspect"] = "docker is unreachable"
     else:
-        info, net = _good_container()
+        info, net, _web = _good_container()
         net["Internal"] = False
-        sandbox["inspect"] = (info, net)
+        sandbox["inspect"] = (info, net, None)
     ok, why = share_sandbox.check_share_session("@9")
     assert ok is False and why
     b, _clock, forwarded, sent = _bridge(monkeypatch, allow_typing=True)
@@ -439,7 +442,7 @@ def test_spawn_sandbox_window_execs_the_launcher_with_no_shell(monkeypatch, tmp_
     class P:
         returncode, stdout, stderr = 0, "@17\n", ""
 
-    monkeypatch.setattr(share_sandbox, "preflight", lambda cwd: None)
+    monkeypatch.setattr(share_sandbox, "preflight", lambda cwd, net="none": None)
     monkeypatch.setattr(spawn.discovery, "ensure_session", lambda: True)
     monkeypatch.setattr(spawn.discovery, "get_all_windows", lambda: ["sandbox-1"])
     monkeypatch.setattr(spawn.agent_manager, "lock_window_name", lambda t: None)
@@ -454,13 +457,13 @@ def test_spawn_sandbox_window_execs_the_launcher_with_no_shell(monkeypatch, tmp_
                                                          ["tmux", "set-environment"]))]
     cmd = argv[argv.index("--") + 1:]
     assert cmd[:2] == [sys.executable, "-m"]
-    assert share_sandbox.verify_pane(cmd, "tmux: server", []) == (cmd[5], str(tmp_path.resolve()))
+    assert share_sandbox.verify_pane(cmd, "tmux: server", []) == (cmd[5], str(tmp_path.resolve()), "none")
 
 
 def test_spawn_sandbox_window_refuses_before_opening_anything(monkeypatch, tmp_path):
     from chela import spawn
     calls = []
-    monkeypatch.setattr(share_sandbox, "preflight", lambda cwd: "docker is not installed")
+    monkeypatch.setattr(share_sandbox, "preflight", lambda cwd, net="none": "docker is not installed")
     monkeypatch.setattr(spawn.subprocess, "run", lambda argv, **kw: calls.append(argv))
     r = spawn.spawn_sandbox_window(str(tmp_path))
     assert not r.ok and "docker" in r.error and calls == []
@@ -481,7 +484,7 @@ def test_spawn_sandboxed_route_uses_the_launcher(monkeypatch, tmp_path):
     monkeypatch.setattr(dash, "_require_terminals", lambda: None)
     seen = []
     monkeypatch.setattr(spawn, "spawn_sandbox_window",
-                        lambda cwd: seen.append(cwd) or spawn.SpawnResult(ok=True, name="sandbox-1", wid="@3", cwd=cwd))
+                        lambda cwd, net="none": seen.append(cwd) or spawn.SpawnResult(ok=True, name="sandbox-1", wid="@3", cwd=cwd))
     monkeypatch.setattr(dash.launcher, "record_recent", lambda p: None)
     r = dash.app.test_client().post("/api/agents/spawn-sandboxed", json={"cwd": str(tmp_path)})
     assert r.status_code == 200 and seen == [str(tmp_path)]
@@ -535,9 +538,9 @@ def _flip_ssh_mount(info, net):
 ])
 def test_each_container_refusal_fails_closed(monkeypatch, sandbox, typing_on, flip, why):
     assert share_sandbox.check_share_session("@9") == (True, "")   # negative control
-    info, net = _good_container()
+    info, net, _web = _good_container()
     flip(info, net)
-    sandbox["inspect"] = (info, net)
+    sandbox["inspect"] = (info, net, None)
     ok, reason = share_sandbox.check_share_session("@9")
     assert ok is False and why in reason
     b, _clock, forwarded, _sent = _bridge(monkeypatch, allow_typing=True)
