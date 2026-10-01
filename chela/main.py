@@ -1144,6 +1144,12 @@ def cmd_wait(args) -> None:
 def _print_hold(held, prefix: str = "") -> None:
     print(f"{prefix}Dispatch is HELD — no task will be claimed until it is released.")
     print(f"  {held.summary()}")
+    # CMX-413: say what the hold stops (judges and rework re-spawns too, not only claims)
+    # and what it deliberately lets finish — from the runs table, never a guess.
+    head, *items = dispatcher.hold_inflight_lines()
+    print(f"  {head}")
+    for line in items:
+        print(f"    {line}")
     print("  Reconciliation keeps running: a merged PR still closes out its run and "
           "frees its slot.")
     print("  Release: chela dispatch --resume")
@@ -2267,7 +2273,18 @@ def cmd_judge(args) -> None:
 
     ⛔ It never merges and never approves: a clean PR stays ``awaiting_review``.
     """
-    result = judge.judge_run(args.run, args.experiments, cleanup=not args.no_cleanup)
+    if getattr(args, "detach", False):
+        # ⏱️ CMX-411: the battery outlives the caller's shell — see judge.detach_judge_run.
+        started = judge.detach_judge_run(args.run, args.experiments, cleanup=not args.no_cleanup)
+        if not started.get("ok"):
+            print(f"judge: {started.get('error', 'unknown error')}")
+            sys.exit(1)
+        print(f"⚖️ {started['task_id']}: judge run started DETACHED (pid {started['pid']}) — "
+              "it publishes the verdict and closes the judge window by itself.")
+        print(f"  log: {started['log']}   progress: `chela doctor`")
+        return
+    result = judge.judge_run(args.run, args.experiments, cleanup=not args.no_cleanup,
+                             detached=getattr(args, "detached_child", False))
     if not result.get("ok") and "task_id" not in result:
         print(f"judge: {result.get('error', 'unknown error')}")
         sys.exit(1)
@@ -2889,8 +2906,10 @@ def main() -> None:
     # the daemon that honours it is not the process that takes it.
     p_disp.add_argument(
         "--pause", action="store_true",
-        help="HOLD the queue: claim no new task until --resume (reconciliation continues). "
-             "Take this BEFORE reordering the tracker.",
+        help="HOLD the queue until --resume: no new claims, no new judges, no rework "
+             "re-spawns. Agents and judges already running are NOT stopped — they finish "
+             "(the output lists them). Reconciliation continues. Take this BEFORE "
+             "reordering the tracker.",
     )
     p_disp.add_argument("--resume", action="store_true", help="Release the queue hold")
     p_disp.add_argument(
@@ -2969,6 +2988,14 @@ def main() -> None:
         "--no-cleanup", action="store_true",
         help="Keep the judge worktree and the tmux window (debugging a judge run by hand)",
     )
+    p_jrun.add_argument(
+        "--detach", action="store_true",
+        help="Run the battery in its own session (setsid), logging to "
+             "$CHELA_DIR/judge-logs/<task>.log, and return at once. A second run on the "
+             "same task while one is live is refused",
+    )
+    # The child `--detach` re-execs — it owns its own process group. Not for humans.
+    p_jrun.add_argument("--detached-child", action="store_true", help=argparse.SUPPRESS)
     p_jcheck = judge_sub.add_parser(
         "self-check",
         help="⚖️🔎 Run the judge's own mutation mechanics against YOUR OWN worktree, before "
@@ -2992,6 +3019,8 @@ def main() -> None:
         "--cwd", metavar="DIR", default=".",
         help="Worktree to mutate in place (default: the current directory)",
     )
+    from chela.judge_eval import cli as judge_eval_cli
+    judge_eval_cli.add_parser(judge_sub)
     p_jshow = judge_sub.add_parser(
         "show",
         help="⚖️🙈 A run's judge rounds from the operator's private record: rounds-to-clean, "
@@ -3354,6 +3383,9 @@ def main() -> None:
             cmd_judge_self_check(args)
         elif args.judge_cmd == "ack-blocked-race":
             cmd_judge_ack_blocked_race(args)
+        elif args.judge_cmd == "eval":
+            from chela.judge_eval import cli as judge_eval_cli
+            judge_eval_cli.main(args)
         elif args.judge_cmd == "show":
             cmd_judge_show(args)
         else:

@@ -20,14 +20,14 @@ Then invoke it in Claude Code with `/handoff`, `/blindspot-pass`, etc.
 
 | Skill | What it does |
 |-------|--------------|
-| **chela-setup** | Install chela and wire its work-item dispatcher into a git repo — scaffold a starter `WORKFLOW.md` + `TODO.md` so each `- [ ] task` becomes an agent → PR. Use to onboard a repo to chela. |
-| **telegram-setup** | Wire Telegram for chela — get a bot token from @BotFather, find the chat id (via `getUpdates`) and forum topic id, and set `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `TELEGRAM_TOPIC_ID`. The one-time config behind `telegram-send`. |
+| **chela-setup** | Install chela (extras, `chela.env`, the hooks plugin, the daemon) and wire its work-item dispatcher into a git repo — seed `WORKFLOW.md` + `TODO.md` so each `- [ ] task` becomes an agent → a judged PR. Use to onboard a repo to chela. |
+| **telegram-setup** | Wire Telegram for chela — a bot from @BotFather, a private forum group with Topics, the chat id, the secrets in `~/.chela/secrets.env`, and the `chela telegram` bridge (one topic per agent window, two-way). |
 
 ## Orchestration
 
 | Skill | What it does |
 |-------|--------------|
-| **orchestrate** | Act as the orchestrator over a fleet of sibling agents — discover who's live, observe status/work (`peek`/`read`), dispatch scoped tasks (`drive`), review results, and surface decisions to the human. The operating manual for chela's agent-facing toolkit. |
+| **orchestrate** | Act as the orchestrator over a fleet of agents and the dispatcher — observe (`peek`/`read`), queue tracker tasks, review PRs against the judge's verdict, merge only through `chela merge`, deploy, and surface decisions to the human. The operating manual for chela's agent-facing toolkit. |
 
 ## Agent workflow
 

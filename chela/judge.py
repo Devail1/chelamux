@@ -76,7 +76,9 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -1297,8 +1299,13 @@ def run_experiments(
     consistency_sample: int = 0,
     max_experiments: int = MAX_EXPERIMENTS,
     risk: str = "",
+    progress=None,
 ) -> Report:
     """Execute every proposed experiment IN THIS WORKTREE and adjudicate each one.
+
+    ⏱️ CMX-411: ``progress``, when given, is called ``progress(done, total)`` as each
+    experiment starts and once more when they are all done — what ``chela doctor`` reads to
+    show a live judge's ``k/N``. It observes; it never changes an outcome.
 
     ⚖️🎚️ CMX-405: ``max_experiments`` is the task's risk-level cap (see
     ``config.judge_max_experiments``) — proposals past it are dropped OUT LOUD, as
@@ -1355,7 +1362,8 @@ def run_experiments(
     report = _run_experiments(worktree, test_cmd, raw, timeout=timeout,
                               base_branch=base_branch, select_tests=select_tests,
                               consistency_sample=consistency_sample,
-                              max_experiments=max_experiments, risk=risk)
+                              max_experiments=max_experiments, risk=risk,
+                              progress=progress)
     report.battery_seconds = time.monotonic() - started
     log.info("judge: mutation battery took %s (%d experiment(s))",
              _duration(report.battery_seconds), len(report.outcomes))
@@ -1365,6 +1373,7 @@ def run_experiments(
 def _run_experiments(
     worktree: Path, test_cmd: str, raw: dict, *, timeout: float, base_branch: str,
     select_tests: bool, consistency_sample: int, max_experiments: int, risk: str,
+    progress=None,
 ) -> Report:
     report = Report(risk=risk, cap=max(1, int(max_experiments)))
     items = raw.get("experiments") if isinstance(raw, dict) else None
@@ -1445,7 +1454,8 @@ def _run_experiments(
         return report
 
     outcomes, contamination = _apply_experiments(
-        worktree, test_cmd, items, baseline, timeout, selector)
+        worktree, test_cmd, items, baseline, timeout, selector, progress=progress,
+    )
     report.outcomes.extend(outcomes)
     if contamination:
         report.cannot_verify = contamination
@@ -1500,6 +1510,7 @@ def _apply_experiments(
     worktree: Path, test_cmd: str, items: list, baseline: SuiteResult, timeout: float,
     selector: "judge_select.Selector | None" = None,
     pinned: "list[judge_select.Selection | None] | None" = None,
+    *, progress=None,
 ) -> tuple[list[Outcome], str]:
     """Apply, adjudicate, and restore every ``items`` entry against an already-green
     ``baseline``. Shared by :func:`run_experiments` (the judge's PR pass, a throwaway
@@ -1520,6 +1531,8 @@ def _apply_experiments(
     """
     outcomes: list[Outcome] = []
     for n, raw_exp in enumerate(items):
+        if progress is not None:
+            progress(n, len(items))
         exp, why = Experiment.parse(raw_exp)
         if exp is None:
             # A malformed HELD-OUT experiment stays held out: its raw repr carries the guard
@@ -1604,6 +1617,8 @@ def _apply_experiments(
                 "blocked and nothing was cleared."
             )
 
+    if progress is not None:
+        progress(len(items), len(items))
     return outcomes, ""
 
 
@@ -2219,7 +2234,9 @@ def _since(ts: str | None) -> float | None:
     return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
 
 
-def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True) -> dict:
+def judge_run(
+    ident: str, experiments_path: str | Path, *, cleanup: bool = True, detached: bool = False,
+) -> dict:
     """Execute the judge's experiments and PUBLISH the verdict. The judge agent's last step.
 
     ⛔ It drives the EXISTING carrier — ``dispatcher.request_changes`` — and adds no second
@@ -2272,10 +2289,23 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
     # documented way an operator clears a stale verdict) land on the identical worktree and
     # would mutate/restore each other's files concurrently. Claim the slot BEFORE touching
     # anything; a live claim held by someone else REFUSES loudly instead of racing them.
-    claim_error = _claim_judge_slot(worktree, task_id)
+    claim_error = _claim_judge_slot(worktree, task_id, detached=detached)
     if claim_error:
         log.warning("judge: %s: refusing to start — %s", task_id, claim_error)
         return {"ok": False, "task_id": task_id, "error": claim_error}
+
+    # ⏱️ CMX-411: THE RUN'S OWN START MARKER. The watchdog's wall measures the battery from
+    # here, not from when the judge agent was spawned — its design time is not the run's.
+    run_started = time.time()
+    dispatcher.mark_judge_run_started(task_id)
+    status = {"pid": os.getpid(), "started": _proc_started_self(), "task_id": task_id,
+              "run_started_at": run_started, "detached": detached, "done": 0, "total": None,
+              "log": str(judge_log_path(task_id)) if detached else None}
+    _write_run_status(task_id, status)
+
+    def _progress(done: int, total: int) -> None:
+        status.update(done=done, total=total)
+        _write_run_status(task_id, status)
 
     # ⛔ CMX-164: the judge worktree already exists on disk by this point (`_spawn_judge`
     # created it before this ever ran), and MUST be reaped whether this call finishes or
@@ -2301,14 +2331,14 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
                     worktree, test_cmd, raw, timeout=judge_cfg.suite_timeout_seconds,
                     base_branch=base_branch, select_tests=judge_cfg.select_tests,
                     consistency_sample=judge_cfg.consistency_sample,
-                    max_experiments=exp_cap, risk=risk,
+                    max_experiments=exp_cap, risk=risk, progress=_progress,
                 )
         else:
             report = run_experiments(
                 worktree, test_cmd, raw, timeout=judge_cfg.suite_timeout_seconds,
                 base_branch=base_branch, select_tests=judge_cfg.select_tests,
                 consistency_sample=judge_cfg.consistency_sample,
-                max_experiments=exp_cap, risk=risk,
+                max_experiments=exp_cap, risk=risk, progress=_progress,
             )
         report.risk, report.cap = risk, exp_cap
         report.total_seconds = _since(run.get("judge_started_at"))
@@ -2511,6 +2541,7 @@ def judge_run(ident: str, experiments_path: str | Path, *, cleanup: bool = True)
         return result
     finally:
         _release_judge_slot(worktree)
+        _clear_run_status(task_id)
         if cleanup:
             _cleanup(wf, task_id, run.get("branch_name") or "", judge_epoch)
 
@@ -2688,7 +2719,7 @@ def _judge_lock_owner_alive(lock: dict) -> bool:
     return abs(live_started - started) < 1.0
 
 
-def _claim_judge_slot(worktree: Path, task_id: str) -> str | None:
+def _claim_judge_slot(worktree: Path, task_id: str, *, detached: bool = False) -> str | None:
     """Claim the judge slot for ``task_id`` before touching its worktree. ``None`` on
     success; an error string, meant to be returned to the caller verbatim, if someone else
     holds it live right now.
@@ -2708,22 +2739,55 @@ def _claim_judge_slot(worktree: Path, task_id: str) -> str | None:
     A stale claim (the owning process is gone) is taken over silently, not refused forever —
     a crashed judge that never released its slot must not wedge every future judge on this
     task; that would trade one bug for a worse one.
+
+    ⏱️ CMX-411: the claim is made with ``O_EXCL``, so two ``chela judge run --detach``
+    children started a moment apart cannot both read "no lock" and both write one — the
+    second is REFUSED, never a from-zero restart racing the first. ``detached`` is recorded
+    so the watchdog knows it may stop this process's own group on a timeout (and never a
+    process it did not launch).
     """
-    lock_path = _judge_lock_path(worktree)
-    existing = _read_judge_lock(lock_path)
-    if existing is not None and _judge_lock_owner_alive(existing):
-        return (f"a judge (pid {existing.get('pid')}) is already running for {task_id} in "
-                f"this worktree — refusing to share it. If that process is actually gone, "
-                f"its claim will be taken over automatically on the next attempt.")
     from chela import sessions
 
-    pid = os.getpid()
+    lock_path = _judge_lock_path(worktree)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.write_text(json.dumps({
+    pid = os.getpid()
+    payload = json.dumps({
         "pid": pid, "started": sessions.proc_started(pid), "task_id": task_id,
-        "claimed_at": time.time(),
-    }))
-    return None
+        "claimed_at": time.time(), "detached": bool(detached),
+    })
+    for _ in range(3):
+        try:
+            fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            existing = _read_judge_lock(lock_path)
+            if existing is not None and _judge_lock_owner_alive(existing):
+                return (f"a judge (pid {existing.get('pid')}) is already running for "
+                        f"{task_id} in this worktree — refusing to share it. If that process "
+                        "is actually gone, its claim will be taken over automatically on the "
+                        "next attempt.")
+            if existing is None and _lock_is_fresh(lock_path):
+                # Created a moment ago and not written yet: another claimer is mid-claim.
+                return (f"another judge is claiming {task_id} right now — refusing to "
+                        "start a second one")
+            lock_path.unlink(missing_ok=True)          # stale: its owner is gone
+            continue
+        with os.fdopen(fd, "w") as f:
+            f.write(payload)
+        return None
+    return f"could not claim the judge slot for {task_id} (the lock kept changing under us)"
+
+
+def _proc_started_self() -> float | None:
+    from chela import sessions
+
+    return sessions.proc_started(os.getpid())
+
+
+def _lock_is_fresh(lock_path: Path, window: float = 5.0) -> bool:
+    try:
+        return time.time() - lock_path.stat().st_mtime < window
+    except OSError:
+        return False
 
 
 def _release_judge_slot(worktree: Path) -> None:
@@ -2755,6 +2819,145 @@ def judge_lock_live(worktree: Path) -> bool:
     """
     lock = _read_judge_lock(_judge_lock_path(worktree))
     return lock is not None and _judge_lock_owner_alive(lock)
+
+
+# --- ⏱️ CMX-411: the judge's battery runs DETACHED from the agent that proposed it --------
+#
+# Measured on #556 (cmx-406), 2026-09-30: the judge agent ran `chela judge run` through its
+# Bash tool, the tool moved it to the background at 10 min and KILLED it at its 30-min
+# background limit, the agent re-ran the whole battery from zero, and the daemon's 60-min
+# judge wall fired first — CANNOT VERIFY, on a battery that never got to finish. The agent's
+# tool limit was the binding constraint, not the wall or the CMX-405 caps. So the agent now
+# runs `chela judge run --detach`: the command re-execs itself in a NEW SESSION (its own
+# process group — not a descendant of the agent's shell, out of reach of that shell's kill,
+# of its tmux window's SIGHUP), writes to its own log, and returns at once.
+
+
+def judge_logs_dir() -> Path:
+    from chela import config
+
+    return config.CHELA_DIR / "judge-logs"
+
+
+def _safe_task(task_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", task_id) or "_"
+
+
+def judge_log_path(task_id: str) -> Path:
+    """``$CHELA_DIR/judge-logs/<task>.log`` — a detached run's stdout/stderr, appended."""
+    return judge_logs_dir() / f"{_safe_task(task_id)}.log"
+
+
+def judge_status_path(task_id: str) -> Path:
+    """``$CHELA_DIR/judge-logs/<task>.json`` — a live run's pid, start and ``k/N``, for
+    ``chela doctor``. Written by :func:`judge_run` after it claims the slot, removed when it
+    releases it; a file left by a crashed run is ignored because its pid is gone."""
+    return judge_logs_dir() / f"{_safe_task(task_id)}.json"
+
+
+def _write_run_status(task_id: str, status: dict) -> None:
+    try:
+        path = judge_status_path(task_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(status))
+        tmp.replace(path)
+    except OSError:
+        log.debug("judge: could not write the run status for %s", task_id, exc_info=True)
+
+
+def _clear_run_status(task_id: str) -> None:
+    path = judge_status_path(task_id)
+    existing = _read_judge_lock(path)
+    if existing is not None and existing.get("pid") == os.getpid():
+        path.unlink(missing_ok=True)
+
+
+def live_judge_runs() -> list[dict]:
+    """Every ``chela judge run`` executing RIGHT NOW (pid + ``/proc`` start time still
+    match), with ``elapsed`` seconds since its own start and its experiment progress."""
+    out = []
+    d = judge_logs_dir()
+    if not d.is_dir():
+        return out
+    now = time.time()
+    for path in sorted(d.glob("*.json")):
+        status = _read_judge_lock(path)
+        if status is None or not _judge_lock_owner_alive(status):
+            continue
+        started = status.get("run_started_at")
+        status["elapsed"] = max(0.0, now - started) if isinstance(started, (int, float)) else None
+        out.append(status)
+    return out
+
+
+def detached_argv(ident: str, experiments: str | Path, *, cleanup: bool = True) -> list[str]:
+    """The child a ``--detach`` re-execs: the SAME ``chela judge run``, minus ``--detach``,
+    plus the hidden marker that tells the child it owns its own process group."""
+    argv = [sys.executable, "-m", "chela.main", "judge", "run", ident,
+            "--experiments", str(Path(experiments).resolve()), "--detached-child"]
+    if not cleanup:
+        argv.append("--no-cleanup")
+    return argv
+
+
+def spawn_detached(argv: list[str], log_path: Path) -> int:
+    """Start ``argv`` in a NEW SESSION with its output appended to ``log_path``; return its
+    pid without waiting. ⛔ ``start_new_session`` is the whole point: it is ``setsid()`` in
+    the child, so the run is no longer in the agent shell's process group or session and
+    nothing that kills them — the Bash tool's limit, the window's hangup — reaches it."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "ab") as out:
+        child = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+            start_new_session=True, close_fds=True,
+        )
+    return child.pid
+
+
+def detach_judge_run(ident: str, experiments: str | Path, *, cleanup: bool = True) -> dict:
+    """``chela judge run --detach``: refuse if a run for this task is already live (the
+    CMX-221 lock), else launch the detached child and return at once."""
+    from chela import dispatcher, workflow
+
+    run = dispatcher.resolve_run(ident)
+    if run is None:
+        return {"ok": False, "error": f"no run matches {ident!r}"}
+    task_id = run["task_id"]
+    wf_path = run.get("workflow_path")
+    try:
+        wf = workflow.load_workflow(wf_path) if wf_path else None
+    except Exception:                  # judge_run itself records the unreadable workflow
+        wf = None
+    if wf is not None:
+        lock = _read_judge_lock(_judge_lock_path(judge_worktree_path(wf, task_id)))
+        if lock is not None and _judge_lock_owner_alive(lock):
+            return {"ok": False, "task_id": task_id, "error": (
+                f"a judge (pid {lock.get('pid')}) is already running for {task_id} — "
+                "refusing to start a second one. Watch it with `chela doctor` or "
+                f"`tail -f {judge_log_path(task_id)}`; do not re-run it.")}
+    log_path = judge_log_path(task_id)
+    pid = spawn_detached(detached_argv(task_id, experiments, cleanup=cleanup), log_path)
+    return {"ok": True, "task_id": task_id, "pid": pid, "log": str(log_path)}
+
+
+def stop_judge_run(worktree: Path) -> bool:
+    """Stop a DETACHED judge run that still holds this worktree's slot — the watchdog's
+    timeout reap, which would otherwise delete the worktree out from under a process that
+    no window-kill can reach any more. Only a claim marked ``detached`` (a process group
+    ``--detach`` itself created) is signalled, and never this process: a manual,
+    foreground run is left to whoever started it."""
+    lock = _read_judge_lock(_judge_lock_path(worktree))
+    if lock is None or not lock.get("detached") or not _judge_lock_owner_alive(lock):
+        return False
+    pid = lock.get("pid")
+    if not isinstance(pid, int) or pid == os.getpid():
+        return False
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    return True
 
 
 def _cleanup(wf, task_id: str, branch: str, judge_epoch: str | None) -> None:

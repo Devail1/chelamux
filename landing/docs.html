@@ -355,6 +355,12 @@ chela schedule remove 3        <span class="c"># delete by id</span></pre>
       <li>when you merge, the struck line lands on <code>base_branch</code>, the item disappears, and the
       run flips to <code>done</code> on the next tick.</li>
     </ul>
+    <p><strong>Merges go through the judge.</strong> <code>chela merge &lt;run&gt;</code> refuses unless the
+    judge's verdict is clean <em>on the PR's current head</em>, CI is green and the PR is mergeable. The hooks
+    plugin's PreToolUse hook denies a direct <code>gh pr merge</code> (or a push to the base branch) in a
+    chela-managed repo, so an agent cannot route around it. <code>chela merge --override --reason "…"</code>
+    is the escape hatch: it waits for your approval (dashboard or <code>chela merge-approve</code>) and writes
+    an audit event.</p>
     <div class="note"><p>The dispatcher shape (task-list → isolated worktree → autonomous agent → PR)
     is an adaptation of OpenAI's <strong>Symphony</strong> pattern.</p></div>
   </section>
@@ -411,7 +417,7 @@ chela watch                          <span class="c"># no window: (re-)register 
       went unreviewed, in total silence, with <code>chela doctor</code> green. Every persisted id
       is now stamped with the server that issued it, and one from a dead server is
       <strong>never acted on</strong>. Being undeliverable is <strong>loud</strong>: an ERROR every
-      tick, an <code>inbox_undeliverable</code> event in the Feed, a phone push, and a red
+      tick, an <code>inbox_undeliverable</code> event in the event log, a phone push, and a red
       <code>chela doctor</code>. Nothing is lost — the queue waits, and <code>chela watch</code>
       with no arguments re-registers the session that is really there.</li>
     </ul>
@@ -539,9 +545,22 @@ Answer by posting back to the asker — this wakes them, with no human in the mi
     <h2>Dashboard &amp; the wall</h2>
     <pre>uv sync --extra dashboard
 uv run chela dashboard           <span class="c"># http://127.0.0.1:5001</span></pre>
-    <p>The web UI has tabs for <strong>agents</strong> (live liveness — alive / waiting / offline),
-    <strong>schedules</strong>, the <strong>dispatcher</strong>, and a <strong>Kanban</strong> of runs.
-    Liveness is derived from the native session status — no heartbeat daemon.</p>
+    <p>The web UI has two views. The <strong>Wall</strong> is every agent's live terminal, each pane
+    marked <em>working</em>, <em>needs you</em>, <em>done</em> or <em>idle</em>; <strong>Work</strong>
+    holds the dispatch <strong>board</strong> (a Kanban of runs), the per-workflow <strong>runs</strong>
+    and the <strong>schedules</strong>. State is derived from the native session status — no heartbeat
+    daemon. On a phone the Wall collapses to one pane with a pill switcher, a keybar and a “+” New
+    session button.</p>
+    <ul>
+      <li><strong>Settings</strong> opens with <kbd>Ctrl</kbd>+<kbd>,</kbd> (<kbd>⌘</kbd>+<kbd>,</kbd> on
+      macOS), from the dashboard or from inside a focused terminal, and its search box filters every setting.</li>
+      <li><strong>Themes reach the terminals.</strong> Each theme (Settings → Appearance, including
+      <code>warm</code>) carries its own terminal palette, applied live to every open pane.
+      <code>CHELA_TERM_THEME</code> still overrides it.</li>
+      <li><strong>Remote Control.</strong> New sessions launch with <code>--remote-control</code>;
+      Settings → General → Remote Control turns it off without a restart (<code>CHELA_REMOTE_CONTROL</code>,
+      when set, wins and locks the switch). A running session keeps the flag it launched with.</li>
+    </ul>
     <p>The embedded <strong>terminal wall</strong> streams the live ttyd panes in a grid. It's
     <strong>on by default but loopback-guarded</strong>: it serves writable shells, so the dashboard
     only serves it on a <code>127.0.0.1</code> bind. On a non-loopback bind it's refused unless you
@@ -555,8 +574,8 @@ uv run chela dashboard           <span class="c"># http://127.0.0.1:5001</span><
     <strong>event-log plugin</strong> (<code>chela plugin</code>) is strongly recommended: it POSTs every
     tool call, prompt and permission gate to the daemon <em>before</em> the fact, which unlocks
     <strong>lossless blocked-agent questions on Telegram</strong> (a scraped multi-question or preview
-    selector otherwise reaches your phone with no options), <strong>answering a question with zero
-    keystrokes</strong>, and the live event Feed. It fails open — if the daemon is down the hook logs a
+    selector otherwise reaches your phone with no options), and <strong>answering a question with zero
+    keystrokes</strong>. It fails open — if the daemon is down the hook logs a
     warning and your agent carries on.</p>
     <p>Install it straight from this repo, inside Claude Code — works out of the box on the default
     dashboard port (<code>5001</code>):</p>
@@ -668,11 +687,12 @@ cd chela/collab-relay && npx wrangler deploy
       <div class="cmd"><code>chela dispatch <span class="opt">&lt;WORKFLOW.md&gt; [--once] [--interval N] [--dry-run]</span></code><p>Turn each open <code>- [ ]</code> item into a worktree, an agent, and a PR. Polls every 60s; <code>--once</code> runs one tick.</p></div>
       <div class="cmd"><code>chela dispatch-runs</code><p>List dispatcher runs and their status.</p></div>
       <div class="cmd"><code>chela task-finished <span class="opt">&lt;task_id&gt;</span></code><p>(agents call this) mark a run awaiting-review, record the PR, and kill its window.</p></div>
+      <div class="cmd"><code>chela merge <span class="opt">&lt;run&gt; [--override --reason …]</span></code><p>Merge a dispatched PR only if the judge passed its current head, CI is green and it is mergeable. <code>--override</code> waits for your approval and is audited.</p></div>
     </div>
 
     <div class="cmd-group">
       <h3>Messaging</h3>
-      <div class="cmd"><code>chela msg <span class="opt">&lt;agent&gt; &lt;message&gt; [--from] [--priority]</span></code><p>Drop a message into one agent's pane. Priority: <code>critical|high|normal|low</code>.</p></div>
+      <div class="cmd"><code>chela msg <span class="opt">&lt;agent&gt; &lt;message&gt; [--from] [--priority]</span></code><p>Drop a message into one agent's pane. Priority: <code>critical|high|normal|low</code>. Peer messages arrive named — <em>Message from @chela</em>.</p></div>
       <div class="cmd"><code>chela broadcast <span class="opt">&lt;message&gt; [--from] [--priority]</span></code><p>Send the same message to every other live agent at once.</p></div>
     </div>
 

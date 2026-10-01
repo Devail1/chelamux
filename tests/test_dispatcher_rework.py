@@ -1602,3 +1602,40 @@ def _git_env() -> dict:
 
     return {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"}
+
+
+def test_a_HOLD_re_spawns_NO_rework_and_the_first_tick_after_resume_does(tmp_path):
+    """⏸️⚖️ CMX-413: a rework re-spawn starts an agent, so a held queue starts none — step 3b
+    sits below the hold return. Moving it above goes red here. ⭐ And resume must pick the run
+    straight back up: the hold defers the rework, it never loses it."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="changes_requested", rework_count=0)
+
+    respawned: list[str] = []
+
+    def respawn(w, row, conn, task=None):
+        respawned.append(row["task_id"])
+        return True
+
+    def _tick():
+        with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+             patch.object(dispatcher, "get_source", return_value=_Source("abc123")), \
+             patch.object(dispatcher, "_claim_order", return_value=[]), \
+             patch.object(dispatcher, "_respawn_rework", side_effect=respawn), \
+             patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+             patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+            return dispatcher.tick(wf.path)
+
+    hold.take(reason="gaming", ttl_seconds=600, by="liav")
+    held = _tick()
+    assert held["held"] is True
+    assert held["reworked"] == 0
+    assert respawned == []                                      # ⛔ no re-spawn while held
+    assert dispatcher.resolve_run("abc123")["status"] == "changes_requested"
+
+    hold.release()
+    resumed = _tick()
+    assert resumed["held"] is False
+    assert resumed["reworked"] == 1                             # ⭐ resume re-spawns it
+    assert respawned == ["abc123"]

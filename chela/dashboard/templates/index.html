@@ -310,7 +310,7 @@
     {% if terminals_enabled %}
     <!-- Terminals wall (flagship view mode; streams live ttyd panes) -->
     <div class="panel" id="panel-terminals">
-        <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
+        <div class="term-toolbar">
             <!-- mode toggle + single-agent picker kept (terminals.js refs them) but hidden: wall-only -->
             <button id="term-mode-single" onclick="chela.setTermMode('single')" style="display:none;">Single</button>
             <button id="term-mode-wall" onclick="chela.setTermMode('wall')" style="display:none;">Wall</button>
@@ -346,7 +346,7 @@
                         style="margin-left:6px;"></button>
                 </span>
             </span>
-            <button id="term-new-shell" onclick="chela.spawnShell(this)" title="Spawn a new plain-shell window" style="margin-left:auto;">+ New shell</button>
+            <button id="term-new-shell" onclick="chela.spawnShell(this)" title="Spawn a new plain-shell window">+ New shell</button>
         </div>
         <!-- Mobile-only agent switcher: a scrollable pill strip that replaces the
              dropdown on phones (single mode). Populated by renderMobileSwitcher(). -->
