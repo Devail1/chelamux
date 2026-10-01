@@ -346,6 +346,15 @@
                         style="margin-left:6px;"></button>
                 </span>
             </span>
+            <!-- CMX-422: the active-shares pill's in-row copy (terminals.js
+                 _renderSharesIndicator drives both). Desktop only: it takes the
+                 row's flow slot left of "+ New shell", and while it shows, the
+                 floating #btn-shares is hidden so it can't be drawn over the button. -->
+            <button class="shares-indicator" id="term-shares" hidden onclick="chela.openSharesSheet()"
+                    title="Active shares — tap to manage or stop" aria-label="Active shares">
+                <span class="si-dot" aria-hidden="true"></span>
+                <span class="si-text">0 sharing</span>
+            </button>
             <button id="term-new-shell" onclick="chela.spawnShell(this)" title="Spawn a new plain-shell window">+ New shell</button>
         </div>
         <!-- Mobile-only agent switcher: a scrollable pill strip that replaces the

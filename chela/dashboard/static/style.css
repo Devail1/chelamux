@@ -566,6 +566,24 @@ body {
     #term-new-shell { height: var(--ctl-h-sm); display: inline-flex; align-items: center; }
 }
 
+/* CMX-422: the active-shares pill in the Wall's toolbar row. .safety-float is
+   position:fixed in the top-right corner — exactly where this row's "+ New
+   shell" sits — so with a share live the floating pill was drawn ON TOP of the
+   button. On desktop the row carries its own copy (#term-shares) in normal
+   flow, left of "+ New shell" with the row's gap, at the row's control height,
+   and the floating copy steps aside while the Wall is the active panel. It is
+   hidden with no share, so "+ New shell" keeps its spot. A phone has no row
+   controls (the "+" FAB starts sessions) — there the floating pill stays. */
+#term-shares { display: none; }
+@media (min-width: 769px) {
+    #term-shares:not([hidden]) {
+        display: inline-flex; height: var(--ctl-h-sm); margin-left: auto;
+        padding: 0 11px; font-size: 12px;
+    }
+    #term-shares:not([hidden]) + #term-new-shell { margin-left: 0; }
+    body:has(#panel-terminals.active) .safety-float #btn-shares { display: none; }
+}
+
 /* CMX-397: the collapsible layout toolbar. Collapsed, only #term-grid-toggle
    shows (the current layout/mode glyph + a chevron); open, the full row sits
    inline beside it and the chevron turns up. The toggle is as tall as the

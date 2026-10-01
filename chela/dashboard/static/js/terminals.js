@@ -573,25 +573,31 @@ function _seedSharedFromAgents(agents) {
 // server truth (/api/term/shared) so the kill list is always accurate at the
 // moment it matters.
 function _renderSharesIndicator() {
-    const btn = document.getElementById('btn-shares');
-    if (!btn) return;
+    // Two copies of one pill (CMX-422): #btn-shares floats in .safety-float on
+    // every tab; #term-shares sits IN the Wall's toolbar row, in normal flow left
+    // of "+ New shell", and the stylesheet hides the floating copy only while the
+    // Wall shows the in-row one — the float used to be drawn on top of the button.
+    const btns = ['btn-shares', 'term-shares'].map(id => document.getElementById(id)).filter(Boolean);
+    if (!btns.length) return;
     const n = _sharedWids.size;
-    btn.hidden = n === 0;
     // The most permissive live mode wins the pill (CMX-403): 👁 view only · ⌨ typing
     // (sandboxed) · a red UNSANDBOXED banner while a trusted-peer override is armed.
     const modes = [..._sharedWids].map(w => _shareModes.get(w) || 'view');
     const unsafe = modes.includes('unsandboxed');
     const typing = modes.includes('typing');
-    btn.classList.toggle('si-unsandboxed', unsafe);
-    btn.dataset.mode = unsafe ? 'unsandboxed' : typing ? 'typing' : 'view';
-    if (n > 0) {
-        const txt = btn.querySelector('.si-text');
-        const icon = typing || unsafe ? '⌨' : '👁';
-        if (txt) txt.textContent = unsafe ? '⚠ UNSANDBOXED — guest can type'
-            : icon + ' ' + n + ' sharing';
-        btn.setAttribute('aria-label', (unsafe ? 'UNSANDBOXED — a guest can type into a real shell. ' : '')
-            + n + ' active share' + (n === 1 ? '' : 's') + (typing || unsafe ? ' (typing allowed)' : ' (view only)')
-            + ' — tap to manage or stop');
+    for (const btn of btns) {
+        btn.hidden = n === 0;
+        btn.classList.toggle('si-unsandboxed', unsafe);
+        btn.dataset.mode = unsafe ? 'unsandboxed' : typing ? 'typing' : 'view';
+        if (n > 0) {
+            const txt = btn.querySelector('.si-text');
+            const icon = typing || unsafe ? '⌨' : '👁';
+            if (txt) txt.textContent = unsafe ? '⚠ UNSANDBOXED — guest can type'
+                : icon + ' ' + n + ' sharing';
+            btn.setAttribute('aria-label', (unsafe ? 'UNSANDBOXED — a guest can type into a real shell. ' : '')
+                + n + ' active share' + (n === 1 ? '' : 's') + (typing || unsafe ? ' (typing allowed)' : ' (view only)')
+                + ' — tap to manage or stop');
+        }
     }
     // Keep an open sheet in sync with the live set (e.g. the reaper stopped one).
     if (document.getElementById('shares-sheet-backdrop')) _buildSharesSheet();
