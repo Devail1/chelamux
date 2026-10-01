@@ -55,6 +55,25 @@ def test_downgrade_from_unsandboxed_ends_the_override(monkeypatch, typing_on):
     assert len(_events("share.unsandboxed_revoked")) == 1
 
 
+def test_unsandboxed_to_typing_also_ends_the_override(monkeypatch, typing_on):
+    """Leaving UNSANDBOXED for ANY other mode — typing included, not only view — must end
+    the override: otherwise the bound guest keeps a real shell on a non-sandboxed window
+    while the sheet says "Allow typing"."""
+    _not_sandboxed(monkeypatch)
+    b, _clock, forwarded, _sent = _bridge(monkeypatch)
+    b.set_mode(cs.MODE_UNSANDBOXED, changed_by="op@example", window="shell-3", ttl_s=600.0)
+    j = _joiner(b)
+    _type(b, j, b"a")
+    assert forwarded == [b"a"]
+    b.set_mode(cs.MODE_TYPING, changed_by="op@example", window="shell-3")
+    assert b.mode() == cs.MODE_TYPING
+    assert b.state() == {"mode": cs.MODE_TYPING, "expires_at": None}
+    _type(b, j, b"b")
+    assert forwarded == [b"a"], "typing on a non-sandboxed window must not reach the pane"
+    revoked = _events("share.unsandboxed_revoked")
+    assert len(revoked) == 1 and revoked[0]["payload"]["reason"] == "mode changed to typing"
+
+
 def test_every_change_is_audited_from_to_by(monkeypatch, sandbox, typing_on):
     b, _clock, _f, _s = _bridge(monkeypatch)
     b.set_mode(cs.MODE_TYPING, changed_by="op@example", window="shell-3")

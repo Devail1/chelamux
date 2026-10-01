@@ -39,6 +39,8 @@ let MODE = 'view';     // the server's live mode for @1
 let OPTIONS = {};      // GET /share-options
 let modePosts = [];    // POST /share-mode bodies
 let mintPosts = [];    // POST /share bodies
+const EXPIRES = 1.9e9; // the UNSANDBOXED override's wall-clock end (epoch seconds)
+const endsAt = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
 function fakeFetch(url, opts) {
     const path = String(url);
@@ -49,7 +51,7 @@ function fakeFetch(url, opts) {
     else if (path.startsWith('/api/term/ready')) body = { ready: true };
     else if (path.endsWith('/share-options')) body = OPTIONS;
     else if (path.endsWith('/share-info')) body = INFO;
-    else if (path.endsWith('/api/term/shared')) body = { '@1': { cols: 80, rows: 24, mode: MODE, expires_at: null } };
+    else if (path.endsWith('/api/term/shared')) body = { '@1': { cols: 80, rows: 24, mode: MODE, expires_at: MODE === 'unsandboxed' ? EXPIRES : null } };
     else if (path.endsWith('/share-mode') && method === 'POST') {
         const b = JSON.parse(opts.body);
         modePosts.push(b);
@@ -202,6 +204,18 @@ test('up to UNSANDBOXED POSTs nothing until the window name is typed', async () 
     await settle();
     assert.deepEqual(modePosts, [{ mode: 'unsandboxed', confirm: 'shell-1' }]);
     assert.equal(document.querySelector('.gs-share-btn[data-wid="@1"] .gs-share-mode').textContent, '⚠');
+    assert.ok(freshRow().querySelector('.ss-mode-desc').textContent.includes('Ends at ' + endsAt(1e9) + '.'),
+        'right after the grant the row must say when full access ends');
+});
+
+test('an UNSANDBOXED row says when full access ends', async () => {
+    const row = await openSheet('unsandboxed', { share_typing: true, sandboxed: false, typing_allowed: false,
+                                                 unsandboxed_offered: true, window_name: 'shell-1' });
+    assert.deepEqual(pressed(row), ['unsandboxed']);
+    const desc = row.querySelector('.ss-mode-desc').textContent;
+    assert.match(desc, /UNSANDBOXED/);
+    assert.ok(desc.includes('Ends at ' + endsAt(EXPIRES) + '.'), `the row must name the end time, got: ${desc}`);
+    assert.ok(row.querySelector('.ss-mode-desc').classList.contains('ss-mode-desc-unsafe'));
 });
 
 test('the override is not offered with the setting off', async () => {

@@ -605,7 +605,9 @@ const SHARE_MODE_UI = {
 // is always offered; up is offered only where the share dialog would offer it — Allow
 // typing with the setting on AND a verified sandboxed window (else disabled, with the
 // dialog's reason), the UNSANDBOXED override only on a non-sandboxed window with the
-// setting on (and it then asks for the typed window name). The server re-checks all of it.
+// setting on (and it then asks for the typed window name). The server re-checks the
+// setting, the live sandbox verdict and the typed name; "only on a non-sandboxed window"
+// for the override is a UI rule, not a server gate (as in the share dialog).
 function _shareModeControlHTML(wid, opts) {
     const cur = _shareModes.get(wid) || 'view';
     const o = opts || {};
