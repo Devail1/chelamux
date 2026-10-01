@@ -561,6 +561,21 @@ function _seedSharedFromAgents(agents) {
         _updateShareBtns(a.window_id);
     });
     _renderSharesIndicator();
+    _syncOwnerPresenceFromAgents(agents);
+}
+
+// Re-key (or drop) owner presence when a share was stopped / re-created — possibly
+// from ANOTHER page, so this page never ran _stopShare/_mintShare (CMX-427). Only
+// wids that already have a presence session are touched; the module is a no-op for
+// an unchanged share_epoch, so this costs nothing per poll on a steady share.
+function _syncOwnerPresenceFromAgents(agents) {
+    if (!_ownerPresenceP) return;
+    _ownerPresenceP.then(m => {
+        if (!m || !m.syncOwnerPresence) return;
+        (agents || []).forEach(a => {
+            if (a.window_id) m.syncOwnerPresence(a.window_id, !!a.shared, a.share_epoch);
+        });
+    });
 }
 
 // --- global active-shares indicator + kill-switch --------------------------
@@ -721,7 +736,7 @@ async function shareBtnClick(btn, wid) {
     try { info = (await api('/api/term/' + encodeURIComponent(wid) + '/share-info')) || {}; } catch (_) {}
     if (info && info.pairing_code) {
         _sharedWids.add(wid); _updateShareBtns(wid); _renderSharesIndicator();
-        _ownerPresence().then(m => m && m.startOwnerPresence(wid, info.join_url, info.pairing_code));
+        _ownerPresence().then(m => m && m.startOwnerPresence(wid, info.join_url, info.pairing_code, info.share_epoch));
         openSharesSheet();
         return;
     }
@@ -823,7 +838,7 @@ async function _mintShare(btn, wid, mode, confirm) {
     if (!resp || !resp.ok) { _termShareToast(btn, (resp && resp.error) || 'Share failed'); return; }
     _sharedWids.add(wid);
     _shareModes.set(wid, resp.mode || 'view');
-    _ownerPresence().then(m => m && m.startOwnerPresence(wid, resp.join_url, resp.pairing_code));
+    _ownerPresence().then(m => m && m.startOwnerPresence(wid, resp.join_url, resp.pairing_code, resp.share_epoch));
     _reloadPaneFrame(wid);
     _updateShareBtns(wid);
     _renderSharesIndicator();
