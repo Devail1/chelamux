@@ -254,6 +254,7 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
     if not discovery.ensure_session():
         return SpawnResult(
             ok=False, error="tmux is unreachable — cannot create the chela session")
+    envutil.scrub_tmux_secrets()    # CMX-425: the window inherits the server's global env
 
     session = config.current_session()
     name = next_shell_name(set(discovery.get_all_windows()))
@@ -337,6 +338,7 @@ def spawn_sandbox_window(cwd: str | os.PathLike) -> SpawnResult:
     if not discovery.ensure_session():
         return SpawnResult(
             ok=False, error="tmux is unreachable — cannot create the chela session")
+    envutil.scrub_tmux_secrets()    # CMX-425: the window inherits the server's global env
     session = config.current_session()
     name = next_sandbox_name(set(discovery.get_all_windows()))
     if not _WINDOW_NAME_RE.match(name):
