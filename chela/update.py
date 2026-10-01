@@ -161,6 +161,60 @@ class ApplyResult:
     backup_ref: str = ""              # where the pre-rewrite HEAD was preserved, if so
     plugin_updated: list[str] = field(default_factory=list)  # marketplaces refreshed
     plugin_error: str = ""            # set if a plugin refresh was attempted and failed
+    share_notice: str = ""            # CMX-434: "N live share(s) will be interrupted…", if so
+
+
+# 🔌 CMX-434: the live-share host. A dashboard deploy must not end a share, so `chela
+# update` restarts `chela-collab` only when the code IT runs changed — see
+# collab_host.COLLAB_HOST_PATHS. Every other service still restarts on every update.
+COLLAB_SERVICE = "chela-collab"
+
+
+def _collab_host_paths() -> tuple[str, ...]:
+    from chela import collab_host
+    return collab_host.COLLAB_HOST_PATHS
+
+
+def _collab_code_changed(repo: Path, old: str, new: str = "HEAD") -> bool:
+    """Did ``old..new`` touch the code the collab host runs? Unknown (no old head, a git
+    error) counts as changed — restarting it then is the old behaviour, never a stale host."""
+    if not old:
+        return True
+    cp = _git(repo, "diff", "--name-only", old, new, "--", *_collab_host_paths())
+    if not _git_ok(cp):
+        return True
+    return bool(_git_out(cp).strip())
+
+
+def _collab_code_epoch(repo: Path) -> int | None:
+    """Committer date of the last commit that touched the collab host's code."""
+    cp = _git(repo, "log", "-1", "--format=%ct", "--", *_collab_host_paths())
+    if not _git_ok(cp):
+        return None
+    try:
+        return int(_git_out(cp))
+    except ValueError:
+        return None
+
+
+def _share_notice(services: list[str]) -> str:
+    try:
+        from chela import collab_host
+        return collab_host.interruption_notice(services)
+    except Exception as e:  # noqa: BLE001 — a warning must never block a deploy
+        log.warning("update: could not count live shares: %s", e)
+        return ""
+
+
+def _restart(repo: Path, services: list[str], on_notice) -> tuple[object, str]:
+    """``pm2 restart`` — preceded by the live-share warning when this restart takes down
+    the process hosting them (CMX-434). Returns ``(completed process, notice)``."""
+    notice = _share_notice(services)
+    if notice:
+        log.warning("update: %s", notice)
+        if on_notice:
+            on_notice(notice)
+    return _sh(["pm2", "restart", *services], cwd=repo), notice
 
 
 def repo_root() -> Path:
@@ -346,10 +400,15 @@ def services_running_stale_code(repo: Path | None = None) -> ServiceFreshness:
         return ServiceFreshness(ok=False, error="git log failed")
     arrival_epoch = _checkout_arrival_epoch(repo)
     threshold_epoch = max(commit_epoch, arrival_epoch) if arrival_epoch is not None else commit_epoch
+    # The collab host (CMX-434) is stale only when ITS code moved since it started — a
+    # commit to anything else must not end every live share.
+    collab_epoch = _collab_code_epoch(repo)
     stale = sorted(
         svc["name"] for svc in _online_chela_services(repo)
         if isinstance(svc["pm2_env"].get("pm_uptime"), (int, float))
-        and svc["pm2_env"]["pm_uptime"] / 1000 < threshold_epoch
+        and svc["pm2_env"]["pm_uptime"] / 1000 < (
+            collab_epoch if svc["name"] == COLLAB_SERVICE and collab_epoch is not None
+            else threshold_epoch)
     )
     return ServiceFreshness(ok=True, stale=stale, commit_epoch=commit_epoch)
 
@@ -518,12 +577,15 @@ def _recover_from_history_rewrite(repo: Path, branch: str) -> ApplyResult:
     return ApplyResult(ok=True, backup_ref=backup_ref)
 
 
-def apply(repo: Path | None = None) -> ApplyResult:
+def apply(repo: Path | None = None, *, on_notice=None) -> ApplyResult:
     """The safe update sequence. Refuses before touching anything on a dirty tree;
     on a diverged branch, recovers safely if the divergence is actually an upstream
     history rewrite (see :func:`_is_history_rewrite`), otherwise still refuses. Then
     pulls (or, after a rewrite recovery, is already up to date), re-syncs, and restarts
     — in that order, every time.
+
+    ``on_notice(str)`` is called BEFORE a restart that will interrupt live shares
+    (CMX-434), so a CLI prints the warning ahead of the restart, not after it.
     """
     repo = repo or repo_root()
 
@@ -536,6 +598,7 @@ def apply(repo: Path | None = None) -> ApplyResult:
     # against the new one is how a force-push (history rewrite) is told apart from an
     # ordinary advance (see _is_history_rewrite). "" if there is no upstream to read.
     old_upstream = _git_out(_git(repo, "rev-parse", "@{u}"))
+    old_head = _git_out(_git(repo, "rev-parse", "HEAD"))
 
     status = commits_behind(repo, fetch=True)
     if not status.ok:
@@ -565,6 +628,7 @@ def apply(repo: Path | None = None) -> ApplyResult:
         # for "nothing to pull" was never a promise that the running services are current.
         freshness = services_running_stale_code(repo)
         restarted: list[str] = []
+        notice = ""
         if freshness.ok and freshness.stale:
             # issue #453: the commit that made these services stale arrived by a route
             # that never synced (a bare `git pull`, a hand merge, a rebase, or a previous
@@ -575,11 +639,12 @@ def apply(repo: Path | None = None) -> ApplyResult:
             if sync_cp is None or sync_cp.returncode != 0:
                 err = sync_cp.stderr.strip() if sync_cp is not None else "uv sync failed to run"
                 return ApplyResult(ok=False, step="uv-sync", behind_before=0, error=err)
-            restart_cp = _sh(["pm2", "restart", *freshness.stale], cwd=repo)
+            restart_cp, notice = _restart(repo, freshness.stale, on_notice)
             if restart_cp is None or restart_cp.returncode != 0:
                 err = (restart_cp.stderr.strip() if restart_cp is not None
                        else "pm2 restart failed to run")
-                return ApplyResult(ok=False, step="pm2-restart", behind_before=0, error=err)
+                return ApplyResult(ok=False, step="pm2-restart", behind_before=0, error=err,
+                                    share_notice=notice)
             restarted = freshness.stale
 
         # A plugin can go stale or unreadable with NO commit involved (a cache sweep, a
@@ -588,7 +653,8 @@ def apply(repo: Path | None = None) -> ApplyResult:
         # docstring). It never touches the working tree, so it's safe on this early return.
         plugin_updated, plugin_error = _refresh_plugin_if_needed(repo)
         return ApplyResult(ok=True, step="done", behind_before=0, restarted=restarted,
-                            plugin_updated=plugin_updated, plugin_error=plugin_error)
+                            plugin_updated=plugin_updated, plugin_error=plugin_error,
+                            share_notice=notice if restarted else "")
 
     if not rewrite_recovered:
         try:
@@ -606,20 +672,23 @@ def apply(repo: Path | None = None) -> ApplyResult:
         return ApplyResult(ok=False, step="uv-sync", behind_before=status.behind, error=err,
                             rewrite_recovered=rewrite_recovered, backup_ref=backup_ref)
 
-    services = _running_pm2_services(repo)
+    services = [s for s in _running_pm2_services(repo)
+                if s != COLLAB_SERVICE or _collab_code_changed(repo, old_head)]
+    notice = ""
     if services:
-        restart_cp = _sh(["pm2", "restart", *services], cwd=repo)
+        restart_cp, notice = _restart(repo, services, on_notice)
         if restart_cp is None or restart_cp.returncode != 0:
             err = restart_cp.stderr.strip() if restart_cp is not None else "pm2 restart failed to run"
             return ApplyResult(ok=False, step="pm2-restart", behind_before=status.behind,
                                 error=err, restarted=[], rewrite_recovered=rewrite_recovered,
-                                backup_ref=backup_ref)
+                                backup_ref=backup_ref, share_notice=notice)
 
     plugin_updated, plugin_error = _refresh_plugin_if_needed(repo)
 
     return ApplyResult(ok=True, step="done", behind_before=status.behind, restarted=services,
                         rewrite_recovered=rewrite_recovered, backup_ref=backup_ref,
-                        plugin_updated=plugin_updated, plugin_error=plugin_error)
+                        plugin_updated=plugin_updated, plugin_error=plugin_error,
+                        share_notice=notice)
 
 
 UNKNOWN_BEHIND = -1

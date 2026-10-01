@@ -62,6 +62,63 @@ Clicking *Share current session* on a window that's already shared never creates
 share, because that would rotate the code. It opens Active shares with that share's row
 highlighted, so you can change its mode there.
 
+## Shares across restarts and deploys
+
+A live share no longer ends when chela restarts (CMX-434).
+
+**Where the share runs.** The bridge that streams a share runs in the **collab host**:
+`chela collab`, a separate PM2 service (`chela-collab`, see
+`examples/ecosystem.config.js`). The dashboard talks to it over an owner-only Unix
+socket, `$CHELA_DIR/collab.sock` (mode 0600; the peer's uid is checked too). A dashboard
+deploy doesn't touch a live share. `chela update` restarts `chela-collab` only when the
+share code itself changed (`chela/collab_host.py`, `collab_stream.py`, `share_store.py`,
+`e2e.py`, `share_sandbox.py`, `collab.py`).
+
+If `chela-collab` isn't running, the dashboard hosts the shares itself, as before. A
+dashboard restart then interrupts them, and the next dashboard restores them. Only one
+process hosts at a time: the holder of the `flock` on `$CHELA_DIR/collab.lock`. A
+dashboard that hosts no share gives the lock back, so a waiting `chela-collab` takes over.
+
+**What is kept.** Each live share is written to `$CHELA_DIR/shares.json`: the window,
+its mode, the relay room, the pairing secret, the override's expiry and bound guest, and
+the window's identity (tmux server pid, window id, pane pid). The file is mode 0600 and
+is never written inside a git work tree. It holds the pairing secret, so treat it like the
+code. Stopping a share removes it from the file. A process exit keeps it.
+
+**What comes back.** When a host starts, each kept share is restored with the **same
+link and pairing code**, so a guest reconnects by itself. These are not restored, and
+`share.not_restored` in the event log says why:
+
+- a share whose window is gone, or is no longer the same window (a tmux restart
+  recycles `@N` ids);
+- a **typing** share whose window doesn't verify as a sandboxed session now. Live, a pane
+  that stops verifying ends the share, so a restart doesn't turn it into anything else;
+- an **UNSANDBOXED** override that expired during the restart. The share comes back
+  view only (`share.unsandboxed_expired`). An override with time left comes back with
+  only that time left.
+
+A restored typing share re-checks the sandbox before it forwards any input, as always.
+
+**Two crypto details make a restore safe.** The pairing secret and the host's stream id
+don't change, so a restored host restarting its sequence numbers at 0 would reuse AES-GCM
+nonces. The host never seals a frame past a sequence ceiling that is already on disk, and
+a restored host resumes at that ceiling. A restored host has also forgotten which guest
+frames it has already seen, so the relay could replay an old keystroke. It sends a fresh
+random `resume` challenge, sealed so only a paired guest can read it. It accepts input
+only from a guest stream that answered it, and that answer also blocks every earlier frame
+from the stream. A guest page that hasn't been updated can still watch a restored share
+but can't type into it.
+
+**What the guest sees.** On a restart the host sends `restarting`, not `ended`. The guest
+page shows **host restarting…**, re-sends its hello with backoff (0.5 s, doubling to 8 s),
+and goes back to live on the host's first frame. It calls the share ended only if the host
+hasn't come back after 5 minutes. The page lives in the relay Worker, so this needs a
+`wrangler deploy` of `chela/collab-relay`.
+
+**Before a deploy.** `chela update` prints *"N live share(s) will be interrupted by
+restarting …"* before a restart that takes down the process hosting them. For a hand
+deploy, run `chela shares --restarting <services…>` first.
+
 ## Starting a sandboxed session
 
 - Dashboard: **New session → Sandboxed session…**, then pick the project directory. It's

@@ -1854,6 +1854,31 @@ def cmd_dashboard(args) -> None:
     dashboard_app.main()
 
 
+def cmd_collab(args) -> None:
+    """``chela collab`` — host the live-share bridges in their own process (CMX-434), so a
+    dashboard deploy never ends a share. Runs under PM2 as ``chela-collab``."""
+    from chela import collab_host
+    if not config.COLLAB_RELAY:
+        log.warning("chela collab: CHELA_COLLAB_RELAY is empty — shares can't start until it is set")
+    collab_host.run_service()
+
+
+def cmd_shares(args) -> None:
+    """``chela shares`` — how many live shares there are, and which restart would interrupt
+    them. Run it before a hand deploy (``pm2 restart ...``)."""
+    from chela import collab_host, share_store
+    n = share_store.count()
+    host = collab_host.current_host()
+    role = host["role"] if host else None
+    print(f"{n} live share(s)" + (f", hosted by {role} (pid {host['pid']})" if host else ""))
+    restarting = list(args.restarting or [])
+    if restarting:
+        notice = collab_host.interruption_notice(restarting)
+        print(notice or f"restarting {', '.join(restarting)} interrupts no live share")
+    elif n and role:
+        print(f"a restart of {role} interrupts them; any other service restart leaves them running")
+
+
 def cmd_doctor(args) -> None:
     """Report where the config a process is RUNNING with disagrees with the env file.
 
@@ -2459,7 +2484,8 @@ def cmd_update(args) -> None:
             print("up to date")
         return
 
-    result = update.apply(repo)
+    # CMX-434: a restart that interrupts live shares says so BEFORE it happens.
+    result = update.apply(repo, on_notice=print)
     if not result.ok:
         print(f"update: refused at {result.step} — {result.error}")
         if result.backup_ref:
@@ -3283,6 +3309,19 @@ def main() -> None:
                         help="One-off override of $CHELA_DASHBOARD_PORT (the env file is "
                              "the source of truth; default 5001)")
 
+    # collab — the live-share host, its own process (CMX-434)
+    sub.add_parser(
+        "collab",
+        help="Host live-share bridges in their own process (PM2 chela-collab) so a "
+             "dashboard restart never ends a share",
+    )
+    p_shares = sub.add_parser(
+        "shares",
+        help="Count live shares and say which service restart would interrupt them",
+    )
+    p_shares.add_argument("--restarting", nargs="*", metavar="SERVICE",
+                          help="PM2 service(s) about to be restarted, e.g. chela-dashboard")
+
     # update — the human-run half of self-update (CMX-142 part 1: no auto-pull)
     p_update = sub.add_parser(
         "update",
@@ -3453,6 +3492,10 @@ def main() -> None:
         cmd_telegram(args)
     elif args.command == "dashboard":
         cmd_dashboard(args)
+    elif args.command == "collab":
+        cmd_collab(args)
+    elif args.command == "shares":
+        cmd_shares(args)
     elif args.command == "task-finished":
         cmd_task_finished(args)
     elif args.command == "request-push":
