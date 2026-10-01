@@ -69,6 +69,18 @@ def test_ip_refusal_honours_extra_deny_nets():
     assert wp.ip_refusal("1.2.3.5", nets) is None
 
 
+@pytest.mark.parametrize("wrapped", ["::ffff:1.2.3.4", "::ffff:203.0.114.9"])
+def test_deny_nets_also_apply_to_the_ipv4_an_ipv6_address_embeds(wrapped):
+    """``::ffff:1.2.3.4`` is a GLOBAL IPv6 address in its own right — only the embedded
+    IPv4 is denied, so the deny-net check must run on the embedded address too (the
+    host's public address must not be reachable by spelling it as mapped IPv6)."""
+    nets = wp.parse_nets("203.0.114.0/24, 1.2.3.4")
+    assert wp.ip_refusal(wrapped) is None                  # public without the deny list…
+    assert "denied network" in (wp.ip_refusal(wrapped, nets) or "")   # …denied with it
+    pol = wp.Policy(resolver=_stub_resolver({"host.example": [wrapped]}), deny_nets=nets)
+    assert pol.check("host.example", 443)[0] == []
+
+
 def _stub_resolver(table):
     calls = []
 
@@ -166,6 +178,24 @@ def test_an_unresolvable_or_malformed_host_is_refused():
     assert pol.check("", 443)[1]
 
 
+@pytest.mark.parametrize("bad", ["bad host!", "a..b.example", "-lead.example",
+                                 "trail-.example", "under_score.example", "x/y.example",
+                                 "a b", "jobs.example\r\nX-Evil: 1", "tab\t.example"])
+def test_a_malformed_host_name_is_refused_before_it_reaches_the_resolver(bad):
+    """The resolver here would answer ANYTHING with a public address — so only the
+    name-syntax check can refuse these, and it must do so without resolving."""
+    calls = []
+
+    def resolve(host, port):
+        calls.append(host)
+        return [PUBLIC_IP]
+    addrs, why = wp.Policy(resolver=resolve).check(bad, 443)
+    assert addrs == [] and "not a valid host name" in (why or ""), why
+    assert calls == []
+    # the negative control: a well-formed name with the same resolver IS accepted
+    assert wp.Policy(resolver=resolve).check("ok-name.example", 443) == ([PUBLIC_IP], None)
+
+
 # =====================================================================================
 # the proxy: rate limits
 # =====================================================================================
@@ -236,9 +266,18 @@ class _Backend(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        body = f"hello from {self.headers.get('Host')} {self.path}".encode()
+        if self.path == "/echo-headers":
+            body = json.dumps([[k.lower(), v] for k, v in self.headers.items()]).encode()
+        else:
+            body = f"hello from {self.headers.get('Host')} {self.path}".encode()
         self.send_response(200)
         self.send_header("content-length", str(len(body)))
+        if self.path == "/hop":
+            # every hop-by-hop / proxy header a server might send, plus one end-to-end one
+            for k, v in (("Keep-Alive", "timeout=5"), ("Proxy-Authenticate", "Basic"),
+                         ("Upgrade", "h2c"), ("Trailer", "X-Sum"), ("TE", "trailers"),
+                         ("Proxy-Connection", "keep-alive"), ("X-Job", "7")):
+                self.send_header(k, v)
         self.send_header("connection", "close")
         self.end_headers()
         self.wfile.write(body)
@@ -401,6 +440,37 @@ def test_the_rate_limit_waits_over_the_wire_before_dialling(monkeypatch, tmp_pat
     assert [n for _, _, n in events] == [2, 3]
 
 
+def _plain_raw(state, path, extra=""):
+    s = _proxy_socket(state)
+    s.sendall(f"GET http://jobs.example{path} HTTP/1.1\r\nHost: jobs.example\r\n{extra}\r\n".encode())
+    raw = _recv_all(s)
+    s.close()
+    head, _, body = raw.partition(b"\r\n\r\n")
+    lines = head.decode().split("\r\n")
+    return lines[0], [ln.split(":", 1)[0].strip().lower() for ln in lines[1:]], body
+
+
+def test_hop_by_hop_response_headers_never_reach_the_guest(wire):
+    status, names, _ = _plain_raw(wire, "/hop")
+    assert status.startswith("HTTP/1.1 200"), status
+    assert "x-job" in names                       # end-to-end headers ARE relayed…
+    leaked = [n for n in names if n in wp._HOP]
+    assert leaked == ["connection"], leaked       # …hop-by-hop ones never (but our own close)
+    assert names.count("content-length") <= 1
+
+
+def test_hop_by_hop_and_proxy_request_headers_never_reach_upstream(wire):
+    status, _, body = _plain_raw(
+        wire, "/echo-headers",
+        "Proxy-Authorization: Basic c2VjcmV0\r\nProxy-Connection: keep-alive\r\n"
+        "Keep-Alive: timeout=5\r\nTE: trailers\r\nUpgrade: h2c\r\nX-Job: 7\r\n")
+    assert status.startswith("HTTP/1.1 200"), status
+    got = dict(json.loads(body))
+    assert got.get("x-job") == "7" and got.get("host") == "jobs.example"
+    assert not [k for k in got if k in wp._HOP and k != "connection"], got
+    assert "proxy-authorization" not in got and "proxy-connection" not in got
+
+
 def test_a_direct_request_to_the_proxy_is_refused(wire):
     c = http.client.HTTPConnection("127.0.0.1", wire["port"], timeout=10)
     c.request("GET", "/")
@@ -418,6 +488,16 @@ def test_configure_from_env_reads_the_operator_knobs(monkeypatch, tmp_path):
     assert pol.deny == ("evil.example",)
     assert {str(n) for n in pol.deny_nets} == {"1.2.3.4/32", "172.18.0.1/32"}
     assert wp.Handler.limiter.host_t == 2.0
+
+
+def test_configure_from_env_global_rps_and_bad_values_fall_back(monkeypatch, tmp_path):
+    monkeypatch.setattr(wp, "default_gateway", lambda: None)
+    wp.configure_from_env({"CHELA_WEB_GLOBAL_RPS": "4", "CHELA_WEB_HOST_RPS": "0"})
+    assert wp.Handler.limiter.glob_t == 0.25
+    assert wp.Handler.limiter.host_t == 1.0         # 0 (would divide by zero) → default
+    wp.configure_from_env({"CHELA_WEB_GLOBAL_RPS": "-3", "CHELA_WEB_HOST_RPS": "x"})
+    assert (wp.Handler.limiter.glob_t, wp.Handler.limiter.host_t) == (1 / 8.0, 1.0)
+    assert wp.Handler.policy.deny_nets == []          # no gateway found → nothing invented
 
 
 # =====================================================================================
@@ -466,6 +546,22 @@ def test_a_web_session_guest_stays_on_its_internal_network_and_uses_the_proxy():
     assert not [m for m in mounts if "docker.sock" in m or "tmux" in m]
 
 
+@pytest.mark.parametrize("mode, pids", [("none", sb.GUEST_PIDS), ("web", sb.GUEST_PIDS_WEB)])
+def test_each_mode_guest_keeps_every_lockdown_flag_and_its_own_pids_limit(mode, pids):
+    """The raised pids limit is a web-only allowance; every other cap is identical in both
+    modes (read back by VALUE, not by flag presence)."""
+    assert sb.GUEST_PIDS != sb.GUEST_PIDS_WEB
+    argv = sb.guest_run_argv(SID, WORKSPACE, UID, GID, "/usr/bin/true", mode)
+    assert _opt(argv, "--pids-limit") == [pids]
+    assert _opt(argv, "--memory") == [sb.GUEST_MEMORY]
+    assert _opt(argv, "--cap-drop") == ["ALL"] and "--cap-add" not in argv
+    assert _opt(argv, "--security-opt") == ["no-new-privileges"]
+    assert "--read-only" in argv and "--privileged" not in argv
+    assert _opt(argv, "--user") == [f"{UID}:{GID}"]
+    assert _opt(argv, "--network") == [sb.network_name(SID)]
+    assert [t.split(":", 1)[0] for t in _opt(argv, "--tmpfs")] == ["/tmp", sb.GUEST_HOME]
+
+
 def test_the_network_is_still_internal_with_no_host_address():
     argv = sb.network_create_argv(SID)
     assert "--internal" in argv and "com.docker.network.bridge.inhibit_ipv4=true" in argv
@@ -484,6 +580,16 @@ def test_the_web_sidecar_holds_no_token_and_runs_locked_down(monkeypatch):
     assert "198.51.100.7" in envs["CHELA_WEB_DENY_NETS"]
     assert envs["CHELA_WEB_DENY"] == "evil.example"
     assert "-p" not in argv and "--network" not in argv
+    # every lockdown option, read back by VALUE (a flag that is merely present with a
+    # different value — `--security-opt label=disable` — is not the lockdown)
+    assert _opt(argv, "--security-opt") == ["no-new-privileges"]
+    assert _opt(argv, "--user") == [f"{UID}:{GID}"]
+    assert _opt(argv, "--memory") == [sb.PROXY_MEMORY] and _opt(argv, "--pids-limit") == ["128"]
+    for flag in ("--privileged", "--cap-add", "--publish", "--add-host", "--device", "--pid",
+                 "--ipc", "--userns", "--entrypoint"):
+        assert flag not in argv
+    assert _opt(argv, "--label") == [f"{sb.LABEL}={SID}", f"{sb.NET_LABEL}={sb.NET_WEB}"]
+    assert argv[-3:] == [sb.image(), "python", sb.WEB_SCRIPT_MOUNT]
 
 
 _IP_O_ADDR = """\
@@ -808,6 +914,54 @@ def live(monkeypatch):
     monkeypatch.setattr(sb, "_proc_shape", lambda pid: (state["argv"], "tmux: server", ["docker"]))
     monkeypatch.setattr(sb, "_inspect", lambda sid: state["inspect"])
     return state
+
+
+@pytest.fixture
+def docker_world(monkeypatch):
+    """``check_share_session`` end to end with only ``docker`` itself stubbed — the REAL
+    ``_inspect`` runs, so the web sidecar lookup is exercised, not assumed."""
+    state = {"argv": sb.launcher_argv(SID, WORKSPACE, "web"),
+             "objects": {sb.container_name(SID): _guest("web"),
+                         sb.network_name(SID): _network("web"),
+                         sb.web_proxy_name(SID): _web_sidecar()},
+             "calls": []}
+    monkeypatch.setattr(sb, "_pane_root", lambda wid: 4242)
+    monkeypatch.setattr(sb, "_proc_shape", lambda pid: (state["argv"], "tmux: server", ["docker"]))
+
+    def docker(*args, timeout=20):
+        state["calls"].append(args)
+        obj = state["objects"].get(args[-1])
+        if obj is None:
+            return subprocess.CompletedProcess(args, 1, "[]", f"No such object: {args[-1]}")
+        return subprocess.CompletedProcess(args, 0, json.dumps([obj]), "")
+    monkeypatch.setattr(sb, "_docker", docker)
+    return state
+
+
+def test_inspect_returns_the_web_sidecar_and_a_web_session_verifies(docker_world):
+    got = sb._inspect(SID)
+    assert got[2] == _web_sidecar()
+    assert sb.check_share_session("@9") == (True, "")
+    assert ("inspect", "--type", "container", sb.web_proxy_name(SID)) in docker_world["calls"]
+
+
+def test_inspect_reports_no_sidecar_when_docker_has_none(docker_world):
+    del docker_world["objects"][sb.web_proxy_name(SID)]
+    assert sb._inspect(SID)[2] is None
+    ok, why = sb.check_share_session("@9")
+    assert ok is False and "web egress proxy is not running" in why
+
+
+def test_a_none_session_is_failed_by_a_stray_web_sidecar_docker_reports(docker_world):
+    """The sidecar is looked up even for a ``none`` session — its mere presence (not on
+    the network, no proxy env) is the route a ``none`` session must not have."""
+    docker_world["argv"] = sb.launcher_argv(SID, WORKSPACE, "none")
+    docker_world["objects"][sb.container_name(SID)] = _guest("none")
+    docker_world["objects"][sb.network_name(SID)] = _network("none")
+    ok, why = sb.check_share_session("@9")
+    assert ok is False and "launched without web access" in why
+    del docker_world["objects"][sb.web_proxy_name(SID)]
+    assert sb.check_share_session("@9") == (True, "")
 
 
 def test_check_share_session_accepts_a_live_web_session(live):
