@@ -82,6 +82,14 @@ def _exp(file: str, before: str, after: str, guard: str = "g") -> dict:
     return {"guard": guard, "file": file, "before": before, "after": after}
 
 
+def _why(o: judge.Outcome) -> str:
+    """An assertion message that names the verdicts and NEVER echoes ``o.reason``. A reason
+    carries the nested suite's counts ("went red with 2 error(s)"), and the judge running
+    THIS suite parses its failure output with the same regexes — an echoed count is read as
+    this suite's own load errors, and a guard that fired is filed INVALID instead of KILLED."""
+    return f"subset {o.subset_verdict or '-'} → {o.verdict} (confirmed_full={o.confirmed_full})"
+
+
 @pytest.fixture
 def calls(monkeypatch):
     """Every command the judge ran, in order — to prove WHICH suite decided a verdict."""
@@ -129,6 +137,58 @@ def test_a_conftest_and_an_unobserved_file_run_the_full_suite(tmp_path):
     assert selector.select("pkg/orphan.py").full        # nothing observes it ⇒ never skipped
 
 
+def test_a_conftest_runs_the_full_suite_even_when_a_test_names_it(tmp_path):
+    """GUARD — the conftest rule itself, not the "nothing observes it" fallback that happens
+    to agree with it. ``test_names_conftest.py`` names ``conftest.py``, so ordinary selection
+    WOULD narrow to it; but every test under a conftest imports it implicitly."""
+    files = {**FILES, "conftest.py": "import pytest\n",
+             "test_names_conftest.py": (
+                 "from pathlib import Path\n\n\ndef test_it():\n"
+                 "    assert Path('conftest.py').exists()\n")}
+    root = _repo(tmp_path / "repo", files)
+    sel = js.Selector(root, _cases(root)).select("conftest.py")
+
+    assert sel.full and sel.nodes == [], sel.why
+    assert "conftest" in sel.why and "imported by every test" in sel.why
+
+
+def test_a_test_importing_a_SUBMODULE_observes_its_package(tmp_path):
+    """GUARD: ``import pkg.widget`` executes ``pkg/__init__.py`` first. The import is the
+    dotted name ``pkg.widget``, never ``pkg`` itself — only a prefix match sees the edge."""
+    files = {**FILES, "test_sub.py": (
+        "import pkg.widget\n\n\ndef test_sub():\n    assert pkg.widget.unused() == 1\n")}
+    root = _repo(tmp_path / "repo", files)
+    sel = js.Selector(root, _cases(root)).select("pkg/__init__.py")
+
+    assert "test_sub.py" in sel.nodes, sel.why
+    assert js._imports_module({"pkg.widget"}, {"pkg"})
+    assert not js._imports_module({"pkgx.widget", "pkgx"}, {"pkg"})     # a prefix, not a dot
+
+
+def test_a_junit_case_that_cannot_be_placed_or_an_empty_report_is_NO_universe(tmp_path):
+    """GUARD: selection's universe is the baseline's report. One case we cannot map back to
+    a file means we do not know what ran — the caller must fall back to the full suite, not
+    select from the cases it happened to recognise."""
+    root = _repo(tmp_path / "repo")
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuites><testsuite>'
+        '<testcase classname="test_gauge" name="test_level"/>'
+        '<testcase classname="nowhere.at_all" name="test_ghost"/>'
+        '</testsuite></testsuites>'
+    )
+    assert js.parse_junit(root, junit) is None
+
+    junit.write_text('<testsuites><testsuite></testsuite></testsuites>')
+    assert js.parse_junit(root, junit) is None
+
+    junit.write_text('<testsuites><testsuite>'
+                     '<testcase classname="test_gauge" name="test_level"/>'
+                     '</testsuite></testsuites>')
+    assert js.parse_junit(root, junit) == [
+        js.Case("test_gauge.py", "test_gauge.py::test_level", True)]
+
+
 def test_selection_never_reaches_outside_what_the_baseline_ran(tmp_path):
     """A test the baseline did not run cannot vouch for a KILL — a red there is red on the
     unmutated tree too. The universe is the JUnit report, not the filesystem."""
@@ -174,6 +234,28 @@ def test_js_selection_follows_the_import_graph_transitively(tmp_path):
     assert sel.expected == 1
 
 
+@pytest.mark.parametrize("spec,target", [
+    ("./util.js", "web/util.js"),       # spelled out
+    ("./util", "web/util.js"),          # extensionless → .js
+    ("./mod", "web/mod.mjs"),           # extensionless → .mjs
+])
+def test_js_specifiers_resolve_with_and_without_an_extension(tmp_path, spec, target):
+    """GUARD: a bundler-style ``import './util'`` names ``util.js``. Resolving only the
+    literal path loses the edge and quietly sends every such mutation to the full suite."""
+    root = tmp_path / "repo"
+    for rel, text in {
+        "web/util.js": "export const x = 1;\n",
+        "web/mod.mjs": "export const m = 1;\n",
+        "web/app.js": f"import {{ x }} from '{spec}';\n",
+    }.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+
+    assert js._resolve_js(root, "web/app.js", spec) == target
+    assert js._resolve_js(root, "web/app.js", "jsdom") is None      # a bare package
+    assert js._resolve_js(root, "web/app.js", "./missing") is None
+
+
 def test_the_coverage_map_adds_tests_the_static_graph_cannot_see(tmp_path):
     """GUARD: ``test_indirect.py`` reaches ``pkg/widget.py`` only through ``pkg/other.py``.
     Coverage recorded it touching the file; selection must use that."""
@@ -188,8 +270,11 @@ def test_the_coverage_map_adds_tests_the_static_graph_cannot_see(tmp_path):
     conn.execute("INSERT INTO file VALUES (1, ?)", (str(root / "pkg" / "widget.py"),))
     conn.execute("INSERT INTO context VALUES (1, 'test_indirect.py::test_strong|run')")
     conn.execute("INSERT INTO context VALUES (2, '')")
+    # A context that is not a test's (no `::`) — a label, not an observer. Never a source.
+    conn.execute("INSERT INTO context VALUES (3, 'test_gauge.py')")
     conn.execute("INSERT INTO line_bits VALUES (1, 1, x'01')")
     conn.execute("INSERT INTO line_bits VALUES (1, 2, x'01')")
+    conn.execute("INSERT INTO line_bits VALUES (1, 3, x'01')")
     conn.commit()
     conn.close()
 
@@ -210,6 +295,43 @@ def test_only_a_single_pytest_invocation_is_extendable():
     assert js.extend("pytest -q", ["a.py::t[x/y.mjs]"]) == "pytest -q 'a.py::t[x/y.mjs]'"
 
 
+@pytest.mark.parametrize("cmd", [
+    "pytest -q; npm test",              # sequence — node ids would go to `npm test`
+    "pytest -q & npm test",             # background
+    "pytest -q || true",                # or-chain
+    "pytest -q > log",                  # redirect — node ids land after the target
+    "pytest -q < /dev/null",
+    "pytest -q 2>&1",
+    "pytest -q `echo x`",               # command substitution, both spellings
+    "pytest -q $(echo x)",
+    "pytest -q 'unbalanced",            # shlex cannot split it — unknowable ⇒ full suite
+    "python -m pytestx -q",             # a different module, not pytest
+    "python -m",                        # -m with nothing after it
+    "pytestx -q",
+    "",
+])
+def test_every_shell_construct_and_non_pytest_is_NOT_extendable(cmd):
+    """GUARD — each shell metacharacter in its OWN case. One combined regex test let the
+    judge narrow the class to ``[&|]`` and stay green: a guard tested on two members of a
+    set says nothing about the other five."""
+    assert js.extendable(cmd) is False, cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "pytest -q",
+    "py.test -q",
+    "/usr/local/bin/pytest -q",         # pytest by path — the NAME is what counts
+    ".venv/bin/py.test",
+    "uv run pytest -q",
+    "CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q",
+    "python -m pytest -q",
+    "'/opt/py 3/bin/python' -m pytest",
+])
+def test_every_plain_pytest_spelling_IS_extendable(cmd):
+    """The accepted half: refusing these is not "safe", it silently turns selection off."""
+    assert js.extendable(cmd) is True, cmd
+
+
 # --- the verdicts --------------------------------------------------------------------------
 
 
@@ -224,7 +346,7 @@ def test_a_subset_green_survivor_that_the_full_suite_kills_is_NOT_a_survivor(tmp
 
     assert not report.cannot_verify, report.cannot_verify
     [o] = report.outcomes
-    assert o.verdict == judge.KILLED, o.reason
+    assert o.verdict == judge.KILLED, _why(o)
     assert o.confirmed_full and o.selected == 1
     assert report.blocking == []
     assert calls[-1] == TEST_CMD            # the verdict came from the FULL suite
@@ -240,7 +362,7 @@ def test_a_subset_green_AND_full_green_survivor_still_BLOCKS(tmp_path, calls):
     )
 
     [o] = report.outcomes
-    assert o.verdict == judge.SURVIVED, o.reason
+    assert o.verdict == judge.SURVIVED, _why(o)
     assert o.confirmed_full
     assert report.blocking == [o] and report.state == judge.J_BLOCKED
     assert o.mutated is not None and o.mutated.passed == 5     # the FULL suite's count
@@ -345,7 +467,7 @@ def test_a_held_out_subset_survivor_is_confirmed_on_the_full_suite_before_it_blo
     assert not report.cannot_verify, report.cannot_verify
     cue, unused = report.outcomes
     assert cue.held_out and cue.confirmed_full and cue.subset_verdict == judge.SURVIVED
-    assert cue.verdict == judge.KILLED, cue.reason          # the full suite killed it
+    assert cue.verdict == judge.KILLED, _why(cue)          # the full suite killed it
     assert unused.verdict == judge.SURVIVED and unused.confirmed_full
     assert report.blocking == [unused] and report.held_out_blocking == [unused]
     assert report.visible_blocking == [] and report.state == judge.J_BLOCKED
@@ -528,7 +650,7 @@ def test_the_coverage_map_reaches_the_selection_of_a_mutation(tmp_path, fake_cov
     )
 
     [o] = report.outcomes
-    assert o.verdict == judge.KILLED and not o.confirmed_full, o.reason
+    assert o.verdict == judge.KILLED and not o.confirmed_full, _why(o)
     assert o.selected == 2
     assert "coverage map: 1 file(s)" in report.selection
 
@@ -565,10 +687,32 @@ def test_a_subset_that_COLLAPSED_is_re_run_on_the_full_suite_never_final(tmp_pat
     )
 
     [o] = report.outcomes
-    assert o.subset_verdict == judge.INVALID, o.reason
+    assert o.subset_verdict == judge.INVALID, _why(o)
     assert o.confirmed_full
     assert calls[1:] == [js.extend(TEST_CMD, ["test_gauge.py"]), TEST_CMD], calls
     assert "inconclusive → confirmed on the full suite" in o.measured_by
+
+
+def test_a_subset_whose_test_count_COLLAPSED_without_errors_is_INVALID_not_KILLED(
+    tmp_path, calls,
+):
+    """GUARD — the collapse check is fed the SUBSET's own expected count. ``os._exit`` kills
+    pytest mid-run: red, no errors, no summary — 0 tests counted where the subset covers 1.
+    Compared against a zero count it would read as a red that "ran normally" ⇒ a final
+    KILLED, and the full suite would never be asked."""
+    root = _repo(tmp_path / "repo")
+    report = judge.run_experiments(
+        root, TEST_CMD, {"experiments": [
+            _exp("pkg/gauge.py", "    return 5", "    import os\n    os._exit(1)"),
+        ]}, timeout=120,
+    )
+
+    [o] = report.outcomes
+    assert o.subset_verdict == judge.INVALID, _why(o)
+    assert o.confirmed_full and o.selected == 1
+    assert calls[1:] == [js.extend(TEST_CMD, ["test_gauge.py"]), TEST_CMD], calls
+    sel = js.Selection(["a.py", "b.py"], 7, "w")
+    assert judge._subset_baseline(sel).ran == 7 and judge._subset_baseline(sel).green
 
 
 def test_every_measured_verdict_but_KILLED_is_confirmed_on_the_full_suite(tmp_path, calls):
