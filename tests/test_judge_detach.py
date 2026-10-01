@@ -617,6 +617,70 @@ def test_a_wall_clock_step_does_not_make_a_live_judge_look_dead(tmp_path, monkey
     assert judge._judge_lock_owner_alive({**lock, "start_ticks": lock["start_ticks"] - 1}) is False
 
 
+def _step_the_wall_clock(monkeypatch, seconds=37.0):
+    """Simulate a wall-clock step: btime moves, so `proc_started` of an untouched process
+    moves with it — and assert it really moved past the fallback's 1s window."""
+    from chela import sessions
+
+    if sessions.proc_start_ticks(os.getpid()) is None:
+        pytest.skip("no /proc on this host — identity falls back to the wall clock")
+    before = sessions.proc_started(os.getpid())
+    real_boot = sessions._boot_time()
+    monkeypatch.setattr(sessions, "_boot_time", lambda: real_boot + seconds)
+    assert abs(sessions.proc_started(os.getpid()) - before) >= 1.0
+
+
+def test_the_slot_claim_survives_a_wall_clock_step(tmp_path, monkeypatch):
+    """⏱️ CMX-424 WIRING: the lock `_claim_judge_slot` REALLY writes (not one a test built
+    with `owner_identity`) must keep its live owner live after a wall-clock step — else the
+    CMX-221 lock is takeable mid-run. Seen to go red: the claim records only pid+started."""
+    wt = tmp_path / "wts" / "judge-abc123"
+    assert judge._claim_judge_slot(wt, "abc123", detached=True) is None
+    lock_path = wt.parent / f".{wt.name}.judgelock"
+    claim = json.loads(lock_path.read_text())
+
+    _step_the_wall_clock(monkeypatch)
+
+    assert judge._judge_lock_owner_alive(claim) is True
+    refused = judge._claim_judge_slot(wt, "other")            # ⛔ not taken over
+    assert refused and "already running" in refused, refused
+    assert json.loads(lock_path.read_text()) == claim
+
+
+def test_the_run_status_judge_run_writes_survives_a_wall_clock_step(tmp_path, monkeypatch):
+    """⏱️ CMX-424 WIRING: the status a REAL `judge_run` writes must keep the in-flight run
+    in doctor after a wall-clock step mid-battery. Seen to go red: the status records only
+    pid+started (the run vanishes from `live_judge_runs`)."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    logs = tmp_path / "judge-logs"
+    monkeypatch.setattr(judge, "judge_logs_dir", lambda: logs)
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    seen = []
+    real_apply = judge._apply_experiments
+
+    def _apply(*a, progress=None, **kw):
+        if progress is None:                      # a consistency re-run: not the battery
+            return real_apply(*a, **kw)
+
+        def _spy(done, total):
+            progress(done, total)
+            with pytest.MonkeyPatch.context() as mp:
+                _step_the_wall_clock(mp)
+                seen.append([r["task_id"] for r in judge.live_judge_runs()])
+        return real_apply(*a, progress=_spy, **kw)
+
+    monkeypatch.setattr(judge, "_apply_experiments", _apply)
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        judge.judge_run(task_id, exp_file, cleanup=True, detached=True)
+
+    assert seen and all(s == [task_id] for s in seen), seen
+
+
 def test_a_finished_run_clears_only_its_own_status(tmp_path, monkeypatch):
     """A run removes its own status file when it releases the slot — and never another
     live process's (a run that took over a stale slot must not erase its successor's)."""
