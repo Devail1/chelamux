@@ -447,7 +447,11 @@ def test_spawn_sandbox_window_execs_the_launcher_with_no_shell(monkeypatch, tmp_
     monkeypatch.setattr(spawn.subprocess, "run", lambda argv, **kw: calls.append(argv) or P())
     r = spawn.spawn_sandbox_window(str(tmp_path))
     assert r.ok and r.wid == "@17" and r.name == "sandbox-2"
-    (argv,) = calls                       # one tmux call, no send-keys at all
+    # one window-making tmux call, no send-keys at all (CMX-425's global-env secret scrub —
+    # `show-environment -g` / `set-environment -gu` — runs first and is not a launch)
+    (argv,) = [c for c in calls
+               if not (isinstance(c, list) and c[:2] in (["tmux", "show-environment"],
+                                                         ["tmux", "set-environment"]))]
     cmd = argv[argv.index("--") + 1:]
     assert cmd[:2] == [sys.executable, "-m"]
     assert share_sandbox.verify_pane(cmd, "tmux: server", []) == (cmd[5], str(tmp_path.resolve()))
