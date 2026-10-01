@@ -204,6 +204,20 @@ umask 077 && printf 'TELEGRAM_BOT_TOKEN=…\nTELEGRAM_CHAT_ID=…\n' > ~/.chela/
 
 Neither file is ever committed. Both live under `$CHELA_DIR`, which is not the repo.
 
+### Secrets stay out of the children chela launches
+
+chela itself reads both files, but nothing it launches gets their secrets: the env handed to
+an agent or judge window, a workflow hook or a judge's test suite drops `LINEAR_API_KEY` and
+every name shaped like `*_API_KEY`, `*_TOKEN`, `*_SECRET` or `*PASSWORD*`. Before opening a
+tmux window, chela also unsets those names from the tmux server's global environment, since
+that table, not the launching process, is what a new window inherits.
+
+A few secret-shaped names are passed on, because the child cannot work without them:
+Claude Code's credentials (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+`CLAUDE_CODE_OAUTH_TOKEN`) and the GitHub CLI's (`GH_TOKEN`, `GITHUB_TOKEN`). To pass on
+another one, for example a token an `after_done` hook needs, name it in
+**`CHELA_CHILD_ENV_FORWARD`** (comma or space separated).
+
 ### Don't clone someone else's `chela.env`
 
 `chela.env` carries no secrets, but it does carry **per-install** values — start from

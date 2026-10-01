@@ -2531,6 +2531,9 @@ def _scrub_node_ipc_env() -> None:
             ["tmux", "set-environment", "-gu", var],
             capture_output=True,
         )
+    # 🔐 CMX-425: and every secret (LINEAR_API_KEY, *_TOKEN, …) a server started before the
+    # child-env strip — or by an operator's shell — still holds in that same global table.
+    envutil.scrub_tmux_secrets()
 
 
 def _new_window(window_name: str, cwd: str) -> str:

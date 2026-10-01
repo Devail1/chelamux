@@ -1,19 +1,18 @@
-"""CMX-412: what a USER ACTION on the served pane actually calls — not what app.py's source says.
+"""CMX-412/CMX-423: what a USER ACTION on the served pane actually calls — not what app.py's source says.
 
 The page ``/term/<wid>/`` is rendered through the real proxy route (upstream ttyd faked),
 then tests/term_upload_harness.mjs loads it in jsdom with EVERY injected shim running for
 real (term-upload.js, the legacy paste-event shim, the Ctrl/Cmd+V key shim…), fires one
 action, and reports the dashboard routes the page hit, in order.
 
-Why this exists: the Ctrl/Cmd+V key shim reads the clipboard itself and must hand an image
-to term-upload.js (→ ``/api/term/upload`` → ``<cwd>/uploads/``). A source-substring check
-(``"window.__chelaUpload" in _TERM_PASTE_KEY_SHIM``) stayed green when the call site was
-pointed back at the legacy ``pasteImage`` (→ ``/tmp`` via ``/api/term/paste-image``), because
-the helper that mentions ``__chelaUpload`` was still defined — just never called
-(docs/defeat_shapes/412-*.md). Here the assertion is the ROUTE the keypress reaches.
+CMX-423 split the routes by MIME type. An IMAGE takes the pre-CMX-412 image path
+(``/api/term/paste-image`` → its ``/tmp`` path typed via ``/api/term/paste``), because that path
+is what Claude Code turns into a real ``[Image #N]`` attachment. Every other file goes to
+``/api/term/upload`` (→ ``<cwd>/uploads/``). The assertion is the ROUTE the action reaches, not a
+source substring (docs/defeat_shapes/412-*.md): a helper can be defined and never called.
 
-Each action runs with the Settings switch ON and OFF: OFF must keep the legacy path, which
-is the negative control proving the harness can tell the two routes apart.
+The non-image cases are the negative control: they prove the harness tells the two routes
+apart, so "the image reached paste-image" is not just "everything reaches paste-image".
 """
 from __future__ import annotations
 
@@ -80,22 +79,17 @@ def _paths(out: dict) -> list[str]:
     return [c["path"] for c in out["calls"]]
 
 
+LEGACY_IMAGE = ["/api/term/paste-image", "/api/term/paste"]
+
+
 # ── Ctrl/Cmd+V with an IMAGE on the clipboard ─────────────────────────────────
 
-def test_ctrl_v_image_goes_to_term_upload_when_file_drop_is_on(run):
-    out = run("keyV-image", file_drop=True)
+@pytest.mark.parametrize("file_drop", [True, False])
+def test_ctrl_v_image_takes_the_old_image_path_and_types_its_path(run, file_drop):
+    out = run("keyV-image", file_drop=file_drop)
     assert out["prevented"] is True, "Ctrl+V must be swallowed, not reach xterm as ^V"
-    assert _paths(out) == ["/api/term/upload"], out
-    up = out["calls"][0]
-    assert up["agent"] == "@1" and up["field"] == "file"
-    assert up["name"].startswith("paste-") and up["name"].endswith(".png")
-    assert out["toasts"] == [f"Saved uploads/{up['name']}"]
-
-
-def test_ctrl_v_image_keeps_the_legacy_tmp_path_when_file_drop_is_off(run):
-    """Negative control: the harness sees the legacy route when it IS the right one."""
-    out = run("keyV-image", file_drop=False)
-    assert _paths(out) == ["/api/term/paste-image", "/api/term/paste"], out
+    assert _paths(out) == LEGACY_IMAGE, out
+    assert out["calls"][0]["field"] == "image"
     assert out["calls"][1]["json"] == {"agent": "@1", "text": "/tmp/chela-paste/x.png"}
 
 
@@ -105,18 +99,29 @@ def test_ctrl_v_text_is_pasted_as_text_never_uploaded(run):
     assert out["calls"][0]["json"] == {"agent": "@1", "text": "hello"}
 
 
-# ── a paste EVENT carrying an image (right-click paste / mobile) ─────────────
+# ── a paste EVENT carrying a file (right-click paste / mobile) ───────────────
 
-def test_a_pasted_image_is_uploaded_once_and_the_legacy_shim_does_not_also_fire(run):
+def test_a_pasted_image_takes_the_image_path_once_never_uploads(run):
+    """file drop ON: term-upload.js claims the paste and sends the image down the old path;
+    the legacy paste-event shim must not ALSO fire (that would type the path twice)."""
     out = run("paste-image", file_drop=True)
     assert out["prevented"] is True
-    assert _paths(out) == ["/api/term/upload"], out
-    assert out["calls"][0]["name"] == "shot.png"
+    assert _paths(out) == LEGACY_IMAGE, out
+    assert out["calls"][0]["name"] == "shot.png" and out["calls"][0]["field"] == "image"
+    assert out["calls"][1]["json"] == {"agent": "@1", "text": "/tmp/chela-paste/x.png"}
 
 
 def test_a_pasted_image_uses_the_legacy_path_when_file_drop_is_off(run):
     out = run("paste-image", file_drop=False)
-    assert _paths(out) == ["/api/term/paste-image", "/api/term/paste"], out
+    assert _paths(out) == LEGACY_IMAGE, out
+
+
+def test_a_pasted_pdf_still_goes_to_uploads(run):
+    out = run("paste-pdf", file_drop=True)
+    assert out["prevented"] is True
+    assert _paths(out) == ["/api/term/upload"], out
+    assert out["calls"][0]["field"] == "file" and out["calls"][0]["name"] == "doc.pdf"
+    assert out["toasts"] == ["Saved uploads/doc.pdf"]
 
 
 def test_a_text_paste_event_is_left_to_xterm(run):
@@ -126,11 +131,20 @@ def test_a_text_paste_event_is_left_to_xterm(run):
 
 # ── drag and drop ─────────────────────────────────────────────────────────────
 
-def test_a_dropped_file_is_uploaded_and_dragover_is_claimed(run):
+def test_a_dropped_image_is_claimed_and_takes_the_image_path(run):
     """Without preventDefault on dragover a real browser never fires `drop` on the page."""
     out = run("drop-file", file_drop=True)
     assert out["prevented"] == {"dragover": True, "drop": True}, out
-    assert _paths(out) == ["/api/term/upload"], out
+    assert _paths(out) == LEGACY_IMAGE, out
+
+
+def test_a_mixed_drop_sends_the_png_to_the_image_path_and_the_pdf_to_uploads(run):
+    """⭐ The ACCEPTED case: one png + one pdf, each to its own path, in drop order."""
+    out = run("drop-mixed", file_drop=True)
+    assert out["prevented"] == {"dragover": True, "drop": True}, out
+    assert _paths(out) == LEGACY_IMAGE + ["/api/term/upload"], out
+    assert out["calls"][0]["name"] == "shot.png" and out["calls"][0]["field"] == "image"
+    assert out["calls"][2]["name"] == "doc.pdf" and out["calls"][2]["field"] == "file"
 
 
 def test_a_drop_with_file_drop_off_is_not_claimed(run):

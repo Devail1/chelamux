@@ -1025,7 +1025,9 @@ def test_spawn_sandbox_window_launches_the_web_mode_launcher(monkeypatch, tmp_pa
     monkeypatch.setattr(spawn.subprocess, "run", lambda argv, **kw: calls.append(argv) or P())
     r = spawn.spawn_sandbox_window(str(tmp_path), net="web")
     assert r.ok and r.name == "sandbox-web-1" and pre == ["web"]
-    cmd = calls[0][calls[0].index("--") + 1:]
+    # CMX-425 scrubs the tmux server's env first, so pick the new-window call itself.
+    (launch,) = [c for c in calls if "new-window" in c]
+    cmd = launch[launch.index("--") + 1:]
     assert sb.verify_pane(cmd, "tmux: server", [])[2] == "web"
 
 

@@ -245,6 +245,8 @@ def api_agents():
             # the launcher's argv; only `sandbox-*` windows pay the /proc read.
             "share_net": (share_sandbox.window_net_mode(window_id)
                           if name.startswith("sandbox") else None),
+            # Bumped on every re-share (CMX-427): owner presence restarts when it moves.
+            "share_epoch": _share_epoch(window_id),
             "window_type": win_type,
             "claude_running": claude_running,
             "thinking": sess_status == "busy",
@@ -452,10 +454,6 @@ _TERM_PASTE_KEY_SHIM = (
     "var r=await fetch('/api/term/paste-image',{method:'POST',body:fd,"
     "credentials:'same-origin'});"
     "if(!r.ok)return;var j=await r.json();if(j&&j.path)await pasteText(j.path);}"
-    # CMX-412: with file drop on, term-upload.js owns images (→ <cwd>/uploads/).
-    "async function pasteClipImage(blob){"
-    "if(typeof window.__chelaUpload==='function'){await window.__chelaUpload(blob);return;}"
-    "await pasteImage(blob);}"
     "async function onKey(e){"
     "if(!(e.ctrlKey||e.metaKey)||e.shiftKey||e.altKey)return;"
     "if(e.key!=='v'&&e.key!=='V')return;"
@@ -466,7 +464,7 @@ _TERM_PASTE_KEY_SHIM = (
     "var items=await navigator.clipboard.read();"
     "for(var i=0;i<items.length;i++){"
     "var t=(items[i].types||[]).filter(function(x){return x.indexOf('image/')===0;})[0];"
-    "if(t){await pasteClipImage(await items[i].getType(t));return;}}"
+    "if(t){await pasteImage(await items[i].getType(t));return;}}"
     "for(var n=0;n<items.length;n++){"
     "if((items[n].types||[]).indexOf('text/plain')>=0){"
     "await pasteText(await (await items[n].getType('text/plain')).text());return;}}"
@@ -1196,6 +1194,21 @@ def api_term_grid(wid):
 # every broadcast report (/api/agents, /api/term/shared) — the pairing code is the
 # capability, so only the authed owner sees it, via api_term_share_info.
 _share_info: dict[str, dict] = {}
+# A share's EPOCH (CMX-427): a non-secret counter bumped on every mint, so a dashboard
+# page that did NOT stop + re-create a share can still see, from the /api/agents poll,
+# that the pairing code under its owner-presence session has rotated. It is the only
+# rotation signal in a broadcast report — the code itself never leaves _share_info.
+_share_epoch_seq = 0
+
+
+def _next_share_epoch() -> int:
+    global _share_epoch_seq
+    _share_epoch_seq += 1
+    return _share_epoch_seq
+
+
+def _share_epoch(wid: str) -> int | None:
+    return _share_info.get(wid, {}).get("share_epoch")   # _revoke_share drops it on stop
 
 
 def _revoke_share(wid: str) -> None:
@@ -1332,7 +1345,8 @@ def api_term_share(wid):
     # Start the E2E stream bridge; on_revoke fires if it fails closed on session
     # death, so a share can never outlive its terminal (see collab_stream).
     code = collab_stream.start_bridge(wid, on_revoke=_revoke_share, **policy)
-    info = {"pairing_code": code, "join_url": collab_stream.join_url(wid)} if code else {}
+    info = ({"pairing_code": code, "join_url": collab_stream.join_url(wid),
+             "share_epoch": _next_share_epoch()} if code else {})
     _share_info[wid] = info
     return jsonify({"ok": True, "shared": True, **info, **(collab_stream.share_state(wid) or {})})
 
@@ -1446,6 +1460,12 @@ def api_term_paste_image():
     _require_terminals()
     agent = (request.form.get("agent") or "").strip()
     f = request.files.get("image")
+    # CMX-423: images drop/paste through here again (not uploads/), so this route carries
+    # CMX-412's owner-only rule too — a share guest is refused before a byte is read.
+    if _share_guest_request():
+        return _upload_refused(agent, (f.filename if f is not None else "") or "",
+                               request.content_length, "share_guest",
+                               "Share guests cannot paste images.", 403)
     if not agent or f is None:
         return jsonify({"error": "agent and image required"}), 400
     mime = (f.mimetype or "").lower()
