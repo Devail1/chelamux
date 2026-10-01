@@ -3000,6 +3000,8 @@ def main() -> None:
         "--cwd", metavar="DIR", default=".",
         help="Worktree to mutate in place (default: the current directory)",
     )
+    from chela.judge_eval import cli as judge_eval_cli
+    judge_eval_cli.add_parser(judge_sub)
     p_jshow = judge_sub.add_parser(
         "show",
         help="⚖️🙈 A run's judge rounds from the operator's private record: rounds-to-clean, "
@@ -3362,6 +3364,9 @@ def main() -> None:
             cmd_judge_self_check(args)
         elif args.judge_cmd == "ack-blocked-race":
             cmd_judge_ack_blocked_race(args)
+        elif args.judge_cmd == "eval":
+            from chela.judge_eval import cli as judge_eval_cli
+            judge_eval_cli.main(args)
         elif args.judge_cmd == "show":
             cmd_judge_show(args)
         else:

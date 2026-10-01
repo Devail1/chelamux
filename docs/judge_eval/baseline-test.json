@@ -1,0 +1,187 @@
+{
+  "meta": {
+    "cases": 4,
+    "estimate_usd": 14.16,
+    "grader_model": "claude-opus-5-5",
+    "model": "opus",
+    "risks": [
+      "high",
+      "normal",
+      "low"
+    ],
+    "rubric": "rubric-v1",
+    "spent_usd": 5.9437,
+    "split": "test",
+    "template": "live JUDGE_PROMPT"
+  },
+  "summary": {
+    "high": {
+      "cases": 4,
+      "contrived_rate": {
+        "ci95": [
+          0.0,
+          0.15384615384615385
+        ],
+        "k": 2,
+        "n": 44,
+        "rate": 0.045454545454545456
+      },
+      "cost_usd": 2.5484,
+      "decoy_hits": {
+        "ci95": [
+          0.0,
+          0.7934567085261071
+        ],
+        "k": 0,
+        "n": 1,
+        "rate": 0.0
+      },
+      "errors": 0,
+      "grader_flips": {
+        "flips": 4,
+        "llm_graded": 43
+      },
+      "mean_proposed": 11.0,
+      "recall_real": {
+        "ci95": [
+          1.0,
+          1.0
+        ],
+        "k": 3,
+        "n": 3,
+        "rate": 1.0
+      },
+      "recall_seeded": {
+        "ci95": [
+          0.20654329147389294,
+          1.0
+        ],
+        "k": 1,
+        "n": 1,
+        "rate": 1.0
+      },
+      "ungraded": 0,
+      "validity": {
+        "ci95": [
+          1.0,
+          1.0
+        ],
+        "k": 44,
+        "n": 44,
+        "rate": 1.0
+      }
+    },
+    "low": {
+      "cases": 4,
+      "contrived_rate": {
+        "ci95": [
+          0.0,
+          0.0
+        ],
+        "k": 0,
+        "n": 15,
+        "rate": 0.0
+      },
+      "cost_usd": 1.4433,
+      "decoy_hits": {
+        "ci95": [
+          0.0,
+          0.7934567085261071
+        ],
+        "k": 0,
+        "n": 1,
+        "rate": 0.0
+      },
+      "errors": 0,
+      "grader_flips": {
+        "flips": 1,
+        "llm_graded": 14
+      },
+      "mean_proposed": 3.75,
+      "recall_real": {
+        "ci95": [
+          0.0,
+          1.0
+        ],
+        "k": 2,
+        "n": 3,
+        "rate": 0.6666666666666666
+      },
+      "recall_seeded": {
+        "ci95": [
+          0.0,
+          0.7934567085261071
+        ],
+        "k": 0,
+        "n": 1,
+        "rate": 0.0
+      },
+      "ungraded": 0,
+      "validity": {
+        "ci95": [
+          1.0,
+          1.0
+        ],
+        "k": 15,
+        "n": 15,
+        "rate": 1.0
+      }
+    },
+    "normal": {
+      "cases": 4,
+      "contrived_rate": {
+        "ci95": [
+          0.0,
+          0.20689655172413793
+        ],
+        "k": 2,
+        "n": 29,
+        "rate": 0.06896551724137931
+      },
+      "cost_usd": 1.952,
+      "decoy_hits": {
+        "ci95": [
+          0.0,
+          0.7934567085261071
+        ],
+        "k": 0,
+        "n": 1,
+        "rate": 0.0
+      },
+      "errors": 0,
+      "grader_flips": {
+        "flips": 0,
+        "llm_graded": 28
+      },
+      "mean_proposed": 7.25,
+      "recall_real": {
+        "ci95": [
+          0.0,
+          1.0
+        ],
+        "k": 2,
+        "n": 3,
+        "rate": 0.6666666666666666
+      },
+      "recall_seeded": {
+        "ci95": [
+          0.20654329147389294,
+          1.0
+        ],
+        "k": 1,
+        "n": 1,
+        "rate": 1.0
+      },
+      "ungraded": 0,
+      "validity": {
+        "ci95": [
+          1.0,
+          1.0
+        ],
+        "k": 29,
+        "n": 29,
+        "rate": 1.0
+      }
+    }
+  }
+}

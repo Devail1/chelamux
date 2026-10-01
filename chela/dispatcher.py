@@ -6456,43 +6456,76 @@ command with `"experiments": []` — that is recorded as **CANNOT VERIFY**, not 
 """
 
 
-def _judge_vars(
-    wf: WorkflowDef, row: sqlite3.Row, worktree: Path, sha: str, task: Task | None = None,
+def judge_prompt_vars(
+    *, wf: WorkflowDef | None, risk: str, task_id: str, task_title: str, task_body: str,
+    branch_name: str, base_branch: str, workspace_path: str, repo_path: str,
+    project_key: str, task_number, pr_url: str, head_sha: str, experiments_path: str,
+    judge_cmd: str, test_cmd: str, diff_cmd: str, pr_view_cmd: str,
 ) -> dict:
-    number = _pr_number(row["pr_url"])
-    base = wf.get("workspace", "base_branch", default="master")
-    exp_path = judge.experiments_path(worktree)
-    risk = _row_risk(row)
+    """📏 CMX-408. EVERY variable :data:`JUDGE_PROMPT` renders with — the one map both the
+    live judge (:func:`_judge_vars`) and the offline eval (``chela.judge_eval.design``)
+    build, so the eval can never drift from the prompt the judge actually sees. The
+    caller-specific values are keyword-only and required (a caller that forgets one fails
+    loudly); what a risk level and the workflow's judge knobs buy is derived HERE, once."""
     return {
         # ⚖️🎚️ CMX-405: the run's risk level (from the tracker, via the run row) and what
         # it buys — the experiment cap `chela judge run` enforces, and how to spend it.
         "risk": risk,
         "max_experiments": judge_max_experiments(risk),
         "risk_guidance": judge.RISK_GUIDANCE[risk],
-        "task_id": row["task_id"],
-        "task_title": row["title"] or "",
+        "task_id": task_id,
+        "task_title": task_title,
         # 📭🧾 CMX-378: kept for parity with the other `_prompt_vars`-style maps even though
         # JUDGE_PROMPT does not render it today — see `_rework_vars` for why this is `task`'s
         # own body, never `row["brief"]`.
-        "task_body": (task.body if task else None) or "",
-        "branch_name": row["branch_name"] or "",
-        "base_branch": base,
-        "workspace_path": str(worktree),
-        "repo_path": str(wf.path.parent),
-        "project_key": wf.project_key,
-        "task_number": row["task_number"],
-        "pr_url": row["pr_url"] or "(no PR link on the run row)",
-        "head_sha": sha,
-        "experiments_path": str(exp_path),
-        "judge_cmd": f"chela judge run {row['task_id']} --experiments {exp_path}",
-        "test_cmd": judge.judge_test_cmd(wf) or "(none)",
+        "task_body": task_body,
+        "branch_name": branch_name,
+        "base_branch": base_branch,
+        "workspace_path": workspace_path,
+        "repo_path": repo_path,
+        "project_key": project_key,
+        "task_number": task_number,
+        "pr_url": pr_url,
+        "head_sha": head_sha,
+        "experiments_path": experiments_path,
+        "judge_cmd": judge_cmd,
+        "test_cmd": test_cmd,
         # ⚖️🙈 CMX-395: the held-out quota the judge is asked to meet.
-        "held_out_pct": round(judge.judge_held_out_fraction(wf) * 100),
+        "held_out_pct": round((judge.judge_held_out_fraction(wf) if wf is not None
+                               else judge.HELD_OUT_FRACTION) * 100),
         "held_out_min": judge.HELD_OUT_MIN_EXPERIMENTS,
-        "diff_cmd": f"git diff origin/{base}...HEAD",
-        "pr_view_cmd": (f"gh pr view {number} --comments" if number
-                        else "gh pr view --comments   # no PR url on the run row"),
+        "diff_cmd": diff_cmd,
+        "pr_view_cmd": pr_view_cmd,
     }
+
+
+def _judge_vars(
+    wf: WorkflowDef, row: sqlite3.Row, worktree: Path, sha: str, task: Task | None = None,
+) -> dict:
+    number = _pr_number(row["pr_url"])
+    base = wf.get("workspace", "base_branch", default="master")
+    exp_path = judge.experiments_path(worktree)
+    return judge_prompt_vars(
+        wf=wf,
+        risk=_row_risk(row),
+        task_id=row["task_id"],
+        task_title=row["title"] or "",
+        task_body=(task.body if task else None) or "",
+        branch_name=row["branch_name"] or "",
+        base_branch=base,
+        workspace_path=str(worktree),
+        repo_path=str(wf.path.parent),
+        project_key=wf.project_key,
+        task_number=row["task_number"],
+        pr_url=row["pr_url"] or "(no PR link on the run row)",
+        head_sha=sha,
+        experiments_path=str(exp_path),
+        judge_cmd=f"chela judge run {row['task_id']} --experiments {exp_path}",
+        test_cmd=judge.judge_test_cmd(wf) or "(none)",
+        diff_cmd=f"git diff origin/{base}...HEAD",
+        pr_view_cmd=(f"gh pr view {number} --comments" if number
+                     else "gh pr view --comments   # no PR url on the run row"),
+    )
 
 
 def _is_adopted(row) -> bool:
