@@ -111,6 +111,41 @@ Knobs, set in `chela.env`, which the launcher process reads:
 A guest who can type can still spend your Claude usage through the proxy. That comes
 with letting them drive Claude at all.
 
+## Telegram: the session reaches your topic too
+
+A sandboxed window gets a Telegram topic like any other agent window, and its replies are
+relayed there. **Everything the session says reaches your topic** — including whatever the
+guest pastes or has Claude read: a CV, a draft, a private file in the workspace. Inbound
+works as usual too, so anything you type in that topic goes into the guest's session.
+
+How it works: the session's transcript stays in the container's tmpfs and its hooks can't
+reach the host, so the relay has no transcript to read. Instead, the credential proxy
+parses each completed model turn from the response stream and appends the assistant's
+visible text (with each tool call reduced to its name) to
+`$CHELA_DIR/share-sessions/<session id>/outbox.jsonl`. That directory is mounted
+read-write into the **proxy sidecar only**, never into the guest container, and a
+workspace that would contain it is refused. `chela telegram` reads the outbox of any
+window that verifies live as a sandboxed session, with the normal relay's formatting,
+chunking and dedup. `chela doctor` reports such a window as healthy while its outbox
+exists and keeps up with the proxy. It flags the window when the outbox is missing, or
+when the proxy is forwarding turns that don't reach the outbox.
+
+A turn is written only once its stream finishes. If the guest disconnects partway through
+a reply, that reply never reaches the topic, even when the model finished it.
+
+Outboxes stay on disk after the session ends, in directories readable only by you (mode
+0700). A new sandboxed session removes any outbox older than 7 days.
+
+**Turning the relay off for one session** (default on):
+
+```bash
+chela telegram --sandbox-relay @<wid>=off    # and =on to turn it back on
+```
+
+The setting is stored against the sandboxed session's id, not the window number, so it
+doesn't carry over to whatever window later gets the same `@N`. While it's off, neither
+the session's replies nor its pane prompts and status line are posted to the topic.
+
 ## Measured results (CMX-400, container route)
 
 Measured by hand against a live sandboxed session:

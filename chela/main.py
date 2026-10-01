@@ -1458,6 +1458,44 @@ def _outbound_loop(monitor, registry, interval: int, stop) -> None:
         stop.wait(interval)
 
 
+class _RelayedWindows:
+    """The bound windows minus the sandboxed ones whose relay was switched off (CMX-420)
+    — the pane watch's polled set, so an opted-out session's pane is not mirrored either.
+    ``windows()`` is re-read every tick, like the registry's."""
+
+    def __init__(self, registry, outboxes) -> None:
+        self._registry = registry
+        self._outboxes = outboxes
+
+    def windows(self) -> list[str]:
+        return [w for w in self._registry.windows() if self._outboxes.allows(w)]
+
+
+def _cmd_sandbox_relay(spec: str) -> None:
+    """``chela telegram --sandbox-relay @N=on|off`` — the per-window opt-out (CMX-420).
+
+    Stored against the window's SANDBOXED-SESSION id, which is verified live here: a
+    window that is not a sandboxed session has nothing to opt out of."""
+    from chela import share_sandbox
+
+    wid, _, value = spec.partition("=")
+    wid = wid.strip()
+    value = value.strip().lower()
+    if not wid.startswith("@"):
+        wid = "@" + wid
+    if value not in ("on", "off"):
+        print("usage: chela telegram --sandbox-relay @N=on|off", file=sys.stderr)
+        sys.exit(2)
+    sid = share_sandbox.share_session_id(wid)
+    if sid is None:
+        why = share_sandbox.check_share_session(wid)[1]
+        print(f"{wid} is not a sandboxed session ({why})", file=sys.stderr)
+        sys.exit(1)
+    share_sandbox.set_relay_enabled(sid, value == "on")
+    state = "relayed to its Telegram topic" if value == "on" else "NOT relayed to Telegram"
+    print(f"{wid} (sandboxed session {sid}) is now {state}")
+
+
 def _pane_loop(gate_watcher, registry, interval: int, stop) -> None:
     """Poll every bound window's PANE and relay the live-TUI prompts, until stopped.
 
@@ -1622,6 +1660,10 @@ def cmd_telegram(args) -> None:
         default_bindings_path,
     )
 
+    if getattr(args, "sandbox_relay", None):
+        _cmd_sandbox_relay(args.sandbox_relay)
+        return
+
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat:
@@ -1724,11 +1766,25 @@ def cmd_telegram(args) -> None:
         selected=DRAFTS.selected,
     )
 
+    # CMX-420: a SANDBOXED session's transcript is in its container, out of reach — its
+    # replies are read from the outbox its credential proxy writes instead. The opt-out
+    # (`chela telegram --sandbox-relay @N=off`) silences such a window in BOTH loops: its
+    # transcript messages here, and its pane mirror/status in the pane watch.
+    from chela import sessions
+    from chela.telegram.sandboxrelay import SandboxOutboxes
+    outboxes = SandboxOutboxes()
+
     def _on_message(window_id, msg):
+        if not outboxes.allows(window_id):
+            return
         gate_watcher.observe(window_id, msg)
         relay.on_message(window_id, msg)
 
-    monitor = TranscriptMonitor(on_message=_on_message)
+    monitor = TranscriptMonitor(
+        on_message=_on_message,
+        resolver=outboxes.resolver(sessions.transcript_for_window),
+    )
+    pane_windows = _RelayedWindows(registry, outboxes)
 
     topic_api = None
     reconcile_interval = max(1, int(args.reconcile_interval))
@@ -1756,7 +1812,7 @@ def cmd_telegram(args) -> None:
         stop = threading.Event()
         threading.Thread(
             target=_pane_loop,
-            args=(gate_watcher, registry, interval, stop),
+            args=(gate_watcher, pane_windows, interval, stop),
             daemon=True,
         ).start()
         if topic_api is not None:
@@ -1810,7 +1866,7 @@ def cmd_telegram(args) -> None:
     ).start()
     threading.Thread(
         target=_pane_loop,
-        args=(gate_watcher, registry, interval, stop),
+        args=(gate_watcher, pane_windows, interval, stop),
         daemon=True,
     ).start()
     if topic_api is not None:
@@ -3273,6 +3329,11 @@ def main() -> None:
     p_tg.add_argument(
         "--no-inbound", action="store_true",
         help="Outbound relay only; skip inbound routing (no python-telegram-bot dependency)",
+    )
+    p_tg.add_argument(
+        "--sandbox-relay", metavar="@N=on|off",
+        help="Relay a sandboxed session's replies to its Telegram topic (default on), then "
+             "exit — e.g. --sandbox-relay @7=off. Does not start the bridge.",
     )
 
     # dashboard (optional component)
