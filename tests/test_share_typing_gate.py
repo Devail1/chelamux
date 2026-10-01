@@ -784,3 +784,29 @@ def test_view_only_share_of_a_normal_window_streams_unchanged(monkeypatch, typin
         monkeypatch, [_frame("plain shell $ "), _frame("ls")])   # allow_typing defaults False
     assert out == [b"plain shell $ ", b"ls"]
     assert not any(b'"ended"' in p for p in ctl) and revoked == []
+
+
+def test_an_idle_typing_share_ends_on_a_swap_before_any_frame(monkeypatch, sandbox, typing_on):
+    """The IDLE path: ttyd's receive times out (``None``) right after the swap, before the
+    new process prints. The idle tick alone must end the share — the pump must not read
+    on and wait for the next frame to be refused (that next frame is the leak window).
+    Corrupt the idle branch's re-check (``why = None``) ⇒ the pump reads past the tick."""
+    read_past_idle = []
+    out, ctl, revoked, b, _clock = _pump(monkeypatch, [
+        _frame("sandbox$ "), _swap_to_host_shell(sandbox), None,
+        lambda: read_past_idle.append(True), _frame("op@example.com eu-west-1 $ "),
+    ], allow_typing=True)
+    assert read_past_idle == []         # ended AT the idle tick, nothing read after it
+    assert out == [b"sandbox$ "] and revoked == ["@9"]
+    ended = [p for p in ctl if b'"ended"' in p]
+    assert ended and cs.SANDBOX_LOST_REASON.encode() in ended[0]
+    assert b._sandbox_lost == "the window is not running the sandboxed-session launcher"
+
+
+def test_an_idle_tick_keeps_a_verified_typing_share_streaming(monkeypatch, sandbox, typing_on):
+    """⭐ Positive control for the idle path: idle ticks over a still-verified pane end
+    nothing, and the frames around them stream."""
+    out, ctl, revoked, _b, _clock = _pump(
+        monkeypatch, [_frame("a"), None, None, _frame("b")], allow_typing=True)
+    assert out == [b"a", b"b"] and revoked == []
+    assert not any(b'"ended"' in p for p in ctl)

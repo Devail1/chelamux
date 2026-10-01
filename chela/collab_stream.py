@@ -59,7 +59,9 @@ to show a sandbox, so every ttyd OUTPUT frame is held until the pane still verif
 pane's identity (tmux pane pid + launcher shape, read per frame) must be the one first
 seen, and the full container check must pass (re-run every SANDBOX_RECHECK_INTERVAL). The
 first failed or UNKNOWN verdict drops that frame and ends the share with a reason the guest
-sees. View-only shares never claimed a sandbox and stream unchanged. Allowed input is still capped by a token bucket. A
+sees. View-only shares never claimed a sandbox and stream unchanged.
+
+Allowed input is still capped by a token bucket. A
 flood of hellos can't spam ttyd reattaches (rate-limited by REATTACH_DEBOUNCE).
 
 Runs standalone for the spike::  python -m chela.collab_stream <wid>
@@ -113,10 +115,10 @@ SANDBOX_RECHECK_INTERVAL = 2.0  # s
 # At most one "view only" notice per this interval, however fast the guest types.
 VIEW_ONLY_NOTICE_INTERVAL = 10.0  # s
 
-# Share access modes, as reported to the dashboard (share pill 👁 / ⌨ / UNSANDBOXED).
 # What the guest is told when a typing share ends because its pane stopped verifying.
 SANDBOX_LOST_REASON = "the session stopped being a verified sandbox"
 
+# Share access modes, as reported to the dashboard (share pill 👁 / ⌨ / UNSANDBOXED).
 MODE_VIEW = "view"
 MODE_TYPING = "typing"            # typing allowed into a verified sandboxed session
 MODE_UNSANDBOXED = "unsandboxed"  # trusted-peer override, time-boxed, one joiner
