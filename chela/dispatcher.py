@@ -1440,6 +1440,16 @@ def _parse_ts(ts: str | None) -> datetime | None:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
+def _epoch_dt(ts: object) -> datetime | None:
+    """Epoch seconds (a judge run status's ``run_started_at``) → aware UTC datetime."""
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _capture_pane(window_name: str, *, ansi: bool = False) -> str:
     """Return the visible text of a tmux window's pane (empty string on error).
 
@@ -6866,6 +6876,18 @@ def _spawn_judge(
     """
     task_id, branch = row["task_id"], row["branch_name"] or ""
     worktree = judge.judge_worktree_path(wf, task_id)
+    # 👻⚖️ CMX-429: never a second judge into a worktree a live `chela judge run` is still
+    # mutating — its window being gone is NORMAL since CMX-411 (the agent stops after
+    # `--detach`), so a row that reads `cannot_verify` (or a new head) can sit beside a run
+    # that is still going. Refused BEFORE the sha is burned or the row is touched: when that
+    # run publishes, its verdict lands on the row as usual; if it was for an older head, the
+    # trigger spawns for the new head on the first tick after it exits. Read from disk, so a
+    # run launched under a daemon from before a restart refuses this too.
+    live = judge.live_judge_run(task_id, worktree)
+    if live is not None:
+        log.info("judge: %s: not spawning — a judge run (pid %s) is still alive in %s",
+                 task_id, live.get("pid"), worktree)
+        return False
     # ⚖️ CMX-81: the CANNOT VERIFY retry budget belongs to a COMMIT, and this is its ONLY
     # writer. A new head is a fresh judgement → the count starts at 0. Re-launching on the
     # SAME head that last came back `cannot_verify` IS a retry → bump it (the trigger gate
@@ -6976,10 +6998,22 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         (str(wf.path), judge.J_RUNNING),
     ).fetchall():
         window = judge.judge_window_name(row["branch_name"] or "")
+        # 👻⚖️ CMX-429: ask the RUN, not the agent's window. Since CMX-411 the agent stops
+        # right after `--detach`, so "window gone" is normal while its run is still going —
+        # measured on PR #569, this arm wrote CANNOT VERIFY and a second judge was spawned
+        # into the same worktree under a live first run. Read from disk, so a run launched
+        # before a daemon restart is found too.
+        live_run = judge.live_judge_run(
+            row["task_id"], judge.judge_worktree_path(wf, row["task_id"]),
+        )
         # ⏱️ CMX-411: the wall measures the RUN, from its own start marker, once there is
         # one — not the agent's design time before it. Until the run starts, the agent's
         # spawn time bounds the agent instead, so a judge that never runs is still reaped.
-        run_started = _parse_ts(row["judge_run_started_at"])
+        # 👻 CMX-429: a live run whose column is empty (wiped by a respawn, or written before
+        # a restart) is timed from the start it recorded about itself.
+        run_started = _parse_ts(row["judge_run_started_at"]) or (
+            _epoch_dt(live_run.get("run_started_at")) if live_run else None
+        )
         started = run_started or _parse_ts(row["judge_started_at"])
         timed_out = (
             started is not None and now is not None
@@ -6992,19 +7026,29 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         # is checked ONLY while `alive` (never worth a tmux call once the window is already
         # gone) and this is a THIRD, affirmative reason to reap on top of `timed_out` — it
         # never widens what already reaps without it: `alive and timed_out` reaped before
-        # this existed, and a dead window reaps via the lock cross-check below either way.
+        # this existed, and a dead window reaps either way once `live_run` below is None.
         # ⏱️ CMX-411: once the run has started, it runs detached and needs nothing more
         # from the agent's session — an expired login there is not a reason to reap it.
         login_expired = (
             alive and run_started is None
             and _pane_shows_login_expired(_capture_pane(window))
         )
+        if live_run is not None and not timed_out and not login_expired:
+            # ⚖️🕳️ CMX-229 / 👻 CMX-429: a live owner is a verdict in flight. Hold — no
+            # CANNOT VERIFY, no window kill, no reap, whatever the window or the agent says.
+            # Bounded by the wall above and, as CMX-282 requires, by an expired login (which
+            # can only be seen while no run has recorded its start).
+            log.info(
+                "judge watchdog: %s: judge run (pid %s) is still alive — holding",
+                row["task_id"], live_run.get("pid"),
+            )
+            continue
         # ⚖️🌩️ CMX-379: the auto-mode classifier outage is the same kind of never-got-a-
         # chance failure. Measured 2026-09-28 on PR #529: every Bash call failed, the judge
         # stopped after the harness's 10-in-a-row limit and sat idle, holding the only judge
-        # slot. Checked only on a live window that no other arm already reaps. Unlike
-        # `login_expired` it does NOT bypass the lock cross-check below, because a live judge
-        # lock means `chela judge run` is executing, which is a verdict in flight.
+        # slot. Checked only on a live window that no other arm already reaps. It never
+        # reaches a live `chela judge run` either: `live_run` above already held that one,
+        # because a live run is a verdict in flight.
         classifier_outage = (
             alive and not timed_out and not login_expired
             and _judge_hit_classifier_outage(wf, row)
@@ -7012,27 +7056,10 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         if alive and not timed_out and not login_expired and not classifier_outage:
             continue
         # ⚖️🕳️ CMX-229 Objective 2: `alive` is ONE signal (this tick's tmux snapshot) and
-        # it can be wrong — measured live on CMX-227, a judge SIGKILLed (exit 137) mid-
-        # `chela judge run` because the watchdog reaped its worktree/window on exactly
-        # this kind of miss. `judge.judge_lock_live` is a SECOND, independent signal (the
-        # judge's own claim file: pid + `/proc` start time, CMX-219) — cross-check it
-        # before tearing anything down. ⛔ BOUNDED, not a second timeout: once `timed_out`
-        # is True the lock is never consulted and this always reaps, exactly as before —
-        # a live owner past JUDGE_TIMEOUT_SECONDS is "stuck, not thinking" regardless of
-        # what its own lock claims, so a hold can never outlive that bound. `login_expired`
-        # is the SAME kind of bound as `timed_out` here, and for the same reason: the pane
-        # evidence is direct and already came from THIS live window, so a lock file saying
-        # "the process is still alive" would only be confirming a process stuck at a login
-        # prompt, never contradicting it.
-        if not timed_out and not login_expired and judge.judge_lock_live(
-            judge.judge_worktree_path(wf, row["task_id"])
-        ):
-            log.info(
-                "judge watchdog: %s: window %s missing from this tick's tmux snapshot, but "
-                "the judge lock says its owner is still alive — holding teardown", row["task_id"],
-                window,
-            )
-            continue
+        # it can be wrong. The judge's own records (lock + run status: pid and `/proc` start
+        # ticks) were already consulted above via `live_run`, so a live owner never reaches
+        # here unless it ran past the wall or sits at an expired login (CMX-282) — "stuck,
+        # not thinking" whatever its lock claims.
         reason = (
             f"the judge did not finish in {JUDGE_TIMEOUT_SECONDS // 60}min — it is stuck, "
             "not thinking" if timed_out else
