@@ -2594,7 +2594,10 @@ function _wallFill() {
     }
     const avail = Math.max(240, floorY - top - dockH - 4);  // leave a hair at the bottom
     const rows = Math.max(3, Math.floor(avail / WALL_CELL_H));
-    const cellPx = Math.max(40, Math.floor(avail / rows));      // exact divisor -> fills
+    // CMX-414: NOT floored. A whole-px row height strands up to rows−1 px
+    // under the Wall (the height the tighter toolbar row freed at the top just
+    // reappeared at the bottom); GridStack takes a fractional cellHeight as-is.
+    const cellPx = Math.max(40, avail / rows);      // exact divisor -> fills
     return { rows, cellPx };
 }
 

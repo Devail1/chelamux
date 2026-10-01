@@ -67,6 +67,21 @@
     --wall-pane-line-height: 1.5;       /* was 1.3; floor ~1.45 */
     --card-font-size: 11.5px;           /* sidebar agent-card text — was 9-10px */
     --card-line-height: 1.5;            /* was the body default (1.5) — named for the same reason */
+
+    /* CMX-414: shared chrome geometry, one lever each.
+       --ctl-h-sm: the small control height — the 32px the layout toggle, the
+         grid presets' segmented track and the sidebar's jump box already used
+         as three separate literals. The Wall toolbar's controls all take it.
+       --head-row-h: the sidebar head's height (12px padding + the 38px
+         .icon-btn + 12px + its 1px bottom border). The Wall's top toolbar row
+         is exactly this tall, so the first pane lines up with the head's rule.
+       --canvas-pad-y: .canvas's top/bottom padding (the toolbar row absorbs it).
+       --wall-gap: the gap between two Wall panes — GridStack's per-item
+         margin (terminals.js WALL_MARGIN = 6) on each side, so 2 × 6. */
+    --ctl-h-sm: 32px;
+    --head-row-h: 63px;
+    --canvas-pad-y: 18px;
+    --wall-gap: 12px;
 }
 
 /* Themes — each re-declares the palette variables; everything else cascades.
@@ -496,7 +511,7 @@ body {
    buttons go borderless inside it, the active cell gets an accent fill. The lock
    button sits OUTSIDE this wrapper, so it keeps the standalone .gl-btn look. */
 #term-grid-presets {
-    display: inline-flex; align-items: center; gap: 2px; padding: 3px;
+    display: inline-flex; align-items: center; gap: 2px; padding: 3px; height: var(--ctl-h-sm);
     background: var(--surface); border: 1px solid var(--border); border-radius: 9px;
 }
 #term-grid-presets .gl-btn { border: 0; background: transparent; padding: 5px 7px; border-radius: 6px; }
@@ -506,6 +521,27 @@ body {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
+/* CMX-414: the Wall's top toolbar row (layout toggle left, "+ New shell"
+   right). It used to be the canvas's 18px top padding + the controls + a 12px
+   margin + GridStack's 6px item margin — ~68px of chrome above the first pane,
+   which started below the sidebar head's rule. Now the row owns the canvas's
+   top padding (negative margin) and is EXACTLY the sidebar head's height; its
+   controls sit on its bottom edge one pane-gap above the first pane, and the
+   negative bottom margin tucks GridStack's own top item margin under the row,
+   so the first pane's top edge lands on the head's bottom rule. _wallFill
+   measures #term-stage's top live, so the Wall still fills to the bottom. */
+.term-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+#term-new-shell { margin-left: auto; }
+@media (min-width: 769px) {
+    .term-toolbar {
+        align-items: flex-end;
+        height: var(--head-row-h);
+        margin: calc(-1 * var(--canvas-pad-y)) 0 calc(var(--wall-gap) / -2);
+        padding-bottom: var(--wall-gap);
+    }
+    #term-new-shell { height: var(--ctl-h-sm); display: inline-flex; align-items: center; }
+}
+
 /* CMX-397: the collapsible layout toolbar. Collapsed, only #term-grid-toggle
    shows (the current layout/mode glyph + a chevron); open, the full row sits
    inline beside it and the chevron turns up. The toggle is as tall as the
@@ -513,7 +549,7 @@ body {
    row's height — the Wall below does not jump. */
 #term-grid-row { display: inline-flex; gap: 6px; align-items: center; }
 #term-grid-row[hidden] { display: none; }
-#term-grid-toggle { gap: 4px; padding: 0 7px; height: 32px; border-radius: 9px; background: var(--surface); }
+#term-grid-toggle { gap: 4px; padding: 0 7px; height: var(--ctl-h-sm); border-radius: 9px; background: var(--surface); }
 #term-grid-toggle .grid-chevron { display: inline-flex; transition: transform .15s ease; }
 #term-grid-toggle.grid-open .grid-chevron { transform: rotate(180deg); }
 
@@ -3105,6 +3141,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .sidebar-head {
     flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
     padding: 12px 14px; border-bottom: 1px solid var(--border);
+    min-height: var(--head-row-h);   /* CMX-414: the Wall toolbar row matches it */
 }
 /* CMX-377: the wordmark is plain --text, not --accent — the old topbar's brand
    was accent-tinted purely decoratively (predates this restyle); the approved
@@ -3132,7 +3169,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .sidebar-new-btn svg { flex: 0 0 auto; }
 .sidebar-new-btn:hover { border-color: var(--accent); }
 .sidebar-jump {
-    height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 10px;
+    height: var(--ctl-h-sm); display: flex; align-items: center; gap: 8px; padding: 0 10px;
     border: 1px solid var(--border); border-radius: 8px; color: var(--text-dim);
 }
 .sidebar-jump svg { flex: 0 0 auto; }
@@ -3570,7 +3607,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
    `grid-row: 2` from the removed topbar row shoved the canvas below the
    sidebar (both landed in .app's only row) with nothing occupying the second
    column, so the whole right side of the viewport went blank. */
-.canvas { grid-column: 2; grid-row: 1; overflow-y: auto; padding: 18px 20px; }
+.canvas { grid-column: 2; grid-row: 1; overflow-y: auto; padding: var(--canvas-pad-y) 20px; }
 .canvas-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
 .canvas-toolbar input[type=text] { flex: 1; }
 
@@ -3928,11 +3965,12 @@ input[type="text"]:focus, textarea:focus, select:focus {
     /* Dropdown is replaced by the pill strip; the empty toolbar above collapses. */
     #term-agent { display: none !important; }
 
-    /* The terminals toolbar (wall mode toggle + grid presets + "New shell") is
-       desktop/wall-only — on phones it's an empty row with a bottom margin that
-       pushes the agent pills well down the canvas. Hide it so the pills sit
-       right at the top (under .canvas's clearance for .mobile-menu-fab). */
-    #panel-terminals > div:first-child { display: none; }
+    /* The terminals toolbar (.term-toolbar) has no visible control on a phone,
+       but it still renders as an EMPTY row whose 12px bottom margin sets where
+       the agent pills sit. A `display: none` here used to say otherwise — it
+       never applied (the row's inline style beat it), and CMX-414 moving that
+       style into the stylesheet would have switched it on and shifted the
+       pills (CMX-386/404) up 12px. Dropped: phone geometry is unchanged. */
 
     /* Scrollable agent-pill strip. (Starting a share moved to the primary menu
        in the sidebar foot, so the row no longer carries its own 🔗 trigger.) */
