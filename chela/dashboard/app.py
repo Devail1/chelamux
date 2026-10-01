@@ -241,6 +241,10 @@ def api_agents():
             "shared": window_id in _SHARED,
             # 👁 / ⌨ / UNSANDBOXED for the share pill (CMX-403); None when not shared.
             "share_mode": _share_mode(window_id),
+            # 🌐 chip on a web-mode sandboxed session (CMX-418) — display only, read from
+            # the launcher's argv; only `sandbox-*` windows pay the /proc read.
+            "share_net": (share_sandbox.window_net_mode(window_id)
+                          if name.startswith("sandbox") else None),
             # Bumped on every re-share (CMX-427): owner presence restarts when it moves.
             "share_epoch": _share_epoch(window_id),
             "window_type": win_type,
@@ -1954,21 +1958,27 @@ def api_agents_spawn():
 def api_agents_spawn_sandboxed():
     """New session → Sandboxed (CMX-403): open a window running a sandboxed share
     session (:func:`chela.spawn.spawn_sandbox_window`) in ``cwd`` — the ONLY kind of
-    window a share guest may type into. Body: ``{cwd}`` (required — a project directory;
-    $HOME and secret directories are refused by the launcher's preflight)."""
+    window a share guest may type into. Body: ``{cwd, web?}`` (``cwd`` required — a
+    project directory; $HOME and secret directories are refused by the launcher's
+    preflight. ``web: true`` opts this one session into web access, CMX-418)."""
     _require_terminals()
     body = request.get_json(silent=True) or {}
     cwd_arg = (body.get("cwd") or "").strip()
     if not cwd_arg:
         return jsonify({"ok": False, "error": "pick a project directory for the sandboxed session"}), 400
-    result = spawn.spawn_sandbox_window(cwd_arg)
+    web = body.get("web", False)
+    if not isinstance(web, bool):
+        return jsonify({"ok": False, "error": "web must be true or false"}), 400
+    result = spawn.spawn_sandbox_window(
+        cwd_arg, net=share_sandbox.NET_WEB if web else share_sandbox.NET_NONE)
     if not result.ok:
         return jsonify({"ok": False, "error": result.error}), 400
     try:
         launcher.record_recent(result.cwd)
     except Exception:  # noqa: BLE001 — a store hiccup must never fail the spawn
         log.warning("launcher.record_recent failed for %s", result.cwd, exc_info=True)
-    return jsonify({"ok": True, "name": result.name, "wid": result.wid, "cwd": result.cwd})
+    return jsonify({"ok": True, "name": result.name, "wid": result.wid, "cwd": result.cwd,
+                    "web": web})
 
 
 # ---------------------------------------------------------------------------

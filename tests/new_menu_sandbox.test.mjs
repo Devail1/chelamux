@@ -76,3 +76,39 @@ test('negative control: Shell window uses the plain spawn route, not the sandbox
     const post = calls.find(c => c.opts.method === 'POST');
     assert.match(post.url, /\/api\/agents\/spawn$/);
 });
+
+// CMX-418: "Sandboxed session · allow web access…" — the same launcher route, with
+// `web: true`, and ONLY after the operator confirms the web-access warning.
+test('the New session menu offers Sandboxed session · allow web access…', () => {
+    click(doc.querySelector('.sidebar-new-btn'));
+    const item = doc.getElementById('new-menu').querySelector('#new-sandbox-web-item');
+    assert.ok(item, 'no web-access sandboxed entry in the New session menu');
+    assert.match(item.textContent, /web access/);
+});
+
+test('the web entry POSTs web:true after the confirm', async () => {
+    let asked = '';
+    win.confirm = globalThis.confirm = (msg) => { asked = msg; return true; };
+    await click(doc.getElementById('new-sandbox-web-item'));
+    await flush();
+    const post = calls.find(c => c.opts.method === 'POST');
+    assert.ok(post, 'no launch request');
+    assert.match(post.url, /\/api\/agents\/spawn-sandboxed$/);
+    assert.deepEqual(JSON.parse(post.opts.body), { cwd: '/work/proj', web: true });
+    assert.match(asked, /PUBLIC/);
+});
+
+test('declining the web-access confirm launches nothing', async () => {
+    win.confirm = globalThis.confirm = () => false;
+    await click(doc.getElementById('new-sandbox-web-item'));
+    await flush();
+    assert.equal(calls.filter(c => c.opts.method === 'POST').length, 0);
+});
+
+test('negative control: the plain Sandboxed entry never sends web', async () => {
+    win.confirm = globalThis.confirm = () => true;
+    await click(doc.getElementById('new-sandbox-item'));
+    await flush();
+    const post = calls.find(c => c.opts.method === 'POST');
+    assert.deepEqual(JSON.parse(post.opts.body), { cwd: '/work/proj' });
+});

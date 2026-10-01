@@ -306,16 +306,18 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
     return SpawnResult(ok=True, name=name, wid=wid if have_wid else None, cwd=real)
 
 
-def next_sandbox_name(existing: set[str]) -> str:
-    """Smallest ``sandbox-N`` (N >= 1) not already a live window name."""
+def next_sandbox_name(existing: set[str], prefix: str = "sandbox") -> str:
+    """Smallest ``<prefix>-N`` (N >= 1) not already a live window name."""
     n = 1
-    while f"sandbox-{n}" in existing:
+    while f"{prefix}-{n}" in existing:
         n += 1
-    return f"sandbox-{n}"
+    return f"{prefix}-{n}"
 
 
-def spawn_sandbox_window(cwd: str | os.PathLike) -> SpawnResult:
-    """Open ONE window running a sandboxed share session (CMX-403) in ``cwd``.
+def spawn_sandbox_window(cwd: str | os.PathLike, net: str = "none") -> SpawnResult:
+    """Open ONE window running a sandboxed share session (CMX-403) in ``cwd``, with
+    network mode ``net`` (CMX-418: ``none`` by default, ``web`` opt-in — named
+    ``sandbox-web-N`` so the operator can tell them apart in tmux too).
 
     Unlike :func:`spawn_window` there is NO shell: the window's command is
     :func:`chela.share_sandbox.launcher_argv` itself, handed to tmux as separate argv
@@ -332,7 +334,7 @@ def spawn_sandbox_window(cwd: str | os.PathLike) -> SpawnResult:
     from chela import share_sandbox
 
     real = os.path.realpath(os.path.expanduser(str(cwd)))
-    why = share_sandbox.preflight(real)
+    why = share_sandbox.preflight(real, net)
     if why:
         return SpawnResult(ok=False, error=why)
     if not discovery.ensure_session():
@@ -340,10 +342,11 @@ def spawn_sandbox_window(cwd: str | os.PathLike) -> SpawnResult:
             ok=False, error="tmux is unreachable — cannot create the chela session")
     envutil.scrub_tmux_secrets()    # CMX-425: the window inherits the server's global env
     session = config.current_session()
-    name = next_sandbox_name(set(discovery.get_all_windows()))
+    name = next_sandbox_name(set(discovery.get_all_windows()),
+                             "sandbox-web" if net == share_sandbox.NET_WEB else "sandbox")
     if not _WINDOW_NAME_RE.match(name):
         return SpawnResult(ok=False, error=f"invalid window name: {name}")
-    argv = share_sandbox.launcher_argv(share_sandbox.new_session_id(), real)
+    argv = share_sandbox.launcher_argv(share_sandbox.new_session_id(), real, net)
     try:
         proc = subprocess.run(
             ["tmux", "new-window", "-t", f"{session}:", "-n", name, "-c", real,
@@ -358,5 +361,5 @@ def spawn_sandbox_window(cwd: str | os.PathLike) -> SpawnResult:
     wid = (proc.stdout or "").strip()
     have_wid = bool(_WID_RE.fullmatch(wid))
     agent_manager.lock_window_name(wid if have_wid else f"{session}:{name}")
-    log.info("spawned sandboxed session %s (%s) in %s", name, wid or "no-id", real)
+    log.info("spawned sandboxed session %s (%s, net=%s) in %s", name, wid or "no-id", net, real)
     return SpawnResult(ok=True, name=name, wid=wid if have_wid else None, cwd=real)
