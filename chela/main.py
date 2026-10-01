@@ -984,6 +984,34 @@ def _report_installed_plugin(directory: Path, port: int) -> None:
               "`claude plugin update chela@<marketplace>`)")
 
 
+def resolve_project_dir(project: str) -> str | None:
+    """A ``share-session`` project argument → a directory: a path as given, else a name
+    under the launcher's projects dir (``CHELA_PROJECTS_DIR``). None if neither exists."""
+    from chela import launcher
+    p = os.path.expanduser(project)
+    if os.path.isdir(p):
+        return os.path.realpath(p)
+    under = launcher._projects_dir() / project
+    return os.path.realpath(under) if under.is_dir() else None
+
+
+def cmd_share_session(args) -> None:
+    """Open a sandboxed share session (CMX-403) — the only kind of window a share guest
+    may type into. Same launcher as the dashboard's New session → Sandboxed."""
+    cwd = resolve_project_dir(args.project)
+    if cwd is None:
+        print(f"no such project directory: {args.project}", file=sys.stderr)
+        sys.exit(1)
+    from chela import spawn
+    result = spawn.spawn_sandbox_window(cwd)
+    if not result.ok:
+        print(f"refusing to start a sandboxed session: {result.error}", file=sys.stderr)
+        sys.exit(1)
+    print(f"sandboxed session {result.name} ({result.wid or 'no id'}) in {result.cwd}")
+    print("share it from the dashboard; guest typing also needs Settings → Collaboration → "
+          "Guest typing")
+
+
 def cmd_whoami(args) -> None:
     """Print this agent's own window id (CHELA_WID / derived from tmux)."""
     wid = orchestrator.self_wid()
@@ -1116,6 +1144,12 @@ def cmd_wait(args) -> None:
 def _print_hold(held, prefix: str = "") -> None:
     print(f"{prefix}Dispatch is HELD — no task will be claimed until it is released.")
     print(f"  {held.summary()}")
+    # CMX-413: say what the hold stops (judges and rework re-spawns too, not only claims)
+    # and what it deliberately lets finish — from the runs table, never a guess.
+    head, *items = dispatcher.hold_inflight_lines()
+    print(f"  {head}")
+    for line in items:
+        print(f"    {line}")
     print("  Reconciliation keeps running: a merged PR still closes out its run and "
           "frees its slot.")
     print("  Release: chela dispatch --resume")
@@ -2239,7 +2273,18 @@ def cmd_judge(args) -> None:
 
     ⛔ It never merges and never approves: a clean PR stays ``awaiting_review``.
     """
-    result = judge.judge_run(args.run, args.experiments, cleanup=not args.no_cleanup)
+    if getattr(args, "detach", False):
+        # ⏱️ CMX-411: the battery outlives the caller's shell — see judge.detach_judge_run.
+        started = judge.detach_judge_run(args.run, args.experiments, cleanup=not args.no_cleanup)
+        if not started.get("ok"):
+            print(f"judge: {started.get('error', 'unknown error')}")
+            sys.exit(1)
+        print(f"⚖️ {started['task_id']}: judge run started DETACHED (pid {started['pid']}) — "
+              "it publishes the verdict and closes the judge window by itself.")
+        print(f"  log: {started['log']}   progress: `chela doctor`")
+        return
+    result = judge.judge_run(args.run, args.experiments, cleanup=not args.no_cleanup,
+                             detached=getattr(args, "detached_child", False))
     if not result.get("ok") and "task_id" not in result:
         print(f"judge: {result.get('error', 'unknown error')}")
         sys.exit(1)
@@ -2248,6 +2293,15 @@ def cmd_judge(args) -> None:
     for outcome in result.get("outcomes") or []:
         print(f"  [{outcome['verdict']:8}] {outcome['file']}: {outcome['guard'][:70]}")
         print(f"             {outcome['reason']}")
+    held = result.get("held_out") or {}
+    if held.get("total"):
+        # ⚖️🙈 CMX-395: counted here, named only in `chela judge show <run> --held-out`.
+        print(f"  🙈 {held['total']} held-out experiment(s), {held.get('survived', 0)} "
+              "survived — details: `chela judge show "
+              f"{result['task_id']} --held-out`")
+    if result.get("flaky"):
+        print(f"  🎲 {result['flaky']} experiment(s) FLIPPED on their consistency re-run — "
+              "flaky, excluded from blocking")
     if state == judge.J_BLOCKED:
         print(f"⚖️ {result['task_id']}: {result['blocking']} guard(s) SURVIVED corruption — "
               f"the PR was SENT BACK (rework round {result.get('round')}).")
@@ -2302,6 +2356,56 @@ def cmd_judge_self_check(args) -> None:
         sys.exit(2)
     print(f"✓ every guard held ({len(result['outcomes'])} experiment(s), all KILLED) — "
           "safe to commit.")
+
+
+def cmd_judge_show(args) -> None:
+    """⚖️🙈 CMX-395: the operator's view of a run's judge rounds — rounds-to-clean, visible
+    vs held-out survival rates, consistency flips — read from the PRIVATE record under
+    ``$CHELA_DIR`` (never the PR). ``--held-out`` prints each held-out experiment in full:
+    that is operator-only data, the one thing the rework loop is never shown."""
+    run = dispatcher.resolve_run(args.run)
+    task_id = run["task_id"] if run else args.run
+    records = judge.load_private(task_id)
+    if not records:
+        print(f"judge show: no judge rounds recorded for {task_id!r} "
+              f"(looked in {judge.heldout_store_path(task_id)})")
+        sys.exit(1)
+
+    def pct(pair: tuple[int, int]) -> str:
+        n, d = pair
+        return f"{n}/{d} ({n / d:.0%})" if d else "0/0 (—)"
+
+    m = judge.private_metrics(records)
+    to_clean = (f"{m['rounds_to_clean']}" if m["rounds_to_clean"]
+                else f"not clean yet ({m['rounds']} round(s))")
+    print(f"⚖️ {task_id} — {m['rounds']} judge round(s)")
+    print(f"  rounds-to-clean:        {to_clean}")
+    print(f"  visible survival rate:  {pct(m['visible'])}")
+    print(f"  held-out survival rate: {pct(m['held_out'])}")
+    print(f"  consistency flip rate:  {pct(m['flips'])}")
+    n = 0
+    for rec in records:
+        if not rec.get("stale"):
+            n += 1
+        label = "stale" if rec.get("stale") else f"#{n}"
+        vis, held = rec.get("visible") or {}, rec.get("held_out") or {}
+        cons = rec.get("consistency") or {}
+        print(f"  {label:>6} {rec.get('at', '?')} {(rec.get('sha') or '?')[:12]:12} "
+              f"{rec.get('state', '?'):14} visible {vis.get('survived', 0)}/"
+              f"{vis.get('total', 0)} survived · held-out {held.get('survived', 0)}/"
+              f"{held.get('total', 0)} (quota {held.get('quota', 0)}) · flips "
+              f"{cons.get('flipped', 0)}/{cons.get('sampled', 0)}")
+        for flip in cons.get("flips") or []:
+            print(f"           🎲 {flip.get('guard', '?')[:70]}: {flip.get('first')} → "
+                  f"{flip.get('rerun')}{' (held-out)' if flip.get('held_out') else ''}")
+        if args.held_out:
+            for o in held.get("outcomes") or []:
+                print(f"           🙈 [{o.get('verdict', '?'):8}] {o.get('file', '?')}: "
+                      f"{str(o.get('guard', '?'))[:70]}")
+                for line in str(o.get("before", "")).splitlines():
+                    print(f"                - {line}")
+                for line in str(o.get("after", "")).splitlines():
+                    print(f"                + {line}")
 
 
 def cmd_judge_ack_blocked_race(args) -> None:
@@ -2675,6 +2779,10 @@ def main() -> None:
 
     # --- orchestrator toolkit (agent-facing: observe + drive siblings) ---
     sub.add_parser("whoami", help="Print this agent's own window id ($CHELA_WID)")
+    p_ss = sub.add_parser(
+        "share-session",
+        help="Open a sandboxed session (container) a share guest may type into")
+    p_ss.add_argument("project", help="project directory, or a name under CHELA_PROJECTS_DIR")
 
     p_peek = sub.add_parser(
         "peek", help="Filtered status view of a window (status + recap + cwd + health)")
@@ -2849,8 +2957,10 @@ def main() -> None:
     # the daemon that honours it is not the process that takes it.
     p_disp.add_argument(
         "--pause", action="store_true",
-        help="HOLD the queue: claim no new task until --resume (reconciliation continues). "
-             "Take this BEFORE reordering the tracker.",
+        help="HOLD the queue until --resume: no new claims, no new judges, no rework "
+             "re-spawns. Agents and judges already running are NOT stopped — they finish "
+             "(the output lists them). Reconciliation continues. Take this BEFORE "
+             "reordering the tracker.",
     )
     p_disp.add_argument("--resume", action="store_true", help="Release the queue hold")
     p_disp.add_argument(
@@ -2929,6 +3039,14 @@ def main() -> None:
         "--no-cleanup", action="store_true",
         help="Keep the judge worktree and the tmux window (debugging a judge run by hand)",
     )
+    p_jrun.add_argument(
+        "--detach", action="store_true",
+        help="Run the battery in its own session (setsid), logging to "
+             "$CHELA_DIR/judge-logs/<task>.log, and return at once. A second run on the "
+             "same task while one is live is refused",
+    )
+    # The child `--detach` re-execs — it owns its own process group. Not for humans.
+    p_jrun.add_argument("--detached-child", action="store_true", help=argparse.SUPPRESS)
     p_jcheck = judge_sub.add_parser(
         "self-check",
         help="⚖️🔎 Run the judge's own mutation mechanics against YOUR OWN worktree, before "
@@ -2951,6 +3069,19 @@ def main() -> None:
     p_jcheck.add_argument(
         "--cwd", metavar="DIR", default=".",
         help="Worktree to mutate in place (default: the current directory)",
+    )
+    from chela.judge_eval import cli as judge_eval_cli
+    judge_eval_cli.add_parser(judge_sub)
+    p_jshow = judge_sub.add_parser(
+        "show",
+        help="⚖️🙈 A run's judge rounds from the operator's private record: rounds-to-clean, "
+             "visible vs held-out survival rates, consistency flips",
+    )
+    p_jshow.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-395)")
+    p_jshow.add_argument(
+        "--held-out", action="store_true",
+        help="Also print every held-out experiment in full (operator-only — never paste "
+             "this into a PR or a rework prompt)",
     )
     p_jack = judge_sub.add_parser(
         "ack-blocked-race",
@@ -3259,6 +3390,8 @@ def main() -> None:
         cmd_broadcast(args)
     elif args.command == "plugin":
         cmd_plugin(args)
+    elif args.command == "share-session":
+        cmd_share_session(args)
     elif args.command == "whoami":
         cmd_whoami(args)
     elif args.command == "peek":
@@ -3327,6 +3460,11 @@ def main() -> None:
             cmd_judge_self_check(args)
         elif args.judge_cmd == "ack-blocked-race":
             cmd_judge_ack_blocked_race(args)
+        elif args.judge_cmd == "eval":
+            from chela.judge_eval import cli as judge_eval_cli
+            judge_eval_cli.main(args)
+        elif args.judge_cmd == "show":
+            cmd_judge_show(args)
         else:
             p_judge.print_help()
     elif args.command == "adopt":

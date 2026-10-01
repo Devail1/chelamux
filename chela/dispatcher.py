@@ -20,12 +20,13 @@ from chela.config import (
     judge_max_concurrent,
     judge_max_unknown_retries,
     judge_outage_backoff_seconds,
-    max_reworks,
+    max_reworks_for,
+    judge_max_experiments,
     worktree_disk_budget_bytes,
 )
 from chela.messenger import messaging_socket_launch_arg, resend_enter, send_tmux
 from chela.sandbox import sandbox_launch_arg
-from chela.sources import Task, get_source
+from chela.sources import Task, get_source, run_risk
 from chela import transcripts
 from chela.transcripts import agent_transcript_summary
 from chela.tui_text import sanitize as tui_sanitize
@@ -158,6 +159,10 @@ SEED_RESEND_SETTLE_SECONDS = float(os.environ.get("CHELA_SEED_RESEND_SETTLE_SECO
 # default `--permission-mode auto` does not render it).
 _READY_FOOTER = "bypass permissions"
 _PROMPT_CHAR = "❯"  # ❯
+# `capture-pane -e` escapes (see _drop_ghost_suggestion): SGR, and every CSI to strip.
+_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_BOX_EDGE = "│"
 
 # Active-work signature (see _pane_shows_activity). The Claude Code TUI draws its
 # working spinner (a cycling star glyph) + a live "(<elapsed> · ↓ <n> tokens)" /
@@ -1218,6 +1223,12 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("judge_sha", "ALTER TABLE runs ADD COLUMN judge_sha TEXT"),
         ("judge_state", "ALTER TABLE runs ADD COLUMN judge_state TEXT"),
         ("judge_started_at", "ALTER TABLE runs ADD COLUMN judge_started_at TEXT"),
+        # ⏱️ CMX-411. When `chela judge run` itself STARTED (its own marker, written right
+        # after it claims the slot) — distinct from `judge_started_at`, which is when the
+        # judge AGENT was spawned. The watchdog's wall measures the battery from here once it
+        # exists: an agent's design time must not be charged to the run. NULL until the run
+        # starts; `_spawn_judge` clears it on every new judge.
+        ("judge_run_started_at", "ALTER TABLE runs ADD COLUMN judge_run_started_at TEXT"),
         ("judge_detail", "ALTER TABLE runs ADD COLUMN judge_detail TEXT"),
         # ⚖️ CMX-81. How many times the judge has been RE-RUN on the CURRENT `judge_sha` after
         # coming back CANNOT VERIFY. `cannot_verify` is an UNKNOWN (a flake, a gh timeout, a
@@ -1329,6 +1340,13 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # announce it exactly once.
         ("merged_outside_gate",
          "ALTER TABLE runs ADD COLUMN merged_outside_gate INTEGER NOT NULL DEFAULT 0"),
+        # ⚖️🎚️ CMX-405. The task's RISK level (high/normal/low) and why it has it — copied
+        # from the TRACKER at claim time (a marker/label, the BOUNDARIES inference, or the
+        # default) and never written by anything an agent can call. It scales the judge's
+        # experiment cap and this run's rework cap (see `_rework_cap`); NULL (a row from
+        # before this, an adopted PR) reads as `normal` via `sources.run_risk`.
+        ("risk", "ALTER TABLE runs ADD COLUMN risk TEXT"),
+        ("risk_reason", "ALTER TABLE runs ADD COLUMN risk_reason TEXT"),
         # 🧊 CMX-336. `_blocked_race_resolved` (chela/runtime_truth.py) clears a
         # `J_BLOCKED_RACE` row on exactly one condition — `judge_sha != pr_head_sha`, i.e.
         # the PR's head moved past the judged commit. That is unreachable once the PR is
@@ -1422,13 +1440,87 @@ def _parse_ts(ts: str | None) -> datetime | None:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
-def _capture_pane(window_name: str) -> str:
-    """Return the visible text of a tmux window's pane (empty string on error)."""
-    out = subprocess.run(
-        ["tmux", "capture-pane", "-p", "-t", f"{TMUX_SESSION}:{window_name}"],
-        capture_output=True, text=True,
-    )
+def _capture_pane(window_name: str, *, ansi: bool = False) -> str:
+    """Return the visible text of a tmux window's pane (empty string on error).
+
+    ``ansi=True`` adds tmux's ``-e`` so SGR escapes ride along. The watchdog needs them:
+    a plain capture strips the one attribute (SGR 2, faint) that tells Claude Code's ghost
+    suggestion apart from a typed draft (see :func:`_drop_ghost_suggestion`).
+    """
+    cmd = ["tmux", "capture-pane", "-p", "-t", f"{TMUX_SESSION}:{window_name}"]
+    if ansi:
+        cmd.insert(2, "-e")
+    out = subprocess.run(cmd, capture_output=True, text=True)
     return out.stdout if out.returncode == 0 else ""
+
+
+def _sgr_faint(params: str, faint: bool) -> bool:
+    """The faint (SGR 2) state after applying one ``ESC[<params>m`` to ``faint``.
+
+    Walks the parameters rather than substring-matching "2": ``38;5;2`` is colour 2 and
+    ``38;2;r;g;b`` is truecolour, neither of them faint.
+    """
+    codes = params.split(";") if params else ["0"]
+    i = 0
+    while i < len(codes):
+        c = codes[i] or "0"
+        if c in ("38", "48", "58"):
+            # Extended colour: `5;n` (256) or `2;r;g;b` (truecolour) — skip its operands.
+            i += 3 if i + 1 < len(codes) and codes[i + 1] == "5" else 5
+            continue
+        if c == "0" or c == "22":
+            faint = False
+        elif c == "2":
+            faint = True
+        i += 1
+    return faint
+
+
+def _input_is_ghost_only(segment: str, faint: bool) -> bool:
+    """True when every visible glyph of ``segment`` (the input line after `❯`) is faint.
+
+    ``faint`` is the SGR 2 state carried in from earlier on the line. Whitespace and the
+    input box's `│` border don't count as input, so an empty prompt is ghost-only too.
+    """
+    pos = 0
+    for m in _SGR_RE.finditer(segment):
+        if not _visible_all_faint(segment[pos:m.start()], faint):
+            return False
+        faint = _sgr_faint(m.group(1), faint)
+        pos = m.end()
+    return _visible_all_faint(segment[pos:], faint)
+
+
+def _visible_all_faint(text: str, faint: bool) -> bool:
+    text = _CSI_RE.sub("", text)
+    return faint or not text.replace(_BOX_EDGE, "").strip()
+
+
+def _drop_ghost_suggestion(pane: str) -> str:
+    """Plain text of an ``-e`` capture, with Claude Code's ghost suggestion removed.
+
+    👻 CMX-410: Claude Code draws a grey SUGGESTION into an EMPTY prompt
+    (``❯ Try "fix lint errors"``). It is the input's placeholder, so it is faint (SGR 2) by
+    construction, and it is shown ONLY while the input is empty (anthropics/claude-code
+    #23859) — so seeing it proves the prompt is empty. A plain capture strips the SGR and
+    the ghost reads as a typed draft: cmx-408 sat stranded ~8h because of that.
+
+    The discriminator is SGR 2 on the INPUT line right after `❯`. Claude's recap is dim
+    too (italic + grey 246) but it lives elsewhere on screen, and it is not SGR 2 anyway.
+    A typed draft has no SGR 2 and is kept. Everything else is returned with its escapes
+    stripped, so the plain-text heuristics read it exactly as before.
+    """
+    out = []
+    for line in pane.splitlines():
+        if _PROMPT_CHAR in line:
+            head, tail = line.split(_PROMPT_CHAR, 1)
+            faint = False
+            for m in _SGR_RE.finditer(head):
+                faint = _sgr_faint(m.group(1), faint)
+            if _input_is_ghost_only(tail, faint):
+                line = head + _PROMPT_CHAR
+        out.append(_CSI_RE.sub("", line))
+    return "\n".join(out) + ("\n" if pane.endswith("\n") else "")
 
 
 def _pane_ready(pane: str) -> bool:
@@ -3082,7 +3174,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
         if head_moved:
             new_status = "awaiting_review"
             text = (
-                f"🔀 Rework round {rework_count}/{max_reworks()} disputed by the agent, "
+                f"🔀 Rework round {rework_count}/{_rework_cap(fresh)} disputed by the agent, "
                 f"but the PR's head already moved past the disputed verdict "
                 f"(`{judge_sha[:12]}` → `{ci.head_sha[:12]}`) — routed back to automatic "
                 f"review instead of a human; the new head still goes through the judge "
@@ -3096,7 +3188,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
         else:
             new_status = "needs_human"
             text = _format_escalation(
-                f"🔁🚫 Rework round {rework_count}/{max_reworks()} disputed by the agent — "
+                f"🔁🚫 Rework round {rework_count}/{_rework_cap(fresh)} disputed by the agent — "
                 f"nothing was pushed: {reason}",
                 recommendation="Read the agent's reasoning against the verdict. If it's right, "
                                 "`chela retry` to send the same head through the loop again "
@@ -3142,7 +3234,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
     return {
         "ok": True, "task_id": task_id, "status": new_status,
         "branch_name": row.get("branch_name"), "pr_url": pr_url,
-        "rework_count": rework_count, "max_reworks": max_reworks(),
+        "rework_count": rework_count, "max_reworks": _rework_cap(row),
         "comment_posted": posted, "comment_detail": detail,
         "head_moved": head_moved,
     }
@@ -3277,7 +3369,10 @@ def latest_required_mutations(run: dict) -> list[dict]:
         if r.get("verdict") in ("retry", "override"):
             continue
         raw = r.get("mutations")
-        return [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+        # ⚖️🙈 CMX-395: belt-and-braces — the judge never stores a held-out experiment here,
+        # but this list is pasted verbatim into the rework prompt, so refuse one regardless.
+        return ([m for m in raw if isinstance(m, dict) and not m.get("held_out")]
+                if isinstance(raw, list) else [])
     return []
 
 
@@ -3572,7 +3667,7 @@ def request_changes(
         "ok": True, "task_id": task_id, "status": "changes_requested",
         "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
         "round": len(reviews), "rework_count": run.get("rework_count") or 0,
-        "max_reworks": max_reworks(), "comment_posted": posted, "comment_detail": detail,
+        "max_reworks": _rework_cap(run), "comment_posted": posted, "comment_detail": detail,
         # The CLI checks that SOMETHING will actually come and pick this run up before it
         # tells the reviewer so (main._rework_prospects). It needs the workflow to check.
         "workflow_path": wf_path,
@@ -3861,7 +3956,7 @@ def reopen(ident: str, reason: str = "") -> dict:
     result = {
         "ok": True, "task_id": task_id, "status": "awaiting_review",
         "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
-        "rework_count": run.get("rework_count") or 0, "max_reworks": max_reworks(),
+        "rework_count": run.get("rework_count") or 0, "max_reworks": _rework_cap(run),
         "reopen_count": new_reopen_count,
         "comment_posted": posted, "comment_detail": detail,
     }
@@ -3950,7 +4045,7 @@ def retry(ident: str, reason: str = "") -> dict:
     if not posted:
         log.warning("retry: %s is changes_requested again, but the PR comment did not post "
                     "(%s)", task_id, detail)
-    cap = max_reworks()
+    cap = _rework_cap(run)
     log.info(
         "retry: %s (needs_human) → changes_requested (rework %d/%d, retry #%d)",
         task_id, run.get("rework_count") or 0, cap + new_retry_count, new_retry_count,
@@ -4183,6 +4278,14 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
         "worktree_path": run.get("worktree_path"), "worktree_removed": worktree_removed,
         "worktree_detail": worktree_detail,
     }
+
+
+def mark_judge_run_started(task_id: str) -> None:
+    """⏱️ CMX-411: stamp ``judge_run_started_at`` — the moment ``chela judge run`` itself
+    began, which is where the watchdog's wall starts counting (see ``_judge_watchdog``)."""
+    with _db() as conn:
+        conn.execute("UPDATE runs SET judge_run_started_at=? WHERE task_id=?", (_now(), task_id))
+        conn.commit()
 
 
 def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | None = None,
@@ -5077,7 +5180,9 @@ def tick(workflow_path: str | Path) -> dict:
                 )
                 if idle_age_ok:
                     window = row["window_name"]
-                    pane = _capture_pane(window)
+                    # 👻 CMX-410: captured WITH escapes so the ghost suggestion (faint text
+                    # in an empty prompt) can be told from a typed draft, then flattened.
+                    pane = _drop_ghost_suggestion(_capture_pane(window, ansi=True))
                     status = _agent_status(window)
                     task = tasks_by_id.get(row["task_id"])
                     nudged = _parse_ts(row["idle_nudged_at"])
@@ -5288,7 +5393,7 @@ def tick(workflow_path: str | Path) -> dict:
                 # tick; a crash after costs at most one missed comment, and the next tick's
                 # log.warning still says so.
                 streak = (row["ci_infra_streak"] or 0) + 1
-                cap = max_reworks()
+                cap = _rework_cap(row)
                 conn.execute(
                     "UPDATE runs SET ci_failed_sha=?, ci_infra_streak=? WHERE task_id=?",
                     (sha, streak, task_id),
@@ -5413,11 +5518,13 @@ def tick(workflow_path: str | Path) -> dict:
         # meant a paused queue also paused the ONE transition that says "the loop gave up,
         # come look" — and a hold that is forgotten is exactly when you need that said. A
         # broken WORKFLOW.md must not silence it either: `needs_human` is how it gets fixed.
-        cap = max_reworks()
         for row in conn.execute(
             "SELECT * FROM runs WHERE workflow_path=? AND status='changes_requested'",
             (str(wf.path),),
         ).fetchall():
+            # ⚖️🎚️ CMX-405: the cap is THIS run's risk level's (high 5 / normal 4 / low 3),
+            # not one global number — reaching it escalates exactly as the global one did.
+            cap = _rework_cap(row)
             # 🔁🚪 CMX-237. A `chela retry` grants extra rounds ON TOP of the automatic
             # budget — never folded into `cap` itself, so a run with no grant escalates at
             # EXACTLY `cap`, same as before this existed.
@@ -5750,6 +5857,23 @@ def _task_brief(task: Task) -> str | None:
     return task.body or task.raw or task.title
 
 
+def _row_risk(row) -> str:
+    """⚖️🎚️ CMX-405. The risk level recorded on a run row (``normal`` for NULL, garbage,
+    or a row read before the column existed — a hand-built dict in a test, an old Row)."""
+    try:
+        keys = row.keys()
+    except AttributeError:
+        keys = row
+    return run_risk(row["risk"] if "risk" in keys else None)
+
+
+def _rework_cap(row) -> int:
+    """⚖️🎚️ CMX-405. THIS run's automatic rework budget — its risk level's cap (high 5,
+    normal 4, low 3 by default, under the global ``CHELA_MAX_REWORKS`` ceiling). Every
+    place that used to read the one global cap for a specific run reads this instead."""
+    return max_reworks_for(_row_risk(row))
+
+
 def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) -> bool:
     repo_path = wf.path.parent
     base_branch = wf.get("workspace", "base_branch", default="master")
@@ -5793,16 +5917,23 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     # conflict: leaving attempt 1's id would point the next run_review at a corpse
     # (or, worse, at whatever window tmux later recycled that id onto).
     conn.execute(
-        """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number, brief)
-           VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?)
+        """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number, brief, risk, risk_reason)
+           VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(task_id) DO UPDATE SET
              status='claimed', window_name=excluded.window_name,
              worktree_path=excluded.worktree_path, branch_name=excluded.branch_name,
              started_at=excluded.started_at, attempt=excluded.attempt, last_error=NULL,
              task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL,
-             window_epoch=NULL, brief=excluded.brief""",
-        (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt, task_number, _task_brief(task)),
+             window_epoch=NULL, brief=excluded.brief, risk=excluded.risk,
+             risk_reason=excluded.risk_reason""",
+        (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt,
+         task_number, _task_brief(task), run_risk(task.risk), task.risk_reason),
     )
+    if task.risk_reason.startswith("inferred"):
+        # ⚖️🎚️ CMX-405: the tracker gave no level, so the BOUNDARIES fallback chose one —
+        # said out loud, so an orchestrator who disagrees knows to mark the bullet.
+        log.info("Task %s: risk %s (%s) — no explicit risk marker on the tracker entry",
+                 task.id, task.risk, task.risk_reason)
     conn.commit()
 
     prompt = render_prompt(wf.prompt_template, hook_vars)
@@ -6221,7 +6352,7 @@ def _rework_vars(
         ),
         "verdict": verdict,
         "rework_round": rework_round,
-        "max_reworks": max_reworks(),
+        "max_reworks": _rework_cap(row),
         "required_mutations_section": _required_mutations_section(mutations or []),
     }
 
@@ -6338,7 +6469,7 @@ def _rework_failed(conn: sqlite3.Connection, row: sqlite3.Row, error: str) -> No
     conn.commit()
     log.warning(
         "Task %s: rework round %d FAILED (%s) — back to changes_requested, verdict intact "
-        "(cap %d)", task_id, spent, error, max_reworks(),
+        "(cap %d)", task_id, spent, error, _rework_cap(row),
     )
 
 
@@ -6461,7 +6592,7 @@ def _respawn_rework(
     )
     log.info(
         "Task %s: rework round %d/%d spawned in %s on %s (PR %s)",
-        task_id, rework_round, max_reworks(), worktree, branch, row["pr_url"] or "?",
+        task_id, rework_round, _rework_cap(row), worktree, branch, row["pr_url"] or "?",
     )
     return True
 
@@ -6496,6 +6627,15 @@ guarded state folded back in, a colourblind cue whose glyph could be emptied wit
 failures, a whole production wiring that could be REVERTED with 1112 passed.
 
 **A guard that survives deliberate corruption is not a guard.** That is what you hunt.
+
+## Stakes: risk {{risk}} — at most {{max_experiments}} experiments
+
+{{risk_guidance}}
+
+chela RUNS at most **{{max_experiments}}** of your experiments (any past that are dropped,
+and the verdict says so), so put the ones that matter first. ⛔ The level sizes your SEARCH,
+nothing else: every experiment that does run is judged exactly the same way, and a mutation
+that SURVIVES **blocks this PR at every risk level** — it is never downgraded to a note.
 
 ## Do this, in order
 
@@ -6539,13 +6679,68 @@ failures, a whole production wiring that could be REVERTED with 1112 passed.
      differently". They are posted as a comment and can never send a PR back. ⛔ Do not
      smuggle an opinion into an experiment: **you are allowed to be useless. You are not
      allowed to be wrong.**
+   - 🙈 **HOLD SOME OUT — you choose which.** Add `"held_out": true` to about
+     {{held_out_pct}}% of your experiments (at least 1 once you propose
+     {{held_out_min}} or more) — pick ones that test the same invariants in a different way
+     from the visible ones, not throwaways. chela runs them like any other and a held-out
+     survivor still BLOCKS, but the PR comment and the rework prompt only ever say HOW MANY
+     held-out guards survived, never which. That is what stops a rework from patching just
+     the listed cases instead of fixing the guard. ⛔ Never mention a held-out experiment in
+     `notes` — notes are posted to the PR.
 
-4. Run **`{{judge_cmd}}`** — your last step. It publishes the verdict, cleans up, and closes
-   this window.
+4. Run **`{{judge_cmd}}`** — your last step. `--detach` starts the battery in its own
+   process group and returns AT ONCE (it can take far longer than your Bash tool allows);
+   it publishes the verdict, cleans up, and closes this window by itself. Its log is
+   `{{judge_log}}`. ⛔ **Then stop.** Do not re-run it, and do not wait on it with a
+   foreground command — a second run on this task is refused, never restarted from zero.
 
 If you genuinely cannot find a guard to corrupt, say so in `notes` and still run the
 command with `"experiments": []` — that is recorded as **CANNOT VERIFY**, not as a pass.
 """
+
+
+def judge_prompt_vars(
+    *, wf: WorkflowDef | None, risk: str, task_id: str, task_title: str, task_body: str,
+    branch_name: str, base_branch: str, workspace_path: str, repo_path: str,
+    project_key: str, task_number, pr_url: str, head_sha: str, experiments_path: str,
+    judge_cmd: str, judge_log: str, test_cmd: str, diff_cmd: str, pr_view_cmd: str,
+) -> dict:
+    """📏 CMX-408. EVERY variable :data:`JUDGE_PROMPT` renders with — the one map both the
+    live judge (:func:`_judge_vars`) and the offline eval (``chela.judge_eval.design``)
+    build, so the eval can never drift from the prompt the judge actually sees. The
+    caller-specific values are keyword-only and required (a caller that forgets one fails
+    loudly); what a risk level and the workflow's judge knobs buy is derived HERE, once."""
+    return {
+        # ⚖️🎚️ CMX-405: the run's risk level (from the tracker, via the run row) and what
+        # it buys — the experiment cap `chela judge run` enforces, and how to spend it.
+        "risk": risk,
+        "max_experiments": judge_max_experiments(risk),
+        "risk_guidance": judge.RISK_GUIDANCE[risk],
+        "task_id": task_id,
+        "task_title": task_title,
+        # 📭🧾 CMX-378: kept for parity with the other `_prompt_vars`-style maps even though
+        # JUDGE_PROMPT does not render it today — see `_rework_vars` for why this is `task`'s
+        # own body, never `row["brief"]`.
+        "task_body": task_body,
+        "branch_name": branch_name,
+        "base_branch": base_branch,
+        "workspace_path": workspace_path,
+        "repo_path": repo_path,
+        "project_key": project_key,
+        "task_number": task_number,
+        "pr_url": pr_url,
+        "head_sha": head_sha,
+        "experiments_path": experiments_path,
+        "judge_cmd": judge_cmd,
+        "judge_log": judge_log,
+        "test_cmd": test_cmd,
+        # ⚖️🙈 CMX-395: the held-out quota the judge is asked to meet.
+        "held_out_pct": round((judge.judge_held_out_fraction(wf) if wf is not None
+                               else judge.HELD_OUT_FRACTION) * 100),
+        "held_out_min": judge.HELD_OUT_MIN_EXPERIMENTS,
+        "diff_cmd": diff_cmd,
+        "pr_view_cmd": pr_view_cmd,
+    }
 
 
 def _judge_vars(
@@ -6554,28 +6749,29 @@ def _judge_vars(
     number = _pr_number(row["pr_url"])
     base = wf.get("workspace", "base_branch", default="master")
     exp_path = judge.experiments_path(worktree)
-    return {
-        "task_id": row["task_id"],
-        "task_title": row["title"] or "",
-        # 📭🧾 CMX-378: kept for parity with the other `_prompt_vars`-style maps even though
-        # JUDGE_PROMPT does not render it today — see `_rework_vars` for why this is `task`'s
-        # own body, never `row["brief"]`.
-        "task_body": (task.body if task else None) or "",
-        "branch_name": row["branch_name"] or "",
-        "base_branch": base,
-        "workspace_path": str(worktree),
-        "repo_path": str(wf.path.parent),
-        "project_key": wf.project_key,
-        "task_number": row["task_number"],
-        "pr_url": row["pr_url"] or "(no PR link on the run row)",
-        "head_sha": sha,
-        "experiments_path": str(exp_path),
-        "judge_cmd": f"chela judge run {row['task_id']} --experiments {exp_path}",
-        "test_cmd": judge.judge_test_cmd(wf) or "(none)",
-        "diff_cmd": f"git diff origin/{base}...HEAD",
-        "pr_view_cmd": (f"gh pr view {number} --comments" if number
-                        else "gh pr view --comments   # no PR url on the run row"),
-    }
+    return judge_prompt_vars(
+        wf=wf,
+        risk=_row_risk(row),
+        task_id=row["task_id"],
+        task_title=row["title"] or "",
+        task_body=(task.body if task else None) or "",
+        branch_name=row["branch_name"] or "",
+        base_branch=base,
+        workspace_path=str(worktree),
+        repo_path=str(wf.path.parent),
+        project_key=wf.project_key,
+        task_number=row["task_number"],
+        pr_url=row["pr_url"] or "(no PR link on the run row)",
+        head_sha=sha,
+        experiments_path=str(exp_path),
+        # ⏱️ CMX-411: `--detach` — the battery must not live inside the agent's Bash tool.
+        judge_cmd=f"chela judge run {row['task_id']} --experiments {exp_path} --detach",
+        judge_log=str(judge.judge_log_path(row["task_id"])),
+        test_cmd=judge.judge_test_cmd(wf) or "(none)",
+        diff_cmd=f"git diff origin/{base}...HEAD",
+        pr_view_cmd=(f"gh pr view {number} --comments" if number
+                     else "gh pr view --comments   # no PR url on the run row"),
+    )
 
 
 def _is_adopted(row) -> bool:
@@ -6687,8 +6883,8 @@ def _spawn_judge(
     tries = prior + 1 if retried_unknown else prior
     conn.execute(
         "UPDATE runs SET judge_sha=?, judge_state=?, judge_started_at=?, judge_detail=?, "
-        "judge_cannot_verify_tries=?, judge_no_verdict=0, judge_retry_after=NULL "
-        "WHERE task_id=?",
+        "judge_cannot_verify_tries=?, judge_no_verdict=0, judge_retry_after=NULL, "
+        "judge_run_started_at=NULL WHERE task_id=?",
         (sha, judge.J_RUNNING, _now(), "", tries, task_id),
     )
     conn.commit()
@@ -6777,7 +6973,11 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         (str(wf.path), judge.J_RUNNING),
     ).fetchall():
         window = judge.judge_window_name(row["branch_name"] or "")
-        started = _parse_ts(row["judge_started_at"])
+        # ⏱️ CMX-411: the wall measures the RUN, from its own start marker, once there is
+        # one — not the agent's design time before it. Until the run starts, the agent's
+        # spawn time bounds the agent instead, so a judge that never runs is still reaped.
+        run_started = _parse_ts(row["judge_run_started_at"])
+        started = run_started or _parse_ts(row["judge_started_at"])
         timed_out = (
             started is not None and now is not None
             and (now - started).total_seconds() >= JUDGE_TIMEOUT_SECONDS
@@ -6790,7 +6990,12 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         # gone) and this is a THIRD, affirmative reason to reap on top of `timed_out` — it
         # never widens what already reaps without it: `alive and timed_out` reaped before
         # this existed, and a dead window reaps via the lock cross-check below either way.
-        login_expired = alive and _pane_shows_login_expired(_capture_pane(window))
+        # ⏱️ CMX-411: once the run has started, it runs detached and needs nothing more
+        # from the agent's session — an expired login there is not a reason to reap it.
+        login_expired = (
+            alive and run_started is None
+            and _pane_shows_login_expired(_capture_pane(window))
+        )
         # ⚖️🌩️ CMX-379: the auto-mode classifier outage is the same kind of never-got-a-
         # chance failure. Measured 2026-09-28 on PR #529: every Bash call failed, the judge
         # stopped after the harness's 10-in-a-row limit and sat idle, holding the only judge
@@ -6856,6 +7061,9 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         conn.commit()
         if alive:
             _kill_windows_named(window)
+        # ⏱️ CMX-411: a detached run is out of the window's reach, so a timed-out one is
+        # stopped here, before its worktree is deleted out from under it.
+        judge.stop_judge_run(judge.judge_worktree_path(wf, row["task_id"]))
         try:
             remove_worktree(
                 wf.path.parent, judge.judge_worktree_path(wf, row["task_id"]),
@@ -6933,6 +7141,72 @@ def list_runs() -> list[dict]:
     with _db() as conn:
         rows = conn.execute("SELECT * FROM runs ORDER BY started_at DESC").fetchall()
         return [dict(r) for r in rows]
+
+# ⏸️⚖️ CMX-413: what a hold stops, and what it deliberately lets finish.
+#
+# Liav, pausing for the evening: "pause workflow pauses also the judges no?" It does — `tick`
+# returns on `hold.active()` BEFORE step 3a′ (the judge spawn) and 3b (the rework re-spawn),
+# so a held queue starts no new agent of ANY kind. But it kills nothing: a claimed/running
+# agent and a judge already mid-verdict both finish. Nothing on any surface said either half,
+# so an operator could not tell "paused" from "paused, but three things are still burning
+# CPU". Every hold surface (the CLI, `chela doctor`, the Settings row) renders THIS sentence
+# from THESE rows, so the claim and the count cannot drift apart.
+HOLD_SCOPE = "new claims, judges and rework re-spawns"
+
+
+def _run_ref(row) -> str:
+    """``CMX-413`` for a dispatched run — its branch is ``cmx-413``, which is what the
+    orchestrator and the PR title call it — falling back to the task id."""
+    name = (row["branch_name"] or row["window_name"] or "").strip()
+    return name.upper() if name else row["task_id"]
+
+
+def hold_inflight(now: datetime | None = None) -> dict:
+    """The agents and judges a hold is letting FINISH, read from the runs table.
+
+    ``agents`` are runs holding a slot (:data:`ACTIVE_STATUSES`); ``judges`` are runs whose
+    judge is live (``judge_state`` running with a recorded ``judge_started_at``). Across
+    every workflow, because the hold is global. Each item carries its ``ref`` (``CMX-N``) and
+    ``elapsed`` seconds since it started (``None`` when the row never recorded a start).
+    """
+    now = now or datetime.now(timezone.utc)
+
+    def _elapsed(ts: str | None) -> float | None:
+        started = _parse_ts(ts)
+        return None if started is None else max(0.0, (now - started).total_seconds())
+
+    with _db() as conn:
+        agents = conn.execute(
+            "SELECT * FROM runs WHERE status IN ({}) ORDER BY COALESCE(started_at, '')"
+            .format(",".join("?" * len(ACTIVE_STATUSES))),
+            ACTIVE_STATUSES,
+        ).fetchall()
+        judges = conn.execute(
+            "SELECT * FROM runs WHERE judge_state=? AND judge_started_at IS NOT NULL "
+            "ORDER BY judge_started_at",
+            (judge.J_RUNNING,),
+        ).fetchall()
+    return {
+        "agents": [{"task_id": r["task_id"], "ref": _run_ref(r),
+                    "elapsed": _elapsed(r["started_at"])} for r in agents],
+        "judges": [{"task_id": r["task_id"], "ref": _run_ref(r),
+                    "elapsed": _elapsed(r["judge_started_at"])} for r in judges],
+    }
+
+
+def hold_inflight_lines(inflight: dict | None = None) -> list[str]:
+    """``["Held: new claims, judges and rework re-spawns. Still finishing: 1 agent(s), 0
+    judge(s)", "agent CMX-12 (running 4m)", ...]`` — the words every hold surface prints."""
+    if inflight is None:
+        inflight = hold_inflight()
+    agents, judges = inflight["agents"], inflight["judges"]
+    lines = [f"Held: {HOLD_SCOPE}. Still finishing: {len(agents)} agent(s), "
+             f"{len(judges)} judge(s)"]
+    for kind, items in (("agent", agents), ("judge", judges)):
+        for it in items:
+            took = "?" if it["elapsed"] is None else hold.human_duration(it["elapsed"])
+            lines.append(f"{kind} {it['ref']} (running {took})")
+    return lines
 
 
 def delete_run(task_id: str) -> dict:

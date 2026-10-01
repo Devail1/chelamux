@@ -1,0 +1,10 @@
+/* CMX-409 — injected into every ttyd terminal page (app.py term_http). iOS
+   Safari auto-zooms the page when a focused control computes under 16px, and
+   xterm's invisible helper textarea (the element that takes the terminal's
+   keyboard focus) inherits a ~13px default — so tapping a terminal zoomed the
+   dashboard in. Coarse-pointer only; desktop is untouched. The textarea is
+   0x0 and off-screen, so the bigger size changes nothing visible. `textarea`
+   is what matches it: xterm.css sets no font-size on it to out-rank. */
+@media (pointer: coarse) {
+    input, textarea, select { font-size: 16px !important; }
+}

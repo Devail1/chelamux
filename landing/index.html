@@ -249,8 +249,10 @@ uv run chela run</pre>
     <div class="card">
       <span class="ic">▦</span>
       <h3>The wall</h3>
-      <p>A live grid of every agent's terminal — drag, lock, maximize — with a context-window
-      bar on each tile and 5h / weekly rate-limit pills up top.</p>
+      <p>A live grid of every agent's terminal — drag, lock, maximize — each pane marked
+      <em>working</em>, <em>needs you</em>, <em>done</em> or <em>idle</em>, with a context-window bar
+      and 5h / weekly rate-limit readouts. Its sibling view, <strong>Work</strong>, holds the dispatch
+      board, runs and schedules.</p>
     </div>
     <div class="card card-wide">
       <span class="ic" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg></span>
@@ -315,15 +317,48 @@ uv run chela run</pre>
 <section id="screenshots" class="wrap">
   <div class="section-head">
     <h2>See the fleet</h2>
-    <p>The live terminal wall streams every agent's pane into one grid — and the dashboard tracks
-    each agent's context, cost, schedule, and liveness at a glance.</p>
+    <p>Two views: the <strong>Wall</strong> streams every agent's pane into one grid, and
+    <strong>Work</strong> shows the dispatch board, runs and schedules. Settings is one
+    <kbd>Ctrl</kbd>+<kbd>,</kbd> away.</p>
   </div>
   <div class="shots">
     <figure>
       <video class="demo-desktop" src="chela-demo-desktop.mp4" poster="img/wall.png" autoplay loop muted playsinline preload="metadata"></video>
       <video class="demo-mobile" src="chela-demo-mobile.mp4" autoplay loop muted playsinline preload="metadata"></video>
-      <figcaption>The live wall, Dispatch board, Kanban and Schedules. On a phone it collapses to a single pane with an agent pill switcher and a keybar — this clip follows your screen.</figcaption>
+      <figcaption>The Wall (one agent in each state), Work's board, runs and schedules, then Settings on Ctrl+,. On a phone it collapses to a single pane with an agent pill switcher, a “+” New session button and a keybar — this clip follows your screen. Recorded from a synthetic demo fleet.</figcaption>
     </figure>
+  </div>
+</section>
+
+<section id="new" class="wrap">
+  <div class="section-head">
+    <h2>Recently shipped</h2>
+  </div>
+  <div class="how-grid">
+    <div class="how-item">
+      <h4>Merges go through the judge</h4>
+      <p>A PreToolUse hook denies a direct <code>gh pr merge</code>; <code>chela merge</code> lands only a PR the judge passed on its current head, and <code>--override</code> waits for your approval and is audited.</p>
+    </div>
+    <div class="how-item">
+      <h4>Remote Control per session</h4>
+      <p>New sessions launch with <code>--remote-control</code>; a Settings switch turns it off without a restart.</p>
+    </div>
+    <div class="how-item">
+      <h4>Themes reach the terminals</h4>
+      <p>Every theme — including the new <code>warm</code> — recolours the live terminals too, not just the chrome.</p>
+    </div>
+    <div class="how-item">
+      <h4>One-tap New session on a phone</h4>
+      <p>A “+” beside the menu button opens the New-session menu directly.</p>
+    </div>
+    <div class="how-item">
+      <h4>Named peer messages</h4>
+      <p>chela's messages arrive in a session as <em>Message from @chela</em>, not as an anonymous block.</p>
+    </div>
+    <div class="how-item">
+      <h4>Ctrl+, opens Settings</h4>
+      <p>⌘, on macOS — and a search box filters every setting across every tab.</p>
+    </div>
   </div>
 </section>
 

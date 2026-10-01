@@ -7,21 +7,24 @@ description: Install chela and wire its work-item dispatcher into a git repo —
 
 chela is a tmux-driven orchestrator for Claude Code agents. Its headline feature
 is the **work-item dispatcher**: drop a `WORKFLOW.md` + `TODO.md` in a repo and
-each unchecked `- [ ] task` becomes a git worktree → an agent that implements it,
-strikes the line, and opens a PR → a run that flips to `done` when you merge.
+each unchecked `- [ ] task` becomes a git worktree → an agent that implements it
+and opens a PR → an adversarial **judge** that corrupts each new guard → a merge
+you approve. The dispatcher strikes the line when the PR merges.
 
 This skill does two things: **install chela**, then **seed a starter dispatcher
 config in the current repo**. Do them in order. Don't invent flags or fields —
-everything below matches the real CLI.
+everything below matches the real CLI. The human-paced version of the same path
+is `docs/GETTING_STARTED.md` in the chela repo.
 
 ## 1. Check prerequisites
 
 ```bash
 python3 --version   # need ≥ 3.11
-tmux -V; git --version; claude --version; gh --version
+tmux -V; git --version; uv --version; claude --version; gh --version
 ```
 
-- `tmux`, `git`, the `claude` CLI, and `gh` (for the PR flow) must be on `PATH`.
+- `tmux`, `git`, [`uv`](https://docs.astral.sh/uv/), the `claude` CLI, and `gh`
+  (for the PR flow) must be on `PATH`.
 - The `claude` CLI must be **logged in already** (`claude` → `/login`, or
   `claude setup-token` for a headless token). chela does not manage credentials —
   every agent window reuses the cached `~/.claude` login, so the whole fleet runs
@@ -30,32 +33,53 @@ tmux -V; git --version; claude --version; gh --version
 
 ## 2. Install chela
 
-If you have the chela source checked out:
-
 ```bash
-uv sync                      # core
-uv sync --extra dashboard    # optional: web dashboard + live terminal wall
+git clone https://github.com/Devail1/chelamux && cd chelamux
+uv sync --all-extras         # core + dashboard + Telegram bridge
 uv run chela status          # smoke test — lists agent windows in the tmux session
 ```
 
-If chela isn't present, clone it first (https://github.com/Devail1/chelamux), then
-`uv sync` as above. All `chela` invocations below assume `uv run chela …` from
-the chela checkout (or `chela …` if installed on `PATH`).
+⚠️ `uv sync --extra X` *replaces* the environment: name every extra you want in one
+command (`--extra dashboard --extra telegram`), or use `--all-extras`. All `chela`
+invocations below assume `uv run chela …` from the checkout (or `chela …` on `PATH`).
+
+Then the one-time wiring:
+
+```bash
+mkdir -p ~/.chela && cp examples/chela.env ~/.chela/chela.env   # the ONE config file; edit it
+chela doctor                   # checks the running config against that file (exit 1 = broken)
+chela install-statusline --write   # exact context / rate-limit numbers for the dashboard
+```
+
+- **The hooks plugin** (recommended — blocked-agent handling, answering from your phone,
+  and the merge gate that denies `gh pr merge`). Inside Claude Code:
+  `/plugin marketplace add Devail1/chelamux`, then `/plugin install chela@chela`.
+  Sessions load hooks only when they start.
+- **Secrets never go in `chela.env`.** Put tokens in `~/.chela/secrets.env` (`chmod 600`);
+  see `docs/CONFIG.md`.
+- **The daemon is the engine.** `chela run` runs the scheduler, the dispatcher, the judge
+  and the needs-input scan. For anything long-lived, run it under a process manager with
+  `examples/ecosystem.config.js` (every app starts through `scripts/run-chela.sh`, which
+  sources `chela.env` and `secrets.env`).
 
 ## 3. Seed the dispatcher config in the target repo
 
 Work in the **root of the repo the user wants chela to work on** (a git repo with
-a clean `main`/default branch and a GitHub remote, since the agent opens PRs).
+a clean default branch and a GitHub remote, since the agent opens PRs).
 
-If the chela checkout is handy, copy the canonical templates instead of writing
-from scratch:
+Copy the canonical templates from the chela checkout — they are the source of truth:
 
 ```bash
-cp /path/to/chela/examples/WORKFLOW.md /path/to/chela/examples/TODO.md ./
+cp /path/to/chelamux/examples/WORKFLOW.md /path/to/chelamux/examples/TODO.md ./
 ```
 
-Otherwise create `WORKFLOW.md` at the repo root. The frontmatter is the config;
-the markdown body below `---` is the prompt every dispatched agent receives:
+(The dashboard's **Init a repo** button seeds the same pair and never overwrites.)
+Then set `project_key`, `workspace.root` and `workspace.base_branch` in the
+frontmatter. For `tracker.kind: gh_issues`, `require_label:` is **required** — it is
+the security gate between "anyone can open an issue" and "code runs on this machine".
+
+If the checkout isn't handy, this is the minimum `WORKFLOW.md`. The frontmatter is the
+config; the markdown body below `---` is the prompt every dispatched agent receives:
 
 ```markdown
 ---
@@ -131,17 +155,26 @@ TODO file, and don't open a half-done PR.
 - Don't edit the TODO file, touch other worktrees, or push `{{base_branch}}`.
 ```
 
+
 Then create `TODO.md` at the repo root. Each unchecked `- [ ]` bullet is one work
-item; a `<!-- blocked: ... -->` marker makes the dispatcher skip a line:
+item. Its **first line is the title and the task id**, so never edit a claimed task's
+first line. Write the four-field brief the judge enforces:
 
 ```markdown
 # TODO
 
 ## Open
 
-- [ ] <first concrete, self-contained task>
-- [ ] <second task>
+- [ ] **Add a --version flag to the CLI.** <!-- risk: low -->
+  **OBJECTIVE.** Print the package version and exit 0.
+  **BOUNDARIES.** The CLI entrypoint + its test only.
+  **GUARDS.** A test asserting `--version` prints the version; break the flag → RED.
+  **VERIFY.** `mytool --version` prints the version.
 ```
+
+Markers on the first line: `<!-- risk: high|normal|low -->` (sizes the judge's battery
+and the rework cap — `docs/RISK_LEVELS.md`), `<!-- blocked: why -->` (skipped), and
+`<!-- depends: "other task title" -->` (held until that task is struck).
 
 **Seed `TODO.md` with real tasks for *this* repo.** Skim the codebase (README,
 open issues, obvious gaps) and propose 3–5 small, independent, well-scoped items —
@@ -155,15 +188,25 @@ others. Confirm the list with the user before kicking off a run.
 chela dispatch ./WORKFLOW.md --dry-run
 
 chela dispatch ./WORKFLOW.md --once     # one pass
-chela dispatch ./WORKFLOW.md            # poll forever
 ```
 
-Or fold it into the daemon: `export CHELA_DISPATCH_WORKFLOWS=$PWD/WORKFLOW.md`
-then `chela run` (scheduler tick + dispatcher + needs-input notify in one loop).
+For the real thing, add the workflow to the daemon: set
+`CHELA_DISPATCH_WORKFLOWS=/abs/path/to/WORKFLOW.md` in `~/.chela/chela.env` and
+(re)start `chela run`.
 
-Inspect runs with `chela dispatch-runs`. If the dashboard extra is installed,
-`chela dashboard` shows the Dispatcher (per-workflow) and Kanban (cross-workflow
-board) views of the same run state, plus the live terminal wall.
+Inspect runs with `chela dispatch-runs`. `chela dashboard` shows the fleet and the Work
+board of the same run state, plus the live terminal wall.
+
+## 5. Review and merge
+
+**Auto-merge is off by default.** When a PR opens, the judge corrupts each new guard in a
+throwaway worktree and posts a verdict on the PR. Then:
+
+- `chela merge <run>` merges only when the judge is clean on the PR's current head, CI is
+  green and the PR is mergeable, into the workflow's `base_branch`.
+- `chela review <run> --request-changes --body-file verdict.md` sends it back to the agent.
+
+The `orchestrate` skill covers the full review loop.
 
 ## Notes
 
@@ -171,4 +214,4 @@ board) views of the same run state, plus the live terminal wall.
   distinct from these ephemeral one-task-per-worktree dispatch agents — use a
   standing `CLAUDE.md` per agent and `chela schedule add <agent> --every 1h
   --prompt "..."`. See `examples/agent-template.md` in the chela repo.
-- Canonical reference: the chela `README.md` and `examples/` directory.
+- Canonical reference: the chela `README.md`, `docs/`, and `examples/`.

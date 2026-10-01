@@ -27,7 +27,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, diffsurface, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, spawn, starter, tasklists, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_stream, context, diffsurface, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, share_sandbox, spawn, starter, tasklists, transcripts, update, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -239,6 +239,8 @@ def api_agents():
             "online": True,
             "window_id": window_id,
             "shared": window_id in _SHARED,
+            # 👁 / ⌨ / UNSANDBOXED for the share pill (CMX-403); None when not shared.
+            "share_mode": _share_mode(window_id),
             "window_type": win_type,
             "claude_running": claude_running,
             "thinking": sess_status == "busy",
@@ -446,6 +448,10 @@ _TERM_PASTE_KEY_SHIM = (
     "var r=await fetch('/api/term/paste-image',{method:'POST',body:fd,"
     "credentials:'same-origin'});"
     "if(!r.ok)return;var j=await r.json();if(j&&j.path)await pasteText(j.path);}"
+    # CMX-412: with file drop on, term-upload.js owns images (→ <cwd>/uploads/).
+    "async function pasteClipImage(blob){"
+    "if(typeof window.__chelaUpload==='function'){await window.__chelaUpload(blob);return;}"
+    "await pasteImage(blob);}"
     "async function onKey(e){"
     "if(!(e.ctrlKey||e.metaKey)||e.shiftKey||e.altKey)return;"
     "if(e.key!=='v'&&e.key!=='V')return;"
@@ -456,7 +462,7 @@ _TERM_PASTE_KEY_SHIM = (
     "var items=await navigator.clipboard.read();"
     "for(var i=0;i<items.length;i++){"
     "var t=(items[i].types||[]).filter(function(x){return x.indexOf('image/')===0;})[0];"
-    "if(t){await pasteImage(await items[i].getType(t));return;}}"
+    "if(t){await pasteClipImage(await items[i].getType(t));return;}}"
     "for(var n=0;n<items.length;n++){"
     "if((items[n].types||[]).indexOf('text/plain')>=0){"
     "await pasteText(await (await items[n].getType('text/plain')).text());return;}}"
@@ -618,6 +624,16 @@ _TERM_SCROLLBAR_CSS = (
     "background-clip:content-box}"
     "::-webkit-scrollbar-corner{background:transparent}"
     "</style>"
+)
+
+# CMX-409: iOS focus-zoom guard for the ttyd page (xterm's hidden helper
+# textarea computes ~13px, so tapping a terminal zoomed the whole dashboard in).
+# Lives in static/term-touch.css so tests/ios_focus_zoom.test.mjs resolves the
+# exact bytes served here.
+_TERM_TOUCH_CSS = (
+    "<style>"
+    + (Path(__file__).parent / "static" / "term-touch.css").read_text(encoding="utf-8")
+    + "</style>"
 )
 
 # Terminal-theme shim (CMX-381). A dashboard theme used to stop at the chrome: ttyd
@@ -787,6 +803,14 @@ _TERM_FONT_PREF_SHIM = (
 # postMessage to the parent, and draws the peers the parent sends back. So only the
 # non-secret {shared, wid} is injected here (the old relay/prefix/grid injection is
 # gone — the parent derives all of that from the owner-only /share-info).
+def _term_upload_shim() -> str:
+    """CMX-412: the file drop/paste shim, with the Settings switch read at serve time (the
+    route re-checks it per upload, so a pane opened before a switch-off is still refused)."""
+    on = "true" if config.file_drop_enabled() else "false"
+    return ("<script>window.__CHELA_FILE_DROP__=" + on + ";</script>"
+            '<script src="/static/term-upload.js"></script>')
+
+
 def _term_presence_shim(wid: str) -> str:
     """Per-wid shim config + client. Carries only this window's live "shared" flag
     and its wid; the shim gates solely on the flag and talks coordinates (never the
@@ -839,8 +863,9 @@ def term_http(wid, rest):
         html = body.decode("utf-8", "replace")
         shims = (_term_theme_shim() + _TERM_FONT_CSS + _TERM_FONT_PREF_SHIM
                  + _term_presence_shim(wid)
+                 + _term_upload_shim()
                  + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM + _TERM_PALETTE_KEY_SHIM
-                 + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS)
+                 + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS + _TERM_TOUCH_CSS)
         html = (html.replace("</head>", shims + "</head>", 1)
                 if "</head>" in html else html + shims)
         body = html.encode("utf-8")
@@ -1181,6 +1206,66 @@ def _revoke_share(wid: str) -> None:
     collab_stream.stop_bridge(wid)
 
 
+def _share_mode(wid: str) -> str | None:
+    if wid not in _SHARED:
+        return None
+    st = collab_stream.share_state(wid)
+    return st["mode"] if st else collab_stream.MODE_VIEW
+
+
+def _window_name(wid: str) -> str | None:
+    """The live tmux window name — what the UNSANDBOXED confirmation must match."""
+    try:
+        p = subprocess.run(["tmux", "display-message", "-p", "-t", wid, "#{window_name}"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    name = p.stdout.strip()
+    return name if p.returncode == 0 and name else None
+
+
+def _granted_by() -> str:
+    """Who is granting, for the audit event. There is no built-in auth; a tailnet
+    front (``tailscale serve``) names the user in a header, else the peer address."""
+    who = (request.headers.get("Tailscale-User-Login") or "").strip()
+    return who or f"dashboard@{request.remote_addr or 'unknown'}"
+
+
+# The share dialog's copy for why "Allow typing" is disabled (CMX-403). The JS renders
+# exactly these strings; tests pin both ends.
+TYPING_OFF_REASON = "Typing is disabled in Settings"
+NOT_SANDBOXED_REASON = "Not a sandboxed session — start one from New session → Sandboxed"
+
+
+def _share_options(wid: str) -> dict:
+    """What the share dialog may offer for ``wid``, from LIVE state: the setting, and a
+    fresh sandbox check of the window (never a stored flag)."""
+    typing_on = config.share_typing_enabled()
+    sandboxed, why = share_sandbox.check_share_session(wid)
+    reason = TYPING_OFF_REASON if not typing_on else (None if sandboxed else NOT_SANDBOXED_REASON)
+    return {
+        "share_typing": typing_on,
+        "sandboxed": sandboxed,
+        "sandbox_detail": why,
+        "typing_allowed": typing_on and sandboxed,
+        "typing_reason": reason,
+        # The trusted-peer override is offered only while the setting is on, and only
+        # where it means something (a window that is NOT already sandboxed).
+        "unsandboxed_offered": typing_on and not sandboxed,
+        "unsandboxed_minutes": config.share_unsandboxed_minutes(),
+        "window_name": _window_name(wid),
+    }
+
+
+@app.route("/api/term/<wid>/share-options")
+@require_auth
+def api_term_share_options(wid):
+    _require_terminals()
+    if wid not in _terminals_port_map():
+        abort(404)
+    return jsonify(_share_options(wid))
+
+
 @app.route("/api/term/<wid>/share", methods=["POST"])
 @require_auth
 def api_term_share(wid):
@@ -1188,7 +1273,13 @@ def api_term_share(wid):
     bridge (pumps the terminal, encrypted, into a per-share relay room) and return
     its join URL + base32 pairing code — the joiner pastes the code to derive keys.
     Off: fully revoke — stop the bridge, abandon the room, restore the grid. The
-    pane's iframe is reloaded client-side to re-serve the page with the new flag."""
+    pane's iframe is reloaded client-side to re-serve the page with the new flag.
+
+    ``mode`` (CMX-403): ``"view"`` (default) · ``"typing"`` — refused unless the
+    ``share_typing`` setting is on AND the window verifies as a sandboxed session ·
+    ``"unsandboxed"`` — the trusted-peer override, refused unless the setting is on and
+    ``confirm`` equals the live window name. The bridge re-enforces all of it per
+    keystroke; these refusals only keep the dialog honest."""
     _require_terminals()
     if wid not in _terminals_port_map():
         abort(404)
@@ -1197,6 +1288,9 @@ def api_term_share(wid):
     if not on:
         _revoke_share(wid)
         return jsonify({"ok": True, "shared": False})
+    mode = (data.get("mode") or collab_stream.MODE_VIEW).strip()
+    if mode not in (collab_stream.MODE_VIEW, collab_stream.MODE_TYPING, collab_stream.MODE_UNSANDBOXED):
+        return jsonify({"ok": False, "error": f"unknown share mode: {mode}"}), 400
     if not config.COLLAB_RELAY:
         # No relay configured — collab_stream.start_bridge would just return None
         # and leave us with a "shared" flag pointing at a bridge that never started.
@@ -1210,15 +1304,33 @@ def api_term_share(wid):
     # the stream instead of drifting (e.g. advertising 120x30 while streaming 110-
     # wide). The joiner then follows the live size via T_META. Sharing NEVER resizes
     # the owner's window — a live workflow must stream undisturbed.
+    policy: dict = {}
+    if mode != collab_stream.MODE_VIEW:
+        if wid in _SHARED:
+            # An existing share keeps the policy it was created with — never upgrade it
+            # silently. Stop it and share again to change access.
+            return jsonify({"ok": False, "error": "already shared — stop it first to change access"}), 409
+        if not config.share_typing_enabled():
+            return jsonify({"ok": False, "error": TYPING_OFF_REASON}), 403
+        if mode == collab_stream.MODE_TYPING:
+            ok, _why = share_sandbox.check_share_session(wid)
+            if not ok:
+                return jsonify({"ok": False, "error": NOT_SANDBOXED_REASON}), 403
+            policy = {"allow_typing": True}
+        else:
+            name = _window_name(wid)
+            if not name or (data.get("confirm") or "").strip() != name:
+                return jsonify({"ok": False, "error": "type the window name to confirm full access"}), 403
+            policy = {"unsandboxed": {"granted_by": _granted_by(), "window": name,
+                                      "ttl_s": config.share_unsandboxed_minutes() * 60.0}}
     cols, rows = collab_stream._window_dims(wid)
     _SHARED[wid] = {"cols": cols, "rows": rows}
     # Start the E2E stream bridge; on_revoke fires if it fails closed on session
     # death, so a share can never outlive its terminal (see collab_stream).
-    code = collab_stream.start_bridge(wid, on_revoke=_revoke_share)
-    # Full access: a paired joiner (they hold the code) can type + scroll — no grant.
+    code = collab_stream.start_bridge(wid, on_revoke=_revoke_share, **policy)
     info = {"pairing_code": code, "join_url": collab_stream.join_url(wid)} if code else {}
     _share_info[wid] = info
-    return jsonify({"ok": True, "shared": True, **info})
+    return jsonify({"ok": True, "shared": True, **info, **(collab_stream.share_state(wid) or {})})
 
 
 @app.route("/api/term/<wid>/share-info")
@@ -1235,9 +1347,11 @@ def api_term_share_info(wid):
 def api_term_shared():
     """Currently-shared window ids → their master dims, so the wall restores
     share-button state on load / across reloads. Pairing codes are deliberately
-    NOT here — they live only in _share_info (owner-only)."""
+    NOT here — they live only in _share_info (owner-only). Each entry also carries
+    its access ``mode`` + override ``expires_at`` (CMX-403) for the share pill."""
     _require_terminals()
-    return jsonify(_SHARED)
+    return jsonify({wid: {**dims, **(collab_stream.share_state(wid) or {"mode": collab_stream.MODE_VIEW, "expires_at": None})}
+                    for wid, dims in list(_SHARED.items())})
 
 
 _TERM_PASTE_MAX = 64 * 1024  # reject pastes larger than 64 KB
@@ -1358,6 +1472,129 @@ def api_term_paste_image():
         agent, digest, len(data), mime, out,
     )
     return jsonify({"path": str(out), "sha256": digest, "bytes": len(data)})
+
+
+# ---------------------------------------------------------------------------
+# 📎 File drop into a Wall terminal (CMX-412) — OWNER ONLY
+#
+# A drop or paste on a pane (see _TERM_UPLOAD_SHIM) POSTs the file here with the pane's
+# window id. It is written to <session cwd>/uploads/<name> (chela.uploads holds every
+# containment rule) and `@uploads/<name> ` is typed into the pane — no Enter.
+#
+# ⛔ Share guests may NOT upload, whatever `share_typing` says. A guest's page is the
+# relay-served joiner (a different origin), so a request whose Origin/Referer is the relay
+# — or any cross-site request at all — is refused before a byte is read. Guest upload is a
+# separate, later task (sandboxed sessions only, behind share_typing, cut by the kill switch).
+# ---------------------------------------------------------------------------
+
+from chela import uploads  # noqa: E402
+
+_UPLOAD_TIMES: list[float] = []
+_UPLOAD_LOCK = threading.Lock()
+FILE_DROP_OFF_REASON = "File drop into terminals is off in Settings"
+
+
+def _origin_of(url: str) -> str:
+    from urllib.parse import urlsplit
+    try:
+        p = urlsplit(url)
+    except ValueError:
+        return ""
+    return f"{p.scheme}://{p.netloc}".lower() if p.scheme and p.netloc else ""
+
+
+def _share_guest_request() -> bool:
+    """True when this request comes from a share guest rather than the owner's dashboard.
+
+    The dashboard has no built-in auth (the tailnet is the boundary), so "authenticated as
+    a guest" is decided by where the request comes FROM: a guest only ever holds the
+    relay-served joiner page, so an Origin or Referer on the relay's origin is a guest. A
+    request the browser marks ``Sec-Fetch-Site: cross-site`` is treated the same way — the
+    owner's own panes are same-origin iframes, so nothing legitimate is cross-site here.
+    (Deliberately NOT "Origin != request.host_url": behind a TLS front — Caddy, `tailscale
+    serve` — the scheme/host Flask sees differ from the browser's, and that would refuse the
+    owner.)"""
+    if (request.headers.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
+        return True
+    relay = config.COLLAB_RELAY or ""
+    relay_origin = _origin_of(relay.replace("wss://", "https://", 1).replace("ws://", "http://", 1))
+    for h in ("Origin", "Referer"):
+        v = (request.headers.get(h) or "").strip()
+        if not v:
+            continue
+        if relay_origin and _origin_of(v) == relay_origin:
+            return True
+    return False
+
+
+def _upload_rate_ok() -> bool:
+    """Sliding one-minute window over accepted uploads (``CHELA_UPLOAD_PER_MINUTE``)."""
+    now = time.monotonic()
+    with _UPLOAD_LOCK:
+        _UPLOAD_TIMES[:] = [t for t in _UPLOAD_TIMES if now - t < 60.0]
+        if len(_UPLOAD_TIMES) >= config.upload_per_minute():
+            return False
+        _UPLOAD_TIMES.append(now)
+        return True
+
+
+def _upload_refused(wid: str, name: str, size: int | None, reason: str, message: str, status: int):
+    event_log.append("upload.refused", f"upload refused ({reason}): {name or '?'}",
+                     {"window": wid, "name": name, "size": size, "reason": reason},
+                     wid=wid if wid.startswith("@") else None)
+    log.info("upload refused wid=%s name=%r reason=%s", wid, name, reason)
+    return jsonify({"ok": False, "error": message, "reason": reason}), status
+
+
+@app.route("/api/term/upload", methods=["POST"])
+@require_auth
+def api_term_upload():
+    """Save a dropped/pasted file into the pane's session workspace and type its @path.
+
+    Multipart: ``agent`` (the pane's window id, ``@N``) + ``file``. Refusals are 4xx with
+    ``{error, reason}`` and an ``upload.refused`` event; success is ``{ok, name, path,
+    size}`` plus an ``upload.saved`` event, after ``@uploads/<name> `` was typed."""
+    _require_terminals()
+    wid = (request.form.get("agent") or "").strip()
+    f = request.files.get("file")
+    raw_name = (f.filename if f is not None else "") or ""
+    size_hint = request.content_length
+    if _share_guest_request():
+        return _upload_refused(wid, raw_name, size_hint, "share_guest",
+                               "Share guests cannot upload files.", 403)
+    if not config.file_drop_enabled():
+        return _upload_refused(wid, raw_name, size_hint, "disabled", FILE_DROP_OFF_REASON, 403)
+    if not wid.startswith("@") or wid not in _terminals_port_map():
+        return _upload_refused(wid, raw_name, size_hint, "unknown_window",
+                               "That terminal is not on the Wall.", 404)
+    if f is None:
+        return _upload_refused(wid, raw_name, size_hint, "no_file", "No file in the request.", 400)
+    max_bytes = config.upload_max_bytes()
+    if size_hint is not None and size_hint > max_bytes + 64 * 1024:
+        return _upload_refused(wid, raw_name, size_hint, "too_large",
+                               f"File is over the {max_bytes // (1024 * 1024)} MB upload limit.", 413)
+    if not _upload_rate_ok():
+        return _upload_refused(wid, raw_name, size_hint, "rate_limited",
+                               "Too many uploads — wait a minute.", 429)
+    cwd = discovery.get_window_cwd_by_id(wid)
+    try:
+        if not cwd:
+            raise uploads.UploadRefused("no_workspace", "The session has no working directory.", 409)
+        name, size = uploads.save(cwd, raw_name, f.stream, max_bytes)
+    except uploads.UploadRefused as e:
+        return _upload_refused(wid, raw_name, size_hint, e.reason, e.message, e.status)
+    mention = f"@{uploads.UPLOADS_DIRNAME}/{name} "
+    typed = True
+    try:
+        subprocess.run(["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{wid}", "-l", mention],
+                       check=True, capture_output=True, timeout=5)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        typed = False
+        log.warning("upload saved but typing into %s failed: %s", wid, e)
+    event_log.append("upload.saved", f"uploaded {name} ({size} bytes) into {wid}",
+                     {"window": wid, "name": name, "size": size, "typed": typed}, wid=wid)
+    return jsonify({"ok": True, "name": name, "path": f"{uploads.UPLOADS_DIRNAME}/{name}",
+                    "size": size, "typed": typed})
 
 
 @app.route("/api/agents/trigger", methods=["POST"])
@@ -1646,6 +1883,28 @@ def api_agents_spawn():
     return jsonify({"ok": True, "name": result.name, "cwd": result.cwd})
 
 
+@app.route("/api/agents/spawn-sandboxed", methods=["POST"])
+@require_auth
+def api_agents_spawn_sandboxed():
+    """New session → Sandboxed (CMX-403): open a window running a sandboxed share
+    session (:func:`chela.spawn.spawn_sandbox_window`) in ``cwd`` — the ONLY kind of
+    window a share guest may type into. Body: ``{cwd}`` (required — a project directory;
+    $HOME and secret directories are refused by the launcher's preflight)."""
+    _require_terminals()
+    body = request.get_json(silent=True) or {}
+    cwd_arg = (body.get("cwd") or "").strip()
+    if not cwd_arg:
+        return jsonify({"ok": False, "error": "pick a project directory for the sandboxed session"}), 400
+    result = spawn.spawn_sandbox_window(cwd_arg)
+    if not result.ok:
+        return jsonify({"ok": False, "error": result.error}), 400
+    try:
+        launcher.record_recent(result.cwd)
+    except Exception:  # noqa: BLE001 — a store hiccup must never fail the spawn
+        log.warning("launcher.record_recent failed for %s", result.cwd, exc_info=True)
+    return jsonify({"ok": True, "name": result.name, "wid": result.wid, "cwd": result.cwd})
+
+
 # ---------------------------------------------------------------------------
 # API: Restore (CMX-208) — the sidebar's "Recent sessions" one-click resume
 #
@@ -1914,9 +2173,36 @@ def api_config():
                     return jsonify({"error": "invalid remote_control",
                                     "valid": [True, False]}), 400
                 userconfig.set_(config.REMOTE_CONTROL_KEY, enabled)
+        if "share_typing" in data:
+            # CMX-403: same strict-bool rule as remote_control. Turning it OFF takes
+            # effect on live shares at once — collab_stream reads it per keystroke.
+            raw = data.get("share_typing")
+            if raw in (None, ""):
+                userconfig.set_(config.SHARE_TYPING_KEY, None)
+            else:
+                try:
+                    enabled = config.cast_strict_bool(raw)
+                except ValueError:
+                    return jsonify({"error": "invalid share_typing",
+                                    "valid": [True, False]}), 400
+                userconfig.set_(config.SHARE_TYPING_KEY, enabled)
+        if "file_drop" in data:
+            # CMX-412: same strict-bool rule. Read per upload, so it applies at once.
+            raw = data.get("file_drop")
+            if raw in (None, ""):
+                userconfig.set_(config.FILE_DROP_KEY, None)
+            else:
+                try:
+                    enabled = config.cast_strict_bool(raw)
+                except ValueError:
+                    return jsonify({"error": "invalid file_drop",
+                                    "valid": [True, False]}), 400
+                userconfig.set_(config.FILE_DROP_KEY, enabled)
     stored_mode = dispatcher.settings_permission_mode()
     stored_model = dispatcher.settings_agent_model()
     remote_control, rc_source = config.remote_control_setting()
+    share_typing, st_source = config.share_typing_setting()
+    file_drop, fd_source = config.file_drop_setting()
     return jsonify({
         "projects_dir": userconfig.get("projects_dir", ""),
         "projects_dir_effective": str(launcher._projects_dir()),
@@ -1940,6 +2226,18 @@ def api_config():
         "remote_control_source": rc_source,
         "remote_control_env_locked": rc_source == "env",
         "remote_control_env": config.REMOTE_CONTROL_ENV,
+        # CMX-403: guest typing into shared terminals — OFF by default.
+        "share_typing": share_typing,
+        "share_typing_source": st_source,
+        "share_typing_env_locked": st_source == "env",
+        "share_typing_env": config.SHARE_TYPING_ENV,
+        "share_unsandboxed_minutes": config.share_unsandboxed_minutes(),
+        # CMX-412: drop/paste a file on an owner's Wall pane → <cwd>/uploads/. ON by default.
+        "file_drop": file_drop,
+        "file_drop_source": fd_source,
+        "file_drop_env_locked": fd_source == "env",
+        "file_drop_env": config.FILE_DROP_ENV,
+        "upload_max_mb": config.upload_max_bytes() // (1024 * 1024),
     })
 
 
@@ -2186,9 +2484,17 @@ def _settings_status() -> dict:
     if dispatch_hold is not None:
         dispatch_on = False
         dispatch_state = "Held"
+        # CMX-413: say the hold stops judges and rework re-spawns too, and name what is
+        # still finishing — from the runs table, the same lines the CLI and doctor print.
+        try:
+            head, *items = dispatcher.hold_inflight_lines()
+            inflight = f"{head}{': ' + '; '.join(items) if items else ''}. "
+        except Exception as e:  # noqa: BLE001 — a DB hiccup must not hide the hold
+            log.warning("could not read in-flight runs for the hold row: %s", e)
+            inflight = f"Held: {dispatcher.HOLD_SCOPE}. "
         dispatch_detail = (
-            f"queue hold — {dispatch_hold.summary()}; NO task will be claimed until it is "
-            "released (`chela dispatch --resume`). Reconciliation continues."
+            f"queue hold — {dispatch_hold.summary()}. {inflight}NO task will be claimed "
+            "until it is released (`chela dispatch --resume`). Reconciliation continues."
         )
 
     try:

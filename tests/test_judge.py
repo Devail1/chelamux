@@ -572,6 +572,9 @@ def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
             "pr_url": "https://x/1", "branch_name": "b", "task_id": "abc123",
             "workspace_path": str(tmp_path), "diff_cmd": "git diff", "pr_view_cmd": "gh pr view",
             "experiments_path": str(tmp_path / "experiments.json"), "judge_cmd": "chela judge run",
+            "judge_log": str(tmp_path / "judge.log"),            # ⏱️ CMX-411
+            "held_out_pct": 30, "held_out_min": 3,     # ⚖️🙈 CMX-395
+            "risk": "normal", "max_experiments": 8, "risk_guidance": "focused",
         }
         with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
              patch.object(dispatcher, "_refresh_judge_worktree", return_value=None), \
@@ -4207,3 +4210,37 @@ def test_cmd_judge_ack_blocked_race_omitting_by_passes_empty_so_the_env_chain_ru
         "argparse default short-circuits the documented $USER/$USERNAME/'unknown' chain, "
         "so every acknowledgement would be attributed to that constant"
     )
+
+
+def test_a_HOLD_spawns_NO_judge_and_the_first_tick_after_resume_does(tmp_path):
+    """⏸️⚖️ CMX-413. "pause workflow pauses also the judges no?" — yes, and this pins it. A
+    judge is an AGENT on this box, so step 3a′ sits BELOW the hold return: a PR that goes green
+    while the queue is held waits, un-judged. Moving the judge step above the hold return
+    spawns one here and goes red.
+
+    ⭐ And the case that must be ACCEPTED: the hold defers the judge, it never drops it. The
+    very next tick after `--resume` judges that same head."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _run_row(conn, tmp_path, workflow_path=str(wf.path), pr_head_sha=None)
+
+    spawns: list[str] = []
+
+    def spawn(w, row, sha, conn, task=None):
+        spawns.append(sha)
+        return True
+
+    hold.take(reason="gaming", ttl_seconds=600, by="liav")
+    held = _tick(wf, spawn)
+    assert held["held"] is True
+    assert held["judged"] == 0
+    assert spawns == []                                         # ⛔ no judge while held
+    run = dispatcher.resolve_run("abc123")
+    assert run["pr_head_sha"] == "cafe1234"                    # it WAS eligible: green, new head
+    assert run["judge_sha"] is None
+
+    hold.release()
+    resumed = _tick(wf, spawn)
+    assert resumed["held"] is False
+    assert resumed["judged"] == 1                               # ⭐ resume judges it at once
+    assert spawns == ["cafe1234"]

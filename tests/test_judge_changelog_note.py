@@ -499,7 +499,8 @@ def test_run_experiments_carries_the_note_on_a_contamination_cannot_verify_repor
     wt = _prep_worktree(repo, "pr-1", tmp_path)
     monkeypatch.setattr(
         judge, "_apply_experiments",
-        lambda worktree, test_cmd, items, baseline, timeout: ([], "could not restore a mutation"),
+        lambda worktree, test_cmd, items, baseline, timeout, **kw: (
+            [], "could not restore a mutation"),
     )
 
     report = judge.run_experiments(

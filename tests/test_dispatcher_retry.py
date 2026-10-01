@@ -90,7 +90,7 @@ def test_retry_flips_needs_human_to_changes_requested_and_posts_a_comment(tmp_pa
     assert result["comment_posted"] is True
     assert result["retry_count"] == 1
     assert result["rework_count"] == 2          # unchanged — retry spends no rework budget
-    assert result["max_reworks"] == dispatcher.max_reworks()
+    assert result["max_reworks"] == dispatcher._rework_cap(dispatcher.resolve_run("abc123"))
 
     run = dispatcher.resolve_run("abc123")
     assert run["status"] == "changes_requested"
