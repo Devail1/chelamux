@@ -28,6 +28,7 @@ ids don't. Address siblings by `@N`, and re-derive them from `chela status` afte
 | `chela judge show <run>` | Rounds-to-clean and survival rates for a run's judge rounds. |
 | `chela events --type T --tail N` | The durable event log — the record of what actually happened. |
 | `chela escalate "…" --recommend "…"` | Hand a decision to the human, with your recommendation. |
+| `chela dispatch --pause` / `--resume` | **HOLD the queue** while you reorder the tracker — no new claims, judges or rework re-spawns until you release; running agents and judges finish. See the gotcha below. |
 
 ## Messaging
 

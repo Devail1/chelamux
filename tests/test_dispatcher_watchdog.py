@@ -134,8 +134,8 @@ def test_working_agent_is_never_failed_even_at_the_fail_step(ticking, monkeypatc
     graces elapsed. Remove the activity veto → this run is failed → RED."""
     repo = ticking
     task_id = _seed_running(repo, nudged=_OLD)
-    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w: _WORKING_WITH_EMPTY_PROMPT)
-    monkeypatch.setattr(dispatcher, "_agent_status", lambda w: "idle")
+    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w, **_: _WORKING_WITH_EMPTY_PROMPT)
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: "idle")
 
     summary = dispatcher.tick(repo / "WORKFLOW.md")
 
@@ -148,8 +148,8 @@ def test_unreadable_status_does_not_drive_a_terminal_fail(ticking, monkeypatch):
     None is not evidence of idleness. Fail on `status != 'busy'` instead → RED."""
     repo = ticking
     task_id = _seed_running(repo, nudged=_OLD)
-    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w: _BARE_IDLE)
-    monkeypatch.setattr(dispatcher, "_agent_status", lambda w: None)
+    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w, **_: _BARE_IDLE)
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: None)
 
     summary = dispatcher.tick(repo / "WORKFLOW.md")
 
@@ -163,8 +163,8 @@ def test_genuinely_idle_agent_still_fails(ticking, monkeypatch):
     both graces → failed into the re-dispatch path."""
     repo = ticking
     task_id = _seed_running(repo, nudged=_OLD)
-    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w: _BARE_IDLE)
-    monkeypatch.setattr(dispatcher, "_agent_status", lambda w: "idle")
+    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w, **_: _BARE_IDLE)
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: "idle")
 
     summary = dispatcher.tick(repo / "WORKFLOW.md")
 
@@ -186,8 +186,8 @@ def test_first_renudge_with_a_broken_prompt_template_fails_only_this_run(ticking
         (repo / "WORKFLOW.md").read_text().replace("\nseed\n", "\nseed {{taks_title}}\n")
     )
     task_id = _seed_running(repo, nudged=None)
-    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w: _BARE_IDLE)
-    monkeypatch.setattr(dispatcher, "_agent_status", lambda w: "idle")
+    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w, **_: _BARE_IDLE)
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: "idle")
 
     summary = dispatcher.tick(repo / "WORKFLOW.md")
 
@@ -204,8 +204,8 @@ def test_waiting_agent_is_escaped_not_failed_on_first_encounter(ticking, monkeyp
     no Escape → RED."""
     repo = ticking
     task_id = _seed_running(repo, nudged=None)
-    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w: _QUESTION)
-    monkeypatch.setattr(dispatcher, "_agent_status", lambda w: "waiting")
+    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w, **_: _QUESTION)
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: "waiting")
     dismiss = Mock()
     monkeypatch.setattr(dispatcher, "_dismiss_input_block", dismiss)
 
@@ -222,8 +222,8 @@ def test_waiting_agent_that_does_not_recover_is_failed(ticking, monkeypatch):
     fails into re-dispatch rather than hanging forever."""
     repo = ticking
     task_id = _seed_running(repo, nudged=_OLD)
-    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w: _QUESTION)
-    monkeypatch.setattr(dispatcher, "_agent_status", lambda w: "waiting")
+    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w, **_: _QUESTION)
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: "waiting")
     monkeypatch.setattr(dispatcher, "_dismiss_input_block", Mock())
 
     summary = dispatcher.tick(repo / "WORKFLOW.md")
@@ -268,3 +268,123 @@ def test_dismiss_input_block_never_raises(monkeypatch):
         dispatcher.subprocess, "run", Mock(side_effect=OSError("no tmux"))
     )
     dispatcher._dismiss_input_block(WID)  # must not raise
+
+
+# ---- 👻 CMX-410: the ghost suggestion is an EMPTY prompt ---------------------
+#
+# Claude Code draws a grey suggestion into an EMPTY prompt through the input's
+# placeholder — faint (SGR 2) by construction, and shown only while the input is empty
+# (anthropics/claude-code #23859). A plain `capture-pane -p` strips the SGR, so the ghost
+# read as a typed draft and cmx-408 sat stranded ~8h, never re-nudged. These fixtures are
+# `capture-pane -pe` bytes; the input line is the orchestrator's real capture of @266.
+
+_ESC = "\x1b"
+_GHOST_LINE = f'{_ESC}[39m❯ {_ESC}[2mTry "fix lint errors"{_ESC}[0m'
+_RULE = "─" * 40
+_GHOST_IDLE_ANSI = f"{_RULE}\n{_GHOST_LINE}\n{_RULE}\n  ? for shortcuts\n"
+# What a PLAIN capture of the same pane returns — the SGR gone, the ghost now "text".
+_GHOST_IDLE_PLAIN = f'{_RULE}\n❯ Try "fix lint errors"\n{_RULE}\n  ? for shortcuts\n'
+_TYPED_ANSI = f"{_RULE}\n{_ESC}[39m❯ hello\n{_RULE}\n"
+# Claude's recap: dim-looking (italic + grey 246), but ABOVE the input and not SGR 2.
+_RECAP = f"{_ESC}[3m{_ESC}[38;5;246m※ recap: added the ghost check; next run the suite{_ESC}[0m"
+_RECAP_THEN_EMPTY_ANSI = f"{_RECAP}\n{_RULE}\n{_ESC}[39m❯ \n{_RULE}\n"
+_RECAP_THEN_TYPED_ANSI = f"{_RECAP}\n{_RULE}\n{_ESC}[39m❯ hello\n{_RULE}\n"
+# Mid-response: the working spinner above a prompt that still shows a ghost.
+_WORKING_WITH_GHOST_ANSI = (
+    f"⏺ Editing dispatcher.py…\n{_ESC}[38;5;174m✽ Puzzling… (6m 9s · ↓ 17.2k tokens){_ESC}[0m\n"
+    f"{_RULE}\n{_GHOST_LINE}\n{_RULE}\n"
+)
+
+
+def _stuck(pane_ansi: str) -> bool:
+    screen = dispatcher._drop_ghost_suggestion(pane_ansi)
+    return dispatcher._pane_idle_empty_prompt(screen) and not dispatcher._pane_shows_activity(screen)
+
+
+def test_ghost_suggestion_reads_as_an_empty_prompt():
+    assert _stuck(_GHOST_IDLE_ANSI)
+    # The same pane without escapes is what the pre-fix watchdog saw: "typed" ⇒ not stuck.
+    assert not dispatcher._pane_idle_empty_prompt(_GHOST_IDLE_PLAIN)
+
+
+def test_typed_draft_without_sgr2_is_not_empty():
+    assert not _stuck(_TYPED_ANSI)
+    # A colour that merely CONTAINS a 2 (`38;5;2`, truecolour `38;2;…`) is not faint.
+    assert not _stuck(f"{_ESC}[39m❯ {_ESC}[38;5;2mhello{_ESC}[0m\n")
+    assert not _stuck(f"{_ESC}[39m❯ {_ESC}[38;2;10;20;30mhello{_ESC}[0m\n")
+    # Faint switched OFF (SGR 22) before the text: typed, not ghost.
+    assert not _stuck(f"{_ESC}[39m❯ {_ESC}[2m{_ESC}[22mhello\n")
+
+
+def test_dim_recap_elsewhere_does_not_confuse_the_input_line():
+    assert _stuck(_RECAP_THEN_EMPTY_ANSI)
+    assert not _stuck(_RECAP_THEN_TYPED_ANSI)
+
+
+def test_agent_mid_response_behind_a_ghost_is_not_stuck():
+    assert not _stuck(_WORKING_WITH_GHOST_ANSI)
+
+
+def _ansi_only_capture(ansi_pane: str, plain_pane: str):
+    """A `_capture_pane` stub returning what tmux would: escapes only under `-e`."""
+    return lambda w, ansi=False: ansi_pane if ansi else plain_pane
+
+
+def test_watchdog_renudges_an_agent_stranded_behind_a_ghost(ticking, monkeypatch):
+    """The cmx-408 strand: an idle agent whose empty prompt shows a ghost suggestion must
+    be re-nudged. Revert the watchdog to a plain capture → the ghost reads as typed text →
+    not stuck → never nudged → RED."""
+    repo = ticking
+    task_id = _seed_running(repo, nudged=None)
+    monkeypatch.setattr(dispatcher, "_capture_pane", _ansi_only_capture(_GHOST_IDLE_ANSI, _GHOST_IDLE_PLAIN))
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: "idle")
+    seed = Mock(return_value=True)
+    monkeypatch.setattr(dispatcher, "_send_seed", seed)
+
+    summary = dispatcher.tick(repo / "WORKFLOW.md")
+
+    assert summary["watchdog_renudged"] == 1
+    seed.assert_called_once()
+    assert _status_of(task_id)[0] == "running"
+
+
+def test_watchdog_never_nudges_an_agent_mid_response_behind_a_ghost(ticking, monkeypatch):
+    """The case that must be ACCEPTED: activity on screen vetoes the nudge even though the
+    ghost makes the input line read empty."""
+    repo = ticking
+    task_id = _seed_running(repo, nudged=None)
+    plain = dispatcher._CSI_RE.sub("", _WORKING_WITH_GHOST_ANSI)
+    monkeypatch.setattr(dispatcher, "_capture_pane", _ansi_only_capture(_WORKING_WITH_GHOST_ANSI, plain))
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: "idle")
+    seed = Mock(return_value=True)
+    monkeypatch.setattr(dispatcher, "_send_seed", seed)
+
+    summary = dispatcher.tick(repo / "WORKFLOW.md")
+
+    assert summary["watchdog_renudged"] == 0
+    seed.assert_not_called()
+    assert _status_of(task_id)[0] == "running"
+
+
+def test_watchdog_does_not_nudge_a_typed_draft(ticking, monkeypatch):
+    repo = ticking
+    _seed_running(repo, nudged=None)
+    monkeypatch.setattr(dispatcher, "_capture_pane", _ansi_only_capture(_TYPED_ANSI, _TYPED_ANSI.replace(f"{_ESC}[39m", "")))
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: "idle")
+    seed = Mock(return_value=True)
+    monkeypatch.setattr(dispatcher, "_send_seed", seed)
+
+    summary = dispatcher.tick(repo / "WORKFLOW.md")
+
+    assert summary["watchdog_renudged"] == 0
+    seed.assert_not_called()
+
+
+def test_capture_pane_ansi_adds_dash_e(monkeypatch):
+    """`ansi=True` must reach tmux as `-e`, or the SGR the ghost check reads never arrives."""
+    run = Mock(return_value=subprocess.CompletedProcess([], 0, stdout="x", stderr=""))
+    monkeypatch.setattr(dispatcher.subprocess, "run", run)
+    dispatcher._capture_pane("cmx-1", ansi=True)
+    assert "-e" in run.call_args.args[0]
+    dispatcher._capture_pane("cmx-1")
+    assert "-e" not in run.call_args.args[0]
