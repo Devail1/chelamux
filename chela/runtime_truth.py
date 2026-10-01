@@ -1010,7 +1010,7 @@ def _judge_runs_report(_declared: None, obs: Observation) -> list[Finding]:
     runs: list[dict] = obs.value or []
     if not runs:
         return [Finding(OK, "no judge run in flight")]
-    from chela.dispatcher import JUDGE_TIMEOUT_SECONDS
+    from chela.dispatcher import judge_overdue, judge_wall_seconds
 
     out: list[Finding] = []
     for r in runs:
@@ -1021,12 +1021,15 @@ def _judge_runs_report(_declared: None, obs: Observation) -> list[Finding]:
         elapsed = r.get("elapsed")
         # Past the wall, the watchdog should already have stopped it: a run still going
         # is one nothing is bounding any more (a daemon that is down, a stop that failed).
-        over = elapsed is not None and elapsed >= JUDGE_TIMEOUT_SECONDS
+        # ⏳⚖️ CMX-431: the SAME rule the watchdog applies — the wall scales with the battery
+        # and an advancing run past it is not overdue, so it is not warned about either.
+        over = elapsed is not None and judge_overdue(elapsed, r, time.time()) is not None
+        wall = int(judge_wall_seconds(r)) // 60
         out.append(Finding(
             WARN if over else OK,
             f"judge for {r.get('task_id')} running ({how}) — "
             f"{_fmt_elapsed(r.get('elapsed'))} elapsed, {progress}",
-            (f"PAST the {JUDGE_TIMEOUT_SECONDS // 60}min judge wall — the watchdog should "
+            (f"PAST the {wall}min judge wall — the watchdog should "
              "have stopped it; is the daemon running? " if over else "")
             + f"pid {r.get('pid')}" + (f", log {r['log']}" if r.get("log") else ""),
         ))

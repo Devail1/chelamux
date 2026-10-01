@@ -195,7 +195,10 @@ autonomous base branch — per-workflow `base_branch` still wins; the NEVER-list
 overridable by this, default `dev`; **restart_required**), `CHELA_GATE_WAIT_S` (how long a
 `PermissionRequest` gate waits for a tap, default `90.0`s, `0` allowed — never wait),
 `CHELA_GATE_MAX_WAITS` (concurrent gate-wait slots, default `8`, floor `1` — a
-`BoundedSemaphore` cannot be sized `0`).
+`BoundedSemaphore` cannot be sized `0`), and CMX-431's battery-scaled judge wall:
+`CHELA_JUDGE_WALL_BASE_S` / `CHELA_JUDGE_WALL_PER_EXPERIMENT_S` /
+`CHELA_JUDGE_WALL_CEILING_S` / `CHELA_JUDGE_WALL_GRACE_S` (defaults `600` / `360` /
+`10800` / `900` s, read per call — see `docs/RISK_LEVELS.md`).
 
 Four of the eleven (`CHELA_DISPATCH_WORKFLOWS`/`CHELA_JUDGE`/`CHELA_CRITIC`/`CHELA_MERGE_BASE`)
 are resolved once at their owning module's import (`chela/config.py` for the first three,
