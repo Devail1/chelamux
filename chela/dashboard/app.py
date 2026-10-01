@@ -241,6 +241,8 @@ def api_agents():
             "shared": window_id in _SHARED,
             # 👁 / ⌨ / UNSANDBOXED for the share pill (CMX-403); None when not shared.
             "share_mode": _share_mode(window_id),
+            # Bumped on every re-share (CMX-427): owner presence restarts when it moves.
+            "share_epoch": _share_epoch(window_id),
             "window_type": win_type,
             "claude_running": claude_running,
             "thinking": sess_status == "busy",
@@ -1188,6 +1190,21 @@ def api_term_grid(wid):
 # every broadcast report (/api/agents, /api/term/shared) — the pairing code is the
 # capability, so only the authed owner sees it, via api_term_share_info.
 _share_info: dict[str, dict] = {}
+# A share's EPOCH (CMX-427): a non-secret counter bumped on every mint, so a dashboard
+# page that did NOT stop + re-create a share can still see, from the /api/agents poll,
+# that the pairing code under its owner-presence session has rotated. It is the only
+# rotation signal in a broadcast report — the code itself never leaves _share_info.
+_share_epoch_seq = 0
+
+
+def _next_share_epoch() -> int:
+    global _share_epoch_seq
+    _share_epoch_seq += 1
+    return _share_epoch_seq
+
+
+def _share_epoch(wid: str) -> int | None:
+    return _share_info.get(wid, {}).get("share_epoch")   # _revoke_share drops it on stop
 
 
 def _revoke_share(wid: str) -> None:
@@ -1324,7 +1341,8 @@ def api_term_share(wid):
     # Start the E2E stream bridge; on_revoke fires if it fails closed on session
     # death, so a share can never outlive its terminal (see collab_stream).
     code = collab_stream.start_bridge(wid, on_revoke=_revoke_share, **policy)
-    info = {"pairing_code": code, "join_url": collab_stream.join_url(wid)} if code else {}
+    info = ({"pairing_code": code, "join_url": collab_stream.join_url(wid),
+             "share_epoch": _next_share_epoch()} if code else {})
     _share_info[wid] = info
     return jsonify({"ok": True, "shared": True, **info, **(collab_stream.share_state(wid) or {})})
 
