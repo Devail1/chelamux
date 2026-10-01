@@ -75,3 +75,6 @@ TODO.md
 # family is a single-source daemon/CLI-owned filename, so nothing legitimate is meant to be
 # tracked under it, and the next one added won't need its own line here.
 .chela-*.json
+
+# `chela judge eval` results (docs/JUDGE_EVAL.md) — per-run output, not source
+.judge-eval/

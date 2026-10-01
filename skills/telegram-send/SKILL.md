@@ -9,13 +9,17 @@ Push a message or a file to Telegram from any agent — a result, a chart, a log
 heads-up — so the human gets it on their phone without watching the terminal. Composes with
 the `orchestrate` skill: the fleet can reach you proactively.
 
-Dependency-free (Python stdlib only). Configure via environment:
+Dependency-free (Python stdlib only). Configure via environment — the same bot and chat as
+the `chela telegram` bridge ([`telegram-setup`](../telegram-setup/SKILL.md)):
 
 | Env var | |
 |---------|--|
 | `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather (required) |
-| `TELEGRAM_CHAT_ID` | Target chat/channel id (required) |
-| `TELEGRAM_TOPIC_ID` | Forum topic id / `message_thread_id` (optional) |
+| `TELEGRAM_CHAT_ID` | Target chat/group id (required) |
+| `TELEGRAM_TOPIC_ID` | Forum topic id / `message_thread_id` (optional; unset → the General thread) |
+
+The token and chat id live in `~/.chela/secrets.env`. A service started through
+`scripts/run-chela.sh` already has them; from a shell, `set -a; . ~/.chela/secrets.env; set +a`.
 
 ## Use
 
@@ -30,12 +34,13 @@ python skills/telegram-send/send.py --file ./equity_curve.png --caption "equity 
 `send_message(text)` and `send_file(path, caption)` are importable if you'd rather call them
 from Python directly.
 
-## Getting the config
+## When not to use it
 
-- **Bot token** — talk to [@BotFather](https://t.me/BotFather): `/newbot`, then copy the token.
-- **Chat id** — message your bot, then open
-  `https://api.telegram.org/bot<TOKEN>/getUpdates` and read `result[].message.chat.id`
-  (group/channel ids are negative).
-- **Topic id** (forum groups only) — the `message_thread_id` of the topic you want to post into.
+- **Talking to an agent that has a bridge topic?** Its own output already reaches its topic
+  through `chela telegram`. Use this for out-of-band pushes, not to duplicate the relay.
+- **A decision for the human** — prefer `chela escalate "…" --recommend "…"`: it records the
+  decision in the event log and pushes it over `CHELA_NOTIFY_URL`.
+- To post into an agent's own topic, read its thread id from
+  `$CHELA_DIR/telegram-bindings.json` and set `TELEGRAM_TOPIC_ID` for the call.
 
-Keep the token out of source control — set it in your shell env or a local `.env` that's gitignored.
+Keep the token out of source control — `secrets.env` (`chmod 600`) only.
