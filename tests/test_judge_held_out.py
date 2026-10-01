@@ -546,8 +546,9 @@ def test_judge_run_passes_a_NON_default_consistency_sample_on_BOTH_worktree_path
     assert judge.CONSISTENCY_SAMPLE != 5
     wt = judge.judge_worktree_path(workflow.load_workflow(repo / "WORKFLOW.md"), task_id)
     if reprovision:
-        import shutil
-        shutil.rmtree(wt)
+        # Rename, never rmtree: the fixture's `git commit` can leave a detached auto-maintenance
+        # child holding `.git/maintenance.lock`, and rmtree racing it went red on CI (#558).
+        wt.rename(tmp_path / f"gone-{task_id}")
     with dispatcher._db() as conn:
         _run_row(conn, repo, task_id)
     exp_file = tmp_path / "experiments.json"
@@ -584,8 +585,9 @@ def test_judge_run_forwards_the_select_tests_kill_switch_on_BOTH_worktree_paths(
         _set_judge_knobs(repo, select_tests=knob)
     wt = judge.judge_worktree_path(workflow.load_workflow(repo / "WORKFLOW.md"), task_id)
     if reprovision:
-        import shutil
-        shutil.rmtree(wt)
+        # Rename, never rmtree: the fixture's `git commit` can leave a detached auto-maintenance
+        # child holding `.git/maintenance.lock`, and rmtree racing it went red on CI (#558).
+        wt.rename(tmp_path / f"gone-{task_id}")
     with dispatcher._db() as conn:
         _run_row(conn, repo, task_id)
     exp_file = tmp_path / "experiments.json"

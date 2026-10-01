@@ -84,7 +84,8 @@ GLYPH_AFTER = '    glyph = ""'
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(
-        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+         "-c", "maintenance.auto=false", "-c", "gc.auto=0", *args],
         check=True, capture_output=True,
     )
 
