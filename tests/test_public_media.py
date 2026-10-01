@@ -63,10 +63,19 @@ def test_public_pages_name_no_removed_view(page):
 
 
 def _public_files() -> list[Path]:
-    files = [p for d in ("docs/img", "landing") for p in (ROOT / d).rglob("*") if p.is_file()]
+    files = [p for d in ("docs/img", "landing", "skills") for p in (ROOT / d).rglob("*")
+             if p.is_file()]
     files.append(ROOT / "README.md")   # the README is the most public page of all
     assert files, "no files found under docs/img or landing — the guard would check nothing"
     return files
+
+
+def test_the_private_strings_sweep_covers_every_shipped_skill():
+    """CMX-415: skills are copied into adopters' ~/.claude — as public as the README."""
+    swept = set(_public_files())
+    skills = [p for p in (ROOT / "skills").rglob("*") if p.is_file()]
+    assert skills and all(p in swept for p in skills), (
+        f"not swept: {[str(p.relative_to(ROOT)) for p in skills if p not in swept]}")
 
 
 def test_public_media_and_pages_carry_no_private_strings():
