@@ -2329,9 +2329,17 @@ def _settings_status() -> dict:
     if dispatch_hold is not None:
         dispatch_on = False
         dispatch_state = "Held"
+        # CMX-413: say the hold stops judges and rework re-spawns too, and name what is
+        # still finishing — from the runs table, the same lines the CLI and doctor print.
+        try:
+            head, *items = dispatcher.hold_inflight_lines()
+            inflight = f"{head}{': ' + '; '.join(items) if items else ''}. "
+        except Exception as e:  # noqa: BLE001 — a DB hiccup must not hide the hold
+            log.warning("could not read in-flight runs for the hold row: %s", e)
+            inflight = f"Held: {dispatcher.HOLD_SCOPE}. "
         dispatch_detail = (
-            f"queue hold — {dispatch_hold.summary()}; NO task will be claimed until it is "
-            "released (`chela dispatch --resume`). Reconciliation continues."
+            f"queue hold — {dispatch_hold.summary()}. {inflight}NO task will be claimed "
+            "until it is released (`chela dispatch --resume`). Reconciliation continues."
         )
 
     try:

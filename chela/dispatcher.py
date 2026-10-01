@@ -6851,6 +6851,72 @@ def list_runs() -> list[dict]:
         rows = conn.execute("SELECT * FROM runs ORDER BY started_at DESC").fetchall()
         return [dict(r) for r in rows]
 
+# ⏸️⚖️ CMX-413: what a hold stops, and what it deliberately lets finish.
+#
+# Liav, pausing for the evening: "pause workflow pauses also the judges no?" It does — `tick`
+# returns on `hold.active()` BEFORE step 3a′ (the judge spawn) and 3b (the rework re-spawn),
+# so a held queue starts no new agent of ANY kind. But it kills nothing: a claimed/running
+# agent and a judge already mid-verdict both finish. Nothing on any surface said either half,
+# so an operator could not tell "paused" from "paused, but three things are still burning
+# CPU". Every hold surface (the CLI, `chela doctor`, the Settings row) renders THIS sentence
+# from THESE rows, so the claim and the count cannot drift apart.
+HOLD_SCOPE = "new claims, judges and rework re-spawns"
+
+
+def _run_ref(row) -> str:
+    """``CMX-413`` for a dispatched run — its branch is ``cmx-413``, which is what the
+    orchestrator and the PR title call it — falling back to the task id."""
+    name = (row["branch_name"] or row["window_name"] or "").strip()
+    return name.upper() if name else row["task_id"]
+
+
+def hold_inflight(now: datetime | None = None) -> dict:
+    """The agents and judges a hold is letting FINISH, read from the runs table.
+
+    ``agents`` are runs holding a slot (:data:`ACTIVE_STATUSES`); ``judges`` are runs whose
+    judge is live (``judge_state`` running with a recorded ``judge_started_at``). Across
+    every workflow, because the hold is global. Each item carries its ``ref`` (``CMX-N``) and
+    ``elapsed`` seconds since it started (``None`` when the row never recorded a start).
+    """
+    now = now or datetime.now(timezone.utc)
+
+    def _elapsed(ts: str | None) -> float | None:
+        started = _parse_ts(ts)
+        return None if started is None else max(0.0, (now - started).total_seconds())
+
+    with _db() as conn:
+        agents = conn.execute(
+            "SELECT * FROM runs WHERE status IN ({}) ORDER BY COALESCE(started_at, '')"
+            .format(",".join("?" * len(ACTIVE_STATUSES))),
+            ACTIVE_STATUSES,
+        ).fetchall()
+        judges = conn.execute(
+            "SELECT * FROM runs WHERE judge_state=? AND judge_started_at IS NOT NULL "
+            "ORDER BY judge_started_at",
+            (judge.J_RUNNING,),
+        ).fetchall()
+    return {
+        "agents": [{"task_id": r["task_id"], "ref": _run_ref(r),
+                    "elapsed": _elapsed(r["started_at"])} for r in agents],
+        "judges": [{"task_id": r["task_id"], "ref": _run_ref(r),
+                    "elapsed": _elapsed(r["judge_started_at"])} for r in judges],
+    }
+
+
+def hold_inflight_lines(inflight: dict | None = None) -> list[str]:
+    """``["Held: new claims, judges and rework re-spawns. Still finishing: 1 agent(s), 0
+    judge(s)", "agent CMX-12 (running 4m)", ...]`` — the words every hold surface prints."""
+    if inflight is None:
+        inflight = hold_inflight()
+    agents, judges = inflight["agents"], inflight["judges"]
+    lines = [f"Held: {HOLD_SCOPE}. Still finishing: {len(agents)} agent(s), "
+             f"{len(judges)} judge(s)"]
+    for kind, items in (("agent", agents), ("judge", judges)):
+        for it in items:
+            took = "?" if it["elapsed"] is None else hold.human_duration(it["elapsed"])
+            lines.append(f"{kind} {it['ref']} (running {took})")
+    return lines
+
 
 def delete_run(task_id: str) -> dict:
     """Drop a run row; if it's still in flight, abort + clean up first.
