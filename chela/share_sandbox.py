@@ -516,7 +516,9 @@ def run(sid: str, cwd: str, net: str = NET_NONE) -> int:
     uid, gid = os.getuid(), os.getgid()
     prune_session_dirs()
     try:
-        session_dir(sid).mkdir(mode=0o700, parents=True, exist_ok=True)
+        # 0o700 on the root AND the session dir: they hold every guest reply on disk.
+        session_root().mkdir(mode=0o700, parents=True, exist_ok=True)
+        session_dir(sid).mkdir(mode=0o700, exist_ok=True)
     except OSError as e:
         _hold(f"refusing to start — cannot create {session_dir(sid)}: {e}")
         return 1

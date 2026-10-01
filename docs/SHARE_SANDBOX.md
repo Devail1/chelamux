@@ -102,8 +102,11 @@ chunking and dedup. `chela doctor` reports such a window as healthy while its ou
 exists and keeps up with the proxy. It flags the window when the outbox is missing, or
 when the proxy is forwarding turns that don't reach the outbox.
 
-Outboxes stay on disk after the session ends. A new sandboxed session removes any
-outbox older than 7 days.
+A turn is written only once its stream finishes. If the guest disconnects partway through
+a reply, that reply never reaches the topic, even when the model finished it.
+
+Outboxes stay on disk after the session ends, in directories readable only by you (mode
+0700). A new sandboxed session removes any outbox older than 7 days.
 
 **Turning the relay off for one session** (default on):
 

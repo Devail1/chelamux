@@ -360,3 +360,384 @@ def test_doctor_reports_an_opted_out_sandboxed_window_as_ok(doctor_env):
     share_sandbox.set_relay_enabled(SID, False)
     [sb] = _for(_doctor(doctor_env), "@7")
     assert sb.level == runtime_truth.OK and "OFF" in sb.title
+
+
+# --- 6. the proxy's outbox switches and branches (CMX-420 rework) ----------------------
+
+class _FakeServer:
+    served: list = []
+
+    def __init__(self, addr, handler):
+        self.handler = handler
+
+    def serve_forever(self):
+        _FakeServer.served.append(self.handler)
+
+
+@pytest.fixture
+def proxy_main(monkeypatch, tmp_path):
+    """Run the sidecar's ``main()`` up to ``serve_forever`` — and serve nothing."""
+    _FakeServer.served = []
+    monkeypatch.setattr(share_proxy, "ThreadingHTTPServer", _FakeServer)
+    for attr in ("outbox", "token_file", "upstream"):      # main() sets these class-wide
+        monkeypatch.setattr(share_proxy._Handler, attr, getattr(share_proxy._Handler, attr))
+    share_proxy._Handler.outbox = None
+    monkeypatch.setenv("CHELA_PROXY_TOKEN_FILE", str(tmp_path / "token"))
+    monkeypatch.delenv("CHELA_PROXY_SESSION_DIR", raising=False)
+    # An outbox opened on an EMPTY dir lands in the cwd ("outbox.jsonl") — so run here,
+    # where that would be seen, and never in the repo.
+    monkeypatch.chdir(tmp_path)
+    return monkeypatch
+
+
+def test_the_proxy_opens_its_outbox_when_given_a_session_dir(proxy_main, tmp_path):
+    d = tmp_path / "session"
+    d.mkdir()
+    proxy_main.setenv("CHELA_PROXY_SESSION_DIR", str(d))
+    share_proxy.main()
+    assert _FakeServer.served, "main() never reached the server"
+    box = share_proxy._Handler.outbox
+    assert isinstance(box, share_proxy.Outbox) and box.path == str(d / share_proxy.OUTBOX_NAME)
+    # Created at STARTUP, empty — so a missing outbox means "no directory", not "quiet".
+    assert (d / share_proxy.OUTBOX_NAME).read_text() == ""
+    status = json.loads((d / share_proxy.STATUS_NAME).read_text())
+    assert status["turns"] == 0 and status["last_turn"] is None
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_the_proxy_has_no_outbox_without_a_session_dir(proxy_main, tmp_path, value):
+    if value is not None:
+        proxy_main.setenv("CHELA_PROXY_SESSION_DIR", value)
+    share_proxy.main()
+    assert _FakeServer.served and share_proxy._Handler.outbox is None
+    assert not list(tmp_path.rglob(share_proxy.OUTBOX_NAME))
+    assert not list(tmp_path.rglob(share_proxy.STATUS_NAME))
+
+
+def test_the_proxy_runs_without_an_outbox_when_its_dir_is_unwritable(proxy_main, tmp_path):
+    proxy_main.setenv("CHELA_PROXY_SESSION_DIR", str(tmp_path / "does-not-exist"))
+    share_proxy.main()
+    assert _FakeServer.served and share_proxy._Handler.outbox is None
+
+
+def _old(path: Path, age: float = 3600.0) -> float:
+    t = path.stat().st_mtime - age
+    os.utime(path, (t, t))
+    return t
+
+
+def test_a_completed_turn_with_nothing_visible_still_touches_the_outbox(tmp_path):
+    box = share_proxy.Outbox(str(tmp_path))
+    box.open()
+    outbox = tmp_path / share_proxy.OUTBOX_NAME
+    before = _old(outbox)
+    c = share_proxy.TurnCollector()
+    c.feed(_sse(   # thinking only — complete, but no visible content
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "x"}},
+        {"type": "message_stop"}))
+    assert c.complete and c.record() is None
+    box.turn(c)
+    assert _outbox_lines(tmp_path) == []
+    assert outbox.stat().st_mtime > before + 1800        # touched: not mistaken for STALE
+    status = json.loads((tmp_path / share_proxy.STATUS_NAME).read_text())
+    assert status["turns"] == 1 and status["last_turn"]
+
+
+def test_a_cut_stream_neither_writes_nor_stamps(tmp_path):
+    box = share_proxy.Outbox(str(tmp_path))
+    box.open()
+    c = share_proxy.TurnCollector()
+    c.feed(TURN.split(b"event: message_stop")[0])
+    box.turn(c)
+    status = json.loads((tmp_path / share_proxy.STATUS_NAME).read_text())
+    assert status["turns"] == 0 and status["last_turn"] is None
+
+
+class _Resp(_FakeResp):
+    def __init__(self, body: bytes, status: int = 200, ctype: str = "text/event-stream"):
+        super().__init__(body)
+        self.status, self._ctype = status, ctype
+
+    def getheader(self, name, default=None):
+        return self._ctype if name.lower() == "content-type" else default
+
+    def getheaders(self):
+        return [("content-type", self._ctype)]
+
+
+def _forward(tmp_path, monkeypatch, body: dict, *, path="/v1/messages", status=200,
+             ctype="text/event-stream", outbox=True):
+    (tmp_path / "token").write_text("tok")
+    (tmp_path / "session").mkdir(exist_ok=True)
+    resp = _Resp(TURN, status, ctype)
+
+    class Conn(_FakeConn):
+        def getresponse(self):
+            return resp
+
+    monkeypatch.setattr(share_proxy.http.client, "HTTPSConnection", Conn)
+    h = _handler(tmp_path, body)
+    h.path = path
+    if outbox:
+        h.outbox.open()
+    else:
+        h.outbox = None
+    h._forward()
+    assert h.wfile.getvalue() == TURN                   # the guest is served regardless
+    out = tmp_path / "session" / share_proxy.OUTBOX_NAME
+    return [json.loads(x) for x in out.read_text().splitlines()] if out.exists() else None
+
+
+TOOLS = [{"name": "Bash"}]
+
+
+def test_forward_control_a_main_loop_turn_is_recorded(tmp_path, monkeypatch):
+    assert len(_forward(tmp_path, monkeypatch, {"stream": True, "tools": TOOLS})) == 1
+
+
+@pytest.mark.parametrize("label, kw", [
+    ("side call: no tools (a title / summary)", dict(body={"stream": True})),
+    ("side call: empty tool list", dict(body={"stream": True, "tools": []})),
+    ("not streamed", dict(body={"stream": False, "tools": TOOLS})),
+    ("count_tokens", dict(body={"stream": True, "tools": TOOLS}, path="/v1/messages/count_tokens")),
+    ("an upstream error", dict(body={"stream": True, "tools": TOOLS}, status=529)),
+    ("not an event stream", dict(body={"stream": True, "tools": TOOLS}, ctype="application/json")),
+])
+def test_forward_never_records_anything_but_a_main_loop_turn(tmp_path, monkeypatch, label, kw):
+    assert _forward(tmp_path, monkeypatch, **kw) == [], label
+    status = json.loads((tmp_path / "session" / share_proxy.STATUS_NAME).read_text())
+    assert status["turns"] == 0, label
+
+
+def test_forward_without_an_outbox_records_nothing_and_still_serves(tmp_path, monkeypatch):
+    assert _forward(tmp_path, monkeypatch, {"stream": True, "tools": TOOLS}, outbox=False) is None
+
+
+def test_a_failing_outbox_never_breaks_the_guests_response(tmp_path, monkeypatch):
+    def boom(self, c):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(share_proxy.Outbox, "turn", boom)
+    _forward(tmp_path, monkeypatch, {"stream": True, "tools": TOOLS})   # asserts bytes served
+
+
+# --- 7. session dirs: pruned, private ---------------------------------------------------
+
+def _session(name: str, age: float, now: float, inner_age: float | None = None) -> Path:
+    d = share_sandbox.session_root() / name
+    d.mkdir(parents=True)
+    f = d / share_proxy.OUTBOX_NAME
+    f.write_text("{}\n")
+    t = now - (age if inner_age is None else inner_age)
+    os.utime(f, (t, t))
+    os.utime(d, (now - age, now - age))
+    return d
+
+
+def test_prune_removes_only_session_dirs_past_their_age():
+    now = 2_000_000_000.0
+    max_age = share_sandbox.SESSION_DIR_MAX_AGE_S
+    old = _session("aaaaaaaaaaaa", max_age + 60, now)
+    fresh = _session("bbbbbbbbbbbb", max_age - 60, now)
+    # An old dir whose outbox was written recently is still in use.
+    live = _session("cccccccccccc", max_age + 60, now, inner_age=10)
+    stranger = _session("not-a-session", max_age + 60, now)        # not ours to delete
+    target = _session("dddddddddddd", max_age - 60, now)
+    link = share_sandbox.session_root() / "eeeeeeeeeeee"
+    link.symlink_to(target)
+    os.utime(target, (now - max_age - 60,) * 2)
+    os.utime(target / share_proxy.OUTBOX_NAME, (now - max_age - 60,) * 2)
+    share_sandbox.prune_session_dirs(now=now)
+    assert not old.exists()
+    assert fresh.exists() and live.exists() and stranger.exists()
+    assert link.is_symlink()                    # a symlink is never followed into rmtree
+
+
+def test_prune_tolerates_a_missing_root():
+    assert not share_sandbox.session_root().exists()
+    share_sandbox.prune_session_dirs()
+
+
+def test_run_prunes_and_creates_a_private_session_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr(share_sandbox, "preflight", lambda cwd, net="none": None)
+    monkeypatch.setattr(share_sandbox, "claude_binary", lambda: "/usr/bin/true")
+    monkeypatch.setattr(share_sandbox, "host_deny_nets", lambda: [])
+    monkeypatch.setattr(share_sandbox.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(share_sandbox, "cleanup", lambda sid: None)
+
+    class P:
+        returncode, stdout, stderr = 0, "", ""
+
+    monkeypatch.setattr(share_sandbox.subprocess, "run", lambda argv, **k: P())
+    monkeypatch.setattr(share_sandbox.subprocess, "call", lambda argv: 0)
+    pruned = []
+    monkeypatch.setattr(share_sandbox, "prune_session_dirs", lambda: pruned.append(1))
+    old = os.umask(0o022)
+    try:
+        assert share_sandbox.run(SID, str(tmp_path)) == 0
+    finally:
+        os.umask(old)
+    assert pruned == [1]
+    assert share_sandbox.session_dir(SID).stat().st_mode & 0o777 == 0o700
+    assert share_sandbox.session_root().stat().st_mode & 0o777 == 0o700
+
+
+# --- 8. `chela telegram --sandbox-relay` --------------------------------------------------
+
+def _sandbox_relay(monkeypatch, spec, sandboxed=("@7",)):
+    import argparse
+
+    from chela import main as cli
+
+    monkeypatch.setattr(share_sandbox, "share_session_id",
+                        lambda wid: SID if wid in sandboxed else None)
+    monkeypatch.setattr(share_sandbox, "check_share_session",
+                        lambda wid: (False, "no such container"))
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)   # must exit BEFORE the bridge
+    cli.cmd_telegram(argparse.Namespace(sandbox_relay=spec))
+
+
+@pytest.mark.parametrize("spec", ["@7=off", "7=off", " @7 = OFF "])
+def test_sandbox_relay_off_stores_the_opt_out(monkeypatch, capsys, spec):
+    _sandbox_relay(monkeypatch, spec)
+    assert not share_sandbox.relay_enabled(SID)
+    assert "NOT relayed" in capsys.readouterr().out
+    _sandbox_relay(monkeypatch, "@7=on")
+    assert share_sandbox.relay_enabled(SID)
+
+
+@pytest.mark.parametrize("spec, code", [("@7=maybe", 2), ("@7", 2), ("@8=off", 1)])
+def test_sandbox_relay_refuses_without_storing(monkeypatch, spec, code):
+    with pytest.raises(SystemExit) as e:
+        _sandbox_relay(monkeypatch, spec)
+    assert e.value.code == code
+    assert share_sandbox.relay_enabled(SID)
+    assert not (config.CHELA_DIR / "share-relay-optout.json").exists()
+
+
+def test_sandbox_relay_is_wired_into_the_cli(monkeypatch):
+    from chela import main as cli
+
+    got = []
+    monkeypatch.setattr(cli, "cmd_telegram", lambda args: got.append(args.sandbox_relay))
+    monkeypatch.setattr(cli.sys, "argv", ["chela", "telegram", "--sandbox-relay", "@7=off"])
+    cli.main()
+    assert got == ["@7=off"]
+
+
+# --- 9. the daemon itself: cmd_telegram's wiring -------------------------------------------
+
+class _Bot:
+    made: list = []
+
+    def __init__(self, *a, **kw):
+        self.sent: list = []
+        _Bot.made.append(self)
+
+    def send(self, text, parse_mode=None, message_thread_id=None, reply_markup=None, **kw):
+        self.sent.append((text, message_thread_id))
+        return True
+
+    def send_photos(self, *a, **kw):
+        return True
+
+    def post(self, *a, **kw):
+        return 1
+
+    def edit(self, *a, **kw):
+        return True
+
+    def delete(self, *a, **kw):
+        return True
+
+    def chat_action(self, *a, **kw):
+        return True
+
+
+class _Thread:
+    started: list = []
+
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
+        self.target, self.args = target, args
+
+    def start(self):
+        _Thread.started.append(self)
+
+
+@pytest.fixture(params=[True, False], ids=["no-inbound", "inbound"])
+def daemon(request, monkeypatch, tmp_path):
+    """Run the REAL ``cmd_telegram`` (both branches) far enough to hold the transcript
+    monitor and the pane watch's window set it built — starting nothing."""
+    import argparse
+    import threading
+    from types import SimpleNamespace
+
+    import chela.telegram as tg
+    from chela import main as cli
+
+    _Bot.made, _Thread.started = [], []
+    monkeypatch.setattr(threading, "Thread", _Thread)
+    monkeypatch.setattr(tg, "BotSender", _Bot)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "0:test")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "-100")
+    monkeypatch.delenv("TELEGRAM_TOPIC_ID", raising=False)
+    reg = BindingRegistry(chat_id="-100")
+    reg.bind("@7", 40)                                   # sandboxed
+    reg.bind("@8", 41)                                   # ordinary
+    monkeypatch.setattr(cli, "_build_bindings_registry", lambda args, chat: reg)
+    monkeypatch.setattr(cli.agent_manager, "start_background_refresh", lambda *a, **kw: None)
+    monkeypatch.setattr(share_sandbox, "share_session_id",
+                        lambda wid: SID if wid == "@7" else None)
+    host = _host_transcript(tmp_path)
+    monkeypatch.setattr(sessions, "transcript_for_window", lambda wid: host)
+    share_sandbox.session_dir(SID).mkdir(parents=True)
+    share_sandbox.outbox_path(SID).write_text("")
+    foreground = []
+    monkeypatch.setattr(cli, "_outbound_loop", lambda *a: foreground.append(a))
+    monkeypatch.setattr(tg, "build_application",
+                        lambda *a, **kw: SimpleNamespace(run_polling=lambda: None))
+
+    def run():
+        cli.cmd_telegram(argparse.Namespace(
+            wid=None, bind=["@7:40"], interval=2, auto_topics=False, reconcile_interval=15,
+            no_inbound=request.param, sandbox_relay=None))
+        relays = foreground + [t.args for t in _Thread.started if t.target is cli._outbound_loop]
+        panes = [t.args for t in _Thread.started if t.target is cli._pane_loop]
+        assert len(relays) == 1 and len(panes) == 1
+        return SimpleNamespace(monitor=relays[0][0], panes=panes[0][1], bot=_Bot.made[0],
+                               host=host, outbox=share_sandbox.outbox_path(SID))
+
+    return run
+
+
+def _texts(bot, thread):
+    return [t for t, th in bot.sent if str(th) == str(thread)]
+
+
+def test_the_daemon_relays_a_sandboxed_window_from_its_outbox(daemon):
+    d = daemon()
+    d.monitor.poll(["@7", "@8"])
+    _append(d.outbox, "from the sandbox")
+    _append(d.host, "an ordinary reply")
+    d.monitor.poll(["@7", "@8"])
+    d.monitor.poll(["@7", "@8"])
+    assert [t for t in _texts(d.bot, 40) if "from the sandbox" in t] and \
+        len(_texts(d.bot, 40)) == 1
+    assert not [t for t in _texts(d.bot, 40) if "ordinary" in t]   # never the cwd guess
+    assert len(_texts(d.bot, 41)) == 1 and "an ordinary reply" in _texts(d.bot, 41)[0]
+    assert d.panes.windows() == ["@7", "@8"]                      # default ON: both watched
+
+
+def test_the_daemon_silences_an_opted_out_sandboxed_session(daemon):
+    share_sandbox.set_relay_enabled(SID, False)
+    d = daemon()
+    d.monitor.poll(["@7", "@8"])
+    _append(d.outbox, "a guest's CV")
+    _append(d.host, "an ordinary reply")
+    d.monitor.poll(["@7", "@8"])
+    assert _texts(d.bot, 40) == []                                # nothing of the guest
+    assert len(_texts(d.bot, 41)) == 1                            # the rest untouched
+    assert d.panes.windows() == ["@8"]                            # nor its pane mirror
+    share_sandbox.set_relay_enabled(SID, True)                    # re-read, not latched
+    assert d.panes.windows() == ["@7", "@8"]

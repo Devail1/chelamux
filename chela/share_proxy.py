@@ -215,14 +215,18 @@ class Outbox:
     def turn(self, collector: TurnCollector) -> None:
         """A qualifying response finished streaming: append its record (if it had one),
         and stamp the status. The outbox is touched on EVERY completed turn, so its mtime
-        trailing ``last_turn`` means the parse is failing, not that the guest went quiet."""
+        trailing ``last_turn`` means the parse is failing, not that the guest went quiet.
+        A stream cut off before ``message_stop`` is not a turn: it neither writes nor
+        stamps, so it can never make the doctor read a healthy outbox as stale."""
+        if not collector.complete:
+            return
         rec = collector.record()
         with self._lock:
             now = time.time()
             if rec is not None:
                 with open(self.path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            elif collector.complete:
+            else:
                 os.utime(self.path)
             self._status["last_turn"] = now
             self._status["turns"] += 1
