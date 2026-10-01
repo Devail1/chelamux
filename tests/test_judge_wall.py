@@ -229,6 +229,11 @@ def test_the_battery_heartbeats_baseline_confirmations_and_consistency(tmp_path)
     names = [e for e, _ in events]
     assert names[0] == "baseline" and events[0][1]["seconds"] > 0
     assert names.count("confirm") == 2          # the battery's, then the re-run's
+    # The consistency re-run passes no `progress` callback, so its experiment starts move
+    # `progress_at` ONLY through this heartbeat. Seen to go red: `heartbeat("experiment")`
+    # dead-coded in `_apply_experiments` (count 0).
+    assert names.count("experiment") == 2       # the battery's start, then the re-run's
+    assert "experiment" in names[names.index("consistency"):], names
     assert "consistency" in names
     assert names.index("consistency") > names.index("confirm")
 
@@ -267,3 +272,50 @@ def test_judge_run_writes_progress_time_and_baseline_to_its_status(tmp_path, mon
                for s in seen), seen
     assert all(s["progress_at"] >= s["run_started_at"] for s in seen), seen
     assert seen[-1]["phase"] == "finishing" and seen[0]["phase"] == "battery"
+
+
+def test_judge_run_counts_each_confirmation_into_its_status(tmp_path, monkeypatch):
+    """GUARD (wiring, consumer side): every heartbeat the battery emits must land in the
+    status json the watchdog sizes the wall from. The producer test above pins the event
+    NAMES `_measure`/`_apply_experiments` emit; this drives a REAL `judge_run`'s heartbeat
+    with exactly those names and reads back what it wrote. Seen to go red: `judge_run`'s
+    `"confirm"` arm renamed (`confirmations` stays 0)."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    logs = tmp_path / "judge-logs"
+    monkeypatch.setattr(judge, "judge_logs_dir", lambda: logs)
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    after: dict[str, dict] = {}
+
+    def _battery(*a, heartbeat=None, progress=None, **kw):
+        def beat(event, **info):
+            before = json.loads((logs / f"{task_id}.json").read_text())["progress_at"]
+            time.sleep(0.01)
+            heartbeat(event, **info)
+            st = json.loads((logs / f"{task_id}.json").read_text())
+            assert st["progress_at"] > before, (event, st)
+            after[event] = st
+        beat("baseline", seconds=42.5)
+        progress(0, 2)
+        beat("experiment")
+        beat("confirm")
+        progress(1, 2)
+        beat("experiment")
+        beat("confirm")
+        progress(2, 2)
+        beat("consistency")
+        beat("experiment")
+        return judge.Report()
+
+    monkeypatch.setattr(judge, "run_experiments", _battery)
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        judge.judge_run(task_id, exp_file, cleanup=True, detached=True)
+
+    assert after["baseline"]["baseline_seconds"] == 42.5
+    assert after["confirm"]["confirmations"] == 2, after["confirm"]
+    assert after["consistency"]["phase"] == "consistency"
+    assert after["experiment"]["confirmations"] == 2          # a start never counts as one
