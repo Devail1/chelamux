@@ -43,7 +43,13 @@ const PANEL = `
 </div>`;
 
 const AGENTS = [
-    { name: 'alpha', window_id: '@3', online: true, cwd: '/p/alpha' },
+    // alpha carries an ai_title AND a recap, so its tooltip takes the two-line
+    // branch; the long-named @32 carries neither (the one-line branch). Each
+    // branch is read back exactly — a fixture parked on empty extras let a
+    // tooltip that dropped the id on the two-line branch stay green (judge,
+    // round 1; docs/defeat_shapes/352b-…).
+    { name: 'alpha', window_id: '@3', online: true, cwd: '/p/alpha',
+      ai_title: 'Refactor the flux capacitor', recap: 'Tests green, PR open' },
     { name: LONG, window_id: '@32', online: true, cwd: '/p/long' },
 ];
 
@@ -154,7 +160,22 @@ test('the sidebar row shows its window id on its second line and in its tooltip'
     const wid = row.querySelector('.ar-sub .ar-wid');
     assert.ok(wid, 'no .ar-wid on the row\'s second line');
     assert.equal(wid.textContent, '@3');
-    assert.match(row.title, /· @3(\n|$| —)/, `tooltip ${JSON.stringify(row.title)} lacks "· @3"`);
+    // The sub-line ENDS with this row's own id (not merely contains an "@3").
+    assert.match(row.querySelector('.ar-sub').textContent, / · @3$/);
+});
+
+// The two tooltip branches, each read back EXACTLY (modulo the on-wall suffix):
+// "<label> · @N" heads the tooltip whether or not an ai_title/recap line follows.
+const tooltip = row => row.title.replace(/ — open on the wall$/, '');
+
+test('a row WITH an ai_title/recap: the tooltip heads with "<label> · @N", then the extras', () => {
+    const row = sidebarRow('alpha');
+    assert.equal(tooltip(row), 'alpha · @3\nRefactor the flux capacitor — Tests green, PR open');
+});
+
+test('a row WITHOUT extras: the tooltip is exactly "<label> · @N" — even for a very long name', () => {
+    const row = sidebarRow(LONG);
+    assert.equal(tooltip(row), `${LONG} · @32`);
 });
 
 // --- 3. the palette resolves "@N" exactly ---------------------------------------
@@ -220,6 +241,98 @@ test('clicking the footer id copies it and shows a "Copied" toast', async () => 
     const toast = tile('@32').querySelector('.gs-wid-toast');
     assert.ok(toast, 'no toast after the copy');
     assert.equal(toast.textContent, 'Copied @32');
+});
+
+test('the footer chip\'s own tooltip names its window', () => {
+    for (const wid of ['@3', '@32']) {
+        assert.equal(tile(wid).querySelector('.gs-wid').title, `tmux window ${wid} — click to copy`);
+    }
+});
+
+// The plain-http path: no navigator.clipboard (not a secure context) → a
+// selected <textarea> + execCommand('copy'). Also the reject path: a clipboard
+// that refuses falls back to the same legacy copy.
+async function withLegacyCopy({ clipboardRejects, execResult }, fn) {
+    const nav = globalThis.navigator;
+    const saved = Object.getOwnPropertyDescriptor(nav, 'clipboard');
+    const savedExec = document.execCommand;
+    const copied = [];
+    if (clipboardRejects) {
+        Object.defineProperty(nav, 'clipboard', { configurable: true,
+            value: { writeText: () => Promise.reject(new Error('denied')) } });
+    } else {
+        delete nav.clipboard;
+        Object.defineProperty(nav, 'clipboard', { configurable: true, value: undefined });
+    }
+    document.execCommand = cmd => {
+        const ta = document.activeElement && document.activeElement.tagName === 'TEXTAREA'
+            ? document.activeElement : document.querySelector('body > textarea');
+        copied.push({ cmd, text: ta ? ta.value : null });
+        return execResult;
+    };
+    try { await fn(copied); } finally {
+        Object.defineProperty(nav, 'clipboard', saved);
+        document.execCommand = savedExec;
+    }
+}
+
+test('no clipboard API: the footer chip copies via a textarea + execCommand, then toasts', async () => {
+    await withLegacyCopy({ clipboardRejects: false, execResult: true }, async copied => {
+        window.chela.copyWindowId(tile('@32').querySelector('.gs-wid'));
+        await sleep(0);
+        assert.deepEqual(copied, [{ cmd: 'copy', text: '@32' }]);
+        assert.equal(document.querySelectorAll('body > textarea').length, 0, 'the copy textarea was left behind');
+        assert.equal(tile('@32').querySelector('.gs-wid-toast').textContent, 'Copied @32');
+    });
+});
+
+test('a clipboard that refuses falls back to the legacy copy of the SAME id', async () => {
+    await withLegacyCopy({ clipboardRejects: true, execResult: true }, async copied => {
+        window.chela.copyWindowId(tile('@3').querySelector('.gs-wid'));
+        await sleep(0);
+        assert.deepEqual(copied, [{ cmd: 'copy', text: '@3' }]);
+        assert.equal(tile('@3').querySelector('.gs-wid-toast').textContent, 'Copied @3');
+    });
+});
+
+test('a legacy copy that fails says so — never a false "Copied"', async () => {
+    await withLegacyCopy({ clipboardRejects: false, execResult: false }, async () => {
+        window.chela.copyWindowId(tile('@32').querySelector('.gs-wid'));
+        await sleep(0);
+        const toasts = tile('@32').querySelectorAll('.gs-wid-toast');
+        assert.equal(toasts.length, 1, 'a second click must replace, not stack, the toast');
+        assert.equal(toasts[0].textContent, 'Copy failed — @32');
+    });
+});
+
+// --- the palette reaches a window with no /api/agents row (a plain shell) -------
+
+test('"@N" for an open plain-shell pane (no agent row) still resolves to that window', async () => {
+    terminals._renderedWids.push('@40');
+    try {
+        window.chela.openPalette();
+        window.chela._renderPalette('@40');
+        const rows = paletteRows();
+        assert.ok(rows.length, 'no palette row for the shell\'s "@40"');
+        assert.deepEqual({ title: rows[0].title, sub: rows[0].sub }, { title: '@40', sub: 'window · @40' });
+        window.chela.closePalette();
+    } finally {
+        terminals._renderedWids.splice(terminals._renderedWids.indexOf('@40'), 1);
+    }
+});
+
+test('jumping to "@32" from the single-pane view switches to the Wall and focuses @32', async () => {
+    window.chela.setTermMode('single');
+    await sleep(0);
+    window.chela.openPalette();
+    window.chela._renderPalette('@32');
+    window.chela._palRun(paletteRows()[0].i);
+    await sleep(120);
+    assert.ok(terminals.isWallVisible(), 'the jump left the single-pane view up');
+    const flashed = [...document.querySelectorAll('#term-stage .grid-stack-item')]
+        .filter(it => it.querySelector('.pane-flash'))
+        .map(it => it.getAttribute('gs-id'));
+    assert.deepEqual(flashed, ['@32']);
 });
 
 // --- the pure matcher -----------------------------------------------------------
