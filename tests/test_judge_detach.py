@@ -25,6 +25,8 @@ import pytest
 from chela import dispatcher, judge, runtime_truth, workflow
 from tests.test_judge import (
     REAL_GUARD_TEST,
+    TEST_CMD,
+    _project,
     _exp,
     _judge_worktree_path,
     _run_row,
@@ -375,3 +377,228 @@ def test_doctor_formats_elapsed_and_progress(elapsed, total, want):
                                    "total": total, "detached": True, "log": "/x.log"}])
     [f] = runtime_truth._judge_runs_report(None, obs)
     assert want in f.title
+
+
+# --- ⚖️ CMX-411 rework round 1: the CLI wiring and the login-expired arm --------------------
+#
+# The judge corrupted each of these and the suite stayed green: every test above called
+# `judge.judge_run(..., detached=True)` / `judge.detach_judge_run(...)` DIRECTLY, so the
+# argparse dispatch in `cmd_judge` that turns `--detach` / `--detached-child` into those
+# calls was never driven (DEFEAT_SHAPES 411). These drive the real `main.main()`.
+
+def test_cli_detached_child_marks_its_claim_detached(tmp_path, monkeypatch):
+    """⛔ The invariant, read off the claim itself: a `--detached-child` run's lock says
+    `detached: true` — else `stop_judge_run` refuses to stop it on a timeout and the
+    watchdog deletes its worktree out from under a live battery. Real argparse, real
+    `judge_run`, the lock read back mid-battery. Seen to go red:
+    `detached=getattr(args, "detached_child", False)` → `detached=False` in `cmd_judge`."""
+    from chela import main
+
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    repo = _workflow_repo(tmp_path, "abc123", REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, "abc123")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    real_run_experiments = judge.run_experiments
+    claims = []
+
+    def _spy(worktree, *a, **kw):
+        claims.append(judge._read_judge_lock(judge._judge_lock_path(worktree)))
+        return real_run_experiments(worktree, *a, **kw)
+
+    def _run(*flags):
+        claims.clear()
+        with patch.object(judge, "run_experiments", _spy), \
+             patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")), \
+             patch.object(sys, "argv", ["chela", "judge", "run", "abc123",
+                                        "--experiments", str(exp_file), *flags]):
+            main.main()
+        assert claims, "the battery never ran"
+        return claims[0]
+
+    assert _run("--detached-child")["detached"] is True
+    # ⭐ COUNTERWEIGHT — an always-detached claim would let the watchdog signal a manual
+    # foreground run it never launched.
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET judge_state=NULL, judge_sha=NULL WHERE task_id='abc123'")
+        conn.commit()
+    assert _run()["detached"] is False
+
+
+def test_cli_detach_takes_the_detach_path_and_never_runs_the_battery_inline(
+    tmp_path, monkeypatch, capsys,
+):
+    """`chela judge run --detach` spawns the detached child and returns — it must NEVER run
+    the battery in the caller's own process (that is the Bash-tool kill all over again).
+    Real argparse; the only thing faked is the process spawn. Seen to go red:
+    `if getattr(args, "detach", False):` → `if False and …` in `cmd_judge`."""
+    from chela import main
+
+    repo = _workflow_repo(tmp_path, "abc123", REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, "abc123")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    spawned = []
+    monkeypatch.setattr(judge, "spawn_detached", lambda argv, log: spawned.append(argv) or 4242)
+    inline = []
+    monkeypatch.setattr(judge, "judge_run", lambda *a, **kw: inline.append(a) or {})
+
+    with patch.object(sys, "argv", ["chela", "judge", "run", "abc123",
+                                    "--experiments", str(exp_file), "--detach"]):
+        main.main()
+
+    assert inline == []                                   # ⛔ no battery in this process
+    assert len(spawned) == 1 and "--detached-child" in spawned[0]
+    out = capsys.readouterr().out
+    assert "started DETACHED (pid 4242)" in out
+    assert str(judge.judge_log_path("abc123")) in out
+
+
+def test_cli_detach_refused_exits_nonzero_and_spawns_nothing(tmp_path, monkeypatch, capsys):
+    """A refused `--detach` (a run is already live) is a FAILURE the agent must see — exit
+    1, nothing spawned, nothing run inline — not a silent "started"."""
+    from chela import main
+
+    repo = _workflow_repo(tmp_path, "abc123", REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, "abc123")
+    _live_lock(_judge_worktree_path(tmp_path, "abc123"))
+    spawned, inline = [], []
+    monkeypatch.setattr(judge, "spawn_detached", lambda *a: spawned.append(a) or 1)
+    monkeypatch.setattr(judge, "judge_run", lambda *a, **kw: inline.append(a) or {})
+
+    with patch.object(sys, "argv", ["chela", "judge", "run", "abc123",
+                                    "--experiments", "x.json", "--detach"]), \
+         pytest.raises(SystemExit) as exit_:
+        main.main()
+
+    assert exit_.value.code == 1
+    assert spawned == [] and inline == []
+    assert "already running" in capsys.readouterr().out
+
+
+_LOGIN_BANNER = "✽ Sonnet 5\n\nLogin expired · Please run /login\n\n❯ "
+
+
+def _watch_with_pane(wf, pane):
+    window = judge.judge_window_name("test-1")
+    with dispatcher._db() as conn, \
+         patch.object(dispatcher, "_capture_pane",
+                      side_effect=lambda w: pane if w == window else ""), \
+         patch.object(dispatcher, "_judge_hit_classifier_outage", return_value=False), \
+         patch.object(dispatcher, "_kill_windows_named"), \
+         patch.object(dispatcher, "remove_worktree", return_value=True):
+        handed = dispatcher._judge_watchdog(conn, wf, live_windows={window})
+        conn.commit()
+    return handed, dispatcher.resolve_run("abc123")["judge_state"]
+
+
+def test_an_expired_login_does_not_reap_a_run_that_has_started(tmp_path):
+    """Once `chela judge run` has stamped its own start it runs detached and needs nothing
+    more from the agent's session: an expired login in that pane is NOT a reason to kill a
+    battery 5 minutes into its 60. Seen to go red:
+    `alive and run_started is None` → `alive` in `_judge_watchdog`."""
+    wf = _judging_row(tmp_path, spawned_ago=10 * 60, run_started_ago=5 * 60)
+    assert _watch_with_pane(wf, _LOGIN_BANNER) == (0, judge.J_RUNNING)
+
+
+def test_an_expired_login_still_reaps_a_judge_whose_run_never_started(tmp_path):
+    """⭐ COUNTERWEIGHT — CMX-282 is kept, not removed: before the run's start marker exists
+    the agent IS the judge, and a dead login there is reaped on sight."""
+    wf = _judging_row(tmp_path, spawned_ago=10 * 60, run_started_ago=None)
+    assert _watch_with_pane(wf, _LOGIN_BANNER) == (1, judge.J_CANNOT_VERIFY)
+    assert "login expired" in dispatcher.resolve_run("abc123")["judge_detail"]
+
+
+# --- the rest of the run's own bookkeeping, asserted on its effect ------------------------
+
+def test_progress_reports_every_experiment_start_and_the_finish(tmp_path):
+    """`chela doctor`'s k/N is exactly what the battery reports: (0,N) … (N-1,N) as each
+    experiment starts, then (N,N) when they are all done — never a stale k past the end."""
+    root = _project(tmp_path / "repo", guard_test=REAL_GUARD_TEST)
+    calls = []
+    report = judge.run_experiments(
+        root, TEST_CMD, {"experiments": [_exp(), _exp(guard="again")]}, timeout=120,
+        progress=lambda done, total: calls.append((done, total)),
+    )
+    assert len(report.outcomes) == 2                 # the battery really ran both
+    assert calls == [(0, 2), (1, 2), (2, 2)]
+
+
+def _status(logs, task, **over):
+    from chela import sessions
+
+    st = {"pid": os.getpid(), "started": sessions.proc_started(os.getpid()), "task_id": task,
+          "run_started_at": time.time() - 125, "detached": True, "done": 3, "total": 8}
+    st.update(over)
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / f"{task}.json").write_text(json.dumps(st))
+
+
+def test_live_runs_reports_elapsed_from_the_runs_own_start_and_skips_dead_owners(
+    tmp_path, monkeypatch,
+):
+    """Elapsed is measured from `run_started_at` (125 s here), and a status left by a
+    process that is gone is not reported as a live run."""
+    logs = tmp_path / "judge-logs"
+    monkeypatch.setattr(judge, "judge_logs_dir", lambda: logs)
+    _status(logs, "live")
+    _status(logs, "dead", pid=2 ** 22 + 7, started=1.0)
+
+    runs = judge.live_judge_runs()
+
+    assert [r["task_id"] for r in runs] == ["live"]
+    assert 124 <= runs[0]["elapsed"] < 135
+
+
+def test_a_finished_run_clears_only_its_own_status(tmp_path, monkeypatch):
+    """A run removes its own status file when it releases the slot — and never another
+    live process's (a run that took over a stale slot must not erase its successor's)."""
+    logs = tmp_path / "judge-logs"
+    monkeypatch.setattr(judge, "judge_logs_dir", lambda: logs)
+    _status(logs, "mine")
+    _status(logs, "theirs", pid=1)
+    judge._clear_run_status("mine")
+    judge._clear_run_status("theirs")
+    assert not (logs / "mine.json").exists()
+    assert (logs / "theirs.json").exists()
+
+
+@pytest.mark.parametrize("elapsed, level", [
+    (dispatcher.JUDGE_TIMEOUT_SECONDS - 1, runtime_truth.OK),
+    (dispatcher.JUDGE_TIMEOUT_SECONDS, runtime_truth.WARN),
+])
+def test_doctor_warns_on_a_run_past_the_wall(elapsed, level):
+    """A run still going past the wall is one nothing is bounding — the doctor WARNs (and
+    says why); one inside it is OK."""
+    obs = runtime_truth.observed([{"task_id": "T", "pid": 1, "elapsed": elapsed, "done": 1,
+                                   "total": 2, "detached": True, "log": None}])
+    [f] = runtime_truth._judge_runs_report(None, obs)
+    assert f.level == level
+    assert ("PAST the 60min judge wall" in f.detail) is (level == runtime_truth.WARN)
+
+
+def test_a_stale_empty_claim_is_taken_over_not_refused_forever(tmp_path):
+    """⭐ COUNTERWEIGHT to the mid-write refusal: an EMPTY lock that is not fresh is a
+    claimer that crashed before writing — taking it over is the only way the slot ever
+    frees. Refusing it would wedge every future judge on this task."""
+    wt = tmp_path / "wts" / "judge-abc123"
+    lock = wt.parent / f".{wt.name}.judgelock"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("")
+    old = time.time() - 60
+    os.utime(lock, (old, old))
+
+    assert judge._claim_judge_slot(wt, "abc123", detached=True) is None
+    claim = json.loads(lock.read_text())
+    assert claim["pid"] == os.getpid() and claim["detached"] is True
+
+
+def test_detached_argv_carries_no_cleanup_and_a_safe_log_name():
+    """`--no-cleanup` survives the re-exec, and a task id can never steer the log path out
+    of `judge-logs/`."""
+    assert "--no-cleanup" in judge.detached_argv("t", "x.json", cleanup=False)
+    assert "--no-cleanup" not in judge.detached_argv("t", "x.json")
+    assert judge.judge_log_path("../../etc/x").parent == judge.judge_logs_dir()
