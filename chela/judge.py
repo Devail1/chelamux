@@ -2298,7 +2298,7 @@ def judge_run(
     # here, not from when the judge agent was spawned — its design time is not the run's.
     run_started = time.time()
     dispatcher.mark_judge_run_started(task_id)
-    status = {"pid": os.getpid(), "started": _proc_started_self(), "task_id": task_id,
+    status = {**owner_identity(os.getpid()), "task_id": task_id,
               "run_started_at": run_started, "detached": detached, "done": 0, "total": None,
               "log": str(judge_log_path(task_id)) if detached else None}
     _write_run_status(task_id, status)
@@ -2706,6 +2706,16 @@ def _judge_lock_owner_alive(lock: dict) -> bool:
         return False
     from chela import sessions
 
+    # ⏱️ CMX-424: the boot-clock identity first. Both sides come from the same reader on the
+    # same clock, so CMX-219's exact equality is right here — and no wall-clock step can move
+    # either side (see `sessions.proc_start_ticks`). Measured 2026-10-01: with WSL2 stepping
+    # the clock every ~34s, the wall-clock comparison below declared the judge's own live
+    # process DEAD, so doctor lost every in-flight run and the CMX-221 lock was takeable.
+    ticks = lock.get("start_ticks")
+    if isinstance(ticks, int) and not isinstance(ticks, bool):
+        live_ticks = sessions.proc_start_ticks(pid)
+        if live_ticks is not None:
+            return live_ticks == ticks
     started = lock.get("started")
     live_started = sessions.proc_started(pid)
     if started is None or live_started is None:
@@ -2746,13 +2756,10 @@ def _claim_judge_slot(worktree: Path, task_id: str, *, detached: bool = False) -
     so the watchdog knows it may stop this process's own group on a timeout (and never a
     process it did not launch).
     """
-    from chela import sessions
-
     lock_path = _judge_lock_path(worktree)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    pid = os.getpid()
     payload = json.dumps({
-        "pid": pid, "started": sessions.proc_started(pid), "task_id": task_id,
+        **owner_identity(os.getpid()), "task_id": task_id,
         "claimed_at": time.time(), "detached": bool(detached),
     })
     for _ in range(3):
@@ -2777,10 +2784,15 @@ def _claim_judge_slot(worktree: Path, task_id: str, *, detached: bool = False) -
     return f"could not claim the judge slot for {task_id} (the lock kept changing under us)"
 
 
-def _proc_started_self() -> float | None:
+def owner_identity(pid: int) -> dict:
+    """What a judge lock / run status records about its owner, and exactly what
+    :func:`_judge_lock_owner_alive` checks it against: the pid, its boot-clock start ticks
+    (CMX-424 — immune to wall-clock steps) and its wall-clock start (the fallback, and what
+    an operator reads)."""
     from chela import sessions
 
-    return sessions.proc_started(os.getpid())
+    return {"pid": pid, "start_ticks": sessions.proc_start_ticks(pid),
+            "started": sessions.proc_started(pid)}
 
 
 def _lock_is_fresh(lock_path: Path, window: float = 5.0) -> bool:

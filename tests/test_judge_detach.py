@@ -115,12 +115,10 @@ def test_the_judge_prompt_tells_the_agent_to_detach(tmp_path):
 # --- a second concurrent run on the same task is refused -----------------------------------
 
 def _live_lock(worktree, *, pid=None, detached=False):
-    from chela import sessions
-
     pid = os.getpid() if pid is None else pid
     lock = worktree.parent / f".{worktree.name}.judgelock"
     lock.parent.mkdir(parents=True, exist_ok=True)
-    lock.write_text(json.dumps({"pid": pid, "started": sessions.proc_started(pid),
+    lock.write_text(json.dumps({**judge.owner_identity(pid),
                                 "task_id": "abc123", "detached": detached}))
     return lock
 
@@ -570,9 +568,7 @@ def test_progress_reports_every_experiment_start_and_the_finish(tmp_path):
 
 
 def _status(logs, task, **over):
-    from chela import sessions
-
-    st = {"pid": os.getpid(), "started": sessions.proc_started(os.getpid()), "task_id": task,
+    st = {**judge.owner_identity(os.getpid()), "task_id": task,
           "run_started_at": time.time() - 125, "detached": True, "done": 3, "total": 8}
     st.update(over)
     logs.mkdir(parents=True, exist_ok=True)
@@ -593,6 +589,32 @@ def test_live_runs_reports_elapsed_from_the_runs_own_start_and_skips_dead_owners
 
     assert [r["task_id"] for r in runs] == ["live"]
     assert 124 <= runs[0]["elapsed"] < 135
+
+
+def test_a_wall_clock_step_does_not_make_a_live_judge_look_dead(tmp_path, monkeypatch):
+    """⏱️ CMX-424: a host that STEPS its wall clock (WSL2's time sync: every ~34s, +440s of
+    btime in 2.5h, measured 2026-10-01) recomputes btime, so `sessions.proc_started` of the
+    same untouched process moves between reads. Identity must come from the boot clock:
+    after a step the live run is still live, still reported — and a recycled pid (same pid,
+    different boot-clock start) is still refused."""
+    from chela import sessions
+
+    if sessions.proc_start_ticks(os.getpid()) is None:
+        pytest.skip("no /proc on this host — identity falls back to the wall clock")
+    logs = tmp_path / "judge-logs"
+    monkeypatch.setattr(judge, "judge_logs_dir", lambda: logs)
+    _status(logs, "live")
+    lock = json.loads((logs / "live.json").read_text())
+
+    real_boot = sessions._boot_time()
+    monkeypatch.setattr(sessions, "_boot_time", lambda: real_boot + 37.0)   # the clock stepped
+    # the step really did move the wall-clock identity past the fallback's 1s window
+    assert abs(sessions.proc_started(os.getpid()) - lock["started"]) >= 1.0
+
+    assert judge._judge_lock_owner_alive(lock) is True
+    assert [r["task_id"] for r in judge.live_judge_runs()] == ["live"]
+    # ⭐ COUNTERWEIGHT: the boot-clock identity is still an identity, not "pid exists"
+    assert judge._judge_lock_owner_alive({**lock, "start_ticks": lock["start_ticks"] - 1}) is False
 
 
 def test_a_finished_run_clears_only_its_own_status(tmp_path, monkeypatch):
