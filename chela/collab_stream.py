@@ -251,6 +251,34 @@ class Bridge:
             exp = self._override["audit"]["expires_at"] if self._override else None
         return {"mode": m, "expires_at": exp}
 
+    def set_mode(self, new: str, *, changed_by: str, window: str | None = None,
+                 ttl_s: float | None = None) -> dict:
+        """Change a LIVE share's access in place (CMX-421) — same secret, room, link and
+        pairing code, so a guest already joined keeps the connection and the next input
+        frame is judged under the new mode. The caller (app.py) has already applied the
+        creation gates for an upgrade; a downgrade needs none. Audited as
+        ``share.mode_changed``; an upgrade to UNSANDBOXED also arms the override (which
+        writes ``share.unsandboxed_granted`` and binds the first guest to type)."""
+        if new not in (MODE_VIEW, MODE_TYPING, MODE_UNSANDBOXED):
+            raise ValueError(f"unknown share mode: {new}")
+        old = self.mode()
+        if new == old:
+            return {"from": old, "to": new, "changed": False}
+        if old == MODE_UNSANDBOXED:
+            self.revoke_unsandboxed("mode changed to " + new)
+        with self._policy_lock:
+            self.allow_typing = new == MODE_TYPING
+            self._sandbox_checked_at = None   # an upgrade to typing re-verifies on the next frame
+        if new == MODE_UNSANDBOXED:
+            self.grant_unsandboxed(granted_by=changed_by, window=window or self.wid,
+                                   ttl_s=float(ttl_s or 0))
+        event_log.append("share.mode_changed",
+                         f"share mode {old} → {new} on {window or self.wid} ({self.wid}) by {changed_by}",
+                         {"wid": self.wid, "window": window, "from": old, "to": new, "by": changed_by},
+                         wid=self.wid)
+        self._notice("View only now." if new == MODE_VIEW else "You can type now.", force=True)
+        return {"from": old, "to": new, "changed": True}
+
     def _bind_joiner(self, stream_id: bytes) -> None:
         with self._policy_lock:
             if self._override is not None and self._override["joiner"] is None:
@@ -581,8 +609,8 @@ def start_bridge(wid: str, secret: bytes | None = None, on_revoke=None, *,
     complement: reconcile _SHARED against the live agent/port map each poll).
 
     ``allow_typing`` / ``unsandboxed`` (``{"granted_by", "window", "ttl_s"}``) set the
-    share's access policy (CMX-403); both only take effect on a NEW bridge — an existing
-    share keeps the policy it was created with."""
+    share's access policy (CMX-403); both only take effect on a NEW bridge — a running
+    share changes mode through ``set_share_mode`` (CMX-421), never by re-minting."""
     if not config.COLLAB_RELAY:
         return None
     with _bridges_lock:
@@ -600,6 +628,13 @@ def share_state(wid: str) -> dict | None:
     """``{"mode", "expires_at"}`` of a running share, or None."""
     b = _bridges.get(wid)
     return b.state() if b else None
+
+
+def set_share_mode(wid: str, mode: str, **kw) -> dict | None:
+    """Switch a running share's mode in place (``Bridge.set_mode``), or None if there is
+    no bridge for ``wid``."""
+    b = _bridges.get(wid)
+    return b.set_mode(mode, **kw) if b else None
 
 
 def stop_bridge(wid: str) -> None:
