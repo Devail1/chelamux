@@ -23,7 +23,7 @@ tracker read can mark live work `done`.
 
 | # | Gap | Kind | Size | Payoff/risk |
 |---|-----|------|------|-------------|
-| G1 | No ID-refresh op; **absence is read as terminal** | 🔴 DEFECT | ~1 day | **highest** |
+| G1 | No ID-refresh op; **absence is read as terminal** | ✅ FIXED (CMX-430) | ~1 day | **highest** |
 | G2 | chelamux's own workflow still runs the `markdown` adapter | UNEXAMINED | ~2–3 days, gated on G1 | high |
 | G3 | `gh_issues` dispatches **newest-first** (LIFO) | 🔴 DEFECT | ~2h | high |
 | G4 | `gh_issues` never fetches the issue **body** ⇒ no brief | 🔴 DEFECT | ~3h | high |
@@ -42,6 +42,31 @@ from "a week+ rewrite" to "2–3 days", and **re-ordered**: G1 must land *before
 ---
 
 ## G1 — SPEC 11.1: only one of the two REQUIRED adapter operations exists 🔴 DEFECT
+
+> ## ✅ FIXED 2026-10-01 — CMX-430
+>
+> Both adapters now implement `fetch_by_ids(ids) -> list[Task] | None`
+> (`chela/sources/markdown.py`, `chela/sources/gh_issues.py`), and `Task` carries a `state`
+> (`open`/`closed`). `None` means the read failed; `[]` means it succeeded and none of the ids
+> exist. `markdown` re-reads the file and reports a struck line `closed` and a parked one
+> `open`. `gh_issues` lists issues in every state (`--state all`) and reports GitHub's state,
+> not dispatchability. It returns `None` on any `gh` failure and when the listing hit its limit
+> with a requested id still unseen (SPEC 11.1: fail, never omit).
+>
+> `tick()` (`_tracker_gone` in `chela/dispatcher.py`) re-reads every run it would close out for
+> leaving the tracker: claimed/running and every review state. An id is gone only when a
+> successful read reports it closed or does not report it. On `None` no run changes from the
+> tracker this tick. The failure is logged once on the edge, recorded as
+> `tracker_refresh_failed` in the tick summary, and retried next tick. Merged-PR evidence, the
+> agent's own completion marker and a dead window still act, since none of them come from the
+> tracker (SPEC 11.4: "keep active workers running"). `list_open_tasks` is unchanged and still
+> drives claiming.
+>
+> Behaviour changes: a parked markdown line and an open issue that lost `require_label` are no
+> longer read as done. A deleted markdown line still reconciles, as long as the file itself
+> could be read. Guards: `tests/test_tracker_fetch_by_ids.py`.
+>
+> The analysis below is kept as written on 2026-09-13.
 
 > **SPEC 11.1:** "An implementation MUST support these adapter operations: 1. `fetch_issues_by_states(state_names)` … 2. `fetch_issues_by_ids(issue_ids)` — Return current normalized issue snapshots for the supplied opaque dispatch IDs. Used for active-run reconciliation and stale-dispatch revalidation."
 
