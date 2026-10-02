@@ -30,9 +30,23 @@ Deliberately stdlib-only and importable with nothing else from chela: the sideca
 file directly (``python share_proxy.py``) from a read-only bind mount, on a stock
 ``python`` image.
 
+**The Telegram outbox (CMX-420).** The guest's transcript lives in its container's tmpfs and
+its hooks cannot reach the host, so the ordinary relay has nothing to read for a sandboxed
+window. This proxy sees every model response anyway, so it is the one place the session's
+replies can be observed from the HOST side: for each completed main-loop turn it parses the
+SSE stream (:class:`TurnCollector`) and appends ONE transcript-shaped record — the
+assistant's visible text, each tool call reduced to its name — to ``outbox.jsonl`` in
+``$CHELA_PROXY_SESSION_DIR``. That directory is a host bind mount on THIS sidecar only; it
+is never mounted into the guest. Because the record has the shape of a Claude Code JSONL
+line, ``chela telegram`` reads it with the same monitor, parser, formatting, chunking and
+offset-dedup it uses for a real transcript. ``proxy-status.json`` beside it records when the
+proxy last forwarded such a turn, so ``chela doctor`` can tell a quiet session from a broken
+outbox.
+
 Env: ``CHELA_PROXY_TOKEN_FILE`` (Claude Code's ``.credentials.json``, or a file holding a
 bare token — e.g. from ``claude setup-token``), ``CHELA_PROXY_UPSTREAM`` (default
-``https://api.anthropic.com``), ``CHELA_PROXY_PORT`` (default 8080).
+``https://api.anthropic.com``), ``CHELA_PROXY_PORT`` (default 8080),
+``CHELA_PROXY_SESSION_DIR`` (optional; where the outbox is written — no outbox without it).
 """
 from __future__ import annotations
 
@@ -40,6 +54,8 @@ import http.client
 import json
 import os
 import sys
+import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -99,6 +115,137 @@ def upstream_headers(incoming: list[tuple[str, str]], token: str) -> dict[str, s
     return out
 
 
+# --- the Telegram outbox (CMX-420) ------------------------------------------------------
+
+OUTBOX_NAME = "outbox.jsonl"
+STATUS_NAME = "proxy-status.json"
+
+
+def records_turn(method: str, path: str, body: bytes | None) -> bool:
+    """Whether a request's response is a main-loop TURN worth relaying: a streamed
+    ``POST /v1/messages`` that offers tools. Claude Code's agent loop always sends its
+    tool list; its side calls (titles, summaries, token counts) don't, and must not reach
+    the operator's topic as if the session had said them."""
+    if method != "POST" or path.split("?")[0] != "/v1/messages" or not body:
+        return False
+    try:
+        req = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return isinstance(req, dict) and req.get("stream") is True and bool(req.get("tools"))
+
+
+class TurnCollector:
+    """Incrementally parses one Anthropic Messages SSE stream into the turn it carries.
+
+    Fed raw response bytes in whatever chunks they arrive; events are framed on blank
+    lines and only their ``data:`` lines are read. Text blocks accumulate their
+    ``text_delta``s; a ``tool_use`` block keeps only its name and id (the relay shows a
+    tool call as one short line, and a tool's input — a whole file for ``Write`` — has no
+    business in a chat topic); thinking is not the assistant's visible text and is
+    dropped. ``complete`` turns True on ``message_stop`` and only then is :meth:`record`
+    non-None — a stream cut off mid-turn is never relayed as if it had finished."""
+
+    def __init__(self) -> None:
+        self._buf = b""
+        self._blocks: dict[int, dict] = {}
+        self.complete = False
+
+    def feed(self, chunk: bytes) -> None:
+        self._buf = (self._buf + chunk).replace(b"\r\n", b"\n")
+        while b"\n\n" in self._buf:
+            frame, self._buf = self._buf.split(b"\n\n", 1)
+            data = b"\n".join(line[5:].lstrip() for line in frame.split(b"\n")
+                              if line.startswith(b"data:"))
+            if not data:
+                continue
+            try:
+                event = json.loads(data)
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if isinstance(event, dict):
+                self._event(event)
+
+    def _event(self, ev: dict) -> None:
+        kind = ev.get("type")
+        if kind == "content_block_start":
+            block = ev.get("content_block") or {}
+            self._blocks[ev.get("index", len(self._blocks))] = {
+                "type": block.get("type"), "text": block.get("text") or "",
+                "name": block.get("name"), "id": block.get("id")}
+        elif kind == "content_block_delta":
+            delta = ev.get("delta") or {}
+            block = self._blocks.get(ev.get("index"))
+            if block is not None and delta.get("type") == "text_delta":
+                block["text"] += delta.get("text") or ""
+        elif kind == "message_stop":
+            self.complete = True
+
+    def record(self, now: float | None = None) -> dict | None:
+        """The turn as ONE Claude-Code-transcript-shaped ``assistant`` record, or None
+        when the stream did not complete or said nothing visible."""
+        if not self.complete:
+            return None
+        content: list[dict] = []
+        for _i, b in sorted(self._blocks.items()):
+            if b["type"] == "text" and b["text"].strip():
+                content.append({"type": "text", "text": b["text"]})
+            elif b["type"] == "tool_use" and b.get("name"):
+                content.append({"type": "tool_use", "id": b.get("id") or "",
+                                "name": b["name"], "input": {}})
+        if not content:
+            return None
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() if now is None else now))
+        return {"type": "assistant", "timestamp": ts, "source": "share-proxy",
+                "message": {"role": "assistant", "content": content}}
+
+
+class Outbox:
+    """The per-session outbox: an append-only JSONL file plus a small status file, in a
+    directory only this sidecar mounts read-write. One writer per file (this process);
+    the lock keeps two concurrent responses from interleaving a line."""
+
+    def __init__(self, directory: str) -> None:
+        self.path = os.path.join(directory, OUTBOX_NAME)
+        self.status_path = os.path.join(directory, STATUS_NAME)
+        self._lock = threading.Lock()
+        self._status = {"started": time.time(), "last_turn": None, "turns": 0}
+
+    def open(self) -> None:
+        """Create the outbox (empty) and the status file at startup — so a sandboxed
+        window with NO outbox means the proxy never got its directory, not "quiet"."""
+        with self._lock:
+            with open(self.path, "a", encoding="utf-8"):
+                pass
+            self._write_status()
+
+    def turn(self, collector: TurnCollector) -> None:
+        """A qualifying response finished streaming: append its record (if it had one),
+        and stamp the status. The outbox is touched on EVERY completed turn, so its mtime
+        trailing ``last_turn`` means the parse is failing, not that the guest went quiet.
+        A stream cut off before ``message_stop`` is not a turn: it neither writes nor
+        stamps, so it can never make the doctor read a healthy outbox as stale."""
+        if not collector.complete:
+            return
+        rec = collector.record()
+        with self._lock:
+            now = time.time()
+            if rec is not None:
+                with open(self.path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            else:
+                os.utime(self.path)
+            self._status["last_turn"] = now
+            self._status["turns"] += 1
+            self._write_status()
+
+    def _write_status(self) -> None:
+        tmp = self.status_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self._status, f)
+        os.replace(tmp, self.status_path)
+
+
 def path_allowed(path: str) -> bool:
     """Only the Messages-API family is forwarded — never an absolute URL (a request line
     naming another host) and never a path that escapes ``/v1/``."""
@@ -111,6 +258,7 @@ def path_allowed(path: str) -> bool:
 class _Handler(BaseHTTPRequestHandler):
     token_file = ""
     upstream = urllib.parse.urlsplit(DEFAULT_UPSTREAM)
+    outbox: Outbox | None = None
 
     def log_message(self, fmt, *args):  # one terse line per request, no headers
         sys.stderr.write("share-proxy: %s %s\n" % (self.command, self.path.split("?")[0]))
@@ -154,6 +302,11 @@ class _Handler(BaseHTTPRequestHandler):
                     conn, resp = self._send(body, fresh)
                 if resp.status == 401:
                     return self._refuse(502, LOGIN_EXPIRED)
+            collector = None
+            if self.outbox is not None and resp.status == 200 and \
+                    "text/event-stream" in (resp.getheader("content-type") or "") and \
+                    records_turn(self.command, self.path, body):
+                collector = TurnCollector()
             self.send_response(resp.status)
             for k, v in resp.getheaders():
                 if k.lower() not in _DROP_RESPONSE:
@@ -166,6 +319,10 @@ class _Handler(BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 self.wfile.flush()
+                if collector is not None:
+                    collector.feed(chunk)
+            if collector is not None:
+                self._record(collector)
         except OSError as e:
             try:
                 self._refuse(502, f"upstream unreachable: {type(e).__name__}")
@@ -175,6 +332,13 @@ class _Handler(BaseHTTPRequestHandler):
             if conn is not None:
                 conn.close()
             self.close_connection = True
+
+    def _record(self, collector: TurnCollector) -> None:
+        # The outbox is a side channel: nothing it does may break the guest's response.
+        try:
+            self.outbox.turn(collector)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"share-proxy: outbox write failed: {type(e).__name__}\n")
 
     def _local_hello(self) -> bool:
         """Claude Code's startup connectivity check (``HEAD /api/hello``) is answered
@@ -204,6 +368,14 @@ def main() -> None:
     _Handler.token_file = token_file
     _Handler.upstream = urllib.parse.urlsplit(os.environ.get("CHELA_PROXY_UPSTREAM") or DEFAULT_UPSTREAM)
     port = int(os.environ.get("CHELA_PROXY_PORT") or DEFAULT_PORT)
+    session_dir = os.environ.get("CHELA_PROXY_SESSION_DIR", "")
+    if session_dir:
+        _Handler.outbox = Outbox(session_dir)
+        try:
+            _Handler.outbox.open()
+        except OSError as e:
+            sys.stderr.write(f"share-proxy: no outbox ({type(e).__name__}) — relay disabled\n")
+            _Handler.outbox = None
     ThreadingHTTPServer(("0.0.0.0", port), _Handler).serve_forever()
 
 

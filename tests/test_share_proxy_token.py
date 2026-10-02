@@ -90,6 +90,7 @@ def host(monkeypatch, tmp_path):
 def test_a_rename_over_replace_on_the_host_reaches_the_proxy_sidecar(host):
     mirror = sb.TokenMirror(sb.token_file(), sb.token_mirror_dir(SID))
     assert mirror.sync()
+    sb.session_dir(SID).mkdir(parents=True, exist_ok=True)   # CMX-420: run() creates it
     argv = sb.proxy_run_argv(SID, UID, GID)
     token_path = dict(e.split("=", 1) for e in _opt(argv, "-e"))["CHELA_PROXY_TOKEN_FILE"]
     box = _Container(argv)
