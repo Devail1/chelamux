@@ -204,7 +204,8 @@ def session_root() -> Path:
     """Host-side per-session state written by the proxy sidecar (CMX-420): one directory
     per session id, bind-mounted read-write into THAT session's proxy only — never into
     the guest (:func:`guest_run_argv` has no such mount, and :func:`verify_container`
-    refuses any mount outside the workspace)."""
+    refuses any mount outside the workspace and the operator's approvals, which can never
+    name this directory — :func:`chela.share_requests.mount_refusal`)."""
     return config.CHELA_DIR / "share-sessions"
 
 
@@ -440,7 +441,17 @@ def host_deny_nets() -> list[str]:
     return sorted(out)
 
 
-def web_proxy_run_argv(sid: str, uid: int, gid: int) -> list[str]:
+def web_allow(extra: list[str] | tuple = ()) -> str:
+    """The sidecar's ``CHELA_WEB_ALLOW``: the operator's list plus domains approved for this
+    session (CMX-7). An approval only ever EXTENDS a list the operator set; with no list,
+    every public host is already allowed and nothing is added."""
+    base = os.environ.get("CHELA_SHARE_WEB_ALLOW", "").strip()
+    if not base:
+        return ""
+    return ",".join(dict.fromkeys([d.strip() for d in base.split(",") if d.strip()] + list(extra)))
+
+
+def web_proxy_run_argv(sid: str, uid: int, gid: int, extra_allow: list[str] | tuple = ()) -> list[str]:
     """The web egress sidecar. Unlike the guest it sits on docker's default bridge (its
     route out), so every destination check lives in :mod:`chela.share_web_proxy`; it holds
     no credential, mounts only its own script (ro) and its log file (rw)."""
@@ -458,7 +469,7 @@ def web_proxy_run_argv(sid: str, uid: int, gid: int) -> list[str]:
             "-e", f"CHELA_WEB_PORT={WEB_PORT}",
             "-e", f"CHELA_WEB_DENY_NETS={','.join(n.strip() for n in deny_nets)}"]
     for var, val in (("CHELA_WEB_DENY", os.environ.get("CHELA_SHARE_WEB_DENY", "")),
-                     ("CHELA_WEB_ALLOW", os.environ.get("CHELA_SHARE_WEB_ALLOW", "")),
+                     ("CHELA_WEB_ALLOW", web_allow(extra_allow)),
                      ("CHELA_WEB_HOST_RPS", os.environ.get("CHELA_SHARE_WEB_HOST_RPS", "")),
                      ("CHELA_WEB_GLOBAL_RPS", os.environ.get("CHELA_SHARE_WEB_GLOBAL_RPS", ""))):
         val = val.strip()
@@ -514,10 +525,50 @@ def guest_auth_env(sub: str | None) -> list[str]:
     return [] if sub else [f"ANTHROPIC_AUTH_TOKEN={GUEST_TOKEN_PLACEHOLDER}"]
 
 
+# 🙋 The guest's way to ASK for more access (CMX-7): a stdlib script seeded into the tmpfs
+# HOME (no extra mount), which POSTs to the token proxy's write-only /chela/request route.
+REQUEST_CLI = f"{GUEST_HOME}/bin/chela-request"
+_REQUEST_CLI_SRC = f"""#!/usr/bin/env python3
+\"\"\"Ask the operator for more access. The request does nothing by itself.\"\"\"
+import argparse, json, sys, urllib.request
+ap = argparse.ArgumentParser(prog="chela-request")
+ap.add_argument("kind", choices=["mount", "domain", "operation"])
+ap.add_argument("target", help="a host path, a domain, or what you need done")
+ap.add_argument("--rw", action="store_true", help="mount: ask for write access (default read-only)")
+ap.add_argument("--why", required=True, help="why you need it (the operator reads this)")
+a = ap.parse_args()
+body = json.dumps({{"kind": a.kind, "target": a.target, "access": "rw" if a.rw else "ro",
+                   "reason": a.why}}).encode()
+req = urllib.request.Request("http://{PROXY_ALIAS}:{PROXY_PORT}/chela/request", data=body,
+                             headers={{"content-type": "application/json"}}, method="POST")
+try:
+    with urllib.request.urlopen(req, timeout=10) as r:
+        print("filed: " + json.loads(r.read()).get("note", ""))
+except Exception as e:
+    sys.exit("not filed: " + str(getattr(e, "read", lambda: b"")() or e))
+"""
+_GUEST_MEMORY_MD = f"""# chela sandboxed session
+
+You run in a container. On the host you can see only /workspace (the project), plus
+anything under /extra that the operator approved. If you need more, ASK the operator:
+
+    python3 {REQUEST_CLI} mount /an/absolute/host/path --why "..."   (read-only; add --rw for write)
+    python3 {REQUEST_CLI} domain example.com --why "..."              (web sessions only)
+    python3 {REQUEST_CLI} operation "what you need done" --why "..."
+
+A request does nothing by itself, and you are not told the decision. An approved mount
+appears under /extra/<name> after the session restarts, and this conversation restarts with
+it. Never try to get around the sandbox.
+"""
+
+
 def guest_entry(sub: str | None) -> str:
-    cmd = f"printf '%s' {shlex.quote(_GUEST_SEED)} > {GUEST_HOME}/.claude.json"
+    cmd = (f"printf '%s' {shlex.quote(_GUEST_SEED)} > {GUEST_HOME}/.claude.json"
+           f" && mkdir -p {GUEST_HOME}/.claude {GUEST_HOME}/bin"
+           f" && printf '%s' {shlex.quote(_REQUEST_CLI_SRC)} > {REQUEST_CLI}"
+           f" && printf '%s' {shlex.quote(_GUEST_MEMORY_MD)} > {GUEST_HOME}/.claude/CLAUDE.md")
     if sub:
-        cmd += (f" && mkdir -p {GUEST_HOME}/.claude && printf '%s' "
+        cmd += (f" && printf '%s' "
                 f"{shlex.quote(guest_credentials(sub))} > {GUEST_HOME}/.claude/.credentials.json")
     return cmd + " && exec claude"
 
@@ -533,7 +584,11 @@ def guest_proxy_env(net: str) -> dict[str, str]:
 
 
 def guest_run_argv(sid: str, cwd: str, uid: int, gid: int, claude_bin: str,
-                   net: str = NET_NONE) -> list[str]:
+                   net: str = NET_NONE,
+                   mounts: list[tuple[str, str, bool]] | tuple = ()) -> list[str]:
+    """``mounts`` are the operator-approved extras (CMX-7), ``(host path, /extra/<name>,
+    read-write)`` from :func:`chela.share_requests.mount_specs` — the only way anything
+    beyond the workspace gets in, and only at launch."""
     real = os.path.realpath(cwd)
     sub = subscription_type()
     argv = ["docker", "run", "--rm", "-it", "--init",
@@ -562,6 +617,15 @@ def guest_run_argv(sid: str, cwd: str, uid: int, gid: int, claude_bin: str,
         argv += ["-v", f"{os.path.join(real, e)}:{GUEST_WORKDIR}/{e}:ro"]
     for m in env_masks(real):
         argv += ["-v", f"/dev/null:{GUEST_WORKDIR}/{m}:ro"]
+    for src, dst, rw in mounts:
+        argv += ["-v", f"{src}:{dst}" + ("" if rw else ":ro")]
+        if os.path.isdir(src):
+            # The workspace's hygiene applies to an extra directory too: `.env*` masked,
+            # and on a writable one the entries an operator's tools would run kept read-only.
+            for e in (readonly_entries(src) if rw else []):
+                argv += ["-v", f"{os.path.join(src, e)}:{dst}/{e}:ro"]
+            for m in env_masks(src):
+                argv += ["-v", f"/dev/null:{dst}/{m}:ro"]
     argv += ["-w", GUEST_WORKDIR, guest_image(net), "sh", "-c", guest_entry(sub)]
     return argv
 
@@ -618,8 +682,8 @@ def _hold(msg: str) -> None:
     time.sleep(15)
 
 
-def _web_steps(sid: str, uid: int, gid: int) -> list[list[str]]:
-    return [web_proxy_run_argv(sid, uid, gid),
+def _web_steps(sid: str, uid: int, gid: int, extra_allow: list[str] | tuple = ()) -> list[list[str]]:
+    return [web_proxy_run_argv(sid, uid, gid, extra_allow),
             ["docker", "network", "connect", "--alias", WEB_ALIAS,
              network_name(sid), web_proxy_name(sid)]]
 
@@ -630,10 +694,102 @@ def _prepare_web_log(sid: str) -> None:
     path.touch(mode=0o600, exist_ok=True)
 
 
+GRANT_POLL_SECONDS = 2.0
+
+
+class GrantWatch:
+    """The launcher's view of the operator's decisions for its session (CMX-7).
+
+    Every :data:`GRANT_POLL_SECONDS` it picks up the guest's new requests (which notifies
+    the operator), marks approvals whose time is up, applies the kill switch (*Guest typing*
+    off revokes this session's approvals), and compares what the session MAY have now
+    (:func:`chela.share_requests.mount_specs` / ``approved_domains``) with what the running
+    container was LAUNCHED with. On a difference it removes the guest container, and
+    :func:`run` launches a fresh one with the new set. That covers an approval (a mount
+    appears), an expiry and a revocation (it goes away). Only this host-side thread asks
+    for a relaunch: a guest that exits on its own just ends the session."""
+
+    def __init__(self, sid: str, net: str):
+        self.sid, self.net = sid, net
+        self.launched: tuple | None = None
+        self._relaunch = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def spec(self, now: float | None = None) -> tuple:
+        from chela import share_requests
+        mounts = tuple(share_requests.mount_specs(self.sid, now))
+        # A domain approval only changes anything when the operator set an allow-list
+        # (:func:`web_allow`) — without one, relaunching for it would just restart Claude.
+        domains = (tuple(share_requests.approved_domains(self.sid, now))
+                   if self.net == NET_WEB and os.environ.get("CHELA_SHARE_WEB_ALLOW", "").strip()
+                   else ())
+        return mounts, domains
+
+    def check(self, now: float | None = None) -> bool:
+        """One pass. True when it asked for a relaunch."""
+        from chela import share_requests
+        share_requests.ingest(self.sid, now)
+        share_requests.sweep(now)
+        if not config.share_typing_enabled():
+            share_requests.revoke_session(self.sid, "guest typing is off")
+        if self.launched is None or self._relaunch.is_set() or self.spec(now) == self.launched:
+            return False
+        self._relaunch.set()
+        try:
+            _docker("rm", "-f", container_name(self.sid))
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log.warning("share sandbox: relaunch of %s failed to stop the guest: %s", self.sid, e)
+        return True
+
+    def take_relaunch(self) -> bool:
+        asked = self._relaunch.is_set()
+        self._relaunch.clear()
+        return asked
+
+    def _loop(self, interval: float) -> None:
+        while not self._stop.wait(interval):
+            try:
+                self.check()
+            except Exception as e:  # noqa: BLE001 — the watcher must outlive a bad pass
+                log.warning("share sandbox: grant check for %s failed: %r", self.sid, e)
+
+    def start(self, interval: float | None = None) -> None:
+        interval = GRANT_POLL_SECONDS if interval is None else interval
+        self._thread = threading.Thread(target=self._loop, args=(interval,), daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+
+def _own_window() -> tuple[str | None, str | None]:
+    """``(window id, window name)`` of this launcher's pane, for display only."""
+    pane = os.environ.get("TMUX_PANE")
+    if not pane:
+        return None, None
+    try:
+        p = subprocess.run(["tmux", "display-message", "-p", "-t", pane, "#{window_id}\t#{window_name}"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None
+    wid, _, name = p.stdout.strip().partition("\t")
+    return (wid or None, name or None) if p.returncode == 0 else (None, None)
+
+
+def _describe_access(mounts: tuple, domains: tuple) -> str:
+    parts = [f"{dst} ({'read-write' if rw else 'read-only'})" for _src, dst, rw in mounts]
+    parts += [f"web: {d}" for d in domains]
+    return ", ".join(parts) or "the workspace only"
+
+
 def run(sid: str, cwd: str, net: str = NET_NONE) -> int:
     """The window's process: bring up network + proxy (+ the web proxy in ``web`` mode),
     run the guest container in the foreground on this pane's tty, and tear everything
-    down when it exits."""
+    down when it exits. When the operator's approvals change (CMX-7), the guest container
+    is re-launched with the new set — never widened in place."""
     if not _SID_RE.match(sid):
         _hold("invalid session id")
         return 2
@@ -658,27 +814,53 @@ def run(sid: str, cwd: str, net: str = NET_NONE) -> int:
         _hold(f"refusing to start — cannot create {session_dir(sid)}: {e}")
         return 1
     mirror = TokenMirror(token_file(), token_mirror_dir(sid))
+    watch = GrantWatch(sid, net)
     steps = [network_create_argv(sid), proxy_run_argv(sid, uid, gid),
              ["docker", "network", "connect", "--alias", PROXY_ALIAS,
               network_name(sid), proxy_name(sid)]]
+
+    def _steps_ok(argvs: list[list[str]]) -> bool:
+        for argv in argvs:
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+            if p.returncode != 0:
+                _hold(f"refusing to start — `{' '.join(argv[:3])}` failed: {p.stderr.strip()[:200]}")
+                return False
+        return True
+
     try:
         if not mirror.sync():
             _hold(f"refusing to start — no token could be read from {token_file()}")
             return 1
         mirror.start()
+        from chela import share_requests
+        wid, window = _own_window()
+        share_requests.register_session(sid, cwd=os.path.realpath(cwd), net=net, wid=wid, window=window)
+        mounts, domains = watch.spec()
         if net == NET_WEB:
             _prepare_web_log(sid)
-            steps += _web_steps(sid, uid, gid)
-        for argv in steps:
-            p = subprocess.run(argv, capture_output=True, text=True, timeout=60)
-            if p.returncode != 0:
-                _hold(f"refusing to start — `{' '.join(argv[:3])}` failed: {p.stderr.strip()[:200]}")
-                return 1
+            steps += _web_steps(sid, uid, gid, domains)
+        if not _steps_ok(steps):
+            return 1
         if net == NET_WEB:
             print(f"\n  🌐 web access on — every request is logged to {web_log_path(sid)}\n",
                   flush=True)
-        return subprocess.call(guest_run_argv(sid, cwd, uid, gid, claude_bin, net))
+        watch.start()
+        while True:
+            watch.launched = (mounts, domains)
+            rc = subprocess.call(guest_run_argv(sid, cwd, uid, gid, claude_bin, net, mounts))
+            if not watch.take_relaunch():
+                return rc
+            watch.launched = None
+            new_mounts, new_domains = watch.spec()
+            if net == NET_WEB and new_domains != domains:
+                _docker("rm", "-f", web_proxy_name(sid))
+                if not _steps_ok(_web_steps(sid, uid, gid, new_domains)):
+                    return 1
+            mounts, domains = new_mounts, new_domains
+            print(f"\n  🙋 the operator changed this session's access — restarting with "
+                  f"{_describe_access(mounts, domains)}\n", flush=True)
     finally:
+        watch.stop()
         mirror.stop()
         cleanup(sid)
 
@@ -784,12 +966,16 @@ def verify_web_proxy(web: dict | None, sid: str, uid: int, gid: int) -> str | No
 
 
 def verify_container(info: dict, net: dict, sid: str, cwd: str, uid: int, gid: int,
-                     mode: str = NET_NONE, web: dict | None = None) -> str | None:
+                     mode: str = NET_NONE, web: dict | None = None,
+                     extra: list[tuple[str, str, bool]] | tuple = ()) -> str | None:
     """None when ``docker inspect`` of the guest container and its network show exactly
     the shape :func:`guest_run_argv` / :func:`network_create_argv` create for ``mode``
     (and, in ``web`` mode, ``web`` — the sidecar — :func:`web_proxy_run_argv`'s); else
-    why not."""
+    why not. ``extra`` is the set of approved mounts in force NOW
+    (:func:`chela.share_requests.mount_specs`): a mount outside it — never approved,
+    expired, revoked, refused, or read-write where only read-only was granted — fails."""
     real = os.path.realpath(cwd)
+    granted = {dst: (os.path.realpath(src), bool(rw)) for src, dst, rw in extra}
     hc = info.get("HostConfig") or {}
     cfg = info.get("Config") or {}
     if not (info.get("State") or {}).get("Running"):
@@ -824,6 +1010,12 @@ def verify_container(info: dict, net: dict, sid: str, cwd: str, uid: int, gid: i
         elif dst.startswith(GUEST_WORKDIR + "/") and not rw and (
                 src == "/dev/null" or os.path.realpath(src).startswith(real + os.sep)):
             continue   # a read-only mask / protected entry inside the workspace
+        elif dst in granted and granted[dst] == (os.path.realpath(src), rw):
+            continue   # an operator-approved extra mount, exactly as granted (CMX-7)
+        elif not rw and any(dst.startswith(g + "/") and (
+                src == "/dev/null" or os.path.realpath(src).startswith(gsrc + os.sep))
+                for g, (gsrc, _grw) in granted.items()):
+            continue   # a read-only mask / protected entry inside an approved mount
         else:
             return f"unexpected mount {src} -> {dst}"
     if not (workspace and claude):
@@ -922,8 +1114,9 @@ def _check(wid: str) -> tuple[str | None, str]:
         got = _inspect(sid)
         if isinstance(got, str):
             return None, got
+        from chela import share_requests
         why = verify_container(got[0], got[1], sid, cwd, os.getuid(), os.getgid(),
-                               mode=mode, web=got[2])
+                               mode=mode, web=got[2], extra=share_requests.mount_specs(sid))
         return (None, why) if why else (sid, "")
     except Exception as e:  # noqa: BLE001 — fail closed on anything unexpected
         log.warning("share_sandbox: check of %s failed: %r", wid, e)

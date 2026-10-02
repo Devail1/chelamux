@@ -502,6 +502,13 @@
     <span class="si-dot" aria-hidden="true"></span>
     <span class="si-text">0 sharing</span>
   </button>
+  <!-- 🙋 Sandboxed guests' access requests (CMX-7): shown only while one waits for a
+       decision. Text + count, never hue alone. -->
+  <button class="shares-indicator access-req-indicator" id="btn-access-req" hidden
+          onclick="chela.openAccessRequests()"
+          title="Access requests from sandboxed guests — tap to approve or deny" aria-label="Access requests">
+    <span class="ar-pill-text">🙋 0 access requests</span>
+  </button>
 </div>
 
 <!-- Command palette (⌘K / Ctrl-K): fuzzy jump to any agent, view, or project -->

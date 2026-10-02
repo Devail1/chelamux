@@ -52,6 +52,13 @@ turns that into ``busy`` (a turn in flight, or one finished within
 :data:`IDLE_GRACE_S` — the gap while Claude runs a tool before its next turn) or ``idle``.
 A permission prompt is not a model request, so ``waiting`` is never claimed from here.
 
+**Access requests (CMX-7).** ``POST /chela/request`` is the guest's one way to ASK the
+operator for more access (a mount, a domain, a named operation). It is never forwarded:
+the proxy checks the shape (:func:`clean_request`) and appends one line to
+``requests.jsonl`` in the session directory (:class:`RequestDrop`), which the host's
+:mod:`chela.share_requests` picks up. It is write-only on purpose. There is no route that
+reads a request or a decision back, so the guest can't see or answer its own requests.
+
 Env: ``CHELA_PROXY_TOKEN_FILE`` (Claude Code's ``.credentials.json``, or a file holding a
 bare token — e.g. from ``claude setup-token``), ``CHELA_PROXY_UPSTREAM`` (default
 ``https://api.anthropic.com``), ``CHELA_PROXY_PORT`` (default 8080),
@@ -321,6 +328,52 @@ def activity_status(state: object, now: float | None = None,
     return "idle"
 
 
+REQUESTS_NAME = "requests.jsonl"
+REQUEST_PATH = "/chela/request"
+REQUEST_KINDS = ("mount", "domain", "operation")
+REQUEST_MAX_BODY = 4096
+# Past this size the drop refuses further requests (a runaway loop can't fill the disk).
+REQUESTS_MAX_BYTES = 256 * 1024
+
+
+def clean_request(body: bytes) -> dict | None:
+    """A guest's request body → the one record the drop writes, or None when malformed.
+    Only these keys survive, each type-checked and length-capped."""
+    try:
+        d = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(d, dict) or d.get("kind") not in REQUEST_KINDS:
+        return None
+    target, reason = d.get("target"), d.get("reason", "")
+    access = d.get("access", "ro")
+    if not isinstance(target, str) or not target.strip() or len(target) > 512:
+        return None
+    if not isinstance(reason, str) or len(reason) > 1000 or access not in ("ro", "rw"):
+        return None
+    return {"kind": d["kind"], "target": target.strip(), "access": access,
+            "reason": reason.strip(), "ts": time.time()}
+
+
+class RequestDrop:
+    """Appends guest requests to ``requests.jsonl`` — write-only, size-capped."""
+
+    def __init__(self, directory: str) -> None:
+        self.path = os.path.join(directory, REQUESTS_NAME)
+        self._lock = threading.Lock()
+
+    def file(self, rec: dict) -> bool:
+        with self._lock:
+            try:
+                if os.path.getsize(self.path) >= REQUESTS_MAX_BYTES:
+                    return False
+            except OSError:
+                pass
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        return True
+
+
 def path_allowed(path: str) -> bool:
     """Only the Messages-API family is forwarded — never an absolute URL (a request line
     naming another host) and never a path that escapes ``/v1/``."""
@@ -335,6 +388,7 @@ class _Handler(BaseHTTPRequestHandler):
     upstream = urllib.parse.urlsplit(DEFAULT_UPSTREAM)
     outbox: Outbox | None = None
     activity: Activity | None = None
+    requests: RequestDrop | None = None
 
     def log_message(self, fmt, *args):  # one terse line per request, no headers
         sys.stderr.write("share-proxy: %s %s\n" % (self.command, self.path.split("?")[0]))
@@ -438,6 +492,37 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         return True
 
+    def _reply(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _file_request(self) -> None:
+        """``POST /chela/request``: file one access request for the operator. Answered
+        here, never forwarded; the reply says it was filed and nothing more."""
+        self.close_connection = True
+        n = int(self.headers.get("content-length") or 0)
+        if n <= 0 or n > REQUEST_MAX_BODY:
+            return self._refuse(400, "a request is a JSON body of at most 4 KB")
+        rec = clean_request(self.rfile.read(n))
+        if rec is None:
+            return self._refuse(400, 'expected {"kind": "mount"|"domain"|"operation", '
+                                     '"target": "...", "access": "ro"|"rw", "reason": "..."}')
+        if self.requests is None:
+            return self._refuse(503, "requests are not available in this session")
+        try:
+            filed = self.requests.file(rec)
+        except OSError as e:
+            return self._refuse(503, f"could not file the request ({type(e).__name__})")
+        if not filed:
+            return self._refuse(429, "too many requests filed in this session")
+        self._reply(202, {"filed": True, "note": "The operator decides. An approved mount "
+                                                 "appears under /extra after the session "
+                                                 "restarts."})
+
     def do_HEAD(self):
         if not self._local_hello():
             self._refuse(403, "only /v1/ is forwarded")
@@ -446,7 +531,10 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._local_hello():
             self._forward()
 
-    do_POST = _forward
+    def do_POST(self):
+        if self.path.split("?")[0] == REQUEST_PATH:
+            return self._file_request()
+        self._forward()
 
 
 def main() -> None:
@@ -470,6 +558,7 @@ def main() -> None:
         except OSError as e:
             sys.stderr.write(f"share-proxy: no activity file ({type(e).__name__}) — status unknown\n")
             _Handler.activity = None
+        _Handler.requests = RequestDrop(session_dir)
     ThreadingHTTPServer(("0.0.0.0", port), _Handler).serve_forever()
 
 

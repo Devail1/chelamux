@@ -19,7 +19,10 @@ into a chela workflow's repo:
   (``main``/``master``/…), including ``--all``/``--mirror`` and a bare ``git push`` while
   that branch is checked out;
 * a Claude session approving its OWN override (``chela merge-approve``, or a request to
-  the dashboard's ``/override/`` route) — the operator's approval must come from a human.
+  the dashboard's ``/override/`` route) — the operator's approval must come from a human;
+* a Claude session approving a sandboxed guest's access request (``chela share-requests
+  approve``, or a request to the dashboard's ``/api/share-requests/…/approve`` route,
+  CMX-7) — same rule.
 
 It never denies read-only ``gh pr view/diff/checks/list``, ``gh pr create``, or a push of a
 ``cmx-*`` feature branch. ``chela merge`` itself is unaffected: its own ``gh``/``git`` calls
@@ -554,11 +557,21 @@ def _self_approval(argv: list[str]) -> Decision:
             return Decision(True, "⚖️ chela merge gate: an override is approved by the "
                                   "OPERATOR, from the dashboard or a plain terminal — never "
                                   "by a Claude session. Ask the human to approve it.")
+        if "share-requests" in rest and "approve" in rest:
+            return Decision(True, SHARE_REQUEST_DENY)
     if name in ("curl", "wget", "http", "xh") and any("/override/" in a for a in rest):
         return Decision(True, "⚖️ chela merge gate: the dashboard's /override/ approval is "
                               "the OPERATOR's to press, not a Claude session's. Ask the "
                               "human to approve it.")
+    if name in ("curl", "wget", "http", "xh") and any(
+            "/api/share-requests/" in a and "approve" in a for a in rest):
+        return Decision(True, SHARE_REQUEST_DENY)
     return ALLOW
+
+
+SHARE_REQUEST_DENY = ("🙋 chela: a sandboxed guest's access request is approved by the "
+                      "OPERATOR, from the dashboard or a plain terminal — never by a Claude "
+                      "session. Ask the human to decide it.")
 
 
 def _decide_segments(command: str, ctx: _Ctx, depth: int = 0) -> Decision:

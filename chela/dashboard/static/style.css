@@ -857,6 +857,19 @@ body {
 }
 .shares-indicator.si-unsandboxed .si-dot { background: #fff; box-shadow: none; }
 
+/* 🙋 Access requests from sandboxed guests (CMX-7): the pill reuses the shares pill's
+   shape; the sheet reuses the shares sheet. */
+.access-req-sheet .ar-row { padding: 10px 0; border-top: 1px solid var(--border); }
+.access-req-sheet .ar-hd { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; }
+.access-req-sheet .ar-status { font-size: 11px; font-weight: 600; opacity: 0.85; }
+.access-req-sheet .ar-what { margin: 4px 0; font-family: var(--mono, monospace); font-size: 12px; word-break: break-all; }
+.access-req-sheet .ar-why { font-size: 12px; color: var(--muted, #7d8590); margin-bottom: 6px; }
+.access-req-sheet .ar-ctl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.access-req-sheet .ar-rw { font-size: 11.5px; }
+.access-req-sheet .ar-refused, .access-req-sheet .ar-err { color: var(--warn, #d29922); font-size: 12px; margin: 4px 0; }
+.access-req-sheet .ar-meta { font-size: 12px; margin-bottom: 4px; }
+.access-req-sheet .ar-done { opacity: 0.65; }
+
 /* The same override, on the pane header itself. */
 .gs-unsafe-banner {
     flex: 0 0 auto; padding: 2px 8px; border-radius: 4px; white-space: nowrap;

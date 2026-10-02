@@ -1,6 +1,6 @@
 {
   "name": "chela",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Feed a chela fleet's event log from Claude Code hooks, answer an AskUserQuestion from Telegram with no keystrokes, and deny a direct PR merge that skips chela's merge gate.",
   "author": {
     "name": "chela"
