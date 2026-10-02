@@ -24,7 +24,7 @@ tracker read can mark live work `done`.
 | # | Gap | Kind | Size | Payoff/risk |
 |---|-----|------|------|-------------|
 | G1 | No ID-refresh op; **absence is read as terminal** | ✅ FIXED (CMX-430) | ~1 day | **highest** |
-| G2 | chelamux's own workflow still runs the `markdown` adapter | UNEXAMINED | ~2–3 days, gated on G1 | high |
+| G2 | chelamux's own workflow still runs the `markdown` adapter | ✅ DONE 2026-10-02, Linear | ~2–3 days, gated on G1 | high |
 | G3 | `gh_issues` dispatches **newest-first** (LIFO) | 🔴 DEFECT | ~2h | high |
 | G4 | `gh_issues` never fetches the issue **body** ⇒ no brief | 🔴 DEFECT | ~3h | high |
 | G5 | `markdown` task id is derived from the title | 🔴 DEFECT | ~1 day + format break | low — G2 dissolves it |
@@ -133,10 +133,11 @@ The mutation-testing guard is easy and real: *corrupt the adapter to return `[]`
 > never reads as absent. It archives what it closes, because the free plan caps a
 > workspace at 250 non-archived issues.
 >
-> ⛔ Still undone, and deliberately separate: flipping chelamux's own `WORKFLOW.md` to
-> `kind: linear` and migrating the open `TODO.md` briefs. That is an operator step taken
-> after the adapter merges. The decision below (not `gh_issues`) still stands; the rest of
-> this section is the record of why.
+> ✅ **DONE 2026-10-02, Linear (CMX-438).** chelamux's own `WORKFLOW.md` now reads
+> `tracker: kind: linear` (`team: CMX`, `ready_states: [Todo]`, `done_state: Done`); the
+> open briefs had already moved to Linear. The markdown adapter is unchanged and remains
+> available to other workflows. The decision below (not `gh_issues`) still stands; the rest
+> of this section is the record of why.
 
 > ## ⛔ DECIDED 2026-09-14 — NOT YET. Do not re-open this as an engineering question.
 >

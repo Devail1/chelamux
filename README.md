@@ -19,7 +19,7 @@ session and does three things:
 
 - **Schedules** long-lived agents — poke an agent's pane on an interval or cron
   (`every 1h`, `0 */8 * * *`, a one-shot timestamp).
-- **Dispatches** work — turn a markdown `TODO.md` (or GitHub issues) into one
+- **Dispatches** work — turn a markdown `TODO.md` (or GitHub issues, or Linear) into one
   **git worktree per task**, spawn an agent in it, and let it **open a PR** — which an
   adversarial judge re-reviews before it reaches you.
 - **Closes the loop** — an orchestrator is just another agent, and it can only act when
