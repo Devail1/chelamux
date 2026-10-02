@@ -382,10 +382,54 @@ class _NoFetch:
         self.open_tasks = [Task(id=i, title=i, file="", line_number=1, raw=i) for i in open_ids]
 
 
+class _AdapterBug(Exception):
+    """An exception type no stdlib handler would name — the adapter's own."""
+
+
+RAISED = [RuntimeError("adapter bug"), ValueError("bad json"), KeyError("number"),
+          TypeError("NoneType"), OSError(5, "EIO"), subprocess.TimeoutExpired("gh", 60),
+          _AdapterBug("custom")]
+
+
+def _raising(exc):
+    class _R:
+        read_failed = False
+
+        def list_open_tasks(self):
+            return []
+
+        def fetch_by_ids(self, ids):
+            raise exc
+    return _R()
+
+
 def test_tracker_gone_reads_a_raising_fetch_as_a_FAILED_read():
     """🔴 GUARD: an adapter that raises must change nothing — never read as "all closed"."""
     assert dispatcher._tracker_gone(_Raises(), "wf", {"a", "b"}, [], False) is None
     assert "wf" in dispatcher._refresh_failed
+
+
+@pytest.mark.parametrize("exc", RAISED, ids=lambda e: type(e).__name__)
+def test_tracker_gone_reads_ANY_exception_from_fetch_as_a_FAILED_read(exc):
+    """🔴 GUARD: narrow the handler to the one type another test raises (`except
+    RuntimeError`) ⇒ every other adapter exception escapes `_tracker_gone` ⇒ RED."""
+    assert dispatcher._tracker_gone(_raising(exc), "wf", {"a"}, [], False) is None
+    assert "wf" in dispatcher._refresh_failed
+
+
+@pytest.mark.parametrize("exc", RAISED, ids=lambda e: type(e).__name__)
+def test_a_raising_fetch_neither_aborts_the_tick_nor_blocks_a_merged_PR(tmp_path, exc):
+    """🔴 GUARD, end to end: an exception escaping the refresh aborts the WHOLE tick — then
+    a review row whose PR merged never reconciles. With the handler it is a failed refresh:
+    the live row stays put and the merged one still goes done."""
+    wf = _wf(tmp_path)
+    _seed_row(wf, tmp_path, "awaiting_review", pr_url=PR_URL, pr_state="open")
+
+    summary, killed = _tick(wf, _raising(exc), pr_status=lambda url: ("merged", "MERGEABLE"))
+
+    assert summary["tracker_refresh_failed"] is True
+    assert _run_of(TID)["status"] == "done"
+    assert summary["reconciled_done"] == 1
 
 
 def test_tracker_gone_without_fetch_by_ids_keeps_the_old_listing_behaviour():
@@ -559,6 +603,42 @@ def test_a_tick_with_no_reconcile_candidates_reports_no_refresh_failure(tmp_path
         summary, killed = _tick(wf, src)
     assert summary["tracker_refresh_failed"] is False
     assert _status_of(tid) == "awaiting_review"
+    assert str(wf.path) not in dispatcher._refresh_failed
+    assert not [r for r in caplog.records if "id refresh FAILED" in r.getMessage()]
+
+
+class _OpenButRefreshFails:
+    """The listing SUCCEEDED and still carries every task; the id refresh would FAIL. Only
+    a run absent from the listing is a refresh candidate, so this must never be asked."""
+
+    read_failed = False
+
+    def __init__(self, src):
+        self.src, self.asked = src, []
+
+    def list_open_tasks(self):
+        return self.src.list_open_tasks()
+
+    def fetch_by_ids(self, ids):
+        self.asked.append(list(ids))
+        return None
+
+
+@pytest.mark.parametrize("status", LIVE_STATUSES)
+def test_a_still_open_run_is_never_a_refresh_candidate(tmp_path, caplog, status):
+    """🔴 GUARD: make every row a candidate (drop the `not in open_ids` filter) ⇒ a tick
+    whose rows are all still open asks the failing refresh ⇒ reports and logs a FAILURE it
+    never had ⇒ RED. The successful-refresh variant above cannot see this: there the
+    widened refresh still succeeds."""
+    wf = _wf(tmp_path)
+    src = _OpenButRefreshFails(MarkdownSource(wf))
+    tid = src.list_open_tasks()[0].id
+    _seed(wf, tid, status, tmp_path)
+    with caplog.at_level("WARNING", logger=dispatcher.log.name):
+        summary, killed = _tick(wf, src)
+    assert src.asked == []
+    assert summary["tracker_refresh_failed"] is False
+    assert _status_of(tid) == status
     assert str(wf.path) not in dispatcher._refresh_failed
     assert not [r for r in caplog.records if "id refresh FAILED" in r.getMessage()]
 
@@ -1003,6 +1083,68 @@ def _ev_rework_respawn():
                 check=check)
 
 
+def _long_ago():
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc)
+            - timedelta(minutes=dispatcher.WATCHDOG_IDLE_MINUTES * 3)).isoformat()
+
+
+def _watchdog(agent_status, *, stuck, nudged, check):
+    """The live-window watchdog: a `running` row whose window is ALIVE, started a full
+    grace ago. None of it is tracker evidence — it reads the pane and the agent's native
+    status — so a failed id refresh must not stop it."""
+    sent: dict[str, list] = {"dismiss": [], "seed": []}
+    extra = [
+        patch.object(dispatcher, "_capture_pane", return_value=""),
+        patch.object(dispatcher, "_agent_status", return_value=agent_status),
+        patch.object(dispatcher, "_pane_idle_empty_prompt", return_value=stuck),
+        patch.object(dispatcher, "_pane_shows_activity", return_value=False),
+        patch.object(dispatcher, "_dismiss_input_block",
+                     side_effect=lambda w: sent["dismiss"].append(w)),
+        patch.object(dispatcher, "_renudge_prompt", return_value="go on"),
+        patch.object(dispatcher, "_send_seed",
+                     side_effect=lambda w, p, t: sent["seed"].append((w, p, t)) or True),
+    ]
+
+    def wrapped(summary, killed, spies, wt):
+        check(summary, sent)
+    seed = dict(started_at=_long_ago(), idle_nudged_at=_long_ago() if nudged else None)
+    return dict(seed=seed, extra=extra, check=wrapped)
+
+
+def _ev_watchdog_unblock():
+    def check(summary, sent):
+        assert sent["dismiss"] == ["test-1"]
+        assert summary["watchdog_unblocked"] == 1
+        assert _run_of(TID)["idle_nudged_at"] is not None
+    return _watchdog("waiting", stuck=False, nudged=False, check=check)
+
+
+def _ev_watchdog_dialog_fail():
+    def check(summary, sent):
+        run = _run_of(TID)
+        assert run["status"] == "failed"
+        assert run["last_error"] == "agent blocked on an input dialog with no human"
+        assert summary["reconciled_failed"] == 1
+    return _watchdog("waiting", stuck=False, nudged=True, check=check)
+
+
+def _ev_watchdog_renudge():
+    def check(summary, sent):
+        assert sent["seed"] == [("test-1", "go on", TID)]
+        assert summary["watchdog_renudged"] == 1
+    return _watchdog("idle", stuck=True, nudged=False, check=check)
+
+
+def _ev_watchdog_idle_fail():
+    def check(summary, sent):
+        run = _run_of(TID)
+        assert run["status"] == "failed"
+        assert run["last_error"] == "agent idle at empty prompt after re-nudge"
+        assert summary["reconciled_failed"] == 1
+    return _watchdog("idle", stuck=True, nudged=True, check=check)
+
+
 # evidence → (the statuses the CODE applies it to, the case). The status sets are the
 # dispatcher's own constants wherever the code reads one.
 NON_TRACKER_EVIDENCE = {
@@ -1014,6 +1156,11 @@ NON_TRACKER_EVIDENCE = {
     "dead_window_rework": (("running",), _ev_dead_window_rework),
     "rework_cap_spent": (("changes_requested",), _ev_rework_cap_spent),
     "rework_respawn": (("changes_requested",), _ev_rework_respawn),
+    # the live-window watchdog (CMX-430 round 6): pane + native status, never the tracker
+    "watchdog_unblock": (("running",), _ev_watchdog_unblock),
+    "watchdog_dialog_fail": (("running",), _ev_watchdog_dialog_fail),
+    "watchdog_renudge": (("running",), _ev_watchdog_renudge),
+    "watchdog_idle_fail": (("running",), _ev_watchdog_idle_fail),
 }
 
 RECONCILED_STATUSES = (*dispatcher.ACTIVE_STATUSES, *dispatcher.RECONCILE_MERGE_STATUSES)
