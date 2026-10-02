@@ -55,12 +55,13 @@ _TYPES = {"Backlog": "backlog", "Todo": "unstarted", "In Progress": "started",
 
 
 def issue(n, title=None, *, state="Todo", priority=0, sort=0.0, desc=None, blockers=(),
-          archived=False, branch=None):
+          archived=False, branch=None, team="CMX"):
     return {
-        "id": f"uuid-{n}", "identifier": f"CMX-{n}", "number": n,
+        "id": f"uuid-{n}" if team == "CMX" else f"uuid-{team}-{n}", "identifier": f"{team}-{n}",
+        "number": n,
         "title": title or f"task {n}", "description": desc, "priority": priority,
         "sortOrder": sort, "url": f"https://linear.app/x/issue/CMX-{n}",
-        "branchName": branch if branch is not None else f"cmx-{n}-task-{n}",
+        "branchName": branch if branch is not None else f"{team.lower()}-{n}-task-{n}",
         "archivedAt": "2026-10-01T00:00:00Z" if archived else None,
         "state": {"name": state, "type": _TYPES[state]},
         "labels": {"nodes": []},
@@ -101,13 +102,8 @@ class FakeLinear:
         self.calls.append((name, variables))
         if self.fail is not None:
             raise self.fail
-        nodes = [i for i in self.issues.values() if _matches(query, i)]
-        if name == "by_number":
-            # A record too malformed to carry a usable number comes back as Linear sent it.
-            return self._page([i for i in nodes if not isinstance(i, dict)
-                               or not isinstance(i.get("number"), int)
-                               or i["number"] in variables["numbers"]])
-        if name in ("open", "sweep"):
+        nodes = [i for i in self.issues.values() if _matches(query, i, variables)]
+        if name in ("by_number", "open", "sweep"):
             return self._page(nodes)
         if name == "states":
             return {"teams": {"nodes": [{"id": "team", "states": {"nodes": [
@@ -131,11 +127,25 @@ class FakeLinear:
         return [n for n, _ in self.calls]
 
 
-def _matches(query: str, node: dict) -> bool:
+def _matches(query: str, node: dict, variables: dict) -> bool:
     """Apply the filter the QUERY TEXT asks for, the way Linear would — so a query whose
     filter is wrong returns the wrong issues here too, instead of the fake knowing better.
+    The team filter and the number filter are read from the query too: a query that drops
+    or inverts either one gets another team's issues (or the wrong numbers) back here.
     A malformed record (no dict, no state dict) passes through: the adapter must cope."""
-    if not isinstance(node, dict) or not isinstance(node.get("state"), dict):
+    if not isinstance(node, dict):
+        return True
+    ident = node.get("identifier")
+    node_team = ident.split("-")[0] if isinstance(ident, str) and "-" in ident else None
+    team = re.search(r"team:\s*\{\s*key:\s*\{\s*(eq|neq):\s*\$team\s*\}", query)
+    if team and node_team is not None:
+        if (node_team == variables.get("team")) != (team.group(1) == "eq"):
+            return False
+    number = re.search(r"number:\s*\{\s*(in|nin):\s*\$numbers\s*\}", query)
+    if number and isinstance(node.get("number"), int):
+        if (node["number"] in variables.get("numbers", [])) != (number.group(1) == "in"):
+            return False
+    if not isinstance(node.get("state"), dict):
         return True
     archived = re.search(r"includeArchived:\s*(true|false)", query)
     if node["archivedAt"] and not (archived and archived.group(1) == "true"):
@@ -642,6 +652,32 @@ def test_an_ambiguous_cmx_n_prefers_the_run_still_in_flight(monkeypatch):
     assert dispatcher.resolve_run("cmx-12")["task_id"] == "0123456789ab"
 
 
+TWIN_A = {**LINEAR_RUN, "workflow_path": "/a/WORKFLOW.md"}
+TWIN_B = {**LINEAR_RUN, "workflow_path": "/b/WORKFLOW.md",
+          "branch_name": "cmx-12-other", "window_name": "cmx-12"}
+
+
+@pytest.mark.parametrize("twin_status", ["running", "done"])
+@pytest.mark.parametrize("old", [None, "done", "awaiting_review"])
+def test_two_tracker_runs_left_after_the_preference_resolve_to_none(
+        monkeypatch, twin_status, old):
+    """CMX-48: a wrong id is worse than no id. Two tracker-identifier runs both named by a
+    bare `cmx-12`, neither preferred over the other ⇒ None, never whichever came first —
+    whether they are both live or both finished, and whatever TODO.md-era run is around."""
+    pr = "merged" if twin_status == "done" else None
+    a = {**TWIN_A, "status": twin_status, "pr_state": pr}
+    b = {**TWIN_B, "status": twin_status, "pr_state": pr}
+    old_row = {**OLD_TODO_ERA, "status": old,
+               "pr_state": "merged" if old == "done" else "open"}
+    rows = [a, b] if old is None else [old_row, a, b]
+    # The one unambiguous case: a lone LIVE TODO.md-era run beside two finished twins.
+    want = "0123456789ab" if (old == "awaiting_review" and twin_status == "done") else None
+    for order in (rows, list(reversed(rows))):
+        monkeypatch.setattr(dispatcher, "list_runs", _runs(*order))
+        got = dispatcher.resolve_run("cmx-12")
+        assert (got and got["task_id"]) == want, order
+
+
 def test_a_lone_todo_era_run_still_resolves(monkeypatch):
     monkeypatch.setattr(dispatcher, "list_runs", _runs(OLD_TODO_ERA))
     assert dispatcher.resolve_run("cmx-12")["task_id"] == "0123456789ab"
@@ -935,6 +971,115 @@ def test_a_canceled_issue_is_canceled_not_done(tmp_path):
            for t in _src(tmp_path, fake).fetch_by_ids([f"CMX-{n}" for n in range(1, 6)])}
     assert got == {"CMX-1": "canceled", "CMX-2": "done", "CMX-3": "canceled",
                    "CMX-4": "done", "CMX-5": None}
+    # G1's reconcile acts on `state`, not `terminal_state`: EVERY terminal verdict —
+    # canceled as much as done — must read CLOSED there, or a canceled run never closes.
+    states = {t.id: t.state
+              for t in _src(tmp_path, fake).fetch_by_ids([f"CMX-{n}" for n in range(1, 6)])}
+    assert states == {"CMX-1": "closed", "CMX-2": "closed", "CMX-3": "closed",
+                      "CMX-4": "closed", "CMX-5": "open"}
+
+
+@pytest.mark.parametrize("node_state", sorted(_TYPES))
+def test_state_is_closed_exactly_when_terminal_state_is_set(tmp_path, node_state):
+    """The invariant itself, over every state type: `state == "closed"` ⇔ the issue is
+    terminal (any terminal verdict), for live and archived records alike."""
+    for archived in (False, True):
+        fake = FakeLinear([issue(1, state=node_state, archived=archived)])
+        (t,) = _src(tmp_path, fake).fetch_by_ids(["CMX-1"])
+        terminal = archived or _TYPES[node_state] in ("completed", "canceled")
+        assert (t.terminal_state is not None) is terminal
+        assert t.state == ("closed" if terminal else "open"), (node_state, archived)
+
+
+# --- only THIS team ------------------------------------------------------------------
+
+def _two_teams():
+    return FakeLinear([issue(1), issue(2, state="In Progress"), issue(3, state="Done"),
+                       issue(1, team="ENG"), issue(4, team="ENG", state="Backlog"),
+                       issue(5, team="ENG", state="Done"), issue(9, team="OPS")])
+
+
+def test_the_open_set_reads_only_this_teams_issues(tmp_path):
+    """Another team's issues are never listed, claimed or reconciled against — the
+    query's own team filter (applied by the fake from the query text) must keep them out."""
+    fake = _two_teams()
+    src = _src(tmp_path, fake)
+    tasks = src.list_open_tasks()
+    assert {t.id for t in tasks} == {"CMX-1", "CMX-2"}
+    candidates, _ = src.claimable(tasks)
+    assert [t.id for t in candidates] == ["CMX-1"]
+    assert all(v["team"] == "CMX" for _, v in fake.calls)
+
+
+def test_fetch_by_ids_reads_only_this_teams_issues(tmp_path):
+    """ENG-1 shares CMX-1's number; the ID refresh must still return CMX-1 alone."""
+    fake = _two_teams()
+    got = _src(tmp_path, fake).fetch_by_ids(["CMX-1", "CMX-3"])
+    assert sorted(t.id for t in got) == ["CMX-1", "CMX-3"]
+
+
+def test_fetch_by_ids_returns_only_the_requested_numbers(tmp_path):
+    fake = FakeLinear([issue(n) for n in range(1, 6)])
+    got = _src(tmp_path, fake).fetch_by_ids(["CMX-2", "CMX-4"])
+    assert sorted(t.id for t in got) == ["CMX-2", "CMX-4"]
+
+
+def test_the_sweep_never_archives_another_teams_issue(tmp_path):
+    fake = _two_teams()
+    _src(tmp_path, fake).archive_sweep(force=True)
+    archived = {v["id"] for n, v in fake.calls if n == "archive"}
+    assert archived == {"uuid-3"}
+
+
+# --- a response without its `issues` connection is a FAILED read ---------------------
+
+MISSING_CONNECTION = {
+    "no-issues-key": {},
+    "issues-null": {"issues": None},
+    "issues-not-object": {"issues": []},
+    "nodes-missing": {"issues": {"pageInfo": {"hasNextPage": False}}},
+    "nodes-not-list": {"issues": {"nodes": {"CMX-1": {}}}},
+}
+
+
+@pytest.mark.parametrize("shape", sorted(MISSING_CONNECTION))
+def test_a_response_without_an_issues_connection_is_a_failed_read(tmp_path, shape):
+    """`[]` here would read as "none of these issues exist any more" and close every
+    live run — a response that is not the connection we asked for is a FAILED read."""
+    payload = MISSING_CONNECTION[shape]
+    src = _src(tmp_path, lambda q, v: payload)
+    assert src.fetch_by_ids(["CMX-1"]) is None
+    src = _src(tmp_path, lambda q, v: payload)
+    assert src.list_open_tasks() == [] and src.read_failed is True
+
+
+@pytest.mark.parametrize("shape", sorted(MISSING_CONNECTION))
+def test_a_missing_connection_on_a_later_page_is_a_failed_read(tmp_path, shape):
+    """Page 1 is good, page 2 is not: the partial list must not pass as the whole."""
+    first = {"issues": {"nodes": [issue(1)],
+                        "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}}
+
+    def transport(q, v):
+        return first if v.get("after") is None else MISSING_CONNECTION[shape]
+
+    assert _src(tmp_path, transport).fetch_by_ids(["CMX-1", "CMX-2"]) is None
+    src = _src(tmp_path, transport)
+    assert src.list_open_tasks() == [] and src.read_failed is True
+
+
+@pytest.mark.parametrize("status", ["awaiting_review", "running"])
+def test_a_missing_connection_changes_no_run(repo, team, launched, monkeypatch, status):
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, attempt, started_at, "
+            "worktree_path) VALUES ('CMX-3', ?, 't', ?, 1, ?, '/nowhere')",
+            (str((repo / "WORKFLOW.md").resolve()), status, dispatcher._now()),
+        )
+        conn.commit()
+    monkeypatch.setattr(linear, "make_transport", lambda key: lambda q, v: {"issues": None})
+    with patch.object(dispatcher, "_read_pr_url", return_value=None):
+        dispatcher.tick(repo / "WORKFLOW.md")
+    assert _row("CMX-3")["status"] == status
 
 
 def test_a_priority_and_order_tie_is_broken_by_the_issue_number(tmp_path):
@@ -1178,7 +1323,7 @@ def test_publishing_one_teams_count_keeps_every_other_teams(tmp_path):
 
 def test_two_teams_sweeps_each_publish_their_own_count(tmp_path):
     a = FakeLinear([issue(1, state="Done"), issue(2), issue(3)])
-    b = FakeLinear([issue(1), issue(2), issue(3), issue(4)])
+    b = FakeLinear([issue(n, team="OPS") for n in (1, 2, 3, 4)])
     linear.LinearSource(_wf(tmp_path), transport=a).archive_sweep(force=True)
     wf_b = _wf(tmp_path)
     wf_b.config["tracker"]["team"] = "OPS"

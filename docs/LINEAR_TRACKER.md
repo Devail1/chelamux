@@ -53,6 +53,11 @@ The adapter is `chela/sources/linear.py` (CMX-432).
 auth, rate limit, malformed response) and never `[]`. It includes archived issues and
 reports an archived issue as **done**, never as missing.
 
+An id that isn't one of this team's identifiers (another team's `ENG-5`, or a TODO.md-era
+hex id) is not returned at all, and reconciliation reads an unreported id as gone. So if a
+`TODO.md`-era run is still in flight when you switch a workflow to `kind: linear`, its run
+closes on the first tick. Let those runs finish, or close them, before you flip the tracker.
+
 A failed read never closes anything. On any error the tick's read is marked failed and
 reconciliation does not treat absent issues as finished. A 429 or a `RATELIMITED` error
 backs off per team, starting at 60 seconds and doubling up to 15 minutes (or using
