@@ -2078,6 +2078,8 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .modal .form-row input, .modal .form-row textarea { width: 100%; }
 .modal .form-row select { width: 100%; }
 .modal textarea { min-height: 60px; resize: vertical; }
+.modal-newtask { width: 560px; }
+.modal-newtask .newtask-error { color: var(--red); font-size: 12px; min-height: 1em; white-space: pre-wrap; }
 
 .modal .form-actions,
 .modal .modal-actions {
@@ -2556,6 +2558,14 @@ input[type="text"]:focus, textarea:focus, select:focus {
     font-size: 10px;
     color: var(--text-dim);
 }
+
+/* CMX-5: a Linear-backed card's id chip is a link to its issue (`CMX-12 ↗`). */
+a.kanban-tracker-link {
+    color: var(--accent);
+    text-decoration: none;
+}
+a.kanban-tracker-link:hover,
+a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 
 .kanban-wf-chip {
     background: rgba(88, 166, 255, 0.12);

@@ -2309,6 +2309,10 @@ function _paletteItems(skipWids) {
     }
 
     items.push({ icon: lucideIcon('terminal'), title: 'New shell window', sub: 'action', run: () => newShellWindow() });
+    // CMX-6: create a Linear issue (newtask.js) — reached through window.chela, not an
+    // import, so nav.js does not pull the Work module graph in.
+    items.push({ icon: lucideIcon('plus'), title: 'New task', sub: 'action · Linear issue',
+                 run: () => { if (window.chela && window.chela.openNewTask) window.chela.openNewTask(); } });
     items.push({ icon: lucideIcon('clock'), title: 'Add scheduled task', sub: 'action',
                  run: () => { if (typeof showAddSchedule === 'function') showAddSchedule(); } });
     // CMX-121: the injected keybinds (Alt+1..9, ⌘K) have no other discovery path —

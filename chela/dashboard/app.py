@@ -4004,6 +4004,9 @@ def api_dispatcher():
             "awaiting_review_runs": [],
             "recent_runs": [],
             "error": None,
+            # CMX-6: the tracker kind — the Work view offers "New task" only on a
+            # workflow whose tracker chela can create issues in (linear).
+            "tracker_kind": None,
         }
 
         active, awaiting, recent = _runs_for_workflow(all_runs, str(wf_path))
@@ -4018,11 +4021,13 @@ def api_dispatcher():
             | {r.get("task_id") for r in recent if r.get("status") == "failed"}
         )
         project_key: str | None = None
+        url_by_id: dict[str, str] = {}
 
         if exists:
             try:
                 wf = load_workflow(wf_path)
                 project_key = wf.project_key
+                entry["tracker_kind"] = wf.get("tracker", "kind")
                 source = get_source(wf)
                 open_tasks = source.list_open_tasks()
                 # Same closed-ids-from-the-tracker read `dispatcher._local_closed_ids`
@@ -4040,6 +4045,10 @@ def api_dispatcher():
                     else set()
                 )
                 known_ids = {t.id for t in open_tasks} | closed_ids
+                # CMX-5: a run claimed before `runs.tracker_url` existed has NULL there;
+                # while its task is still open in the tracker, the URL this same read
+                # just returned fills it in (display-only, never written back).
+                url_by_id = {t.id: t.url for t in open_tasks if t.url}
                 entry["open_tasks"] = []
                 for t in open_tasks:
                     if t.id in in_flight_ids:
@@ -4060,6 +4069,9 @@ def api_dispatcher():
                         # one-line task or a source with no notion of a continuation
                         # (gh_issues). The task-detail modal prefers this over `raw`.
                         "body": t.body,
+                        # 🔗↗️ CMX-5: the tracker's own issue URL (Linear's `url`) — the
+                        # card's `CMX-N ↗` link. None for markdown/gh_issues: no link.
+                        "tracker_url": t.url,
                         # True when this task has a `depends:` reference not yet
                         # struck done — kept in sync with `dispatcher._ready`, the
                         # claim-time gate, so a card the dispatcher would refuse to
@@ -4126,6 +4138,9 @@ def api_dispatcher():
             # or one the tick has not asked GitHub about yet — carries None, and the
             # frontend renders that as "ci ?", never as green: not-yet-read is not a pass.
             r.setdefault("pr_checks", None)
+            # 🔗↗️ CMX-5: the Linear issue URL recorded at claim, else the one this request's
+            # tracker read returned for the same id, else None (no link — never guessed).
+            r["tracker_url"] = r.get("tracker_url") or url_by_id.get(r.get("task_id"))
             # Per-run task-list progress (issue #462) — None (not "0/0", not an error)
             # whenever the run can't be joined to a live session's task directory; see
             # tasklists.progress_for_run.
@@ -4258,6 +4273,78 @@ def _remove_backlog_bullet(backlog_text: str, text: str) -> tuple[str | None, in
     if keep_trailing_nl:
         out += "\n"
     return out, 1
+
+
+# ➕📐 CMX-6: "New task" — create an issue in a linear workflow's team, in its ready
+# state. 🔐 The key stays HERE: the browser posts the form, this calls Linear through
+# the adapter (which reads LINEAR_API_KEY from chela.env), and no response ever carries
+# it. Owner only — a share guest is refused before anything is read.
+def _scrub_linear_key(text: str) -> str:
+    """Belt and braces: the adapter's errors never carry the key, but nothing this
+    route returns may, whatever a future error message decides to include."""
+    from chela.sources.linear import load_api_key
+
+    key = load_api_key()
+    return text.replace(key, "[redacted]") if key else text
+
+
+@app.route("/api/dispatcher/linear/issue", methods=["POST"])
+@require_auth
+def api_dispatcher_linear_issue():
+    """Body: ``{workflow_path, title, description?, priority?, blocked_by?: [ids]}``.
+    → ``{ok, issue: {identifier, url, title}, warnings}`` or ``{ok: false, error}``."""
+    if _share_guest_request():
+        return jsonify({"ok": False, "error": "Share guests cannot create tasks.",
+                        "reason": "share_guest"}), 403
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "error": "a JSON object is required"}), 400
+    title = data.get("title")
+    description = data.get("description") or ""
+    priority = data.get("priority", 0)
+    blocked_by = data.get("blocked_by") or []
+    if not isinstance(title, str) or not title.strip():
+        return jsonify({"ok": False, "error": "a title is required"}), 400
+    if not isinstance(description, str):
+        return jsonify({"ok": False, "error": "description must be text"}), 400
+    try:
+        priority = int(priority)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "priority must be 0-4"}), 400
+    if not isinstance(blocked_by, list) or not all(isinstance(b, str) for b in blocked_by):
+        return jsonify({"ok": False, "error": "blocked_by must be a list of issue ids"}), 400
+
+    wf_path = str(data.get("workflow_path") or "")
+    known = {str(p): p for p in _discover_dispatch_workflows(dispatcher.list_runs())}
+    try:
+        wf_resolved = known.get(str(Path(wf_path).expanduser().resolve())) if wf_path else None
+    except OSError:
+        wf_resolved = None
+    if wf_resolved is None:
+        return jsonify({"ok": False, "error": f"unknown workflow: {wf_path}"}), 400
+    try:
+        wf = load_workflow(wf_resolved)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"failed to load workflow: {e}"}), 500
+    if wf.get("tracker", "kind") != "linear":
+        return jsonify({"ok": False, "error": "this workflow's tracker is not linear"}), 400
+
+    from chela.sources.linear import LinearError
+
+    try:
+        created = get_source(wf).create_issue(title, description, priority, blocked_by)
+    except LinearError as e:
+        status = 400 if e.kind == "input" else 502
+        return jsonify({"ok": False, "error": _scrub_linear_key(str(e))}), status
+    except Exception as e:                   # never a 500 page in place of the form
+        return jsonify({"ok": False,
+                        "error": _scrub_linear_key(f"{type(e).__name__}: {e}")}), 500
+    event_log.append("task.created", f"created {created['identifier']}: {created['title']}",
+                     {"identifier": created["identifier"], "workflow": str(wf_resolved)})
+    warnings = [_scrub_linear_key(w) for w in created.get("warnings") or []]
+    return jsonify({"ok": True,
+                    "issue": {k: created[k] for k in ("identifier", "url", "title")},
+                    "warnings": warnings})
 
 
 @app.route("/api/dispatcher/backlog/promote", methods=["POST"])
