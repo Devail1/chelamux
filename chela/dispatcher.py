@@ -4621,6 +4621,47 @@ def _refused(error: str | None, refused: bool = False) -> dict:
 _escaped: set[str] = set()
 # Workflows whose CMX-384 re-key has run in this process — see `_rekey_legacy_raw_ids`.
 _rekeyed: set[str] = set()
+# Workflows whose id refresh is currently FAILING — so it is logged on the EDGE (CMX-430).
+_refresh_failed: set[str] = set()
+
+
+def _tracker_gone(source, workflow_path: str, ids, open_tasks, read_failed: bool) -> set[str] | None:
+    """Which of `ids` the tracker POSITIVELY says are no longer open — or ``None`` when it
+    could not be read, in which case reconciliation must change nothing tracker-derived.
+
+    🧾🔎 CMX-430, Symphony SPEC 11.1 ``fetch_issues_by_ids`` / 11.4 ("running-state refresh
+    failure: log and keep active workers running"). Before this, "done" was inferred from a
+    task's ABSENCE in ``list_open_tasks()`` — and a failed or partial read is absence too.
+    Now the runs reconcile would close out are re-read by id: an id is gone only when a read
+    that SUCCEEDED reports it ``closed`` or does not report it at all. A source without
+    ``fetch_by_ids`` (test doubles, third-party adapters) falls back to the open listing,
+    which is what it always had.
+    """
+    ids = set(ids)
+    if not ids:
+        return set()
+    fetch = getattr(source, "fetch_by_ids", None)
+    if callable(fetch):
+        try:
+            snapshot = fetch(sorted(ids))
+        except Exception as e:  # noqa: BLE001 — an adapter bug must not read as "all done"
+            log.warning("tracker id refresh raised for %s: %s", workflow_path, e)
+            snapshot = None
+    else:
+        snapshot = None if read_failed else list(open_tasks)
+    if snapshot is None:
+        if workflow_path not in _refresh_failed:
+            _refresh_failed.add(workflow_path)
+            log.warning(
+                "Tracker id refresh FAILED for %s — no run is reconciled from the tracker "
+                "this tick (%d waiting); retrying every tick", workflow_path, len(ids),
+            )
+        return None
+    if workflow_path in _refresh_failed:
+        _refresh_failed.discard(workflow_path)
+        log.info("Tracker id refresh recovered for %s", workflow_path)
+    still_open = {t.id for t in snapshot if getattr(t, "state", "open") != "closed"}
+    return ids - still_open
 
 
 def _rekey_legacy_raw_ids(conn: sqlite3.Connection, workflow_path: str, mapping: dict[str, str]) -> int:
@@ -4718,14 +4759,15 @@ def tick(workflow_path: str | Path) -> dict:
     # through, can say so only by returning `[]` — byte-for-byte what a genuinely
     # empty queue also returns. `read_failed` is the adapter's own signal that
     # THIS tick's `open_tasks`/`open_ids` is not trustworthy "nothing is open"
-    # evidence. Reconciliation below must not read absence-from-open_ids as
-    # completion evidence on a tick where this is True — see the two `not in
-    # open_ids` branches a few hundred lines down.
+    # evidence. CMX-430: reconciliation no longer reads absence-from-open_ids as
+    # completion evidence at all — it re-reads the candidates by id (`_tracker_gone`,
+    # the adapter's `fetch_by_ids`) and acts only on a read that succeeded.
     tracker_read_failed = getattr(source, "read_failed", False)
 
     summary = {
         "open": len(open_tasks),
         "tracker_read_failed": tracker_read_failed,
+        "tracker_refresh_failed": False,
         "reconciled_done": 0,
         "reconciled_closed": 0,
         "reconciled_failed": 0,
@@ -4887,6 +4929,19 @@ def tick(workflow_path: str | Path) -> dict:
             ),
             (str(wf.path), *ACTIVE_STATUSES, *RECONCILE_MERGE_STATUSES),
         ).fetchall()
+        # 🧾🔎 CMX-430: the runs the loop below could close out for LEAVING the tracker are
+        # re-read BY ID, not inferred from absence in `open_ids` — a failed or partial
+        # listing is absence too. `tracker_gone` is None when that read failed: then no row
+        # is reconciled off the tracker this tick (merged-PR evidence, the agent's own
+        # completion marker and a dead window still are — none of them come from it).
+        tracker_gone = _tracker_gone(
+            source, str(wf.path),
+            [r["task_id"] for r in rows if r["task_id"] not in open_ids],
+            open_tasks, tracker_read_failed,
+        )
+        summary["tracker_refresh_failed"] = tracker_gone is None
+        if tracker_gone is None:
+            tracker_gone = set()
         for row in rows:
             # ⛔🏃‍♂️💀 issue #491: `RECONCILE_MERGE_STATUSES_WITH_RUNNING`, not
             # `RECONCILE_MERGE_STATUSES` — a `running` row whose rework spawn raced an
@@ -5109,8 +5164,11 @@ def tick(workflow_path: str | Path) -> dict:
             # row the tracker never owned; it just deletes the row before the judge trigger
             # a few lines below ever gets a look at it, silently recreating the exact bug
             # this feature exists to close, just with an extra row in the table.
-            if (row["task_id"] not in open_ids and not _is_adopted(row)
-                    and not tracker_read_failed and row["status"] in REVIEW_STATUSES):
+            # 🧾🔎 CMX-430: `in tracker_gone` — a SUCCESSFUL id refresh said this task is
+            # closed or gone. It replaces `not in open_ids and not tracker_read_failed`,
+            # which a partial listing (read OK, rows missing) still satisfied.
+            if (row["task_id"] in tracker_gone and not _is_adopted(row)
+                    and row["status"] in REVIEW_STATUSES):
                 # Read the agent's transcript *before* killing the window —
                 # transcript resolution maps window_name → cwd → transcript via
                 # the live tmux pane, and that mapping disappears once tmux drops
@@ -5139,7 +5197,7 @@ def tick(workflow_path: str | Path) -> dict:
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (removed from source, window killed)", row["task_id"])
                 continue
-            if row["task_id"] not in open_ids:
+            if row["task_id"] in tracker_gone:
                 # claimed/running, no review state: "left the tracker" is NOT proof of a
                 # merge (cmx-100 — an orphaned agent whose window died before ever opening a
                 # PR still leaves the tracker for unrelated reasons: a human edit, a re-hash,

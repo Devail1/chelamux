@@ -32,6 +32,12 @@ class Task:
     # BOUNDARIES (see :func:`infer_risk`). `risk_reason` records which of those it was.
     risk: str = "normal"
     risk_reason: str = "default"
+    # 🧾🔎 CMX-430 (Symphony SPEC 11.1 `fetch_issues_by_ids`). The task's tracker state as
+    # of the read that produced it — `open` (still live work, parked/unlabelled included)
+    # or `closed` (struck `- [x]` / a closed issue). `list_open_tasks` only ever yields
+    # `open`; `fetch_by_ids` reports either, so reconciliation acts on a POSITIVE read of
+    # a task's state instead of inferring "done" from its absence.
+    state: str = "open"
 
 
 # ⚖️🎚️ CMX-405 — ordered LOWEST to HIGHEST stakes; `highest_risk` relies on the order.

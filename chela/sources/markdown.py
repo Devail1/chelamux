@@ -65,6 +65,40 @@ class MarkdownSource:
         self.read_failed = False
         return self.tasks_from_text(self.path.read_text())
 
+    def fetch_by_ids(self, ids) -> list[Task] | None:
+        """The current snapshot of each of `ids` this tracker can see — Symphony SPEC 11.1's
+        ID-refresh operation, the one reconciliation trusts (see ``dispatcher.tick``).
+
+        ``None`` means the read FAILED (the file is missing or unreadable) — the caller
+        must change nothing. ``[]`` means the read succeeded and none of `ids` is in the
+        file at all. Otherwise one :class:`Task` per id found, its ``state`` ``open`` for
+        an open OR parked bullet (parked is not done) and ``closed`` for a ``- [x]`` one.
+        An id on both an open and a struck line reads ``open`` — the safe side.
+        """
+        wanted = set(ids)
+        try:
+            text = self.path.read_text()
+        except (OSError, UnicodeDecodeError) as e:
+            # Missing (a `git clean -xdf` of this gitignored file) or unreadable: either
+            # way this is NOT "none of these ids are open". See list_open_tasks.
+            log.warning("markdown tracker %s could not be read for an id refresh (%s) — "
+                        "treating it as FAILED, not as every id being gone", self.path, e)
+            return None
+        found: dict[str, Task] = {}
+        for t in self.tasks_from_text(text) + self.parked_tasks_from_text(text):
+            if t.id in wanted:
+                found.setdefault(t.id, t)
+        for i, raw in enumerate(text.splitlines(), start=1):
+            m = DONE_RE.match(raw)
+            if not m:
+                continue
+            bare = _bare_title(m.group(1).strip())
+            tid = _task_id(self.path, bare)
+            if tid in wanted and tid not in found:
+                found[tid] = Task(id=tid, title=bare, file=str(self.path), line_number=i,
+                                  raw=raw, state="closed")
+        return list(found.values())
+
     def tasks_from_text(self, text: str) -> list[Task]:
         """The open tasks in `text`, as if it were this tracker's contents.
 
