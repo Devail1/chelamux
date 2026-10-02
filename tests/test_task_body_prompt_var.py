@@ -13,6 +13,7 @@ cleanly with an empty body, never a crash and never the string "None".
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -88,10 +89,20 @@ def test_examples_workflow_md_also_renders_the_task_body():
 
 # --- dry_run: the CLI preview a human actually runs (this task's own VERIFY step) -----
 
+def _repo_workflow_on_markdown() -> str:
+    """The real WORKFLOW.md (its prompt body is what's under test), with its tracker block
+    swapped for the markdown adapter so the preview reads a local TODO.md. chelamux's own
+    queue is Linear (CMX-438), and a dry run must never reach the network."""
+    text = (_REPO_ROOT / "WORKFLOW.md").read_text()
+    swapped, n = re.subn(r"(?m)^tracker:\n(?:  .*\n)+", "tracker:\n  kind: markdown\n  path: TODO.md\n", text)
+    assert n == 1, "WORKFLOW.md has no top-level tracker: block to swap"
+    return swapped
+
+
 def test_dry_run_shows_the_multiline_body_for_a_real_multiline_TODO_item(tmp_path):
     """`chela dispatch ./WORKFLOW.md --dry-run` on a multi-line item must show the body in
     the printed prompt — the exact manual check this task names."""
-    (tmp_path / "WORKFLOW.md").write_text((_REPO_ROOT / "WORKFLOW.md").read_text())
+    (tmp_path / "WORKFLOW.md").write_text(_repo_workflow_on_markdown())
     (tmp_path / "TODO.md").write_text(f"- [ ] short title\n\n  {_DISTINCTIVE_LINE}\n")
 
     plans = dispatcher.dry_run(tmp_path / "WORKFLOW.md")
@@ -101,7 +112,7 @@ def test_dry_run_shows_the_multiline_body_for_a_real_multiline_TODO_item(tmp_pat
 
 
 def test_dry_run_renders_cleanly_for_a_bare_one_line_TODO_item(tmp_path):
-    (tmp_path / "WORKFLOW.md").write_text((_REPO_ROOT / "WORKFLOW.md").read_text())
+    (tmp_path / "WORKFLOW.md").write_text(_repo_workflow_on_markdown())
     (tmp_path / "TODO.md").write_text("- [ ] short title\n")
 
     plans = dispatcher.dry_run(tmp_path / "WORKFLOW.md")

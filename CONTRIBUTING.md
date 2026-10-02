@@ -152,8 +152,10 @@ gh workflow run release.yml -f version=X.Y.Z    # dry_run defaults to true
 
 ## How the dispatcher builds tasks (optional context)
 
-If you're curious how chela develops itself: the daemon reads unchecked `- [ ]` items
-from a workflow's `TODO.md`, runs each as an isolated git-worktree agent seeded with
+If you're curious how chela develops itself: the daemon reads ready issues from
+chelamux's own Linear team (`tracker: kind: linear`, see
+[`docs/LINEAR_TRACKER.md`](docs/LINEAR_TRACKER.md)) — other workflows can use unchecked
+`- [ ]` items in a markdown `TODO.md` or GitHub issues instead — runs each as an isolated git-worktree agent seeded with
 [`WORKFLOW.md`](WORKFLOW.md), has the judge adversarially review the PR, and strikes the
 item on merge. Each task is a four-field brief — **OBJECTIVE / BOUNDARIES / GUARDS /
 VERIFY** — precisely so the guard discipline above can be enforced mechanically. See
