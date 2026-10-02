@@ -106,7 +106,7 @@ def test_share_does_not_resize_owner_window(monkeypatch, _isolate):
     # Single grid authority: _SHARED is seeded from the LIVE window size, not the
     # posted pane dims — so the advertised grid matches the stream.
     monkeypatch.setattr(dash.collab_stream, "_window_dims", lambda wid: (110, 19))
-    monkeypatch.setattr(dash.collab_stream, "start_bridge", lambda wid, on_revoke=None: "CODE")
+    monkeypatch.setattr(dash.collab_stream, "start_bridge", lambda wid, on_revoke=None, **kw: "CODE")
     monkeypatch.setattr(dash.collab_stream, "join_url", lambda wid: "https://relay/j/room")
 
     resp = dash.app.test_client().post("/api/term/@9/share", json={"on": True, "cols": 111, "rows": 22})

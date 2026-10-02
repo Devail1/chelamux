@@ -138,9 +138,13 @@ committed `base_branch` says so).
 
 Pull, re-sync, and restart only the services whose code changed: the daemon (`chela run`)
 for the dispatcher, judge, contract, workflow and sources; the dashboard for
-`chela/dashboard/`; the Telegram bridge for `chela/telegram/`. `chela update` does
-pull + sync + restart in one step. A changed hook or plugin reaches a session only when
-that session restarts.
+`chela/dashboard/`; the Telegram bridge for `chela/telegram/`; `chela-collab` (the
+live-share host) only for the share code (`collab_host.COLLAB_HOST_PATHS`). `chela update`
+does pull + sync + restart in one step, and prints "N live share(s) will be interrupted"
+first when the restart takes down the process hosting them. Before restarting by hand, run
+`chela shares --restarting <services…>`. A restarted host restores the shares with the same
+link and code, but guests see a pause. A changed hook or plugin reaches a session only
+when that session restarts.
 
 ## Releases
 

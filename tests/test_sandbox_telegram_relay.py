@@ -573,6 +573,10 @@ def test_run_prunes_and_creates_a_private_session_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(share_sandbox.subprocess, "call", lambda argv: 0)
     pruned = []
     monkeypatch.setattr(share_sandbox, "prune_session_dirs", lambda: pruned.append(1))
+    # CMX-433: run() mirrors the operator's token before launching. Hand it a readable one.
+    tok = tmp_path / "creds.json"
+    tok.write_text('{"claudeAiOauth": {"accessToken": "tok-test"}}')
+    monkeypatch.setattr(share_sandbox, "token_file", lambda: tok)
     old = os.umask(0o022)
     try:
         assert share_sandbox.run(SID, str(tmp_path)) == 0
