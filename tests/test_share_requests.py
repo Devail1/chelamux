@@ -313,6 +313,20 @@ def test_an_approved_directory_keeps_the_workspace_hygiene(typing_on, allowed):
     assert f"{allowed}/.git:/extra/datasets/.git:ro" in argv
 
 
+def test_a_read_only_extra_directory_masks_env_too(typing_on, allowed):
+    """``.env*`` is masked on a READ-ONLY grant as well — read-only still lets the guest
+    read a secret. (The write-only ``readonly_entries`` re-mounts are rw-only.)"""
+    open(os.path.join(allowed, ".env"), "w").close()
+    open(os.path.join(allowed, ".env.local"), "w").close()
+    rec = _filed(target=allowed)
+    assert sr.approve(rec["id"], by="op", now=T0)[0]
+    specs = sr.mount_specs(SID, T0 + 1)
+    assert specs == [(allowed, "/extra/datasets", False)]
+    argv = sb.guest_run_argv(SID, "/tmp", UID, GID, "/usr/bin/true", mounts=specs)
+    assert "/dev/null:/extra/datasets/.env:ro" in argv
+    assert "/dev/null:/extra/datasets/.env.local:ro" in argv
+
+
 def test_write_needs_the_guest_to_ask_and_the_operator_to_allow(typing_on, allowed):
     ro = _filed(target=allowed, access="ro")
     ok, why = sr.approve(ro["id"], by="op", rw=True, now=T0)
@@ -564,6 +578,18 @@ def test_domain_requests_are_refused_on_a_none_session_and_against_the_deny_list
     assert sr.domain_refusal("10.0.0.1") and sr.domain_refusal("http://x.com/")
 
 
+def test_the_deny_list_wins_over_a_domain_approved_before_it(typing_on, monkeypatch):
+    """A domain approved, THEN deny-listed by the operator, drops out of the allow-list."""
+    with sr._locked() as store:
+        store["sessions"][SID] = {"net": "web"}
+    monkeypatch.delenv("CHELA_SHARE_WEB_DENY", raising=False)
+    rec = _filed(kind="domain", target="jobs.example.com")
+    assert sr.approve(rec["id"], by="op", now=T0)[0]
+    assert sr.approved_domains(SID, T0 + 1) == ["jobs.example.com"]
+    monkeypatch.setenv("CHELA_SHARE_WEB_DENY", "jobs.example.com")
+    assert sr.approved_domains(SID, T0 + 1) == []
+
+
 def test_an_operation_is_recorded_only(typing_on):
     rec = _filed(kind="operation", target="push my branch")
     assert sr.approve(rec["id"], by="op", now=T0)[0]
@@ -597,6 +623,17 @@ def test_malformed_lines_are_skipped_and_the_cap_holds(monkeypatch):
     for i in range(sr.MAX_PER_SESSION + 5):
         _file(SID, target=f"/srv/{i}")
     assert len(sr.ingest(SID)) == sr.MAX_PER_SESSION
+
+
+def test_the_cap_holds_across_ingests_not_per_batch():
+    """The cap counts what the session ALREADY filed: two batches of 30 store 50, not 60."""
+    for i in range(30):
+        _file(SID, target=f"/srv/a{i}")
+    assert len(sr.ingest(SID)) == 30
+    for i in range(30):
+        _file(SID, target=f"/srv/b{i}")
+    assert len(sr.ingest(SID)) == sr.MAX_PER_SESSION - 30
+    assert sum(1 for r in sr._load()["requests"].values() if r["sid"] == SID) == sr.MAX_PER_SESSION
 
 
 # =====================================================================================
@@ -641,6 +678,19 @@ def test_the_proxy_refuses_an_oversized_body_and_files_nothing(proxy):
     assert not (d / share_proxy.REQUESTS_NAME).exists()
 
 
+def test_the_proxy_refuses_an_unknown_access_and_files_nothing(proxy):
+    """The drop type-checks ``access`` itself (ingest does too, but the drop is the guest's
+    only write path): only ``ro``/``rw`` ever reaches requests.jsonl."""
+    port, d = proxy
+    for access in ("rwx", "RW", "", 1, None, ["rw"]):
+        body = {"kind": "mount", "target": "/srv/data", "reason": "x", "access": access}
+        assert share_proxy.clean_request(json.dumps(body).encode()) is None, access
+        assert _req(port, "POST", share_proxy.REQUEST_PATH, body)[0] == 400, access
+    assert not (d / share_proxy.REQUESTS_NAME).exists()
+    assert share_proxy.clean_request(json.dumps({"kind": "mount", "target": "/a",
+                                                 "access": "rw"}).encode())["access"] == "rw"
+
+
 def test_ingest_drops_a_line_with_an_unknown_access(typing_on):
     _file(SID, target="/srv/x", access="rwx")
     assert sr.ingest(SID) == []
@@ -670,6 +720,19 @@ def test_the_guest_gets_the_request_cli_and_is_told_how_to_ask():
     assert f"http://{sb.PROXY_ALIAS}:{sb.PROXY_PORT}/chela/request" in sb._REQUEST_CLI_SRC
 
 
+def test_the_guest_entry_actually_writes_the_request_cli(tmp_path):
+    """Run the guest's entry for real (HOME re-rooted in tmp, ``claude`` stubbed out): the CLI
+    must LAND at REQUEST_CLI with its source — a string merely naming the path proves nothing."""
+    import subprocess
+    home = str(tmp_path / "guest")
+    os.makedirs(home)
+    entry = sb.guest_entry(None).replace(sb.GUEST_HOME, home)
+    assert entry.endswith(" && exec claude")
+    subprocess.run(["sh", "-c", entry[: -len("exec claude")] + "true"], check=True)
+    cli = tmp_path / "guest" / os.path.relpath(sb.REQUEST_CLI, sb.GUEST_HOME)
+    assert cli.read_text() == sb._REQUEST_CLI_SRC.replace(sb.GUEST_HOME, home)
+
+
 # =====================================================================================
 # only a human approves
 # =====================================================================================
@@ -693,6 +756,28 @@ def test_a_claude_session_cannot_approve_a_request(cmd):
                                  "curl http://127.0.0.1:5005/api/share-requests"])
 def test_listing_and_denying_stay_allowed(cmd):
     assert not mergegate.decide(_bash(cmd), env={}, registry=[]).deny
+
+
+def _chela(*argv):
+    import sys
+    from unittest.mock import patch
+    from chela import main
+    with patch.object(sys, "argv", ["chela", *argv]):
+        main.main()
+
+
+def test_the_cli_approves_read_only_unless_rw_is_passed(typing_on, allowed):
+    """Through the real argparse dispatch: ``approve`` on a write request is read-only
+    without ``--rw``, read-write with it, and ``--minutes`` is honoured."""
+    plain = _filed(target=allowed, access="rw")
+    _chela("share-requests", "approve", plain["id"], "--minutes", "30")
+    got = sr._load()["requests"][plain["id"]]
+    assert got["status"] == "approved" and got["rw"] is False and got["minutes"] == 30
+    sr.revoke(plain["id"], by="op")
+    wr = _filed(target=allowed, access="rw")
+    _chela("share-requests", "approve", wr["id"], "--rw")
+    got = sr._load()["requests"][wr["id"]]
+    assert got["status"] == "approved" and got["rw"] is True
 
 
 def test_the_dashboard_route_approves_and_refuses(typing_on, allowed):

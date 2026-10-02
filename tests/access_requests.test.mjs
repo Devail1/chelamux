@@ -110,3 +110,16 @@ test('a write request posts rw:true only when "allow write" is TICKED, not merel
         ['/api/share-requests/rw-2/approve', true],    // ticked → read-write
     ]);
 });
+
+test('Approve posts the duration the operator PICKED, not the default', async () => {
+    LISTING = { requests: [pending(), pending({ id: 'x-1' })], share_typing: true, default_minutes: 60 };
+    await ar.openAccessRequests();
+    const [a, b] = document.querySelectorAll('.ar-row');
+    a.querySelector('.ar-dur').value = '240';
+    a.querySelector('.ar-approve').click();
+    await new Promise(r => setTimeout(r, 0));
+    b.querySelector('.ar-dur').value = '15';
+    b.querySelector('.ar-approve').click();
+    await new Promise(r => setTimeout(r, 0));
+    assert.deepEqual(POSTS.map(p => p.body.minutes), [240, 15]);
+});
