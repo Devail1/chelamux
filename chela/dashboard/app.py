@@ -27,7 +27,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, sandbox_status, scheduler, sessionids, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, sandbox_status, scheduler, sessionids, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -1417,12 +1417,17 @@ def _share_options(wid: str) -> dict:
         # The trusted-peer override is offered only while the setting is on, and only
         # where it means something (a window that is NOT already sandboxed).
         "unsandboxed_offered": typing_on and not sandboxed,
+        # The override's duration picker (CMX-419): preselect the configured default; a
+        # pick above ``unsandboxed_long_minutes`` needs the window name typed twice.
         "unsandboxed_minutes": config.share_unsandboxed_minutes(),
+        "unsandboxed_choices": sorted({*config.SHARE_UNSANDBOXED_CHOICES, config.share_unsandboxed_minutes()}),
+        "unsandboxed_long_minutes": config.SHARE_UNSANDBOXED_LONG_MINUTES,
         "window_name": _window_name(wid),
     }
 
 
 CONFIRM_REASON = "type the window name to confirm full access"
+CONFIRM_LONG_REASON = "type the window name again to confirm full access for longer than 4 h"
 
 
 def _access_gate(wid: str, mode: str, data: dict):
@@ -1441,8 +1446,20 @@ def _access_gate(wid: str, mode: str, data: dict):
     name = _window_name(wid)
     if not name or (data.get("confirm") or "").strip() != name:
         return None, (jsonify({"ok": False, "error": CONFIRM_REASON}), 403)
+    # How long the override lasts (CMX-419): the configured default when absent, clamped
+    # to [1, 14 days]; above 4 h the window name must be typed a second time.
+    raw = data.get("minutes")
+    if raw is None:
+        minutes = config.share_unsandboxed_minutes()
+    else:
+        try:
+            minutes = config.clamp_unsandboxed_minutes(int(raw))
+        except (TypeError, ValueError):
+            return None, (jsonify({"ok": False, "error": f"bad duration: {raw!r}"}), 400)
+    if minutes > config.SHARE_UNSANDBOXED_LONG_MINUTES and (data.get("confirm_long") or "").strip() != name:
+        return None, (jsonify({"ok": False, "error": CONFIRM_LONG_REASON}), 403)
     return {"unsandboxed": {"granted_by": _granted_by(), "window": name,
-                            "ttl_s": config.share_unsandboxed_minutes() * 60.0}}, None
+                            "ttl_s": minutes * 60.0}}, None
 
 
 @app.route("/api/term/<wid>/share-options")
@@ -1466,7 +1483,9 @@ def api_term_share(wid):
     ``mode`` (CMX-403): ``"view"`` (default) · ``"typing"`` — refused unless the
     ``share_typing`` setting is on AND the window verifies as a sandboxed session ·
     ``"unsandboxed"`` — the trusted-peer override, refused unless the setting is on and
-    ``confirm`` equals the live window name. The bridge re-enforces all of it per
+    ``confirm`` equals the live window name. ``minutes`` (CMX-419) is how long it lasts —
+    the configured default when absent, clamped to [1, 14 days]; above 4 h it also needs
+    ``confirm_long`` equal to the window name. The bridge re-enforces all of it per
     keystroke; these refusals only keep the dialog honest."""
     _require_terminals()
     if wid not in _terminals_port_map():
@@ -2236,10 +2255,17 @@ def api_restore():
     is ever resumable, only *shown* (hidden by default; the sidebar's toggle reveals
     them with no Resume affordance) — ``session_id`` is left off their shape since
     there is no action for the client to build with it.
+
+    Rows whose session id the operator DISMISSED (:mod:`chela.dismissed_sessions`,
+    CMX-437) are left out of both buckets. That is a hide, not a delete: the
+    transcript and every store ``chela restore`` reads are untouched.
     """
     _require_terminals()
     owned = _dispatcher_owned_wid_epochs()
-    candidates = [v for v in _restore_verdicts() if v.verdict == "MANUAL" and v.manual_command()]
+    dismissed = dismissed_sessions.ids()
+    candidates = [v for v in _restore_verdicts()
+                  if v.verdict == "MANUAL" and v.manual_command()
+                  and v.session_id not in dismissed]
     rows, dispatcher_rows = [], []
     for v in candidates:
         if (v.wid, v.stamped_epoch) in owned or not _cwd_is_live(v.cwd):
@@ -2247,6 +2273,43 @@ def api_restore():
         else:
             rows.append(_shape_restore_row(v, resumable=True))
     return jsonify({"rows": rows, "dispatcher_rows": dispatcher_rows, "hidden": len(dispatcher_rows)})
+
+
+def _session_ids_from_body() -> list[str] | None:
+    """``session_ids`` from a JSON body: a non-empty list of non-empty strings, else None."""
+    sids = (request.get_json(silent=True) or {}).get("session_ids")
+    if not isinstance(sids, list) or not sids:
+        return None
+    if not all(isinstance(s, str) and s.strip() for s in sids):
+        return None
+    return [s.strip() for s in sids]
+
+
+@app.route("/api/restore/dismiss", methods=["POST"])
+@require_auth
+def api_restore_dismiss():
+    """Hide Recent-sessions rows by session id (the row's ×, or the header's "Clear
+    all"). Recorded server-side so every device stops showing them. Only the hide list
+    is written — never the transcript, never a session-ids/bindings row — so the
+    session stays resumable by hand and shows up under Sessions if it comes back."""
+    _require_terminals()
+    sids = _session_ids_from_body()
+    if sids is None:
+        return jsonify({"ok": False, "error": "session_ids must be a non-empty list of ids"}), 400
+    dismissed_sessions.dismiss(sids)
+    return jsonify({"ok": True, "dismissed": sids})
+
+
+@app.route("/api/restore/undismiss", methods=["POST"])
+@require_auth
+def api_restore_undismiss():
+    """Undo a dismiss: the rows come back on the next ``/api/restore``."""
+    _require_terminals()
+    sids = _session_ids_from_body()
+    if sids is None:
+        return jsonify({"ok": False, "error": "session_ids must be a non-empty list of ids"}), 400
+    dismissed_sessions.undismiss(sids)
+    return jsonify({"ok": True, "restored": sids})
 
 
 @app.route("/api/restore/resume", methods=["POST"])

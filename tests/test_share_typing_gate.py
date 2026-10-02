@@ -575,7 +575,8 @@ def test_an_exception_from_the_check_fails_closed_in_the_gate(monkeypatch, typin
     assert forwarded2 == [b"ls\r"]
 
 
-@pytest.mark.parametrize("raw, want", [("10000", 240), ("241", 240), ("240", 240),
+@pytest.mark.parametrize("raw, want", [("20160", 20160), ("20161", 20160), ("99999", 20160),
+                                       ("10000", 10000), ("241", 241), ("240", 240),
                                        ("0", 1), ("-5", 1), ("45", 45), ("junk", None)])
 def test_unsandboxed_minutes_is_clamped(monkeypatch, raw, want):
     monkeypatch.setenv("CHELA_SHARE_UNSANDBOXED_MINUTES", raw)
@@ -635,6 +636,111 @@ def test_share_route_arms_the_real_bridge(monkeypatch, real_bridges, typing_on):
     finally:
         dash._SHARED.clear()
         dash._share_info.clear()
+
+
+# --- CMX-419: the operator picks the override's duration, up to 14 days -----------------
+
+def test_unsandboxed_default_is_30_minutes_without_env(monkeypatch):
+    monkeypatch.delenv("CHELA_SHARE_UNSANDBOXED_MINUTES", raising=False)
+    assert config.share_unsandboxed_minutes() == 30
+
+
+def test_default_override_with_no_picker_change_behaves_as_before(monkeypatch, share_app, typing_on):
+    """⭐ ACCEPTED: no env, no ``minutes`` in the POST ⇒ the 30-minute default, granted on
+    the single typed confirmation — no second one needed."""
+    monkeypatch.delenv("CHELA_SHARE_UNSANDBOXED_MINUTES", raising=False)
+    _not_sandboxed(monkeypatch)
+    r = _post({"mode": "unsandboxed", "confirm": "shell-3"})
+    assert r.status_code == 200
+    (policy,) = share_app
+    assert policy["unsandboxed"]["ttl_s"] == 30 * 60.0
+
+
+def test_picked_duration_reaches_the_grant(monkeypatch, share_app, typing_on):
+    _not_sandboxed(monkeypatch)
+    r = _post({"mode": "unsandboxed", "confirm": "shell-3", "minutes": 20160,
+               "confirm_long": "shell-3"})
+    assert r.status_code == 200
+    (policy,) = share_app
+    assert policy["unsandboxed"]["ttl_s"] == 20160 * 60.0
+
+
+def test_picked_duration_is_clamped_to_14_days(monkeypatch, share_app, typing_on):
+    _not_sandboxed(monkeypatch)
+    r = _post({"mode": "unsandboxed", "confirm": "shell-3", "minutes": 99999,
+               "confirm_long": "shell-3"})
+    assert r.status_code == 200
+    assert share_app[0]["unsandboxed"]["ttl_s"] == 20160 * 60.0
+
+
+@pytest.mark.parametrize("extra", [{}, {"confirm_long": ""}, {"confirm_long": "shell-4"}])
+def test_long_override_without_second_confirmation_is_refused(monkeypatch, share_app, typing_on, extra):
+    _not_sandboxed(monkeypatch)
+    r = _post({"mode": "unsandboxed", "confirm": "shell-3", "minutes": 241, **extra})
+    assert r.status_code == 403
+    assert "longer than 4 h" in r.get_json()["error"]
+    assert share_app == [] and "@9" not in dash._SHARED
+
+
+def test_four_hours_needs_only_one_confirmation(monkeypatch, share_app, typing_on):
+    """Negative control for the refusal above: exactly 4 h is not 'longer than 4 h'."""
+    _not_sandboxed(monkeypatch)
+    r = _post({"mode": "unsandboxed", "confirm": "shell-3", "minutes": 240})
+    assert r.status_code == 200
+    assert share_app[0]["unsandboxed"]["ttl_s"] == 240 * 60.0
+
+
+def test_bad_duration_is_refused(monkeypatch, share_app, typing_on):
+    _not_sandboxed(monkeypatch)
+    r = _post({"mode": "unsandboxed", "confirm": "shell-3", "minutes": "soon"})
+    assert r.status_code == 400 and share_app == []
+
+
+def test_picked_duration_reaches_expires_at_in_the_audit_event(monkeypatch, real_bridges, typing_on):
+    """End to end with the REAL start_bridge: the picker's 7 days lands in
+    ``share.unsandboxed_granted``'s ``expires_at`` — not the 30-minute default."""
+    _not_sandboxed(monkeypatch)
+    dash._SHARED.clear()
+    dash._share_info.clear()
+    monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
+    monkeypatch.setattr(dash, "_require_terminals", lambda: None)
+    monkeypatch.setattr(dash, "_window_name", lambda wid: "shell-3")
+    monkeypatch.setattr(cs, "_window_dims", lambda wid: (80, 24))
+    try:
+        r = _post({"mode": "unsandboxed", "confirm": "shell-3", "minutes": 10080,
+                   "confirm_long": "shell-3"})
+        assert r.status_code == 200
+        (g,) = _events("share.unsandboxed_granted")
+        p = g["payload"]
+        assert p["expires_at"] - p["started_at"] == 10080 * 60.0
+        assert r.get_json()["expires_at"] == p["expires_at"]
+    finally:
+        dash._SHARED.clear()
+        dash._share_info.clear()
+
+
+def test_a_14_day_override_still_expires_on_the_fake_clock(monkeypatch, typing_on):
+    _not_sandboxed(monkeypatch)
+    b, clock, forwarded, _sent = _bridge(monkeypatch)
+    _grant(b, ttl_s=20160 * 60.0)
+    j = _joiner(b)
+    clock.t += 20160 * 60.0 - 1.0
+    _type(b, j, b"a")
+    assert forwarded == [b"a"]
+    clock.t += 1.0
+    _type(b, j, b"b")
+    assert forwarded == [b"a"]
+    assert b.mode() == cs.MODE_VIEW
+    assert len(_events("share.unsandboxed_expired")) == 1
+
+
+def test_share_options_offer_the_duration_picker(monkeypatch, share_app, typing_on):
+    _not_sandboxed(monkeypatch)
+    monkeypatch.setenv("CHELA_SHARE_UNSANDBOXED_MINUTES", "45")
+    got = dash._share_options("@9")
+    assert got["unsandboxed_minutes"] == 45
+    assert got["unsandboxed_choices"] == [30, 45, 240, 1440, 10080, 20160]
+    assert got["unsandboxed_long_minutes"] == 240
 
 
 # --- 🕶️ CMX-416: a typing share's OUTPUT is gated on the same live check -------------

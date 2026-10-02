@@ -49,9 +49,14 @@ joined keeps the connection, so nobody needs a new invite.
 - **Up** passes the same checks as creating a share with that mode
   (`app._access_gate`, used by both routes). Allow typing needs *Guest typing* on and a
   window that verifies as sandboxed; when it's refused, the row shows the same reason as
-  the share dialog. UNSANDBOXED needs the typed window name. Its expiry and one-joiner
-  binding start at the upgrade, so the first guest to type after it is the one bound.
-- The server route is `POST /api/term/<wid>/share-mode` with `{"mode", "confirm"?}`.
+  the share dialog. UNSANDBOXED needs the typed window name, and offers the same
+  duration picker as the share dialog; a pick longer than 4 h needs the name typed a
+  second time, and the server applies the same 14-day clamp (CMX-419). Its expiry and
+  one-joiner binding start at the upgrade, so the first guest to type after it is the
+  one bound. The row then says when it ends and how long is left
+  (e.g. "Ends Oct 15, 14:05 (12d 4h left)").
+- The server route is `POST /api/term/<wid>/share-mode` with
+  `{"mode", "confirm"?, "minutes"?, "confirm_long"?}`.
   The bridge (`Bridge.set_mode`) applies the change in place.
 - Every change writes a `share.mode_changed` event with `from`, `to` and `by`. An
   upgrade to UNSANDBOXED also writes `share.unsandboxed_granted`, and leaving it writes
@@ -454,8 +459,18 @@ on by accident, and to end on its own:
 - The dialog labels it **"Full access — UNSANDBOXED: the guest can type into a real shell
   on this machine"**. To confirm, you type the **window name**, and the server checks
   that name against the live tmux window.
-- It **expires** after `CHELA_SHARE_UNSANDBOXED_MINUTES` minutes (default **30**, range
-  1–240). The share then goes back to view only by itself, and the guest is told.
+- It **expires** after the duration you pick in the dialog (or in *Active shares* when
+  you upgrade a live share): **30 min · 4 h · 1 day ·
+  7 days · 14 days**. The picker starts on `CHELA_SHARE_UNSANDBOXED_MINUTES` (default
+  **30**; any value in the range 1–20160 minutes, i.e. up to 14 days, is accepted and
+  added to the picker if it isn't one of the five). The server clamps whatever is posted
+  to the same range. When it runs out, the share goes back to view only by itself, and
+  the guest is told. The red banner and *Active shares* show the time left
+  (e.g. "12d 4h left").
+- A duration **longer than 4 h** needs the window name typed a **second** time, and the
+  server refuses the grant without it, so a multi-day grant can't be clicked through by
+  accident. A long override ends exactly as a short one does: expiry, Stop, the kill
+  switch, the share reaper, or *Guest typing* turned off.
 - It's **bound to one joiner**: the first one to say hello (or type) after the grant.
   Anyone else on the same share stays view only. A guest who reloads the page gets a new
   stream id, so they're view only too; stop and re-share to re-pair. This binding keeps
@@ -465,6 +480,6 @@ on by accident, and to end on its own:
   header and in the share pill. The **#btn-shares** kill switch (Stop / Stop all)
   revokes it instantly.
 - Every step goes to the event log. `share.unsandboxed_granted` records who, the window,
-  the start and the expiry. `share.unsandboxed_expired` and `share.unsandboxed_revoked`
+  the start and the expiry (`expires_at`, from the duration you picked). `share.unsandboxed_expired` and `share.unsandboxed_revoked`
   record the end and its reason.
 - Turning *Guest typing* off also disables an active override.
