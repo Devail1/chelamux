@@ -184,6 +184,34 @@ def test_run_mirrors_the_token_before_the_proxy_starts_and_removes_it_after(monk
     assert not sb.token_mirror_dir(SID).exists()
 
 
+def test_run_keeps_the_mirror_current_while_the_guest_runs(monkeypatch, host):
+    """The wiring: a refresh DURING the session reaches the sidecar — run() itself must
+    start the poll thread, not just seed the mirror once before the guest starts."""
+    ran, seen = _stub_run(monkeypatch)
+    monkeypatch.setattr(sb, "TOKEN_POLL_SECONDS", 0.01)
+    mirror_file = sb.token_mirror_dir(SID) / sb.TOKEN_NAME
+
+    def call(argv):                                   # the guest's whole lifetime
+        _replace(host, _creds("tok-2"))               # the host refreshes mid-session
+        for _ in range(300):
+            if mirror_file.read_text() == "tok-2":
+                break
+            threading.Event().wait(0.01)
+        seen["mirror"] = mirror_file.read_text()
+        return 0
+
+    monkeypatch.setattr(sb.subprocess, "call", call)
+    assert sb.run(SID, "/tmp", "none") == 0
+    assert seen["mirror"] == "tok-2"
+    assert not sb.token_mirror_dir(SID).exists()
+
+
+def test_the_mirror_dir_is_private(host):
+    mirror = sb.TokenMirror(sb.token_file(), sb.token_mirror_dir(SID))
+    assert mirror.sync()
+    assert oct(mirror.dir.stat().st_mode & 0o777) == oct(0o700)
+
+
 def test_run_refuses_before_any_docker_step_when_no_token_is_readable(monkeypatch, host):
     host.write_text("")
     ran, _ = _stub_run(monkeypatch)

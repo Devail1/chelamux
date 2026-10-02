@@ -187,12 +187,15 @@ class TokenMirror:
             except OSError as e:
                 log.warning("share sandbox: token mirror sync failed: %s", e)
 
-    def start(self, interval: float = TOKEN_POLL_SECONDS) -> None:
+    def start(self, interval: float | None = None) -> None:
+        interval = TOKEN_POLL_SECONDS if interval is None else interval
         self._thread = threading.Thread(target=self._loop, args=(interval,), daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
+        if self._thread is not None:    # a sync() in flight must not recreate the dir
+            self._thread.join(timeout=5)
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
