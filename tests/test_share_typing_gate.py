@@ -313,7 +313,7 @@ def share_app(monkeypatch):
     monkeypatch.setattr(cs, "_window_dims", lambda wid: (80, 24))
     started = []
 
-    def start(wid, on_revoke=None, **policy):
+    def start(wid, on_revoke=None, share_epoch=None, **policy):
         started.append(policy)
         return "CODE"
 

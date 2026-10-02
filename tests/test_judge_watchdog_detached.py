@@ -100,13 +100,17 @@ def test_a_live_run_is_timed_from_its_own_start_when_the_rows_marker_was_wiped(t
 
 
 def test_a_live_run_past_the_wall_from_its_own_start_is_still_reaped(tmp_path):
-    """⭐ COUNTERWEIGHT: the hold is bounded — a live run 61 min past its OWN start is stuck,
-    and is reaped exactly as before."""
-    wf = _judging_row(tmp_path, spawned_ago=90 * 60, run_started_ago=None)
-    _run_status(run_started_ago=61 * 60)
+    """⭐ COUNTERWEIGHT: the hold is bounded — a live run a minute past its OWN wall, whose
+    progress stopped, is stuck, and is reaped exactly as before. ⏳⚖️ CMX-431: the wall is
+    the battery's (`judge_wall_seconds`: 64 min for this 2/9 run), not a flat 60 min, and
+    "stuck" needs progress that stopped advancing — here, not since the run started."""
+    wf = _judging_row(tmp_path, spawned_ago=180 * 60, run_started_ago=None)
+    st = _run_status()
+    ago = dispatcher.judge_wall_seconds(st) + 60
+    _run_status(run_started_ago=ago, progress_at=time.time() - ago)
     handed, state, removed, _, run = _tick(wf)
     assert (handed, state, removed) == (1, judge.J_CANNOT_VERIFY, 1)
-    assert "did not finish" in run["judge_detail"]
+    assert "stuck, not thinking" in run["judge_detail"]
 
 
 # --- window gone, run dead ⇒ CANNOT VERIFY, once --------------------------------------------

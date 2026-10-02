@@ -17,6 +17,12 @@ What this proxy refuses to be:
   request (so a refresh by the operator's own sessions is picked up), and only ever written
   into the UPSTREAM request's headers, never into a response.
 
+On an upstream 401 the token is read once more: if it changed (the host refreshed its
+login since this request read it), the request is retried once with the new one. A 401
+that persists is answered with a 502 naming the real cause — the HOST's login expired —
+because a 401 would send the guest's Claude Code into its own /login flow, which can never
+help: the guest holds no credential by design (CMX-433).
+
 A guest who can type can still spend the operator's usage through it — that is inherent in
 letting them drive Claude at all, not a defect of the proxy.
 
@@ -65,6 +71,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
 DEFAULT_PORT = 8080
 OAUTH_BETA = "oauth-2025-04-20"
+LOGIN_EXPIRED = "The host's Claude login expired — ask the operator to log in again on the host."
 
 # Headers never copied from the guest's request to upstream: every auth header (the whole
 # point), the hop-by-hop set, and the ones this proxy recomputes.
@@ -340,6 +347,19 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send(self, body: bytes | None, token: str):
+        """One upstream request with ``token``; returns ``(conn, response)``."""
+        up = self.upstream
+        conn_cls = http.client.HTTPSConnection if up.scheme == "https" else http.client.HTTPConnection
+        conn = conn_cls(up.hostname, up.port, timeout=600)
+        try:
+            conn.request(self.command, self.path, body=body,
+                         headers=upstream_headers(list(self.headers.items()), token))
+            return conn, conn.getresponse()
+        except BaseException:
+            conn.close()
+            raise
+
     def _forward(self) -> None:
         if not path_allowed(self.path):
             return self._refuse(403, "only /v1/ is forwarded")
@@ -350,15 +370,18 @@ class _Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(n) if n else None
         turn = records_turn(self.command, self.path, body)
         activity = self.activity if turn else None
-        up = self.upstream
-        conn_cls = http.client.HTTPSConnection if up.scheme == "https" else http.client.HTTPConnection
-        conn = conn_cls(up.hostname, up.port, timeout=600)
+        conn = None
         if activity is not None:
             self._mark(activity.begin)
         try:
-            conn.request(self.command, self.path, body=body,
-                         headers=upstream_headers(list(self.headers.items()), token))
-            resp = conn.getresponse()
+            conn, resp = self._send(body, token)
+            if resp.status == 401:
+                conn.close()
+                fresh = read_token(self.token_file)
+                if fresh and fresh != token:      # the host refreshed since we read it
+                    conn, resp = self._send(body, fresh)
+                if resp.status == 401:
+                    return self._refuse(502, LOGIN_EXPIRED)
             collector = None
             if self.outbox is not None and resp.status == 200 and \
                     "text/event-stream" in (resp.getheader("content-type") or "") and turn:
@@ -385,7 +408,8 @@ class _Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
             self.close_connection = True
             if activity is not None:
                 self._mark(activity.end)

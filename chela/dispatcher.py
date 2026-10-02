@@ -20,6 +20,10 @@ from chela.config import (
     judge_max_concurrent,
     judge_max_unknown_retries,
     judge_outage_backoff_seconds,
+    judge_wall_base_seconds,
+    judge_wall_ceiling_seconds,
+    judge_wall_grace_seconds,
+    judge_wall_per_experiment_seconds,
     max_reworks_for,
     judge_max_experiments,
     worktree_disk_budget_bytes,
@@ -294,7 +298,15 @@ JUDGE_TRIGGER_CHECKS = (CI_PASSING, CI_NONE)
 
 # A judge that has not published a verdict in this long is not thinking, it is stuck. It is
 # killed and its run becomes CANNOT VERIFY — which blocks nothing and approves nothing.
+# ⏳⚖️ CMX-431: this is now the FLOOR of the wall, not the wall — once a run has started and
+# published its battery size, `judge_wall_seconds` scales the wall with the battery, and
+# `judge_overdue` reaps past it only a run whose progress stopped. A small battery's wall
+# is exactly this, as before.
 JUDGE_TIMEOUT_SECONDS = 60 * 60
+
+# ⏳⚖️ CMX-431: a full-suite confirmation (CMX-407) is budgeted at this multiple of the run's
+# OWN baseline — the same suite, on the same box, a moment earlier — with headroom for load.
+JUDGE_FULL_SUITE_MARGIN = 1.5
 
 # --- agent launch command ---------------------------------------------------
 #
@@ -6980,12 +6992,113 @@ def _judge_backoff_pending(row: sqlite3.Row) -> bool:
     return retry_after is not None and now is not None and now < retry_after
 
 
+def _num(value: object) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) \
+        else None
+
+
+def _judge_full_suite_budget(status: dict | None) -> float:
+    """⏳⚖️ CMX-431: what one full-suite run may take, measured from the run's own baseline
+    (``baseline_seconds`` in its status) — the per-experiment budget until it is known."""
+    baseline = _num((status or {}).get("baseline_seconds"))
+    if baseline is None or baseline <= 0:
+        return judge_wall_per_experiment_seconds()
+    return baseline * JUDGE_FULL_SUITE_MARGIN
+
+
+def judge_wall_seconds(status: dict | None) -> float:
+    """⏳⚖️ CMX-431. The wall of a judge RUN, from its live status (``judge.judge_status_path``):
+
+        base + total × per_experiment + confirmations × full-suite budget
+
+    clamped to ``[JUDGE_TIMEOUT_SECONDS, ceiling]``. ``confirmations`` counts the full-suite
+    re-runs a subset survivor needed (CMX-407) — measured on PR #580 at 8m05s and 8m34s
+    each, against ~3 min for a targeted run; they are what a flat 60 min could not hold.
+    ⭐ No status, or no battery size yet, is the flat ``JUDGE_TIMEOUT_SECONDS`` — and the
+    floor means a small battery's wall is never SHORTER than it was before this existed.
+    """
+    floor = float(JUDGE_TIMEOUT_SECONDS)
+    status = status or {}
+    total = status.get("total")
+    if not isinstance(total, int) or isinstance(total, bool) or total <= 0:
+        return floor
+    confirmations = status.get("confirmations")
+    confirmations = confirmations if isinstance(confirmations, int) and confirmations > 0 else 0
+    budget = (judge_wall_base_seconds() + total * judge_wall_per_experiment_seconds()
+              + confirmations * _judge_full_suite_budget(status))
+    return min(max(judge_wall_ceiling_seconds(), floor), max(floor, budget))
+
+
+def judge_run_completed(status: dict | None) -> bool:
+    """⏳⚖️ CMX-431: has this run finished EVERY experiment (``done == total``)? It is then in
+    its consistency/confirmation/publish stage, and gets the grace past its wall."""
+    status = status or {}
+    total, done = status.get("total"), status.get("done")
+    return (isinstance(total, int) and total > 0 and isinstance(done, int) and done >= total)
+
+
+def judge_overdue(elapsed: float, status: dict | None, now: float) -> str | None:
+    """⏳⚖️ CMX-431. Should the watchdog reap a judge run ``elapsed`` seconds past its own
+    start? ``None`` keeps it; otherwise the CANNOT VERIFY reason.
+
+    * Inside its wall (:func:`judge_wall_seconds`) — plus the grace, once every experiment
+      is done (:func:`judge_run_completed`) — a run is never reaped.
+    * Past it, a run whose progress (``progress_at``) has not advanced for the stall window
+      (the per-experiment budget, or one full-suite run if that is longer) is stuck — and
+      ONLY then is it called "stuck, not thinking". A run with no progress record at all
+      (an older run, or one still before its first write) is judged as before: past the
+      wall, stuck.
+    * A run still advancing is kept until the hard ceiling, and reaped there as out of
+      budget — never as stuck.
+
+    Measured 2026-10-01 on PR #580: a 12-experiment HIGH-risk run finished its battery at
+    ~60 min and was reaped at 62 min as "stuck, not thinking" while publishing a real BLOCK.
+    """
+    floor = float(JUDGE_TIMEOUT_SECONDS)
+    wall = judge_wall_seconds(status)
+    grace = judge_wall_grace_seconds() if judge_run_completed(status) else 0.0
+    if elapsed < wall + grace:
+        return None
+    status = status or {}
+    total, done = status.get("total"), status.get("done")
+    if judge_run_completed(status):
+        where = f"all {total} experiments done"
+    elif total:
+        where = f"experiment {done}/{total}"
+    else:
+        where = "before its first experiment"
+    progress_at = _num(status.get("progress_at"))
+    stall = max(judge_wall_per_experiment_seconds(), _judge_full_suite_budget(status))
+    if progress_at is None:
+        return f"the judge did not finish in {int(wall) // 60}min — it is stuck, not thinking"
+    since = max(0.0, now - progress_at)
+    if since >= stall:
+        return (f"the judge's progress has not advanced in {int(since) // 60}min ({where}, "
+                f"past its {int(wall + grace) // 60}min wall) — it is stuck, not thinking")
+    ceiling = max(judge_wall_ceiling_seconds(), floor) + grace
+    if elapsed >= ceiling:
+        return (f"the judge was still advancing ({where}) but reached the "
+                f"{int(ceiling) // 60}min hard ceiling — out of budget, not stuck")
+    return None
+
+
+def _judge_run_status(task_id: str) -> dict | None:
+    """⏳⚖️ CMX-431: the live status of THIS task's judge run, or ``None`` when there is none
+    or its owner is gone (a status a crashed run left behind is not progress)."""
+    status = judge._read_judge_lock(judge.judge_status_path(task_id))
+    if status is None or not judge._judge_lock_owner_alive(status):
+        return None
+    return status
+
+
 def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set[str]) -> int:
     """A judge that stopped without a verdict is CANNOT VERIFY — never a pass, never a fail.
 
     Two silences mean the same thing, and neither may be mistaken for a clean bill of health:
     the window is gone but no verdict was published (the agent died, or a human killed it),
-    or it has been running past :data:`JUDGE_TIMEOUT_SECONDS` (it is stuck, not thinking).
+    or it has been running past its wall (it is stuck, not thinking). ⏳⚖️ CMX-431: for a
+    started run the wall scales with its battery and only a run whose progress stopped is
+    stuck — see :func:`judge_overdue`; before that, :data:`JUDGE_TIMEOUT_SECONDS`.
     ⛔ `chela judge run` writes the state BEFORE it kills its own window, so "window gone,
     state still running" is unambiguous — it did not finish.
 
@@ -7015,10 +7128,19 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
             _epoch_dt(live_run.get("run_started_at")) if live_run else None
         )
         started = run_started or _parse_ts(row["judge_started_at"])
-        timed_out = (
-            started is not None and now is not None
-            and (now - started).total_seconds() >= JUDGE_TIMEOUT_SECONDS
-        )
+        # ⏳⚖️ CMX-431: once the run has started, its wall scales with its battery and only a
+        # run whose progress STOPPED is reaped past it (see `judge_overdue`). Before that the
+        # agent is bounded by the flat JUDGE_TIMEOUT_SECONDS from its spawn, as always.
+        timeout_reason = None
+        if started is not None and now is not None:
+            elapsed = (now - started).total_seconds()
+            if run_started is not None:
+                timeout_reason = judge_overdue(
+                    elapsed, _judge_run_status(row["task_id"]), now.timestamp())
+            elif elapsed >= JUDGE_TIMEOUT_SECONDS:
+                timeout_reason = (f"the judge did not finish in {JUDGE_TIMEOUT_SECONDS // 60}"
+                                  "min — it is stuck, not thinking")
+        timed_out = timeout_reason is not None
         alive = window in live_windows
         # ⚖️🔌 CMX-282: an expired login burns the whole JUDGE_TIMEOUT_SECONDS (60min) wait
         # for nothing — measured live 2026-08-14, two judges (CMX-277, CMX-279) sat at
@@ -7061,8 +7183,7 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         # here unless it ran past the wall or sits at an expired login (CMX-282) — "stuck,
         # not thinking" whatever its lock claims.
         reason = (
-            f"the judge did not finish in {JUDGE_TIMEOUT_SECONDS // 60}min — it is stuck, "
-            "not thinking" if timed_out else
+            timeout_reason if timed_out else
             "the judge's session login expired mid-run (\"Login expired · Please run "
             "/login\") — not a verdict on the PR" if login_expired else
             "the judge hit a Claude Code auto-mode classifier outage (every tool call came "

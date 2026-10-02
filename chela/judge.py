@@ -1300,12 +1300,20 @@ def run_experiments(
     max_experiments: int = MAX_EXPERIMENTS,
     risk: str = "",
     progress=None,
+    heartbeat=None,
 ) -> Report:
     """Execute every proposed experiment IN THIS WORKTREE and adjudicate each one.
 
     ⏱️ CMX-411: ``progress``, when given, is called ``progress(done, total)`` as each
     experiment starts and once more when they are all done — what ``chela doctor`` reads to
     show a live judge's ``k/N``. It observes; it never changes an outcome.
+
+    ⏳⚖️ CMX-431: ``heartbeat``, when given, is called ``heartbeat(event, **info)`` at every
+    other point the run is demonstrably moving — ``"baseline"`` (with ``seconds``, the full
+    suite's own measured duration), ``"experiment"`` (any experiment starting, consistency
+    re-runs included), ``"confirm"`` (a full-suite confirmation of a subset survivor
+    starting) and ``"consistency"`` (the re-run stage starting). The daemon's watchdog sizes
+    the wall from these and never calls an advancing run stuck. It observes, too.
 
     ⚖️🎚️ CMX-405: ``max_experiments`` is the task's risk-level cap (see
     ``config.judge_max_experiments``) — proposals past it are dropped OUT LOUD, as
@@ -1363,7 +1371,7 @@ def run_experiments(
                               base_branch=base_branch, select_tests=select_tests,
                               consistency_sample=consistency_sample,
                               max_experiments=max_experiments, risk=risk,
-                              progress=progress)
+                              progress=progress, heartbeat=heartbeat)
     report.battery_seconds = time.monotonic() - started
     log.info("judge: mutation battery took %s (%d experiment(s))",
              _duration(report.battery_seconds), len(report.outcomes))
@@ -1373,7 +1381,7 @@ def run_experiments(
 def _run_experiments(
     worktree: Path, test_cmd: str, raw: dict, *, timeout: float, base_branch: str,
     select_tests: bool, consistency_sample: int, max_experiments: int, risk: str,
-    progress=None,
+    progress=None, heartbeat=None,
 ) -> Report:
     report = Report(risk=risk, cap=max(1, int(max_experiments)))
     items = raw.get("experiments") if isinstance(raw, dict) else None
@@ -1429,9 +1437,12 @@ def _run_experiments(
         return report
 
     # THE BASELINE — the suite as the PR actually ships it, before anything is touched.
+    baseline_started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="chela-judge-select-") as scratch:
         baseline, selector, report.selection = run_baseline(
             worktree, test_cmd, timeout, Path(scratch), select_tests=select_tests)
+    if heartbeat is not None:
+        heartbeat("baseline", seconds=time.monotonic() - baseline_started)
     report.baseline = baseline
     if not baseline.green:
         # ⛔ CMX-80: name the CAUSE, not just the exit code. `judge_detail` (this string) is
@@ -1455,6 +1466,7 @@ def _run_experiments(
 
     outcomes, contamination = _apply_experiments(
         worktree, test_cmd, items, baseline, timeout, selector, progress=progress,
+        heartbeat=heartbeat,
     )
     report.outcomes.extend(outcomes)
     if contamination:
@@ -1464,6 +1476,7 @@ def _run_experiments(
     if consistency_sample > 0:
         contamination = _check_consistency(
             worktree, test_cmd, items, outcomes, baseline, timeout, consistency_sample, report,
+            heartbeat=heartbeat,
         )
         if contamination:
             report.cannot_verify = contamination
@@ -1510,7 +1523,7 @@ def _apply_experiments(
     worktree: Path, test_cmd: str, items: list, baseline: SuiteResult, timeout: float,
     selector: "judge_select.Selector | None" = None,
     pinned: "list[judge_select.Selection | None] | None" = None,
-    *, progress=None,
+    *, progress=None, heartbeat=None,
 ) -> tuple[list[Outcome], str]:
     """Apply, adjudicate, and restore every ``items`` entry against an already-green
     ``baseline``. Shared by :func:`run_experiments` (the judge's PR pass, a throwaway
@@ -1533,6 +1546,8 @@ def _apply_experiments(
     for n, raw_exp in enumerate(items):
         if progress is not None:
             progress(n, len(items))
+        if heartbeat is not None:
+            heartbeat("experiment")
         exp, why = Experiment.parse(raw_exp)
         if exp is None:
             # A malformed HELD-OUT experiment stays held out: its raw repr carries the guard
@@ -1563,7 +1578,8 @@ def _apply_experiments(
             if applied:
                 outcome = _measure(worktree, test_cmd, exp, reason, parses, parse_detail,
                                    baseline, timeout, selector,
-                                   pinned[n] if pinned is not None else _SELECT)
+                                   pinned[n] if pinned is not None else _SELECT,
+                                   heartbeat=heartbeat)
             else:
                 outcome = adjudicate(exp, applied, reason, parses, parse_detail, baseline, None)
             outcome.seconds = time.monotonic() - started
@@ -1625,7 +1641,7 @@ def _apply_experiments(
 def _measure(
     worktree: Path, test_cmd: str, exp: Experiment, reason: str, parses: bool,
     parse_detail: str, baseline: SuiteResult, timeout: float,
-    selector: "judge_select.Selector | None", pinned: object = None,
+    selector: "judge_select.Selector | None", pinned: object = None, *, heartbeat=None,
 ) -> Outcome:
     """⚡ CMX-407: run one APPLIED mutation against the tests that can observe its file, and
     adjudicate it WITHOUT changing what any verdict means.
@@ -1660,6 +1676,9 @@ def _measure(
     if outcome.verdict == KILLED or not parses:
         # Final. A broken parse is INVALID whatever the suite says — no full run can change it.
         return outcome
+    if heartbeat is not None:
+        # ⏳⚖️ CMX-431: a full-suite run is about to start — it is what the wall must budget.
+        heartbeat("confirm")
     full = run_suite(test_cmd, worktree, timeout)
     confirmed = adjudicate(exp, True, reason, parses, parse_detail, baseline, full)
     confirmed.selected, confirmed.selection, confirmed.plan = sel.expected, sel.why, sel
@@ -1673,7 +1692,7 @@ _SELECT = object()   # _measure's "no pinned selection — compute one" sentinel
 
 def _check_consistency(
     worktree: Path, test_cmd: str, items: list, outcomes: list[Outcome],
-    baseline: SuiteResult, timeout: float, sample: int, report: Report,
+    baseline: SuiteResult, timeout: float, sample: int, report: Report, *, heartbeat=None,
 ) -> str:
     """⚖️🎲 CMX-395: run the grader twice. Re-run up to ``sample`` experiments whose first
     verdict was a FACT (KILLED or SURVIVED — an INVALID one proved nothing either time), and
@@ -1705,9 +1724,11 @@ def _check_consistency(
     if not picked:
         report.consistency = {"sampled": 0, "flipped": 0, "flip_rate": 0.0}
         return ""
+    if heartbeat is not None:
+        heartbeat("consistency")
     reruns, contamination = _apply_experiments(
         worktree, test_cmd, [items[i] for i in picked], baseline, timeout,
-        pinned=[outcomes[i].plan for i in picked],
+        pinned=[outcomes[i].plan for i in picked], heartbeat=heartbeat,
     )
     flipped = 0
     for i, again in zip(picked, reruns):
@@ -2298,13 +2319,29 @@ def judge_run(
     # here, not from when the judge agent was spawned — its design time is not the run's.
     run_started = time.time()
     dispatcher.mark_judge_run_started(task_id)
+    # ⏳⚖️ CMX-431: `progress_at` is when the run last demonstrably MOVED, `phase` where it
+    # is, `baseline_seconds`/`confirmations` what its wall must budget — the daemon's
+    # watchdog (`dispatcher.judge_overdue`) reads all four.
     status = {**owner_identity(os.getpid()), "task_id": task_id,
               "run_started_at": run_started, "detached": detached, "done": 0, "total": None,
+              "progress_at": run_started, "phase": "setup", "baseline_seconds": None,
+              "confirmations": 0,
               "log": str(judge_log_path(task_id)) if detached else None}
     _write_run_status(task_id, status)
 
     def _progress(done: int, total: int) -> None:
-        status.update(done=done, total=total)
+        status.update(done=done, total=total, progress_at=time.time(),
+                      phase="battery" if done < total else "finishing")
+        _write_run_status(task_id, status)
+
+    def _heartbeat(event: str, **info) -> None:
+        status["progress_at"] = time.time()
+        if event == "baseline":
+            status["baseline_seconds"] = info.get("seconds")
+        elif event == "confirm":
+            status["confirmations"] = int(status.get("confirmations") or 0) + 1
+        elif event == "consistency":
+            status["phase"] = "consistency"
         _write_run_status(task_id, status)
 
     # ⛔ CMX-164: the judge worktree already exists on disk by this point (`_spawn_judge`
@@ -2332,6 +2369,7 @@ def judge_run(
                     base_branch=base_branch, select_tests=judge_cfg.select_tests,
                     consistency_sample=judge_cfg.consistency_sample,
                     max_experiments=exp_cap, risk=risk, progress=_progress,
+                    heartbeat=_heartbeat,
                 )
         else:
             report = run_experiments(
@@ -2339,6 +2377,7 @@ def judge_run(
                 base_branch=base_branch, select_tests=judge_cfg.select_tests,
                 consistency_sample=judge_cfg.consistency_sample,
                 max_experiments=exp_cap, risk=risk, progress=_progress,
+                heartbeat=_heartbeat,
             )
         report.risk, report.cap = risk, exp_cap
         report.total_seconds = _since(run.get("judge_started_at"))

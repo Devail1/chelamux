@@ -27,7 +27,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, diffsurface, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, sandbox_status, scheduler, sessionids, share_sandbox, spawn, starter, tasklists, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, sandbox_status, scheduler, sessionids, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -252,6 +252,7 @@ def _needs_human(wid: str, sess_status: str | None, dispatched: bool) -> bool:
 @app.route("/api/agents")
 @require_auth
 def api_agents():
+    _sync_shares()   # CMX-434: shares hosted by `chela collab` survive our restarts
     windows = discovery.get_all_windows()
     tasks = scheduler.list_tasks()
     dispatched = _dispatched_wids(windows)
@@ -1278,8 +1279,11 @@ _share_epoch_seq = 0
 
 
 def _next_share_epoch() -> int:
+    """Strictly increasing within this process AND across restarts (wall-clock ms), since
+    a share now outlives the dashboard that minted it (CMX-434): a re-mint after a restart
+    must never repeat the epoch a page is still keyed on."""
     global _share_epoch_seq
-    _share_epoch_seq += 1
+    _share_epoch_seq = max(_share_epoch_seq + 1, int(time.time() * 1000))
     return _share_epoch_seq
 
 
@@ -1296,13 +1300,81 @@ def _revoke_share(wid: str) -> None:
     _SHARED.pop(wid, None)
     _share_info.pop(wid, None)
     _share_dead_since.pop(wid, None)
-    collab_stream.stop_bridge(wid)
+    collab_host.stop_bridge(wid)
+
+
+def _adopt_share(wid: str, info: dict | None) -> None:
+    """Show a share this dashboard did not mint in this life — restored after a restart,
+    or running in the `chela collab` host (CMX-434). Grid = the live window size, as at mint."""
+    if wid not in _SHARED:
+        cols, rows = collab_stream._window_dims(wid)
+        _SHARED[wid] = {"cols": cols, "rows": rows}
+    if info:
+        _share_info[wid] = {k: info.get(k) for k in ("pairing_code", "join_url", "share_epoch")}
+
+
+def _on_shares_restored(restored: list[dict]) -> None:
+    for r in restored:
+        _adopt_share(r["wid"], collab_stream.share_info(r["wid"]))
+
+
+collab_host.set_local_hooks(on_revoke=_revoke_share, on_restored=_on_shares_restored)
+
+
+def _sync_shares() -> None:
+    """When the bridges run in the `chela collab` host, ITS table is the truth: adopt the
+    shares it has that this dashboard doesn't (a restart forgot them), and forget the ones
+    it no longer has (stopped, or failed closed over there). A no-op when this process is
+    the host (on_revoke keeps the table) or no host answers (keep what we know)."""
+    live = collab_host.remote_listing()
+    if live is None:
+        return
+    for wid in list(_SHARED):
+        if wid not in live:
+            _SHARED.pop(wid, None)
+            _share_info.pop(wid, None)
+            _share_dead_since.pop(wid, None)
+    for wid in live:
+        if wid not in _SHARED or not _share_info.get(wid):
+            _adopt_share(wid, collab_host.remote_info(wid))
+
+
+# How long a starting dashboard waits for `chela collab` to answer before it restores the
+# persisted shares itself (both start together on a boot / `chela update`).
+SHARE_HOST_GRACE = 5.0
+
+
+def _start_share_restore() -> None:
+    """🔌 CMX-434: bring back the shares a restart interrupted. With NO persisted share this
+    does nothing at all — no thread, no lock, no socket — so startup is unchanged."""
+    if not share_store.count():
+        return
+
+    def run():
+        deadline = time.monotonic() + SHARE_HOST_GRACE
+        while time.monotonic() < deadline:
+            if collab_host.remote_listing() is not None:
+                return _sync_shares()      # `chela collab` hosts them; just show them
+            time.sleep(0.5)
+        if collab_host.become_local_host():
+            collab_host.release_if_idle()  # nothing came back: let `chela collab` have it
+        else:
+            _sync_shares()
+
+    threading.Thread(target=run, name="share-restore", daemon=True).start()
+
+
+def _shutdown_hosted_shares() -> None:
+    """At exit, if THIS process hosts shares: tell guests "host restarting…" and keep the
+    store for whichever host comes up next — never "ended" (CMX-434)."""
+    if collab_host.is_host():
+        collab_stream.shutdown_all()
 
 
 def _share_mode(wid: str) -> str | None:
     if wid not in _SHARED:
         return None
-    st = collab_stream.share_state(wid)
+    st = collab_host.share_state(wid)
     return st["mode"] if st else collab_stream.MODE_VIEW
 
 
@@ -1433,11 +1505,18 @@ def api_term_share(wid):
     _SHARED[wid] = {"cols": cols, "rows": rows}
     # Start the E2E stream bridge; on_revoke fires if it fails closed on session
     # death, so a share can never outlive its terminal (see collab_stream).
-    code = collab_stream.start_bridge(wid, on_revoke=_revoke_share, **policy)
-    info = ({"pairing_code": code, "join_url": collab_stream.join_url(wid),
-             "share_epoch": _next_share_epoch()} if code else {})
+    # The bridge runs in the collab host — the `chela collab` service when it is up, so
+    # a dashboard deploy never ends this share; else this process (CMX-434).
+    epoch = _next_share_epoch()
+    try:
+        code = collab_host.start_bridge(wid, on_revoke=_revoke_share, share_epoch=epoch, **policy)
+    except collab_host.HostUnavailable as e:
+        _SHARED.pop(wid, None)
+        return jsonify({"ok": False, "error": f"the share host is not answering ({e}) — retry in a moment"}), 503
+    info = ({"pairing_code": code, "join_url": collab_host.join_url(wid),
+             "share_epoch": epoch} if code else {})
     _share_info[wid] = info
-    return jsonify({"ok": True, "shared": True, **info, **(collab_stream.share_state(wid) or {})})
+    return jsonify({"ok": True, "shared": True, **info, **(collab_host.share_state(wid) or {})})
 
 
 @app.route("/api/term/<wid>/share-mode", methods=["POST"])
@@ -1462,15 +1541,17 @@ def api_term_share_mode(wid):
         return refusal
     over = policy.get("unsandboxed") or {}
     try:
-        changed = collab_stream.set_share_mode(
+        changed = collab_host.set_share_mode(
             wid, mode, changed_by=over.get("granted_by") or _granted_by(),
             window=over.get("window") or _window_name(wid), ttl_s=over.get("ttl_s"))
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
+    except collab_host.HostUnavailable as e:
+        return jsonify({"ok": False, "error": f"the share host is not answering ({e})"}), 503
     if changed is None:
         return jsonify({"ok": False, "error": "this share has no running stream — stop and share again"}), 409
     return jsonify({"ok": True, "shared": True, **_share_info.get(wid, {}), **changed,
-                    **(collab_stream.share_state(wid) or {})})
+                    **(collab_host.share_state(wid) or {})})
 
 
 @app.route("/api/term/<wid>/share-info")
@@ -1479,6 +1560,7 @@ def api_term_share_info(wid):
     """Owner-only: the join URL + pairing code for a currently-shared wid, so the
     share popover can reopen without re-sharing (which would rotate the code)."""
     _require_terminals()
+    _sync_shares()
     return jsonify(_share_info.get(wid, {}))
 
 
@@ -1490,7 +1572,8 @@ def api_term_shared():
     NOT here — they live only in _share_info (owner-only). Each entry also carries
     its access ``mode`` + override ``expires_at`` (CMX-403) for the share pill."""
     _require_terminals()
-    return jsonify({wid: {**dims, **(collab_stream.share_state(wid) or {"mode": collab_stream.MODE_VIEW, "expires_at": None})}
+    _sync_shares()
+    return jsonify({wid: {**dims, **(collab_host.share_state(wid) or {"mode": collab_stream.MODE_VIEW, "expires_at": None})}
                     for wid, dims in list(_SHARED.items())})
 
 
@@ -4999,6 +5082,8 @@ def main():
     # instead of an inbound request paying it inline.
     agent_manager.start_background_refresh()
     collab.start()  # P3: publish running agents as presence peers (to shared viewers)
+    _start_share_restore()
+    atexit.register(_shutdown_hosted_shares)
 
     # Write down the port we are really binding, so another process (`chela plugin`,
     # `chela doctor`) can address us without guessing. A hook `url` is a literal baked

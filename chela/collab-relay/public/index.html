@@ -32,6 +32,9 @@
   #dot { width:8px; height:8px; border-radius:50%; background:var(--warn); box-shadow:0 0 0 3px rgba(210,153,34,.15); }
   #dot.up { background:var(--ok); box-shadow:0 0 0 3px rgba(63,185,80,.15); }
   #dot.down { background:var(--err); box-shadow:0 0 0 3px rgba(248,81,73,.15); }
+  /* CMX-434: a visible "host restarting…" while the host process is being redeployed. */
+  #hoststate { font-size:11px; color:var(--warn); white-space:nowrap; }
+  #hoststate[hidden] { display:none; }
   #stage { position:fixed; inset:34px 0 0 0; display:flex; align-items:center; justify-content:center;
     background:radial-gradient(1200px 620px at 50% 32%,#151a23,#0a0c11); overflow:hidden; }
   #term { box-shadow:0 0 0 1px rgba(255,255,255,.06), 0 12px 48px rgba(0,0,0,.55); border-radius:6px; }
@@ -114,6 +117,7 @@
     <span class="lock">🔒 end-to-end</span>
     <span class="tag">live</span>
     <span class="facepile" id="facepile"></span>
+    <span id="hoststate" role="status" hidden></span>
     <span id="dot" title="enter code"></span>
   </div>
   <div id="stage"><div id="term"></div></div>
@@ -173,6 +177,7 @@
     import { identity, saveName, autoName, colorForId, PeerStore, throttle, toNorm, fromNorm,
              makePointer, renderFacepile, PRESENCE_TIMEOUT_MS, HEARTBEAT_MS } from '/presence-core.js';
     import { keySeq, ctrlChar, swipeWheelDelta } from '/keys.js';
+    import { HostRestart, helloMessage, resumeNonceOf, RESTARTING_STATUS } from '/restart.js';
 
     const room = decodeURIComponent((location.pathname.match(/\/j\/([^/]+)/) || [, ''])[1]);
     const WS = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/room/' + room;
@@ -193,6 +198,8 @@
     const joinBtn = document.getElementById('join');
     const titleEl = document.getElementById('title');
     const setDot = (cls, t) => { dot.className = cls; dot.title = t; };
+    const hostStateEl = document.getElementById('hoststate');
+    const setHostState = (t) => { hostStateEl.textContent = t || ''; hostStateEl.hidden = !t; };
 
     const term = new Terminal({
       cursorBlink: false, convertEol: false,
@@ -281,6 +288,14 @@
     // --- crypto + transport ---------------------------------------------------
     let session = null, presence = null, secret = null, ws = null, paired = false, ended = false, backoff = 500;
     let pairTimer = null;
+    // CMX-434: the host process restarting (a deploy) is NOT the share ending — the share
+    // comes back with the same link and code. resumeNonce = the restored host's challenge.
+    let resumeNonce = null;
+    const hostRestart = new HostRestart({
+      hello: () => hello(),
+      status: (msg) => { setDot('down', msg); setHostState(msg); },
+      giveUp: (msg) => showEnded(msg),
+    });
     // If no frame decrypts within this window the room is empty/dead (a stopped
     // share or a bad link) — show 'not found' instead of hanging on 'Deriving keys…'.
     // Overridable for tests via window.__CHELA_PAIR_MS__.
@@ -428,7 +443,7 @@
     const hello = () => {
       // COLD-JOIN: on connect AND reconnect, ask the host for a keyframe (the relay
       // holds no history) — the host replies with a keyframe + current grant state.
-      sealSend(T_CTL, enc.encode(JSON.stringify({ t: 'hello', cols: grid.cols, rows: grid.rows })));
+      sealSend(T_CTL, enc.encode(JSON.stringify(helloMessage(grid.cols, grid.rows, resumeNonce))));
     };
     // WebCrypto is async and frames must be opened in seq order, so serialise
     // decryption through a promise chain (concurrent open() would race _recvLast).
@@ -455,6 +470,7 @@
         showKeybar();   // reveal the on-screen keys-line (coarse pointers only)
         try { sessionStorage.setItem(PAIR_KEY, pendingCode); } catch (_) {}
       }
+      if (hostRestart.frame()) { setDot('up', 'live · encrypted'); setHostState(null); }   // the host is back
       if (typ === T_OUTPUT) term.write(pt);
       else if (typ === T_META) {
         try { const m = JSON.parse(dec.decode(pt)); applyGrid(m.cols, m.rows); if (m.title) titleEl.textContent = m.title; } catch (_) {}
@@ -467,6 +483,10 @@
           // CMX-403: the host dropped our keystrokes (view-only share, typing off, or an
           // expired full-access window) and says why — shown in the status line.
           else if (m.t === 'notice' && typeof m.msg === 'string') setDot('up', m.msg.slice(0, 120));
+          // CMX-434: the host is restarting (a deploy) — wait for it, don't end.
+          else if (m.t === 'restarting') hostRestart.start();
+          // CMX-434: a restored host challenges us; echoing it in a hello unlocks typing.
+          else if (resumeNonceOf(m)) { resumeNonce = resumeNonceOf(m); hello(); }
         } catch (_) {}
       }
     };
@@ -476,7 +496,7 @@
       ws.binaryType = 'arraybuffer';
       ws.onopen = () => { backoff = 500; if (paired) setDot('up', 'live · encrypted'); hello(); };
       ws.onmessage = (ev) => onFrame(ev.data);
-      ws.onclose = () => { if (ended) return; if (paired) { setDot('down', 'reconnecting…'); setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 8000); } };
+      ws.onclose = () => { if (ended) return; if (paired) { setDot('down', hostRestart.active ? RESTARTING_STATUS : 'reconnecting…'); setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 8000); } };
       ws.onerror = () => { try { ws.close(); } catch (_) {} };
     };
 
@@ -495,7 +515,7 @@
     // dead room → pairing timeout). Distinct from wrong-code: the key was fine,
     // there's just no live share. No reconnect; a fresh code can still retry.
     const showEnded = (msg) => {
-      ended = true; paired = false; clearTimeout(pairTimer); stopPresence();
+      ended = true; paired = false; clearTimeout(pairTimer); stopPresence(); hostRestart.stop(); resumeNonce = null; setHostState(null);
       try { ws && ws.close(); } catch (_) {}
       try { sessionStorage.removeItem(PAIR_KEY); } catch (_) {}
       session = null;
