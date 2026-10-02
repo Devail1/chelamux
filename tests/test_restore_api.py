@@ -529,3 +529,99 @@ def test_resume_records_nothing_when_spawn_gave_no_wid(client, monkeypatch):
 
     assert resp.status_code == 200
     assert record_calls == []
+
+
+# --------------------------------------------------------------------------
+# POST /api/restore/dismiss + /undismiss (CMX-437) — hide a Recent row for good
+# --------------------------------------------------------------------------
+
+SID_OTHER = "dddddddd-1111-2222-3333-444444444444"
+
+
+@pytest.fixture(autouse=True)
+def dismissed_store(tmp_path, monkeypatch):
+    """Each test gets its own hide list on disk — ``_STORE`` is latched at import."""
+    from chela import dismissed_sessions
+    store = tmp_path / "dismissed-sessions.json"
+    monkeypatch.setattr(dismissed_sessions, "_STORE", store)
+    return store
+
+
+def _dismiss(client, *sids, path="/api/restore/dismiss"):
+    return client.post(path, json={"session_ids": list(sids)})
+
+
+def test_a_dismissed_row_is_gone_and_stays_gone_on_the_next_load(client, monkeypatch, dismissed_store):
+    """🔴 GUARD: dismiss is recorded in the SERVER store (a file), so a reload — or a
+    second device — still doesn't list it. Held only in memory, the file never gets
+    the id and this goes RED."""
+    import json
+
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [
+        _manual(), _manual(wid="@6", session_id=SID_OTHER, label="six")])
+
+    assert _dismiss(client, SID_DEAD).get_json() == {"ok": True, "dismissed": [SID_DEAD]}
+
+    on_disk = json.loads(dismissed_store.read_text())
+    assert SID_DEAD in on_disk["dismissed"], "the dismiss must be persisted server-side"
+    rows = client.get("/api/restore").get_json()["rows"]
+    assert [r["session_id"] for r in rows] == [SID_OTHER]
+
+
+def test_dismiss_never_touches_the_transcript(client, monkeypatch, tmp_path):
+    """🔴 GUARD: dismissing is a HIDE — the session's transcript stays on disk."""
+    monkeypatch.setattr(dash.transcripts, "CLAUDE_PROJECTS_DIR", tmp_path / "projects")
+    transcript = dash.transcripts.transcript_path(CWD, SID_DEAD)
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text('{"type":"user"}\n')
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual()])
+
+    assert _dismiss(client, SID_DEAD).status_code == 200
+
+    assert transcript.exists(), "dismiss must never delete the transcript"
+    assert transcript.read_text() == '{"type":"user"}\n'
+
+
+def test_undismiss_brings_the_row_back(client, monkeypatch):
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual()])
+    _dismiss(client, SID_DEAD)
+    assert client.get("/api/restore").get_json()["rows"] == []
+
+    assert _dismiss(client, SID_DEAD, path="/api/restore/undismiss").status_code == 200
+
+    assert [r["session_id"] for r in client.get("/api/restore").get_json()["rows"]] == [SID_DEAD]
+
+
+def test_an_undismissed_row_still_lists_and_resumes_as_before(client, monkeypatch):
+    """⭐ The case that must be ACCEPTED: dismissing one session leaves every other
+    row exactly as it was — listed, with its session id, and resumable."""
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [
+        _manual(), _manual(wid="@6", session_id=SID_OTHER, label="six")])
+    _dismiss(client, SID_OTHER)
+
+    rows = client.get("/api/restore").get_json()["rows"]
+    assert [(r["wid"], r["session_id"]) for r in rows] == [("@5", SID_DEAD)]
+
+    spawn_calls = []
+    monkeypatch.setattr(dash.spawn, "spawn_window", lambda cwd, *, command=None: (
+        spawn_calls.append((cwd, command)),
+        spawn_mod.SpawnResult(ok=True, name="shell-9", wid="@99", cwd=cwd))[1])
+    monkeypatch.setattr(dash.sessionids, "set_session_id", lambda wid, sid: None)
+    monkeypatch.setattr(restore_mod, "apply", lambda verdicts: None)
+
+    resp = _resume(client, store="session-ids", wid="@5", session_id=SID_DEAD, stamped_epoch=OLD)
+
+    assert resp.status_code == 200
+    assert spawn_calls == [(CWD, f"claude --resume {SID_DEAD}")]
+
+
+@pytest.mark.parametrize("body", [{}, {"session_ids": []}, {"session_ids": "x"},
+                                  {"session_ids": [""]}, {"session_ids": [3]}])
+def test_dismiss_rejects_a_malformed_body(client, body, dismissed_store):
+    assert client.post("/api/restore/dismiss", json=body).status_code == 400
+    assert not dismissed_store.exists()
+
+
+def test_dismiss_gated_on_terminals_enabled(client, monkeypatch):
+    monkeypatch.setattr(dash.config, "TERMINALS_ENABLED", False)
+    assert _dismiss(client, SID_DEAD).status_code == 404
