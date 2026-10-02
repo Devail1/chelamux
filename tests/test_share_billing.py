@@ -18,6 +18,7 @@ import http.client
 import json
 import os
 import shlex
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -142,6 +143,33 @@ def test_the_entry_still_seeds_onboarding_and_execs_claude(token_file, tmp_path)
     assert seed["hasCompletedOnboarding"] is True
     assert seed["projects"][sb.GUEST_WORKDIR]["hasTrustDialogAccepted"] is True
     assert words[-2:] == ["exec", "claude"]
+
+
+@pytest.mark.parametrize("sub", ["max", None])
+def test_the_entry_runs_in_an_empty_home_and_reaches_claude(token_file, tmp_path, sub):
+    """RUN the entry, don't parse it: the guest's HOME is a fresh tmpfs with no ``.claude``
+    dir, so a write into it without creating it first aborts the ``&&`` chain and Claude
+    never starts. A stub ``claude`` on PATH records that it was exec'd."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    ran = tmp_path / "claude-ran"
+    stub = bindir / "claude"
+    stub.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(ran))}\n")
+    stub.chmod(0o755)
+    entry = sb.guest_entry(sub).replace(sb.GUEST_HOME, shlex.quote(str(home)))
+    r = subprocess.run(["sh", "-c", entry], env={"PATH": f"{bindir}:/usr/bin:/bin"},
+                       capture_output=True, text=True, timeout=10)
+    assert r.returncode == 0, r.stderr
+    assert ran.exists()                                    # the chain reached `exec claude`
+    assert json.loads((home / ".claude.json").read_text())["hasCompletedOnboarding"] is True
+    creds = home / ".claude" / ".credentials.json"
+    if sub:
+        oauth = json.loads(creds.read_text())["claudeAiOauth"]
+        assert oauth["accessToken"] == "placeholder" and oauth["subscriptionType"] == sub
+    else:
+        assert not creds.exists()
 
 
 # =====================================================================================
