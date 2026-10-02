@@ -394,3 +394,194 @@ def test_update_restarts_chela_collab_only_when_its_code_changed(tmp_path, monke
         assert result.share_notice
     else:
         assert order == ["restart"] and result.share_notice == ""
+
+
+# --- round 1 of review: each invariant driven through its real wiring ------------------------
+
+def test_dashboard_main_restores_a_persisted_share_at_startup(host, monkeypatch):
+    """The WIRING: ``app.main()`` — not ``_start_share_restore`` called by hand — brings a
+    persisted share back (same code) and shows it, when no `chela collab` answers."""
+    code = cs.start_bridge(WID)
+    _crash()
+    for name in ("_start_notifier",):
+        monkeypatch.setattr(dash, name, lambda: None)
+    monkeypatch.setattr(dash.scheduler, "init", lambda: None)
+    monkeypatch.setattr(dash.agent_manager, "start_background_refresh", lambda: None)
+    monkeypatch.setattr(dash.collab, "start", lambda: None)
+    monkeypatch.setattr(dash.config, "publish_dashboard_port", lambda *a, **k: None)
+    monkeypatch.setattr(dash.config, "clear_dashboard_port", lambda: None)
+    monkeypatch.setattr(dash.atexit, "register", lambda *a, **k: None)
+    monkeypatch.setattr(dash.app, "run", lambda **k: None)
+    monkeypatch.setattr(dash, "SHARE_HOST_GRACE", 0.0)
+    monkeypatch.setattr(collab_host, "remote_listing", lambda: None)
+    monkeypatch.setattr(cs, "_window_dims", lambda wid: (80, 24))
+    dash._SHARED.clear()
+    dash._share_info.clear()
+    try:
+        dash.main()
+        for t in threading.enumerate():
+            if t.name == "share-restore":
+                t.join(5)
+        assert cs._bridges[WID].pairing_code == code, "startup must restore the persisted share"
+        assert dash._share_info[WID]["pairing_code"] == code and WID in dash._SHARED
+    finally:
+        collab_host.release_host()
+        dash._SHARED.clear()
+        dash._share_info.clear()
+
+
+def _restored_typing_bridge(monkeypatch):
+    cs.start_bridge(WID, allow_typing=True)
+    joiner = cs.e2e.Session(cs._bridges[WID].secret, cs._bridges[WID].room, role="joiner")
+    _crash()
+    cs.restore_bridges()
+    b = cs._bridges[WID]
+    forwarded, sent = [], []
+    monkeypatch.setattr(b, "_forward_input", lambda data: forwarded.append(data))
+    monkeypatch.setattr(b, "_seal_send", lambda typ, pt: sent.append(json.loads(pt)))
+    return b, joiner, forwarded, sent
+
+
+def _hello(joiner, **extra):
+    return joiner.seal(cs.e2e.T_CTL, json.dumps({"t": "hello", "cols": 80, "rows": 24, **extra}).encode())
+
+
+@pytest.mark.parametrize("answer", [None, "wrong", ""], ids=["no-resume", "wrong-nonce", "empty"])
+def test_a_hello_that_does_not_answer_the_challenge_never_unlocks_input(
+        host, monkeypatch, sandbox, typing_on, answer):  # noqa: F811
+    """🔐 Only a hello carrying THIS incarnation's nonce makes a joiner stream fresh — a
+    plain hello (what the relay can replay from before the restart) or a wrong one does not."""
+    b, joiner, forwarded, sent = _restored_typing_bridge(monkeypatch)
+    b._handle_relay(_hello(joiner) if answer is None else _hello(joiner, resume=answer))
+    b._handle_relay(joiner.seal(cs.e2e.T_INPUT, b"id\r"))
+    assert forwarded == [], "input before the challenge was answered must never reach the pane"
+    assert any(m.get("t") == "resume" for m in sent), "the challenge is re-issued"
+    b._handle_relay(_hello(joiner, resume=b._resume_nonce))
+    b._handle_relay(joiner.seal(cs.e2e.T_INPUT, b"ok\r"))
+    assert forwarded == [b"ok\r"]
+
+
+def test_a_fresh_challenge_per_restore_an_old_answer_is_refused(host, monkeypatch, sandbox, typing_on):  # noqa: F811
+    """A hello answering the PREVIOUS incarnation's nonce (replayable) does not unlock the next."""
+    b, joiner, forwarded, _ = _restored_typing_bridge(monkeypatch)
+    old_answer = _hello(joiner, resume=b._resume_nonce)
+    b._handle_relay(old_answer)
+    _crash()
+    cs.restore_bridges()
+    b2 = cs._bridges[WID]
+    assert b2._resume_nonce and b2._resume_nonce != b._resume_nonce, "a fresh nonce per restore"
+    fwd2 = []
+    monkeypatch.setattr(b2, "_forward_input", lambda data: fwd2.append(data))
+    monkeypatch.setattr(b2, "_seal_send", lambda typ, pt: None)
+    b2._handle_relay(old_answer)
+    b2._handle_relay(joiner.seal(cs.e2e.T_INPUT, b"id\r"))
+    assert fwd2 == []
+
+
+@pytest.mark.parametrize("live_key", [None, "111 @9 4242"], ids=["unreadable-now", "readable-now"])
+def test_a_share_persisted_with_no_window_identity_is_not_restored(host, live_key):
+    """A share whose window identity could not be read when it was minted has nothing to
+    verify against — even if tmux can't read the identity now either (None == None)."""
+    host.win[WID] = None
+    cs.start_bridge(WID)
+    assert share_store.load()[WID]["window_key"] is None
+    _crash()
+    host.win[WID] = live_key
+    (r,) = cs.restore_bridges()
+    assert not r["restored"] and WID not in cs._bridges and share_store.load() == {}
+
+
+# --- `chela update`: chela-collab staleness on the NOTHING-TO-PULL path, and the warning order
+
+def _commit(git, repo, path, text, *, date=None):
+    (repo / path).parent.mkdir(parents=True, exist_ok=True)
+    (repo / path).write_text(text)
+    git(repo, "add", path)
+    env = {**os.environ, "GIT_COMMITTER_DATE": f"@{date} +0000", "GIT_AUTHOR_DATE": f"@{date} +0000"} if date else None
+    import subprocess
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", f"touch {path}"], check=True,
+                   capture_output=True, env=env)
+
+
+def _age_reflog(co, epoch: int) -> None:
+    """Pretend the clone happened at ``epoch`` (its reflog entries are dated then)."""
+    import re
+    log_ = co / ".git" / "logs" / "HEAD"
+    log_.write_text(re.sub(r"> \d+ ([+-]\d{4})\t", lambda m: f"> {epoch} {m.group(1)}\t", log_.read_text()))
+
+
+def _fake_pm2(uptime_s: float, restarts: list, order: list | None = None):
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _CP(json.dumps([{"name": n, "pm2_env": {"status": "online", "pm_uptime": uptime_s * 1000}}
+                                   for n in ("chela-collab", "chela-dashboard")]))
+        if args[:2] == ["pm2", "restart"]:
+            restarts.append(args[2:])
+            if order is not None:
+                order.append("restart")
+            print("PM2-RESTARTED")
+        return _CP()
+    return fake_sh
+
+
+@pytest.mark.parametrize("touched,collab_stale", [("README.md", False), ("chela/collab_stream.py", True)])
+def test_a_bare_pull_of_collab_code_makes_chela_collab_stale_and_update_restarts_it(
+        tmp_path, monkeypatch, touched, collab_stale):
+    """Nothing to pull (a bare `git pull` already brought the commit in) — `chela update`
+    still restarts `chela-collab` when ITS code changed since it started, even though that
+    commit was AUTHORED before the service started; and never when only other code moved."""
+    up, co, git = _clone(tmp_path)
+    started = time.time() - 600
+    _age_reflog(co, int(started) - 7200)                               # the service started on it
+    _commit(git, up, touched, "changed\n", date=int(started) - 3600)   # authored BEFORE the start
+    git(co, "pull", "-q")                                              # …pulled AFTER it
+    restarts: list = []
+    monkeypatch.setattr(update, "_sh", _fake_pm2(started, restarts))
+    monkeypatch.setattr(update, "_refresh_plugin_if_needed", lambda repo: ([], ""))
+
+    fresh = update.services_running_stale_code(co)
+    assert fresh.ok and ("chela-collab" in fresh.stale) is collab_stale
+    assert "chela-dashboard" in fresh.stale
+
+    result = update.apply(co)
+    assert result.ok and result.behind_before == 0
+    assert ("chela-collab" in restarts[0]) is collab_stale
+    assert "chela-dashboard" in restarts[0]
+
+
+def test_chela_collab_started_after_the_collab_code_landed_is_not_stale(tmp_path, monkeypatch):
+    up, co, git = _clone(tmp_path)
+    _commit(git, up, "chela/collab_stream.py", "changed\n", date=int(time.time()) - 7200)
+    git(co, "pull", "-q")
+    monkeypatch.setattr(update, "_sh", _fake_pm2(time.time() + 5, []))
+    assert "chela-collab" not in update.services_running_stale_code(co).stale
+
+
+def test_chela_update_prints_the_share_warning_before_the_restart(tmp_path, monkeypatch, capsys, host):
+    """`chela update` (main.cmd_update, the real apply()) prints the interruption warning
+    BEFORE pm2 restarts the process hosting the share."""
+    import argparse
+
+    from chela import main
+    up, co, git = _clone(tmp_path)
+    _commit(git, up, "chela/collab_stream.py", "changed\n")
+    cs.start_bridge(WID)
+    monkeypatch.setattr(collab_host, "current_host", lambda: {"role": "chela-collab", "pid": 1})
+    monkeypatch.setattr(update, "repo_root", lambda: co)
+    monkeypatch.setattr(update, "_sh", _fake_pm2(time.time(), []))
+    monkeypatch.setattr(update, "_refresh_plugin_if_needed", lambda repo: ([], ""))
+    main.cmd_update(argparse.Namespace(check=False))
+    out = capsys.readouterr().out
+    warn = out.find("1 live share(s) will be interrupted")
+    assert warn != -1, out
+    assert warn < out.find("PM2-RESTARTED"), "the warning must come BEFORE the restart"
+
+
+def test_stopping_a_share_that_is_persisted_but_not_running_still_forgets_it(host):
+    """Owner hits Stop between a crash and the restore: the share must not come back."""
+    cs.start_bridge(WID)
+    _crash()
+    assert WID in share_store.load() and WID not in cs._bridges
+    cs.stop_bridge(WID)
+    assert share_store.load() == {}
+    assert cs.restore_bridges() == [] and WID not in cs._bridges

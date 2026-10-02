@@ -197,6 +197,45 @@ def _collab_code_epoch(repo: Path) -> int | None:
         return None
 
 
+def _head_when(repo: Path, epoch: float) -> str:
+    """The commit this checkout's HEAD was on at ``epoch`` (unix s), read from the HEAD
+    reflog. "" when the reflog can't say (unreadable, or every entry is later and the first
+    one has no previous commit) — the caller then treats the code as changed."""
+    cp = _git(repo, "rev-parse", "--git-path", "logs/HEAD")
+    if not _git_ok(cp):
+        return ""
+    try:
+        lines = (repo / _git_out(cp)).read_text().splitlines()
+    except OSError:
+        return ""
+    entries = []
+    for line in lines:
+        head = line.split("\t", 1)[0].split()
+        try:
+            entries.append((head[0], head[1], int(head[-2])))
+        except (IndexError, ValueError):
+            continue
+    at = ""
+    for old, new, ts in entries:
+        if ts > epoch:
+            break
+        at = new
+    if not at and entries and set(entries[0][0]) != {"0"}:
+        at = entries[0][0]   # every update came after: HEAD was on the first one's "old"
+    return at
+
+
+def _collab_stale(repo: Path, started_epoch: float, collab_epoch: int | None) -> bool:
+    """Is a ``chela-collab`` started at ``started_epoch`` running old collab-host code?
+    Yes when that code changed between the HEAD it started on and HEAD now — which also
+    catches a bare ``git pull`` of a collab commit AUTHORED before the service started (its
+    committer date alone would call the service current). Unknown counts as stale."""
+    if collab_epoch is not None and started_epoch < collab_epoch:
+        return True
+    then = _head_when(repo, started_epoch)
+    return _collab_code_changed(repo, then) if then else True
+
+
 def _share_notice(services: list[str]) -> str:
     try:
         from chela import collab_host
@@ -406,9 +445,9 @@ def services_running_stale_code(repo: Path | None = None) -> ServiceFreshness:
     stale = sorted(
         svc["name"] for svc in _online_chela_services(repo)
         if isinstance(svc["pm2_env"].get("pm_uptime"), (int, float))
-        and svc["pm2_env"]["pm_uptime"] / 1000 < (
-            collab_epoch if svc["name"] == COLLAB_SERVICE and collab_epoch is not None
-            else threshold_epoch)
+        and (_collab_stale(repo, svc["pm2_env"]["pm_uptime"] / 1000, collab_epoch)
+             if svc["name"] == COLLAB_SERVICE
+             else svc["pm2_env"]["pm_uptime"] / 1000 < threshold_epoch)
     )
     return ServiceFreshness(ok=True, stale=stale, commit_epoch=commit_epoch)
 

@@ -72,7 +72,10 @@ A live share no longer ends when chela restarts (CMX-434).
 socket, `$CHELA_DIR/collab.sock` (mode 0600; the peer's uid is checked too). A dashboard
 deploy doesn't touch a live share. `chela update` restarts `chela-collab` only when the
 share code itself changed (`chela/collab_host.py`, `collab_stream.py`, `share_store.py`,
-`e2e.py`, `share_sandbox.py`, `collab.py`).
+`e2e.py`, `share_sandbox.py`, `collab.py`). That holds on the nothing-to-pull path too:
+if a bare `git pull` brought in share code after `chela-collab` started, `chela update`
+finds the HEAD the service started on in the HEAD reflog and restarts it. When the
+reflog can't say, it restarts it.
 
 If `chela-collab` isn't running, the dashboard hosts the shares itself, as before. A
 dashboard restart then interrupts them, and the next dashboard restores them. Only one
