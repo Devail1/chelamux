@@ -451,4 +451,6 @@ def test_accepted_a_created_issue_appears_in_the_queue_on_the_next_refresh(
     new = [t for t in wf["open_tasks"] if t["id"] == "CMX-100"]
     assert new, wf["open_tasks"]
     assert new[0]["title"] == "Fresh from the form"
-    assert new[0]["url"] == "https://linear.app/acme/issue/CMX-100"
+    # CMX-5's field — the one the card's `CMX-N ↗` link (_kTrackerLink) reads.
+    assert new[0]["tracker_url"] == "https://linear.app/acme/issue/CMX-100"
+    assert "url" not in new[0]

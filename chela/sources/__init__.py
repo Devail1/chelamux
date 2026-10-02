@@ -49,6 +49,11 @@ class Task:
     # that archives finished work (Linear) reports an ARCHIVED issue as terminal, never as
     # absent — absence is what a reconcile reads as "gone", and archived is not gone.
     terminal_state: str | None = None
+    # 🔗↗️ CMX-5. The issue's own web URL, exactly as the tracker returned it (Linear's
+    # GraphQL `url`) — the Work board links a card to it. Set ONLY by a tracker that hands
+    # one back (Linear); None for markdown/gh_issues, whose cards render no tracker link.
+    # ⛔ Never built from a guessed workspace slug: no `url` from the tracker ⇒ no link.
+    url: str | None = None
 
 
 # ⚖️🎚️ CMX-405 — ordered LOWEST to HIGHEST stakes; `highest_risk` relies on the order.

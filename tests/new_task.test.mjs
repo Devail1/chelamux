@@ -29,7 +29,7 @@ function payload(kind = 'linear') {
             path: WF, exists: true, project_key: 'CMX', tracker_kind: kind, error: null,
             open_tasks: [{ id: 'CMX-1', title: 'first open task', file: '', line_number: 1,
                            raw: 'https://linear.app/acme/issue/CMX-1', body: null,
-                           url: 'https://linear.app/acme/issue/CMX-1', blocked: false,
+                           tracker_url: 'https://linear.app/acme/issue/CMX-1', blocked: false,
                            unmet_depends: [], unresolved_depends: [] }],
             backlog_items: [], parked_tasks: [],
             active_runs: [{ task_id: 'CMX-2', title: 'running task', status: 'running' }],
@@ -243,23 +243,62 @@ test('the ⌘K palette has a "New task" row that opens the form', async () => {
     assert.ok($('#modal-newtask').classList.contains('active'));
 });
 
-test('an open Linear card links its id to the issue — CMX-N ↗', () => {
-    kanban.renderKanban(payload());
-    const link = document.querySelector('.kanban-card a.kanban-card-id');
-    assert.ok(link, 'the open card id is not a link');
-    assert.equal(link.getAttribute('href'), 'https://linear.app/acme/issue/CMX-1');
-    assert.equal(link.getAttribute('target'), '_blank');
-    assert.match(link.textContent, /CMX-1 ↗/);
+// What the server does on a create (tests/test_linear_new_task.py pins that half): the
+// next /api/dispatcher read lists the new issue, its `tracker_url` the URL issueCreate
+// returned. The card is drawn by CMX-5's _kTrackerLink — there is one link, not two.
+function serverCreates(trackerUrl) {
+    createResponse = { status: 200, body: { ok: true, warnings: [],
+        issue: { identifier: 'CMX-100', url: trackerUrl, title: 'Add a thing' } } };
+    const base = payload();
+    base.workflows[0].open_tasks.push({ ...base.workflows[0].open_tasks[0],
+        id: 'CMX-100', title: 'Add a thing', raw: trackerUrl || 'CMX-100', tracker_url: trackerUrl });
+    dispatchPayload = base;
+}
+
+test('a created issue shows in the queue as CMX-N ↗, linked to its Linear page', async () => {
+    const prev = createResponse;
+    try {
+        serverCreates('https://linear.app/acme/issue/CMX-100');
+        window.chela.selectView('work');     // the board is drawn by the post-submit refresh
+        await openForm();
+        fill();
+        await submit();
+        await flush();
+        const card = document.querySelector('.kanban-card[data-task-id="CMX-100"]');
+        assert.ok(card, 'the created issue is not in the queue after the submit');
+        const i = calls.findIndex(c => c.url.endsWith('/api/dispatcher/linear/issue'));
+        assert.ok(i >= 0 && calls.slice(i + 1).some(c => c.url.endsWith('/api/dispatcher')),
+                  'the board was not refreshed after the create');
+        const links = card.querySelectorAll('a');
+        assert.equal(links.length, 1, 'expected exactly one link on the card');
+        const link = card.querySelector('a.kanban-tracker-link');
+        assert.ok(link, 'the created card has no tracker link');
+        assert.equal(link.getAttribute('href'), 'https://linear.app/acme/issue/CMX-100');
+        assert.equal(link.getAttribute('target'), '_blank');
+        assert.match(link.textContent, /CMX-100 ↗/);
+    } finally {
+        createResponse = prev;
+    }
 });
 
-test('a card with no https url is a plain id, never a link', () => {
-    for (const url of [null, 'http://linear.app/acme/issue/CMX-1', 'javascript:alert(1)']) {
-        const p = payload();
-        p.workflows[0].open_tasks[0].url = url;
-        kanban.renderKanban(p);
-        const card = document.querySelector('.kanban-card[data-task-id="CMX-1"]');
-        assert.ok(card, 'card missing');
-        assert.equal(card.querySelector('a.kanban-card-id'), null, `linked ${url}`);
-        assert.ok(card.querySelector('span.kanban-card-id'));
+test('a created issue with no https url is a plain id, never a link', async () => {
+    const prev = createResponse;
+    try {
+        window.chela.selectView('work');
+        for (const url of [null, 'http://linear.app/acme/issue/CMX-100', 'javascript:alert(1)']) {
+            serverCreates(url);
+            await openForm();
+            fill();
+            await submit();
+            await flush();
+            const card = document.querySelector('.kanban-card[data-task-id="CMX-100"]');
+            assert.ok(card, `card missing for ${url}`);
+            assert.equal(card.querySelector('a'), null, `linked ${url}`);
+            const chip = card.querySelector('span.kanban-card-id');
+            assert.ok(chip, `no plain id chip for ${url}`);
+            assert.match(chip.textContent, /CMX-100/);
+        }
+    } finally {
+        createResponse = prev;
     }
 });

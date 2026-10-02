@@ -141,6 +141,21 @@ function _kCardDeleteBtn(card) {
                    title="Delete this card" aria-label="Delete">&times;</button>`;
 }
 
+// 🔗↗️ CMX-5. A Linear-backed card's identifier as a link to its issue — `CMX-12 ↗`,
+// opening in a new tab. The href is EXACTLY the URL the Linear adapter fetched
+// (GraphQL `url`, carried as `tracker_url` on the open task / run row) — never built
+// from a guessed workspace slug — so a card with no `tracker_url` (every markdown and
+// gh_issues card) renders no link and keeps its plain id chip. Only an https URL is
+// linked: it lands in an href, and a `javascript:` value must render nothing at all.
+// The click stops propagating so it never ALSO opens the card's task modal underneath.
+function _kTrackerLink(card) {
+    const url = card.tracker_url;
+    if (typeof url !== 'string' || !/^https:\/\//i.test(url) || !card.task_id) return '';
+    return `<a class="kanban-card-id kanban-tracker-link" href="${attrEsc(url)}" target="_blank"
+               rel="noopener noreferrer" title="Open ${attrEsc(card.task_id)} in Linear"
+               onclick="event.stopPropagation()">${escHtml(card.task_id)} ↗</a>`;
+}
+
 function _kCard(card) {
     // Register this card in render order so a click can resolve it back to the
     // FULL object (task-detail modal — CMX task-modal) without a second fetch.
@@ -272,19 +287,13 @@ function _kCard(card) {
         // accident, because on 2026-07-14 it did exactly that and the base branch broke.
         // The chip beside it says which of the three it is.
     }
-    // CMX-6: a tracker issue (Linear) is a link to its own page — `CMX-N ↗`, opening a
-    // new tab without opening the task modal underneath it. https only.
-    const idChip = (card.url && /^https:\/\//.test(card.url))
-        ? `<a class="kanban-card-id kanban-card-link" href="${attrEsc(card.url)}" target="_blank" rel="noopener noreferrer"
-              title="${tid}" onclick="event.stopPropagation()">${displayId} ↗</a>`
-        : `<span class="kanban-card-id" title="${tid}">${displayId}</span>`;
     return `
     <div class="kanban-card kanban-card-${card.status}" data-task-id="${tid}" data-kidx="${kidx}" onclick="chela.openTaskModalFromCard(this)">
         ${delBtn}
         <div class="kanban-card-title">${title}</div>
         <div class="kanban-card-meta">
             <span class="kanban-wf-chip">${wf}</span>
-            ${idChip}
+            ${_kTrackerLink(card) || `<span class="kanban-card-id" title="${tid}">${displayId}</span>`}
             ${branchOrLine}
             ${stateChip}
             ${risk}
@@ -579,8 +588,8 @@ function _kanbanFlatten(data) {
                 // reads both — there's no run (and so no `brief` column) yet.
                 raw: t.raw,
                 body: t.body,
-                // CMX-6: the tracker issue's own page (Linear / GitHub issue), or null.
-                url: t.url || null,
+                // CMX-5: the Linear issue URL (null for a markdown/gh_issues task).
+                tracker_url: t.tracker_url || null,
                 workflow_path: wf.path,
                 project_key: wf.project_key || null,
             });

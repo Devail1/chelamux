@@ -2546,6 +2546,14 @@ input[type="text"]:focus, textarea:focus, select:focus {
     color: var(--text-dim);
 }
 
+/* CMX-5: a Linear-backed card's id chip is a link to its issue (`CMX-12 ↗`). */
+a.kanban-tracker-link {
+    color: var(--accent);
+    text-decoration: none;
+}
+a.kanban-tracker-link:hover,
+a.kanban-tracker-link:focus-visible { text-decoration: underline; }
+
 .kanban-wf-chip {
     background: rgba(88, 166, 255, 0.12);
     border: 1px solid rgba(88, 166, 255, 0.4);
