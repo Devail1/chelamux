@@ -40,6 +40,13 @@ class FakeTeam:
         self.calls: list[tuple[str, dict]] = []
         self.fail_create: LinearError | None = None
         self.fail_relation = False
+        # A refusal Linear REPLIES with (no exception): `{"success": false}`. Distinct from
+        # `fail_relation` / `fail_create`, which raise — the adapter handles each on its own
+        # line, so each needs its own fixture (docs/defeat_shapes/6b-…).
+        self.relation_reply: dict | None = None
+        self.refuse_relation_for: set[str] = set()
+        self.create_reply: dict | None = None
+        self.fail_read = False
         self.next_number = 100
 
     def __call__(self, query, variables):
@@ -55,6 +62,8 @@ class FakeTeam:
                      if i["state"]["type"] not in ("completed", "canceled")]
             return {"issues": {"nodes": nodes, **page}}
         if name == "by_number":
+            if self.fail_read:
+                raise LinearError("network", "connection reset")
             nodes = [i for i in self.issues.values() if i["number"] in variables["numbers"]]
             return {"issues": {"nodes": nodes, **page}}
         if name == "states":
@@ -64,6 +73,8 @@ class FakeTeam:
         if name == "create":
             if self.fail_create is not None:
                 raise self.fail_create
+            if self.create_reply is not None:
+                return self.create_reply
             inp = variables["input"]
             assert inp["teamId"] == "team-uuid"
             n = self.next_number
@@ -79,6 +90,10 @@ class FakeTeam:
         if self.fail_relation:
             raise LinearError("graphql", "relation refused")
         inp = variables["input"]
+        if self.relation_reply is not None:
+            return self.relation_reply
+        if inp["issueId"] in self.refuse_relation_for:
+            return {"issueRelationCreate": {"success": False}}
         blocker = next(i for i in self.issues.values() if i["id"] == inp["issueId"])
         blocked = next(i for i in self.issues.values() if i["id"] == inp["relatedIssueId"])
         blocked["inverseRelations"]["nodes"].append({"type": inp["type"], "issue": {
@@ -209,12 +224,72 @@ def test_an_unknown_blocker_refuses_before_anything_is_created():
     assert "create" not in fake.names()
 
 
-def test_a_failed_relation_is_a_warning_once_the_issue_exists():
+@pytest.mark.parametrize("refusal", [
+    "raises",                                         # the transport raises LinearError
+    {"issueRelationCreate": {"success": False}},      # Linear REPLIES with a refusal
+    {"issueRelationCreate": None},                    # …or with no payload at all
+    {},
+])
+def test_a_failed_relation_is_a_warning_once_the_issue_exists(refusal):
     fake = FakeTeam(_node(1, "blocker"))
-    fake.fail_relation = True
+    if refusal == "raises":
+        fake.fail_relation = True
+    else:
+        fake.relation_reply = refusal
     out = _source(fake).create_issue("x", blocked_by=["CMX-1"])
     assert out["identifier"] == "CMX-100"
-    assert out["warnings"] and "CMX-1" in out["warnings"][0]
+    assert "CMX-100" in fake.issues                  # the issue is real — never re-created
+    assert out["warnings"] == ["could not mark CMX-100 blocked by CMX-1"]
+    assert fake.names().count("create") == 1
+
+
+def test_only_the_refused_relation_warns():
+    """Two blockers, Linear refuses ONE (success=false): exactly that one warns, and the
+    other relation really landed."""
+    fake = FakeTeam(_node(1, "blocker"), _node(2, "another blocker"))
+    fake.refuse_relation_for = {"uuid-2"}
+    out = _source(fake).create_issue("x", blocked_by=["CMX-1", "CMX-2"])
+    assert out["warnings"] == ["could not mark CMX-100 blocked by CMX-2"]
+    assert _source(fake).fetch_by_ids(["CMX-100"])[0].depends == ("CMX-1",)
+
+
+@pytest.mark.parametrize("reply", [
+    {"issueCreate": {"success": False, "issue": None}},
+    {"issueCreate": {"success": False, "issue": {"id": "u", "identifier": "CMX-9"}}},
+    {"issueCreate": {"success": True, "issue": None}},
+    {"issueCreate": {"success": True, "issue": {"id": "u"}}},
+    {"issueCreate": {"success": True, "issue": {"identifier": "CMX-9"}}},
+    {},
+])
+def test_a_create_linear_refuses_is_an_error_not_a_success(reply):
+    fake = FakeTeam(_node(1, "blocker"))
+    fake.create_reply = reply
+    with pytest.raises(LinearError):
+        _source(fake).create_issue("x", blocked_by=["CMX-1"])
+    assert "relation" not in fake.names()
+
+
+def test_a_failed_blocker_read_refuses_before_anything_is_created():
+    fake = FakeTeam(_node(1, "blocker"))
+    fake.fail_read = True
+    with pytest.raises(LinearError) as ei:
+        _source(fake).create_issue("x", blocked_by=["CMX-1"])
+    assert ei.value.kind == "network"
+    assert "create" not in fake.names()
+
+
+@pytest.mark.parametrize("title", ["", "   ", None])
+def test_create_issue_refuses_an_empty_title(title):
+    fake = FakeTeam()
+    with pytest.raises(LinearError):
+        _source(fake).create_issue(title)
+    assert fake.calls == []
+
+
+def test_create_issue_strips_the_title():
+    fake = FakeTeam()
+    _source(fake).create_issue("  Ship it \n")
+    assert fake.inputs("create")[0]["title"] == "Ship it"
 
 
 @pytest.mark.parametrize("priority", [-1, 5, True, "2"])
@@ -272,6 +347,65 @@ def test_route_shows_a_linear_error_and_creates_nothing(client, team, wf_path):
     data = resp.get_json()
     assert data["ok"] is False
     assert "Title is too long" in data["error"]
+    assert "issue" not in data
+    assert sorted(team.issues) == ["CMX-1", "CMX-2"]  # nothing was created
+
+
+def test_route_a_refused_create_reply_is_an_error(client, team, wf_path):
+    team.create_reply = {"issueCreate": {"success": False, "issue": None}}
+    resp = _post(client, wf_path)
+    assert resp.status_code == 502
+    assert resp.get_json()["ok"] is False
+
+
+def test_route_an_unknown_blocker_is_a_400_and_creates_nothing(client, team, wf_path):
+    resp = _post(client, wf_path, blocked_by=["CMX-77"])
+    assert resp.status_code == 400
+    data = resp.get_json()
+    assert data["ok"] is False and "CMX-77" in data["error"]
+    assert "create" not in team.names()
+
+
+def test_route_a_refused_relation_is_a_warning_on_a_success(client, team, wf_path):
+    team.relation_reply = {"issueRelationCreate": {"success": False}}
+    resp = _post(client, wf_path, blocked_by=["CMX-1"])
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True and data["issue"]["identifier"] == "CMX-100"
+    assert data["warnings"] == ["could not mark CMX-100 blocked by CMX-1"]
+
+
+@pytest.mark.parametrize("body", [
+    {"title": ""}, {"title": "   "}, {"title": None}, {"title": 7},
+    {"description": 5}, {"priority": "high"}, {"priority": None},
+    {"blocked_by": "CMX-1"}, {"blocked_by": [1]},
+])
+def test_route_refuses_a_malformed_form(client, team, wf_path, body):
+    resp = _post(client, wf_path, **body)
+    assert resp.status_code == 400, resp.get_data(as_text=True)
+    assert resp.get_json()["ok"] is False
+    assert team.calls == []
+
+
+def test_route_an_unexpected_error_is_json_and_scrubbed(client, team, wf_path, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError(f"socket said {SECRET}")
+    monkeypatch.setattr(LinearSource, "create_issue", boom)
+    resp = _post(client, wf_path)
+    assert resp.status_code == 500
+    body = resp.get_data(as_text=True)
+    assert SECRET not in body
+    assert resp.get_json() == {"ok": False, "error": "RuntimeError: socket said [redacted]"}
+
+
+def test_route_scrubs_the_key_out_of_a_warning(client, team, wf_path, monkeypatch):
+    monkeypatch.setattr(LinearSource, "create_issue", lambda *a, **k: {
+        "identifier": "CMX-100", "url": "u", "title": "t",
+        "warnings": [f"relation failed: {SECRET}"]})
+    resp = _post(client, wf_path)
+    body = resp.get_data(as_text=True)
+    assert SECRET not in body
+    assert resp.get_json()["warnings"] == ["relation failed: [redacted]"]
 
 
 def test_route_refuses_an_unknown_workflow_and_a_non_linear_one(client, team, wf_path, tmp_path):

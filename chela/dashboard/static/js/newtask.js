@@ -98,7 +98,7 @@ async function submitNewTask() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
-        try { data = await resp.json(); } catch (_) { data = {}; }
+        try { data = (await resp.json()) || {}; } catch (_) { data = {}; }
         if (!resp.ok || !data.ok) {
             // ⛔ Keep the form: the brief the user typed is still in its fields.
             if (err) err.textContent = data.error || `Linear refused it (HTTP ${resp.status}).`;

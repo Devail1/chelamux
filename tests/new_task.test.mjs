@@ -41,16 +41,22 @@ function payload(kind = 'linear') {
 let dispatchPayload = payload();
 let createResponse = { status: 200, body: { ok: true, issue: { identifier: 'CMX-100', url: 'https://linear.app/acme/issue/CMX-100', title: 'x' }, warnings: [] } };
 let calls = [];
+let createRejects = null;      // an Error ⇒ the create fetch REJECTS (network down)
+let alerts = [];
 let work, kanban;
 
 function fetchImpl(url, opts) {
     const u = String(url);
     calls.push({ url: u, opts: opts || null });
     let status = 200, body = {};
+    if (u.endsWith('/api/dispatcher/linear/issue') && createRejects) return Promise.reject(createRejects);
     if (u.endsWith('/api/dispatcher/linear/issue')) ({ status, body } = createResponse);
     else if (u.endsWith('/api/dispatcher')) body = dispatchPayload;
     else if (u.includes('/api/agents')) body = [];
-    return Promise.resolve({ ok: status < 400, status, json: () => Promise.resolve(body) });
+    // body undefined ⇒ a non-JSON response (an HTML error page): json() rejects, as in a browser.
+    const json = () => (body === undefined ? Promise.reject(new SyntaxError('Unexpected token <'))
+                                           : Promise.resolve(body));
+    return Promise.resolve({ ok: status < 400, status, json });
 }
 
 const $ = sel => document.querySelector(sel);
@@ -61,9 +67,13 @@ before(async () => {
         fetchImpl, canvasStub: true, extraModules: ['work.js', 'kanban.js'],
     }));
     await flush();
+    window.alert = msg => { alerts.push(String(msg)); };
+    globalThis.alert = window.alert;
 });
 
 beforeEach(async () => {
+    createRejects = null;
+    alerts = [];
     dispatchPayload = payload();
     await work.pollWork();
     calls = [];
@@ -83,8 +93,25 @@ function fill({ title = 'Add a thing', desc = '## Brief\n\nDo **it**.', prio = '
 }
 
 async function submit() {
-    await clickOnclick($('#newtask-submit'));
+    clickOnclick($('#newtask-submit'));
     await flush();
+    await flush();
+}
+
+// Every field exactly as fill() typed it, the form still open, no queue refresh after the
+// attempt, and the submit button usable again — what "a failed submit keeps the brief" means.
+function assertKept({ title, desc, prio = '2', blockers = ['CMX-1'] }) {
+    assert.ok($('#modal-newtask').classList.contains('active'), 'form closed on a failure');
+    assert.equal($('#newtask-title').value, title);
+    assert.equal($('#newtask-desc').value, desc);
+    assert.equal($('#newtask-priority').value, prio);
+    assert.deepEqual([...$('#newtask-blocked').selectedOptions].map(o => o.value), blockers);
+    assert.equal($('#newtask-submit').disabled, false, 'submit left disabled');
+    const i = calls.findIndex(c => c.url.endsWith('/api/dispatcher/linear/issue'));
+    assert.ok(i >= 0, 'the create was never attempted');
+    assert.ok(!calls.slice(i + 1).some(c => c.url.endsWith('/api/dispatcher')),
+        'the queue was refreshed as if the create had succeeded');
+    assert.deepEqual(alerts, []);
 }
 
 test('the toolbar button shows for a linear workflow and hides otherwise', async () => {
@@ -123,6 +150,10 @@ test('success clears and closes the form, and refreshes the queue', async () => 
     assert.ok(!$('#modal-newtask').classList.contains('active'), 'form still open');
     assert.equal($('#newtask-title').value, '');
     assert.equal($('#newtask-desc').value, '');
+    assert.equal($('#newtask-priority').value, '0');
+    assert.deepEqual([...$('#newtask-blocked').selectedOptions].map(o => o.value), []);
+    assert.equal($('#newtask-submit').disabled, false);
+    assert.deepEqual(alerts, []);
     const i = calls.findIndex(c => c.url.endsWith('/api/dispatcher/linear/issue'));
     assert.ok(calls.slice(i + 1).some(c => c.url.endsWith('/api/dispatcher')),
         'the queue was not refreshed after the create');
@@ -134,14 +165,70 @@ test('a Linear error is shown and the typed brief is kept', async () => {
         await openForm();
         fill({ title: 'Keep me', desc: 'a long brief I typed' });
         await submit();
-        assert.ok($('#modal-newtask').classList.contains('active'), 'form closed on an error');
         assert.match($('#newtask-error').textContent, /Title is too long/);
-        assert.equal($('#newtask-title').value, 'Keep me');
-        assert.equal($('#newtask-desc').value, 'a long brief I typed');
-        assert.equal($('#newtask-priority').value, '2');
-        assert.deepEqual([...$('#newtask-blocked').selectedOptions].map(o => o.value), ['CMX-1']);
+        assertKept({ title: 'Keep me', desc: 'a long brief I typed' });
     } finally {
         createResponse = { status: 200, body: { ok: true, issue: { identifier: 'CMX-100', url: '', title: 'x' }, warnings: [] } };
+    }
+});
+
+test('a failed submit (network error) KEEPS every typed field and the form open', async () => {
+    createRejects = new TypeError('Failed to fetch');
+    await openForm();
+    fill({ title: 'Keep me too', desc: 'typed offline' });
+    await submit();
+    assert.match($('#newtask-error').textContent, /Request failed — nothing was created\. TypeError: Failed to fetch/);
+    assertKept({ title: 'Keep me too', desc: 'typed offline' });
+});
+
+test('an HTTP error with no JSON body still keeps the form and names the status', async () => {
+    createResponse = { status: 500, body: undefined };
+    try {
+        await openForm();
+        fill({ title: 'Still here', desc: 'brief' });
+        await submit();
+        assert.match($('#newtask-error').textContent, /HTTP 500/);
+        assertKept({ title: 'Still here', desc: 'brief' });
+    } finally {
+        createResponse = { status: 200, body: { ok: true, issue: { identifier: 'CMX-100', url: '', title: 'x' }, warnings: [] } };
+    }
+});
+
+test('a 200 that says ok:false is a failure, not a success', async () => {
+    createResponse = { status: 200, body: { ok: false, error: 'nope' } };
+    try {
+        await openForm();
+        fill({ title: 'T', desc: 'D' });
+        await submit();
+        assert.match($('#newtask-error').textContent, /nope/);
+        assertKept({ title: 'T', desc: 'D' });
+    } finally {
+        createResponse = { status: 200, body: { ok: true, issue: { identifier: 'CMX-100', url: '', title: 'x' }, warnings: [] } };
+    }
+});
+
+test('an empty title never POSTs and keeps the form', async () => {
+    await openForm();
+    fill({ title: '   ', desc: 'a brief with no title' });
+    await submit();
+    assert.ok(!calls.some(c => c.url.endsWith('/api/dispatcher/linear/issue')));
+    assert.match($('#newtask-error').textContent, /title is required/);
+    assert.ok($('#modal-newtask').classList.contains('active'));
+    assert.equal($('#newtask-desc').value, 'a brief with no title');
+});
+
+test('a relation warning on a success is surfaced with the new issue id', async () => {
+    const prev = createResponse;
+    createResponse = { status: 200, body: { ok: true, issue: { identifier: 'CMX-101', url: '', title: 'x' },
+                                            warnings: ['could not mark CMX-101 blocked by CMX-1'] } };
+    try {
+        await openForm();
+        fill();
+        await submit();
+        assert.deepEqual(alerts, ['CMX-101 created, but: could not mark CMX-101 blocked by CMX-1']);
+        assert.ok(!$('#modal-newtask').classList.contains('active'));
+    } finally {
+        createResponse = prev;
     }
 });
 
@@ -163,4 +250,16 @@ test('an open Linear card links its id to the issue — CMX-N ↗', () => {
     assert.equal(link.getAttribute('href'), 'https://linear.app/acme/issue/CMX-1');
     assert.equal(link.getAttribute('target'), '_blank');
     assert.match(link.textContent, /CMX-1 ↗/);
+});
+
+test('a card with no https url is a plain id, never a link', () => {
+    for (const url of [null, 'http://linear.app/acme/issue/CMX-1', 'javascript:alert(1)']) {
+        const p = payload();
+        p.workflows[0].open_tasks[0].url = url;
+        kanban.renderKanban(p);
+        const card = document.querySelector('.kanban-card[data-task-id="CMX-1"]');
+        assert.ok(card, 'card missing');
+        assert.equal(card.querySelector('a.kanban-card-id'), null, `linked ${url}`);
+        assert.ok(card.querySelector('span.kanban-card-id'));
+    }
 });
