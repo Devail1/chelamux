@@ -3958,6 +3958,9 @@ def api_dispatcher():
             "awaiting_review_runs": [],
             "recent_runs": [],
             "error": None,
+            # CMX-6: the tracker kind — the Work view offers "New task" only on a
+            # workflow whose tracker chela can create issues in (linear).
+            "tracker_kind": None,
         }
 
         active, awaiting, recent = _runs_for_workflow(all_runs, str(wf_path))
@@ -3978,6 +3981,7 @@ def api_dispatcher():
             try:
                 wf = load_workflow(wf_path)
                 project_key = wf.project_key
+                entry["tracker_kind"] = wf.get("tracker", "kind")
                 source = get_source(wf)
                 open_tasks = source.list_open_tasks()
                 # Same closed-ids-from-the-tracker read `dispatcher._local_closed_ids`
@@ -4223,6 +4227,78 @@ def _remove_backlog_bullet(backlog_text: str, text: str) -> tuple[str | None, in
     if keep_trailing_nl:
         out += "\n"
     return out, 1
+
+
+# ➕📐 CMX-6: "New task" — create an issue in a linear workflow's team, in its ready
+# state. 🔐 The key stays HERE: the browser posts the form, this calls Linear through
+# the adapter (which reads LINEAR_API_KEY from chela.env), and no response ever carries
+# it. Owner only — a share guest is refused before anything is read.
+def _scrub_linear_key(text: str) -> str:
+    """Belt and braces: the adapter's errors never carry the key, but nothing this
+    route returns may, whatever a future error message decides to include."""
+    from chela.sources.linear import load_api_key
+
+    key = load_api_key()
+    return text.replace(key, "[redacted]") if key else text
+
+
+@app.route("/api/dispatcher/linear/issue", methods=["POST"])
+@require_auth
+def api_dispatcher_linear_issue():
+    """Body: ``{workflow_path, title, description?, priority?, blocked_by?: [ids]}``.
+    → ``{ok, issue: {identifier, url, title}, warnings}`` or ``{ok: false, error}``."""
+    if _share_guest_request():
+        return jsonify({"ok": False, "error": "Share guests cannot create tasks.",
+                        "reason": "share_guest"}), 403
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "error": "a JSON object is required"}), 400
+    title = data.get("title")
+    description = data.get("description") or ""
+    priority = data.get("priority", 0)
+    blocked_by = data.get("blocked_by") or []
+    if not isinstance(title, str) or not title.strip():
+        return jsonify({"ok": False, "error": "a title is required"}), 400
+    if not isinstance(description, str):
+        return jsonify({"ok": False, "error": "description must be text"}), 400
+    try:
+        priority = int(priority)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "priority must be 0-4"}), 400
+    if not isinstance(blocked_by, list) or not all(isinstance(b, str) for b in blocked_by):
+        return jsonify({"ok": False, "error": "blocked_by must be a list of issue ids"}), 400
+
+    wf_path = str(data.get("workflow_path") or "")
+    known = {str(p): p for p in _discover_dispatch_workflows(dispatcher.list_runs())}
+    try:
+        wf_resolved = known.get(str(Path(wf_path).expanduser().resolve())) if wf_path else None
+    except OSError:
+        wf_resolved = None
+    if wf_resolved is None:
+        return jsonify({"ok": False, "error": f"unknown workflow: {wf_path}"}), 400
+    try:
+        wf = load_workflow(wf_resolved)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"failed to load workflow: {e}"}), 500
+    if wf.get("tracker", "kind") != "linear":
+        return jsonify({"ok": False, "error": "this workflow's tracker is not linear"}), 400
+
+    from chela.sources.linear import LinearError
+
+    try:
+        created = get_source(wf).create_issue(title, description, priority, blocked_by)
+    except LinearError as e:
+        status = 400 if e.kind == "input" else 502
+        return jsonify({"ok": False, "error": _scrub_linear_key(str(e))}), status
+    except Exception as e:                   # never a 500 page in place of the form
+        return jsonify({"ok": False,
+                        "error": _scrub_linear_key(f"{type(e).__name__}: {e}")}), 500
+    event_log.append("task.created", f"created {created['identifier']}: {created['title']}",
+                     {"identifier": created["identifier"], "workflow": str(wf_resolved)})
+    warnings = [_scrub_linear_key(w) for w in created.get("warnings") or []]
+    return jsonify({"ok": True,
+                    "issue": {k: created[k] for k in ("identifier", "url", "title")},
+                    "warnings": warnings})
 
 
 @app.route("/api/dispatcher/backlog/promote", methods=["POST"])

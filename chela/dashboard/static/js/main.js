@@ -5,6 +5,7 @@ import { checkContext } from './agents.js';
 import { refreshSidebar, renderNav, selectView } from './nav.js';
 import { refreshLauncher } from './launcher.js';
 import { startWorkPoll } from './work.js';
+import './newtask.js';
 import { VIEWS } from './views.js';
 import { findView } from './viewreg.js';
 import { initSSE } from './sse.js';
