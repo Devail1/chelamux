@@ -1245,3 +1245,151 @@ def test_gh_fetch_by_ids_reads_even_with_a_config_error(tmp_path):
         snap = src.fetch_by_ids([tid, closed_tid])
     assert snap is not None
     assert {t.id: t.state for t in snap} == {tid: "open", closed_tid: "closed"}
+
+
+# --- THE RULE as a DIFFERENTIAL, not a list of effects -------------------------------------
+#
+# Every check above pins one consequence of one transition, and each round the judge found
+# the next consequence nobody pinned (round 7: the window kill, the worktree cleanup and the
+# outside-gate audit on a failed-refresh tick). So the rule is now stated once, as a diff:
+# for each (evidence × status) row, run the SAME fixture twice —
+#   A: the id refresh SUCCEEDS and reports the task still OPEN (no tracker-derived transition)
+#   B: the id refresh FAILS (`fetch_by_ids → None`)
+# — and record EVERYTHING the tick does: every table of the DB, the worktree on disk, every
+# call `tick()` makes (its own frame's callees, in order), every `_kill_window`, every
+# `_cleanup_worktree_on_done`, every event appended, and the summary. A failed refresh may
+# only change the tracker-derived part, and this fixture has none, so A must equal B.
+# A side effect gated on the refresh — whichever one, listed here or not — makes them differ.
+
+
+class _RefreshOk(_PartialRead):
+    """Same short listing as `_PartialRead` (so the run IS a refresh candidate on both
+    arms), but the id refresh succeeds — and says whatever `state` the test gives it."""
+
+    def __init__(self, state="open"):
+        self.state = state
+
+    def fetch_by_ids(self, ids):
+        from chela.sources import Task
+        return [Task(id=i, title=i, file="", line_number=0, raw=i, state=self.state)
+                for i in ids]
+
+
+_STAMP = __import__("re").compile(r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d[^'\" ,)]*")
+
+
+def _norm(value, root):
+    """Strip what legitimately differs between the two arms: the arm's own tmp root and
+    wall-clock stamps."""
+    text = repr(value).replace(str(root.parent / ".chela" / "wts" / root.name), "<wts>")
+    return _STAMP.sub("<ts>", text.replace(str(root), "<root>"))
+
+
+def _trace_tick_calls(calls):
+    """A profiler that records every Python callee whose CALLER is `tick()` itself. The
+    refresh gate lives in `tick`'s frame (`summary`, `tracker_gone`), so a transition gated
+    on it shows up here as a missing call, whatever that call is."""
+    import sys
+    tick_code = dispatcher.tick.__code__
+
+    def prof(frame, event, arg):
+        if event == "call" and frame.f_back is not None and frame.f_back.f_code is tick_code:
+            name = frame.f_code.co_name
+            if not name.endswith(("expr>", "comp>")):   # genexprs / comprehensions
+                calls.append(f"{frame.f_code.co_filename.rsplit('/', 1)[-1]}:{name}")
+        elif event == "c_call" and frame.f_code is tick_code:
+            calls.append(f"c:{getattr(arg, '__qualname__', arg)}")
+    prev = sys.getprofile()
+    sys.setprofile(prof)
+    return lambda: sys.setprofile(prev)
+
+
+def _one_arm(root, monkeypatch, name, status, source, *, check=True):
+    root.mkdir()
+    monkeypatch.setattr(dispatcher, "DB_PATH", root / "scheduler.db")
+    dispatcher._refresh_failed.clear()
+    case = NON_TRACKER_EVIDENCE[name][1]() if name else {}
+    wf = _wf(root.parent)       # ONE workflow (its workspace must sit in this test's CHELA_DIR)
+    # no evidence row: a review row owns an open PR; any other row names only its
+    # transcript's PR (merged) — the evidence a tracker close needs to act on it (cmx-100)
+    seed = case.get("seed", {}) if name else (
+        dict(pr_url=PR_URL, pr_state="open") if status in dispatcher.REVIEW_STATUSES else {})
+    # under the workspace root, so a cleanup is never refused for living outside it
+    wt = _seed_row(wf, root.parent / ".chela" / "wts" / root.name, status, **seed)
+    if "arm" in case:
+        case["arm"](wt)
+
+    cleaned: list[str] = []
+    events: list = []
+    real_cleanup, real_append = dispatcher._cleanup_worktree_on_done, dispatcher.event_log.append
+
+    def cleanup(wf_, row):
+        cleaned.append(row["task_id"])
+        return real_cleanup(wf_, row)
+
+    def append(*a, **k):
+        events.append((a, k))
+        return real_append(*a, **k)
+
+    calls: list[str] = []
+    extra = [*case.get("extra", ()),
+             patch.object(dispatcher, "_cleanup_worktree_on_done", side_effect=cleanup),
+             patch.object(dispatcher.event_log, "append", side_effect=append)]
+    stop = None
+
+    class _Trace:
+        def __enter__(self):
+            nonlocal stop
+            stop = _trace_tick_calls(calls)
+
+        def __exit__(self, *exc):
+            stop()
+    summary, killed = _tick(wf, source, pr_status=case.get("pr_status"),
+                            extra=[*extra, _Trace()])
+    if name and check:
+        case["check"](summary, killed, None, wt)
+
+    with dispatcher._db() as conn:
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+        db = {t: [tuple(r) for r in conn.execute(f"SELECT * FROM {t} ORDER BY rowid")]
+              for t in tables}
+    disk = sorted(p.name for p in wt.iterdir()) if wt.exists() else None
+    refresh_failed = summary.pop("tracker_refresh_failed")
+    outcome = dict(summary=summary, killed=killed, cleaned=cleaned, events=events,
+                   calls=calls, db=db, worktree=disk)
+    return refresh_failed, {k: _norm(v, root) for k, v in outcome.items()}
+
+
+@pytest.mark.parametrize("name,status", EVIDENCE_TABLE)
+def test_a_failed_refresh_changes_nothing_a_successful_one_would_not(
+        tmp_path, monkeypatch, name, status):
+    """🔴 GUARD (the rule, as a diff): gate ANY effect of a non-tracker transition — the
+    status flip, the window kill, the worktree cleanup, the outside-gate audit, an event, a
+    counter, a call nobody thought to list — on `tracker_refresh_failed` (or `tracker_gone
+    is None`) ⇒ arm B differs from arm A on that key ⇒ RED."""
+    ok, a = _one_arm(tmp_path / "A", monkeypatch, name, status, _RefreshOk("open"))
+    failed, b = _one_arm(tmp_path / "B", monkeypatch, name, status, _PartialRead())
+
+    assert (ok, failed) == (False, True)
+    for key in a:
+        assert b[key] == a[key], f"{key}: a failed refresh changed what the tick did"
+
+
+@pytest.mark.parametrize("status", RECONCILED_STATUSES)
+def test_a_tracker_close_is_the_only_thing_a_failed_refresh_withholds(
+        tmp_path, monkeypatch, status):
+    """The accepted half: the tracker positively says CLOSED. A acts on it; B (refresh
+    failed) must leave the row exactly as an OPEN refresh would — so B is diffed against
+    the open arm (nothing changes), and A must differ from it in the tracker transition."""
+    _, closed = _one_arm(tmp_path / "A", monkeypatch, None, status, _RefreshOk("closed"))
+    _, still_open = _one_arm(tmp_path / "O", monkeypatch, None, status, _RefreshOk("open"))
+    _, failed = _one_arm(tmp_path / "B", monkeypatch, None, status, _PartialRead())
+
+    for key in failed:
+        assert failed[key] == still_open[key], f"{key}: a failed refresh acted"
+    # ⭐ MUST BE ACCEPTED: the close itself is acted on, in full — row done, window killed,
+    # worktree freed — and that is the whole of what B withheld.
+    assert "'done'" in closed["db"] and "'done'" not in still_open["db"]
+    assert closed["killed"] == "['test-1']" and still_open["killed"] == "[]"
+    assert closed["cleaned"] == "['abc123']" and still_open["cleaned"] == "[]"
