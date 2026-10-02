@@ -150,6 +150,36 @@ Knobs, set in `chela.env`, which the launcher process reads:
 | `CHELA_SHARE_WEB_GLOBAL_RPS` | `8` | web mode: requests per second across all sites (burst 20) |
 | `CHELA_SHARE_WEB_DENY_CIDRS` | unset | web mode: extra address ranges to refuse, on top of every private range and this host's own addresses |
 
+### The token, and long-running shares
+
+For a share that runs longer than a few hours, use a long-lived token:
+
+```bash
+claude setup-token            # prints a token valid for about a year
+umask 077; printf '%s' '<the token>' > ~/.chela/share-sandbox-token
+echo 'CHELA_SHARE_SANDBOX_TOKEN_FILE=~/.chela/share-sandbox-token' >> ~/.chela/chela.env
+```
+
+With the default, Claude Code's own `.credentials.json`, the session works, but it depends
+on your host login. Claude Code refreshes that login every few hours. It writes a new file
+in place of the old one, and the old token stops working. Here is how a session handles a
+refresh:
+
+- The launcher copies **only the access token** (never the refresh token) into a
+  per-session directory, `~/.chela/share-token/<id>/`. It checks the source file every 2
+  seconds and copies it again when it changes. The directory is removed when the session
+  ends.
+- The proxy sidecar mounts that **directory** read-only and reads the token from it on
+  every request. It mounts a directory, not the file itself, because a mounted single
+  file keeps showing the old file after a replace. The guest container mounts neither.
+- If Anthropic rejects the token (401), the proxy reads the token once more and, if it
+  changed, retries once with the new one.
+- If the 401 persists, the proxy answers **502** with *"The host's Claude login expired —
+  ask the operator to log in again on the host."* It never passes the 401 on, because a
+  401 would start Claude Code's `/login` inside the guest, which can never work there.
+  Log in again on the host (`claude`, then `/login`). The next request picks up the new
+  token, with no restart needed.
+
 ## What is isolated
 
 - The guest's Claude runs in a container. It sees the **workspace** (read-write, with
