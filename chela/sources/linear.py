@@ -653,6 +653,7 @@ class LinearSource:
             file="",
             line_number=number,
             raw=str(node.get("url") or ident),
+            url=_issue_url(node.get("url")),
             body=description.strip() if isinstance(description, str) and description.strip()
             else None,
             depends=tuple(b["identifier"] for b in _blockers(node)),
@@ -683,6 +684,15 @@ class LinearSource:
             return (prio if prio > 0 else 5, order, t.task_number or 0)
 
         return sorted(tasks, key=key)
+
+
+def _issue_url(url: object) -> str | None:
+    """CMX-5: the issue's web URL as Linear returned it, or None. Only an ``https://`` URL
+    is kept — the dashboard puts it in an ``href``, and anything else (a missing field, a
+    ``javascript:`` string) must render no link at all rather than a guessed or unsafe one."""
+    if isinstance(url, str) and url.strip().lower().startswith("https://"):
+        return url.strip()
+    return None
 
 
 def _blockers(node: dict) -> list[dict]:

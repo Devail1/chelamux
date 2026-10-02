@@ -3972,6 +3972,7 @@ def api_dispatcher():
             | {r.get("task_id") for r in recent if r.get("status") == "failed"}
         )
         project_key: str | None = None
+        url_by_id: dict[str, str] = {}
 
         if exists:
             try:
@@ -3994,6 +3995,10 @@ def api_dispatcher():
                     else set()
                 )
                 known_ids = {t.id for t in open_tasks} | closed_ids
+                # CMX-5: a run claimed before `runs.tracker_url` existed has NULL there;
+                # while its task is still open in the tracker, the URL this same read
+                # just returned fills it in (display-only, never written back).
+                url_by_id = {t.id: t.url for t in open_tasks if t.url}
                 entry["open_tasks"] = []
                 for t in open_tasks:
                     if t.id in in_flight_ids:
@@ -4014,6 +4019,9 @@ def api_dispatcher():
                         # one-line task or a source with no notion of a continuation
                         # (gh_issues). The task-detail modal prefers this over `raw`.
                         "body": t.body,
+                        # 🔗↗️ CMX-5: the tracker's own issue URL (Linear's `url`) — the
+                        # card's `CMX-N ↗` link. None for markdown/gh_issues: no link.
+                        "tracker_url": t.url,
                         # True when this task has a `depends:` reference not yet
                         # struck done — kept in sync with `dispatcher._ready`, the
                         # claim-time gate, so a card the dispatcher would refuse to
@@ -4080,6 +4088,9 @@ def api_dispatcher():
             # or one the tick has not asked GitHub about yet — carries None, and the
             # frontend renders that as "ci ?", never as green: not-yet-read is not a pass.
             r.setdefault("pr_checks", None)
+            # 🔗↗️ CMX-5: the Linear issue URL recorded at claim, else the one this request's
+            # tracker read returned for the same id, else None (no link — never guessed).
+            r["tracker_url"] = r.get("tracker_url") or url_by_id.get(r.get("task_id"))
             # Per-run task-list progress (issue #462) — None (not "0/0", not an error)
             # whenever the run can't be joined to a live session's task directory; see
             # tasklists.progress_for_run.
