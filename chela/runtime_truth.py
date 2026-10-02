@@ -1822,7 +1822,7 @@ def _workflows_read() -> Observation:
             states.append({"path": path, "state": "refusing", "detail": config_error})
             continue
         states.append({"path": path, "state": "ok", "tracker": tracker,
-                       "project": wf.project_key})
+                       "kind": wf.get("tracker", "kind"), "project": wf.project_key})
     return observed(states)
 
 
@@ -1858,7 +1858,7 @@ def _workflows_report(declared: list[Path], obs: Observation) -> list[Finding]:
             tracker = found["tracker"]
             out.append(Finding(
                 OK, f"{path.name} parses (project {found['project']})",
-                f"tracker: {tracker}" if tracker else "tracker: gh_issues",
+                f"tracker: {tracker}" if tracker else f"tracker: {found.get('kind')}",
             ))
     return out
 
@@ -2199,6 +2199,66 @@ def _hold_report(_declared: None, obs: Observation) -> list[Finding]:
         "out and free their slot). Release with `chela dispatch --resume`; it also "
         "self-releases at its expiry, loudly.",
     )]
+
+
+# --- fact: a Linear tracker's issue count vs the free plan's cap (CMX-432) ------------
+#
+# The free plan caps a workspace at 250 NON-archived issues, and Done/Canceled ones count
+# until they are archived. At ~19 tasks a day that is two weeks — and the failure is Linear
+# refusing to create the next issue, far from anything chela watches. The daemon's archive
+# sweep (`LinearSource.archive_sweep`) publishes each team's count; doctor reads that file,
+# so it stays instant and never needs the API key.
+
+def _linear_teams() -> dict[str, str]:
+    """``{team key: workflow file name}`` for every dispatched workflow on a linear tracker."""
+    teams: dict[str, str] = {}
+    for path in dispatched_workflows():
+        try:
+            wf = load_workflow(path)
+        except Exception:                          # noqa: BLE001 — dispatch.workflows says so
+            continue
+        if wf.get("tracker", "kind") == "linear":
+            team = str(wf.get("tracker", "team", default="") or "").strip()
+            if team:
+                teams[team] = path.name
+    return teams
+
+
+def _linear_issue_cap_read() -> Observation:
+    from chela.sources import linear
+
+    return observed(linear.read_published_counts())
+
+
+def _linear_issue_cap_report(declared: dict[str, str], obs: Observation) -> list[Finding]:
+    from chela.sources import linear
+
+    out: list[Finding] = []
+    counts = obs.value or {}
+    for team, wf_name in sorted(declared.items()):
+        entry = counts.get(team) if isinstance(counts, dict) else None
+        count = entry.get("count") if isinstance(entry, dict) else None
+        if not isinstance(count, int):
+            out.append(Finding(
+                OK, f"Linear team {team} ({wf_name}): no issue count published yet",
+                "The daemon's archive sweep publishes it every "
+                f"{linear.ARCHIVE_SWEEP_INTERVAL_SECONDS // 60} minutes once it runs.",
+            ))
+        elif linear.over_issue_warning(count):
+            out.append(Finding(
+                WARN, f"Linear team {team} has {count} non-archived issues — the free plan "
+                      f"stops at {linear.ISSUE_CAP}",
+                "Done and Canceled issues count until they are archived. chela archives "
+                "what it closes and sweeps the rest; whatever is left is open work or an "
+                "archive the sweep could not make. Archive or delete issues in Linear "
+                "before it refuses new ones.",
+            ))
+        else:
+            out.append(Finding(
+                OK, f"Linear team {team}: {count} non-archived issues "
+                    f"(warns above {linear.ISSUE_COUNT_WARN_AT}, cap {linear.ISSUE_CAP})",
+            ))
+    return out
 
 
 # --- fact: the test suites the pytest COLLECTOR really executes ----------------------
@@ -3220,6 +3280,15 @@ def facts() -> list[Fact]:
             declare=_base_write_targets,
             read_back=_base_write_read,
             report=_base_write_report,
+        ),
+        Fact(
+            name="tracker.linear_issue_cap",
+            declared_by="each dispatched workflow's `tracker: kind: linear` + `team:`",
+            owned_by="Linear — the team's non-archived issue count, as the daemon's "
+                     "archive sweep last read it ($CHELA_DIR/linear-issue-counts.json)",
+            declare=_linear_teams,
+            read_back=_linear_issue_cap_read,
+            report=_linear_issue_cap_report,
         ),
         Fact(
             name="dispatch.hold",

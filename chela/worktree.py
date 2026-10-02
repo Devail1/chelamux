@@ -16,6 +16,7 @@ def ensure_worktree(
     project_key: str,
     task_number: int,
     root: Path,
+    branch: str | None = None,
 ) -> tuple[Path, bool]:
     """Idempotent AND collision-proof. Returns (worktree_path, created) for task_id.
 
@@ -51,7 +52,8 @@ def ensure_worktree(
     A branch or directory that a LIVE worktree still owns is never touched here; that
     case returns via the reuse path above, before any of this runs.
     """
-    branch = f"{project_key.lower()}-{task_number}"
+    # 📐🔗 CMX-432: a tracker that names its own branches (Linear) passes `branch`.
+    branch = branch or f"{project_key.lower()}-{task_number}"
     wt_path = (root / task_id).resolve()
 
     # (1) Drop administrative records for worktrees whose directory is already gone —

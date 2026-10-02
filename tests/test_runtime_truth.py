@@ -339,6 +339,17 @@ def _break_dispatch_hold(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_linear_issue_cap(tmp_path, monkeypatch):
+    """📐🔗 CMX-432: the workflow moved to a Linear team, and the archive sweep's last read
+    found 201 non-archived issues — 49 from the free plan refusing the next one."""
+    from chela.sources import linear
+
+    (tmp_path / "repo" / "WORKFLOW.md").write_text(
+        "---\nproject_key: CMX\ntracker:\n  kind: linear\n  team: CMX\n---\ndo it\n")
+    linear._publish_count("CMX", linear.ISSUE_COUNT_WARN_AT + 1)
+    return doctor.WARN
+
+
 def _break_unresolved_depends(tmp_path, monkeypatch):
     """CMX-234: a `depends:` marker whose title is a typo of the real bullet — it
     resolves to no task at all, open or closed, anywhere in the tracker. Before this
@@ -625,6 +636,7 @@ CORRUPTIONS = {
     "dispatch.base_branch": _break_base_branch,
     "dispatch.base_write_remote": _break_base_write_remote,
     "dispatch.hold": _break_dispatch_hold,
+    "tracker.linear_issue_cap": _break_linear_issue_cap,
     "tmux.windows": _break_tmux_windows,
     "peer.transport": _break_peer_transport,
     "inbox.address": _break_inbox_address,

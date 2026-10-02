@@ -1502,3 +1502,61 @@ def test_a_listing_failure_is_not_promoted_into_a_refresh_failure(tmp_path, monk
     assert "'done'" in listing_failed["db"], "a listing failure withheld a refresh-confirmed close"
     assert listing_failed["killed"] == healthy["killed"]
     assert listing_failed["cleaned"] == healthy["cleaned"]
+
+
+# --- the linear adapter (CMX-432), held to the same contract -------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_linear_backoff():
+    from chela.sources import linear
+    linear._backoff.clear()
+    yield
+    linear._backoff.clear()
+
+
+def _linear(tmp_path, transport):
+    from chela.sources.linear import LinearSource
+    return LinearSource(WorkflowDef(
+        path=tmp_path / "WORKFLOW.md",
+        config={"tracker": {"kind": "linear", "team": "CMX"}},
+        prompt_template="",
+    ), transport=transport)
+
+
+def _linear_node(n, state_type, archived=False):
+    return {"id": f"u{n}", "identifier": f"CMX-{n}", "number": n, "title": f"t{n}",
+            "state": {"name": state_type, "type": state_type},
+            "archivedAt": "2026-10-01T00:00:00Z" if archived else None}
+
+
+def _linear_raising(kind):
+    from chela.sources.linear import LinearError
+
+    def transport(query, variables):
+        raise LinearError(kind, "stubbed")
+    return transport
+
+
+@pytest.mark.parametrize("transport", [
+    _linear_raising("network"), _linear_raising("auth"), _linear_raising("rate_limited"),
+    _linear_raising("malformed"), lambda q, v: {}, lambda q, v: {"issues": None},
+    lambda q, v: {"issues": {"nodes": None}}, lambda q, v: "nope",
+])
+def test_linear_fetch_by_ids_is_None_on_a_failed_read(tmp_path, transport):
+    assert _linear(tmp_path, transport).fetch_by_ids(["CMX-1"]) is None
+
+
+def test_linear_fetch_by_ids_reports_state_and_absence(tmp_path):
+    nodes = [_linear_node(1, "started"), _linear_node(2, "completed"),
+             _linear_node(3, "canceled"), _linear_node(4, "unstarted", archived=True)]
+
+    def transport(query, variables):
+        return {"issues": {"nodes": [n for n in nodes if n["number"] in variables["numbers"]],
+                           "pageInfo": {"hasNextPage": False}}}
+
+    snap = {t.id: t.state for t in _linear(tmp_path, transport).fetch_by_ids(
+        ["CMX-1", "CMX-2", "CMX-3", "CMX-4", "CMX-99", "ENG-1", "0123456789ab"])}
+    # ⭐ closed (done, canceled, archived) is POSITIVELY closed; a missing id is absent;
+    # a foreign id is not this tracker's at all.
+    assert snap == {"CMX-1": "open", "CMX-2": "closed", "CMX-3": "closed", "CMX-4": "closed"}

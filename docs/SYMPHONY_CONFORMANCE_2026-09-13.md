@@ -120,6 +120,24 @@ The mutation-testing guard is easy and real: *corrupt the adapter to return `[]`
 
 ## G2 — SPEC 11: run chelamux's own workflow on the `gh_issues` adapter (item 3)
 
+> ## 🔗 UPDATED 2026-10-01 — migrating to LINEAR, not GitHub issues.
+>
+> The owner's call (2026-10-01). Linear keeps briefs private, which was the blocker below,
+> and it has native *blocked by* relations and manual ordering, so the hand-ordering and
+> `depends:` losses listed below no longer apply. Its GitHub integration closes an issue when
+> its PR merges, and Linear is Symphony's native tracker (SPEC §11's reference adapter).
+> The adapter shipped as `tracker: kind: linear` (CMX-432, `chela/sources/linear.py`,
+> configured per [LINEAR_TRACKER.md](LINEAR_TRACKER.md)). It implements G1's `fetch_by_ids`
+> contract: `None` on a failed read, and an archived issue is done, not absent. Its open
+> set is every non-terminal state type, so an issue the integration moved to In Progress
+> never reads as absent. It archives what it closes, because the free plan caps a
+> workspace at 250 non-archived issues.
+>
+> ⛔ Still undone, and deliberately separate: flipping chelamux's own `WORKFLOW.md` to
+> `kind: linear` and migrating the open `TODO.md` briefs. That is an operator step taken
+> after the adapter merges. The decision below (not `gh_issues`) still stands; the rest of
+> this section is the record of why.
+
 > ## ⛔ DECIDED 2026-09-14 — NOT YET. Do not re-open this as an engineering question.
 >
 > The owner's call, made on the positioning grounds this section lays out, not on cost. **Every

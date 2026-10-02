@@ -551,6 +551,15 @@ def _claim_order(wf: WorkflowDef, source, on_disk: list[Task]) -> list[Task]:
     :mod:`chela.sources.markdown`) are not yet all struck done — a task that has not merged
     yet cannot be the base a same-day follow-up forks its worktree from.
     """
+    # 📐🔗 CMX-432: a tracker whose open set is wider than what may be CLAIMED (Linear: the
+    # open set spans every non-terminal state, so an integration-moved issue never reads as
+    # absent; claiming draws only from the ready state(s)) narrows it here, and hands back
+    # the blockers it knows are DONE — its live read is already claim-fresh.
+    claimable = getattr(source, "claimable", None)
+    if claimable is not None:
+        candidates, closed_ids = claimable(on_disk)
+        return _ready(candidates, closed_ids, known_ids={t.id for t in on_disk} | closed_ids)
+
     tasks_from_text = getattr(source, "tasks_from_text", None)
     closed_ids_from_text = getattr(source, "closed_ids_from_text", None)
     tracker = getattr(source, "path", None)
@@ -603,7 +612,8 @@ def _local_closed_ids(closed_ids_from_text, tracker: Path) -> set[str]:
     return closed_ids_from_text(text)
 
 
-def _ready(tasks: list[Task], closed_ids: set[str]) -> list[Task]:
+def _ready(tasks: list[Task], closed_ids: set[str],
+           known_ids: set[str] | None = None) -> list[Task]:
     """Drop tasks whose declared dependencies (``Task.depends`` — the markdown
     tracker's ``<!-- depends: ... -->`` marker) have not merged yet.
 
@@ -627,8 +637,14 @@ def _ready(tasks: list[Task], closed_ids: set[str]) -> list[Task]:
     resolve but whose task simply hasn't been struck yet is the normal, expected
     case and only warrants ``log.info`` — warning on every unmet dependency would
     drown the one case that actually needs a human's attention.
+
+    ``known_ids`` widens that universe for a source whose claim candidates are a SUBSET of
+    what is open (Linear: only the ready state is claimable, but an In Progress blocker is
+    still a real, resolved reference) — it only changes which log level an unmet
+    reference gets, never whether it holds the task.
     """
-    known_ids = {t.id for t in tasks} | closed_ids
+    if known_ids is None:
+        known_ids = {t.id for t in tasks} | closed_ids
     ready = []
     for t in tasks:
         unmet = set(t.depends) - closed_ids
@@ -825,10 +841,23 @@ def _strike_merged_tasks(wf: WorkflowDef, source, task_ids: list[str]) -> int:
     """
     close_tasks = getattr(source, "close_tasks", None)
     tracker = getattr(source, "path", None)
-    if close_tasks is None or tracker is None:
+    if close_tasks is None:
         # A non-file tracker (gh_issues) closes itself: the merged PR closes the
         # issue, so the task leaves list_open_tasks with no write from us.
         return 0
+    if tracker is None:
+        # 📐🔗 CMX-432: a network tracker chela WRITES (Linear) — its GitHub integration
+        # may not mark a PR merged into `dev` Done, so chela does, and archives it (the
+        # free plan's cap counts Done issues until they are archived). Never raises: a
+        # failed write leaves the task open, so it is pending again next tick.
+        try:
+            struck = _log_and_collect_struck(close_tasks(task_ids), "tracker close")
+        except Exception:
+            log.exception("tracker close failed for %s", ", ".join(task_ids))
+            return 0
+        if struck:
+            log.info("tracker close: marked %d task(s) done: %s", len(struck), ", ".join(struck))
+        return len(struck)
 
     repo = wf.path.parent
     base = wf.get("workspace", "base_branch", default="master")
@@ -3511,8 +3540,24 @@ def resolve_run(ident: str) -> dict | None:
         r for r in runs
         if (r.get("branch_name") or "").lower() == low
         or (r.get("window_name") or "").lower() == low
+        or (r.get("task_id") or "").lower() == low
     ]
-    return named[0] if len(named) == 1 else None
+    if len(named) <= 1:
+        return named[0] if named else None
+    # 📐🔗 CMX-432: Linear's `CMX-12` and the TODO.md-era `cmx-12` branch share a number, so
+    # a bare `cmx-12` can name both. The run still MOVING wins; among those (or, if none
+    # moves, among all of them) the tracker-identifier run wins — never an old done/closed
+    # TODO.md-era run. Anything still ambiguous after that resolves to None, as before.
+    live = [r for r in named if not run_is_terminal(r)]
+    if len(live) == 1:
+        return live[0]
+    tracker_runs = [r for r in (live or named) if _TRACKER_IDENT_RE.match(r.get("task_id") or "")]
+    return tracker_runs[0] if len(tracker_runs) == 1 else None
+
+
+# A run keyed by a tracker's own identifier (Linear's `CMX-12`), as opposed to the
+# 12-hex hash a markdown/gh_issues task id is.
+_TRACKER_IDENT_RE = re.compile(r"^[A-Z][A-Z0-9]*-\d+$")
 
 
 def adopt_pr(pr_ident: str, workflow_path: str | Path, *, reason: str = "") -> dict:
@@ -5411,6 +5456,15 @@ def tick(workflow_path: str | Path) -> dict:
         ]
         if pending_strikes:
             summary["tracker_struck"] = _strike_merged_tasks(wf, source, pending_strikes)
+        # 📐🔗 CMX-432: the backstop for a tracker that ARCHIVES finished work — every closed
+        # but unarchived issue, whoever closed it (the GitHub integration, a human). The
+        # source throttles itself; a failure is logged there and never stops the tick.
+        sweep = getattr(source, "archive_sweep", None)
+        if sweep is not None and not tracker_read_failed:
+            try:
+                summary["tracker_archived"] = sweep() or 0
+            except Exception:
+                log.exception("tracker archive sweep failed for %s", wf.path)
 
         # 1c. A RED CI SENDS THE PR BACK — automatically, with no reviewer.
         #
@@ -5929,6 +5983,39 @@ def _max_existing_task_number(repo_path: Path, project_key: str) -> int:
     return best
 
 
+def _remote_branch_exists(repo_path: Path, branch: str) -> bool:
+    """Whether ``origin`` has ``branch``. Asks the remote (``ls-remote``); when it cannot be
+    asked, falls back to this clone's ``refs/remotes/origin/`` — the best it knows."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo_path), "ls-remote", "--exit-code", "--heads", "origin",
+             branch],
+            capture_output=True, text=True, check=False, timeout=GIT_NET_TIMEOUT_SECONDS,
+        )
+        if out.returncode in (0, 2):
+            return out.returncode == 0
+    except subprocess.TimeoutExpired:
+        pass
+    local = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "--verify", "--quiet",
+         f"refs/remotes/origin/{branch}"],
+        capture_output=True, text=True, check=False,
+    )
+    return local.returncode == 0
+
+
+def _unused_remote_branch(repo_path: Path, branch: str) -> str:
+    """``branch``, or ``branch-2``, ``branch-3``, … — the first name ``origin`` does not
+    already have. 📐🔗 CMX-432: a Linear branch name is the tracker's, so it can collide
+    with a branch a previous run left on the remote; that branch is never reused."""
+    if not _remote_branch_exists(repo_path, branch):
+        return branch
+    n = 2
+    while _remote_branch_exists(repo_path, f"{branch}-{n}"):
+        n += 1
+    return f"{branch}-{n}"
+
+
 def _task_brief(task: Task) -> str | None:
     """What to persist onto `runs.brief` at claim time — the task-detail modal's
     left pane. `task.body` (the markdown source's full title + dedented
@@ -5981,7 +6068,11 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     existing = conn.execute(
         "SELECT task_number FROM runs WHERE task_id=?", (task.id,)
     ).fetchone()
-    if existing and existing["task_number"] is not None:
+    if task.task_number is not None:
+        # 📐🔗 CMX-432: a tracker with its own numbering (Linear's `CMX-12` → 12) — the
+        # number is the tracker's, not minted here.
+        task_number = task.task_number
+    elif existing and existing["task_number"] is not None:
         task_number = existing["task_number"]
     else:
         row = conn.execute(
@@ -5990,8 +6081,19 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
         ).fetchone()
         task_number = max(int(row["n"]), _max_existing_task_number(repo_path, project_key) + 1)
 
-    worktree, created = ensure_worktree(repo_path, task.id, base_branch, project_key, task_number, root)
-    branch = f"{project_key.lower()}-{task_number}"
+    if task.branch:
+        # 📐🔗 CMX-432: the tracker's own branch name (Linear's `cmx-12-tighten-top-row`).
+        # A retry keeps the branch its first attempt took; a fresh claim never reuses a
+        # name the remote already has — it takes `-2`, `-3`, ….
+        prior = conn.execute(
+            "SELECT branch_name FROM runs WHERE task_id=?", (task.id,)
+        ).fetchone()
+        branch = (prior["branch_name"] if prior and prior["branch_name"]
+                  else _unused_remote_branch(repo_path, task.branch))
+    else:
+        branch = f"{project_key.lower()}-{task_number}"
+    worktree, created = ensure_worktree(repo_path, task.id, base_branch, project_key, task_number,
+                                        root, branch=branch)
     window_name = branch
     hook_vars = _prompt_vars(wf, task, str(worktree), branch, base_branch, task_number)
 
@@ -7510,12 +7612,12 @@ def dry_run(workflow_path: str | Path) -> list[dict]:
 
     plans: list[dict] = []
     for task in open_tasks:
-        tn = existing_numbers.get(task.id)
+        tn = task.task_number if task.task_number is not None else existing_numbers.get(task.id)
         if tn is None:
             tn = next_number
             next_number += 1
         worktree = (root / task.id).resolve()
-        branch = f"{project_key.lower()}-{tn}"
+        branch = task.branch or f"{project_key.lower()}-{tn}"
         prompt = render_prompt(wf.prompt_template, {
             "task_id": task.id,
             "task_title": task.title,
