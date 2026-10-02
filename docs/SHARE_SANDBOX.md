@@ -147,6 +147,7 @@ Knobs, set in `chela.env`, which the launcher process reads:
 |---|---|---|
 | `CHELA_SHARE_SANDBOX_IMAGE` | `python:3.12-slim` | image for the guest and the proxy sidecar (must be pulled) |
 | `CHELA_SHARE_SANDBOX_TOKEN_FILE` | Claude Code's `.credentials.json` | the token the proxy adds on egress, e.g. a `claude setup-token` token |
+| `CHELA_SHARE_SANDBOX_SUBSCRIPTION` | the token file's `subscriptionType` | the plan the guest's banner names (`max`, `pro`, …); set it when the token file is a bare `setup-token` token |
 | `CHELA_SHARE_PROXY_UPSTREAM` | `https://api.anthropic.com` | the proxy's fixed upstream |
 | `CHELA_SHARE_SANDBOX_WEB_IMAGE` | `chela-share-web:latest` | web mode only: the guest image with headless Chromium (build it, below) |
 | `CHELA_SHARE_WEB_DENY` | unset | web mode: comma-separated domains (and their subdomains) always refused |
@@ -202,6 +203,8 @@ refresh:
   [Web mode](#web-mode-opt-in).)
 - tmux starts the window's process directly, with no shell. When Claude exits, the
   container, the proxy, the network and the pane go with it.
+
+**Billing:** a sandboxed session runs on your Claude subscription, through the proxy, with no API key involved. The guest's Claude gets a placeholder login that names your plan, so its banner reads "Claude Max" or "Claude Pro". If chela can't tell the plan, the guest gets a placeholder `ANTHROPIC_AUTH_TOKEN` instead and its banner says "API Usage Billing", which is wrong; set `CHELA_SHARE_SANDBOX_SUBSCRIPTION` to fix it.
 
 A guest who can type can still spend your Claude usage through the proxy. That comes
 with letting them drive Claude at all.

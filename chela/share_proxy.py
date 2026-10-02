@@ -4,7 +4,7 @@ A typing guest drives a Claude Code session that runs in a container (see
 :mod:`chela.share_sandbox`). Claude needs the operator's Anthropic token to work, and the
 goal is that neither the guest nor the model can ever read it. So the token never enters
 the guest container at all: the container's Claude is given ``ANTHROPIC_BASE_URL`` pointing
-here and a placeholder ``ANTHROPIC_AUTH_TOKEN``, and this proxy — running in a separate
+here and a placeholder login (or ``ANTHROPIC_AUTH_TOKEN``), and this proxy — running in a separate
 sidecar container, the only thing on the guest's internal network — strips whatever auth
 the request carried, adds the real one, and forwards to a FIXED upstream. It is NanoClaw's
 OneCLI-gateway pattern, reduced to the one route Claude Code needs.

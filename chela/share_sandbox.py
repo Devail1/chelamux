@@ -50,6 +50,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -457,7 +458,52 @@ _GUEST_SEED = json.dumps({
     "projects": {GUEST_WORKDIR: {"hasTrustDialogAccepted": True,
                                  "hasCompletedProjectOnboarding": True}},
 })
-_GUEST_ENTRY = f"printf '%s' '{_GUEST_SEED}' > {GUEST_HOME}/.claude.json && exec claude"
+# Claude Code names its billing from how it is AUTHENTICATED, not from where its requests
+# go: a placeholder ``ANTHROPIC_AUTH_TOKEN`` makes it say "API Usage Billing", though the
+# proxy always sends the operator's SUBSCRIPTION OAuth token. A placeholder Claude.ai login
+# (credentials file, no refresh token, far expiry) makes it say "Claude Max" / "Claude Pro"
+# instead, and it still sends every request to ANTHROPIC_BASE_URL with the placeholder as
+# its bearer — the proxy replaces it exactly as before. Measured in CMX-435.
+GUEST_TOKEN_PLACEHOLDER = "placeholder"
+_SUBSCRIPTION_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_FAR_EXPIRY_MS = 4102444800000          # 2100-01-01: Claude never tries to refresh it
+
+
+def subscription_type() -> str | None:
+    """The operator's Claude subscription type (``max``, ``pro``, …) for the guest's
+    banner: ``$CHELA_SHARE_SANDBOX_SUBSCRIPTION``, else the non-secret
+    ``claudeAiOauth.subscriptionType`` of the token file. None when unknown (a bare
+    ``setup-token`` file, or an unexpected value)."""
+    raw = os.environ.get("CHELA_SHARE_SANDBOX_SUBSCRIPTION", "").strip().lower()
+    if not raw:
+        try:
+            data = json.loads(token_file().read_text(encoding="utf-8"))
+            raw = str((data.get("claudeAiOauth") or {}).get("subscriptionType") or "")
+        except (OSError, ValueError, AttributeError):
+            raw = ""
+    return raw if _SUBSCRIPTION_RE.match(raw) else None
+
+
+def guest_credentials(sub: str) -> str:
+    """The guest's own ``.credentials.json``: a placeholder login, never the real token."""
+    return json.dumps({"claudeAiOauth": {
+        "accessToken": GUEST_TOKEN_PLACEHOLDER, "refreshToken": None,
+        "expiresAt": _FAR_EXPIRY_MS, "scopes": ["user:inference"], "subscriptionType": sub}})
+
+
+def guest_auth_env(sub: str | None) -> list[str]:
+    """The auth env the guest gets: none with a placeholder login, else (subscription
+    unknown) a placeholder ``ANTHROPIC_AUTH_TOKEN`` so Claude sends *an* Authorization
+    header. Either way the proxy replaces it."""
+    return [] if sub else [f"ANTHROPIC_AUTH_TOKEN={GUEST_TOKEN_PLACEHOLDER}"]
+
+
+def guest_entry(sub: str | None) -> str:
+    cmd = f"printf '%s' {shlex.quote(_GUEST_SEED)} > {GUEST_HOME}/.claude.json"
+    if sub:
+        cmd += (f" && mkdir -p {GUEST_HOME}/.claude && printf '%s' "
+                f"{shlex.quote(guest_credentials(sub))} > {GUEST_HOME}/.claude/.credentials.json")
+    return cmd + " && exec claude"
 
 
 def guest_proxy_env(net: str) -> dict[str, str]:
@@ -473,6 +519,7 @@ def guest_proxy_env(net: str) -> dict[str, str]:
 def guest_run_argv(sid: str, cwd: str, uid: int, gid: int, claude_bin: str,
                    net: str = NET_NONE) -> list[str]:
     real = os.path.realpath(cwd)
+    sub = subscription_type()
     argv = ["docker", "run", "--rm", "-it", "--init",
             "--name", container_name(sid), "--label", f"{LABEL}={sid}",
             "--label", f"{NET_LABEL}={net}",
@@ -487,19 +534,19 @@ def guest_run_argv(sid: str, cwd: str, uid: int, gid: int, claude_bin: str,
             "-e", f"TERM={os.environ.get('TERM') or 'xterm-256color'}",
             "-e", "LANG=C.UTF-8",
             "-e", f"ANTHROPIC_BASE_URL=http://{PROXY_ALIAS}:{PROXY_PORT}",
-            # A placeholder so Claude sends *an* Authorization header; the proxy replaces it.
-            "-e", "ANTHROPIC_AUTH_TOKEN=placeholder",
             "-e", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
             "-e", "DISABLE_AUTOUPDATER=1",
             "-v", f"{claude_bin}:{CLAUDE_MOUNT}:ro",
             "-v", f"{real}:{GUEST_WORKDIR}"]
+    for kv in guest_auth_env(sub):
+        argv += ["-e", kv]
     for k, v in guest_proxy_env(net).items():
         argv += ["-e", f"{k}={v}"]
     for e in readonly_entries(real):
         argv += ["-v", f"{os.path.join(real, e)}:{GUEST_WORKDIR}/{e}:ro"]
     for m in env_masks(real):
         argv += ["-v", f"/dev/null:{GUEST_WORKDIR}/{m}:ro"]
-    argv += ["-w", GUEST_WORKDIR, guest_image(net), "sh", "-c", _GUEST_ENTRY]
+    argv += ["-w", GUEST_WORKDIR, guest_image(net), "sh", "-c", guest_entry(sub)]
     return argv
 
 
