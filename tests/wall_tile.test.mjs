@@ -350,4 +350,7 @@ test('stateTitle labels a proxy-derived status, and only that', () => {
     const ordinary = agent({ claude_running: true, session_status: 'busy', status_source: null });
     assert.equal(stateTitle(ordinary, tileState(ordinary, false)), 'Working');
     assert.equal(stateTitle(undefined, tileState(undefined, false)), 'Idle');
+    // Any OTHER source is not the proxy — the label is for that one source, not "has a source".
+    const other = agent({ claude_running: true, session_status: 'busy', status_source: 'hooks' });
+    assert.equal(stateTitle(other, tileState(other, false)), 'Working');
 });

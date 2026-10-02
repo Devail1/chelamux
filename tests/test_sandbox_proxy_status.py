@@ -49,6 +49,7 @@ def test_completion_reads_busy_within_the_grace_then_idle_after_it():
     state = {"inflight": 0, "last_done": 100.0, "updated": 100.0}
     assert share_proxy.activity_status(state, now=100.0 + GRACE / 2) == "busy"   # tool gap
     assert share_proxy.activity_status(state, now=100.0 + GRACE + 0.5) == "idle"
+    assert share_proxy.activity_status(state, now=100.0 + GRACE) == "idle"     # the grace is exclusive
 
 
 def test_a_fresh_proxy_with_nothing_yet_is_idle():
@@ -61,7 +62,10 @@ def test_in_flight_on_a_proxy_that_stopped_writing_is_not_claimed_as_busy():
     assert share_proxy.activity_status(state, now=100.0 + share_proxy.ACTIVITY_STALE_S + 1) is None
 
 
-@pytest.mark.parametrize("state", [None, [], "busy", {"inflight": "x", "updated": 1.0}])
+@pytest.mark.parametrize("state", [
+    None, [], "busy", {"inflight": "x", "updated": 1.0},
+    {"inflight": 1, "last_done": None, "updated": None},   # in flight, never stamped: unknown
+])
 def test_an_unreadable_activity_claims_nothing(state):
     assert share_proxy.activity_status(state, now=2.0) is None
 
@@ -78,6 +82,17 @@ def test_activity_file_round_trip(tmp_path):
     st = read()
     assert st["inflight"] == 0 and st["last_done"] is not None
     assert share_proxy.activity_status(st, now=st["last_done"] + GRACE + 1) == "idle"
+
+
+def test_an_unmatched_end_never_drives_inflight_negative(tmp_path):
+    # A negative count would make the NEXT turn's begin() read 0 — idle mid-answer.
+    a = share_proxy.Activity(str(tmp_path))
+    a.open()
+    a.end()
+    a.begin()
+    st = json.loads((tmp_path / share_proxy.ACTIVITY_NAME).read_text())
+    assert st["inflight"] == 1
+    assert share_proxy.activity_status(st) == "busy"
 
 
 # --- 2. the proxy's forward path drives them -------------------------------------------
@@ -163,6 +178,18 @@ def test_side_calls_never_mark_the_session_working(tmp_path, monkeypatch, label,
     assert seen["after"]["last_done"] is None, label
 
 
+def test_a_failing_activity_write_never_breaks_the_guests_response(tmp_path, monkeypatch):
+    class Broken(share_proxy.Activity):
+        def begin(self):
+            raise RuntimeError("disk on fire")
+
+        def end(self):
+            raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(share_proxy, "Activity", Broken)
+    _forward(tmp_path, monkeypatch, {"stream": True, "tools": TOOLS})   # asserts the guest is served
+
+
 def test_an_upstream_failure_still_ends_the_turn(tmp_path, monkeypatch):
     (tmp_path / "token").write_text("tok")
     sdir = tmp_path / "session"
@@ -225,6 +252,10 @@ def test_the_proxy_opens_its_activity_file_only_with_a_session_dir(monkeypatch, 
     act = share_proxy._Handler.activity
     assert isinstance(act, share_proxy.Activity) and act.path == str(d / share_proxy.ACTIVITY_NAME)
     assert json.loads((d / share_proxy.ACTIVITY_NAME).read_text())["inflight"] == 0
+    # An unwritable session dir: no activity at all (status unknown), never a dead writer.
+    monkeypatch.setenv("CHELA_PROXY_SESSION_DIR", str(tmp_path / "missing"))
+    share_proxy.main()
+    assert share_proxy._Handler.activity is None
 
 
 # --- 3. the status file is never the guest's ------------------------------------------
@@ -259,6 +290,20 @@ def test_a_sandboxed_window_takes_its_status_from_the_proxy():
 
 def test_a_sandboxed_window_with_no_activity_file_stays_unresolved():
     assert sandbox_status.resolve("@5", None, check=lambda w: SID) == (None, None)
+
+
+def test_a_corrupt_activity_file_claims_nothing():
+    d = share_sandbox.session_dir(SID)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / share_proxy.ACTIVITY_NAME).write_text("{not json")
+    assert share_sandbox.proxy_activity_status(SID) is None
+    assert sandbox_status.resolve("@5", None, check=lambda w: SID) == (None, None)
+
+
+def test_proxy_activity_status_reads_at_the_given_time():
+    _activity({"inflight": 0, "last_done": 100.0, "updated": 100.0})
+    assert share_sandbox.proxy_activity_status(SID, now=100.0 + GRACE / 2) == "busy"
+    assert share_sandbox.proxy_activity_status(SID, now=100.0 + GRACE + 1) == "idle"
 
 
 def test_an_ordinary_window_is_unaffected():
@@ -311,6 +356,9 @@ def test_peek_reads_a_sandboxed_windows_status_from_its_proxy(monkeypatch):
     assert p["session_status"] == "busy" and p["status_source"] == sandbox_status.PROXY_SOURCE
     assert "from the sandbox proxy" in orchestrator.format_peek(p)
     assert q["session_status"] is None and q["status_source"] is None   # ordinary: unchanged
+    assert "sandbox proxy" not in orchestrator.format_peek(q)
+    # ⭐ An ordinary window Claude itself reports as busy: no proxy label.
+    assert "sandbox proxy" not in orchestrator.format_peek({**q, "session_status": "busy"})
 
 
 def test_api_agents_reads_a_sandboxed_windows_status_from_its_proxy():
