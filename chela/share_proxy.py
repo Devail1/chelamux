@@ -43,6 +43,15 @@ offset-dedup it uses for a real transcript. ``proxy-status.json`` beside it reco
 proxy last forwarded such a turn, so ``chela doctor`` can tell a quiet session from a broken
 outbox.
 
+**Working/idle status (CMX-436).** The same blindness leaves a sandboxed window's status
+pill on "unknown" forever: chela reads busy/idle from Claude's own session list and
+transcript, and this session has neither on the host. So the proxy also keeps
+``activity.json`` in the same session directory (:class:`Activity`): how many main-loop
+turns are in flight right now, and when the last one finished. :func:`activity_status`
+turns that into ``busy`` (a turn in flight, or one finished within
+:data:`IDLE_GRACE_S` — the gap while Claude runs a tool before its next turn) or ``idle``.
+A permission prompt is not a model request, so ``waiting`` is never claimed from here.
+
 Env: ``CHELA_PROXY_TOKEN_FILE`` (Claude Code's ``.credentials.json``, or a file holding a
 bare token — e.g. from ``claude setup-token``), ``CHELA_PROXY_UPSTREAM`` (default
 ``https://api.anthropic.com``), ``CHELA_PROXY_PORT`` (default 8080),
@@ -246,6 +255,72 @@ class Outbox:
         os.replace(tmp, self.status_path)
 
 
+# --- working/idle activity (CMX-436) ----------------------------------------------------
+
+ACTIVITY_NAME = "activity.json"
+# A turn that finished this recently still reads as busy: between two turns of one
+# answer Claude is running a tool, and the pill must not flicker to idle for it.
+IDLE_GRACE_S = 4.0
+# In flight with no update for longer than the upstream timeout means the proxy died
+# mid-request (it is the only writer) — that is not "working", it is unknown.
+ACTIVITY_STALE_S = 900.0
+
+
+class Activity:
+    """The per-session activity file: in-flight main-loop turns + when the last finished.
+    Written atomically on every transition; :func:`activity_status` is the reader."""
+
+    def __init__(self, directory: str) -> None:
+        self.path = os.path.join(directory, ACTIVITY_NAME)
+        self._lock = threading.Lock()
+        self._state = {"inflight": 0, "last_done": None, "updated": None}
+
+    def open(self) -> None:
+        """Reset at startup — a restarted proxy has nothing in flight."""
+        with self._lock:
+            self._write()
+
+    def begin(self) -> None:
+        with self._lock:
+            self._state["inflight"] += 1
+            self._write()
+
+    def end(self) -> None:
+        with self._lock:
+            self._state["inflight"] = max(0, self._state["inflight"] - 1)
+            self._state["last_done"] = time.time()
+            self._write()
+
+    def _write(self) -> None:
+        self._state["updated"] = time.time()
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self._state, f)
+        os.replace(tmp, self.path)
+
+
+def activity_status(state: object, now: float | None = None,
+                    grace: float = IDLE_GRACE_S) -> str | None:
+    """``"busy"`` / ``"idle"`` from an :class:`Activity` file's contents, or None when it
+    says nothing trustworthy (unreadable, or in flight on a proxy that stopped writing)."""
+    if not isinstance(state, dict):
+        return None
+    now = time.time() if now is None else now
+    try:
+        inflight = int(state.get("inflight") or 0)
+        updated = float(state["updated"]) if state.get("updated") is not None else None
+        last_done = float(state["last_done"]) if state.get("last_done") is not None else None
+    except (TypeError, ValueError):
+        return None
+    if inflight > 0:
+        if updated is None or now - updated > ACTIVITY_STALE_S:
+            return None
+        return "busy"
+    if last_done is not None and now - last_done < grace:
+        return "busy"
+    return "idle"
+
+
 def path_allowed(path: str) -> bool:
     """Only the Messages-API family is forwarded — never an absolute URL (a request line
     naming another host) and never a path that escapes ``/v1/``."""
@@ -259,6 +334,7 @@ class _Handler(BaseHTTPRequestHandler):
     token_file = ""
     upstream = urllib.parse.urlsplit(DEFAULT_UPSTREAM)
     outbox: Outbox | None = None
+    activity: Activity | None = None
 
     def log_message(self, fmt, *args):  # one terse line per request, no headers
         sys.stderr.write("share-proxy: %s %s\n" % (self.command, self.path.split("?")[0]))
@@ -292,7 +368,11 @@ class _Handler(BaseHTTPRequestHandler):
             return self._refuse(503, "operator token unavailable")
         n = int(self.headers.get("content-length") or 0)
         body = self.rfile.read(n) if n else None
+        turn = records_turn(self.command, self.path, body)
+        activity = self.activity if turn else None
         conn = None
+        if activity is not None:
+            self._mark(activity.begin)
         try:
             conn, resp = self._send(body, token)
             if resp.status == 401:
@@ -304,8 +384,7 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._refuse(502, LOGIN_EXPIRED)
             collector = None
             if self.outbox is not None and resp.status == 200 and \
-                    "text/event-stream" in (resp.getheader("content-type") or "") and \
-                    records_turn(self.command, self.path, body):
+                    "text/event-stream" in (resp.getheader("content-type") or "") and turn:
                 collector = TurnCollector()
             self.send_response(resp.status)
             for k, v in resp.getheaders():
@@ -332,6 +411,15 @@ class _Handler(BaseHTTPRequestHandler):
             if conn is not None:
                 conn.close()
             self.close_connection = True
+            if activity is not None:
+                self._mark(activity.end)
+
+    def _mark(self, step) -> None:
+        # Like the outbox, the activity file is a side channel the guest never depends on.
+        try:
+            step()
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"share-proxy: activity write failed: {type(e).__name__}\n")
 
     def _record(self, collector: TurnCollector) -> None:
         # The outbox is a side channel: nothing it does may break the guest's response.
@@ -376,6 +464,12 @@ def main() -> None:
         except OSError as e:
             sys.stderr.write(f"share-proxy: no outbox ({type(e).__name__}) — relay disabled\n")
             _Handler.outbox = None
+        _Handler.activity = Activity(session_dir)
+        try:
+            _Handler.activity.open()
+        except OSError as e:
+            sys.stderr.write(f"share-proxy: no activity file ({type(e).__name__}) — status unknown\n")
+            _Handler.activity = None
     ThreadingHTTPServer(("0.0.0.0", port), _Handler).serve_forever()
 
 

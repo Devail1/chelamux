@@ -3,7 +3,7 @@ import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, at
 import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
-import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, tileState } from './wallmodel.js';
+import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, stateTitle, tileState } from './wallmodel.js';
 // Side-effect only: registers window.chela.openDiffModal/closeDiffModal for the
 // "Files" chip below (_ctxBarHTML) and the #modal-diff close button in index.html.
 import './diffpanel.js';
@@ -1792,7 +1792,7 @@ function _colorTermDots(agents) {
         const cls = _TILE_CLS_TO_DOT[s.cls] || 'idle';
         dot.classList.remove('working', 'waiting', 'idle', 'done');
         dot.classList.add(cls);
-        dot.title = s.word.charAt(0).toUpperCase() + s.word.slice(1);
+        dot.title = stateTitle(a, s);
         // Flag the host surface (live pane OR taskbar chip) so a "waiting for
         // input" pane gets a yellow border even when minimized to the dock.
         const host = dot.closest('.grid-stack-item-content, .term-pane, .min-chip');
@@ -2664,7 +2664,7 @@ function _applyWallTileFrame(agents) {
         const a = by[el.dataset.stateFor];
         const s = tileState(a, wantsHuman(a));
         el.className = 'gs-state gs-state-' + s.cls;
-        el.title = s.word;
+        el.title = stateTitle(a, s);
         // CMX-393: no glyph in the pill — `.gs-dot` carries the shape.
         const w = el.querySelector('.gs-state-word');
         if (w) w.textContent = s.word;

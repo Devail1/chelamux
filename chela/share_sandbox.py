@@ -222,6 +222,22 @@ def proxy_status_path(sid: str) -> Path:
     return session_dir(sid) / STATUS_NAME
 
 
+def activity_path(sid: str) -> Path:
+    from chela.share_proxy import ACTIVITY_NAME
+    return session_dir(sid) / ACTIVITY_NAME
+
+
+def proxy_activity_status(sid: str, now: float | None = None) -> str | None:
+    """``busy``/``idle`` as the session's credential proxy saw it (CMX-436), or None when
+    there is no readable activity file. Never ``waiting`` — a prompt is not a request."""
+    from chela.share_proxy import activity_status
+    try:
+        state = json.loads(activity_path(sid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return activity_status(state, now)
+
+
 # Session dirs whose outbox has not been written for this long are removed at the next
 # launch — they hold everything a guest's session said, and nothing reads them once the
 # window is gone.

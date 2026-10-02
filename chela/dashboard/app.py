@@ -27,7 +27,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, sandbox_status, scheduler, sessionids, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -286,6 +286,8 @@ def api_agents():
         claude_running = cpid is not None
         sess_status = status_map["by_pid"].get(cpid) if cpid is not None else None
         sess_cwd = status_map["cwd_by_pid"].get(cpid) if cpid is not None else None
+        # A sandboxed session's Claude is not in that list — its proxy fills the gap (CMX-436).
+        sess_status, status_source = sandbox_status.resolve(window_id, sess_status)
 
         liveness, health = _liveness(claude_running, sess_status)
         win_type = agent_manager.window_type(window_id, claude_running)
@@ -324,6 +326,8 @@ def api_agents():
             "claude_running": claude_running,
             "thinking": sess_status == "busy",
             "session_status": sess_status,
+            # "sandbox-proxy" when that status came from a sandboxed session's proxy.
+            "status_source": status_source,
             # The Wall's lazy-tile pair (CMX-76). `dispatched` = the dispatcher owns this
             # window (run-row derived); `needs_human` = it is blocked on you right now.
             # Together they are the whole rule: a dispatched worker opens MINIMIZED and
