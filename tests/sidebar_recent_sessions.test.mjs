@@ -10,7 +10,7 @@
 //
 // Run: node --test tests/sidebar_recent_sessions.test.mjs  (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, beforeEach, test } from 'node:test';
+import { after, before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -28,6 +28,7 @@ const BODY = `
     </section>
     <section class="side-section" id="side-recent-section" hidden>
       <span class="side-count" id="hdr-recent">0</span>
+      <button id="recent-clear-all" hidden onclick="chela.clearRecentSessions()">Clear all</button>
       <div class="side-list" id="side-recent"></div>
     </section>
   </aside>
@@ -48,6 +49,8 @@ const DISPATCHER_ROW = {
 let RECENT = { rows: [], dispatcher_rows: [], hidden: 0 };   // what GET /api/restore answers with
 let RESUME_OK = true;          // what POST /api/restore/resume answers with
 let RESUME_CALLS = [];         // every resume request body, in order
+let DISMISS_OK = true;         // what POST /api/restore/dismiss answers with
+let DISMISS_CALLS = [];        // [path, body] for every dismiss/undismiss request
 
 function fakeFetch(url, opts) {
     const path = String(url);
@@ -59,6 +62,12 @@ function fakeFetch(url, opts) {
         return _json(RESUME_OK
             ? { ok: true, name: 'shell-9', cwd: ROW.cwd, wid: '@99' }
             : { ok: false, error: 'this row no longer matches — refresh and retry' });
+    }
+    if ((path.endsWith('/api/restore/dismiss') || path.endsWith('/api/restore/undismiss'))
+        && method === 'POST') {
+        const body = JSON.parse(opts.body);
+        DISMISS_CALLS.push([path.slice(path.lastIndexOf('/') + 1), body]);
+        return _json(DISMISS_OK ? { ok: true } : { ok: false, error: 'nope' });
     }
     if (path.endsWith('/api/restore') && method === 'GET') return _json(RECENT);
     return _json({});
@@ -98,6 +107,10 @@ beforeEach(() => {
     RECENT = { rows: [], dispatcher_rows: [], hidden: 0 };
     RESUME_OK = true;
     RESUME_CALLS = [];
+    DISMISS_OK = true;
+    DISMISS_CALLS = [];
+    globalThis.confirm = () => true;
+    nav._closeRecentUndoToast();
     document.getElementById('side-recent-section').hidden = true;
     document.getElementById('side-recent').innerHTML = '';
 });
@@ -208,7 +221,7 @@ test('dispatcher-owned rows are hidden by default, with a visible count', () => 
         'a dispatcher-owned row must not render until the toggle is used');
     const toggle = document.querySelector('#side-recent .recent-toggle-dispatcher');
     assert.ok(toggle, 'no toggle rendered for the hidden dispatcher rows');
-    assert.match(toggle.textContent, /1 dispatcher session/);
+    assert.equal(toggle.textContent, 'Show 1 hidden dispatcher session');
 });
 
 test('the toggle reveals dispatcher rows with NO resume affordance, and hides them again', () => {
@@ -245,3 +258,110 @@ test('a bare array (legacy shape) renders with no dispatcher toggle at all', () 
 
     assert.equal(document.querySelector('#side-recent .recent-toggle-dispatcher'), null);
 });
+
+// --- toggle copy (CMX-437): it once read "Hide 1 dispatcher session hidden" -------
+
+test('the dispatcher toggle reads exactly right, singular, plural and expanded', () => {
+    const toggleText = () => document.querySelector('#side-recent .recent-toggle-dispatcher').textContent;
+
+    nav.renderRecentSessions({ rows: [], dispatcher_rows: [DISPATCHER_ROW], hidden: 1 });
+    assert.equal(toggleText(), 'Show 1 hidden dispatcher session');
+
+    nav.renderRecentSessions({ rows: [], dispatcher_rows: [DISPATCHER_ROW, { ...DISPATCHER_ROW, wid: '@139' }], hidden: 2 });
+    assert.equal(toggleText(), 'Show 2 hidden dispatcher sessions');
+
+    window.chela.toggleDispatcherSessions();
+    assert.equal(toggleText(), 'Hide dispatcher sessions');
+    window.chela.toggleDispatcherSessions();   // leave module state collapsed
+    assert.equal(toggleText(), 'Show 2 hidden dispatcher sessions');
+});
+
+// --- dismiss (CMX-437) -------------------------------------------------------------
+
+test('a resumable row has a dismiss ×; a dispatcher row has neither × nor Resume', () => {
+    nav.renderRecentSessions({ rows: [ROW], dispatcher_rows: [DISPATCHER_ROW], hidden: 1 });
+    window.chela.toggleDispatcherSessions();
+    try {
+        const x = document.querySelector('#side-recent .recent-row:not(.recent-row-dispatcher) .recent-dismiss');
+        assert.ok(x, 'no dismiss control on a resumable row');
+        assert.equal(x.dataset.session, ROW.session_id);
+        const d = document.querySelector('#side-recent .recent-row-dispatcher');
+        assert.equal(d.querySelector('.recent-dismiss'), null);
+        assert.equal(d.querySelector('.recent-resume'), null);
+    } finally {
+        window.chela.toggleDispatcherSessions();
+    }
+});
+
+test('clicking × removes the row, POSTs its session id, and offers Undo', async () => {
+    const OTHER = { ...ROW, wid: '@6', session_id: 'dddddddd-1111-2222-3333-444444444444', label: 'six' };
+    nav.renderRecentSessions([ROW, OTHER]);
+
+    await window.chela.dismissRecentSession(
+        document.querySelector(`#side-recent .recent-dismiss[data-session="${ROW.session_id}"]`));
+
+    assert.deepEqual(DISMISS_CALLS, [['dismiss', { session_ids: [ROW.session_id] }]]);
+    const left = [...document.querySelectorAll('#side-recent .recent-resume')].map(b => b.dataset.session);
+    assert.deepEqual(left, [OTHER.session_id], 'only the dismissed row may leave');
+    assert.equal(document.getElementById('hdr-recent').textContent, '1');
+    const toast = document.querySelector('.recent-undo-toast');
+    assert.ok(toast, 'no Undo toast after a dismiss');
+    assert.match(toast.textContent, /Dismissed five/);
+
+    RECENT = { rows: [ROW, OTHER], dispatcher_rows: [], hidden: 0 };   // server lists it again after undismiss
+    toast.querySelector('.recent-undo').click();
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+
+    assert.deepEqual(DISMISS_CALLS[1], ['undismiss', { session_ids: [ROW.session_id] }]);
+    assert.equal(document.querySelector('.recent-undo-toast'), null, 'Undo must close its toast');
+    assert.equal(document.querySelectorAll('#side-recent .recent-resume').length, 2,
+        'Undo must bring the row back');
+});
+
+test('a dismiss the server refused puts the row back — no silent loss', async () => {
+    DISMISS_OK = false;
+    nav.renderRecentSessions([ROW]);
+
+    await window.chela.dismissRecentSession(document.querySelector('#side-recent .recent-dismiss'));
+
+    assert.equal(document.querySelectorAll('#side-recent .recent-resume').length, 1);
+    assert.equal(document.querySelector('.recent-undo-toast'), null);
+});
+
+test('⭐ an undismissed row keeps its Resume and resumes exactly as before', async () => {
+    const OTHER = { ...ROW, wid: '@6', session_id: 'dddddddd-1111-2222-3333-444444444444', label: 'six' };
+    nav.renderRecentSessions([ROW, OTHER]);
+    await window.chela.dismissRecentSession(
+        document.querySelector(`#side-recent .recent-dismiss[data-session="${OTHER.session_id}"]`));
+
+    const btn = document.querySelector('#side-recent .recent-resume');
+    assert.equal(btn.dataset.session, ROW.session_id);
+    await window.chela.resumeSession(btn);
+
+    assert.deepEqual(RESUME_CALLS, [{
+        store: ROW.store, wid: ROW.wid, session_id: ROW.session_id, stamped_epoch: ROW.stamped_epoch,
+    }]);
+});
+
+test('Clear all is offered for 2+ rows, confirms, and dismisses every resumable row', async () => {
+    const OTHER = { ...ROW, wid: '@6', session_id: 'dddddddd-1111-2222-3333-444444444444', label: 'six' };
+    nav.renderRecentSessions([ROW]);
+    assert.equal(document.getElementById('recent-clear-all').hidden, true, 'one row: the × is enough');
+
+    nav.renderRecentSessions({ rows: [ROW, OTHER], dispatcher_rows: [DISPATCHER_ROW], hidden: 1 });
+    assert.equal(document.getElementById('recent-clear-all').hidden, false);
+
+    globalThis.confirm = () => false;
+    await window.chela.clearRecentSessions();
+    assert.equal(DISMISS_CALLS.length, 0, 'a declined confirmation must change nothing');
+
+    globalThis.confirm = () => true;
+    await window.chela.clearRecentSessions();
+    assert.deepEqual(DISMISS_CALLS, [['dismiss', { session_ids: [ROW.session_id, OTHER.session_id] }]]);
+    assert.equal(document.querySelectorAll('#side-recent .recent-resume').length, 0);
+    assert.ok(document.querySelector('#side-recent .recent-toggle-dispatcher'),
+        'the dispatcher toggle is not a dismissable row and stays');
+});
+
+after(() => nav._closeRecentUndoToast());   // its auto-close timer would hold the run open

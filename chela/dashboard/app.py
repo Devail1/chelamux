@@ -27,7 +27,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -2232,10 +2232,17 @@ def api_restore():
     is ever resumable, only *shown* (hidden by default; the sidebar's toggle reveals
     them with no Resume affordance) — ``session_id`` is left off their shape since
     there is no action for the client to build with it.
+
+    Rows whose session id the operator DISMISSED (:mod:`chela.dismissed_sessions`,
+    CMX-437) are left out of both buckets. That is a hide, not a delete: the
+    transcript and every store ``chela restore`` reads are untouched.
     """
     _require_terminals()
     owned = _dispatcher_owned_wid_epochs()
-    candidates = [v for v in _restore_verdicts() if v.verdict == "MANUAL" and v.manual_command()]
+    dismissed = dismissed_sessions.ids()
+    candidates = [v for v in _restore_verdicts()
+                  if v.verdict == "MANUAL" and v.manual_command()
+                  and v.session_id not in dismissed]
     rows, dispatcher_rows = [], []
     for v in candidates:
         if (v.wid, v.stamped_epoch) in owned or not _cwd_is_live(v.cwd):
@@ -2243,6 +2250,43 @@ def api_restore():
         else:
             rows.append(_shape_restore_row(v, resumable=True))
     return jsonify({"rows": rows, "dispatcher_rows": dispatcher_rows, "hidden": len(dispatcher_rows)})
+
+
+def _session_ids_from_body() -> list[str] | None:
+    """``session_ids`` from a JSON body: a non-empty list of non-empty strings, else None."""
+    sids = (request.get_json(silent=True) or {}).get("session_ids")
+    if not isinstance(sids, list) or not sids:
+        return None
+    if not all(isinstance(s, str) and s.strip() for s in sids):
+        return None
+    return [s.strip() for s in sids]
+
+
+@app.route("/api/restore/dismiss", methods=["POST"])
+@require_auth
+def api_restore_dismiss():
+    """Hide Recent-sessions rows by session id (the row's ×, or the header's "Clear
+    all"). Recorded server-side so every device stops showing them. Only the hide list
+    is written — never the transcript, never a session-ids/bindings row — so the
+    session stays resumable by hand and shows up under Sessions if it comes back."""
+    _require_terminals()
+    sids = _session_ids_from_body()
+    if sids is None:
+        return jsonify({"ok": False, "error": "session_ids must be a non-empty list of ids"}), 400
+    dismissed_sessions.dismiss(sids)
+    return jsonify({"ok": True, "dismissed": sids})
+
+
+@app.route("/api/restore/undismiss", methods=["POST"])
+@require_auth
+def api_restore_undismiss():
+    """Undo a dismiss: the rows come back on the next ``/api/restore``."""
+    _require_terminals()
+    sids = _session_ids_from_body()
+    if sids is None:
+        return jsonify({"ok": False, "error": "session_ids must be a non-empty list of ids"}), 400
+    dismissed_sessions.undismiss(sids)
+    return jsonify({"ok": True, "restored": sids})
 
 
 @app.route("/api/restore/resume", methods=["POST"])

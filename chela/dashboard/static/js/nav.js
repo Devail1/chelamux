@@ -534,6 +534,9 @@ function _recentRowHtml(r) {
                 data-store="${attrEsc(r.store)}" data-wid="${attrEsc(r.wid)}"
                 data-session="${attrEsc(r.session_id || '')}" data-epoch="${attrEsc(r.stamped_epoch || '')}"
                 onclick="event.stopPropagation(); chela.resumeSession(this)">Resume</button>
+        <button class="recent-dismiss" title="Dismiss — hide this session from Recent (the transcript is kept)"
+                aria-label="Dismiss ${attrEsc(label)}" data-session="${attrEsc(r.session_id || '')}"
+                onclick="event.stopPropagation(); chela.dismissRecentSession(this)">${lucideIcon('x')}</button>
     </div>`;
 }
 
@@ -576,6 +579,8 @@ function _paintRecentSessions() {
     const rows = _recentPayload.rows || [];
     const dispatcherRows = _recentPayload.dispatcher_rows || [];
     if (count) count.textContent = String(rows.length);
+    const clearAll = document.getElementById('recent-clear-all');
+    if (clearAll) clearAll.hidden = rows.length < 2;
 
     if (!rows.length && !dispatcherRows.length) {
         section.hidden = true;
@@ -586,15 +591,139 @@ function _paintRecentSessions() {
 
     let html = rows.map(_recentRowHtml).join('');
     if (dispatcherRows.length) {
-        const n = dispatcherRows.length;
-        const verb = _recentDispatcherRevealed ? 'Hide' : 'Show';
-        html += `<button class="recent-toggle-dispatcher" onclick="chela.toggleDispatcherSessions()">`
-            + `${verb} ${n} dispatcher session${n === 1 ? '' : 's'} hidden</button>`;
+        html += `<button class="recent-toggle-dispatcher" aria-expanded="${_recentDispatcherRevealed}"`
+            + ` onclick="chela.toggleDispatcherSessions()">`
+            + `${escHtml(dispatcherToggleLabel(dispatcherRows.length, _recentDispatcherRevealed))}</button>`;
         if (_recentDispatcherRevealed) {
             html += dispatcherRows.map(_dispatcherRowHtml).join('');
         }
     }
     host.innerHTML = html;
+    host.querySelectorAll('.recent-row:not(.recent-row-dispatcher)').forEach(_wireRecentSwipe);
+}
+
+// The toggle's copy (CMX-437). It once concatenated two labels into "Hide 1
+// dispatcher session hidden"; collapsed it now says what a click reveals, expanded
+// what a click does.
+function dispatcherToggleLabel(n, revealed) {
+    if (revealed) return 'Hide dispatcher sessions';
+    return `Show ${n} hidden dispatcher session${n === 1 ? '' : 's'}`;
+}
+
+// Swipe-left on touch dismisses, same as the ×. A mostly-horizontal leftward drag
+// past the threshold counts; anything shorter or more vertical is a scroll.
+const _SWIPE_DISMISS_PX = 70;
+function _wireRecentSwipe(row) {
+    let x0 = null, y0 = 0;
+    row.addEventListener('touchstart', e => {
+        const t = e.touches && e.touches[0];
+        if (t) { x0 = t.clientX; y0 = t.clientY; }
+    }, { passive: true });
+    row.addEventListener('touchmove', e => {
+        const t = e.touches && e.touches[0];
+        if (x0 === null || !t) return;
+        const dx = Math.min(0, t.clientX - x0);
+        if (Math.abs(dx) > Math.abs(t.clientY - y0)) row.style.transform = `translateX(${dx}px)`;
+    }, { passive: true });
+    row.addEventListener('touchend', e => {
+        const t = e.changedTouches && e.changedTouches[0];
+        const start = x0;
+        x0 = null;
+        row.style.transform = '';
+        if (start === null || !t) return;
+        const dx = t.clientX - start, dy = t.clientY - y0;
+        if (dx < -_SWIPE_DISMISS_PX && Math.abs(dx) > 2 * Math.abs(dy)) {
+            dismissRecentSession(row.querySelector('.recent-dismiss'));
+        }
+    });
+}
+
+// --- Dismiss (CMX-437) -------------------------------------------------------
+// The × on a Recent row (or a swipe-left) hides it: the row leaves the list at once,
+// the server records the session id (chela/dismissed_sessions.py, so every device
+// agrees), and an Undo toast offers it back for a few seconds. Nothing is deleted —
+// not the transcript, not the restore bookkeeping.
+
+const _UNDO_MS = 6000;
+let _undoToast = null;
+
+function _closeRecentUndoToast() {
+    if (!_undoToast) return;
+    clearTimeout(_undoToast.timer);
+    _undoToast.el.remove();
+    _undoToast = null;
+}
+
+function _showRecentUndoToast(sids, text) {
+    _closeRecentUndoToast();
+    let stack = document.getElementById('run-toast-stack');
+    if (!stack) {
+        stack = document.createElement('div');
+        stack.id = 'run-toast-stack';
+        stack.className = 'run-toast-stack';
+        document.body.appendChild(stack);
+    }
+    const el = document.createElement('div');
+    el.className = 'run-toast recent-undo-toast';
+    el.setAttribute('role', 'status');
+    el.innerHTML = `<span>${escHtml(text)}</span> <button class="recent-undo">Undo</button>`;
+    el.querySelector('.recent-undo').onclick = e => { e.stopPropagation(); undoDismissRecent(sids); };
+    el.onclick = () => _closeRecentUndoToast();
+    stack.appendChild(el);
+    _undoToast = { el, sids, timer: setTimeout(_closeRecentUndoToast, _UNDO_MS) };
+}
+
+async function _postDismiss(path, sids) {
+    try {
+        const res = await api(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_ids: sids }),
+        });
+        return !!(res && res.ok);
+    } catch (e) {
+        return false;
+    }
+}
+
+async function _dismiss(sids, text) {
+    sids = sids.filter(Boolean);
+    if (!sids.length) return;
+    const gone = new Set(sids);
+    const before = _recentPayload;
+    _recentPayload = { ...before, rows: (before.rows || []).filter(r => !gone.has(r.session_id)) };
+    _paintRecentSessions();
+    if (!(await _postDismiss('/api/restore/dismiss', sids))) {
+        _recentPayload = before;
+        _paintRecentSessions();
+        alert('Could not dismiss — nothing was changed.');
+        return;
+    }
+    _showRecentUndoToast(sids, text);
+}
+
+async function dismissRecentSession(btn) {
+    if (!btn) return;
+    const sid = btn.dataset.session;
+    const row = (_recentPayload.rows || []).find(r => r.session_id === sid);
+    const label = row ? (row.label || row.cwd || row.wid) : 'session';
+    await _dismiss([sid], `Dismissed ${label}`);
+}
+
+async function clearRecentSessions() {
+    const sids = (_recentPayload.rows || []).map(r => r.session_id).filter(Boolean);
+    if (!sids.length) return;
+    const n = sids.length;
+    if (!confirm(`Dismiss all ${n} recent session${n === 1 ? '' : 's'}? Transcripts are kept; Undo is offered briefly.`)) return;
+    await _dismiss(sids, `Dismissed ${n} session${n === 1 ? '' : 's'}`);
+}
+
+async function undoDismissRecent(sids) {
+    _closeRecentUndoToast();
+    if (!(await _postDismiss('/api/restore/undismiss', sids))) {
+        alert('Could not undo the dismiss.');
+    }
+    await refreshRecentSessions();
 }
 
 function toggleDispatcherSessions() {
@@ -2419,8 +2548,8 @@ function closeShortcuts() {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { closeShortcuts, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
+export { _closeRecentUndoToast, closeShortcuts, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyUpdate, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar });
+Object.assign(window.chela, { applyUpdate, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
