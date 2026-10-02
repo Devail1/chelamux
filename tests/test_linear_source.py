@@ -788,3 +788,276 @@ def test_the_tick_runs_the_archive_sweep(repo, team, launched):
     summary = dispatcher.tick(repo / "WORKFLOW.md")
     assert summary["tracker_archived"] == 1
     assert team.issues["CMX-2"]["archivedAt"]
+
+
+# --- CMX-432 rework 2: each guard asserts the invariant itself ------------------------
+
+def test_the_production_transport_sends_the_key_to_linears_graphql_endpoint(tmp_path):
+    """The real request — not a stub's view of it: POST to Linear's GraphQL URL, the key
+    from chela.env as `Authorization`, a JSON body carrying the query and its variables."""
+    seen = []
+
+    def urlopen(req, timeout=None):
+        seen.append((req, timeout))
+        return _urlopen_returning(json.dumps({"data": {"ok": 1}}).encode())(req, timeout)
+
+    assert linear._http_transport(SECRET, urlopen=urlopen)("query Q { x }", {"a": 1}) == {
+        "ok": 1}
+    (req, timeout), = seen
+    assert req.full_url == linear.LINEAR_API_URL == "https://api.linear.app/graphql"
+    assert req.get_method() == "POST"
+    assert req.get_header("Authorization") == SECRET
+    assert req.get_header("Content-type") == "application/json"
+    assert json.loads(req.data) == {"query": "query Q { x }", "variables": {"a": 1}}
+    assert timeout == linear.HTTP_TIMEOUT_SECONDS
+
+
+def test_make_transport_is_the_http_transport_carrying_that_key(tmp_path, monkeypatch):
+    """The seam the suite replaces must, unreplaced, authenticate with the key it is given."""
+    seen = []
+
+    def urlopen(req, timeout=None):
+        seen.append(req.get_header("Authorization"))
+        return _urlopen_returning(b'{"data": {}}')(req, timeout)
+
+    monkeypatch.setattr(linear._http_transport, "__defaults__", (urlopen,))
+    linear.make_transport(SECRET)("q", {})
+    assert seen == [SECRET]
+
+
+@pytest.mark.parametrize("code,kind", [(401, "auth"), (403, "auth"), (429, "rate_limited"),
+                                       (500, "http"), (502, "http")])
+def test_each_http_failure_is_classified_by_its_status(code, kind):
+    with pytest.raises(LinearError) as e:
+        linear._http_transport(SECRET, urlopen=_urlopen_raising(_http_error(code)))("q", {})
+    assert e.value.kind == kind
+    assert SECRET not in str(e.value)
+
+
+@pytest.mark.parametrize("payload,kind", [
+    (b"<html>gateway</html>", "malformed"),
+    (b"[]", "malformed"),
+    (b'{"data": null}', "malformed"),
+    (json.dumps({"errors": [{"message": "who", "extensions": {
+        "code": "AUTHENTICATION_ERROR"}}]}).encode(), "auth"),
+    (json.dumps({"errors": [{"message": "no", "extensions": {
+        "code": "FORBIDDEN"}}]}).encode(), "auth"),
+    (json.dumps({"errors": [{"message": "bad field"}]}).encode(), "graphql"),
+])
+def test_each_response_failure_is_classified_by_its_body(payload, kind):
+    with pytest.raises(LinearError) as e:
+        linear._http_transport(SECRET, urlopen=_urlopen_returning(payload))("q", {})
+    assert e.value.kind == kind
+
+
+def test_a_network_failure_is_classified_network():
+    with pytest.raises(LinearError) as e:
+        linear._http_transport(SECRET, urlopen=_urlopen_raising(
+            urllib.error.URLError("no route")))("q", {})
+    assert e.value.kind == "network"
+
+
+def test_a_transport_that_raises_anything_is_a_failed_read_not_a_crash(tmp_path):
+    def boom(query, variables):
+        raise RuntimeError("stub blew up")
+
+    src = _src(tmp_path, boom)
+    assert src.fetch_by_ids(["CMX-1"]) is None
+    assert src.list_open_tasks() == [] and src.read_failed is True
+    assert _src(tmp_path, lambda q, v: ["not", "a", "dict"]).fetch_by_ids(["CMX-1"]) is None
+
+
+@pytest.mark.parametrize("key", ["api_key", "apiKey", "API_KEY", "apikey", "token",
+                                 "auth_token", "secret", "client_secret", "password",
+                                 "Password"])
+def test_every_credential_shaped_workflow_key_is_refused(tmp_path, monkeypatch, key):
+    """Not only `api_key`: any token/secret/password-shaped key under `tracker:` would put
+    a credential in a repo file. Named in the error, never echoed, and nothing is built."""
+    monkeypatch.setattr(linear, "load_api_key", lambda: SECRET)
+    monkeypatch.setattr(linear, "make_transport", lambda k: pytest.fail("must not build"))
+    src = LinearSource(_wf(tmp_path, **{key: SECRET}))
+    assert src.config_error and f"tracker.{key}" in src.config_error
+    assert SECRET not in src.config_error
+    assert src.fetch_by_ids(["CMX-1"]) is None
+
+
+def test_the_ordinary_tracker_keys_are_not_mistaken_for_credentials(tmp_path, monkeypatch):
+    monkeypatch.setattr(linear, "load_api_key", lambda: SECRET)
+    monkeypatch.setattr(linear, "make_transport", lambda k: FakeLinear())
+    src = LinearSource(_wf(tmp_path, ready_states=["Todo"], done_state="Done"))
+    assert src.config_error is None
+
+
+def test_a_blank_key_line_is_a_missing_key(tmp_path, monkeypatch):
+    env = tmp_path / "chela.env"
+    env.write_text("LINEAR_API_KEY=   \n")
+    monkeypatch.setenv("CHELA_ENV_FILE", str(env))
+    assert "no LINEAR_API_KEY" in LinearSource(_wf(tmp_path)).config_error
+
+
+@pytest.mark.parametrize("foreign", ["ENG-5", "CMXX-5", "XCMX-5", "5", "CMX-5x", "CMX-",
+                                     "", None, "0123456789ab"])
+def test_an_id_outside_this_team_is_never_this_trackers(tmp_path, foreign):
+    """`ENG-5` is another team's issue 5, and a TODO.md-era hash is no issue at all — the
+    team's own CMX-5 must not come back for it, and Linear is not even asked."""
+    fake = FakeLinear([issue(5)])
+    assert _src(tmp_path, fake).fetch_by_ids([foreign]) == []
+    assert fake.calls == []
+
+
+def test_only_this_teams_numbers_are_requested(tmp_path):
+    fake = FakeLinear([issue(5), issue(6)])
+    got = _src(tmp_path, fake).fetch_by_ids(["ENG-6", "cmx-5", "CMX-5", "OPS-7"])
+    assert [t.id for t in got] == ["CMX-5"]
+    assert fake.calls == [("by_number", {"team": "CMX", "numbers": [5], "after": None})]
+    # A lowercase identifier (`chela peek cmx-6`) is still this team's issue 6.
+    assert [t.id for t in _src(tmp_path, fake).fetch_by_ids(["cmx-6"])] == ["CMX-6"]
+
+
+def test_a_canceled_issue_is_canceled_not_done(tmp_path):
+    """Two terminal verdicts, kept apart: canceled work did not ship."""
+    fake = FakeLinear([issue(1, state="Canceled"), issue(2, state="Done"),
+                       issue(3, state="Canceled", archived=True),
+                       issue(4, state="Done", archived=True), issue(5, state="Backlog")])
+    got = {t.id: t.terminal_state
+           for t in _src(tmp_path, fake).fetch_by_ids([f"CMX-{n}" for n in range(1, 6)])}
+    assert got == {"CMX-1": "canceled", "CMX-2": "done", "CMX-3": "canceled",
+                   "CMX-4": "done", "CMX-5": None}
+
+
+def test_a_priority_and_order_tie_is_broken_by_the_issue_number(tmp_path):
+    """Same priority, same sortOrder, listed out of order by Linear: the number decides,
+    so the claim order never depends on how the API happened to page."""
+    fake = FakeLinear([issue(3, priority=2, sort=1.0), issue(1, priority=2, sort=1.0),
+                       issue(2, priority=2, sort=1.0), issue(9, priority=1, sort=9.0)])
+    assert [t.id for t in _src(tmp_path, fake).list_open_tasks()] == [
+        "CMX-9", "CMX-1", "CMX-2", "CMX-3"]
+    assert _claim(tmp_path, fake) == ["CMX-9", "CMX-1", "CMX-2", "CMX-3"]
+
+
+@pytest.mark.parametrize("rel_type", ["related", "duplicate", "similar", None])
+def test_only_a_blocks_relation_holds_a_task(tmp_path, rel_type):
+    """`inverseRelations` carries every relation type pointing at the issue; a related or
+    duplicate link to an OPEN issue is not a blocker and must not hold the task."""
+    rel = {"type": rel_type, "issue": {"identifier": "CMX-2", "archivedAt": None,
+                                       "state": {"type": "started"}}}
+    fake = FakeLinear([issue(1, blockers=[rel]), issue(2, state="In Progress")])
+    t = {t.id: t for t in _src(tmp_path, fake).list_open_tasks()}["CMX-1"]
+    assert t.depends == ()
+    assert _claim(tmp_path, fake) == ["CMX-1"]
+    # … while the same link typed `blocks` does hold it.
+    fake = FakeLinear([issue(1, blockers=[{**rel, "type": "blocks"}]),
+                       issue(2, state="In Progress")])
+    assert _claim(tmp_path, fake) == []
+
+
+def test_closing_an_issue_archived_while_still_open_writes_nothing(tmp_path):
+    """An issue archived straight out of Todo is already terminal for chela: no state
+    update (Linear would un-archive or reject it) and no second archive."""
+    fake = FakeLinear([issue(4, state="Todo", archived=True)])
+    assert _src(tmp_path, fake).close_tasks(["CMX-4"]) == {"CMX-4": "already"}
+    assert fake.names() == ["by_number"]
+    assert fake.issues["CMX-4"]["state"]["name"] == "Todo"
+
+
+def test_a_close_whose_read_fails_is_failed_and_an_unknown_issue_is_missing(tmp_path):
+    fake = FakeLinear([issue(4, state="In Review")], fail=LinearError("network", "x"))
+    assert _src(tmp_path, fake).close_tasks(["CMX-4"]) == {"CMX-4": "failed"}
+    fake.fail = None
+    assert _src(tmp_path, fake).close_tasks(["CMX-8"]) == {"CMX-8": "missing"}
+    assert "update" not in fake.names() and "archive" not in fake.names()
+
+
+def test_a_close_that_raises_never_crashes_the_strike(tmp_path):
+    src = _src(tmp_path, FakeLinear())
+    src.close_tasks = lambda ids, **kw: (_ for _ in ()).throw(RuntimeError("boom"))
+    assert dispatcher._strike_merged_tasks(_wf(tmp_path), src, ["CMX-4"]) == 0
+
+
+def test_list_open_tasks_follows_every_page(tmp_path):
+    """Linear pages at 100; the second page's issues are open work too, fetched with the
+    first page's `endCursor`."""
+    calls = []
+
+    def paged(query, variables):
+        calls.append(variables.get("after"))
+        if variables.get("after") is None:
+            return {"issues": {"nodes": [issue(1)],
+                               "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}}
+        assert variables["after"] == "c1"
+        return {"issues": {"nodes": [issue(2)],
+                           "pageInfo": {"hasNextPage": False, "endCursor": "c2"}}}
+
+    assert [t.id for t in _src(tmp_path, paged).list_open_tasks()] == ["CMX-1", "CMX-2"]
+    assert calls == [None, "c1"]
+
+
+def test_a_risk_label_sets_the_task_risk(tmp_path):
+    node = issue(1)
+    node["labels"] = {"nodes": [{"name": "risk:high"}, {"name": "ui"}]}
+    t = _src(tmp_path, FakeLinear([node])).list_open_tasks()[0]
+    assert (t.risk, t.risk_reason) == ("high", "label")
+
+
+def test_a_held_task_logs_info_for_an_open_blocker_and_warns_for_an_unknown_one(
+        tmp_path, caplog):
+    """An In Progress blocker is open (just not claimable): an ordinary wait, INFO. A
+    blocker the team does not have open or done is a tracker problem: WARNING."""
+    fake = FakeLinear([issue(1, blockers=[blocked_by("CMX-2", "In Progress")]),
+                       issue(2, state="In Progress"),
+                       issue(3, blockers=[blocked_by("CMX-77", "Canceled")])])
+    with caplog.at_level(logging.INFO, logger="chela.dispatcher"):
+        assert _claim(tmp_path, fake) == []
+    by_task = {("CMX-1" in r.getMessage(), "CMX-3" in r.getMessage()): r.levelno
+               for r in caplog.records if "held back" in r.getMessage()}
+    assert by_task == {(True, False): logging.INFO, (False, True): logging.WARNING}
+
+
+def test_the_sweep_warns_above_the_threshold(tmp_path, caplog):
+    fake = FakeLinear([issue(i) for i in range(1, linear.ISSUE_COUNT_WARN_AT + 2)])
+    with caplog.at_level(logging.WARNING, logger="chela.sources.linear"):
+        assert _src(tmp_path, fake).archive_sweep() == 0
+    assert f"{linear.ISSUE_COUNT_WARN_AT + 1} non-archived issues" in caplog.text
+    linear._last_sweep.clear()
+    caplog.clear()
+    fake = FakeLinear([issue(i) for i in range(1, linear.ISSUE_COUNT_WARN_AT + 1)])
+    with caplog.at_level(logging.WARNING, logger="chela.sources.linear"):
+        _src(tmp_path, fake).archive_sweep()
+    assert "non-archived issues" not in caplog.text
+
+
+def test_dry_run_previews_the_trackers_branch_and_number(repo, team):
+    """The preview must name the branch a live tick would take — Linear's, not
+    `{project_key}-{N}` — and Linear's own number."""
+    desc = "**Do.** tighten the top row"
+    team.issues = {"CMX-7": issue(7, "Tighten top row", desc=desc,
+                                  branch="cmx-7-tighten-top-row")}
+    plan, = dispatcher.dry_run(repo / "WORKFLOW.md")
+    assert (plan["task_id"], plan["task_number"], plan["branch"]) == (
+        "CMX-7", 7, "cmx-7-tighten-top-row")
+    assert plan["prompt"] == f"brief: {desc}"
+
+
+def test_the_worktree_is_checked_out_on_the_trackers_branch(repo, team, launched):
+    team.issues = {"CMX-7": issue(7, "Tighten top row", branch="cmx-7-tighten-top-row")}
+    dispatcher.tick(repo / "WORKFLOW.md")
+    row = _row("CMX-7")
+    head = subprocess.run(["git", "-C", row["worktree_path"], "rev-parse", "--abbrev-ref",
+                           "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    assert head == row["branch_name"] == "cmx-7-tighten-top-row"
+
+
+def test_every_taken_suffix_is_skipped(repo, team, launched):
+    for b in ("cmx-7-tighten-top-row", "cmx-7-tighten-top-row-2"):
+        subprocess.run(["git", "-C", str(repo), "push", "-q", "origin", f"dev:{b}"],
+                       check=True, capture_output=True)
+    team.issues = {"CMX-7": issue(7, "Tighten top row", branch="cmx-7-tighten-top-row")}
+    dispatcher.tick(repo / "WORKFLOW.md")
+    assert _row("CMX-7")["branch_name"] == "cmx-7-tighten-top-row-3"
+
+
+def test_a_failed_read_skips_the_archive_sweep(repo, team, launched):
+    team.fail = LinearError("auth", "HTTP 401")
+    summary = dispatcher.tick(repo / "WORKFLOW.md")
+    assert summary["tracker_read_failed"] is True
+    assert "sweep" not in team.names() and "tracker_archived" not in summary
