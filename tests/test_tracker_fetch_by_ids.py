@@ -414,3 +414,164 @@ def test_tracker_gone_logs_failure_and_recovery_once_each(caplog):
         assert (len(fails()), len(recoveries())) == (1, 1)
         dispatcher._tracker_gone(bad, "wf", {"a"}, [], True)
         assert (len(fails()), len(recoveries())) == (2, 1)
+
+
+# --- rework round 2: each invariant asserted on its own, not via a neighbour ---------------
+
+
+def _gh_projecting(issues: list[dict]):
+    """A fake `gh issue list` that, like the real one, returns ONLY the fields its `--json`
+    asked for — so a refresh that forgets to ask for `state` gets no state back."""
+    def run(cmd, *a, **k):
+        fields = cmd[cmd.index("--json") + 1].split(",")
+        return _GhOut(stdout=json.dumps([{f: i[f] for f in fields if f in i} for i in issues]))
+    return run
+
+
+def test_gh_fetch_by_ids_reads_state_from_what_it_asked_gh_for(tmp_path):
+    """🔴 GUARD: drop `state` from `--json` ⇒ every requested issue is unclassifiable ⇒ the
+    read fails (None) instead of reporting open/closed ⇒ RED."""
+    src = _gh(tmp_path)
+    tid, closed_tid = gh_task_id(REPO, ISSUE), gh_task_id(REPO, 8)
+    with patch("chela.sources.gh_issues.subprocess.run",
+               side_effect=_gh_projecting(json.loads(_issues((ISSUE, "OPEN"), (8, "CLOSED"))))):
+        snap = src.fetch_by_ids([tid, closed_tid])
+    assert snap is not None
+    assert {t.id: t.state for t in snap} == {tid: "open", closed_tid: "closed"}
+
+
+@pytest.mark.parametrize("payload", ['{"message": "Not Found"}', "null", '"oops"', "42"])
+def test_gh_fetch_by_ids_is_None_on_a_non_list_payload(tmp_path, payload):
+    """🔴 GUARD: valid JSON that is not a list is a FAILED read — never `[]` ("none of these
+    ids exist"), which would close out every live run it was asked about."""
+    src = _gh(tmp_path)
+    with patch("chela.sources.gh_issues.subprocess.run", return_value=_GhOut(stdout=payload)):
+        assert src.fetch_by_ids([gh_task_id(REPO, ISSUE)]) is None
+
+
+@pytest.mark.parametrize("status", LIVE_STATUSES)
+def test_a_non_list_gh_payload_changes_no_row(tmp_path, status):
+    """🔴 GUARD, end to end: a non-list payload must leave a live row exactly as it was."""
+    wf = _wf(tmp_path)
+    src = _gh(tmp_path)
+    tid = gh_task_id(REPO, ISSUE)
+    wt = _seed(wf, tid, status, tmp_path)
+
+    summary, killed = _tick(wf, src, gh_behaviour=lambda cmd, *a, **k:
+                            _GhOut(stdout='{"message": "Not Found"}') if "all" in cmd
+                            else _GhOut(stdout="[]"))
+
+    assert summary["tracker_refresh_failed"] is True
+    assert summary["reconciled_done"] == 0
+    assert _status_of(tid) == status
+    assert killed == []
+    assert wt.exists()
+
+
+def test_gh_a_full_page_that_found_every_requested_id_is_a_good_read(tmp_path, monkeypatch):
+    """⭐ MUST BE ACCEPTED: truncation fails the read ONLY when a requested id is still
+    unaccounted for. A full page that holds every requested id is a complete answer — fail
+    it and a repo past the limit could never reconcile anything."""
+    import chela.sources.gh_issues as gh
+    monkeypatch.setattr(gh, "_REFRESH_LIMIT", 2)
+    src = _gh(tmp_path)
+    tid, closed_tid = gh_task_id(REPO, ISSUE), gh_task_id(REPO, 8)
+    with patch("chela.sources.gh_issues.subprocess.run",
+               return_value=_GhOut(stdout=_issues((ISSUE, "OPEN"), (8, "CLOSED")))):
+        snap = src.fetch_by_ids([tid, closed_tid])
+        assert snap is not None
+        assert {t.id: t.state for t in snap} == {tid: "open", closed_tid: "closed"}
+        # …and the same full page with ONE requested id missing is a failed read.
+        assert src.fetch_by_ids([tid, gh_task_id(REPO, 99)]) is None
+
+
+def test_gh_a_short_page_missing_an_id_is_a_good_read_reporting_it_absent(tmp_path, monkeypatch):
+    """⭐ MUST BE ACCEPTED: under the limit, the listing is complete — a missing id is
+    positively absent (`[]`), not a failure."""
+    import chela.sources.gh_issues as gh
+    monkeypatch.setattr(gh, "_REFRESH_LIMIT", 3)
+    src = _gh(tmp_path)
+    with patch("chela.sources.gh_issues.subprocess.run",
+               return_value=_GhOut(stdout=_issues((1, "OPEN"), (2, "OPEN")))):
+        assert src.fetch_by_ids([gh_task_id(REPO, 99)]) == []
+
+
+def test_gh_an_unrequested_issue_never_fails_or_pollutes_the_read(tmp_path):
+    """🔴 GUARD: only REQUESTED ids are classified and returned — an unrelated issue with an
+    odd state must neither fail the refresh nor appear in it."""
+    src = _gh(tmp_path)
+    payload = json.loads(_issues((ISSUE, "OPEN"), (8, "OPEN")))
+    payload[1]["state"] = "weird"
+    with patch("chela.sources.gh_issues.subprocess.run",
+               return_value=_GhOut(stdout=json.dumps(payload))):
+        snap = src.fetch_by_ids([gh_task_id(REPO, ISSUE)])
+    assert snap is not None
+    assert [(t.id, t.state) for t in snap] == [(gh_task_id(REPO, ISSUE), "open")]
+
+
+def test_gh_fetch_by_ids_of_nothing_is_an_empty_good_read(tmp_path):
+    src = _gh(tmp_path)
+    with patch("chela.sources.gh_issues.subprocess.run") as run:
+        assert src.fetch_by_ids([]) == []
+    run.assert_not_called()
+
+
+class _Fetch:
+    read_failed = False
+
+    def __init__(self, snapshot):
+        self.snapshot, self.calls = snapshot, 0
+
+    def fetch_by_ids(self, ids):
+        self.calls += 1
+        return self.snapshot
+
+
+def test_tracker_gone_with_no_candidates_is_a_successful_empty_refresh(caplog):
+    """🔴 GUARD: nothing to refresh is NOT a failed refresh. Read it as one and every quiet
+    tick logs a spurious FAILURE and — worse — parks the workflow in `_refresh_failed`, so
+    the edge-triggered warning is swallowed when a REAL failure follows."""
+    src = _Fetch(None)
+    with caplog.at_level("INFO", logger=dispatcher.log.name):
+        assert dispatcher._tracker_gone(src, "wf", [], [], False) == set()
+        assert dispatcher._tracker_gone(src, "wf", set(), [], True) == set()
+    assert src.calls == 0
+    assert "wf" not in dispatcher._refresh_failed
+    assert not [r for r in caplog.records if "id refresh" in r.getMessage()]
+    # A real failure afterwards is still announced.
+    with caplog.at_level("WARNING", logger=dispatcher.log.name):
+        assert dispatcher._tracker_gone(src, "wf", {"a"}, [], False) is None
+    assert len([r for r in caplog.records if "id refresh FAILED" in r.getMessage()]) == 1
+
+
+def test_a_tick_with_no_reconcile_candidates_reports_no_refresh_failure(tmp_path, caplog):
+    """🔴 GUARD, end to end: a tick whose rows are all still open has no candidates and
+    must not report (or log) a refresh failure."""
+    wf = _wf(tmp_path)
+    src = MarkdownSource(wf)
+    tid = src.list_open_tasks()[0].id
+    _seed(wf, tid, "awaiting_review", tmp_path)
+    with caplog.at_level("WARNING", logger=dispatcher.log.name):
+        summary, killed = _tick(wf, src)
+    assert summary["tracker_refresh_failed"] is False
+    assert _status_of(tid) == "awaiting_review"
+    assert str(wf.path) not in dispatcher._refresh_failed
+    assert not [r for r in caplog.records if "id refresh FAILED" in r.getMessage()]
+
+
+def test_tracker_gone_classifies_closed_open_and_absent():
+    """🔴 GUARD: gone = reported `closed` OR absent from a GOOD read; reported `open` is
+    never gone. Each arm is pinned on its own."""
+    from chela.sources import Task
+
+    def t(i, state):
+        return Task(id=i, title=i, file="", line_number=1, raw=i, state=state)
+
+    src = _Fetch([t("open1", "open"), t("closed1", "closed")])
+    assert dispatcher._tracker_gone(src, "wf", {"open1", "closed1", "absent1"}, [], False) \
+        == {"closed1", "absent1"}
+    assert dispatcher._tracker_gone(_Fetch([t("o", "open")]), "wf", {"o"}, [], False) == set()
+    assert dispatcher._tracker_gone(_Fetch([]), "wf", {"x"}, [], False) == {"x"}
+    # A good read is trusted even when the open LISTING flagged itself failed — the refresh,
+    # not the listing, is the evidence.
+    assert dispatcher._tracker_gone(_Fetch([]), "wf", {"x"}, [], True) == {"x"}
