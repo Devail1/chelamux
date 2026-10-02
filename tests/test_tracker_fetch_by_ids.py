@@ -575,3 +575,165 @@ def test_tracker_gone_classifies_closed_open_and_absent():
     # A good read is trusted even when the open LISTING flagged itself failed — the refresh,
     # not the listing, is the evidence.
     assert dispatcher._tracker_gone(_Fetch([]), "wf", {"x"}, [], True) == {"x"}
+
+
+# --- rework round 3: the per-workflow edge, the full id set, the listing fallback's wiring --
+
+
+def test_the_failure_edge_is_per_workflow(caplog):
+    """🔴 GUARD: one workflow already failing must not swallow ANOTHER workflow's first
+    failure warning — nor its recovery line, nor be recovered by the other's good read."""
+    bad = _Fetch(None)
+
+    def fails(wf):
+        return [r for r in caplog.records
+                if "id refresh FAILED" in r.getMessage() and wf in r.getMessage()]
+
+    with caplog.at_level("INFO", logger=dispatcher.log.name):
+        assert dispatcher._tracker_gone(bad, "wf-a", {"a"}, [], False) is None
+        assert dispatcher._tracker_gone(bad, "wf-b", {"b"}, [], False) is None
+        assert (len(fails("wf-a")), len(fails("wf-b"))) == (1, 1)
+        assert dispatcher._refresh_failed == {"wf-a", "wf-b"}
+        # wf-b recovering leaves wf-a parked (and silent) — its edge is its own.
+        assert dispatcher._tracker_gone(_Fetch([]), "wf-b", {"b"}, [], False) == {"b"}
+        assert dispatcher._refresh_failed == {"wf-a"}
+        assert dispatcher._tracker_gone(bad, "wf-a", {"a"}, [], False) is None
+        assert len(fails("wf-a")) == 1
+        recovered = [r for r in caplog.records if "id refresh recovered" in r.getMessage()]
+        assert [r.getMessage().endswith("wf-b") for r in recovered] == [True]
+
+
+class _OpenForWhatItWasAsked:
+    """An adapter whose answer depends on the QUESTION: every id it is asked about is open,
+    every id it is not asked about is (necessarily) absent from the snapshot."""
+
+    read_failed = False
+
+    def __init__(self):
+        self.asked: list[list[str]] = []
+
+    def fetch_by_ids(self, ids):
+        from chela.sources import Task
+        self.asked.append(list(ids))
+        return [Task(id=i, title=i, file="", line_number=1, raw=i) for i in ids]
+
+
+@pytest.mark.parametrize("ids", [{"a", "b"}, {"c", "a", "b"}, ["z", "y", "x", "w"]])
+def test_tracker_gone_refreshes_every_candidate_it_was_given(ids):
+    """🔴 GUARD: an id the adapter was never ASKED about is absent from its snapshot and
+    would read as gone. Every candidate goes into the one refresh — all of them open ⇒
+    none gone."""
+    src = _OpenForWhatItWasAsked()
+    assert dispatcher._tracker_gone(src, "wf", ids, [], False) == set()
+    assert len(src.asked) == 1
+    assert sorted(src.asked[0]) == sorted(set(ids))
+
+
+class _NoFetchFailedListing:
+    """A source predating `fetch_by_ids` whose open LISTING failed this tick."""
+
+    read_failed = True
+
+    def list_open_tasks(self):
+        return []
+
+
+class _NoFetchGoodListing:
+    read_failed = False
+
+    def list_open_tasks(self):
+        return []
+
+
+@pytest.mark.parametrize("status", LIVE_STATUSES)
+def test_a_source_without_fetch_whose_listing_failed_changes_no_row(tmp_path, status):
+    """🔴 GUARD, end to end (the WIRING): `tick` must hand `_tracker_gone` the listing's OWN
+    `read_failed`. Pass `False` instead ⇒ the empty failed listing reads as "every task
+    gone" ⇒ the live row goes `done` ⇒ RED."""
+    wf = _wf(tmp_path)
+    wt = _seed(wf, "abc123", status, tmp_path)
+
+    summary, killed = _tick(wf, _NoFetchFailedListing())
+
+    assert summary["tracker_read_failed"] is True
+    assert summary["tracker_refresh_failed"] is True
+    assert summary["reconciled_done"] == 0
+    assert _status_of("abc123") == status
+    assert killed == []
+    assert wt.exists()
+
+
+def test_a_source_without_fetch_whose_listing_succeeded_reconciles_as_today(tmp_path):
+    """⭐ MUST BE ACCEPTED — the control for the guard above: the same empty listing, read
+    OK, still closes the review row out exactly as before CMX-430."""
+    wf = _wf(tmp_path)
+    _seed(wf, "abc123", "awaiting_review", tmp_path)
+
+    summary, _ = _tick(wf, _NoFetchGoodListing())
+
+    assert summary["tracker_refresh_failed"] is False
+    assert summary["reconciled_done"] == 1
+    assert _status_of("abc123") == "done"
+
+
+@pytest.mark.parametrize("exc", [
+    FileNotFoundError(2, "No such file or directory", "gh"),
+    subprocess.TimeoutExpired(cmd="gh", timeout=60),
+])
+def test_gh_fetch_by_ids_is_None_when_gh_cannot_run(tmp_path, exc):
+    """🔴 GUARD: `gh` missing from PATH or hanging is a FAILED read (None) — never an
+    exception escaping into the tick, never `[]`."""
+    src = _gh(tmp_path)
+    with patch("chela.sources.gh_issues.subprocess.run", side_effect=exc):
+        assert src.fetch_by_ids([gh_task_id(REPO, ISSUE)]) is None
+
+
+@pytest.mark.parametrize("status", LIVE_STATUSES)
+def test_a_missing_gh_binary_changes_no_row(tmp_path, status):
+    """🔴 GUARD, end to end: no `gh` on PATH ⇒ no row changes."""
+    wf = _wf(tmp_path)
+    src = _gh(tmp_path)
+    tid = gh_task_id(REPO, ISSUE)
+    wt = _seed(wf, tid, status, tmp_path)
+
+    def missing(cmd, *a, **k):
+        raise FileNotFoundError(2, "No such file or directory", "gh")
+
+    summary, killed = _tick(wf, src, gh_behaviour=missing)
+
+    assert summary["tracker_refresh_failed"] is True
+    assert summary["reconciled_done"] == 0
+    assert _status_of(tid) == status
+    assert killed == []
+    assert wt.exists()
+
+
+def test_gh_fetch_by_ids_skips_junk_records_without_dropping_real_ones(tmp_path):
+    """🔴 GUARD: a record with no number (or not an object) is skipped — it neither fails
+    the read nor stops the scan before the requested issue behind it."""
+    src = _gh(tmp_path)
+    payload = ["junk", {"title": "no number"}, *json.loads(_issues((ISSUE, " Closed ")))]
+    with patch("chela.sources.gh_issues.subprocess.run",
+               return_value=_GhOut(stdout=json.dumps(payload))):
+        snap = src.fetch_by_ids([gh_task_id(REPO, ISSUE)])
+    assert snap is not None
+    assert [(t.id, t.state) for t in snap] == [(gh_task_id(REPO, ISSUE), "closed")]
+
+
+def test_markdown_fetch_by_ids_is_None_when_the_file_is_unreadable(tmp_path):
+    """🔴 GUARD: a TODO.md that exists but cannot be read (a directory, non-UTF-8 bytes) is a
+    FAILED read — never "none of these ids exist"."""
+    src = _md(tmp_path, None)
+    (tmp_path / "TODO.md").mkdir()
+    assert src.fetch_by_ids(["abc123"]) is None
+    (tmp_path / "TODO.md").rmdir()
+    (tmp_path / "TODO.md").write_bytes(b"- [ ] \xff\xfe alpha\n")
+    assert src.fetch_by_ids(["abc123"]) is None
+
+
+def test_markdown_a_struck_line_with_markers_maps_to_its_bare_title_id(tmp_path):
+    """🔴 GUARD: a struck line still carrying its `<!-- … -->` markers is the SAME task as
+    the open bullet it was — reported `closed` under the bare-title id, not absent."""
+    src = _md(tmp_path, "- [x] beta <!-- depends: alpha -->\n")
+    b = _md_id(src, "beta")
+    assert [(t.id, t.state) for t in src.fetch_by_ids([b])] == [(b, "closed")]
