@@ -1,5 +1,5 @@
 // --- Stage 0: ES-module imports ---
-import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, updateTabSignal, wantsHuman } from './util.js';
+import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, staticUrl, updateTabSignal, wantsHuman } from './util.js';
 import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
@@ -272,22 +272,108 @@ async function termKey(key) { return termKeyFor($('#term-agent').value, key); }
 
 // Paste the device clipboard into the active pane. xterm.js can't surface iOS's
 // native "Paste" callout inside its hidden textarea, so phones had no reliable
-// paste path; this reads the clipboard on tap (the gesture unlocks readText() on
+// paste path; this reads the clipboard on tap (the gesture unlocks the read on
 // iOS) and ships it to /api/term/paste, which delivers a bracketed paste at the
-// tmux layer. No-op where the Clipboard API is unavailable or permission denied.
+// tmux layer.
+//
+// CMX-423: ONE clipboard.read() where it exists, like the in-pane Ctrl/Cmd+V shim. An
+// image (a screenshot is the usual phone clipboard) takes the image path
+// (/api/term/paste-image, then its path typed) so Claude attaches it. Every no-op says
+// why on the button.
+//
+// CMX-428: exactly ONE clipboard call per tap — read() if it exists, else readText(),
+// never both. On iOS WebKit the tap's user activation covers a single read, so a
+// readText() after an awaited read() came back '' (or threw) and the button said
+// "Empty" over a full clipboard. iOS also often hands copied text over as
+// text/uri-list or text/html with no text/plain entry, so those are accepted too.
+function _pasteFlash(btn, label) {
+    if (!btn) return;
+    const orig = btn.dataset.label || btn.textContent;
+    btn.dataset.label = orig;
+    btn.textContent = label;
+    clearTimeout(btn._pasteFlash);
+    btn._pasteFlash = setTimeout(() => { btn.textContent = orig; }, 1500);
+}
+
+async function _pasteTextTo(wid, text, btn) {
+    if (!text) { _pasteFlash(btn, 'Empty'); return; }
+    await api('/api/term/paste', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent: wid, text }),
+    });
+}
+
+async function _pasteImageTo(wid, blob, btn) {
+    const fd = new FormData();
+    fd.append('agent', wid);
+    fd.append('image', blob, blob.name || 'paste');
+    const j = await api('/api/term/paste-image', { method: 'POST', body: fd, credentials: 'same-origin' });
+    if (!j || !j.path) { _pasteFlash(btn, 'Failed'); return; }
+    await _pasteTextTo(wid, j.path, btn);
+}
+
+// Plain text from a text/html clipboard entry: drop script/style, fold source
+// whitespace (HTML newlines are just spaces), break lines at <br> and block ends, strip tags, decode entities (a <textarea>'s innerHTML parses as RCDATA, so no
+// markup is ever instantiated), then collapse whitespace.
+function _htmlToText(html) {
+    const stripped = String(html)
+        .replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, '')
+        .replace(/\s+/g, ' ')
+        .replace(/<br\b[^>]*>|<\/(p|div|li|tr|h[1-6]|pre|blockquote)\s*>/gi, '\n')
+        .replace(/<[^>]*>/g, '');
+    const ta = document.createElement('textarea');
+    ta.innerHTML = stripped;
+    return ta.value.split('\n')
+        .map(l => l.replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .join('\n');
+}
+
+// text/uri-list: first line that is neither blank nor a '#' comment (RFC 2483).
+function _uriListToText(list) {
+    return String(list).split(/\r?\n/).map(l => l.trim()).find(l => l && l[0] !== '#') || '';
+}
+
+const _PASTE_TEXT_TYPES = [
+    ['text/plain', t => t],
+    ['text/uri-list', _uriListToText],
+    ['text/html', _htmlToText],
+];
+
+// Best text out of clipboard.read()'s items: text/plain, then text/uri-list, then
+// text/html. '' when none of them yields anything.
+async function _clipboardItemsText(items) {
+    for (const [type, conv] of _PASTE_TEXT_TYPES) {
+        for (const it of items) {
+            if ((it.types || []).indexOf(type) < 0) continue;
+            const text = conv(await (await it.getType(type)).text());
+            if (text) return text;
+        }
+    }
+    return '';
+}
+
 async function termPaste(btn) {
     const wid = $('#term-agent').value;
-    if (!wid || !navigator.clipboard || !navigator.clipboard.readText) return;
-    let text = '';
-    try { text = await navigator.clipboard.readText(); } catch (e) { return; }
-    if (!text) return;
+    const cb = navigator.clipboard;
+    if (!wid) return;
+    if (!cb || (!cb.read && !cb.readText)) { _pasteFlash(btn, 'No clipboard'); return; }
     try {
-        await api('/api/term/paste', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ agent: wid, text }),
-        });
-    } catch (e) { console.error('termPaste', e); }
+        if (!cb.read) {
+            let text = '';
+            try { text = await cb.readText(); } catch (e) { _pasteFlash(btn, 'Denied'); return; }
+            await _pasteTextTo(wid, text, btn);
+            return;
+        }
+        let items;
+        try { items = await cb.read(); } catch (e) { _pasteFlash(btn, 'Denied'); return; }
+        for (const it of items || []) {
+            const t = (it.types || []).find(x => x.indexOf('image/') === 0);
+            if (t) { await _pasteImageTo(wid, await it.getType(t), btn); return; }
+        }
+        await _pasteTextTo(wid, await _clipboardItemsText(items || []), btn);
+    } catch (e) { console.error('termPaste', e); _pasteFlash(btn, 'Failed'); }
 }
 
 function termScrollToggle() {
@@ -471,11 +557,18 @@ const _presenceByWid = new Map();
 // share POST, /api/term/shared and /api/agents .share_mode. Drives the 👁 / ⌨ share
 // pill and the red UNSANDBOXED banner. Display only: the host enforces the gate.
 const _shareModes = new Map();
-// Per-wid UNSANDBOXED override expiry, epoch seconds (CMX-419) — for the "12d 4h left"
-// on the red banner and in Active shares. Display only, like _shareModes.
-const _shareExpires = new Map();
+// wid → the UNSANDBOXED override's wall-clock expiry (epoch s): the sheet's "Ends at" and
+// the "12d 4h left" on the red banner + Active shares badge (CMX-419). Display only.
+const _shareExpiry = new Map();
 function _noteShareExpiry(wid, exp) {
-    if (exp) _shareExpires.set(wid, exp); else _shareExpires.delete(wid);
+    if (exp) _shareExpiry.set(wid, exp); else _shareExpiry.delete(wid);
+}
+// Per-wid sandbox network mode (CMX-418), from /api/agents .share_net: 'web' shows the
+// "🌐 web" chip on the pane header. Display only — the host's live check is the gate.
+const _netModes = new Map();
+function _updateNetBadges(wid) {
+    const web = _netModes.get(wid) === 'web';
+    document.querySelectorAll('.gs-net-badge[data-net-for="' + _cssEsc(wid) + '"]').forEach(b => { b.hidden = !web; });
 }
 function _noteShareModes(shared) {
     Object.entries(shared || {}).forEach(([w, v]) => {
@@ -485,7 +578,7 @@ function _noteShareModes(shared) {
 }
 // "12d 4h left" · "3h 5m left" · "25m left" · "<1m left" — or '' with no expiry.
 function _shareTimeLeft(wid, nowMs) {
-    const exp = _shareExpires.get(wid);
+    const exp = _shareExpiry.get(wid);
     if (!exp) return '';
     const mins = Math.floor((exp * 1000 - (nowMs == null ? Date.now() : nowMs)) / 60000);
     if (mins < 1) return '<1m left';
@@ -507,7 +600,7 @@ function _unsafeBannerText(wid) {
 let _ownerPresenceP = null;
 function _ownerPresence() {
     if (!_ownerPresenceP) {
-        _ownerPresenceP = import(BASE_PATH + '/static/collab/presence-owner.js')
+        _ownerPresenceP = import(staticUrl('collab/presence-owner.js'))
             .then(m => { try { m.initOwnerPresence(); } catch (_) {} return m; })
             .catch(e => { console.warn('[chela] owner-presence load failed', e); _ownerPresenceP = null; return null; });
     }
@@ -532,15 +625,31 @@ function _seedSharedFromAgents(agents) {
         if (a.shared) {
             _sharedWids.add(a.window_id);
             _shareModes.set(a.window_id, a.share_mode || 'view');
-            _noteShareExpiry(a.window_id, a.share_expires_at);
-        } else {
+                    } else {
             _sharedWids.delete(a.window_id);
             _shareModes.delete(a.window_id);
-            _shareExpires.delete(a.window_id);
+            _shareExpiry.delete(a.window_id);
         }
         _updateShareBtns(a.window_id);
+        if (a.share_net) _netModes.set(a.window_id, a.share_net); else _netModes.delete(a.window_id);
+        _updateNetBadges(a.window_id);
     });
     _renderSharesIndicator();
+    _syncOwnerPresenceFromAgents(agents);
+}
+
+// Re-key (or drop) owner presence when a share was stopped / re-created — possibly
+// from ANOTHER page, so this page never ran _stopShare/_mintShare (CMX-427). Only
+// wids that already have a presence session are touched; the module is a no-op for
+// an unchanged share_epoch, so this costs nothing per poll on a steady share.
+function _syncOwnerPresenceFromAgents(agents) {
+    if (!_ownerPresenceP) return;
+    _ownerPresenceP.then(m => {
+        if (!m || !m.syncOwnerPresence) return;
+        (agents || []).forEach(a => {
+            if (a.window_id) m.syncOwnerPresence(a.window_id, !!a.shared, a.share_epoch);
+        });
+    });
 }
 
 // --- global active-shares indicator + kill-switch --------------------------
@@ -553,32 +662,45 @@ function _seedSharedFromAgents(agents) {
 // server truth (/api/term/shared) so the kill list is always accurate at the
 // moment it matters.
 function _renderSharesIndicator() {
-    const btn = document.getElementById('btn-shares');
-    if (!btn) return;
+    // Two copies of one pill (CMX-422): #btn-shares floats in .safety-float on
+    // every tab; #term-shares sits IN the Wall's toolbar row, in normal flow left
+    // of "+ New shell", and the stylesheet hides the floating copy only while the
+    // Wall shows the in-row one — the float used to be drawn on top of the button.
+    const btns = ['btn-shares', 'term-shares'].map(id => document.getElementById(id)).filter(Boolean);
+    if (!btns.length) return;
     const n = _sharedWids.size;
-    btn.hidden = n === 0;
     // The most permissive live mode wins the pill (CMX-403): 👁 view only · ⌨ typing
     // (sandboxed) · a red UNSANDBOXED banner while a trusted-peer override is armed.
     const modes = [..._sharedWids].map(w => _shareModes.get(w) || 'view');
     const unsafe = modes.includes('unsandboxed');
     const typing = modes.includes('typing');
-    btn.classList.toggle('si-unsandboxed', unsafe);
-    btn.dataset.mode = unsafe ? 'unsandboxed' : typing ? 'typing' : 'view';
-    if (n > 0) {
-        const txt = btn.querySelector('.si-text');
-        const icon = typing || unsafe ? '⌨' : '👁';
-        const unsafeWid = [..._sharedWids].find(w => _shareModes.get(w) === 'unsandboxed');
-        if (txt) txt.textContent = unsafe ? _unsafeBannerText(unsafeWid)
-            : icon + ' ' + n + ' sharing';
-        btn.setAttribute('aria-label', (unsafe ? 'UNSANDBOXED — a guest can type into a real shell. ' : '')
-            + n + ' active share' + (n === 1 ? '' : 's') + (typing || unsafe ? ' (typing allowed)' : ' (view only)')
-            + ' — tap to manage or stop');
+    for (const btn of btns) {
+        btn.hidden = n === 0;
+        btn.classList.toggle('si-unsandboxed', unsafe);
+        btn.dataset.mode = unsafe ? 'unsandboxed' : typing ? 'typing' : 'view';
+        if (n > 0) {
+            const txt = btn.querySelector('.si-text');
+            const icon = typing || unsafe ? '⌨' : '👁';
+            const unsafeWid = [..._sharedWids].find(w => _shareModes.get(w) === 'unsandboxed');
+            if (txt) txt.textContent = unsafe ? _unsafeBannerText(unsafeWid)
+                : icon + ' ' + n + ' sharing';
+            btn.setAttribute('aria-label', (unsafe ? 'UNSANDBOXED — a guest can type into a real shell. ' : '')
+                + n + ' active share' + (n === 1 ? '' : 's') + (typing || unsafe ? ' (typing allowed)' : ' (view only)')
+                + ' — tap to manage or stop');
+        }
     }
     // Keep an open sheet in sync with the live set (e.g. the reaper stopped one).
     if (document.getElementById('shares-sheet-backdrop')) _buildSharesSheet();
 }
 
-async function openSharesSheet() {
+// The share whose row the sheet should point at (CMX-421): set when "Share current
+// session" lands on an ALREADY-shared window (adopt-first), so the sheet makes that
+// share's mode — and the control to change it — the obvious thing on screen. Survives
+// the sheet's own rebuilds; cleared on close.
+let _sharesSheetFocus = null;
+
+async function openSharesSheet(focusWid) {
+    if (typeof focusWid === 'string') _sharesSheetFocus = focusWid;
     // Reconcile against the server truth first, so the kill list is accurate no
     // matter which tab we're on or how stale the best-effort set is.
     try {
@@ -594,6 +716,7 @@ async function openSharesSheet() {
 
 function closeSharesSheet() {
     _sharesSheetGen++;   // invalidate any in-flight _buildSharesSheet fetch (see below)
+    _sharesSheetFocus = null;
     const bd = document.getElementById('shares-sheet-backdrop');
     if (bd) bd.remove();
     document.removeEventListener('keydown', _sharesSheetKey, true);
@@ -609,11 +732,168 @@ function _sharesSheetKey(e) { if (e.key === 'Escape') closeSharesSheet(); }
 // close) has superseded it.
 let _sharesSheetGen = 0;
 
+// One share's access, in the share dialog's own words (CMX-421). `desc` is what the
+// sheet says about THAT share — never one blanket sentence for every row.
+const SHARE_MODE_UI = {
+    view: { label: '👁 View only', desc: 'Anyone with the link + code can watch. Nothing they type reaches this machine.' },
+    typing: { label: '⌨ Allow typing', desc: 'Anyone with the link + code can watch and type into this sandboxed session.' },
+    unsandboxed: { label: '⚠ Full access — UNSANDBOXED', desc: 'UNSANDBOXED: the first guest to type gets a real shell on this machine.' },
+};
+
+// The per-row mode control: three buttons, the live mode pressed. Down (to View only)
+// is always offered; up is offered only where the share dialog would offer it — Allow
+// typing with the setting on AND a verified sandboxed window (else disabled, with the
+// dialog's reason), the UNSANDBOXED override only on a non-sandboxed window with the
+// setting on (and it then asks for the typed window name). The server re-checks the
+// setting, the live sandbox verdict and the typed name; "only on a non-sandboxed window"
+// for the override is a UI rule, not a server gate (as in the share dialog).
+// The UNSANDBOXED duration picker (CMX-419), shared by the share dialog and the Active
+// shares upgrade: the server's choices (preselected to the configured default), and the
+// length past which the window name must be typed a SECOND time.
+function _unsafeDurations(o) {
+    const base = (o && o.unsandboxed_choices && o.unsandboxed_choices.length)
+        ? o.unsandboxed_choices : [30, 240, 1440, 10080, 20160];
+    const dflt = (o && o.unsandboxed_minutes) || 30;
+    const choices = [...new Set([...base, dflt])].sort((a, b) => a - b);
+    return { choices, longMins: (o && o.unsandboxed_long_minutes) || 240 };
+}
+function _durLabel(n) {
+    return n % 1440 === 0 ? (n / 1440) + (n === 1440 ? ' day' : ' days')
+        : n % 60 === 0 ? (n / 60) + ' h' : n + ' min';
+}
+function _durOptionsHTML(choices, sel) {
+    return choices.map(n => `<option value="${attrEsc(String(n))}"${n === sel ? ' selected' : ''}>${escHtml(_durLabel(n))}</option>`).join('');
+}
+// "at 14:05" today, else "Oct 15, 14:05" — an override can now outlast the day.
+function _fmtShareEnd(exp, nowMs) {
+    const d = new Date(exp * 1000), now = new Date(nowMs == null ? Date.now() : nowMs);
+    const t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return d.toDateString() === now.toDateString() ? 'at ' + t
+        : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + t;
+}
+
+function _shareModeControlHTML(wid, opts) {
+    const cur = _shareModes.get(wid) || 'view';
+    const o = opts || {};
+    const typingOk = !!o.typing_allowed;
+    const reason = typingOk ? '' : (o.share_typing ? SHARE_NOT_SANDBOXED_REASON : SHARE_TYPING_OFF_REASON);
+    const offerUnsafe = cur === 'unsandboxed' || !!(o.share_typing && !o.sandboxed && o.unsandboxed_offered && o.window_name);
+    const btn = (m, enabled) => `<button class="ss-mode-opt${m === 'unsandboxed' ? ' ss-mode-opt-unsafe' : ''}" type="button"
+        data-wid="${attrEsc(wid)}" data-mode="${m}" aria-pressed="${cur === m ? 'true' : 'false'}"${!enabled && cur !== m ? ' disabled' : ''}>${escHtml(SHARE_MODE_UI[m].label)}</button>`;
+    const name = o.window_name || '';
+    const mins = o.unsandboxed_minutes || 30;
+    const { choices, longMins } = _unsafeDurations(o);
+    let exp = '';
+    if (cur === 'unsandboxed' && _shareExpiry.get(wid)) {
+        const left = _shareTimeLeft(wid);
+        exp = ` Ends ${escHtml(_fmtShareEnd(_shareExpiry.get(wid)))}${left ? ' (' + escHtml(left) + ')' : ''}.`;
+    }
+    return `
+      <div class="ss-mode-ctl" role="group" aria-label="Access for this share">
+        ${btn('view', true)}${btn('typing', typingOk)}${offerUnsafe ? btn('unsandboxed', true) : ''}
+      </div>
+      <div class="ss-mode-desc${cur === 'unsandboxed' ? ' ss-mode-desc-unsafe' : ''}">${escHtml(SHARE_MODE_UI[cur].desc)}${exp}</div>
+      ${!typingOk && cur !== 'typing' ? `<div class="ss-mode-reason">${escHtml(reason)}</div>` : ''}
+      ${offerUnsafe && cur !== 'unsandboxed' ? `
+      <div class="ss-unsafe-confirm" hidden data-long-mins="${attrEsc(String(longMins))}">
+        <label class="tsp-lbl">Type <code>${escHtml(name)}</code> to give this guest a real shell for <span class="ss-dur-txt">${escHtml(_durLabel(mins))}</span></label>
+        <select class="tsp-in ss-dur" aria-label="How long full access lasts">${_durOptionsHTML(choices, mins)}</select>
+        <div class="tsp-row"><input class="tsp-in ss-confirm-in" autocomplete="off" spellcheck="false" placeholder="${attrEsc(name)}">
+          <button class="ss-confirm-go sd-danger" type="button" disabled>Grant full access</button></div>
+        <div class="ss-confirm-long" hidden>
+          <label class="tsp-lbl">Longer than 4 h — type <code>${escHtml(name)}</code> again</label>
+          <input class="tsp-in ss-confirm-long-in" autocomplete="off" spellcheck="false" placeholder="${attrEsc(name)}">
+        </div>
+      </div>` : ''}
+      <div class="ss-mode-err" hidden></div>`;
+}
+
+// Change a LIVE share's mode (CMX-421): same link, same code, guests stay joined.
+async function _setShareMode(wid, mode, confirm, extra) {
+    const body = { mode, ...(extra || {}) };
+    if (confirm) body.confirm = confirm;
+    let resp;
+    try {
+        resp = await api('/api/term/' + encodeURIComponent(wid) + '/share-mode', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+    } catch (_) { resp = null; }
+    if (!resp || !resp.ok) return { ok: false, error: (resp && resp.error) || 'Could not change the mode' };
+    _shareModes.set(wid, resp.mode || mode);
+    _noteShareExpiry(wid, resp.expires_at);
+    _updateShareBtns(wid);
+    _renderSharesIndicator();
+    return resp;
+}
+
+function _wireShareModeControls(sheet) {
+    sheet.querySelectorAll('.ss-row').forEach(row => {
+        const wid = row.dataset.wid;
+        const err = row.querySelector('.ss-mode-err');
+        const confirmBox = row.querySelector('.ss-unsafe-confirm');
+        const confirmIn = row.querySelector('.ss-confirm-in');
+        const go = row.querySelector('.ss-confirm-go');
+        const name = confirmIn ? confirmIn.getAttribute('placeholder') : '';
+        const durSel = row.querySelector('.ss-dur');
+        const longBox = row.querySelector('.ss-confirm-long');
+        const longIn = row.querySelector('.ss-confirm-long-in');
+        const longMins = confirmBox ? parseInt(confirmBox.dataset.longMins, 10) || 240 : 240;
+        const minutes = () => (durSel ? parseInt(durSel.value, 10) : 0) || null;
+        const isLong = () => (minutes() || 0) > longMins;
+        // Same rule as the share dialog: the window name typed, and typed AGAIN past 4 h.
+        const confirmed = () => !!confirmIn && confirmIn.value.trim() === name
+            && (!isLong() || (!!longIn && longIn.value.trim() === name));
+        const durTxt = row.querySelector('.ss-dur-txt');
+        const sync = () => {
+            if (durTxt && minutes()) durTxt.textContent = _durLabel(minutes());
+            if (longBox) longBox.hidden = !isLong();
+            if (go) go.disabled = !confirmed();
+        };
+        const apply = async (mode, confirm, extra) => {
+            if (err) { err.hidden = true; err.textContent = ''; }
+            const r = await _setShareMode(wid, mode, confirm, extra);
+            if (!r.ok) {
+                if (err) { err.textContent = r.error; err.hidden = false; }
+                if (go) sync();
+                return;
+            }
+            _buildSharesSheet();
+        };
+        row.querySelectorAll('.ss-mode-opt').forEach(b => b.onclick = () => {
+            const m = b.dataset.mode;
+            if (b.getAttribute('aria-pressed') === 'true') return;
+            // UNSANDBOXED needs the typed window name (twice past 4 h), as in the dialog.
+            if (m === 'unsandboxed') {
+                if (confirmBox) { confirmBox.hidden = false; if (confirmIn) confirmIn.focus(); }
+                return;
+            }
+            apply(m);
+        });
+        if (confirmIn && go) {
+            confirmIn.oninput = sync;
+            if (longIn) longIn.oninput = sync;
+            if (durSel) durSel.onchange = sync;
+            go.onclick = () => {
+                if (!confirmed()) return;
+                go.disabled = true;
+                const extra = minutes() ? { minutes: minutes() } : {};
+                if (isLong()) extra.confirm_long = longIn.value.trim();
+                apply('unsandboxed', confirmIn.value.trim(), extra);
+            };
+            sync();
+        }
+    });
+}
+
 async function _buildSharesSheet() {
     const gen = ++_sharesSheetGen;
     const wids = [..._sharedWids];
-    const infos = await Promise.all(wids.map(wid =>
-        api('/api/term/' + encodeURIComponent(wid) + '/share-info').catch(() => ({}))));
+    const enc = w => '/api/term/' + encodeURIComponent(w);
+    const [infos, opts] = await Promise.all([
+        Promise.all(wids.map(wid => api(enc(wid) + '/share-info').catch(() => ({})))),
+        Promise.all(wids.map(wid => api(enc(wid) + '/share-options').catch(() => ({})))),
+    ]);
     if (gen !== _sharesSheetGen) return;   // superseded — a newer build or a close won
     const existing = document.getElementById('shares-sheet-backdrop');
     if (existing) existing.remove();
@@ -623,23 +903,29 @@ async function _buildSharesSheet() {
     backdrop.onclick = (e) => { if (e.target === backdrop) closeSharesSheet(); };
     const sheet = document.createElement('div');
     sheet.className = 'shares-sheet';
+    const focus = _sharesSheetFocus && wids.includes(_sharesSheetFocus) ? _sharesSheetFocus : null;
     const rows = wids.map((wid, i) => `
-        <div class="ss-row" data-wid="${attrEsc(wid)}">
+        <div class="ss-row${wid === focus ? ' ss-row-focus' : ''}" data-wid="${attrEsc(wid)}">
+          ${wid === focus ? '<div class="ss-already">This session is already shared — change who can type below. The link and code stay the same.</div>' : ''}
           <div class="ss-row-hd">
             <span class="ss-label">${_shareModeBadge(wid)} ${escHtml(_paneTitle(wid))} <span class="ss-wid">${escHtml(wid)}</span></span>
             <button class="ss-stop" type="button" data-wid="${attrEsc(wid)}">Stop</button>
           </div>
+          ${_shareModeControlHTML(wid, opts[i])}
           <div class="ss-row-body">${_shareInfoRowsHTML(infos[i], 'Link unavailable — reopen this sheet to retry.')}</div>
         </div>`).join('');
     sheet.innerHTML =
         `<div class="ss-hd"><span class="ss-hd-ic">${lucideIcon('share-2', 15)}</span> Active shares
            <button class="ss-close" type="button" aria-label="Close">&times;</button></div>
-         <div class="ss-sub">Anyone with the link + code can watch; typing reaches the pane only where it says ⌨. Stop a share to revoke it — the link dies and the code rotates.</div>
+         <div class="ss-sub">Each share says who can type. Changing it keeps the same link and code. Stop a share to revoke it — the link dies and the code rotates.</div>
          <div class="ss-list">${rows || '<div class="ss-empty">No active shares.</div>'}</div>
          ${wids.length ? `<button class="ss-stopall" type="button">Stop all sharing (${wids.length})</button>` : ''}`;
     backdrop.appendChild(sheet);
     document.body.appendChild(backdrop);
     _wireShareCopyButtons(sheet);
+    _wireShareModeControls(sheet);
+    const fr = focus && sheet.querySelector('.ss-row-focus');
+    if (fr && fr.scrollIntoView) { try { fr.scrollIntoView({ block: 'nearest' }); } catch (_) {} }
     sheet.querySelector('.ss-close').onclick = closeSharesSheet;
     sheet.querySelectorAll('.ss-stop').forEach(b => b.onclick = async () => {
         b.disabled = true; b.textContent = 'Stopping…';
@@ -696,8 +982,10 @@ async function shareBtnClick(btn, wid) {
     try { info = (await api('/api/term/' + encodeURIComponent(wid) + '/share-info')) || {}; } catch (_) {}
     if (info && info.pairing_code) {
         _sharedWids.add(wid); _updateShareBtns(wid); _renderSharesIndicator();
-        _ownerPresence().then(m => m && m.startOwnerPresence(wid, info.join_url, info.pairing_code));
-        openSharesSheet();
+        _ownerPresence().then(m => m && m.startOwnerPresence(wid, info.join_url, info.pairing_code, info.share_epoch));
+        // Never re-mint — but point the sheet at THIS share, so its mode and the
+        // control to change it are what you see (CMX-421).
+        openSharesSheet(wid);
         return;
     }
     await openShareDialog(btn, wid);
@@ -730,11 +1018,7 @@ async function openShareDialog(btn, wid) {
     const mins = opts.unsandboxed_minutes || 30;
     // Duration picker (CMX-419): preselected to the configured default; a pick longer
     // than `longMins` (4 h) needs the window name typed a SECOND time.
-    const longMins = opts.unsandboxed_long_minutes || 240;
-    const choices = (opts.unsandboxed_choices && opts.unsandboxed_choices.length)
-        ? opts.unsandboxed_choices : [30, 240, 1440, 10080, 20160];
-    const durLabel = n => n % 1440 === 0 ? (n / 1440) + (n === 1440 ? ' day' : ' days')
-        : n % 60 === 0 ? (n / 60) + ' h' : n + ' min';
+    const { choices, longMins } = _unsafeDurations(opts);
     const backdrop = document.createElement('div');
     backdrop.id = 'share-dialog-backdrop';
     backdrop.className = 'shares-backdrop';
@@ -754,8 +1038,7 @@ async function openShareDialog(btn, wid) {
           <span class="sd-desc">For a very trusted peer only. Bound to the first guest who joins, ends when the time you pick runs out, audited. Stop the share to revoke it at once.</span></span></label>
         <div class="sd-confirm" hidden>
           <label class="tsp-lbl" for="sd-dur">Lasts</label>
-          <select id="sd-dur" class="tsp-in">${choices.map(n =>
-              `<option value="${attrEsc(String(n))}"${n === mins ? ' selected' : ''}>${escHtml(durLabel(n))}</option>`).join('')}</select>
+          <select id="sd-dur" class="tsp-in">${_durOptionsHTML(choices, mins)}</select>
           <label class="tsp-lbl" for="sd-confirm-in">Type <code>${escHtml(name)}</code> to confirm</label>
           <input id="sd-confirm-in" class="tsp-in" autocomplete="off" spellcheck="false" placeholder="${attrEsc(name)}">
           <div class="sd-confirm-long" hidden>
@@ -825,7 +1108,7 @@ async function _mintShare(btn, wid, mode, confirm, extra) {
     _sharedWids.add(wid);
     _shareModes.set(wid, resp.mode || 'view');
     _noteShareExpiry(wid, resp.expires_at);
-    _ownerPresence().then(m => m && m.startOwnerPresence(wid, resp.join_url, resp.pairing_code));
+    _ownerPresence().then(m => m && m.startOwnerPresence(wid, resp.join_url, resp.pairing_code, resp.share_epoch));
     _reloadPaneFrame(wid);
     _updateShareBtns(wid);
     _renderSharesIndicator();
@@ -839,7 +1122,7 @@ async function _stopShare(wid) {
             body: JSON.stringify({ on: false }),
         });
     } catch (_) {}
-    _sharedWids.delete(wid); _shareModes.delete(wid); _shareExpires.delete(wid); _presenceByWid.delete(wid); _renderFacepile(wid);
+    _sharedWids.delete(wid); _shareModes.delete(wid); _shareExpiry.delete(wid); _presenceByWid.delete(wid); _renderFacepile(wid);
     _ownerPresence().then(m => m && m.stopOwnerPresence(wid));
     _reloadPaneFrame(wid); _updateShareBtns(wid); _renderSharesIndicator();
 }
@@ -928,20 +1211,32 @@ function _updateShareBtns(wid) {
         b.hidden = !unsafe;
         if (unsafe) b.textContent = _unsafeBannerText(wid);
     });
+    const mode = shared ? (_shareModes.get(wid) || 'view') : null;
     document.querySelectorAll('.gs-share-btn[data-wid="' + _cssEsc(wid) + '"]').forEach(btn => {
         btn.classList.toggle('on', shared);
         btn.setAttribute('aria-pressed', shared ? 'true' : 'false');
+        // The pane's share pill carries the share's mode (CMX-421), like the dialog.
+        btn.dataset.mode = mode || '';
+        const glyph = btn.querySelector('.gs-share-mode');
+        if (glyph) {
+            glyph.textContent = mode ? SHARE_MODE_GLYPH[mode] : '';
+            glyph.hidden = !mode;
+            glyph.title = mode ? SHARE_MODE_UI[mode].label : '';
+        }
         // The peer-count badge is owned by the owner-presence client (setBadge in
         // presence-owner.js), which alone knows the live joiner count; clearing the
         // share flag hides it there on stopOwnerPresence.
     });
 }
 
+const SHARE_MODE_GLYPH = { view: '👁', typing: '⌨', unsandboxed: '⚠' };
+
 function _shareBtnHTML(wid) {
     const on = _sharedWids.has(wid);
+    const mode = on ? (_shareModes.get(wid) || 'view') : null;
     return `<button class="gs-share-btn popover-item ov-item${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
-      onclick="chela.shareBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
-      title="Share this session"><span class="ov-ic">${lucideIcon('share-2', 14)}</span><span>Share current session</span><span class="gs-share-count" hidden></span></button>`;
+      onclick="chela.shareBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}" data-mode="${mode || ''}"
+      title="Share this session"><span class="ov-ic">${lucideIcon('share-2', 14)}</span><span>Share current session</span><span class="gs-share-mode"${mode ? ` title="${attrEsc(SHARE_MODE_UI[mode].label)}"` : ' hidden'}>${mode ? SHARE_MODE_GLYPH[mode] : ''}</span><span class="gs-share-count" hidden></span></button>`;
 }
 
 // The pane-title toggle: "⊙ Orchestrator" — one click registers THIS pane's
@@ -1093,6 +1388,7 @@ function paneHead(wid, draggable) {
       ${label}
       ${roomBadge}
       <span class="gs-presence" data-presence-for="${attrEsc(wid)}"></span>
+      <span class="gs-net-badge" data-net-for="${attrEsc(wid)}" title="Sandboxed session with web access — public hosts only, rate-limited, every request logged"${_netModes.get(wid) === 'web' ? '' : ' hidden'}>🌐 web</span>
       <span class="gs-unsafe-banner" data-banner-for="${attrEsc(wid)}" role="status"${_sharedWids.has(wid) && _shareModes.get(wid) === 'unsandboxed' ? '' : ' hidden'}>${escHtml(_unsafeBannerText(wid))}</span>
       ${state}
       ${menu}
@@ -3691,7 +3987,7 @@ if (window.visualViewport) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareExpires, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _stopShare, closeShareDialog, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

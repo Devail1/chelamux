@@ -226,6 +226,14 @@ function _drawFavicon(n) {
 }
 
 const BASE_PATH = window.location.pathname.replace(/\/$/, '');
+// CMX-426: the deploy's asset version (app.py ASSET_VERSION), rendered into index.html.
+// A static URL built in JS goes through staticUrl() so it carries it too — a bare
+// '/static/…' would keep serving the browser's cached copy from before the deploy.
+// Relative ES imports need nothing: they resolve against the versioned module URL.
+const ASSET_VERSION = window.CHELA_ASSET_VERSION || '';
+function staticUrl(path) {
+    return BASE_PATH + '/static/' + (ASSET_VERSION ? 'v/' + ASSET_VERSION + '/' : '') + path;
+}
 async function api(path, opts) {
     const res = await fetch(BASE_PATH + path, opts);
     return res.json();
@@ -293,7 +301,7 @@ function setMsgTarget(v) { msgTargetAgent = v; }
 function setAgentsCache(v) { _agentsCache = v; }
 
 // --- Stage 0: ES-module exports ---
-export { $, $$, BASE_PATH, REFRESH_MS, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, currentTab, escHtml, humanSchedule, lucideIcon, msgTargetAgent, relativeTime, setAgentsCache, setCurrentTab, setMsgTarget, shortTime, showModal, updateTabSignal, wantsHuman };
+export { $, $$, ASSET_VERSION, BASE_PATH, REFRESH_MS, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, currentTab, escHtml, humanSchedule, lucideIcon, msgTargetAgent, relativeTime, setAgentsCache, setCurrentTab, setMsgTarget, shortTime, showModal, staticUrl, updateTabSignal, wantsHuman };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

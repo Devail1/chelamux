@@ -39,6 +39,7 @@ module.exports = {
     app('chela-daemon', 'run'),            // scheduler + dispatcher + notifier
     app('chela-dashboard', 'dashboard'),   // the web dashboard (binds CHELA_DASHBOARD_PORT)
     app('chela-telegram', 'telegram'),     // the Telegram bridge (needs ~/.chela/secrets.env)
+    app('chela-collab', 'collab'),         // live-share host: shares survive a dashboard deploy
     {
       name: 'chela-agent-terminals',       // the ttyd wall: a script, not the CLI
       script: `${CHELA_REPO}/scripts/agent-terminals.sh`,

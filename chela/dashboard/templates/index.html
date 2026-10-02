@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>chela — Mission Control</title>
-    <link rel="icon" href="static/img/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="static/vendor/gridstack.min.css">
-    <link rel="stylesheet" href="static/style.css">
+    <link rel="icon" href="{{ asset_path('img/favicon.svg') }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ asset_path('vendor/gridstack.min.css') }}">
+    <link rel="stylesheet" href="{{ asset_path('style.css') }}">
 </head>
 <body>
 
@@ -46,7 +46,7 @@
               aria-label="Toggle sidebar" aria-expanded="true" onclick="chela.toggleSidebar()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
       </button>
-      <div class="brand"><img src="static/img/claw-mark.svg" class="brand-mark" alt=""><span>chela</span></div>
+      <div class="brand"><img src="{{ asset_path('img/claw-mark.svg') }}" class="brand-mark" alt=""><span>chela</span></div>
       <!-- CMX-393: the inbox moved up here from the foot (as in the approved
            mockup), so the foot is ONE row: readouts left, one menu right. It sits
            at the head's right end; the toggle stays first because the phone's
@@ -346,6 +346,15 @@
                         style="margin-left:6px;"></button>
                 </span>
             </span>
+            <!-- CMX-422: the active-shares pill's in-row copy (terminals.js
+                 _renderSharesIndicator drives both). Desktop only: it takes the
+                 row's flow slot left of "+ New shell", and while it shows, the
+                 floating #btn-shares is hidden so it can't be drawn over the button. -->
+            <button class="shares-indicator" id="term-shares" hidden onclick="chela.openSharesSheet()"
+                    title="Active shares — tap to manage or stop" aria-label="Active shares">
+                <span class="si-dot" aria-hidden="true"></span>
+                <span class="si-text">0 sharing</span>
+            </button>
             <button id="term-new-shell" onclick="chela.spawnShell(this)" title="Spawn a new plain-shell window">+ New shell</button>
         </div>
         <!-- Mobile-only agent switcher: a scrollable pill strip that replaces the
@@ -603,6 +612,10 @@
        and the phone "+" open this same #new-menu, so it is in both. -->
   <div class="popover-item" id="new-sandbox-item" title="A container that sees only the project — the only kind of window a share guest may type into"
        onclick="chela.hideNewMenu(); chela.newSandboxedSession()">Sandboxed session…</div>
+  <!-- CMX-418: the same container, opted in to web access (public hosts only, through a
+       filtering + rate-limited + logged egress proxy, with a headless browser). -->
+  <div class="popover-item" id="new-sandbox-web-item" title="A sandboxed session that may also read PUBLIC web pages — never your host or LAN; every request is logged"
+       onclick="chela.hideNewMenu(); chela.newSandboxedSession(true)">Sandboxed session · allow web access…</div>
   <div class="popover-item" id="new-shell-item" onclick="chela.hideNewMenu(); chela.newShellWindow()">Shell window</div>
 </div>
 
@@ -779,13 +792,14 @@
   </div>
 </div>
 
+<script>window.CHELA_ASSET_VERSION = {{ asset_version|tojson }};</script>
 {% if terminals_enabled %}<script>window.TERMINALS_ENABLED = true;</script>{% endif %}
 {% if wall_tile_dispatched %}<script>window.WALL_TILE_DISPATCHED = true;</script>{% endif %}
-<script src="static/vendor/gridstack-all.js"></script>
+<script src="{{ asset_path('vendor/gridstack-all.js') }}"></script>
 <!-- Stage 0: one ES-module entry. main.js imports the rest through the module
      graph (util → feature renderers → nav → sse → main bootstrap). No build step.
      terminals.js/launcher.js load via the graph and stay inert when terminals
      are off (TERMINALS_ON-guarded). -->
-<script type="module" src="static/js/main.js"></script>
+<script type="module" src="{{ asset_path('js/main.js') }}"></script>
 </body>
 </html>

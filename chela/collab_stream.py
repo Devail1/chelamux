@@ -64,6 +64,22 @@ sees. View-only shares never claimed a sandbox and stream unchanged.
 Allowed input is still capped by a token bucket. A
 flood of hellos can't spam ttyd reattaches (rate-limited by REATTACH_DEBOUNCE).
 
+🔌 A share survives a restart of the process hosting it (CMX-434). Every live share is
+persisted to an owner-only store (``chela/share_store.py``); ``restore_bridges`` brings
+each one back with the SAME room and pairing code, so a guest reconnects by itself. Two
+things make that safe, not just convenient:
+  * NO NONCE REUSE. The host stream id is fixed and the key does not change, so a restored
+    bridge restarting its seq at 0 would reuse AES-GCM nonces. The bridge never seals a
+    seq at or past ``seq_ceiling`` until a higher ceiling is on disk
+    (``_reserve_seq``), and a restored bridge resumes AT the persisted ceiling.
+  * NO REPLAYED KEYSTROKES. A restored bridge has forgotten which joiner seqs it already
+    saw, so the relay could replay an old T_INPUT. It therefore issues a fresh random
+    ``resume`` challenge (sealed, so only a paired guest can read it) and accepts input
+    only from a joiner stream that answered it with a hello carrying that nonce — that
+    hello also sets the stream's replay floor above every frame it sent before.
+A process EXIT (``shutdown_all``) tells guests ``{"t":"restarting"}`` and keeps the store;
+only a deliberate ``stop`` says ``ended`` and forgets the share.
+
 Runs standalone for the spike::  python -m chela.collab_stream <wid>
 and exposes start_bridge(wid) / stop_bridge(wid) for app.py to call from the
 share toggle (CHUNK 2 integration).
@@ -73,11 +89,12 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets as _secrets
 import subprocess
 import threading
 import time
 
-from chela import collab, config, e2e, event_log, share_sandbox
+from chela import collab, config, e2e, event_log, share_sandbox, share_store
 
 log = logging.getLogger(__name__)
 
@@ -123,6 +140,10 @@ MODE_VIEW = "view"
 MODE_TYPING = "typing"            # typing allowed into a verified sandboxed session
 MODE_UNSANDBOXED = "unsandboxed"  # trusted-peer override, time-boxed, one joiner
 
+# 🔌 Persistence (CMX-434). Host seqs are reserved on disk in blocks of this many frames,
+# so the store is written once per block, not once per frame.
+SEQ_BLOCK = 1 << 16
+
 
 def _port_map() -> dict:
     """wid → local ttyd port, from the map agent-terminals.sh writes."""
@@ -149,6 +170,22 @@ def _window_dims(wid: str) -> tuple[int, int]:
         return config.TERM_COLS, config.TERM_ROWS
 
 
+def window_key(wid: str) -> str | None:
+    """Who ``wid`` IS, not just its name: the tmux server pid, the window id and the
+    pane's root pid. A tmux restart recycles ``@N`` ids and an agent restart changes the
+    pane pid — either way a persisted share must not reattach to whatever now answers to
+    the same id. None when it can't be read (that never matches)."""
+    try:
+        out = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", wid, "#{pid} #{window_id} #{pane_pid}"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    key = out.stdout.strip()
+    return key if out.returncode == 0 and len(key.split()) == 3 else None
+
+
 class Bridge:
     """One ttyd↔relay pump for a single wid. Two sockets: the local ttyd (we read
     its OUTPUT) and the relay room (we publish DATA, and read CTL hellos). Sends
@@ -156,7 +193,10 @@ class Bridge:
     (keyframes), so relay writes are serialised under a lock."""
 
     def __init__(self, wid: str, secret: bytes | None = None, on_revoke=None, *,
-                 allow_typing: bool = False, clock=time.monotonic, wallclock=time.time) -> None:
+                 allow_typing: bool = False, clock=time.monotonic, wallclock=time.time,
+                 persist: bool = False, share_epoch: int | None = None,
+                 window_key: str | None = None, seq_start: int = 0,
+                 restored: bool = False) -> None:
         self.wid = wid
         self.room = collab.room_id(wid) + "-tty"   # isolated from the presence room
         # E2E: owner-minted pairing secret → host session. The joiner pastes the
@@ -164,6 +204,19 @@ class Bridge:
         self.secret = secret or e2e.mint_secret()
         self.pairing_code = e2e.pairing_code(self.secret)
         self._session = e2e.Session(self.secret, self.room, role="host")
+        # 🔌 CMX-434 — see the module docstring. A restored bridge resumes its host seq AT
+        # the persisted ceiling (every seq below it may already have been used).
+        self._session._send_seq = int(seq_start)
+        self._persist = bool(persist)
+        self._seal_blocked = False   # set when a stale ceiling may be on disk: seal nothing
+        self._store_lock = threading.RLock()
+        self._seq_ceiling = int(seq_start)
+        self.share_epoch = share_epoch
+        self.window_key = window_key
+        # A restored bridge accepts input only from joiner streams that answered THIS
+        # incarnation's resume challenge (None = a fresh bridge: no challenge).
+        self._resume_nonce: str | None = _secrets.token_hex(16) if restored else None
+        self._fresh_streams: set[bytes] = set()
         self._stop = threading.Event()
         self._relay = None
         self._relay_lock = threading.Lock()
@@ -212,12 +265,78 @@ class Bridge:
         """Seal + send under one lock so wire order == seq order (the receiver
         rejects out-of-order seqs). Both pump threads funnel through here."""
         with self._relay_lock:
-            if self._relay is None:
+            if self._relay is None or self._seal_blocked:
+                return
+            if not self._reserve_seq():
                 return
             try:
                 self._relay.send(self._session.seal(typ, plaintext))
             except Exception:
                 pass
+
+    # --- persistence (CMX-434) ----------------------------------------------
+    def snapshot(self) -> dict:
+        """The store record for this share (see chela/share_store.py)."""
+        with self._policy_lock:
+            ov = self._override
+            override = None if ov is None else {
+                "expires_at": ov["audit"]["expires_at"], "started_at": ov["audit"]["started_at"],
+                "granted_by": ov["audit"]["granted_by"], "window": ov["audit"]["window"],
+                "joiner": ov["joiner"].hex() if ov["joiner"] else None,
+            }
+            allow_typing = self.allow_typing
+        return {"wid": self.wid, "secret": self.secret.hex(), "room": self.room,
+                "allow_typing": allow_typing, "override": override,
+                "window_key": self.window_key, "share_epoch": self.share_epoch,
+                "seq_ceiling": self._seq_ceiling}
+
+    def _save(self) -> None:
+        """Write this share's record (after any policy change). A failed write never
+        weakens a live gate — it only means the share won't survive a restart."""
+        if not self._persist:
+            return
+        with self._store_lock:
+            if self._seq_ceiling <= self._session._send_seq:
+                self._seq_ceiling = self._session._send_seq + SEQ_BLOCK
+            ok = self._write_or_disown()
+        if not ok:
+            self._fail_closed_async()
+
+    def _reserve_seq(self) -> bool:
+        """🔐 The nonce guard: True when the next host seq is below a ceiling already on
+        disk. Crossing the ceiling writes a higher one FIRST."""
+        if not self._persist:
+            return True
+        with self._store_lock:
+            if self._session._send_seq < self._seq_ceiling:
+                return True
+            self._seq_ceiling = self._session._send_seq + SEQ_BLOCK
+            ok = self._write_or_disown()
+        if not ok:
+            self._fail_closed_async()
+        return ok
+
+    def _write_or_disown(self) -> bool:
+        """Persist the record (caller holds _store_lock). If the write fails, DROP the
+        record — a share that can't be restored can't reuse a nonce — and stop persisting.
+        False only when even the drop can't be confirmed: the store may still hold a stale
+        ceiling, so not one more frame may be sealed."""
+        try:
+            share_store.put(self.wid, self.snapshot())
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.warning("collab_stream: could not persist share %s (%s) — it will not "
+                        "survive a restart", self.wid, e)
+        self._persist = False
+        share_store.drop(self.wid)
+        if self.wid in share_store.load():
+            self._seal_blocked = True
+            return False
+        return True
+
+    def _fail_closed_async(self) -> None:
+        threading.Thread(target=self._fail_closed, args=("share record not persisted",),
+                         daemon=True).start()
 
     # --- typing gate (CMX-403) ----------------------------------------------
     def grant_unsandboxed(self, *, granted_by: str, window: str, ttl_s: float) -> dict:
@@ -232,6 +351,7 @@ class Bridge:
         event_log.append("share.unsandboxed_granted",
                          f"UNSANDBOXED typing granted on {window} ({self.wid}) by {granted_by}",
                          audit, wid=self.wid)
+        self._save()
         return audit
 
     def revoke_unsandboxed(self, reason: str, *, event: str = "share.unsandboxed_revoked") -> bool:
@@ -245,6 +365,8 @@ class Bridge:
                        joiner=ov["joiner"].hex() if ov["joiner"] else None)
         event_log.append(event, f"UNSANDBOXED typing ended on {payload['window']} "
                          f"({self.wid}): {reason}", payload, wid=self.wid)
+        if not self._stop.is_set():
+            self._save()
         return True
 
     def _expire_override_if_due(self) -> None:
@@ -267,10 +389,42 @@ class Bridge:
             exp = self._override["audit"]["expires_at"] if self._override else None
         return {"mode": m, "expires_at": exp}
 
+    def set_mode(self, new: str, *, changed_by: str, window: str | None = None,
+                 ttl_s: float | None = None) -> dict:
+        """Change a LIVE share's access in place (CMX-421) — same secret, room, link and
+        pairing code, so a guest already joined keeps the connection and the next input
+        frame is judged under the new mode. The caller (app.py) has already applied the
+        creation gates for an upgrade; a downgrade needs none. Audited as
+        ``share.mode_changed``; an upgrade to UNSANDBOXED also arms the override (which
+        writes ``share.unsandboxed_granted`` and binds the first guest to type)."""
+        if new not in (MODE_VIEW, MODE_TYPING, MODE_UNSANDBOXED):
+            raise ValueError(f"unknown share mode: {new}")
+        old = self.mode()
+        if new == old:
+            return {"from": old, "to": new, "changed": False}
+        if old == MODE_UNSANDBOXED:
+            self.revoke_unsandboxed("mode changed to " + new)
+        with self._policy_lock:
+            self.allow_typing = new == MODE_TYPING
+            self._sandbox_checked_at = None   # an upgrade to typing re-verifies on the next frame
+        if new == MODE_UNSANDBOXED:
+            self.grant_unsandboxed(granted_by=changed_by, window=window or self.wid,
+                                   ttl_s=float(ttl_s or 0))
+        self._save()
+        event_log.append("share.mode_changed",
+                         f"share mode {old} → {new} on {window or self.wid} ({self.wid}) by {changed_by}",
+                         {"wid": self.wid, "window": window, "from": old, "to": new, "by": changed_by},
+                         wid=self.wid)
+        self._notice("View only now." if new == MODE_VIEW else "You can type now.", force=True)
+        return {"from": old, "to": new, "changed": True}
+
     def _bind_joiner(self, stream_id: bytes) -> None:
         with self._policy_lock:
-            if self._override is not None and self._override["joiner"] is None:
+            bound = self._override is not None and self._override["joiner"] is None
+            if bound:
                 self._override["joiner"] = stream_id
+        if bound:
+            self._save()
 
     def _sandbox_ok(self) -> tuple[bool, str]:
         """The LIVE sandbox verdict, re-checked at least every SANDBOX_RECHECK_INTERVAL."""
@@ -339,9 +493,14 @@ class Bridge:
         self._expire_override_if_due()
         with self._policy_lock:
             ov = self._override
+            bound = ov is not None and ov["joiner"] is None
+            if bound:
+                ov["joiner"] = stream_id
+        if bound:
+            self._save()
+        with self._policy_lock:
+            ov = self._override
             if ov is not None:
-                if ov["joiner"] is None:
-                    ov["joiner"] = stream_id
                 if ov["joiner"] == stream_id:
                     return None
                 return "View only — typing is limited to one paired guest."
@@ -523,9 +682,13 @@ class Bridge:
             except Exception:
                 time.sleep(RECONNECT_DELAY)
                 continue
-            # On (re)connect, resync any already-open joiner with the current grid.
+            # On (re)connect, resync any already-open joiner with the current grid AND a
+            # fresh keyframe: frames sealed while we were away (or before a restore) never
+            # reached them. A restored bridge also re-challenges every joiner (CMX-434).
             # (Genuine reconnects only now — idle no longer drops the socket.)
             self._send_meta()
+            self._request_reattach()
+            self._send_resume()
             try:
                 while not self._stop.is_set():
                     msg = self._relay.receive(timeout=1.0)
@@ -574,6 +737,26 @@ class Bridge:
             return
         # The sender's stream id — authenticated: the header is GCM additional data.
         sender = bytes(msg[2:2 + e2e.STREAM_ID_LEN])
+        obj = None
+        if typ == e2e.T_CTL:
+            try:
+                obj = json.loads(pt.decode("utf-8", "replace"))
+            except Exception:
+                return
+            if not isinstance(obj, dict):
+                return
+            if (obj.get("t") == "hello" and self._resume_nonce is not None
+                    and obj.get("resume") == self._resume_nonce):
+                self._fresh_streams.add(sender)   # proved it holds THIS incarnation's nonce
+        if not self._stream_fresh(sender):
+            # 🔐 A restored bridge: this stream hasn't answered the resume challenge, so
+            # its frame may be a relay replay from before the restart. Never act on it;
+            # (re)issue the challenge so a real guest answers and carries on.
+            self._send_resume()
+            if typ == e2e.T_CTL and obj.get("t") == "hello":
+                self._send_meta()          # a keyframe is harmless; binding/typing are not
+                self._request_reattach()
+            return
         if typ == e2e.T_INPUT:
             # 🔐 The typing gate — HOST-side, per frame (see _input_refusal).
             refusal = self._input_refusal(sender)
@@ -583,10 +766,6 @@ class Bridge:
             self._forward_input(bytes(pt))
             return
         if typ == e2e.T_CTL:
-            try:
-                obj = json.loads(pt.decode("utf-8", "replace"))
-            except Exception:
-                return
             if obj.get("t") == "hello":
                 self._bind_joiner(sender)   # an armed override binds to the first joiner
                 # Cold join: size the joiner (T_META), then cycle ttyd so tmux paints
@@ -594,8 +773,16 @@ class Bridge:
                 self._send_meta()
                 self._request_reattach()
 
+    def _stream_fresh(self, stream_id: bytes) -> bool:
+        return self._resume_nonce is None or stream_id in self._fresh_streams
+
+    def _send_resume(self) -> None:
+        if self._resume_nonce is not None:
+            self._seal_send(e2e.T_CTL, json.dumps({"t": "resume", "n": self._resume_nonce}).encode("utf-8"))
+
     # --- lifecycle ---------------------------------------------------------
     def start(self) -> "Bridge":
+        self._save()
         for target in (self._pump_relay_control, self._pump_ttyd_to_relay):
             t = threading.Thread(target=target, name=f"collab-stream-{self.wid}", daemon=True)
             t.start()
@@ -615,7 +802,27 @@ class Bridge:
             except Exception:
                 log.exception("collab_stream: on_revoke hook failed for %s", self.wid)
 
+    def shutdown(self) -> None:
+        """The hosting PROCESS is exiting (a deploy or restart), not the share: tell the
+        guests the host is restarting, close the relay, and KEEP the store record so the
+        next host restores this share with the same link and code (CMX-434)."""
+        self._seal_send(e2e.T_CTL, json.dumps({"t": "restarting"}).encode("utf-8"))
+        self._persist = False   # nothing after this point may rewrite the record
+        self._stop.set()
+        with self._relay_lock:
+            try:
+                if self._relay:
+                    self._relay.close()
+            except Exception:
+                pass
+            self._relay = None
+        _bridges.pop(self.wid, None)
+
     def stop(self, *, guest_reason: str | None = None) -> None:
+        # Deliberately stopped ⇒ it must not come back after a restart (CMX-434).
+        if self._persist:
+            self._persist = False
+            share_store.drop(self.wid)
         # The share is going away, so an armed UNSANDBOXED override ends with it — audited
         # (the #btn-shares kill switch lands here via app.py _revoke_share).
         self.revoke_unsandboxed("share stopped")
@@ -647,7 +854,8 @@ _bridges_lock = threading.Lock()
 
 
 def start_bridge(wid: str, secret: bytes | None = None, on_revoke=None, *,
-                 allow_typing: bool = False, unsandboxed: dict | None = None) -> str | None:
+                 allow_typing: bool = False, unsandboxed: dict | None = None,
+                 share_epoch: int | None = None) -> str | None:
     """Start a bridge for a shared wid and return its base32 pairing code (or the
     existing bridge's code if already running). on_revoke(wid) fires if the bridge
     fails closed on session death — app.py passes a hook that pops _SHARED[wid] so
@@ -655,14 +863,16 @@ def start_bridge(wid: str, secret: bytes | None = None, on_revoke=None, *,
     complement: reconcile _SHARED against the live agent/port map each poll).
 
     ``allow_typing`` / ``unsandboxed`` (``{"granted_by", "window", "ttl_s"}``) set the
-    share's access policy (CMX-403); both only take effect on a NEW bridge — an existing
-    share keeps the policy it was created with."""
+    share's access policy (CMX-403); both only take effect on a NEW bridge — a running
+    share changes mode through ``set_share_mode`` (CMX-421), never by re-minting.
+    The share is persisted (CMX-434) so a restart of this process restores it."""
     if not config.COLLAB_RELAY:
         return None
     with _bridges_lock:
         if wid in _bridges:
             return _bridges[wid].pairing_code
-        b = Bridge(wid, secret=secret, on_revoke=on_revoke, allow_typing=allow_typing)
+        b = Bridge(wid, secret=secret, on_revoke=on_revoke, allow_typing=allow_typing,
+                   persist=True, share_epoch=share_epoch, window_key=window_key(wid))
         if unsandboxed:
             b.grant_unsandboxed(**unsandboxed)
         b.start()
@@ -676,11 +886,134 @@ def share_state(wid: str) -> dict | None:
     return b.state() if b else None
 
 
+def set_share_mode(wid: str, mode: str, **kw) -> dict | None:
+    """Switch a running share's mode in place (``Bridge.set_mode``), or None if there is
+    no bridge for ``wid``."""
+    b = _bridges.get(wid)
+    return b.set_mode(mode, **kw) if b else None
+
+
 def stop_bridge(wid: str) -> None:
     with _bridges_lock:
         b = _bridges.pop(wid, None)
     if b:
         b.stop()
+    else:
+        share_store.drop(wid)   # a stop always forgets the share, running or not
+
+
+def share_info(wid: str) -> dict | None:
+    """Owner-only: ``{"pairing_code", "join_url", "share_epoch"}`` of a running share."""
+    b = _bridges.get(wid)
+    if b is None:
+        return None
+    return {"pairing_code": b.pairing_code, "join_url": join_url(wid), "share_epoch": b.share_epoch}
+
+
+def list_shares() -> dict[str, dict]:
+    """Every running share → ``{"mode", "expires_at", "share_epoch"}`` (no secrets)."""
+    return {wid: {**b.state(), "share_epoch": b.share_epoch} for wid, b in list(_bridges.items())}
+
+
+def shutdown_all() -> int:
+    """The hosting process is exiting: every bridge says "restarting" and closes, and the
+    store is KEPT so the next host restores them (CMX-434). Returns how many."""
+    with _bridges_lock:
+        live = list(_bridges.values())
+    for b in live:
+        try:
+            b.shutdown()
+        except Exception:  # noqa: BLE001 — never block an exit
+            log.exception("collab_stream: shutdown of %s failed", b.wid)
+    if live:
+        time.sleep(0.15)   # let the notices flush before the process goes
+    return len(live)
+
+
+# --- restore (CMX-434) ---------------------------------------------------------------
+
+def restore_verdict(rec: dict, *, port_map: dict, live_window_key: str | None,
+                    sandbox: tuple[bool, str] | None, now: float) -> tuple[str | None, str]:
+    """Decide what a persisted share comes back as: ``(mode, why)`` with mode one of
+    MODE_VIEW / MODE_TYPING / MODE_UNSANDBOXED, or ``(None, why)`` — not restored.
+
+    * the window must still be in the ttyd map AND be the same window (``window_key``);
+    * a TYPING share must verify as a sandboxed session again, now — or it is not restored
+      at all (live, a pane that stops verifying ends the share; a restart must not launder
+      it into anything else);
+    * an UNSANDBOXED override comes back only if it has time left — an expired one comes
+      back as the view-only share it would have reverted to live.
+    ``sandbox`` is the live ``check_share_session`` verdict (only needed for typing)."""
+    wid = rec.get("wid")
+    if not wid or wid not in port_map:
+        return None, "window gone"
+    if not rec.get("window_key") or rec.get("window_key") != live_window_key:
+        return None, "window changed"
+    ov = rec.get("override")
+    if ov:
+        try:
+            left = float(ov.get("expires_at")) - now
+        except (TypeError, ValueError):
+            left = 0.0
+        return (MODE_UNSANDBOXED, "override still running") if left > 0 else (MODE_VIEW, "override expired")
+    if rec.get("allow_typing"):
+        ok, why = sandbox or (False, "the sandbox could not be verified")
+        return (MODE_TYPING, "verified sandbox") if ok else (None, f"not a verified sandbox ({why})")
+    return MODE_VIEW, "view only"
+
+
+def restore_bridges(on_revoke=None, *, now=None) -> list[dict]:
+    """Bring back every persisted share whose window still verifies (CMX-434), with the
+    SAME secret — so the same link and pairing code — and a host seq that resumes at the
+    persisted ceiling. Records that don't come back are dropped from the store and the
+    event log says why. Returns one ``{"wid", "restored", "mode", "reason"}`` per record;
+    an empty store does nothing at all."""
+    records = share_store.load()
+    if not records:
+        return []
+    now = time.time() if now is None else now
+    port_map = _port_map()
+    out: list[dict] = []
+    for wid, rec in records.items():
+        try:
+            sandbox = share_sandbox.check_share_session(wid) if rec.get("allow_typing") and not rec.get("override") else None
+            mode, why = restore_verdict(rec, port_map=port_map, live_window_key=window_key(wid),
+                                        sandbox=sandbox, now=now)
+            secret = bytes.fromhex(rec["secret"])
+            seq = int(rec.get("seq_ceiling") or 0)
+        except Exception as e:  # noqa: BLE001 — a malformed record is never restored
+            mode, why, secret, seq = None, f"unreadable record ({e})", b"", 0
+        if mode is None or not config.COLLAB_RELAY:
+            why = why if mode is None else "no relay configured"
+            share_store.drop(wid)
+            event_log.append("share.not_restored", f"share of {wid} not restored after a restart: {why}",
+                             {"wid": wid, "reason": why}, wid=wid)
+            out.append({"wid": wid, "restored": False, "mode": None, "reason": why})
+            continue
+        b = Bridge(wid, secret=secret, on_revoke=on_revoke, allow_typing=(mode == MODE_TYPING),
+                   persist=True, share_epoch=rec.get("share_epoch"),
+                   window_key=rec.get("window_key"), seq_start=seq, restored=True)
+        ov = rec.get("override")
+        if mode == MODE_UNSANDBOXED:
+            left = float(ov["expires_at"]) - now
+            audit = {"wid": wid, "window": ov.get("window"), "granted_by": ov.get("granted_by"),
+                     "started_at": ov.get("started_at"), "expires_at": ov["expires_at"]}
+            joiner = bytes.fromhex(ov["joiner"]) if ov.get("joiner") else None
+            b._override = {"until": b._clock() + left, "joiner": joiner, "audit": audit}
+        elif ov:
+            event_log.append("share.unsandboxed_expired",
+                             f"UNSANDBOXED typing ended on {ov.get('window')} ({wid}): expired "
+                             "while the host was restarting",
+                             {"wid": wid, "window": ov.get("window"), "reason": "expired"}, wid=wid)
+        with _bridges_lock:
+            if wid in _bridges:
+                continue
+            b.start()
+            _bridges[wid] = b
+        event_log.append("share.restored", f"share of {wid} restored after a restart ({mode})",
+                         {"wid": wid, "mode": mode, "reason": why}, wid=wid)
+        out.append({"wid": wid, "restored": True, "mode": mode, "reason": why})
+    return out
 
 
 def join_url(wid: str) -> str:

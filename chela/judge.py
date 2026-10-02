@@ -1300,12 +1300,20 @@ def run_experiments(
     max_experiments: int = MAX_EXPERIMENTS,
     risk: str = "",
     progress=None,
+    heartbeat=None,
 ) -> Report:
     """Execute every proposed experiment IN THIS WORKTREE and adjudicate each one.
 
     ⏱️ CMX-411: ``progress``, when given, is called ``progress(done, total)`` as each
     experiment starts and once more when they are all done — what ``chela doctor`` reads to
     show a live judge's ``k/N``. It observes; it never changes an outcome.
+
+    ⏳⚖️ CMX-431: ``heartbeat``, when given, is called ``heartbeat(event, **info)`` at every
+    other point the run is demonstrably moving — ``"baseline"`` (with ``seconds``, the full
+    suite's own measured duration), ``"experiment"`` (any experiment starting, consistency
+    re-runs included), ``"confirm"`` (a full-suite confirmation of a subset survivor
+    starting) and ``"consistency"`` (the re-run stage starting). The daemon's watchdog sizes
+    the wall from these and never calls an advancing run stuck. It observes, too.
 
     ⚖️🎚️ CMX-405: ``max_experiments`` is the task's risk-level cap (see
     ``config.judge_max_experiments``) — proposals past it are dropped OUT LOUD, as
@@ -1363,7 +1371,7 @@ def run_experiments(
                               base_branch=base_branch, select_tests=select_tests,
                               consistency_sample=consistency_sample,
                               max_experiments=max_experiments, risk=risk,
-                              progress=progress)
+                              progress=progress, heartbeat=heartbeat)
     report.battery_seconds = time.monotonic() - started
     log.info("judge: mutation battery took %s (%d experiment(s))",
              _duration(report.battery_seconds), len(report.outcomes))
@@ -1373,7 +1381,7 @@ def run_experiments(
 def _run_experiments(
     worktree: Path, test_cmd: str, raw: dict, *, timeout: float, base_branch: str,
     select_tests: bool, consistency_sample: int, max_experiments: int, risk: str,
-    progress=None,
+    progress=None, heartbeat=None,
 ) -> Report:
     report = Report(risk=risk, cap=max(1, int(max_experiments)))
     items = raw.get("experiments") if isinstance(raw, dict) else None
@@ -1429,9 +1437,12 @@ def _run_experiments(
         return report
 
     # THE BASELINE — the suite as the PR actually ships it, before anything is touched.
+    baseline_started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="chela-judge-select-") as scratch:
         baseline, selector, report.selection = run_baseline(
             worktree, test_cmd, timeout, Path(scratch), select_tests=select_tests)
+    if heartbeat is not None:
+        heartbeat("baseline", seconds=time.monotonic() - baseline_started)
     report.baseline = baseline
     if not baseline.green:
         # ⛔ CMX-80: name the CAUSE, not just the exit code. `judge_detail` (this string) is
@@ -1455,6 +1466,7 @@ def _run_experiments(
 
     outcomes, contamination = _apply_experiments(
         worktree, test_cmd, items, baseline, timeout, selector, progress=progress,
+        heartbeat=heartbeat,
     )
     report.outcomes.extend(outcomes)
     if contamination:
@@ -1464,6 +1476,7 @@ def _run_experiments(
     if consistency_sample > 0:
         contamination = _check_consistency(
             worktree, test_cmd, items, outcomes, baseline, timeout, consistency_sample, report,
+            heartbeat=heartbeat,
         )
         if contamination:
             report.cannot_verify = contamination
@@ -1510,7 +1523,7 @@ def _apply_experiments(
     worktree: Path, test_cmd: str, items: list, baseline: SuiteResult, timeout: float,
     selector: "judge_select.Selector | None" = None,
     pinned: "list[judge_select.Selection | None] | None" = None,
-    *, progress=None,
+    *, progress=None, heartbeat=None,
 ) -> tuple[list[Outcome], str]:
     """Apply, adjudicate, and restore every ``items`` entry against an already-green
     ``baseline``. Shared by :func:`run_experiments` (the judge's PR pass, a throwaway
@@ -1533,6 +1546,8 @@ def _apply_experiments(
     for n, raw_exp in enumerate(items):
         if progress is not None:
             progress(n, len(items))
+        if heartbeat is not None:
+            heartbeat("experiment")
         exp, why = Experiment.parse(raw_exp)
         if exp is None:
             # A malformed HELD-OUT experiment stays held out: its raw repr carries the guard
@@ -1563,7 +1578,8 @@ def _apply_experiments(
             if applied:
                 outcome = _measure(worktree, test_cmd, exp, reason, parses, parse_detail,
                                    baseline, timeout, selector,
-                                   pinned[n] if pinned is not None else _SELECT)
+                                   pinned[n] if pinned is not None else _SELECT,
+                                   heartbeat=heartbeat)
             else:
                 outcome = adjudicate(exp, applied, reason, parses, parse_detail, baseline, None)
             outcome.seconds = time.monotonic() - started
@@ -1625,7 +1641,7 @@ def _apply_experiments(
 def _measure(
     worktree: Path, test_cmd: str, exp: Experiment, reason: str, parses: bool,
     parse_detail: str, baseline: SuiteResult, timeout: float,
-    selector: "judge_select.Selector | None", pinned: object = None,
+    selector: "judge_select.Selector | None", pinned: object = None, *, heartbeat=None,
 ) -> Outcome:
     """⚡ CMX-407: run one APPLIED mutation against the tests that can observe its file, and
     adjudicate it WITHOUT changing what any verdict means.
@@ -1660,6 +1676,9 @@ def _measure(
     if outcome.verdict == KILLED or not parses:
         # Final. A broken parse is INVALID whatever the suite says — no full run can change it.
         return outcome
+    if heartbeat is not None:
+        # ⏳⚖️ CMX-431: a full-suite run is about to start — it is what the wall must budget.
+        heartbeat("confirm")
     full = run_suite(test_cmd, worktree, timeout)
     confirmed = adjudicate(exp, True, reason, parses, parse_detail, baseline, full)
     confirmed.selected, confirmed.selection, confirmed.plan = sel.expected, sel.why, sel
@@ -1673,7 +1692,7 @@ _SELECT = object()   # _measure's "no pinned selection — compute one" sentinel
 
 def _check_consistency(
     worktree: Path, test_cmd: str, items: list, outcomes: list[Outcome],
-    baseline: SuiteResult, timeout: float, sample: int, report: Report,
+    baseline: SuiteResult, timeout: float, sample: int, report: Report, *, heartbeat=None,
 ) -> str:
     """⚖️🎲 CMX-395: run the grader twice. Re-run up to ``sample`` experiments whose first
     verdict was a FACT (KILLED or SURVIVED — an INVALID one proved nothing either time), and
@@ -1705,9 +1724,11 @@ def _check_consistency(
     if not picked:
         report.consistency = {"sampled": 0, "flipped": 0, "flip_rate": 0.0}
         return ""
+    if heartbeat is not None:
+        heartbeat("consistency")
     reruns, contamination = _apply_experiments(
         worktree, test_cmd, [items[i] for i in picked], baseline, timeout,
-        pinned=[outcomes[i].plan for i in picked],
+        pinned=[outcomes[i].plan for i in picked], heartbeat=heartbeat,
     )
     flipped = 0
     for i, again in zip(picked, reruns):
@@ -2298,13 +2319,29 @@ def judge_run(
     # here, not from when the judge agent was spawned — its design time is not the run's.
     run_started = time.time()
     dispatcher.mark_judge_run_started(task_id)
-    status = {"pid": os.getpid(), "started": _proc_started_self(), "task_id": task_id,
+    # ⏳⚖️ CMX-431: `progress_at` is when the run last demonstrably MOVED, `phase` where it
+    # is, `baseline_seconds`/`confirmations` what its wall must budget — the daemon's
+    # watchdog (`dispatcher.judge_overdue`) reads all four.
+    status = {**owner_identity(os.getpid()), "task_id": task_id,
               "run_started_at": run_started, "detached": detached, "done": 0, "total": None,
+              "progress_at": run_started, "phase": "setup", "baseline_seconds": None,
+              "confirmations": 0,
               "log": str(judge_log_path(task_id)) if detached else None}
     _write_run_status(task_id, status)
 
     def _progress(done: int, total: int) -> None:
-        status.update(done=done, total=total)
+        status.update(done=done, total=total, progress_at=time.time(),
+                      phase="battery" if done < total else "finishing")
+        _write_run_status(task_id, status)
+
+    def _heartbeat(event: str, **info) -> None:
+        status["progress_at"] = time.time()
+        if event == "baseline":
+            status["baseline_seconds"] = info.get("seconds")
+        elif event == "confirm":
+            status["confirmations"] = int(status.get("confirmations") or 0) + 1
+        elif event == "consistency":
+            status["phase"] = "consistency"
         _write_run_status(task_id, status)
 
     # ⛔ CMX-164: the judge worktree already exists on disk by this point (`_spawn_judge`
@@ -2332,6 +2369,7 @@ def judge_run(
                     base_branch=base_branch, select_tests=judge_cfg.select_tests,
                     consistency_sample=judge_cfg.consistency_sample,
                     max_experiments=exp_cap, risk=risk, progress=_progress,
+                    heartbeat=_heartbeat,
                 )
         else:
             report = run_experiments(
@@ -2339,6 +2377,7 @@ def judge_run(
                 base_branch=base_branch, select_tests=judge_cfg.select_tests,
                 consistency_sample=judge_cfg.consistency_sample,
                 max_experiments=exp_cap, risk=risk, progress=_progress,
+                heartbeat=_heartbeat,
             )
         report.risk, report.cap = risk, exp_cap
         report.total_seconds = _since(run.get("judge_started_at"))
@@ -2706,6 +2745,16 @@ def _judge_lock_owner_alive(lock: dict) -> bool:
         return False
     from chela import sessions
 
+    # ⏱️ CMX-424: the boot-clock identity first. Both sides come from the same reader on the
+    # same clock, so CMX-219's exact equality is right here — and no wall-clock step can move
+    # either side (see `sessions.proc_start_ticks`). Measured 2026-10-01: with WSL2 stepping
+    # the clock every ~34s, the wall-clock comparison below declared the judge's own live
+    # process DEAD, so doctor lost every in-flight run and the CMX-221 lock was takeable.
+    ticks = lock.get("start_ticks")
+    if isinstance(ticks, int) and not isinstance(ticks, bool):
+        live_ticks = sessions.proc_start_ticks(pid)
+        if live_ticks is not None:
+            return live_ticks == ticks
     started = lock.get("started")
     live_started = sessions.proc_started(pid)
     if started is None or live_started is None:
@@ -2746,13 +2795,10 @@ def _claim_judge_slot(worktree: Path, task_id: str, *, detached: bool = False) -
     so the watchdog knows it may stop this process's own group on a timeout (and never a
     process it did not launch).
     """
-    from chela import sessions
-
     lock_path = _judge_lock_path(worktree)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    pid = os.getpid()
     payload = json.dumps({
-        "pid": pid, "started": sessions.proc_started(pid), "task_id": task_id,
+        **owner_identity(os.getpid()), "task_id": task_id,
         "claimed_at": time.time(), "detached": bool(detached),
     })
     for _ in range(3):
@@ -2777,10 +2823,15 @@ def _claim_judge_slot(worktree: Path, task_id: str, *, detached: bool = False) -
     return f"could not claim the judge slot for {task_id} (the lock kept changing under us)"
 
 
-def _proc_started_self() -> float | None:
+def owner_identity(pid: int) -> dict:
+    """What a judge lock / run status records about its owner, and exactly what
+    :func:`_judge_lock_owner_alive` checks it against: the pid, its boot-clock start ticks
+    (CMX-424 — immune to wall-clock steps) and its wall-clock start (the fallback, and what
+    an operator reads)."""
     from chela import sessions
 
-    return sessions.proc_started(os.getpid())
+    return {"pid": pid, "start_ticks": sessions.proc_start_ticks(pid),
+            "started": sessions.proc_started(pid)}
 
 
 def _lock_is_fresh(lock_path: Path, window: float = 5.0) -> bool:
@@ -2891,6 +2942,28 @@ def live_judge_runs() -> list[dict]:
     return out
 
 
+def live_judge_run(task_id: str, worktree: Path | None = None) -> dict | None:
+    """👻⚖️ CMX-429: the ``chela judge run`` executing for ``task_id`` RIGHT NOW, or None.
+
+    The run's own record, not the agent's window: since CMX-411 the judge AGENT stops right
+    after launching ``--detach``, so its window (or its agent) going away is NORMAL and says
+    nothing about whether the run is alive. Measured 2026-10-01 on PR #569: the watchdog read
+    "window gone" as a dead judge, wrote CANNOT VERIFY, and a second judge was spawned into
+    the SAME worktree while the first run was still mutating it.
+
+    Asks the two records the run writes about ITSELF, both on disk (so they survive a daemon
+    restart): ``$CHELA_DIR/judge-logs/<task>.json`` and, given ``worktree``, the CMX-221 slot
+    lock beside it. Either one names a live owner ⇒ the run is live. Identity is CMX-424's:
+    the pid's ``/proc`` start ticks must still match, so a recycled pid reads as dead.
+    """
+    status = _read_judge_lock(judge_status_path(task_id))
+    if status is not None and _judge_lock_owner_alive(status):
+        return status
+    if worktree is not None and judge_lock_live(worktree):
+        return _read_judge_lock(_judge_lock_path(worktree)) or {}
+    return None
+
+
 def detached_argv(ident: str, experiments: str | Path, *, cleanup: bool = True) -> list[str]:
     """The child a ``--detach`` re-execs: the SAME ``chela judge run``, minus ``--detach``,
     plus the hidden marker that tells the child it owns its own process group."""
@@ -2917,7 +2990,7 @@ def spawn_detached(argv: list[str], log_path: Path) -> int:
 
 def detach_judge_run(ident: str, experiments: str | Path, *, cleanup: bool = True) -> dict:
     """``chela judge run --detach``: refuse if a run for this task is already live (the
-    CMX-221 lock), else launch the detached child and return at once."""
+    CMX-221 lock, or 👻 CMX-429 its run status), else launch the detached child and return at once."""
     from chela import dispatcher, workflow
 
     run = dispatcher.resolve_run(ident)
@@ -2929,13 +3002,12 @@ def detach_judge_run(ident: str, experiments: str | Path, *, cleanup: bool = Tru
         wf = workflow.load_workflow(wf_path) if wf_path else None
     except Exception:                  # judge_run itself records the unreadable workflow
         wf = None
-    if wf is not None:
-        lock = _read_judge_lock(_judge_lock_path(judge_worktree_path(wf, task_id)))
-        if lock is not None and _judge_lock_owner_alive(lock):
-            return {"ok": False, "task_id": task_id, "error": (
-                f"a judge (pid {lock.get('pid')}) is already running for {task_id} — "
-                "refusing to start a second one. Watch it with `chela doctor` or "
-                f"`tail -f {judge_log_path(task_id)}`; do not re-run it.")}
+    live = live_judge_run(task_id, judge_worktree_path(wf, task_id) if wf is not None else None)
+    if live is not None:
+        return {"ok": False, "task_id": task_id, "error": (
+            f"a judge (pid {live.get('pid')}) is already running for {task_id} — "
+            "refusing to start a second one. Watch it with `chela doctor` or "
+            f"`tail -f {judge_log_path(task_id)}`; do not re-run it.")}
     log_path = judge_log_path(task_id)
     pid = spawn_detached(detached_argv(task_id, experiments, cleanup=cleanup), log_path)
     return {"ok": True, "task_id": task_id, "pid": pid, "log": str(log_path)}

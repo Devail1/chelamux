@@ -56,9 +56,9 @@ const geometry = page => page.evaluate(() => {
     // Every control the row shows, each checked for clipping: its whole box
     // inside the row's box and the viewport, and the browser's own hit-test
     // STACK at its centre containing it — an ancestor's overflow clip removes
-    // an element from that stack. (The stack, not the top hit: .safety-float
-    // is a position:fixed overlay that already sits over "+ New shell" on dev
-    // whenever a session is shared — a separate issue, not a clip.)
+    // an element from that stack. (The stack, not the top hit: this guard is
+    // about clipping. Overlap with the active-shares pill is CMX-422's, in
+    // wall_shares_pill.test.mjs.)
     const controls = [...row.querySelectorAll('button')].filter(shown).map(b => {
         const r = rect(b);
         const stack = document.elementsFromPoint(r.left + r.width / 2, r.top + r.height / 2);

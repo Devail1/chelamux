@@ -601,16 +601,40 @@ def proc_started(pid: int) -> float | None:
         stat = (PROC / str(pid) / "stat").read_text()
     except OSError:
         return _sh_started(pid)
-    # The comm field can contain spaces and parens; everything after the last ')' is safe.
-    try:
-        fields = stat[stat.rindex(")") + 1:].split()
-        ticks = float(fields[19])            # field 22 overall, 20th after the comm
-    except (ValueError, IndexError):
+    ticks = _stat_start_ticks(stat)
+    if ticks is None:
         return None
     boot = _boot_time()
     if not boot or not _CLK_TCK:
         return None
     return boot + ticks / _CLK_TCK
+
+
+def _stat_start_ticks(stat: str) -> int | None:
+    # The comm field can contain spaces and parens; everything after the last ')' is safe.
+    try:
+        return int(stat[stat.rindex(")") + 1:].split()[19])   # field 22 overall, 20th after comm
+    except (ValueError, IndexError):
+        return None
+
+
+def proc_start_ticks(pid: int) -> int | None:
+    """The process's start time as the kernel stores it: clock ticks since BOOT, read raw
+    from ``/proc/<pid>/stat`` (field 22). ``None`` when ``/proc`` cannot answer — there is
+    deliberately no ``ps`` fallback, since ``ps`` only knows wall-clock time.
+
+    ⏱️ CMX-424: use THIS, not :func:`proc_started`, to ask "is it still the same process?"
+    across time. :func:`proc_started` adds ``btime`` — the boot moment on the WALL clock,
+    which the kernel recomputes every time the wall clock is stepped. A host that steps its
+    clock (WSL2's time sync did it every ~34s, moving btime +440s in 2.5h, measured
+    2026-10-01) makes the same untouched process report a different ``proc_started`` from
+    one read to the next. Ticks since boot are on the boot clock, which no step touches.
+    """
+    try:
+        stat = (PROC / str(pid) / "stat").read_text()
+    except OSError:
+        return None
+    return _stat_start_ticks(stat)
 
 
 def _sh_started(pid: int) -> float | None:

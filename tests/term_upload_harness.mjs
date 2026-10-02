@@ -3,12 +3,13 @@
 // every injected <script> running for real, then fires ONE user action and prints which
 // dashboard routes the page called, in order, as JSON.
 //
-// The external `<script src="/static/term-upload.js">` tag is swapped for the file's source
-// at the SAME position (jsdom cannot fetch it). If term_http stops serving the tag, nothing
-// is swapped and the upload shim does not run — exactly as in a browser.
+// The external `<script src="/static/v/<ver>/term-upload.js">` tag (CMX-426: versioned) is
+// swapped for the file's source at the SAME position (jsdom cannot fetch it). If term_http
+// stops serving the tag, nothing is swapped and the upload shim does not run — exactly as in
+// a browser.
 //
 // Usage: node term_upload_harness.mjs <servedHtmlPath> <action>
-//   action: keyV-image | keyV-text | paste-image | paste-text | drop-file
+//   action: keyV-image | keyV-text | paste-image | paste-text | paste-pdf | drop-file | drop-mixed
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -17,9 +18,9 @@ import { JSDOM, VirtualConsole } from 'jsdom';
 const [, , htmlPath, action] = process.argv;
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const UPLOAD_JS = readFileSync(join(ROOT, 'chela', 'dashboard', 'static', 'term-upload.js'), 'utf8');
-const TAG = '<script src="/static/term-upload.js"></script>';
+const TAG = /<script src="\/static\/(?:v\/[^/"]+\/)?term-upload\.js"><\/script>/;
 let html = readFileSync(htmlPath, 'utf8');
-if (html.includes(TAG)) html = html.replace(TAG, '<script>' + UPLOAD_JS + '</script>');
+html = html.replace(TAG, () => '<script>' + UPLOAD_JS + '</script>');
 
 const calls = [];
 const errors = [];
@@ -79,12 +80,21 @@ if (action === 'keyV-image' || action === 'keyV-text') {
 } else if (action === 'paste-image') {
     prevented = fire('paste', 'clipboardData',
         { files: [file], items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] }).defaultPrevented;
+} else if (action === 'paste-pdf') {
+    const pdf = new w.File(['%PDF'], 'doc.pdf', { type: 'application/pdf' });
+    prevented = fire('paste', 'clipboardData',
+        { files: [pdf], items: [{ kind: 'file', type: 'application/pdf', getAsFile: () => pdf }] }).defaultPrevented;
 } else if (action === 'paste-text') {
     prevented = fire('paste', 'clipboardData',
         { files: [], items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }] }).defaultPrevented;
 } else if (action === 'drop-file') {
     const over = fire('dragover', 'dataTransfer', { types: ['Files'], dropEffect: 'none' });
     const drop = fire('drop', 'dataTransfer', { files: [file], types: ['Files'] });
+    prevented = { dragover: over.defaultPrevented, drop: drop.defaultPrevented };
+} else if (action === 'drop-mixed') {
+    const pdf = new w.File(['%PDF'], 'doc.pdf', { type: 'application/pdf' });
+    const over = fire('dragover', 'dataTransfer', { types: ['Files'], dropEffect: 'none' });
+    const drop = fire('drop', 'dataTransfer', { files: [file, pdf], types: ['Files'] });
     prevented = { dragover: over.defaultPrevented, drop: drop.defaultPrevented };
 } else {
     throw new Error('unknown action ' + action);

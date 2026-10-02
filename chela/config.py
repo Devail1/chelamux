@@ -446,6 +446,15 @@ DISPATCH_KNOBS: tuple[DispatchKnob, ...] = (
                  "Judge max concurrent (per workflow)", floor=1),
     DispatchKnob("judge_outage_backoff_seconds", "CHELA_JUDGE_OUTAGE_BACKOFF_S", 600.0, float,
                  "Judge classifier-outage backoff", unit="s", floor=0),
+    # ⏳⚖️ CMX-431: the judge wall scales with the battery — see `judge_wall_*` below.
+    DispatchKnob("judge_wall_base_seconds", "CHELA_JUDGE_WALL_BASE_S", 600.0, float,
+                 "Judge wall: base", unit="s", floor=0),
+    DispatchKnob("judge_wall_per_experiment_seconds", "CHELA_JUDGE_WALL_PER_EXPERIMENT_S",
+                 360.0, float, "Judge wall: per experiment", unit="s", floor=1),
+    DispatchKnob("judge_wall_ceiling_seconds", "CHELA_JUDGE_WALL_CEILING_S", 10800.0, float,
+                 "Judge wall: hard ceiling", unit="s", floor=0),
+    DispatchKnob("judge_wall_grace_seconds", "CHELA_JUDGE_WALL_GRACE_S", 900.0, float,
+                 "Judge wall: finishing grace", unit="s", floor=0),
     DispatchKnob("critic_enabled", "CHELA_CRITIC", True, _cast_bool,
                  "Critic (pre-dispatch review)", kind="bool", restart_required=True),
     DispatchKnob("worktree_disk_budget_bytes", "CHELA_WORKTREE_DISK_BUDGET", 0, _cast_size,
@@ -879,6 +888,38 @@ def judge_outage_backoff_seconds() -> float:
     Dispatch-tab knob (CMX-220), see DISPATCH_KNOBS above.
     """
     return max(0.0, dispatch_value("judge_outage_backoff_seconds"))
+
+
+def judge_wall_base_seconds() -> float:
+    """⏳⚖️ CMX-431. The fixed part of a judge run's wall, before any experiment: claim,
+    provision, baseline and publish. The wall is ``base + total × per_experiment +
+    confirmations × full-suite budget`` (see ``dispatcher.judge_wall_seconds``), never below
+    the flat ``JUDGE_TIMEOUT_SECONDS`` it replaced and never above
+    :func:`judge_wall_ceiling_seconds`. Read per call. A Dispatch-tab knob."""
+    return max(0.0, dispatch_value("judge_wall_base_seconds"))
+
+
+def judge_wall_per_experiment_seconds() -> float:
+    """⏳⚖️ CMX-431. The wall each experiment in the battery adds — and the STALL window: a
+    run past its wall whose progress has not advanced for longer than this (or than one
+    full-suite run, whichever is longer) is stuck. Measured 2026-10-01 (PR #580): a targeted
+    run took ~3 min, so the default 6 min is twice that. Read per call. A Dispatch-tab knob."""
+    return max(1.0, dispatch_value("judge_wall_per_experiment_seconds"))
+
+
+def judge_wall_ceiling_seconds() -> float:
+    """⏳⚖️ CMX-431. The HARD ceiling: no judge run outlives this, however much it is still
+    advancing. A judge holds the only judge slot (``judge_max_concurrent`` defaults to 1),
+    so an unbounded one would park every other PR. Never below ``JUDGE_TIMEOUT_SECONDS``.
+    Read per call. A Dispatch-tab knob."""
+    return max(0.0, dispatch_value("judge_wall_ceiling_seconds"))
+
+
+def judge_wall_grace_seconds() -> float:
+    """⏳⚖️ CMX-431. Extra time past the wall for a run that has COMPLETED every experiment
+    and is in its final consistency/publish stage — an hour of battery is never thrown away
+    for its last few minutes. Read per call. A Dispatch-tab knob."""
+    return max(0.0, dispatch_value("judge_wall_grace_seconds"))
 # ⚖️ The judge (see chela.judge) — the adversarial pass on a PR that reached
 # awaiting_review. The fleet-wide kill switch; a workflow turns it off for itself with
 # `judge: {enabled: false}`, and it is off anyway for any workflow with no `judge.test_cmd`

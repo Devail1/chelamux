@@ -2,9 +2,15 @@
 // term_http, right after `window.__CHELA_FILE_DROP__` (the Settings switch at serve time).
 //
 // The browser cannot give a pane a host path: the file is on the viewer's device. So a
-// dropped file, or a file/image on the clipboard, is POSTed to /api/term/upload with this
-// pane's window id; the server saves it to <session cwd>/uploads/<name> and types
-// `@uploads/<name> ` into the prompt itself (no Enter). This page only shows the toast.
+// dropped or pasted NON-image file is POSTed to /api/term/upload with this pane's window
+// id; the server saves it to <session cwd>/uploads/<name> and types `@uploads/<name> ` into
+// the prompt itself (no Enter). This page only shows the toast.
+//
+// An IMAGE (png/jpeg/webp/gif) takes the pre-CMX-412 image path instead (CMX-423): POST
+// /api/term/paste-image (saved under /tmp/chela-paste-images/), then type the returned path
+// via /api/term/paste. Claude Code turns that path into a real attachment ("[Image #N]"),
+// which is how it actually SEES the image; an `@uploads/x.png` mention is just a file ref.
+// A drop/paste of several files sends each to its path, in the original order.
 //
 // Registered in the CAPTURE phase and injected before the legacy paste shims, so a file
 // paste is claimed here first; text pastes fall straight through, untouched. With the
@@ -61,8 +67,45 @@
         return j;
     }
 
-    async function uploadAll(files) {
-        for (var i = 0; i < files.length; i++) await upload(files[i]);
+    // The legacy image endpoint's MIME allowlist (_PASTE_IMAGE_MIME_EXT): anything else —
+    // svg, heic, a pdf — goes to uploads/, which takes any type.
+    var IMAGE = { 'image/png': 1, 'image/jpeg': 1, 'image/webp': 1, 'image/gif': 1 };
+
+    function isImage(blob) {
+        return !!(blob && IMAGE[(blob.type || '').toLowerCase()]);
+    }
+
+    // Byte-for-byte the pre-CMX-412 sequence (the legacy paste shims make the same two calls).
+    async function pasteImage(blob) {
+        try {
+            var fd = new FormData();
+            fd.append('agent', wid);
+            fd.append('image', blob, blob.name || 'paste');
+            var r = await fetch('/api/term/paste-image', { method: 'POST', body: fd, credentials: 'same-origin' });
+            if (!r.ok) {
+                var j0 = null;
+                try { j0 = await r.json(); } catch (e) { j0 = null; }
+                toast('err', 'Image not pasted: ' + ((j0 && j0.error) || ('HTTP ' + r.status)));
+                return null;
+            }
+            var j = await r.json();
+            if (!j || !j.path) return null;
+            await fetch('/api/term/paste', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin', body: JSON.stringify({ agent: wid, text: j.path }),
+            });
+            return j;
+        } catch (err) {
+            toast('err', 'Image paste failed');
+            return null;
+        }
+    }
+
+    async function sendAll(files) {
+        for (var i = 0; i < files.length; i++) {
+            if (isImage(files[i])) await pasteImage(files[i]);
+            else await upload(files[i]);
+        }
     }
 
     function filesOf(dt) {
@@ -96,7 +139,7 @@
         if (!files.length) return;
         e.preventDefault();
         e.stopImmediatePropagation();
-        uploadAll(files);
+        sendAll(files);
     }, true);
 
     document.addEventListener('paste', function (e) {
@@ -104,10 +147,7 @@
         if (!files.length) return;          // text paste → xterm.js / the legacy shims
         e.preventDefault();
         e.stopImmediatePropagation();
-        uploadAll(files);
+        sendAll(files);
     }, true);
 
-    // The Ctrl/Cmd+V key shim reads the clipboard itself (and swallows the keydown, so no
-    // paste event follows); it hands an image here instead of the legacy /tmp path.
-    window.__chelaUpload = upload;
 })();

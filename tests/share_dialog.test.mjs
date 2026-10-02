@@ -273,12 +273,12 @@ test('time left reads "12d 4h left" on the red banner and in Active shares', asy
 
 test('time-left formatting', () => {
     const now = 1_700_000_000_000;
-    terminals._shareExpires.set('@x', now / 1000 + 3 * 3600 + 5 * 60 + 10);
+    terminals._shareExpiry.set('@x', now / 1000 + 3 * 3600 + 5 * 60 + 10);
     assert.equal(terminals._shareTimeLeft('@x', now), '3h 5m left');
-    terminals._shareExpires.set('@x', now / 1000 + 25 * 60 + 10);
+    terminals._shareExpiry.set('@x', now / 1000 + 25 * 60 + 10);
     assert.equal(terminals._shareTimeLeft('@x', now), '25m left');
-    terminals._shareExpires.set('@x', now / 1000 + 20);
+    terminals._shareExpiry.set('@x', now / 1000 + 20);
     assert.equal(terminals._shareTimeLeft('@x', now), '<1m left');
-    terminals._shareExpires.delete('@x');
+    terminals._shareExpiry.delete('@x');
     assert.equal(terminals._shareTimeLeft('@x', now), '');
 });

@@ -32,7 +32,100 @@ read a frame, so it can't enforce anything.
 
 When input is dropped, the guest gets one "view only" notice, at most once every 10 s.
 
-The share pill shows **👁** for a view-only share and **⌨** when typing is allowed.
+The share pill and the pane's *Share current session* row show **👁** for a view-only
+share, **⌨** when typing is allowed, and **⚠** while the UNSANDBOXED override is on.
+
+## Changing a live share's mode
+
+You don't have to stop a share to change who can type. **Active shares** (the
+**#btn-shares** pill, or *Share current session* on a window that is already shared)
+lists each share with its mode as three buttons: **👁 View only**, **⌨ Allow typing** and,
+where the override is offered, **⚠ Full access — UNSANDBOXED**. Each row also says what
+that share allows. The link and pairing code stay the same, and a guest who already
+joined keeps the connection, so nobody needs a new invite.
+
+- **Down** (to View only) applies at once, with no confirmation. The next keystroke
+  the guest sends is dropped.
+- **Up** passes the same checks as creating a share with that mode
+  (`app._access_gate`, used by both routes). Allow typing needs *Guest typing* on and a
+  window that verifies as sandboxed; when it's refused, the row shows the same reason as
+  the share dialog. UNSANDBOXED needs the typed window name, and offers the same
+  duration picker as the share dialog; a pick longer than 4 h needs the name typed a
+  second time, and the server applies the same 14-day clamp (CMX-419). Its expiry and
+  one-joiner binding start at the upgrade, so the first guest to type after it is the
+  one bound. The row then says when it ends and how long is left
+  (e.g. "Ends Oct 15, 14:05 (12d 4h left)").
+- The server route is `POST /api/term/<wid>/share-mode` with
+  `{"mode", "confirm"?, "minutes"?, "confirm_long"?}`.
+  The bridge (`Bridge.set_mode`) applies the change in place.
+- Every change writes a `share.mode_changed` event with `from`, `to` and `by`. An
+  upgrade to UNSANDBOXED also writes `share.unsandboxed_granted`, and leaving it writes
+  `share.unsandboxed_revoked`.
+- The guest's status line says **"You can type now."** or **"View only now."**
+
+Clicking *Share current session* on a window that's already shared never creates a new
+share, because that would rotate the code. It opens Active shares with that share's row
+highlighted, so you can change its mode there.
+
+## Shares across restarts and deploys
+
+A live share no longer ends when chela restarts (CMX-434).
+
+**Where the share runs.** The bridge that streams a share runs in the **collab host**:
+`chela collab`, a separate PM2 service (`chela-collab`, see
+`examples/ecosystem.config.js`). The dashboard talks to it over an owner-only Unix
+socket, `$CHELA_DIR/collab.sock` (mode 0600; the peer's uid is checked too). A dashboard
+deploy doesn't touch a live share. `chela update` restarts `chela-collab` only when the
+share code itself changed (`chela/collab_host.py`, `collab_stream.py`, `share_store.py`,
+`e2e.py`, `share_sandbox.py`, `collab.py`). That holds on the nothing-to-pull path too:
+if a bare `git pull` brought in share code after `chela-collab` started, `chela update`
+finds the HEAD the service started on in the HEAD reflog and restarts it. When the
+reflog can't say, it restarts it.
+
+If `chela-collab` isn't running, the dashboard hosts the shares itself, as before. A
+dashboard restart then interrupts them, and the next dashboard restores them. Only one
+process hosts at a time: the holder of the `flock` on `$CHELA_DIR/collab.lock`. A
+dashboard that hosts no share gives the lock back, so a waiting `chela-collab` takes over.
+
+**What is kept.** Each live share is written to `$CHELA_DIR/shares.json`: the window,
+its mode, the relay room, the pairing secret, the override's expiry and bound guest, and
+the window's identity (tmux server pid, window id, pane pid). The file is mode 0600 and
+is never written inside a git work tree. It holds the pairing secret, so treat it like the
+code. Stopping a share removes it from the file. A process exit keeps it.
+
+**What comes back.** When a host starts, each kept share is restored with the **same
+link and pairing code**, so a guest reconnects by itself. These are not restored, and
+`share.not_restored` in the event log says why:
+
+- a share whose window is gone, or is no longer the same window (a tmux restart
+  recycles `@N` ids);
+- a **typing** share whose window doesn't verify as a sandboxed session now. Live, a pane
+  that stops verifying ends the share, so a restart doesn't turn it into anything else;
+- an **UNSANDBOXED** override that expired during the restart. The share comes back
+  view only (`share.unsandboxed_expired`). An override with time left comes back with
+  only that time left.
+
+A restored typing share re-checks the sandbox before it forwards any input, as always.
+
+**Two crypto details make a restore safe.** The pairing secret and the host's stream id
+don't change, so a restored host restarting its sequence numbers at 0 would reuse AES-GCM
+nonces. The host never seals a frame past a sequence ceiling that is already on disk, and
+a restored host resumes at that ceiling. A restored host has also forgotten which guest
+frames it has already seen, so the relay could replay an old keystroke. It sends a fresh
+random `resume` challenge, sealed so only a paired guest can read it. It accepts input
+only from a guest stream that answered it, and that answer also blocks every earlier frame
+from the stream. A guest page that hasn't been updated can still watch a restored share
+but can't type into it.
+
+**What the guest sees.** On a restart the host sends `restarting`, not `ended`. The guest
+page shows **host restarting…**, re-sends its hello with backoff (0.5 s, doubling to 8 s),
+and goes back to live on the host's first frame. It calls the share ended only if the host
+hasn't come back after 5 minutes. The page lives in the relay Worker, so this needs a
+`wrangler deploy` of `chela/collab-relay`.
+
+**Before a deploy.** `chela update` prints *"N live share(s) will be interrupted by
+restarting …"* before a restart that takes down the process hosting them. For a hand
+deploy, run `chela shares --restarting <services…>` first.
 
 ## Starting a sandboxed session
 
@@ -40,6 +133,8 @@ The share pill shows **👁** for a view-only share and **⌨** when typing is a
   in the sidebar's *New session* menu and in the phone's **+** menu.
 - CLI: `chela share-session <project>`, where `<project>` is a path or a name under
   `CHELA_PROJECTS_DIR`.
+- With web access (opt-in, per session): **New session → Sandboxed session · allow web
+  access…**, or `chela share-session <project> --web`. See [Web mode](#web-mode-opt-in).
 
 Both routes use `chela.share_sandbox`'s launcher, and both refuse to start without
 docker, the image, the `claude` binary or a token file. They also refuse a workspace
@@ -53,6 +148,42 @@ Knobs, set in `chela.env`, which the launcher process reads:
 | `CHELA_SHARE_SANDBOX_IMAGE` | `python:3.12-slim` | image for the guest and the proxy sidecar (must be pulled) |
 | `CHELA_SHARE_SANDBOX_TOKEN_FILE` | Claude Code's `.credentials.json` | the token the proxy adds on egress, e.g. a `claude setup-token` token |
 | `CHELA_SHARE_PROXY_UPSTREAM` | `https://api.anthropic.com` | the proxy's fixed upstream |
+| `CHELA_SHARE_SANDBOX_WEB_IMAGE` | `chela-share-web:latest` | web mode only: the guest image with headless Chromium (build it, below) |
+| `CHELA_SHARE_WEB_DENY` | unset | web mode: comma-separated domains (and their subdomains) always refused |
+| `CHELA_SHARE_WEB_ALLOW` | unset (= any public host) | web mode: if set, ONLY these domains (and subdomains); IP literals are then refused |
+| `CHELA_SHARE_WEB_HOST_RPS` | `1` | web mode: requests per second per site (burst 3) |
+| `CHELA_SHARE_WEB_GLOBAL_RPS` | `8` | web mode: requests per second across all sites (burst 20) |
+| `CHELA_SHARE_WEB_DENY_CIDRS` | unset | web mode: extra address ranges to refuse, on top of every private range and this host's own addresses |
+
+### The token, and long-running shares
+
+For a share that runs longer than a few hours, use a long-lived token:
+
+```bash
+claude setup-token            # prints a token valid for about a year
+umask 077; printf '%s' '<the token>' > ~/.chela/share-sandbox-token
+echo 'CHELA_SHARE_SANDBOX_TOKEN_FILE=~/.chela/share-sandbox-token' >> ~/.chela/chela.env
+```
+
+With the default, Claude Code's own `.credentials.json`, the session works, but it depends
+on your host login. Claude Code refreshes that login every few hours. It writes a new file
+in place of the old one, and the old token stops working. Here is how a session handles a
+refresh:
+
+- The launcher copies **only the access token** (never the refresh token) into a
+  per-session directory, `~/.chela/share-token/<id>/`. It checks the source file every 2
+  seconds and copies it again when it changes. The directory is removed when the session
+  ends.
+- The proxy sidecar mounts that **directory** read-only and reads the token from it on
+  every request. It mounts a directory, not the file itself, because a mounted single
+  file keeps showing the old file after a replace. The guest container mounts neither.
+- If Anthropic rejects the token (401), the proxy reads the token once more and, if it
+  changed, retries once with the new one.
+- If the 401 persists, the proxy answers **502** with *"The host's Claude login expired —
+  ask the operator to log in again on the host."* It never passes the 401 on, because a
+  401 would start Claude Code's `/login` inside the guest, which can never work there.
+  Log in again on the host (`claude`, then `/login`). The next request picks up the new
+  token, with no restart needed.
 
 ## What is isolated
 
@@ -66,12 +197,49 @@ Knobs, set in `chela.env`, which the launcher process reads:
   address** (`inhibit_ipv4`), so it can't reach any host service or the internet. The
   only other thing on that bridge is a sidecar running `chela/share_proxy.py`, which
   forwards `/v1/…` to one fixed upstream and adds your token on the way out. **The token
-  never enters the guest container.**
+  never enters the guest container.** (A session started with web access has exactly one
+  more member on that bridge, the filtering egress proxy. See
+  [Web mode](#web-mode-opt-in).)
 - tmux starts the window's process directly, with no shell. When Claude exits, the
   container, the proxy, the network and the pane go with it.
 
 A guest who can type can still spend your Claude usage through the proxy. That comes
 with letting them drive Claude at all.
+
+## Telegram: the session reaches your topic too
+
+A sandboxed window gets a Telegram topic like any other agent window, and its replies are
+relayed there. **Everything the session says reaches your topic** — including whatever the
+guest pastes or has Claude read: a CV, a draft, a private file in the workspace. Inbound
+works as usual too, so anything you type in that topic goes into the guest's session.
+
+How it works: the session's transcript stays in the container's tmpfs and its hooks can't
+reach the host, so the relay has no transcript to read. Instead, the credential proxy
+parses each completed model turn from the response stream and appends the assistant's
+visible text (with each tool call reduced to its name) to
+`$CHELA_DIR/share-sessions/<session id>/outbox.jsonl`. That directory is mounted
+read-write into the **proxy sidecar only**, never into the guest container, and a
+workspace that would contain it is refused. `chela telegram` reads the outbox of any
+window that verifies live as a sandboxed session, with the normal relay's formatting,
+chunking and dedup. `chela doctor` reports such a window as healthy while its outbox
+exists and keeps up with the proxy. It flags the window when the outbox is missing, or
+when the proxy is forwarding turns that don't reach the outbox.
+
+A turn is written only once its stream finishes. If the guest disconnects partway through
+a reply, that reply never reaches the topic, even when the model finished it.
+
+Outboxes stay on disk after the session ends, in directories readable only by you (mode
+0700). A new sandboxed session removes any outbox older than 7 days.
+
+**Turning the relay off for one session** (default on):
+
+```bash
+chela telegram --sandbox-relay @<wid>=off    # and =on to turn it back on
+```
+
+The setting is stored against the sandboxed session's id, not the window number, so it
+doesn't carry over to whatever window later gets the same `@N`. While it's off, neither
+the session's replies nor its pane prompts and status line are posted to the topic.
 
 ## Measured results (CMX-400, container route)
 
@@ -85,7 +253,7 @@ Measured by hand against a live sandboxed session:
 | network, host services, the tmux socket | blocked (no-host-address network) |
 | `.git` | read-only |
 | workspace `.env` | masked |
-| shift+tab | cycles manual → plan → auto only, no bypass |
+| shift+tab | cycles manual → accept edits → plan → auto only, no bypass (re-measured 2026-10-01) |
 | `/sandbox` | only its dependency tab (no bwrap in the container) |
 | `/config` | affects only the container's temporary HOME |
 | Ctrl+P Ctrl+Q, `/exit`, double Ctrl+C | each ends the pane with no shell; container and network removed |
@@ -118,6 +286,157 @@ escape-probe scripts; this list is the test.
    stopped being a verified sandbox". (A view-only share of an ordinary window is not
    checked; it never claimed to show a sandbox.)
 
+## Web mode (opt-in)
+
+A sandboxed session normally reaches nothing but the token proxy. **Web mode** lets one
+session read the public web: job listings, documentation, a public LinkedIn job page. It
+is chosen per session at launch, and the default stays *no network*.
+
+### What changes
+
+- **The guest's network does not change.** The guest container is still alone on its
+  per-session `--internal` bridge, the host still has no address on it (`inhibit_ipv4`),
+  and there are still no published ports and no host sockets. The guest never gets a
+  route of its own.
+- **One more sidecar joins that network:** `chela/share_web_proxy.py`, a filtering HTTP(S)
+  forward proxy, reachable as `chela-web:3128`. It is the only thing that can carry the
+  guest's traffic out. It holds no credential, runs `--cap-drop ALL`, read-only, as your
+  uid, and mounts only its own script (read-only) and its log file.
+- **The guest gets proxy settings:** `HTTPS_PROXY` / `HTTP_PROXY` point at the sidecar,
+  and `NO_PROXY` keeps Claude's own API calls on the token proxy. Claude's WebFetch,
+  `curl`, `pip` and the browser all go through it. A tool that ignores the proxy has
+  nowhere to go.
+- **A browser in the guest:** the guest runs the `chela-share-web` image, which is the
+  stock image plus a headless Chromium driven by Playwright, `curl`, `git` and a `browse`
+  command. `browse <url> [--links] [--screenshot out.png]` prints a page's final URL,
+  status, title and visible text. Claude can use it from Bash. There is no host browser
+  and no host CDP port.
+- **The pane says so:** the window is named `sandbox-web-N`, and its header shows
+  **🌐 web**.
+
+### What the egress proxy enforces
+
+Each request goes through these checks in order:
+
+1. **Ports 80 and 443 only.**
+2. **The operator's lists**, if set: `CHELA_SHARE_WEB_DENY` always refuses its domains,
+   and `CHELA_SHARE_WEB_ALLOW` (when set) admits only its domains. Unset means any
+   public host. That's the default, because job listings live on many company sites.
+3. **Public addresses only, checked after DNS.** The proxy resolves the name itself and
+   refuses the request if **any** answer is not a public address. That covers loopback,
+   RFC 1918, link-local (cloud metadata included), CGNAT `100.64/10`, IPv6 loopback,
+   link-local and ULA, an IPv4 address hidden in a mapped, 6to4, Teredo or NAT64 IPv6
+   address, multicast and reserved ranges. It also refuses the docker host gateway as the
+   sidecar sees it, **this host's own interface addresses** (which matters on a host with
+   a public IP), and `CHELA_SHARE_WEB_DENY_CIDRS`. It then connects to the **checked
+   address**, never re-resolving the name, so there is no DNS-rebinding window.
+4. **Rate limits:** each site (`www.linkedin.com` and `linkedin.com` count as one site)
+   gets 1 request/s with a burst of 3, and all sites together get 8/s with a burst of 20.
+   A request over the limit waits for its slot. If it would wait more than 30 s, it is
+   refused with 429.
+5. **A log line per request**, appended as JSON to
+   `~/.chela/share-web/<session-id>.log` (under `CHELA_DIR`): time, method, host, port,
+   the address it went to, the path (plain HTTP only), status, bytes each way, and the
+   reason for any refusal. The log is kept after the session ends. The launcher prints
+   its path in the pane when the session starts.
+
+HTTPS is **tunnelled, not decrypted**. The log shows the host and the byte counts, but not
+HTTPS paths. Decrypting would mean putting a CA inside the guest and letting the proxy read
+the guest's traffic, and neither is worth it.
+
+### Why Chromium runs with `--no-sandbox`
+
+Chromium's own sandbox needs user namespaces or a setuid helper. Inside this container
+that means adding `CAP_SYS_ADMIN` or loosening the seccomp profile. Either one weakens the
+**outer** boundary (the container) to strengthen an inner one. So the browser runs
+without its own sandbox. A renderer exploit would land in a container that already lets
+the guest's Claude run arbitrary code, with the same workspace, the same network and the
+same caps. It gains nothing the guest doesn't already have.
+
+### Threat model: what web mode adds
+
+The invariants are unchanged. A mistake, or a hostile page doing prompt injection, still
+cannot reach the host, the LAN or any private address, still can't read outside the
+workspace, and still can't see the token.
+
+What web mode **adds** is a way **out**. A web page can tell the session's Claude to send
+data to a public host it controls: in a URL, in a form post, or through `curl`.
+Everything the session can read can leave this way, and **that is the whole workspace**.
+So:
+
+- **Keep only the guest's own material in the workspace.** Their CV, their notes, job
+  descriptions. Nothing of yours, and no shared repo.
+- Anything the guest pastes into the session, the session can also send out.
+- The rate limits and the log are for noticing and slowing a runaway. They don't prevent
+  a single small leak.
+- Traffic leaves from **your** IP address. A site that blocks or flags automated access
+  will see your address. That's why the limits are on by default.
+
+### Building the browser image
+
+The image is built locally and nothing is pulled from a chela registry. The Dockerfile
+ships with chela at `chela/assets/share-sandbox-web/`. When the image is missing,
+`chela share-session --web` prints the exact build command, which looks like this:
+
+```bash
+docker build -t chela-share-web <chela install>/chela/assets/share-sandbox-web
+```
+
+To use another tag, set `CHELA_SHARE_SANDBOX_WEB_IMAGE`. The image must keep `python`,
+`browse` and Chromium. The proxy sidecars still use `CHELA_SHARE_SANDBOX_IMAGE`.
+
+### What the live check verifies in web mode
+
+`check_share_session` reads the mode from the launcher's own argv (`--net none|web`), so
+the mode comes from the process tree and not from a flag chela stores. It then checks the
+live session against that mode. Everything in [The three rules](#the-three-rules) still
+applies. On top of that:
+
+- the guest's mode label matches the launched mode;
+- the guest's proxy variables are **exactly** the ones that mode sets. A `none` session
+  with any `*_PROXY` variable fails;
+- the session network's members are **exactly** the guest and the token proxy, plus the
+  web proxy in web mode. A `none` session that gained a web sidecar or any other member
+  fails, and so does a `none` session whose web sidecar is merely running;
+- in web mode, the web sidecar is this session's, unprivileged, read-only and running
+  chela's proxy script from a read-only mount, with no other mounts.
+
+### Your checklist before switching a guest to web mode
+
+Run this yourself, on a **throwaway** project, with a second browser of your own as the
+guest. This list is the test.
+
+1. Build the image (above). Then `chela share-session <throwaway> --web` starts a window
+   named `sandbox-web-N`, and its pane header shows **🌐 web**.
+2. `python -m chela.share_sandbox check @<wid>` prints `sandboxed`.
+3. Run steps 3, 4 and 6 to 9 of the checklist above in this session. They must all
+   behave the same way here.
+4. **Public works:** `!curl -sI https://example.com` returns 200, and
+   `!browse https://example.com` prints the page's title and text. A public LinkedIn job
+   URL (`!browse https://www.linkedin.com/jobs/view/<id>`) loads, or LinkedIn's own login
+   wall does.
+5. **Private is refused, by IP and by name:** each of these gets a `403 refused` (curl
+   may skip the proxy for `localhost` itself, in which case it fails outright):
+   `!curl -m5 -x "$HTTPS_PROXY" http://127.0.0.1/`, `http://<your host's LAN IP>:<a port
+   you serve>/`, `http://169.254.169.254/`, `http://172.17.0.1/` (or your docker gateway),
+   `https://localhost/`, and a name that resolves to a private address (for example
+   `http://<your router's hostname>/`, or a `nip.io` name like `http://10.0.0.1.nip.io/`).
+6. **Other ports are refused:** `!curl -m5 https://example.com:8443/` gets 403.
+7. **No route without the proxy:** `!curl -m5 --noproxy '*' https://example.com` fails,
+   because the guest still has no route of its own.
+8. **The rate limit holds:**
+   `!for i in $(seq 10); do curl -s -o /dev/null -w '%{http_code}\n' https://example.com; done`
+   finishes in roughly 7 s or more, not instantly.
+9. **The log is there:** `tail ~/.chela/share-web/<session-id>.log` shows each request
+   above, with host, status, bytes, and the refusals with their reasons.
+10. **The mode can't drift:** start a plain (`none`) sandboxed session and run
+    `docker network connect chela-share-net-<its id> chela-share-web-<a web session's id>`.
+    `python -m chela.share_sandbox check @<wid>` on the `none` session now prints
+    `NOT sandboxed`, and guest input stops within a couple of seconds.
+11. `/exit` the web session. The pane closes, and
+    `docker ps -a --filter label=dev.chela.share-sandbox` is empty, including the
+    `chela-share-web-*` sidecar.
+
 ## The trusted-peer override (UNSANDBOXED)
 
 For a very trusted peer, a single share can allow typing into a window that is **not**
@@ -129,7 +448,8 @@ on by accident, and to end on its own:
 - The dialog labels it **"Full access — UNSANDBOXED: the guest can type into a real shell
   on this machine"**. To confirm, you type the **window name**, and the server checks
   that name against the live tmux window.
-- It **expires** after the duration you pick in the dialog: **30 min · 4 h · 1 day ·
+- It **expires** after the duration you pick in the dialog (or in *Active shares* when
+  you upgrade a live share): **30 min · 4 h · 1 day ·
   7 days · 14 days**. The picker starts on `CHELA_SHARE_UNSANDBOXED_MINUTES` (default
   **30**; any value in the range 1–20160 minutes, i.e. up to 14 days, is accepted and
   added to the picker if it isn't one of the five). The server clamps whatever is posted
