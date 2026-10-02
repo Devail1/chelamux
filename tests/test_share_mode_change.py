@@ -344,3 +344,62 @@ def test_unsandboxed_is_refused_when_the_window_has_no_name(monkeypatch, live_sh
         assert r.status_code == 403 and r.get_json()["error"] == dash.CONFIRM_REASON
     assert cs._bridges["@9"].mode() == cs.MODE_VIEW
     assert _events("share.unsandboxed_granted") == []
+
+
+# --- CMX-419: the duration picker on the upgrade path ----------------------------------
+# Upgrading a live share to UNSANDBOXED is a second road to the same grant: it must not
+# bypass the 14-day clamp or the >4 h second confirmation.
+
+@pytest.mark.parametrize("extra", [{}, {"confirm_long": ""}, {"confirm_long": "shell-4"}])
+def test_long_upgrade_without_second_confirmation_is_refused(monkeypatch, live_share, typing_on, extra):
+    _not_sandboxed(monkeypatch)
+    live_share("view")
+    r = _switch("unsandboxed", confirm="shell-3", minutes=241, **extra)
+    assert r.status_code == 403
+    assert r.get_json()["error"] == dash.CONFIRM_LONG_REASON
+    assert cs._bridges["@9"].mode() == cs.MODE_VIEW
+    assert _events("share.unsandboxed_granted") == [] and _events("share.mode_changed") == []
+
+
+def test_long_upgrade_with_second_confirmation_lands_in_expires_at(monkeypatch, live_share, typing_on):
+    _not_sandboxed(monkeypatch)
+    live_share("view")
+    r = _switch("unsandboxed", confirm="shell-3", minutes=10080, confirm_long="shell-3")
+    assert r.status_code == 200, r.get_json()
+    (g,) = _events("share.unsandboxed_granted")
+    assert g["payload"]["expires_at"] - g["payload"]["started_at"] == 10080 * 60.0
+    assert r.get_json()["expires_at"] == g["payload"]["expires_at"]
+
+
+def test_upgrade_duration_is_clamped_to_14_days(monkeypatch, live_share, typing_on):
+    _not_sandboxed(monkeypatch)
+    live_share("view")
+    r = _switch("unsandboxed", confirm="shell-3", minutes=20161, confirm_long="shell-3")
+    assert r.status_code == 200, r.get_json()
+    (g,) = _events("share.unsandboxed_granted")
+    assert g["payload"]["expires_at"] - g["payload"]["started_at"] == 20160 * 60.0
+
+
+def test_upgrade_with_no_minutes_keeps_the_configured_default(monkeypatch, live_share, typing_on):
+    """⭐ ACCEPTED: no env, no ``minutes`` ⇒ 30 min on ONE confirmation, as before."""
+    monkeypatch.delenv("CHELA_SHARE_UNSANDBOXED_MINUTES", raising=False)
+    _not_sandboxed(monkeypatch)
+    live_share("view")
+    r = _switch("unsandboxed", confirm="shell-3")
+    assert r.status_code == 200, r.get_json()
+    (g,) = _events("share.unsandboxed_granted")
+    assert g["payload"]["expires_at"] - g["payload"]["started_at"] == 30 * 60.0
+
+
+def test_long_upgrade_override_still_expires(monkeypatch, typing_on):
+    """A 14-day override ends the way a short one does: on the (fake) clock."""
+    _not_sandboxed(monkeypatch)
+    b, clock, forwarded, _sent = _bridge(monkeypatch)
+    b.set_mode(cs.MODE_UNSANDBOXED, changed_by="op@example", window="shell-3", ttl_s=20160 * 60.0)
+    j = _joiner(b)
+    _type(b, j, b"a")
+    assert forwarded == [b"a"]
+    clock.t += 20160 * 60.0 + 1
+    _type(b, j, b"b")
+    assert forwarded == [b"a"], "past 14 days the guest is view only again"
+    assert b.mode() == cs.MODE_VIEW

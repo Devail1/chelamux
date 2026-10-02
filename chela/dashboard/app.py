@@ -1413,12 +1413,17 @@ def _share_options(wid: str) -> dict:
         # The trusted-peer override is offered only while the setting is on, and only
         # where it means something (a window that is NOT already sandboxed).
         "unsandboxed_offered": typing_on and not sandboxed,
+        # The override's duration picker (CMX-419): preselect the configured default; a
+        # pick above ``unsandboxed_long_minutes`` needs the window name typed twice.
         "unsandboxed_minutes": config.share_unsandboxed_minutes(),
+        "unsandboxed_choices": sorted({*config.SHARE_UNSANDBOXED_CHOICES, config.share_unsandboxed_minutes()}),
+        "unsandboxed_long_minutes": config.SHARE_UNSANDBOXED_LONG_MINUTES,
         "window_name": _window_name(wid),
     }
 
 
 CONFIRM_REASON = "type the window name to confirm full access"
+CONFIRM_LONG_REASON = "type the window name again to confirm full access for longer than 4 h"
 
 
 def _access_gate(wid: str, mode: str, data: dict):
@@ -1437,8 +1442,20 @@ def _access_gate(wid: str, mode: str, data: dict):
     name = _window_name(wid)
     if not name or (data.get("confirm") or "").strip() != name:
         return None, (jsonify({"ok": False, "error": CONFIRM_REASON}), 403)
+    # How long the override lasts (CMX-419): the configured default when absent, clamped
+    # to [1, 14 days]; above 4 h the window name must be typed a second time.
+    raw = data.get("minutes")
+    if raw is None:
+        minutes = config.share_unsandboxed_minutes()
+    else:
+        try:
+            minutes = config.clamp_unsandboxed_minutes(int(raw))
+        except (TypeError, ValueError):
+            return None, (jsonify({"ok": False, "error": f"bad duration: {raw!r}"}), 400)
+    if minutes > config.SHARE_UNSANDBOXED_LONG_MINUTES and (data.get("confirm_long") or "").strip() != name:
+        return None, (jsonify({"ok": False, "error": CONFIRM_LONG_REASON}), 403)
     return {"unsandboxed": {"granted_by": _granted_by(), "window": name,
-                            "ttl_s": config.share_unsandboxed_minutes() * 60.0}}, None
+                            "ttl_s": minutes * 60.0}}, None
 
 
 @app.route("/api/term/<wid>/share-options")
@@ -1462,7 +1479,9 @@ def api_term_share(wid):
     ``mode`` (CMX-403): ``"view"`` (default) · ``"typing"`` — refused unless the
     ``share_typing`` setting is on AND the window verifies as a sandboxed session ·
     ``"unsandboxed"`` — the trusted-peer override, refused unless the setting is on and
-    ``confirm`` equals the live window name. The bridge re-enforces all of it per
+    ``confirm`` equals the live window name. ``minutes`` (CMX-419) is how long it lasts —
+    the configured default when absent, clamped to [1, 14 days]; above 4 h it also needs
+    ``confirm_long`` equal to the window name. The bridge re-enforces all of it per
     keystroke; these refusals only keep the dialog honest."""
     _require_terminals()
     if wid not in _terminals_port_map():
