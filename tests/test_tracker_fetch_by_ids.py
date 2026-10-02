@@ -9,6 +9,7 @@ none of those ids exist — and `tick()` re-reads, by id, every run it would clo
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 from unittest.mock import patch
@@ -131,9 +132,9 @@ def test_gh_fetch_by_ids_fails_rather_than_guess_past_its_limit(tmp_path, monkey
 # --- tick(): what reconcile does with it ---------------------------------------------------
 
 
-def _tick(wf, source, gh_behaviour=None, pr_status=None):
+def _tick(wf, source, gh_behaviour=None, pr_status=None, extra=()):
     """One real `tick()` against `source`, tmux and every other `gh` call stubbed. Returns
-    (summary, killed window names)."""
+    (summary, killed window names). `extra` patchers are entered LAST, so they win."""
     fake = _FakeTmux()
     fake.windows = [("@1", "test-1")]
     killed: list[str] = []
@@ -157,7 +158,10 @@ def _tick(wf, source, gh_behaviour=None, pr_status=None):
          patch.object(dispatcher, "_fire_after_done", lambda wf: None), \
          patch.object(dispatcher, "_read_pr_url", return_value=TRANSCRIPT_PR), \
          patch.object(dispatcher, "_read_pr_status", side_effect=read_pr_status), \
-         patch.object(dispatcher.subprocess, "run", side_effect=run):
+         patch.object(dispatcher.subprocess, "run", side_effect=run), \
+         contextlib.ExitStack() as stack:
+        for p in extra:
+            stack.enter_context(p)
         summary = dispatcher.tick(wf.path)
     return summary, killed
 
@@ -870,3 +874,221 @@ def test_gh_fetch_by_ids_sees_past_ghs_default_page(tmp_path):
         snap = src.fetch_by_ids([old])
     assert snap is not None
     assert {t.id: t.state for t in snap} == {old: "closed"}
+
+
+# --- THE RULE, not another case ------------------------------------------------------------
+#
+# ⭐ A FAILED id refresh blocks ONLY tracker-derived transitions. Every other source of
+# evidence the reconcile pass acts on must still act on that SAME tick. Rounds 2-4 each pinned
+# one more (status × evidence) pair and the next round found another unpinned — so this is
+# ONE table, keyed off the dispatcher's own status constants: a source of evidence is pinned
+# for EVERY status the code applies it to, and a status added to a constant joins its rows.
+#
+# The non-tracker evidence the tick reconciles from (in tick order):
+#   • merged PR     — RECONCILE_MERGE_STATUSES_WITH_RUNNING → done
+#   • closed PR     — RECONCILE_MERGE_STATUSES             → closed
+#   • push marker   — ACTIVE_STATUSES                      → the push is applied
+#   • task-finished — ACTIVE_STATUSES                      → awaiting_review
+#   • dead window   — running (first dispatch)             → failed
+#   • dead window   — running (a rework)                   → changes_requested
+#   • rework cap    — changes_requested, cap spent         → needs_human
+#   • rework        — changes_requested, budget left       → re-spawned
+#
+# Each row runs a real tick with `_PartialRead`: the listing is short (every run is a refresh
+# candidate) and `fetch_by_ids` returns None, so `tracker_refresh_failed` is True on every
+# row — asserted, not assumed.
+
+TID = "abc123"
+
+
+def _seed_row(wf, tmp_path, status, **over):
+    wt = tmp_path / "wt" / TID
+    wt.mkdir(parents=True)
+    fields = dict(task_id=TID, workflow_path=str(wf.path), status=status, window_name="test-1",
+                  worktree_path=str(wt), pr_url=None, pr_state=None, rework_count=0,
+                  started_at=dispatcher._now())
+    fields.update(over)
+    with dispatcher._db() as conn:
+        _row(conn, **fields)
+    return wt
+
+
+def _run_of(task_id):
+    return dispatcher.resolve_run(task_id)
+
+
+def _ev_merged_pr():
+    def check(summary, killed, spies, wt):
+        assert _run_of(TID)["status"] == "done"
+        assert summary["reconciled_done"] == 1
+        assert killed[:1] == ["test-1"]
+    return dict(seed=dict(pr_url=PR_URL, pr_state="open"),
+                pr_status=lambda url: ("merged", "MERGEABLE"), check=check)
+
+
+def _ev_closed_pr():
+    def check(summary, killed, spies, wt):
+        assert _run_of(TID)["status"] == "closed"
+        assert summary["reconciled_closed"] == 1
+    return dict(seed=dict(pr_url=PR_URL, pr_state="open"),
+                pr_status=lambda url: ("closed", None), check=check)
+
+
+def _ev_push_marker():
+    calls: list[str] = []
+
+    def apply(conn, wf, row):
+        calls.append(row["task_id"])
+        return {"ok": True}
+
+    def arm(wt):
+        dispatcher._push_request_path(wt).write_text("{}")
+
+    def check(summary, killed, spies, wt):
+        assert calls == [TID]
+        assert summary["push_applied"] == 1
+        assert not dispatcher._push_request_path(wt).exists()
+    return dict(arm=arm, extra=[patch.object(dispatcher, "_apply_push_request", side_effect=apply)],
+                check=check)
+
+
+def _ev_task_finished_marker():
+    def arm(wt):
+        dispatcher._task_finished_request_path(wt).write_text("{}")
+
+    def check(summary, killed, spies, wt):
+        assert _run_of(TID)["status"] == "awaiting_review"
+        assert summary["task_finished_applied"] == 1
+        assert not dispatcher._task_finished_request_path(wt).exists()
+    return dict(arm=arm, check=check)
+
+
+def _ev_dead_window_first_dispatch():
+    def check(summary, killed, spies, wt):
+        run = _run_of(TID)
+        assert run["status"] == "failed"
+        assert run["last_error"] == "tmux window disappeared"
+        assert summary["reconciled_failed"] == 1
+    return dict(seed=dict(window_name="gone-1"), check=check)
+
+
+def _ev_dead_window_rework():
+    def check(summary, killed, spies, wt):
+        run = _run_of(TID)
+        assert run["status"] == "changes_requested"
+        assert "window disappeared" in (run["last_error"] or "")
+    return dict(seed=dict(window_name="gone-1", rework_count=1, pr_url=PR_URL, pr_state="open"),
+                check=check)
+
+
+def _ev_rework_cap_spent():
+    def check(summary, killed, spies, wt):
+        assert _run_of(TID)["status"] == "needs_human"
+        assert summary["escalated"] >= 1
+    return dict(seed=dict(rework_count=99, pr_url=PR_URL, pr_state="open"), check=check)
+
+
+def _ev_rework_respawn():
+    calls: list[str] = []
+
+    def respawn(wf, row, conn, task=None):
+        calls.append(row["task_id"])
+        return True
+
+    def check(summary, killed, spies, wt):
+        assert calls == [TID]
+        assert summary["reworked"] == 1
+    return dict(seed=dict(pr_url=PR_URL, pr_state="open"),
+                extra=[patch.object(dispatcher, "_respawn_rework", side_effect=respawn)],
+                check=check)
+
+
+# evidence → (the statuses the CODE applies it to, the case). The status sets are the
+# dispatcher's own constants wherever the code reads one.
+NON_TRACKER_EVIDENCE = {
+    "merged_pr": (dispatcher.RECONCILE_MERGE_STATUSES_WITH_RUNNING, _ev_merged_pr),
+    "closed_pr": (dispatcher.RECONCILE_MERGE_STATUSES, _ev_closed_pr),
+    "push_marker": (dispatcher.ACTIVE_STATUSES, _ev_push_marker),
+    "task_finished_marker": (dispatcher.ACTIVE_STATUSES, _ev_task_finished_marker),
+    "dead_window_first_dispatch": (("running",), _ev_dead_window_first_dispatch),
+    "dead_window_rework": (("running",), _ev_dead_window_rework),
+    "rework_cap_spent": (("changes_requested",), _ev_rework_cap_spent),
+    "rework_respawn": (("changes_requested",), _ev_rework_respawn),
+}
+
+RECONCILED_STATUSES = (*dispatcher.ACTIVE_STATUSES, *dispatcher.RECONCILE_MERGE_STATUSES)
+
+EVIDENCE_TABLE = [
+    pytest.param(name, status, id=f"{name}-{status}")
+    for name, (statuses, _case) in NON_TRACKER_EVIDENCE.items()
+    for status in statuses
+]
+
+
+def test_the_evidence_table_covers_every_status_the_reconcile_pass_reads():
+    """A status the reconcile query selects that no evidence row exercises is a status
+    whose failed-refresh behaviour nothing pins."""
+    covered = {status for statuses, _ in NON_TRACKER_EVIDENCE.values() for status in statuses}
+    assert set(RECONCILED_STATUSES) <= covered
+    # the merged branch is the one with `running` in it (issue #491) — pin the constant's
+    # shape so the table can't silently shrink with it.
+    assert set(dispatcher.RECONCILE_MERGE_STATUSES_WITH_RUNNING) == {
+        *dispatcher.REVIEW_STATUSES, "failed", "running"}
+
+
+@pytest.mark.parametrize("name,status", EVIDENCE_TABLE)
+def test_a_failed_refresh_blocks_only_tracker_evidence(tmp_path, name, status):
+    """🔴 GUARD (the rule): gate ANY non-tracker transition in the reconcile pass on
+    `tracker_refresh_failed` (or skip it while the refresh is failing) ⇒ its row here stays
+    put on a failed-refresh tick ⇒ RED."""
+    case = NON_TRACKER_EVIDENCE[name][1]()
+    wf = _wf(tmp_path)
+    wt = _seed_row(wf, tmp_path, status, **case.get("seed", {}))
+    if "arm" in case:
+        case["arm"](wt)
+
+    summary, killed = _tick(wf, _PartialRead(), pr_status=case.get("pr_status"),
+                            extra=case.get("extra", ()))
+
+    assert summary["tracker_refresh_failed"] is True
+    case["check"](summary, killed, None, wt)
+
+
+@pytest.mark.parametrize("status", RECONCILED_STATUSES)
+def test_a_failed_refresh_changes_no_row_that_has_no_other_evidence(tmp_path, status):
+    """The other half of the rule, over every status the reconcile pass reads: with no
+    non-tracker evidence at all, a failed refresh changes NOTHING — no status, no kill, no
+    worktree removed. 🔴 Read the failed refresh as "all gone" ⇒ a review row goes done ⇒
+    RED."""
+    wf = _wf(tmp_path)
+    wt = _seed_row(wf, tmp_path, status, pr_url=PR_URL, pr_state="open")
+    before = dict(_run_of(TID))
+
+    summary, killed = _tick(wf, _PartialRead(), extra=[
+        patch.object(dispatcher, "_respawn_rework", return_value=False)])
+
+    assert summary["tracker_refresh_failed"] is True
+    after = _run_of(TID)
+    assert after["status"] == before["status"] == status
+    assert (summary["reconciled_done"], summary["reconciled_closed"],
+            summary["reconciled_failed"]) == (0, 0, 0)
+    assert killed == []
+    assert wt.exists()
+
+
+def test_gh_fetch_by_ids_reads_even_with_a_config_error(tmp_path):
+    """🔴 GUARD: `config_error` gates CLAIMING (an unset `require_label`), not refreshing a
+    run already in flight. Let `fetch_by_ids` bail on it ⇒ every in-flight run of a
+    misconfigured gh workflow reads as a FAILED refresh forever ⇒ RED."""
+    src = GhIssuesSource(WorkflowDef(
+        path=tmp_path / "WORKFLOW.md",
+        config={"tracker": {"kind": "gh_issues", "repo": REPO}},   # no require_label
+        prompt_template="",
+    ))
+    assert src.config_error
+    tid, closed_tid = gh_task_id(REPO, ISSUE), gh_task_id(REPO, 8)
+    with patch("chela.sources.gh_issues.subprocess.run",
+               side_effect=_gh_faithful({REPO: [(ISSUE, "OPEN"), (8, "CLOSED")]})):
+        snap = src.fetch_by_ids([tid, closed_tid])
+    assert snap is not None
+    assert {t.id: t.state for t in snap} == {tid: "open", closed_tid: "closed"}

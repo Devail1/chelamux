@@ -57,10 +57,13 @@ from "a week+ rewrite" to "2–3 days", and **re-ordered**: G1 must land *before
 > leaving the tracker: claimed/running and every review state. An id is gone only when a
 > successful read reports it closed or does not report it. On `None` no run changes from the
 > tracker this tick. The failure is logged once on the edge, recorded as
-> `tracker_refresh_failed` in the tick summary, and retried next tick. Merged-PR evidence, the
-> agent's own completion marker and a dead window still act, since none of them come from the
-> tracker (SPEC 11.4: "keep active workers running"). `list_open_tasks` is unchanged and still
-> drives claiming.
+> `tracker_refresh_failed` in the tick summary, and retried next tick. Every non-tracker
+> transition still acts on that same tick, since none of them come from the tracker (SPEC
+> 11.4: "keep active workers running"): a merged PR (every status in
+> `RECONCILE_MERGE_STATUSES_WITH_RUNNING`), a closed PR, the agent's push and task-finished
+> markers, a dead window (first dispatch → `failed`, rework → `changes_requested`), the rework
+> cap and the rework re-spawn. One table-driven test pins each (status × evidence) pair with
+> the refresh forced to fail. `list_open_tasks` is unchanged and still drives claiming.
 >
 > Behaviour changes: a parked markdown line and an open issue that lost `require_label` are no
 > longer read as done. A deleted markdown line still reconciles, as long as the file itself
