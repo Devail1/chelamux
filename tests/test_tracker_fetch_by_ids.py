@@ -737,3 +737,136 @@ def test_markdown_a_struck_line_with_markers_maps_to_its_bare_title_id(tmp_path)
     src = _md(tmp_path, "- [x] beta <!-- depends: alpha -->\n")
     b = _md_id(src, "beta")
     assert [(t.id, t.state) for t in src.fetch_by_ids([b])] == [(b, "closed")]
+
+
+# --- rework round 4: the wiring the judge's battery found unguarded ------------------------
+
+
+def _gh_faithful(issues_by_repo: dict[str, list[tuple[int, str]]], cwd_repo: str = "cwd/repo"):
+    """A fake `gh issue list` that answers the question it was ASKED, like the real one:
+    `--repo` (absent ⇒ gh's cwd default, a different repo with its own issue numbers),
+    `--state` (absent ⇒ gh's default, `open`), `--json` (only those fields come back) and
+    `--limit` (absent ⇒ gh's default, 30). A refresh that asks the wrong question gets the
+    wrong answer — which is the only way a test can see that it asked the wrong question."""
+    def opt(cmd, flag, default):
+        return cmd[cmd.index(flag) + 1] if flag in cmd else default
+
+    def run(cmd, *a, **k):
+        repo = opt(cmd, "--repo", cwd_repo)
+        state = opt(cmd, "--state", "open").lower()
+        fields = opt(cmd, "--json", "number,title,url").split(",")
+        limit = int(opt(cmd, "--limit", "30"))
+        rows = [
+            {"number": n, "title": f"{repo} {n}", "url": f"https://github.com/{repo}/issues/{n}",
+             "state": st, "labels": [{"name": "ready"}], "author": {"login": "x"},
+             "createdAt": "2026-01-01T00:00:00Z", "body": "b"}
+            for n, st in issues_by_repo.get(repo, [])
+            if state == "all" or st.lower() == state
+        ][:limit]
+        return _GhOut(stdout=json.dumps([{f: r[f] for f in fields if f in r} for r in rows]))
+    return run
+
+
+# The cwd's repo (gh's default without `--repo`) has issues too — just not #ISSUE.
+_CWD_ISSUES = {"cwd/repo": [(1, "OPEN"), (2, "OPEN")]}
+
+
+def test_gh_fetch_by_ids_reads_the_resolved_repo_not_ghs_cwd_default(tmp_path):
+    """🔴 GUARD: drop `--repo` from the id refresh ⇒ gh lists the CWD's repo, a complete
+    listing in which the candidate is absent ⇒ the open issue reads as gone ⇒ RED."""
+    src = _gh(tmp_path)
+    tid = gh_task_id(REPO, ISSUE)
+    with patch("chela.sources.gh_issues.subprocess.run",
+               side_effect=_gh_faithful({REPO: [(ISSUE, "OPEN")], **_CWD_ISSUES})):
+        snap = src.fetch_by_ids([tid])
+    assert snap is not None
+    assert {t.id: t.state for t in snap} == {tid: "open"}
+
+
+@pytest.mark.parametrize("status", LIVE_STATUSES)
+def test_a_tick_refreshes_against_the_resolved_repo(tmp_path, status):
+    """🔴 GUARD (end to end): the same `--repo` drop, through a real tick ⇒ a live run whose
+    issue is still OPEN goes `done` ⇒ RED."""
+    wf = _wf(tmp_path)
+    src = _gh(tmp_path)
+    tid = gh_task_id(REPO, ISSUE)
+    wt = _seed(wf, tid, status, tmp_path)
+    refresh = _gh_faithful({REPO: [(ISSUE, "OPEN")], **_CWD_ISSUES})
+
+    def gh(cmd, *a, **k):
+        # The claim listing sees nothing (label gone); the id refresh must still see #7 open.
+        if "all" not in cmd:
+            return _GhOut(stdout="[]")
+        return refresh(cmd)
+
+    summary, killed = _tick(wf, src, gh_behaviour=gh)
+
+    assert summary["tracker_refresh_failed"] is False
+    assert summary["reconciled_done"] == 0
+    assert _status_of(tid) == status
+    assert killed == []
+    assert wt.exists()
+
+
+@pytest.mark.parametrize("status", dispatcher.REVIEW_STATUSES)
+def test_a_merged_PR_still_closes_a_review_row_on_a_failed_refresh_tick(tmp_path, status):
+    """🔴 GUARD: a failed id refresh stops reconciliation OFF THE TRACKER only. A merged PR is
+    not tracker evidence — gate the merged branch on `tracker_refresh_failed` ⇒ the row stays
+    in review on a tick whose PR merged ⇒ RED."""
+    wf = _wf(tmp_path)
+    _seed(wf, "abc123", status, tmp_path)
+
+    summary, killed = _tick(wf, _PartialRead(),
+                            pr_status=lambda url: ("merged", "MERGEABLE"))
+
+    assert summary["tracker_refresh_failed"] is True
+    assert summary["reconciled_done"] == 1
+    assert _status_of("abc123") == "done"
+    assert killed == ["test-1"]
+
+
+def test_tick_keys_the_refresh_failure_edge_on_its_own_workflow(tmp_path, caplog):
+    """🔴 GUARD (wiring): `tick` must pass ITS workflow path as the edge key. A shared key ⇒
+    the second failing workflow's first FAILED warning is swallowed by the first's ⇒ RED."""
+    a = _wf(tmp_path)
+    b = WorkflowDef(path=tmp_path / "OTHER-WORKFLOW.md", config=a.config,
+                    prompt_template=a.prompt_template)
+    wfs = [a, b]
+    for i, wf in enumerate(wfs):
+        _seed(wf, f"task{i}", "awaiting_review", tmp_path)
+
+    with caplog.at_level("WARNING", logger=dispatcher.log.name):
+        for wf in wfs:
+            assert _tick(wf, _PartialRead())[0]["tracker_refresh_failed"] is True
+
+    assert dispatcher._refresh_failed == {str(wf.path) for wf in wfs}
+    for wf in wfs:
+        hits = [r for r in caplog.records
+                if "id refresh FAILED" in r.getMessage() and str(wf.path) in r.getMessage()]
+        assert len(hits) == 1, wf.path
+
+
+def test_gh_fetch_by_ids_asks_for_every_state_and_reports_closed_as_closed(tmp_path):
+    """🔴 GUARD: the refresh must list issues in EVERY state. Ask for open only (or leave
+    `--state` at gh's default) ⇒ a closed issue is absent instead of positively `closed`,
+    and "closed" can no longer be told apart from "no such issue" ⇒ RED."""
+    src = _gh(tmp_path)
+    tid, closed_tid, missing = (gh_task_id(REPO, n) for n in (ISSUE, 8, 99))
+    fake = _gh_faithful({REPO: [(ISSUE, "OPEN"), (8, "CLOSED"), (9, "OPEN")], **_CWD_ISSUES})
+    with patch("chela.sources.gh_issues.subprocess.run", side_effect=fake):
+        snap = src.fetch_by_ids([tid, closed_tid, missing])
+    assert snap is not None
+    assert {t.id: t.state for t in snap} == {tid: "open", closed_tid: "closed"}
+
+
+def test_gh_fetch_by_ids_sees_past_ghs_default_page(tmp_path):
+    """🔴 GUARD: drop `--limit` ⇒ gh returns its default 30 ⇒ an older candidate is cut off
+    and the read FAILS (or worse) instead of finding it ⇒ RED."""
+    src = _gh(tmp_path)
+    old = gh_task_id(REPO, 1)
+    issues = [(n, "OPEN") for n in range(200, 1, -1)] + [(1, "CLOSED")]
+    with patch("chela.sources.gh_issues.subprocess.run",
+               side_effect=_gh_faithful({REPO: issues})):
+        snap = src.fetch_by_ids([old])
+    assert snap is not None
+    assert {t.id: t.state for t in snap} == {old: "closed"}
