@@ -84,6 +84,7 @@ class FakeLinear:
         self.fail = fail
         self.calls: list[tuple[str, dict]] = []
         self.refuse_archive = False
+        self.archive_success = True               # False: Linear's `success: false` on a 200
         self.refuse_update = False
         self.states = dict(_TYPES)               # the team's workflow states, name → type
 
@@ -102,14 +103,17 @@ class FakeLinear:
             raise self.fail
         nodes = [i for i in self.issues.values() if _matches(query, i)]
         if name == "by_number":
-            return self._page([i for i in nodes if i["number"] in variables["numbers"]])
+            # A record too malformed to carry a usable number comes back as Linear sent it.
+            return self._page([i for i in nodes if not isinstance(i, dict)
+                               or not isinstance(i.get("number"), int)
+                               or i["number"] in variables["numbers"]])
         if name in ("open", "sweep"):
             return self._page(nodes)
         if name == "states":
             return {"teams": {"nodes": [{"id": "team", "states": {"nodes": [
                 {"id": f"st-{k}", "name": k, "type": t, "position": p}
                 for p, (k, t) in enumerate(self.states.items())]}}]}}
-        target = next(i for i in nodes if i["id"] == variables["id"])
+        target = next(i for i in nodes if isinstance(i, dict) and i["id"] == variables["id"])
         if name == "update":
             if self.refuse_update:
                 return {"issueUpdate": {"success": False}}
@@ -118,6 +122,8 @@ class FakeLinear:
             return {"issueUpdate": {"success": True}}
         if self.refuse_archive:
             raise LinearError("graphql", "archive refused")
+        if not self.archive_success:
+            return {"issueArchive": {"success": False}}
         target["archivedAt"] = "2026-10-01T12:00:00Z"
         return {"issueArchive": {"success": True}}
 
@@ -127,7 +133,10 @@ class FakeLinear:
 
 def _matches(query: str, node: dict) -> bool:
     """Apply the filter the QUERY TEXT asks for, the way Linear would — so a query whose
-    filter is wrong returns the wrong issues here too, instead of the fake knowing better."""
+    filter is wrong returns the wrong issues here too, instead of the fake knowing better.
+    A malformed record (no dict, no state dict) passes through: the adapter must cope."""
+    if not isinstance(node, dict) or not isinstance(node.get("state"), dict):
+        return True
     archived = re.search(r"includeArchived:\s*(true|false)", query)
     if node["archivedAt"] and not (archived and archived.group(1) == "true"):
         return False
@@ -1061,3 +1070,182 @@ def test_a_failed_read_skips_the_archive_sweep(repo, team, launched):
     summary = dispatcher.tick(repo / "WORKFLOW.md")
     assert summary["tracker_read_failed"] is True
     assert "sweep" not in team.names() and "tracker_archived" not in summary
+
+
+# --- CMX-432 rework 3: the guards the judge's mutations walked past -------------------
+
+def test_an_archive_refused_with_success_false_is_a_failed_archive(tmp_path, caplog):
+    """Linear's OTHER refusal shape — `issueArchive { success: false }` on a 200, no error
+    raised. It is a failed archive: `archive_issue` says False, the sweep does not count it
+    as archived, and the published count still includes the issue (it is still there)."""
+    fake = FakeLinear([issue(1, state="Done"), issue(2, state="Canceled"), issue(3)])
+    fake.archive_success = False
+    src = _src(tmp_path, fake)
+    with caplog.at_level(logging.WARNING, logger="chela.sources.linear"):
+        assert src.archive_issue("uuid-1", "CMX-1") is False
+        assert src.archive_sweep(force=True) == 0
+    assert "archiving CMX-1 was refused" in caplog.text
+    assert linear.read_published_counts()["CMX"]["count"] == 3
+    assert fake.names().count("archive") == 3        # tried, and each one refused
+    # The same reply after a close: still unarchived, so the sweep retries it later.
+    fake.calls.clear()
+    assert _src(tmp_path, fake).close_tasks(["CMX-1"]) == {"CMX-1": "already"}
+    assert fake.names().count("archive") == 1
+    assert fake.issues["CMX-1"]["archivedAt"] is None
+
+
+def test_an_accepted_archive_is_a_success(tmp_path):
+    """The counterweight: `success: true` IS an archive."""
+    fake = FakeLinear([issue(1, state="Done")])
+    assert _src(tmp_path, fake).archive_issue("uuid-1", "CMX-1") is True
+    assert fake.issues["CMX-1"]["archivedAt"]
+
+
+def _malformed(n, shape):
+    bad = issue(n)
+    if shape == "not-a-dict":
+        return ["not", "an", "issue"]
+    if shape == "no-identifier":
+        bad["identifier"] = None
+    elif shape == "title-not-text":
+        bad["title"] = 42
+    elif shape == "number-not-int":
+        bad["number"] = "twelve"
+    elif shape == "state-not-dict":
+        bad["state"] = "Todo"
+    return bad
+
+
+MALFORMED = ["not-a-dict", "no-identifier", "title-not-text", "number-not-int",
+             "state-not-dict"]
+
+
+@pytest.mark.parametrize("shape", MALFORMED)
+def test_a_malformed_open_record_drops_only_that_record(tmp_path, caplog, shape):
+    """SPEC 11.1: the open-set read MAY drop a malformed record — and ONLY that record. An
+    empty open set on a GOOD read means "nothing is open", which reconciles every live
+    run to done; one bad record must never cost the others."""
+    fake = FakeLinear([issue(1), issue(3, state="In Progress")])
+    fake.issues["bad"] = _malformed(2, shape)
+    src = _src(tmp_path, fake)
+    with caplog.at_level(logging.WARNING, logger="chela.sources.linear"):
+        tasks = src.list_open_tasks()
+    assert [t.id for t in tasks] == ["CMX-1", "CMX-3"]
+    assert src.read_failed is False
+    assert "skipping a malformed issue record" in caplog.text
+
+
+@pytest.mark.parametrize("shape", MALFORMED)
+def test_each_malformed_requested_record_fails_the_whole_refresh(tmp_path, shape):
+    """…while the ID refresh MUST fail rather than omit a requested record."""
+    fake = FakeLinear([issue(1)])
+    bad = _malformed(2, shape)
+    fake.issues["bad"] = bad
+    assert _src(tmp_path, fake).fetch_by_ids(["CMX-1", "CMX-2"]) is None
+
+
+def test_a_malformed_open_record_never_reconciles_a_live_run(repo, team, launched):
+    """End to end: the run whose issue IS readable stays where it is."""
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, attempt, started_at, "
+            "worktree_path) VALUES ('CMX-3', ?, 't', 'awaiting_review', 1, ?, '/nowhere')",
+            (str((repo / "WORKFLOW.md").resolve()), dispatcher._now()),
+        )
+        conn.commit()
+    team.issues = {"CMX-3": issue(3, state="In Review"), "bad": _malformed(2, "state-not-dict")}
+    summary = dispatcher.tick(repo / "WORKFLOW.md")
+    assert summary.get("tracker_read_failed") is not True
+    assert _row("CMX-3")["status"] == "awaiting_review"
+
+
+def test_publishing_one_teams_count_keeps_every_other_teams(tmp_path):
+    """The counts file holds every linear team's entry; publishing one replaces only that
+    team's — doctor reads each declared team from the same file."""
+    linear._publish_count("CMX", 12)
+    linear._publish_count("OPS", 230)
+    linear._publish_count("CMX", 13)
+    counts = linear.read_published_counts()
+    assert {t: e["count"] for t, e in counts.items()} == {"CMX": 13, "OPS": 230}
+    found = runtime_truth._linear_issue_cap_report(
+        {"CMX": "a.md", "OPS": "b.md"}, runtime_truth._linear_issue_cap_read())
+    assert [(f.level, "OPS" in f.title) for f in found] == [
+        (runtime_truth.OK, False), (runtime_truth.WARN, True)]
+
+
+def test_two_teams_sweeps_each_publish_their_own_count(tmp_path):
+    a = FakeLinear([issue(1, state="Done"), issue(2), issue(3)])
+    b = FakeLinear([issue(1), issue(2), issue(3), issue(4)])
+    linear.LinearSource(_wf(tmp_path), transport=a).archive_sweep(force=True)
+    wf_b = _wf(tmp_path)
+    wf_b.config["tracker"]["team"] = "OPS"
+    linear.LinearSource(wf_b, transport=b).archive_sweep(force=True)
+    counts = linear.read_published_counts()
+    assert (counts["CMX"]["count"], counts["OPS"]["count"]) == (2, 4)
+
+
+def test_a_team_with_no_published_count_is_ok_not_a_warning(tmp_path):
+    linear._publish_count("OPS", 999)
+    found = runtime_truth._linear_issue_cap_report(
+        {"CMX": "WORKFLOW.md"}, runtime_truth._linear_issue_cap_read())
+    assert [f.level for f in found] == [runtime_truth.OK]
+    assert "no issue count published yet" in found[0].title
+
+
+def _push_from_elsewhere(repo, tmp_path, branch):
+    """Put ``branch`` on origin WITHOUT this clone hearing of it — no refs/remotes/origin
+    entry here. Only asking the remote can see it."""
+    other = tmp_path / "other"
+    origin = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    subprocess.run(["git", "clone", "-q", origin, str(other)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(other), "push", "-q", "origin", f"HEAD:{branch}"],
+                   check=True, capture_output=True)
+    assert subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet",
+                           f"refs/remotes/origin/{branch}"]).returncode != 0
+
+
+def test_a_branch_only_the_remote_has_is_never_reused(repo, team, launched, tmp_path):
+    """The name was taken on origin by someone else (another clone, a human). This clone's
+    refs/remotes/origin has never heard of it — only `ls-remote` can tell."""
+    _push_from_elsewhere(repo, tmp_path, "cmx-7-tighten-top-row")
+    team.issues = {"CMX-7": issue(7, "Tighten top row", branch="cmx-7-tighten-top-row")}
+    dispatcher.tick(repo / "WORKFLOW.md")
+    assert _row("CMX-7")["branch_name"] == "cmx-7-tighten-top-row-2"
+
+
+def test_a_stale_tracking_ref_the_remote_deleted_does_not_take_the_name(repo, team, launched):
+    """The other direction: this clone remembers `origin/<branch>`, but origin deleted it
+    (a merged PR's branch). The remote is the authority, so the name is free."""
+    subprocess.run(["git", "-C", str(repo), "update-ref",
+                    "refs/remotes/origin/cmx-7-tighten-top-row", "HEAD"], check=True)
+    team.issues = {"CMX-7": issue(7, "Tighten top row", branch="cmx-7-tighten-top-row")}
+    dispatcher.tick(repo / "WORKFLOW.md")
+    assert _row("CMX-7")["branch_name"] == "cmx-7-tighten-top-row"
+
+
+def test_the_remote_branch_check_falls_back_to_tracking_refs_when_origin_is_unreachable(
+        tmp_path):
+    """No answer from origin (exit 128, not 0/2) — the clone's own refs are the best it
+    knows."""
+    work = tmp_path / "w"
+    subprocess.run(["git", "init", "-q", "-b", "dev", str(work)], check=True)
+    subprocess.run(["git", "-C", str(work), "remote", "add", "origin", str(tmp_path / "gone")],
+                   check=True)
+    subprocess.run(["git", "-C", str(work), "-c", "user.email=t@e", "-c", "user.name=T",
+                    "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+    subprocess.run(["git", "-C", str(work), "update-ref", "refs/remotes/origin/taken", "HEAD"],
+                   check=True)
+    assert dispatcher._remote_branch_exists(work, "taken") is True
+    assert dispatcher._remote_branch_exists(work, "free") is False
+
+
+def test_doctor_names_a_linear_workflows_tracker_kind(tmp_path, monkeypatch):
+    """`chela doctor`'s dispatch.workflows line, read end to end: a linear workflow has no
+    tracker FILE, so the line must name its kind — not gh_issues, not a blank."""
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text("---\nproject_key: CMX\ntracker:\n  kind: linear\n  team: CMX\n---\nx\n")
+    monkeypatch.setattr(runtime_truth, "dispatched_workflows", lambda: [wf])
+    monkeypatch.setattr(linear, "load_api_key", lambda: SECRET)
+    found = runtime_truth._workflows_report([wf], runtime_truth._workflows_read())
+    assert [(f.level, f.detail) for f in found] == [(runtime_truth.OK, "tracker: linear")]
