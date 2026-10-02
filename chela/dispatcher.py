@@ -20,6 +20,10 @@ from chela.config import (
     judge_max_concurrent,
     judge_max_unknown_retries,
     judge_outage_backoff_seconds,
+    judge_wall_base_seconds,
+    judge_wall_ceiling_seconds,
+    judge_wall_grace_seconds,
+    judge_wall_per_experiment_seconds,
     max_reworks_for,
     judge_max_experiments,
     worktree_disk_budget_bytes,
@@ -294,7 +298,15 @@ JUDGE_TRIGGER_CHECKS = (CI_PASSING, CI_NONE)
 
 # A judge that has not published a verdict in this long is not thinking, it is stuck. It is
 # killed and its run becomes CANNOT VERIFY — which blocks nothing and approves nothing.
+# ⏳⚖️ CMX-431: this is now the FLOOR of the wall, not the wall — once a run has started and
+# published its battery size, `judge_wall_seconds` scales the wall with the battery, and
+# `judge_overdue` reaps past it only a run whose progress stopped. A small battery's wall
+# is exactly this, as before.
 JUDGE_TIMEOUT_SECONDS = 60 * 60
+
+# ⏳⚖️ CMX-431: a full-suite confirmation (CMX-407) is budgeted at this multiple of the run's
+# OWN baseline — the same suite, on the same box, a moment earlier — with headroom for load.
+JUDGE_FULL_SUITE_MARGIN = 1.5
 
 # --- agent launch command ---------------------------------------------------
 #
@@ -1467,6 +1479,16 @@ def _parse_ts(ts: str | None) -> datetime | None:
     except (ValueError, TypeError):
         return None
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def _epoch_dt(ts: object) -> datetime | None:
+    """Epoch seconds (a judge run status's ``run_started_at``) → aware UTC datetime."""
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _capture_pane(window_name: str, *, ansi: bool = False) -> str:
@@ -4644,6 +4666,47 @@ def _refused(error: str | None, refused: bool = False) -> dict:
 _escaped: set[str] = set()
 # Workflows whose CMX-384 re-key has run in this process — see `_rekey_legacy_raw_ids`.
 _rekeyed: set[str] = set()
+# Workflows whose id refresh is currently FAILING — so it is logged on the EDGE (CMX-430).
+_refresh_failed: set[str] = set()
+
+
+def _tracker_gone(source, workflow_path: str, ids, open_tasks, read_failed: bool) -> set[str] | None:
+    """Which of `ids` the tracker POSITIVELY says are no longer open — or ``None`` when it
+    could not be read, in which case reconciliation must change nothing tracker-derived.
+
+    🧾🔎 CMX-430, Symphony SPEC 11.1 ``fetch_issues_by_ids`` / 11.4 ("running-state refresh
+    failure: log and keep active workers running"). Before this, "done" was inferred from a
+    task's ABSENCE in ``list_open_tasks()`` — and a failed or partial read is absence too.
+    Now the runs reconcile would close out are re-read by id: an id is gone only when a read
+    that SUCCEEDED reports it ``closed`` or does not report it at all. A source without
+    ``fetch_by_ids`` (test doubles, third-party adapters) falls back to the open listing,
+    which is what it always had.
+    """
+    ids = set(ids)
+    if not ids:
+        return set()
+    fetch = getattr(source, "fetch_by_ids", None)
+    if callable(fetch):
+        try:
+            snapshot = fetch(sorted(ids))
+        except Exception as e:  # noqa: BLE001 — an adapter bug must not read as "all done"
+            log.warning("tracker id refresh raised for %s: %s", workflow_path, e)
+            snapshot = None
+    else:
+        snapshot = None if read_failed else list(open_tasks)
+    if snapshot is None:
+        if workflow_path not in _refresh_failed:
+            _refresh_failed.add(workflow_path)
+            log.warning(
+                "Tracker id refresh FAILED for %s — no run is reconciled from the tracker "
+                "this tick (%d waiting); retrying every tick", workflow_path, len(ids),
+            )
+        return None
+    if workflow_path in _refresh_failed:
+        _refresh_failed.discard(workflow_path)
+        log.info("Tracker id refresh recovered for %s", workflow_path)
+    still_open = {t.id for t in snapshot if getattr(t, "state", "open") != "closed"}
+    return ids - still_open
 
 
 def _rekey_legacy_raw_ids(conn: sqlite3.Connection, workflow_path: str, mapping: dict[str, str]) -> int:
@@ -4741,14 +4804,15 @@ def tick(workflow_path: str | Path) -> dict:
     # through, can say so only by returning `[]` — byte-for-byte what a genuinely
     # empty queue also returns. `read_failed` is the adapter's own signal that
     # THIS tick's `open_tasks`/`open_ids` is not trustworthy "nothing is open"
-    # evidence. Reconciliation below must not read absence-from-open_ids as
-    # completion evidence on a tick where this is True — see the two `not in
-    # open_ids` branches a few hundred lines down.
+    # evidence. CMX-430: reconciliation no longer reads absence-from-open_ids as
+    # completion evidence at all — it re-reads the candidates by id (`_tracker_gone`,
+    # the adapter's `fetch_by_ids`) and acts only on a read that succeeded.
     tracker_read_failed = getattr(source, "read_failed", False)
 
     summary = {
         "open": len(open_tasks),
         "tracker_read_failed": tracker_read_failed,
+        "tracker_refresh_failed": False,
         "reconciled_done": 0,
         "reconciled_closed": 0,
         "reconciled_failed": 0,
@@ -4910,6 +4974,19 @@ def tick(workflow_path: str | Path) -> dict:
             ),
             (str(wf.path), *ACTIVE_STATUSES, *RECONCILE_MERGE_STATUSES),
         ).fetchall()
+        # 🧾🔎 CMX-430: the runs the loop below could close out for LEAVING the tracker are
+        # re-read BY ID, not inferred from absence in `open_ids` — a failed or partial
+        # listing is absence too. `tracker_gone` is None when that read failed: then no row
+        # is reconciled off the tracker this tick (merged-PR evidence, the agent's own
+        # completion marker and a dead window still are — none of them come from it).
+        tracker_gone = _tracker_gone(
+            source, str(wf.path),
+            [r["task_id"] for r in rows if r["task_id"] not in open_ids],
+            open_tasks, tracker_read_failed,
+        )
+        summary["tracker_refresh_failed"] = tracker_gone is None
+        if tracker_gone is None:
+            tracker_gone = set()
         for row in rows:
             # ⛔🏃‍♂️💀 issue #491: `RECONCILE_MERGE_STATUSES_WITH_RUNNING`, not
             # `RECONCILE_MERGE_STATUSES` — a `running` row whose rework spawn raced an
@@ -5132,8 +5209,11 @@ def tick(workflow_path: str | Path) -> dict:
             # row the tracker never owned; it just deletes the row before the judge trigger
             # a few lines below ever gets a look at it, silently recreating the exact bug
             # this feature exists to close, just with an extra row in the table.
-            if (row["task_id"] not in open_ids and not _is_adopted(row)
-                    and not tracker_read_failed and row["status"] in REVIEW_STATUSES):
+            # 🧾🔎 CMX-430: `in tracker_gone` — a SUCCESSFUL id refresh said this task is
+            # closed or gone. It replaces `not in open_ids and not tracker_read_failed`,
+            # which a partial listing (read OK, rows missing) still satisfied.
+            if (row["task_id"] in tracker_gone and not _is_adopted(row)
+                    and row["status"] in REVIEW_STATUSES):
                 # Read the agent's transcript *before* killing the window —
                 # transcript resolution maps window_name → cwd → transcript via
                 # the live tmux pane, and that mapping disappears once tmux drops
@@ -5162,7 +5242,7 @@ def tick(workflow_path: str | Path) -> dict:
                 summary["reconciled_done"] += 1
                 log.info("Task %s done (removed from source, window killed)", row["task_id"])
                 continue
-            if row["task_id"] not in open_ids:
+            if row["task_id"] in tracker_gone:
                 # claimed/running, no review state: "left the tracker" is NOT proof of a
                 # merge (cmx-100 — an orphaned agent whose window died before ever opening a
                 # PR still leaves the tracker for unrelated reasons: a human edit, a re-hash,
@@ -6968,6 +7048,18 @@ def _spawn_judge(
     """
     task_id, branch = row["task_id"], row["branch_name"] or ""
     worktree = judge.judge_worktree_path(wf, task_id)
+    # 👻⚖️ CMX-429: never a second judge into a worktree a live `chela judge run` is still
+    # mutating — its window being gone is NORMAL since CMX-411 (the agent stops after
+    # `--detach`), so a row that reads `cannot_verify` (or a new head) can sit beside a run
+    # that is still going. Refused BEFORE the sha is burned or the row is touched: when that
+    # run publishes, its verdict lands on the row as usual; if it was for an older head, the
+    # trigger spawns for the new head on the first tick after it exits. Read from disk, so a
+    # run launched under a daemon from before a restart refuses this too.
+    live = judge.live_judge_run(task_id, worktree)
+    if live is not None:
+        log.info("judge: %s: not spawning — a judge run (pid %s) is still alive in %s",
+                 task_id, live.get("pid"), worktree)
+        return False
     # ⚖️ CMX-81: the CANNOT VERIFY retry budget belongs to a COMMIT, and this is its ONLY
     # writer. A new head is a fresh judgement → the count starts at 0. Re-launching on the
     # SAME head that last came back `cannot_verify` IS a retry → bump it (the trigger gate
@@ -7060,12 +7152,113 @@ def _judge_backoff_pending(row: sqlite3.Row) -> bool:
     return retry_after is not None and now is not None and now < retry_after
 
 
+def _num(value: object) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) \
+        else None
+
+
+def _judge_full_suite_budget(status: dict | None) -> float:
+    """⏳⚖️ CMX-431: what one full-suite run may take, measured from the run's own baseline
+    (``baseline_seconds`` in its status) — the per-experiment budget until it is known."""
+    baseline = _num((status or {}).get("baseline_seconds"))
+    if baseline is None or baseline <= 0:
+        return judge_wall_per_experiment_seconds()
+    return baseline * JUDGE_FULL_SUITE_MARGIN
+
+
+def judge_wall_seconds(status: dict | None) -> float:
+    """⏳⚖️ CMX-431. The wall of a judge RUN, from its live status (``judge.judge_status_path``):
+
+        base + total × per_experiment + confirmations × full-suite budget
+
+    clamped to ``[JUDGE_TIMEOUT_SECONDS, ceiling]``. ``confirmations`` counts the full-suite
+    re-runs a subset survivor needed (CMX-407) — measured on PR #580 at 8m05s and 8m34s
+    each, against ~3 min for a targeted run; they are what a flat 60 min could not hold.
+    ⭐ No status, or no battery size yet, is the flat ``JUDGE_TIMEOUT_SECONDS`` — and the
+    floor means a small battery's wall is never SHORTER than it was before this existed.
+    """
+    floor = float(JUDGE_TIMEOUT_SECONDS)
+    status = status or {}
+    total = status.get("total")
+    if not isinstance(total, int) or isinstance(total, bool) or total <= 0:
+        return floor
+    confirmations = status.get("confirmations")
+    confirmations = confirmations if isinstance(confirmations, int) and confirmations > 0 else 0
+    budget = (judge_wall_base_seconds() + total * judge_wall_per_experiment_seconds()
+              + confirmations * _judge_full_suite_budget(status))
+    return min(max(judge_wall_ceiling_seconds(), floor), max(floor, budget))
+
+
+def judge_run_completed(status: dict | None) -> bool:
+    """⏳⚖️ CMX-431: has this run finished EVERY experiment (``done == total``)? It is then in
+    its consistency/confirmation/publish stage, and gets the grace past its wall."""
+    status = status or {}
+    total, done = status.get("total"), status.get("done")
+    return (isinstance(total, int) and total > 0 and isinstance(done, int) and done >= total)
+
+
+def judge_overdue(elapsed: float, status: dict | None, now: float) -> str | None:
+    """⏳⚖️ CMX-431. Should the watchdog reap a judge run ``elapsed`` seconds past its own
+    start? ``None`` keeps it; otherwise the CANNOT VERIFY reason.
+
+    * Inside its wall (:func:`judge_wall_seconds`) — plus the grace, once every experiment
+      is done (:func:`judge_run_completed`) — a run is never reaped.
+    * Past it, a run whose progress (``progress_at``) has not advanced for the stall window
+      (the per-experiment budget, or one full-suite run if that is longer) is stuck — and
+      ONLY then is it called "stuck, not thinking". A run with no progress record at all
+      (an older run, or one still before its first write) is judged as before: past the
+      wall, stuck.
+    * A run still advancing is kept until the hard ceiling, and reaped there as out of
+      budget — never as stuck.
+
+    Measured 2026-10-01 on PR #580: a 12-experiment HIGH-risk run finished its battery at
+    ~60 min and was reaped at 62 min as "stuck, not thinking" while publishing a real BLOCK.
+    """
+    floor = float(JUDGE_TIMEOUT_SECONDS)
+    wall = judge_wall_seconds(status)
+    grace = judge_wall_grace_seconds() if judge_run_completed(status) else 0.0
+    if elapsed < wall + grace:
+        return None
+    status = status or {}
+    total, done = status.get("total"), status.get("done")
+    if judge_run_completed(status):
+        where = f"all {total} experiments done"
+    elif total:
+        where = f"experiment {done}/{total}"
+    else:
+        where = "before its first experiment"
+    progress_at = _num(status.get("progress_at"))
+    stall = max(judge_wall_per_experiment_seconds(), _judge_full_suite_budget(status))
+    if progress_at is None:
+        return f"the judge did not finish in {int(wall) // 60}min — it is stuck, not thinking"
+    since = max(0.0, now - progress_at)
+    if since >= stall:
+        return (f"the judge's progress has not advanced in {int(since) // 60}min ({where}, "
+                f"past its {int(wall + grace) // 60}min wall) — it is stuck, not thinking")
+    ceiling = max(judge_wall_ceiling_seconds(), floor) + grace
+    if elapsed >= ceiling:
+        return (f"the judge was still advancing ({where}) but reached the "
+                f"{int(ceiling) // 60}min hard ceiling — out of budget, not stuck")
+    return None
+
+
+def _judge_run_status(task_id: str) -> dict | None:
+    """⏳⚖️ CMX-431: the live status of THIS task's judge run, or ``None`` when there is none
+    or its owner is gone (a status a crashed run left behind is not progress)."""
+    status = judge._read_judge_lock(judge.judge_status_path(task_id))
+    if status is None or not judge._judge_lock_owner_alive(status):
+        return None
+    return status
+
+
 def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set[str]) -> int:
     """A judge that stopped without a verdict is CANNOT VERIFY — never a pass, never a fail.
 
     Two silences mean the same thing, and neither may be mistaken for a clean bill of health:
     the window is gone but no verdict was published (the agent died, or a human killed it),
-    or it has been running past :data:`JUDGE_TIMEOUT_SECONDS` (it is stuck, not thinking).
+    or it has been running past its wall (it is stuck, not thinking). ⏳⚖️ CMX-431: for a
+    started run the wall scales with its battery and only a run whose progress stopped is
+    stuck — see :func:`judge_overdue`; before that, :data:`JUDGE_TIMEOUT_SECONDS`.
     ⛔ `chela judge run` writes the state BEFORE it kills its own window, so "window gone,
     state still running" is unambiguous — it did not finish.
 
@@ -7078,15 +7271,36 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         (str(wf.path), judge.J_RUNNING),
     ).fetchall():
         window = judge.judge_window_name(row["branch_name"] or "")
+        # 👻⚖️ CMX-429: ask the RUN, not the agent's window. Since CMX-411 the agent stops
+        # right after `--detach`, so "window gone" is normal while its run is still going —
+        # measured on PR #569, this arm wrote CANNOT VERIFY and a second judge was spawned
+        # into the same worktree under a live first run. Read from disk, so a run launched
+        # before a daemon restart is found too.
+        live_run = judge.live_judge_run(
+            row["task_id"], judge.judge_worktree_path(wf, row["task_id"]),
+        )
         # ⏱️ CMX-411: the wall measures the RUN, from its own start marker, once there is
         # one — not the agent's design time before it. Until the run starts, the agent's
         # spawn time bounds the agent instead, so a judge that never runs is still reaped.
-        run_started = _parse_ts(row["judge_run_started_at"])
-        started = run_started or _parse_ts(row["judge_started_at"])
-        timed_out = (
-            started is not None and now is not None
-            and (now - started).total_seconds() >= JUDGE_TIMEOUT_SECONDS
+        # 👻 CMX-429: a live run whose column is empty (wiped by a respawn, or written before
+        # a restart) is timed from the start it recorded about itself.
+        run_started = _parse_ts(row["judge_run_started_at"]) or (
+            _epoch_dt(live_run.get("run_started_at")) if live_run else None
         )
+        started = run_started or _parse_ts(row["judge_started_at"])
+        # ⏳⚖️ CMX-431: once the run has started, its wall scales with its battery and only a
+        # run whose progress STOPPED is reaped past it (see `judge_overdue`). Before that the
+        # agent is bounded by the flat JUDGE_TIMEOUT_SECONDS from its spawn, as always.
+        timeout_reason = None
+        if started is not None and now is not None:
+            elapsed = (now - started).total_seconds()
+            if run_started is not None:
+                timeout_reason = judge_overdue(
+                    elapsed, _judge_run_status(row["task_id"]), now.timestamp())
+            elif elapsed >= JUDGE_TIMEOUT_SECONDS:
+                timeout_reason = (f"the judge did not finish in {JUDGE_TIMEOUT_SECONDS // 60}"
+                                  "min — it is stuck, not thinking")
+        timed_out = timeout_reason is not None
         alive = window in live_windows
         # ⚖️🔌 CMX-282: an expired login burns the whole JUDGE_TIMEOUT_SECONDS (60min) wait
         # for nothing — measured live 2026-08-14, two judges (CMX-277, CMX-279) sat at
@@ -7094,19 +7308,29 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         # is checked ONLY while `alive` (never worth a tmux call once the window is already
         # gone) and this is a THIRD, affirmative reason to reap on top of `timed_out` — it
         # never widens what already reaps without it: `alive and timed_out` reaped before
-        # this existed, and a dead window reaps via the lock cross-check below either way.
+        # this existed, and a dead window reaps either way once `live_run` below is None.
         # ⏱️ CMX-411: once the run has started, it runs detached and needs nothing more
         # from the agent's session — an expired login there is not a reason to reap it.
         login_expired = (
             alive and run_started is None
             and _pane_shows_login_expired(_capture_pane(window))
         )
+        if live_run is not None and not timed_out and not login_expired:
+            # ⚖️🕳️ CMX-229 / 👻 CMX-429: a live owner is a verdict in flight. Hold — no
+            # CANNOT VERIFY, no window kill, no reap, whatever the window or the agent says.
+            # Bounded by the wall above and, as CMX-282 requires, by an expired login (which
+            # can only be seen while no run has recorded its start).
+            log.info(
+                "judge watchdog: %s: judge run (pid %s) is still alive — holding",
+                row["task_id"], live_run.get("pid"),
+            )
+            continue
         # ⚖️🌩️ CMX-379: the auto-mode classifier outage is the same kind of never-got-a-
         # chance failure. Measured 2026-09-28 on PR #529: every Bash call failed, the judge
         # stopped after the harness's 10-in-a-row limit and sat idle, holding the only judge
-        # slot. Checked only on a live window that no other arm already reaps. Unlike
-        # `login_expired` it does NOT bypass the lock cross-check below, because a live judge
-        # lock means `chela judge run` is executing, which is a verdict in flight.
+        # slot. Checked only on a live window that no other arm already reaps. It never
+        # reaches a live `chela judge run` either: `live_run` above already held that one,
+        # because a live run is a verdict in flight.
         classifier_outage = (
             alive and not timed_out and not login_expired
             and _judge_hit_classifier_outage(wf, row)
@@ -7114,30 +7338,12 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         if alive and not timed_out and not login_expired and not classifier_outage:
             continue
         # ⚖️🕳️ CMX-229 Objective 2: `alive` is ONE signal (this tick's tmux snapshot) and
-        # it can be wrong — measured live on CMX-227, a judge SIGKILLed (exit 137) mid-
-        # `chela judge run` because the watchdog reaped its worktree/window on exactly
-        # this kind of miss. `judge.judge_lock_live` is a SECOND, independent signal (the
-        # judge's own claim file: pid + `/proc` start time, CMX-219) — cross-check it
-        # before tearing anything down. ⛔ BOUNDED, not a second timeout: once `timed_out`
-        # is True the lock is never consulted and this always reaps, exactly as before —
-        # a live owner past JUDGE_TIMEOUT_SECONDS is "stuck, not thinking" regardless of
-        # what its own lock claims, so a hold can never outlive that bound. `login_expired`
-        # is the SAME kind of bound as `timed_out` here, and for the same reason: the pane
-        # evidence is direct and already came from THIS live window, so a lock file saying
-        # "the process is still alive" would only be confirming a process stuck at a login
-        # prompt, never contradicting it.
-        if not timed_out and not login_expired and judge.judge_lock_live(
-            judge.judge_worktree_path(wf, row["task_id"])
-        ):
-            log.info(
-                "judge watchdog: %s: window %s missing from this tick's tmux snapshot, but "
-                "the judge lock says its owner is still alive — holding teardown", row["task_id"],
-                window,
-            )
-            continue
+        # it can be wrong. The judge's own records (lock + run status: pid and `/proc` start
+        # ticks) were already consulted above via `live_run`, so a live owner never reaches
+        # here unless it ran past the wall or sits at an expired login (CMX-282) — "stuck,
+        # not thinking" whatever its lock claims.
         reason = (
-            f"the judge did not finish in {JUDGE_TIMEOUT_SECONDS // 60}min — it is stuck, "
-            "not thinking" if timed_out else
+            timeout_reason if timed_out else
             "the judge's session login expired mid-run (\"Login expired · Please run "
             "/login\") — not a verdict on the PR" if login_expired else
             "the judge hit a Claude Code auto-mode classifier outage (every tool call came "

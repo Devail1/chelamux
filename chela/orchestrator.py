@@ -27,7 +27,7 @@ import os
 import subprocess
 from datetime import datetime, timezone
 
-from chela import agent_manager, discovery, sessions, transcripts
+from chela import agent_manager, discovery, sandbox_status, sessions, transcripts
 
 # Per-turn character cap for the tail/query digests — enough to read intent
 # without dumping a whole essay per turn. `--all` is uncapped (full read).
@@ -95,6 +95,7 @@ def peek(wid: str) -> dict | None:
     cpid = agent_manager.claude_pid(wid)
     claude_running = cpid is not None
     sess_status = status_map["by_pid"].get(cpid) if cpid is not None else None
+    sess_status, status_source = sandbox_status.resolve(wid, sess_status)
     live, health = agent_manager.liveness(claude_running, sess_status)
     win_type = agent_manager.window_type(wid, claude_running)
 
@@ -109,6 +110,7 @@ def peek(wid: str) -> dict | None:
         "window_type": win_type,
         "claude_running": claude_running,
         "session_status": sess_status,
+        "status_source": status_source,
         "liveness": live,
         "health": health,
         "recap": summary["recap"],
@@ -140,6 +142,8 @@ def format_peek(p: dict) -> str:
     """Render a peek() dict as a compact human-readable block."""
     dot = {"green": "●", "yellow": "◐", "grey": "○"}.get(p["health"], "○")
     status = p["session_status"] or ("shell" if not p["claude_running"] else "—")
+    if p.get("status_source") == sandbox_status.PROXY_SOURCE:
+        status += ", from the sandbox proxy"
     lines = [
         f"{p['wid']}  {p['name']}   {dot} {p['liveness']}/{p['health']}   "
         f"claude:{'yes' if p['claude_running'] else 'no'} ({status})",

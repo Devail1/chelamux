@@ -9,9 +9,9 @@ from chela.workflow import WorkflowDef
 
 log = logging.getLogger(__name__)
 
-# Done semantics (mirrors the markdown source): the dispatcher needs no change.
-# A closed issue drops out of `list_open_tasks`, so reconcile transitions the
-# run exactly like a struck TODO line. NOTE for workflow authors: a gh_issues
+# Done semantics (mirrors the markdown source): a closed issue drops out of
+# `list_open_tasks` and `fetch_by_ids` reports it `closed` (CMX-430), so reconcile
+# transitions the run exactly like a struck TODO line. NOTE for workflow authors: a gh_issues
 # workflow's prompt body should instruct the agent to open a PR with
 # `Closes #<n>` (so merging the PR closes the issue) rather than "strike the
 # TODO line" — there is no tracker file to edit.
@@ -36,7 +36,8 @@ def _report_once(key: tuple[str, str], message: str) -> None:
 class GhIssuesSource:
     """Pull open work from `gh issue list` — sibling to the markdown source.
 
-    Duck-typed identically to MarkdownSource: __init__(wf) + list_open_tasks().
+    Duck-typed identically to MarkdownSource: __init__(wf) + list_open_tasks() +
+    fetch_by_ids(ids).
     Config (workflow front matter, `tracker:` block):
         kind:           gh_issues
         repo:           owner/name   (optional — defaults to the repo the
@@ -255,6 +256,87 @@ class GhIssuesSource:
             ))
         tasks.sort(key=lambda pair: pair[0])
         return [task for _, task in tasks]
+
+
+    def fetch_by_ids(self, ids) -> list[Task] | None:
+        """The current snapshot of each of `ids` — Symphony SPEC 11.1's ID-refresh
+        operation, the one reconciliation trusts (see ``dispatcher.tick``).
+
+        ``None`` means the read FAILED: the repo is unresolvable, ``gh`` is missing, timed
+        out, exited nonzero (auth expiry, rate limit, a 5xx), returned bad JSON, or — ⛔
+        SPEC 11.1 "an ID-refresh call MUST fail instead of silently omitting" — the
+        listing was truncated at its limit while a requested id was still unaccounted for,
+        so "not seen" would be a guess. The caller must change nothing on ``None``.
+
+        Otherwise one :class:`Task` per id whose issue exists, ``state`` taken from
+        GitHub (``open``/``closed``). It reports STATE, not dispatchability: an open issue
+        that lost ``require_label`` or gained ``blocked_label`` is still ``open`` — it is
+        unroutable for a fresh claim, not finished (SPEC 8.4). An id absent from a
+        COMPLETE listing names no issue in this repo at all.
+
+        A task id is a hash of ``repo#number``, so ids cannot be looked up directly; this
+        lists issues in every state and matches them. ``config_error`` does not stop it —
+        that gate is about what may be CLAIMED, and refreshing a run already in flight
+        claims nothing.
+        """
+        wanted = set(ids)
+        if not wanted:
+            return []
+        repo = self._resolve_repo()
+        if not repo:
+            return None
+        try:
+            out = subprocess.run(
+                [
+                    "gh", "issue", "list", "--repo", repo, "--state", "all",
+                    "--json", "number,title,url,state", "--limit", str(_REFRESH_LIMIT),
+                ],
+                capture_output=True, text=True, timeout=60,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            log.warning("gh_issues: id refresh (`gh issue list --state all`) failed for %s: %s",
+                        repo, e)
+            return None
+        if out.returncode != 0:
+            log.warning("gh_issues: id refresh exited %d for %s: %s",
+                        out.returncode, repo, (out.stderr or "").strip())
+            return None
+        try:
+            issues = json.loads(out.stdout)
+        except (json.JSONDecodeError, ValueError) as e:
+            log.warning("gh_issues: bad JSON from the id refresh for %s: %s", repo, e)
+            return None
+        if not isinstance(issues, list):
+            return None
+        found: dict[str, Task] = {}
+        for issue in issues:
+            number = issue.get("number") if isinstance(issue, dict) else None
+            if number is None:
+                continue
+            tid = _task_id(repo, number)
+            if tid not in wanted:
+                continue
+            state = str(issue.get("state") or "").strip().lower()
+            if state not in ("open", "closed"):
+                # A requested record we cannot classify — SPEC 11.1: fail, never omit.
+                log.warning("gh_issues: id refresh got issue #%s with state %r — failing "
+                            "the read", number, issue.get("state"))
+                return None
+            found[tid] = Task(
+                id=tid, title=(issue.get("title") or "").strip(), file="",
+                line_number=int(number), raw=issue.get("url") or "", state=state,
+            )
+        if len(issues) >= _REFRESH_LIMIT and wanted - found.keys():
+            log.warning("gh_issues: id refresh hit its %d-issue limit for %s with %d id(s) "
+                        "unaccounted for — failing the read rather than guessing",
+                        _REFRESH_LIMIT, repo, len(wanted - found.keys()))
+            return None
+        return list(found.values())
+
+
+# The id refresh lists every issue in every state; past this many, an id it did not see
+# may simply be older than the page, so the read fails instead (see fetch_by_ids).
+_REFRESH_LIMIT = 1000
 
 
 def _task_id(repo: str, number: int) -> str:

@@ -49,9 +49,14 @@ joined keeps the connection, so nobody needs a new invite.
 - **Up** passes the same checks as creating a share with that mode
   (`app._access_gate`, used by both routes). Allow typing needs *Guest typing* on and a
   window that verifies as sandboxed; when it's refused, the row shows the same reason as
-  the share dialog. UNSANDBOXED needs the typed window name. Its expiry and one-joiner
-  binding start at the upgrade, so the first guest to type after it is the one bound.
-- The server route is `POST /api/term/<wid>/share-mode` with `{"mode", "confirm"?}`.
+  the share dialog. UNSANDBOXED needs the typed window name, and offers the same
+  duration picker as the share dialog; a pick longer than 4 h needs the name typed a
+  second time, and the server applies the same 14-day clamp (CMX-419). Its expiry and
+  one-joiner binding start at the upgrade, so the first guest to type after it is the
+  one bound. The row then says when it ends and how long is left
+  (e.g. "Ends Oct 15, 14:05 (12d 4h left)").
+- The server route is `POST /api/term/<wid>/share-mode` with
+  `{"mode", "confirm"?, "minutes"?, "confirm_long"?}`.
   The bridge (`Bridge.set_mode`) applies the change in place.
 - Every change writes a `share.mode_changed` event with `from`, `to` and `by`. An
   upgrade to UNSANDBOXED also writes `share.unsandboxed_granted`, and leaving it writes
@@ -61,6 +66,66 @@ joined keeps the connection, so nobody needs a new invite.
 Clicking *Share current session* on a window that's already shared never creates a new
 share, because that would rotate the code. It opens Active shares with that share's row
 highlighted, so you can change its mode there.
+
+## Shares across restarts and deploys
+
+A live share no longer ends when chela restarts (CMX-434).
+
+**Where the share runs.** The bridge that streams a share runs in the **collab host**:
+`chela collab`, a separate PM2 service (`chela-collab`, see
+`examples/ecosystem.config.js`). The dashboard talks to it over an owner-only Unix
+socket, `$CHELA_DIR/collab.sock` (mode 0600; the peer's uid is checked too). A dashboard
+deploy doesn't touch a live share. `chela update` restarts `chela-collab` only when the
+share code itself changed (`chela/collab_host.py`, `collab_stream.py`, `share_store.py`,
+`e2e.py`, `share_sandbox.py`, `collab.py`). That holds on the nothing-to-pull path too:
+if a bare `git pull` brought in share code after `chela-collab` started, `chela update`
+finds the HEAD the service started on in the HEAD reflog and restarts it. When the
+reflog can't say, it restarts it.
+
+If `chela-collab` isn't running, the dashboard hosts the shares itself, as before. A
+dashboard restart then interrupts them, and the next dashboard restores them. Only one
+process hosts at a time: the holder of the `flock` on `$CHELA_DIR/collab.lock`. A
+dashboard that hosts no share gives the lock back, so a waiting `chela-collab` takes over.
+
+**What is kept.** Each live share is written to `$CHELA_DIR/shares.json`: the window,
+its mode, the relay room, the pairing secret, the override's expiry and bound guest, and
+the window's identity (tmux server pid, window id, pane pid). The file is mode 0600 and
+is never written inside a git work tree. It holds the pairing secret, so treat it like the
+code. Stopping a share removes it from the file. A process exit keeps it.
+
+**What comes back.** When a host starts, each kept share is restored with the **same
+link and pairing code**, so a guest reconnects by itself. These are not restored, and
+`share.not_restored` in the event log says why:
+
+- a share whose window is gone, or is no longer the same window (a tmux restart
+  recycles `@N` ids);
+- a **typing** share whose window doesn't verify as a sandboxed session now. Live, a pane
+  that stops verifying ends the share, so a restart doesn't turn it into anything else;
+- an **UNSANDBOXED** override that expired during the restart. The share comes back
+  view only (`share.unsandboxed_expired`). An override with time left comes back with
+  only that time left.
+
+A restored typing share re-checks the sandbox before it forwards any input, as always.
+
+**Two crypto details make a restore safe.** The pairing secret and the host's stream id
+don't change, so a restored host restarting its sequence numbers at 0 would reuse AES-GCM
+nonces. The host never seals a frame past a sequence ceiling that is already on disk, and
+a restored host resumes at that ceiling. A restored host has also forgotten which guest
+frames it has already seen, so the relay could replay an old keystroke. It sends a fresh
+random `resume` challenge, sealed so only a paired guest can read it. It accepts input
+only from a guest stream that answered it, and that answer also blocks every earlier frame
+from the stream. A guest page that hasn't been updated can still watch a restored share
+but can't type into it.
+
+**What the guest sees.** On a restart the host sends `restarting`, not `ended`. The guest
+page shows **host restarting…**, re-sends its hello with backoff (0.5 s, doubling to 8 s),
+and goes back to live on the host's first frame. It calls the share ended only if the host
+hasn't come back after 5 minutes. The page lives in the relay Worker, so this needs a
+`wrangler deploy` of `chela/collab-relay`.
+
+**Before a deploy.** `chela update` prints *"N live share(s) will be interrupted by
+restarting …"* before a restart that takes down the process hosting them. For a hand
+deploy, run `chela shares --restarting <services…>` first.
 
 ## Starting a sandboxed session
 
@@ -82,6 +147,7 @@ Knobs, set in `chela.env`, which the launcher process reads:
 |---|---|---|
 | `CHELA_SHARE_SANDBOX_IMAGE` | `python:3.12-slim` | image for the guest and the proxy sidecar (must be pulled) |
 | `CHELA_SHARE_SANDBOX_TOKEN_FILE` | Claude Code's `.credentials.json` | the token the proxy adds on egress, e.g. a `claude setup-token` token |
+| `CHELA_SHARE_SANDBOX_SUBSCRIPTION` | the token file's `subscriptionType` | the plan the guest's banner names (`max`, `pro`, …); set it when the token file is a bare `setup-token` token |
 | `CHELA_SHARE_PROXY_UPSTREAM` | `https://api.anthropic.com` | the proxy's fixed upstream |
 | `CHELA_SHARE_SANDBOX_WEB_IMAGE` | `chela-share-web:latest` | web mode only: the guest image with headless Chromium (build it, below) |
 | `CHELA_SHARE_WEB_DENY` | unset | web mode: comma-separated domains (and their subdomains) always refused |
@@ -89,6 +155,36 @@ Knobs, set in `chela.env`, which the launcher process reads:
 | `CHELA_SHARE_WEB_HOST_RPS` | `1` | web mode: requests per second per site (burst 3) |
 | `CHELA_SHARE_WEB_GLOBAL_RPS` | `8` | web mode: requests per second across all sites (burst 20) |
 | `CHELA_SHARE_WEB_DENY_CIDRS` | unset | web mode: extra address ranges to refuse, on top of every private range and this host's own addresses |
+
+### The token, and long-running shares
+
+For a share that runs longer than a few hours, use a long-lived token:
+
+```bash
+claude setup-token            # prints a token valid for about a year
+umask 077; printf '%s' '<the token>' > ~/.chela/share-sandbox-token
+echo 'CHELA_SHARE_SANDBOX_TOKEN_FILE=~/.chela/share-sandbox-token' >> ~/.chela/chela.env
+```
+
+With the default, Claude Code's own `.credentials.json`, the session works, but it depends
+on your host login. Claude Code refreshes that login every few hours. It writes a new file
+in place of the old one, and the old token stops working. Here is how a session handles a
+refresh:
+
+- The launcher copies **only the access token** (never the refresh token) into a
+  per-session directory, `~/.chela/share-token/<id>/`. It checks the source file every 2
+  seconds and copies it again when it changes. The directory is removed when the session
+  ends.
+- The proxy sidecar mounts that **directory** read-only and reads the token from it on
+  every request. It mounts a directory, not the file itself, because a mounted single
+  file keeps showing the old file after a replace. The guest container mounts neither.
+- If Anthropic rejects the token (401), the proxy reads the token once more and, if it
+  changed, retries once with the new one.
+- If the 401 persists, the proxy answers **502** with *"The host's Claude login expired —
+  ask the operator to log in again on the host."* It never passes the 401 on, because a
+  401 would start Claude Code's `/login` inside the guest, which can never work there.
+  Log in again on the host (`claude`, then `/login`). The next request picks up the new
+  token, with no restart needed.
 
 ## What is isolated
 
@@ -108,8 +204,56 @@ Knobs, set in `chela.env`, which the launcher process reads:
 - tmux starts the window's process directly, with no shell. When Claude exits, the
   container, the proxy, the network and the pane go with it.
 
+**Billing:** a sandboxed session runs on your Claude subscription, through the proxy, with no API key involved. The guest's Claude gets a placeholder login that names your plan, so its banner reads "Claude Max" or "Claude Pro". If chela can't tell the plan, the guest gets a placeholder `ANTHROPIC_AUTH_TOKEN` instead and its banner says "API Usage Billing", which is wrong; set `CHELA_SHARE_SANDBOX_SUBSCRIPTION` to fix it.
+
 A guest who can type can still spend your Claude usage through the proxy. That comes
 with letting them drive Claude at all.
+
+## Telegram: the session reaches your topic too
+
+A sandboxed window gets a Telegram topic like any other agent window, and its replies are
+relayed there. **Everything the session says reaches your topic** — including whatever the
+guest pastes or has Claude read: a CV, a draft, a private file in the workspace. Inbound
+works as usual too, so anything you type in that topic goes into the guest's session.
+
+How it works: the session's transcript stays in the container's tmpfs and its hooks can't
+reach the host, so the relay has no transcript to read. Instead, the credential proxy
+parses each completed model turn from the response stream and appends the assistant's
+visible text (with each tool call reduced to its name) to
+`$CHELA_DIR/share-sessions/<session id>/outbox.jsonl`. That directory is mounted
+read-write into the **proxy sidecar only**, never into the guest container, and a
+workspace that would contain it is refused. `chela telegram` reads the outbox of any
+window that verifies live as a sandboxed session, with the normal relay's formatting,
+chunking and dedup. `chela doctor` reports such a window as healthy while its outbox
+exists and keeps up with the proxy. It flags the window when the outbox is missing, or
+when the proxy is forwarding turns that don't reach the outbox.
+
+A turn is written only once its stream finishes. If the guest disconnects partway through
+a reply, that reply never reaches the topic, even when the model finished it.
+
+Outboxes stay on disk after the session ends, in directories readable only by you (mode
+0700). A new sandboxed session removes any outbox older than 7 days.
+
+**Turning the relay off for one session** (default on):
+
+```bash
+chela telegram --sandbox-relay @<wid>=off    # and =on to turn it back on
+```
+
+The setting is stored against the sandboxed session's id, not the window number, so it
+doesn't carry over to whatever window later gets the same `@N`. While it's off, neither
+the session's replies nor its pane prompts and status line are posted to the topic.
+
+## Status: working/idle from the proxy
+
+chela normally reads a window's status from Claude itself, and a sandboxed Claude is
+invisible to that. Its proxy writes `activity.json` to the same per-session directory as
+the outbox (proxy-only, never mounted into the guest). It records how many main-loop
+requests are in flight and when the last one finished. For a window that verifies as
+sandboxed, `chela peek` and the Wall then show **working** while a request is in flight
+or finished less than 4 seconds ago (the gap while Claude runs a tool), and **idle** after
+that. The pill's tooltip says "from the sandbox proxy". A permission prompt is not a
+request, so the proxy can't see **waiting**. Ordinary windows are unchanged.
 
 ## Measured results (CMX-400, container route)
 
@@ -318,8 +462,18 @@ on by accident, and to end on its own:
 - The dialog labels it **"Full access — UNSANDBOXED: the guest can type into a real shell
   on this machine"**. To confirm, you type the **window name**, and the server checks
   that name against the live tmux window.
-- It **expires** after `CHELA_SHARE_UNSANDBOXED_MINUTES` minutes (default **30**, range
-  1–240). The share then goes back to view only by itself, and the guest is told.
+- It **expires** after the duration you pick in the dialog (or in *Active shares* when
+  you upgrade a live share): **30 min · 4 h · 1 day ·
+  7 days · 14 days**. The picker starts on `CHELA_SHARE_UNSANDBOXED_MINUTES` (default
+  **30**; any value in the range 1–20160 minutes, i.e. up to 14 days, is accepted and
+  added to the picker if it isn't one of the five). The server clamps whatever is posted
+  to the same range. When it runs out, the share goes back to view only by itself, and
+  the guest is told. The red banner and *Active shares* show the time left
+  (e.g. "12d 4h left").
+- A duration **longer than 4 h** needs the window name typed a **second** time, and the
+  server refuses the grant without it, so a multi-day grant can't be clicked through by
+  accident. A long override ends exactly as a short one does: expiry, Stop, the kill
+  switch, the share reaper, or *Guest typing* turned off.
 - It's **bound to one joiner**: the first one to say hello (or type) after the grant.
   Anyone else on the same share stays view only. A guest who reloads the page gets a new
   stream id, so they're view only too; stop and re-share to re-pair. This binding keeps
@@ -329,6 +483,6 @@ on by accident, and to end on its own:
   header and in the share pill. The **#btn-shares** kill switch (Stop / Stop all)
   revokes it instantly.
 - Every step goes to the event log. `share.unsandboxed_granted` records who, the window,
-  the start and the expiry. `share.unsandboxed_expired` and `share.unsandboxed_revoked`
+  the start and the expiry (`expires_at`, from the duration you picked). `share.unsandboxed_expired` and `share.unsandboxed_revoked`
   record the end and its reason.
 - Turning *Guest typing* off also disables an active override.

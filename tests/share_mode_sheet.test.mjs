@@ -43,6 +43,8 @@ let REFUSE = null;     // when set, POST /share-mode answers {ok:false, error: R
 let SERVER_MODE = null; // when set, the mode the server reports back (it is the truth)
 const EXPIRES = 1.9e9; // the UNSANDBOXED override's wall-clock end (epoch seconds)
 const endsAt = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+// A far-off end (not today) names the day too (CMX-419: an override can last 14 days).
+const endsOn = t => new Date(t * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + endsAt(t);
 
 function fakeFetch(url, opts) {
     const path = String(url);
@@ -205,10 +207,75 @@ test('up to UNSANDBOXED POSTs nothing until the window name is typed', async () 
     assert.equal(go.disabled, false);
     go.click();
     await settle();
-    assert.deepEqual(modePosts, [{ mode: 'unsandboxed', confirm: 'shell-1' }]);
+    assert.deepEqual(modePosts, [{ mode: 'unsandboxed', confirm: 'shell-1', minutes: 30 }]);
     assert.equal(document.querySelector('.gs-share-btn[data-wid="@1"] .gs-share-mode').textContent, '⚠');
-    assert.ok(freshRow().querySelector('.ss-mode-desc').textContent.includes('Ends at ' + endsAt(1e9) + '.'),
+    assert.ok(freshRow().querySelector('.ss-mode-desc').textContent.includes('Ends ' + endsOn(1e9)),
         'right after the grant the row must say when full access ends');
+});
+
+// --- the duration picker on the upgrade path (CMX-419) ---------------------------------
+// Upgrading a live share to UNSANDBOXED is a second road to the same grant, so it gets the
+// share dialog's picker AND its >4 h second confirmation.
+
+const UPGRADE = { share_typing: true, sandboxed: false, typing_allowed: false, unsandboxed_offered: true,
+                  unsandboxed_minutes: 30, unsandboxed_choices: [30, 240, 1440, 10080, 20160],
+                  unsandboxed_long_minutes: 240, window_name: 'shell-1' };
+
+test('the upgrade offers the picker, preselected to the configured default', async () => {
+    const row = await openSheet('view', UPGRADE);
+    opt(row, 'unsandboxed').click();
+    const sel = row.querySelector('.ss-dur');
+    assert.ok(sel, 'the upgrade must offer the duration picker');
+    assert.deepEqual([...sel.options].map(o => o.textContent), ['30 min', '4 h', '1 day', '7 days', '14 days']);
+    assert.equal(sel.value, '30');
+    assert.equal(row.querySelector('.ss-confirm-long').hidden, true, '30 min needs no second confirmation');
+});
+
+test('⭐ an upgrade past 4 h POSTs nothing until the window name is typed TWICE', async () => {
+    const row = await openSheet('view', UPGRADE);
+    opt(row, 'unsandboxed').click();
+    const sel = row.querySelector('.ss-dur');
+    sel.value = '20160'; sel.onchange();
+    const longBox = row.querySelector('.ss-confirm-long');
+    assert.equal(longBox.hidden, false, 'a >4 h pick must ask for the name again');
+    const input = row.querySelector('.ss-confirm-in');
+    const go = row.querySelector('.ss-confirm-go');
+    input.value = 'shell-1'; input.oninput();
+    assert.equal(go.disabled, true, 'one typed name must not arm a 14-day grant');
+    go.click();
+    await settle();
+    assert.deepEqual(modePosts, [], 'no POST without the second confirmation');
+    const longIn = row.querySelector('.ss-confirm-long-in');
+    longIn.value = 'shell-1'; longIn.oninput();
+    assert.equal(go.disabled, false);
+    go.click();
+    await settle();
+    assert.deepEqual(modePosts, [{ mode: 'unsandboxed', confirm: 'shell-1', minutes: 20160, confirm_long: 'shell-1' }],
+        'the picked duration reaches the server with both confirmations');
+});
+
+test('a 4 h upgrade (not longer than 4 h) needs one confirmation and carries its minutes', async () => {
+    const row = await openSheet('view', UPGRADE);
+    opt(row, 'unsandboxed').click();
+    const sel = row.querySelector('.ss-dur');
+    sel.value = '240'; sel.onchange();
+    assert.equal(row.querySelector('.ss-confirm-long').hidden, true);
+    const input = row.querySelector('.ss-confirm-in');
+    input.value = 'shell-1'; input.oninput();
+    row.querySelector('.ss-confirm-go').click();
+    await settle();
+    assert.deepEqual(modePosts, [{ mode: 'unsandboxed', confirm: 'shell-1', minutes: 240 }]);
+});
+
+test('a multi-day UNSANDBOXED row names the day it ends and the time left', async () => {
+    const realNow = Date.now;
+    Date.now = () => (EXPIRES - (12 * 86400 + 4 * 3600 + 30)) * 1000;
+    try {
+        const row = await openSheet('unsandboxed', { ...UPGRADE });
+        const desc = row.querySelector('.ss-mode-desc').textContent;
+        assert.ok(desc.includes('Ends ' + endsOn(EXPIRES) + ' (12d 4h left).'), `got: ${desc}`);
+        assert.match(row.querySelector('.ss-mode-unsafe').textContent, /12d 4h left/);
+    } finally { Date.now = realNow; }
 });
 
 test('an UNSANDBOXED row says when full access ends', async () => {
@@ -217,7 +284,7 @@ test('an UNSANDBOXED row says when full access ends', async () => {
     assert.deepEqual(pressed(row), ['unsandboxed']);
     const desc = row.querySelector('.ss-mode-desc').textContent;
     assert.match(desc, /UNSANDBOXED/);
-    assert.ok(desc.includes('Ends at ' + endsAt(EXPIRES) + '.'), `the row must name the end time, got: ${desc}`);
+    assert.ok(desc.includes('Ends ' + endsOn(EXPIRES)), `the row must name the end time, got: ${desc}`);
     assert.ok(row.querySelector('.ss-mode-desc').classList.contains('ss-mode-desc-unsafe'));
 });
 
@@ -311,7 +378,7 @@ test('the grant handler itself refuses a wrong name (not only the disabled butto
     go.onclick();
     assert.equal(go.disabled, true, 'the grant button locks while the request is in flight');
     await settle();
-    assert.deepEqual(modePosts, [{ mode: 'unsandboxed', confirm: 'shell-1' }]);
+    assert.deepEqual(modePosts, [{ mode: 'unsandboxed', confirm: 'shell-1', minutes: 30 }]);
 });
 
 test('the UNSANDBOXED confirmation names the window and the time box, and takes focus', async () => {

@@ -3466,6 +3466,30 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .recent-toggle-dispatcher:hover { color: var(--text); text-decoration: underline; }
 
+/* Dismiss (CMX-437): the × hides a row from Recent — never deletes its transcript.
+   Quiet until hovered on desktop; always visible on touch (no hover there). */
+.recent-row { transition: transform 0.12s ease-out; }
+.recent-dismiss {
+    flex: 0 0 auto; align-self: center; display: inline-flex; align-items: center;
+    justify-content: center; width: 24px; height: 24px; padding: 0; margin-left: 2px;
+    background: none; border: none; border-radius: 4px; cursor: pointer;
+    color: var(--text-dim); opacity: 0.55; transition: opacity 0.12s, color 0.12s;
+}
+.recent-dismiss svg { width: 14px; height: 14px; }
+.recent-row:hover .recent-dismiss, .recent-dismiss:focus-visible { opacity: 1; }
+.recent-dismiss:hover { color: var(--text); background: var(--surface); }
+@media (hover: none) { .recent-dismiss { opacity: 0.85; width: 32px; height: 32px; } }
+.recent-clear-all {
+    background: none; border: none; padding: 0 2px; cursor: pointer;
+    font-size: 10px; color: var(--text-dim);
+}
+.recent-clear-all:hover { color: var(--text); text-decoration: underline; }
+.recent-undo-toast { display: flex; align-items: center; gap: 10px; }
+.recent-undo {
+    background: none; border: 1px solid var(--border); border-radius: 4px;
+    padding: 2px 8px; font-size: 11px; color: var(--accent); cursor: pointer;
+}
+
 .ar-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .ar-top { display: flex; align-items: center; gap: 6px; }
 .ar-top .agent-row-name { flex: 1; }
@@ -3536,7 +3560,8 @@ input[type="text"]:focus, textarea:focus, select:focus {
     body.sidebar-collapsed .group-head,
     body.sidebar-collapsed .triage-head,
     body.sidebar-collapsed .agent-row .ar-main,
-    body.sidebar-collapsed .agent-row .recent-resume { display: none; }
+    body.sidebar-collapsed .agent-row .recent-resume,
+    body.sidebar-collapsed .agent-row .recent-dismiss { display: none; }
 
     /* The section heads are gone, so a rule stands in for the section break. */
     body.sidebar-collapsed .side-section { margin-bottom: 10px; }
@@ -4489,3 +4514,15 @@ input[type="text"]:focus, textarea:focus, select:focus {
 @media (pointer: coarse) {
     input, textarea, select { font-size: 16px !important; }
 }
+
+/* CMX-426: "chela was updated — Reload". Unobtrusive: bottom-centre, never modal, never
+   auto-reloads (version.js). Above the wall, below modals. */
+.update-banner {
+    position: fixed; z-index: 46; left: 50%; transform: translateX(-50%);
+    bottom: max(14px, env(safe-area-inset-bottom));
+    display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 14px;
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; box-shadow: 0 4px 16px rgba(0, 0, 0, .35); font-size: 13px;
+    max-width: calc(100vw - 32px);
+}
+.update-banner[hidden] { display: none; }

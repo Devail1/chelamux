@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>chela — Mission Control</title>
-    <link rel="icon" href="static/img/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="static/vendor/gridstack.min.css">
-    <link rel="stylesheet" href="static/style.css">
+    <link rel="icon" href="{{ asset_path('img/favicon.svg') }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ asset_path('vendor/gridstack.min.css') }}">
+    <link rel="stylesheet" href="{{ asset_path('style.css') }}">
 </head>
 <body>
 
@@ -46,7 +46,7 @@
               aria-label="Toggle sidebar" aria-expanded="true" onclick="chela.toggleSidebar()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
       </button>
-      <div class="brand"><img src="static/img/claw-mark.svg" class="brand-mark" alt=""><span>chela</span></div>
+      <div class="brand"><img src="{{ asset_path('img/claw-mark.svg') }}" class="brand-mark" alt=""><span>chela</span></div>
       <!-- CMX-393: the inbox moved up here from the foot (as in the approved
            mockup), so the foot is ONE row: readouts left, one menu right. It sits
            at the head's right end; the toggle stays first because the phone's
@@ -133,6 +133,9 @@
         <div class="side-head">
           <span class="side-title">Recent sessions</span>
           <span class="side-count" id="hdr-recent">0</span>
+          <button class="recent-clear-all" id="recent-clear-all" hidden
+                  title="Dismiss every recent session (transcripts are kept)"
+                  onclick="chela.clearRecentSessions()">Clear all</button>
         </div>
         <div class="side-list" id="side-recent"></div>
       </section>
@@ -792,13 +795,14 @@
   </div>
 </div>
 
+<script>window.CHELA_ASSET_VERSION = {{ asset_version|tojson }};</script>
 {% if terminals_enabled %}<script>window.TERMINALS_ENABLED = true;</script>{% endif %}
 {% if wall_tile_dispatched %}<script>window.WALL_TILE_DISPATCHED = true;</script>{% endif %}
-<script src="static/vendor/gridstack-all.js"></script>
+<script src="{{ asset_path('vendor/gridstack-all.js') }}"></script>
 <!-- Stage 0: one ES-module entry. main.js imports the rest through the module
      graph (util → feature renderers → nav → sse → main bootstrap). No build step.
      terminals.js/launcher.js load via the graph and stay inert when terminals
      are off (TERMINALS_ON-guarded). -->
-<script type="module" src="static/js/main.js"></script>
+<script type="module" src="{{ asset_path('js/main.js') }}"></script>
 </body>
 </html>

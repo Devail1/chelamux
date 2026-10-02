@@ -40,12 +40,21 @@ const TYPES = {
     '.html': 'text/html', '.txt': 'text/plain',
 };
 
+// CMX-426: the asset version the fixture "deploy" runs (app.py ASSET_VERSION). The
+// template names every asset as `{{ asset_path('…') }}` → static/v/<ver>/…, and the
+// static route below strips that prefix again, exactly as Flask's versioned route does.
+export const ASSET_VERSION = 'f1x7ure0000a';
+
 // What Flask's render_template would produce with terminals enabled and the
-// dispatched-tile flag off. The template's only Jinja is `{% if flag %}…{% endif %}`
-// pairs; anything else is a loud error rather than a silently mis-rendered shell.
+// dispatched-tile flag off. The template's Jinja is `{% if flag %}…{% endif %}`
+// pairs plus the CMX-426 asset expressions; anything else is a loud error rather than a
+// silently mis-rendered shell.
 export function renderShell() {
     const flags = { terminals_enabled: true, wall_tile_dispatched: false };
-    const html = readFileSync(TEMPLATE, 'utf8').replace(
+    const html = readFileSync(TEMPLATE, 'utf8')
+        .replace(/\{\{\s*asset_path\('([^']+)'\)\s*\}\}/g, (_, rel) => `static/v/${ASSET_VERSION}/${rel}`)
+        .replace(/\{\{\s*asset_version\|tojson\s*\}\}/g, JSON.stringify(ASSET_VERSION))
+        .replace(
         /\{%\s*if\s+(\w+)\s*%\}([\s\S]*?)\{%\s*endif\s*%\}/g,
         (_, flag, inner) => {
             if (!(flag in flags)) throw new Error(`renderShell: unknown template flag ${flag}`);
@@ -57,6 +66,7 @@ export function renderShell() {
 
 function apiBody(path, api = {}) {
     if (Object.prototype.hasOwnProperty.call(api, path)) return api[path];
+    if (path === '/api/version') return { version: ASSET_VERSION };
     if (path === '/api/agents') return AGENTS;
     if (path === '/api/agents/context') return [];
     if (path === '/api/summary') return { windows_total: AGENTS.length };
@@ -93,7 +103,8 @@ export async function routeFixture(context, api = {}) {
             return route.fulfill({ status: 200, contentType: 'text/html', body: renderShell() });
         }
         if (path.startsWith('/static/')) {
-            const file = staticFile(decodeURIComponent(path.slice('/static/'.length)));
+            const rel = path.slice('/static/'.length).replace(/^v\/[^/]+\//, '');   // CMX-426
+            const file = staticFile(decodeURIComponent(rel));
             if (!file) {
                 misses.push(`404 ${path}`);
                 return route.fulfill({ status: 404, body: '' });

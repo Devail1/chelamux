@@ -214,6 +214,9 @@ def test_an_archived_issue_reads_as_done_not_missing(tmp_path):
     assert got["CMX-1"].terminal_state == "done"
     assert got["CMX-3"].terminal_state == "done"
     assert got["CMX-2"].terminal_state is None
+    # CMX-430 integration: the dispatcher reconciles on `state`, so a terminal issue must
+    # read CLOSED there too (an archived one included), and a live one OPEN.
+    assert (got["CMX-1"].state, got["CMX-3"].state, got["CMX-2"].state) == ("closed", "closed", "open")
     assert fake.calls[0][1]["numbers"] == [1, 2, 3]
 
 

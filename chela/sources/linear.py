@@ -659,6 +659,9 @@ class LinearSource:
             task_number=number,
             branch=_branch_for(ident, title, node.get("branchName")),
             terminal_state=terminal,
+            # CMX-430: the reconcile acts on `state`. A terminal (done/canceled/archived)
+            # Linear issue is POSITIVELY closed, never left reading as open.
+            state="closed" if terminal else "open",
         ), risk, "label")
 
     @staticmethod

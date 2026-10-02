@@ -20,7 +20,7 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**57** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+**59** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
 wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
 added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
@@ -33,7 +33,8 @@ then 44, until CMX-382 wired `CHELA_REMOTE_CONTROL` through
 `dashboard_setting()` as the General tab's Remote Control switch — back to 43, see group 10 —
 then 44, until CMX-389 added `CHELA_OVERRIDE_WAIT_S`, group 4 — then 51, until CMX-403
 added the seven sandboxed-share knobs, group 9 — then 57, until CMX-418 added the six
-web-mode knobs, group 9 — 57) — every literal `CHELA_*` name a Python module in
+web-mode knobs, group 9 — then 58, until CMX-420 added the proxy's `CHELA_PROXY_SESSION_DIR`,
+group 9 — then 59, until CMX-435 added `CHELA_SHARE_SANDBOX_SUBSCRIPTION`, group 9) — every literal `CHELA_*` name a Python module in
 `chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
@@ -195,7 +196,10 @@ autonomous base branch — per-workflow `base_branch` still wins; the NEVER-list
 overridable by this, default `dev`; **restart_required**), `CHELA_GATE_WAIT_S` (how long a
 `PermissionRequest` gate waits for a tap, default `90.0`s, `0` allowed — never wait),
 `CHELA_GATE_MAX_WAITS` (concurrent gate-wait slots, default `8`, floor `1` — a
-`BoundedSemaphore` cannot be sized `0`).
+`BoundedSemaphore` cannot be sized `0`), and CMX-431's battery-scaled judge wall:
+`CHELA_JUDGE_WALL_BASE_S` / `CHELA_JUDGE_WALL_PER_EXPERIMENT_S` /
+`CHELA_JUDGE_WALL_CEILING_S` / `CHELA_JUDGE_WALL_GRACE_S` (defaults `600` / `360` /
+`10800` / `900` s, read per call — see `docs/RISK_LEVELS.md`).
 
 Four of the eleven (`CHELA_DISPATCH_WORKFLOWS`/`CHELA_JUDGE`/`CHELA_CRITIC`/`CHELA_MERGE_BASE`)
 are resolved once at their owning module's import (`chela/config.py` for the first three,
@@ -272,19 +276,21 @@ under-deliver: the shell-only 6 (font, port base, poll interval, backoff, max
 clients) are exactly the kind of thing a person opening a "Terminal wall" tab expects to
 find there, and today they don't exist in any UI or even `docs/CONFIG.md`'s table.
 
-### 9. Collaboration (15 + 1 wired) — mixed
+### 9. Collaboration (16 + 1 wired) — mixed
 
 | Variable | Default | Class | Notes |
 |---|---|---|---|
 | `CHELA_COLLAB` | `true` | `hot` | Presence kill switch |
 | `CHELA_COLLAB_RELAY` | empty | `hot` | The one relay-shaped value `docs/CONFIG.md` says **is** meant to be shared across installs, unlike `CHELA_NOTIFY_URL` |
-| `CHELA_SHARE_UNSANDBOXED_MINUTES` | `30` | `trust-boundary` | Lifetime of the trusted-peer UNSANDBOXED typing override (CMX-403, `docs/SHARE_SANDBOX.md`), clamped 1–240. Env-only on purpose: it bounds an explicit per-share opt-in |
+| `CHELA_SHARE_UNSANDBOXED_MINUTES` | `30` | `trust-boundary` | Lifetime of the trusted-peer UNSANDBOXED typing override (CMX-403, `docs/SHARE_SANDBOX.md`) — the default the share dialog's duration picker preselects (CMX-419), clamped 1–20160 (14 days). Env-only on purpose: it bounds an explicit per-share opt-in |
 | `CHELA_SHARE_SANDBOX_IMAGE` | `python:3.12-slim` | `hot` | Image for a sandboxed share session's guest + proxy containers (`chela/share_sandbox.py`) |
 | `CHELA_SHARE_SANDBOX_TOKEN_FILE` | Claude Code's `.credentials.json` | `trust-boundary` | The token file mounted into the proxy sidecar ONLY — never the guest |
+| `CHELA_SHARE_SANDBOX_SUBSCRIPTION` | the token file's `subscriptionType` | `hot` | The plan a sandboxed guest's banner names (`max`, `pro`, …), written into the guest's placeholder login (CMX-435). Never a token |
 | `CHELA_SHARE_PROXY_UPSTREAM` | `https://api.anthropic.com` | `trust-boundary` | The proxy's one fixed upstream |
 | `CHELA_PROXY_TOKEN_FILE` | none | `internal-path` | Read by `chela/share_proxy.py` INSIDE the sidecar; set by the launcher, not by an operator |
 | `CHELA_PROXY_UPSTREAM` | `https://api.anthropic.com` | `internal-path` | Same — the sidecar's copy of `CHELA_SHARE_PROXY_UPSTREAM` |
 | `CHELA_PROXY_PORT` | `8080` | `internal-path` | Same — the sidecar's listen port |
+| `CHELA_PROXY_SESSION_DIR` | none | `internal-path` | Same — where the sidecar writes the session's Telegram outbox (CMX-420) |
 | `CHELA_SHARE_SANDBOX_WEB_IMAGE` | `chela-share-web:latest` | `hot` | Web-mode guest image with headless Chromium (CMX-418), built locally from `chela/assets/share-sandbox-web/` |
 | `CHELA_SHARE_WEB_DENY` | empty | `trust-boundary` | Web mode: domains (and subdomains) the egress proxy always refuses |
 | `CHELA_SHARE_WEB_ALLOW` | empty (= any public host) | `trust-boundary` | Web mode: if set, the ONLY domains the egress proxy admits |

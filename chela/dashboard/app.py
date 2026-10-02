@@ -23,11 +23,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from flask import abort, Flask, jsonify, render_template, request, Response
+from flask import abort, Flask, jsonify, render_template, request, Response, send_from_directory
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_stream, context, diffsurface, discovery, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, scheduler, sessionids, share_sandbox, spawn, starter, tasklists, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, sandbox_status, scheduler, sessionids, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -107,14 +107,86 @@ def _require_terminals() -> None:
 # Page route
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# CMX-426: versioned static assets
+#
+# A deploy restarts chela-dashboard, but an open browser kept serving its cached ES
+# modules and CSS, so recent UI looked missing until a hard refresh. Every asset the page
+# loads is now served from ``static/v/<ASSET_VERSION>/…``: a new deploy is a new URL, so a
+# reload can never mix old modules with new ones, and the versioned copy may be cached for
+# good. Relative ES imports (``./util.js``) resolve against the module's own URL, so they
+# inherit the version with no import map. Unversioned ``static/…`` keeps working.
+#
+# The version is a hash of the CONTENT that reaches the browser (JS, CSS, templates),
+# computed ONCE at import. Not the git sha: an installed wheel has no .git, and a deploy
+# that only touches Python must not ask every open page to reload.
+# ---------------------------------------------------------------------------
+
+_STATIC_DIR = Path(__file__).parent / "static"
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+_VERSIONED_SUFFIXES = {".js", ".mjs", ".css", ".html", ".svg"}
+
+
+def compute_asset_version(roots: tuple[Path, ...] = (_STATIC_DIR, _TEMPLATES_DIR)) -> str:
+    """A short content hash over every browser-facing text asset under ``roots``.
+
+    Deterministic: same files, same bytes → same version (no reload storm within a deploy).
+    """
+    h = hashlib.sha256()
+    for root in roots:
+        for p in sorted(root.rglob("*")):
+            if p.is_file() and p.suffix in _VERSIONED_SUFFIXES:
+                h.update(p.relative_to(root).as_posix().encode())
+                h.update(b"\0")
+                h.update(p.read_bytes())
+                h.update(b"\0")
+    return h.hexdigest()[:12]
+
+
+ASSET_VERSION = compute_asset_version()
+
+
+def asset_path(path: str) -> str:
+    """``static/v/<ASSET_VERSION>/<path>`` — relative, like the template's other URLs, so
+    a dashboard behind a path prefix still resolves it."""
+    return f"static/v/{ASSET_VERSION}/{path}"
+
+
+@app.route("/static/v/<ver>/<path:filename>")
+def static_versioned(ver, filename):
+    resp = send_from_directory(app.static_folder, filename)
+    if ver == ASSET_VERSION:
+        # This exact URL can only ever mean these bytes: cache it for good.
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    else:
+        # A page from an older deploy asking for its old version: the bytes are the
+        # CURRENT ones, so they must not be cached under the old URL.
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@app.route("/api/version")
+@require_auth
+def api_version():
+    """The running deploy's asset version; an open page compares it with its own."""
+    resp = jsonify({"version": ASSET_VERSION})
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 @app.route("/")
 @require_auth
 def index():
-    return render_template(
+    resp = app.make_response(render_template(
         "index.html",
         terminals_enabled=config.TERMINALS_ENABLED,
         wall_tile_dispatched=config.WALL_TILE_DISPATCHED,
-    )
+        asset_version=ASSET_VERSION,
+        asset_path=asset_path,
+    ))
+    # The HTML names the versioned assets, so it must be revalidated on every load.
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +252,7 @@ def _needs_human(wid: str, sess_status: str | None, dispatched: bool) -> bool:
 @app.route("/api/agents")
 @require_auth
 def api_agents():
+    _sync_shares()   # CMX-434: shares hosted by `chela collab` survive our restarts
     windows = discovery.get_all_windows()
     tasks = scheduler.list_tasks()
     dispatched = _dispatched_wids(windows)
@@ -213,6 +286,8 @@ def api_agents():
         claude_running = cpid is not None
         sess_status = status_map["by_pid"].get(cpid) if cpid is not None else None
         sess_cwd = status_map["cwd_by_pid"].get(cpid) if cpid is not None else None
+        # A sandboxed session's Claude is not in that list — its proxy fills the gap (CMX-436).
+        sess_status, status_source = sandbox_status.resolve(window_id, sess_status)
 
         liveness, health = _liveness(claude_running, sess_status)
         win_type = agent_manager.window_type(window_id, claude_running)
@@ -251,6 +326,8 @@ def api_agents():
             "claude_running": claude_running,
             "thinking": sess_status == "busy",
             "session_status": sess_status,
+            # "sandbox-proxy" when that status came from a sandboxed session's proxy.
+            "status_source": status_source,
             # The Wall's lazy-tile pair (CMX-76). `dispatched` = the dispatcher owns this
             # window (run-row derived); `needs_human` = it is blocked on you right now.
             # Together they are the whole rule: a dispatched worker opens MINIMIZED and
@@ -810,7 +887,7 @@ def _term_upload_shim() -> str:
     route re-checks it per upload, so a pane opened before a switch-off is still refused)."""
     on = "true" if config.file_drop_enabled() else "false"
     return ("<script>window.__CHELA_FILE_DROP__=" + on + ";</script>"
-            '<script src="/static/term-upload.js"></script>')
+            '<script src="/' + asset_path("term-upload.js") + '"></script>')
 
 
 def _term_presence_shim(wid: str) -> str:
@@ -822,7 +899,7 @@ def _term_presence_shim(wid: str) -> str:
         "shared": wid in _SHARED,
     })
     return ("<script>window.__CHELA_COLLAB__=" + cfg + ";</script>"
-            '<script type="module" src="/static/collab/presence-shim.js"></script>')
+            '<script type="module" src="/' + asset_path("collab/presence-shim.js") + '"></script>')
 
 
 @app.route("/term/<wid>/", defaults={"rest": ""}, methods=["GET", "POST"])
@@ -1202,8 +1279,11 @@ _share_epoch_seq = 0
 
 
 def _next_share_epoch() -> int:
+    """Strictly increasing within this process AND across restarts (wall-clock ms), since
+    a share now outlives the dashboard that minted it (CMX-434): a re-mint after a restart
+    must never repeat the epoch a page is still keyed on."""
     global _share_epoch_seq
-    _share_epoch_seq += 1
+    _share_epoch_seq = max(_share_epoch_seq + 1, int(time.time() * 1000))
     return _share_epoch_seq
 
 
@@ -1220,13 +1300,81 @@ def _revoke_share(wid: str) -> None:
     _SHARED.pop(wid, None)
     _share_info.pop(wid, None)
     _share_dead_since.pop(wid, None)
-    collab_stream.stop_bridge(wid)
+    collab_host.stop_bridge(wid)
+
+
+def _adopt_share(wid: str, info: dict | None) -> None:
+    """Show a share this dashboard did not mint in this life — restored after a restart,
+    or running in the `chela collab` host (CMX-434). Grid = the live window size, as at mint."""
+    if wid not in _SHARED:
+        cols, rows = collab_stream._window_dims(wid)
+        _SHARED[wid] = {"cols": cols, "rows": rows}
+    if info:
+        _share_info[wid] = {k: info.get(k) for k in ("pairing_code", "join_url", "share_epoch")}
+
+
+def _on_shares_restored(restored: list[dict]) -> None:
+    for r in restored:
+        _adopt_share(r["wid"], collab_stream.share_info(r["wid"]))
+
+
+collab_host.set_local_hooks(on_revoke=_revoke_share, on_restored=_on_shares_restored)
+
+
+def _sync_shares() -> None:
+    """When the bridges run in the `chela collab` host, ITS table is the truth: adopt the
+    shares it has that this dashboard doesn't (a restart forgot them), and forget the ones
+    it no longer has (stopped, or failed closed over there). A no-op when this process is
+    the host (on_revoke keeps the table) or no host answers (keep what we know)."""
+    live = collab_host.remote_listing()
+    if live is None:
+        return
+    for wid in list(_SHARED):
+        if wid not in live:
+            _SHARED.pop(wid, None)
+            _share_info.pop(wid, None)
+            _share_dead_since.pop(wid, None)
+    for wid in live:
+        if wid not in _SHARED or not _share_info.get(wid):
+            _adopt_share(wid, collab_host.remote_info(wid))
+
+
+# How long a starting dashboard waits for `chela collab` to answer before it restores the
+# persisted shares itself (both start together on a boot / `chela update`).
+SHARE_HOST_GRACE = 5.0
+
+
+def _start_share_restore() -> None:
+    """🔌 CMX-434: bring back the shares a restart interrupted. With NO persisted share this
+    does nothing at all — no thread, no lock, no socket — so startup is unchanged."""
+    if not share_store.count():
+        return
+
+    def run():
+        deadline = time.monotonic() + SHARE_HOST_GRACE
+        while time.monotonic() < deadline:
+            if collab_host.remote_listing() is not None:
+                return _sync_shares()      # `chela collab` hosts them; just show them
+            time.sleep(0.5)
+        if collab_host.become_local_host():
+            collab_host.release_if_idle()  # nothing came back: let `chela collab` have it
+        else:
+            _sync_shares()
+
+    threading.Thread(target=run, name="share-restore", daemon=True).start()
+
+
+def _shutdown_hosted_shares() -> None:
+    """At exit, if THIS process hosts shares: tell guests "host restarting…" and keep the
+    store for whichever host comes up next — never "ended" (CMX-434)."""
+    if collab_host.is_host():
+        collab_stream.shutdown_all()
 
 
 def _share_mode(wid: str) -> str | None:
     if wid not in _SHARED:
         return None
-    st = collab_stream.share_state(wid)
+    st = collab_host.share_state(wid)
     return st["mode"] if st else collab_stream.MODE_VIEW
 
 
@@ -1269,12 +1417,17 @@ def _share_options(wid: str) -> dict:
         # The trusted-peer override is offered only while the setting is on, and only
         # where it means something (a window that is NOT already sandboxed).
         "unsandboxed_offered": typing_on and not sandboxed,
+        # The override's duration picker (CMX-419): preselect the configured default; a
+        # pick above ``unsandboxed_long_minutes`` needs the window name typed twice.
         "unsandboxed_minutes": config.share_unsandboxed_minutes(),
+        "unsandboxed_choices": sorted({*config.SHARE_UNSANDBOXED_CHOICES, config.share_unsandboxed_minutes()}),
+        "unsandboxed_long_minutes": config.SHARE_UNSANDBOXED_LONG_MINUTES,
         "window_name": _window_name(wid),
     }
 
 
 CONFIRM_REASON = "type the window name to confirm full access"
+CONFIRM_LONG_REASON = "type the window name again to confirm full access for longer than 4 h"
 
 
 def _access_gate(wid: str, mode: str, data: dict):
@@ -1293,8 +1446,20 @@ def _access_gate(wid: str, mode: str, data: dict):
     name = _window_name(wid)
     if not name or (data.get("confirm") or "").strip() != name:
         return None, (jsonify({"ok": False, "error": CONFIRM_REASON}), 403)
+    # How long the override lasts (CMX-419): the configured default when absent, clamped
+    # to [1, 14 days]; above 4 h the window name must be typed a second time.
+    raw = data.get("minutes")
+    if raw is None:
+        minutes = config.share_unsandboxed_minutes()
+    else:
+        try:
+            minutes = config.clamp_unsandboxed_minutes(int(raw))
+        except (TypeError, ValueError):
+            return None, (jsonify({"ok": False, "error": f"bad duration: {raw!r}"}), 400)
+    if minutes > config.SHARE_UNSANDBOXED_LONG_MINUTES and (data.get("confirm_long") or "").strip() != name:
+        return None, (jsonify({"ok": False, "error": CONFIRM_LONG_REASON}), 403)
     return {"unsandboxed": {"granted_by": _granted_by(), "window": name,
-                            "ttl_s": config.share_unsandboxed_minutes() * 60.0}}, None
+                            "ttl_s": minutes * 60.0}}, None
 
 
 @app.route("/api/term/<wid>/share-options")
@@ -1318,7 +1483,9 @@ def api_term_share(wid):
     ``mode`` (CMX-403): ``"view"`` (default) · ``"typing"`` — refused unless the
     ``share_typing`` setting is on AND the window verifies as a sandboxed session ·
     ``"unsandboxed"`` — the trusted-peer override, refused unless the setting is on and
-    ``confirm`` equals the live window name. The bridge re-enforces all of it per
+    ``confirm`` equals the live window name. ``minutes`` (CMX-419) is how long it lasts —
+    the configured default when absent, clamped to [1, 14 days]; above 4 h it also needs
+    ``confirm_long`` equal to the window name. The bridge re-enforces all of it per
     keystroke; these refusals only keep the dialog honest."""
     _require_terminals()
     if wid not in _terminals_port_map():
@@ -1357,11 +1524,18 @@ def api_term_share(wid):
     _SHARED[wid] = {"cols": cols, "rows": rows}
     # Start the E2E stream bridge; on_revoke fires if it fails closed on session
     # death, so a share can never outlive its terminal (see collab_stream).
-    code = collab_stream.start_bridge(wid, on_revoke=_revoke_share, **policy)
-    info = ({"pairing_code": code, "join_url": collab_stream.join_url(wid),
-             "share_epoch": _next_share_epoch()} if code else {})
+    # The bridge runs in the collab host — the `chela collab` service when it is up, so
+    # a dashboard deploy never ends this share; else this process (CMX-434).
+    epoch = _next_share_epoch()
+    try:
+        code = collab_host.start_bridge(wid, on_revoke=_revoke_share, share_epoch=epoch, **policy)
+    except collab_host.HostUnavailable as e:
+        _SHARED.pop(wid, None)
+        return jsonify({"ok": False, "error": f"the share host is not answering ({e}) — retry in a moment"}), 503
+    info = ({"pairing_code": code, "join_url": collab_host.join_url(wid),
+             "share_epoch": epoch} if code else {})
     _share_info[wid] = info
-    return jsonify({"ok": True, "shared": True, **info, **(collab_stream.share_state(wid) or {})})
+    return jsonify({"ok": True, "shared": True, **info, **(collab_host.share_state(wid) or {})})
 
 
 @app.route("/api/term/<wid>/share-mode", methods=["POST"])
@@ -1386,15 +1560,17 @@ def api_term_share_mode(wid):
         return refusal
     over = policy.get("unsandboxed") or {}
     try:
-        changed = collab_stream.set_share_mode(
+        changed = collab_host.set_share_mode(
             wid, mode, changed_by=over.get("granted_by") or _granted_by(),
             window=over.get("window") or _window_name(wid), ttl_s=over.get("ttl_s"))
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
+    except collab_host.HostUnavailable as e:
+        return jsonify({"ok": False, "error": f"the share host is not answering ({e})"}), 503
     if changed is None:
         return jsonify({"ok": False, "error": "this share has no running stream — stop and share again"}), 409
     return jsonify({"ok": True, "shared": True, **_share_info.get(wid, {}), **changed,
-                    **(collab_stream.share_state(wid) or {})})
+                    **(collab_host.share_state(wid) or {})})
 
 
 @app.route("/api/term/<wid>/share-info")
@@ -1403,6 +1579,7 @@ def api_term_share_info(wid):
     """Owner-only: the join URL + pairing code for a currently-shared wid, so the
     share popover can reopen without re-sharing (which would rotate the code)."""
     _require_terminals()
+    _sync_shares()
     return jsonify(_share_info.get(wid, {}))
 
 
@@ -1414,7 +1591,8 @@ def api_term_shared():
     NOT here — they live only in _share_info (owner-only). Each entry also carries
     its access ``mode`` + override ``expires_at`` (CMX-403) for the share pill."""
     _require_terminals()
-    return jsonify({wid: {**dims, **(collab_stream.share_state(wid) or {"mode": collab_stream.MODE_VIEW, "expires_at": None})}
+    _sync_shares()
+    return jsonify({wid: {**dims, **(collab_host.share_state(wid) or {"mode": collab_stream.MODE_VIEW, "expires_at": None})}
                     for wid, dims in list(_SHARED.items())})
 
 
@@ -2077,10 +2255,17 @@ def api_restore():
     is ever resumable, only *shown* (hidden by default; the sidebar's toggle reveals
     them with no Resume affordance) — ``session_id`` is left off their shape since
     there is no action for the client to build with it.
+
+    Rows whose session id the operator DISMISSED (:mod:`chela.dismissed_sessions`,
+    CMX-437) are left out of both buckets. That is a hide, not a delete: the
+    transcript and every store ``chela restore`` reads are untouched.
     """
     _require_terminals()
     owned = _dispatcher_owned_wid_epochs()
-    candidates = [v for v in _restore_verdicts() if v.verdict == "MANUAL" and v.manual_command()]
+    dismissed = dismissed_sessions.ids()
+    candidates = [v for v in _restore_verdicts()
+                  if v.verdict == "MANUAL" and v.manual_command()
+                  and v.session_id not in dismissed]
     rows, dispatcher_rows = [], []
     for v in candidates:
         if (v.wid, v.stamped_epoch) in owned or not _cwd_is_live(v.cwd):
@@ -2088,6 +2273,43 @@ def api_restore():
         else:
             rows.append(_shape_restore_row(v, resumable=True))
     return jsonify({"rows": rows, "dispatcher_rows": dispatcher_rows, "hidden": len(dispatcher_rows)})
+
+
+def _session_ids_from_body() -> list[str] | None:
+    """``session_ids`` from a JSON body: a non-empty list of non-empty strings, else None."""
+    sids = (request.get_json(silent=True) or {}).get("session_ids")
+    if not isinstance(sids, list) or not sids:
+        return None
+    if not all(isinstance(s, str) and s.strip() for s in sids):
+        return None
+    return [s.strip() for s in sids]
+
+
+@app.route("/api/restore/dismiss", methods=["POST"])
+@require_auth
+def api_restore_dismiss():
+    """Hide Recent-sessions rows by session id (the row's ×, or the header's "Clear
+    all"). Recorded server-side so every device stops showing them. Only the hide list
+    is written — never the transcript, never a session-ids/bindings row — so the
+    session stays resumable by hand and shows up under Sessions if it comes back."""
+    _require_terminals()
+    sids = _session_ids_from_body()
+    if sids is None:
+        return jsonify({"ok": False, "error": "session_ids must be a non-empty list of ids"}), 400
+    dismissed_sessions.dismiss(sids)
+    return jsonify({"ok": True, "dismissed": sids})
+
+
+@app.route("/api/restore/undismiss", methods=["POST"])
+@require_auth
+def api_restore_undismiss():
+    """Undo a dismiss: the rows come back on the next ``/api/restore``."""
+    _require_terminals()
+    sids = _session_ids_from_body()
+    if sids is None:
+        return jsonify({"ok": False, "error": "session_ids must be a non-empty list of ids"}), 400
+    dismissed_sessions.undismiss(sids)
+    return jsonify({"ok": True, "restored": sids})
 
 
 @app.route("/api/restore/resume", methods=["POST"])
@@ -4923,6 +5145,8 @@ def main():
     # instead of an inbound request paying it inline.
     agent_manager.start_background_refresh()
     collab.start()  # P3: publish running agents as presence peers (to shared viewers)
+    _start_share_restore()
+    atexit.register(_shutdown_hosted_shares)
 
     # Write down the port we are really binding, so another process (`chela plugin`,
     # `chela doctor`) can address us without guessing. A hook `url` is a literal baked
