@@ -102,6 +102,12 @@ def _timeout(*a, **k):
     _timeout,
     lambda *a, **k: _GhOut(returncode=1, stderr="HTTP 401: Bad credentials"),
     lambda *a, **k: _GhOut(stdout="not json"),
+    # A nonzero exit is a FAILED read WHATEVER stdout holds: gh can print a partial (or a
+    # stale cached) listing and still exit 1, and a partial listing would read every
+    # missing candidate as gone (orchestrator, CMX-430 held-out survivor on 56f513b).
+    lambda *a, **k: _GhOut(returncode=1, stdout=_issues((8, "CLOSED")),
+                           stderr="GraphQL: was submitted too quickly"),
+    lambda *a, **k: _GhOut(returncode=2, stdout="[]"),
 ])
 def test_gh_fetch_by_ids_is_None_on_a_failed_read(tmp_path, behaviour):
     src = _gh(tmp_path)
