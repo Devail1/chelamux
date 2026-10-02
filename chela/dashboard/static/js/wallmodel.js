@@ -62,6 +62,14 @@ export function tileState(agent, wants) {
     return { glyph: '○', word: 'idle', cls: 'idle' };
 }
 
+// The state's tooltip. A sandboxed session's working/idle is derived from its
+// credential proxy's traffic (app.py `status_source: "sandbox-proxy"`, CMX-436),
+// not Claude's own report — say so, so a reader knows what the pill rests on.
+export function stateTitle(agent, s) {
+    const word = s.word.charAt(0).toUpperCase() + s.word.slice(1);
+    return agent && agent.status_source === 'sandbox-proxy' ? word + ' — from the sandbox proxy' : word;
+}
+
 // ---- action-bar verb ----------------------------------------------------
 //
 // Which verb a wantsHuman pane's action bar shows, with NO new backend field:

@@ -146,6 +146,17 @@ The setting is stored against the sandboxed session's id, not the window number,
 doesn't carry over to whatever window later gets the same `@N`. While it's off, neither
 the session's replies nor its pane prompts and status line are posted to the topic.
 
+## Status: working/idle from the proxy
+
+chela normally reads a window's status from Claude itself, and a sandboxed Claude is
+invisible to that. Its proxy writes `activity.json` to the same per-session directory as
+the outbox (proxy-only, never mounted into the guest). It records how many main-loop
+requests are in flight and when the last one finished. For a window that verifies as
+sandboxed, `chela peek` and the Wall then show **working** while a request is in flight
+or finished less than 4 seconds ago (the gap while Claude runs a tool), and **idle** after
+that. The pill's tooltip says "from the sandbox proxy". A permission prompt is not a
+request, so the proxy can't see **waiting**. Ordinary windows are unchanged.
+
 ## Measured results (CMX-400, container route)
 
 Measured by hand against a live sandboxed session:

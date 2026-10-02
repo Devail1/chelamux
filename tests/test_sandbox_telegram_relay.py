@@ -379,7 +379,7 @@ def proxy_main(monkeypatch, tmp_path):
     """Run the sidecar's ``main()`` up to ``serve_forever`` — and serve nothing."""
     _FakeServer.served = []
     monkeypatch.setattr(share_proxy, "ThreadingHTTPServer", _FakeServer)
-    for attr in ("outbox", "token_file", "upstream"):      # main() sets these class-wide
+    for attr in ("outbox", "activity", "token_file", "upstream"):  # main() sets these class-wide
         monkeypatch.setattr(share_proxy._Handler, attr, getattr(share_proxy._Handler, attr))
     share_proxy._Handler.outbox = None
     monkeypatch.setenv("CHELA_PROXY_TOKEN_FILE", str(tmp_path / "token"))

@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    actionBarKind, actionVerb, costView, ctxLevel, focusLayout, isFinished, prChip, rankOrder, recapView, tileState,
+    actionBarKind, actionVerb, costView, ctxLevel, focusLayout, isFinished, prChip, rankOrder, recapView, stateTitle, tileState,
 } from '../chela/dashboard/static/js/wallmodel.js';
 
 const agent = (over = {}) => ({
@@ -339,4 +339,15 @@ test('focusLayout: focusWid absent from orderedWids falls back to the first wid 
 test('focusLayout: empty orderedWids -> {}', () => {
     assert.deepEqual(focusLayout([], '@a', 10), {});
     assert.deepEqual(focusLayout(null, '@a', 10), {});
+});
+
+// --- stateTitle (CMX-436) ------------------------------------------------------
+// A sandboxed session's working/idle comes from its credential proxy, not Claude's
+// own report — the tooltip must say so, and ONLY for that source.
+test('stateTitle labels a proxy-derived status, and only that', () => {
+    const sb = agent({ claude_running: true, session_status: 'busy', status_source: 'sandbox-proxy' });
+    assert.equal(stateTitle(sb, tileState(sb, false)), 'Working — from the sandbox proxy');
+    const ordinary = agent({ claude_running: true, session_status: 'busy', status_source: null });
+    assert.equal(stateTitle(ordinary, tileState(ordinary, false)), 'Working');
+    assert.equal(stateTitle(undefined, tileState(undefined, false)), 'Idle');
 });
