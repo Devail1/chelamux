@@ -1151,6 +1151,44 @@ def _ev_watchdog_idle_fail():
     return _watchdog("idle", stuck=True, nudged=True, check=check)
 
 
+def _ev_ci_red():
+    """1c: a RED CI is a GitHub fact, not tracker evidence — it sends the PR back even on a
+    failed-refresh tick (orchestrator, CMX-430 round 8 survivor)."""
+    sent: list[str] = []
+
+    def check(summary, killed, spies, wt):
+        assert sent == [TID]
+        assert summary["ci_failed"] == 1
+        assert _run_of(TID)["ci_failed_sha"] == "sha-red"
+    red = dispatcher.CIStatus(dispatcher.CI_FAILING, "sha-red", ("test",), (1,), "")
+    return dict(
+        seed=dict(pr_url=PR_URL, pr_state="open", pr_head_sha="sha-red"),
+        extra=[patch.object(dispatcher, "_read_pr_checks", return_value=red),
+               patch.object(dispatcher, "_failing_log_tail", return_value=""),
+               patch.object(dispatcher, "_ci_infra_by_steps", side_effect=lambda ci, d: ci),
+               patch.object(dispatcher, "request_changes",
+                            side_effect=lambda t, b: sent.append(t) or {"ok": True})],
+        check=check)
+
+
+def _ev_ci_pending_stale():
+    """1c′: checks stuck pending past CI_PENDING_STALE_SECONDS escalate to a human even on
+    a failed-refresh tick (orchestrator, CMX-430 round 8 survivor)."""
+    from datetime import datetime, timedelta, timezone
+    since = (datetime.now(timezone.utc)
+             - timedelta(seconds=dispatcher.CI_PENDING_STALE_SECONDS + 3600)).isoformat()
+
+    def check(summary, killed, spies, wt):
+        assert summary["escalated"] == 1
+        assert _run_of(TID)["status"] == "needs_human"
+    pending = dispatcher.CIStatus(dispatcher.CI_PENDING, "sha-p", (), (), "")
+    return dict(
+        seed=dict(pr_url=PR_URL, pr_state="open", pr_head_sha="sha-p",
+                  ci_pending_since=since),
+        extra=[patch.object(dispatcher, "_read_pr_checks", return_value=pending)],
+        check=check)
+
+
 # evidence → (the statuses the CODE applies it to, the case). The status sets are the
 # dispatcher's own constants wherever the code reads one.
 NON_TRACKER_EVIDENCE = {
@@ -1167,6 +1205,9 @@ NON_TRACKER_EVIDENCE = {
     "watchdog_dialog_fail": (("running",), _ev_watchdog_dialog_fail),
     "watchdog_renudge": (("running",), _ev_watchdog_renudge),
     "watchdog_idle_fail": (("running",), _ev_watchdog_idle_fail),
+    # CI (CMX-430 round 8): GitHub's checks, never the tracker
+    "ci_red": (("awaiting_review",), _ev_ci_red),
+    "ci_pending_stale": (("awaiting_review",), _ev_ci_pending_stale),
 }
 
 RECONCILED_STATUSES = (*dispatcher.ACTIVE_STATUSES, *dispatcher.RECONCILE_MERGE_STATUSES)
@@ -1393,3 +1434,71 @@ def test_a_tracker_close_is_the_only_thing_a_failed_refresh_withholds(
     assert "'done'" in closed["db"] and "'done'" not in still_open["db"]
     assert closed["killed"] == "['test-1']" and still_open["killed"] == "[]"
     assert closed["cleaned"] == "['abc123']" and still_open["cleaned"] == "[]"
+
+
+
+# --- round 8 (orchestrator): the strike and the listing/refresh distinction ----------------
+
+
+class _ListedButRefreshFailed:
+    """The LISTING succeeded and still shows the task (so it's unstruck); the id refresh
+    FAILED."""
+    read_failed = False
+
+    def list_open_tasks(self):
+        from chela.sources import Task
+        return [Task(id=TID, title=TID, file="", line_number=0, raw=TID)]
+
+    def fetch_by_ids(self, ids):
+        return None
+
+
+def test_a_failed_refresh_does_not_hold_back_the_tracker_strike(tmp_path):
+    """🔴 GUARD: striking a MERGED run's task is chela's own write, driven by the run row
+    and the listing, not by the id refresh. Gate `if pending_strikes:` on
+    `tracker_refresh_failed` ⇒ a merged task stays unstruck on a failed-refresh tick ⇒ RED."""
+    wf = _wf(tmp_path)
+    _seed_row(wf, tmp_path, "done", pr_url=PR_URL, pr_state="merged")
+    # a second, live run absent from the listing, so the tick DOES run an id refresh (and
+    # it fails) on the same tick the merged task is due its strike
+    other = tmp_path / "wt" / "zzz999"
+    other.mkdir(parents=True)
+    with dispatcher._db() as conn:
+        _row(conn, task_id="zzz999", workflow_path=str(wf.path), status="awaiting_review",
+             window_name="test-2", worktree_path=str(other), pr_url=PR_URL, pr_state="open",
+             rework_count=0, started_at=dispatcher._now())
+    struck: list = []
+    summary, _ = _tick(wf, _ListedButRefreshFailed(), extra=[
+        patch.object(dispatcher, "_strike_merged_tasks",
+                     side_effect=lambda wf_, src, ids: struck.append(list(ids)) or len(ids))])
+    assert summary["tracker_refresh_failed"] is True
+    assert struck == [[TID]]
+    assert summary["tracker_struck"] == 1
+
+
+class _ListingFailedRefreshOk:
+    """The LISTING failed (read_failed True), but the id refresh SUCCEEDED and positively
+    reports the task closed."""
+    read_failed = True
+
+    def list_open_tasks(self):
+        return []
+
+    def fetch_by_ids(self, ids):
+        from chela.sources import Task
+        return [Task(id=i, title=i, file="", line_number=0, raw=i, state="closed") for i in ids]
+
+
+def test_a_listing_failure_is_not_promoted_into_a_refresh_failure(tmp_path, monkeypatch):
+    """🔴 GUARD: a failed LISTING is not a failed id REFRESH. When the refresh itself
+    succeeded and says CLOSED, the close acts exactly as it does on a fully healthy tick.
+    Discard the refresh's answer whenever the listing failed (`if tracker_gone is None or
+    tracker_read_failed:`) ⇒ the closed task's run never reconciles ⇒ RED."""
+    _, healthy = _one_arm(tmp_path / "A", monkeypatch, None, "awaiting_review",
+                          _RefreshOk("closed"))
+    _, listing_failed = _one_arm(tmp_path / "B", monkeypatch, None, "awaiting_review",
+                                 _ListingFailedRefreshOk())
+    assert "'done'" in healthy["db"]
+    assert "'done'" in listing_failed["db"], "a listing failure withheld a refresh-confirmed close"
+    assert listing_failed["killed"] == healthy["killed"]
+    assert listing_failed["cleaned"] == healthy["cleaned"]
