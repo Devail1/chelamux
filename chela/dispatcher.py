@@ -1336,6 +1336,12 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # column back. A pre-migration row simply reads NULL — the modal degrades to
         # "no brief recorded", never a crash.
         ("brief", "ALTER TABLE runs ADD COLUMN brief TEXT"),
+        # 🔗↗️ CMX-5. The tracker's own web URL for the task (`Task.url` — Linear's GraphQL
+        # `url`), copied at CLAIM time like `brief`, so a running / in-review / done card can
+        # still link to its issue after the task has left `open_tasks`. Display-only: nothing
+        # in the dispatch/rework/judge path reads it back. NULL for markdown/gh_issues tasks
+        # and for pre-migration rows — the card then simply renders no tracker link.
+        ("tracker_url", "ALTER TABLE runs ADD COLUMN tracker_url TEXT"),
         # 🔁🛑 CMX-198. `CHELA_MAX_REWORKS` bounds the dispatcher's AUTOMATIC rework loop —
         # it does NOT bound `reopen` (deliberately: the human-takeover path must never
         # refuse). Measured 2026-07-31: cmx-197 was reopened 14 times, `rework_count`
@@ -6102,17 +6108,17 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     # conflict: leaving attempt 1's id would point the next run_review at a corpse
     # (or, worse, at whatever window tmux later recycled that id onto).
     conn.execute(
-        """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number, brief, risk, risk_reason)
-           VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number, brief, risk, risk_reason, tracker_url)
+           VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(task_id) DO UPDATE SET
              status='claimed', window_name=excluded.window_name,
              worktree_path=excluded.worktree_path, branch_name=excluded.branch_name,
              started_at=excluded.started_at, attempt=excluded.attempt, last_error=NULL,
              task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL,
              window_epoch=NULL, brief=excluded.brief, risk=excluded.risk,
-             risk_reason=excluded.risk_reason""",
+             risk_reason=excluded.risk_reason, tracker_url=excluded.tracker_url""",
         (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt,
-         task_number, _task_brief(task), run_risk(task.risk), task.risk_reason),
+         task_number, _task_brief(task), run_risk(task.risk), task.risk_reason, task.url),
     )
     if task.risk_reason.startswith("inferred"):
         # ⚖️🎚️ CMX-405: the tracker gave no level, so the BOUNDARIES fallback chose one —
