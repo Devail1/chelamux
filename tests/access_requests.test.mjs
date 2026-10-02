@@ -93,3 +93,20 @@ test('an approved request shows its time left and a Revoke', async () => {
     await new Promise(r => setTimeout(r, 0));
     assert.equal(POSTS[0].path, '/api/share-requests/abcdefabcdef-0/revoke');
 });
+
+test('a write request posts rw:true only when "allow write" is TICKED, not merely offered', async () => {
+    LISTING = { requests: [pending({ id: 'rw-1', access: 'rw' }), pending({ id: 'rw-2', access: 'rw' })],
+        share_typing: true, default_minutes: 60 };
+    await ar.openAccessRequests();
+    const [offered, ticked] = document.querySelectorAll('.ar-row');
+    assert.ok(offered.querySelector('.ar-rw-in'), 'write is offered on a write request');
+    offered.querySelector('.ar-approve').click();
+    await new Promise(r => setTimeout(r, 0));
+    ticked.querySelector('.ar-rw-in').checked = true;
+    ticked.querySelector('.ar-approve').click();
+    await new Promise(r => setTimeout(r, 0));
+    assert.deepEqual(POSTS.map(p => [p.path, p.body.rw]), [
+        ['/api/share-requests/rw-1/approve', false],   // offered, left unticked → read-only
+        ['/api/share-requests/rw-2/approve', true],    // ticked → read-write
+    ]);
+});

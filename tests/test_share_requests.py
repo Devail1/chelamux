@@ -151,6 +151,27 @@ def test_a_symlink_swapped_after_approval_mounts_nothing(typing_on, tmp_path, al
     assert [s[0] for s in sr.mount_specs(SID, T0 + 1)] == [allowed]
 
 
+def test_a_granted_path_that_now_resolves_elsewhere_mounts_nothing(typing_on, tmp_path, allowed):
+    """The grant pinned ``allowed`` (already resolved). If that very path is later replaced
+    by a symlink — even one to another perfectly allowed directory — it no longer names
+    what the operator approved, so it mounts nothing."""
+    rec = _filed(target=allowed)
+    assert sr.approve(rec["id"], by="op", now=T0)[0]
+    assert [s[0] for s in sr.mount_specs(SID, T0 + 1)] == [allowed]     # control
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    os.rename(allowed, str(tmp_path / "moved"))
+    os.symlink(elsewhere, allowed)
+    assert sr.mount_refusal(allowed) is None, "the new target is itself allowed — only the swap refuses it"
+    assert sr.mount_specs(SID, T0 + 1) == []
+
+
+def test_one_sessions_grant_never_mounts_into_another(typing_on, allowed):
+    rec = _filed(sid="ba9876543210", target=allowed)
+    assert sr.approve(rec["id"], by="op", now=T0)[0]
+    assert sr.mount_specs("ba9876543210", T0 + 1) and sr.mount_specs(SID, T0 + 1) == []
+
+
 # =====================================================================================
 # an unapproved request changes nothing
 # =====================================================================================
@@ -206,7 +227,9 @@ def test_expiry_relaunches_the_guest_without_the_mount(typing_on, allowed, monke
     w.launched = w.spec(T0 + 1)
     assert w.launched[0]
     assert w.check(T0 + 60) is False
+    assert sr.sweep(T0 + 60) == [] and sr.active_grants(SID, T0 + 60)
     assert w.check(T0 + 3601) is True
+    assert w.check(T0 + 3602) is False                      # one relaunch per change
     assert removed == [("rm", "-f", sb.container_name(SID))]
     assert w.take_relaunch() and w.spec(T0 + 3601) == ((), ())
     assert [e["payload"]["id"] for e in _events("share.request_expired")] == [rec["id"]]
@@ -299,6 +322,41 @@ def test_write_needs_the_guest_to_ask_and_the_operator_to_allow(typing_on, allow
     assert sr.mount_specs(SID, T0 + 1) == [(allowed, "/extra/datasets", False)]
 
 
+@pytest.mark.parametrize("first", ["ro", "rw"])
+def test_the_same_path_granted_both_ways_mounts_once_read_write(typing_on, allowed, first):
+    order = [first, "rw" if first == "ro" else "ro"]
+    for access in order:
+        rec = _filed(target=allowed, access=access)
+        assert sr.approve(rec["id"], by="op", rw=access == "rw", now=T0)[0]
+    assert sr.mount_specs(SID, T0 + 1) == [(allowed, "/extra/datasets", True)]
+
+
+def test_a_write_request_approved_without_write_is_read_only_everywhere(typing_on, allowed):
+    from chela.dashboard import app as dash
+    rec = _filed(target=allowed, access="rw")
+    c = dash.app.test_client()
+    # Only a JSON ``true`` allows write — a truthy string is not the operator ticking it.
+    assert c.post(f"/api/share-requests/{rec['id']}/approve", json={"rw": "true"}).status_code == 200
+    assert [s[2] for s in sr.mount_specs(SID)] == [False]
+
+
+def test_an_operation_never_carries_write(typing_on):
+    rec = _filed(kind="operation", target="push my branch")
+    assert sr.approve(rec["id"], by="op", rw=True, now=T0)[0]
+    got = next(r for r in sr.listing(T0 + 1) if r["id"] == rec["id"])
+    assert got["rw"] is False
+
+
+def test_the_decision_store_is_written_owner_only(typing_on, allowed):
+    old = os.umask(0)          # so the mode is exactly what _save asked for
+    try:
+        rec = _filed(target=allowed)
+        assert sr.approve(rec["id"], by="op", now=T0)[0]
+    finally:
+        os.umask(old)
+    assert os.stat(sr.store_path()).st_mode & 0o777 == 0o600
+
+
 def _guest(extra_mounts=()):
     net = sb.network_name(SID)
     return {
@@ -334,6 +392,16 @@ def test_the_live_check_accepts_the_granted_mount_read_only_and_nothing_more(all
     assert v(_guest([_mount(allowed, "/extra/datasets", False)]), [])         # not granted
     assert v(_guest([_mount(os.path.expanduser("~/.ssh"), "/extra/datasets", False)]), grant)
     assert v(_guest([_mount("/dev/null", "/extra/datasets/.env", False)]), grant) is None
+    assert v(_guest([_mount(allowed, "/extra/other", False)]), grant)        # wrong place
+    # An entry INSIDE the approved mount must come from inside the granted source…
+    os.mkdir(os.path.join(allowed, ".git"))
+    assert v(_guest([_mount(os.path.join(allowed, ".git"), "/extra/datasets/.git", False)]), grant) is None
+    # …never from an arbitrary host path, nor a sibling that merely shares the prefix.
+    outside = allowed + "-evil"
+    os.mkdir(outside)
+    for src in (outside, os.path.dirname(allowed), "/etc"):
+        assert v(_guest([_mount(src, "/extra/datasets/x", False)]), grant), src
+    assert v(_guest([_mount(os.path.join(allowed, ".git"), "/extra/datasets/.git", True)]), grant)
 
 
 def test_check_share_session_reads_the_grants_from_the_store(typing_on, allowed, monkeypatch):
@@ -391,6 +459,80 @@ def test_the_launcher_relaunches_with_the_approved_mount(typing_on, allowed, mon
     assert len(guest) == 2
     assert not any(":" + sr.EXTRA_ROOT + "/" in a for a in guest[0])
     assert f"{allowed}:/extra/datasets:ro" in guest[1]
+
+
+def _web_run(monkeypatch, tmp_path, on_guest):
+    """``sb.run`` in web mode with docker stubbed. Returns (subprocess.run argvs, _docker
+    calls, guest argvs). ``on_guest(n)`` runs inside the n-th guest ``docker run``."""
+    monkeypatch.setattr(sb, "preflight", lambda cwd, net="none": None)
+    (tmp_path / "tok").write_text("t")
+    monkeypatch.setenv("CHELA_SHARE_SANDBOX_TOKEN_FILE", str(tmp_path / "tok"))
+    monkeypatch.setenv("CHELA_SHARE_WEB_ALLOW", "docs.python.org")
+    monkeypatch.setattr(sb, "token_mirror_dir", lambda sid: tmp_path / "share-token" / sid)
+    monkeypatch.setattr(sb, "claude_binary", lambda: "/usr/bin/true")
+    monkeypatch.setattr(sb, "host_deny_nets", lambda: [])
+    monkeypatch.setattr(sb, "web_log_path", lambda sid: tmp_path / "share-web" / f"{sid}.log")
+    monkeypatch.setattr(sb.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(sb, "cleanup", lambda sid: None)
+    ran, docker, guest = [], [], []
+
+    class P:
+        returncode, stdout, stderr = 0, "", ""
+
+    class Watch(sb.GrantWatch):
+        def start(self, interval=None):
+            watches.append(self)
+
+    watches: list = []
+    monkeypatch.setattr(sb, "GrantWatch", Watch)
+    monkeypatch.setattr(sb, "_docker", lambda *a, **k: docker.append(a))
+    monkeypatch.setattr(sb.subprocess, "run", lambda argv, **k: ran.append(argv) or P())
+
+    def call(argv):
+        guest.append(argv)
+        on_guest(len(guest), watches[0])
+        return 0
+
+    monkeypatch.setattr(sb.subprocess, "call", call)
+    assert sb.run(SID, "/tmp", "web") == 0
+    return ran, docker, guest
+
+
+def _sidecar_allow(ran) -> list[str]:
+    """CHELA_WEB_ALLOW of every web sidecar ``docker run``, in order."""
+    out = []
+    for a in ran:
+        if a[:2] == ["docker", "run"] and sb.web_proxy_name(SID) in a:
+            out.append(next((x.split("=", 1)[1] for x in a if x.startswith("CHELA_WEB_ALLOW=")), ""))
+    return out
+
+
+def _approve_domain(target="jobs.example.com"):
+    _file(SID, kind="domain", target=target)
+    rid, = [r["id"] for r in sr.ingest(SID)]
+    assert sr.approve(rid, by="op")[0]
+
+
+def test_a_web_session_starts_its_sidecar_with_domains_already_approved(typing_on, monkeypatch, tmp_path):
+    with sr._locked() as store:
+        store["sessions"][SID] = {"net": "web"}
+    _approve_domain()
+    ran, _docker, guest = _web_run(monkeypatch, tmp_path, lambda n, w: None)
+    assert len(guest) == 1
+    assert _sidecar_allow(ran) == ["docs.python.org,jobs.example.com"]
+
+
+def test_a_domain_approved_mid_session_restarts_the_sidecar_with_it(typing_on, monkeypatch, tmp_path):
+    def on_guest(n, watch):
+        if n == 1:
+            _approve_domain()
+            assert watch.check() is True
+
+    ran, docker, guest = _web_run(monkeypatch, tmp_path, on_guest)
+    assert len(guest) == 2
+    assert _sidecar_allow(ran) == ["docs.python.org", "docs.python.org,jobs.example.com"]
+    assert ("rm", "-f", sb.web_proxy_name(SID)) in docker
+    assert docker.index(("rm", "-f", sb.web_proxy_name(SID))) > docker.index(("rm", "-f", sb.container_name(SID)))
 
 
 # =====================================================================================
@@ -490,6 +632,22 @@ def test_the_proxy_files_a_request_and_never_reads_one_back(proxy):
     assert _req(port, "POST", share_proxy.REQUEST_PATH, {"kind": "sudo", "target": "x"})[0] == 400
 
 
+def test_the_proxy_refuses_an_oversized_body_and_files_nothing(proxy):
+    port, d = proxy
+    # Padded with a key the drop ignores, so ONLY the size limit can refuse it.
+    big = {"kind": "operation", "target": "x", "pad": "y" * share_proxy.REQUEST_MAX_BODY}
+    assert share_proxy.clean_request(json.dumps(big).encode()) is not None
+    assert _req(port, "POST", share_proxy.REQUEST_PATH, big)[0] == 400
+    assert not (d / share_proxy.REQUESTS_NAME).exists()
+
+
+def test_ingest_drops_a_line_with_an_unknown_access(typing_on):
+    _file(SID, target="/srv/x", access="rwx")
+    assert sr.ingest(SID) == []
+    rec = _filed(kind="domain", target="example.com", access="rw")
+    assert rec["access"] is None
+
+
 def test_the_drop_refuses_past_its_size_cap(tmp_path, monkeypatch):
     monkeypatch.setattr(share_proxy, "REQUESTS_MAX_BYTES", 10)
     drop = share_proxy.RequestDrop(str(tmp_path))
@@ -551,6 +709,10 @@ def test_the_dashboard_route_approves_and_refuses(typing_on, allowed):
     assert r.status_code == 200
     got = next(x for x in c.get("/api/share-requests").get_json()["requests"] if x["id"] == good["id"])
     assert got["status"] == "approved" and 0 < got["seconds_left"] <= 1800 and got["rw"] is False
+    assert sr.mount_specs(SID)
+    assert c.post(f"/api/share-requests/{good['id']}/revoke", json={}).status_code == 200
+    assert sr.mount_specs(SID) == []
+    assert c.post(f"/api/share-requests/{good['id']}/revoke", json={}).status_code == 409
 
 
 def test_a_domain_approval_relaunches_a_web_session_only_with_an_allow_list(typing_on, monkeypatch):
