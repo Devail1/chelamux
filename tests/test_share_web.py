@@ -574,7 +574,7 @@ def test_the_web_sidecar_holds_no_token_and_runs_locked_down(monkeypatch):
     mounts = _opt(argv, "-v")
     assert f"{sb.WEB_SCRIPT_MOUNT}:ro" in mounts[0] and len(mounts) == 2
     assert mounts[1].endswith(f":{sb.WEB_LOG_MOUNT}")
-    assert not [m for m in mounts if "credentials" in m or sb.PROXY_TOKEN_MOUNT in m]
+    assert not [m for m in mounts if "credentials" in m or sb.PROXY_TOKEN_DIR in m or "share-token" in m]
     assert "--read-only" in argv and _opt(argv, "--cap-drop") == ["ALL"]
     envs = dict(e.split("=", 1) for e in _opt(argv, "-e"))
     assert "198.51.100.7" in envs["CHELA_WEB_DENY_NETS"]
@@ -682,6 +682,9 @@ def test_preflight_requires_the_browser_image_only_for_web(monkeypatch, tmp_path
 
 def test_run_brings_up_the_web_sidecar_only_in_web_mode(monkeypatch, tmp_path):
     monkeypatch.setattr(sb, "preflight", lambda cwd, net="none": None)
+    (tmp_path / "tok").write_text("t")
+    monkeypatch.setenv("CHELA_SHARE_SANDBOX_TOKEN_FILE", str(tmp_path / "tok"))
+    monkeypatch.setattr(sb, "token_mirror_dir", lambda sid: tmp_path / "share-token" / sid)
     monkeypatch.setattr(sb, "claude_binary", lambda: "/usr/bin/true")
     monkeypatch.setattr(sb, "host_deny_nets", lambda: [])
     monkeypatch.setattr(sb, "web_log_path", lambda sid: tmp_path / "share-web" / f"{sid}.log")

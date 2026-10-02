@@ -125,6 +125,9 @@ def test_registry_has_exactly_the_twelve_settings_inventory_knobs(mods):
         # ⚖️🎚️ CMX-405: the per-risk-level rework caps and judge experiment caps.
         "max_reworks_high", "max_reworks_normal", "max_reworks_low",
         "judge_experiments_high", "judge_experiments_normal", "judge_experiments_low",
+        # ⏳⚖️ CMX-431: the battery-scaled judge wall.
+        "judge_wall_base_seconds", "judge_wall_per_experiment_seconds",
+        "judge_wall_ceiling_seconds", "judge_wall_grace_seconds",
     }
 
 
@@ -145,6 +148,9 @@ def test_exactly_four_knobs_are_restart_required(mods):
         "gate_wait_seconds", "gate_max_waits", "judge_outage_backoff_seconds",
         "max_reworks_high", "max_reworks_normal", "max_reworks_low",
         "judge_experiments_high", "judge_experiments_normal", "judge_experiments_low",
+        # ⏳⚖️ CMX-431: the battery-scaled judge wall.
+        "judge_wall_base_seconds", "judge_wall_per_experiment_seconds",
+        "judge_wall_ceiling_seconds", "judge_wall_grace_seconds",
     }
 
 
@@ -159,13 +165,19 @@ def test_named_readers_return_their_own_knobs_stored_value(mods):
         "judge_max_concurrent": config.judge_max_concurrent,
         "worktree_disk_budget_bytes": config.worktree_disk_budget_bytes,
         "judge_outage_backoff_seconds": config.judge_outage_backoff_seconds,
+        "judge_wall_base_seconds": config.judge_wall_base_seconds,
+        "judge_wall_per_experiment_seconds": config.judge_wall_per_experiment_seconds,
+        "judge_wall_ceiling_seconds": config.judge_wall_ceiling_seconds,
+        "judge_wall_grace_seconds": config.judge_wall_grace_seconds,
     }
     for key, reader in readers.items():
         knob = next(k for k in config.DISPATCH_KNOBS if k.key == key)
         assert reader() == knob.default
 
     distinct = {"max_reworks": 11, "judge_max_unknown_retries": 12, "judge_max_concurrent": 3,
-                "worktree_disk_budget_bytes": 999_000, "judge_outage_backoff_seconds": 42.0}
+                "worktree_disk_budget_bytes": 999_000, "judge_outage_backoff_seconds": 42.0,
+                "judge_wall_base_seconds": 43.0, "judge_wall_per_experiment_seconds": 44.0,
+                "judge_wall_ceiling_seconds": 45.0, "judge_wall_grace_seconds": 46.0}
     for key, value in distinct.items():
         userconfig.set_(key, value)
     for key, reader in readers.items():

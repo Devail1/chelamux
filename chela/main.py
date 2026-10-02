@@ -1458,6 +1458,44 @@ def _outbound_loop(monitor, registry, interval: int, stop) -> None:
         stop.wait(interval)
 
 
+class _RelayedWindows:
+    """The bound windows minus the sandboxed ones whose relay was switched off (CMX-420)
+    — the pane watch's polled set, so an opted-out session's pane is not mirrored either.
+    ``windows()`` is re-read every tick, like the registry's."""
+
+    def __init__(self, registry, outboxes) -> None:
+        self._registry = registry
+        self._outboxes = outboxes
+
+    def windows(self) -> list[str]:
+        return [w for w in self._registry.windows() if self._outboxes.allows(w)]
+
+
+def _cmd_sandbox_relay(spec: str) -> None:
+    """``chela telegram --sandbox-relay @N=on|off`` — the per-window opt-out (CMX-420).
+
+    Stored against the window's SANDBOXED-SESSION id, which is verified live here: a
+    window that is not a sandboxed session has nothing to opt out of."""
+    from chela import share_sandbox
+
+    wid, _, value = spec.partition("=")
+    wid = wid.strip()
+    value = value.strip().lower()
+    if not wid.startswith("@"):
+        wid = "@" + wid
+    if value not in ("on", "off"):
+        print("usage: chela telegram --sandbox-relay @N=on|off", file=sys.stderr)
+        sys.exit(2)
+    sid = share_sandbox.share_session_id(wid)
+    if sid is None:
+        why = share_sandbox.check_share_session(wid)[1]
+        print(f"{wid} is not a sandboxed session ({why})", file=sys.stderr)
+        sys.exit(1)
+    share_sandbox.set_relay_enabled(sid, value == "on")
+    state = "relayed to its Telegram topic" if value == "on" else "NOT relayed to Telegram"
+    print(f"{wid} (sandboxed session {sid}) is now {state}")
+
+
 def _pane_loop(gate_watcher, registry, interval: int, stop) -> None:
     """Poll every bound window's PANE and relay the live-TUI prompts, until stopped.
 
@@ -1622,6 +1660,10 @@ def cmd_telegram(args) -> None:
         default_bindings_path,
     )
 
+    if getattr(args, "sandbox_relay", None):
+        _cmd_sandbox_relay(args.sandbox_relay)
+        return
+
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat:
@@ -1724,11 +1766,25 @@ def cmd_telegram(args) -> None:
         selected=DRAFTS.selected,
     )
 
+    # CMX-420: a SANDBOXED session's transcript is in its container, out of reach — its
+    # replies are read from the outbox its credential proxy writes instead. The opt-out
+    # (`chela telegram --sandbox-relay @N=off`) silences such a window in BOTH loops: its
+    # transcript messages here, and its pane mirror/status in the pane watch.
+    from chela import sessions
+    from chela.telegram.sandboxrelay import SandboxOutboxes
+    outboxes = SandboxOutboxes()
+
     def _on_message(window_id, msg):
+        if not outboxes.allows(window_id):
+            return
         gate_watcher.observe(window_id, msg)
         relay.on_message(window_id, msg)
 
-    monitor = TranscriptMonitor(on_message=_on_message)
+    monitor = TranscriptMonitor(
+        on_message=_on_message,
+        resolver=outboxes.resolver(sessions.transcript_for_window),
+    )
+    pane_windows = _RelayedWindows(registry, outboxes)
 
     topic_api = None
     reconcile_interval = max(1, int(args.reconcile_interval))
@@ -1756,7 +1812,7 @@ def cmd_telegram(args) -> None:
         stop = threading.Event()
         threading.Thread(
             target=_pane_loop,
-            args=(gate_watcher, registry, interval, stop),
+            args=(gate_watcher, pane_windows, interval, stop),
             daemon=True,
         ).start()
         if topic_api is not None:
@@ -1810,7 +1866,7 @@ def cmd_telegram(args) -> None:
     ).start()
     threading.Thread(
         target=_pane_loop,
-        args=(gate_watcher, registry, interval, stop),
+        args=(gate_watcher, pane_windows, interval, stop),
         daemon=True,
     ).start()
     if topic_api is not None:
@@ -1852,6 +1908,31 @@ def cmd_dashboard(args) -> None:
     host, port = config.dashboard_host(), config.dashboard_port()
     log.info("chela dashboard on http://%s:%s (zero auth — keep it loopback/tailnet)", host, port)
     dashboard_app.main()
+
+
+def cmd_collab(args) -> None:
+    """``chela collab`` — host the live-share bridges in their own process (CMX-434), so a
+    dashboard deploy never ends a share. Runs under PM2 as ``chela-collab``."""
+    from chela import collab_host
+    if not config.COLLAB_RELAY:
+        log.warning("chela collab: CHELA_COLLAB_RELAY is empty — shares can't start until it is set")
+    collab_host.run_service()
+
+
+def cmd_shares(args) -> None:
+    """``chela shares`` — how many live shares there are, and which restart would interrupt
+    them. Run it before a hand deploy (``pm2 restart ...``)."""
+    from chela import collab_host, share_store
+    n = share_store.count()
+    host = collab_host.current_host()
+    role = host["role"] if host else None
+    print(f"{n} live share(s)" + (f", hosted by {role} (pid {host['pid']})" if host else ""))
+    restarting = list(args.restarting or [])
+    if restarting:
+        notice = collab_host.interruption_notice(restarting)
+        print(notice or f"restarting {', '.join(restarting)} interrupts no live share")
+    elif n and role:
+        print(f"a restart of {role} interrupts them; any other service restart leaves them running")
 
 
 def cmd_doctor(args) -> None:
@@ -2459,7 +2540,8 @@ def cmd_update(args) -> None:
             print("up to date")
         return
 
-    result = update.apply(repo)
+    # CMX-434: a restart that interrupts live shares says so BEFORE it happens.
+    result = update.apply(repo, on_notice=print)
     if not result.ok:
         print(f"update: refused at {result.step} — {result.error}")
         if result.backup_ref:
@@ -3274,6 +3356,11 @@ def main() -> None:
         "--no-inbound", action="store_true",
         help="Outbound relay only; skip inbound routing (no python-telegram-bot dependency)",
     )
+    p_tg.add_argument(
+        "--sandbox-relay", metavar="@N=on|off",
+        help="Relay a sandboxed session's replies to its Telegram topic (default on), then "
+             "exit — e.g. --sandbox-relay @7=off. Does not start the bridge.",
+    )
 
     # dashboard (optional component)
     p_dash = sub.add_parser("dashboard", help="Launch the optional web dashboard (needs the 'dashboard' extra)")
@@ -3282,6 +3369,19 @@ def main() -> None:
     p_dash.add_argument("--port", type=int, default=None,
                         help="One-off override of $CHELA_DASHBOARD_PORT (the env file is "
                              "the source of truth; default 5001)")
+
+    # collab — the live-share host, its own process (CMX-434)
+    sub.add_parser(
+        "collab",
+        help="Host live-share bridges in their own process (PM2 chela-collab) so a "
+             "dashboard restart never ends a share",
+    )
+    p_shares = sub.add_parser(
+        "shares",
+        help="Count live shares and say which service restart would interrupt them",
+    )
+    p_shares.add_argument("--restarting", nargs="*", metavar="SERVICE",
+                          help="PM2 service(s) about to be restarted, e.g. chela-dashboard")
 
     # update — the human-run half of self-update (CMX-142 part 1: no auto-pull)
     p_update = sub.add_parser(
@@ -3453,6 +3553,10 @@ def main() -> None:
         cmd_telegram(args)
     elif args.command == "dashboard":
         cmd_dashboard(args)
+    elif args.command == "collab":
+        cmd_collab(args)
+    elif args.command == "shares":
+        cmd_shares(args)
     elif args.command == "task-finished":
         cmd_task_finished(args)
     elif args.command == "request-push":

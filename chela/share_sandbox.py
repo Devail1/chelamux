@@ -55,11 +55,13 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
 
 from chela import config
+from chela.share_proxy import read_token
 from chela.transcripts import claude_config_dir
 
 log = logging.getLogger(__name__)
@@ -75,7 +77,13 @@ CLAUDE_MOUNT = "/usr/local/bin/claude"
 PROXY_ALIAS = "chela-proxy"
 PROXY_PORT = 8080
 PROXY_SCRIPT_MOUNT = "/run/chela/share_proxy.py"
-PROXY_TOKEN_MOUNT = "/run/chela/token"
+# A DIRECTORY, never a single file: a single-file bind mount pins the inode it was
+# started with, so a token replaced by rename on the host is never seen (CMX-433).
+PROXY_TOKEN_DIR = "/run/chela/token.d"
+TOKEN_NAME = "token"
+PROXY_TOKEN_FILE = f"{PROXY_TOKEN_DIR}/{TOKEN_NAME}"
+TOKEN_POLL_SECONDS = 2.0
+PROXY_SESSION_MOUNT = "/run/chela/session"
 DEFAULT_IMAGE = "python:3.12-slim"
 GUEST_MEMORY = "2g"
 GUEST_PIDS = "512"
@@ -125,6 +133,152 @@ def token_file() -> Path:
     ``<config dir>/.credentials.json`` (Linux/WSL; macOS keeps it in the keychain)."""
     raw = os.environ.get("CHELA_SHARE_SANDBOX_TOKEN_FILE", "").strip()
     return Path(raw).expanduser() if raw else claude_config_dir() / ".credentials.json"
+
+
+def token_mirror_dir(sid: str) -> Path:
+    """The per-session directory the proxy sidecar mounts (read-only) to read the token."""
+    return Path(config.CHELA_DIR) / "share-token" / sid
+
+
+class TokenMirror:
+    """Keeps ``dst_dir/token`` holding the CURRENT access token from ``src`` (CMX-433).
+
+    Claude Code refreshes its OAuth token by renaming a new ``.credentials.json`` over the
+    old one, and the refresh revokes the old token. The proxy sidecar mounts ``dst_dir`` —
+    a directory, so a file renamed into it is seen — and reads ``token`` by name per
+    request. Only the bare access token is copied: the refresh token and the rest of
+    ``~/.claude`` never enter the sidecar, and the guest container mounts none of it."""
+
+    def __init__(self, src: Path, dst_dir: Path):
+        self.src, self.dir = Path(src), Path(dst_dir)
+        self._seen: tuple[int, int, int] | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def path(self) -> Path:
+        return self.dir / TOKEN_NAME
+
+    def sync(self) -> bool:
+        """Copy the source's token into the mirror when the source changed (inode, mtime
+        or size) since the last copy. True when the mirror now holds a token."""
+        try:
+            st = os.stat(self.src)
+        except OSError:
+            return self.path.is_file()
+        sig = (st.st_ino, st.st_mtime_ns, st.st_size)
+        if sig == self._seen:
+            return True
+        tok = read_token(str(self.src))
+        if not tok:
+            return self.path.is_file()      # mid-write or unreadable: retried next poll
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = self.dir / f".{TOKEN_NAME}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(tok)
+        os.replace(tmp, self.path)          # atomic: the proxy never reads half a token
+        self._seen = sig
+        return True
+
+    def _loop(self, interval: float) -> None:
+        while not self._stop.wait(interval):
+            try:
+                self.sync()
+            except OSError as e:
+                log.warning("share sandbox: token mirror sync failed: %s", e)
+
+    def start(self, interval: float | None = None) -> None:
+        interval = TOKEN_POLL_SECONDS if interval is None else interval
+        self._thread = threading.Thread(target=self._loop, args=(interval,), daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:    # a sync() in flight must not recreate the dir
+            self._thread.join(timeout=5)
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def session_root() -> Path:
+    """Host-side per-session state written by the proxy sidecar (CMX-420): one directory
+    per session id, bind-mounted read-write into THAT session's proxy only — never into
+    the guest (:func:`guest_run_argv` has no such mount, and :func:`verify_container`
+    refuses any mount outside the workspace)."""
+    return config.CHELA_DIR / "share-sessions"
+
+
+def session_dir(sid: str) -> Path:
+    return session_root() / sid
+
+
+def outbox_path(sid: str) -> Path:
+    from chela.share_proxy import OUTBOX_NAME
+    return session_dir(sid) / OUTBOX_NAME
+
+
+def proxy_status_path(sid: str) -> Path:
+    from chela.share_proxy import STATUS_NAME
+    return session_dir(sid) / STATUS_NAME
+
+
+# Session dirs whose outbox has not been written for this long are removed at the next
+# launch — they hold everything a guest's session said, and nothing reads them once the
+# window is gone.
+SESSION_DIR_MAX_AGE_S = 7 * 86400
+
+
+def prune_session_dirs(now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    root = session_root()
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return
+    for d in entries:
+        if not (_SID_RE.match(d.name) and d.is_dir() and not d.is_symlink()):
+            continue
+        try:
+            newest = max([d.stat().st_mtime] + [f.stat().st_mtime for f in d.iterdir()])
+        except OSError:
+            continue
+        if now - newest > SESSION_DIR_MAX_AGE_S:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+# --- the per-session Telegram relay opt-out (CMX-420) ----------------------------------
+#
+# Default ON (Liav, 2026-10-01): a sandboxed session relays to its topic like any agent.
+# Keyed by SESSION id, not window id — ``@N`` is reissued after a tmux restart, and an
+# opt-out must not silently attach itself to whatever window inherits the number.
+
+def _relay_optout_path() -> Path:
+    return config.CHELA_DIR / "share-relay-optout.json"
+
+
+def _relay_optouts() -> set[str]:
+    try:
+        data = json.loads(_relay_optout_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {s for s in data if isinstance(s, str)} if isinstance(data, list) else set()
+
+
+def relay_enabled(sid: str) -> bool:
+    """Whether a sandboxed session's replies are relayed to its Telegram topic."""
+    return sid not in _relay_optouts()
+
+
+def set_relay_enabled(sid: str, on: bool) -> None:
+    if not _SID_RE.match(sid):
+        raise ValueError(f"not a sandboxed-session id: {sid!r}")
+    off = _relay_optouts()
+    (off.discard if on else off.add)(sid)
+    path = _relay_optout_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(sorted(off)), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def proxy_upstream() -> str:
@@ -197,6 +351,11 @@ def workspace_refusal(cwd: str) -> str | None:
     for p in protected:
         if real == p or real.startswith(p.rstrip(os.sep) + os.sep):
             return f"{cwd} is inside {p}, which holds secrets or session state"
+    # The proxy's outbox holds every session's replies; a workspace that CONTAINS it (a
+    # CHELA_DIR relocated into a project) would hand the guest all of them.
+    outboxes = os.path.realpath(str(session_root()))
+    if outboxes.startswith(real.rstrip(os.sep) + os.sep):
+        return f"{cwd} contains {outboxes}, which holds sandboxed sessions' replies"
     return None
 
 
@@ -239,8 +398,11 @@ def proxy_run_argv(sid: str, uid: int, gid: int) -> list[str]:
             "--security-opt", "no-new-privileges", "--read-only",
             "--memory", PROXY_MEMORY, "--pids-limit", "64",
             "-v", f"{proxy_src}:{PROXY_SCRIPT_MOUNT}:ro",
-            "-v", f"{token_file()}:{PROXY_TOKEN_MOUNT}:ro",
-            "-e", f"CHELA_PROXY_TOKEN_FILE={PROXY_TOKEN_MOUNT}",
+            "-v", f"{token_mirror_dir(sid)}:{PROXY_TOKEN_DIR}:ro",
+            # Read-write, and on the PROXY only: where it writes the Telegram outbox.
+            "-v", f"{session_dir(sid)}:{PROXY_SESSION_MOUNT}",
+            "-e", f"CHELA_PROXY_TOKEN_FILE={PROXY_TOKEN_FILE}",
+            "-e", f"CHELA_PROXY_SESSION_DIR={PROXY_SESSION_MOUNT}",
             "-e", f"CHELA_PROXY_UPSTREAM={proxy_upstream()}",
             "-e", f"CHELA_PROXY_PORT={PROXY_PORT}",
             image(), "python", PROXY_SCRIPT_MOUNT]
@@ -471,10 +633,23 @@ def run(sid: str, cwd: str, net: str = NET_NONE) -> int:
     signal.signal(signal.SIGHUP, _term)
     signal.signal(signal.SIGTERM, _term)
     uid, gid = os.getuid(), os.getgid()
+    prune_session_dirs()
+    try:
+        # 0o700 on the root AND the session dir: they hold every guest reply on disk.
+        session_root().mkdir(mode=0o700, parents=True, exist_ok=True)
+        session_dir(sid).mkdir(mode=0o700, exist_ok=True)
+    except OSError as e:
+        _hold(f"refusing to start — cannot create {session_dir(sid)}: {e}")
+        return 1
+    mirror = TokenMirror(token_file(), token_mirror_dir(sid))
     steps = [network_create_argv(sid), proxy_run_argv(sid, uid, gid),
              ["docker", "network", "connect", "--alias", PROXY_ALIAS,
               network_name(sid), proxy_name(sid)]]
     try:
+        if not mirror.sync():
+            _hold(f"refusing to start — no token could be read from {token_file()}")
+            return 1
+        mirror.start()
         if net == NET_WEB:
             _prepare_web_log(sid)
             steps += _web_steps(sid, uid, gid)
@@ -488,6 +663,7 @@ def run(sid: str, cwd: str, net: str = NET_NONE) -> int:
                   flush=True)
         return subprocess.call(guest_run_argv(sid, cwd, uid, gid, claude_bin, net))
     finally:
+        mirror.stop()
         cleanup(sid)
 
 
@@ -719,23 +895,36 @@ def pane_identity(wid: str) -> tuple[int, str, str, str] | str:
     return root, shape[0], shape[1], shape[2]
 
 
-def check_share_session(wid: str) -> tuple[bool, str]:
-    """``(True, "")`` only when the LIVE window verifies as a sandboxed session; otherwise
-    ``(False, reason)``. Every unknown — no tmux, unreadable /proc, docker down — is False."""
+def _check(wid: str) -> tuple[str | None, str]:
+    """``(sid, "")`` only when the LIVE window verifies as a sandboxed session; otherwise
+    ``(None, reason)``. Every unknown — no tmux, unreadable /proc, docker down — is None."""
     try:
         ident = pane_identity(wid)
         if isinstance(ident, str):
-            return False, ident
+            return None, ident
         _root, sid, cwd, mode = ident
         got = _inspect(sid)
         if isinstance(got, str):
-            return False, got
+            return None, got
         why = verify_container(got[0], got[1], sid, cwd, os.getuid(), os.getgid(),
                                mode=mode, web=got[2])
-        return (False, why) if why else (True, "")
+        return (None, why) if why else (sid, "")
     except Exception as e:  # noqa: BLE001 — fail closed on anything unexpected
         log.warning("share_sandbox: check of %s failed: %r", wid, e)
-        return False, "the sandbox could not be verified"
+        return None, "the sandbox could not be verified"
+
+
+def check_share_session(wid: str) -> tuple[bool, str]:
+    """``(True, "")`` only when the LIVE window verifies as a sandboxed session; otherwise
+    ``(False, reason)``. Every unknown — no tmux, unreadable /proc, docker down — is False."""
+    sid, why = _check(wid)
+    return (True, "") if sid else (False, why)
+
+
+def share_session_id(wid: str) -> str | None:
+    """The session id of a window that verifies LIVE as a sandboxed session, else None —
+    what the Telegram relay and the doctor key the session's outbox on."""
+    return _check(wid)[0]
 
 
 def is_sandboxed_share_session(wid: str) -> bool:

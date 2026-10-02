@@ -1320,7 +1320,7 @@ def test_cli_check_flag_prints_the_ACTUAL_reason_when_the_fetch_itself_fails(
 def test_cli_without_check_does_call_apply(checkout, monkeypatch):
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
     called = []
-    monkeypatch.setattr(update, "apply", lambda repo: called.append(repo) or
+    monkeypatch.setattr(update, "apply", lambda repo, **kw: called.append(repo) or
                          update.ApplyResult(ok=True, step="done", behind_before=0))
 
     main.cmd_update(argparse.Namespace(check=False))
@@ -1334,7 +1334,7 @@ def test_update_reminds_when_the_installed_plugin_is_stale(checkout, monkeypatch
     agent already loaded from. Detect that (reusing `plugin.installed`'s own comparison,
     :func:`chela.doctor.installed_hooks_stale`) and say so."""
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
-    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+    monkeypatch.setattr(update, "apply", lambda repo, **kw: update.ApplyResult(
         ok=True, step="done", behind_before=0))
     monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: True)
 
@@ -1345,7 +1345,7 @@ def test_update_reminds_when_the_installed_plugin_is_stale(checkout, monkeypatch
 
 def test_update_stays_quiet_when_the_installed_plugin_is_current(checkout, monkeypatch, capsys):
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
-    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+    monkeypatch.setattr(update, "apply", lambda repo, **kw: update.ApplyResult(
         ok=True, step="done", behind_before=0))
     monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
 
@@ -1356,7 +1356,7 @@ def test_update_stays_quiet_when_the_installed_plugin_is_current(checkout, monke
 
 def test_update_prints_the_plugin_refresh_result(checkout, monkeypatch, capsys):
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
-    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+    monkeypatch.setattr(update, "apply", lambda repo, **kw: update.ApplyResult(
         ok=True, step="done", behind_before=1, plugin_updated=["acme"]))
     monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
 
@@ -1369,7 +1369,7 @@ def test_update_prints_the_plugin_refresh_result(checkout, monkeypatch, capsys):
 
 def test_update_prints_the_plugin_refresh_failure(checkout, monkeypatch, capsys):
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
-    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+    monkeypatch.setattr(update, "apply", lambda repo, **kw: update.ApplyResult(
         ok=True, step="done", behind_before=1, plugin_error="boom"))
     monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
 
@@ -1388,7 +1388,7 @@ def test_update_does_not_print_a_bare_success_line_when_the_plugin_refresh_faile
     (agents running current hooks) did not happen, and a bare ✅ read as unqualified
     success while that failure sat in an easy-to-miss ⚠️ line underneath it, in the wild."""
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
-    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+    monkeypatch.setattr(update, "apply", lambda repo, **kw: update.ApplyResult(
         ok=True, step="done", behind_before=4,
         restarted=["chela-daemon", "chela-dashboard", "chela-telegram", "chela-agent-terminals"],
         plugin_error="marketplace update (chela): Marketplace chela not found"))
@@ -1407,7 +1407,7 @@ def test_update_still_prints_a_success_line_without_a_plugin_error(checkout, mon
     """The downgrade above must be conditional on `plugin_error` — an ordinary successful
     pull with a healthy plugin keeps its ✅."""
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
-    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+    monkeypatch.setattr(update, "apply", lambda repo, **kw: update.ApplyResult(
         ok=True, step="done", behind_before=1, restarted=["chela-daemon"]))
     monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
 
@@ -1428,7 +1428,7 @@ def test_update_names_a_gone_marketplace_distinctly_from_stale_hooks(checkout, m
     arm would never fire either way.
     """
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
-    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+    monkeypatch.setattr(update, "apply", lambda repo, **kw: update.ApplyResult(
         ok=True, step="done", behind_before=0))
     monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: True)
     # "acme" (not "chela") on purpose — "chela" appears in this message for reasons that
@@ -1455,7 +1455,7 @@ def test_update_does_not_warn_about_a_healthy_registered_plugin(checkout, monkey
     every existing `cmd_update` test skips, since only one of them installs a plugin at
     all and that one's marketplace is genuinely gone."""
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
-    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+    monkeypatch.setattr(update, "apply", lambda repo, **kw: update.ApplyResult(
         ok=True, step="done", behind_before=0))
     monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
     _install_plugin(marketplace="acme")
@@ -1474,7 +1474,7 @@ def test_update_reports_the_plugin_refresh_even_when_already_up_to_date(
     the CLI must surface that result there as well, not only in the "pulled N commits"
     branch."""
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
-    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+    monkeypatch.setattr(update, "apply", lambda repo, **kw: update.ApplyResult(
         ok=True, step="done", behind_before=0, plugin_updated=["acme"]))
     monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
 
@@ -1492,7 +1492,7 @@ def test_update_cli_reports_a_restart_only_catch_up_when_nothing_behind(
     """CMX-346: `apply()`'s up-to-date path can now restart stale services on its own —
     the CLI must say so, not print the old blanket "nothing to do" over a real action."""
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
-    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+    monkeypatch.setattr(update, "apply", lambda repo, **kw: update.ApplyResult(
         ok=True, step="done", behind_before=0, restarted=["chela-dashboard"]))
     monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: False)
 
@@ -1514,7 +1514,7 @@ def test_update_fallback_reminder_leads_with_the_cli_command(checkout, monkeypat
     (`claude plugin update chela@<marketplace>`), not `/plugin update` — that Claude Code
     slash command is the thing that was wrong here; keep it only as the parenthetical."""
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
-    monkeypatch.setattr(update, "apply", lambda repo: update.ApplyResult(
+    monkeypatch.setattr(update, "apply", lambda repo, **kw: update.ApplyResult(
         ok=True, step="done", behind_before=0))
     monkeypatch.setattr(main.doctor, "installed_hooks_stale", lambda: True)
 

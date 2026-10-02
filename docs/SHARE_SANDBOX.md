@@ -62,6 +62,66 @@ Clicking *Share current session* on a window that's already shared never creates
 share, because that would rotate the code. It opens Active shares with that share's row
 highlighted, so you can change its mode there.
 
+## Shares across restarts and deploys
+
+A live share no longer ends when chela restarts (CMX-434).
+
+**Where the share runs.** The bridge that streams a share runs in the **collab host**:
+`chela collab`, a separate PM2 service (`chela-collab`, see
+`examples/ecosystem.config.js`). The dashboard talks to it over an owner-only Unix
+socket, `$CHELA_DIR/collab.sock` (mode 0600; the peer's uid is checked too). A dashboard
+deploy doesn't touch a live share. `chela update` restarts `chela-collab` only when the
+share code itself changed (`chela/collab_host.py`, `collab_stream.py`, `share_store.py`,
+`e2e.py`, `share_sandbox.py`, `collab.py`). That holds on the nothing-to-pull path too:
+if a bare `git pull` brought in share code after `chela-collab` started, `chela update`
+finds the HEAD the service started on in the HEAD reflog and restarts it. When the
+reflog can't say, it restarts it.
+
+If `chela-collab` isn't running, the dashboard hosts the shares itself, as before. A
+dashboard restart then interrupts them, and the next dashboard restores them. Only one
+process hosts at a time: the holder of the `flock` on `$CHELA_DIR/collab.lock`. A
+dashboard that hosts no share gives the lock back, so a waiting `chela-collab` takes over.
+
+**What is kept.** Each live share is written to `$CHELA_DIR/shares.json`: the window,
+its mode, the relay room, the pairing secret, the override's expiry and bound guest, and
+the window's identity (tmux server pid, window id, pane pid). The file is mode 0600 and
+is never written inside a git work tree. It holds the pairing secret, so treat it like the
+code. Stopping a share removes it from the file. A process exit keeps it.
+
+**What comes back.** When a host starts, each kept share is restored with the **same
+link and pairing code**, so a guest reconnects by itself. These are not restored, and
+`share.not_restored` in the event log says why:
+
+- a share whose window is gone, or is no longer the same window (a tmux restart
+  recycles `@N` ids);
+- a **typing** share whose window doesn't verify as a sandboxed session now. Live, a pane
+  that stops verifying ends the share, so a restart doesn't turn it into anything else;
+- an **UNSANDBOXED** override that expired during the restart. The share comes back
+  view only (`share.unsandboxed_expired`). An override with time left comes back with
+  only that time left.
+
+A restored typing share re-checks the sandbox before it forwards any input, as always.
+
+**Two crypto details make a restore safe.** The pairing secret and the host's stream id
+don't change, so a restored host restarting its sequence numbers at 0 would reuse AES-GCM
+nonces. The host never seals a frame past a sequence ceiling that is already on disk, and
+a restored host resumes at that ceiling. A restored host has also forgotten which guest
+frames it has already seen, so the relay could replay an old keystroke. It sends a fresh
+random `resume` challenge, sealed so only a paired guest can read it. It accepts input
+only from a guest stream that answered it, and that answer also blocks every earlier frame
+from the stream. A guest page that hasn't been updated can still watch a restored share
+but can't type into it.
+
+**What the guest sees.** On a restart the host sends `restarting`, not `ended`. The guest
+page shows **host restarting…**, re-sends its hello with backoff (0.5 s, doubling to 8 s),
+and goes back to live on the host's first frame. It calls the share ended only if the host
+hasn't come back after 5 minutes. The page lives in the relay Worker, so this needs a
+`wrangler deploy` of `chela/collab-relay`.
+
+**Before a deploy.** `chela update` prints *"N live share(s) will be interrupted by
+restarting …"* before a restart that takes down the process hosting them. For a hand
+deploy, run `chela shares --restarting <services…>` first.
+
 ## Starting a sandboxed session
 
 - Dashboard: **New session → Sandboxed session…**, then pick the project directory. It's
@@ -91,6 +151,36 @@ Knobs, set in `chela.env`, which the launcher process reads:
 | `CHELA_SHARE_WEB_GLOBAL_RPS` | `8` | web mode: requests per second across all sites (burst 20) |
 | `CHELA_SHARE_WEB_DENY_CIDRS` | unset | web mode: extra address ranges to refuse, on top of every private range and this host's own addresses |
 
+### The token, and long-running shares
+
+For a share that runs longer than a few hours, use a long-lived token:
+
+```bash
+claude setup-token            # prints a token valid for about a year
+umask 077; printf '%s' '<the token>' > ~/.chela/share-sandbox-token
+echo 'CHELA_SHARE_SANDBOX_TOKEN_FILE=~/.chela/share-sandbox-token' >> ~/.chela/chela.env
+```
+
+With the default, Claude Code's own `.credentials.json`, the session works, but it depends
+on your host login. Claude Code refreshes that login every few hours. It writes a new file
+in place of the old one, and the old token stops working. Here is how a session handles a
+refresh:
+
+- The launcher copies **only the access token** (never the refresh token) into a
+  per-session directory, `~/.chela/share-token/<id>/`. It checks the source file every 2
+  seconds and copies it again when it changes. The directory is removed when the session
+  ends.
+- The proxy sidecar mounts that **directory** read-only and reads the token from it on
+  every request. It mounts a directory, not the file itself, because a mounted single
+  file keeps showing the old file after a replace. The guest container mounts neither.
+- If Anthropic rejects the token (401), the proxy reads the token once more and, if it
+  changed, retries once with the new one.
+- If the 401 persists, the proxy answers **502** with *"The host's Claude login expired —
+  ask the operator to log in again on the host."* It never passes the 401 on, because a
+  401 would start Claude Code's `/login` inside the guest, which can never work there.
+  Log in again on the host (`claude`, then `/login`). The next request picks up the new
+  token, with no restart needed.
+
 ## What is isolated
 
 - The guest's Claude runs in a container. It sees the **workspace** (read-write, with
@@ -113,6 +203,41 @@ Knobs, set in `chela.env`, which the launcher process reads:
 
 A guest who can type can still spend your Claude usage through the proxy. That comes
 with letting them drive Claude at all.
+
+## Telegram: the session reaches your topic too
+
+A sandboxed window gets a Telegram topic like any other agent window, and its replies are
+relayed there. **Everything the session says reaches your topic** — including whatever the
+guest pastes or has Claude read: a CV, a draft, a private file in the workspace. Inbound
+works as usual too, so anything you type in that topic goes into the guest's session.
+
+How it works: the session's transcript stays in the container's tmpfs and its hooks can't
+reach the host, so the relay has no transcript to read. Instead, the credential proxy
+parses each completed model turn from the response stream and appends the assistant's
+visible text (with each tool call reduced to its name) to
+`$CHELA_DIR/share-sessions/<session id>/outbox.jsonl`. That directory is mounted
+read-write into the **proxy sidecar only**, never into the guest container, and a
+workspace that would contain it is refused. `chela telegram` reads the outbox of any
+window that verifies live as a sandboxed session, with the normal relay's formatting,
+chunking and dedup. `chela doctor` reports such a window as healthy while its outbox
+exists and keeps up with the proxy. It flags the window when the outbox is missing, or
+when the proxy is forwarding turns that don't reach the outbox.
+
+A turn is written only once its stream finishes. If the guest disconnects partway through
+a reply, that reply never reaches the topic, even when the model finished it.
+
+Outboxes stay on disk after the session ends, in directories readable only by you (mode
+0700). A new sandboxed session removes any outbox older than 7 days.
+
+**Turning the relay off for one session** (default on):
+
+```bash
+chela telegram --sandbox-relay @<wid>=off    # and =on to turn it back on
+```
+
+The setting is stored against the sandboxed session's id, not the window number, so it
+doesn't carry over to whatever window later gets the same `@N`. While it's off, neither
+the session's replies nor its pane prompts and status line are posted to the topic.
 
 ## Measured results (CMX-400, container route)
 
