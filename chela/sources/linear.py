@@ -247,6 +247,24 @@ mutation Archive($id: String!) {
 }
 """
 
+# CMX-6: the dashboard's "New task". ⛔ The input never carries `parentId` — chela never
+# creates a sub-issue (the free plan's cap counts them, and a sub-issue is not a task).
+CREATE_ISSUE_MUTATION = """
+mutation CreateIssue($input: IssueCreateInput!) {
+  issueCreate(input: $input) { success issue { id identifier title url } }
+}
+"""
+
+# `blockedBy` is a `blocks` relation stored on the BLOCKER (see _blockers): issueId is the
+# blocker, relatedIssueId the issue it blocks.
+CREATE_RELATION_MUTATION = """
+mutation BlockRelation($input: IssueRelationCreateInput!) {
+  issueRelationCreate(input: $input) { success }
+}
+"""
+
+PRIORITIES = (0, 1, 2, 3, 4)          # No priority, Urgent, High, Medium, Low
+
 
 def counts_path() -> Path:
     """Where the daemon's archive sweep publishes each team's non-archived issue count —
@@ -592,17 +610,94 @@ class LinearSource:
             log.info("linear: archived %d closed issue(s) in team %s", archived, self.team)
         return archived
 
+    def create_issue(self, title: str, description: str = "", priority: int = 0,
+                     blocked_by=()) -> dict:
+        """📐 CMX-6 — create one issue in this team, in its first configured READY state,
+        and a ``blocks`` relation from each of ``blocked_by`` (identifiers of this team).
+
+        Returns ``{"identifier", "url", "title", "warnings"}``. Raises :class:`LinearError`
+        when nothing was created (a bad input, an unknown blocker, Linear refused) — the
+        caller keeps the typed brief. A relation that fails AFTER the issue exists is a
+        warning, not an error: the issue is real, and creating it twice would be worse.
+        Never a sub-issue: no ``parentId`` is ever sent."""
+        title = (title or "").strip()
+        if not title:
+            raise LinearError("input", "a title is required")
+        if isinstance(priority, bool) or priority not in PRIORITIES:
+            raise LinearError("input", "priority must be 0 (none) to 4 (low)")
+        blockers = [str(b).strip() for b in (blocked_by or ()) if str(b).strip()]
+        if self.config_error:
+            raise LinearError("config", self.config_error)
+        foreign = [b for b in blockers if self._number_of(b) is None]
+        if foreign:
+            raise LinearError("input", f"not an issue of team {self.team}: {foreign[0]}")
+        blocker_ids: dict[str, str] = {}
+        if blockers:
+            nodes = self._nodes_by_id(blockers)
+            if nodes is None:
+                raise LinearError("network", "could not read the blocking issues")
+            found = {str(n.get("identifier") or "").upper(): n.get("id")
+                     for n in nodes if isinstance(n, dict) and n.get("id")}
+            for b in blockers:
+                if b.upper() not in found:
+                    raise LinearError("input", f"no such issue: {b}")
+                blocker_ids[b.upper()] = found[b.upper()]
+        team = self._team()
+        if team is None:
+            raise LinearError("network", f"could not read team {self.team}")
+        team_id, states = team
+        ready = {str(s.get("name", "")).lower(): s["id"] for s in states}
+        state_id = next((ready[n.lower()] for n in self.ready_states if n.lower() in ready),
+                        None)
+        if state_id is None:
+            raise LinearError("config", f"team {self.team} has no state named "
+                                        f"{' / '.join(self.ready_states)}")
+        data = self._call(CREATE_ISSUE_MUTATION, {"input": {
+            "teamId": team_id, "title": title, "description": description or "",
+            "priority": priority, "stateId": state_id,
+        }}, cache=False)
+        created = data.get("issueCreate") or {}
+        issue = created.get("issue") if isinstance(created, dict) else None
+        if not (isinstance(created, dict) and created.get("success") and isinstance(issue, dict)
+                and issue.get("id") and issue.get("identifier")):
+            raise LinearError("graphql", "Linear did not create the issue")
+        warnings = []
+        for ident, bid in blocker_ids.items():
+            try:
+                rel = self._call(CREATE_RELATION_MUTATION, {"input": {
+                    "issueId": bid, "relatedIssueId": issue["id"], "type": "blocks",
+                }}, cache=False)
+                ok = bool((rel.get("issueRelationCreate") or {}).get("success"))
+            except LinearError as e:
+                log.warning("linear: %s created, but %s→%s failed: %s",
+                            issue["identifier"], ident, issue["identifier"], e)
+                ok = False
+            if not ok:
+                warnings.append(f"could not mark {issue['identifier']} blocked by {ident}")
+        return {"identifier": issue["identifier"], "url": str(issue.get("url") or ""),
+                "title": str(issue.get("title") or title), "warnings": warnings}
+
     # --- helpers -------------------------------------------------------------------------
 
-    def _done_state_id(self) -> str | None:
+    def _team(self) -> tuple[str, list[dict]] | None:
+        """``(team id, workflow states)`` for this team, or None on a failed read."""
         try:
             data = self._call(TEAM_STATES_QUERY, {"team": self.team})
         except LinearError as e:
             log.warning("linear: could not read team %s's workflow states: %s", self.team, e)
             return None
         teams = ((data.get("teams") or {}).get("nodes")) or []
-        states = (((teams[0] if teams else {}).get("states") or {}).get("nodes")) or []
-        states = [s for s in states if isinstance(s, dict) and s.get("id")]
+        team = teams[0] if teams and isinstance(teams[0], dict) else {}
+        states = ((team.get("states") or {}).get("nodes")) or []
+        if not team.get("id"):
+            return None
+        return team["id"], [s for s in states if isinstance(s, dict) and s.get("id")]
+
+    def _done_state_id(self) -> str | None:
+        team = self._team()
+        if team is None:
+            return None
+        states = team[1]
         if self.done_state:
             named = [s for s in states if str(s.get("name", "")).lower() == self.done_state.lower()]
             if named:

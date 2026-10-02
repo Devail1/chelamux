@@ -272,13 +272,19 @@ function _kCard(card) {
         // accident, because on 2026-07-14 it did exactly that and the base branch broke.
         // The chip beside it says which of the three it is.
     }
+    // CMX-6: a tracker issue (Linear) is a link to its own page — `CMX-N ↗`, opening a
+    // new tab without opening the task modal underneath it. https only.
+    const idChip = (card.url && /^https:\/\//.test(card.url))
+        ? `<a class="kanban-card-id kanban-card-link" href="${attrEsc(card.url)}" target="_blank" rel="noopener noreferrer"
+              title="${tid}" onclick="event.stopPropagation()">${displayId} ↗</a>`
+        : `<span class="kanban-card-id" title="${tid}">${displayId}</span>`;
     return `
     <div class="kanban-card kanban-card-${card.status}" data-task-id="${tid}" data-kidx="${kidx}" onclick="chela.openTaskModalFromCard(this)">
         ${delBtn}
         <div class="kanban-card-title">${title}</div>
         <div class="kanban-card-meta">
             <span class="kanban-wf-chip">${wf}</span>
-            <span class="kanban-card-id" title="${tid}">${displayId}</span>
+            ${idChip}
             ${branchOrLine}
             ${stateChip}
             ${risk}
@@ -573,6 +579,8 @@ function _kanbanFlatten(data) {
                 // reads both — there's no run (and so no `brief` column) yet.
                 raw: t.raw,
                 body: t.body,
+                // CMX-6: the tracker issue's own page (Linear / GitHub issue), or null.
+                url: t.url || null,
                 workflow_path: wf.path,
                 project_key: wf.project_key || null,
             });

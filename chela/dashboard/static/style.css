@@ -2065,6 +2065,8 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .modal .form-row input, .modal .form-row textarea { width: 100%; }
 .modal .form-row select { width: 100%; }
 .modal textarea { min-height: 60px; resize: vertical; }
+.modal-newtask { width: 560px; }
+.modal-newtask .newtask-error { color: var(--red); font-size: 12px; min-height: 1em; white-space: pre-wrap; }
 
 .modal .form-actions,
 .modal .modal-actions {

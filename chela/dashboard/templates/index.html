@@ -198,6 +198,10 @@
           <button type="button" class="work-seg-btn" data-seg="schedules" aria-pressed="false"
                   onclick="chela.setWorkSegment('schedules')">Schedules</button>
         </div>
+        <!-- CMX-6: create a Linear issue in a linear workflow's team. Hidden until a poll
+             shows a workflow whose tracker is linear (work.js _renderNewTaskButton). -->
+        <button class="btn-accent" id="new-task-btn" style="display:none;"
+                onclick="chela.openNewTask()">+ New task</button>
         <button class="btn-accent" onclick="chela.openInitRepo()">+ Init a repo</button>
         <!-- CMX-206: `chela dispatch --pause` from the dashboard — no task is claimed
              until Resume. Hidden until the first /api/dispatcher poll lands (see
@@ -739,6 +743,36 @@
     </div>
   </div>
 </div>
+
+<!-- New task (CMX-6): creates a Linear issue via the dashboard — the key never comes
+     here. A failed submit shows #newtask-error and KEEPS every field (newtask.js). -->
+<div class="modal-overlay" id="modal-newtask">
+  <div class="modal modal-newtask" role="dialog" aria-modal="true" aria-label="New task">
+    <h3>New task</h3>
+    <div class="form-row"><label for="newtask-workflow">Workflow</label>
+      <select id="newtask-workflow" onchange="chela.newTaskWorkflowChanged()"></select></div>
+    <div class="form-row"><label for="newtask-title">Title</label>
+      <input type="text" id="newtask-title" autocomplete="off"></div>
+    <div class="form-row"><label for="newtask-desc">Description (markdown — the brief)</label>
+      <textarea id="newtask-desc" rows="8"></textarea></div>
+    <div class="form-row"><label for="newtask-priority">Priority</label>
+      <select id="newtask-priority">
+        <option value="0">No priority</option>
+        <option value="1">Urgent</option>
+        <option value="2">High</option>
+        <option value="3">Medium</option>
+        <option value="4">Low</option>
+      </select></div>
+    <div class="form-row"><label for="newtask-blocked">Blocked by (optional — ctrl/⌘-click for several)</label>
+      <select id="newtask-blocked" multiple size="4"></select></div>
+    <div class="newtask-error" id="newtask-error" role="alert"></div>
+    <div class="modal-actions">
+      <button onclick="chela.closeModal('modal-newtask')">Cancel</button>
+      <button class="btn-accent" id="newtask-submit" onclick="chela.submitNewTask()">Create</button>
+    </div>
+  </div>
+</div>
+<!-- /modal-newtask -->
 
 <!-- Send Message Modal -->
 <div class="modal-overlay" id="modal-msg">

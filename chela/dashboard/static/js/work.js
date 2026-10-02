@@ -43,6 +43,9 @@ let _segment = _loadSegment();
 let _workTimer = null;
 let _lastData = null;   // the last /api/dispatcher payload — a segment switch redraws from it
 
+// The payload the New-task form (newtask.js) reads its workflows and blockers from.
+export function lastWorkData() { return _lastData; }
+
 // Counts for the sidebar WORK badges, off the payload the board already fetched.
 // Pure: the same numbers the Kanban's Running / Awaiting Review columns show.
 function workBadgeCounts(data) {
@@ -105,6 +108,15 @@ function _renderDispatchHold(data) {
         btn.classList.remove('btn-warn');
         if (hint) hint.textContent = '';
     }
+}
+
+// CMX-6: "+ New task" shows only when some workflow's tracker is linear — the only
+// tracker chela creates issues in. Hidden until the first poll, like the hold button.
+function _renderNewTaskButton(data) {
+    const btn = document.getElementById('new-task-btn');
+    if (!btn) return;
+    const linear = ((data && data.workflows) || []).some(w => w && w.tracker_kind === 'linear');
+    btn.style.display = linear ? '' : 'none';
 }
 
 // Pause takes the hold (30m default TTL, same as the CLI's --pause with no --ttl);
@@ -171,6 +183,7 @@ async function pollWork() {
     _renderWorkBadges(data);            // sidebar — visible from every view
     _renderDispatchHold(data);          // Pause/Resume button — lives in the Work toolbar,
                                          // always in the DOM regardless of the active tab
+    _renderNewTaskButton(data);
     if (currentTab !== 'work') return;  // nothing else on screen to draw
     _applySegment();
     _renderWorkPanes(data);
