@@ -2328,16 +2328,88 @@ def _relay_read() -> Observation:
     if not bound:
         return absent("no window is bound to a Telegram topic")
     live = set(discovery.get_windows_by_id())
-    return observed({wid: sessions.resolve_window(wid) for wid in bound if wid in live})
+    out: dict = {}
+    for wid in bound:
+        if wid not in live:
+            continue
+        # CMX-420: a sandboxed session has no reachable transcript BY DESIGN; its relay
+        # reads the outbox its proxy writes. Checked first, as the relay itself does.
+        sb = _sandbox_outbox(wid)
+        out[wid] = sb if sb is not None else sessions.resolve_window(wid)
+    return observed(out)
+
+
+# A sandboxed session's outbox is stale when its proxy forwarded a turn this long after the
+# outbox was last written — the proxy is live and talking, but nothing reaches the relay.
+SANDBOX_OUTBOX_STALE_S = 120.0
+
+
+@dataclass(frozen=True)
+class SandboxOutbox:
+    """What the doctor saw of a sandboxed window's outbox (CMX-420)."""
+
+    sid: str
+    exists: bool
+    mtime: float | None
+    last_turn: float | None
+    relay_on: bool
+
+
+def _sandbox_outbox(wid: str) -> SandboxOutbox | None:
+    from chela import share_sandbox                  # lazy: doctor must import cheaply
+
+    sid = share_sandbox.share_session_id(wid)
+    if sid is None:
+        return None
+    path = share_sandbox.outbox_path(sid)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = None
+    try:
+        status = json.loads(share_sandbox.proxy_status_path(sid).read_text(encoding="utf-8"))
+        last_turn = float(status["last_turn"]) if status.get("last_turn") else None
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        last_turn = None
+    return SandboxOutbox(sid, mtime is not None, mtime, last_turn,
+                         share_sandbox.relay_enabled(sid))
+
+
+def _sandbox_report(wid: str, topic: str, sb: SandboxOutbox) -> Finding:
+    head = f"{wid} ({topic}) is a sandboxed session"
+    if not sb.relay_on:
+        return Finding(OK, f"{head} — relay to Telegram switched OFF for it",
+                       f"    `chela telegram --sandbox-relay {wid}=on` turns it back on.")
+    if not sb.exists:
+        return Finding(
+            ERROR, f"{head} with NO outbox — outbound is DEAD for this window",
+            "    Its transcript is inside the container by design, so the relay reads the "
+            "outbox its credential proxy writes — and there is none. The proxy was started "
+            "without its session directory (a sidecar from before CMX-420?): restart the "
+            "sandboxed session.",
+        )
+    if sb.last_turn is not None and sb.mtime is not None and \
+            sb.last_turn - sb.mtime > SANDBOX_OUTBOX_STALE_S:
+        return Finding(
+            ERROR, f"{head} whose outbox is STALE — outbound is DEAD for this window",
+            f"    Its proxy forwarded a turn {int(sb.last_turn - sb.mtime)}s after the outbox "
+            "was last written: the session is talking, but the proxy is not turning its "
+            "replies into outbox entries (the SSE parse in chela/share_proxy.py).",
+        )
+    age = time.time() - sb.mtime if sb.mtime is not None else 0.0
+    return Finding(OK, f"{head} → outbox (via its proxy, last written {_ago(age)})")
 
 
 def _relay_report(bound: dict[str, str], obs: Observation) -> list[Finding]:
     if obs.missing:
         return []                                      # the bridge is not in use here
-    resolved: dict[str, sessions.Resolution] = obs.value
+    resolved: dict = obs.value
     out: list[Finding] = []
     for wid, res in sorted(resolved.items()):
         topic = bound.get(wid) or wid
+        if isinstance(res, SandboxOutbox):
+            out.append(_sandbox_report(wid, topic, res))
+            continue
         if not res.ok:
             out.append(Finding(
                 ERROR, f"{wid} ({topic}) is bound to a topic but resolves to NO transcript",

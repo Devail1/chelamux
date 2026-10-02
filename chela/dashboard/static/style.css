@@ -960,6 +960,32 @@ body {
 }
 .shares-sheet .ss-stopall:disabled { opacity: 0.6; cursor: default; }
 .shares-sheet .ss-empty { color: var(--muted, #7d8590); font-size: 12.5px; padding: 8px 2px; }
+/* Per-share mode control (CMX-421): the live mode is the pressed button. Shape and
+   text carry the state (pressed = filled + bold), never hue alone. */
+.shares-sheet .ss-mode-ctl { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+.shares-sheet .ss-mode-opt {
+    cursor: pointer; border-radius: 6px; padding: 6px 10px; font-size: 12px;
+    background: transparent; color: var(--text); border: 1px solid var(--border);
+}
+.shares-sheet .ss-mode-opt[aria-pressed="true"] {
+    background: var(--accent); border-color: var(--accent); color: #0d1117; font-weight: 700; cursor: default;
+}
+.shares-sheet .ss-mode-opt-unsafe { border-color: var(--ok-vermillion, #d55e00); }
+.shares-sheet .ss-mode-opt-unsafe[aria-pressed="true"] { background: var(--ok-vermillion, #d55e00); border-color: var(--ok-vermillion, #d55e00); color: #fff; }
+.shares-sheet .ss-mode-opt:disabled { opacity: 0.5; cursor: not-allowed; }
+.shares-sheet .ss-mode-desc { color: var(--text-dim); font-size: 11.5px; margin-bottom: 4px; }
+.shares-sheet .ss-mode-desc-unsafe { color: var(--ok-vermillion, #d55e00); font-weight: 600; }
+.shares-sheet .ss-mode-reason, .shares-sheet .ss-mode-err { color: var(--warn, #d29922); font-size: 11.5px; margin-bottom: 4px; }
+.shares-sheet .ss-mode-err[hidden], .shares-sheet .ss-unsafe-confirm[hidden] { display: none; }
+.shares-sheet .ss-confirm-go {
+    cursor: pointer; border-radius: 6px; padding: 0 12px; font-size: 12px; font-weight: 700;
+    background: var(--ok-vermillion, #d55e00); border: 1px solid var(--ok-vermillion, #d55e00); color: #fff;
+}
+.shares-sheet .ss-confirm-go:disabled { opacity: 0.5; cursor: not-allowed; }
+.shares-sheet .ss-row-focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.shares-sheet .ss-already { font-size: 11.5px; font-weight: 600; margin-bottom: 6px; }
+.gs-share-mode { margin-left: 6px; font-size: 12px; }
+.gs-share-mode[hidden] { display: none; }
 
 @media (max-width: 768px) {
     .shares-sheet {
@@ -970,6 +996,7 @@ body {
     .shares-sheet .ss-list { max-height: 60vh; }
     .shares-sheet .ss-stop { padding: 11px 16px; min-height: 44px; }
     .shares-sheet .ss-stopall { min-height: 48px; }
+    .shares-sheet .ss-mode-opt, .shares-sheet .ss-confirm-go { min-height: 44px; }
     .shares-sheet .tsp-in { padding: 11px 12px; font-size: 14px; }
     .shares-sheet .tsp-copy { min-height: 44px; padding: 0 16px; }
     /* Keep the amber pill readable but compact in .safety-float on a phone. */
@@ -4462,3 +4489,15 @@ input[type="text"]:focus, textarea:focus, select:focus {
 @media (pointer: coarse) {
     input, textarea, select { font-size: 16px !important; }
 }
+
+/* CMX-426: "chela was updated — Reload". Unobtrusive: bottom-centre, never modal, never
+   auto-reloads (version.js). Above the wall, below modals. */
+.update-banner {
+    position: fixed; z-index: 46; left: 50%; transform: translateX(-50%);
+    bottom: max(14px, env(safe-area-inset-bottom));
+    display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 14px;
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; box-shadow: 0 4px 16px rgba(0, 0, 0, .35); font-size: 13px;
+    max-width: calc(100vw - 32px);
+}
+.update-banner[hidden] { display: none; }

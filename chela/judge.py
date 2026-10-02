@@ -2942,6 +2942,28 @@ def live_judge_runs() -> list[dict]:
     return out
 
 
+def live_judge_run(task_id: str, worktree: Path | None = None) -> dict | None:
+    """👻⚖️ CMX-429: the ``chela judge run`` executing for ``task_id`` RIGHT NOW, or None.
+
+    The run's own record, not the agent's window: since CMX-411 the judge AGENT stops right
+    after launching ``--detach``, so its window (or its agent) going away is NORMAL and says
+    nothing about whether the run is alive. Measured 2026-10-01 on PR #569: the watchdog read
+    "window gone" as a dead judge, wrote CANNOT VERIFY, and a second judge was spawned into
+    the SAME worktree while the first run was still mutating it.
+
+    Asks the two records the run writes about ITSELF, both on disk (so they survive a daemon
+    restart): ``$CHELA_DIR/judge-logs/<task>.json`` and, given ``worktree``, the CMX-221 slot
+    lock beside it. Either one names a live owner ⇒ the run is live. Identity is CMX-424's:
+    the pid's ``/proc`` start ticks must still match, so a recycled pid reads as dead.
+    """
+    status = _read_judge_lock(judge_status_path(task_id))
+    if status is not None and _judge_lock_owner_alive(status):
+        return status
+    if worktree is not None and judge_lock_live(worktree):
+        return _read_judge_lock(_judge_lock_path(worktree)) or {}
+    return None
+
+
 def detached_argv(ident: str, experiments: str | Path, *, cleanup: bool = True) -> list[str]:
     """The child a ``--detach`` re-execs: the SAME ``chela judge run``, minus ``--detach``,
     plus the hidden marker that tells the child it owns its own process group."""
@@ -2968,7 +2990,7 @@ def spawn_detached(argv: list[str], log_path: Path) -> int:
 
 def detach_judge_run(ident: str, experiments: str | Path, *, cleanup: bool = True) -> dict:
     """``chela judge run --detach``: refuse if a run for this task is already live (the
-    CMX-221 lock), else launch the detached child and return at once."""
+    CMX-221 lock, or 👻 CMX-429 its run status), else launch the detached child and return at once."""
     from chela import dispatcher, workflow
 
     run = dispatcher.resolve_run(ident)
@@ -2980,13 +3002,12 @@ def detach_judge_run(ident: str, experiments: str | Path, *, cleanup: bool = Tru
         wf = workflow.load_workflow(wf_path) if wf_path else None
     except Exception:                  # judge_run itself records the unreadable workflow
         wf = None
-    if wf is not None:
-        lock = _read_judge_lock(_judge_lock_path(judge_worktree_path(wf, task_id)))
-        if lock is not None and _judge_lock_owner_alive(lock):
-            return {"ok": False, "task_id": task_id, "error": (
-                f"a judge (pid {lock.get('pid')}) is already running for {task_id} — "
-                "refusing to start a second one. Watch it with `chela doctor` or "
-                f"`tail -f {judge_log_path(task_id)}`; do not re-run it.")}
+    live = live_judge_run(task_id, judge_worktree_path(wf, task_id) if wf is not None else None)
+    if live is not None:
+        return {"ok": False, "task_id": task_id, "error": (
+            f"a judge (pid {live.get('pid')}) is already running for {task_id} — "
+            "refusing to start a second one. Watch it with `chela doctor` or "
+            f"`tail -f {judge_log_path(task_id)}`; do not re-run it.")}
     log_path = judge_log_path(task_id)
     pid = spawn_detached(detached_argv(task_id, experiments, cleanup=cleanup), log_path)
     return {"ok": True, "task_id": task_id, "pid": pid, "log": str(log_path)}

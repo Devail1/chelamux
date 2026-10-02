@@ -385,7 +385,7 @@ def test_the_served_pane_loads_the_upload_shim_before_the_legacy_paste_shim(monk
     monkeypatch.delenv("CHELA_FILE_DROP", raising=False)
     html = _served(monkeypatch)
     head = html.split("</head>", 1)[0]
-    tag = '<script src="/static/term-upload.js"></script>'
+    tag = '<script src="/' + app_mod.asset_path("term-upload.js") + '"></script>'   # CMX-426
     assert head.count(tag) == 1
     assert "window.__CHELA_FILE_DROP__=true;" in head
     assert head.index(tag) < head.index(app_mod._TERM_PASTE_SHIM)

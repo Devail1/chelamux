@@ -23,7 +23,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from flask import abort, Flask, jsonify, render_template, request, Response
+from flask import abort, Flask, jsonify, render_template, request, Response, send_from_directory
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
@@ -107,14 +107,86 @@ def _require_terminals() -> None:
 # Page route
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# CMX-426: versioned static assets
+#
+# A deploy restarts chela-dashboard, but an open browser kept serving its cached ES
+# modules and CSS, so recent UI looked missing until a hard refresh. Every asset the page
+# loads is now served from ``static/v/<ASSET_VERSION>/…``: a new deploy is a new URL, so a
+# reload can never mix old modules with new ones, and the versioned copy may be cached for
+# good. Relative ES imports (``./util.js``) resolve against the module's own URL, so they
+# inherit the version with no import map. Unversioned ``static/…`` keeps working.
+#
+# The version is a hash of the CONTENT that reaches the browser (JS, CSS, templates),
+# computed ONCE at import. Not the git sha: an installed wheel has no .git, and a deploy
+# that only touches Python must not ask every open page to reload.
+# ---------------------------------------------------------------------------
+
+_STATIC_DIR = Path(__file__).parent / "static"
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+_VERSIONED_SUFFIXES = {".js", ".mjs", ".css", ".html", ".svg"}
+
+
+def compute_asset_version(roots: tuple[Path, ...] = (_STATIC_DIR, _TEMPLATES_DIR)) -> str:
+    """A short content hash over every browser-facing text asset under ``roots``.
+
+    Deterministic: same files, same bytes → same version (no reload storm within a deploy).
+    """
+    h = hashlib.sha256()
+    for root in roots:
+        for p in sorted(root.rglob("*")):
+            if p.is_file() and p.suffix in _VERSIONED_SUFFIXES:
+                h.update(p.relative_to(root).as_posix().encode())
+                h.update(b"\0")
+                h.update(p.read_bytes())
+                h.update(b"\0")
+    return h.hexdigest()[:12]
+
+
+ASSET_VERSION = compute_asset_version()
+
+
+def asset_path(path: str) -> str:
+    """``static/v/<ASSET_VERSION>/<path>`` — relative, like the template's other URLs, so
+    a dashboard behind a path prefix still resolves it."""
+    return f"static/v/{ASSET_VERSION}/{path}"
+
+
+@app.route("/static/v/<ver>/<path:filename>")
+def static_versioned(ver, filename):
+    resp = send_from_directory(app.static_folder, filename)
+    if ver == ASSET_VERSION:
+        # This exact URL can only ever mean these bytes: cache it for good.
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    else:
+        # A page from an older deploy asking for its old version: the bytes are the
+        # CURRENT ones, so they must not be cached under the old URL.
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@app.route("/api/version")
+@require_auth
+def api_version():
+    """The running deploy's asset version; an open page compares it with its own."""
+    resp = jsonify({"version": ASSET_VERSION})
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 @app.route("/")
 @require_auth
 def index():
-    return render_template(
+    resp = app.make_response(render_template(
         "index.html",
         terminals_enabled=config.TERMINALS_ENABLED,
         wall_tile_dispatched=config.WALL_TILE_DISPATCHED,
-    )
+        asset_version=ASSET_VERSION,
+        asset_path=asset_path,
+    ))
+    # The HTML names the versioned assets, so it must be revalidated on every load.
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -810,7 +882,7 @@ def _term_upload_shim() -> str:
     route re-checks it per upload, so a pane opened before a switch-off is still refused)."""
     on = "true" if config.file_drop_enabled() else "false"
     return ("<script>window.__CHELA_FILE_DROP__=" + on + ";</script>"
-            '<script src="/static/term-upload.js"></script>')
+            '<script src="/' + asset_path("term-upload.js") + '"></script>')
 
 
 def _term_presence_shim(wid: str) -> str:
@@ -822,7 +894,7 @@ def _term_presence_shim(wid: str) -> str:
         "shared": wid in _SHARED,
     })
     return ("<script>window.__CHELA_COLLAB__=" + cfg + ";</script>"
-            '<script type="module" src="/static/collab/presence-shim.js"></script>')
+            '<script type="module" src="/' + asset_path("collab/presence-shim.js") + '"></script>')
 
 
 @app.route("/term/<wid>/", defaults={"rest": ""}, methods=["GET", "POST"])
@@ -1274,6 +1346,29 @@ def _share_options(wid: str) -> dict:
     }
 
 
+CONFIRM_REASON = "type the window name to confirm full access"
+
+
+def _access_gate(wid: str, mode: str, data: dict):
+    """The gates a share must pass to GET typing access — identical whether it is being
+    minted with ``mode`` or a live share is being switched up to it (CMX-421).
+    Returns ``(policy, None)`` (the ``start_bridge`` kwargs) or ``(None, refusal)``."""
+    if mode == collab_stream.MODE_VIEW:
+        return {}, None
+    if not config.share_typing_enabled():
+        return None, (jsonify({"ok": False, "error": TYPING_OFF_REASON}), 403)
+    if mode == collab_stream.MODE_TYPING:
+        ok, _why = share_sandbox.check_share_session(wid)
+        if not ok:
+            return None, (jsonify({"ok": False, "error": NOT_SANDBOXED_REASON}), 403)
+        return {"allow_typing": True}, None
+    name = _window_name(wid)
+    if not name or (data.get("confirm") or "").strip() != name:
+        return None, (jsonify({"ok": False, "error": CONFIRM_REASON}), 403)
+    return {"unsandboxed": {"granted_by": _granted_by(), "window": name,
+                            "ttl_s": config.share_unsandboxed_minutes() * 60.0}}, None
+
+
 @app.route("/api/term/<wid>/share-options")
 @require_auth
 def api_term_share_options(wid):
@@ -1324,22 +1419,12 @@ def api_term_share(wid):
     policy: dict = {}
     if mode != collab_stream.MODE_VIEW:
         if wid in _SHARED:
-            # An existing share keeps the policy it was created with — never upgrade it
-            # silently. Stop it and share again to change access.
-            return jsonify({"ok": False, "error": "already shared — stop it first to change access"}), 409
-        if not config.share_typing_enabled():
-            return jsonify({"ok": False, "error": TYPING_OFF_REASON}), 403
-        if mode == collab_stream.MODE_TYPING:
-            ok, _why = share_sandbox.check_share_session(wid)
-            if not ok:
-                return jsonify({"ok": False, "error": NOT_SANDBOXED_REASON}), 403
-            policy = {"allow_typing": True}
-        else:
-            name = _window_name(wid)
-            if not name or (data.get("confirm") or "").strip() != name:
-                return jsonify({"ok": False, "error": "type the window name to confirm full access"}), 403
-            policy = {"unsandboxed": {"granted_by": _granted_by(), "window": name,
-                                      "ttl_s": config.share_unsandboxed_minutes() * 60.0}}
+            # Never upgrade a live share through the mint route — that would re-mint
+            # (rotating link + code). Its mode changes in place via /share-mode.
+            return jsonify({"ok": False, "error": "already shared — change its mode from Active shares"}), 409
+        policy, refusal = _access_gate(wid, mode, data)
+        if refusal:
+            return refusal
     cols, rows = collab_stream._window_dims(wid)
     _SHARED[wid] = {"cols": cols, "rows": rows}
     # Start the E2E stream bridge; on_revoke fires if it fails closed on session
@@ -1349,6 +1434,39 @@ def api_term_share(wid):
              "share_epoch": _next_share_epoch()} if code else {})
     _share_info[wid] = info
     return jsonify({"ok": True, "shared": True, **info, **(collab_stream.share_state(wid) or {})})
+
+
+@app.route("/api/term/<wid>/share-mode", methods=["POST"])
+@require_auth
+def api_term_share_mode(wid):
+    """Change a LIVE share's mode — ``{"mode": "view"|"typing"|"unsandboxed",
+    "confirm"?}`` — keeping the same bridge, link and pairing code (CMX-421), so a guest
+    already joined keeps the connection. Down to view: always, no confirmation. Up: the
+    exact gates of minting a share with that mode (``_access_gate``). The bridge audits
+    every change as ``share.mode_changed`` and tells the guest."""
+    _require_terminals()
+    if wid not in _terminals_port_map():
+        abort(404)
+    if wid not in _SHARED:
+        return jsonify({"ok": False, "error": "not shared"}), 404
+    data = request.get_json(force=True) or {}
+    mode = (data.get("mode") or "").strip()
+    if mode not in (collab_stream.MODE_VIEW, collab_stream.MODE_TYPING, collab_stream.MODE_UNSANDBOXED):
+        return jsonify({"ok": False, "error": f"unknown share mode: {mode}"}), 400
+    policy, refusal = _access_gate(wid, mode, data)
+    if refusal:
+        return refusal
+    over = policy.get("unsandboxed") or {}
+    try:
+        changed = collab_stream.set_share_mode(
+            wid, mode, changed_by=over.get("granted_by") or _granted_by(),
+            window=over.get("window") or _window_name(wid), ttl_s=over.get("ttl_s"))
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    if changed is None:
+        return jsonify({"ok": False, "error": "this share has no running stream — stop and share again"}), 409
+    return jsonify({"ok": True, "shared": True, **_share_info.get(wid, {}), **changed,
+                    **(collab_stream.share_state(wid) or {})})
 
 
 @app.route("/api/term/<wid>/share-info")
