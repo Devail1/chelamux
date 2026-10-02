@@ -84,6 +84,8 @@ class FakeLinear:
         self.fail = fail
         self.calls: list[tuple[str, dict]] = []
         self.refuse_archive = False
+        self.refuse_update = False
+        self.states = dict(_TYPES)               # the team's workflow states, name → type
 
     def _page(self, nodes):
         return {"issues": {"nodes": nodes, "pageInfo": {"hasNextPage": False,
@@ -106,11 +108,13 @@ class FakeLinear:
         if name == "states":
             return {"teams": {"nodes": [{"id": "team", "states": {"nodes": [
                 {"id": f"st-{k}", "name": k, "type": t, "position": p}
-                for p, (k, t) in enumerate(_TYPES.items())]}}]}}
+                for p, (k, t) in enumerate(self.states.items())]}}]}}
         target = next(i for i in nodes if i["id"] == variables["id"])
         if name == "update":
+            if self.refuse_update:
+                return {"issueUpdate": {"success": False}}
             sid = variables["stateId"][len("st-"):]
-            target["state"] = {"name": sid, "type": _TYPES[sid]}
+            target["state"] = {"name": sid, "type": self.states[sid]}
             return {"issueUpdate": {"success": True}}
         if self.refuse_archive:
             raise LinearError("graphql", "archive refused")
@@ -236,6 +240,33 @@ def test_task_identity_number_and_branch_come_from_linear(tmp_path):
     assert t.branch == "cmx-12-tighten-top-row"
 
 
+@pytest.mark.parametrize("suggested,expected", [
+    # trusted: it carries THIS issue's identifier, as a whole token
+    ("cmx-12-tighten-top-row", "cmx-12-tighten-top-row"),
+    ("CMX-12-Tighten-Top-Row", "cmx-12-tighten-top-row"),
+    ("liav/cmx-12-tighten-top-row", "liav/cmx-12-tighten-top-row"),
+    # rebuilt: another issue's identifier that merely STARTS with this one's …
+    ("cmx-123-other-work", "cmx-12-tighten-top-row"),
+    ("cmx-1-other-work", "cmx-12-tighten-top-row"),
+    # … the identifier glued inside a word, or not followed by the slug …
+    ("xcmx-12-tighten", "cmx-12-tighten-top-row"),
+    ("cmx-12", "cmx-12-tighten-top-row"),
+    # … no identifier at all, or not a legal branch name
+    ("tighten-top-row", "cmx-12-tighten-top-row"),
+    ("cmx-12-a b", "cmx-12-tighten-top-row"),
+    ("cmx-12-a..b", "cmx-12-tighten-top-row"),
+    ("", "cmx-12-tighten-top-row"),
+])
+def test_a_branch_name_is_trusted_only_when_it_carries_the_identifier(
+        tmp_path, suggested, expected):
+    """CMX-432 rework: Linear's `branchName` is used only when it carries `cmx-12-` as a
+    whole token — `cmx-123-…` is another issue's branch, and a bare substring match would
+    adopt it. Anything else falls back to the derived `<identifier>-<title slug>`."""
+    t = _src(tmp_path, FakeLinear([issue(12, "Tighten top row", branch=suggested)]
+                                  )).list_open_tasks()[0]
+    assert t.branch == expected
+
+
 # --- claiming: ready state, blockers, order ------------------------------------------
 
 def _claim(tmp_path, fake, **tracker):
@@ -315,6 +346,42 @@ def test_a_failed_archive_is_logged_and_never_raises(tmp_path, caplog):
     assert "could not archive CMX-4" in caplog.text
 
 
+def test_done_state_selects_the_state_chela_sets_on_merge(tmp_path):
+    """`tracker.done_state` names the state close_tasks moves the issue to — not the
+    first `completed` state. Two completed states, so ignoring the setting is visible."""
+    fake = FakeLinear([issue(4, state="In Review")])
+    fake.states = {**_TYPES, "Shipped": "completed"}
+    assert _src(tmp_path, fake, done_state="Shipped").close_tasks(["CMX-4"]) == {
+        "CMX-4": "struck"}
+    assert fake.issues["CMX-4"]["state"]["name"] == "Shipped"
+    assert [v["stateId"] for n, v in fake.calls if n == "update"] == ["st-Shipped"]
+
+
+def test_without_done_state_the_first_completed_state_is_set(tmp_path):
+    fake = FakeLinear([issue(4, state="In Review")])
+    fake.states = {**_TYPES, "Shipped": "completed"}
+    assert _src(tmp_path, fake).close_tasks(["CMX-4"]) == {"CMX-4": "struck"}
+    assert fake.issues["CMX-4"]["state"]["name"] == "Done"
+
+
+def test_a_done_state_the_team_lacks_fails_the_close_and_writes_nothing(tmp_path):
+    fake = FakeLinear([issue(4, state="In Review")])
+    assert _src(tmp_path, fake, done_state="Shipped").close_tasks(["CMX-4"]) == {
+        "CMX-4": "failed"}
+    assert "update" not in fake.names() and "archive" not in fake.names()
+    assert fake.issues["CMX-4"]["state"]["name"] == "In Review"
+
+
+def test_a_refused_issue_update_is_failed_never_struck(tmp_path):
+    """Linear answers a refused write with `success: false` on a 200 — that is `failed`
+    (retried next tick), never `struck`, and the still-open issue is not archived."""
+    fake = FakeLinear([issue(4, state="In Review")])
+    fake.refuse_update = True
+    assert _src(tmp_path, fake).close_tasks(["CMX-4"]) == {"CMX-4": "failed"}
+    assert "archive" not in fake.names()
+    assert fake.issues["CMX-4"]["archivedAt"] is None
+
+
 def test_the_dispatcher_strike_closes_a_network_tracker(tmp_path):
     """`_strike_merged_tasks` reaches a tracker with `close_tasks` but no file."""
     fake = FakeLinear([issue(4, state="In Review")])
@@ -331,6 +398,19 @@ def test_the_sweep_archives_closed_issues_and_publishes_the_count(tmp_path):
     # Throttled: the next tick's sweep does nothing.
     fake.calls.clear()
     assert _src(tmp_path, fake).archive_sweep() is None and fake.calls == []
+
+
+def test_a_sweep_archives_at_most_archives_per_sweep_issues(tmp_path):
+    """A backlog clears over a few sweeps, never in one burst of mutations."""
+    assert linear.ARCHIVES_PER_SWEEP == 50
+    n = linear.ARCHIVES_PER_SWEEP + 3
+    fake = FakeLinear([issue(i, state="Done") for i in range(1, n + 1)])
+    assert _src(tmp_path, fake).archive_sweep() == linear.ARCHIVES_PER_SWEEP
+    assert fake.names().count("archive") == linear.ARCHIVES_PER_SWEEP
+    assert linear.read_published_counts()["CMX"]["count"] == 3
+    # The next sweep takes the rest.
+    assert _src(tmp_path, fake).archive_sweep(force=True) == 3
+    assert fake.names().count("archive") == n
 
 
 @pytest.mark.parametrize("count,warns", [(linear.ISSUE_COUNT_WARN_AT, False),
@@ -352,6 +432,83 @@ def test_a_429_backs_off_without_calling_again(tmp_path):
     second = _src(tmp_path, fake)
     assert second.list_open_tasks() == [] and second.read_failed is True
     assert len(fake.calls) == 1                      # the back-off window held
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_back_off_grows_exponentially_with_consecutive_strikes(tmp_path, monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(linear.time, "monotonic", clock)
+    fake = FakeLinear([issue(1)], fail=LinearError("rate_limited", "HTTP 429"))
+    waits = []
+    for _ in range(6):
+        assert _src(tmp_path, fake).fetch_by_ids(["CMX-1"]) is None
+        retry_at, _strikes = linear._backoff["CMX"]
+        waits.append(retry_at - clock.now)
+        clock.now = retry_at + 1                     # the window passes; Linear says 429 again
+    base = linear.BACKOFF_BASE_SECONDS
+    assert waits == [base, 2 * base, 4 * base, 8 * base, linear.BACKOFF_MAX_SECONDS,
+                     linear.BACKOFF_MAX_SECONDS]
+    assert len(fake.calls) == 6
+    # A good read resets the strikes: the next 429 waits the base again.
+    fake.fail = None
+    assert _src(tmp_path, fake).fetch_by_ids(["CMX-1"]) is not None
+    assert "CMX" not in linear._backoff
+    fake.fail = LinearError("rate_limited", "HTTP 429")
+    _src(tmp_path, fake).fetch_by_ids(["CMX-1"])
+    assert linear._backoff["CMX"][0] - clock.now == base
+
+
+def test_back_off_honours_retry_after(tmp_path, monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(linear.time, "monotonic", clock)
+    err = urllib.error.HTTPError(linear.LINEAR_API_URL, 429, "err", {"Retry-After": "7"},
+                                 io.BytesIO(b"{}"))
+    src = _src(tmp_path, linear._http_transport(SECRET, urlopen=_urlopen_raising(err)))
+    assert src.fetch_by_ids(["CMX-1"]) is None
+    assert linear._backoff["CMX"][0] - clock.now == 7
+
+
+_RATELIMITED = json.dumps({"errors": [{"message": "slow down",
+                                       "extensions": {"code": "RATELIMITED"}}]}).encode()
+
+
+def _urlopen_ratelimited_400(req, timeout=None):
+    raise _http_error(400, _RATELIMITED)                   # fresh: its body is read once
+
+
+@pytest.mark.parametrize("urlopen", [
+    _urlopen_ratelimited_400,                              # how Linear actually sends it
+    _urlopen_returning(_RATELIMITED),                      # the same error on a 200
+], ids=["http-400", "http-200"])
+def test_a_graphql_ratelimited_error_is_a_rate_limit(tmp_path, monkeypatch, urlopen):
+    """Linear's RATELIMITED arrives as a GraphQL error (on an HTTP 400). It must be
+    classified `rate_limited` — a FAILED read (None) that starts the back-off like a 429 —
+    not `graphql`/`http`/`malformed`, which would hammer Linear every tick."""
+    calls = []
+
+    def counting(req, timeout=None):
+        calls.append(1)
+        return urlopen(req, timeout)
+
+    with pytest.raises(LinearError) as e:
+        linear._http_transport(SECRET, urlopen=urlopen)("query", {})
+    assert e.value.kind == "rate_limited"
+
+    clock = _Clock()
+    monkeypatch.setattr(linear.time, "monotonic", clock)
+    transport = linear._http_transport(SECRET, urlopen=counting)
+    assert _src(tmp_path, transport).fetch_by_ids(["CMX-1"]) is None
+    assert linear._backoff["CMX"][0] - clock.now == linear.BACKOFF_BASE_SECONDS
+    second = _src(tmp_path, transport)
+    assert second.list_open_tasks() == [] and second.read_failed is True
+    assert len(calls) == 1                          # backing off: Linear was not called again
 
 
 def test_reads_are_cached_within_one_tick(tmp_path):
@@ -384,6 +541,19 @@ def test_a_missing_key_is_a_startup_error_for_that_workflow(tmp_path, monkeypatc
     with caplog.at_level(logging.ERROR, logger="chela.sources.linear"):
         assert src.list_open_tasks() == [] and src.read_failed is True
     assert "no LINEAR_API_KEY in chela.env" in caplog.text
+
+
+def test_a_missing_key_logs_one_error_not_one_per_tick(tmp_path, monkeypatch, caplog):
+    env = tmp_path / "chela.env"
+    env.write_text("CHELA_TMUX_SESSION=chela\n")
+    monkeypatch.setenv("CHELA_ENV_FILE", str(env))
+    with caplog.at_level(logging.ERROR, logger="chela.sources.linear"):
+        for _ in range(3):                           # a fresh source every tick
+            src = LinearSource(_wf(tmp_path))
+            src.list_open_tasks()
+            assert src.fetch_by_ids(["CMX-1"]) is None
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1 and "no LINEAR_API_KEY in chela.env" in errors[0].getMessage()
 
 
 def test_a_key_in_workflow_md_is_refused_not_used(tmp_path, monkeypatch):
@@ -551,6 +721,28 @@ def test_a_branch_name_the_remote_already_has_is_never_reused(repo, team, launch
     team.issues = {"CMX-7": issue(7, "Tighten top row", branch="cmx-7-tighten-top-row")}
     dispatcher.tick(repo / "WORKFLOW.md")
     assert _row("CMX-7")["branch_name"] == "cmx-7-tighten-top-row-2"
+
+
+def test_a_retry_keeps_the_branch_its_first_attempt_took(repo, team, launched):
+    """Attempt 1 took `cmx-7-old-title` (and pushed it). The issue was renamed since, so
+    Linear now suggests `cmx-7-new-title`. Attempt 2 must reuse attempt 1's branch — not
+    the new suggestion, and not `cmx-7-old-title-2` because the remote already has it."""
+    subprocess.run(["git", "-C", str(repo), "push", "-q", "origin", "dev:cmx-7-old-title"],
+                   check=True, capture_output=True)
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, attempt, started_at, "
+            "branch_name, window_name) VALUES ('CMX-7', ?, 't', 'failed', 1, ?, "
+            "'cmx-7-old-title', 'cmx-7-old-title')",
+            (str((repo / "WORKFLOW.md").resolve()), dispatcher._now()),
+        )
+        conn.commit()
+    team.issues = {"CMX-7": issue(7, "New title", branch="cmx-7-new-title")}
+    summary = dispatcher.tick(repo / "WORKFLOW.md")
+    assert summary["dispatched"] == 1, summary
+    row = _row("CMX-7")
+    assert (row["attempt"], row["branch_name"]) == (2, "cmx-7-old-title")
+    assert [c["window"] for c in launched] == ["cmx-7-old-title"]
 
 
 def test_a_failed_read_changes_no_run(repo, team, launched):
