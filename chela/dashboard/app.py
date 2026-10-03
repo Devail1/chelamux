@@ -2255,6 +2255,59 @@ def _dispatcher_owned_wid_epochs() -> set[tuple[str, str | None]]:
     return owned
 
 
+def _terminal_run_claims() -> tuple[set[tuple[str, str | None]], set[str]]:
+    """What the dispatcher's FINISHED runs (:func:`chela.dispatcher.run_is_terminal` —
+    merged, ``done``/``closed``, or failed past every retry) still claim, as two facts off
+    the ``runs`` table: the ``(wid, epoch)`` pairs of their agent and judge windows, and
+    the worktree paths those windows ran in (the run's ``worktree_path`` and its judge's
+    :func:`chela.judge.judge_worktree_path`).
+
+    A dangling row matching either, whose cwd is ALSO gone, is history — the trial is over
+    and its worktree was reaped on schedule — so ``/api/restore`` drops it outright rather
+    than parking it in ``dispatcher_rows`` forever (CMX-11: ``judge-cmx-407`` lingered
+    there, undismissable, long after PR #558 merged). Both joins are kept because either
+    one alone can miss: a tmux restart renumbers windows (CMX-330), which breaks the
+    ``(wid, epoch)`` join, and a run's ``worktree_path`` can be NULL. ⛔ Still never a name
+    or path-prefix guess — every value here is one the ``runs`` row itself recorded.
+    """
+    wid_epochs: set[tuple[str, str | None]] = set()
+    cwds: set[str] = set()
+    workflows: dict[str, object] = {}
+    for row in dispatcher.list_runs():
+        if not dispatcher.run_is_terminal(row):
+            continue
+        if row.get("window_id"):
+            wid_epochs.add((row["window_id"], row.get("window_epoch")))
+        if row.get("judge_window_id"):
+            wid_epochs.add((row["judge_window_id"], row.get("judge_window_epoch")))
+        if row.get("worktree_path"):
+            cwds.add(os.path.normpath(row["worktree_path"]))
+        wf_path, task_id = row.get("workflow_path"), row.get("task_id")
+        if wf_path and task_id:
+            if wf_path not in workflows:
+                try:
+                    workflows[wf_path] = load_workflow(wf_path)
+                except Exception:  # noqa: BLE001 — a gone/bad workflow file only loses this join
+                    workflows[wf_path] = None
+            if workflows[wf_path] is not None:
+                cwds.add(os.path.normpath(str(judge.judge_worktree_path(workflows[wf_path], task_id))))
+    return wid_epochs, cwds
+
+
+def _dismiss_key(v: restore.Verdict, *, resumable: bool) -> str:
+    """The stable identity ``/api/restore/dismiss`` hides a row by (CMX-11).
+
+    A resumable row is keyed by its Claude session id — the CMX-437 contract, so every
+    existing dismiss keeps working. A dispatcher row carries no session id in its shape
+    (it has no resume affordance, see :func:`api_restore`), so it is keyed by the row's
+    own address instead: ``row:<store>|<wid>|<stamped_epoch>``. That is the same
+    identity ``/api/restore/resume`` matches a row on, minus the session id.
+    """
+    if resumable and v.session_id:
+        return v.session_id
+    return f"row:{v.store}|{v.wid}|{v.stamped_epoch or ''}"
+
+
 def _cwd_is_live(cwd: str | None) -> bool:
     """Whether a verdict's recorded cwd still exists on disk.
 
@@ -2273,7 +2326,8 @@ def _cwd_is_live(cwd: str | None) -> bool:
 
 def _shape_restore_row(v: restore.Verdict, *, resumable: bool) -> dict:
     shaped = {"store": v.store, "wid": v.wid, "cwd": v.cwd, "label": v.label,
-              "stamped_epoch": v.stamped_epoch}
+              "stamped_epoch": v.stamped_epoch,
+              "dismiss_key": _dismiss_key(v, resumable=resumable)}
     if resumable:
         shaped["session_id"] = v.session_id
     return shaped
@@ -2299,22 +2353,33 @@ def api_restore():
     them with no Resume affordance) — ``session_id`` is left off their shape since
     there is no action for the client to build with it.
 
-    Rows whose session id the operator DISMISSED (:mod:`chela.dismissed_sessions`,
-    CMX-437) are left out of both buckets. That is a hide, not a delete: the
+    A row whose cwd is gone AND that belongs to a FINISHED run
+    (:func:`_terminal_run_claims`) is not returned at all (CMX-11): the trial is over and
+    its worktree was reaped on schedule, so it is history, not a recovery affordance.
+
+    Every returned row carries a ``dismiss_key`` (:func:`_dismiss_key`), so every row
+    the sidebar shows can be hidden through ``/api/restore/dismiss``. Rows the operator
+    DISMISSED (:mod:`chela.dismissed_sessions`, CMX-437) — by that key or by their
+    session id — are left out of both buckets. That is a hide, not a delete: the
     transcript and every store ``chela restore`` reads are untouched.
     """
     _require_terminals()
     owned = _dispatcher_owned_wid_epochs()
+    terminal_wid_epochs, terminal_cwds = _terminal_run_claims()
     dismissed = dismissed_sessions.ids()
     candidates = [v for v in _restore_verdicts()
                   if v.verdict == "MANUAL" and v.manual_command()
                   and v.session_id not in dismissed]
     rows, dispatcher_rows = [], []
     for v in candidates:
-        if (v.wid, v.stamped_epoch) in owned or not _cwd_is_live(v.cwd):
-            dispatcher_rows.append(_shape_restore_row(v, resumable=False))
-        else:
-            rows.append(_shape_restore_row(v, resumable=True))
+        cwd_live = _cwd_is_live(v.cwd)
+        if not cwd_live and ((v.wid, v.stamped_epoch) in terminal_wid_epochs
+                             or os.path.normpath(v.cwd) in terminal_cwds):
+            continue
+        resumable = (v.wid, v.stamped_epoch) not in owned and cwd_live
+        if _dismiss_key(v, resumable=resumable) in dismissed:
+            continue
+        (rows if resumable else dispatcher_rows).append(_shape_restore_row(v, resumable=resumable))
     return jsonify({"rows": rows, "dispatcher_rows": dispatcher_rows, "hidden": len(dispatcher_rows)})
 
 
@@ -2331,8 +2396,10 @@ def _session_ids_from_body() -> list[str] | None:
 @app.route("/api/restore/dismiss", methods=["POST"])
 @require_auth
 def api_restore_dismiss():
-    """Hide Recent-sessions rows by session id (the row's ×, or the header's "Clear
-    all"). Recorded server-side so every device stops showing them. Only the hide list
+    """Hide Recent-sessions rows (the row's ×, or the header's "Clear all").
+    ``session_ids`` carries each row's ``dismiss_key`` from ``/api/restore`` — its
+    session id, or for a dispatcher row (which has none in its shape) its ``row:``
+    address key (CMX-11). Recorded server-side so every device stops showing them. Only the hide list
     is written — never the transcript, never a session-ids/bindings row — so the
     session stays resumable by hand and shows up under Sessions if it comes back."""
     _require_terminals()

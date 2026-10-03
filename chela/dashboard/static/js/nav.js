@@ -521,6 +521,20 @@ onOrchestratorChange(() => {
 // (resuming spawns a window, same as the "+" launcher) and hidden entirely when
 // there is nothing to resume — a rare recovery affordance, not a permanent fixture.
 
+// The identity a row is hidden by (CMX-11): /api/restore's `dismiss_key` — the
+// session id for a resumable row, a `row:` address key for a dispatcher row, which
+// carries no session id. Every row the list shows has one, so every row has a ×.
+function _dismissKey(r) {
+    return (r && (r.dismiss_key || r.session_id)) || '';
+}
+
+function _dismissButtonHtml(r, label) {
+    return `<button class="recent-dismiss" title="Dismiss — hide this session from Recent (the transcript is kept)"
+                aria-label="Dismiss ${attrEsc(label)}" data-session="${attrEsc(r.session_id || '')}"
+                data-dismiss="${attrEsc(_dismissKey(r))}"
+                onclick="event.stopPropagation(); chela.dismissRecentSession(this)">${lucideIcon('x')}</button>`;
+}
+
 function _recentRowHtml(r) {
     const label = r.label || r.cwd || r.wid;
     const key = `${r.store} ${r.wid}`;
@@ -534,9 +548,7 @@ function _recentRowHtml(r) {
                 data-store="${attrEsc(r.store)}" data-wid="${attrEsc(r.wid)}"
                 data-session="${attrEsc(r.session_id || '')}" data-epoch="${attrEsc(r.stamped_epoch || '')}"
                 onclick="event.stopPropagation(); chela.resumeSession(this)">Resume</button>
-        <button class="recent-dismiss" title="Dismiss — hide this session from Recent (the transcript is kept)"
-                aria-label="Dismiss ${attrEsc(label)}" data-session="${attrEsc(r.session_id || '')}"
-                onclick="event.stopPropagation(); chela.dismissRecentSession(this)">${lucideIcon('x')}</button>
+        ${_dismissButtonHtml(r, label)}
     </div>`;
 }
 
@@ -544,7 +556,8 @@ function _recentRowHtml(r) {
 // app.py's _dispatcher_owned_wid_epochs) never gets a Resume button, hidden or
 // revealed: resuming it would race the dispatcher's own worktree reap/completion,
 // the same single-writer hazard roster.json/telegram-bindings.json have already hit
-// (three times). It is shown ONLY as a fact, behind the toggle below.
+// (three times). It is shown ONLY as a fact, behind the toggle below — but, like
+// every row the list shows, it can be dismissed (CMX-11).
 function _dispatcherRowHtml(r) {
     const label = r.label || r.cwd || r.wid;
     return `<div class="agent-row recent-row recent-row-dispatcher"
@@ -554,6 +567,7 @@ function _dispatcherRowHtml(r) {
             <div class="ar-top"><span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span></div>
             <div class="ar-sub"><span class="ar-recap" title="${attrEsc(r.cwd || '')}">${escHtml(r.cwd || '')}</span></div>
         </div>
+        ${_dismissButtonHtml(r, label)}
     </div>`;
 }
 
@@ -691,7 +705,12 @@ async function _dismiss(sids, text) {
     if (!sids.length) return;
     const gone = new Set(sids);
     const before = _recentPayload;
-    _recentPayload = { ...before, rows: (before.rows || []).filter(r => !gone.has(r.session_id)) };
+    const keep = r => !gone.has(_dismissKey(r));
+    _recentPayload = {
+        ...before,
+        rows: (before.rows || []).filter(keep),
+        dispatcher_rows: (before.dispatcher_rows || []).filter(keep),
+    };
     _paintRecentSessions();
     if (!(await _postDismiss('/api/restore/dismiss', sids))) {
         _recentPayload = before;
@@ -704,14 +723,15 @@ async function _dismiss(sids, text) {
 
 async function dismissRecentSession(btn) {
     if (!btn) return;
-    const sid = btn.dataset.session;
-    const row = (_recentPayload.rows || []).find(r => r.session_id === sid);
+    const key = btn.dataset.dismiss || btn.dataset.session;
+    const row = [...(_recentPayload.rows || []), ...(_recentPayload.dispatcher_rows || [])]
+        .find(r => _dismissKey(r) === key);
     const label = row ? (row.label || row.cwd || row.wid) : 'session';
-    await _dismiss([sid], `Dismissed ${label}`);
+    await _dismiss([key], `Dismissed ${label}`);
 }
 
 async function clearRecentSessions() {
-    const sids = (_recentPayload.rows || []).map(r => r.session_id).filter(Boolean);
+    const sids = (_recentPayload.rows || []).map(_dismissKey).filter(Boolean);
     if (!sids.length) return;
     const n = sids.length;
     if (!confirm(`Dismiss all ${n} recent session${n === 1 ? '' : 's'}? Transcripts are kept; Undo is offered briefly.`)) return;

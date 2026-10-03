@@ -3,13 +3,15 @@
 The dashboard's Recent sessions list (``/api/restore``, CMX-208) is a view over the
 session-stamped stores ``chela restore`` classifies, so a dead session nobody intends
 to resume would otherwise sit there forever. Dismissing one records its Claude
-session id here and ``/api/restore`` leaves it out (CMX-437).
+session id here and ``/api/restore`` leaves it out (CMX-437). A row that carries no
+session id (a dispatcher row) is recorded by its ``row:<store>|<wid>|<epoch>`` address
+key instead — whatever ``dismiss_key`` ``/api/restore`` gave it (CMX-11).
 
 State is server-side (under ``CHELA_DIR``), like :mod:`chela.launcher`, so a dismiss
 on the phone also hides the row on the desktop. Store shape
 (``CHELA_DIR/dismissed-sessions.json``)::
 
-    {"dismissed": {"<session id>": 1718000000.0, ...}}
+    {"dismissed": {"<session id | row: key>": 1718000000.0, ...}}
 
 This is a HIDE list and nothing more. It never touches a transcript, a
 session-ids/bindings row, or anything ``chela restore`` reads: a dismissed session
