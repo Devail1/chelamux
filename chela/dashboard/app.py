@@ -5222,7 +5222,11 @@ def _start_notifier():
     the dashboard is the always-on process in most deployments — so when
     ``CHELA_NOTIFY_URL`` is set we run the same edge-triggered scan here in a
     single daemon thread (every ``CHELA_NOTIFY_INTERVAL`` seconds) rather than
-    requiring a second long-lived process. No-op when notifications are off."""
+    requiring a second long-lived process. No-op when notifications are off.
+
+    When the daemon runs too, only one of the two sends: ``check_waiting`` gates on the
+    host-wide ``$CHELA_DIR/notify.lock`` (CMX-9), so this thread stays silent while the
+    daemon holds it and takes over if the daemon goes away."""
     if not notify.enabled():
         return
     import threading

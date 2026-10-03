@@ -18,16 +18,28 @@ stdlib ``urllib``):
 
 All sends are best-effort: any failure is logged and swallowed so a flaky
 notifier never disturbs the daemon loop.
+
+**One announcer per host (CMX-9).** Both ``chela run`` (the daemon loop) and the
+dashboard (``_start_notifier``) drive ``check_waiting`` — each exists for deployments
+that lack the other. With both running, each kept its own in-memory ``seen`` set and
+every transition was pushed twice. Now only the process holding an exclusive ``flock``
+on ``$CHELA_DIR/notify.lock`` sends; the other keeps tracking the waiting set silently.
+The lock is held for the holder's lifetime and dropped by the kernel when it dies, so the
+standby takes over on its next tick — and, because it tracked the set all along, it
+announces only transitions that happen after that, never the windows already announced.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
+import threading
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
-from chela import agent_manager, discovery
+from chela import agent_manager, config, discovery
 from chela.config import NOTIFY_KIND, NOTIFY_TITLE, NOTIFY_URL
 
 log = logging.getLogger(__name__)
@@ -105,15 +117,69 @@ def waiting_windows() -> set[str]:
     return out
 
 
-def check_waiting(previously_waiting: set[str]) -> set[str]:
+LOCK_NAME = "notify.lock"
+
+
+class OwnerLock:
+    """The cross-process "I am this host's announcer" lease: a non-blocking exclusive
+    ``flock`` on ``$CHELA_DIR/notify.lock``, kept for as long as this object holds it.
+
+    ``flock`` binds to the open file description, so two instances conflict even inside
+    one process — which is what lets a test stand in for daemon + dashboard."""
+
+    def __init__(self, path: Path | str | None = None):
+        self._path = Path(path) if path is not None else None
+        self._fd: int | None = None
+        self._mu = threading.Lock()
+
+    @property
+    def path(self) -> Path:
+        return self._path if self._path is not None else Path(config.CHELA_DIR) / LOCK_NAME
+
+    def acquire(self) -> bool:
+        """True if this instance holds the lock (taking it now if it is free)."""
+        with self._mu:
+            if self._fd is not None:
+                return True
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+            except OSError:
+                log.exception("notify: cannot open %s", self.path)
+                return False
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                return False
+            self._fd = fd
+            log.info("notify: this process is now the needs-input announcer (pid %d)",
+                     os.getpid())
+            return True
+
+    def release(self) -> None:
+        with self._mu:
+            fd, self._fd = self._fd, None
+        if fd is not None:
+            os.close(fd)   # closing the description drops the flock
+
+
+_owner = OwnerLock()   # this process's lease — shared by every caller in the process
+
+
+def check_waiting(previously_waiting: set[str], owner: OwnerLock | None = None) -> set[str]:
     """Fire one notification per newly-waiting window; return the current set.
 
     Edge-triggered: a window only notifies on the transition into `waiting`, so
-    a pane that sits waiting across many ticks is announced once.
+    a pane that sits waiting across many ticks is announced once. Only the holder of
+    ``owner`` (default: this process's :data:`_owner` lease) sends; a non-holder still
+    returns the current set, so it can take over later without re-announcing.
     """
     if not enabled():
         return set()
     current = waiting_windows()
+    if not (owner or _owner).acquire():
+        return current
     for name in sorted(current - previously_waiting):
         log.info("notify: %s entered waiting", name)
         send(f"{name} is waiting for input", title=NOTIFY_TITLE)
