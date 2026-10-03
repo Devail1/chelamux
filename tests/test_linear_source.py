@@ -5,6 +5,7 @@ transport (`_urlopen_*`) — no test talks to Linear.
 """
 from __future__ import annotations
 
+import copy
 import io
 import json
 import logging
@@ -93,8 +94,10 @@ class FakeLinear:
         self.states = dict(_TYPES)               # the team's workflow states, name → type
 
     def _page(self, nodes):
-        return {"issues": {"nodes": nodes, "pageInfo": {"hasNextPage": False,
-                                                        "endCursor": None}}}
+        # A COPY, as a real response is fresh JSON: handing back the live dicts would let a
+        # cached read "see" later writes, so a stale cache could never fail a test.
+        return {"issues": {"nodes": copy.deepcopy(nodes),
+                           "pageInfo": {"hasNextPage": False, "endCursor": None}}}
 
     def __call__(self, query, variables):
         name = {
@@ -1512,6 +1515,75 @@ def test_a_close_that_tips_the_team_over_keep_done_archives_the_oldest_now(tmp_p
     assert src.close_tasks(["CMX-77"]) == {"CMX-77": "struck"}
     assert _archived_ids(fake) == [oldest]
     assert fake.issues["CMX-77"]["archivedAt"] is None
+
+
+def test_a_close_after_a_sweep_on_the_same_source_sees_the_issue_it_just_closed(tmp_path):
+    """The post-close sweep reads UNCACHED: one tick's source already swept (3 finished,
+    keep_done 3 — nothing to do) and then closes a 4th; the sweep must read the team again
+    and archive the oldest, not replay the first sweep's answer (which has CMX-77 open)."""
+    issues = _finished_team(3) + [issue(77, state="In Review")]
+    fake = FakeLinear(issues)
+    oldest = _by_finish(issues)[0]["id"]
+    src = _src(tmp_path, fake, keep_done=3)
+    assert src.archive_sweep(force=True) == 0
+    fake.issues["CMX-77"]["completedAt"] = "2099-01-01T00:00:00.000Z"
+    assert src.close_tasks(["CMX-77"]) == {"CMX-77": "struck"}
+    assert _archived_ids(fake) == [oldest]
+    assert [n for n in fake.names() if n == "sweep"] == ["sweep", "sweep"]
+    assert linear.read_published_counts()["CMX"]["count"] == 3
+
+
+def _two(a, b):
+    """Two finished issues in page order a, b."""
+    return FakeLinear([a, b])
+
+
+def test_a_canceled_issue_is_dated_by_canceled_at_and_a_done_one_by_completed_at(tmp_path):
+    """Each kind is dated by ITS OWN field, even when the other one is set (a reopened then
+    re-closed issue): keep_done 1 keeps the one that finished LAST by that field."""
+    stale, mid, fresh = ("2026-01-01T00:00:00.000Z", "2026-06-01T00:00:00.000Z",
+                         "2026-09-01T00:00:00.000Z")
+    canceled = issue(1, state="Canceled", finished_at=fresh)
+    canceled["completedAt"] = stale
+    done = issue(2, state="Done", finished_at=mid)
+    fake = _two(canceled, done)
+    _src(tmp_path, fake, keep_done=1).archive_sweep(force=True)
+    assert _archived_ids(fake) == ["uuid-2"]
+
+    done = issue(3, state="Done", finished_at=fresh)
+    done["canceledAt"] = stale
+    canceled = issue(4, state="Canceled", finished_at=mid)
+    fake = _two(done, canceled)
+    _src(tmp_path, fake, keep_done=1).archive_sweep(force=True)
+    assert _archived_ids(fake) == ["uuid-4"]
+
+
+@pytest.mark.parametrize("bad", [None, "", "not-a-date"])
+def test_a_finished_issue_without_a_readable_time_is_archived_first(tmp_path, bad):
+    """It sorts as the OLDEST, so it never pins one of the keep_done slots forever."""
+    for undated_first in (True, False):
+        undated = issue(1, state="Done", finished_at=bad)
+        dated = issue(2, state="Done", finished_at="2020-01-01T00:00:00.000Z")
+        fake = _two(undated, dated) if undated_first else _two(dated, undated)
+        _src(tmp_path, fake, keep_done=1).archive_sweep(force=True)
+        assert _archived_ids(fake) == ["uuid-1"]
+
+
+def test_a_time_without_a_zone_is_utc_and_never_crashes_the_sweep(tmp_path):
+    naive = issue(1, state="Done", finished_at="2026-09-02T00:00:00")
+    aware = issue(2, state="Done", finished_at="2026-09-01T00:00:00.000Z")
+    fake = _two(naive, aware)
+    assert _src(tmp_path, fake, keep_done=1).archive_sweep(force=True) == 1
+    assert _archived_ids(fake) == ["uuid-2"]
+
+
+def test_a_finish_time_tie_keeps_the_higher_numbered_issue_whatever_the_page_order(
+        tmp_path):
+    at = "2026-09-01T00:00:00.000Z"
+    for order in ((1, 2), (2, 1)):
+        fake = FakeLinear([issue(n, state="Done", finished_at=at) for n in order])
+        _src(tmp_path, fake, keep_done=1).archive_sweep(force=True)
+        assert _archived_ids(fake) == ["uuid-1"]
 
 
 def test_an_archived_issue_still_reads_as_terminal_in_fetch_by_ids(tmp_path):
