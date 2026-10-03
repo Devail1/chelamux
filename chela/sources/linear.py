@@ -12,10 +12,11 @@ network tracker that chela itself writes to needs:
   only the configured ready state(s), ordered priority-then-manual-order, with the
   ``blockedBy`` closures :func:`chela.dispatcher._ready` needs.
 * :meth:`LinearSource.close_tasks` — chela marks a merged task Done (the fallback for the
-  GitHub integration, which may not fire for merges into ``dev``) and ARCHIVES it.
-* :meth:`LinearSource.archive_sweep` — the periodic backstop that archives every closed but
-  unarchived issue in the team, whoever closed it, and publishes the team's non-archived
-  issue count for ``chela doctor`` (the free plan caps a workspace at 250).
+  GitHub integration, which may not fire for merges into ``dev``). It does NOT archive it.
+* :meth:`LinearSource.archive_sweep` — the one place chela archives (CMX-8): it keeps the
+  ``keep_done`` most recently finished issues visible and archives only the finished issues
+  older than those, whoever closed them, then publishes the team's non-archived issue count
+  for ``chela doctor`` (the free plan caps a workspace at 250).
 
 Config (workflow front matter, ``tracker:`` block)::
 
@@ -25,6 +26,9 @@ Config (workflow front matter, ``tracker:`` block)::
       ready_states: [Todo]       # the state NAMES a task may be CLAIMED from (default Todo)
       done_state: Done           # optional — the state chela sets on merge; default: the
                                  # team's first state of type `completed`
+      keep_done: 100             # optional — how many of the most recently finished
+                                 # (Done + Canceled) issues stay unarchived; 0 = archive
+                                 # every finished issue. Default 100.
 
 🔐 The API key is read from ``$CHELA_DIR/chela.env`` as exactly ``LINEAR_API_KEY`` — through
 :func:`chela.config.parse_env_file`, at the moment a source is built, never from WORKFLOW.md,
@@ -46,6 +50,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 from chela.sources import Task, apply_risk, highest_risk
@@ -68,6 +73,9 @@ PAGE_SIZE = 100
 MAX_PAGES = 10                       # 1000 issues — four times the free plan's whole cap
 ARCHIVE_SWEEP_INTERVAL_SECONDS = 15 * 60
 ARCHIVES_PER_SWEEP = 50              # a backlog clears over a few sweeps, never in one burst
+# CMX-8: the N most recently finished issues stay on the board; only older ones are archived.
+# Cap arithmetic: 250 − open − keep_done is the headroom left for new issues.
+DEFAULT_KEEP_DONE = 100
 HTTP_TIMEOUT_SECONDS = 20
 BACKOFF_BASE_SECONDS = 60
 BACKOFF_MAX_SECONDS = 15 * 60
@@ -229,7 +237,7 @@ SWEEP_QUERY = """
 query UnarchivedIssues($team: String!, $after: String) {
   issues(first: %d, after: $after, includeArchived: false,
          filter: { team: { key: { eq: $team } } }) {
-    nodes { id identifier archivedAt state { type } }
+    nodes { id identifier number archivedAt completedAt canceledAt state { type } }
     pageInfo { hasNextPage endCursor }
   }
 }
@@ -301,6 +309,38 @@ def over_issue_warning(count: int) -> bool:
     return count > ISSUE_COUNT_WARN_AT
 
 
+def _keep_done(value: object) -> int:
+    """``tracker.keep_done`` as a count ≥ 0. Anything else (unset, negative, not a whole
+    number) is the default, logged once when it was set — a typo never turns into
+    "archive everything"."""
+    if value is None:
+        return DEFAULT_KEEP_DONE
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    _report_once(("keep_done", repr(value)),
+                 f"linear: tracker.keep_done={value!r} is not a whole number ≥ 0 — using "
+                 f"{DEFAULT_KEEP_DONE}")
+    return DEFAULT_KEEP_DONE
+
+
+def _finished_at(node: dict) -> datetime:
+    """When a finished issue finished: ``completedAt`` (Done) or ``canceledAt`` (Canceled).
+    One without a readable time sorts as the OLDEST — it is archived first rather than
+    pinning a slot of the newest ``keep_done`` forever."""
+    state = node.get("state") if isinstance(node.get("state"), dict) else {}
+    first, second = ("canceledAt", "completedAt") if state.get("type") == "canceled" else (
+        "completedAt", "canceledAt")
+    for key in (first, second):
+        raw = node.get(key)
+        if isinstance(raw, str) and raw:
+            try:
+                at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
 def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")[:48].strip("-")
 
@@ -334,6 +374,7 @@ class LinearSource:
         ) or DEFAULT_READY_STATES
         done = wf.get("tracker", "done_state", default=None)
         self.done_state: str | None = str(done).strip() if done else None
+        self.keep_done = _keep_done(wf.get("tracker", "keep_done", default=None))
         self.config_error: str | None = None
         # Same meaning as markdown/gh_issues: True when THIS tick's list_open_tasks() did
         # NOT read the tracker, so [] must not be taken as "nothing is open".
@@ -400,11 +441,11 @@ class LinearSource:
             self._cache[key] = data
         return data
 
-    def _paged(self, query: str, variables: dict) -> list[dict]:
+    def _paged(self, query: str, variables: dict, *, cache: bool = True) -> list[dict]:
         nodes: list[dict] = []
         after = None
         for _ in range(MAX_PAGES):
-            data = self._call(query, {**variables, "after": after})
+            data = self._call(query, {**variables, "after": after}, cache=cache)
             conn = data.get("issues")
             if not isinstance(conn, dict) or not isinstance(conn.get("nodes"), list):
                 raise LinearError("malformed", "issues connection missing")
@@ -513,8 +554,9 @@ class LinearSource:
     # --- writing -------------------------------------------------------------------------
 
     def close_tasks(self, task_ids, *, at: Path | None = None) -> dict[str, str]:
-        """Mark each merged task Done (unless it already is) and ARCHIVE it — the free-plan
-        cap counts Done issues until they are archived. Same outcomes as markdown's strike:
+        """Mark each merged task Done (unless it already is). It does NOT archive it
+        (CMX-8): the sweep applies the ``keep_done`` rule, and runs once right after any
+        close here so the free-plan cap cannot creep. Same outcomes as markdown's strike:
         ``struck`` / ``already`` / ``missing``; ``failed`` when Linear refused. Idempotent,
         and it never raises: a write that fails is logged and retried next tick (the task is
         still open, so the dispatcher still lists it as pending)."""
@@ -553,8 +595,10 @@ class LinearSource:
                     results[tid] = "failed"
                     continue
                 results[tid] = "struck"
-            if not node.get("archivedAt"):
-                self.archive_issue(node["id"], tid)
+        if "struck" in results.values():
+            # A finished issue was just added: if that put the team over keep_done, the
+            # oldest goes now, not up to 15 minutes later.
+            self.archive_sweep(force=True)
         return results
 
     def archive_issue(self, issue_id: str, label: str = "") -> bool:
@@ -571,11 +615,13 @@ class LinearSource:
         return ok
 
     def archive_sweep(self, *, force: bool = False) -> int | None:
-        """The backstop: archive every closed (completed/canceled) but unarchived issue in
-        the team — the ones Linear's GitHub integration closed, or a human did — and
-        publish the team's non-archived count for ``chela doctor``. Throttled to once per
-        :data:`ARCHIVE_SWEEP_INTERVAL_SECONDS` per team unless ``force``. Returns how many
-        it archived, or None when it did not run or could not read."""
+        """Apply the ``keep_done`` rule (CMX-8): of the team's finished (completed/canceled)
+        but unarchived issues — whoever closed them — keep the ``keep_done`` most recently
+        finished and archive the older ones, oldest first. Open issues are never archived
+        and never count toward ``keep_done``. Then publish the team's non-archived count
+        for ``chela doctor``. Throttled to once per :data:`ARCHIVE_SWEEP_INTERVAL_SECONDS`
+        per team unless ``force``. Returns how many it archived, or None when it did not
+        run or could not read."""
         if self.config_error:
             return None
         now = time.monotonic()
@@ -584,30 +630,38 @@ class LinearSource:
             return None
         _last_sweep[self.team] = now
         try:
-            nodes = self._paged(SWEEP_QUERY, {"team": self.team})
+            # Uncached: a sweep right after close_tasks must see the issues it just closed.
+            nodes = self._paged(SWEEP_QUERY, {"team": self.team}, cache=False)
         except LinearError as e:
             log.warning("linear: archive sweep could not read team %s: %s", self.team, e)
             return None
+        finished = [
+            n for n in nodes
+            if isinstance(n, dict) and n.get("id") and not n.get("archivedAt")
+            and isinstance(n.get("state"), dict)
+            and n["state"].get("type") in TERMINAL_STATE_TYPES
+        ]
+        # Newest first; the number breaks a tie so the order never depends on the page.
+        finished.sort(key=lambda n: (_finished_at(n), n.get("number") or 0), reverse=True)
+        older = finished[self.keep_done:]
         archived = 0
-        for node in nodes:
+        for node in reversed(older):              # oldest first: a capped sweep takes those
             if archived >= ARCHIVES_PER_SWEEP:
                 break
-            if not isinstance(node, dict) or node.get("archivedAt") or not node.get("id"):
-                continue
-            state = node.get("state") if isinstance(node.get("state"), dict) else {}
-            if state.get("type") in TERMINAL_STATE_TYPES:
-                if self.archive_issue(node["id"], str(node.get("identifier") or "")):
-                    archived += 1
+            if self.archive_issue(node["id"], str(node.get("identifier") or "")):
+                archived += 1
         remaining = len(nodes) - archived
         _publish_count(self.team, remaining)
         if over_issue_warning(remaining):
             log.warning(
                 "linear: team %s has %d non-archived issues — the free plan stops at %d. "
-                "Archive or delete issues before new ones are refused.",
-                self.team, remaining, ISSUE_CAP,
+                "Lower `keep_done` (now %d), or archive or delete issues, before new ones "
+                "are refused.",
+                self.team, remaining, ISSUE_CAP, self.keep_done,
             )
         if archived:
-            log.info("linear: archived %d closed issue(s) in team %s", archived, self.team)
+            log.info("linear: archived %d finished issue(s) in team %s (keeping the newest "
+                     "%d)", archived, self.team, self.keep_done)
         return archived
 
     def create_issue(self, title: str, description: str = "", priority: int = 0,
