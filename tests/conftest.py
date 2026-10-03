@@ -276,6 +276,13 @@ def _isolate_chela_dir(tmp_path, monkeypatch):
     scratch = tmp_path / ".chela"
     monkeypatch.setenv("CHELA_DIR", str(scratch))
     monkeypatch.setattr(config, "CHELA_DIR", scratch)
+    # ``userconfig._PATH`` is latched from ``config.CHELA_DIR`` at ITS import — i.e. the
+    # session-wide sandbox, shared by every test on an xdist worker. Without this, one
+    # test's ``userconfig.set_("share_typing", True)`` silently flipped the defaults of
+    # whichever test ran next on the same worker (CMX-7: the judge's baseline failed
+    # ``test_share_typing_defaults_off`` 3/3 while every other run was green).
+    from chela import userconfig
+    monkeypatch.setattr(userconfig, "_PATH", scratch / "config.json")
 
 
 class LiveChelaDirEscape(BaseException):

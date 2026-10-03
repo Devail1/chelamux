@@ -451,6 +451,104 @@ guest. This list is the test.
     `docker ps -a --filter label=dev.chela.share-sandbox` is empty, including the
     `chela-share-web-*` sidecar.
 
+## Asking for more access (requests and approvals)
+
+A sandboxed session sees only its workspace, plus the public web in web mode. When the guest
+needs more, the guest or its Claude **asks**, and you decide on the host. A request never
+does anything by itself.
+
+### Filing a request (inside the session)
+
+```bash
+python3 ~/bin/chela-request mount /srv/datasets --why "the CSVs for the report"
+python3 ~/bin/chela-request mount /srv/drafts --rw --why "save the edited draft"
+python3 ~/bin/chela-request domain jobs.example.com --why "the job listing"
+python3 ~/bin/chela-request operation "push my branch" --why "ready for review"
+```
+
+The script lives in the container's temporary HOME, and the guest's Claude finds these
+instructions in its `~/.claude/CLAUDE.md`. Both are written at launch, so no extra mount
+is needed. The script POSTs to `/chela/request` on the session's token proxy. The proxy
+checks the shape and appends one line to `requests.jsonl` in the session's host directory
+(`~/.chela/share-sessions/<id>/`, mounted into the proxy only). Each session can file at
+most 50 requests, and the file is capped at 256 KB. **The route is write-only.** Nothing in
+the guest's reach reads a request or a decision back, so the guest can't see, approve or
+deny its own requests.
+
+### Deciding (on the host)
+
+- **Dashboard:** the **🙋 N access requests** pill appears next to the shares pill while a
+  request waits. It opens a sheet showing which session asked, what it asked for, and why.
+  Each request gets **Approve** (with a duration, default **60 min**) or **Deny**. An
+  approval in force shows the time left and a **Revoke** button.
+- **Push:** with `CHELA_NOTIFY_URL` set (ntfy, or a Telegram bot URL), each new request is
+  pushed once. Every request is also a `share.request_filed` event in the event log.
+- **Terminal:** `chela share-requests` lists requests, and
+  `chela share-requests approve|deny|revoke <id> [--minutes N] [--rw]` decides one.
+
+Nothing approves on its own: there's no auto-approve, no default yes and no rule. chela's
+merge-gate hook denies `chela share-requests approve` and the dashboard's
+`/api/share-requests/…/approve` route to every Claude session, so an agent can't approve
+for you. Approving also needs *Guest typing* on.
+
+### What an approval does
+
+- **mount**: read-only by default. Read-write needs the guest to have asked for `--rw`
+  **and** you to tick *allow write*. The launcher **re-launches the guest container** with
+  the extra bind mount at `/extra/<name>`. The running container is never given more
+  access. The workspace's hygiene applies to the extra directory too: `.env*` files are
+  masked, and in a writable mount `.git`/`.claude`/… stay read-only. **A relaunch restarts
+  the guest's Claude conversation**, because its HOME is temporary. The live sandbox check
+  briefly fails while the container is down, so a live typing share of that window may
+  end; share it again.
+- **domain**: web sessions only (refused on a `none` session). When you set
+  `CHELA_SHARE_WEB_ALLOW`, the domain joins that session's allow-list, and the web proxy
+  sidecar is restarted with it. With no allow-list every public host is already allowed, so
+  the approval is only recorded. `CHELA_SHARE_WEB_DENY` always wins.
+- **operation**: recorded and audited only. chela never runs anything for the guest; you
+  do it by hand.
+
+### What is always refused
+
+These are refused **even when approved**. The check runs when you approve, again every
+time the launcher builds the container, and again in the live sandbox check, which fails a
+container carrying any mount outside the approvals in force:
+
+- `$HOME` itself, the filesystem root, and any ancestor of `$HOME`;
+- the secrets directories under `$HOME` (`.ssh`, `.claude`, `.chela`, `.config`, `.aws`,
+  `.gnupg`, `.docker`, `.kube`, `.secrets`, `.local`, …), `CHELA_DIR`, Claude Code's
+  config directory and the sandboxed sessions' own directory, along with anything inside
+  them or containing them;
+- the tmux socket directory (`/tmp/tmux-<uid>`, so `/tmp` itself), `/proc`, `/sys`,
+  `/dev`, `/run`, `/var/run` (the docker socket), `/etc`, `/boot`, `/root`,
+  `/var/lib/docker`, and `/mnt` with everything under it (`/mnt/c`, …);
+- a symlink into any of these. The path is checked as written and as resolved, and an
+  approval pins the resolved path, so re-pointing a symlink later can't redirect it.
+
+The sheet shows the reason, and that request has only **Deny**.
+
+### When it ends
+
+- **Expiry:** the approval stops counting the moment its time is up. Within about 2 s the
+  launcher sees the change and relaunches the container without it
+  (`share.request_expired`).
+- **Kill switch:** **Stop** on a share (or *Stop all*) revokes every approval of that
+  sandboxed session. Turning **Guest typing** off revokes every approval of every session,
+  whether you do it in Settings or any other way, because each launcher checks the setting
+  too (`share.request_revoked`).
+- **Revoke:** ends one approval from the sheet or the CLI.
+
+### Audit trail
+
+| event | when |
+|---|---|
+| `share.request_filed` | a request arrived (with the guest's reason) |
+| `share.request_approved` | you approved it (who, duration, read-write or not, `expires_at`) |
+| `share.request_denied` | you denied it |
+| `share.request_refused` | an approval was refused by the deny-list |
+| `share.request_expired` | an approval's time ran out |
+| `share.request_revoked` | an approval was revoked (Revoke, Stop, Guest typing off) |
+
 ## The trusted-peer override (UNSANDBOXED)
 
 For a very trusted peer, a single share can allow typing into a window that is **not**

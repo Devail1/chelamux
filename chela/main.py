@@ -1015,6 +1015,42 @@ def cmd_share_session(args) -> None:
           "Guest typing")
 
 
+def cmd_share_requests(args) -> None:
+    """🙋 The operator's half of a sandboxed guest's access requests (CMX-7), for a plain
+    terminal. Lists them with no action. A Claude session is denied ``approve`` by chela's
+    merge-gate hook (:mod:`chela.mergegate`): only a human approves."""
+    from chela import share_requests
+    share_requests.ingest_all()
+    share_requests.sweep()
+    by = f"terminal:{os.environ.get('USER') or 'operator'}"
+    if args.action == "list":
+        rows = share_requests.listing()
+        if not rows:
+            print("No access requests.")
+        for r in rows:
+            who = r.get("window") or r.get("wid") or r.get("sid")
+            extra = (f"  ⛔ can't approve: {r['refusal']}" if r.get("refusal") else
+                     f"  {r['seconds_left'] // 60} min left" if r.get("seconds_left") is not None else "")
+            print(f"{r['id']}  [{r['status']}]  {who}: {r['description']}{extra}")
+            if r.get("reason"):
+                print(f"    why: {r['reason']}")
+        return
+    if not args.request:
+        print(f"share-requests {args.action}: which request? (see `chela share-requests`)")
+        sys.exit(2)
+    if args.action == "approve":
+        ok, msg = share_requests.approve(args.request, by=by, minutes=args.minutes, rw=args.rw)
+    elif args.action == "deny":
+        ok, msg = share_requests.deny(args.request, by=by)
+    else:
+        ok = bool(share_requests.revoke(args.request, by=by))
+        msg = "revoked" if ok else "that request holds no approval in force"
+    if not ok:
+        print(f"share-requests: {msg}")
+        sys.exit(1)
+    print(f"✅ {msg}: {args.request}")
+
+
 def cmd_whoami(args) -> None:
     """Print this agent's own window id (CHELA_WID / derived from tmux)."""
     wid = orchestrator.self_wid()
@@ -2874,6 +2910,19 @@ def main() -> None:
              "rate-limited, logged egress proxy, plus a headless browser in the guest "
              "(see docs/SHARE_SANDBOX.md)")
 
+    p_sreq = sub.add_parser(
+        "share-requests",
+        help="🙋 List, approve, deny or revoke a sandboxed guest's access requests — for a "
+             "HUMAN in a plain terminal; a Claude session is denied `approve` by chela's hook")
+    p_sreq.add_argument("action", nargs="?", default="list",
+                        choices=["list", "approve", "deny", "revoke"])
+    p_sreq.add_argument("request", nargs="?", default=None, help="the request id")
+    p_sreq.add_argument("--minutes", type=int, default=None,
+                        help="approve: how long it lasts (default 60, at most 1440)")
+    p_sreq.add_argument("--rw", action="store_true",
+                        help="approve a mount read-write (only if the guest asked for it; "
+                             "default read-only)")
+
     p_peek = sub.add_parser(
         "peek", help="Filtered status view of a window (status + recap + cwd + health)")
     p_peek.add_argument("wid", nargs="?", help="Target window id (@N, N, or 'self'); default self")
@@ -3500,6 +3549,8 @@ def main() -> None:
         cmd_plugin(args)
     elif args.command == "share-session":
         cmd_share_session(args)
+    elif args.command == "share-requests":
+        cmd_share_requests(args)
     elif args.command == "whoami":
         cmd_whoami(args)
     elif args.command == "peek":

@@ -14,6 +14,7 @@ import { enterDecisions, tickDecisions } from './decisions.js';
 import { enterResources, tickResources } from './resources.js';
 import { enterStatusHealth, tickStatusHealth } from './statushealth.js';
 import { checkForUpdate } from './version.js';
+import { tickAccessRequests } from './accessreq.js';
 
 // ---------------------------------------------------------------------------
 // Refresh loop
@@ -42,6 +43,8 @@ async function refresh() {
         await tickResources();
         // Native status feed health marker — same reasoning: no push side, a plain poll.
         await tickStatusHealth();
+        // 🙋 Sandboxed guests' access requests (CMX-7) — the pill shows on every tab.
+        await tickAccessRequests();
         if (typeof refreshLauncher === 'function') refreshLauncher();
         const view = findView(VIEWS, currentTab);
         if (view && view.tick) await view.tick();

@@ -27,7 +27,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, sandbox_status, scheduler, sessionids, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -1462,6 +1462,44 @@ def _access_gate(wid: str, mode: str, data: dict):
                             "ttl_s": minutes * 60.0}}, None
 
 
+def _revoke_approvals_of(wid: str, reason: str) -> None:
+    ident = share_sandbox.pane_identity(wid)
+    if not isinstance(ident, str):
+        share_requests.revoke_session(ident[1], reason, by=_granted_by())
+
+
+# 🙋 Access requests from sandboxed guests (CMX-7). The guest can only FILE one (through its
+# proxy); these routes are the operator's half. chela.mergegate refuses them to a Claude
+# session, so nothing but a human approves.
+@app.route("/api/share-requests")
+@require_auth
+def api_share_requests():
+    share_requests.ingest_all()
+    share_requests.sweep()
+    return jsonify({"requests": share_requests.listing(),
+                    "share_typing": config.share_typing_enabled(),
+                    "default_minutes": share_requests.DEFAULT_MINUTES,
+                    "max_minutes": share_requests.MAX_MINUTES})
+
+
+@app.route("/api/share-requests/<rid>/<action>", methods=["POST"])
+@require_auth
+def api_share_request_decide(rid, action):
+    data = request.get_json(silent=True) or {}
+    by = _granted_by()
+    if action == "approve":
+        ok, msg = share_requests.approve(rid, by=by, minutes=data.get("minutes"),
+                                         rw=data.get("rw") is True)
+    elif action == "deny":
+        ok, msg = share_requests.deny(rid, by=by)
+    elif action == "revoke":
+        ok = bool(share_requests.revoke(rid, by=by))
+        msg = "revoked" if ok else "that request holds no approval in force"
+    else:
+        abort(404)
+    return jsonify({"ok": ok, "message" if ok else "error": msg}), (200 if ok else 409)
+
+
 @app.route("/api/term/<wid>/share-options")
 @require_auth
 def api_term_share_options(wid):
@@ -1494,6 +1532,11 @@ def api_term_share(wid):
     on = bool(data.get("on", True))
     if not on:
         _revoke_share(wid)
+        # The kill switch (CMX-7): stopping a share also ends every access approval of the
+        # sandboxed session behind it. Only on this deliberate Stop — the reaper and a
+        # fail-closed bridge also land in _revoke_share, and a relaunch that briefly
+        # un-verifies the sandbox must not revoke the very approval it is applying.
+        _revoke_approvals_of(wid, "share stopped")
         return jsonify({"ok": True, "shared": False})
     mode = (data.get("mode") or collab_stream.MODE_VIEW).strip()
     if mode not in (collab_stream.MODE_VIEW, collab_stream.MODE_TYPING, collab_stream.MODE_UNSANDBOXED):
@@ -2484,6 +2527,9 @@ def api_config():
                     return jsonify({"error": "invalid share_typing",
                                     "valid": [True, False]}), 400
                 userconfig.set_(config.SHARE_TYPING_KEY, enabled)
+            if not config.share_typing_enabled():
+                # The kill switch (CMX-7): Guest typing off ends every access approval.
+                share_requests.revoke_all("guest typing turned off", by=_granted_by())
         if "file_drop" in data:
             # CMX-412: same strict-bool rule. Read per upload, so it applies at once.
             raw = data.get("file_drop")
