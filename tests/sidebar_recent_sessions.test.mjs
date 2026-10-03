@@ -40,10 +40,12 @@ const ROW = {
 };
 
 // A dispatcher-owned row (CMX-208 rework) — never carries session_id, and must never
-// render a Resume button, hidden or revealed.
+// render a Resume button, hidden or revealed. Its `dismiss_key` is the address key
+// /api/restore gives a row with no session id (CMX-11).
 const DISPATCHER_ROW = {
     store: 'session-ids', wid: '@138', cwd: '/home/liav/.chela/worktrees/chelamux/judge-cmx-206',
     label: 'judge-cmx-206', stamped_epoch: '786-1784045825',
+    dismiss_key: 'row:session-ids|@138|786-1784045825',
 };
 
 let RECENT = { rows: [], dispatcher_rows: [], hidden: 0 };   // what GET /api/restore answers with
@@ -278,7 +280,7 @@ test('the dispatcher toggle reads exactly right, singular, plural and expanded',
 
 // --- dismiss (CMX-437) -------------------------------------------------------------
 
-test('a resumable row has a dismiss ×; a dispatcher row has neither × nor Resume', () => {
+test('a resumable row has a dismiss ×; a dispatcher row has a × but never a Resume', () => {
     nav.renderRecentSessions({ rows: [ROW], dispatcher_rows: [DISPATCHER_ROW], hidden: 1 });
     window.chela.toggleDispatcherSessions();
     try {
@@ -286,8 +288,31 @@ test('a resumable row has a dismiss ×; a dispatcher row has neither × nor Resu
         assert.ok(x, 'no dismiss control on a resumable row');
         assert.equal(x.dataset.session, ROW.session_id);
         const d = document.querySelector('#side-recent .recent-row-dispatcher');
-        assert.equal(d.querySelector('.recent-dismiss'), null);
+        const dx = d.querySelector('.recent-dismiss');
+        assert.ok(dx, 'every row the list shows must be dismissable (CMX-11)');
+        assert.equal(dx.dataset.dismiss, DISPATCHER_ROW.dismiss_key);
         assert.equal(d.querySelector('.recent-resume'), null);
+    } finally {
+        window.chela.toggleDispatcherSessions();
+    }
+});
+
+test('CMX-11: × on a dispatcher row (no session id) POSTs its dismiss_key and removes only it', async () => {
+    const OTHER_D = { ...DISPATCHER_ROW, wid: '@139', label: 'judge-cmx-207',
+                      dismiss_key: 'row:session-ids|@139|786-1784045825' };
+    nav.renderRecentSessions({ rows: [ROW], dispatcher_rows: [DISPATCHER_ROW, OTHER_D], hidden: 2 });
+    window.chela.toggleDispatcherSessions();
+    try {
+        await window.chela.dismissRecentSession(document.querySelector(
+            `#side-recent .recent-row-dispatcher .recent-dismiss[data-dismiss="${DISPATCHER_ROW.dismiss_key}"]`));
+
+        assert.deepEqual(DISMISS_CALLS, [['dismiss', { session_ids: [DISPATCHER_ROW.dismiss_key] }]]);
+        const left = [...document.querySelectorAll('#side-recent .recent-row-dispatcher .recent-dismiss')]
+            .map(b => b.dataset.dismiss);
+        assert.deepEqual(left, [OTHER_D.dismiss_key], 'only the dismissed dispatcher row may leave');
+        assert.equal(document.querySelectorAll('#side-recent .recent-resume').length, 1,
+            'the resumable row is untouched');
+        assert.match(document.querySelector('.recent-undo-toast').textContent, /Dismissed judge-cmx-206/);
     } finally {
         window.chela.toggleDispatcherSessions();
     }

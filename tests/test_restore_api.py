@@ -104,7 +104,8 @@ def test_lists_a_resumable_MANUAL_row(client, monkeypatch):
     assert resp.status_code == 200
     data = resp.get_json()
     assert data == {"rows": [{"store": "session-ids", "wid": "@5", "session_id": SID_DEAD,
-                              "cwd": CWD, "label": "five", "stamped_epoch": OLD}],
+                              "cwd": CWD, "label": "five", "stamped_epoch": OLD,
+                              "dismiss_key": SID_DEAD}],
                     "dispatcher_rows": [], "hidden": 0}
 
 
@@ -175,7 +176,8 @@ def test_a_dispatcher_owned_row_via_the_runs_own_window_is_hidden_not_resumable(
     assert data["rows"] == []
     assert data["hidden"] == 1
     assert data["dispatcher_rows"] == [{"store": "session-ids", "wid": "@138", "cwd": JUDGE_CWD,
-                                        "label": "judge-cmx-206", "stamped_epoch": OLD}]
+                                        "label": "judge-cmx-206", "stamped_epoch": OLD,
+                                        "dismiss_key": f"row:session-ids|@138|{OLD}"}]
     assert "session_id" not in data["dispatcher_rows"][0], (
         "a dispatcher-owned row has no resume affordance — it must not even carry the "
         "session id a resume request would need"
@@ -220,7 +222,7 @@ def test_a_row_named_like_a_dispatcher_convention_but_unowned_stays_resumable(cl
 
     assert data["rows"] == [{"store": "session-ids", "wid": "@200", "session_id": "human-sid",
                              "cwd": "/home/liav/scratch/whatever", "label": "cmx-999",
-                             "stamped_epoch": OLD}]
+                             "stamped_epoch": OLD, "dismiss_key": "human-sid"}]
     assert data["dispatcher_rows"] == []
     assert data["hidden"] == 0
 
@@ -237,7 +239,8 @@ def test_a_dispatcher_row_at_a_different_epoch_no_longer_owns_the_wid(client, mo
     data = client.get("/api/restore").get_json()
 
     assert data["rows"] == [{"store": "session-ids", "wid": "@138", "session_id": JUDGE_SID,
-                             "cwd": JUDGE_CWD, "label": "judge-cmx-206", "stamped_epoch": OLD}]
+                             "cwd": JUDGE_CWD, "label": "judge-cmx-206", "stamped_epoch": OLD,
+                             "dismiss_key": JUDGE_SID}]
     assert data["dispatcher_rows"] == []
 
 
@@ -260,7 +263,8 @@ def test_a_row_whose_cwd_no_longer_exists_is_hidden_not_resumable(client, monkey
     assert data["rows"] == []
     assert data["hidden"] == 1
     assert data["dispatcher_rows"] == [{"store": "session-ids", "wid": "@9", "cwd": "/gone",
-                                        "label": "five", "stamped_epoch": OLD}]
+                                        "label": "five", "stamped_epoch": OLD,
+                                        "dismiss_key": f"row:session-ids|@9|{OLD}"}]
     assert "session_id" not in data["dispatcher_rows"][0], (
         "a dead-cwd row has no resume affordance — it must not even carry the "
         "session id a resume request would need"
@@ -625,3 +629,177 @@ def test_dismiss_rejects_a_malformed_body(client, body, dismissed_store):
 def test_dismiss_gated_on_terminals_enabled(client, monkeypatch):
     monkeypatch.setattr(dash.config, "TERMINALS_ENABLED", False)
     assert _dismiss(client, SID_DEAD).status_code == 404
+
+
+# --------------------------------------------------------------------------
+# CMX-11 — a FINISHED run's row is history, not a restore candidate; and every row
+# /api/restore returns (dispatcher rows included, which carry no session id) can be
+# dismissed.
+# --------------------------------------------------------------------------
+
+JUDGE_407_CWD = "/home/liav/.chela/worktrees/chelamux/judge-e0090b0d9a04"
+JUDGE_407_SID = "eeeeeeee-1111-2222-3333-444444444444"
+
+
+def _judge_407():
+    """The live shape from the CMX-11 report: ``judge-cmx-407`` at ``@329``, its
+    worktree long reaped."""
+    return _manual(store="session-ids", wid="@329", session_id=JUDGE_407_SID,
+                   cwd=JUDGE_407_CWD, label="judge-cmx-407", stamped_epoch=OLD)
+
+
+def _run_407(status="done", pr_state="merged", **over):
+    row = {"task_id": "e0090b0d9a04", "status": status, "pr_state": pr_state,
+           "attempt": 1, "window_id": "@300", "window_epoch": OLD,
+           "judge_window_id": "@329", "judge_window_epoch": OLD,
+           "worktree_path": None, "workflow_path": None}
+    row.update(over)
+    return row
+
+
+def test_a_finished_runs_judge_row_with_a_gone_worktree_is_not_returned(client, monkeypatch):
+    """🔴 GUARD (CMX-11): run done + PR merged, judge window gone, worktree reaped —
+    the row is not a restore candidate in EITHER bucket."""
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_judge_407()])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [_run_407()])
+    monkeypatch.setattr(dash, "_cwd_is_live", lambda cwd: False)
+
+    data = client.get("/api/restore").get_json()
+
+    assert data == {"rows": [], "dispatcher_rows": [], "hidden": 0}
+
+
+def test_the_same_row_for_a_RUNNING_run_is_still_a_dispatcher_row(client, monkeypatch):
+    """Negative control: the run is not terminal and its cwd is present — the row stays
+    in ``dispatcher_rows`` (shown behind the toggle, never resumable)."""
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_judge_407()])
+    monkeypatch.setattr(dash.dispatcher, "list_runs",
+                        lambda: [_run_407(status="running", pr_state=None)])
+    monkeypatch.setattr(dash, "_cwd_is_live", lambda cwd: True)
+
+    data = client.get("/api/restore").get_json()
+
+    assert data["rows"] == []
+    assert [r["label"] for r in data["dispatcher_rows"]] == ["judge-cmx-407"]
+
+
+def test_a_running_runs_row_with_a_gone_cwd_is_still_a_dispatcher_row(client, monkeypatch):
+    """Only a FINISHED run's row is dropped — a dead cwd on a live run is still shown."""
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_judge_407()])
+    monkeypatch.setattr(dash.dispatcher, "list_runs",
+                        lambda: [_run_407(status="running", pr_state=None)])
+    monkeypatch.setattr(dash, "_cwd_is_live", lambda cwd: False)
+
+    data = client.get("/api/restore").get_json()
+
+    assert [r["label"] for r in data["dispatcher_rows"]] == ["judge-cmx-407"]
+
+
+def test_a_finished_runs_row_whose_cwd_still_exists_is_still_a_dispatcher_row(client, monkeypatch):
+    """Only BOTH facts together (terminal run AND gone cwd) make it history."""
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_judge_407()])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [_run_407()])
+    monkeypatch.setattr(dash, "_cwd_is_live", lambda cwd: True)
+
+    data = client.get("/api/restore").get_json()
+
+    assert [r["label"] for r in data["dispatcher_rows"]] == ["judge-cmx-407"]
+
+
+def test_a_finished_runs_row_is_dropped_via_its_worktree_path_after_a_renumber(client, monkeypatch):
+    """CMX-330 shape: a tmux restart renumbered the window, so the (wid, epoch) join
+    misses — the run's recorded ``worktree_path`` still identifies the row."""
+    wt = "/home/liav/.chela/worktrees/chelamux/cmx-407"
+    row = _manual(store="session-ids", wid="@9", session_id=JUDGE_407_SID, cwd=wt,
+                  label="cmx-407", stamped_epoch="9000-1")
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [row])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [_run_407(worktree_path=wt)])
+    monkeypatch.setattr(dash, "_cwd_is_live", lambda cwd: False)
+
+    assert client.get("/api/restore").get_json()["dispatcher_rows"] == []
+
+
+def test_a_finished_runs_judge_row_is_dropped_via_its_judge_worktree_after_a_renumber(
+        client, monkeypatch, tmp_path):
+    """The judge's worktree is never on the run row — it is derived from the workflow
+    (:func:`chela.judge.judge_worktree_path`). After a renumber that is the only join
+    left for the exact CMX-11 row."""
+    root = tmp_path / "worktrees"
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text(f"---\nproject_key: CMX\nworkspace:\n  root: {root}\n---\nbody\n")
+    judge_cwd = str(root / "judge-e0090b0d9a04")
+    row = _manual(store="session-ids", wid="@9", session_id=JUDGE_407_SID, cwd=judge_cwd,
+                  label="judge-cmx-407", stamped_epoch="9000-1")
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [row])
+    monkeypatch.setattr(dash.dispatcher, "list_runs",
+                        lambda: [_run_407(workflow_path=str(wf))])
+    monkeypatch.setattr(dash, "_cwd_is_live", lambda cwd: False)
+
+    assert client.get("/api/restore").get_json()["dispatcher_rows"] == []
+
+
+def test_a_human_row_with_a_gone_cwd_is_not_swept_up_by_a_finished_run(client, monkeypatch):
+    """🔴 Counterweight: a finished run elsewhere must not swallow an unrelated row
+    whose cwd happens to be gone too — the join is exact, not "any finished run"."""
+    human = _manual(wid="@200", session_id="human-sid", cwd="/home/liav/scratch/gone",
+                    label="scratch", stamped_epoch=OLD)
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [human])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [_run_407()])
+    monkeypatch.setattr(dash, "_cwd_is_live", lambda cwd: False)
+
+    assert [r["label"] for r in client.get("/api/restore").get_json()["dispatcher_rows"]] == ["scratch"]
+
+
+def test_every_returned_row_carries_a_dismiss_key_and_dismissing_it_hides_it(
+        client, monkeypatch, dismissed_store):
+    """🔴 GUARD (CMX-11): every row ``/api/restore`` returns — a resumable row AND a
+    dispatcher row, which carries no ``session_id`` — can be hidden through
+    ``/api/restore/dismiss``, persisted server-side so every device agrees."""
+    import json
+
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual(), _judge_407()])
+    monkeypatch.setattr(dash.dispatcher, "list_runs",
+                        lambda: [_run_407(status="running", pr_state=None)])
+    data = client.get("/api/restore").get_json()
+    shown = data["rows"] + data["dispatcher_rows"]
+    assert len(shown) == 2
+    disp = data["dispatcher_rows"][0]
+    assert "session_id" not in disp, "a dispatcher row still never carries its session id"
+
+    for r in shown:
+        assert r["dismiss_key"], f"row {r['wid']} has nothing to dismiss it by"
+        assert _dismiss(client, r["dismiss_key"]).status_code == 200
+
+    on_disk = json.loads(dismissed_store.read_text())["dismissed"]
+    assert disp["dismiss_key"] in on_disk
+    assert client.get("/api/restore").get_json() == {"rows": [], "dispatcher_rows": [], "hidden": 0}
+
+
+def test_dismissing_one_dispatcher_row_leaves_the_others(client, monkeypatch):
+    """The no-session-id key is the row's own address — dismissing one dispatcher row
+    must not hide a sibling."""
+    other = _manual(store="session-ids", wid="@330", session_id="ffff", cwd="/x",
+                    label="cmx-408", stamped_epoch=OLD)
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_judge_407(), other])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [
+        _run_407(status="running", pr_state=None),
+        {"task_id": "x", "status": "running", "window_id": "@330", "window_epoch": OLD}])
+
+    _dismiss(client, f"row:session-ids|@329|{OLD}")
+
+    assert [r["label"] for r in client.get("/api/restore").get_json()["dispatcher_rows"]] == ["cmx-408"]
+
+
+def test_dismissing_a_dispatcher_row_never_touches_session_ids_or_bindings(client, monkeypatch):
+    """⛔ CMX-437 contract: the dismiss is a hide — no session-ids/bindings row is
+    written or removed, and nothing is restored/applied."""
+    from chela.telegram import bindings as bindings_mod
+
+    touched = []
+    monkeypatch.setattr(dash.sessionids, "set_session_id", lambda *a, **k: touched.append("set"))
+    monkeypatch.setattr(restore_mod, "apply", lambda *a, **k: touched.append("apply"))
+    monkeypatch.setattr(bindings_mod.BindingRegistry, "save",
+                        lambda *a, **k: touched.append("bindings"), raising=False)
+
+    assert _dismiss(client, f"row:session-ids|@329|{OLD}").status_code == 200
+    assert touched == []
