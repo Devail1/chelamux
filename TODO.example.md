@@ -1,8 +1,10 @@
 ---
 # This is the TEMPLATE for a chela dispatch tracker. Copy it to `TODO.md`
 # (which is gitignored — your queue is per-install, not shipped) and add your
-# own work items. `WORKFLOW.md` points at `TODO.md` as its tracker; the
-# dispatcher reads it from disk, so it never has to be committed.
+# own work items. A markdown-tracker WORKFLOW.md (e.g. `examples/WORKFLOW.md`)
+# points at `TODO.md` as its tracker; the dispatcher reads it from disk, so it
+# never has to be committed. (chelamux's own root WORKFLOW.md uses a Linear
+# tracker instead — see docs/LINEAR_TRACKER.md.)
 #
 #   cp TODO.example.md TODO.md
 #

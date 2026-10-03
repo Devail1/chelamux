@@ -237,9 +237,10 @@ uv run chela status
 uv run chela schedule add researcher --every 1h --prompt <span class="g">"Run your research cycle."</span>
 uv run chela run</pre>
 
-    <h3>3. Dispatch a TODO list into PRs</h3>
+    <h3>3. Dispatch a TODO list (or a Linear team) into PRs</h3>
     <p>Drop a <code>WORKFLOW.md</code> + <code>TODO.md</code> into a repo (copy <code>examples/</code>),
-    then point chela at it. Each open <code>- [ ]</code> becomes a worktree → an agent → a PR.</p>
+    then point chela at it. Each open <code>- [ ]</code> becomes a worktree → an agent → a PR.
+    The queue can also be GitHub issues or a Linear team — see <a href="#linear">the Linear tracker</a>.</p>
     <pre>uv run chela dispatch /path/to/repo/WORKFLOW.md --once   <span class="c"># one pass</span>
 uv run chela dispatch /path/to/repo/WORKFLOW.md          <span class="c"># poll forever</span></pre>
   </section>
@@ -302,8 +303,8 @@ chela schedule remove 3        <span class="c"># delete by id</span></pre>
   <!-- ───────── Dispatch ───────── -->
   <section class="doc-section" id="dispatch">
     <h2>Dispatching work (the headline feature)</h2>
-    <p class="lede">Turn a markdown checklist into a stream of pull requests, each built by its own
-    isolated agent.</p>
+    <p class="lede">Turn a markdown checklist — or GitHub issues, or a Linear team — into a stream of
+    pull requests, each built by its own isolated agent.</p>
 
     <h3>TODO.md — the work list</h3>
     <p>Every unchecked <code>- [ ]</code> bullet is a work item. Append
@@ -320,7 +321,7 @@ chela schedule remove 3        <span class="c"># delete by id</span></pre>
     <pre><span class="k">project_key:</span> PROJ          <span class="c"># branches/windows are &lt;key&gt;-&lt;n&gt;, e.g. proj-1</span>
 
 <span class="k">tracker:</span>
-  <span class="k">kind:</span> markdown          <span class="c"># markdown TODO.md — also: gh_issues</span>
+  <span class="k">kind:</span> markdown          <span class="c"># markdown TODO.md — also: gh_issues, linear</span>
   <span class="k">path:</span> TODO.md           <span class="c"># relative to this file</span>
 
 <span class="k">workspace:</span>
@@ -339,6 +340,20 @@ chela schedule remove 3        <span class="c"># delete by id</span></pre>
   <span class="c"># after_create: seed .claude/settings.local.json (least-privilege perms)</span>
   <span class="c"># before_run:   uv sync --quiet || true   (lockfile sync / codegen)</span>
   <span class="c"># after_done:   runs in the repo when the PR merges (e.g. a deploy)</span></pre>
+
+    <h3 id="linear">Linear — the work list as a team</h3>
+    <p>A workflow can read its queue from a Linear team instead of <code>TODO.md</code>
+    (<code>TODO.md</code> stays fully supported). Claimable issues are those in a
+    <code>ready_states</code> state (default <code>Todo</code>) whose <em>blocked by</em> relations are
+    all done; the issue description becomes the agent's brief.</p>
+    <pre><span class="k">tracker:</span>
+  <span class="k">kind:</span> linear
+  <span class="k">team:</span> ABC                <span class="c"># the team KEY — issues are ABC-12, ABC-13, …</span>
+  <span class="k">ready_states:</span> [Todo]     <span class="c"># optional: the states chela may claim from</span></pre>
+    <p>The API key goes in <code>$CHELA_DIR/chela.env</code> (normally <code>~/.chela/chela.env</code>) as
+    <code>LINEAR_API_KEY=…</code> — never in <code>WORKFLOW.md</code>, which refuses it. chela never hands
+    the key to the agents, judges or hooks it launches. Full reference:
+    <a href="https://github.com/Devail1/chelamux/blob/main/docs/LINEAR_TRACKER.md">docs/LINEAR_TRACKER.md</a>.</p>
 
     <h3>The lifecycle</h3>
     <p>Each task is keyed by a stable SHA of its source line (idempotent — a task is never picked up
@@ -721,6 +736,7 @@ cd chela/collab-relay && npx wrangler deploy
         <tr><td>CHELA_TERMINALS_ENABLED</td><td>true</td><td>Embedded ttyd terminal wall (streams live; loopback-guarded)</td></tr>
         <tr><td>CHELA_TERMINALS_EXPOSE</td><td>false</td><td>Serve the writable wall on a non-loopback bind too (RCE risk — opt-in)</td></tr>
         <tr><td>CHELA_COLLAB_RELAY</td><td>— (off)</td><td>Relay <code>wss://</code> URL for collaborative terminal sharing (end-to-end encrypted). Empty = sharing off; chela never phones home. <a href="#collab">Details</a>.</td></tr>
+        <tr><td>LINEAR_API_KEY</td><td>—</td><td>Linear personal API key for a <code>kind: linear</code> tracker. Read <strong>only</strong> from <code>$CHELA_DIR/chela.env</code>, and stripped from every process chela launches. <a href="#linear">Details</a>.</td></tr>
         <tr><td>CHELA_DEFAULT_CONTEXT_WINDOW</td><td>200000</td><td>Window size assumed by the transcript-based context estimate (fallback)</td></tr>
       </tbody>
     </table>
