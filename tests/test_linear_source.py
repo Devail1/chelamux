@@ -55,7 +55,8 @@ _TYPES = {"Backlog": "backlog", "Todo": "unstarted", "In Progress": "started",
 
 
 def issue(n, title=None, *, state="Todo", priority=0, sort=0.0, desc=None, blockers=(),
-          archived=False, branch=None, team="CMX"):
+          archived=False, branch=None, team="CMX", finished_at=None):
+    kind = _TYPES[state]
     return {
         "id": f"uuid-{n}" if team == "CMX" else f"uuid-{team}-{n}", "identifier": f"{team}-{n}",
         "number": n,
@@ -63,7 +64,9 @@ def issue(n, title=None, *, state="Todo", priority=0, sort=0.0, desc=None, block
         "sortOrder": sort, "url": f"https://linear.app/x/issue/CMX-{n}",
         "branchName": branch if branch is not None else f"{team.lower()}-{n}-task-{n}",
         "archivedAt": "2026-10-01T00:00:00Z" if archived else None,
-        "state": {"name": state, "type": _TYPES[state]},
+        "state": {"name": state, "type": kind},
+        "completedAt": finished_at if kind == "completed" else None,
+        "canceledAt": finished_at if kind == "canceled" else None,
         "labels": {"nodes": []},
         "inverseRelations": {"nodes": list(blockers)},
     }
@@ -340,31 +343,33 @@ def test_claim_order_is_priority_then_manual_order(tmp_path):
 
 # --- closing + archiving -------------------------------------------------------------
 
-def test_closing_a_task_marks_it_done_and_archives_it_once(tmp_path):
+def test_closing_a_task_marks_it_done_and_does_not_archive_it(tmp_path):
+    """CMX-8: close_tasks only marks Done — the board keeps recent history; the sweep (and
+    only the sweep) applies keep_done."""
     fake = FakeLinear([issue(4, state="In Review")])
     src = _src(tmp_path, fake)
     assert src.close_tasks(["CMX-4"]) == {"CMX-4": "struck"}
-    assert fake.names().count("archive") == 1
+    assert "archive" not in fake.names()
     assert fake.issues["CMX-4"]["state"]["type"] == "completed"
-    assert fake.issues["CMX-4"]["archivedAt"]
+    assert fake.issues["CMX-4"]["archivedAt"] is None
     # Idempotent: a second close (next tick) writes nothing.
     fake.calls.clear()
     assert _src(tmp_path, fake).close_tasks(["CMX-4"]) == {"CMX-4": "already"}
     assert "archive" not in fake.names() and "update" not in fake.names()
 
 
-def test_an_integration_closed_issue_is_archived_on_close(tmp_path):
-    """Linear's GitHub integration set Done — chela must still archive it."""
+def test_an_integration_closed_issue_is_left_for_the_sweep(tmp_path):
+    """Linear's GitHub integration set Done — chela writes nothing; it stays visible."""
     fake = FakeLinear([issue(4, state="Done")])
     assert _src(tmp_path, fake).close_tasks(["CMX-4"]) == {"CMX-4": "already"}
-    assert fake.names().count("archive") == 1 and "update" not in fake.names()
+    assert "archive" not in fake.names() and "update" not in fake.names()
 
 
 def test_a_failed_archive_is_logged_and_never_raises(tmp_path, caplog):
     fake = FakeLinear([issue(4, state="Done")])
     fake.refuse_archive = True
     with caplog.at_level(logging.WARNING, logger="chela.sources.linear"):
-        assert _src(tmp_path, fake).close_tasks(["CMX-4"]) == {"CMX-4": "already"}
+        assert _src(tmp_path, fake, keep_done=0).archive_sweep(force=True) == 0
     assert "could not archive CMX-4" in caplog.text
 
 
@@ -408,13 +413,14 @@ def test_the_dispatcher_strike_closes_a_network_tracker(tmp_path):
     """`_strike_merged_tasks` reaches a tracker with `close_tasks` but no file."""
     fake = FakeLinear([issue(4, state="In Review")])
     assert dispatcher._strike_merged_tasks(_wf(tmp_path), _src(tmp_path, fake), ["CMX-4"]) == 1
-    assert fake.names().count("archive") == 1
+    assert "archive" not in fake.names()
+    assert fake.issues["CMX-4"]["state"]["type"] == "completed"
 
 
 def test_the_sweep_archives_closed_issues_and_publishes_the_count(tmp_path):
     fake = FakeLinear([issue(1, state="Done"), issue(2, state="Canceled"),
                        issue(3, state="Todo"), issue(4, state="Done", archived=True)])
-    src = _src(tmp_path, fake)
+    src = _src(tmp_path, fake, keep_done=0)
     assert src.archive_sweep() == 2
     assert linear.read_published_counts()["CMX"]["count"] == 1
     # Throttled: the next tick's sweep does nothing.
@@ -427,11 +433,11 @@ def test_a_sweep_archives_at_most_archives_per_sweep_issues(tmp_path):
     assert linear.ARCHIVES_PER_SWEEP == 50
     n = linear.ARCHIVES_PER_SWEEP + 3
     fake = FakeLinear([issue(i, state="Done") for i in range(1, n + 1)])
-    assert _src(tmp_path, fake).archive_sweep() == linear.ARCHIVES_PER_SWEEP
+    assert _src(tmp_path, fake, keep_done=0).archive_sweep() == linear.ARCHIVES_PER_SWEEP
     assert fake.names().count("archive") == linear.ARCHIVES_PER_SWEEP
     assert linear.read_published_counts()["CMX"]["count"] == 3
     # The next sweep takes the rest.
-    assert _src(tmp_path, fake).archive_sweep(force=True) == 3
+    assert _src(tmp_path, fake, keep_done=0).archive_sweep(force=True) == 3
     assert fake.names().count("archive") == n
 
 
@@ -831,11 +837,15 @@ def test_get_source_selects_linear(tmp_path, team):
 
 
 def test_the_tick_runs_the_archive_sweep(repo, team, launched):
-    """An issue the GitHub integration closed is archived by the daemon's own tick."""
-    team.issues = {"CMX-2": issue(2, state="Done")}
-    summary = dispatcher.tick(repo / "WORKFLOW.md")
+    """An issue the GitHub integration closed is archived by the daemon's own tick — once
+    it is older than the workflow file's `keep_done` newest finished ones."""
+    wf = repo / "WORKFLOW.md"
+    wf.write_text(wf.read_text().replace("  team: CMX\n", "  team: CMX\n  keep_done: 1\n"))
+    team.issues = {"CMX-2": issue(2, state="Done", finished_at="2026-09-01T00:00:00Z"),
+                   "CMX-3": issue(3, state="Done", finished_at="2026-09-02T00:00:00Z")}
+    summary = dispatcher.tick(wf)
     assert summary["tracker_archived"] == 1
-    assert team.issues["CMX-2"]["archivedAt"]
+    assert team.issues["CMX-2"]["archivedAt"] and not team.issues["CMX-3"]["archivedAt"]
 
 
 # --- CMX-432 rework 2: each guard asserts the invariant itself ------------------------
@@ -1026,7 +1036,7 @@ def test_fetch_by_ids_returns_only_the_requested_numbers(tmp_path):
 
 def test_the_sweep_never_archives_another_teams_issue(tmp_path):
     fake = _two_teams()
-    _src(tmp_path, fake).archive_sweep(force=True)
+    _src(tmp_path, fake, keep_done=0).archive_sweep(force=True)
     archived = {v["id"] for n, v in fake.calls if n == "archive"}
     assert archived == {"uuid-3"}
 
@@ -1228,17 +1238,17 @@ def test_an_archive_refused_with_success_false_is_a_failed_archive(tmp_path, cap
     as archived, and the published count still includes the issue (it is still there)."""
     fake = FakeLinear([issue(1, state="Done"), issue(2, state="Canceled"), issue(3)])
     fake.archive_success = False
-    src = _src(tmp_path, fake)
+    src = _src(tmp_path, fake, keep_done=0)
     with caplog.at_level(logging.WARNING, logger="chela.sources.linear"):
         assert src.archive_issue("uuid-1", "CMX-1") is False
         assert src.archive_sweep(force=True) == 0
     assert "archiving CMX-1 was refused" in caplog.text
     assert linear.read_published_counts()["CMX"]["count"] == 3
     assert fake.names().count("archive") == 3        # tried, and each one refused
-    # The same reply after a close: still unarchived, so the sweep retries it later.
+    # Still unarchived, so the next sweep retries both.
     fake.calls.clear()
-    assert _src(tmp_path, fake).close_tasks(["CMX-1"]) == {"CMX-1": "already"}
-    assert fake.names().count("archive") == 1
+    assert _src(tmp_path, fake, keep_done=0).archive_sweep(force=True) == 0
+    assert fake.names().count("archive") == 2
     assert fake.issues["CMX-1"]["archivedAt"] is None
 
 
@@ -1324,7 +1334,7 @@ def test_publishing_one_teams_count_keeps_every_other_teams(tmp_path):
 def test_two_teams_sweeps_each_publish_their_own_count(tmp_path):
     a = FakeLinear([issue(1, state="Done"), issue(2), issue(3)])
     b = FakeLinear([issue(n, team="OPS") for n in (1, 2, 3, 4)])
-    linear.LinearSource(_wf(tmp_path), transport=a).archive_sweep(force=True)
+    linear.LinearSource(_wf(tmp_path, keep_done=0), transport=a).archive_sweep(force=True)
     wf_b = _wf(tmp_path)
     wf_b.config["tracker"]["team"] = "OPS"
     linear.LinearSource(wf_b, transport=b).archive_sweep(force=True)
@@ -1397,3 +1407,130 @@ def test_doctor_names_a_linear_workflows_tracker_kind(tmp_path, monkeypatch):
     monkeypatch.setattr(linear, "load_api_key", lambda: SECRET)
     found = runtime_truth._workflows_report([wf], runtime_truth._workflows_read())
     assert [(f.level, f.detail) for f in found] == [(runtime_truth.OK, "tracker: linear")]
+
+
+# --- CMX-8: keep the `keep_done` most recently finished issues visible ------------------
+
+def _finished_team(n_finished, *, n_open=0):
+    """``n_finished`` finished issues, CMX-1 finished FIRST (oldest) … CMX-n last (newest),
+    alternating Done/Canceled; issue NUMBERS run the other way round from finish times for
+    half of them, so ordering by number instead of by time is visible."""
+    issues = []
+    for i in range(1, n_finished + 1):
+        # number order ≠ finish order: odd rows count DOWN from 1000+
+        num = i if i % 2 == 0 else 1000 + (n_finished + 1 - i)
+        at = f"2026-09-{1 + i // 24:02d}T{i % 24:02d}:00:00.000Z"
+        issues.append(issue(num, state="Done" if i % 2 else "Canceled", finished_at=at))
+    for j in range(n_open):
+        issues.append(issue(5000 + j, state=("Todo", "In Progress", "Backlog")[j % 3]))
+    return issues
+
+
+def _archived_ids(fake):
+    return [v["id"] for n, v in fake.calls if n == "archive"]
+
+
+def _by_finish(issues):
+    return sorted((i for i in issues if i["state"]["type"] in linear.TERMINAL_STATE_TYPES),
+                  key=lambda i: i["completedAt"] or i["canceledAt"])
+
+
+def test_keep_done_defaults_to_100_and_reads_the_tracker_setting(tmp_path):
+    assert linear.DEFAULT_KEEP_DONE == 100
+    assert _src(tmp_path, FakeLinear()).keep_done == 100
+    assert _src(tmp_path, FakeLinear(), keep_done=7).keep_done == 7
+    assert _src(tmp_path, FakeLinear(), keep_done=0).keep_done == 0
+    for bad in (-1, "lots", 2.5, True):
+        assert _src(tmp_path, FakeLinear(), keep_done=bad).keep_done == 100
+
+
+def test_the_sweep_archives_exactly_the_30_oldest_of_130_finished(tmp_path):
+    """130 finished, keep_done 100 ⇒ exactly the 30 OLDEST by completed/canceled time go."""
+    issues = _finished_team(130)
+    fake = FakeLinear(issues)
+    oldest = {i["id"] for i in _by_finish(issues)[:30]}
+    src = _src(tmp_path, fake, keep_done=100)
+    assert src.archive_sweep(force=True) == 30           # ARCHIVES_PER_SWEEP is 50 ≥ 30
+    assert set(_archived_ids(fake)) == oldest
+    assert len(_archived_ids(fake)) == 30
+    assert linear.read_published_counts()["CMX"]["count"] == 100
+    # Settled: the next sweep has nothing to archive.
+    fake.calls.clear()
+    assert src.archive_sweep(force=True) == 0 and _archived_ids(fake) == []
+
+
+def test_a_capped_sweep_archives_the_oldest_first(tmp_path):
+    """Over ARCHIVES_PER_SWEEP to go: the first sweep takes the OLDEST ones."""
+    issues = _finished_team(10 + linear.ARCHIVES_PER_SWEEP + 5)
+    fake = FakeLinear(issues)
+    order = [i["id"] for i in _by_finish(issues)]
+    assert _src(tmp_path, fake, keep_done=10).archive_sweep(force=True) == (
+        linear.ARCHIVES_PER_SWEEP)
+    assert set(_archived_ids(fake)) == set(order[:linear.ARCHIVES_PER_SWEEP])
+
+
+def test_with_90_finished_nothing_is_archived(tmp_path):
+    fake = FakeLinear(_finished_team(90, n_open=20))
+    assert _src(tmp_path, fake, keep_done=100).archive_sweep(force=True) == 0
+    assert "archive" not in fake.names()
+    assert linear.read_published_counts()["CMX"]["count"] == 110
+
+
+def test_keep_done_0_archives_every_finished_issue(tmp_path):
+    issues = _finished_team(12, n_open=4)
+    fake = FakeLinear(issues)
+    finished = {i["id"] for i in _by_finish(issues)}
+    assert _src(tmp_path, fake, keep_done=0).archive_sweep(force=True) == 12
+    assert set(_archived_ids(fake)) == finished
+    assert linear.read_published_counts()["CMX"]["count"] == 4
+
+
+@pytest.mark.parametrize("keep", [0, 1, 5, 100])
+def test_open_issues_are_never_archived_nor_counted_toward_keep_done(tmp_path, keep):
+    """Open issues are always kept, and never take one of the keep_done slots: with 5
+    open + 8 finished, exactly max(0, 8 − keep) finished go, whatever the open count."""
+    issues = _finished_team(8, n_open=5)
+    fake = FakeLinear(issues)
+    open_ids = {i["id"] for i in issues if i["state"]["type"] not in
+                linear.TERMINAL_STATE_TYPES}
+    _src(tmp_path, fake, keep_done=keep).archive_sweep(force=True)
+    archived = set(_archived_ids(fake))
+    assert not archived & open_ids
+    assert len(archived) == max(0, 8 - keep)
+
+
+def test_a_close_that_tips_the_team_over_keep_done_archives_the_oldest_now(tmp_path):
+    """close_tasks never archives what it closes, but runs the sweep once right after,
+    so the cap cannot creep for up to 15 minutes: keep_done 3, 3 finished + 1 closed now
+    ⇒ the OLDEST finished goes (never the one just closed)."""
+    issues = _finished_team(3) + [issue(77, state="In Review")]
+    fake = FakeLinear(issues)
+    oldest = _by_finish(issues)[0]["id"]
+    src = _src(tmp_path, fake, keep_done=3)
+    linear._last_sweep[src.team] = linear.time.monotonic()     # throttled: just swept
+    fake.issues["CMX-77"]["completedAt"] = "2099-01-01T00:00:00.000Z"
+    assert src.close_tasks(["CMX-77"]) == {"CMX-77": "struck"}
+    assert _archived_ids(fake) == [oldest]
+    assert fake.issues["CMX-77"]["archivedAt"] is None
+
+
+def test_an_archived_issue_still_reads_as_terminal_in_fetch_by_ids(tmp_path):
+    """⭐ G1 contract unchanged: whatever the sweep archived reads back as done."""
+    fake = FakeLinear(_finished_team(3) + [issue(9)])
+    _src(tmp_path, fake, keep_done=0).archive_sweep(force=True)
+    archived = [i for i in fake.issues.values() if i["archivedAt"]]
+    assert len(archived) == 3
+    got = {t.id: t for t in _src(tmp_path, fake).fetch_by_ids(
+        [i["identifier"] for i in archived] + ["CMX-9"])}
+    assert set(got) == {i["identifier"] for i in archived} | {"CMX-9"}
+    assert all(got[i["identifier"]].state == "closed" for i in archived)
+    assert all(got[i["identifier"]].terminal_state in ("done", "canceled") for i in archived)
+    assert got["CMX-9"].state == "open"
+
+
+def test_the_doctor_warn_says_lower_keep_done(tmp_path):
+    linear._publish_count("CMX", linear.ISSUE_COUNT_WARN_AT + 1)
+    found, = runtime_truth._linear_issue_cap_report(
+        {"CMX": "WORKFLOW.md"}, runtime_truth._linear_issue_cap_read())
+    assert found.level == runtime_truth.WARN
+    assert "lower `keep_done`" in found.detail

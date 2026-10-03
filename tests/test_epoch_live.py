@@ -374,8 +374,13 @@ def test_a_watch_survives_its_own_server_but_never_the_next_one(tmux, live_inbox
 
     assert inbox.watches() == {}, "the dead watch survived to lie about somebody else's work"
     pane = tmux.pane(reborn)
-    assert "tmux SERVER restarted" in pane and "UNKNOWN" in pane
-    assert "finished" not in pane, "it reported a stranger's idleness as our agent's success"
+    # Judge only what the inbox delivered, from its 📥 on: the pane also renders the user's
+    # shell prompt, which can carry the git branch name — and a branch named
+    # `…-finished-…` (CMX-8's) made `"finished" not in pane` fail with nothing delivered.
+    delivered = "\n".join(ln[ln.index("📥"):] for ln in pane.splitlines() if "📥" in ln)
+    assert "tmux SERVER restarted" in delivered and "UNKNOWN" in delivered
+    assert "finished" not in delivered, (
+        "it reported a stranger's idleness as our agent's success")
     assert "watch_epoch_lost" in _kinds()
 
 

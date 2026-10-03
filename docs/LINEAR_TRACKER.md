@@ -9,7 +9,7 @@ The adapter is `chela/sources/linear.py` (CMX-432).
 
 1. **Create a personal API key** in Linear (Settings → Security & access → Personal API
    keys), scoped to the one team the workflow dispatches. chela needs read and write access:
-   it marks merged tasks Done and archives them.
+   it marks merged tasks Done and archives older finished ones.
 2. **Put the key in `$CHELA_DIR/chela.env`** (normally `~/.chela/chela.env`), exactly as:
 
    ```
@@ -31,6 +31,8 @@ The adapter is `chela/sources/linear.py` (CMX-432).
      ready_states: [Todo]   # optional: the state names chela may CLAIM from (default Todo)
      done_state: Done       # optional: the state chela sets on merge
                             # (default: the team's first `completed` state)
+     keep_done: 100         # optional: how many recently finished issues stay unarchived
+                            # (default 100; 0 archives every finished issue)
    ```
 
 4. Restart `chela-daemon`. If the key is missing, only this workflow stops. It claims
@@ -84,18 +86,36 @@ the `TODO.md` era. That is safe:
 
 Linear's free plan caps a workspace at **250 non-archived issues**. Done and Canceled issues
 count until they are archived. At ~19 tasks a day that cap arrives in about two weeks, and
-Linear's own auto-archive runs monthly at most. So chela archives:
+Linear's own auto-archive runs monthly at most. Archiving everything the moment it finishes
+would empty the board of recent history, so chela keeps the most recent finished issues
+visible and archives only older ones (CMX-8):
 
+- **`keep_done`** (default **100**) is how many finished issues stay unarchived. Finished
+  means Done or Canceled, ranked by when they finished (`completedAt` / `canceledAt`),
+  newest first. Only finished issues older than the newest `keep_done` are archived. Open
+  issues (backlog, unstarted, started) are never archived and never count toward
+  `keep_done`. `keep_done: 0` archives every finished issue, which is the behaviour before
+  CMX-8.
 - **When a run's PR merges**, chela marks the issue Done if it is not already (the fallback
-  for the GitHub integration) and calls `issueArchive`. This is idempotent: an issue that
-  is already Done is only archived, and one that is already archived is left alone. A
-  failure is logged and retried on the next tick. It never crashes the dispatcher.
-- **A backstop sweep** runs every 15 minutes per team. It archives every completed or
-  canceled issue that is not archived yet (at most 50 per sweep), whoever closed it: the
-  integration, a human, or chela. It also publishes the team's non-archived count to
-  `$CHELA_DIR/linear-issue-counts.json`.
+  for the GitHub integration). It does not archive it. If it marked anything Done, it runs
+  the sweep once right away, so a close that puts the team over `keep_done` archives the
+  oldest finished issue now, not 15 minutes later. A failure is logged and retried on the
+  next tick. It never crashes the dispatcher.
+- **The sweep** runs every 15 minutes per team. It applies the `keep_done` rule to every
+  finished issue that is not archived yet, whoever closed it: the integration, a human, or
+  chela. It archives at most 50 per sweep, oldest first. It also publishes the team's
+  non-archived count to `$CHELA_DIR/linear-issue-counts.json`.
 - **`chela doctor`** reads that count (fact `tracker.linear_issue_cap`) and WARNs above
-  **200**.
+  **200**. The fix it names is to lower `keep_done`.
+
+**The cap arithmetic.** Once the sweep has caught up, the team holds `open + keep_done`
+non-archived issues, so the headroom for new issues is **250 − open − keep_done**. With the
+default 100 and 60 open issues that is 90. The cap is per workspace, so subtract every
+other team's issues too. If doctor warns, lower `keep_done` before Linear refuses new
+issues.
+
+An archived issue is still readable: `fetch_by_ids` includes archived issues and reports
+each one as done, so archiving never makes a finished task look missing.
 
 chela never creates sub-issues, and never creates issues at all. Issues are written by a
 human in Linear.
@@ -111,8 +131,8 @@ merge into the default branch as done. Either:
 
 - in the team's settings (Workflow → Git automations), add a **target-branch rule** for
   `dev` that moves the issue to Done on merge, or
-- do nothing. When chela reconciles a merged PR it marks the issue Done itself and archives
-  it, so the queue stays correct either way. The rule only makes Done appear sooner.
+- do nothing. When chela reconciles a merged PR it marks the issue Done itself, so the
+  queue stays correct either way. The rule only makes Done appear sooner.
 
 ## Migrating a `TODO.md` queue
 

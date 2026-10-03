@@ -2248,10 +2248,12 @@ def _linear_issue_cap_report(declared: dict[str, str], obs: Observation) -> list
             out.append(Finding(
                 WARN, f"Linear team {team} has {count} non-archived issues — the free plan "
                       f"stops at {linear.ISSUE_CAP}",
-                "Done and Canceled issues count until they are archived. chela archives "
-                "what it closes and sweeps the rest; whatever is left is open work or an "
-                "archive the sweep could not make. Archive or delete issues in Linear "
-                "before it refuses new ones.",
+                "Done and Canceled issues count until they are archived. chela keeps the "
+                "`keep_done` most recently finished issues (default "
+                f"{linear.DEFAULT_KEEP_DONE}) and archives the older ones, so the headroom "
+                f"is {linear.ISSUE_CAP} − open − keep_done. Fix: lower `keep_done` under "
+                "`tracker:` in the workflow file (0 archives every finished issue), or "
+                "archive or delete issues in Linear before it refuses new ones.",
             ))
         else:
             out.append(Finding(
