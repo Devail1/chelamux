@@ -9,6 +9,7 @@ behind decisions that are otherwise invisible in the code.
 | File | What it covers |
 |---|---|
 | [GETTING_STARTED.md](GETTING_STARTED.md) | ~10 minutes, clone to your first dispatched agent |
+| [LINEAR_TRACKER.md](LINEAR_TRACKER.md) | Dispatching from a Linear team (`tracker: kind: linear`): setup, the API key, what chela reads |
 | [CONFIG.md](CONFIG.md) | Every environment variable, with defaults |
 | [HOOKS.md](HOOKS.md) | The Claude Code hooks plugin — what it enables and what it costs |
 | [EVENTS.md](EVENTS.md) | The event log: kinds, shape, rotation |

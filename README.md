@@ -118,7 +118,7 @@ Everything lives at **[chela.pages.dev/docs](https://chela.pages.dev/docs)**:
 |---|---|
 | [Quickstart](https://chela.pages.dev/docs#quickstart) · [Concepts](https://chela.pages.dev/docs#concepts) | tmux as the source of truth, one window per agent |
 | [Scheduling](https://chela.pages.dev/docs#scheduling) | intervals, cron, standing context |
-| [Dispatching work](https://chela.pages.dev/docs#dispatch) | `TODO.md` → worktree → agent → PR, and the judge |
+| [Dispatching work](https://chela.pages.dev/docs#dispatch) | a tracker (`TODO.md` / GitHub issues / Linear) → worktree → agent → PR, and the judge |
 | [The orchestration loop](https://chela.pages.dev/docs#orchestration) | the decisions inbox, and the rules that make writing into a live session safe |
 | [Agent rooms](https://chela.pages.dev/docs#rooms) | agents that can actually talk to each other |
 | [Agent autonomy](https://chela.pages.dev/docs#autonomy) | permission modes, and the resource-isolation gap |

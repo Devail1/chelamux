@@ -25,7 +25,7 @@ _WORKFLOW_TEMPLATE = """---
 project_key: __PROJECT_KEY__   # short uppercase key; branches/windows are <key>-<n>
 
 tracker:
-  kind: markdown          # markdown TODO.md (also: gh_issues)
+  kind: markdown          # markdown TODO.md (also: gh_issues, linear)
   path: TODO.md           # relative to this file
 
 workspace:
