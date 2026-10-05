@@ -99,8 +99,9 @@ def test_the_guest_mounts_only_its_transcripts_from_claude(workspaces):
     assert any(t.startswith(sb.GUEST_CLAUDE_DIR + ":") and f"uid={UID}" in t for t in tmpfs)
 
 
-def test_the_launcher_creates_it_and_mounts_it(workspaces, monkeypatch, tmp_path):
-    a, _ = workspaces
+def _stub_launcher(monkeypatch, tmp_path):
+    """Stub every docker / tty side effect of :func:`sb.run`; returns the recorded
+    ``(steps, guest)`` argv lists."""
     monkeypatch.setattr(sb, "preflight", lambda cwd, net="none": None)
     (tmp_path / "tok").write_text("t")
     monkeypatch.setenv("CHELA_SHARE_SANDBOX_TOKEN_FILE", str(tmp_path / "tok"))
@@ -113,13 +114,62 @@ def test_the_launcher_creates_it_and_mounts_it(workspaces, monkeypatch, tmp_path
     class P:
         returncode, stdout, stderr = 0, "", ""
 
-    monkeypatch.setattr(sb.subprocess, "run", lambda argv, **k: P())
-    guest = []
+    steps, guest = [], []
+    monkeypatch.setattr(sb.subprocess, "run", lambda argv, **k: steps.append(argv) or P())
     monkeypatch.setattr(sb.subprocess, "call", lambda argv: guest.append(argv) or 0)
+    return steps, guest
+
+
+def test_the_launcher_creates_it_and_mounts_it(workspaces, monkeypatch, tmp_path):
+    a, _ = workspaces
+    _steps, guest = _stub_launcher(monkeypatch, tmp_path)
     assert not sb.transcripts_dir(a).exists()
     assert sb.run(SID, a, "none") == 0
     assert sb.transcripts_dir(a).is_dir()
     assert _mount_of(guest[0], sb.GUEST_TRANSCRIPTS) == [os.path.realpath(sb.transcripts_dir(a))]
+
+
+@pytest.mark.parametrize("broken", [False, True])
+def test_the_launcher_refuses_to_start_when_the_dir_cannot_be_made(workspaces, monkeypatch,
+                                                                   tmp_path, broken):
+    """Fail-closed: no transcripts dir ⇒ no network, no proxy, no guest — never a guest
+    whose ``~/.claude/projects`` mount points at something chela didn't vet. The
+    ``broken=False`` arm is the negative control: the same stubs DO launch a guest."""
+    a, _ = workspaces
+    steps, guest = _stub_launcher(monkeypatch, tmp_path)
+    held = []
+    monkeypatch.setattr(sb, "_hold", held.append)
+    if broken:
+        # a real failure, not a stubbed one: the root is a FILE, so mkdir under it fails
+        sb.transcripts_root().parent.mkdir(parents=True, exist_ok=True)
+        sb.transcripts_root().write_text("not a dir")
+        assert sb.run(SID, a, "none") == 1
+        assert steps == [] and guest == []
+        assert any("transcripts" in m or "share-transcripts" in m for m in held), held
+    else:
+        assert sb.run(SID, a, "none") == 0
+        assert guest
+
+
+def test_a_symlinked_transcripts_path_is_refused(workspaces, tmp_path):
+    """A symlink anywhere on the path (root, per-workspace dir, or ``projects``) could
+    redirect a guest's writable mount at another workspace's transcripts — or anywhere
+    else on the host. ``ensure_transcripts_dir`` refuses it instead of following it."""
+    a, b = workspaces
+    victim = sb.ensure_transcripts_dir(b)            # bob's real transcripts
+    d = sb.transcripts_dir(a)
+    for link in (d, d.parent):
+        if link == d:
+            d.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            d.symlink_to(victim, target_is_directory=True)
+        else:
+            d.unlink()
+            d.parent.rmdir()
+            d.parent.symlink_to(victim.parent, target_is_directory=True)
+        with pytest.raises(OSError, match="symlink"):
+            sb.ensure_transcripts_dir(a)
+    d.parent.unlink()
+    assert sb.ensure_transcripts_dir(a) != victim   # negative control: a real dir is fine
 
 
 def test_a_workspace_containing_the_transcripts_is_refused(tmp_path, monkeypatch):

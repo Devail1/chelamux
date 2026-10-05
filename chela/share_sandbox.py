@@ -48,13 +48,13 @@ argv (``--net``), so the live check reads it from the process tree, not from a f
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import shlex
 import shutil
-import hashlib
 import signal
 import subprocess
 import sys
