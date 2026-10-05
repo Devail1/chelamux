@@ -194,6 +194,14 @@ refresh:
   `~/.claude`, `~/.chela` or `~/.config`.
 - The container runs as your uid with `--cap-drop ALL`, `no-new-privileges` and a
   read-only root. `/tmp` and `HOME` are tmpfs, and memory and pid counts are capped.
+- **Transcripts survive a relaunch.** The one host directory under the guest's HOME is
+  `$CHELA_DIR/share-transcripts/<workspace>-<hash>/projects`, mounted read-write at
+  `~/.claude/projects`, so `/resume` lists earlier conversations after a relaunch, a crash
+  or an approved mount. It is keyed by the workspace's real path (never the per-launch
+  session id), created owner-only, and holds only that workspace's transcripts. Nothing
+  else from your `~/.claude` (credentials, settings, other projects) is mounted, and the
+  live sandbox check fails a container carrying any other workspace's directory there.
+  Delete the directory to forget a workspace's guest conversations.
 - Its only network is a per-session `--internal` bridge that gives the host **no
   address** (`inhibit_ipv4`), so it can't reach any host service or the internet. The
   only other thing on that bridge is a sidecar running `chela/share_proxy.py`, which
@@ -216,8 +224,9 @@ relayed there. **Everything the session says reaches your topic** — including 
 guest pastes or has Claude read: a CV, a draft, a private file in the workspace. Inbound
 works as usual too, so anything you type in that topic goes into the guest's session.
 
-How it works: the session's transcript stays in the container's tmpfs and its hooks can't
-reach the host, so the relay has no transcript to read. Instead, the credential proxy
+How it works: the session's transcript is guest-written (its host copy, kept for
+`/resume`, is never read by chela) and its hooks can't reach the host, so the relay does
+not use it. Instead, the credential proxy
 parses each completed model turn from the response stream and appends the assistant's
 visible text (with each tool call reduced to its name) to
 `$CHELA_DIR/share-sessions/<session id>/outbox.jsonl`. That directory is mounted
@@ -498,7 +507,8 @@ for you. Approving also needs *Guest typing* on.
   the extra bind mount at `/extra/<name>`. The running container is never given more
   access. The workspace's hygiene applies to the extra directory too: `.env*` files are
   masked, and in a writable mount `.git`/`.claude`/… stay read-only. **A relaunch restarts
-  the guest's Claude conversation**, because its HOME is temporary. The live sandbox check
+  the guest's Claude**; its transcripts are kept, so `/resume` picks the conversation
+  back up. The live sandbox check
   briefly fails while the container is down, so a live typing share of that window may
   end; share it again.
 - **domain**: web sessions only (refused on a `none` session). When you set
@@ -517,7 +527,8 @@ container carrying any mount outside the approvals in force:
 - `$HOME` itself, the filesystem root, and any ancestor of `$HOME`;
 - the secrets directories under `$HOME` (`.ssh`, `.claude`, `.chela`, `.config`, `.aws`,
   `.gnupg`, `.docker`, `.kube`, `.secrets`, `.local`, …), `CHELA_DIR`, Claude Code's
-  config directory and the sandboxed sessions' own directory, along with anything inside
+  config directory, the sandboxed sessions' own directory and their transcripts
+  directory (`$CHELA_DIR/share-transcripts`), along with anything inside
   them or containing them;
 - the tmux socket directory (`/tmp/tmux-<uid>`, so `/tmp` itself), `/proc`, `/sys`,
   `/dev`, `/run`, `/var/run` (the docker socket), `/etc`, `/boot`, `/root`,
