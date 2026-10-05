@@ -162,7 +162,8 @@ def protected_paths() -> list[str]:
     home = _home()
     out = [os.path.join(home, d) for d in share_sandbox.SECRET_DIRS]
     out += [os.path.realpath(str(config.CHELA_DIR)), os.path.realpath(str(claude_config_dir())),
-            os.path.realpath(str(share_sandbox.session_root())), _tmux_socket_dir()]
+            os.path.realpath(str(share_sandbox.session_root())),
+            os.path.realpath(str(share_sandbox.transcripts_root())), _tmux_socket_dir()]
     out += list(_SYSTEM_DIRS)
     return out
 

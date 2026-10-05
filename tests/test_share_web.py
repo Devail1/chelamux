@@ -542,7 +542,9 @@ def test_a_web_session_guest_stays_on_its_internal_network_and_uses_the_proxy():
         assert flag not in argv
     assert sb.web_image() in argv and f"{sb.NET_LABEL}=web" in _opt(argv, "--label")
     mounts = _opt(argv, "-v")
-    assert not [m for m in mounts if any(d in m for d in (".ssh", ".claude:", ".chela", ".config"))]
+    # the one CHELA_DIR mount is this workspace's own transcripts dir (CMX-12)
+    own = f"{os.path.realpath(sb.transcripts_dir(WORKSPACE))}:{sb.GUEST_TRANSCRIPTS}"
+    assert not [m for m in mounts if m != own and any(d in m for d in (".ssh", ".claude:", ".chela", ".config"))]
     assert not [m for m in mounts if "docker.sock" in m or "tmux" in m]
 
 
@@ -559,7 +561,8 @@ def test_each_mode_guest_keeps_every_lockdown_flag_and_its_own_pids_limit(mode, 
     assert "--read-only" in argv and "--privileged" not in argv
     assert _opt(argv, "--user") == [f"{UID}:{GID}"]
     assert _opt(argv, "--network") == [sb.network_name(SID)]
-    assert [t.split(":", 1)[0] for t in _opt(argv, "--tmpfs")] == ["/tmp", sb.GUEST_HOME]
+    assert [t.split(":", 1)[0] for t in _opt(argv, "--tmpfs")] == ["/tmp", sb.GUEST_HOME,
+                                                                sb.GUEST_CLAUDE_DIR]
 
 
 def test_the_network_is_still_internal_with_no_host_address():

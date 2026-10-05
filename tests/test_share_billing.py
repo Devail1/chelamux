@@ -97,7 +97,9 @@ def test_the_real_token_appears_nowhere_in_the_guest_argv(token_file, tmp_path, 
         blob = "\0".join(argv)
         assert REAL_TOKEN not in blob and REAL_REFRESH not in blob
         assert "sk-ant" not in blob
-        assert not [m for m in argv if str(tmp_path) in m]   # the token file isn't mounted
+        # the token file isn't mounted (the transcripts dir lives in the test's CHELA_DIR)
+        own = f"{os.path.realpath(sb.transcripts_dir(WORKSPACE))}:{sb.GUEST_TRANSCRIPTS}"
+        assert not [m for m in argv if str(tmp_path) in m and m != own]
 
 
 def test_the_subscription_type_comes_from_the_token_file(token_file, tmp_path):

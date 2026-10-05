@@ -18,7 +18,9 @@ sandbox (``--settings`` with ``sandbox.enabled``, the #502 route in
   ``.env*`` files masked and existing ``.git``/``.claude``/… mounted read-only) plus a
   read-only Claude binary — no ``~/.ssh``, ``~/.claude``, ``~/.chela``, ``~/.config``;
 * the container runs as the host uid, ``--cap-drop ALL``, ``no-new-privileges``, read-only
-  root, tmpfs ``/tmp`` + ``HOME``, and memory / pid caps;
+  root, tmpfs ``/tmp`` + ``HOME`` (save the workspace's own transcripts dir at
+  ``~/.claude/projects``, so ``/resume`` survives a relaunch — :func:`transcripts_dir`),
+  and memory / pid caps;
 * its only network is a per-session ``--internal`` bridge with **no host-side IP**
   (``inhibit_ipv4``) — so it reaches no host service and no internet — whose one other
   member is a sidecar running :mod:`chela.share_proxy`, which adds the operator's token on
@@ -52,6 +54,7 @@ import os
 import re
 import shlex
 import shutil
+import hashlib
 import signal
 import subprocess
 import sys
@@ -73,6 +76,11 @@ PROXY_PREFIX = "chela-share-proxy-"
 NETWORK_PREFIX = "chela-share-net-"
 GUEST_WORKDIR = "/workspace"
 GUEST_HOME = "/home/guest"
+# Where the guest's Claude keeps its transcripts — the ONE path under the guest's HOME that
+# is a host directory (CMX-12), so ``/resume`` survives a relaunch. Nothing else from
+# ``~/.claude`` is ever mounted.
+GUEST_CLAUDE_DIR = f"{GUEST_HOME}/.claude"
+GUEST_TRANSCRIPTS = f"{GUEST_CLAUDE_DIR}/projects"
 CLAUDE_MOUNT = "/usr/local/bin/claude"
 PROXY_ALIAS = "chela-proxy"
 PROXY_PORT = 8080
@@ -211,6 +219,41 @@ def session_root() -> Path:
 
 def session_dir(sid: str) -> Path:
     return session_root() / sid
+
+
+def transcripts_root() -> Path:
+    """Host-side transcripts of sandboxed sessions (CMX-12): one directory per WORKSPACE,
+    bind-mounted read-write at :data:`GUEST_TRANSCRIPTS` into the guest of a session in
+    that workspace only. Kept outside :func:`session_root` (whose per-launch dirs are
+    pruned, and which is the proxy's) and outside the workspace. It lives under
+    ``CHELA_DIR``, so :func:`workspace_refusal` and
+    :func:`chela.share_requests.mount_refusal` refuse it; the guest never chooses it."""
+    return config.CHELA_DIR / "share-transcripts"
+
+
+def transcripts_key(cwd: str) -> str:
+    """The STABLE name a workspace's transcripts are kept under: the workspace's realpath,
+    hashed (never the per-launch session id, which changes every run), behind a readable
+    slug of its basename."""
+    real = os.path.realpath(cwd)
+    slug = re.sub(r"[^A-Za-z0-9._-]", "-", os.path.basename(real)).strip(".-") or "workspace"
+    return f"{slug[:40]}-{hashlib.sha256(real.encode('utf-8')).hexdigest()[:16]}"
+
+
+def transcripts_dir(cwd: str) -> Path:
+    return transcripts_root() / transcripts_key(cwd) / "projects"
+
+
+def ensure_transcripts_dir(cwd: str) -> Path:
+    """Create (or re-tighten) the workspace's transcripts dir, owner-only, as the uid the
+    guest runs as. Returns its realpath — what the guest mount and the live check use."""
+    d = transcripts_dir(cwd)
+    for p in (transcripts_root(), d.parent, d):
+        p.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if p.is_symlink():
+            raise OSError(f"{p} is a symlink")
+        os.chmod(p, 0o700)
+    return Path(os.path.realpath(d))
 
 
 def outbox_path(sid: str) -> Path:
@@ -373,6 +416,10 @@ def workspace_refusal(cwd: str) -> str | None:
     outboxes = os.path.realpath(str(session_root()))
     if outboxes.startswith(real.rstrip(os.sep) + os.sep):
         return f"{cwd} contains {outboxes}, which holds sandboxed sessions' replies"
+    # Likewise every sandboxed workspace's transcripts (CMX-12).
+    transcripts = os.path.realpath(str(transcripts_root()))
+    if transcripts.startswith(real.rstrip(os.sep) + os.sep):
+        return f"{cwd} contains {transcripts}, which holds sandboxed sessions' transcripts"
     return None
 
 
@@ -599,6 +646,9 @@ def guest_run_argv(sid: str, cwd: str, uid: int, gid: int, claude_bin: str,
             "--security-opt", "no-new-privileges", "--read-only",
             "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m",
             "--tmpfs", f"{GUEST_HOME}:rw,nosuid,nodev,size=512m,uid={uid},gid={gid},mode=700",
+            # Its own tmpfs so the guest owns it: docker would otherwise create it root-owned
+            # as the parent of the transcripts mount point below, and Claude couldn't write it.
+            "--tmpfs", f"{GUEST_CLAUDE_DIR}:rw,nosuid,nodev,size=256m,uid={uid},gid={gid},mode=700",
             "--memory", GUEST_MEMORY,
             "--pids-limit", GUEST_PIDS_WEB if net == NET_WEB else GUEST_PIDS,
             "-e", f"HOME={GUEST_HOME}",
@@ -608,7 +658,8 @@ def guest_run_argv(sid: str, cwd: str, uid: int, gid: int, claude_bin: str,
             "-e", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
             "-e", "DISABLE_AUTOUPDATER=1",
             "-v", f"{claude_bin}:{CLAUDE_MOUNT}:ro",
-            "-v", f"{real}:{GUEST_WORKDIR}"]
+            "-v", f"{real}:{GUEST_WORKDIR}",
+            "-v", f"{os.path.realpath(transcripts_dir(real))}:{GUEST_TRANSCRIPTS}"]
     for kv in guest_auth_env(sub):
         argv += ["-e", kv]
     for k, v in guest_proxy_env(net).items():
@@ -813,6 +864,11 @@ def run(sid: str, cwd: str, net: str = NET_NONE) -> int:
     except OSError as e:
         _hold(f"refusing to start — cannot create {session_dir(sid)}: {e}")
         return 1
+    try:
+        ensure_transcripts_dir(cwd)
+    except OSError as e:
+        _hold(f"refusing to start — cannot create {transcripts_dir(cwd)}: {e}")
+        return 1
     mirror = TokenMirror(token_file(), token_mirror_dir(sid))
     watch = GrantWatch(sid, net)
     steps = [network_create_argv(sid), proxy_run_argv(sid, uid, gid),
@@ -975,6 +1031,7 @@ def verify_container(info: dict, net: dict, sid: str, cwd: str, uid: int, gid: i
     (:func:`chela.share_requests.mount_specs`): a mount outside it — never approved,
     expired, revoked, refused, or read-write where only read-only was granted — fails."""
     real = os.path.realpath(cwd)
+    transcripts = os.path.realpath(str(transcripts_dir(real)))
     granted = {dst: (os.path.realpath(src), bool(rw)) for src, dst, rw in extra}
     hc = info.get("HostConfig") or {}
     cfg = info.get("Config") or {}
@@ -1007,6 +1064,8 @@ def verify_container(info: dict, net: dict, sid: str, cwd: str, uid: int, gid: i
             workspace = True
         elif dst == CLAUDE_MOUNT and not rw:
             claude = True
+        elif dst == GUEST_TRANSCRIPTS and rw and os.path.realpath(src) == transcripts:
+            continue   # THIS workspace's own transcripts dir, chosen by chela (CMX-12)
         elif dst.startswith(GUEST_WORKDIR + "/") and not rw and (
                 src == "/dev/null" or os.path.realpath(src).startswith(real + os.sep)):
             continue   # a read-only mask / protected entry inside the workspace
