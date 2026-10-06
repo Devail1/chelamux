@@ -1350,7 +1350,11 @@ def run_events(runs: list[dict], seen: dict[str, str],
                 f"⚠️ {label} was merged outside chela's gate (judge "
                 f"{judge_state or 'never ran'!r}, no approved override) — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
-        elif judge_state == judge.J_CANNOT_VERIFY and status != "awaiting_review":
+        elif (judge_state == judge.J_CANNOT_VERIFY and status != "awaiting_review"
+              and not (status == "needs_human" and run.get("judge_unknown_final"))):
+            # ⚖️🧱 CMX-19: ...except a final unknown the judge PARKED in `needs_human` itself
+            # (`dispatcher.park_final_unknown`). That is not the CAS race — nothing moved
+            # under the judge — and it announces ONCE, below, as `run_needs_human`.
             # ⚖️🔔 CMX-229 Objective 1. `chela/judge.py`'s CAS-refused path: the run left
             # `awaiting_review` (a human merged it, CI got there first, a fresh review sent
             # it back) WHILE the judge was still working, so `request_changes`'s own CAS
