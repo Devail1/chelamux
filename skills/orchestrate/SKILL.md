@@ -21,6 +21,7 @@ ids don't. Address siblings by `@N`, and re-derive them from `chela status` afte
 | `chela status` | The live fleet — every window, its type and liveness. |
 | `chela peek <wid>` | **Filtered** status: native `session_status` (busy/idle/waiting) + recap + cwd + health + context. The cheap default. `--json` for scripts. |
 | `chela read <wid> --tail N` / `--query Q` / `--all` | **Distilled** transcript. Escalate to this only when `peek` isn't enough. |
+| `chela spawn <cwd> [--command CMD]` / `chela close @N` | Open an agent window (default `$CHELA_AGENT_CMD`, i.e. `claude`; prints `@N`) / kill one. `close` refuses the orchestrator's window and a dispatched run's window — never raw `tmux kill-window`. |
 | `chela msg <wid> "…"` / `chela drive <wid> "…"` | Message a sibling. `drive --wait done` blocks until it finishes. |
 | `chela watch <wid> --note "…"` / `chela watching` | Wake me when that window finishes/blocks; show the inbox and its address. |
 | `chela dispatch-runs --awaiting` | Every run parked in the review loop. |
