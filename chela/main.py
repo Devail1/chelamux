@@ -41,6 +41,7 @@ from chela import (
     inbox,
     judge,
     launcher,
+    malloc_arenas,
     messenger,
     notify,
     okf,
@@ -3628,6 +3629,11 @@ def main() -> None:
                                       "resolves the dispute")
 
     args = parser.parse_args()
+
+    # Before any service starts a thread: the arena cap must not depend on the service
+    # having been launched through scripts/run-chela.sh (CMX-14, see chela/malloc_arenas.py).
+    if args.command in malloc_arenas.SERVICE_COMMANDS:
+        malloc_arenas.cap()
 
     if args.command == "status":
         cmd_status(args)
