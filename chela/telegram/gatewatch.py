@@ -1419,6 +1419,7 @@ class PermissionGateWatcher:
         registry,
         *,
         capture: Capture,
+        tick_capture: "Callable[[list[str]], Capture] | None" = None,
         detect: Callable[[str], Gate | None] = detect_permission_gate,
         detect_askuq: Callable[[str], AskUQ | None] = detect_askuserquestion,
         detect_plan: Callable[[str], ExitPlan | None] = detect_exitplanmode,
@@ -1436,6 +1437,12 @@ class PermissionGateWatcher:
         self._sender = sender
         self._registry = registry
         self._capture = capture
+        # The poll's pane source for ONE tick (CMX-18,
+        # :class:`chela.telegram.panecache.ActivityGatedCapture`): it re-captures only the
+        # windows whose tmux activity stamp moved and hands back the last text for the
+        # rest. ``None`` = capture every window every tick. :meth:`refresh_mirror` never
+        # uses it — a tap always re-reads the pane it just changed.
+        self._tick_capture = tick_capture
         self._detect = detect
         self._detect_askuq = detect_askuq
         self._detect_plan = detect_plan
@@ -1564,12 +1571,18 @@ class PermissionGateWatcher:
     def poll(self, window_ids) -> None:
         """Read each window's pane once and relay newly-detected prompts."""
         window_ids = list(window_ids)
+        capture = self._capture
+        if self._tick_capture is not None:
+            try:
+                capture = self._tick_capture(window_ids)
+            except Exception:
+                log.exception("pane-watch tick capture failed; capturing every pane")
         for wid in window_ids:
             try:
                 # Held against a concurrent D-pad tap (:meth:`refresh_mirror`), which
                 # runs on the PTB loop and reconciles the same tracker.
                 with self._lock:
-                    self._poll_window(wid)
+                    self._poll_window(wid, capture)
             except Exception:
                 log.exception("pane-watch poll failed for %s", wid)
         # Outside the lock, on purpose — see :meth:`_drain_poofs`.
@@ -1584,9 +1597,9 @@ class PermissionGateWatcher:
 
     # -- internals ---------------------------------------------------------
 
-    def _poll_window(self, window_id: str) -> None:
+    def _poll_window(self, window_id: str, capture: Capture | None = None) -> None:
         # One capture per window per tick, shared by every detector.
-        pane = self._capture(window_id)
+        pane = (capture or self._capture)(window_id)
         uq = self._detect_askuq(pane)
         plan = self._detect_plan(pane)
         # A plan-approval selector's "❯ 1. Yes, and auto-accept edits" row also
