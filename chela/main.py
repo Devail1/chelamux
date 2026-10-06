@@ -14,7 +14,9 @@ import argparse
 import json
 import logging
 import os
+import re
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -38,6 +40,7 @@ from chela import (
     hooks,
     inbox,
     judge,
+    launcher,
     messenger,
     notify,
     okf,
@@ -47,6 +50,7 @@ from chela import (
     rooms,
     scheduler,
     sessionids,
+    spawn,
     update,
     wait,
     workflow,
@@ -2790,6 +2794,82 @@ def cmd_retry(args) -> None:
               "the authority, so it retries regardless, but nothing landed on the PR.")
 
 
+def cmd_spawn(args) -> None:
+    """Open an agent window in ``cwd`` from the terminal (CMX-13).
+
+    A thin wrapper over :func:`chela.spawn.spawn_window` — the same one window-open path the
+    dashboard launcher and Telegram ``/new`` use, so a CLI spawn cannot drift from them.
+    The one thing it must NOT inherit is ``spawn_window``'s own default: no ``command``
+    there means a plain SHELL, and ``chela spawn`` means an agent — so with no
+    ``--command`` it launches :data:`chela.agent_manager.DEFAULT_LAUNCH_CMD`
+    (``$CHELA_AGENT_CMD``, default ``claude``), exactly as ``/new`` does.
+
+    ``--command`` is not vetted against the dashboard's ``claude``-only allowlist: that
+    allowlist guards an HTTP door untrusted input comes through; this is the operator's own
+    shell, which can already run anything. Like the dashboard, the cwd is pushed onto the
+    launcher's Recent list, best-effort — a store hiccup never fails a spawn that happened.
+    """
+    command = args.launch_cmd or agent_manager.DEFAULT_LAUNCH_CMD
+    result = spawn.spawn_window(args.cwd, command=command)
+    if not result.ok:
+        print(f"spawn: {result.error}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        launcher.record_recent(result.cwd)
+    except Exception:  # noqa: BLE001 — a store hiccup must never fail the spawn
+        log.warning("launcher.record_recent failed for %s", result.cwd, exc_info=True)
+    print(f"{result.wid or result.name} {result.cwd}")
+
+
+_WINDOW_ID_RE = re.compile(r"@\d+")
+
+
+def _close_window(args) -> None:
+    """``chela close @N`` — kill one chela window, so nobody reaches for raw
+    ``tmux kill-window`` (CMX-13).
+
+    Refuses, before anything is killed:
+
+    * a ``wid`` that is not a live window of THIS chela session
+      (:func:`chela.config.current_session`) — an unknown id, or one belonging to another
+      tmux session (a ``webterm_*`` mirror, the user's own session), is never chela's to kill;
+    * the orchestrator's window — this process's own (:func:`chela.orchestrator.self_wid`)
+      or the registered orchestrator (:func:`chela.inbox.orchestrator_wid`) — unless
+      ``--orchestrator``;
+    * a window a dispatched run still claims (agent or judge, ``claimed``/``running``) —
+      killing it out from under the dispatcher strands the run as a FAILED card; that is
+      ``chela close <task> --reason …``'s job. ``--force`` overrides.
+
+    The kill targets ``<session>:@N``, so even a race cannot reach outside the session.
+    """
+    wid = args.run
+    session = config.current_session()
+    live = discovery.get_windows_by_id()
+    if wid not in live:
+        print(f"close: {wid} is not a live window in chela session {session!r} — "
+              "refusing (see `chela status`)", file=sys.stderr)
+        sys.exit(1)
+    name = live[wid]
+    orch = {w for w in (orchestrator.self_wid(), inbox.orchestrator_wid()) if w}
+    if wid in orch and not args.orchestrator:
+        print(f"close: {wid} ({name}) is the orchestrator's own window — refusing. Pass "
+              "--orchestrator to close it anyway.", file=sys.stderr)
+        sys.exit(1)
+    task_id = restore._task_in_flight(wid, dispatcher.list_runs())
+    if task_id and not args.force:
+        print(f"close: {wid} ({name}) belongs to in-flight run {task_id} — refusing. Use "
+              f"`chela close {task_id} --reason …` to close the run, or --force to kill "
+              "the window anyway.", file=sys.stderr)
+        sys.exit(1)
+    proc = subprocess.run(["tmux", "kill-window", "-t", f"{session}:{wid}"],
+                          capture_output=True, text=True, timeout=10)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "tmux kill-window failed").strip()
+        print(f"close: {wid} — {err}", file=sys.stderr)
+        sys.exit(1)
+    print(f"✖ closed {wid} ({name})")
+
+
 def cmd_close(args) -> None:
     """🗂️✖️ Mark an abandoned or superseded run ``closed``, with a reason (CMX-406).
 
@@ -2802,6 +2882,12 @@ def cmd_close(args) -> None:
     An OPEN PR gets the reason as a comment. Whether to close it too is ``--close-pr`` /
     ``--keep-pr``; with neither, an interactive terminal is asked, anything else keeps it open.
     """
+    if _WINDOW_ID_RE.fullmatch(args.run or ""):
+        _close_window(args)
+        return
+    if not args.reason:
+        print("close: --reason is required to close a run", file=sys.stderr)
+        sys.exit(2)
     close_pr = args.close_pr
     if not close_pr and not args.keep_pr:
         run = dispatcher.resolve_run(args.run)
@@ -2868,6 +2954,13 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("status", help="List discovered agent windows")
+    p_spawn = sub.add_parser(
+        "spawn", help="Open an agent window in a directory (prints its @N id and cwd)")
+    p_spawn.add_argument("cwd", help="Directory to open the window in")
+    p_spawn.add_argument(
+        "--command", dest="launch_cmd", default=None, metavar="CMD",
+        help="Command to launch in it (default: $CHELA_AGENT_CMD, else `claude`)",
+    )
     sub.add_parser("run", help="Run the daemon loop (scheduler)")
 
     p_sched = sub.add_parser("schedule", help="Manage scheduled tasks")
@@ -3322,16 +3415,24 @@ def main() -> None:
         help="🗂️✖️ Mark an abandoned or superseded run CLOSED with a visible reason, instead "
              "of leaving it as a FAILED card. Never re-claimed; slot freed; branch kept",
     )
-    p_close.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-84)")
     p_close.add_argument(
-        "--reason", required=True,
+        "run",
+        help="Run id, branch name, or window name (e.g. cmx-84) — or a window id (@N) to "
+             "just kill that chela window",
+    )
+    p_close.add_argument(
+        "--reason",
         help="Why (e.g. 'superseded by cmx-403') — stored on the run, recorded in its review "
-             "history, shown on the Work card and posted on an open PR",
+             "history, shown on the Work card and posted on an open PR. Required for a run",
     )
     p_close.add_argument(
         "--force", action="store_true",
         help="Close a running/claimed run even though its agent is not idle (its window is "
-             "killed)",
+             "killed). With @N: kill the window even though a dispatched run claims it",
+    )
+    p_close.add_argument(
+        "--orchestrator", action="store_true",
+        help="With @N: allow closing the orchestrator's own window",
     )
     pr_group = p_close.add_mutually_exclusive_group()
     pr_group.add_argument("--close-pr", action="store_true",
@@ -3530,6 +3631,8 @@ def main() -> None:
 
     if args.command == "status":
         cmd_status(args)
+    elif args.command == "spawn":
+        cmd_spawn(args)
     elif args.command == "run":
         cmd_run(args)
     elif args.command == "schedule":
