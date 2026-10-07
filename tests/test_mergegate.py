@@ -282,3 +282,65 @@ def test_a_declared_base_other_than_dev_is_protected(world):
     mergegate.register(world["chela"] / "WORKFLOW.md", ["trunk"], env=world["env"])
     assert _denied(_run_hook(world, "git push origin HEAD:trunk"))
     assert not _denied(_run_hook(world, "git push origin HEAD:dev"))
+
+
+# --- 🧯 CMX-21: tmux kill-server / kill-session aimed at the LIVE server -----------------
+
+def _tmux_denied(proc: subprocess.CompletedProcess) -> bool:
+    assert proc.returncode == 0, proc.stderr
+    if not proc.stdout.strip():
+        return False
+    out = json.loads(proc.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+    assert "LIVE tmux server" in out["permissionDecisionReason"]
+    return True
+
+
+TMUX_DENIED = [
+    "tmux kill-server",
+    # the 2026-10-06 command: `$TMUX` overrides TMUX_TMPDIR inside a pane
+    "TMUX_TMPDIR=/tmp/cmx17pt tmux kill-server",
+    "env TMUX= TMUX_TMPDIR=/tmp/x tmux kill-ser",
+    "tmux -L default kill-server",
+    "tmux -S /tmp/tmux-1000/default kill-server",
+    "tmux kill-session -t chela",
+    "tmux kill-session -t =chela:2",
+    "tmux kill-session",
+    "tmux kill-session -a -t other",
+    'bash -c "cd /tmp && tmux kill-server"',
+    r"tmux new-session -d -s x \; kill-server",
+]
+
+
+@pytest.mark.parametrize("command", TMUX_DENIED)
+def test_the_hook_denies_killing_the_live_tmux_server(world, command):
+    """🔴 GUARD: drop the `tmux` branch, or count TMUX_TMPDIR as a private socket, and the
+    exact command that killed the live fleet on 2026-10-06 runs."""
+    assert _tmux_denied(_run_hook(world, command, cwd=world["other"])), command
+
+
+TMUX_ACCEPTED = [
+    "tmux -L chelatest-x kill-server",
+    "tmux -Lchelatest-x kill-server",
+    "tmux -u -L chelatest-x kill-server",
+    "tmux -S /tmp/cmx17/tmux.sock kill-server",
+    r"tmux -L x new-session -d -s y \; kill-server",
+    "tmux kill-session -t scratch",
+    "tmux list-sessions",
+    "tmux kill-window -t @7",
+    "echo tmux kill-server",
+]
+
+
+@pytest.mark.parametrize("command", TMUX_ACCEPTED)
+def test_the_hook_allows_tmux_on_a_private_socket(world, command):
+    """⭐ Negative control: a private `-L`/`-S` socket, or a non-chela target, passes — a
+    gate that denied every tmux kill would be as broken as one that allowed them all."""
+    assert not _tmux_denied(_run_hook(world, command, cwd=world["other"])), command
+
+
+def test_kill_session_honours_chela_tmux_session():
+    payload = {"tool_name": "Bash", "tool_input": {"command": "tmux kill-session -t fleet"},
+               "cwd": "/"}
+    assert mergegate.decide(payload, env={"CHELA_TMUX_SESSION": "fleet"}, registry=[]).deny
+    assert not mergegate.decide(payload, env={}, registry=[]).deny

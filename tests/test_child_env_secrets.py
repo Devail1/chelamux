@@ -94,7 +94,8 @@ def test_ordinary_vars_are_unchanged(monkeypatch, secret_env):
     for k in list(os.environ):
         if k in _SECRETS or k in _FORWARD:
             continue
-        if real_secret.search(k) or envutil.is_leaked(k):
+        # CMX-21: Claude session markers are a deliberate strip, not an ordinary var.
+        if real_secret.search(k) or envutil.is_leaked(k) or k in envutil.SESSION_MARKER_VARS:
             monkeypatch.delenv(k)
         else:
             monkeypatch.setenv(k, f"probe-{k}")

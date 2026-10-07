@@ -98,23 +98,38 @@ def ensure_session(session: str | None = None) -> bool:
     A session must own at least one window, so the anchor window is named to match the
     wall's own scheme (``shell-1``, cf. :func:`chela.spawn.next_shell_name`); passing ``-n``
     is itself what pins automatic-rename off, so no follow-up option write is needed.
+
+    🧯 CMX-21 — a heal must never resurrect the LIVE server polluted, or on the wrong
+    socket. It REFUSES (False, logged loudly) when ``TMUX_TMPDIR`` names a directory that
+    no longer exists: tmux silently falls back to the default socket then, which is how an
+    orphaned perf-harness supervisor re-created the live server from its own env on
+    2026-10-06. Otherwise it creates the server from :func:`chela.envutil.server_env` and,
+    once created, unsets the same set from the server's global table.
     """
     session = session or config.current_session()
+    missing = envutil.tmux_tmpdir_missing()
+    if missing:
+        log.error("REFUSING to heal-create tmux session '%s': TMUX_TMPDIR=%s does not "
+                  "exist, and tmux would silently fall back to the DEFAULT socket (the "
+                  "live server). Unset TMUX_TMPDIR or recreate the dir.", session, missing)
+        return False
     if session_exists(session):
         return True
     try:
         subprocess.run(
             ["tmux", "new-session", "-A", "-d", "-s", session, "-n", ANCHOR_WINDOW],
             capture_output=True, text=True, timeout=10,
-            # CMX-390: if this call STARTS the tmux server, the server's global env — which
-            # every later window inherits — is born from this one; keep pm2's IPC leak out.
-            env=envutil.child_env(),
+            # CMX-390 / CMX-21: if this call STARTS the tmux server, the server's global env —
+            # which every later window inherits — is born from this one; keep pm2's IPC leak,
+            # Claude session markers, proxies and harness vars out of it.
+            env=envutil.server_env(),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         log.warning("tmux unreachable; could not create session '%s'", session)
         return False
     if session_exists(session):
         log.info("Created tmux session '%s'", session)
+        envutil.scrub_tmux_secrets()   # CMX-21: and TMUX_TMPDIR, which server_env kept
         return True
     return False
 
