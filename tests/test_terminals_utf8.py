@@ -56,10 +56,11 @@ def test_the_reason_for_u_is_written_down_next_to_it():
 
 
 def test_the_anchor_session_is_not_confused_for_the_client():
-    """The supervisor also creates the SHARED session (`new-session -A -d`) when it has
-    gone missing. That one is a detached server-side helper writing to no terminal, so it
+    """The supervisor also creates the SHARED session when it has gone missing — since
+    CMX-21 through `chela.discovery.ensure_session` (a scrubbed `new-session -A -d`). That one is a detached server-side helper writing to no terminal, so it
     needs no `-u`; this test pins that the assertion above is about the ttyd client and
     does not silently start passing because some other tmux call grew the flag."""
     sh = AGENT_TERMINALS_SH.read_text()
-    assert "new-session -A -d" in sh, "the session-recreate helper moved; re-check the regex"
+    assert "discovery.ensure_session" in sh, \
+        "the session-recreate helper moved; re-check the regex"
     assert _spawn_tmux_invocation().count("new-session") == 1

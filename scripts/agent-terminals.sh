@@ -210,6 +210,31 @@ write_map() {
     echo "agent-terminals: map -> ${json}"
 }
 
+# 🧯 CMX-21 — the 2026-10-06 incident. A perf harness started this supervisor with
+# TMUX_TMPDIR=/tmp/cx15, deleted that dir and left the supervisor running as an orphan
+# (PPID 1, cwd deleted). When the live server died, its heal ran `new-session` with
+# TMUX_TMPDIR pointing nowhere — and tmux silently FALLS BACK TO THE DEFAULT SOCKET, so it
+# re-created the LIVE server from its own env (a dead-port HTTPS_PROXY, a parent Claude
+# session's markers): every pane after it was broken. So:
+#   - a missing TMUX_TMPDIR dir is never healed against (ensure_session refuses, loudly);
+#   - a supervisor whose cwd was deleted, or that is orphaned (PPID 1, not under pm2) with
+#     its TMUX_TMPDIR gone, has lost what it was started to serve: it EXITS.
+tmux_tmpdir_missing() { [[ -n "${TMUX_TMPDIR:-}" && ! -d "${TMUX_TMPDIR}" ]]; }
+cwd_deleted() { [[ "$(readlink "/proc/$$/cwd" 2>/dev/null)" == *" (deleted)" ]]; }
+# $PPID is fixed at shell start-up; a reparent to init only shows in /proc.
+orphaned() { [[ -z "${pm_id:-}" && "$(awk '{print $4}' "/proc/$$/stat" 2>/dev/null)" == 1 ]]; }
+
+exit_if_stranded() {
+    if cwd_deleted; then
+        echo "agent-terminals: my cwd was deleted — I outlived whatever started me; exiting instead of healing" >&2
+        exit 1
+    fi
+    if tmux_tmpdir_missing && orphaned; then
+        echo "agent-terminals: orphaned (PPID 1, not under pm2) and TMUX_TMPDIR=${TMUX_TMPDIR} is gone; exiting instead of healing" >&2
+        exit 1
+    fi
+}
+
 cleanup() {
     # A trap-driven `exit` (see TERM/INT below) only ends THIS shell — it does not
     # touch a `nap()` sleep still backgrounded at the moment the signal landed. Left
@@ -220,6 +245,9 @@ cleanup() {
         for wid in "${!PID_OF[@]}"; do kill "${PID_OF[$wid]}" 2>/dev/null; done
     fi
     rm -f "${MAP_FILE}"
+    # CMX-21: with our TMUX_TMPDIR gone, a bare `tmux` lands on the DEFAULT socket —
+    # whose webterm_* sessions belong to the live supervisor, not to us.
+    tmux_tmpdir_missing && return
     # drop ONLY our own grouped viewer sessions (scoped to this supervisor's
     # prefix — never touch another instance's / another tool's webterm_*).
     tmux list-sessions -F '#{session_name}' 2>/dev/null \
@@ -297,9 +325,21 @@ ANCHOR_WINDOW="shell-1"   # a session needs >=1 window; match the wall's shell-N
 # tty to attach). That is a success, not a failure, so the exit code is deliberately
 # ignored: has-session alone decides. That also makes the create race-safe — whoever
 # wins, we agree the session is there.
+#
+# CMX-21: the CREATE itself goes through chela.discovery.ensure_session — the one place
+# that starts the server from a scrubbed env (chela.envutil.server_env: no Claude session
+# markers, proxies, PERF_*/H) and `set-environment -gu`s the same set once it exists, so
+# the list lives in one file. A missing TMUX_TMPDIR dir is refused BEFORE any tmux call:
+# even has-session would fall back to the default socket from there.
 ensure_session() {
+    if tmux_tmpdir_missing; then
+        echo "agent-terminals: REFUSING to heal: TMUX_TMPDIR=${TMUX_TMPDIR} does not exist, and tmux would silently fall back to the DEFAULT socket (the live server)" >&2
+        return 1
+    fi
     tmux has-session -t "${TMUX_SESSION}" 2>/dev/null && return 0
-    tmux new-session -A -d -s "${TMUX_SESSION}" -n "${ANCHOR_WINDOW}" </dev/null >/dev/null 2>&1
+    "${PYTHON}" -c 'import sys
+from chela import discovery
+sys.exit(0 if discovery.ensure_session(sys.argv[1]) else 1)' "${TMUX_SESSION}" </dev/null >/dev/null
     if tmux has-session -t "${TMUX_SESSION}" 2>/dev/null; then
         echo "agent-terminals: tmux session '${TMUX_SESSION}' was missing — created it"
         return 0
@@ -313,9 +353,11 @@ ensure_session() {
 # running supervisor is recovered from too (not just a cold boot).
 wait_for_session() {
     local delay=1
+    exit_if_stranded
     until ensure_session; do
         echo "agent-terminals: tmux unreachable, cannot create session '${TMUX_SESSION}'; retrying in ${delay}s" >&2
         nap "${delay}"
+        exit_if_stranded
         delay=$(( delay * 2 ))
         (( delay > BACKOFF_MAX )) && delay="${BACKOFF_MAX}"
     done

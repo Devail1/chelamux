@@ -46,12 +46,30 @@ The parent's env is a channel too: a tmux window inherits the tmux SERVER's glob
 environment, not the env of the client that ran ``new-window``. :func:`tmux_secret_names`
 reads that table so a launch path can ``set-environment -gu`` whatever secret a server
 started before this fix (or by an operator's shell) still carries.
+
+🧯 CMX-21 — a polluted tmux SERVER. On 2026-10-06 an orphaned perf-harness supervisor
+re-created the live tmux server from its own environment, so every window born after it
+carried ``HTTPS_PROXY=http://127.0.0.1:9`` (ECONNREFUSED on every request), a parent Claude
+session's ``CLAUDE_CODE_SESSION_ID``/``CLAUDE_CODE_CHILD_SESSION`` (transcripts off) and a
+``TMUX_TMPDIR`` pointing at a deleted dir. Two more groups, therefore:
+
+* :data:`SESSION_MARKER_VARS` — the markers a running Claude Code session sets for its
+  OWN children. A process chela spawns is never that session's child, so
+  :func:`child_env` drops them everywhere.
+* :func:`is_server_hazard` — proxies, ``TMUX_TMPDIR``, ``PERF_*`` and the harness's ``H``.
+  Legitimate in a hook's or a suite's env (a proxy may be real), so :func:`child_env`
+  keeps them; but a tmux SERVER's global table hands them to every window, so
+  :func:`server_env` (the env a heal-create starts the server from) drops them and
+  :func:`scrub_tmux_secrets` unsets them from the global table. An operator who really
+  runs behind a proxy names it in ``CHELA_CHILD_ENV_FORWARD``.
 """
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
-from collections.abc import Mapping
+import urllib.parse
+from collections.abc import Callable, Mapping
 
 # Node's own IPC / cluster markers: a Node process that sees these believes it is a forked
 # IPC child (or a cluster worker) and wires itself to a channel that is not its own.
@@ -75,6 +93,19 @@ FORWARDED_SECRET_VARS = frozenset({
 FORWARD_ENV = "CHELA_CHILD_ENV_FORWARD"
 
 
+# 🧯 CMX-21. Set by a running Claude Code session for its own children; inherited by a
+# process that is NOT its child, they switch that process's transcripts off.
+SESSION_MARKER_VARS = (
+    "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PID", "AI_AGENT",
+)
+# Kept out of a tmux SERVER's global env (every window inherits it), not out of a hook's.
+PROXY_ENV_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY",
+                  "http_proxy", "https_proxy", "all_proxy", "ftp_proxy")
+_SERVER_HAZARD_EXACT = (*PROXY_ENV_VARS, "TMUX_TMPDIR", "H")
+_SERVER_HAZARD_PREFIXES = ("PERF_",)
+
+
 def forwarded_names(src: Mapping[str, str] | None = None) -> frozenset[str]:
     """:data:`FORWARDED_SECRET_VARS` plus the operator's ``CHELA_CHILD_ENV_FORWARD`` names."""
     src = os.environ if src is None else src
@@ -92,6 +123,17 @@ def is_secret(key: str, forward: frozenset[str] = FORWARDED_SECRET_VARS) -> bool
     return up.endswith(_SECRET_SUFFIXES) or any(s in up for s in _SECRET_SUBSTRINGS)
 
 
+def is_session_marker(key: str) -> bool:
+    """True for a Claude Code session marker (:data:`SESSION_MARKER_VARS`)."""
+    return key in SESSION_MARKER_VARS
+
+
+def is_server_hazard(key: str) -> bool:
+    """True for a var a tmux server must not hand every window: a proxy, ``TMUX_TMPDIR``,
+    the perf harness's ``PERF_*``/``H`` (CMX-21)."""
+    return key in _SERVER_HAZARD_EXACT or key.startswith(_SERVER_HAZARD_PREFIXES)
+
+
 def tmux_secret_names(show_environment_output: str,
                       forward: frozenset[str] | None = None) -> list[str]:
     """Secret names SET in ``tmux show-environment -g`` output (``KEY=value`` lines; a
@@ -105,10 +147,29 @@ def tmux_secret_names(show_environment_output: str,
     return names
 
 
+def tmux_scrub_names(show_environment_output: str,
+                     forward: frozenset[str] | None = None) -> list[str]:
+    """Every name SET in ``tmux show-environment -g`` output that no window should inherit:
+    the secrets (:func:`tmux_secret_names`), pm2/Node leaks, Claude session markers and the
+    server hazards (CMX-21). A name in ``forward`` is kept. Values are never returned."""
+    forward = forwarded_names() if forward is None else forward
+    names = []
+    for line in (show_environment_output or "").splitlines():
+        key, eq, _ = line.partition("=")
+        if not eq or not key or key.startswith("-"):
+            continue
+        if is_leaked(key) or is_secret(key, forward) or (key not in forward and (
+                is_session_marker(key) or is_server_hazard(key))):
+            names.append(key)
+    return names
+
+
 def scrub_tmux_secrets() -> list[str]:
-    """``tmux set-environment -gu`` every secret name set in the tmux server's GLOBAL
-    environment — the table every new window inherits — before a launch path opens one.
-    Best-effort (no server, no tmux: nothing to scrub). Returns the names unset."""
+    """``tmux set-environment -gu`` every name :func:`tmux_scrub_names` flags in the tmux
+    server's GLOBAL environment — the table every new window inherits — before a launch
+    path opens one: secrets (CMX-425), and since CMX-21 the session markers, proxies and
+    ``TMUX_TMPDIR`` a polluted server was born with. Best-effort (no server, no tmux:
+    nothing to scrub). Returns the names unset."""
     try:
         out = subprocess.run(["tmux", "show-environment", "-g"],
                              capture_output=True, text=True, timeout=10)
@@ -116,7 +177,7 @@ def scrub_tmux_secrets() -> list[str]:
         return []
     if out.returncode != 0 or not isinstance(out.stdout, str):
         return []
-    names = tmux_secret_names(out.stdout)
+    names = tmux_scrub_names(out.stdout)
     for name in names:
         subprocess.run(["tmux", "set-environment", "-gu", name], capture_output=True)
     return names
@@ -137,7 +198,81 @@ def child_env(extra: Mapping[str, str] | None = None,
     explicitly means it."""
     src = os.environ if base is None else base
     forward = forwarded_names(src)
-    env = {k: v for k, v in src.items() if not is_leaked(k) and not is_secret(k, forward)}
+    env = {k: v for k, v in src.items()
+           if not is_leaked(k) and not is_secret(k, forward)
+           and (k in forward or not is_session_marker(k))}
     if extra:
         env.update(extra)
     return env
+
+
+def server_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The env a tmux SERVER is started from (CMX-21): :func:`child_env` minus the server
+    hazards, because the server copies it into the global table every window inherits.
+
+    ``TMUX_TMPDIR`` is the one hazard kept HERE: the tmux client reads it to pick the
+    socket, and dropping it would aim the create at a different server. The caller unsets
+    it from the new server's global table afterwards (:func:`scrub_tmux_secrets`)."""
+    src = os.environ if base is None else base
+    forward = forwarded_names(src)
+    return {k: v for k, v in child_env(base=src).items()
+            if k in forward or k == "TMUX_TMPDIR" or not is_server_hazard(k)}
+
+
+def tmux_tmpdir_missing(env: Mapping[str, str] | None = None) -> str | None:
+    """The ``TMUX_TMPDIR`` value when it is set but its directory does not exist, else None.
+
+    That is exactly the orphaned supervisor's state on 2026-10-06 (CMX-21): tmux silently
+    falls back to the DEFAULT socket when that dir is missing, so a "heal" from here lands
+    on the live server, not the private one it was started for."""
+    src = os.environ if env is None else env
+    raw = src.get("TMUX_TMPDIR")
+    if raw and not os.path.isdir(raw):
+        return raw
+    return None
+
+
+# --- 🧯 CMX-21: the health check over a tmux server's global env -------------------------
+
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+# Port 9 is "discard": a proxy aimed there is a deliberate egress kill switch (the perf
+# harness's), never a real proxy.
+_DEAD_PORTS = frozenset({9})
+POLLUTION_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION")
+
+
+def _port_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
+def tmux_env_pollution(env: Mapping[str, str],
+                       port_open: Callable[[str, int], bool] = _port_open) -> dict[str, str]:
+    """``{name: why}`` for each entry in a tmux server's GLOBAL env that breaks every window
+    born from it — the 2026-10-06 state: a proxy aimed at a dead localhost port, a Claude
+    session marker, a ``TMUX_TMPDIR`` whose directory is gone. Empty when clean."""
+    found: dict[str, str] = {}
+    for name in PROXY_ENV_VARS:
+        raw = env.get(name)
+        if not raw:
+            continue
+        parsed = urllib.parse.urlparse(raw if "://" in raw else f"http://{raw}")
+        try:
+            host, port = parsed.hostname, parsed.port
+        except ValueError:
+            continue
+        if host not in _LOCAL_HOSTS:
+            continue
+        port = port or 80
+        if port in _DEAD_PORTS or not port_open(host, port):
+            found[name] = f"a proxy at {host}:{port}, where nothing listens"
+    for name in POLLUTION_MARKERS:
+        if name in env:
+            found[name] = "a Claude session marker — transcripts are off in every window"
+    missing = tmux_tmpdir_missing(env)
+    if missing:
+        found["TMUX_TMPDIR"] = f"{missing} does not exist — tmux falls back to the default socket"
+    return found

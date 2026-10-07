@@ -283,6 +283,15 @@ def _break_tmux_node_ipc_env(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_tmux_leaked_env(tmp_path, monkeypatch):
+    """CMX-21: an orphaned perf harness re-created the live server from its own env — a
+    proxy aimed at the discard port and a parent Claude session's marker."""
+    monkeypatch.setattr(runtime_truth, "_tmux_global_env",
+                        lambda: {"HTTPS_PROXY": "http://127.0.0.1:9",
+                                 "CLAUDE_CODE_SESSION_ID": "fc9c56ea"})
+    return doctor.ERROR
+
+
 def _break_process_node_ipc_env(tmp_path, monkeypatch):
     """CMX-281: THIS process — a window already alive, not a new spawn — carries the
     leaked vars in its OWN environment. `tmux.node_ipc_env`'s corruption (above) breaks
@@ -624,6 +633,7 @@ CORRUPTIONS = {
     "env.running": _break_env_running,
     "tmux.session": _break_tmux_session,
     "tmux.node_ipc_env": _break_tmux_node_ipc_env,
+    "tmux.leaked_env": _break_tmux_leaked_env,
     "process.node_ipc_env": _break_process_node_ipc_env,
     "dashboard.port": _break_dashboard_port,
     "dashboard.update_lock": _break_update_apply_lock,

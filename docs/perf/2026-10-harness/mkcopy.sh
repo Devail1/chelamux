@@ -2,7 +2,7 @@
 # write a safe chela.env (no dispatch, no notify, no relay, no restore-resume); disable
 # every scheduled task in the copy so the harness daemon never prompts an agent.
 set -e; . "$(dirname "$0")/env.sh"; SRC=${1:-$HOME/.chela}
-rm -rf "$CHELA_DIR"; mkdir -p "$CHELA_DIR" "$TMUX_TMPDIR"; chmod 700 "$TMUX_TMPDIR"
+rm -rf "$CHELA_DIR"; mkdir -p "$CHELA_DIR"
 rsync -a --exclude worktrees --exclude socks --exclude 'share-*' --exclude '*.env' \
   --exclude 'secrets*' --exclude 'judge-*' --exclude '*.sock' --exclude '*.lock' \
   --exclude collab_id --exclude dashboard.port --exclude 'chela.env*' --exclude 'ecosystem*' \

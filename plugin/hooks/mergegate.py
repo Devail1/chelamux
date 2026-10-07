@@ -24,6 +24,14 @@ into a chela workflow's repo:
   approve``, or a request to the dashboard's ``/api/share-requests/…/approve`` route,
   CMX-7) — same rule.
 
+* 🧯 ``tmux kill-server`` / ``tmux kill-session`` aimed at the LIVE server (CMX-21) —
+  i.e. without a private ``-L <name>`` / ``-S <path>`` socket. A ``TMUX_TMPDIR=…`` prefix
+  does NOT count: inside a tmux pane ``$TMUX`` takes precedence over it, which is exactly
+  how an agent's "private" ``TMUX_TMPDIR=/tmp/x tmux kill-server`` killed the live fleet
+  (its own pane included) on 2026-10-06. ``kill-session`` is denied when it names chela's
+  session (``$CHELA_TMUX_SESSION``, else ``chela``), a ``$id``, uses ``-a``, or names no
+  target at all (inside a chela pane that is chela's session).
+
 It never denies read-only ``gh pr view/diff/checks/list``, ``gh pr create``, or a push of a
 ``cmx-*`` feature branch. ``chela merge`` itself is unaffected: its own ``gh``/``git`` calls
 run as subprocesses of chela's Python, never through a Claude ``Bash`` tool, so no hook
@@ -569,6 +577,99 @@ def _self_approval(argv: list[str]) -> Decision:
     return ALLOW
 
 
+# --- tmux: the live server (CMX-21) ------------------------------------------------------
+
+_TMUX_VALUE_FLAGS = frozenset("cfLST")       # global flags that take a value
+TMUX_DENY_HINT = ("Pin a PRIVATE server on every call — `tmux -L <name> …` or "
+                  "`tmux -S <path> …`. `TMUX_TMPDIR=` alone does not isolate: inside a tmux "
+                  "pane `$TMUX` overrides it, and a missing TMUX_TMPDIR dir falls back to the "
+                  "default socket. That is how the live fleet was killed on 2026-10-06.")
+
+
+def _tmux_globals(args: list[str]) -> tuple[str | None, str | None, int]:
+    """``(-L name, -S path, index of the first command word)`` — clustered flags too."""
+    name = path = None
+    i = 0
+    while i < len(args) and args[i].startswith("-") and len(args[i]) > 1:
+        a = args[i]
+        if a == "--":
+            return name, path, i + 1
+        for j, c in enumerate(a[1:], start=1):
+            if c in _TMUX_VALUE_FLAGS:
+                value = a[j + 1:]
+                if not value and i + 1 < len(args):
+                    i += 1
+                    value = args[i]
+                if c == "L":
+                    name = value
+                elif c == "S":
+                    path = value
+                break
+        i += 1
+    return name, path, i
+
+
+def _private_socket(name: str | None, path: str | None) -> bool:
+    if name is not None:
+        return bool(name) and name != "default"
+    if path is not None:
+        p = Path(path)
+        return bool(path) and not (p.name == "default" and p.parent.name.startswith("tmux-"))
+    return False
+
+
+def _tmux_commands(rest: list[str]) -> list[list[str]]:
+    """``tmux a \\; b`` — the commands of one tmux invocation (``;`` arrives as its own
+    token only when the shell lexer kept it; :func:`_decide_segments` covers the rest)."""
+    out: list[list[str]] = [[]]
+    for tok in rest:
+        if tok in (";", "\\;"):
+            out.append([])
+        else:
+            out[-1].append(tok)
+    return [c for c in out if c]
+
+
+def _is_cmd(word: str, full: str, min_len: int) -> bool:
+    """tmux accepts any unambiguous prefix of a command name (``kill-ser``)."""
+    return len(word) >= min_len and full.startswith(word)
+
+
+def _tmux_kill(cmd: list[str], env: dict) -> str | None:
+    """What ``cmd`` would kill on the live server, or None."""
+    word, args = cmd[0], cmd[1:]
+    if _is_cmd(word, "kill-server", 8):
+        return "`tmux kill-server`"
+    if not _is_cmd(word, "kill-session", 8):
+        return None
+    live = {"chela", env.get("CHELA_TMUX_SESSION") or "chela"}
+    if "-a" in args:
+        return "`tmux kill-session -a` (it kills every OTHER session, chela's included)"
+    target = _flag_value(args, ("-t",))
+    if target is None:
+        attached = [a for a in args if a.startswith("-t") and len(a) > 2]
+        target = attached[0][2:] if attached else None
+    if target is None:
+        return "`tmux kill-session` with no -t (inside a chela pane that is chela's session)"
+    session = target.lstrip("=").split(":", 1)[0]
+    if session in live or session.startswith("$"):
+        return f"`tmux kill-session -t {target}`"
+    return None
+
+
+def _tmux(args: list[str], ctx: _Ctx) -> Decision:
+    name, path, i = _tmux_globals(args)
+    if _private_socket(name, path):
+        return ALLOW
+    for cmd in _tmux_commands(args[i:]):
+        what = _tmux_kill(cmd, ctx.env)
+        if what:
+            return Decision(True, f"🧯 chela: {what} on the LIVE tmux server — it would take "
+                                  f"down every agent pane, this one included. "
+                                  f"{TMUX_DENY_HINT}")
+    return ALLOW
+
+
 SHARE_REQUEST_DENY = ("🙋 chela: a sandboxed guest's access request is approved by the "
                       "OPERATOR, from the dashboard or a plain terminal — never by a Claude "
                       "session. Ask the human to decide it.")
@@ -583,12 +684,21 @@ def _decide_segments(command: str, ctx: _Ctx, depth: int = 0) -> Decision:
         merge_shaped = any(k in command for k in ("merge", "push", "override"))
         return Decision(undecided=f"unparseable command ({exc})") if merge_shaped else ALLOW
     undecided = ""
+    tmux_globals: list[str] | None = None    # the last tmux call's globals, for `\;` chains
     for raw in segs:
         env = dict(ctx.env)
         argv = _unwrap(raw, env)
         if not argv:
             continue
         name = os.path.basename(argv[0])
+        if name == "tmux":
+            tmux_globals = argv[1:1 + _tmux_globals(argv[1:])[2]]
+        elif tmux_globals is not None and name.startswith("kill-"):
+            # `tmux new -d \; kill-server`: the lexer split the escaped `;` into its own
+            # segment, so this word is still a command of the tmux call before it.
+            argv, name = ["tmux", *tmux_globals, *argv], "tmux"
+        else:
+            tmux_globals = None
         sub = _Ctx(ctx.cwd, env, ctx.registry)
         if name in ("cd", "pushd"):
             target = argv[1] if len(argv) > 1 and argv[1] != "-" else "~"
@@ -608,6 +718,8 @@ def _decide_segments(command: str, ctx: _Ctx, depth: int = 0) -> Decision:
             d = _gh(argv[1:], sub)
         elif name == "git":
             d = _git(argv[1:], sub)
+        elif name == "tmux":
+            d = _tmux(argv[1:], sub)
         else:
             d = _self_approval(argv)
         if d.deny:

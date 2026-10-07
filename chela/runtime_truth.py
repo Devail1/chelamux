@@ -71,6 +71,7 @@ from chela import (
     capabilities,
     config,
     discovery,
+    envutil,
     epoch,
     event_log,
     hold,
@@ -429,6 +430,41 @@ def _node_ipc_env_report(_declared: None, obs: Observation) -> list[Finding]:
         "on every window it spawns, so seeing this means a NEW tmux server has started "
         "since the last spawn (pm2 restart, a reboot) under a node-parented ancestor. "
         f"Clear it now: `{unset_cmd}`.",
+    )]
+
+
+# 🧯 CMX-21: the 2026-10-06 incident — an orphaned perf-harness supervisor re-created the
+# live tmux server from its own env, so every window born after it carried a proxy aimed at
+# a dead local port (ECONNREFUSED on every request), a parent Claude session's markers
+# (transcripts off) and a TMUX_TMPDIR pointing at a deleted dir. Nothing said so until two
+# agents died of it. This fact reads the same global table and makes that state RED; the
+# daemon's doctor sweep (`doctor.check_and_notify`) pushes it once, edge-triggered.
+def _tmux_leaked_env_read() -> Observation:
+    env = _tmux_global_env()
+    if env is None:
+        return cannot_verify("tmux is not on PATH, so chela cannot read its global "
+                             "environment table — the one every window it spawns "
+                             "inherits from.")
+    return observed(envutil.tmux_env_pollution(env))
+
+
+def _tmux_leaked_env_report(_declared: None, obs: Observation) -> list[Finding]:
+    found: dict[str, str] = obs.value
+    if not found:
+        return [Finding(OK, "tmux's global environment carries no dead proxy, Claude "
+                            "session marker or missing TMUX_TMPDIR")]
+    names = sorted(found)
+    unset_cmd = " && ".join(f"tmux set-environment -gu {n}" for n in names)
+    return [Finding(
+        ERROR,
+        f"tmux's GLOBAL environment is polluted ({', '.join(names)}) — every new window "
+        "inherits it",
+        "; ".join(f"{n}: {found[n]}" for n in names) + ". CMX-21: this is the state an "
+        "orphaned harness left the live server in on 2026-10-06 — new panes failed with "
+        "ECONNREFUSED and agent transcripts were off. chela scrubs this table before each "
+        "spawn, so seeing it means a server was (re)started from a polluted env. Clear it "
+        f"now: `{unset_cmd}`, and find what started the server (`tmux display -p "
+        "'#{pid}'`).",
     )]
 
 
@@ -3119,6 +3155,16 @@ def facts() -> list[Fact]:
             declare=lambda: None,
             read_back=_node_ipc_env_read,
             report=_node_ipc_env_report,
+        ),
+        Fact(
+            name="tmux.leaked_env",
+            declared_by="nothing — chela never sets these; a clean spawn path requires "
+                        "their absence (CMX-21)",
+            owned_by="tmux's GLOBAL environment — the table every window chela spawns, "
+                     "in ANY session, inherits from",
+            declare=lambda: None,
+            read_back=_tmux_leaked_env_read,
+            report=_tmux_leaked_env_report,
         ),
         Fact(
             name="process.node_ipc_env",
