@@ -288,6 +288,61 @@ def test_each_edge_is_written_exactly_once(repo, team, launched):
     assert _row("CMX-7")["tracker_edge"] == "in_review"
 
 
+def test_a_rework_bounces_in_progress_in_review_and_lands_done_one_write_per_edge(
+        repo, team, launched, monkeypatch):
+    """Liav's mapping (CMX-23, 2026-10-07): In Progress = the agent is working — the first
+    attempt AND every rework round, though the PR stays open; In Review = the PR is out of
+    the agent's hands. Every hop is driven by ``tick`` itself, idle ticks included, so the
+    sync's call-site in the tick is under test too — and each edge is ONE write."""
+    class _EveryWindowLives(set):           # the fake launch opens no tmux window
+        def __contains__(self, _):
+            return True
+    monkeypatch.setattr(dispatcher, "_tmux_windows", _EveryWindowLives)
+    team.issues = {"CMX-7": issue(7, "Todo")}
+    wf = repo / "WORKFLOW.md"
+
+    def tick(times=1):                     # >1 = idle ticks: they must write nothing
+        for _ in range(times):
+            summary = dispatcher.tick(wf)
+        return summary
+
+    assert tick()["dispatched"] == 1                                   # claim
+    tick()                                                             # idle tick
+    pr = {"pr_url": "https://github.com/o/r/pull/1", "pr_state": "open"}
+    _set("CMX-7", status="awaiting_review", **pr)                           # judging
+    tick(2)
+    _set("CMX-7", status="changes_requested")                               # sent back
+    tick()
+    # Sent back is already the agent's again — before the rework agent even spawns.
+    assert team.issues["CMX-7"]["state"]["name"] == "In Progress"
+    _set("CMX-7", status="running", rework_count=1)                         # rework agent
+    tick()
+    _set("CMX-7", status="awaiting_review")                                 # judged again
+    tick(2)
+    _set("CMX-7", status="done", pr_state="merged", ended_at=dispatcher._now())  # merged
+    tick(2)
+
+    assert [s for _, s in team.updates()] == [
+        "st-progress", "st-review", "st-progress", "st-review", "st-done"]
+    assert team.issues["CMX-7"]["state"]["name"] == "Done"
+
+
+def test_the_tick_drives_the_tracker_even_when_dispatch_is_held(repo, team, launched):
+    """A PR opened since the last tick → In Review on the NEXT tick, before the dispatch
+    gates: a held queue (nothing is claimed, so the post-claim sync never runs) still keeps
+    the board honest."""
+    from chela import hold
+    team.issues = {"CMX-7": issue(7, "In Progress")}
+    _seed(repo, "CMX-7", "awaiting_review", pr_url="https://github.com/o/r/pull/1",
+          pr_state="open", tracker_edge="in_progress")
+    hold.take("rewriting the queue", by="test")
+    summary = dispatcher.tick(repo / "WORKFLOW.md")
+    assert summary.get("held") and summary["dispatched"] == 0, summary
+    assert summary["tracker_transitions"] == 1
+    assert team.updates() == [("uuid-7", "st-review")]
+    assert _row("CMX-7")["tracker_edge"] == "in_review"
+
+
 def test_an_edge_already_set_by_the_github_integration_is_not_written_again(repo, team):
     """Linear's GitHub integration moved the issue to In Review first — chela records the
     edge and writes nothing (it does not fight the integration)."""

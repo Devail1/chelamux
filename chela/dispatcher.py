@@ -5991,18 +5991,26 @@ def _died_run_ids(conn: sqlite3.Connection, workflow_path: str) -> frozenset[str
     )
 
 
+# 🗂️📐 CMX-23 — the run statuses that put the work in the AGENT's hands (→ In Progress):
+# the first attempt, and every rework round — `changes_requested` is the judge sending it
+# back, even though the PR stays open (Liav's mapping, Linear comment on CMX-23,
+# 2026-10-07). The rest of REVIEW_STATUSES is out of the agent's hands (→ In Review).
+_TRACKER_IN_PROGRESS_STATUSES = (*ACTIVE_STATUSES, "changes_requested")
+
+
 def _desired_tracker_edge(row) -> str | None:
-    """The workflow edge a run is on, for a tracker chela drives (CMX-23): a run parked in
-    the review loop (its PR is open) → ``in_review``; a claimed/running one →
-    ``in_progress`` — unless it already reached In Review (a rework runs on an open PR, and
-    that PR is still in review). Everything else (failed, done, closed) → None: a died run
-    keeps its state until it is re-claimed, merge → Done is ``close_tasks``' job, and a
-    close writes its own edge (:func:`_tracker_close`)."""
+    """The workflow edge a run is on, for a tracker chela drives (CMX-23): the agent is
+    working — a claim, or a rework round on an open PR — → ``in_progress``; the PR is open
+    and out of the agent's hands (judging, clean awaiting merge, needs_human) →
+    ``in_review``. So a rework bounces In Review → In Progress → In Review. Everything else
+    (failed, done, closed) → None: a died run keeps its state until it is re-claimed,
+    merge → Done is ``close_tasks``' job, and a close writes its own edge
+    (:func:`_tracker_close`)."""
     status = row["status"]
+    if status in _TRACKER_IN_PROGRESS_STATUSES:
+        return "in_progress"
     if status in REVIEW_STATUSES:
         return "in_review"
-    if status in ACTIVE_STATUSES:
-        return "in_review" if row["tracker_edge"] == "in_review" else "in_progress"
     return None
 
 

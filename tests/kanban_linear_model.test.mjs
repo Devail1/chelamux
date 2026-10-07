@@ -6,15 +6,10 @@
 // .test.mjs inside pytest, by discovery).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 import {
     UNMAPPED_KEY, columnOf, runStateBadges, trackerBoard, trackerColumns,
 } from '../chela/dashboard/static/js/kanbanlinearmodel.js';
 
-const JS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static', 'js');
-const KANBAN_JS_SRC = readFileSync(join(JS_DIR, 'kanban.js'), 'utf8');
 
 // A fake team's states, already in Linear's board order (the server sorts them).
 const LINEAR = [
@@ -54,8 +49,8 @@ test('a failed run in In Review renders inside In Review with its failed badge â
     assert.deepEqual(review.cards, [card]);
     for (const c of board.columns) if (c.label !== 'In Review') assert.equal(c.cards.length, 0, c.label);
     assert.ok(!labels(board).some(l => /fail/i.test(l)));
-    // The card's own pill still says "failed" (kanban.js's STATUS_CHIPS renders by status).
-    assert.match(KANBAN_JS_SRC, /failed:\s*\{\s*label:\s*'âœ— failed'/);
+    // The card's own red "failed" pill is checked on the RENDERED card:
+    // tests/kanban_tracker_render.test.mjs.
 });
 
 test('the tracker state wins over the run status; the status is only the fallback', () => {
@@ -94,7 +89,5 @@ test('run state rides as badges: judging, rework N, blocked race', () => {
     assert.deepEqual(runStateBadges({ status: 'running', judge_state: 'clean', rework_count: 0 }), []);
 });
 
-test('kanban.js renders the tracker board when the workflows have tracker columns', () => {
-    assert.match(KANBAN_JS_SRC, /const tracker = trackerColumns\(shown\);/);
-    assert.match(KANBAN_JS_SRC, /cols = trackerBoard\(tracker, allCards\)\.columns;/);
-});
+// kanban.js's call sites are guarded by a RENDER, not a source regex:
+// tests/kanban_tracker_render.test.mjs.
