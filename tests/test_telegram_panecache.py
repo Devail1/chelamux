@@ -296,3 +296,263 @@ def test_the_pane_loop_resolves_the_epoch_once_per_tick(monkeypatch):
     stop = threading.Event()
     main._pane_loop(_OneTick(stop, 40), _Registry(["@0"]), 1, stop)
     assert len(calls) == 1
+
+
+# ── round 3: guards on the invariants the tests above left coinciding ────────
+
+
+def test_the_capture_second_is_read_before_the_capture_not_after():
+    """The clean rule compares the stamp against the second the capture BEGAN. A capture
+    that straddles a second boundary — output written mid-capture, in the same second the
+    stamp already reads — must be re-captured. Read the clock after the capture and that
+    second looks older than the capture, so the write is lost until the sweep."""
+    wids = ["@0"]
+    fleet = _Fleet(wids)
+    fleet.wall = 1_005.5
+    fleet.stamp["@0"] = 1_005                   # it wrote earlier in this second
+    real = fleet.capture
+
+    def slow_capture(wid):
+        pane = real(wid)                        # reads the idle pane...
+        fleet.text[wid] = ASKUQ_PANE            # ...then the agent writes, still in 1005
+        fleet.wall = 1_006.2                    # and the capture returns in the next second
+        return pane
+
+    fleet.capture = slow_capture
+    sends = []
+    watcher = _watcher(fleet, wids, sends)
+
+    watcher.poll(wids)
+    assert _fruit_sends(sends) == []
+    fleet.advance(2)
+    watcher.poll(wids)
+
+    assert len(_fruit_sends(sends)) == 1
+    assert fleet.captures["@0"] == 2
+
+
+def test_the_sweep_fires_at_exactly_the_sweep_interval():
+    """'Every window is re-captured at least every ``sweep`` seconds' — at the interval,
+    not one tick after it."""
+    wids = ["@0"]
+    fleet = _Fleet(wids)
+    sends = []
+    watcher = _watcher(fleet, wids, sends, sweep=10.0)
+
+    watcher.poll(wids)                          # captured at mono 0
+    fleet.text["@0"] = ASKUQ_PANE               # silent change: stamp never moves
+    fleet.advance(9.9)
+    watcher.poll(wids)
+    assert fleet.captures["@0"] == 1 and _fruit_sends(sends) == []
+
+    fleet.advance(0.1)                          # exactly 10 s since the capture
+    watcher.poll(wids)
+    assert fleet.captures["@0"] == 2
+    assert len(_fruit_sends(sends)) == 1
+
+
+def test_the_sweep_is_measured_from_each_windows_own_last_capture():
+    """A window re-captured because its stamp moved restarts ITS sweep clock; an idle
+    window keeps its own. Neither is swept early nor late because of the other."""
+    wids = ["@0", "@1"]
+    fleet = _Fleet(wids)
+    watcher = _watcher(fleet, wids, [], sweep=10.0)
+
+    watcher.poll(wids)                          # both captured at mono 0
+    fleet.advance(6)
+    fleet.text["@1"] = "busy\n"
+    fleet.stamp["@1"] = int(fleet.wall) - 1     # moved, and older than the next capture
+    watcher.poll(wids)                          # @1 re-captured at mono 6
+    fleet.advance(4)
+    watcher.poll(wids)                          # mono 10: @0 is due, @1 is not
+    assert fleet.captures == {"@0": 2, "@1": 2}
+    fleet.advance(6)
+    watcher.poll(wids)                          # mono 16: @1 is due, @0 is not
+    assert fleet.captures == {"@0": 2, "@1": 3}
+
+
+def test_a_cached_window_is_handed_exactly_its_own_last_text():
+    """Served-from-cache must be THAT window's last capture — never a neighbour's, never
+    an empty string."""
+    wids = ["@0", "@1"]
+    fleet = _Fleet(wids)
+    fleet.text["@0"] = "zero\n"
+    fleet.text["@1"] = "one\n"
+    gated = ActivityGatedCapture(
+        fleet.capture, activity=fleet.activity,
+        wall=lambda: fleet.wall, now=lambda: fleet.mono)
+
+    first = gated.tick(wids)
+    assert [first(w) for w in wids] == ["zero\n", "one\n"]
+    fleet.advance(2)
+    second = gated.tick(wids)
+    assert [second(w) for w in wids] == ["zero\n", "one\n"]
+    assert fleet.captures == {"@0": 1, "@1": 1}
+
+
+def test_a_stamp_that_moves_again_after_a_recapture_is_recaptured_again():
+    """The remembered stamp is the one seen at the LATEST capture — not the first."""
+    wids = ["@0"]
+    fleet = _Fleet(wids)
+    watcher = _watcher(fleet, wids, [])
+
+    for n in range(3):
+        _ticks(watcher, fleet, wids, 2)
+        fleet.write("@0", f"out {n}\n")
+    _ticks(watcher, fleet, wids, 3)
+
+    # one initial + one per write (+1 each for the same-second rule, since each write is
+    # stamped with the second its capture begins in), and nothing while idle after
+    assert fleet.captures["@0"] == 1 + 3 * 2
+    before = fleet.captures["@0"]
+    _ticks(watcher, fleet, wids, 5)
+    assert fleet.captures["@0"] == before
+
+
+def test_activity_that_raises_falls_back_to_capturing_everything():
+    wids = ["@0", "@1"]
+    fleet = _Fleet(wids)
+
+    def boom():
+        raise RuntimeError("tmux went away")
+
+    fleet.activity = boom
+    watcher = _watcher(fleet, wids, [])
+
+    _ticks(watcher, fleet, wids, 3)
+
+    assert fleet.captures == {"@0": 3, "@1": 3}
+
+
+def test_a_tick_capture_that_raises_still_polls_every_pane():
+    """If the tick source itself blows up, the watcher reads every pane directly — a
+    prompt is still relayed, and only once."""
+    wids = ["@0", "@1"]
+    fleet = _Fleet(wids)
+    fleet.text["@1"] = ASKUQ_PANE
+    sends = []
+
+    def sender(text, parse_mode=None, thread=None, reply_markup=None):
+        sends.append((thread, text))
+        return True
+
+    def broken_tick(_wids):
+        raise RuntimeError("cache exploded")
+
+    watcher = PermissionGateWatcher(
+        sender, _Registry(wids), capture=fleet.capture, tick_capture=broken_tick)
+
+    _ticks(watcher, fleet, wids, 3)
+
+    assert fleet.captures == {"@0": 3, "@1": 3}
+    fruit = _fruit_sends(sends)
+    assert len(fruit) == 1 and fruit[0][0] == "5001"
+
+
+def test_window_activity_asks_tmux_once_for_every_window_of_every_session(monkeypatch):
+    from chela.telegram import panecache
+
+    calls = []
+
+    class _Done:
+        returncode = 0
+        stdout = "@0 1791322535\n@7 1791322540\n"
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return _Done()
+
+    monkeypatch.setattr(panecache.subprocess, "run", fake_run)
+
+    assert panecache.window_activity() == {"@0": 1791322535, "@7": 1791322540}
+    assert calls == [["tmux", "list-windows", "-a", "-F", "#{window_id} #{window_activity}"]]
+
+
+def test_window_activity_is_unknown_when_tmux_fails(monkeypatch):
+    from chela.telegram import panecache
+
+    class _Failed:
+        returncode = 1
+        stdout = "@0 1791322535\n"
+
+    monkeypatch.setattr(panecache.subprocess, "run", lambda argv, **kw: _Failed())
+    assert panecache.window_activity() is None
+
+    def missing(argv, **kw):
+        raise FileNotFoundError("tmux")
+
+    monkeypatch.setattr(panecache.subprocess, "run", missing)
+    assert panecache.window_activity() is None
+
+
+def test_epoch_nested_per_tick_shares_and_keeps_the_outer_memo(monkeypatch):
+    """Nesting is not a new tick: the inner block reuses the outer answer, and leaving it
+    must not drop the outer memo (the outer tick would then ask per window again)."""
+    calls = _count_asks(monkeypatch)
+
+    with epoch.per_tick():
+        epoch.current()
+        with epoch.per_tick():
+            epoch.current()
+        epoch.current()
+        epoch.current()
+    assert len(calls) == 1
+
+    epoch.current()
+    assert len(calls) == 2                     # and the outer exit still clears it
+
+
+def test_epoch_per_tick_hands_back_the_answer_it_got(monkeypatch):
+    answers = iter(["111-1", "222-2"])
+    monkeypatch.setattr(epoch, "_ask", lambda: next(answers))
+    clock = [0.0]
+    monkeypatch.setattr(epoch.time, "monotonic", lambda: clock[0])
+
+    with epoch.per_tick():
+        assert epoch.current() == "111-1"
+        clock[0] += epoch._TICK_MAX_AGE - 0.01
+        assert epoch.current() == "111-1"
+        clock[0] += 0.01
+        assert epoch.current() == "222-2"       # re-asked: the NEW answer, not the old
+        assert epoch.current() == "222-2"
+
+
+def test_epoch_per_tick_memoises_an_unknown_answer_too(monkeypatch):
+    """``None`` (tmux unreachable) is an answer: a dead server must not cost one spawn
+    per window per tick either."""
+    calls = []
+
+    def fake_ask():
+        calls.append(1)
+        return None
+
+    monkeypatch.setattr(epoch, "_ask", fake_ask)
+    with epoch.per_tick():
+        assert [epoch.current() for _ in range(5)] == [None] * 5
+    assert len(calls) == 1
+
+
+def test_tick_itself_survives_activity_that_raises():
+    """The cache's own fallback, not the watcher's: a raising stamp read must still hand
+    back a working capture (and keep the cache), not throw the whole tick away."""
+    fleet = _Fleet(["@0"])
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("tmux went away")
+        return dict(fleet.stamp)
+
+    gated = ActivityGatedCapture(
+        fleet.capture, activity=flaky, wall=lambda: fleet.wall, now=lambda: fleet.mono)
+
+    assert gated.tick(["@0"])("@0") == IDLE_PANE
+    fleet.advance(2)
+    assert gated.tick(["@0"])("@0") == IDLE_PANE        # raised: captured, not skipped
+    assert fleet.captures["@0"] == 2
+    fleet.advance(2)
+    gated.tick(["@0"])("@0")                            # back: its stamp is now known
+    fleet.advance(2)
+    assert gated.tick(["@0"])("@0") == IDLE_PANE        # ...so it is served from cache
+    assert fleet.captures["@0"] == 3

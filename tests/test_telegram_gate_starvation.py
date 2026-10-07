@@ -449,9 +449,18 @@ def test_the_daemon_wires_the_activity_gated_capture(daemon_env, monkeypatch):
 
     main.cmd_telegram(_tg_args(no_inbound=True))
 
-    tick = daemon_env.watchers[0]._tick_capture
+    watcher = daemon_env.watchers[0]
+    tick = watcher._tick_capture
     assert tick is not None, "the daemon's pane watch still captures every pane every tick"
-    assert isinstance(tick.__self__, panecache.ActivityGatedCapture)
+    gated = tick.__self__
+    assert isinstance(gated, panecache.ActivityGatedCapture)
+    assert tick.__func__ is panecache.ActivityGatedCapture.tick
+    # It gates the SAME capture the watcher would use, against tmux's real activity
+    # stamps, with the documented backstop — not a stub, a different pane source, or a
+    # sweep that never fires.
+    assert gated._capture is watcher._capture
+    assert gated._activity is panecache.window_activity
+    assert gated._sweep == panecache.SWEEP_SECONDS
 
 
 # ── CMX-188: the daemon entrypoint must warm its OWN status cache ────────────
