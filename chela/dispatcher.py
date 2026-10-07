@@ -1298,6 +1298,14 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # back to 0 on every other write, so it always describes the CURRENT `judge_state`,
         # never a stale prior one.
         ("judge_no_verdict", "ALTER TABLE runs ADD COLUMN judge_no_verdict INTEGER"),
+        # ⚖️🧱 CMX-19. Is the CURRENT `cannot_verify` one a re-run of the SAME commit can never
+        # change (a docs-only diff, no `test_cmd`, a deletion-heavy shape)? CMX-81's bounded
+        # retry exists for FLAKES; spending it on a deterministic unknown re-ran CMX-15's
+        # docs-only PR four times in three minutes, each with its own inbox notice. Set ONLY
+        # by `park_final_unknown` (which moves the row to `needs_human` in the same write);
+        # cleared by `_spawn_judge` and `set_judge_state`, so it always describes the current
+        # verdict. The judge trigger never re-selects a row with it set.
+        ("judge_unknown_final", "ALTER TABLE runs ADD COLUMN judge_unknown_final INTEGER"),
         # ⚖️🌩️ CMX-379. Not before this ISO timestamp may the judge trigger re-judge the run.
         # Set ONLY by `_judge_watchdog`'s classifier-outage arm (now + the
         # `judge_outage_backoff_seconds` knob), so the next tick does not spawn a fresh judge
@@ -4392,16 +4400,72 @@ def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | No
         if sha:
             conn.execute(
                 "UPDATE runs SET judge_state=?, judge_detail=?, judge_sha=?, "
-                "judge_no_verdict=?, judge_retry_after=NULL WHERE task_id=?",
+                "judge_no_verdict=?, judge_retry_after=NULL, judge_unknown_final=0 "
+                "WHERE task_id=?",
                 (state, (detail or "")[:2000], sha, int(no_verdict), task_id),
             )
         else:
             conn.execute(
                 "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=?, "
-                "judge_retry_after=NULL WHERE task_id=?",
+                "judge_retry_after=NULL, judge_unknown_final=0 WHERE task_id=?",
                 (state, (detail or "")[:2000], int(no_verdict), task_id),
             )
         conn.commit()
+
+
+def park_final_unknown(task_id: str, detail: str, *, sha: str | None = None,
+                       conn: sqlite3.Connection | None = None) -> bool:
+    """⚖️🧱 CMX-19: record a ``cannot_verify`` no re-run can change AND hand the run to a
+    human — in ONE write. Returns whether the row moved to ``needs_human``.
+
+    Two writes (``set_judge_state`` now, ``_escalate_stranded_judge_unknowns`` a tick later)
+    would let the inbox sample the row in between and announce it TWICE — once as
+    ``awaiting_review:cannot_verify``, again as ``needs_human`` — and the point of this is
+    exactly one notice. ``judge_unknown_final=1`` keeps the judge trigger off the row for
+    good on this commit; a new head sha is a fresh judgement as always.
+
+    ⛔ Compare-and-swap on ``awaiting_review``: a run a human already merged, closed, or sent
+    back keeps its status (the verdict columns are still written — the inbox's CMX-229
+    branch reports a cannot-verify on a row that moved on). And ⛔ it approves nothing:
+    ``needs_human`` is not mergeable without a clean judge or ``chela merge --override``.
+    """
+    reason = _format_escalation(
+        f"the judge CANNOT VERIFY this PR, and re-running it on the same commit cannot change "
+        f"that: {detail}",
+        recommendation="Read the diff yourself; merge with `chela merge --override` if it is "
+                       "right, or push a new commit to get a fresh judgement.",
+        options=[
+            "Review the PR by hand and `chela merge --override` it",
+            "Push a new commit (a code change is judged normally)",
+            "Abandon the task",
+        ],
+    )
+    sql = (
+        "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=0, "
+        "judge_retry_after=NULL, judge_unknown_final=1, "
+        "judge_sha=COALESCE(?, judge_sha), "
+        "ended_at=CASE WHEN status='awaiting_review' THEN ? ELSE ended_at END, "
+        "last_error=CASE WHEN status='awaiting_review' THEN ? ELSE last_error END, "
+        "status=CASE WHEN status='awaiting_review' THEN 'needs_human' ELSE status END "
+        "WHERE task_id=?"
+    )
+    params = (judge.J_CANNOT_VERIFY, (detail or "")[:2000], sha, _now(), reason, task_id)
+
+    def _write(c: sqlite3.Connection) -> bool:
+        before = c.execute("SELECT status FROM runs WHERE task_id=?", (task_id,)).fetchone()
+        c.execute(sql, params)
+        c.commit()
+        return before is not None and before["status"] == "awaiting_review"
+
+    if conn is not None:
+        moved = _write(conn)
+    else:
+        with _db() as c:
+            moved = _write(c)
+    if moved:
+        log.warning("Task %s → needs_human (judge cannot verify, final): %s", task_id,
+                    (detail or "")[:200])
+    return moved
 
 
 def acknowledge_blocked_race(ident: str, by: str = "", note: str = "") -> dict:
@@ -5810,17 +5874,7 @@ def tick(workflow_path: str | Path) -> dict:
                 "SELECT COUNT(*) FROM runs WHERE workflow_path=? AND judge_state=?",
                 (str(wf.path), judge.J_RUNNING),
             ).fetchone()[0]
-            for row in conn.execute(
-                "SELECT * FROM runs WHERE workflow_path=? AND status='awaiting_review' "
-                "AND pr_state='open' AND pr_head_sha IS NOT NULL "
-                "AND pr_checks IN ({}) AND ("
-                "  judge_sha IS NULL OR judge_sha != pr_head_sha"
-                "  OR (judge_state=? AND COALESCE(judge_cannot_verify_tries, 0) < ?)"
-                ")"
-                .format(",".join("?" * len(JUDGE_TRIGGER_CHECKS))),
-                (str(wf.path), *JUDGE_TRIGGER_CHECKS,
-                 judge.J_CANNOT_VERIFY, judge_max_unknown_retries()),
-            ).fetchall():
+            for row in _judge_candidates(conn, wf):
                 if _judge_backoff_pending(row):
                     continue     # ⚖️🌩️ CMX-379: sitting out a classifier outage
                 if judging >= judge_max_concurrent():
@@ -7087,7 +7141,7 @@ def _spawn_judge(
     conn.execute(
         "UPDATE runs SET judge_sha=?, judge_state=?, judge_started_at=?, judge_detail=?, "
         "judge_cannot_verify_tries=?, judge_no_verdict=0, judge_retry_after=NULL, "
-        "judge_run_started_at=NULL WHERE task_id=?",
+        "judge_run_started_at=NULL, judge_unknown_final=0 WHERE task_id=?",
         (sha, judge.J_RUNNING, _now(), "", tries, task_id),
     )
     conn.commit()
@@ -7113,6 +7167,22 @@ def _spawn_judge(
     if stale:
         set_judge_state(task_id, judge.J_CANNOT_VERIFY, stale)
         log.warning("judge: %s: %s", task_id, stale)
+        return False
+
+    # ⚖️📄 CMX-19: a PR that touches ONLY documentation (`judge.docs_only_diff` — an explicit
+    # set, and `docs/x.py` is not in it) has nothing for a mutation to corrupt. Spawning a
+    # judge just to hear "no experiments" — then re-spawning it on the unknown — is how
+    # CMX-15 came back cannot_verify four times. Park it ONCE for a human instead; ⛔ it is
+    # still not mergeable without a clean judge or `chela merge --override`. Only a definite
+    # True parks: an unknown (`None`) is judged normally, as a code+docs PR is.
+    if judge.docs_only_diff(worktree, base) is True:
+        park_final_unknown(task_id, judge.DOCS_ONLY_PARK_REASON, conn=conn)
+        log.warning("judge: %s: docs-only PR on %s — parked for a human, no judge spawned",
+                    task_id, sha[:12])
+        try:
+            remove_worktree(wf.path.parent, worktree, resolve_workspace_root(wf))
+        except Exception as e:  # noqa: BLE001 — a leftover dir costs disk, never the verdict
+            log.warning("judge: %s: could not remove %s: %s", task_id, worktree, e)
         return False
 
     try:
@@ -7145,6 +7215,28 @@ def _spawn_judge(
         return False
     log.info("judge: %s: judging %s on %s in %s", task_id, row["pr_url"] or "?", sha[:12], worktree)
     return True
+
+
+def _judge_candidates(conn: sqlite3.Connection, wf: WorkflowDef) -> list[sqlite3.Row]:
+    """The runs the judge trigger (tick STEP 3a′) may spawn a judge on, in table order.
+
+    A green, open PR whose head was never judged — or (CMX-81) whose head last came back
+    ``cannot_verify`` with retry budget left. ⚖️🧱 CMX-19: never a ``judge_unknown_final``
+    unknown — re-running a docs-only or no-`test_cmd` verdict on the same commit returns the
+    same answer and another inbox notice; a new head sha is judged afresh as always.
+    """
+    return conn.execute(
+        "SELECT * FROM runs WHERE workflow_path=? AND status='awaiting_review' "
+        "AND pr_state='open' AND pr_head_sha IS NOT NULL "
+        "AND pr_checks IN ({}) AND ("
+        "  judge_sha IS NULL OR judge_sha != pr_head_sha"
+        "  OR (judge_state=? AND COALESCE(judge_cannot_verify_tries, 0) < ?"
+        "      AND COALESCE(judge_unknown_final, 0) = 0)"
+        ")"
+        .format(",".join("?" * len(JUDGE_TRIGGER_CHECKS))),
+        (str(wf.path), *JUDGE_TRIGGER_CHECKS,
+         judge.J_CANNOT_VERIFY, judge_max_unknown_retries()),
+    ).fetchall()
 
 
 def _judge_backoff_pending(row: sqlite3.Row) -> bool:

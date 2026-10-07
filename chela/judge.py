@@ -82,7 +82,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from chela import envutil, judge_select
@@ -360,6 +360,11 @@ class Report:
     notes: list[dict] = field(default_factory=list)
     baseline: SuiteResult | None = None
     cannot_verify: str = ""     # non-empty ⇒ NOTHING here may block. Unknown is not a fail.
+    # ⚖️🧱 CMX-19: ``cannot_verify`` that a re-run of the SAME commit can never change (a
+    # docs-only diff, no `test_cmd`, a deletion-heavy shape). The dispatcher retries an
+    # unknown because it might be a flake; this one is not, so it parks the run in
+    # `needs_human` ONCE instead of burning `judge_max_unknown_retries` identical rounds.
+    cannot_verify_final: bool = False
     dropped: int = 0            # experiments past `cap` — said out loud, never silent
     # ⚡ CMX-407: wall-clock of the mutation battery (baseline + every experiment), and — when
     # the caller knows when the judge LAUNCHED — of the whole judge, agent time included.
@@ -1129,6 +1134,76 @@ def _is_prose_path(name: str) -> bool:
     return p.suffix.lower() in _PROSE_SUFFIXES or p.name in _PROSE_BASENAMES
 
 
+# ⚖️📄 CMX-19: the EXPLICIT set a PR must stay inside for the dispatcher to skip the judge
+# entirely and park it for a human (`docs_only_diff`). Narrower than `_is_prose_path` on
+# purpose — that one only labels files for messages and ratios; this one decides whether a
+# judge runs at all, so a path counts only when it is BOTH prose by name AND lives somewhere
+# nothing executes it:
+#   * under ``docs/`` or ``changelog.d/`` with a prose suffix — ``docs/x.py`` (a module the
+#     package could import) or an extensionless ``docs/run`` script stays CODE;
+#   * a top-level ``*.md``/``*.mdx``/``*.rst`` or a prose basename (LICENSE, NOTICE, …) —
+#     except the files an agent or the dispatcher READS AS INSTRUCTIONS (`WORKFLOW.md`,
+#     `CLAUDE.md`, `AGENTS.md`), and never a top-level ``*.txt`` (``requirements.txt``).
+# Anything else — prose under ``chela/``, ``skills/``, ``plugin/`` — takes the normal judge
+# path. ⛔ Not a bypass either way: a docs-only run is parked in `needs_human`, and
+# `chela merge` still refuses it without a clean judge or a human `--override`.
+DOCS_ONLY_DIRS = ("docs", "changelog.d")
+_DOCS_ROOT_SUFFIXES = {".md", ".mdx", ".rst"}
+_INSTRUCTION_PROSE = {"WORKFLOW.md", "CLAUDE.md", "AGENTS.md"}
+
+
+def _is_docs_path(name: str) -> bool:
+    p = PurePosixPath(name)
+    if len(p.parts) > 1:
+        return p.parts[0] in DOCS_ONLY_DIRS and _is_prose_path(name)
+    if p.name in _INSTRUCTION_PROSE:
+        return False
+    return p.suffix.lower() in _DOCS_ROOT_SUFFIXES or p.name in _PROSE_BASENAMES
+
+
+def _changed_files(worktree: Path, base_branch: str) -> list[str] | None:
+    """Every path this PR touches vs ``origin/<base_branch>``, or ``None`` when git cannot
+    say. ``--no-renames``: a rename lists BOTH sides, so ``chela/x.py`` → ``docs/x.md``
+    reports the code path it removed instead of hiding behind the prose one it added."""
+    if not base_branch:
+        return None
+    ref = f"origin/{base_branch}"
+    resolved = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "--verify", "--quiet", ref],
+        capture_output=True, text=True, errors="replace",
+    )
+    if resolved.returncode != 0 or not resolved.stdout.strip():
+        return None
+    base_sha = resolved.stdout.strip()
+    diff = subprocess.run(
+        ["git", "-C", str(worktree), "diff", "--name-only", "--no-renames",
+         f"{base_sha}...HEAD"],
+        capture_output=True, text=True, errors="replace",
+    )
+    if diff.returncode != 0:
+        return None
+    return [f for f in diff.stdout.splitlines() if f.strip()]
+
+
+def docs_only_diff(worktree: Path, base_branch: str) -> bool | None:
+    """⚖️📄 CMX-19: does this PR touch ONLY :data:`DOCS_ONLY_DIRS`/top-level prose (see
+    :func:`_is_docs_path`)? ``None`` — never read as yes — when git cannot say or the diff is
+    empty. The dispatcher parks a ``True`` once in ``needs_human`` instead of spawning a
+    judge that has nothing to corrupt."""
+    files = _changed_files(worktree, base_branch)
+    if not files:
+        return None
+    return all(_is_docs_path(f) for f in files)
+
+
+DOCS_ONLY_PARK_REASON = (
+    "docs-only — nothing to verify; needs a human OK / `chela merge --override`. Every file "
+    "this PR changes is documentation (docs/, changelog.d/, top-level prose), so there is no "
+    "code for a mutation to corrupt and a judge re-run could never change the answer. "
+    "⛔ Not a pass: it still blocks AUTONOMOUS merge."
+)
+
+
 def _touches_changelog_entry(path: str) -> bool:
     """Whether ``path`` is a changelog entry a PR could have written: the legacy
     ``CHANGELOG.md`` edit, or (CMX-312) a fragment file added under ``changelog.d/`` —
@@ -1154,23 +1229,7 @@ def _docs_only_diff(worktree: Path, base_branch: str) -> bool | None:
     Returns ``None`` — an unknown, never read as yes or no — when it cannot tell: no
     ``base_branch``, an unresolvable ref, a git failure, or an empty diff.
     """
-    if not base_branch:
-        return None
-    ref = f"origin/{base_branch}"
-    resolved = subprocess.run(
-        ["git", "-C", str(worktree), "rev-parse", "--verify", "--quiet", ref],
-        capture_output=True, text=True, errors="replace",
-    )
-    if resolved.returncode != 0 or not resolved.stdout.strip():
-        return None
-    base_sha = resolved.stdout.strip()
-    diff = subprocess.run(
-        ["git", "-C", str(worktree), "diff", "--name-only", f"{base_sha}...HEAD"],
-        capture_output=True, text=True, errors="replace",
-    )
-    if diff.returncode != 0:
-        return None
-    files = [f for f in diff.stdout.splitlines() if f.strip()]
+    files = _changed_files(worktree, base_branch)
     if not files:
         return None
     return all(_is_prose_path(f) for f in files)
@@ -1408,6 +1467,7 @@ def _run_experiments(
                 "AUTONOMOUS merge (unknown ≠ safe), but it needs a human's read of the prose "
                 "itself, not a rework round."
             )
+            report.cannot_verify_final = True     # CMX-19: prose stays prose on a re-run
         else:
             report.cannot_verify = (
                 "the judge proposed NO experiments — nothing was corrupted, so nothing was "
@@ -1516,6 +1576,9 @@ def _run_experiments(
                 "needs no replacement guard, or a rework adds one (e.g. a guard that fails if "
                 "the deleted code is reintroduced)."
             )
+            # CMX-19: the diff's SHAPE is what triggered this, and a re-run of the same commit
+            # has the same shape — only a human or a new commit can resolve it.
+            report.cannot_verify_final = True
     return report
 
 
@@ -2357,7 +2420,8 @@ def judge_run(
             report = Report(cannot_verify=err)
         elif not test_cmd:
             report = Report(cannot_verify="this workflow sets no `judge.test_cmd` — there is no "
-                                          "suite to run a mutation against")
+                                          "suite to run a mutation against",
+                            cannot_verify_final=True)
         elif not worktree.is_dir():
             stale = _reprovision_worktree(wf, worktree, run.get("pr_head_sha") or "", base_branch)
             if stale:
@@ -2568,6 +2632,15 @@ def judge_run(
                 # still `J_RUNNING` from this call's own launch — either way correct, or about
                 # to be corrected by the trigger on its next tick.
                 result["state"] = J_STALE_HEAD
+            elif report.cannot_verify and report.cannot_verify_final:
+                # ⚖️🧱 CMX-19: an unknown no re-run can change. Recording it as a plain
+                # `cannot_verify` is what made CMX-15's docs-only PR come back FOUR times
+                # (the trigger re-fires a same-sha unknown up to `judge_max_unknown_retries`),
+                # each with its own inbox notice. Park it in `needs_human` ONCE, atomically,
+                # and the trigger never selects it again.
+                dispatcher.park_final_unknown(task_id, report.cannot_verify, sha=judged_sha)
+                log.warning("judge: %s → CANNOT VERIFY (final, parked for a human): %s",
+                            task_id, report.cannot_verify[:200])
             else:
                 dispatcher.set_judge_state(
                     task_id, report.state, report.cannot_verify or "every guard held",

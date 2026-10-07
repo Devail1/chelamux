@@ -221,6 +221,9 @@ def test_deletion_heavy_pr_with_only_killed_experiments_is_cannot_verify_not_cle
     assert report.state == judge.J_CANNOT_VERIFY
     assert "DELETION-HEAVY" in report.cannot_verify
     assert "cmx-268" in report.cannot_verify
+    # ⚖️🧱 CMX-19: the diff's shape is what tripped this — a re-run of the same commit
+    # cannot change it, so the dispatcher must park it once, not retry it.
+    assert report.cannot_verify_final is True
     assert report.blocking == []
     assert any(n.get("title") == "No CHANGELOG.md entry" for n in report.notes)
 
