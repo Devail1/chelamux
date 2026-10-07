@@ -2659,6 +2659,58 @@ def _inbox_report(declared: dict, obs: Observation) -> list[Finding]:
             + (f"; {queued} event(s) queued for its next idle tick" if queued else ""))]
 
 
+# --- fact: is the decisions inbox HOLDING events nobody is being told about? ----------
+#
+# CMX-26. `inbox.address` above asks whether the address is ALIVE; it was alive, idle-gated
+# and correct on 2026-10-07 — and the orchestrator still got nothing for 4h25m, because a
+# background task kept its session reading `busy` and the queue held nine events (three of
+# them judge-clean verdicts) in silence. The address was fine; the queue was not moving.
+# chela's copy is the alert threshold; the queue on disk is what is really waiting.
+
+
+def _inbox_held_threshold() -> int | None:
+    from chela import inbox                          # lazy: doctor must import cheaply
+
+    return config.inbox_held_alert_s() if inbox.enabled() else None
+
+
+def _inbox_held_read() -> Observation:
+    from chela import inbox, stall_alerts
+
+    store = inbox.load()
+    oldest = stall_alerts.oldest_held(store)
+    return observed({"queued": len(store.get("queue") or []), "oldest": oldest,
+                     "who": inbox.orchestrator_wid(store), "now": time.time()})
+
+
+def _inbox_held_report(threshold: int | None, obs: Observation) -> list[Finding]:
+    from chela import stall_alerts
+    from chela.hold import human_duration
+
+    if threshold is None:
+        return []                                    # the inbox is switched off
+    queued, oldest = obs.value["queued"], obs.value["oldest"]
+    if not queued or oldest is None:
+        return [Finding(OK, "decisions inbox: nothing held")]
+    age = obs.value["now"] - oldest["ts"]
+    what = stall_alerts.describe_event(oldest)
+    if age < threshold:
+        return [Finding(OK, f"decisions inbox: {queued} event(s) queued, oldest "
+                            f"{human_duration(age)} — under the {human_duration(threshold)} "
+                            "alert threshold")]
+    # The age lives in the DETAIL, never the title: doctor.check_and_notify de-dups on
+    # (fact, title), and a title that ticks every minute would re-push every sweep.
+    return [Finding(
+        ERROR, f"the decisions inbox is HELD — oldest event {what} has waited past "
+               f"{human_duration(threshold)}",
+        f"Oldest held event: {what}, queued {human_duration(age)} ago; {queued} event(s) "
+        f"held in all for orchestrator {obs.value['who'] or '(none)'}. The inbox only "
+        "delivers to an IDLE orchestrator, so a session that keeps reading busy/waiting "
+        "(e.g. a long-running background task) holds every verdict behind it. Check it with "
+        "`chela peek`; the queue drains on its next idle tick.",
+    )]
+
+
 # --- fact: on a host with no /proc (macOS), can chela's window-resolution FALLBACK
 # actually run? --------------------------------------------------------------------------
 #
@@ -3370,6 +3422,15 @@ def facts() -> list[Fact]:
             read_back=_inbox_read,
             report=_inbox_report,
             unverifiable_level=WARN,      # same reason as tmux.session
+        ),
+        Fact(
+            name="inbox.held",
+            declared_by="CHELA_INBOX_HELD_ALERT_S — how long the oldest queued event may "
+                        "wait before a human is told",
+            owned_by="$CHELA_DIR/inbox.json — the queue itself, and the oldest event in it",
+            declare=_inbox_held_threshold,
+            read_back=_inbox_held_read,
+            report=_inbox_held_report,
         ),
         Fact(
             name="runs.parked_branch",

@@ -20,7 +20,7 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**59** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+**61** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
 wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
 added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
@@ -34,7 +34,8 @@ then 44, until CMX-382 wired `CHELA_REMOTE_CONTROL` through
 then 44, until CMX-389 added `CHELA_OVERRIDE_WAIT_S`, group 4 — then 51, until CMX-403
 added the seven sandboxed-share knobs, group 9 — then 57, until CMX-418 added the six
 web-mode knobs, group 9 — then 58, until CMX-420 added the proxy's `CHELA_PROXY_SESSION_DIR`,
-group 9 — then 59, until CMX-435 added `CHELA_SHARE_SANDBOX_SUBSCRIPTION`, group 9) — every literal `CHELA_*` name a Python module in
+group 9 — then 59, until CMX-435 added `CHELA_SHARE_SANDBOX_SUBSCRIPTION`, group 9 — then 61,
+until CMX-26 added `CHELA_INBOX_HELD_ALERT_S` and `CHELA_CLEAN_UNMERGED_ALERT_S`, group 5) — every literal `CHELA_*` name a Python module in
 `chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
@@ -225,7 +226,7 @@ one-line env edit — a checkbox implies casualness these should not have. If a 
 surfaces them at all, it should be **read-only status** (what the drawer's Connections &
 Status section already does for other facts), not a write control.
 
-### 5. Notifications / inbox (9) — mixed
+### 5. Notifications / inbox (11) — mixed
 
 | Variable | Default | Class | Notes |
 |---|---|---|---|
@@ -236,6 +237,8 @@ Status section already does for other facts), not a write control.
 | `CHELA_NOTIFY_TITLE` | fixed string | `hot` | Notification title |
 | `CHELA_INBOX_ENABLED` | `true` | `hot` | Decisions-inbox kill switch |
 | `CHELA_INBOX_ALARM_GRACE_SECONDS` | `120` | `hot` | Grace before an undeliverable address pages |
+| `CHELA_INBOX_HELD_ALERT_S` | `1800` | `hot` | How long the inbox's oldest event may sit held before one push (CMX-26); `chela doctor`'s `inbox.held` goes red past it |
+| `CHELA_CLEAN_UNMERGED_ALERT_S` | `1800` | `hot` | How long a run may sit judge-clean on its current head, unmerged, before one push (CMX-26) |
 | `CHELA_INBOX_FILE` | `$CHELA_DIR/inbox.json` | `internal-path` | |
 | `CHELA_ORCHESTRATOR_WID` | empty | `identity` | Pins the inbox target window; env pin carries no epoch/session (see `chela/inbox.py`) |
 

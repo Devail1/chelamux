@@ -1269,6 +1269,18 @@ def share_unsandboxed_minutes() -> int:
 # proactive push, never the record.
 INBOX_ALARM_GRACE_SECONDS = int(os.environ.get("CHELA_INBOX_ALARM_GRACE_SECONDS", "120"))
 
+
+# CMX-26: how long the inbox's OLDEST queued event may sit held (behind a busy/waiting
+# orchestrator — the idle gate is right, the silence was not) before one phone push says
+# so, and how long a run may sit judge-clean on its current head, unmerged, before the
+# same. Read per call so a test (or an operator's env edit + restart) needs no re-import.
+def inbox_held_alert_s() -> int:
+    return int(os.environ.get("CHELA_INBOX_HELD_ALERT_S", "1800"))
+
+
+def clean_unmerged_alert_s() -> int:
+    return int(os.environ.get("CHELA_CLEAN_UNMERGED_ALERT_S", "1800"))
+
 # Explicit opt-in to serve the writable terminal wall on a NON-loopback bind
 # (e.g. --host 0.0.0.0 or a LAN/tailnet IP). Off by default: a public bind would
 # otherwise hand out unauthenticated remote shells (RCE). Loopback binds, fronted

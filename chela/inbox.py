@@ -126,7 +126,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from chela import agent_manager, discovery, epoch, event_log, judge, messenger, notify, sessions, transcripts
-from chela import config
+from chela import config, stall_alerts
 from chela.config import INBOX_ENABLED
 from chela.hold import human_duration
 from chela.tui_text import sanitize_prompt
@@ -237,7 +237,10 @@ def _empty() -> dict:
     return {"orchestrator": None, "orchestrator_epoch": None, "orchestrator_session": None,
             "orchestrator_name": None, "orchestrator_peer": None, "watches": {}, "queue": [],
             "runs_seen": {},
-            "address_alarm": None, "address_alarm_since": None, "address_alarm_pushed": False}
+            "address_alarm": None, "address_alarm_since": None, "address_alarm_pushed": False,
+            # CMX-26: the stall-alert latches (chela.stall_alerts) — one push per held
+            # episode, one per clean-but-unmerged run. Shared state, like everything here.
+            "held_alert": None, "clean_unmerged": {}}
 
 
 def _clear_address_alarm(store: dict) -> None:
@@ -2176,6 +2179,8 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
         # against them is a dict/list scan, so the critical section stays as short as it was.
         deliver(store, statuses, runs, now_epoch=now_epoch, alarms=alarms,
                live_heads=live_heads)
+        # CMX-26: AFTER deliver, so a queue this very tick drained ends its held episode.
+        stalls = stall_alerts.evaluate(store, statuses, runs, live_heads, time.time())
 
     # A self-heal is announced once, OUTSIDE the lock (an event_log append is another file's
     # I/O): the address just recovered from a renumbering, and the held queue — delivered above
@@ -2197,4 +2202,5 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
     # POST with a ten-second timeout. Neither belongs inside the lock that `chela watch` —
     # the command that FIXES a dangling address — has to take.
     raise_alarms(alarms)
+    stall_alerts.send(stalls)
     return statuses
