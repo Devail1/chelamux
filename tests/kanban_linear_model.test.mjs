@@ -91,3 +91,27 @@ test('run state rides as badges: judging, rework N, blocked race', () => {
 
 // kanban.js's call sites are guarded by a RENDER, not a source regex:
 // tests/kanban_tracker_render.test.mjs.
+
+test('several Linear workflows: the first one\'s order, each state ONCE, the others\' extras appended', () => {
+    const other = [
+        { name: 'todo', type: 'unstarted', hidden: false },        // same state, other casing
+        { name: 'QA', type: 'started', hidden: false },
+    ];
+    const cols = trackerColumns([{ tracker_columns: LINEAR }, { tracker_columns: other }]);
+    assert.deepEqual(cols.map(c => c.name), [...LINEAR.map(c => c.name), 'QA']);
+    // Control: one workflow alone has no QA.
+    assert.ok(!trackerColumns([{ tracker_columns: LINEAR }]).some(c => c.name === 'QA'));
+});
+
+test('with no tracker state, every run status falls back to the column its edge means', () => {
+    const want = {
+        backlog: 'Backlog', parked: 'Backlog', open: 'Todo', claimed: 'In Progress',
+        running: 'In Progress', failed: 'In Progress', awaiting_review: 'In Review',
+        changes_requested: 'In Review', needs_human: 'In Review', done: 'Done', closed: 'Canceled',
+    };
+    for (const [status, col] of Object.entries(want)) {
+        assert.equal(columnOf({ status }, LINEAR)?.name, col, status);
+    }
+    // Control: an unknown status maps nowhere (→ Unmapped, see below), never to a guess.
+    assert.equal(columnOf({ status: 'mystery' }, LINEAR), null);
+});

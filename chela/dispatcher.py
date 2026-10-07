@@ -5979,14 +5979,15 @@ def tick(workflow_path: str | Path) -> dict:
 
 
 def _died_run_ids(conn: sqlite3.Connection, workflow_path: str) -> frozenset[str]:
-    """🗂️📐 CMX-23 — this workflow's ``failed`` runs whose PR did not merge: the tasks a
-    claim may RETRY even though their tracker issue has left the ready state. The attempt
-    cap is NOT applied here — the claim loop's own ``MAX_ATTEMPTS`` check is the one place
-    that decides it, for every tracker alike."""
+    """🗂️📐 CMX-23 — this workflow's ``failed`` runs: the tasks a claim may RETRY even
+    though their tracker issue has left the ready state. Neither the attempt cap nor the
+    merged-PR guard is applied here — the claim loop's own ``MAX_ATTEMPTS`` and
+    ``pr_state='merged'`` checks are the one place that decides them, for every tracker
+    alike."""
     return frozenset(
         r["task_id"] for r in conn.execute(
-            "SELECT task_id FROM runs WHERE workflow_path=? AND status='failed' "
-            "AND COALESCE(pr_state, '') != 'merged'", (workflow_path,),
+            "SELECT task_id FROM runs WHERE workflow_path=? AND status='failed'",
+            (workflow_path,),
         ).fetchall()
     )
 
@@ -6058,8 +6059,7 @@ def _tracker_close(run: dict, reason: str) -> str | None:
         return None
     try:
         wf = load_workflow(Path(wf_path))
-        if wf.get("tracker", "kind") != "linear":
-            return None
+        # Only a tracker with a cancel write has one (Linear); markdown/gh_issues → None.
         cancel = getattr(get_source(wf), "cancel_task", None)
         if cancel is None:
             return None

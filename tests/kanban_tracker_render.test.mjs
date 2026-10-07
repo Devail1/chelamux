@@ -118,3 +118,70 @@ test('negative control: a quiet run carries its status pill and no run-state bad
     assert.deepEqual(got.filter(t => /judging|rework|blocked race/.test(t)), []);
     assert.ok(got.length >= 1, 'the status pill itself must still render');
 });
+
+test('the swipe nav strip has one chip per RENDERED column, with that column\'s count', () => {
+    renderKanban(_payload({ active: [_run({ tracker_state: 'In Progress' })] }));
+    const strip = document.querySelector('#kanban-nav-strip');
+    const navChips = [...strip.querySelectorAll('.kanban-nav-chip')];
+    assert.deepEqual(navChips.map(c => c.querySelector('.kanban-nav-label').textContent), colLabels());
+    const counts = Object.fromEntries(navChips.map(c => [
+        c.querySelector('.kanban-nav-label').textContent,
+        c.querySelector('.kanban-nav-count').textContent]));
+    assert.equal(counts['In Progress'], '1');
+    // Control: an empty column counts 0 — the count is per column, not the board's total.
+    assert.equal(counts['Todo'], '0');
+});
+
+test('merge-all counts the mergeable awaiting_review cards wherever their Linear column is', () => {
+    const ready = { status: 'awaiting_review', pr_mergeable: 'MERGEABLE', pr_checks: 'passing',
+                    pr_url: 'https://github.com/o/r/pull/4' };
+    renderKanban(_payload({ review: [
+        _run({ task_id: 'CMX-4', tracker_state: 'In Review', ...ready }),
+        // A human dragged this one back in Linear — still mergeable on GitHub.
+        _run({ task_id: 'CMX-5', tracker_state: 'In Progress', ...ready }),
+        // Control: failing checks never count.
+        _run({ task_id: 'CMX-6', tracker_state: 'In Review', ...ready, pr_checks: 'failing' }),
+    ] }));
+    const btn = document.querySelector('#kanban-filters .kanban-merge-all-btn');
+    assert.ok(btn, 'no merge-all button for two mergeable cards');
+    assert.equal(btn.dataset.count, '2');
+});
+
+test('a tracker state name is escaped into the column header, never parsed as markup', () => {
+    renderKanban(_payload({ columns: [
+        { name: 'Todo', type: 'unstarted', hidden: false },
+        { name: '<b>QA</b>', type: 'started', hidden: false },
+    ] }));
+    assert.deepEqual(colLabels(), ['Todo', '<b>QA</b>']);
+    assert.equal(board().querySelector('.kanban-col-label b'), null);
+});
+
+test('the workflow filter picks the board: a Linear workflow gets its columns, the other its lanes — each only its own cards', () => {
+    const linearWf = _payload({ active: [_run({ task_id: 'CMX-1', tracker_state: 'In Progress',
+                                                  workflow_path: '/x/WORKFLOW.md' })] }).workflows[0];
+    const mdWf = { ..._payload({ columns: null, active: [_run({ task_id: 'MD-1',
+                                                    workflow_path: '/y/WORKFLOW.md' })] }).workflows[0],
+                   path: '/y/WORKFLOW.md', project_key: 'MD' };
+    const data = { configured: true, workflows: [linearWf, mdWf] };
+    const cardIds = () => [...board().querySelectorAll('.kanban-card [data-task-id]')]
+        .map(e => e.dataset.taskId);
+    try {
+        window.chela.setKanbanFilter('/x/WORKFLOW.md');
+        renderKanban(data);
+        assert.deepEqual(colLabels(), ['Backlog', 'Todo', 'In Progress', 'In Review', 'Done']);
+        assert.deepEqual(cardIds(), ['CMX-1']);
+
+        window.chela.setKanbanFilter('/y/WORKFLOW.md');
+        renderKanban(data);
+        assert.ok(!colLabels().includes('In Review'), `the markdown workflow got Linear columns: ${colLabels()}`);
+        assert.deepEqual(cardIds(), ['MD-1']);
+
+        // Control: both on screen, one without states ⇒ chela's lanes, both cards.
+        window.chela.setKanbanFilter('all');
+        renderKanban(data);
+        assert.ok(!colLabels().includes('In Review'));
+        assert.deepEqual(cardIds().sort(), ['CMX-1', 'MD-1']);
+    } finally {
+        window.chela.setKanbanFilter('all');
+    }
+});

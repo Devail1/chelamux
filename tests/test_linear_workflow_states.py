@@ -49,8 +49,9 @@ def issue(n, state="Todo"):
 class Team:
     """An in-memory Linear team: reads, `issueUpdate`, `issueRelationCreate`."""
 
-    def __init__(self, *issues):
+    def __init__(self, *issues, states=STATES):
         self.issues = {i["identifier"]: i for i in issues}
+        self.states = states
         self.calls: list[tuple[str, dict]] = []
         self.refuse_update = False
 
@@ -76,13 +77,14 @@ class Team:
         if name == "states":
             return {"teams": {"nodes": [{"id": "team", "states": {"nodes": [
                 {"id": sid, "name": nm, "type": kind, "position": pos}
-                for sid, nm, kind, pos in STATES]}}]}}
+                for sid, nm, kind, pos in self.states]}}]}}
         if name == "update":
             if self.refuse_update:
                 return {"issueUpdate": {"success": False}}
             target = next(i for i in self.issues.values() if i["id"] == variables["id"])
-            state = next(nm for sid, nm, _, _ in STATES if sid == variables["stateId"])
-            target["state"] = {"name": state, "type": TYPE_OF[state]}
+            state, kind = next((nm, k) for sid, nm, k, _ in self.states
+                               if sid == variables["stateId"])
+            target["state"] = {"name": state, "type": kind}
             return {"issueUpdate": {"success": True}}
         if name == "relation":
             return {"issueRelationCreate": {"success": True}}
@@ -442,3 +444,206 @@ def test_the_work_api_carries_the_columns_and_each_cards_linear_state(tmp_path, 
     assert {t["id"]: t["tracker_state"] for t in entry["open_tasks"]} == {"CMX-1": "Todo"}
     (died,) = entry["recent_runs"]
     assert (died["task_id"], died["tracker_state"]) == ("CMX-2", "In Review")
+
+
+# --- rework 2: guards that assert each invariant itself ---------------------------------
+
+def _in(n, name, kind):
+    """An issue in a state of a custom team (one `issue()`'s STATES does not have)."""
+    node = issue(n)
+    node["state"] = {"name": name, "type": kind}
+    return node
+
+
+def test_a_team_without_the_default_names_falls_back_to_the_state_types(tmp_path):
+    """In Progress = the FIRST `started` state, In Review = the LAST — by position."""
+    states = [("s-todo", "Todo", "unstarted", 0), ("s-rev", "Reviewing", "started", 7),
+              ("s-doing", "Doing", "started", 3), ("s-kill", "Killed", "canceled", 0)]
+    team = Team(_in(1, "Todo", "unstarted"), states=states)
+    src = _src(tmp_path, team)
+    assert src.transition("CMX-1", "in_progress") == "set"
+    assert src.transition("CMX-1", "in_review") == "set"
+    assert src.transition("CMX-1", "canceled") == "set"
+    assert [s for _, s in team.updates()] == ["s-doing", "s-rev", "s-kill"]
+
+
+def test_a_team_with_one_started_state_has_no_in_review_to_write(tmp_path):
+    """Negative control for the fallback: one `started` state is In Progress, never also
+    In Review — the edge is skipped, not written onto the same column."""
+    states = [("s-todo", "Todo", "unstarted", 0), ("s-doing", "Doing", "started", 0)]
+    team = Team(_in(1, "Todo", "unstarted"), states=states)
+    assert _src(tmp_path, team).transition("CMX-1", "in_review") == "skipped"
+    assert team.updates() == []
+
+
+def test_a_configured_state_name_wins_over_the_default(tmp_path):
+    states = [*STATES, ("st-code", "Code Review", "started", 5)]
+    team = Team(issue(1, "In Progress"), states=states)
+    src = _src(tmp_path, team, states={"in_review": "Code Review"})
+    assert src.transition("CMX-1", "in_review") == "set"
+    assert team.updates() == [("uuid-1", "st-code")]
+    # Control: an edge not configured keeps its default name.
+    assert src.transition("CMX-1", "in_progress") == "set"
+    assert team.updates()[-1] == ("uuid-1", "st-progress")
+
+
+def test_an_unknown_edge_is_skipped_without_touching_linear(tmp_path):
+    team = Team(issue(1, "Todo"))
+    assert _src(tmp_path, team).transition("CMX-1", "in_limbo") == "skipped"
+    assert team.calls == []
+
+
+def test_an_archived_issue_is_never_moved(tmp_path):
+    node = issue(1, "In Progress")
+    node["archivedAt"] = "2026-10-01T00:00:00Z"
+    team = Team(node)
+    assert _src(tmp_path, team).transition("CMX-1", "in_review") == "skipped"
+    assert team.updates() == []
+    # Control: the same issue unarchived does move.
+    node["archivedAt"] = None
+    assert _src(tmp_path, Team(node)).transition("CMX-1", "in_review") == "set"
+
+
+def test_the_team_states_are_read_once_per_ttl_across_sources(tmp_path):
+    """The dashboard builds a fresh source on every poll — the TTL cache is per TEAM."""
+    team = Team()
+    _src(tmp_path, team).workflow_states()
+    assert _src(tmp_path, team).workflow_states()[0]["name"] == "Backlog"
+    assert [n for n, _ in team.calls].count("states") == 1
+    # Control: once the cache is stale it is read again.
+    stamp, states = linear._team_states["CMX"]
+    linear._team_states["CMX"] = (stamp - linear.TEAM_STATES_TTL_SECONDS - 1, states)
+    _src(tmp_path, team).workflow_states()
+    assert [n for n, _ in team.calls].count("states") == 2
+
+
+@pytest.mark.parametrize("reason", [
+    "superseded by CMX-9", "duplicate of CMX-9", "dup of CMX-9", "replaced by CMX-9",
+    "subsumed into CMX-9", "folded into CMX-9",
+])
+def test_every_supersede_wording_is_a_duplicate(tmp_path, reason):
+    team = Team(issue(1, "In Review"), issue(9, "Todo"))
+    assert _src(tmp_path, team).cancel_task("CMX-1", reason) == "set"
+    assert team.issues["CMX-1"]["state"]["name"] == "Duplicate"
+
+
+def test_a_reason_naming_the_closed_issue_itself_first_still_finds_the_superseding_one(tmp_path):
+    team = Team(issue(1, "In Review"), issue(9, "Todo"))
+    assert _src(tmp_path, team).cancel_task("CMX-1", "CMX-1 is superseded by CMX-9") == "set"
+    assert team.issues["CMX-1"]["state"]["name"] == "Duplicate"
+    rels = [v["input"]["relatedIssueId"] for n, v in team.calls if n == "relation"]
+    assert rels == ["uuid-9"]                  # never a relation to itself
+
+
+def test_needs_human_is_in_review(repo, team):
+    """needs_human / override pending: the PR is out of the agent's hands → In Review."""
+    team.issues = {"CMX-7": issue(7, "In Progress")}
+    _seed(repo, "CMX-7", "needs_human", pr_url="https://github.com/o/r/pull/1",
+          tracker_edge="in_progress")
+    wf = dispatcher.load_workflow(repo / "WORKFLOW.md")
+    with dispatcher._db() as conn:
+        assert dispatcher._sync_tracker_states(conn, wf, dispatcher.get_source(wf)) == 1
+    assert team.updates() == [("uuid-7", "st-review")]
+
+
+def test_a_skipped_edge_is_recorded_so_it_is_not_retried_every_tick(repo, team):
+    """A human closed the issue in Linear while the run is still alive: chela never
+    resurrects it, and records the edge so the next tick does not re-read it."""
+    team.issues = {"CMX-7": issue(7, "Done")}
+    _seed(repo, "CMX-7", "running")
+    wf = dispatcher.load_workflow(repo / "WORKFLOW.md")
+    for _ in range(2):
+        with dispatcher._db() as conn:
+            dispatcher._sync_tracker_states(conn, wf, dispatcher.get_source(wf))
+    assert team.updates() == []
+    assert _row("CMX-7")["tracker_edge"] == "in_progress"
+    assert [n for n, _ in team.calls].count("by_number") == 1
+
+
+def test_a_recorded_edge_is_committed_by_the_sync_itself(repo, team):
+    """The sync commits what it recorded: a tick that fails AFTER it must not roll the
+    edges back (each would then be written to Linear a second time)."""
+    team.issues = {"CMX-7": issue(7, "Todo")}
+    _seed(repo, "CMX-7", "running")
+    wf = dispatcher.load_workflow(repo / "WORKFLOW.md")
+    with dispatcher._db() as conn:
+        assert dispatcher._sync_tracker_states(conn, wf, dispatcher.get_source(wf)) == 1
+        conn.rollback()                         # what a later failure in the tick does
+    assert _row("CMX-7")["tracker_edge"] == "in_progress"
+
+
+def test_one_transition_that_raises_never_stops_the_others(repo, monkeypatch):
+    calls = []
+
+    def transition(task_id, edge):
+        calls.append(task_id)
+        if task_id == "CMX-1":
+            raise RuntimeError("boom")
+        return "set"
+
+    _seed(repo, "CMX-1", "running")
+    _seed(repo, "CMX-2", "running")
+    wf = dispatcher.load_workflow(repo / "WORKFLOW.md")
+    with dispatcher._db() as conn:
+        got = dispatcher._sync_tracker_states(conn, wf, SimpleNamespace(transition=transition))
+    assert got == 1 and sorted(calls) == ["CMX-1", "CMX-2"]
+    assert (_row("CMX-1")["tracker_edge"], _row("CMX-2")["tracker_edge"]) == (None, "in_progress")
+
+
+def test_a_reclaimed_run_is_moved_to_in_progress_again(repo, team, launched):
+    """A human moved a died run's issue back to Todo; chela had recorded In Progress for
+    its LAST attempt. The re-claim forgets that edge, so the new attempt writes it again."""
+    team.issues = {"CMX-19": issue(19, "Todo")}
+    _seed(repo, "CMX-19", "failed", attempt=1, branch_name="cmx-19-task",
+          tracker_edge="in_progress")
+    assert dispatcher.tick(repo / "WORKFLOW.md")["dispatched"] == 1
+    assert team.issues["CMX-19"]["state"]["name"] == "In Progress"
+    assert team.updates() == [("uuid-19", "st-progress")]
+
+
+def test_a_died_run_whose_pr_merged_is_not_retried(repo, team, launched):
+    """Its work landed — a stale In Review issue is the merge's to finish, not a retry."""
+    team.issues = {"CMX-19": issue(19, "In Review")}
+    _seed(repo, "CMX-19", "failed", attempt=1, branch_name="cmx-19-task",
+          pr_url="https://github.com/o/r/pull/1", pr_state="merged")
+    assert dispatcher.tick(repo / "WORKFLOW.md")["dispatched"] == 0
+    assert launched == []
+
+
+def test_a_died_run_in_triage_is_not_reclaimed(repo, team, launched):
+    """Only a `started`-type state is chela's own leftover; any other non-ready state
+    (Triage here) is a human's decision."""
+    team.states = [*STATES, ("st-triage", "Triage", "triage", 0)]
+    team.issues = {"CMX-21": _in(21, "Triage", "triage")}
+    _seed(repo, "CMX-21", "failed", attempt=1)
+    assert dispatcher.tick(repo / "WORKFLOW.md")["dispatched"] == 0
+    assert launched == []
+
+
+def test_a_misconfigured_source_has_no_columns_and_logs_nothing_per_poll(tmp_path, caplog):
+    """The dashboard asks on every poll: a config error (already reported where the
+    workflow is checked) must not turn into a warning per poll."""
+    team = Team()
+    src = _src(tmp_path, team, api_key="lin_api_leaked")
+    assert src.config_error
+    with caplog.at_level("WARNING", logger=linear.log.name):
+        assert src.workflow_states() is None
+    assert caplog.records == [] and team.calls == []
+
+
+def test_a_team_without_a_duplicate_state_closes_a_superseded_issue_into_its_canceled_type(
+        tmp_path):
+    states = [("s-todo", "Todo", "unstarted", 0), ("s-doing", "Doing", "started", 0),
+              ("s-kill", "Killed", "canceled", 0)]
+    team = Team(_in(1, "Doing", "started"), _in(9, "Todo", "unstarted"), states=states)
+    assert _src(tmp_path, team).cancel_task("CMX-1", "superseded by CMX-9") == "set"
+    assert team.updates() == [("uuid-1", "s-kill")]
+
+
+def test_a_failed_close_write_does_not_record_the_canceled_edge(repo, team):
+    team.issues = {"CMX-7": issue(7, "In Progress")}
+    team.refuse_update = True
+    _seed(repo, "CMX-7", "failed", tracker_edge="in_progress")
+    got = dispatcher.close_run("CMX-7", "not needed")
+    assert got["ok"] and got["tracker"] == "failed"
+    assert _row("CMX-7")["tracker_edge"] == "in_progress"

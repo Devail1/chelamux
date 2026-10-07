@@ -575,7 +575,9 @@ class LinearSource:
         moved their issue to In Progress / In Review when it claimed them, so demanding the
         ready state again would strand the retry forever. Such a task is a candidate from
         any ``started``-type state too. Not from Backlog: a human parking it there is a
-        decision, not a leftover. The attempt cap is the dispatcher's (``MAX_ATTEMPTS``).
+        decision, not a leftover. ⚠️ ``retry_ids`` is UNCAPPED — the attempt cap and the
+        merged-PR guard are the dispatcher's claim loop's (``MAX_ATTEMPTS``); any other
+        caller passing ``retry_ids`` must apply them itself.
 
         A blocker counts as done only when its state type is ``completed`` — a canceled,
         open, or unreadable blocker (the relation is there but the issue is not) holds the
