@@ -2319,10 +2319,13 @@ def collected_js_suites(root: Path) -> Observation:
         return cannot_verify(
             "`pytest --collect-only` exited "
             f"{proc.returncode}: {(proc.stderr or proc.stdout)[-400:].strip()}")
+    # Walk the tree ONCE, outside the comprehension: inside it, the walk re-ran per line
+    # of collector output (~5,900 lines) — ~35 s of CPU per read (CMX-15/CMX-16).
+    suites = _js_suites_on_disk()
     found = {
         suite
         for line in proc.stdout.splitlines()
-        for suite in _js_suites_on_disk()
+        for suite in suites
         if suite in line
     }
     return observed(found)
