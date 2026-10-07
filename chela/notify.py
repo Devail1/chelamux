@@ -27,6 +27,14 @@ on ``$CHELA_DIR/notify.lock`` sends; the other keeps tracking the waiting set si
 The lock is held for the holder's lifetime and dropped by the kernel when it dies, so the
 standby takes over on its next tick — and, because it tracked the set all along, it
 announces only transitions that happen after that, never the windows already announced.
+
+**Classifier denials (CMX-25).** ``waiting`` is reached only at an interactive permission
+PROMPT. An auto-mode classifier that REFUSES a tool call never shows one — the session
+goes busy → idle and asks for permission in prose, so ``check_waiting`` never fires.
+:class:`DeniedWatch` covers that hole: it tails the event log for ``hook.permission_denied``
+and pushes one notification per window per :data:`DENIED_COOLDOWN_S`. It reads the LOG,
+not the hook route, so whichever process holds the lease announces — the dashboard
+receives the hook, but the daemon may be the announcer.
 """
 from __future__ import annotations
 
@@ -35,11 +43,12 @@ import json
 import logging
 import os
 import threading
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from chela import agent_manager, config, discovery
+from chela import agent_manager, config, discovery, event_log, hooks
 from chela.config import NOTIFY_KIND, NOTIFY_TITLE, NOTIFY_URL
 
 log = logging.getLogger(__name__)
@@ -184,3 +193,76 @@ def check_waiting(previously_waiting: set[str], owner: OwnerLock | None = None) 
         log.info("notify: %s entered waiting", name)
         send(f"{name} is waiting for input", title=NOTIFY_TITLE)
     return current
+
+
+# --- classifier denials (CMX-25) ---------------------------------------------------
+
+DENIED_TYPE = hooks.event_type("PermissionDenied")   # "hook.permission_denied"
+DENIED_COOLDOWN_S = 10 * 60   # at most one push per window per this many seconds
+DENIED_DETAIL_CHARS = 80
+
+
+def _denied_message(event: dict, names: dict[str, str]) -> str:
+    wid = event.get("wid") or ""
+    payload = event.get("payload") or {}
+    tool = str(payload.get("tool_name") or "tool")
+    tool_input = payload.get("tool_input")
+    detail = hooks._tool_detail(tool, tool_input if isinstance(tool_input, dict) else {})
+    detail = " ".join(detail.split()) or tool
+    if len(detail) > DENIED_DETAIL_CHARS:
+        detail = detail[:DENIED_DETAIL_CHARS - 1] + "…"
+    label = f"{wid} {names[wid]}" if names.get(wid) else wid
+    return f"{label}: blocked by its permission classifier: {detail}"
+
+
+class DeniedWatch:
+    """Tail the event log for ``hook.permission_denied`` and push once per window per
+    :data:`DENIED_COOLDOWN_S`.
+
+    The first :meth:`check` only anchors the cursor at the log's tip — a fresh process
+    never replays denials from before it started. A non-holder of the lease advances its
+    cursor too, so when it takes over it announces only denials newer than that. A denial
+    with no ``wid`` (a session chela did not launch) is not an agent window and is skipped.
+
+    When the cursor cannot be honoured (``gap`` — the daemon restarted and the boot id
+    moved), :func:`chela.event_log.read` resumes from the start of what it serves; only
+    events stamped after this watch's previous check are announced then, so a restart never
+    replays the ring's old denials onto the phone.
+    """
+
+    def __init__(self):
+        self._cursor: int | None = None
+        self._boot: str | None = None
+        self._checked_at = 0.0
+        self._last_push: dict[str, float] = {}
+
+    def check(self, owner: OwnerLock | None = None, now: float | None = None) -> list[str]:
+        """Push for new denials; return the messages actually sent."""
+        if not enabled():
+            return []
+        now = time.time() if now is None else now
+        since, self._checked_at = self._checked_at, time.time()
+        if self._cursor is None:
+            tip = event_log.tip()
+            self._cursor, self._boot = tip["seq"], tip["boot_id"]
+            return []
+        batch = event_log.read(self._cursor, after_boot=self._boot, types=[DENIED_TYPE])
+        self._cursor, self._boot = batch["next_seq"], batch["boot_id"]
+        events = [e for e in batch["events"] if e.get("wid")]
+        if batch["gap"] is not None:
+            events = [e for e in events if (e.get("ts") or 0) >= since]
+        if not events or not (owner or _owner).acquire():
+            return []
+        names = {wid: name for name, wid in discovery.get_all_windows().items()}
+        sent: list[str] = []
+        for event in events:
+            wid = event["wid"]
+            last = self._last_push.get(wid)
+            if last is not None and now - last < DENIED_COOLDOWN_S:
+                continue
+            self._last_push[wid] = now
+            message = _denied_message(event, names)
+            log.info("notify: %s", message)
+            send(message, title=NOTIFY_TITLE)
+            sent.append(message)
+        return sent

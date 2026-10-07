@@ -5343,11 +5343,16 @@ def _start_notifier():
 
     def _loop():
         waiting_seen: set[str] = set()
+        denied_watch = notify.DeniedWatch()   # CMX-25: classifier denials
         while True:
             try:
                 waiting_seen = notify.check_waiting(waiting_seen)
             except Exception:
                 log.exception("notify: check_waiting failed")
+            try:
+                denied_watch.check()
+            except Exception:
+                log.exception("notify: permission-denied check failed")
             time.sleep(NOTIFY_INTERVAL)
 
     threading.Thread(target=_loop, name="chela-notifier", daemon=True).start()
