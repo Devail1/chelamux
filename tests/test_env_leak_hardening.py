@@ -146,6 +146,23 @@ def test_forward_list_overrides_the_server_strip():
     assert env["HTTPS_PROXY"] == "http://proxy:3128"
 
 
+def test_child_env_keeps_a_session_marker_the_operator_forwards():
+    """🔴 GUARD: a marker named in CHELA_CHILD_ENV_FORWARD (chela setting the messaging
+    socket on purpose) reaches the child; the unforwarded markers beside it still go."""
+    base = {"PATH": "/bin", **POLLUTION, "CLAUDE_CODE_MESSAGING_SOCKET": "/run/chela.sock",
+            envutil.FORWARD_ENV: "CLAUDE_CODE_MESSAGING_SOCKET, CLAUDE_PID"}
+    for env in (envutil.child_env(base=base), envutil.server_env(base=base)):
+        assert env.get("CLAUDE_CODE_MESSAGING_SOCKET") == "/run/chela.sock", env
+        assert env.get("CLAUDE_PID") == "4242", env
+        # ⭐ negative control: the same kind of name, NOT forwarded, is dropped
+        assert not {"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+                    "AI_AGENT"} & set(env), env
+    # ⭐ and without the forward list the socket itself is dropped too
+    unfwd = {k: v for k, v in base.items() if k != envutil.FORWARD_ENV}
+    assert "CLAUDE_CODE_MESSAGING_SOCKET" not in envutil.child_env(base=unfwd)
+    assert "CLAUDE_PID" not in envutil.child_env(base=unfwd)
+
+
 def test_tmux_scrub_names_flags_markers_and_hazards_only():
     out = "\n".join(f"{k}={v}" for k, v in POLLUTION.items()) + \
         "\nTMUX_TMPDIR=/tmp/cx15\nPATH=/bin\nHOME=/h\n-CLAUDECODE_OLD\n"
@@ -368,6 +385,21 @@ def test_negative_control_an_orphan_with_its_dir_intact_keeps_serving(env, sock,
         _kill(pid)
 
 
+@needs_tmux
+def test_negative_control_a_pm2_child_with_its_dir_gone_is_not_an_orphan(env, sock, tmp_path):
+    """⭐ The 'not under pm2' half: the same reparented supervisor, but carrying pm2's
+    `pm_id`, is pm2's to restart — it backs off (refusing to heal), it does not exit."""
+    out = tmp_path / "pm2-child.log"
+    pid = _orphan({**env, "TMUX_TMPDIR": env["TMUX_TMPDIR"] + "-deleted", "pm_id": "7"}, out)
+    try:
+        time.sleep(3)
+        assert not _gone(pid), out.read_text()
+    finally:
+        _kill(pid)
+    text = out.read_text()
+    assert "REFUSING to heal" in text and "orphaned" not in text, text
+
+
 # --- Ask 3: an agent launch env lacks the markers ----------------------------------------
 
 def _pane_env(env, sock, tmp_path, name) -> dict[str, str]:
@@ -423,6 +455,66 @@ def test_a_dead_local_proxy_port_is_flagged():
         port = s.getsockname()[1]            # bound, never listening: refused
         assert "HTTP_PROXY" in envutil.tmux_env_pollution(
             {"HTTP_PROXY": f"http://127.0.0.1:{port}"})
+
+
+def test_a_proxy_at_the_discard_port_is_flagged_even_if_something_answers_there():
+    """🔴 GUARD: 127.0.0.1:9 is the harness's deliberate egress kill switch — flagged by its
+    port alone, whatever a probe says (an inetd discard service DOES accept)."""
+    probes: list[tuple[str, int]] = []
+
+    def answers(h, p):
+        probes.append((h, p))
+        return True
+
+    found = envutil.tmux_env_pollution({"HTTPS_PROXY": "http://127.0.0.1:9",
+                                        "http_proxy": "localhost:9"}, port_open=answers)
+    assert set(found) == {"HTTPS_PROXY", "http_proxy"}, found
+    assert "127.0.0.1:9" in found["HTTPS_PROXY"]
+    # ⭐ negative control: any other local port that answers is a live proxy, not flagged
+    assert envutil.tmux_env_pollution({"HTTPS_PROXY": "http://127.0.0.1:3128"},
+                                      port_open=answers) == {}
+    assert ("127.0.0.1", 3128) in probes
+
+
+def test_a_local_proxy_with_no_port_is_probed_on_80():
+    probes: list[tuple[str, int]] = []
+
+    def dead(h, p):
+        probes.append((h, p))
+        return False
+
+    assert set(envutil.tmux_env_pollution({"HTTP_PROXY": "http://localhost"},
+                                          port_open=dead)) == {"HTTP_PROXY"}
+    assert probes == [("localhost", 80)]
+
+
+def test_a_remote_proxy_is_never_probed_or_flagged():
+    """⭐ Only LOCAL proxies are judged: a corporate proxy that does not answer from here is
+    not the 2026-10-06 state. Every local spelling is judged."""
+    def must_not_probe(h, p):
+        raise AssertionError(f"probed a remote proxy {h}:{p}")
+
+    assert envutil.tmux_env_pollution(
+        {"HTTPS_PROXY": "http://proxy.corp:9", "ALL_PROXY": "http://10.0.0.1:3128"},
+        port_open=must_not_probe) == {}
+    for host in ("127.0.0.1", "localhost", "[::1]", "0.0.0.0"):
+        assert "HTTPS_PROXY" in envutil.tmux_env_pollution(
+            {"HTTPS_PROXY": f"http://{host}:8888"}, port_open=lambda h, p: False), host
+
+
+def test_an_unparseable_proxy_port_is_skipped_not_raised():
+    assert envutil.tmux_env_pollution({"HTTPS_PROXY": "http://127.0.0.1:notaport",
+                                       "CLAUDECODE": "1"},
+                                      port_open=lambda h, p: False) == {
+        "CLAUDECODE": envutil.tmux_env_pollution({"CLAUDECODE": "1"})["CLAUDECODE"]}
+
+
+def test_tmux_tmpdir_missing_only_for_a_set_but_absent_dir(tmp_path):
+    assert envutil.tmux_tmpdir_missing({}) is None
+    assert envutil.tmux_tmpdir_missing({"TMUX_TMPDIR": ""}) is None
+    assert envutil.tmux_tmpdir_missing({"TMUX_TMPDIR": str(tmp_path)}) is None
+    gone = str(tmp_path / "gone")
+    assert envutil.tmux_tmpdir_missing({"TMUX_TMPDIR": gone}) == gone
 
 
 class _StubNotify:
