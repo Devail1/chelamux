@@ -20,12 +20,6 @@ history lives in `git log`.
   `chela close` → Canceled, or Duplicate plus the relation when the reason names the issue
   that supersedes it. Each edge is written once, and a failed write never blocks anything. A run whose window
   died is re-claimed from In Progress or In Review while it has retries left. (CMX-23, #607)
-### Fixed
-
-- **Telegram: a screenshot an agent opens with `Read` now relays as a photo.** With tool calls
-  hidden (the default) the image-bearing tool result was dropped whole, and the Read tool's
-  "[Image: original … Multiply coordinates …]" note relayed as a 👤 user message instead. The
-  photo now posts (tool text stays hidden) and the note is never relayed. (CMX-24, #608)
 
 ## [0.14.0] — 2026-09-30
 
