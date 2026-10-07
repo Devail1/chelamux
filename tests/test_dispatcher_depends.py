@@ -597,8 +597,8 @@ def test_a_failed_tracker_read_does_not_burn_the_once_per_process_rekey(repo, sp
     # there, so this test sees only the re-key's effect.
     real_claim_order = dispatcher._claim_order
 
-    def claim_order(wf, source, on_disk):
-        return [] if reads["n"] == 1 else real_claim_order(wf, source, on_disk)
+    def claim_order(wf, source, on_disk, *rest):
+        return [] if reads["n"] == 1 else real_claim_order(wf, source, on_disk, *rest)
 
     monkeypatch.setattr(dispatcher, "get_source", get_source)
     monkeypatch.setattr(dispatcher, "_claim_order", claim_order)
