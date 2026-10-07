@@ -680,7 +680,7 @@ function _showRecentUndoToast(sids, text) {
     const el = document.createElement('div');
     el.className = 'run-toast recent-undo-toast';
     el.setAttribute('role', 'status');
-    el.innerHTML = `<span>${escHtml(text)}</span> <button class="recent-undo">Undo</button>`;
+    el.innerHTML = `<span class="recent-undo-text">${escHtml(text)}</span> <button class="recent-undo">Undo</button>`;
     el.querySelector('.recent-undo').onclick = e => { e.stopPropagation(); undoDismissRecent(sids); };
     el.onclick = () => _closeRecentUndoToast();
     stack.appendChild(el);
