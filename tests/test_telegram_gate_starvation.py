@@ -440,6 +440,29 @@ def test_the_inbound_daemon_starts_the_pane_thread_beside_the_relay(daemon_env, 
     assert panes[0] is not relays[0]
 
 
+def test_the_daemon_wires_the_activity_gated_capture(daemon_env, monkeypatch):
+    """CMX-18: the watcher the daemon builds re-captures only panes whose tmux activity
+    moved — the class can be perfect and still never be wired in."""
+    from chela.telegram import panecache
+
+    monkeypatch.setattr(main, "_outbound_loop", lambda *a, **kw: None)
+
+    main.cmd_telegram(_tg_args(no_inbound=True))
+
+    watcher = daemon_env.watchers[0]
+    tick = watcher._tick_capture
+    assert tick is not None, "the daemon's pane watch still captures every pane every tick"
+    gated = tick.__self__
+    assert isinstance(gated, panecache.ActivityGatedCapture)
+    assert tick.__func__ is panecache.ActivityGatedCapture.tick
+    # It gates the SAME capture the watcher would use, against tmux's real activity
+    # stamps, with the documented backstop — not a stub, a different pane source, or a
+    # sweep that never fires.
+    assert gated._capture is watcher._capture
+    assert gated._activity is panecache.window_activity
+    assert gated._sweep == panecache.SWEEP_SECONDS
+
+
 # ── CMX-188: the daemon entrypoint must warm its OWN status cache ────────────
 
 

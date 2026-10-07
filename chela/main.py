@@ -1493,7 +1493,10 @@ def _outbound_loop(monitor, registry, interval: int, stop) -> None:
     """
     while not stop.is_set():
         try:
-            monitor.poll(registry.windows())
+            # One `epoch.current()` per tick, not one per window (CMX-18): the resolver
+            # reaches it per window through `sessionids.session_id_for`.
+            with epoch.per_tick():
+                monitor.poll(registry.windows())
         except Exception:
             log.exception("Telegram relay poll failed")
         stop.wait(interval)
@@ -1556,7 +1559,8 @@ def _pane_loop(gate_watcher, registry, interval: int, stop) -> None:
     """
     while not stop.is_set():
         try:
-            gate_watcher.poll(registry.windows())
+            with epoch.per_tick():
+                gate_watcher.poll(registry.windows())
         except Exception:
             log.exception("Telegram pane poll failed")
         stop.wait(interval)
@@ -1794,10 +1798,14 @@ def cmd_telegram(args) -> None:
     # the bug, wearing a new hat. Nothing is dropped by not sleeping: an undelivered
     # prompt is not recorded as delivered, so the next tick posts it again, on a backoff
     # (`_REPOST_BACKOFF_BASE`) — the retry moved out of the sleep and into the loop.
+    # CMX-18: the poll re-captures only panes whose tmux `window_activity` moved (one
+    # `list-windows` per tick for the whole fleet), with a slow full sweep as backstop.
+    from chela.telegram.panecache import ActivityGatedCapture
     gate_watcher = PermissionGateWatcher(
         bot.send,
         registry,
         capture=capture_pane,
+        tick_capture=ActivityGatedCapture(capture_pane).tick,
         post=partial(bot.post, retry_flood=False),
         edit=partial(bot.edit, retry_flood=False),
         delete=partial(bot.delete, retry_flood=False),

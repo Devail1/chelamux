@@ -44,6 +44,9 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
+import time
+from contextlib import contextmanager
 
 log = logging.getLogger(__name__)
 
@@ -52,12 +55,52 @@ log = logging.getLogger(__name__)
 _FORMAT = "#{pid}-#{start_time}"
 
 
+# A tick's memo (CMX-18): see :func:`per_tick`. Thread-local, so one loop's tick never
+# hands its answer to another thread.
+_tick = threading.local()
+# Even inside one tick, an answer older than this is asked again: a tick that blocks on the
+# network (the Telegram relay sleeps through flood control) must not carry an epoch across
+# a tmux restart for minutes.
+_TICK_MAX_AGE = 5.0
+
+
+@contextmanager
+def per_tick():
+    """Within this block, on this thread, :func:`current` asks tmux at most once.
+
+    For a polling loop that resolves many windows per tick (the Telegram relay reached
+    :func:`current` once per bound window via :func:`chela.sessionids.session_id_for` —
+    CMX-15 measured it as one tmux spawn per window per 2 s). Nested blocks share the
+    outer memo. An answer is re-asked once it is :data:`_TICK_MAX_AGE` old.
+    """
+    outer = getattr(_tick, "memo", None)
+    if outer is None:
+        _tick.memo = {}
+    try:
+        yield
+    finally:
+        if outer is None:
+            _tick.memo = None
+
+
 def current() -> str | None:
     """The identity of the tmux server that is issuing window ids RIGHT NOW.
 
     ``None`` when tmux cannot be asked (not installed, no server running) — the honest
-    "unknown", never a value that could be compared equal to a stamp.
+    "unknown", never a value that could be compared equal to a stamp. Inside
+    :func:`per_tick` the answer is memoised for the rest of the tick.
     """
+    memo = getattr(_tick, "memo", None)
+    if memo is None:
+        return _ask()
+    now = time.monotonic()
+    if "at" not in memo or now - memo["at"] >= _TICK_MAX_AGE:
+        memo["value"] = _ask()
+        memo["at"] = now
+    return memo["value"]
+
+
+def _ask() -> str | None:
     try:
         result = subprocess.run(
             ["tmux", "display-message", "-p", _FORMAT],
