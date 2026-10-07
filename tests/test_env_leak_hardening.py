@@ -153,6 +153,19 @@ def test_tmux_scrub_names_flags_markers_and_hazards_only():
         set(POLLUTION) | {"TMUX_TMPDIR"}
 
 
+def test_tmux_scrub_names_keeps_a_forwarded_marker_or_hazard():
+    """🔴 GUARD: an operator's CHELA_CHILD_ENV_FORWARD name (a real corporate proxy, a
+    deliberately-set marker) stays in the global table; the unforwarded ones still go."""
+    out = ("HTTPS_PROXY=http://proxy.corp:3128\nCLAUDE_CODE_MESSAGING_SOCKET=/run/x\n"
+           "PERF_KEEP=1\nCLAUDECODE=1\nhttp_proxy=http://127.0.0.1:9\nPERF_OUT=/tmp/a\n")
+    fwd = frozenset({"HTTPS_PROXY", "CLAUDE_CODE_MESSAGING_SOCKET", "PERF_KEEP"})
+    names = set(envutil.tmux_scrub_names(out, forward=fwd))
+    assert names.isdisjoint(fwd), f"forwarded names were scrubbed: {sorted(names & fwd)}"
+    # ⭐ negative control: the same kinds of name, NOT forwarded, are still flagged
+    assert names == {"CLAUDECODE", "http_proxy", "PERF_OUT"}, names
+    assert set(envutil.tmux_scrub_names(out, forward=frozenset())) >= fwd
+
+
 # --- Ask 2: heal-create from a polluted env yields a clean global env --------------------
 
 @needs_tmux
@@ -256,6 +269,103 @@ def test_supervisor_exits_once_its_cwd_is_deleted(env, sock, tmp_path):
         shutil.rmtree(copy, ignore_errors=True)
     assert proc.returncode == 1
     assert "my cwd was deleted" in proc.stdout.read()
+
+
+def _fallback_env(env) -> dict[str, str]:
+    """``env`` with no TMUX_TMPDIR: where tmux lands when the supervisor's dir is gone. The
+    scratch ``-L`` name still pins it to a ``chelatest-*`` socket, never ``default``."""
+    return {k: v for k, v in env.items() if k != "TMUX_TMPDIR"}
+
+
+@needs_tmux
+def test_supervisor_cleanup_spares_fallback_socket_webterms_when_its_dir_is_gone(env, sock):
+    """🔴 GUARD: with its TMUX_TMPDIR gone, a bare `tmux` from the supervisor reaches the
+    fallback socket — in production the DEFAULT one, whose webterm_* mirrors belong to the
+    live supervisor. Its exit cleanup must not reap them."""
+    fb = _fallback_env(env)
+    victim = f"webterm_{SESSION.replace('-', '_')}_live"
+    _tmux(fb, sock, "new-session", "-d", "-s", victim)
+    gone = env["TMUX_TMPDIR"] + "-deleted"
+    proc = subprocess.Popen([str(SCRIPT)], env={**env, "TMUX_TMPDIR": gone},
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        time.sleep(2)
+        assert proc.poll() is None
+    finally:
+        _reap(proc)                          # TERM -> EXIT trap -> cleanup()
+        alive = _tmux(fb, sock, "has-session", "-t", victim, check=False).returncode == 0
+        _tmux(fb, sock, "kill-server", check=False)
+    assert alive, "cleanup reaped a webterm_* session on the fallback socket"
+
+
+@needs_tmux
+def test_negative_control_supervisor_cleanup_reaps_its_own_webterms(env, sock):
+    """⭐ The same session on the supervisor's OWN (existing) socket IS reaped on exit, so the
+    test above can see a reap at all."""
+    victim = f"webterm_{SESSION.replace('-', '_')}_mine"
+    _tmux(env, sock, "new-session", "-d", "-s", victim)
+    proc = subprocess.Popen([str(SCRIPT)], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        assert _wait(lambda: _has_session(env, sock))
+    finally:
+        _reap(proc)
+    assert _tmux(env, sock, "has-session", "-t", victim, check=False).returncode != 0
+
+
+def _orphan(env, out: Path) -> int:
+    """Start the supervisor double-forked under setsid, so it is reparented to PID 1 (the
+    2026-10-06 orphan's state). Returns its pid."""
+    pidf = out.with_suffix(".pid")
+    subprocess.run(["setsid", "sh", "-c", '"$0" >"$1" 2>&1 & echo $! >"$2"',
+                    str(SCRIPT), str(out), str(pidf)], env=env, check=True)
+    assert _wait(lambda: pidf.exists() and pidf.read_text().strip())
+    pid = int(pidf.read_text())
+    assert _wait(lambda: not Path(f"/proc/{pid}").exists() or
+                 Path(f"/proc/{pid}/stat").read_text().split()[3] == "1", 5), \
+        "the double fork did not reparent the supervisor to PID 1"
+    return pid
+
+
+def _gone(pid: int) -> bool:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().split()[2] == "Z"
+    except FileNotFoundError:
+        return True
+
+
+def _kill(pid: int) -> None:
+    try:
+        os.kill(pid, 15)
+    except ProcessLookupError:
+        return
+    _wait(lambda: _gone(pid), 10)
+
+
+@needs_tmux
+def test_orphaned_supervisor_with_its_tmux_tmpdir_gone_exits(env, sock, tmp_path):
+    """🔴 GUARD: the 2026-10-06 orphan (PPID 1, no pm_id, socket dir deleted) must EXIT,
+    not sit backing off until the live server dies and then heal against it."""
+    out = tmp_path / "orphan.log"
+    pid = _orphan({**env, "TMUX_TMPDIR": env["TMUX_TMPDIR"] + "-deleted"}, out)
+    try:
+        assert _wait(lambda: _gone(pid), 15), "the orphan kept running"
+    finally:
+        _kill(pid)
+    assert "orphaned (PPID 1, not under pm2)" in out.read_text(), out.read_text()
+
+
+@needs_tmux
+def test_negative_control_an_orphan_with_its_dir_intact_keeps_serving(env, sock, tmp_path):
+    """⭐ Orphaned alone is not stranded: with its TMUX_TMPDIR present it heals and stays."""
+    out = tmp_path / "orphan-ok.log"
+    pid = _orphan(env, out)
+    try:
+        assert _wait(lambda: _has_session(env, sock)), out.read_text()
+        time.sleep(2)
+        assert not _gone(pid), out.read_text()
+    finally:
+        _kill(pid)
 
 
 # --- Ask 3: an agent launch env lacks the markers ----------------------------------------
