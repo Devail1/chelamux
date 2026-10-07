@@ -3507,8 +3507,13 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     font-size: 10px; color: var(--text-dim);
 }
 .recent-clear-all:hover { color: var(--text); text-decoration: underline; }
-.recent-undo-toast { display: flex; align-items: center; gap: 10px; }
+/* A long session label must wrap inside its own span, never squeeze the button:
+   .run-toast's inherited `word-break: break-word` otherwise lets flex shrink the
+   button to min-content and split "Undo" into "Un" / "do" (CMX-22). */
+.recent-undo-toast { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.recent-undo-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .recent-undo {
+    flex-shrink: 0; white-space: nowrap;
     background: none; border: 1px solid var(--border); border-radius: 4px;
     padding: 2px 8px; font-size: 11px; color: var(--accent); cursor: pointer;
 }

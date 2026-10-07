@@ -332,6 +332,10 @@ test('clicking × removes the row, POSTs its session id, and offers Undo', async
     const toast = document.querySelector('.recent-undo-toast');
     assert.ok(toast, 'no Undo toast after a dismiss');
     assert.match(toast.textContent, /Dismissed five/);
+    // CMX-22: the label rides in its own .recent-undo-text span — the hook style.css
+    // uses to let a long name wrap (min-width:0) instead of squeezing the Undo button.
+    assert.match(toast.querySelector('.recent-undo-text')?.textContent ?? '', /Dismissed five/,
+        'toast label lost its .recent-undo-text span — the CMX-22 wrap rule no longer applies');
 
     RECENT = { rows: [ROW, OTHER], dispatcher_rows: [], hidden: 0 };   // server lists it again after undismiss
     toast.querySelector('.recent-undo').click();
