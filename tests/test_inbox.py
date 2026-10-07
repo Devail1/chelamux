@@ -81,6 +81,22 @@ def sends(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_live_peer_socket(monkeypatch):
+    """Default: no peer socket is reachable — a SPY, never a real socket to a live session.
+
+    Since CMX-27 a ``busy`` orchestrator is delivered to over the socket, so a test that
+    leaves ``send_peer`` real would reach out to whatever claude runs at ``@1`` on the host.
+    Tests that exercise the socket path override this with their own ``monkeypatch.setattr``.
+    """
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.messenger, "send_peer",
+                        lambda wid, frm, text: messenger.PeerSendResult(False, None))
+    monkeypatch.setattr(inbox.messenger, "send_peer_to_pid",
+                        lambda pid, frm, text: messenger.PeerSendResult(False, None))
+
+
+@pytest.fixture(autouse=True)
 def no_transcript_evidence(monkeypatch):
     """Default: no window resolves a transcript (so status transitions are the only signal).
 
@@ -225,7 +241,8 @@ def test_no_push_while_the_orchestrator_is_busy_then_delivered_on_next_idle(
         store_file, windows, sends, monkeypatch):
     _confirm_idle_immediately(monkeypatch)
     _registered()
-    # Agent finished, but the orchestrator is mid-thought — never interrupt it.
+    # Agent finished, but the orchestrator is mid-thought — never PASTE into it. (CMX-27: the
+    # peer socket would be tried while busy; the autouse stub makes it unreachable here.)
     _statuses(monkeypatch, {ORCH: inbox.BUSY, AGENT: inbox.IDLE})
     prev = inbox.tick({ORCH: inbox.BUSY, AGENT: inbox.BUSY})
 
@@ -3139,6 +3156,113 @@ def test_peer_socket_unreachable_falls_back_to_tmux(store_file, windows, sends, 
     assert sends[0][0] == ORCH
 
 
+# --- CMX-27: a BUSY orchestrator takes the peer socket, never a tmux paste ------------
+
+def _spy_peer(monkeypatch, result):
+    """Record every `send_peer` call and answer with `result` — never a real socket."""
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(inbox.messenger, "send_peer",
+                        lambda wid, frm, text: (calls.append((wid, text)), result)[1])
+    return calls
+
+
+def _queue_one():
+    with inbox.locked_store() as st:
+        st["orchestrator"] = ORCH
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+
+
+def _deliver(statuses):
+    with inbox.locked_store() as st:
+        return inbox.deliver(st, statuses, [])
+
+
+def test_a_busy_orchestrator_is_delivered_to_over_the_socket_and_popped(
+        store_file, windows, sends, monkeypatch):
+    """The 2026-10-07 outage: a stuck background job pinned the orchestrator `busy` and
+    the idle gate held 9 events for 4h. Claude Code queues a peer message and drains it at
+    the next tool round, so busy + a live socket → delivered NOW."""
+    from chela import messenger
+
+    _queue_one()
+    peer = _spy_peer(monkeypatch, messenger.PeerSendResult(True, "sent"))
+
+    sent = _deliver({ORCH: inbox.BUSY})
+
+    assert len(sent) == 1
+    assert peer == [(ORCH, "📥 hello")]
+    assert sends == []                              # no paste into a busy session
+    assert inbox.load()["queue"] == []              # popped — never re-sent
+
+
+def test_a_busy_orchestrator_whose_socket_fails_holds_and_never_pastes(
+        store_file, windows, sends, monkeypatch):
+    """⛔ Never fall back to tmux while busy: a paste lands mid-thought. Socket
+    unavailable → HOLD for the next tick."""
+    from chela import messenger
+
+    _queue_one()
+    peer = _spy_peer(monkeypatch, messenger.PeerSendResult(False, None))
+
+    sent = _deliver({ORCH: inbox.BUSY})
+
+    assert sent == []
+    assert len(peer) == 1                           # the socket WAS tried...
+    assert sends == []                              # ...and tmux was NOT
+    assert len(inbox.load()["queue"]) == 1          # HELD, not dropped
+
+
+def test_a_waiting_orchestrator_gets_nothing_on_either_path(
+        store_file, windows, sends, monkeypatch):
+    """`waiting` = an open permission/question prompt. Refused on the socket too (its
+    interaction with a queued peer message is unmeasured) and on tmux (it would ANSWER it)."""
+    from chela import messenger
+
+    _queue_one()
+    peer = _spy_peer(monkeypatch, messenger.PeerSendResult(True, "sent"))
+
+    sent = _deliver({ORCH: inbox.WAITING})
+
+    assert sent == []
+    assert peer == []                               # socket never even tried
+    assert sends == []
+    assert len(inbox.load()["queue"]) == 1
+
+
+def test_an_idle_orchestrator_still_tries_the_socket_then_falls_back_to_tmux(
+        store_file, windows, sends, monkeypatch):
+    """Idle is unchanged by CMX-27: socket first, tmux paste as fallback."""
+    from chela import messenger
+
+    _queue_one()
+    peer = _spy_peer(monkeypatch, messenger.PeerSendResult(False, None))
+
+    sent = _deliver({ORCH: inbox.IDLE})
+
+    assert len(sent) == 1
+    assert len(peer) == 1                           # socket first...
+    assert sends == [(ORCH, "📥 hello")]            # ...then the paste
+    assert inbox.load()["queue"] == []
+
+
+def test_an_adverse_receipt_while_busy_holds_the_event(
+        store_file, windows, sends, monkeypatch):
+    """A held/denied/expired receipt is a DROP, not a delivery — busy or not, the event
+    stays queued (and no paste is attempted)."""
+    from chela import messenger
+
+    _queue_one()
+    _spy_peer(monkeypatch, messenger.PeerSendResult(True, "denied"))
+
+    sent = _deliver({ORCH: inbox.BUSY})
+
+    assert sent == []
+    assert sends == []
+    assert len(inbox.load()["queue"]) == 1
+    receipts = [e for e in event_log.read()["events"] if e["type"] == "inbox_receipt"]
+    assert [r["payload"]["status"] for r in receipts] == ["denied"]
+
+
 # --- CMX-255: the windowless orchestrator — a raw pid, no tmux window at all ----------
 #
 # The delivery half of the mechanism CMX-254 deliberately deferred (PR #323's `## Scope`):
@@ -3311,12 +3435,10 @@ def test_delivery_falls_back_to_the_peer_when_the_wid_address_has_rotted(
     assert inbox.load()["queue"] == []
 
 
-def test_delivery_skips_a_windowless_peer_that_is_busy(store_file, windows, monkeypatch):
-    """⛔ Must prove the BUSY gate itself held the event, not merely that no socket
-    exists for this pid — stub `send_peer_to_pid` to succeed and record its calls, then
-    assert it was never even attempted, the same shape
-    `test_delivery_does_not_fall_back_to_the_peer_while_a_healthy_wid_orchestrator_is_busy`
-    uses for the wid path."""
+def test_delivery_to_a_busy_windowless_peer_goes_over_its_socket(
+        store_file, windows, sends, monkeypatch):
+    """CMX-27: the windowless peer gets the wid path's rule — busy → socket OK (Claude
+    Code queues it for the next tool round). Was held until idle before CMX-27."""
     from chela import messenger
 
     monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
@@ -3332,8 +3454,35 @@ def test_delivery_skips_a_windowless_peer_that_is_busy(store_file, windows, monk
         st["queue"] = [inbox._event("run_review", "📥 hello", {})]
         sent = inbox.deliver(st, {}, [])
 
+    assert len(sent) == 1
+    assert peer_calls == [4242]
+    assert sends == []
+    assert inbox.load()["queue"] == []
+
+
+def test_delivery_skips_a_windowless_peer_that_is_waiting(store_file, windows, sends, monkeypatch):
+    """⛔ Must prove the WAITING gate itself held the event, not merely that no socket
+    exists for this pid — stub `send_peer_to_pid` to succeed and record its calls, then
+    assert it was never even attempted. A prompt is open; a queued peer message's
+    interaction with it is unmeasured (CMX-27 keeps refusing it)."""
+    from chela import messenger
+
+    monkeypatch.setattr(inbox.sessions, "proc_started", lambda pid: 1000.0)
+    inbox.register_peer(4242, "sid-abc")
+    _peer_status(monkeypatch, {4242: inbox.WAITING})
+    peer_calls = []
+    monkeypatch.setattr(
+        inbox.messenger, "send_peer_to_pid",
+        lambda pid, frm, text: (peer_calls.append(pid),
+                                messenger.PeerSendResult(True, "sent"))[1])
+
+    with inbox.locked_store() as st:
+        st["queue"] = [inbox._event("run_review", "📥 hello", {})]
+        sent = inbox.deliver(st, {}, [])
+
     assert sent == []
-    assert peer_calls == []                          # never even tried — busy gate held it
+    assert peer_calls == []                          # never even tried — waiting gate held it
+    assert sends == []
     assert inbox.load()["queue"]
 
 
