@@ -127,3 +127,115 @@ def test_fixture_matches_the_reported_record_shapes():
     assert meta["isMeta"] is True and isinstance(meta["message"]["content"], str)
     assert result["toolUseResult"]["file"]["dimensions"]["originalWidth"] == 1170
     assert json.dumps(result).count('"type": "tool_result"') == 1
+
+
+# --- Hardening (CMX-24 rework): each invariant gets BOTH sides, on every relay. ---
+
+_NOTE = ("[Image: original 1170x2532, displayed at 924x2000. "
+         "Multiply coordinates by 1.27 to map to original image.]")
+
+
+@pytest.mark.parametrize("text", [
+    # Near-misses of the note must survive verbatim: the strip is for the Read
+    # tool's exact note, not anything that looks like an image caption.
+    "[Image: original screenshot attached]",
+    "[Image: original 1170x2532]",
+    "Multiply coordinates by 1.27 to map to original image.",
+    "[Image #1]",
+    "see [Image: original 10x20, displayed at 5x10. please] here",
+])
+def test_parser_keeps_user_text_that_only_resembles_the_note(text):
+    for content in (text, [{"type": "text", "text": text}], [text]):
+        events, _ = parse_entries([{"type": "user", "message": {"content": content}}])
+        assert [(e.role, e.text) for e in events] == [("user", text)], content
+
+
+@pytest.mark.parametrize("wrap", ["str", "block", "bare"])
+def test_parser_strips_only_the_note_from_surrounding_user_text(wrap):
+    text = f"before {_NOTE} after"
+    content = {"str": text, "block": [{"type": "text", "text": text}], "bare": [text]}[wrap]
+    events, _ = parse_entries([{"type": "user", "message": {"content": content}}])
+    assert [(e.role, e.text) for e in events] == [("user", "before  after")]
+
+
+@pytest.mark.parametrize("make", [
+    lambda s: {"type": "text", "text": s},
+    lambda s: s,
+], ids=["block", "bare"])
+def test_a_note_only_item_between_real_items_leaves_no_blank_line(make):
+    events, _ = parse_entries([{"type": "user", "message": {"content": [
+        make("a"), make(_NOTE), make("b"),
+    ]}}])
+    assert [(e.role, e.text) for e in events] == [("user", "a\nb")]
+
+
+def _image_tool_result_entries(extra_blocks: list) -> list[dict]:
+    """The fixture's Read call + a tool_result carrying a text block AND the image."""
+    entries = _entries()
+    use, result = entries[0], json.loads(json.dumps(entries[2]))
+    tr = result["message"]["content"][0]
+    tr["content"] = [{"type": "text", "text": "read ok"}] + tr["content"]
+    result["message"]["content"] = [tr] + extra_blocks
+    return [use, result]
+
+
+def _drive(kind, show_tool_calls, entries, window="@28"):
+    sender, photos = _Sender(), _Photos()
+    if kind == "registry":
+        reg = BindingRegistry("777")
+        reg.bind("@28", "42")
+        relay = RegistryRelay(sender, reg, show_tool_calls=show_tool_calls, send_photos=photos)
+    else:
+        relay = TelegramRelay(sender, show_tool_calls=show_tool_calls, send_photos=photos)
+    events, _ = parse_entries(entries)
+    for ev in events:
+        relay.on_message(window, ev)
+    return sender, photos
+
+
+@pytest.mark.parametrize("kind", ["registry", "single"])
+@pytest.mark.parametrize("show_tool_calls", [False, True])
+def test_image_path_holds_whatever_the_sibling_blocks_are(kind, show_tool_calls):
+    # The tool_result mixes text + image, and the SAME record also carries the
+    # note as a sibling text block: still exactly one photo, never a 👤 note.
+    entries = _image_tool_result_entries([{"type": "text", "text": _NOTE}])
+    sender, photos = _drive(kind, show_tool_calls, entries)
+    assert [c[0] for c in photos.calls] == [[("image/png", _png_bytes())]]
+    assert not any("Multiply coordinates" in t or "👤" in t for t in sender.texts)
+    if not show_tool_calls:
+        assert sender.texts == []
+
+
+@pytest.mark.parametrize("kind", ["registry", "single"])
+def test_hidden_tool_calls_send_the_photo_without_tool_text_on_every_relay(kind):
+    sender, photos = _relay_fixture(kind, show_tool_calls=False)
+    assert sender.texts == []
+    assert len(photos.calls) == 1
+
+
+@pytest.mark.parametrize("kind", ["registry", "single"])
+def test_shown_tool_calls_post_tool_text_then_one_photo(kind):
+    # Negative control for the hidden case: with tool calls SHOWN the tool
+    # text does relay — so an empty sender above is the hide, not a dead relay.
+    sender, photos = _relay_fixture(kind, show_tool_calls=True)
+    assert sender.texts, "shown tool calls posted nothing"
+    assert len(photos.calls) == 1
+
+
+@pytest.mark.parametrize("kind", ["registry", "single"])
+@pytest.mark.parametrize("show_tool_calls", [False, True])
+def test_a_text_only_tool_result_never_reaches_send_photos(kind, show_tool_calls):
+    use = _entries()[0]
+    result = {"type": "user", "message": {"content": [{
+        "tool_use_id": use["message"]["content"][0]["id"],
+        "type": "tool_result", "content": "plain text result",
+    }]}}
+    sender, photos = _drive(kind, show_tool_calls, [use, result])
+    assert photos.calls == []
+    assert (sender.texts == []) is (not show_tool_calls)
+
+
+@pytest.mark.parametrize("show_tool_calls", [False, True])
+def test_unbound_window_posts_no_photo(show_tool_calls):
+    sender, photos = _drive("registry", show_tool_calls, _entries(), window="@99")
+    assert photos.calls == [] and sender.texts == []
