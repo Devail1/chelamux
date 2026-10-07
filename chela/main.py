@@ -224,6 +224,7 @@ def cmd_run(args) -> None:
     dispatch_held = False
     last_notify_check = 0.0
     waiting_seen: set[str] = set()
+    denied_watch = notify.DeniedWatch()   # CMX-25: classifier denials never reach `waiting`
     last_update_check = 0.0
     update_behind_seen = 0
     # CMX-187: last (fact, title) pairs seen at ERROR — the edge-trigger state for
@@ -340,6 +341,10 @@ def cmd_run(args) -> None:
                     waiting_seen = notify.check_waiting(waiting_seen)
                 except Exception:
                     log.exception("Needs-input check failed")
+                try:
+                    denied_watch.check()
+                except Exception:
+                    log.exception("Permission-denied check failed")
                 last_notify_check = now
 
             # 🩺 Doctor red-finding escalation (CMX-187): `chela doctor` only ever spoke to
