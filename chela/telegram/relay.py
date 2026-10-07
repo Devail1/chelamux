@@ -832,6 +832,10 @@ class TelegramRelay:
     def on_message(self, window_id: str, msg: Message) -> None:
         """Relay one parsed message (monitor callback signature)."""
         if _hide_tool_event(msg, self._show_tool_calls):
+            # A hidden tool_result's IMAGES still relay (CMX-24): a screenshot
+            # the agent opened with Read is the content, not tool-call noise —
+            # only its text notification is suppressed.
+            self._relay_images(msg)
             return
         # An AskUserQuestion prompt gets an inline keyboard so the human can tap
         # an answer; every other message has no markup. Pass the kwarg only when
@@ -893,11 +897,17 @@ class RegistryRelay:
 
     def on_message(self, window_id: str, msg: Message) -> None:
         """Relay one parsed message to the window's bound topic (monitor callback)."""
-        if _hide_tool_event(msg, self._show_tool_calls):
+        hidden = _hide_tool_event(msg, self._show_tool_calls)
+        if hidden and not msg.images:
             return
         thread = self._registry.thread_for_window(window_id)
         if thread is None:
             log.debug("no topic bound for %s; skipping outbound", window_id)
+            return
+        if hidden:
+            # See TelegramRelay.on_message: a hidden tool_result's images still
+            # relay, only its text notification is suppressed (CMX-24).
+            self._relay_images(msg, thread)
             return
         # AskUserQuestion prompts carry an inline answer keyboard; see the
         # single-topic relay above for why the kwarg is passed only when present.
