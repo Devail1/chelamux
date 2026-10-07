@@ -2455,7 +2455,9 @@ input[type="text"]:focus, textarea:focus, select:focus {
 
 .kanban-board {
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    /* --kanban-cols: set by kanban.js — chela's 6 lanes, or a Linear team's visible
+       states (CMX-23). */
+    grid-template-columns: repeat(var(--kanban-cols, 6), minmax(0, 1fr));
     gap: 10px;
     align-items: stretch;
 }
@@ -2665,6 +2667,10 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 .kanban-state-chip.st-needs-human  { color: var(--red); border-color: rgba(248, 81, 73, 0.5); background: rgba(248, 81, 73, 0.10); font-weight: 600; }
 .kanban-state-chip.st-failed       { color: var(--red); border-color: rgba(248, 81, 73, 0.55); background: rgba(248, 81, 73, 0.14); font-weight: 600; }
 .kanban-state-chip.st-done         { color: var(--text-dim); }
+/* 🗂️📐 CMX-23 — run-state badges that ride beside the status pill (kanbanlinearmodel.js). */
+.kanban-state-chip.st-judging      { color: var(--accent); border-color: rgba(88, 166, 255, 0.45); background: rgba(88, 166, 255, 0.10); }
+.kanban-state-chip.st-rework       { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }
+.kanban-state-chip.st-blocked-race { color: var(--red); border-color: rgba(248, 81, 73, 0.5); background: rgba(248, 81, 73, 0.10); }
 .kanban-state-chip.st-closed-unmerged { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }
 
 /* ⚖️🎚️ CMX-405 — the run's RISK level (kanban.js / taskmodal.js via riskChip). The WORD

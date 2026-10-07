@@ -54,6 +54,10 @@ class Task:
     # one back (Linear); None for markdown/gh_issues, whose cards render no tracker link.
     # ⛔ Never built from a guessed workspace slug: no `url` from the tracker ⇒ no link.
     url: str | None = None
+    # 🗂️📐 CMX-23. The tracker's own workflow-state NAME for the task as of this read
+    # (Linear: `Todo`, `In Progress`, `In Review`, …) — the Work board files the card under
+    # that column. None for markdown/gh_issues, whose board keeps chela's own lanes.
+    tracker_state: str | None = None
 
 
 # ⚖️🎚️ CMX-405 — ordered LOWEST to HIGHEST stakes; `highest_risk` relies on the order.

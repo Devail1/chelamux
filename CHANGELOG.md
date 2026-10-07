@@ -10,6 +10,17 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Changed
+
+- **With `tracker: kind: linear`, the Work board's columns are the team's Linear workflow
+  states, in Linear's order.** Canceled and Duplicate are hidden, as Linear hides them. chela's
+  run state (failed, judging, rework N, blocked race) now shows as a badge on the card, never as
+  a column. Other tracker kinds keep chela's own lanes. chela also drives the issue's state:
+  claim or rework round → In Progress, PR out of the agent's hands → In Review, merge → Done,
+  `chela close` → Canceled, or Duplicate plus the relation when the reason names the issue
+  that supersedes it. Each edge is written once, and a failed write never blocks anything. A run whose window
+  died is re-claimed from In Progress or In Review while it has retries left. (CMX-23, #607)
+
 ## [0.14.0] — 2026-09-30
 
 ### Added

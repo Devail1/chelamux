@@ -13,6 +13,12 @@ network tracker that chela itself writes to needs:
   ``blockedBy`` closures :func:`chela.dispatcher._ready` needs.
 * :meth:`LinearSource.close_tasks` — chela marks a merged task Done (the fallback for the
   GitHub integration, which may not fire for merges into ``dev``). It does NOT archive it.
+* :meth:`LinearSource.transition` / :meth:`LinearSource.cancel_task` — 🗂️📐 CMX-23: chela
+  drives the issue through the team's workflow (claim → In Progress, PR open → In Review,
+  ``chela close`` → Canceled, or Duplicate + a ``duplicate`` relation when the close reason
+  names the superseding issue). Never raises; never moves a finished issue.
+* :meth:`LinearSource.workflow_states` — the team's states in Linear's board order, for the
+  dashboard's Work board (Canceled-type columns flagged ``hidden``, as Linear hides them).
 * :meth:`LinearSource.archive_sweep` — the one place chela archives (CMX-8): it keeps the
   ``keep_done`` most recently finished issues visible and archives only the finished issues
   older than those, whoever closed them, then publishes the team's non-archived issue count
@@ -29,6 +35,11 @@ Config (workflow front matter, ``tracker:`` block)::
       keep_done: 100             # optional — how many of the most recently finished
                                  # (Done + Canceled) issues stay unarchived; 0 = archive
                                  # every finished issue. Default 100.
+      states:                    # optional (CMX-23) — the state NAMES chela moves an issue
+        in_progress: In Progress #   to on claim / PR open / close. These are the defaults;
+        in_review: In Review     #   a name the team lacks falls back to the state TYPE
+        canceled: Canceled       #   (first/last `started`, first `canceled`), else the
+        duplicate: Duplicate     #   write is skipped and logged.
 
 🔐 The API key is read from ``$CHELA_DIR/chela.env`` as exactly ``LINEAR_API_KEY`` — through
 :func:`chela.config.parse_env_file`, at the moment a source is built, never from WORKFLOW.md,
@@ -63,6 +74,20 @@ API_KEY_ENV = "LINEAR_API_KEY"
 DEFAULT_READY_STATES = ("Todo",)
 # Linear's state TYPES. Terminal ones leave the open set; everything else is open.
 TERMINAL_STATE_TYPES = ("completed", "canceled")
+# 🗂️📐 CMX-23 — the order Linear's board shows its columns in: by state TYPE, then the
+# state's own `position` inside its type. Canceled-type states (Canceled, Duplicate) are
+# collapsed off the board by default in Linear, so the Work board hides them too.
+STATE_TYPE_ORDER = ("triage", "backlog", "unstarted", "started", "completed", "canceled")
+HIDDEN_STATE_TYPES = ("canceled",)
+# The edges chela writes (CMX-23), and the default state NAME each one moves an issue to.
+# `done` is not here: merge → Done is `close_tasks` (and the `done_state` key), unchanged.
+DEFAULT_TRANSITION_STATES = {
+    "in_progress": "In Progress",
+    "in_review": "In Review",
+    "canceled": "Canceled",
+    "duplicate": "Duplicate",
+}
+TEAM_STATES_TTL_SECONDS = 10 * 60        # the dashboard polls; a team's states rarely change
 
 # 🆓 The free plan caps a workspace at 250 NON-archived issues (Done/Canceled count,
 # archived ones do not). Doctor WARNs above this, with ~50 issues of headroom left.
@@ -102,6 +127,7 @@ Transport = Callable[[str, dict], dict]
 _backoff: dict[str, tuple[float, int]] = {}      # team → (retry-at monotonic, strikes)
 _last_sweep: dict[str, float] = {}               # team → monotonic of the last sweep
 _reported: set[tuple[str, str]] = set()
+_team_states: dict[str, tuple[float, list[dict]]] = {}   # team → (monotonic, ordered states)
 
 
 def _report_once(key: tuple[str, str], message: str) -> None:
@@ -273,6 +299,13 @@ mutation BlockRelation($input: IssueRelationCreateInput!) {
 
 PRIORITIES = (0, 1, 2, 3, 4)          # No priority, Urgent, High, Medium, Low
 
+# 🗂️📐 CMX-23: "<this issue> is a duplicate of <that one>" — Linear's own `duplicate`
+# relation: issueId is the duplicate, relatedIssueId the issue that supersedes it.
+# A close reason names the superseding issue only next to one of these words, so a reason
+# that merely mentions another issue ("flaky, see CMX-30") is a plain Canceled.
+_SUPERSEDED_RE = re.compile(r"supersed|duplicat|\bdup(?:e)?\b|replaced|subsumed|folded",
+                            re.IGNORECASE)
+
 
 def counts_path() -> Path:
     """Where the daemon's archive sweep publishes each team's non-archived issue count —
@@ -375,6 +408,12 @@ class LinearSource:
         done = wf.get("tracker", "done_state", default=None)
         self.done_state: str | None = str(done).strip() if done else None
         self.keep_done = _keep_done(wf.get("tracker", "keep_done", default=None))
+        named = wf.get("tracker", "states", default=None)
+        named = named if isinstance(named, dict) else {}
+        self.transition_states: dict[str, str] = {
+            edge: (str(named.get(edge)).strip() if named.get(edge) else default)
+            for edge, default in DEFAULT_TRANSITION_STATES.items()
+        }
         self.config_error: str | None = None
         # Same meaning as markdown/gh_issues: True when THIS tick's list_open_tasks() did
         # NOT read the tracker, so [] must not be taken as "nothing is open".
@@ -515,21 +554,30 @@ class LinearSource:
             tasks.append(task)
         return tasks
 
-    def _nodes_by_id(self, ids) -> list[dict] | None:
+    def _nodes_by_id(self, ids, *, cache: bool = True) -> list[dict] | None:
         """The raw nodes for ``ids`` (archived ones included), or None on a failed read."""
         numbers = sorted({n for n in (self._number_of(i) for i in ids) if n is not None})
         if not numbers:
             return []
         try:
-            return self._paged(ISSUES_BY_NUMBER_QUERY, {"team": self.team, "numbers": numbers})
+            return self._paged(ISSUES_BY_NUMBER_QUERY, {"team": self.team, "numbers": numbers},
+                               cache=cache)
         except LinearError as e:
             log.warning("linear: could not refresh %d issue(s) for team %s: %s",
                         len(numbers), self.team, e)
             return None
 
-    def claimable(self, tasks: list[Task]) -> tuple[list[Task], set[str]]:
+    def claimable(self, tasks: list[Task], retry_ids=frozenset()) -> tuple[list[Task], set[str]]:
         """``(candidates, closed_ids)`` for :func:`chela.dispatcher._ready`: the tasks in a
         configured READY state, in claim order, and the ids of every blocker known DONE.
+
+        🗂️📐 CMX-23: ``retry_ids`` are tasks whose last run DIED (``failed``) — chela itself
+        moved their issue to In Progress / In Review when it claimed them, so demanding the
+        ready state again would strand the retry forever. Such a task is a candidate from
+        any ``started``-type state too. Not from Backlog: a human parking it there is a
+        decision, not a leftover. ⚠️ ``retry_ids`` is UNCAPPED — the attempt cap and the
+        merged-PR guard are the dispatcher's claim loop's (``MAX_ATTEMPTS``); any other
+        caller passing ``retry_ids`` must apply them itself.
 
         A blocker counts as done only when its state type is ``completed`` — a canceled,
         open, or unreadable blocker (the relation is there but the issue is not) holds the
@@ -549,7 +597,40 @@ class LinearSource:
             state = node.get("state") if isinstance(node.get("state"), dict) else {}
             if str(state.get("name") or "").lower() in ready_names:
                 candidates.append(t)
+            elif t.id in retry_ids and state.get("type") == "started":
+                candidates.append(t)
         return candidates, closed
+
+    def workflow_states(self) -> list[dict] | None:
+        """🗂️📐 CMX-23 — the team's workflow states as the Work board's columns, in Linear's
+        board order (:data:`STATE_TYPE_ORDER`, then ``position``): ``[{"name", "type",
+        "hidden"}]``. ``hidden`` marks the Canceled-type states Linear collapses. None when
+        the team cannot be read. Cached per team for :data:`TEAM_STATES_TTL_SECONDS` — the
+        dashboard asks on every poll, and a team's states almost never change."""
+        cached = _team_states.get(self.team)
+        if cached and time.monotonic() - cached[0] < TEAM_STATES_TTL_SECONDS:
+            return [dict(s) for s in cached[1]]
+        if self.config_error:
+            return None
+        team = self._team()
+        if team is None:
+            return None
+        rank = {t: i for i, t in enumerate(STATE_TYPE_ORDER)}
+
+        def key(s: dict):
+            try:
+                pos = float(s.get("position") or 0)
+            except (TypeError, ValueError):
+                pos = 0.0
+            return (rank.get(s.get("type"), len(rank)), pos)
+
+        states = [
+            {"name": str(s["name"]), "type": str(s.get("type") or ""),
+             "hidden": s.get("type") in HIDDEN_STATE_TYPES}
+            for s in sorted(team[1], key=key) if isinstance(s.get("name"), str) and s["name"]
+        ]
+        _team_states[self.team] = (time.monotonic(), states)
+        return [dict(s) for s in states]
 
     # --- writing -------------------------------------------------------------------------
 
@@ -600,6 +681,126 @@ class LinearSource:
             # oldest goes now, not up to 15 minutes later.
             self.archive_sweep(force=True)
         return results
+
+    def transition(self, task_id: str, edge: str, *, duplicate_of: str | None = None) -> str:
+        """🗂️📐 CMX-23 — move one issue along the edge chela just crossed: ``in_progress``
+        (claimed), ``in_review`` (its PR is open), ``canceled`` or ``duplicate`` (``chela
+        close``). Returns ``set`` (written), ``already`` (it is in that state), ``skipped``
+        (the issue is finished — never resurrected — or the team has no such state),
+        ``missing`` (no such issue) or ``failed`` (a read or the write failed; the caller
+        may try again). Never raises: a tracker write must never block a claim, a close or
+        a merge. ``duplicate_of`` (an identifier of this team) also adds Linear's
+        ``duplicate`` relation; a relation that fails after the state landed is logged."""
+        if edge not in DEFAULT_TRANSITION_STATES:
+            log.warning("linear: unknown transition %r for %s", edge, task_id)
+            return "skipped"
+        if self.config_error:
+            return "failed"
+        try:
+            # Uncached: the state this tick's open read saw may be one chela just changed.
+            found = self._nodes_by_id([task_id], cache=False)
+            if found is None:
+                return "failed"
+            node = next((n for n in found if isinstance(n, dict) and n.get("id")
+                         and str(n.get("identifier") or "").upper() == str(task_id).upper()),
+                        None)
+            if node is None:
+                return "missing"
+            state = node.get("state") if isinstance(node.get("state"), dict) else {}
+            if state.get("type") in TERMINAL_STATE_TYPES or node.get("archivedAt"):
+                return "skipped"
+            target = self._transition_state(edge)
+            if target is None:
+                return "skipped"
+            if str(state.get("name") or "").lower() == str(target.get("name") or "").lower():
+                return "already"
+            data = self._call(UPDATE_STATE_MUTATION, {"id": node["id"], "stateId": target["id"]},
+                              cache=False)
+            if not (data.get("issueUpdate") or {}).get("success"):
+                log.warning("linear: moving %s to %s was refused", task_id, target.get("name"))
+                return "failed"
+        except LinearError as e:
+            log.warning("linear: could not move %s to %s: %s", task_id, edge, e)
+            return "failed"
+        except Exception:                       # never a crash in the caller's path
+            log.exception("linear: moving %s to %s failed", task_id, edge)
+            return "failed"
+        log.info("linear: %s → %s", task_id, target.get("name"))
+        if edge == "duplicate" and duplicate_of:
+            self._relate_duplicate(task_id, node["id"], duplicate_of)
+        return "set"
+
+    def cancel_task(self, task_id: str, reason: str) -> str:
+        """``chela close <run> --reason`` → Canceled, or Duplicate (+ the relation) when the
+        reason names the issue that supersedes this one. Same outcomes as
+        :meth:`transition`."""
+        superseding = self.superseding_issue(reason, task_id)
+        if superseding:
+            return self.transition(task_id, "duplicate", duplicate_of=superseding)
+        return self.transition(task_id, "canceled")
+
+    def superseding_issue(self, reason: str, own_id: str) -> str | None:
+        """The identifier of this team's issue a close ``reason`` says supersedes ``own_id``
+        — only when the reason also says so (:data:`_SUPERSEDED_RE`); else None."""
+        text = str(reason or "")
+        if not self.team or not _SUPERSEDED_RE.search(text):
+            return None
+        for m in re.finditer(rf"\b{re.escape(self.team)}-(\d+)\b", text, re.IGNORECASE):
+            ident = f"{self.team}-{m.group(1)}".upper()
+            if ident != str(own_id or "").upper():
+                return ident
+        return None
+
+    def _relate_duplicate(self, task_id: str, issue_id: str, canonical: str) -> bool:
+        nodes = self._nodes_by_id([canonical])
+        target = next((n.get("id") for n in nodes or () if isinstance(n, dict)
+                       and str(n.get("identifier") or "").upper() == canonical.upper()), None)
+        if not target:
+            log.warning("linear: %s marked Duplicate, but %s could not be read for the "
+                        "relation", task_id, canonical)
+            return False
+        try:
+            rel = self._call(CREATE_RELATION_MUTATION, {"input": {
+                "issueId": issue_id, "relatedIssueId": target, "type": "duplicate",
+            }}, cache=False)
+            ok = bool((rel.get("issueRelationCreate") or {}).get("success"))
+        except LinearError as e:
+            log.warning("linear: %s marked Duplicate, but the relation to %s failed: %s",
+                        task_id, canonical, e)
+            return False
+        if not ok:
+            log.warning("linear: %s marked Duplicate, but the relation to %s was refused",
+                        task_id, canonical)
+        return ok
+
+    def _transition_state(self, edge: str) -> dict | None:
+        """The team state ``edge`` moves an issue to: the configured (or default) NAME, else
+        the state TYPE's natural pick — In Progress = the first ``started`` state, In Review
+        = the last one (only when there are two), Canceled/Duplicate = the first
+        ``canceled`` one. None (logged) when the team has nothing that fits."""
+        team = self._team()
+        if team is None:
+            return None
+        states = team[1]
+        name = self.transition_states.get(edge, "")
+        named = [s for s in states if str(s.get("name", "")).lower() == name.lower()]
+        if named:
+            return named[0]
+        by_pos = sorted(states, key=lambda s: s.get("position") or 0)
+        started = [s for s in by_pos if s.get("type") == "started"]
+        canceled = [s for s in by_pos if s.get("type") == "canceled"]
+        pick = None
+        if edge == "in_progress" and started:
+            pick = started[0]
+        elif edge == "in_review" and len(started) > 1:
+            pick = started[-1]
+        elif edge in ("canceled", "duplicate") and canceled:
+            pick = canceled[0]
+        if pick is None:
+            _report_once((self.team, f"state:{edge}"),
+                         f"linear: team {self.team} has no state named {name!r} (nor one of "
+                         f"the type it falls back to) — chela will not write the {edge} edge")
+        return pick
 
     def archive_issue(self, issue_id: str, label: str = "") -> bool:
         """``issueArchive`` one issue. True on success; logs and returns False on any
@@ -809,6 +1010,7 @@ class LinearSource:
             task_number=number,
             branch=_branch_for(ident, title, node.get("branchName")),
             terminal_state=terminal,
+            tracker_state=str(state.get("name") or "") or None,
             # CMX-430: the reconcile acts on `state`. A terminal (done/canceled/archived)
             # Linear issue is POSITIVELY closed, never left reading as open.
             state="closed" if terminal else "open",

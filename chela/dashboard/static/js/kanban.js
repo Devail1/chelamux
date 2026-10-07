@@ -6,6 +6,7 @@ import { openTaskModal } from './taskmodal.js';
 import { displayTitle, riskChip } from './taskmodalmodel.js';
 import { knInline } from './knowledge.js';
 import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from './kanbanlanemodel.js';
+import { runStateBadges, trackerBoard, trackerColumns } from './kanbanlinearmodel.js';
 import { runCardNote } from './runstate.js';
 
 // ---------------------------------------------------------------------------
@@ -245,9 +246,12 @@ function _kCard(card) {
     // lane apart. Text, deliberately: a pill's colour is a secondary cue, never the whole
     // message (Liav is red-weak, here or anywhere).
     const chipMeta = STATUS_CHIPS[card.status];
-    const stateChip = chipMeta
+    const stateChip = (chipMeta
         ? `<span class="kanban-state-chip ${chipMeta.cls}">${escHtml(chipMeta.label)}</span>`
-        : '';
+        : '')
+        // 🗂️📐 CMX-23: judging / rework N / blocked race — run state as badges, never columns.
+        + runStateBadges(card)
+            .map(b => `<span class="kanban-state-chip ${b.cls}">${escHtml(b.label)}</span>`).join('');
     // Progress inside the run's own task list (issue #462) — see _taskProgressChip;
     // renders nothing when card.tasks is null (no session to join, or no task dir).
     const taskChip = _taskProgressChip(card.tasks);
@@ -513,6 +517,7 @@ function _kanbanPromoteToast(btn, msg) {
 }
 
 function _kCol(key, label, cards) {
+    label = escHtml(label);
     const body = cards.length
         ? cards.map(_kCard).join('')
         : `<div class="kanban-empty-col">—</div>`;
@@ -733,18 +738,17 @@ function toggleKanbanCol(col) {
     }
 }
 
-// Quick-nav strip (swipe layout only): one chip per lane with its live
-// count; tapping snap-scrolls the carousel to that lane.
-function _renderKanbanNav(lanes) {
+// Quick-nav strip (swipe layout only): one chip per column with its live
+// count; tapping snap-scrolls the carousel to that column. `cols` is the
+// rendered board — `[{key, label, cards}]` (already workflow-filtered).
+function _renderKanbanNav(cols) {
     const strip = $('#kanban-nav-strip');
     if (!strip) return;
-    const apply = arr => _kanbanFilter === 'all' ? arr : arr.filter(c => c.workflow_path === _kanbanFilter);
-    strip.innerHTML = KANBAN_LANES.map(k => {
-        const n = apply(lanes[k] || []).length;
-        return `<button class="kanban-nav-chip" type="button" data-col="${k}"
-                       onclick="chela.kanbanNavTo('${k}')">
-                    <span class="kanban-nav-label">${KANBAN_LANE_LABELS[k]}</span>
-                    <span class="kanban-nav-count">${n}</span>
+    strip.innerHTML = cols.map(c => {
+        return `<button class="kanban-nav-chip" type="button" data-col="${c.key}"
+                       onclick="chela.kanbanNavTo('${c.key}')">
+                    <span class="kanban-nav-label">${escHtml(c.label)}</span>
+                    <span class="kanban-nav-count">${c.cards.length}</span>
                 </button>`;
     }).join('');
 }
@@ -787,10 +791,23 @@ function renderKanban(data) {
     _kanbanCardIndex.length = 0;
 
     const { buckets, workflows } = _kanbanFlatten(data);
-    const lanes = _lanesFromBuckets(buckets);
 
     // Apply the workflow filter to every lane (Backlog/To Do included).
     const apply = arr => _kanbanFilter === 'all' ? arr : arr.filter(c => c.workflow_path === _kanbanFilter);
+    const allCards = apply(_KANBAN_BUCKET_ORDER.flatMap(k => buckets[k] || []));
+
+    // 🗂️📐 CMX-23: the columns. Every workflow on screen has tracker states (Linear) ⇒
+    // the board's columns ARE those states, in the tracker's order, and chela's run state
+    // is a badge on the card. Otherwise chela's own 6 lanes (kanbanlanemodel.js).
+    const shown = (data.workflows || []).filter(wf => _kanbanFilter === 'all' || wf.path === _kanbanFilter);
+    const tracker = trackerColumns(shown);
+    let cols;
+    if (tracker) {
+        cols = trackerBoard(tracker, allCards).columns;
+    } else {
+        const lanes = _lanesFromBuckets(buckets);
+        cols = KANBAN_LANES.map(k => ({ key: k, label: KANBAN_LANE_LABELS[k], cards: apply(lanes[k]) }));
+    }
 
     // Merge-all count = awaiting_review cards that GitHub reports MERGEABLE in
     // the active filter. Drives the toolbar button's label + visibility. The status test
@@ -803,16 +820,15 @@ function renderKanban(data) {
     // server skips it in the batch, and a count that included it would be promising a merge
     // that cannot happen. `none` (a repo with no CI at all) still counts: no checks is not
     // the same as failing checks.
-    const mergeableCount = apply(lanes.review)
+    const mergeableCount = allCards
         .filter(c => c.status === 'awaiting_review' && c.pr_mergeable === 'MERGEABLE'
                      && (c.pr_checks === 'passing' || c.pr_checks === 'none')).length;
     _renderKanbanFilters(workflows, mergeableCount);
-    _renderKanbanNav(lanes);
+    _renderKanbanNav(cols);
     _applyKanbanLayout();
 
-    board.innerHTML = KANBAN_LANES
-        .map(key => _kCol(key, KANBAN_LANE_LABELS[key], apply(lanes[key])))
-        .join('');
+    board.style.setProperty('--kanban-cols', String(cols.length || 1));
+    board.innerHTML = cols.map(c => _kCol(c.key, c.label, c.cards)).join('');
 }
 
 

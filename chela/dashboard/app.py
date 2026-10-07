@@ -4100,6 +4100,12 @@ def api_dispatcher():
             # CMX-6: the tracker kind — the Work view offers "New task" only on a
             # workflow whose tracker chela can create issues in (linear).
             "tracker_kind": None,
+            # 🗂️📐 CMX-23: the tracker's own workflow states, in its board order
+            # (`[{name, type, hidden}]`) — with these the Work board's columns ARE the
+            # tracker's (Linear's Backlog · Todo · In Progress · In Review · Done) and chela's
+            # run state rides on the card as a badge. None for a tracker without states
+            # (markdown, gh_issues) or a failed read: the board keeps chela's own lanes.
+            "tracker_columns": None,
         }
 
         active, awaiting, recent = _runs_for_workflow(all_runs, str(wf_path))
@@ -4115,6 +4121,7 @@ def api_dispatcher():
         )
         project_key: str | None = None
         url_by_id: dict[str, str] = {}
+        state_by_id: dict[str, str] = {}
 
         if exists:
             try:
@@ -4142,6 +4149,10 @@ def api_dispatcher():
                 # while its task is still open in the tracker, the URL this same read
                 # just returned fills it in (display-only, never written back).
                 url_by_id = {t.id: t.url for t in open_tasks if t.url}
+                state_by_id = {t.id: t.tracker_state for t in open_tasks if t.tracker_state}
+                workflow_states = getattr(source, "workflow_states", None)
+                if workflow_states is not None:
+                    entry["tracker_columns"] = workflow_states()
                 entry["open_tasks"] = []
                 for t in open_tasks:
                     if t.id in in_flight_ids:
@@ -4165,6 +4176,8 @@ def api_dispatcher():
                         # 🔗↗️ CMX-5: the tracker's own issue URL (Linear's `url`) — the
                         # card's `CMX-N ↗` link. None for markdown/gh_issues: no link.
                         "tracker_url": t.url,
+                        # 🗂️📐 CMX-23: the tracker state this read saw (Linear's column).
+                        "tracker_state": t.tracker_state,
                         # True when this task has a `depends:` reference not yet
                         # struck done — kept in sync with `dispatcher._ready`, the
                         # claim-time gate, so a card the dispatcher would refuse to
@@ -4234,6 +4247,10 @@ def api_dispatcher():
             # 🔗↗️ CMX-5: the Linear issue URL recorded at claim, else the one this request's
             # tracker read returned for the same id, else None (no link — never guessed).
             r["tracker_url"] = r.get("tracker_url") or url_by_id.get(r.get("task_id"))
+            # 🗂️📐 CMX-23: the issue's current tracker state, when it is still open there.
+            # None for a finished/archived issue — the board then files the card by its
+            # run status (kanbanlinearmodel.js's fallback), never drops it.
+            r["tracker_state"] = state_by_id.get(r.get("task_id"))
             # Per-run task-list progress (issue #462) — None (not "0/0", not an error)
             # whenever the run can't be joined to a live session's task directory; see
             # tasklists.progress_for_run.

@@ -516,7 +516,8 @@ def _git_out(cp) -> str:
     return cp.stdout.strip() if _git_ok(cp) else ""
 
 
-def _claim_order(wf: WorkflowDef, source, on_disk: list[Task]) -> list[Task]:
+def _claim_order(wf: WorkflowDef, source, on_disk: list[Task],
+                 retry_ids: frozenset[str] = frozenset()) -> list[Task]:
     """The queue AS OF THE INSTANT OF CLAIMING — re-read from ``origin/<base_branch>``.
 
     FETCH-THEN-CLAIM. The tick's own parse happens before reconciliation, PR polling and
@@ -557,7 +558,10 @@ def _claim_order(wf: WorkflowDef, source, on_disk: list[Task]) -> list[Task]:
     # the blockers it knows are DONE — its live read is already claim-fresh.
     claimable = getattr(source, "claimable", None)
     if claimable is not None:
-        candidates, closed_ids = claimable(on_disk)
+        # 🗂️📐 CMX-23: `retry_ids` — tasks whose run died with retries left. chela moved
+        # their issue out of the ready state itself when it claimed them, so the tracker
+        # must not demand it back (see LinearSource.claimable).
+        candidates, closed_ids = claimable(on_disk, retry_ids=retry_ids)
         return _ready(candidates, closed_ids, known_ids={t.id for t in on_disk} | closed_ids)
 
     tasks_from_text = getattr(source, "tasks_from_text", None)
@@ -1427,6 +1431,13 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # still true, and the Work card shows this reason INSTEAD of it, not on top of it.
         # NULL on every reconcile-closed row (a PR closed on GitHub carries no reason here).
         ("close_reason", "ALTER TABLE runs ADD COLUMN close_reason TEXT"),
+        # 🗂️📐 CMX-23. The last workflow edge chela WROTE to the tracker for this run
+        # (`in_progress` / `in_review` / `canceled` / `duplicate` — see
+        # `_sync_tracker_states`). It is what makes each transition land ONCE per edge: the
+        # sync writes only when the edge the run is on differs from this. A fresh claim
+        # resets it (a re-claimed run is In Progress again). NULL for a run whose tracker
+        # chela does not drive (markdown, gh_issues) and for pre-migration rows.
+        ("tracker_edge", "ALTER TABLE runs ADD COLUMN tracker_edge TEXT"),
     ):
         if _column in existing_columns:
             continue  # already migrated — no DDL attempted, nothing to fail
@@ -4343,6 +4354,8 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
         except Exception as e:  # noqa: BLE001 — the close already landed; report, never raise
             worktree_detail = f"{type(e).__name__}: {e}"
 
+    tracker_outcome = _tracker_close(run, reason)
+
     label = run.get("branch_name") or task_id
     event_log.append(
         "run_closed",
@@ -4360,7 +4373,7 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
         "comment_posted": comment_posted, "comment_detail": comment_detail,
         "window_killed": window_killed, "forced": bool(force and refusal),
         "worktree_path": run.get("worktree_path"), "worktree_removed": worktree_removed,
-        "worktree_detail": worktree_detail,
+        "worktree_detail": worktree_detail, "tracker": tracker_outcome,
     }
 
 
@@ -4893,6 +4906,7 @@ def tick(workflow_path: str | Path) -> dict:
         "watchdog_renudged": 0,
         "watchdog_unblocked": 0,
         "tracker_struck": 0,
+        "tracker_transitions": 0,
         "reworked": 0,
         "escalated": 0,
         "ci_failed": 0,
@@ -5795,6 +5809,11 @@ def tick(workflow_path: str | Path) -> dict:
         if merged_in_tick:
             _fire_after_done(wf)
 
+        # 2c. 🗂️📐 CMX-23: drive the tracker's workflow state from the run's (a PR that
+        # opened since last tick → In Review). Before the dispatch gates below, so a held or
+        # blocked queue still keeps the board honest. Never raises, never blocks.
+        summary["tracker_transitions"] = _sync_tracker_states(conn, wf, source)
+
         # 3. Dispatch — BLOCKED while the workflow file does not parse.
         # Everything above (PR-state refresh, done/failed reconcile, the tracker
         # strike) has already run on the last known-good config, which is the
@@ -5956,7 +5975,8 @@ def tick(workflow_path: str | Path) -> dict:
         # NOT sufficient — see _claim_order. Skipped entirely when every slot is busy, OR
         # when the disk budget above refused the claim: there is nothing to claim, and a
         # network fetch to learn that is a waste either way.
-        queue = _claim_order(wf, source, open_tasks) if (active < max_concurrent and not over_budget) else []
+        queue = (_claim_order(wf, source, open_tasks, _died_run_ids(conn, str(wf.path)))
+                 if (active < max_concurrent and not over_budget) else [])
 
         for task in queue:
             if active >= max_concurrent:
@@ -6004,7 +6024,111 @@ def tick(workflow_path: str | Path) -> dict:
                 active += 1
                 summary["dispatched"] += 1
 
+        if summary["dispatched"]:
+            # The runs just claimed → In Progress, this tick rather than the next.
+            conn.commit()
+            summary["tracker_transitions"] += _sync_tracker_states(conn, wf, source)
+
     return summary
+
+
+def _died_run_ids(conn: sqlite3.Connection, workflow_path: str) -> frozenset[str]:
+    """🗂️📐 CMX-23 — this workflow's ``failed`` runs: the tasks a claim may RETRY even
+    though their tracker issue has left the ready state. Neither the attempt cap nor the
+    merged-PR guard is applied here — the claim loop's own ``MAX_ATTEMPTS`` and
+    ``pr_state='merged'`` checks are the one place that decides them, for every tracker
+    alike."""
+    return frozenset(
+        r["task_id"] for r in conn.execute(
+            "SELECT task_id FROM runs WHERE workflow_path=? AND status='failed'",
+            (workflow_path,),
+        ).fetchall()
+    )
+
+
+# 🗂️📐 CMX-23 — the run statuses that put the work in the AGENT's hands (→ In Progress):
+# the first attempt, and every rework round — `changes_requested` is the judge sending it
+# back, even though the PR stays open (Liav's mapping, Linear comment on CMX-23,
+# 2026-10-07). The rest of REVIEW_STATUSES is out of the agent's hands (→ In Review).
+_TRACKER_IN_PROGRESS_STATUSES = (*ACTIVE_STATUSES, "changes_requested")
+
+
+def _desired_tracker_edge(row) -> str | None:
+    """The workflow edge a run is on, for a tracker chela drives (CMX-23): the agent is
+    working — a claim, or a rework round on an open PR — → ``in_progress``; the PR is open
+    and out of the agent's hands (judging, clean awaiting merge, needs_human) →
+    ``in_review``. So a rework bounces In Review → In Progress → In Review. Everything else
+    (failed, done, closed) → None: a died run keeps its state until it is re-claimed,
+    merge → Done is ``close_tasks``' job, and a close writes its own edge
+    (:func:`_tracker_close`)."""
+    status = row["status"]
+    if status in _TRACKER_IN_PROGRESS_STATUSES:
+        return "in_progress"
+    if status in REVIEW_STATUSES:
+        return "in_review"
+    return None
+
+
+def _sync_tracker_states(conn: sqlite3.Connection, wf: WorkflowDef, source) -> int:
+    """🗂️📐 CMX-23 — write each run's workflow edge to a tracker that has one
+    (``source.transition`` — Linear), ONCE per edge: only when the edge differs from the
+    ``tracker_edge`` this run last recorded. ``set``/``already``/``skipped`` record it (the
+    tracker is where it should be, or never can be); ``failed``/``missing`` leave it to be
+    tried next tick. A failed write is logged by the source and never raises out of here.
+    Returns how many edges were recorded."""
+    transition = getattr(source, "transition", None)
+    if transition is None:
+        return 0
+    rows = conn.execute(
+        "SELECT task_id, status, tracker_edge FROM runs WHERE workflow_path=? "
+        "AND status IN ({})".format(",".join("?" * len(ACTIVE_STATUSES + REVIEW_STATUSES))),
+        (str(wf.path), *ACTIVE_STATUSES, *REVIEW_STATUSES),
+    ).fetchall()
+    recorded = 0
+    for row in rows:
+        edge = _desired_tracker_edge(row)
+        if edge is None or edge == row["tracker_edge"]:
+            continue
+        try:
+            outcome = transition(row["task_id"], edge)
+        except Exception:
+            log.exception("tracker transition %s → %s failed", row["task_id"], edge)
+            continue
+        if outcome in ("set", "already", "skipped"):
+            conn.execute("UPDATE runs SET tracker_edge=? WHERE task_id=? AND status=?",
+                         (edge, row["task_id"], row["status"]))
+            recorded += 1
+    if recorded:
+        conn.commit()
+    return recorded
+
+
+def _tracker_close(run: dict, reason: str) -> str | None:
+    """🗂️📐 CMX-23 — ``chela close`` → the tracker: Canceled, or Duplicate + the relation
+    when the reason names the superseding issue (``source.cancel_task`` — Linear). The
+    outcome, or None when the run's tracker has no such write. Never raises: the close has
+    already landed, and this is its projection."""
+    wf_path = run.get("workflow_path")
+    if not wf_path:
+        return None
+    try:
+        wf = load_workflow(Path(wf_path))
+        # Only a tracker with a cancel write has one (Linear); markdown/gh_issues → None.
+        cancel = getattr(get_source(wf), "cancel_task", None)
+        if cancel is None:
+            return None
+        outcome = cancel(run["task_id"], reason)
+    except Exception:  # noqa: BLE001 — a projection; the close already landed
+        log.exception("close: could not update the tracker for %s", run.get("task_id"))
+        return "failed"
+    if outcome in ("set", "already", "skipped"):
+        try:
+            with _db() as conn:
+                conn.execute("UPDATE runs SET tracker_edge='canceled' WHERE task_id=?",
+                             (run["task_id"],))
+        except sqlite3.Error:
+            log.warning("close: could not record the tracker edge for %s", run["task_id"])
+    return outcome
 
 
 def _max_existing_task_number(repo_path: Path, project_key: str) -> int:
@@ -6170,7 +6294,8 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
              started_at=excluded.started_at, attempt=excluded.attempt, last_error=NULL,
              task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL,
              window_epoch=NULL, brief=excluded.brief, risk=excluded.risk,
-             risk_reason=excluded.risk_reason, tracker_url=excluded.tracker_url""",
+             risk_reason=excluded.risk_reason, tracker_url=excluded.tracker_url,
+             tracker_edge=NULL""",
         (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt,
          task_number, _task_brief(task), run_risk(task.risk), task.risk_reason, task.url),
     )
