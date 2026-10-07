@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-from chela import config
+from chela import config, probecache
 from chela.discovery import get_window_id, get_window_cwd, get_all_windows, get_windows_by_id
 from chela.messenger import send_tmux
 
@@ -521,7 +521,17 @@ def status_by_wid() -> dict[str, str]:
 
 
 def claude_pid(window_id: str) -> int | None:
-    """PID of the claude process in a tmux window (matches `agents --json` pid)."""
+    """PID of the claude process in a tmux window (matches `agents --json` pid).
+
+    Inside a :func:`chela.probecache.batch` this is read from the shared pane snapshot's
+    :attr:`chela.sessions.Pane.direct_claude_pid` — the same ``pgrep -P <pane_pid> -f
+    claude`` answer, computed once per refresh for every window instead of two spawns per
+    window per call (CMX-17).
+    """
+    batch = probecache.active()
+    if batch is not None:
+        pane = batch.pane(window_id)
+        return pane.direct_claude_pid if pane is not None else None
     try:
         result = subprocess.run(
             ["tmux", "display-message", "-t", f"{config.current_session()}:{window_id}", "-p", "#{pane_pid}"],
@@ -555,7 +565,14 @@ _SERVER_COMMANDS = (
 
 
 def pane_command(window_id: str) -> str:
-    """tmux #{pane_current_command} for a window (foreground process), or ""."""
+    """tmux #{pane_current_command} for a window (foreground process), or "".
+
+    From the shared pane snapshot inside a :func:`chela.probecache.batch` (CMX-17).
+    """
+    batch = probecache.active()
+    if batch is not None:
+        pane = batch.pane(window_id)
+        return pane.command if pane is not None else ""
     try:
         out = subprocess.run(
             ["tmux", "display-message", "-p", "-t", f"{config.current_session()}:{window_id}",

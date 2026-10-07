@@ -48,6 +48,8 @@ import threading
 import time
 from contextlib import contextmanager
 
+from chela import probecache
+
 log = logging.getLogger(__name__)
 
 # pid AND start time: the kernel recycles pids, and a recycled one would make a stale
@@ -87,9 +89,16 @@ def current() -> str | None:
     """The identity of the tmux server that is issuing window ids RIGHT NOW.
 
     ``None`` when tmux cannot be asked (not installed, no server running) — the honest
-    "unknown", never a value that could be compared equal to a stamp. Inside
-    :func:`per_tick` the answer is memoised for the rest of the tick.
+    "unknown", never a value that could be compared equal to a stamp.
+
+    Inside a :func:`chela.probecache.batch` (the dashboard's polled endpoints, which reach
+    this once per WINDOW through ``sessionids.session_id_for``) the answer is shared for
+    :data:`chela.probecache.TTL` across requests and threads (CMX-17). Inside
+    :func:`per_tick` it is memoised for the rest of the tick (CMX-18). Everywhere else it
+    is asked fresh.
     """
+    if probecache.active() is not None:
+        return probecache.shared("epoch", _ask)
     memo = getattr(_tick, "memo", None)
     if memo is None:
         return _ask()
@@ -101,6 +110,7 @@ def current() -> str | None:
 
 
 def _ask() -> str | None:
+    """Ask the running tmux server for its ``pid-start_time``, right now."""
     try:
         result = subprocess.run(
             ["tmux", "display-message", "-p", _FORMAT],

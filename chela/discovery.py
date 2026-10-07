@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import subprocess
 
-from chela import config, envutil
+from chela import config, envutil, probecache
 from chela.config import IGNORE_WINDOWS
 
 log = logging.getLogger(__name__)
@@ -140,7 +140,20 @@ def get_window_cwd_by_id(window_id: str) -> str | None:
 
 
 def get_window_cwd(agent_name: str) -> str | None:
-    """Working directory of an agent's window, read straight from its tmux pane."""
+    """Working directory of an agent's window, read straight from its tmux pane.
+
+    Inside a :func:`chela.probecache.batch` the name resolves through the window list the
+    batch was opened with and the path comes from the shared pane snapshot (the same
+    ``#{pane_current_path}``, listed once) instead of two tmux calls per agent (CMX-17).
+    """
+    batch = probecache.active()
+    if batch is not None:
+        wid = (batch.windows.get(agent_name) if batch.windows is not None
+               else get_window_id(agent_name))
+        if not wid:
+            return None
+        pane = batch.pane(wid)
+        return (pane.path or None) if pane is not None else None
     wid = get_window_id(agent_name)
     if not wid:
         return None
