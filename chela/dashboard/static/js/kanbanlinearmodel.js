@@ -27,7 +27,9 @@ const STATUS_FALLBACK = {
     running: ['started', 'first'],
     failed: ['started', 'first'],
     awaiting_review: ['started', 'last'],
-    changes_requested: ['started', 'last'],
+    // A rework round is back in the agent's hands → In Progress, as the dispatcher writes it
+    // (`_TRACKER_IN_PROGRESS_STATUSES`, chela/dispatcher.py).
+    changes_requested: ['started', 'first'],
     needs_human: ['started', 'last'],
     done: ['completed', 'first'],
     closed: ['canceled', 'first'],

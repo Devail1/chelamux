@@ -85,6 +85,11 @@ test('run state rides as badges: judging, rework N, blocked race', () => {
     assert.deepEqual(got, ['⚖️ judging', '🔁 rework 2']);
     assert.deepEqual(runStateBadges({ status: 'awaiting_review', judge_state: 'blocked_race' }).map(b => b.label),
                      ['🧊 blocked race']);
+    // The FIRST rework round sits exactly on the boundary (rework > 0): it must carry its
+    // badge too — a 0/2 pair alone straddles the boundary and lets `> 1` through
+    // (docs/defeat_shapes/333).
+    assert.deepEqual(runStateBadges({ status: 'running', judge_state: 'clean', rework_count: 1 }).map(b => b.label),
+                     ['🔁 rework 1']);
     // Control: a quiet run carries none.
     assert.deepEqual(runStateBadges({ status: 'running', judge_state: 'clean', rework_count: 0 }), []);
 });
@@ -107,7 +112,7 @@ test('with no tracker state, every run status falls back to the column its edge 
     const want = {
         backlog: 'Backlog', parked: 'Backlog', open: 'Todo', claimed: 'In Progress',
         running: 'In Progress', failed: 'In Progress', awaiting_review: 'In Review',
-        changes_requested: 'In Review', needs_human: 'In Review', done: 'Done', closed: 'Canceled',
+        changes_requested: 'In Progress', needs_human: 'In Review', done: 'Done', closed: 'Canceled',
     };
     for (const [status, col] of Object.entries(want)) {
         assert.equal(columnOf({ status }, LINEAR)?.name, col, status);
