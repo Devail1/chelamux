@@ -7,15 +7,21 @@ nothing told the orchestrator; it polled the pane, and the human became the mess
 bus ("he's done"). This closes that loop: agent/run events are pushed straight into
 the orchestrator's session, so it wakes up and acts.
 
-**Push, gated on idle.** An event is delivered — peer socket first
-(:func:`chela.messenger.send_peer`), :func:`chela.messenger.send_tmux` as fallback —
-ONLY when the orchestrator's window is ``idle``. Otherwise it queues (durably) and
-goes out on the next idle tick. Two rules make that safe:
+**Push, gated per path.** An event is delivered — peer socket first
+(:func:`chela.messenger.send_peer`), :func:`chela.messenger.send_tmux` as fallback.
+The two paths carry different gates (CMX-27):
 
-* ``idle`` is checked STRICTLY — ``not busy`` is not good enough. A ``waiting``
-  session is sitting on a permission/question prompt, and pasting into it would
-  ANSWER THE GATE with our notification. Only a session that is genuinely idle at
-  its prompt is ever written to.
+* **Peer socket: ``idle`` or ``busy``.** Claude Code QUEUES a peer message and drains it
+  at the receiver's next tool round, mid-turn included — that is how agents' SendMessage
+  reports reach a busy orchestrator. Gating the socket on idle too cost a 4h outage on
+  2026-10-07: a stuck background job pinned the orchestrator to ``busy`` and every
+  verdict was held silently. ``waiting`` is still REFUSED on the socket: a permission /
+  question prompt is open, and how a queued peer message interacts with it is unmeasured.
+* **tmux paste: ``idle`` ONLY, checked STRICTLY** — ``not busy`` is not good enough. A
+  paste into a ``busy`` session interleaves with its work, and a ``waiting`` session is
+  sitting on a permission/question prompt that our paste would ANSWER. So the tmux
+  fallback is never attempted unless the window is genuinely idle at its prompt; a busy
+  orchestrator whose socket refuses simply HOLDS the event for the next tick.
 * ⛔ **And ``idle`` is not "the prompt will treat this as prose".** The status
   authority models whether a session is THINKING; it says nothing about the INPUT
   MODE its prompt is in. On 2026-07-15 the orchestrator's idle pane was in ``!``
@@ -129,6 +135,11 @@ log = logging.getLogger(__name__)
 
 # Statuses `claude agents --json` reports (see agent_manager.session_status_map).
 BUSY, IDLE, WAITING = "busy", "idle", "waiting"
+
+# CMX-27: the statuses the PEER SOCKET may deliver in. Claude Code queues a peer message and
+# drains it at the next tool round, so `busy` is safe there; `waiting` (an open permission /
+# question prompt) is not, until measured. The tmux paste fallback stays strictly IDLE-only.
+SOCKET_DELIVERABLE = (IDLE, BUSY)
 
 # How many events go out per tick. ONE: a delivery makes the orchestrator busy, and
 # a second paste would land mid-thought (or, worse, race its status back to idle).
@@ -1805,12 +1816,20 @@ def deliver(store: dict, statuses: dict[str, str],
             now_epoch: str | None = None,
             alarms: list[dict] | None = None,
             live_heads: dict[str, str] | None = None) -> list[dict]:
-    """Push queued events into the orchestrator — ONLY if its window is ``idle``.
+    """Push queued events into the orchestrator — socket while ``idle``/``busy``, tmux only while ``idle``.
 
-    The gate is a strict equality against ``idle``. ``waiting`` must never be written
-    to: that session is sitting on a permission/question prompt, and our paste would
-    be consumed as the ANSWER to that prompt. ``busy`` we leave alone by design (never
-    interrupt a session mid-thought) — the event just waits for the next idle tick.
+    **The tmux paste gate is a strict equality against ``idle``.** ``waiting`` must never be
+    pasted into: that session is sitting on a permission/question prompt, and our paste would
+    be consumed as the ANSWER to that prompt. ``busy`` is never pasted into either — a paste
+    lands mid-thought and interleaves with the session's own work.
+
+    **The peer socket is not a paste, so it is not held to that gate (CMX-27).** Claude Code
+    queues a peer message and drains it at the receiver's next tool round, so a ``busy``
+    orchestrator is delivered to over the socket ONLY — no tmux fallback; a socket that is
+    unavailable or refuses while busy HOLDS the event for the next tick. ``waiting`` is still
+    refused on BOTH paths (nothing sent at all): a prompt is open, and how a queued peer
+    message interacts with it has not been measured. Any other status (unknown, absent) is
+    held too.
 
     **And the address itself is checked BEFORE the status is** (:func:`address_state`). That
     order is the CMX-77 fix: ``statuses.get(orch) != IDLE`` is also what a DEAD address looks
@@ -1844,8 +1863,10 @@ def deliver(store: dict, statuses: dict[str, str],
     there is no LIVE wid-based orchestrator to deliver to at all — nobody has ever run
     ``chela watch`` from a window (``ADDR_NONE``), or the recorded ``@N`` has rotted
     (``ADDR_DANGLING``/``ADDR_GONE``) and :func:`_undeliverable` has already shouted about
-    it above. A wid orchestrator that is merely BUSY is left alone exactly as before — it is
-    alive and will go idle on its own, so the peer fallback is never raced against it.
+    it above. A wid orchestrator that is merely BUSY is delivered to over ITS OWN socket (see
+    above) and never handed to the windowless peer — it is alive, so the peer fallback is
+    never raced against it. The windowless peer gets the same status rule: ``idle``/``busy``
+    → socket, ``waiting`` (or anything else) → hold.
     """
     if not store["queue"]:
         return []
@@ -1859,15 +1880,18 @@ def deliver(store: dict, statuses: dict[str, str],
         else:
             if state == ADDR_UNSTAMPED:
                 log.warning("inbox: %s", why)
-            if statuses.get(orch) != IDLE:
-                return []
-            # A real, idle window at the address: whatever it was alarming about is over,
+            status = statuses.get(orch)
+            if status not in SOCKET_DELIVERABLE:
+                return []                  # waiting (a prompt is open) / unknown: hold
+            # A real, live window at the address: whatever it was alarming about is over,
             # and the next failure — even the same kind — is news again, not a de-dup repeat.
             _clear_address_alarm(store)
             return _deliver_loop(
                 store, runs, live_heads, target_desc=orch, event_wid=orch,
                 send=lambda text: messenger.send_peer(orch, "chela-inbox", text),
-                tmux_fallback=lambda text: messenger.send_tmux(orch, text))
+                # CMX-27: a busy session takes the socket (it queues), never a paste.
+                tmux_fallback=((lambda text: messenger.send_tmux(orch, text))
+                               if status == IDLE else None))
 
     peer = orchestrator_peer(store)
     if not peer:
@@ -1879,9 +1903,9 @@ def deliver(store: dict, statuses: dict[str, str],
         return []
     pid = peer["pid"]
     # Native status is pid-keyed (`claude agents --json`), so it needs no window either —
-    # the same idle gate the wid path applies, read a different way. `statuses` (the wid-
+    # the same socket gate the wid path applies, read a different way. `statuses` (the wid-
     # keyed view `status_snapshot()` passed in) has nothing for a windowless pid at all.
-    if agent_manager.session_status_map()["by_pid"].get(pid) != IDLE:
+    if agent_manager.session_status_map()["by_pid"].get(pid) not in SOCKET_DELIVERABLE:
         return []
     return _deliver_loop(
         store, runs, live_heads, target_desc=f"pid {pid}", event_wid=None,
