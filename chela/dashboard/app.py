@@ -12,6 +12,7 @@ core CLI never imports this module at top level.
 from __future__ import annotations
 
 import atexit
+import functools
 import hashlib
 import json
 import logging
@@ -27,7 +28,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, probecache, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -81,6 +82,23 @@ def require_auth(f):
     (loopback bind + tailnet), not this function.
     """
     return f
+
+
+def _batched_probes(f):
+    """Serve the route with its per-window tmux/pgrep probes read from ONE shared snapshot.
+
+    The polled endpoints (the Wall asks ``/api/agents`` and ``/api/agents/context`` every
+    4 s per open tab) asked tmux and pgrep about every window one at a time — 94% of the
+    dashboard's process spawns in the CMX-15 profile, linear in the fleet. Inside
+    :func:`chela.probecache.batch` the same functions answer from ``sessions.panes()`` (one
+    ``list-windows`` + /proc, ~1 s TTL shared across requests and threads) and a shared
+    epoch; their answers, and so the response, are unchanged (CMX-17).
+    """
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        with probecache.batch():
+            return f(*args, **kwargs)
+    return wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +269,7 @@ def _needs_human(wid: str, sess_status: str | None, dispatched: bool) -> bool:
 
 @app.route("/api/agents")
 @require_auth
+@_batched_probes
 def api_agents():
     _sync_shares()   # CMX-434: shares hosted by `chela collab` survive our restarts
     windows = discovery.get_all_windows()
@@ -3386,12 +3405,18 @@ def _fmt_k(v):
 
 @app.route("/api/agents/context")
 @require_auth
+@_batched_probes
 def api_agents_context():
     # Live, per discovered agent: a fresh statusLine cache file (authoritative —
     # context %, 5h/7d rate limits, cost) when present, else a transcript-derived
     # context estimate. No dependency on the snapshot DB being populated.
     agent_name = request.args.get("agent")
     windows = discovery.get_all_windows()  # {name: window_id}
+    # Each agent's transcript fallback resolves name → cwd; let it use THIS listing rather
+    # than a `list-windows` of its own per agent (see discovery.get_window_cwd).
+    batch = probecache.active()
+    if batch is not None:
+        batch.windows = windows
     names = [agent_name] if agent_name else list(windows.keys())
 
     results = []
@@ -3989,6 +4014,7 @@ def _orchestrator_status_payload() -> dict:
 
 @app.route("/api/orchestrator/status")
 @require_auth
+@_batched_probes
 def api_orchestrator_status():
     """Who (if anyone) currently receives the decisions inbox, and whether that
     address is actually deliverable — the fact the pane toggle and the decisions

@@ -153,7 +153,8 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from chela import config, event_log, sessionids, transcripts
@@ -253,12 +254,92 @@ class Pane:
     launched_in: str | None = None
     resumed: str | None = None
     started: float | None = None
+    # What ``pgrep -P <pane_pid> -f claude`` names — the lowest-pid DIRECT child whose
+    # full command line contains "claude" — i.e. exactly :func:`chela.agent_manager.claude_pid`'s
+    # answer, so the dashboard can read it from this one snapshot (CMX-17). Deliberately NOT
+    # ``claude_pid`` above, which walks a few generations and stops at the first match: the
+    # two differ for a claude behind a wrapper, and the dashboard's busy/idle/shell rows must
+    # not move because of where they are read from.
+    direct_claude_pid: int | None = None
 
     @property
     def origin(self) -> str | None:
         """The directory this window's agent was launched in — the pane path only if the
         process could not be read (no /proc, no claude running)."""
         return self.launched_in or self.path or None
+
+
+# --- one process table per refresh, for a host with no /proc ----------------------
+#
+# Without /proc every fact below falls back to its own `pgrep`/`ps`/`lsof` spawn, per pid —
+# about 4-6 per window, which made one :func:`panes` refresh on macOS cost MORE spawns than
+# the per-window probe it replaces (CMX-15 §8). So :func:`_load_panes` takes ONE
+# ``ps -axo pid=,ppid=,lstart=,args=`` up front (and one ``lsof`` for the cwds of the claude
+# processes it found) and the fallbacks read that table while it is set. It is never built
+# on a /proc host, so the Linux path and every PROC-fixture test are untouched.
+
+@dataclass
+class _PsTable:
+    ppid: dict[int, int] = field(default_factory=dict)
+    argv: dict[int, list[str]] = field(default_factory=dict)
+    started: dict[int, float] = field(default_factory=dict)
+    # Filled by :func:`_load_panes` once it knows which pids are claude; None = not asked.
+    cwd: dict[int, str] | None = None
+
+    def children(self, pid: int) -> list[int]:
+        # ps lists by ascending pid, the same order `pgrep -P` prints.
+        return sorted(p for p, pp in self.ppid.items() if pp == pid)
+
+    def comm(self, pid: int) -> str:
+        # `args` is all ps gives without a second column; its argv[0] basename stands in
+        # for `comm` (a `comm` with spaces would make the line unparseable). Only
+        # :func:`_looks_like_claude` reads it, and it also scans the full argv, so a claude
+        # this missed by name is still found by its command line.
+        argv = self.argv.get(pid)
+        return os.path.basename(argv[0]) if argv else ""
+
+
+_PS: ContextVar[_PsTable | None] = ContextVar("chela_ps_table", default=None)
+
+
+def _ps_table() -> _PsTable | None:
+    """Every process's pid, ppid, start time and argv from ONE ``ps`` — or None.
+
+    None (not an empty table) when ``ps`` cannot be run or printed nothing parseable: the
+    per-pid fallbacks then run exactly as before, rather than every fact reading "absent".
+    """
+    out = _sh(["ps", "-axo", "pid=,ppid=,lstart=,args="])
+    table = _PsTable()
+    for line in (out or "").splitlines():
+        parts = line.split(None, 7)          # pid ppid Dow Mon DD HH:MM:SS YYYY args…
+        if len(parts) < 7 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        pid = int(parts[0])
+        table.ppid[pid] = int(parts[1])
+        table.argv[pid] = parts[7].split() if len(parts) == 8 else []
+        try:
+            table.started[pid] = time.mktime(time.strptime(" ".join(parts[2:7]),
+                                                           "%a %b %d %H:%M:%S %Y"))
+        except ValueError:
+            pass
+    return table if table.ppid else None
+
+
+def _lsof_cwds(pids: list[int]) -> dict[int, str]:
+    """``{pid: cwd}`` for ``pids`` from ONE ``lsof`` (``-F``: a ``p`` line opens each pid)."""
+    if not pids:
+        return {}
+    out = _sh(["lsof", "-a", "-d", "cwd", "-Fn", "-p", ",".join(map(str, pids))])
+    cwds: dict[int, str] = {}
+    current = None
+    for line in (out or "").splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            current = int(line[1:])
+        elif line.startswith("n") and current is not None and current not in cwds:
+            path = line[1:].strip()
+            if path:
+                cwds[current] = path
+    return cwds
 
 
 # --- process facts ------------------------------------------------------------------
@@ -313,6 +394,9 @@ def _comm(pid: int) -> str:
         return (PROC / str(pid) / "comm").read_text().strip()
     except OSError:
         pass
+    table = _PS.get()
+    if table is not None:
+        return table.comm(pid)
     # `ps -o comm=` prints an absolute path on macOS and a bare name on Linux; /proc's
     # `comm` is always the basename, so normalise to that and keep one comparison.
     return os.path.basename(_first_line(_sh(["ps", "-o", "comm=", "-p", str(pid)])))
@@ -361,6 +445,9 @@ def _children(pid: int) -> list[int]:
     try:
         raw = (PROC / str(pid) / "task" / str(pid) / "children").read_text()
     except OSError:
+        table = _PS.get()
+        if table is not None:
+            return _cap_children(pid, table.children(pid))
         return _sh_children(pid)
     out = []
     for token in raw.split():
@@ -399,6 +486,9 @@ def _cmdline_argv(pid: int) -> list[str]:
     try:
         raw = (PROC / str(pid) / "cmdline").read_bytes()
     except OSError:
+        table = _PS.get()
+        if table is not None:
+            return list(table.argv.get(pid, []))
         return (_sh(["ps", "-o", "args=", "-p", str(pid)]) or "").split()
     return [a for a in raw.decode("utf-8", "replace").split("\0") if a]
 
@@ -441,6 +531,49 @@ def _claude_pid(pane_pid: int) -> int | None:
             return None
         frontier = nxt
     return None
+
+
+def _direct_claude_pid(pane_pid: int) -> int | None:
+    """What ``pgrep -P <pane_pid> -f claude`` prints first — without running it.
+
+    :func:`chela.agent_manager.claude_pid`'s exact rule, so a batched read of it is
+    interchangeable with the per-window probe (CMX-17): DIRECT children only (any thread of
+    the parent — hence every ``task/*/children``, which is what ``pgrep -P``'s ppid match
+    sees), whose command line, NUL-joined with spaces, contains ``claude`` — or whose
+    ``comm`` does when the command line is empty, which is what procps matches then — and
+    the LOWEST such pid, the first line pgrep prints. Uncapped, unlike :func:`_children`:
+    pgrep has no cap.
+    """
+    table = _PS.get()
+    if table is not None:
+        hits = [k for k in table.children(pane_pid)
+                if "claude" in " ".join(table.argv.get(k, []))]
+        return min(hits) if hits else None
+    try:
+        tasks = list((PROC / str(pane_pid) / "task").iterdir())
+    except OSError:
+        if _PROC_HOST:
+            return None
+        out = _sh(["pgrep", *_pgrep_ancestor_flag(sys.platform), "-P", str(pane_pid),
+                   "-f", "claude"])
+        pids = [int(t) for t in (out or "").split() if t.isdigit()]
+        return min(pids) if pids else None
+    kids: set[int] = set()
+    for task in tasks:
+        try:
+            kids.update(int(t) for t in (task / "children").read_text().split() if t.isdigit())
+        except OSError:
+            continue
+    hits = []
+    for kid in kids:
+        try:
+            raw = (PROC / str(kid) / "cmdline").read_bytes()
+        except OSError:
+            continue                          # gone since it was listed: pgrep skips it too
+        line = " ".join(a for a in raw.decode("utf-8", "replace").split("\0") if a)
+        if "claude" in (line or _comm(kid)):
+            hits.append(kid)
+    return min(hits) if hits else None
 
 
 # A `chela watch` invoked with no window climbs through a Bash-tool subshell, and
@@ -502,6 +635,9 @@ def _proc_cwd(pid: int) -> str | None:
         return os.readlink(str(PROC / str(pid) / "cwd")) or None
     except OSError:
         pass
+    table = _PS.get()
+    if table is not None and table.cwd is not None:
+        return table.cwd.get(pid)
     # `lsof -Fn` is field output: one field per line, the value after a 1-char tag. `-d cwd`
     # narrows it to the one descriptor we want, so the first `n` line IS the cwd.
     for line in (_sh(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"]) or "").splitlines():
@@ -600,6 +736,9 @@ def proc_started(pid: int) -> float | None:
     try:
         stat = (PROC / str(pid) / "stat").read_text()
     except OSError:
+        table = _PS.get()
+        if table is not None:
+            return table.started.get(pid)
         return _sh_started(pid)
     ticks = _stat_start_ticks(stat)
     if ticks is None:
@@ -668,26 +807,40 @@ def _load_panes() -> dict[str, Pane]:
         return {}
     if result.returncode != 0:
         return {}
-    out: dict[str, Pane] = {}
-    for line in result.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) != 4:
-            continue
-        wid, command, path, pane_pid = (p.strip() for p in parts)
-        if not wid:
-            continue
-        pid = None
-        try:
-            pid = _claude_pid(int(pane_pid)) if pane_pid else None
-        except ValueError:
-            pid = None
-        out[wid] = Pane(
-            wid=wid, path=path, command=command, claude_pid=pid,
-            launched_in=_proc_cwd(pid) if pid else None,
-            resumed=_resumed_session(pid) if pid else None,
-            started=proc_started(pid) if pid else None,
-        )
-    return out
+    # No /proc: one `ps` for the whole table instead of a spawn per fact per pid (CMX-17).
+    token = _PS.set(None if _PROC_HOST else _ps_table())
+    try:
+        rows = []
+        for line in result.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 4:
+                continue
+            wid, command, path, pane_pid = (p.strip() for p in parts)
+            if not wid:
+                continue
+            pid = direct = None
+            try:
+                if pane_pid:
+                    pid = _claude_pid(int(pane_pid))
+                    direct = _direct_claude_pid(int(pane_pid))
+            except ValueError:
+                pid = direct = None
+            rows.append((wid, command, path, pid, direct))
+        table = _PS.get()
+        if table is not None:
+            table.cwd = _lsof_cwds(sorted({r[3] for r in rows if r[3]}))
+        out: dict[str, Pane] = {}
+        for wid, command, path, pid, direct in rows:
+            out[wid] = Pane(
+                wid=wid, path=path, command=command, claude_pid=pid,
+                launched_in=_proc_cwd(pid) if pid else None,
+                resumed=_resumed_session(pid) if pid else None,
+                started=proc_started(pid) if pid else None,
+                direct_claude_pid=direct,
+            )
+        return out
+    finally:
+        _PS.reset(token)
 
 
 def panes(force: bool = False) -> dict[str, Pane]:
