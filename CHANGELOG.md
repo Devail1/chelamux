@@ -20,6 +20,13 @@ history lives in `git log`.
   `chela close` → Canceled, or Duplicate plus the relation when the reason names the issue
   that supersedes it. Each edge is written once, and a failed write never blocks anything. A run whose window
   died is re-claimed from In Progress or In Review while it has retries left. (CMX-23, #607)
+### Added
+
+- **A push when an agent is blocked by its permission classifier** (CMX-25). An auto-mode
+  denial never shows a prompt, so the session never reaches `waiting` and the needs-input
+  push stayed silent. `notify.DeniedWatch` now tails `hook.permission_denied` events and
+  sends one ntfy push per window per 10 minutes, from whichever process holds the announcer
+  lease (daemon or dashboard).
 
 ## [0.14.0] — 2026-09-30
 

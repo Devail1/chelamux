@@ -145,14 +145,79 @@ def test_notifications_off_is_a_noop(world, monkeypatch):
     assert state["sent"] == []
 
 
-def test_both_announcer_loops_run_the_watch():
-    """The production call sites: the daemon loop and the dashboard notifier thread."""
-    import inspect
+class _StopLoop(BaseException):
+    """Escapes a `while True` loop whose body catches every ``Exception``."""
+
+
+class _RecordingWatch:
+    """Stands in for ``notify.DeniedWatch`` at a production call site: counts checks."""
+    instances: list["_RecordingWatch"] = []
+
+    def __init__(self):
+        self.calls = 0
+        _RecordingWatch.instances.append(self)
+
+    def check(self, *a, **kw):
+        self.calls += 1
+        return []
+
+
+def _record_watches(monkeypatch) -> list[_RecordingWatch]:
+    _RecordingWatch.instances = []
+    monkeypatch.setattr(notify, "DeniedWatch", _RecordingWatch)
+    return _RecordingWatch.instances
+
+
+def test_the_daemon_loop_runs_the_watch(monkeypatch):
+    """🔴 WIRING (``chela run``) — drives ONE real pass of ``cmd_run``'s loop with notify on
+    and asserts the watch was actually CHECKED, not merely mentioned in the source. A
+    dead-coded call (``False and denied_watch.check()``) leaves the text intact and must
+    still go RED here."""
+    from types import SimpleNamespace
 
     from chela import main
+    from tests.test_main_dispatch_log import _stub_daemon_loop_inert
+    _stub_daemon_loop_inert(monkeypatch)
+    monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", [])
+    monkeypatch.setattr(main.notify, "enabled", lambda: True)
+    monkeypatch.setattr(main.notify, "check_waiting", lambda seen: seen)
+    watches = _record_watches(monkeypatch)
+
+    main.cmd_run(SimpleNamespace())
+
+    assert [w.calls for w in watches] == [1], (
+        "cmd_run's notify tick never called DeniedWatch.check — classifier denials are unwired")
+
+
+def test_the_dashboard_notifier_thread_runs_the_watch(monkeypatch):
+    """🔴 WIRING (dashboard) — runs ``_start_notifier``'s thread body synchronously for one
+    iteration and asserts the watch was CHECKED."""
+    import threading
+    from types import SimpleNamespace
+
     from chela.dashboard import app
-    for src in (inspect.getsource(main), inspect.getsource(app._start_notifier)):
-        assert "notify.DeniedWatch()" in src and "denied_watch.check()" in src
+
+    class _InlineThread:
+        def __init__(self, target, **_kw):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    def _stop(_s):
+        raise _StopLoop
+
+    monkeypatch.setattr(app.notify, "enabled", lambda: True)
+    monkeypatch.setattr(app.notify, "check_waiting", lambda seen: seen)
+    monkeypatch.setattr(threading, "Thread", _InlineThread)
+    monkeypatch.setattr(app, "time", SimpleNamespace(sleep=_stop))
+    watches = _record_watches(monkeypatch)
+
+    with pytest.raises(_StopLoop):
+        app._start_notifier()
+
+    assert [w.calls for w in watches] == [1], (
+        "the dashboard notifier thread never called DeniedWatch.check — denials are unwired")
 
 
 def test_a_daemon_restart_does_not_replay_old_denials(world):
