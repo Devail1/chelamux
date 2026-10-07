@@ -31,6 +31,21 @@ _RE_SYSTEM_TAGS = re.compile(
     r"|command-name|local-command-stdout)"
 )
 
+# The Read tool's own note on a downscaled image (e.g. "[Image: original
+# 1170x2532, displayed at 924x2000. Multiply coordinates by 1.27 to map to
+# original image.]"). Claude Code writes it as a separate ``isMeta`` user record
+# next to the image ``tool_result``; it is model-facing guidance, not a user
+# turn, so it must never relay as one (CMX-24).
+_RE_IMAGE_COORD_NOTE = re.compile(
+    r"\[Image: original \d+x\d+, displayed at \d+x\d+\."
+    r" Multiply coordinates by [\d.]+ to map to original image\.\]"
+)
+
+
+def _strip_image_note(text: str) -> str:
+    """``text`` with any Read-tool image coordinate note removed, stripped."""
+    return _RE_IMAGE_COORD_NOTE.sub("", text).strip()
+
 
 @dataclass
 class Message:
@@ -233,8 +248,8 @@ def parse_entries(
             user_text: list[str] = []
             for block in content:
                 if not isinstance(block, dict):
-                    if isinstance(block, str) and block.strip():
-                        user_text.append(block.strip())
+                    if isinstance(block, str) and _strip_image_note(block):
+                        user_text.append(_strip_image_note(block))
                     continue
                 btype = block.get("type", "")
                 if btype == "tool_result":
@@ -257,7 +272,7 @@ def parse_entries(
                         )
                     )
                 elif btype == "text":
-                    t = block.get("text", "").strip()
+                    t = _strip_image_note(block.get("text", ""))
                     if t and not _RE_SYSTEM_TAGS.search(t):
                         user_text.append(t)
             if user_text:
