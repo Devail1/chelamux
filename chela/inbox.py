@@ -240,7 +240,9 @@ def _empty() -> dict:
             "address_alarm": None, "address_alarm_since": None, "address_alarm_pushed": False,
             # CMX-26: the stall-alert latches (chela.stall_alerts) — one push per held
             # episode, one per clean-but-unmerged run. Shared state, like everything here.
-            "held_alert": None, "clean_unmerged": {}}
+            # `last_delivery_failure` is WHY the queue is held, when a delivery was attempted
+            # and failed (CMX-27 made `busy` deliverable, so the status alone no longer says).
+            "held_alert": None, "clean_unmerged": {}, "last_delivery_failure": None}
 
 
 def _clear_address_alarm(store: dict) -> None:
@@ -1894,7 +1896,8 @@ def deliver(store: dict, statuses: dict[str, str],
                 send=lambda text: messenger.send_peer(orch, "chela-inbox", text),
                 # CMX-27: a busy session takes the socket (it queues), never a paste.
                 tmux_fallback=((lambda text: messenger.send_tmux(orch, text))
-                               if status == IDLE else None))
+                               if status == IDLE else None),
+                no_fallback=f"no tmux paste while {status}")
 
     peer = orchestrator_peer(store)
     if not peer:
@@ -1917,13 +1920,19 @@ def deliver(store: dict, statuses: dict[str, str],
 
 
 def _deliver_loop(store: dict, runs: list[dict], live_heads: dict[str, str] | None, *,
-                  target_desc: str, event_wid: str | None, send, tmux_fallback) -> list[dict]:
+                  target_desc: str, event_wid: str | None, send, tmux_fallback,
+                  no_fallback: str = "no pane to paste into") -> list[dict]:
     """The actual send loop :func:`deliver` runs once it has picked a live address — shared
     between the wid-based orchestrator and CMX-255's windowless peer fallback, which differ
     only in HOW a message reaches the target: ``send`` is the peer-socket attempt (already
     bound to its target — a wid or a raw pid), ``tmux_fallback`` is the pane-paste retry
     (``None`` for the peer fallback: with no window there is no pane to paste into, so
     ``send`` failing there means genuinely undeliverable, not "try tmux next").
+
+    A failed attempt is recorded in ``store["last_delivery_failure"]`` (CMX-26) — the held
+    alert names it, since after CMX-27 a ``busy`` status alone no longer explains a held
+    queue — and a successful delivery clears it. ``no_fallback`` says why there was no tmux
+    retry, for that record.
     """
     sent: list[dict] = []
     while store["queue"] and len(sent) < MAX_DELIVERIES_PER_TICK:
@@ -1956,17 +1965,27 @@ def _deliver_loop(store: dict, runs: list[dict], live_heads: dict[str, str] | No
                  "task_id": (event.get("payload") or {}).get("task_id"),
                  "status": peer.status}, wid=event_wid,
             )
+            _record_failure(store, target_desc, event, f"peer receipt {peer.status}")
             break
         if not (peer.handed_off or (tmux_fallback and tmux_fallback(text))):
             # Includes the unsafe-input-mode refusal: HOLD, never drop. The pane will be
             # back at its prose prompt eventually, and the event is still true.
             log.warning("inbox: delivery of %s to %s refused/failed; holding it queued",
                         event.get("kind"), target_desc)
+            _record_failure(store, target_desc, event,
+                            "peer socket unreachable, tmux paste refused" if tmux_fallback
+                            else f"peer socket unreachable ({no_fallback})")
             break
+        store["last_delivery_failure"] = None
         store["queue"].pop(0)
         sent.append(event)
         log.info("inbox: delivered %s -> %s", event["kind"], target_desc)
     return sent
+
+
+def _record_failure(store: dict, target_desc: str, event: dict, reason: str) -> None:
+    store["last_delivery_failure"] = {"ts": time.time(), "target": target_desc,
+                                      "kind": event.get("kind"), "reason": reason}
 
 
 # --- self-heal: re-resolve a renumbered address from the session's identity (CMX-82) ---

@@ -2679,8 +2679,10 @@ def _inbox_held_read() -> Observation:
 
     store = inbox.load()
     oldest = stall_alerts.oldest_held(store)
+    now = time.time()
     return observed({"queued": len(store.get("queue") or []), "oldest": oldest,
-                     "who": inbox.orchestrator_wid(store), "now": time.time()})
+                     "who": inbox.orchestrator_wid(store), "now": now,
+                     "failure": stall_alerts.describe_failure(store, now)})
 
 
 def _inbox_held_report(threshold: int | None, obs: Observation) -> list[Finding]:
@@ -2704,10 +2706,13 @@ def _inbox_held_report(threshold: int | None, obs: Observation) -> list[Finding]
         ERROR, f"the decisions inbox is HELD — oldest event {what} has waited past "
                f"{human_duration(threshold)}",
         f"Oldest held event: {what}, queued {human_duration(age)} ago; {queued} event(s) "
-        f"held in all for orchestrator {obs.value['who'] or '(none)'}. The inbox only "
-        "delivers to an IDLE orchestrator, so a session that keeps reading busy/waiting "
-        "(e.g. a long-running background task) holds every verdict behind it. Check it with "
-        "`chela peek`; the queue drains on its next idle tick.",
+        f"held in all for orchestrator {obs.value['who'] or '(none)'}."
+        + (f" Last delivery attempt: {obs.value['failure']}." if obs.value.get("failure")
+           else "")
+        + " The inbox delivers over the peer socket while the orchestrator is idle or busy "
+        "(tmux paste only while idle), so a queue this old means a session sitting on an "
+        "open prompt (`waiting`), or a socket that refuses / returns an adverse receipt. "
+        "Check it with `chela peek`; the queue drains on the next tick that can deliver.",
     )]
 
 

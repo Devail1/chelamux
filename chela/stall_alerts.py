@@ -8,6 +8,12 @@ held nine events, among them three judge-clean verdicts: one PR sat clean and me
 about four hours while two others went CONFLICTING. The idle gate was right. What was
 missing is that a held queue says NOTHING to the human.
 
+CMX-27 has since made a ``busy`` orchestrator deliverable over the peer socket, so ``busy``
+alone no longer holds the queue: what does is ``waiting`` (an open prompt, refused on both
+paths), or a socket that is unreachable / returns an adverse receipt. So the held alert names
+the status the episode saw AND, when one was recorded, the last delivery failure
+(``inbox.json``'s ``last_delivery_failure``).
+
 Two edge-triggered pushes, both evaluated inside :func:`chela.inbox.tick`'s store lock
 (the state they latch lives in ``inbox.json`` beside the queue it describes) and SENT
 outside it (:func:`send` — an HTTP POST must never hold the lock ``chela watch`` needs):
@@ -56,6 +62,17 @@ def describe_event(event: dict) -> str:
     return f"{event.get('kind') or '?'} {task}" if task else (event.get("kind") or "?")
 
 
+def describe_failure(store: dict, now: float) -> str | None:
+    """``peer receipt held at @6, 2m ago`` — the last failed delivery attempt, or None."""
+    failure = store.get("last_delivery_failure")
+    if not isinstance(failure, dict) or not failure.get("reason"):
+        return None
+    ago = (f", {human_duration(max(0.0, now - failure['ts']))} ago"
+           if isinstance(failure.get("ts"), (int, float)) else "")
+    at = f" at {failure['target']}" if failure.get("target") else ""
+    return f"{failure['reason']}{at}{ago}"
+
+
 def _orchestrator_status(store: dict, statuses: dict[str, str]) -> tuple[str, str]:
     """``(who, status)`` of the orchestrator the queue is held for, as this tick sees it."""
     from chela import inbox                          # lazy: inbox imports this module
@@ -73,6 +90,7 @@ def _held(store: dict, statuses: dict[str, str], now: float) -> dict | None:
     state = store.get(HELD_KEY) or {}
     if not store.get("queue"):
         store[HELD_KEY] = None                       # drained: the next held queue is news
+        store["last_delivery_failure"] = None        # ...and whatever held it is over
         return None
     who, status = _orchestrator_status(store, statuses)
     seen = list(state.get("statuses") or [])
@@ -92,9 +110,11 @@ def _held(store: dict, statuses: dict[str, str], now: float) -> dict | None:
     n = len(store["queue"])
     how = (f"has been {seen[0]} the whole time" if len(seen) == 1
            else f"has been {'/'.join(seen)} meanwhile")
+    failure = describe_failure(store, now)
+    last = f" Last delivery attempt: {failure}." if failure else ""
     return {"title": HELD_TITLE,
             "message": f"chela inbox: {n} notice(s) held for {human_duration(age)} — "
-                       f"orchestrator {who} {how}. Oldest: {describe_event(oldest)}."}
+                       f"orchestrator {who} {how}.{last} Oldest: {describe_event(oldest)}."}
 
 
 def _current_head(run: dict, live_heads: dict[str, str] | None) -> str | None:

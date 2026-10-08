@@ -5,6 +5,10 @@ the idle-gated inbox held nine events — three judge-clean verdicts among them 
 told the human. These pin the alert's contract: past the threshold and not before, once per
 held episode, re-armed only by a drain; clean-unmerged once per run and never for a verdict
 on a stale head; and only the announcer (the CMX-9 lease) ever sends.
+
+CMX-27 made a ``busy`` orchestrator deliverable over the peer socket, so the tests hold the
+queue the ways that STILL hold it: the orchestrator ``waiting`` (an open prompt, refused on
+both paths), or a socket that is unreachable / answers with an adverse receipt while busy.
 """
 from __future__ import annotations
 
@@ -12,7 +16,7 @@ import time
 
 import pytest
 
-from chela import dispatcher, inbox, judge, notify, stall_alerts
+from chela import dispatcher, inbox, judge, messenger, notify, stall_alerts
 
 ORCH = "@6"
 T0 = 1_000_000.0
@@ -39,17 +43,17 @@ def owner(tmp_path):
     lock.release()
 
 
-def _store(*event_ts):
+def _store(*event_ts, kind="run_judge_clean"):
     store = inbox._empty()
     store["orchestrator"] = ORCH
-    store["queue"] = [{"kind": "run_judge_clean", "summary": "x",
+    store["queue"] = [{"kind": kind, "summary": "x",
                        "payload": {"task_id": f"CMX-{i}"}, "ts": ts}
                       for i, ts in enumerate(event_ts, start=23)]
     return store
 
 
 def _tick(store, now, owner, statuses=None, runs=None, live_heads=None):
-    alerts = stall_alerts.evaluate(store, statuses or {ORCH: "busy"}, runs, live_heads, now,
+    alerts = stall_alerts.evaluate(store, statuses or {ORCH: "waiting"}, runs, live_heads, now,
                                    owner=owner)
     stall_alerts.send(alerts)
     return alerts
@@ -74,8 +78,26 @@ def test_held_fires_once_past_the_threshold_and_not_before(sent, owner):
     assert len(_held(sent)) == 1                     # past it
     msg = _held(sent)[0]
     assert "1 notice(s) held for 30m" in msg
-    assert f"orchestrator {ORCH} has been busy the whole time" in msg
+    assert f"orchestrator {ORCH} has been waiting the whole time" in msg
     assert "run_judge_clean CMX-23" in msg
+    assert "Last delivery attempt" not in msg        # none was recorded: say nothing
+
+
+def test_held_names_the_last_delivery_failure(sent, owner):
+    store = _store(T0)
+    store["last_delivery_failure"] = {"ts": T0 + HELD_S - 120, "target": ORCH,
+                                      "kind": "run_judge_clean", "reason": "peer receipt held"}
+    _tick(store, T0 + HELD_S + 1, owner, statuses={ORCH: "busy"})
+    msg = _held(sent)[0]
+    assert f"has been busy the whole time. Last delivery attempt: peer receipt held at {ORCH}, 2m ago." in msg
+
+
+def test_a_drain_forgets_the_last_delivery_failure(sent, owner):
+    store = _store(T0)
+    store["last_delivery_failure"] = {"ts": T0, "target": ORCH, "reason": "peer receipt held"}
+    store["queue"] = []
+    _tick(store, T0 + 1, owner)
+    assert store["last_delivery_failure"] is None
 
 
 def test_held_does_not_fire_twice_in_one_episode(sent, owner):
@@ -182,20 +204,66 @@ def test_clean_unmerged_forgets_a_run_that_left_review(sent, owner):
     assert store[stall_alerts.CLEAN_KEY] == {}
 
 
-# --- the daemon wiring: inbox.tick really calls it ------------------------------------------
+# --- the daemon wiring: inbox.tick really calls it, after CMX-27's deliver ---------------
+#
+# Window events (`finished`) never go stale, so these isolate the HOLD from the stale-drop.
 
-def test_inbox_tick_pushes_the_held_alert(sent, owner, tmp_path, monkeypatch):
+@pytest.fixture
+def wired(sent, owner, tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_INBOX_FILE", str(tmp_path / "inbox.json"))
     monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
     monkeypatch.setattr(inbox, "INBOX_ENABLED", True)
     monkeypatch.setattr(notify, "_owner", owner)
     monkeypatch.setattr(dispatcher, "list_runs", lambda: [])
-    monkeypatch.setattr(inbox, "status_snapshot", lambda: {ORCH: "busy"})
     monkeypatch.setattr(inbox.discovery, "get_windows_by_id", lambda: {ORCH: "orchestrator"})
     monkeypatch.setattr(inbox.epoch, "current", lambda: None)
     monkeypatch.setattr(inbox.sessions, "wid_for_session", lambda sid, pane_map=None: None)
-    inbox.save(_store(time.time() - HELD_S - 60))
+    calls = {"peer": [], "tmux": []}
 
+    def arm(status, peer_result):
+        monkeypatch.setattr(inbox, "status_snapshot", lambda: {ORCH: status})
+        monkeypatch.setattr(inbox.messenger, "send_peer",
+                            lambda wid, frm, text: calls["peer"].append(text) or peer_result)
+        monkeypatch.setattr(inbox.messenger, "send_tmux",
+                            lambda wid, text: calls["tmux"].append(text) or False)
+        inbox.save(_store(time.time() - HELD_S - 60, kind="finished"))
+        return calls
+    return arm
+
+
+def test_tick_alerts_once_while_the_orchestrator_is_waiting(sent, wired):
+    calls = wired("waiting", messenger.PeerSendResult(True, "sent"))
+    inbox.tick({})
+    inbox.tick({})
+    assert calls["peer"] == [] and calls["tmux"] == []   # a prompt is open: nothing sent
+    assert len(_held(sent)) == 1
+    assert f"orchestrator {ORCH} has been waiting the whole time" in _held(sent)[0]
+    assert len(inbox.load()["queue"]) == 1
+
+
+def test_tick_alerts_when_a_busy_orchestrators_socket_is_unreachable(sent, wired):
+    calls = wired("busy", messenger.PeerSendResult(False, None))
+    inbox.tick({})
+    inbox.tick({})
+    assert calls["tmux"] == []                           # never a paste into a busy session
+    assert len(_held(sent)) == 1
+    assert ("has been busy the whole time. Last delivery attempt: peer socket unreachable "
+            f"(no tmux paste while busy) at {ORCH}") in _held(sent)[0]
+
+
+def test_tick_alerts_when_a_busy_orchestrators_socket_returns_an_adverse_receipt(sent, wired):
+    wired("busy", messenger.PeerSendResult(True, "denied"))
     inbox.tick({})
     inbox.tick({})
     assert len(_held(sent)) == 1
+    assert f"Last delivery attempt: peer receipt denied at {ORCH}" in _held(sent)[0]
+
+
+def test_a_tick_that_drains_a_long_held_queue_does_not_alert(sent, wired):
+    """Evaluate-AFTER-deliver is load-bearing: the queue this tick delivered was held past
+    the threshold, but it is not held any more, so there is nothing to tell the human."""
+    calls = wired("busy", messenger.PeerSendResult(True, "sent"))
+    inbox.tick({})
+    assert len(calls["peer"]) == 1
+    assert inbox.load()["queue"] == []
+    assert _held(sent) == []

@@ -10,6 +10,16 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Added
+
+- **A held decisions inbox, or a clean PR nobody merges, now pushes one ntfy alert.** When the
+  inbox queue's oldest event has waited past `CHELA_INBOX_HELD_ALERT_S` (default 30m), the
+  announcer pushes once per held episode, naming the orchestrator's status and the last failed
+  delivery (an open prompt, an unreachable socket, an adverse receipt). A run that stays
+  judge-clean on its current head and unmerged past `CHELA_CLEAN_UNMERGED_ALERT_S` (default
+  30m) pushes once. `chela doctor` gains an `inbox.held` fact that goes red while the queue is
+  held. (CMX-26, #610)
+
 ### Changed
 
 - **With `tracker: kind: linear`, the Work board's columns are the team's Linear workflow
