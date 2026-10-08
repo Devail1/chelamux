@@ -22,18 +22,20 @@ from unittest.mock import patch
 
 import pytest
 
-from chela import agent_manager, inbox, orchestrator, sessions, transcripts
+from chela import agent_manager, collab, inbox, notify, orchestrator, sessions, transcripts
 from chela.dashboard import app as dash
 
 PANE_CLAUDE = 1694219          # the foreground claude in the pane — no feed entry
 BG = 2528563                   # the background session it moved to
 OLD_SID = "7f3a91c2-4b8e-4d15-9c62-1e0d5a8b3f47"
 NEW_SID = "da024f6d-e6c6-4220-bdd2-0f0f14c1dc7b"
+BG_CWD = "/w/tradeplan-bg"     # only the descendant's entry carries it
 
 
-def _smap(*, by_pid, ancestors=None, kinds=None, started=None, names=None, sids=None):
+def _smap(*, by_pid, ancestors=None, kinds=None, started=None, names=None, sids=None,
+          cwds=None):
     return {
-        "by_pid": by_pid, "cwd_by_pid": {}, "by_cwd": {},
+        "by_pid": by_pid, "cwd_by_pid": cwds or {}, "by_cwd": {},
         "ancestors_by_pid": ancestors or {}, "kind_by_pid": kinds or {},
         "started_by_pid": started or {}, "name_by_pid": names or {},
         "session_by_pid": sids or {},
@@ -48,6 +50,7 @@ def _moved_smap(status="busy"):
         kinds={BG: "background"},
         names={BG: "prove-byte-identical-prompt-move"},
         sids={BG: NEW_SID},
+        cwds={BG: BG_CWD},
     )
 
 
@@ -61,6 +64,8 @@ def test_a_busy_background_descendant_gives_the_window_its_status():
     assert e["moved"] is True
     assert e["name"] == "prove-byte-identical-prompt-move"
     assert e["session_id"] == NEW_SID
+    assert e["kind"] == "background"
+    assert e["cwd"] == BG_CWD
 
 
 def test_no_descendant_entry_still_reads_unknown_never_invented():
@@ -101,6 +106,23 @@ def test_the_panes_own_entry_still_wins_when_it_has_one():
     assert e["pid"] == PANE_CLAUDE and e["status"] == "idle" and e["moved"] is False
 
 
+def test_no_pane_claude_means_no_entry():
+    assert agent_manager.session_entry(None, _moved_smap()) is None
+
+
+def test_a_descendant_with_no_feed_entry_is_not_followed():
+    """The parent chain alone is not an entry: a pid listed in ancestors_by_pid but absent
+    from by_pid (it left the feed) must not be followed."""
+    smap = _smap(by_pid={9001: "busy"}, ancestors={BG: [PANE_CLAUDE], 9001: [4000]},
+                 kinds={BG: "background"})
+    assert agent_manager.session_entry(PANE_CLAUDE, smap) is None
+
+
+def test_ancestors_is_bounded_by_its_limit(monkeypatch):
+    monkeypatch.setattr(sessions, "_ppid", lambda pid: pid - 1)
+    assert sessions.ancestors(100, limit=3) == [99, 98, 97]
+
+
 def test_the_refresh_records_kind_name_and_the_parent_chain(monkeypatch):
     payload = json.dumps([{"pid": BG, "status": "busy", "name": "bg-name",
                            "kind": "background", "sessionId": NEW_SID, "cwd": "/w"}])
@@ -131,6 +153,42 @@ def test_status_by_wid_follows_the_move(monkeypatch):
     monkeypatch.setattr(agent_manager, "get_windows_by_id", lambda: {"@80": "tradeplan"})
     monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: PANE_CLAUDE)
     assert agent_manager.status_by_wid() == {"@80": "busy"}
+
+
+def test_status_by_wid_omits_a_window_with_no_entry(monkeypatch):
+    monkeypatch.setattr(agent_manager, "session_status_map",
+                        lambda force=False: _smap(by_pid={4242: "busy"}, ancestors={4242: [4000]}))
+    monkeypatch.setattr(agent_manager, "get_windows_by_id", lambda: {"@80": "tradeplan"})
+    monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: PANE_CLAUDE)
+    assert agent_manager.status_by_wid() == {}
+
+
+# --- the other consumers of the status feed ---------------------------------
+
+def _wire_window(monkeypatch, module, smap):
+    monkeypatch.setattr(module.discovery, "get_all_windows", lambda: {"tradeplan": "@80"})
+    monkeypatch.setattr(agent_manager, "session_status_map", lambda force=False: smap)
+    monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: PANE_CLAUDE)
+
+
+def test_collab_agent_rooms_status_follows_the_move(monkeypatch):
+    _wire_window(monkeypatch, collab, _moved_smap())
+    assert collab._agent_rooms() == {"@80": {"name": "tradeplan", "status": "busy"}}
+
+
+def test_collab_agent_rooms_has_no_status_without_a_descendant(monkeypatch):
+    _wire_window(monkeypatch, collab, _smap(by_pid={4242: "busy"}, ancestors={4242: [4000]}))
+    assert collab._agent_rooms() == {"@80": {"name": "tradeplan", "status": None}}
+
+
+def test_notify_sees_a_moved_session_that_is_waiting(monkeypatch):
+    _wire_window(monkeypatch, notify, _moved_smap("waiting"))
+    assert notify.waiting_windows() == {"tradeplan"}
+
+
+def test_notify_ignores_a_moved_session_that_is_busy(monkeypatch):
+    _wire_window(monkeypatch, notify, _moved_smap("busy"))
+    assert notify.waiting_windows() == set()
 
 
 # --- the Wall + sidebar (/api/agents) ----------------------------------------
@@ -164,6 +222,8 @@ def test_the_wall_reads_busy_not_unknown_for_a_moved_session():
     assert row["thinking"] is True
     assert row["session_name"] == "prove-byte-identical-prompt-move"
     assert row["session_moved"] is True
+    # The pane's own pid has no cwd in the feed — only the followed entry does.
+    assert row["cwd"] == BG_CWD
 
 
 def test_the_sidebar_does_not_mark_a_busy_moved_session_finished():
@@ -177,6 +237,8 @@ def test_the_wall_still_reads_unknown_with_no_descendant_entry():
     assert row["claude_running"] is True
     assert row["session_status"] is None
     assert row["session_name"] is None
+    assert row["session_moved"] is False
+    assert row["cwd"] is None
 
 
 # --- peek: the name peers need ----------------------------------------------
@@ -192,8 +254,30 @@ def test_peek_exposes_the_background_sessions_name(monkeypatch):
     p = orchestrator.peek("@80")
     assert p["session_status"] == "busy"
     assert p["session_name"] == "prove-byte-identical-prompt-move"
+    assert p["session_id"] == NEW_SID
+    assert p["session_kind"] == "background"
     assert p["session_moved"] is True
-    assert "session: prove-byte-identical-prompt-move" in orchestrator.format_peek(p)
+    session_line = [ln for ln in orchestrator.format_peek(p).splitlines()
+                    if ln.strip().startswith("session:")]
+    assert session_line == ["  session: prove-byte-identical-prompt-move — moved to a "
+                            "background session; address it by this name"]
+
+
+def test_peek_of_an_unmoved_session_names_it_without_the_moved_note(monkeypatch):
+    monkeypatch.setattr(orchestrator.discovery, "get_windows_by_id", lambda: {"@80": "tradeplan"})
+    monkeypatch.setattr(orchestrator.discovery, "get_window_cwd_by_id", lambda wid: "/w")
+    monkeypatch.setattr(sessions, "transcript_for_window", lambda wid, base=None: None)
+    monkeypatch.setattr(agent_manager, "session_status_map", lambda force=False: _smap(
+        by_pid={PANE_CLAUDE: "idle"}, names={PANE_CLAUDE: "tradeplan-main"},
+        sids={PANE_CLAUDE: OLD_SID}))
+    monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: PANE_CLAUDE)
+    monkeypatch.setattr(agent_manager, "window_type", lambda wid, running=None: "claude")
+
+    p = orchestrator.peek("@80")
+    assert p["session_id"] == OLD_SID and p["session_moved"] is False
+    session_line = [ln for ln in orchestrator.format_peek(p).splitlines()
+                    if ln.strip().startswith("session:")]
+    assert session_line == ["  session: tradeplan-main"]
 
 
 # --- the transcript follows the new session ---------------------------------
@@ -263,3 +347,36 @@ def test_the_cli_status_lists_the_moved_session_name(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "session: prove-byte-identical-prompt-move (moved to background)" in out
 
+
+
+def test_the_cli_status_names_an_unmoved_session_without_the_moved_note(monkeypatch, capsys):
+    from chela import main
+    monkeypatch.setattr(main.discovery, "get_all_windows", lambda: {"tradeplan": "@80"})
+    monkeypatch.setattr(main.discovery, "get_window_cwd", lambda name: "/w")
+    monkeypatch.setattr(agent_manager, "session_status_map", lambda force=False: _smap(
+        by_pid={PANE_CLAUDE: "idle"}, names={PANE_CLAUDE: "tradeplan-main"}))
+    monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: PANE_CLAUDE)
+    main.cmd_status(types.SimpleNamespace(sessions=True))
+    out = capsys.readouterr().out
+    assert out.rstrip().endswith("session: tradeplan-main")
+    assert "moved" not in out
+
+
+def test_the_cli_status_without_sessions_never_queries_the_feed(monkeypatch, capsys):
+    from chela import main
+    monkeypatch.setattr(main.discovery, "get_all_windows", lambda: {"tradeplan": "@80"})
+    monkeypatch.setattr(main.discovery, "get_window_cwd", lambda name: "/w")
+
+    def _boom(force=False):
+        raise AssertionError("plain `chela status` must not call `claude agents --json`")
+    monkeypatch.setattr(agent_manager, "session_status_map", _boom)
+    main.cmd_status(types.SimpleNamespace(sessions=False))
+    assert "session:" not in capsys.readouterr().out
+
+
+def test_a_moved_session_with_no_transcript_yet_falls_back(moved_window):
+    """The background tier only answers with a real transcript: no NEW_SID.jsonl means the
+    ordinary tiers decide."""
+    moved_window.new.unlink()
+    res = sessions.resolve_window("@80")
+    assert res.session_id == OLD_SID and res.source == "event_log"
