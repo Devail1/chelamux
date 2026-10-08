@@ -1449,7 +1449,8 @@ def cmd_install_statusline(args) -> None:
     """Print (or write) the Claude Code statusLine hook that feeds the context bar.
 
     The hook caches Claude Code's status payload (context %, the 5h/7d rate-limit
-    blocks, cost) to ``$CHELA_DIR/context/<window>.json`` — the only place those
+    blocks, cost) to ``$CHELA_DIR/context/<key>.json`` (``<key>`` = the window name
+    via ``chela.cachekey``) — the only place those
     numbers are exposed. Default is to print the snippet; ``--write`` edits the
     settings file and refuses to clobber an existing statusLine without ``--force``.
     """

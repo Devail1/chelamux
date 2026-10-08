@@ -5,7 +5,8 @@
 # on stdin: context-window usage, the 5h/7d rate-limit blocks, session cost, and
 # the model. None of that is persisted anywhere chela can read on its own (it is
 # not in the JSONL transcript), so we cache the payload verbatim to
-# $CHELA_DIR/context/<window>.json. The dashboard reads these to show each
+# $CHELA_DIR/context/<key>.json (<key> = the window name, made filesystem-safe by
+# chela/cachekey.py). The dashboard reads these to show each
 # agent's context bar and the account-wide rate-limit pills without interrupting
 # the agent.
 #
@@ -20,7 +21,22 @@
 
 CHELA_DIR="${CHELA_DIR:-$HOME/.chela}"
 CACHE_DIR="$CHELA_DIR/context"
-mkdir -p "$CACHE_DIR"
+
+# A failed cache write must be LOUD (CMX-30). Claude Code never shows a
+# statusLine's stderr, so a write that failed used to vanish without a trace —
+# for six days every dispatched agent cached nothing and nothing said so. Every
+# failure below is appended to $CHELA_DIR/statusline-errors.log, echoed to
+# stderr, and exits non-zero.
+fail() {
+    local msg
+    msg="$(date -u +%Y-%m-%dT%H:%M:%SZ) cache-statusline: $*"
+    printf '%s\n' "$msg" >&2
+    mkdir -p "$CHELA_DIR" 2>/dev/null
+    printf '%s\n' "$msg" >> "$CHELA_DIR/statusline-errors.log" 2>/dev/null
+    exit 1
+}
+
+mkdir -p "$CACHE_DIR" || fail "cannot create $CACHE_DIR"
 
 INPUT=$(cat)
 
@@ -53,6 +69,17 @@ except Exception:
 ' 2>/dev/null)
 [ -z "$ENRICHED" ] && ENRICHED="$INPUT"
 
+# The file is keyed by chela/cachekey.py — the SAME mapping chela.context reads
+# it back with — never by the raw window name (CMX-30): dispatched windows are
+# named <org>/cmx-N-<slug>, and a raw "/" made the path a subdirectory that
+# does not exist. Run with -I so nothing next to the module can shadow stdlib.
+SCRIPT_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+KEY=$(python3 -I "$SCRIPT_DIR/../chela/cachekey.py" "$WINDOW_NAME") \
+    || fail "could not compute the cache key for window '$WINDOW_NAME'"
+[ -n "$KEY" ] || fail "empty cache key for window '$WINDOW_NAME'"
+
 # Atomic write (tmp + mv) so the dashboard never reads a half-written file.
-printf '%s' "$ENRICHED" > "${CACHE_DIR}/${WINDOW_NAME}.json.tmp"
-mv "${CACHE_DIR}/${WINDOW_NAME}.json.tmp" "${CACHE_DIR}/${WINDOW_NAME}.json"
+printf '%s' "$ENRICHED" > "${CACHE_DIR}/${KEY}.json.tmp" \
+    || fail "cannot write ${CACHE_DIR}/${KEY}.json.tmp (window '$WINDOW_NAME')"
+mv "${CACHE_DIR}/${KEY}.json.tmp" "${CACHE_DIR}/${KEY}.json" \
+    || fail "cannot move cache file into place: ${CACHE_DIR}/${KEY}.json (window '$WINDOW_NAME')"

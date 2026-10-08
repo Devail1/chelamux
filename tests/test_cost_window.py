@@ -10,8 +10,9 @@ against the cases that break a naive "just diff the endpoints" implementation:
 
 * a session that starts and ends entirely inside the window,
 * a session that started before the window and is still running inside it,
-* a session with no activity inside the window at all (must contribute $0, not be
-  skipped in a way that undercounts, and must not be double counted),
+* a session with no snapshot inside the window at all (CMX-30: it did not run in the
+  window, so it gets NO row — listing it at $0.00 put every agent ever seen in the
+  table),
 * an agent that restarted (two session_names) within one window — summed, not
   overwritten,
 * and the live-vs-windowed split in the HTTP layer: ``window=live`` must NOT depend on
@@ -76,14 +77,26 @@ def test_session_spanning_the_window_start_counts_only_the_delta(chela_db):
     assert rows == [{"name": "cmx-1", "model": "Sonnet", "cost_usd": 2.00}]
 
 
-def test_session_idle_before_the_window_contributes_zero(chela_db):
-    # All of this session's activity is well before the window; nothing changed
-    # during [start, end], so it must contribute exactly $0 - not be dropped in a
-    # way that silently undercounts, and not show a stale nonzero total either.
+def test_session_idle_before_the_window_is_not_listed(chela_db):
+    # CMX-30: all of this session's activity is well before the window — it did not
+    # run in [start, end], so it gets NO row (it used to be listed at $0.00, which
+    # put every agent ever seen into the 'today' table and buried the real gaps).
+    # The in-window agent next to it is still listed with its real spend.
     start = NOW - timedelta(hours=1)
-    _insert("cmx-1", "sess-a", NOW - timedelta(hours=5), 4.00)
+    _insert("cmx-old", "sess-a", NOW - timedelta(hours=5), 4.00)
+    _insert("cmx-1", "sess-b", NOW - timedelta(minutes=5), 0.50)
     rows = context.windowed_cost(start, NOW)
-    assert rows == [{"name": "cmx-1", "model": "Sonnet", "cost_usd": 0.0}]
+    assert rows == [{"name": "cmx-1", "model": "Sonnet", "cost_usd": 0.50}]
+
+
+def test_an_old_session_does_not_count_but_the_agents_in_window_session_does(chela_db):
+    # Per-SESSION, not per-agent: an agent's stale earlier session must not add a
+    # phantom delta, while its in-window session counts in full.
+    start = NOW - timedelta(hours=1)
+    _insert("cmx-1", "sess-old", NOW - timedelta(hours=5), 4.00)
+    _insert("cmx-1", "sess-new", NOW - timedelta(minutes=5), 0.25)
+    rows = context.windowed_cost(start, NOW)
+    assert rows == [{"name": "cmx-1", "model": "Sonnet", "cost_usd": 0.25}]
 
 
 def test_session_with_no_snapshot_at_or_before_window_end_is_excluded(chela_db):
@@ -164,6 +177,34 @@ def test_api_cost_window_today_reads_windowed_history(chela_db, client):
     resp = client.get("/api/cost?window=today")
     assert resp.status_code == 200
     assert resp.get_json() == [{"name": "cmx-1", "model": "Sonnet", "cost_usd": 1.5}]
+
+
+def test_api_cost_window_today_excludes_an_agent_with_only_old_snapshots(chela_db, client):
+    # CMX-30: an agent whose every snapshot predates today did not run today — the
+    # endpoint must not list it (not even at $0.00); today's agent still appears.
+    real_now = datetime.now(timezone.utc)
+    midnight = real_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    _insert("cmx-348", "sess-old", midnight - timedelta(days=3), 7.00)
+    _insert("cmx-1", "sess-a", real_now, 2.00)
+    resp = client.get("/api/cost?window=today")
+    assert resp.status_code == 200
+    assert resp.get_json() == [{"name": "cmx-1", "model": "Sonnet", "cost_usd": 2.0}]
+
+
+def test_api_cost_live_keeps_unknown_cost_null_and_a_real_zero_zero(chela_db, client):
+    # CMX-30: a transcript-only snapshot (a background session) carries no cost —
+    # that is UNKNOWN and must reach the tab as null (rendered '—'), never as 0;
+    # and a real $0.00 must stay 0.0, not be collapsed into null.
+    snaps = {
+        "tradeplan": {"name": "tradeplan", "model": "Opus", "cost_usd": None},
+        "fresh": {"name": "fresh", "model": "Opus", "cost_usd": 0.0},
+    }
+    with patch.object(discovery, "get_all_windows", return_value={"tradeplan": "@1", "fresh": "@2"}), \
+            patch.object(context, "live_snapshot", side_effect=lambda n: snaps[n]):
+        resp = client.get("/api/cost?window=live")
+    assert resp.status_code == 200
+    by_name = {r["name"]: r["cost_usd"] for r in resp.get_json()}
+    assert by_name == {"tradeplan": None, "fresh": 0.0}
 
 
 def test_api_cost_window_7d_reads_windowed_history(chela_db, client):

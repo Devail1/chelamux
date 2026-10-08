@@ -3450,7 +3450,7 @@ def api_agents_context():
             "free": _fmt_k(s.get("free_k")),
             "free_pct": s.get("free_pct"),
             "model": s.get("model"),
-            "cost_usd": round(s["cost_usd"], 2) if s.get("cost_usd") else None,
+            "cost_usd": round(s["cost_usd"], 2) if s.get("cost_usd") is not None else None,
             "rate_limit_pct": s.get("rate_limit_pct"),
             "rate_limit_resets_at": s.get("rate_limit_resets_at"),
             "weekly_rl_pct": s.get("weekly_rl_pct"),
@@ -3529,10 +3529,13 @@ def api_cost():
             s = context.live_snapshot(name)
             if not s:
                 continue
+            # CMX-30: None (no cost reported — e.g. a transcript-only snapshot of a
+            # background session) stays None so the tab renders it as unknown, and a
+            # real 0.0 stays 0.0. A truthiness test here conflated the two.
             rows.append({
                 "name": s["name"],
                 "model": s.get("model"),
-                "cost_usd": round(s["cost_usd"], 2) if s.get("cost_usd") else None,
+                "cost_usd": round(s["cost_usd"], 2) if s.get("cost_usd") is not None else None,
             })
         return jsonify(rows)
 
