@@ -416,7 +416,7 @@ def test_transcript_snapshot_reads_default_context_window_live_not_the_200k_lite
     `used_pct`, so this cannot pass on a latched literal."""
     monkeypatch.setattr(
         context.transcripts, "agent_context_from_transcript",
-        lambda name: {"used_tokens": 50_000},
+        lambda name, window_id=None: {"used_tokens": 50_000},
     )
     monkeypatch.setattr(context.config, "default_context_window", lambda: 500_000)
 

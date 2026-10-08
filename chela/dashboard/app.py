@@ -3436,7 +3436,9 @@ def api_agents_context():
         window_id = windows.get(name)
         if window_id is not None and agent_manager.claude_pid(window_id) is None:
             continue
-        s = context.live_snapshot(name)
+        # CMX-29: hand over the window id so the snapshot is THIS window's own session's,
+        # not whichever process that inherited the pane's $TMUX_PANE wrote the cache last.
+        s = context.live_snapshot(name, window_id)
         if not s:
             continue
         results.append({
@@ -3525,8 +3527,8 @@ def api_cost():
     if window == "live":
         windows = discovery.get_all_windows()
         rows = []
-        for name in windows:
-            s = context.live_snapshot(name)
+        for name, wid in windows.items():
+            s = context.live_snapshot(name, wid)
             if not s:
                 continue
             # CMX-30: None (no cost reported — e.g. a transcript-only snapshot of a

@@ -200,7 +200,7 @@ def test_api_cost_live_keeps_unknown_cost_null_and_a_real_zero_zero(chela_db, cl
         "fresh": {"name": "fresh", "model": "Opus", "cost_usd": 0.0},
     }
     with patch.object(discovery, "get_all_windows", return_value={"tradeplan": "@1", "fresh": "@2"}), \
-            patch.object(context, "live_snapshot", side_effect=lambda n: snaps[n]):
+            patch.object(context, "live_snapshot", side_effect=lambda n, wid=None: snaps[n]):
         resp = client.get("/api/cost?window=live")
     assert resp.status_code == 200
     by_name = {r["name"]: r["cost_usd"] for r in resp.get_json()}

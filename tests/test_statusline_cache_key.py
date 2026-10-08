@@ -77,8 +77,9 @@ def test_key_has_no_slash_and_round_trips():
 def test_hook_writes_a_slashed_window_and_live_snapshot_reads_it(tmp_path, chela_dir):
     proc = _run_hook(tmp_path, SLASHED, chela_dir)
     assert proc.returncode == 0, proc.stderr
-    # Writer: one flat, readable file — no subdirectory named after the org.
-    files = list((chela_dir / "context").iterdir())
+    # Writer: one flat, readable file — no subdirectory named after the org (the only
+    # directory is CMX-29's by-session/, keyed by session id, not by window name).
+    files = [f for f in (chela_dir / "context").iterdir() if f.name != "by-session"]
     assert [f.name for f in files] == [f"{cachekey.encode(SLASHED)}.json"]
     assert json.loads(files[0].read_text())["cost"]["total_cost_usd"] == 1.23
     # Reader: the same name resolves to that file, with cost AND context.
