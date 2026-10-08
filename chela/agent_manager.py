@@ -517,7 +517,7 @@ def _note_failure_ts(now: float | None = None) -> None:
         _status_cache["escalated"] = True
 
 
-def session_entry(cpid: int | None, status_map: dict | None = None) -> dict | None:
+def session_entry(cpid: int | None, status_map: dict) -> dict | None:
     """The `claude agents --json` entry that describes the window whose claude is ``cpid``
     — CMX-28. ``{pid, status, session_id, name, kind, cwd, moved}``, or None.
 
@@ -532,13 +532,12 @@ def session_entry(cpid: int | None, status_map: dict | None = None) -> dict | No
     SendMessage), not the window's.
 
     None when neither ``cpid`` nor any descendant of it is in the feed: no entry means no
-    status, never a guess. ``status_map`` defaults to :func:`session_status_map`; pass
-    :func:`cached_status_map` from a path that must never spawn the command.
+    status, never a guess. ``status_map`` is required — :func:`session_status_map`, or
+    :func:`cached_status_map` from a path that must never spawn the command — so no caller
+    spawns `claude agents --json` by accident.
     """
     if cpid is None:
         return None
-    if status_map is None:
-        status_map = session_status_map()
     by_pid = status_map.get("by_pid") or {}
     pid = cpid
     if cpid not in by_pid:

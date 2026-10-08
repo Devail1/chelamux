@@ -380,3 +380,208 @@ def test_a_moved_session_with_no_transcript_yet_falls_back(moved_window):
     moved_window.new.unlink()
     res = sessions.resolve_window("@80")
     assert res.session_id == OLD_SID and res.source == "event_log"
+
+
+# --- round 2: guards the judge's corruptions survived -----------------------
+
+def _own_entry_smap():
+    """The pane's OWN claude has a feed entry — nothing moved. It carries every field a
+    moved entry does (name, kind, sid, cwd), so a check that keys off `entry` existing
+    instead of `entry["moved"]` cannot tell the two apart by a missing value."""
+    return _smap(by_pid={PANE_CLAUDE: "busy"}, names={PANE_CLAUDE: "tradeplan-main"},
+                 kinds={PANE_CLAUDE: "interactive"}, sids={PANE_CLAUDE: OLD_SID},
+                 cwds={PANE_CLAUDE: "/w/tradeplan"})
+
+
+def test_the_wall_does_not_flag_a_window_whose_own_claude_has_an_entry_as_moved():
+    row = _row(_own_entry_smap())
+    assert row["session_status"] == "busy"
+    assert row["session_name"] == "tradeplan-main"
+    assert row["session_moved"] is False
+    assert row["cwd"] == "/w/tradeplan"
+
+
+def _peek_with(monkeypatch, smap):
+    monkeypatch.setattr(orchestrator.discovery, "get_windows_by_id", lambda: {"@80": "tradeplan"})
+    monkeypatch.setattr(orchestrator.discovery, "get_window_cwd_by_id", lambda wid: "/w")
+    monkeypatch.setattr(sessions, "transcript_for_window", lambda wid, base=None: None)
+    monkeypatch.setattr(agent_manager, "session_status_map", lambda force=False: smap)
+    monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: PANE_CLAUDE)
+    monkeypatch.setattr(agent_manager, "window_type", lambda wid, running=None: "claude")
+    return orchestrator.peek("@80")
+
+
+def _session_lines(text):
+    return [ln for ln in text.splitlines() if ln.strip().startswith("session:")]
+
+
+def test_format_peek_names_the_moved_sessions_actual_kind(monkeypatch):
+    """The kind comes from the feed, not a literal: a move to a non-background kind must be
+    rendered as THAT kind (here "fork"), so `'background'` hardcoded goes red."""
+    smap = _moved_smap()
+    smap["kind_by_pid"] = {BG: "fork"}
+    p = _peek_with(monkeypatch, smap)
+    assert p["session_kind"] == "fork" and p["session_moved"] is True
+    assert _session_lines(orchestrator.format_peek(p)) == [
+        "  session: prove-byte-identical-prompt-move — moved to a fork session; "
+        "address it by this name"]
+
+
+def test_format_peek_falls_back_to_background_when_the_feed_gave_no_kind(monkeypatch):
+    smap = _moved_smap()
+    smap["kind_by_pid"] = {}
+    p = _peek_with(monkeypatch, smap)
+    assert p["session_kind"] is None and p["session_moved"] is True
+    assert _session_lines(orchestrator.format_peek(p)) == [
+        "  session: prove-byte-identical-prompt-move — moved to a background session; "
+        "address it by this name"]
+
+
+def test_peek_of_an_own_entry_is_not_moved(monkeypatch):
+    p = _peek_with(monkeypatch, _own_entry_smap())
+    assert p["session_name"] == "tradeplan-main" and p["session_moved"] is False
+    assert p["session_kind"] == "interactive" and p["session_id"] == OLD_SID
+    assert _session_lines(orchestrator.format_peek(p)) == ["  session: tradeplan-main"]
+
+
+def _drive_cli(monkeypatch, argv, smap):
+    """`chela <argv>` through the REAL argparse dispatch in ``main.main()`` — so the flag's
+    spelling, its dest, and the dispatch to cmd_status are all on the path under test."""
+    import sys
+    from chela import main
+    monkeypatch.setattr(main.discovery, "get_all_windows", lambda: {"tradeplan": "@80"})
+    monkeypatch.setattr(main.discovery, "get_window_cwd", lambda name: "/w")
+    monkeypatch.setattr(agent_manager, "session_status_map", lambda force=False: smap)
+    monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: PANE_CLAUDE)
+    monkeypatch.setattr(sys, "argv", ["chela", *argv])
+    main.main()
+
+
+def test_chela_status_sessions_from_the_real_cli_shows_the_live_session_name(monkeypatch,
+                                                                             capsys):
+    _drive_cli(monkeypatch, ["status", "--sessions"], _moved_smap())
+    out = capsys.readouterr().out
+    assert "session: prove-byte-identical-prompt-move (moved to background)" in out
+
+
+def test_plain_chela_status_from_the_real_cli_shows_no_session(monkeypatch, capsys):
+    _drive_cli(monkeypatch, ["status"], _moved_smap())
+    assert "session:" not in capsys.readouterr().out
+
+
+def test_the_cli_status_names_the_moved_sessions_actual_kind(monkeypatch, capsys):
+    smap = _moved_smap()
+    smap["kind_by_pid"] = {BG: "fork"}
+    _drive_cli(monkeypatch, ["status", "--sessions"], smap)
+    out = capsys.readouterr().out
+    assert "session: prove-byte-identical-prompt-move (moved to fork)" in out
+
+
+def test_the_cli_status_falls_back_to_background_with_no_kind(monkeypatch, capsys):
+    smap = _moved_smap()
+    smap["kind_by_pid"] = {}
+    _drive_cli(monkeypatch, ["status", "--sessions"], smap)
+    assert "session: prove-byte-identical-prompt-move (moved to background)" in \
+        capsys.readouterr().out
+
+
+def test_the_cli_status_omits_a_session_whose_entry_has_no_name(monkeypatch, capsys):
+    smap = _moved_smap()
+    smap["name_by_pid"] = {}
+    _drive_cli(monkeypatch, ["status", "--sessions"], smap)
+    assert "session:" not in capsys.readouterr().out
+
+
+def test_two_descendants_started_together_the_higher_pid_wins():
+    smap = _smap(by_pid={5001: "idle", 5002: "busy"},
+                 ancestors={5001: [PANE_CLAUDE], 5002: [PANE_CLAUDE]},
+                 kinds={5001: "background", 5002: "background"},
+                 started={5001: 1000.0, 5002: 1000.0})
+    assert agent_manager.session_entry(PANE_CLAUDE, smap)["pid"] == 5002
+
+
+def test_a_descendant_with_no_start_time_loses_to_one_that_has_it():
+    smap = _smap(by_pid={5001: "idle", 5002: "busy"},
+                 ancestors={5001: [PANE_CLAUDE], 5002: [PANE_CLAUDE]},
+                 kinds={5001: "background", 5002: "background"},
+                 started={5001: 1000.0})
+    assert agent_manager.session_entry(PANE_CLAUDE, smap)["pid"] == 5001
+
+
+def test_session_entry_requires_a_status_map():
+    """No default that spawns `claude agents --json` behind a caller's back."""
+    with pytest.raises(TypeError):
+        agent_manager.session_entry(PANE_CLAUDE)
+
+
+def test_the_refresh_drops_an_empty_name_and_a_non_string_kind(monkeypatch):
+    payload = json.dumps([{"pid": BG, "status": "busy", "name": "", "kind": 7,
+                           "sessionId": NEW_SID, "cwd": "/w"}])
+    monkeypatch.setattr(agent_manager.subprocess, "run",
+                        lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout=payload,
+                                                                stderr=""))
+    monkeypatch.setattr(sessions, "proc_started", lambda pid: None)
+    monkeypatch.setattr(sessions, "ancestors", lambda pid: [PANE_CLAUDE])
+    saved = dict(agent_manager._status_cache)
+    try:
+        agent_manager.probe_native_status_feed()
+        cache = agent_manager.cached_status_map()
+        assert BG not in cache["name_by_pid"] and BG not in cache["kind_by_pid"]
+        assert cache["ancestors_by_pid"] == {BG: [PANE_CLAUDE]}
+        e = agent_manager.session_entry(PANE_CLAUDE, cache)
+        assert e["name"] is None and e["kind"] is None and e["session_id"] == NEW_SID
+    finally:
+        agent_manager._status_cache.clear()
+        agent_manager._status_cache.update(saved)
+
+
+def test_cached_status_map_is_the_live_cache_and_never_refreshes(monkeypatch):
+    monkeypatch.setattr(agent_manager, "_refresh_status_locked",
+                        lambda: pytest.fail("cached_status_map must not refresh"))
+    assert agent_manager.cached_status_map() is agent_manager._status_cache
+
+
+def test_the_background_tier_detail_names_the_session_pid_and_pane(moved_window):
+    res = sessions.resolve_window("@80")
+    assert res.detail == (f"`claude agents --json` reports session {NEW_SID} (background) "
+                          f"for pid {BG}, a descendant of the pane's claude {PANE_CLAUDE} "
+                          "— the session moved there")
+
+
+def test_a_moved_session_with_no_transcript_says_so_in_tried(moved_window, monkeypatch):
+    """Every tier misses (no transcript anywhere), so the Resolution's detail is the joined
+    `tried` list — and the background tier's line must be in it, verbatim."""
+    moved_window.new.unlink()
+    moved_window.old.unlink()
+    monkeypatch.setattr(agent_manager, "session_and_cwd_for_pid", lambda pid: (None, None))
+    monkeypatch.setattr(agent_manager, "started_for_pid", lambda pid: None)
+    res = sessions.resolve_window("@80")
+    assert res.path is None
+    assert (f"the pane's claude {PANE_CLAUDE} moved to session {NEW_SID} (pid {BG}), but "
+            f"no {NEW_SID}.jsonl exists under the projects dir") in res.detail
+
+
+def test_a_moved_entry_with_a_malformed_session_id_is_not_followed(moved_window, monkeypatch):
+    """A sessionId that is not a session id is not a session: it is neither followed nor
+    reported as one (no "moved to session ../.." line handed to a human as a diagnosis)."""
+    smap = _moved_smap()
+    smap["session_by_pid"] = {BG: "../../etc/passwd"}
+    monkeypatch.setattr(agent_manager, "cached_status_map", lambda: smap)
+    res = sessions.resolve_window("@80")
+    assert res.session_id == OLD_SID and res.source == "event_log"
+    moved_window.old.unlink()
+    moved_window.new.unlink()
+    monkeypatch.setattr(agent_manager, "session_and_cwd_for_pid", lambda pid: (None, None))
+    monkeypatch.setattr(agent_manager, "started_for_pid", lambda pid: None)
+    res = sessions.resolve_window("@80")
+    assert res.path is None
+    assert "moved to session" not in res.detail and "etc/passwd" not in res.detail
+
+
+def test_status_by_wid_reads_the_followed_entrys_status_not_the_panes(monkeypatch):
+    """Waiting, not busy: a guard that hardcodes or defaults the value goes red."""
+    monkeypatch.setattr(agent_manager, "session_status_map",
+                        lambda force=False: _moved_smap("waiting"))
+    monkeypatch.setattr(agent_manager, "get_windows_by_id", lambda: {"@80": "tradeplan"})
+    monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: PANE_CLAUDE)
+    assert agent_manager.status_by_wid() == {"@80": "waiting"}
