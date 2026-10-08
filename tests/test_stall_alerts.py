@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from chela import dispatcher, inbox, judge, messenger, notify, stall_alerts
+from chela import dispatcher, inbox, judge, messenger, notify, runtime_truth, stall_alerts
 
 ORCH = "@6"
 T0 = 1_000_000.0
@@ -83,6 +83,59 @@ def test_held_fires_once_past_the_threshold_and_not_before(sent, owner):
     assert "Last delivery attempt" not in msg        # none was recorded: say nothing
 
 
+def _mixed_queue():
+    """A queue whose OLDEST stamped event is neither first nor last, behind an unstamped one,
+    and whose NEWEST is far younger than the threshold. ``min``/``max``/``queue[0]``/
+    ``queue[-1]`` all pick a DIFFERENT event here, so the alert can only be right if it
+    measures the oldest stamped one (min ts)."""
+    store = _store()
+    store["queue"] = [
+        {"kind": "finished", "summary": "x", "payload": {"task_id": "CMX-90"}},   # no ts
+        {"kind": "run_rework", "summary": "x", "payload": {"task_id": "CMX-91"},
+         "ts": T0 + 600},
+        {"kind": "run_judge_clean", "summary": "x", "payload": {"task_id": "CMX-92"},
+         "ts": T0},                                                              # oldest
+        {"kind": "run_review", "summary": "x", "payload": {"task_id": "CMX-93"},
+         "ts": T0 + HELD_S},                                                     # newest
+    ]
+    return store
+
+
+def test_oldest_held_is_the_min_ts_not_the_newest_or_first_or_last():
+    assert stall_alerts.oldest_held(_mixed_queue())["payload"]["task_id"] == "CMX-92"
+    assert stall_alerts.oldest_held(_store()) is None
+    unstamped = _store()
+    unstamped["queue"] = [{"kind": "finished", "payload": {}}]
+    assert stall_alerts.oldest_held(unstamped) is None
+
+
+def test_held_measures_the_oldest_event_while_the_newest_is_still_young(sent, owner):
+    """The newest event is 1s old when the oldest crosses the threshold: an alert measured
+    off the newest (or off whichever sits first/last in the queue) stays silent here."""
+    store = _mixed_queue()
+    _tick(store, T0 + HELD_S - 1, owner)
+    assert _held(sent) == []
+    _tick(store, T0 + HELD_S + 1, owner)
+    assert len(_held(sent)) == 1
+    msg = _held(sent)[0]
+    assert "4 notice(s) held for 30m" in msg         # n counts every queued event
+    assert msg.endswith("Oldest: run_judge_clean CMX-92.")
+
+
+def test_held_fires_exactly_at_the_threshold(sent, owner):
+    store = _store(T0)
+    _tick(store, T0 + HELD_S - 1, owner)
+    assert _held(sent) == []
+    _tick(store, T0 + HELD_S, owner)
+    assert len(_held(sent)) == 1
+
+
+def test_held_threshold_comes_from_config(sent, owner, monkeypatch):
+    monkeypatch.setenv("CHELA_INBOX_HELD_ALERT_S", "60")
+    _tick(_store(T0), T0 + 61, owner)
+    assert len(_held(sent)) == 1
+
+
 def test_held_names_the_last_delivery_failure(sent, owner):
     store = _store(T0)
     store["last_delivery_failure"] = {"ts": T0 + HELD_S - 120, "target": ORCH,
@@ -132,6 +185,51 @@ def test_held_names_every_status_the_episode_saw(sent, owner):
     assert "has been busy/waiting meanwhile" in _held(sent)[0]
 
 
+def test_held_lists_each_status_once_in_the_order_seen(sent, owner):
+    store = _store(T0)
+    for k, st in enumerate(["busy", "busy", "waiting", "busy", "waiting"]):
+        _tick(store, T0 + k, owner, statuses={ORCH: st})
+    _tick(store, T0 + HELD_S + 1, owner, statuses={ORCH: "waiting"})
+    assert "has been busy/waiting meanwhile" in _held(sent)[0]
+
+
+def test_a_drain_forgets_the_statuses_the_last_episode_saw(sent, owner):
+    store = _store(T0)
+    _tick(store, T0 + 1, owner, statuses={ORCH: "busy"})
+    store["queue"] = []
+    _tick(store, T0 + 2, owner, statuses={ORCH: "busy"})
+    assert store[stall_alerts.HELD_KEY] is None
+    store["queue"] = _store(T0 + 10)["queue"]
+    _tick(store, T0 + 10 + HELD_S + 1, owner, statuses={ORCH: "waiting"})
+    assert f"orchestrator {ORCH} has been waiting the whole time" in _held(sent)[0]
+
+
+def test_held_names_an_absent_or_unregistered_orchestrator(sent, owner):
+    store = _store(T0)
+    _tick(store, T0 + HELD_S + 1, owner, statuses={"@9": "idle"})
+    assert f"orchestrator {ORCH} has been absent the whole time" in _held(sent)[0]
+
+    store = _store(T0)
+    store["orchestrator"] = None
+    sent.clear()
+    _tick(store, T0 + HELD_S + 1, owner, statuses={})
+    assert "orchestrator (none) has been unregistered the whole time" in _held(sent)[0]
+
+
+def test_describe_failure_without_ts_or_target():
+    assert stall_alerts.describe_failure({"last_delivery_failure": {"reason": "r"}}, T0) == "r"
+    assert stall_alerts.describe_failure({"last_delivery_failure": {"reason": ""}}, T0) is None
+    assert stall_alerts.describe_failure({}, T0) is None
+    assert (stall_alerts.describe_failure(
+        {"last_delivery_failure": {"reason": "r", "target": ORCH, "ts": T0 - 7200}}, T0)
+        == f"r at {ORCH}, 2h00m ago")
+
+
+def test_describe_event_without_a_task():
+    assert stall_alerts.describe_event({"kind": "finished", "payload": {}}) == "finished"
+    assert stall_alerts.describe_event({}) == "?"
+
+
 def test_a_non_holder_of_the_lease_never_sends(sent, owner, tmp_path):
     assert owner.acquire()                           # the other process is the announcer
     standby = notify.OwnerLock(tmp_path / notify.LOCK_NAME)
@@ -177,6 +275,61 @@ def test_clean_unmerged_fires_once_per_run(sent, owner):
     _tick(store, T0 + 5 * CLEAN_S, owner, runs=runs + [other])
     _tick(store, T0 + 7 * CLEAN_S, owner, runs=runs + [other])
     assert len(_clean(sent)) == 2                    # a second run gets its own push
+
+
+def test_clean_unmerged_fires_exactly_at_the_threshold(sent, owner):
+    store = inbox._empty()
+    runs = [_clean_run()]
+    _tick(store, T0, owner, runs=runs)
+    _tick(store, T0 + CLEAN_S - 1, owner, runs=runs)
+    assert _clean(sent) == []
+    _tick(store, T0 + CLEAN_S, owner, runs=runs)
+    assert len(_clean(sent)) == 1
+    assert "(abc1234)" in _clean(sent)[0] and "for 30m" in _clean(sent)[0]
+
+
+def test_clean_unmerged_restarts_the_clock_on_a_new_clean_head(sent, owner):
+    """Re-judged clean on a NEW head: the PR the human would merge has been clean only since
+    that verdict, so the clock restarts — and the push names the new sha."""
+    store = inbox._empty()
+    _tick(store, T0, owner, runs=[_clean_run()])
+    moved = [_clean_run(judge_sha="bbb9999", pr_head_sha="bbb9999")]
+    t1 = T0 + CLEAN_S - 10
+    _tick(store, t1, owner, runs=moved)
+    _tick(store, T0 + CLEAN_S + 1, owner, runs=moved)
+    assert _clean(sent) == []
+    _tick(store, t1 + CLEAN_S, owner, runs=moved)
+    assert len(_clean(sent)) == 1 and "(bbb9999)" in _clean(sent)[0]
+
+
+def test_clean_unmerged_stays_once_per_run_after_the_head_moves(sent, owner):
+    store = inbox._empty()
+    _tick(store, T0, owner, runs=[_clean_run()])
+    _tick(store, T0 + CLEAN_S, owner, runs=[_clean_run()])
+    moved = [_clean_run(judge_sha="bbb9999", pr_head_sha="bbb9999")]
+    for k in range(2, 6):
+        _tick(store, T0 + k * CLEAN_S, owner, runs=moved)
+    assert len(_clean(sent)) == 1
+
+
+@pytest.mark.parametrize("over", [
+    {"judge_state": "survived"}, {"judge_sha": None}, {"judge_sha": None, "pr_head_sha": None},
+    {"pr_head_sha": None}, {"status": "reworking"}, {"task_id": None}])
+def test_clean_unmerged_needs_a_clean_verdict_on_a_known_current_head(sent, owner, over):
+    store = inbox._empty()
+    runs = [_clean_run(**over)]
+    for k in range(4):
+        _tick(store, T0 + k * CLEAN_S, owner, runs=runs)
+    assert _clean(sent) == []
+
+
+def test_clean_unmerged_uses_the_live_head_when_the_cache_is_stale(sent, owner):
+    store = inbox._empty()
+    runs = [_clean_run(pr_head_sha="0000oldhead")]   # cache lags...
+    live = {"CMX-23": "abc1234def"}                  # ...GitHub agrees with the verdict
+    _tick(store, T0, owner, runs=runs, live_heads=live)
+    _tick(store, T0 + CLEAN_S, owner, runs=runs, live_heads=live)
+    assert len(_clean(sent)) == 1
 
 
 def test_clean_unmerged_ignores_a_verdict_on_a_stale_head(sent, owner):
@@ -267,3 +420,69 @@ def test_a_tick_that_drains_a_long_held_queue_does_not_alert(sent, wired):
     assert len(calls["peer"]) == 1
     assert inbox.load()["queue"] == []
     assert _held(sent) == []
+
+
+def test_tick_records_why_an_idle_orchestrator_was_not_reached(sent, wired):
+    calls = wired("idle", messenger.PeerSendResult(False, None))
+    inbox.tick({})
+    assert len(calls["tmux"]) == 1                       # idle: the paste WAS tried
+    assert inbox.load()["last_delivery_failure"]["reason"] == (
+        "peer socket unreachable, tmux paste refused")
+    assert len(_held(sent)) == 1
+
+
+# --- (3) chela doctor: the fact reads the OLDEST held event ---------------------------------
+
+def _doctor(store, now, monkeypatch, threshold=HELD_S):
+    monkeypatch.setattr(inbox, "load", lambda: store)
+    monkeypatch.setattr(runtime_truth.time, "time", lambda: now)
+    return runtime_truth._inbox_held_report(threshold, runtime_truth._inbox_held_read())
+
+
+def test_doctor_goes_red_on_the_oldest_held_event_while_the_newest_is_young(monkeypatch):
+    [f] = _doctor(_mixed_queue(), T0 + HELD_S + 1, monkeypatch)
+    assert f.level == runtime_truth.ERROR
+    assert "oldest event run_judge_clean CMX-92 has waited past 30m" in f.title
+    assert "Oldest held event: run_judge_clean CMX-92, queued 30m ago; 4 event(s)" in f.detail
+    assert f"orchestrator {ORCH}" in f.detail
+
+
+def test_doctor_is_green_just_under_the_threshold(monkeypatch):
+    [f] = _doctor(_mixed_queue(), T0 + HELD_S - 1, monkeypatch)
+    assert f.level == runtime_truth.OK and "4 event(s) queued, oldest 29m" in f.title
+    [f] = _doctor(_mixed_queue(), T0 + HELD_S, monkeypatch)
+    assert f.level == runtime_truth.ERROR
+
+
+def test_doctor_names_the_last_delivery_failure(monkeypatch):
+    store = _mixed_queue()
+    store["last_delivery_failure"] = {"ts": T0 + HELD_S - 120, "target": ORCH,
+                                      "reason": "peer receipt held"}
+    [f] = _doctor(store, T0 + HELD_S + 1, monkeypatch)
+    assert f"Last delivery attempt: peer receipt held at {ORCH}, 2m ago." in f.detail
+
+
+def test_doctor_inbox_held_empty_and_disabled(monkeypatch):
+    [f] = _doctor(_store(), T0, monkeypatch)
+    assert f.level == runtime_truth.OK and f.title == "decisions inbox: nothing held"
+    assert _doctor(_mixed_queue(), T0 + 10 * HELD_S, monkeypatch, threshold=None) == []
+
+
+def test_a_successful_delivery_clears_the_recorded_failure_before_the_queue_drains(
+        sent, wired, monkeypatch):
+    """A delivery that succeeds while events are STILL queued must clear the old failure —
+    or the held alert would blame a socket that is working. One delivery per tick keeps the
+    queue non-empty, so the drain's own reset cannot stand in for this one."""
+    wired("busy", messenger.PeerSendResult(False, None))
+    store = inbox.load()
+    store["queue"] = _store(time.time() - 60, time.time() - 30, kind="finished")["queue"]
+    inbox.save(store)
+    inbox.tick({})
+    assert inbox.load()["last_delivery_failure"] is not None
+    monkeypatch.setattr(inbox, "MAX_DELIVERIES_PER_TICK", 1)
+    monkeypatch.setattr(inbox.messenger, "send_peer",
+                        lambda wid, frm, text: messenger.PeerSendResult(True, "sent"))
+    inbox.tick({})
+    after = inbox.load()
+    assert len(after["queue"]) == 1
+    assert after["last_delivery_failure"] is None
