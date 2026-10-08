@@ -106,6 +106,19 @@ def test_each_window_row_carries_its_own_sessions_numbers(env, fleet, order):
     assert rows["liavedunix-2"]["cost_usd"] == 5.0
 
 
+@pytest.mark.parametrize("order", list(ORDERS), ids=list(ORDERS))
+def test_live_cost_rows_carry_each_windows_own_session_cost(env, fleet, order):
+    """The SECOND reader of the cache: ``/api/cost?window=live`` (the Cost tab) must
+    hand ``live_snapshot`` the window id too — a name-only read serves the window
+    file, i.e. whichever session wrote last, and @6's row shows the background
+    agent's $48 in one of the two orders."""
+    for write in ORDERS[order]:
+        env.run_hook(*write)
+    rows = {r["name"]: r for r in dash.app.test_client().get("/api/cost?window=live").get_json()}
+    assert rows["liavedunix"]["cost_usd"] == 0.82
+    assert rows["liavedunix-2"]["cost_usd"] == 5.0
+
+
 def test_the_hook_caches_every_session_under_its_own_id(env):
     """The write side alone: the window file is last-writer-wins (that is the bug's
     shape), but each session's by-session file holds only its own payload."""
@@ -184,13 +197,18 @@ def test_zero_setup_fallback_with_an_unidentified_window_still_resolves(tmp_path
     assert snap["used_k"] == 50.0
 
 
-def test_prune_drops_only_stale_session_cache_files(tmp_path, monkeypatch):
+def test_prune_snapshots_drops_only_stale_session_cache_files(tmp_path, monkeypatch):
+    """Through the PUBLIC entry point the daemon calls (``prune_snapshots``), not the
+    private helper: one by-session file accrues per session ever run, so retention
+    must reach them — a prune that only trims the DB lets them grow forever."""
     by = tmp_path / "context" / "by-session"
     by.mkdir(parents=True)
     monkeypatch.setattr(context, "CONTEXT_CACHE_DIR", tmp_path / "context")
+    monkeypatch.setattr(context, "DB_PATH", tmp_path / "scheduler.db")
     old, new = by / f"{BG}.json", by / f"{FG}.json"
     old.write_text("{}")
     new.write_text("{}")
     os.utime(old, (1, 1))
-    context._prune_session_cache(30)
-    assert not old.exists() and new.exists()
+    context.prune_snapshots(30)
+    assert not old.exists(), "prune_snapshots left a 30-day-stale by-session cache file"
+    assert new.exists()
