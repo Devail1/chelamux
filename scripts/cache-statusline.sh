@@ -5,7 +5,8 @@
 # on stdin: context-window usage, the 5h/7d rate-limit blocks, session cost, and
 # the model. None of that is persisted anywhere chela can read on its own (it is
 # not in the JSONL transcript), so we cache the payload verbatim to
-# $CHELA_DIR/context/<window>.json. The dashboard reads these to show each
+# $CHELA_DIR/context/<window>.json and $CHELA_DIR/context/by-session/<session_id>.json
+# (CMX-29 — the second is the one a window's bar trusts). The dashboard reads these to show each
 # agent's context bar and the account-wide rate-limit pills without interrupting
 # the agent.
 #
@@ -54,5 +55,30 @@ except Exception:
 [ -z "$ENRICHED" ] && ENRICHED="$INPUT"
 
 # Atomic write (tmp + mv) so the dashboard never reads a half-written file.
-printf '%s' "$ENRICHED" > "${CACHE_DIR}/${WINDOW_NAME}.json.tmp"
-mv "${CACHE_DIR}/${WINDOW_NAME}.json.tmp" "${CACHE_DIR}/${WINDOW_NAME}.json"
+# The tmp name carries our pid: two sessions writing one window's file at once
+# (see below) must not share a tmp file.
+printf '%s' "$ENRICHED" > "${CACHE_DIR}/${WINDOW_NAME}.json.$$.tmp"
+mv "${CACHE_DIR}/${WINDOW_NAME}.json.$$.tmp" "${CACHE_DIR}/${WINDOW_NAME}.json"
+
+# CMX-29: ALSO cache by the payload's own session_id. $TMUX_PANE is inherited by
+# every process launched from a pane — a Claude Code background session, a
+# subprocess — so <window>.json above is written by whichever of them ran last,
+# and a window's bar showed another session's numbers. by-session/<sid>.json can
+# only ever hold that session's payload; the dashboard reads it for the session
+# the window's own claude process is running. The id is validated before it
+# becomes a path component.
+SESSION_ID=$(printf '%s' "$INPUT" | python3 -c '
+import sys, json, re
+try:
+    sid = json.loads(sys.stdin.read()).get("session_id")
+except Exception:
+    sid = None
+if isinstance(sid, str) and re.match(r"^[0-9a-fA-F][0-9a-fA-F-]{7,63}$", sid):
+    sys.stdout.write(sid)
+' 2>/dev/null)
+if [ -n "$SESSION_ID" ]; then
+    SESSION_DIR="$CACHE_DIR/by-session"
+    mkdir -p "$SESSION_DIR"
+    printf '%s' "$ENRICHED" > "${SESSION_DIR}/${SESSION_ID}.json.$$.tmp"
+    mv "${SESSION_DIR}/${SESSION_ID}.json.$$.tmp" "${SESSION_DIR}/${SESSION_ID}.json"
+fi

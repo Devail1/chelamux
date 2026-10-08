@@ -42,7 +42,7 @@ def _fleet(*, claude_pids: dict, snapshots: dict):
     with (
         patch("chela.discovery.get_all_windows", return_value=dict(WINDOWS)),
         patch("chela.agent_manager.claude_pid", side_effect=lambda wid: claude_pids.get(wid)),
-        patch("chela.context.live_snapshot", side_effect=lambda name: snapshots.get(name)),
+        patch("chela.context.live_snapshot", side_effect=lambda name, *a, **kw: snapshots.get(name)),
     ):
         yield
 
