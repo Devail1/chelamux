@@ -421,6 +421,19 @@ def _break_inbox_address(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_inbox_held(tmp_path, monkeypatch):
+    """CMX-26, the 2026-10-07 outage: the address was alive and correct, but the session
+    behind it kept reading `busy`, so a clean verdict sat in the queue for hours and
+    nothing said so. The queue on disk is the owner — age its oldest event past the alert
+    threshold."""
+    store = inbox.load()
+    event = inbox._event("run_judge_clean", "📥 CMX-23 judge-clean", {"task_id": "CMX-23"})
+    event["ts"] = time.time() - config.inbox_held_alert_s() - 60
+    store["queue"] = [event]
+    inbox.save(store)
+    return doctor.ERROR
+
+
 def _break_tests_js_suites(tmp_path, monkeypatch):
     """The collector executes every JS suite but one — which is CMX-65, exactly: a test
     that exists and is never run, while `pytest -q` reports green."""
@@ -650,6 +663,7 @@ CORRUPTIONS = {
     "tmux.windows": _break_tmux_windows,
     "peer.transport": _break_peer_transport,
     "inbox.address": _break_inbox_address,
+    "inbox.held": _break_inbox_held,
     "runs.parked_branch": _break_runs_parked_branch,
     "pr.checks": _break_pr_checks,
     "tests.js_suites": _break_tests_js_suites,
