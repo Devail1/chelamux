@@ -431,6 +431,114 @@ def test_tick_records_why_an_idle_orchestrator_was_not_reached(sent, wired):
     assert len(_held(sent)) == 1
 
 
+class _Clock:
+    """``inbox.time`` with a settable ``time()`` — everything else is the real module."""
+
+    def __init__(self, t):
+        self.t = t
+
+    def time(self):
+        return self.t
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+@pytest.fixture
+def wired_runs(wired, monkeypatch):
+    """`wired`, plus a dispatcher that reports ``runs`` and a GitHub whose live PR head is
+    ``live`` — so the tick's OWN runs query and live-head read are what feed the alert."""
+    clock = _Clock(T0)
+    monkeypatch.setattr(inbox, "time", clock)
+
+    def arm(runs, live):
+        wired("waiting", messenger.PeerSendResult(True, "sent"))
+        monkeypatch.setattr(dispatcher, "list_runs", lambda: runs)
+        monkeypatch.setattr(dispatcher, "_read_pr_checks",
+                            lambda url, repo: dispatcher.CIStatus(dispatcher.CI_PASSING,
+                                                                  head_sha=live))
+        return clock
+    return arm
+
+
+def test_tick_feeds_its_own_runs_to_the_clean_unmerged_alert(sent, wired_runs):
+    """The daemon wiring, not just the evaluator: a clean run the DISPATCHER reports pushes
+    once past the threshold — measured on the tick's own clock — and not before."""
+    clock = wired_runs([_clean_run()], live="abc1234def")
+    inbox.tick({})                                   # starts the clock at T0
+    clock.t = T0 + CLEAN_S - 1
+    inbox.tick({})
+    assert _clean(sent) == []
+    clock.t = T0 + CLEAN_S
+    inbox.tick({})
+    clock.t = T0 + 3 * CLEAN_S
+    inbox.tick({})
+    assert len(_clean(sent)) == 1
+    assert "CMX-23 has been judge-clean on its current head (abc1234)" in _clean(sent)[0]
+    assert "https://github.com/o/r/pull/607" in _clean(sent)[0]
+    assert inbox.load()["clean_unmerged"]["CMX-23"]["since"] == T0   # the tick's own clock
+
+
+def test_tick_measures_the_held_queue_on_its_own_clock(sent, wired_runs):
+    """The held age is ``now - oldest ts``, both absolute: a tick that passed any clock but
+    its own would fire early (or never). Silent 1s before the threshold, fires at it."""
+    clock = wired_runs([], live=None)
+    inbox.save(_store(T0, kind="finished"))
+    clock.t = T0 + HELD_S - 1
+    inbox.tick({})
+    assert _held(sent) == []
+    clock.t = T0 + HELD_S
+    inbox.tick({})
+    assert len(_held(sent)) == 1 and "held for 30m" in _held(sent)[0]
+
+
+def test_tick_feeds_the_live_head_to_the_clean_unmerged_alert(sent, wired_runs):
+    """The row's cached head is stale; GitHub says the verdict IS on the current head. Only
+    the tick's live read can know that — so the push proves the live heads reach the alert."""
+    clock = wired_runs([_clean_run(pr_head_sha="0ld0ld0ld0")], live="abc1234def")
+    inbox.tick({})
+    clock.t = T0 + CLEAN_S
+    inbox.tick({})
+    assert len(_clean(sent)) == 1
+
+
+def test_tick_never_alerts_clean_when_the_live_head_moved_past_the_verdict(sent, wired_runs):
+    """The cache says clean-on-head; GitHub says the head moved. The live read must win."""
+    clock = wired_runs([_clean_run()], live="fff9999fff")
+    for k in range(4):
+        clock.t = T0 + k * CLEAN_S
+        inbox.tick({})
+    assert _clean(sent) == []
+    assert inbox.load()["clean_unmerged"] == {}
+
+
+def test_thresholds_default_to_thirty_minutes(monkeypatch):
+    from chela import config
+    monkeypatch.delenv("CHELA_INBOX_HELD_ALERT_S", raising=False)
+    monkeypatch.delenv("CHELA_CLEAN_UNMERGED_ALERT_S", raising=False)
+    assert config.inbox_held_alert_s() == 1800
+    assert config.clean_unmerged_alert_s() == 1800
+
+
+def test_a_windowless_peer_failure_records_why_there_was_no_paste():
+    store = _store(T0, kind="finished")
+    inbox._deliver_loop(store, [], None, target_desc="pid 4242", event_wid=None,
+                        send=lambda text: messenger.PeerSendResult(False, None),
+                        tmux_fallback=None)
+    failure = store["last_delivery_failure"]
+    assert failure["reason"] == "peer socket unreachable (no pane to paste into)"
+    assert failure["target"] == "pid 4242" and failure["kind"] == "finished"
+
+
+def test_held_names_a_windowless_peer_orchestrator(sent, owner):
+    store = _store(T0)
+    store["orchestrator"] = None
+    store["orchestrator_peer"] = {"pid": 4242, "session": "sid", "started": 1.0, "since": 1.0}
+    _tick(store, T0 + HELD_S, owner, statuses={})
+    [msg] = _held(sent)
+    assert "orchestrator pid 4242 has been a windowless peer the whole time" in msg
+
+
 # --- (3) chela doctor: the fact reads the OLDEST held event ---------------------------------
 
 def _doctor(store, now, monkeypatch, threshold=HELD_S):
