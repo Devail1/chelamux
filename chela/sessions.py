@@ -608,6 +608,22 @@ def own_claude_pid(pid: int | None = None) -> int | None:
     return None
 
 
+def ancestors(pid: int, limit: int = _MAX_ANCESTRY) -> list[int]:
+    """``pid``'s parent chain, nearest first, at most ``limit`` generations and never
+    past pid 1 — CMX-28: how :func:`chela.agent_manager.session_entry` tells that a
+    `claude agents --json` entry belongs to a pane whose own claude has none (the session
+    moved to a background session that descends from it). Empty for an unreadable pid."""
+    out: list[int] = []
+    cur = pid
+    for _ in range(limit):
+        parent = _ppid(cur)
+        if not parent or parent <= 1:
+            break
+        out.append(parent)
+        cur = parent
+    return out
+
+
 def session_id_for_pid(pid: int) -> str | None:
     """Best-effort session identity for a live pid that has no window to resolve it
     through — the identity half of CMX-255's windowless-orchestrator mechanism.
@@ -1014,7 +1030,7 @@ class Resolution:
     wid: str
     session_id: str | None = None
     path: Path | None = None
-    source: str = "none"          # event_log | pinned | cmdline | native_status | cwd | none
+    source: str = "none"          # background | event_log | pinned | cmdline | native_status | cwd | none
     detail: str = ""
 
     @property
@@ -1069,6 +1085,31 @@ def resolve_window(wid: str, base: Path | None = None, pane: Pane | None = None,
     if pane is None:
         pane = pane_map.get(wid)
     tried: list[str] = []
+
+    # CMX-28: the session MOVED to a Claude Code background session. The pane's own claude
+    # is now only attached to it, the feed has no entry for its pid, and the session it
+    # started — the one the event log, the pin and `--resume` all still name — ENDED with
+    # the move, so every tier below would hand back a finished transcript ("Done") while
+    # the live one is busy. The feed entry that descends from the pane's claude belongs
+    # to this pane by construction (its own parent chain says so), so it goes first. Not
+    # promoted into the pin: it is a live fact, and stops answering when that session ends.
+    if pane is not None and pane.claude_pid:
+        from chela import agent_manager  # lazy, and a cache READ only — see the module Cost note
+        entry = agent_manager.session_entry(pane.claude_pid,
+                                            agent_manager.cached_status_map())
+        if entry and entry["moved"]:
+            bsid = entry["session_id"]
+            if bsid and SESSION_RE.match(bsid):
+                path = transcript_for_session(bsid, base)
+                if path is not None:
+                    return Resolution(wid, bsid, path, "background",
+                                      f"`claude agents --json` reports session {bsid} "
+                                      f"({entry['kind'] or 'unknown kind'}) for pid "
+                                      f"{entry['pid']}, a descendant of the pane's claude "
+                                      f"{pane.claude_pid} — the session moved there")
+                tried.append(f"the pane's claude {pane.claude_pid} moved to session {bsid} "
+                             f"(pid {entry['pid']}), but no {bsid}.jsonl exists under the "
+                             "projects dir")
 
     sid = None
     if pane is None or pane.started is None:

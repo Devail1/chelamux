@@ -33,6 +33,7 @@ class _Clock:
 
 _RESET = dict(
     ts=0.0, by_pid={}, by_cwd={}, cwd_by_pid={}, session_by_pid={}, started_by_pid={},
+    name_by_pid={}, kind_by_pid={}, ancestors_by_pid={},
     down_since=None, escalated=False, last_success_ts=0.0, last_warning_ts=0.0,
 )
 
@@ -52,6 +53,8 @@ def _no_real_proc_started(monkeypatch):
     unstubbed subprocess call this suite otherwise takes pains to avoid. A test that wants
     started_by_pid populated overrides this explicitly."""
     monkeypatch.setattr(sessions, "proc_started", lambda pid: None)
+    # CMX-28: likewise the per-pid parent-chain read — fake pids, no /proc walk.
+    monkeypatch.setattr(sessions, "ancestors", lambda pid: [])
 
 
 def _counting_run(payload="[]", returncode=0, counter=None):

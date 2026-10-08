@@ -106,6 +106,8 @@ def no_native_status(monkeypatch):
     :func:`_native`."""
     monkeypatch.setattr(agent_manager, "session_and_cwd_for_pid", lambda pid: (None, None))
     monkeypatch.setattr(agent_manager, "started_for_pid", lambda pid: None)
+    # CMX-28's background-session tier reads the same singleton cache.
+    monkeypatch.setattr(agent_manager, "cached_status_map", lambda: {})
 
 
 @pytest.fixture(autouse=True)

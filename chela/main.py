@@ -141,9 +141,19 @@ def cmd_status(args) -> None:
         print("Is the session running? Override the session with CHELA_TMUX_SESSION.")
         return
     print(f"Agents in tmux session '{session}':\n")
+    # --sessions (CMX-28) pays for one `claude agents --json` call — slow cold, so opt-in —
+    # to show each window's live session name: after a move to a Claude Code background
+    # session it is NOT the window's name, and it is the one ListAgents/SendMessage need.
+    status_map = agent_manager.session_status_map() if getattr(args, "sessions", False) else None
     for name, wid in sorted(windows.items()):
         cwd = discovery.get_window_cwd(name) or "?"
-        print(f"  {name:<24} {wid:<6} {cwd}")
+        line = f"  {name:<24} {wid:<6} {cwd}"
+        if status_map is not None:
+            entry = agent_manager.session_entry(agent_manager.claude_pid(wid), status_map)
+            if entry and entry["name"]:
+                moved = f" (moved to {entry['kind'] or 'background'})" if entry["moved"] else ""
+                line += f"   session: {entry['name']}{moved}"
+        print(line)
 
 
 def _due(last: float, now: float, interval: float) -> bool:
@@ -2967,7 +2977,10 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("status", help="List discovered agent windows")
+    p_status = sub.add_parser("status", help="List discovered agent windows")
+    p_status.add_argument("--sessions", action="store_true",
+                          help="Also show each window's live Claude Code session name "
+                               "(one `claude agents --json` call)")
     p_spawn = sub.add_parser(
         "spawn", help="Open an agent window in a directory (prints its @N id and cwd)")
     p_spawn.add_argument("cwd", help="Directory to open the window in")

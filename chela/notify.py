@@ -117,11 +117,11 @@ def send(message: str, title: str | None = None) -> bool:
 def waiting_windows() -> set[str]:
     """Names of windows whose claude session is currently `waiting`."""
     status_map = agent_manager.session_status_map()
-    by_pid = status_map.get("by_pid", {})
     out: set[str] = set()
     for name, wid in discovery.get_all_windows().items():
-        pid = agent_manager.claude_pid(wid)
-        if pid is not None and by_pid.get(pid) == "waiting":
+        # CMX-28: session_entry follows a session that moved to a background session.
+        entry = agent_manager.session_entry(agent_manager.claude_pid(wid), status_map)
+        if entry and entry["status"] == "waiting":
             out.add(name)
     return out
 

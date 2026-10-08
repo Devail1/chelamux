@@ -178,6 +178,13 @@ _status_cache: dict = {
     # is the second, independent witness chela.sessions' tier 3 cross-checks a cwd
     # disagreement against before refusing.
     "started_by_pid": {},
+    # CMX-28: the rest of each feed entry, plus where its pid sits in the process tree.
+    # name_by_pid/kind_by_pid are the feed's own `name` and `kind` ("background" for a
+    # session that moved to a Claude Code background session); ancestors_by_pid is chela's
+    # own `/proc` read of the pid's parent chain (nearest first, bounded), taken at this
+    # same refresh — what lets :func:`session_entry` find a window's session when the
+    # pane's own claude has no entry and only a DESCENDANT of it does.
+    "name_by_pid": {}, "kind_by_pid": {}, "ancestors_by_pid": {},
     # down_since: wall-clock time of the FIRST failure in the current outage episode, or
     # None while healthy. escalated: whether this episode already fired its one ERROR log
     # (so a long outage does not re-log ERROR on every failed poll).
@@ -382,6 +389,7 @@ def _refresh_status_locked() -> tuple[bool, str]:
     by_pid, by_cwd, cwd_by_pid = {}, {}, {}
     session_by_pid = {}
     started_by_pid = {}
+    name_by_pid, kind_by_pid, ancestors_by_pid = {}, {}, {}
     cwd_statuses: dict[str, list] = {}
     try:
         r = subprocess.run(
@@ -406,6 +414,12 @@ def _refresh_status_locked() -> tuple[bool, str]:
                     started = sessions.proc_started(pid)
                     if started is not None:
                         started_by_pid[pid] = started
+                    name, kind = s.get("name"), s.get("kind")
+                    if isinstance(name, str) and name:
+                        name_by_pid[pid] = name
+                    if isinstance(kind, str) and kind:
+                        kind_by_pid[pid] = kind
+                    ancestors_by_pid[pid] = sessions.ancestors(pid)
                 if cwd:
                     cwd_statuses.setdefault(cwd, []).append(st)
             # A cwd is not a session id (docs/AGENT_IDENTITY.md) — every live pid
@@ -422,6 +436,8 @@ def _refresh_status_locked() -> tuple[bool, str]:
             _status_cache.update(
                 ts=time.time(), by_pid=by_pid, by_cwd=by_cwd, cwd_by_pid=cwd_by_pid,
                 session_by_pid=session_by_pid, started_by_pid=started_by_pid,
+                name_by_pid=name_by_pid, kind_by_pid=kind_by_pid,
+                ancestors_by_pid=ancestors_by_pid,
             )
             return True, "ok"
         detail = f"exited {r.returncode}"
@@ -501,6 +517,57 @@ def _note_failure_ts(now: float | None = None) -> None:
         _status_cache["escalated"] = True
 
 
+def session_entry(cpid: int | None, status_map: dict | None = None) -> dict | None:
+    """The `claude agents --json` entry that describes the window whose claude is ``cpid``
+    — CMX-28. ``{pid, status, session_id, name, kind, cwd, moved}``, or None.
+
+    Normally that is ``cpid``'s own entry. But a session that moved to a Claude Code
+    BACKGROUND session leaves the pane's foreground ``claude`` merely attached to it: the
+    feed lists the background process (a new pid, a new ``sessionId``, a new ``name``) and
+    has NO entry for the pane's pid at all. Looked up by ``cpid`` alone, that window read
+    "unknown" while it was visibly busy. So when ``cpid`` has no entry, this takes the
+    entry whose pid DESCENDS from ``cpid`` (its cached parent chain names it — see
+    ``ancestors_by_pid``): ``kind: background`` first, then the newest process. ``moved``
+    is True exactly then — the name in it is the one peers must address (ListAgents /
+    SendMessage), not the window's.
+
+    None when neither ``cpid`` nor any descendant of it is in the feed: no entry means no
+    status, never a guess. ``status_map`` defaults to :func:`session_status_map`; pass
+    :func:`cached_status_map` from a path that must never spawn the command.
+    """
+    if cpid is None:
+        return None
+    if status_map is None:
+        status_map = session_status_map()
+    by_pid = status_map.get("by_pid") or {}
+    pid = cpid
+    if cpid not in by_pid:
+        ancestors = status_map.get("ancestors_by_pid") or {}
+        found = [p for p, chain in ancestors.items()
+                 if p != cpid and p in by_pid and cpid in chain]
+        if not found:
+            return None
+        kinds = status_map.get("kind_by_pid") or {}
+        started = status_map.get("started_by_pid") or {}
+        pid = max(found, key=lambda p: (kinds.get(p) == "background",
+                                        started.get(p) or 0.0, p))
+    return {
+        "pid": pid,
+        "status": by_pid.get(pid),
+        "session_id": (status_map.get("session_by_pid") or {}).get(pid),
+        "name": (status_map.get("name_by_pid") or {}).get(pid),
+        "kind": (status_map.get("kind_by_pid") or {}).get(pid),
+        "cwd": (status_map.get("cwd_by_pid") or {}).get(pid),
+        "moved": pid != cpid,
+    }
+
+
+def cached_status_map() -> dict:
+    """The status cache as it stands — never refreshes it, never spawns the command (the
+    contract :func:`session_and_cwd_for_pid` keeps, for :mod:`chela.sessions`)."""
+    return _status_cache
+
+
 def status_by_wid() -> dict[str, str]:
     """``{window_id: busy|idle|waiting}`` for every live window running claude.
 
@@ -510,11 +577,11 @@ def status_by_wid() -> dict[str, str]:
     for busy/idle/waiting, shared by the decisions inbox and anything else that needs
     it; never add a second source.
     """
-    by_pid = session_status_map().get("by_pid", {})
+    status_map = session_status_map()
     out: dict[str, str] = {}
     for wid in get_windows_by_id():
-        pid = claude_pid(wid)
-        status = by_pid.get(pid) if pid is not None else None
+        entry = session_entry(claude_pid(wid), status_map)
+        status = entry["status"] if entry else None
         if status:
             out[wid] = status
     return out

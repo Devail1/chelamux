@@ -303,8 +303,11 @@ def api_agents():
         # means a plain shell (or a dead session): not running, never "thinking".
         cpid = agent_manager.claude_pid(window_id)
         claude_running = cpid is not None
-        sess_status = status_map["by_pid"].get(cpid) if cpid is not None else None
-        sess_cwd = status_map["cwd_by_pid"].get(cpid) if cpid is not None else None
+        # CMX-28: follows a session that moved to a Claude Code background session (the
+        # feed then lists a DESCENDANT of the pane's claude, not the pane's claude itself).
+        entry = agent_manager.session_entry(cpid, status_map)
+        sess_status = entry["status"] if entry else None
+        sess_cwd = entry["cwd"] if entry else None
         # A sandboxed session's Claude is not in that list — its proxy fills the gap (CMX-436).
         sess_status, status_source = sandbox_status.resolve(window_id, sess_status)
 
@@ -359,6 +362,10 @@ def api_agents():
             "health": health,
             "status": sess_status,
             "cwd": sess_cwd,
+            # The live session's own name — after a move to a background session, the
+            # name peers must address (ListAgents/SendMessage), not the window's.
+            "session_name": entry["name"] if entry else None,
+            "session_moved": bool(entry and entry["moved"]),
             "has_schedules": name in scheduled_agents,
             "schedule_last_run": agent_schedule_summary.get(name, {}).get("last_run"),
             "schedule_next_run": agent_schedule_summary.get(name, {}).get("next_run"),

@@ -94,7 +94,10 @@ def peek(wid: str) -> dict | None:
     status_map = agent_manager.session_status_map()
     cpid = agent_manager.claude_pid(wid)
     claude_running = cpid is not None
-    sess_status = status_map["by_pid"].get(cpid) if cpid is not None else None
+    # CMX-28: the pane's claude may have moved to a background session — the entry then
+    # belongs to a descendant pid, under the name peers must use to reach it.
+    entry = agent_manager.session_entry(cpid, status_map)
+    sess_status = entry["status"] if entry else None
     sess_status, status_source = sandbox_status.resolve(wid, sess_status)
     live, health = agent_manager.liveness(claude_running, sess_status)
     win_type = agent_manager.window_type(wid, claude_running)
@@ -111,6 +114,13 @@ def peek(wid: str) -> dict | None:
         "claude_running": claude_running,
         "session_status": sess_status,
         "status_source": status_source,
+        # The live session's own name/id/kind from `claude agents --json` (None when the
+        # feed has no entry). For a session that MOVED to a background session these are
+        # the background session's — the name ListAgents/SendMessage need, not the window's.
+        "session_name": entry["name"] if entry else None,
+        "session_id": entry["session_id"] if entry else None,
+        "session_kind": entry["kind"] if entry else None,
+        "session_moved": bool(entry and entry["moved"]),
         "liveness": live,
         "health": health,
         "recap": summary["recap"],
@@ -150,6 +160,10 @@ def format_peek(p: dict) -> str:
         f"  cwd:     {p['cwd'] or '?'}",
         f"  type:    {p['window_type']}",
     ]
+    if p.get("session_name"):
+        moved = (f" — moved to a {p.get('session_kind') or 'background'} session; "
+                 "address it by this name" if p.get("session_moved") else "")
+        lines.append(f"  session: {p['session_name']}{moved}")
     ctx = p.get("context")
     if ctx and ctx.get("used_tokens"):
         model = f" ({ctx['model']})" if ctx.get("model") else ""

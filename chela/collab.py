@@ -166,7 +166,8 @@ def _agent_rooms() -> dict[str, dict]:
             cpid = None
         if cpid is None:
             continue  # not an agent
-        out[wid] = {"name": name, "status": status_map["by_pid"].get(cpid)}
+        entry = agent_manager.session_entry(cpid, status_map)   # CMX-28: follows a move
+        out[wid] = {"name": name, "status": entry["status"] if entry else None}
     return out
 
 
