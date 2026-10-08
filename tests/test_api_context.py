@@ -74,3 +74,19 @@ def test_a_live_claude_agent_keeps_its_context_and_branch_intact(client):
         rows = _by_name(client)
     assert rows["cmx-76"]["used_pct"] == 77
     assert rows["cmx-76"]["branch"] == "main"
+
+
+def test_cost_keeps_unknown_as_null_and_a_real_zero_as_zero(client):
+    """CMX-30: a snapshot with no cost (transcript fallback) is UNKNOWN — the wall must
+    get null and hide it — while a session that genuinely spent $0 must read 0.0, not be
+    collapsed into null by a truthiness test."""
+    with _fleet(
+        claude_pids={"@9": 4242, "@10": 4343},
+        snapshots={
+            "cmx-76": {**LIVE_SNAPSHOT, "name": "cmx-76", "cost_usd": 0.0},
+            "shell-1": {**LIVE_SNAPSHOT, "cost_usd": None},
+        },
+    ):
+        rows = _by_name(client)
+    assert rows["cmx-76"]["cost_usd"] == 0.0
+    assert rows["shell-1"]["cost_usd"] is None

@@ -481,3 +481,31 @@ test('the Cost tab survives a non-array /api/cost payload instead of throwing ou
     assert.match(table.textContent, /No cost data yet/,
         'a non-array /api/cost payload did not fall back to the empty-state render');
 });
+
+// --- CMX-30. 🔴 an UNKNOWN cost (null) renders as '—', a real zero as $0.00 ----
+//
+// /api/cost?window=live serves cost_usd: null for a session whose snapshot carries
+// no cost (a background session read from its transcript). That is "no data" and
+// must be distinguishable from a session that genuinely spent nothing.
+test('a null cost renders as unknown (—), never as $0.00, and a real zero still reads $0.00', async () => {
+    costPayload = [
+        { name: 'runner-east', model: 'sonnet', cost_usd: null },
+        { name: 'runner-west', model: 'opus', cost_usd: 0 },
+    ];
+    await openOnTab('cost');
+    const table = document.getElementById('cost-table');
+    const agentCost = {};
+    table.querySelectorAll('.cost-agent-row').forEach(tr => {
+        agentCost[tr.querySelector('td:nth-child(2)').textContent.trim()] =
+            tr.querySelector('td:last-child').textContent.trim();
+    });
+    assert.equal(agentCost['runner-east'], '—', 'an unknown (null) cost did not render as —');
+    assert.equal(agentCost['runner-west'], '$0.00', 'a real zero cost did not render as $0.00');
+    const projectCost = {};
+    table.querySelectorAll('.cost-project-row').forEach(tr => {
+        projectCost[tr.querySelector('td:first-child').textContent.trim()] =
+            tr.querySelector('td:last-child').textContent.trim();
+    });
+    assert.equal(projectCost.chelamux, '—', 'a project whose only cost is unknown rendered a subtotal instead of —');
+    assert.equal(projectCost.nautilus, '$0.00', 'a project with a real zero lost its $0.00 subtotal');
+});

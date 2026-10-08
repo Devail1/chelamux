@@ -5,7 +5,8 @@ Reads cached status-line JSON files written by a Claude Code status-line script
 dashboard can read them instantly without interrupting agents.
 
 Agents' Claude Code status-line scripts cache JSON to
-~/.chela/context/{window_name}.json after every assistant message.
+~/.chela/context/<key>.json after every assistant message, where <key> is
+``cachekey.encode(window_name)`` — use :func:`cache_path`, never the raw name.
 """
 
 import json
@@ -16,7 +17,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from chela import config, dispatcher, transcripts
+from chela import cachekey, config, dispatcher, transcripts
 from chela.config import CHELA_DIR, CONTEXT_CACHE_DIR
 
 # Context-window size (tokens) assumed when deriving usage from the transcript
@@ -207,8 +208,8 @@ def capture_all() -> list[dict]:
         }
 
         for cache_file in CONTEXT_CACHE_DIR.glob("*.json"):
-            # Agent name = filename without .json
-            agent_name = cache_file.stem
+            # Agent name = the window name this file's key was encoded from (CMX-30).
+            agent_name = cachekey.decode(cache_file.stem)
 
             # Skip stale files (agent likely dead or restarted)
             mtime = cache_file.stat().st_mtime
@@ -289,9 +290,19 @@ def get_latest() -> list[dict]:
 # back to a coarser context-only estimate derived from the agent's transcript.
 # ---------------------------------------------------------------------------
 
+def cache_path(agent_name: str) -> Path:
+    """The statusLine cache file for a window name (CMX-30).
+
+    Keyed through :func:`chela.cachekey.encode` — the SAME mapping the hook uses to
+    write it — so a name with a ``/`` (``<org>/cmx-N-<slug>``) is one flat file, not
+    a path into a subdirectory that does not exist.
+    """
+    return CONTEXT_CACHE_DIR / f"{cachekey.encode(agent_name)}.json"
+
+
 def _cache_snapshot(agent_name: str) -> dict | None:
     """Full snapshot from a fresh statusLine cache file, or None if absent/stale."""
-    path = CONTEXT_CACHE_DIR / f"{agent_name}.json"
+    path = cache_path(agent_name)
     try:
         mtime = path.stat().st_mtime
     except OSError:
@@ -361,6 +372,8 @@ def live_snapshot(agent_name: str) -> dict | None:
 # no snapshot before window_start (it started inside, or right at, the
 # window). An agent (tmux window) can span more than one session within a
 # window if it restarted, so we sum across all of an agent's sessions.
+# Only sessions with at least one snapshot INSIDE the window are counted (CMX-30):
+# an agent that did not run in the window gets no row at all, not a $0.00 row.
 # ---------------------------------------------------------------------------
 
 def windowed_cost(window_start: datetime, window_end: datetime) -> list[dict]:
@@ -386,6 +399,12 @@ def windowed_cost(window_start: datetime, window_end: datetime) -> list[dict]:
         # recs are ts-ascending and already ts <= end_iso (filtered in SQL), so
         # the last cost_usd seen is last_cum(<= window_end), and the last one
         # seen with ts < start_iso is last_cum(< window_start).
+        # CMX-30: a session with NO snapshot inside the window did not run in it —
+        # it is skipped, not listed at $0.00. Reading every snapshot `ts <= end`
+        # unfiltered listed every agent ever seen (204 of 208 'today' rows were such
+        # $0.00 ghosts), which also buried the agents that were genuinely missing.
+        if not any(r["ts"] >= start_iso for r in recs):
+            continue
         baseline = 0.0
         endval = None
         for r in recs:
