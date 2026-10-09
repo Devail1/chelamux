@@ -541,12 +541,15 @@ def test_a_bare_pull_of_collab_code_makes_chela_collab_stale_and_update_restarts
 
     fresh = update.services_running_stale_code(co)
     assert fresh.ok and ("chela-collab" in fresh.stale) is collab_stale
-    assert "chela-dashboard" in fresh.stale
+    # CMX-56: import-aware — the dashboard imports the collab stream, never the README.
+    assert ("chela-dashboard" in fresh.stale) is collab_stale
 
     result = update.apply(co)
     assert result.ok and result.behind_before == 0
-    assert ("chela-collab" in restarts[0]) is collab_stale
-    assert "chela-dashboard" in restarts[0]
+    if collab_stale:
+        assert "chela-collab" in restarts[0] and "chela-dashboard" in restarts[0]
+    else:
+        assert restarts == []
 
 
 def test_chela_collab_started_after_the_collab_code_landed_is_not_stale(tmp_path, monkeypatch):

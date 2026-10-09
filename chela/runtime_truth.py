@@ -2983,8 +2983,8 @@ def _services_current_report(_declared: None, obs: Observation) -> list[Finding]
     return [Finding(
         WARN,
         f"{len(status.stale)} running service(s) predate the checked-out code: {names}",
-        "These PM2 services started before the commit now checked out existed, so they "
-        "cannot be running it — the checkout itself may report as fully in sync while "
+        "Code these PM2 services run (their own import graph, launcher or data files) "
+        "changed after they started, so they cannot be running it — the checkout itself may report as fully in sync while "
         "this is true, since a bare `git pull` (bypassing `chela update`, which pulls AND "
         f"restarts together) never restarts anything. `pm2 restart {names}` (or `chela "
         "update`, idempotent when there's nothing left to pull) picks up the new code.",

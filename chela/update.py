@@ -63,7 +63,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chela import config, hooks, notify
+from chela import config, hooks, notify, service_code
 from chela.dispatcher import (
     GIT_NET_TIMEOUT_SECONDS,
     GIT_TIMEOUT_SECONDS,
@@ -186,17 +186,6 @@ def _collab_code_changed(repo: Path, old: str, new: str = "HEAD") -> bool:
     return bool(_git_out(cp).strip())
 
 
-def _collab_code_epoch(repo: Path) -> int | None:
-    """Committer date of the last commit that touched the collab host's code."""
-    cp = _git(repo, "log", "-1", "--format=%ct", "--", *_collab_host_paths())
-    if not _git_ok(cp):
-        return None
-    try:
-        return int(_git_out(cp))
-    except ValueError:
-        return None
-
-
 def _head_when(repo: Path, epoch: float) -> str:
     """The commit this checkout's HEAD was on at ``epoch`` (unix s), read from the HEAD
     reflog. "" when the reflog can't say (unreadable, or every entry is later and the first
@@ -223,17 +212,6 @@ def _head_when(repo: Path, epoch: float) -> str:
     if not at and entries and set(entries[0][0]) != {"0"}:
         at = entries[0][0]   # every update came after: HEAD was on the first one's "old"
     return at
-
-
-def _collab_stale(repo: Path, started_epoch: float, collab_epoch: int | None) -> bool:
-    """Is a ``chela-collab`` started at ``started_epoch`` running old collab-host code?
-    Yes when that code changed between the HEAD it started on and HEAD now — which also
-    catches a bare ``git pull`` of a collab commit AUTHORED before the service started (its
-    committer date alone would call the service current). Unknown counts as stale."""
-    if collab_epoch is not None and started_epoch < collab_epoch:
-        return True
-    then = _head_when(repo, started_epoch)
-    return _collab_code_changed(repo, then) if then else True
 
 
 def _share_notice(services: list[str]) -> str:
@@ -361,25 +339,20 @@ def _running_pm2_services(repo: Path) -> list[str]:
 
 @dataclass(frozen=True)
 class ServiceFreshness:
-    """Whether the ``chela-*`` PM2 services running RIGHT NOW were started before the
-    commit the checkout is sitting on right now existed — see :func:`services_running_stale_code`.
+    """Which running ``chela-*`` PM2 services are executing code older than the checkout
+    — see :func:`services_running_stale_code`. ``unknown`` is neither stale nor fresh:
+    a service whose start commit or code set could not be determined.
     """
 
     ok: bool
     stale: list[str] = field(default_factory=list)
     commit_epoch: int = 0
     error: str = ""
+    unknown: list[str] = field(default_factory=list)
 
 
 def _current_commit_epoch(repo: Path) -> int | None:
-    """The committer-date (unix epoch seconds) of the checkout's current HEAD.
-
-    A fixed property of the commit object itself, authored wherever the commit was first
-    made — which is exactly why it is NOT, by itself, safe to compare a service's PM2
-    start time against (see :func:`services_running_stale_code`): a commit is always
-    committed before it is pulled, so this alone cannot tell "running old code" apart from
-    "restarted in the ordinary gap between upstream authoring it and this box pulling it".
-    """
+    """The committer-date (unix epoch seconds) of the checkout's current HEAD."""
     cp = _git(repo, "log", "-1", "--format=%ct")
     if not _git_ok(cp):
         return None
@@ -389,67 +362,66 @@ def _current_commit_epoch(repo: Path) -> int | None:
         return None
 
 
-def _checkout_arrival_epoch(repo: Path) -> int | None:
-    """When HEAD's current commit actually landed in THIS checkout's working tree —
-    the mtime of the reflog entry its last update (a pull, checkout, reset, or commit)
-    wrote. Unlike :func:`_current_commit_epoch`'s committer date, this is pinned to this
-    clone: it can't predate the moment the files actually arrived on disk here, which is
-    what makes it the correct half of the comparison in
-    :func:`services_running_stale_code`. ``None`` if it can't be determined (reflogs are
-    disabled, or the path is unreadable) rather than a hard failure — the commit's own
-    date, on its own, is still a valid (if weaker) floor.
-    """
-    cp = _git(repo, "rev-parse", "--git-path", "logs/HEAD")
+def _changed_since(repo: Path, old: str) -> list[str] | None:
+    """Repo paths ``old..HEAD`` touched; ``None`` if git can't say."""
+    cp = _git(repo, "diff", "--name-only", old, "HEAD")
     if not _git_ok(cp):
         return None
-    # `--git-path` is relative to `repo` (not the caller's cwd) for a plain checkout, but
-    # already absolute for a worktree — `Path.__truediv__` does the right thing for both:
-    # joining onto an absolute right-hand side just returns that absolute path.
-    try:
-        return int((repo / _git_out(cp)).stat().st_mtime)
-    except OSError:
+    return [line for line in _git_out(cp).splitlines() if line]
+
+
+def _service_stale(repo: Path, name: str, pm_uptime, diffs: dict) -> bool | None:
+    """Is service ``name``, started at ``pm_uptime`` (epoch ms), running stale code?
+    Only when a file IT runs (:func:`chela.service_code.service_paths`) changed between
+    the commit HEAD was on when it started (the HEAD reflog — so a bare ``git pull`` of a
+    commit authored BEFORE the start still counts) and HEAD now. ``None`` = unknown."""
+    if not isinstance(pm_uptime, (int, float)):
         return None
+    then = _head_when(repo, pm_uptime / 1000)
+    if not then:
+        return None
+    paths = service_code.service_paths(name)
+    if paths is None:
+        return None
+    if then not in diffs:
+        diffs[then] = _changed_since(repo, then)
+    if diffs[then] is None:
+        return None
+    return bool(service_code.touches(paths, diffs[then]))
 
 
 def services_running_stale_code(repo: Path | None = None) -> ServiceFreshness:
-    """Which running ``chela-*`` PM2 services predate the code now checked out.
+    """Which running ``chela-*`` PM2 services are executing code older than the checkout.
 
     ``chela update`` pulls and restarts in the same step, and the ``repo.upstream_synced``
-    doctor fact now catches a checkout that has simply fallen behind (CMX-199). Neither
-    catches the residual gap this closes: an operator running a bare ``git pull`` by hand
-    (bypassing ``chela update`` entirely) leaves the checkout genuinely in sync with its
-    upstream — ``ahead == behind == 0`` — while every ``chela-*`` PM2 service just keeps
-    running the process image it loaded at its OWN last start, oblivious to the new files
-    on disk. ``repo.upstream_synced`` is a fact about the CHECKOUT; this is a fact about
-    the RUNNING CODE, and a checkout can be perfectly "in sync" while every service
-    serving traffic is still the old build.
+    doctor fact catches a checkout that has simply fallen behind (CMX-199). Neither
+    catches the residual gap this closes: a bare ``git pull`` by hand leaves the checkout
+    in sync while every ``chela-*`` PM2 service keeps running the process image it loaded
+    at its OWN last start.
 
-    Compares each online service's PM2 ``pm_uptime`` (its own last-start timestamp, in
-    epoch milliseconds) against the LATER of :func:`_current_commit_epoch` (when the
-    commit was authored) and :func:`_checkout_arrival_epoch` (when it actually landed
-    here): a service that started before either cannot possibly be running it, and a
-    commit is always authored before it is pulled — using the commit date alone would miss
-    a service that restarted in that ordinary gap, which is exactly the bare-`git pull`
-    scenario this fact exists to catch. Never restarts anything itself — read-only,
-    exactly like :func:`commits_behind`.
+    CMX-56: import-aware. A service is stale only when a file in its own code set — its
+    import closure, launcher and data files (:mod:`chela.service_code`) — changed between
+    the commit HEAD was on when the service started and HEAD now. Comparing the start time
+    with HEAD's commit time alone flagged ``chela-daemon`` and ``chela-telegram`` after a
+    commit that touched only dashboard files, neither of which they import. A service
+    whose start commit (reflog), code set or diff can't be read lands in ``unknown`` —
+    never stale, never fresh. Read-only, exactly like :func:`commits_behind`.
     """
     repo = repo or repo_root()
     commit_epoch = _current_commit_epoch(repo)
     if commit_epoch is None:
         return ServiceFreshness(ok=False, error="git log failed")
-    arrival_epoch = _checkout_arrival_epoch(repo)
-    threshold_epoch = max(commit_epoch, arrival_epoch) if arrival_epoch is not None else commit_epoch
-    # The collab host (CMX-434) is stale only when ITS code moved since it started — a
-    # commit to anything else must not end every live share.
-    collab_epoch = _collab_code_epoch(repo)
-    stale = sorted(
-        svc["name"] for svc in _online_chela_services(repo)
-        if isinstance(svc["pm2_env"].get("pm_uptime"), (int, float))
-        and (_collab_stale(repo, svc["pm2_env"]["pm_uptime"] / 1000, collab_epoch)
-             if svc["name"] == COLLAB_SERVICE
-             else svc["pm2_env"]["pm_uptime"] / 1000 < threshold_epoch)
-    )
-    return ServiceFreshness(ok=True, stale=stale, commit_epoch=commit_epoch)
+    stale: list[str] = []
+    unknown: list[str] = []
+    diffs: dict[str, list[str] | None] = {}
+    for svc in _online_chela_services(repo):
+        verdict = _service_stale(repo, svc["name"], svc["pm2_env"].get("pm_uptime"), diffs)
+        if verdict is None:
+            unknown.append(svc["name"])
+        elif verdict:
+            stale.append(svc["name"])
+    return ServiceFreshness(ok=True, stale=sorted(stale), unknown=sorted(unknown),
+                            commit_epoch=commit_epoch)
 
 
 def _plugin_marketplaces() -> list[str]:
@@ -616,6 +588,34 @@ def _recover_from_history_rewrite(repo: Path, branch: str) -> ApplyResult:
     return ApplyResult(ok=True, backup_ref=backup_ref)
 
 
+def restart_stale(repo: Path | None = None, *, on_notice=None) -> ApplyResult:
+    """Restart exactly the services :func:`services_running_stale_code` names stale —
+    no fetch, no pull, nothing else. What :func:`apply` does when there is nothing to
+    pull, and what the dashboard's "Restart stale services" click runs (CMX-56).
+
+    issue #453: the commit that made these services stale arrived by a route that never
+    synced (a bare `git pull`, a hand merge, a rebase, or a previous `apply()` that died
+    between "pull" and "pm2 restart") — it may have moved `uv.lock`, so restarting onto it
+    without syncing first risks new code against old dependencies. Same order as the pull
+    path in :func:`apply`: sync, then restart.
+    """
+    repo = repo or repo_root()
+    freshness = services_running_stale_code(repo)
+    if not freshness.ok or not freshness.stale:
+        return ApplyResult(ok=True, step="done")
+    sync_cp = _sh(["uv", "sync", "--all-extras"], cwd=repo)
+    if sync_cp is None or sync_cp.returncode != 0:
+        err = sync_cp.stderr.strip() if sync_cp is not None else "uv sync failed to run"
+        return ApplyResult(ok=False, step="uv-sync", behind_before=0, error=err)
+    restart_cp, notice = _restart(repo, freshness.stale, on_notice)
+    if restart_cp is None or restart_cp.returncode != 0:
+        err = (restart_cp.stderr.strip() if restart_cp is not None
+               else "pm2 restart failed to run")
+        return ApplyResult(ok=False, step="pm2-restart", behind_before=0, error=err,
+                            share_notice=notice)
+    return ApplyResult(ok=True, step="done", restarted=freshness.stale, share_notice=notice)
+
+
 def apply(repo: Path | None = None, *, on_notice=None) -> ApplyResult:
     """The safe update sequence. Refuses before touching anything on a dirty tree;
     on a diverged branch, recovers safely if the divergence is actually an upstream
@@ -665,26 +665,11 @@ def apply(repo: Path | None = None, *, on_notice=None) -> ApplyResult:
         # before "pm2 restart") — so this must not live behind "we just pulled" either, on
         # exactly the same reasoning as the plugin check below (CMX-346): the early return
         # for "nothing to pull" was never a promise that the running services are current.
-        freshness = services_running_stale_code(repo)
-        restarted: list[str] = []
-        notice = ""
-        if freshness.ok and freshness.stale:
-            # issue #453: the commit that made these services stale arrived by a route
-            # that never synced (a bare `git pull`, a hand merge, a rebase, or a previous
-            # `apply()` that died between "pull" and "pm2 restart") — it may have moved
-            # `uv.lock`, so restarting onto it without syncing first risks new code against
-            # old dependencies. Same order as the pull path below: sync, then restart.
-            sync_cp = _sh(["uv", "sync", "--all-extras"], cwd=repo)
-            if sync_cp is None or sync_cp.returncode != 0:
-                err = sync_cp.stderr.strip() if sync_cp is not None else "uv sync failed to run"
-                return ApplyResult(ok=False, step="uv-sync", behind_before=0, error=err)
-            restart_cp, notice = _restart(repo, freshness.stale, on_notice)
-            if restart_cp is None or restart_cp.returncode != 0:
-                err = (restart_cp.stderr.strip() if restart_cp is not None
-                       else "pm2 restart failed to run")
-                return ApplyResult(ok=False, step="pm2-restart", behind_before=0, error=err,
-                                    share_notice=notice)
-            restarted = freshness.stale
+        stale = restart_stale(repo, on_notice=on_notice)
+        if not stale.ok:
+            return stale
+        restarted = stale.restarted
+        notice = stale.share_notice
 
         # A plugin can go stale or unreadable with NO commit involved (a cache sweep, a
         # manual uninstall, a failed install) — this check must not live behind "we just

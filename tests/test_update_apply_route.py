@@ -54,6 +54,15 @@ def _wait_for_release_then_clear(lock, timeout=2):
 
 
 @pytest.fixture(autouse=True)
+def _nothing_stale(monkeypatch):
+    """With nothing to pull the route now consults service freshness (CMX-56); pin it to
+    "nothing stale" so tests about the pull path never read the operator's real pm2. The
+    restart-stale tests below override it."""
+    monkeypatch.setattr(update, "services_running_stale_code",
+                        lambda *a, **k: update.ServiceFreshness(ok=True, stale=[]))
+
+
+@pytest.fixture(autouse=True)
 def _reset_lock():
     # The lock (and its start-time sidecar) are process-global module state — start and
     # end every test unlocked/unset regardless of what a previous test's background
@@ -177,11 +186,64 @@ def test_apply_starts_a_background_run_when_behind(client, monkeypatch):
 
     assert resp.status_code == 200
     data = resp.get_json()
-    assert data == {"ok": True, "started": True, "behind": 3}
+    assert data == {"ok": True, "started": True, "behind": 3,
+                    "detail": "pulling 3 commit(s), then restarting services"}
     # The response returned WITHOUT waiting for apply() to finish — proof this runs off
     # the request thread, which is the entire point (apply() can restart this process).
     assert started.wait(timeout=2), "update.apply() was never invoked"
     finished.set()
+
+
+# --- CMX-56: nothing to pull, but services ARE stale ------------------------------------
+#
+# The card listed "3 STALE" over an "Update now" button that answered every click with
+# `{"started": false, "detail": "already up to date"}` — the services it flagged were never
+# restarted. With nothing to pull, a click now restarts exactly the stale ones.
+
+def _stale(monkeypatch, names):
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=0, ahead=0, branch="dev"))
+    monkeypatch.setattr(update, "services_running_stale_code",
+                        lambda *a, **k: update.ServiceFreshness(
+                            ok=True, stale=list(names), unknown=["chela-agent-terminals"]))
+
+
+def test_nothing_to_pull_but_stale_services_restarts_exactly_those(client, monkeypatch):
+    """🔴 CMX-56: the click restarts the stale services — via `restart_stale`, which
+    restarts only what freshness names, never `apply()` (whose fetch could turn a restart
+    click into a pull) — and says which ones it is restarting."""
+    _stale(monkeypatch, ["chela-dashboard"])
+    restarted = threading.Event()
+    applied = []
+    monkeypatch.setattr(update, "restart_stale", lambda: (restarted.set(), update.ApplyResult(
+        ok=True, step="done", restarted=["chela-dashboard"]))[1])
+    monkeypatch.setattr(update, "apply", lambda *a, **k: applied.append("apply"))
+
+    resp = client.post("/api/update/apply")
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"ok": True, "started": True, "behind": 0,
+                               "restarting": ["chela-dashboard"],
+                               "detail": "restarting chela-dashboard"}
+    assert restarted.wait(timeout=2), "update.restart_stale() was never invoked"
+    assert applied == []
+
+
+def test_a_stale_restart_waits_for_an_in_flight_dispatched_run(client, monkeypatch):
+    """The same CMX-199 guard as the pull path: restarting chela-daemon mid-run orphans
+    the dispatched agent, whether or not anything was pulled."""
+    _stale(monkeypatch, ["chela-daemon"])
+    monkeypatch.setattr(dispatcher, "list_runs",
+                        lambda: [{"task_id": "cmx-56-abc12", "status": "running"}])
+    calls = []
+    monkeypatch.setattr(update, "restart_stale", lambda *a, **k: calls.append("restart"))
+
+    resp = client.post("/api/update/apply")
+
+    assert resp.status_code == 409
+    assert "cmx-56-abc12" in resp.get_json()["error"]
+    time.sleep(0.05)
+    assert calls == []
 
 
 def test_apply_refuses_while_a_dispatched_run_is_in_flight(client, monkeypatch):

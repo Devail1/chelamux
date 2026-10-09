@@ -14,7 +14,9 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +38,7 @@ def _configure(repo: Path) -> None:
 
 
 def _commit(repo: Path, filename: str, content: str, message: str = "update") -> None:
+    (repo / filename).parent.mkdir(parents=True, exist_ok=True)
     (repo / filename).write_text(content)
     _git(repo, "add", filename)
     _git(repo, "commit", "-q", "-m", message)
@@ -72,6 +75,33 @@ def git_calls(monkeypatch):
 
     monkeypatch.setattr(update, "_git", spy)
     return calls
+
+
+def _age_reflog(repo: Path, epoch: int) -> None:
+    """Pretend every HEAD move recorded so far happened at ``epoch``."""
+    log_ = repo / ".git" / "logs" / "HEAD"
+    log_.write_text(re.sub(r"> \d+ ([+-]\d{4})\t", lambda m: f"> {epoch} {m.group(1)}\t",
+                           log_.read_text()))
+
+
+def _pull_ts(repo: Path) -> int:
+    """The reflog timestamp of the checkout's latest HEAD move."""
+    last = (repo / ".git" / "logs" / "HEAD").read_text().splitlines()[-1]
+    return int(last.split("\t", 1)[0].split()[-2])
+
+
+def _land_commit(checkout: Path, path: str = "chela/dashboard/app.py") -> tuple[int, int]:
+    """CMX-56: a REAL bare `git pull` of one upstream commit touching only ``path``, into a
+    checkout whose previous HEAD dates two hours back (its reflog says so). Returns the
+    ``pm_uptime`` (epoch ms) of a service started BEFORE that pull (on the old HEAD) and
+    one started AFTER it. Staleness is import-aware, so which services the ``before`` one
+    makes stale depends on ``path`` — a dashboard file stales ``chela-dashboard`` only."""
+    upstream = checkout.parent / "upstream"
+    now = int(time.time())
+    _age_reflog(checkout, now - 7200)
+    _commit(upstream, path, f"changed {now}\n", f"touch {path}")
+    _git(checkout, "pull", "-q")
+    return (now - 600) * 1000, (_pull_ts(checkout) + 100) * 1000
 
 
 class _FakeCP:
@@ -852,17 +882,16 @@ def test_apply_restarts_a_stale_service_even_with_nothing_behind(checkout, monke
     guards: it would bounce the operator's Telegram bridge every tick. See
     docs/defeat_shapes/306-a-single-item-fixture-collapses-every-candidate-source.md — the
     same shape, not a new one."""
-    commit_epoch = update._current_commit_epoch(checkout)
-    assert commit_epoch is not None
+    before, after = _land_commit(checkout)
     calls = []
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
         if args[:2] == ["pm2", "jlist"]:
             return _FakeCP(stdout=json.dumps([
                 {"name": "chela-dashboard",
-                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+                 "pm2_env": {"status": "online", "pm_uptime": before}},
                 {"name": "chela-telegram",
-                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch + 100) * 1000}},
+                 "pm2_env": {"status": "online", "pm_uptime": after}},
             ]))
         if args[:2] == ["uv", "sync"] or args[:2] == ["pm2", "restart"]:
             calls.append(args)
@@ -888,14 +917,13 @@ def test_apply_never_restarts_a_fresh_service_with_nothing_behind(checkout, monk
     ⛔⛔ The one that matters. A fix that restarts unconditionally passes the stale-service
     guard above perfectly and bounces every running service on every routine no-op
     `chela update`."""
-    commit_epoch = update._current_commit_epoch(checkout)
-    assert commit_epoch is not None
+    before, after = _land_commit(checkout)
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
         if args[:2] == ["pm2", "jlist"]:
             return _FakeCP(stdout=json.dumps([
                 {"name": "chela-dashboard",
-                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch + 100) * 1000}},
+                 "pm2_env": {"status": "online", "pm_uptime": after}},
             ]))
         raise AssertionError(f"unexpected _sh call: {args} — nothing was stale, "
                              "pm2 restart must never run")
@@ -910,17 +938,25 @@ def test_apply_never_restarts_a_fresh_service_with_nothing_behind(checkout, monk
 
 
 def test_a_service_started_exactly_at_the_threshold_is_not_stale(checkout, monkeypatch):
-    """The boundary itself. `services_running_stale_code` is `pm_uptime/1000 < threshold`,
-    and every other fixture in this file sits 100s to either side of it — bracketing the
-    cap without ever landing ON it, so `<` -> `<=` would survive every one of them. Same
-    shape as docs/defeat_shapes/333 (a bracketing pair that straddles the limit instead of
-    sitting on it), one axis over. A service that started at the very instant the code
-    became current has loaded that code; calling it stale would restart it for nothing,
-    every single update, forever."""
-    commit_epoch = update._current_commit_epoch(checkout)
-    assert commit_epoch is not None
-    arrival_epoch = update._checkout_arrival_epoch(checkout)
-    threshold = max(commit_epoch, arrival_epoch) if arrival_epoch is not None else commit_epoch
+    """The boundary itself. A service's start commit is the HEAD the reflog names at its
+    start second — an entry stamped AT that second already counts (`_head_when` breaks
+    only on `ts > epoch`). Every other fixture here sits 100s+ to either side of the pull,
+    bracketing the boundary without ever landing ON it, so `>` -> `>=` would survive every
+    one of them. Same shape as docs/defeat_shapes/333. A service that started at the very
+    instant the code became current has loaded that code; calling it stale would restart
+    it for nothing, every single update, forever. The one-second-earlier twin proves the
+    boundary is a real edge, not a fixture that is fresh either way."""
+    _land_commit(checkout)
+    threshold = _pull_ts(checkout)
+    probe = update.services_running_stale_code
+
+    def jlist(uptime_s):
+        return lambda args, cwd, timeout=0: _FakeCP(stdout=json.dumps([
+            {"name": "chela-dashboard", "pm2_env": {"status": "online", "pm_uptime": uptime_s * 1000}},
+        ]))
+
+    monkeypatch.setattr(update, "_sh", jlist(threshold - 1))
+    assert probe(checkout).stale == ["chela-dashboard"]
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
         if args[:2] == ["pm2", "jlist"]:
@@ -943,14 +979,13 @@ def test_a_service_started_exactly_at_the_threshold_is_not_stale(checkout, monke
 def test_apply_fails_at_pm2_restart_when_the_stale_only_restart_fails(checkout, monkeypatch):
     """The restart-only path must fail the same way the post-pull restart does: a broken
     `pm2` here must not be reported as a successful update."""
-    commit_epoch = update._current_commit_epoch(checkout)
-    assert commit_epoch is not None
+    before, after = _land_commit(checkout)
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
         if args[:2] == ["pm2", "jlist"]:
             return _FakeCP(stdout=json.dumps([
                 {"name": "chela-dashboard",
-                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+                 "pm2_env": {"status": "online", "pm_uptime": before}},
             ]))
         if args[:2] == ["uv", "sync"]:
             return _FakeCP()
@@ -978,15 +1013,14 @@ def test_apply_syncs_deps_before_restarting_a_stale_only_service(checkout, monke
     service up on new code against old dependencies. Dropping the `uv sync` call from the
     restart-only branch turns this red, because `pm2 restart` would then be the first call
     `fake_sh` sees and this asserts on `sync_calls` instead."""
-    commit_epoch = update._current_commit_epoch(checkout)
-    assert commit_epoch is not None
+    before, after = _land_commit(checkout)
     sync_calls = []
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
         if args[:2] == ["pm2", "jlist"]:
             return _FakeCP(stdout=json.dumps([
                 {"name": "chela-dashboard",
-                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+                 "pm2_env": {"status": "online", "pm_uptime": before}},
             ]))
         if args[:2] == ["uv", "sync"]:
             sync_calls.append(args)
@@ -1010,14 +1044,13 @@ def test_apply_reports_uv_sync_missing_binary_on_the_stale_only_path(checkout, m
     timeout — both surface as `_sh` returning ``None``, see its docstring), the stale-only
     path must still report a legible error rather than an empty string. Kills a mutation
     that dropped the ``sync_cp is None`` fallback message to ``""``."""
-    commit_epoch = update._current_commit_epoch(checkout)
-    assert commit_epoch is not None
+    before, after = _land_commit(checkout)
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
         if args[:2] == ["pm2", "jlist"]:
             return _FakeCP(stdout=json.dumps([
                 {"name": "chela-dashboard",
-                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+                 "pm2_env": {"status": "online", "pm_uptime": before}},
             ]))
         if args[:2] == ["uv", "sync"]:
             return None
@@ -1040,14 +1073,13 @@ def test_apply_never_syncs_deps_when_nothing_is_stale_with_nothing_behind(
     """Counterweight: with no stale service to restart, there is nothing to sync for
     either — `uv sync` firing on every routine no-op `chela update` would make an
     already-cheap early return needlessly slow."""
-    commit_epoch = update._current_commit_epoch(checkout)
-    assert commit_epoch is not None
+    before, after = _land_commit(checkout)
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
         if args[:2] == ["pm2", "jlist"]:
             return _FakeCP(stdout=json.dumps([
                 {"name": "chela-dashboard",
-                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch + 100) * 1000}},
+                 "pm2_env": {"status": "online", "pm_uptime": after}},
             ]))
         raise AssertionError(f"unexpected _sh call: {args} — nothing was stale, "
                              "`uv sync` must never run")
@@ -1101,29 +1133,29 @@ def test_commits_behind_reports_no_upstream_without_erroring(tmp_path):
 
 
 
-# --- services_running_stale_code (CMX-200) --------------------------------------------
+# --- services_running_stale_code (CMX-200, import-aware since CMX-56) ------------------
 #
 # `commits_behind` above is a fact about the CHECKOUT. A bare `git pull` (bypassing
 # `chela update`, which pulls AND restarts together) can leave the checkout fully in
 # sync while a running PM2 service keeps executing the process image from its own last
-# start. This compares each service's `pm_uptime` against the checked-out commit's fixed
-# committer date instead — read-only, same as `commits_behind`.
+# start. A service is stale only when a file IT runs changed between the commit HEAD was
+# on when it started (the reflog) and HEAD now — read-only, same as `commits_behind`.
 
 def test_services_running_stale_code_flags_a_service_older_than_head(checkout, monkeypatch):
+    before, after = _land_commit(checkout)
     commit_epoch = update._current_commit_epoch(checkout)
-    assert commit_epoch is not None
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
         if args[:2] == ["pm2", "jlist"]:
             return _FakeCP(stdout=json.dumps([
                 {"name": "chela-dashboard",
-                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+                 "pm2_env": {"status": "online", "pm_uptime": before}},
                 {"name": "chela-daemon",
-                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch + 100) * 1000}},
+                 "pm2_env": {"status": "online", "pm_uptime": after}},
                 {"name": "unrelated-app",
-                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+                 "pm2_env": {"status": "online", "pm_uptime": before}},
                 {"name": "chela-telegram",
-                 "pm2_env": {"status": "stopped", "pm_uptime": (commit_epoch - 100) * 1000}},
+                 "pm2_env": {"status": "stopped", "pm_uptime": before}},
             ]))
         raise AssertionError(f"unexpected _sh call: {args}")
 
@@ -1132,58 +1164,122 @@ def test_services_running_stale_code_flags_a_service_older_than_head(checkout, m
     status = update.services_running_stale_code(checkout)
 
     assert status.ok is True
-    # started BEFORE HEAD's commit date, online, and chela-owned — not the newer
+    # started BEFORE its code changed, online, and chela-owned — not the newer
     # service, not the unrelated app, not the stopped one.
     assert status.stale == ["chela-dashboard"]
     assert status.commit_epoch == commit_epoch
 
 
-def test_services_running_stale_code_catches_a_restart_between_authored_and_pulled(
-    upstream, tmp_path, monkeypatch,
+def _jlist_all_started_at(uptime_ms: int, names=("chela-agent-terminals", "chela-collab",
+                                                "chela-daemon", "chela-dashboard",
+                                                "chela-telegram")):
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _FakeCP(stdout=json.dumps([
+                {"name": n, "pm2_env": {"status": "online", "pm_uptime": uptime_ms}}
+                for n in names]))
+        raise AssertionError(f"unexpected _sh call: {args}")
+    return fake_sh
+
+
+def test_a_dashboard_only_head_stales_only_the_dashboard(checkout, monkeypatch):
+    """🔴 CMX-56, THE LOAD-BEARING GUARD: the Settings card said "3 STALE: chela-agent-
+    terminals, chela-daemon, chela-telegram predate this code" after a HEAD that changed
+    ONLY dashboard files — none of which those services import. EVERY service here started
+    before that commit landed, so a time-only check (start < HEAD) flags all five; only an
+    import-aware one names the dashboard alone. Reverting to time-only turns this red."""
+    before, _after = _land_commit(checkout, "chela/dashboard/app.py")
+    monkeypatch.setattr(update, "_sh", _jlist_all_started_at(before))
+
+    status = update.services_running_stale_code(checkout)
+
+    assert status.ok is True
+    assert status.stale == ["chela-dashboard"]
+    assert status.unknown == []
+
+
+def test_a_usage_only_head_stales_only_the_dashboard(checkout, monkeypatch):
+    """The other half of CMX-38's diff: `chela/usage.py` sits OUTSIDE `chela/dashboard/`, so
+    a directory-prefix shortcut can't explain it — only the dashboard's import closure
+    reaches it. The daemon and telegram bridge never import it."""
+    before, _after = _land_commit(checkout, "chela/usage.py")
+    monkeypatch.setattr(update, "_sh", _jlist_all_started_at(before))
+
+    assert update.services_running_stale_code(checkout).stale == ["chela-dashboard"]
+
+
+def test_a_shared_module_change_stales_every_python_service_that_imports_it(
+    checkout, monkeypatch,
 ):
-    """A commit is always committed upstream BEFORE it is pulled anywhere else. A naive
-    `pm_uptime > commit_epoch` comparison misses a service that restarts in that ordinary
-    gap (a crash, a memcap kill, a one-service `pm2 restart`) -- it started after the
-    commit's own timestamp, so it reads as fresh, while it is actually still running
-    whatever it loaded before this checkout's `git pull` landed the new files. Reproduced
-    with a REAL clone: the upstream commit's committer date is stamped a day in the past,
-    then cloned right now -- `_current_commit_epoch` alone reports "old" while the code
-    only actually arrived on this machine moments ago.
-    """
-    base_epoch = update._current_commit_epoch(upstream)
-    old_committer_epoch = base_epoch - 86400
-    (upstream / "late.txt").write_text("late\n")
-    subprocess.run(["git", "-C", str(upstream), "add", "late.txt"],
-                    check=True, capture_output=True)
+    """Counterweight: import-aware must not mean "never stale". `chela/config.py` is in
+    every CLI service's closure — all four Python services restart; the bash wall, whose
+    `python -c` snippets start a fresh interpreter every poll, does not."""
+    before, _after = _land_commit(checkout, "chela/config.py")
+    monkeypatch.setattr(update, "_sh", _jlist_all_started_at(before))
+
+    assert update.services_running_stale_code(checkout).stale == [
+        "chela-collab", "chela-daemon", "chela-dashboard", "chela-telegram"]
+
+
+def test_a_wall_script_change_stales_only_agent_terminals(checkout, monkeypatch):
+    before, _after = _land_commit(checkout, "scripts/agent-terminals.sh")
+    monkeypatch.setattr(update, "_sh", _jlist_all_started_at(before))
+
+    assert update.services_running_stale_code(checkout).stale == ["chela-agent-terminals"]
+
+
+def test_a_service_whose_start_commit_is_unreadable_is_unknown_not_stale(checkout, monkeypatch):
+    """CMX-56: "unknown" is its own answer. A service that started before the checkout's
+    oldest reflog entry (here: before the clone itself) has no knowable start commit —
+    it must be neither listed stale (restarted for nothing) nor silently counted fresh.
+    Likewise a `chela-*` name with no known code set."""
+    oldest = _pull_ts(checkout)
+    monkeypatch.setattr(update, "_sh", _jlist_all_started_at(
+        (oldest - 3600) * 1000, names=("chela-daemon",)))
+
+    status = update.services_running_stale_code(checkout)
+    assert status.ok is True
+    assert status.stale == []
+    assert status.unknown == ["chela-daemon"]
+
+    before, _after = _land_commit(checkout, "chela/config.py")
+    monkeypatch.setattr(update, "_sh", _jlist_all_started_at(
+        before, names=("chela-mystery", "chela-daemon")))
+    status = update.services_running_stale_code(checkout)
+    assert status.stale == ["chela-daemon"]
+    assert status.unknown == ["chela-mystery"]
+
+
+def test_services_running_stale_code_catches_a_commit_authored_before_the_service_started(
+    upstream, checkout, monkeypatch,
+):
+    """A commit is always committed upstream BEFORE it is pulled anywhere else. A service
+    that restarted in that ordinary gap (a crash, a memcap kill, a one-service `pm2
+    restart`) started after the commit's own timestamp, yet is still running what it
+    loaded before this checkout's `git pull` landed the new files. The reflog — not the
+    commit date — names the HEAD it started on. `uv.lock` is in every CLI service's code
+    set, so both services below are judged on WHEN they started, nothing else."""
+    now = int(time.time())
+    _age_reflog(checkout, now - 86400 * 2)
+    (upstream / "uv.lock").write_text("bumped\n")
+    _git(upstream, "add", "uv.lock")
     subprocess.run(
-        ["git", "-C", str(upstream), "commit", "-q", "-m", "late"],
+        ["git", "-C", str(upstream), "commit", "-q", "-m", "bump"],
         check=True, capture_output=True,
-        env={**os.environ, "GIT_COMMITTER_DATE": f"{old_committer_epoch} +0000"},
+        env={**os.environ, "GIT_COMMITTER_DATE": f"{now - 86400} +0000"},
     )
-
-    checkout = tmp_path / "checkout"
-    subprocess.run(["git", "clone", "-q", str(upstream), str(checkout)],
-                    check=True, capture_output=True)
-    _configure(checkout)
-
-    commit_epoch = update._current_commit_epoch(checkout)
-    assert commit_epoch == old_committer_epoch
-
-    # started an hour after the commit was authored upstream, but long before the clone
-    # above (which just happened, in real time) actually pulled it onto this machine --
-    # the pre-pull restart the naive comparison misses.
-    restarted_in_the_gap = (old_committer_epoch + 3600) * 1000
-    # started safely after the real clone time -- the counterweight: a restart that
-    # genuinely postdates the code landing here must NOT be flagged.
-    restarted_after_pull = (base_epoch + 200) * 1000
+    _git(checkout, "pull", "-q")
+    assert update._current_commit_epoch(checkout) == now - 86400
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
         if args[:2] == ["pm2", "jlist"]:
             return _FakeCP(stdout=json.dumps([
+                # an hour after the commit was authored, long before it was pulled
                 {"name": "chela-daemon",
-                 "pm2_env": {"status": "online", "pm_uptime": restarted_in_the_gap}},
+                 "pm2_env": {"status": "online", "pm_uptime": (now - 86400 + 3600) * 1000}},
+                # safely after the pull — the counterweight
                 {"name": "chela-dashboard",
-                 "pm2_env": {"status": "online", "pm_uptime": restarted_after_pull}},
+                 "pm2_env": {"status": "online", "pm_uptime": (_pull_ts(checkout) + 200) * 1000}},
             ]))
         raise AssertionError(f"unexpected _sh call: {args}")
 
@@ -1204,8 +1300,7 @@ def test_services_running_stale_code_excludes_a_service_with_no_readable_pm_upti
     missing/malformed field and a `TypeError` in the `/ 1000` arithmetic right after it in
     the same generator expression (CMX-200 review: 'the one remaining path where the fact
     reads green without having actually checked anything' — flagged, never given a test)."""
-    commit_epoch = update._current_commit_epoch(checkout)
-    assert commit_epoch is not None
+    before, after = _land_commit(checkout)
 
     def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
         if args[:2] == ["pm2", "jlist"]:
@@ -1217,7 +1312,7 @@ def test_services_running_stale_code_excludes_a_service_with_no_readable_pm_upti
                  "pm2_env": {"status": "online", "pm_uptime": "not-a-number"}},
                 # counterweight -- a genuinely stale, well-formed entry must still fire.
                 {"name": "chela-dashboard",
-                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+                 "pm2_env": {"status": "online", "pm_uptime": before}},
             ]))
         raise AssertionError(f"unexpected _sh call: {args}")
 
@@ -1227,6 +1322,7 @@ def test_services_running_stale_code_excludes_a_service_with_no_readable_pm_upti
 
     assert status.ok is True
     assert status.stale == ["chela-dashboard"]
+    assert status.unknown == ["chela-no-field", "chela-string-uptime"]
 
 
 def test_services_running_stale_code_is_empty_when_nothing_is_running(checkout, monkeypatch):
@@ -1885,8 +1981,7 @@ def test_auto_apply_sweep_reports_a_restart_only_catch_up_loudly(checkout, monke
     """CMX-346: with nothing behind but a service caught stale, `apply()` now restarts it
     on its own — that is a real unattended action and must be logged/notified like any
     other, not folded into the quiet "nothing was behind" path."""
-    commit_epoch = update._current_commit_epoch(checkout)
-    assert commit_epoch is not None
+    before, after = _land_commit(checkout)
     monkeypatch.setattr(update, "repo_root", lambda: checkout)
     restart_calls = []
 
@@ -1894,7 +1989,7 @@ def test_auto_apply_sweep_reports_a_restart_only_catch_up_loudly(checkout, monke
         if args[:2] == ["pm2", "jlist"]:
             return _FakeCP(stdout=json.dumps([
                 {"name": "chela-dashboard",
-                 "pm2_env": {"status": "online", "pm_uptime": (commit_epoch - 100) * 1000}},
+                 "pm2_env": {"status": "online", "pm_uptime": before}},
             ]))
         if args[:2] == ["uv", "sync"]:
             return _FakeCP()
@@ -2147,3 +2242,30 @@ def test_repo_root_refuses_a_non_git_directory(tmp_path, monkeypatch):
 
     with pytest.raises(update.NotAGitCheckout):
         update.repo_root()
+
+
+# --- restart_stale (CMX-56) -------------------------------------------------------------
+
+def test_restart_stale_restarts_exactly_the_stale_services_and_never_fetches(
+    checkout, monkeypatch, git_calls,
+):
+    """The dashboard's "Restart stale services (N)" click. Exactly what freshness names —
+    the import-unaffected daemon/telegram stay up — and no `git fetch`/`pull`: a restart
+    click must never quietly become an update."""
+    before, _after = _land_commit(checkout, "chela/dashboard/app.py")
+    calls = []
+
+    def fake_sh(args, cwd, timeout=update._SHELL_TIMEOUT_SECONDS):
+        if args[:2] == ["pm2", "jlist"]:
+            return _jlist_all_started_at(before)(args, cwd)
+        calls.append(args)
+        return _FakeCP()
+
+    monkeypatch.setattr(update, "_sh", fake_sh)
+
+    result = update.restart_stale(checkout)
+
+    assert result.ok is True
+    assert result.restarted == ["chela-dashboard"]
+    assert calls == [["uv", "sync", "--all-extras"], ["pm2", "restart", "chela-dashboard"]]
+    assert not [c for c in git_calls if c[0] in ("fetch", "pull")]
