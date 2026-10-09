@@ -739,6 +739,54 @@ class LinearSource:
             return self.transition(task_id, "duplicate", duplicate_of=superseding)
         return self.transition(task_id, "canceled")
 
+    def requeue_task(self, task_id: str) -> str:
+        """🗂️🔁 CMX-65 — ``chela close <run> --requeue`` → the first configured READY state
+        (Todo), so the next claim takes it. Unlike :meth:`transition` this DOES move an issue
+        out of a ``canceled``-type state: requeueing a task an earlier ``chela close``
+        canceled is exactly the explicit human ask that resurrection needs. Never out of
+        ``completed`` (Done shipped). Same outcomes as :meth:`transition`; never raises."""
+        if self.config_error:
+            return "failed"
+        try:
+            found = self._nodes_by_id([task_id], cache=False)
+            if found is None:
+                return "failed"
+            node = next((n for n in found if isinstance(n, dict) and n.get("id")
+                         and str(n.get("identifier") or "").upper() == str(task_id).upper()),
+                        None)
+            if node is None:
+                return "missing"
+            state = node.get("state") if isinstance(node.get("state"), dict) else {}
+            if state.get("type") == "completed" or node.get("archivedAt"):
+                return "skipped"
+            team = self._team()
+            if team is None:
+                return "failed"
+            by_name = {str(s.get("name") or "").lower(): s for s in team[1]}
+            target = next((by_name[n.lower()] for n in self.ready_states
+                           if n.lower() in by_name), None)
+            if target is None:
+                _report_once((self.team, "state:ready"),
+                             f"linear: team {self.team} has none of the ready states "
+                             f"{' / '.join(self.ready_states)} — a requeue cannot move it")
+                return "skipped"
+            if str(state.get("name") or "").lower() == str(target.get("name") or "").lower():
+                return "already"
+            data = self._call(UPDATE_STATE_MUTATION, {"id": node["id"], "stateId": target["id"]},
+                              cache=False)
+            if not (data.get("issueUpdate") or {}).get("success"):
+                log.warning("linear: moving %s back to %s was refused", task_id,
+                            target.get("name"))
+                return "failed"
+        except LinearError as e:
+            log.warning("linear: could not requeue %s: %s", task_id, e)
+            return "failed"
+        except Exception:                       # never a crash in the caller's path
+            log.exception("linear: requeueing %s failed", task_id)
+            return "failed"
+        log.info("linear: %s → %s (requeued)", task_id, target.get("name"))
+        return "set"
+
     def superseding_issue(self, reason: str, own_id: str) -> str | None:
         """The identifier of this team's issue a close ``reason`` says supersedes ``own_id``
         — only when the reason also says so (:data:`_SUPERSEDED_RE`); else None."""

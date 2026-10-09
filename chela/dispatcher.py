@@ -95,7 +95,10 @@ REVIEW_STATUSES = ("awaiting_review", "changes_requested", "needs_human")
 # States a fresh claim must skip: already in flight, parked in review, or terminal.
 # `closed` (CMX-265) is terminal the same way `done` is — a rejected/superseded trial
 # already owns its branch, worktree and PR, and re-claiming the same task_id would fork
-# a second worktree behind a PR nobody is looking at.
+# a second worktree behind a PR nobody is looking at. The ONE way back is explicit
+# (CMX-65): `chela close <run> --requeue` sets `requeue_pending`, and the claim loop takes
+# that row as a fresh attempt on a NEW branch/worktree. A closed task left in the tracker's
+# ready state WITHOUT it is flagged (`closed_run_stalls`), never silently skipped forever.
 NOT_CLAIMABLE = (*ACTIVE_STATUSES, *REVIEW_STATUSES, "done", "closed")
 
 # Statuses whose PR can still merge OUT OF BAND (a hand `gh pr merge`, never through
@@ -1001,6 +1004,8 @@ def run_is_terminal(row) -> bool:
         return True
     if row.get("status") == "failed" and (row.get("attempt") or 1) >= MAX_ATTEMPTS:
         return True
+    if row.get("status") == "closed" and row.get("requeue_pending"):
+        return False                     # CMX-65: requeued — the next tick claims it again
     return row.get("status") in ("done", "closed")
 
 
@@ -1438,6 +1443,14 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # resets it (a re-claimed run is In Progress again). NULL for a run whose tracker
         # chela does not drive (markdown, gh_issues) and for pre-migration rows.
         ("tracker_edge", "ALTER TABLE runs ADD COLUMN tracker_edge TEXT"),
+        # 🗂️🔁 CMX-65. `chela close <run> --requeue`: a `closed` row with
+        # `requeue_pending=1` is the ONE closed row a claim may take again — as a fresh
+        # attempt on a NEW branch/worktree (`-r<requeue_count+1>`), never the closed run's.
+        # `requeue_count` is how many times the task was requeued: it names the attempt's
+        # branch and worktree suffix, and survives the claim (a failed retry of attempt
+        # `-r2` keeps `-r2`). Without `--requeue`, `closed` stays terminal (CMX-265).
+        ("requeue_pending", "ALTER TABLE runs ADD COLUMN requeue_pending INTEGER DEFAULT 0"),
+        ("requeue_count", "ALTER TABLE runs ADD COLUMN requeue_count INTEGER DEFAULT 0"),
     ):
         if _column in existing_columns:
             continue  # already migrated — no DDL attempted, nothing to fail
@@ -4236,8 +4249,19 @@ def pr_is_open(run: dict) -> bool:
     return bool(run.get("pr_url")) and run.get("pr_state") not in ("merged", "closed")
 
 
+# 🗂️🔁 CMX-65. What a board / doctor / `chela close` says about a `closed` run whose task is
+# still in the tracker's READY state with no requeue: nothing will ever claim it again.
+CLOSED_RUN_STALL = "closed run blocks this task: requeue or refile"
+
+
+def requeue_hint(task_id: str) -> str:
+    """The exact command that makes a closed task claimable again."""
+    return f"chela close {task_id} --requeue --reason '…'"
+
+
 def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = False,
-              remove_worktree: bool = False, by: str | None = None) -> dict:
+              remove_worktree: bool = False, by: str | None = None,
+              requeue: bool = False) -> dict:
     """🗂️✖️ Mark an abandoned or superseded run ``closed``, with a reason a human can read.
 
     Before this, the one path to ``status='closed'`` was reconcile's closed-PR branch in
@@ -4262,6 +4286,16 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
     Same compare-and-swap discipline as :func:`retry`: the write only lands if the row is
     STILL in the status this read saw, so a tick that moved it meanwhile wins, and nothing
     is changed.
+
+    🗂️🔁 ``requeue`` (CMX-65) closes the run AND marks the task re-claimable
+    (``requeue_pending``): the next tick claims a FRESH attempt on its own ``-r<N>`` branch and
+    worktree (see :func:`_spawn`) — never this run's branch, worktree or PR. The open PR is
+    always closed (a fresh attempt opens its own; two PRs for one task is the fork CMX-265
+    forbids), the tracker issue goes back to its ready state instead of Canceled, and the
+    requeue is recorded in the review history. It also accepts a run that is ALREADY
+    ``closed`` — that is how a task closed without ``--requeue`` (a stall doctor and the board
+    flag, :data:`CLOSED_RUN_STALL`) is put back in the queue. A run whose PR MERGED is
+    refused: it shipped, and follow-up work is a new task.
     """
     reason = (reason or "").strip()
     if not reason:
@@ -4271,18 +4305,30 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
         return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
     task_id = run["task_id"]
     status = run["status"]
-    if status not in CLOSABLE_STATUSES:
+    allowed = (*CLOSABLE_STATUSES, "closed") if requeue else CLOSABLE_STATUSES
+    if status not in allowed:
         return {
             "ok": False, "task_id": task_id,
-            "error": f"run is in status {status!r} — only {', '.join(CLOSABLE_STATUSES)} "
-                     "can be closed",
+            "error": f"run is in status {status!r} — only {', '.join(allowed)} can be "
+                     + ("requeued" if requeue else "closed"),
         }
     if run.get("pr_state") == "merged":
         return {
             "ok": False, "task_id": task_id,
-            "error": "its PR is MERGED — that run shipped; the next dispatcher tick marks it "
-                     "'done'. Nothing was changed.",
+            "error": ("refusing to requeue: its PR is MERGED — that work shipped, so a second "
+                      "attempt would redo it. File follow-up work as a NEW task. "
+                      if requeue else
+                      "its PR is MERGED — that run shipped; the next dispatcher tick marks it "
+                      "'done'. ") + "Nothing was changed.",
         }
+    if requeue and status == "closed" and run.get("requeue_pending"):
+        return {
+            "ok": False, "task_id": task_id,
+            "error": "it is already requeued — the next dispatcher tick claims a fresh "
+                     "attempt. Nothing was changed.",
+        }
+    if requeue:
+        close_pr = True                  # never leave the old PR open behind a fresh attempt
 
     live_wid, refusal = _close_liveness(run)
     if refusal and not force:
@@ -4293,8 +4339,13 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
         }
 
     reviews = reviews_of(run)
-    entry = {"round": len(reviews) + 1, "at": _now(), "verdict": "closed", "body": reason,
+    entry = {"round": len(reviews) + 1, "at": _now(),
+             "verdict": "requeued" if requeue else "closed", "body": reason,
              "from_status": status}
+    if requeue:
+        # The closed attempt's identity, kept in the history: the row's own branch/PR
+        # columns are reset when the fresh attempt is claimed.
+        entry.update({"branch_name": run.get("branch_name"), "pr_url": run.get("pr_url")})
     if by:
         entry["by"] = by
     reviews.append(entry)
@@ -4302,8 +4353,10 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
     with _db() as conn:
         cur = conn.execute(
             "UPDATE runs SET status='closed', close_reason=?, review_history=?, "
-            "ended_at=COALESCE(ended_at, ?) WHERE task_id=? AND status=?",
-            (reason, json.dumps(reviews), _now(), task_id, status),
+            "ended_at=COALESCE(ended_at, ?), "
+            "requeue_pending=?, requeue_count=COALESCE(requeue_count, 0) + ? "
+            "WHERE task_id=? AND status=?",
+            (reason, json.dumps(reviews), _now(), int(requeue), int(requeue), task_id, status),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -4354,20 +4407,22 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
         except Exception as e:  # noqa: BLE001 — the close already landed; report, never raise
             worktree_detail = f"{type(e).__name__}: {e}"
 
-    tracker_outcome = _tracker_close(run, reason)
+    tracker_outcome = _tracker_requeue(run) if requeue else _tracker_close(run, reason)
 
     label = run.get("branch_name") or task_id
+    verb = "closed & requeued" if requeue else "closed"
     event_log.append(
         "run_closed",
-        f"🗂️✖️ {label} closed ({status} → closed) — {reason}",
+        f"🗂️✖️ {label} {verb} ({status} → closed) — {reason}",
         payload={"task_id": task_id, "branch_name": run.get("branch_name"),
                  "pr_url": run.get("pr_url"), "from_status": status, "reason": reason,
                  "forced": bool(force and refusal), "pr_closed": pr_closed,
-                 "worktree_removed": worktree_removed, "by": by},
+                 "worktree_removed": worktree_removed, "by": by, "requeued": requeue},
     )
-    log.info("close: %s (%s) → closed — %s", task_id, status, reason)
+    log.info("close: %s (%s) → %s — %s", task_id, status, verb, reason)
     return {
         "ok": True, "task_id": task_id, "status": "closed", "from_status": status,
+        "requeued": requeue, "requeue_hint": requeue_hint(task_id),
         "reason": reason, "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
         "pr_open": pr_open, "pr_closed": pr_closed,
         "comment_posted": comment_posted, "comment_detail": comment_detail,
@@ -5973,16 +6028,28 @@ def tick(workflow_path: str | Path) -> dict:
         # NOT sufficient — see _claim_order. Skipped entirely when every slot is busy, OR
         # when the disk budget above refused the claim: there is nothing to claim, and a
         # network fetch to learn that is a waste either way.
-        queue = (_claim_order(wf, source, open_tasks, _died_run_ids(conn, str(wf.path)))
+        queue = (_claim_order(wf, source, open_tasks,
+                              _died_run_ids(conn, str(wf.path))
+                              | _requeued_run_ids(conn, str(wf.path)))
                  if (active < max_concurrent and not over_budget) else [])
 
         for task in queue:
             if active >= max_concurrent:
                 break
             existing = conn.execute(
-                "SELECT status, attempt, pr_state FROM runs WHERE task_id=?", (task.id,)
+                "SELECT status, attempt, pr_state, requeue_pending FROM runs WHERE task_id=?",
+                (task.id,),
             ).fetchone()
-            if existing:
+            # 🗂️🔁 CMX-65: the ONE `closed` row a claim may take — a human ran
+            # `chela close --requeue`. It gets a FRESH attempt (attempt 1, its own
+            # `-r<N>` branch and worktree, see `_spawn`), never the closed run's.
+            requeue = bool(existing and existing["status"] == "closed"
+                           and existing["requeue_pending"])
+            if existing and requeue:
+                if existing["pr_state"] == "merged":
+                    continue                   # it shipped after all — never a 2nd run
+                attempt = 1
+            elif existing:
                 # Fresh tasks only: anything already in flight (claimed/running), parked in
                 # review (awaiting_review / changes_requested / needs_human — each of which
                 # already owns a branch, a worktree and a PR), or already shipped (done) is
@@ -6005,7 +6072,9 @@ def tick(workflow_path: str | Path) -> dict:
                 attempt = 1
 
             try:
-                spawned = _spawn(wf, task, attempt, conn)
+                # `requeue` only when set: a plain claim keeps `_spawn`'s 4-arg call shape.
+                spawned = (_spawn(wf, task, attempt, conn, requeue=True) if requeue
+                           else _spawn(wf, task, attempt, conn))
             except Exception as e:
                 log.exception("Dispatch failed for task %s", task.id)
                 conn.execute(
@@ -6016,6 +6085,11 @@ def tick(workflow_path: str | Path) -> dict:
                          brief=excluded.brief""",
                     (task.id, str(wf.path), task.title, attempt, str(e), _now(), _task_brief(task)),
                 )
+                if requeue:
+                    # The requeued attempt failed before it owned anything: drop the CLOSED
+                    # run's branch/worktree/PR off the row too, so its retry forks a fresh
+                    # `-r<N>` again instead of "keeping the branch its first attempt took".
+                    _clear_closed_attempt(conn, task.id, _REQUEUE_KEEP)
                 conn.commit()
                 continue
             if spawned:
@@ -6028,6 +6102,20 @@ def tick(workflow_path: str | Path) -> dict:
             summary["tracker_transitions"] += _sync_tracker_states(conn, wf, source)
 
     return summary
+
+
+def _requeued_run_ids(conn: sqlite3.Connection, workflow_path: str) -> frozenset[str]:
+    """🗂️🔁 CMX-65 — this workflow's ``closed`` runs a human requeued (``chela close
+    --requeue``). Handed to the claim alongside :func:`_died_run_ids` for the same reason: a
+    tracker issue chela itself moved to In Progress / In Review must not have to be dragged
+    back to the ready state by hand before the requeued task can be claimed again."""
+    return frozenset(
+        r["task_id"] for r in conn.execute(
+            "SELECT task_id FROM runs WHERE workflow_path=? AND status='closed' "
+            "AND requeue_pending=1",
+            (workflow_path,),
+        ).fetchall()
+    )
 
 
 def _died_run_ids(conn: sqlite3.Connection, workflow_path: str) -> frozenset[str]:
@@ -6127,6 +6215,65 @@ def _tracker_close(run: dict, reason: str) -> str | None:
         except sqlite3.Error:
             log.warning("close: could not record the tracker edge for %s", run["task_id"])
     return outcome
+
+
+def _tracker_requeue(run: dict) -> str | None:
+    """🗂️🔁 CMX-65 — ``chela close --requeue`` → the tracker: back to its READY state
+    (``source.requeue_task`` — Linear), so the issue reads as waiting for a claim rather than
+    Canceled. The outcome, or None for a tracker with no such write (markdown, gh_issues:
+    their task is still open, which is all a claim needs). Never raises."""
+    wf_path = run.get("workflow_path")
+    if not wf_path:
+        return None
+    try:
+        wf = load_workflow(Path(wf_path))
+        requeue = getattr(get_source(wf), "requeue_task", None)
+        if requeue is None:
+            return None
+        outcome = requeue(run["task_id"])
+    except Exception:  # noqa: BLE001 — a projection; the requeue already landed
+        log.exception("close: could not move %s back to ready in the tracker",
+                      run.get("task_id"))
+        return "failed"
+    try:
+        with _db() as conn:
+            # The fresh claim writes In Progress again — it must not read as already done.
+            conn.execute("UPDATE runs SET tracker_edge=NULL WHERE task_id=?", (run["task_id"],))
+    except sqlite3.Error:
+        log.warning("close: could not reset the tracker edge for %s", run["task_id"])
+    return outcome
+
+
+def closed_run_stalls(runs: list[dict], ready_ids) -> list[dict]:
+    """🗂️🔁 CMX-65 — the ``closed`` runs (no requeue pending) whose task is STILL in the
+    tracker's ready state. ``closed`` is in :data:`NOT_CLAIMABLE`, so such a task is never
+    claimed again — and before CMX-65 it sat in Todo with no run and no signal anywhere
+    (CMX-33: ~11 hours, its dependants stalled with it). Pure: ``ready_ids`` is whatever
+    :func:`ready_task_ids` read for the run's workflow."""
+    ready = set(ready_ids or ())
+    return [
+        {"task_id": r.get("task_id"), "title": r.get("title"),
+         "workflow_path": r.get("workflow_path"), "branch_name": r.get("branch_name"),
+         "pr_url": r.get("pr_url"), "close_reason": r.get("close_reason"),
+         "hint": requeue_hint(r.get("task_id") or "")}
+        for r in runs
+        if r.get("status") == "closed" and not r.get("requeue_pending")
+        and r.get("task_id") in ready
+    ]
+
+
+def ready_task_ids(source, open_tasks: list[Task] | None = None) -> set[str] | None:
+    """The ids of ``source``'s tasks in a READY state — what a claim would draw from. A
+    tracker with states narrows its open set (``claimable`` — Linear: Todo, not Backlog or In
+    Progress); one without (markdown, gh_issues) has every open task ready. None when the
+    read failed: "could not read" is never "nothing is ready"."""
+    tasks = source.list_open_tasks() if open_tasks is None else open_tasks
+    if getattr(source, "read_failed", False):
+        return None
+    claimable = getattr(source, "claimable", None)
+    if claimable is not None:
+        tasks, _blockers_done = claimable(tasks)
+    return {t.id for t in tasks}
 
 
 def _max_existing_task_number(repo_path: Path, project_key: str) -> int:
@@ -6241,7 +6388,43 @@ def rework_cap_reached(row) -> bool:
     return (row["rework_count"] or 0) >= effective_rework_cap(row)
 
 
-def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) -> bool:
+# 🗂️🔁 CMX-65. The columns a requeued claim KEEPS from the closed run's row: the task's own
+# identity and brief, the review history (it carries the close + the requeue — the record of
+# what was tried), and the requeue counter itself. Every other column — branch, worktree,
+# window, PR, CI, judge, rework/retry counters, close_reason — belonged to the CLOSED attempt
+# and is reset to its column default, so nothing of it leaks into the fresh one (a stale
+# `pr_url` here would point the new attempt's review at the old, closed PR).
+_REQUEUE_KEEP = frozenset({
+    "task_id", "workflow_path", "title", "status", "attempt", "started_at", "task_number",
+    "brief", "risk", "risk_reason", "tracker_url", "review_history", "requeue_count",
+    "last_error",
+})
+
+
+def _clear_closed_attempt(conn: sqlite3.Connection, task_id: str, keep: frozenset[str]) -> None:
+    """Reset every ``runs`` column NOT in ``keep`` to its schema default (NULL when it has
+    none). Enumerated from ``PRAGMA table_info``, not hand-listed: a column added after this
+    was written is reset too, instead of silently carrying the closed attempt's value."""
+    sets = [
+        f"{name}={default if default is not None else 'NULL'}"
+        for _cid, name, _type, _notnull, default, _pk in conn.execute("PRAGMA table_info(runs)")
+        if name not in keep
+    ]
+    if sets:
+        conn.execute(f"UPDATE runs SET {', '.join(sets)} WHERE task_id=?", (task_id,))
+
+
+def requeued_branch(stem: str, requeue_count: int) -> str:
+    """The branch stem a requeued attempt takes: ``cmx-33`` → ``cmx-33-r2`` after the first
+    requeue, ``-r3`` after the second. Never the closed run's own name."""
+    return f"{stem}-r{requeue_count + 1}" if requeue_count else stem
+
+
+def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection, *,
+           requeue: bool = False) -> bool:
+    """Claim ``task`` and launch its agent. ``requeue`` (CMX-65): the row is a ``closed`` run
+    a human requeued — the attempt gets a NEW branch and worktree (``-r<N>``), never the
+    closed run's, and every other per-attempt column of that run is reset."""
     repo_path = wf.path.parent
     base_branch = wf.get("workspace", "base_branch", default="master")
     project_key = wf.project_key
@@ -6263,8 +6446,12 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
     # mint a fresh one scoped per workflow_path. task_id is the stable identity;
     # task_number is an additive display layer.
     existing = conn.execute(
-        "SELECT task_number FROM runs WHERE task_id=?", (task.id,)
+        "SELECT task_number, branch_name, requeue_count FROM runs WHERE task_id=?", (task.id,)
     ).fetchone()
+    requeue_count = (existing["requeue_count"] or 0) if existing else 0
+    # The branch an earlier attempt of THIS run took — a retry keeps it. A requeue never
+    # does: that branch belongs to the closed run (and to its closed PR).
+    prior_branch = None if requeue else (existing["branch_name"] if existing else None)
     if task.task_number is not None:
         # 📐🔗 CMX-432: a tracker with its own numbering (Linear's `CMX-12` → 12) — the
         # number is the tracker's, not minted here.
@@ -6282,15 +6469,20 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
         # 📐🔗 CMX-432: the tracker's own branch name (Linear's `cmx-12-tighten-top-row`).
         # A retry keeps the branch its first attempt took; a fresh claim never reuses a
         # name the remote already has — it takes `-2`, `-3`, ….
-        prior = conn.execute(
-            "SELECT branch_name FROM runs WHERE task_id=?", (task.id,)
-        ).fetchone()
-        branch = (prior["branch_name"] if prior and prior["branch_name"]
-                  else _unused_remote_branch(repo_path, task.branch))
+        branch = prior_branch or _unused_remote_branch(
+            repo_path, requeued_branch(task.branch, requeue_count))
+    elif requeue_count:
+        # 🗂️🔁 CMX-65: a requeued task's attempts live on `-r<N>`, never the closed run's.
+        branch = prior_branch or _unused_remote_branch(
+            repo_path, requeued_branch(f"{project_key.lower()}-{task_number}", requeue_count))
     else:
         branch = f"{project_key.lower()}-{task_number}"
-    worktree, created = ensure_worktree(repo_path, task.id, base_branch, project_key, task_number,
-                                        root, branch=branch)
+    worktree, created = ensure_worktree(
+        repo_path, task.id, base_branch, project_key, task_number, root, branch=branch,
+        # The closed run's worktree is KEPT (`chela close` never removes it by default) and
+        # lives at `<root>/<task_id>` — a requeued attempt must not land on top of it.
+        name=requeued_branch(task.id, requeue_count),
+    )
     window_name = branch
     hook_vars = _prompt_vars(wf, task, str(worktree), branch, base_branch, task_number)
 
@@ -6312,6 +6504,9 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) 
         (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt,
          task_number, _task_brief(task), run_risk(task.risk), task.risk_reason, task.url),
     )
+    if requeue:
+        _clear_closed_attempt(conn, task.id,
+                              _REQUEUE_KEEP | {"window_name", "worktree_path", "branch_name"})
     if task.risk_reason.startswith("inferred"):
         # ⚖️🎚️ CMX-405: the tracker gave no level, so the BOUNDARIES fallback chose one —
         # said out loud, so an orchestrator who disagrees knows to mark the bullet.
