@@ -298,15 +298,16 @@ def test_missing_pending_entry_for_source_id_is_suppressed_as_unknown_skill():
     assert user_texts[0].text == "Loaded skill: unknown"
 
 
-def test_isMeta_without_source_id_relays_in_full():
-    # isMeta alone (no sourceToolUseID) is the shape of a cross-session peer
-    # notification, not a skill body — it must relay in full. Guards against
-    # a future refactor collapsing the gate to ``if data.get("isMeta"):``
-    # alone, which would silently swallow every peer message too.
+def test_isMeta_peer_message_relays_in_full():
+    # A cross-session peer message is isMeta with ``origin.kind == "peer"`` — the
+    # ONE meta kind that is conversation, so it must relay in full. Guards against
+    # the CMX-36 meta filter collapsing to ``if data.get("isMeta"):`` alone, which
+    # would silently swallow every peer message too.
     entries = [
         {
             "type": "user",
             "isMeta": True,
+            "origin": {"kind": "peer", "from": "uds:/run/peer.sock"},
             "timestamp": "t",
             "message": {"content": [{"type": "text", "text": "peer notice: hello"}]},
         }
@@ -336,16 +337,15 @@ def test_non_meta_source_id_is_relayed_normally_not_swallowed():
 
 def test_source_id_resolving_to_non_skill_pending_entry_falls_through():
     # A sourceToolUseID whose pending entry resolves to some OTHER tool (not
-    # "Skill") must fall through to ordinary user-text handling, not be
-    # swallowed as if it were a skill body.
+    # "Skill") must fall through, not be reported as a loaded skill. It is still
+    # isMeta harness content, so (CMX-36) its text never relays as a user turn.
     entries = [
         _bash_tool_use_entry("tu_6"),
         _skill_body_entry("tu_6", "hello from a non-skill source"),
     ]
     events, _ = parse_entries(entries)
     user_texts = [m for m in events if m.role == "user" and m.content_type == "text"]
-    assert len(user_texts) == 1
-    assert user_texts[0].text == "hello from a non-skill source"
+    assert user_texts == []
 
 
 def test_skill_tool_result_still_carries_its_own_short_text():

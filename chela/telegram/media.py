@@ -30,6 +30,12 @@ log = logging.getLogger(__name__)
 # cannot be fetched and is rejected before we attempt the download.
 MAX_FILE_BYTES = 20 * 1024 * 1024
 
+# The line :func:`receive_photo` delivers ahead of a downloaded photo's path. Claude
+# Code turns that path into an attachment, so the agent's transcript records the turn
+# as ``"<caption>\n\n📎 image:"`` + an ``image`` block — and the outbound parser keys
+# on this marker to never echo a photo back into the topic it came from (CMX-36).
+INBOUND_IMAGE_MARKER = "📎 image:"
+
 # (chat_id, thread_id) -> window_id | None — the router's chat/topic gate.
 Resolve = Callable[[object, object], "str | None"]
 # (window_id, text) -> ok — the tmux sender (chela.messenger.send_tmux).
@@ -148,7 +154,8 @@ async def receive_photo(
     if saved is None:
         return
     caption = (getattr(msg, "caption", None) or "").strip()
-    text = f"{caption}\n\n📎 image: {saved}" if caption else f"📎 image: {saved}"
+    line = f"{INBOUND_IMAGE_MARKER} {saved}"
+    text = f"{caption}\n\n{line}" if caption else line
     if deliver(window_id, text):
         await _reply(msg, f"📎 Image sent to the agent: {saved.name}")
     else:
