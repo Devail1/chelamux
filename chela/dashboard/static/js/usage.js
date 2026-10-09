@@ -13,6 +13,8 @@
 //                                 UNKNOWN (missing or stale) and renders so,
 //                                 never as an empty 0% bar.
 //   windows.{30m,today}.rows      one row per transcript, heaviest first.
+//   roots                         the transcript roots scanned — shown read-only;
+//                                 they are a config setting, not editable here.
 //
 // The "Cost | Usage" toggle lives here too: refreshCostTab() is what the tab
 // rail calls, and it refreshes whichever view is showing.
@@ -184,12 +186,18 @@ function renderUsageTable(rows) {
     </table></div>`;
 }
 
-function _renderRoots(roots) {
-    const inp = $('#usage-roots');
-    if (!inp || !roots) return;
-    if (document.activeElement !== inp) inp.value = (roots.extra || []).join('\n');
-    const note = $('#usage-roots-scanned');
-    if (note) note.textContent = 'Scanning: ' + ((roots.scanned || []).join(', ') || 'nothing');
+const ROOT_SOURCES = { env: 'CHELA_USAGE_EXTRA_ROOTS', config: '~/.chela/config.json', default: 'default' };
+
+// The roots this report scanned — read-only: they are a config setting, never written
+// from here.
+function renderRoots(roots) {
+    const host = $('#usage-roots');
+    if (!host) return;
+    if (!roots) { host.innerHTML = ''; return; }
+    const extra = (roots.extra || []).join(', ') || 'none';
+    const src = ROOT_SOURCES[roots.source] || roots.source || '';
+    host.innerHTML = `<dt>Extra roots${src ? ` (${escHtml(src)})` : ''}</dt><dd>${escHtml(extra)}</dd>
+        <dt>Scanning</dt><dd>${escHtml((roots.scanned || []).join(', ') || 'nothing')}</dd>`;
 }
 
 async function refreshUsage() {
@@ -197,44 +205,30 @@ async function refreshUsage() {
     let payload;
     try {
         payload = await api('/api/usage');
+        if (!payload || typeof payload !== 'object' || payload.error || !payload.limits) {
+            throw new Error((payload && payload.error) || 'bad /api/usage payload');
+        }
     } catch (e) {
+        // Failed (network, a non-JSON 5xx, a JSON {error}): the limit bars go UNKNOWN —
+        // never the previous payload's %, never 0% — and the stale rows are dropped so
+        // a window switch cannot bring them back.
+        _last = null;
         const host = $('#usage-table');
         if (host) host.innerHTML = '<div class="side-empty">Usage data unavailable.</div>';
         renderLimits(null);
+        renderRoots(null);
         return;
     }
-    _last = (payload && typeof payload === 'object') ? payload : {};
+    _last = payload;
     renderLimits(_last.limits);
     renderUsageTable(_rowsFor(_last));
-    _renderRoots(_last.roots);
-}
-
-async function saveUsageRoots() {
-    const inp = $('#usage-roots');
-    const msg = $('#usage-roots-msg');
-    if (!inp) return;
-    let res;
-    try {
-        res = await api('/api/usage/roots', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ roots: inp.value }),
-        });
-    } catch (e) {
-        res = null;
-    }
-    if (!res || !res.ok) {
-        if (msg) { msg.className = 's-savemsg err'; msg.textContent = (res && res.error) || 'Save failed'; }
-        return;
-    }
-    if (msg) { msg.className = 's-savemsg ok'; msg.textContent = 'Saved'; }
-    await refreshUsage();
+    renderRoots(_last.roots);
 }
 
 window.chela = window.chela || {};
-Object.assign(window.chela, { setCostView, setUsageWindow, saveUsageRoots });
+Object.assign(window.chela, { setCostView, setUsageWindow });
 
 export {
-    fmtTokens, refreshCostTab, refreshUsage, renderLimitBar, renderLimits, renderUsageTable,
-    saveUsageRoots, setCostView, setUsageWindow, sparkline,
+    fmtTokens, refreshCostTab, refreshUsage, renderLimitBar, renderLimits, renderRoots,
+    renderUsageTable, setCostView, setUsageWindow, sparkline,
 };

@@ -250,31 +250,38 @@ def test_normalize_roots_rejects_relative():
         usage.normalize_roots(["relative/dir"])
 
 
-def test_api_usage_and_roots(tmp_path, monkeypatch):
-    root = tmp_path / "projects"
-    extra = tmp_path / "win" / "projects"
+def _live_transcripts(tmp_path):
+    """The default root holds a healthy session; a Windows-side root holds the 10-08 bot."""
+    root, win = tmp_path / "projects", tmp_path / "win"
     _write(root, "p/s.jsonl", _healthy_lines(n=3, start=int(time.time()) - 300))
-    _write(extra, "q/bot.jsonl", _bot_lines(n=12, start=int(time.time()) - 900))
-    for p in list(root.rglob("*.jsonl")) + list(extra.rglob("*.jsonl")):
+    _write(win / "u1" / "projects", "q/bot.jsonl", _bot_lines(n=12, start=int(time.time()) - 900))
+    for p in tmp_path.rglob("*.jsonl"):
         os.utime(p, None)
+    return root, win
+
+
+def test_api_usage_reads_roots_from_config_and_has_no_write_route(tmp_path, monkeypatch):
+    # The extra roots are a plain config setting (CMX-38 scope cut): /api/usage reads them
+    # from ~/.chela/config.json and echoes them read-only; there is no route that writes them.
+    from chela import userconfig
+    root, win = _live_transcripts(tmp_path)
+    monkeypatch.delenv(usage.EXTRA_ROOTS_ENV, raising=False)
     monkeypatch.setattr(usage, "default_root", lambda: root)
     monkeypatch.setattr(usage, "CONTEXT_CACHE_DIR", tmp_path / "ctx")
     monkeypatch.setattr(dash, "_usage_window_names", lambda: {})
+    userconfig.set_(usage.EXTRA_ROOTS_KEY, [str(win / "*" / "projects")])
     client = dash.app.test_client()
-
-    r = client.post("/api/usage/roots", json={"roots": ["not/absolute"]})
-    assert r.status_code == 400
-    r = client.post("/api/usage/roots", json={"roots": [str(tmp_path / "w*" / "projects")]})
-    assert r.status_code == 200 and r.get_json()["extra"] == [str(tmp_path / "w*" / "projects")]
 
     body = client.get("/api/usage").get_json()
     rows = body["windows"]["30m"]["rows"]
     assert rows[0]["cache_broken"] is True and rows[0]["label"].startswith("open-mmo")
+    assert body["roots"]["extra"] == [str(win / "*" / "projects")]
+    assert body["roots"]["source"] == "config"
+    assert body["roots"]["scanned"] == [str(root), str(win / "u1" / "projects")]
     assert body["limits"]["five_hour"]["used_pct"] is None
 
-    client.post("/api/usage/roots", json={"roots": []})
-    body = client.get("/api/usage").get_json()
-    assert all(not r["cache_broken"] for r in body["windows"]["30m"]["rows"])
+    assert client.post("/api/usage/roots", json={"roots": []}).status_code in (404, 405)
+    assert userconfig.get(usage.EXTRA_ROOTS_KEY) == [str(win / "*" / "projects")]
 
 
 # ---------------------------------------------------------------------------
@@ -585,42 +592,127 @@ def test_report_cache_is_keyed_on_the_scanned_roots(tmp_path, monkeypatch):
     (None, "DEFAULT"),       # never set -> the default /mnt/c root
     ([], []),                # explicitly empty list -> scan nothing extra
     ("", []),                # an empty string (hand-edited config) -> nothing extra
+    ("[]", []),              # the JSON spelling of the same
     (["/x/*"], ["/x/*"]),
     ([" ", "/y"], ["/y"]),
+    ("/a, /b", ["/a", "/b"]),
+    (["relative"], "DEFAULT"),  # invalid -> treated as absent, like any dashboard_setting
 ])
 def test_extra_roots_empty_is_none_unset_is_default(monkeypatch, stored, expected):
+    import json as _json
+
     from chela import userconfig
-    monkeypatch.setattr(userconfig, "get", lambda k, *a, **kw: stored if k == usage.EXTRA_ROOTS_KEY else None)
+    monkeypatch.delenv(usage.EXTRA_ROOTS_ENV, raising=False)
+    if stored is not None:
+        # Written straight to the file: userconfig.set_ drops "", and a hand edit must not.
+        userconfig._PATH.parent.mkdir(parents=True, exist_ok=True)
+        userconfig._PATH.write_text(_json.dumps({usage.EXTRA_ROOTS_KEY: stored}))
     want = list(usage.DEFAULT_EXTRA_ROOTS) if expected == "DEFAULT" else expected
     assert usage.extra_roots() == want
+    assert usage.extra_roots_setting()[1] == ("default" if expected == "DEFAULT" else "config")
 
 
-def test_api_roots_empty_scans_no_extra_root_and_null_restores_default(tmp_path, monkeypatch):
-    # End to end through the route the gear menu posts to, with the DEFAULT root pointed
-    # at a real directory holding the 10-08 bot — so "fell back to the default" is
-    # visible as rows, and no _REPORT.clear() hides a stale cache between saves.
-    root, win = tmp_path / "projects", tmp_path / "win"
-    _write(root, "p/s.jsonl", _healthy_lines(n=3, start=int(time.time()) - 300))
-    _write(win / "u1" / "projects", "q/bot.jsonl", _bot_lines(n=12, start=int(time.time()) - 900))
-    for p in tmp_path.rglob("*.jsonl"):
-        os.utime(p, None)
+@pytest.mark.parametrize("env, stored, expected, source", [
+    ("/e/*", ["/c"], ["/e/*"], "env"),         # env beats config.json
+    ("[]", ["/c"], [], "env"),                 # env "[]" turns the extra roots off
+    ("", ["/c"], ["/c"], "config"),            # an empty env var is UNSET, as for every knob
+    ("rel/x", ["/c"], ["/c"], "config"),       # a bad env value falls through
+    (None, None, "DEFAULT", "default"),
+])
+def test_extra_roots_env_precedence(monkeypatch, env, stored, expected, source):
+    from chela import userconfig
+    if env is None:
+        monkeypatch.delenv(usage.EXTRA_ROOTS_ENV, raising=False)
+    else:
+        monkeypatch.setenv(usage.EXTRA_ROOTS_ENV, env)
+    if stored is not None:
+        userconfig.set_(usage.EXTRA_ROOTS_KEY, stored)
+    want = list(usage.DEFAULT_EXTRA_ROOTS) if expected == "DEFAULT" else expected
+    assert usage.extra_roots_setting() == (want, source)
+
+
+def test_api_empty_roots_setting_scans_no_extra_root_and_unset_restores_default(tmp_path, monkeypatch):
+    # End to end through the route the Usage view calls, with the DEFAULT extra root
+    # pointed at a real directory holding the 10-08 bot — so "fell back to the default"
+    # is visible as a row — and no _REPORT.clear() between config changes: a change of
+    # roots inside the cache TTL must rescan (the cache is keyed on the scanned roots).
+    import json as _json
+
+    from chela import userconfig
+    root, win = _live_transcripts(tmp_path)
+    monkeypatch.delenv(usage.EXTRA_ROOTS_ENV, raising=False)
     monkeypatch.setattr(usage, "default_root", lambda: root)
     monkeypatch.setattr(usage, "DEFAULT_EXTRA_ROOTS", (str(win / "*" / "projects"),))
     monkeypatch.setattr(usage, "CONTEXT_CACHE_DIR", tmp_path / "ctx")
     monkeypatch.setattr(dash, "_usage_window_names", lambda: {})
     client = dash.app.test_client()
 
-    def broken():
-        return [r for r in client.get("/api/usage").get_json()["windows"]["30m"]["rows"] if r["cache_broken"]]
+    def get():
+        body = client.get("/api/usage").get_json()
+        return [r for r in body["windows"]["30m"]["rows"] if r["cache_broken"]], body["roots"]
 
-    assert client.post("/api/usage/roots", json={"roots": None}).get_json()["extra"] == list(usage.DEFAULT_EXTRA_ROOTS)
-    assert len(broken()) == 1                      # unset -> default root scanned
-    for empty in ([], ""):
-        r = client.post("/api/usage/roots", json={"roots": empty})
-        assert r.status_code == 200 and r.get_json()["extra"] == []
-        assert broken() == []                      # saved empty -> no extra root, at once
-    client.post("/api/usage/roots", json={"roots": None})
-    assert len(broken()) == 1                      # null restores the default
+    broken, roots = get()
+    assert len(broken) == 1 and roots["source"] == "default"      # unset -> default scanned
+    assert roots["scanned"] == [str(root), str(win / "u1" / "projects")]
+    userconfig._PATH.parent.mkdir(parents=True, exist_ok=True)
+    for empty in ([], "", "[]"):
+        userconfig._PATH.write_text(_json.dumps({usage.EXTRA_ROOTS_KEY: empty}))
+        broken, roots = get()
+        assert broken == [], f"{empty!r} still scanned an extra root"
+        assert roots["extra"] == [] and roots["scanned"] == [str(root)]
+    userconfig._PATH.write_text("{}")
+    broken, roots = get()
+    assert len(broken) == 1                                        # unset again -> default
+
+
+def test_api_env_empty_roots_scans_no_extra_root(tmp_path, monkeypatch):
+    root, win = _live_transcripts(tmp_path)
+    monkeypatch.setattr(usage, "default_root", lambda: root)
+    monkeypatch.setattr(usage, "DEFAULT_EXTRA_ROOTS", (str(win / "*" / "projects"),))
+    monkeypatch.setattr(usage, "CONTEXT_CACHE_DIR", tmp_path / "ctx")
+    monkeypatch.setattr(dash, "_usage_window_names", lambda: {})
+    monkeypatch.setenv(usage.EXTRA_ROOTS_ENV, "[]")
+    body = dash.app.test_client().get("/api/usage").get_json()
+    assert body["roots"] == {"default": str(root), "extra": [], "source": "env", "scanned": [str(root)]}
+    assert all(not r["cache_broken"] for r in body["windows"]["30m"]["rows"])
+
+
+def test_api_usage_labels_by_window_name_through_live_discovery(tmp_path, monkeypatch):
+    # Guard 1 on the production path, nothing in app.py stubbed: discovery's live
+    # windows + context's per-window session id -> the row's label is the window name.
+    sid = "abcdef01-1234-5678-9abc-def012345678"
+    root = tmp_path / "projects"
+    _write(root, f"-work-chelamux/{sid}.jsonl", _healthy_lines(n=3, start=int(time.time()) - 300))
+    _write(root, "-work-other/99999999-0000.jsonl", [_line(int(time.time()) - 60, "o1", "o1", cwd="/x/other")])
+    for p in root.rglob("*.jsonl"):
+        os.utime(p, None)
+    monkeypatch.setattr(usage, "default_root", lambda: root)
+    monkeypatch.setenv(usage.EXTRA_ROOTS_ENV, "[]")
+    monkeypatch.setattr(usage, "CONTEXT_CACHE_DIR", tmp_path / "ctx")
+    monkeypatch.setattr(dash.discovery, "get_all_windows", lambda: {"review-west": "@7", "idle": "@8"})
+    monkeypatch.setattr(dash.context, "window_session", {"@7": sid, "@8": None}.get)
+    rows = {r["session_id"]: r for r in dash.app.test_client().get("/api/usage").get_json()["windows"]["today"]["rows"]}
+    assert rows[sid]["label"] == "review-west" and rows[sid]["chela_window"] == "review-west"
+    assert rows["99999999-0000"]["label"] == "other · 99999999"
+
+
+def test_api_usage_limit_reset_since_newest_sample_reads_unknown(tmp_path, monkeypatch):
+    # Guard 2 through /api/usage (history on, as production): a FRESH sample whose 5h
+    # window has already reset must not show its 97% — and the 7d bar, same file, must.
+    now = time.time()
+    ctx = tmp_path / "ctx"
+    _cache(ctx, "a.json", now - 120, five=(97, int(now) - 30), seven=(30, int(now) + 86400))
+    _snapshot_db(tmp_path, monkeypatch, [(now - 1800, 90.0, int(now) - 30, 28.0, int(now) + 86400)])
+    monkeypatch.setattr(usage, "CONTEXT_CACHE_DIR", ctx)
+    monkeypatch.setattr(usage, "default_root", lambda: tmp_path / "projects")
+    monkeypatch.setenv(usage.EXTRA_ROOTS_ENV, "[]")
+    monkeypatch.setattr(dash, "_usage_window_names", lambda: {})
+    lim = dash.app.test_client().get("/api/usage").get_json()["limits"]
+    five = lim["five_hour"]
+    assert five["used_pct"] is None and five["burn_pct_per_h"] is None
+    assert five["hits_100_before_reset"] is None and five["projected_pct"] is None
+    assert "reset" in five["reason"]
+    assert lim["seven_day"]["used_pct"] == 30
 
 
 # ---------------------------------------------------------------------------

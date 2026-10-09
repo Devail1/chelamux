@@ -1263,7 +1263,7 @@ function renderSettings(focus) {
             <div id="usage-pane" hidden>
             <p class="s-desc">Tokens, not dollars, read from EVERY Claude Code transcript —
             judges, subagents, dispatched agents, background sessions, and any extra root
-            below — so a session with no statusLine still shows up. Limits come from the
+            listed below — so a session with no statusLine still shows up. Limits come from the
             freshest statusLine <code>rate_limits</code>.</p>
             <div class="usage-limits" id="usage-limits"></div>
             <div class="work-toolbar">
@@ -1275,16 +1275,10 @@ function renderSettings(focus) {
                 </div>
             </div>
             <div id="usage-table"><div class="s-desc">Loading…</div></div>
-            <p class="s-desc">Extra transcript roots — one absolute path or glob per line,
-            on top of this host's own Claude Code projects dir. Empty scans none.</p>
-            <div class="s-row usage-roots-row">
-                <textarea id="usage-roots" class="s-input" rows="2" spellcheck="false"
-                          aria-label="Extra transcript roots, one absolute path or glob per line"
-                          placeholder="/mnt/c/Users/*/.claude/projects"></textarea>
-                <button class="btn-accent" onclick="chela.saveUsageRoots()">Save</button>
-            </div>
-            <div id="usage-roots-msg" class="s-savemsg" role="status"></div>
-            <p class="s-desc" id="usage-roots-scanned"></p>
+            <p class="s-desc">Transcript roots: this host's own Claude Code projects dir plus
+            the extra roots set by <code>usage_extra_roots</code> in <code>~/.chela/config.json</code>
+            or <code>CHELA_USAGE_EXTRA_ROOTS</code> (absolute globs; <code>[]</code> scans none).</p>
+            <dl class="usage-roots" id="usage-roots"></dl>
             </div>
         </section>
         </div>

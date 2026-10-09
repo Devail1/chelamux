@@ -3568,34 +3568,15 @@ def _usage_window_names() -> dict[str, str]:
 def api_usage():
     """The Cost tab's Usage view (CMX-38): 5h/7d limit bars + burn rate, and the top
     token consumers over the last 30 min and today (UTC) across EVERY Claude Code
-    transcript — not only the chela windows that report a cost. See chela/usage.py."""
+    transcript — not only the chela windows that report a cost. See chela/usage.py.
+    Read-only: the extra transcript roots are a config setting (``usage_extra_roots`` /
+    ``$CHELA_USAGE_EXTRA_ROOTS``), shown here but never written from the dashboard."""
     try:
         names = _usage_window_names()
     except Exception:  # noqa: BLE001 — tmux down still leaves the transcripts readable
         log.debug("usage: window names unavailable", exc_info=True)
         names = {}
     return jsonify(usage.report(names))
-
-
-@app.route("/api/usage/roots", methods=["POST"])
-@require_auth
-def api_usage_roots():
-    """Set the extra transcript roots (absolute globs; ``null`` restores the default,
-    ``""`` or ``[]`` scans none). A relative entry is rejected 400, nothing stored."""
-    data = request.get_json(silent=True) or {}
-    raw = data.get("roots")
-    if raw is None:
-        userconfig.set_(usage.EXTRA_ROOTS_KEY, None)
-    else:
-        try:
-            roots = usage.normalize_roots(raw)
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
-        # A list, even an empty one: set_ clears only None/"", so [] is stored as an
-        # explicit "scan no extra roots" rather than falling back to the default.
-        userconfig.set_(usage.EXTRA_ROOTS_KEY, roots)
-    return jsonify({"ok": True, "extra": usage.extra_roots(),
-                    "default": list(usage.DEFAULT_EXTRA_ROOTS)})
 
 
 @app.route("/api/resources")

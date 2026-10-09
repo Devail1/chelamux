@@ -66,9 +66,11 @@ RESULT_TTL_S = 45.0
 TOP_N = 25
 SYNTHETIC_MODEL = "<synthetic>"
 
-# The userconfig key holding extra transcript roots (globs), and its default: a WSL
-# host's Windows-side Claude Code. A root that matches nothing is simply skipped.
+# The extra transcript roots (globs) setting — a config.json key / env var, read-only in
+# the Usage view — and its default: a WSL host's Windows-side Claude Code. A root that
+# matches nothing is simply skipped.
 EXTRA_ROOTS_KEY = "usage_extra_roots"
+EXTRA_ROOTS_ENV = "CHELA_USAGE_EXTRA_ROOTS"
 DEFAULT_EXTRA_ROOTS = ("/mnt/c/Users/*/.claude/projects",)
 
 LIMIT_KEYS = ("five_hour", "seven_day")
@@ -201,26 +203,51 @@ def default_root() -> Path:
     return transcripts.CLAUDE_PROJECTS_DIR
 
 
-def extra_roots() -> list[str]:
-    """The configured extra transcript roots (globs); the default when never set."""
+def _cast_roots(raw) -> list[str]:
+    """A roots setting -> a list of absolute globs: a JSON list, or one string split on
+    newlines/commas (``"[]"`` is the env spelling of "none"). Raises ValueError on a bad
+    value, which :func:`chela.config.dashboard_setting` treats as absent."""
+    if isinstance(raw, str) and raw.strip().startswith("["):
+        raw = json.loads(raw)
+    return normalize_roots(raw)
+
+
+def extra_roots_setting() -> tuple[list[str], str]:
+    """``(extra roots, source)`` — a plain config setting, resolved like every other
+    dashboard_setting knob: ``$CHELA_USAGE_EXTRA_ROOTS`` beats ``usage_extra_roots`` in
+    ``~/.chela/config.json`` beats :data:`DEFAULT_EXTRA_ROOTS`. ``source`` is ``"env"``,
+    ``"config"`` or ``"default"``.
+
+    UNSET falls back to the default (a WSL host's Windows side); an EXPLICITLY EMPTY
+    value (``[]``, or ``""`` in config.json) scans no extra root. An empty env var is
+    unset, as for every other knob — export ``"[]"`` to turn the extra roots off there.
+    """
+    from chela import config
+    v, source = config._resolve_dashboard_setting(EXTRA_ROOTS_KEY, EXTRA_ROOTS_ENV, None, _cast_roots)
+    if source == "env":
+        return v, "env"
+    if source == "dashboard":
+        return v, "config"
     try:
         from chela import userconfig
-        v = userconfig.get(EXTRA_ROOTS_KEY)
+        stored = userconfig.get(EXTRA_ROOTS_KEY)
     except Exception:  # noqa: BLE001 — a bad config must not blank the view
-        v = None
-    if v is None:
-        return list(DEFAULT_EXTRA_ROOTS)
-    if isinstance(v, list):
-        return [s for s in v if isinstance(s, str) and s.strip()]
-    return []
+        stored = None
+    # dashboard_setting skips "" as absent; here it is the explicit "none".
+    if stored == "":
+        return [], "config"
+    return list(DEFAULT_EXTRA_ROOTS), "default"
+
+
+def extra_roots() -> list[str]:
+    """The configured extra transcript roots (globs); see :func:`extra_roots_setting`."""
+    return extra_roots_setting()[0]
 
 
 def normalize_roots(raw) -> list[str]:
-    """User input (a list, or one string split on newlines/commas) -> a list of absolute
-    globs. Raises ValueError on a relative entry: a relative root would resolve against
+    """A list, or one string split on newlines/commas -> a list of absolute globs.
+    Raises ValueError on a relative entry: a relative root would resolve against
     whatever cwd the dashboard happened to start in."""
-    if raw is None:
-        return []
     if isinstance(raw, str):
         items = raw.replace(",", "\n").splitlines()
     elif isinstance(raw, list) and all(isinstance(s, str) for s in raw):
@@ -529,7 +556,11 @@ def report(window_names: dict[str, str] | None = None, now: float | None = None,
     """Limits + top consumers for the dashboard. ``window_names`` maps a chela window's
     session id to its window name, for :func:`label`."""
     now = time.time() if now is None else now
-    configured = [str(default_root())] + (extra_roots() if roots is None else roots)
+    if roots is None:
+        roots, source = extra_roots_setting()
+    else:
+        source = "argument"
+    configured = [str(default_root())] + roots
     dirs = resolve_roots(configured)
     cache_key = tuple(dirs)
     with _REPORT_LOCK:
@@ -549,7 +580,7 @@ def report(window_names: dict[str, str] | None = None, now: float | None = None,
         "generated_at": now,
         "limits": limits(now=now),
         "windows": labelled,
-        "roots": {"default": str(default_root()), "extra": extra_roots() if roots is None else roots,
+        "roots": {"default": str(default_root()), "extra": roots, "source": source,
                   "scanned": dirs},
         "thresholds": {"hit_rate": BROKEN_HIT_RATE, "min_requests": BROKEN_MIN_REQUESTS,
                        "min_tokens": BROKEN_MIN_TOKENS},
