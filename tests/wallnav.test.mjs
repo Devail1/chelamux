@@ -1360,8 +1360,9 @@ test('.gs-branch never grows past its own content — no flex-grow, no flex: 1',
 // subscribe/release round-trip — never a hardcoded paint.
 test('the header dot gains a ring iff its pane owns the decisions inbox, in lockstep with the menu row — CMX-117 E', async () => {
     const owner = '@2', other = '@1';
-    const ownerBadge = tile(owner).querySelector('.gs-dot');
-    const otherBadge = tile(other).querySelector('.gs-dot');
+    // CMX-32: the ring rides the dot's unclipped wrapper, not the dot (see 16b).
+    const ownerBadge = tile(owner).querySelector('.gs-dot-ring');
+    const otherBadge = tile(other).querySelector('.gs-dot-ring');
     const orchBtn = tile(owner).querySelector('.gs-orch-btn');
     assert.equal(ownerBadge.classList.contains('gs-dot-orch'), false, 'sanity: nobody owns the slot yet');
 
@@ -1374,6 +1375,68 @@ test('the header dot gains a ring iff its pane owns the decisions inbox, in lock
 
     await window.chela.orchestratorBtnClick(orchBtn, owner);   // release, leave state as found
     assert.equal(ownerBadge.classList.contains('gs-dot-orch'), false, 'releasing must remove the ring');
+});
+
+// 16b — CMX-32: THE ORCHESTRATOR RING STAYS VISIBLE IN EVERY STATUS STATE. The ring
+// used to be an `outline` on `.gs-dot` itself — but that dot's `done` (check) and
+// `waiting` (triangle) shapes are `clip-path`s, and a clip-path clips everything
+// outside the shape, outline included. So the ring showed only while the
+// orchestrator was working or idle, and vanished exactly when it finished or needed
+// a decision. This drives the REAL wall (subscribe through the real button, paint
+// each state through a real termTick), then mounts that tile's ACTUAL rendered
+// markup under the REAL style.css and reads the cascade back: the element wearing
+// `.gs-dot-orch` must resolve a solid outline, must contain the status dot, and
+// neither it nor any ancestor may carry a clip-path. Put the ring back on the dot
+// and `done`/`waiting` go red here.
+test('CMX-32: the orchestrator ring resolves visible, unclipped, for working, waiting, idle AND done', async (t) => {
+    const owner = '@2';
+    const agent = AGENTS[1];
+    const orchBtn = tile(owner).querySelector('.gs-orch-btn');
+    // The button TOGGLES — read its `.on` first, so a prior test that failed before
+    // releasing can't turn this subscribe into a release.
+    if (!orchBtn.classList.contains('on')) await window.chela.orchestratorBtnClick(orchBtn, owner);
+    assert.ok(orchBtn.classList.contains('on'), `sanity: ${owner} should own the decisions inbox now`);
+    const CASES = {
+        working: { session_status: 'busy' },
+        waiting: { needs_human: true },
+        idle: {},
+        done: { session_status: 'idle', pr: { url: 'https://github.com/x/y/pull/1' } },
+    };
+    const css = cssForViewport(CSS, DESKTOP);
+    try {
+        // One subtest per state, so a regression names EVERY state it breaks.
+        for (const [state, fields] of Object.entries(CASES)) await t.test(state, async () => {
+            Object.assign(agent, { session_status: undefined, pr: undefined, needs_human: undefined }, fields);
+            await terminals.termTick();
+            const dot = tile(owner).querySelector('.gs-dot');
+            assert.ok(dot.classList.contains(state), `sanity: the owner's dot should be painted "${state}"`);
+
+            const dom = new JSDOM(
+                `<!doctype html><html><head><style>${css}</style></head><body>` +
+                `<div class="panel" id="panel-terminals"><div id="term-stage">${tile(owner).outerHTML}</div></div>` +
+                '</body></html>', { pretendToBeVisual: true });
+            const w = dom.window;
+            const rings = w.document.querySelectorAll('.gs-dot-orch');
+            assert.equal(rings.length, 1, `${state}: expected exactly one element wearing the orchestrator ring`);
+            const ring = rings[0];
+            assert.ok(ring.querySelector('.gs-dot') || ring.classList.contains('gs-dot'),
+                `${state}: the ring must surround the pane's status dot`);
+            const cs = w.getComputedStyle(ring);
+            assert.match(cs.outline, /\bsolid\b/, `${state}: the ring element resolves no solid outline ("${cs.outline}")`);
+            assert.doesNotMatch(cs.outline, /\bnone\b|^0(px)?\b/, `${state}: the ring outline resolves empty ("${cs.outline}")`);
+            assert.notEqual(cs.display, 'none', `${state}: the ring element is display:none`);
+            for (let el = ring; el && el.nodeType === 1; el = el.parentElement) {
+                const clip = w.getComputedStyle(el).clipPath;
+                assert.ok(!clip || clip === 'none',
+                    `${state}: clip-path "${clip}" applies to <${el.tagName.toLowerCase()} class="${el.className}"> ` +
+                    'on the ring\'s path — it clips the outline away (CMX-32)');
+            }
+        });
+    } finally {
+        Object.assign(agent, { session_status: undefined, pr: undefined, needs_human: undefined });
+        await terminals.termTick();
+        if (orchBtn.classList.contains('on')) await window.chela.orchestratorBtnClick(orchBtn, owner);   // release
+    }
 });
 
 // 17 — WIRE-FROM-MENU: THE POPOVER CLOSES THE INSTANT THE DRAG STARTS, AND CLEANUP IS

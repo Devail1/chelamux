@@ -1270,8 +1270,10 @@ function _updateOrchBtns() {
     // CMX-119: the pane's status dot (paneHead) carries a non-hue ring while
     // it owns the decisions inbox — driven off this SAME signal as the menu
     // row above, so the ring and the row's `.on` state can never disagree.
-    document.querySelectorAll('.gs-dot[data-wid]').forEach(dot => {
-        dot.classList.toggle('gs-dot-orch', dot.getAttribute('data-wid') === owner);
+    // CMX-32: the ring goes on the dot's unclipped WRAPPER (.gs-dot-ring), not
+    // the dot — the dot's done/waiting shapes are clip-paths that clip it away.
+    document.querySelectorAll('.gs-dot-ring[data-wid]').forEach(ring => {
+        ring.classList.toggle('gs-dot-orch', ring.getAttribute('data-wid') === owner);
     });
 }
 
@@ -1348,7 +1350,9 @@ function paneHead(wid, draggable) {
     // `.term-status-dot`, which this dot also wears, so the same
     // working/waiting/idle classes paint it same as everywhere else (see the
     // .gs-dot rules in style.css). The orchestrator ring (_updateOrchBtns,
-    // below) is a SEPARATE non-hue outline on this same dot. The "⋯" trigger
+    // below) is a SEPARATE non-hue outline on the dot's `.gs-dot-ring` wrapper
+    // — never the dot itself, whose done/waiting clip-paths would clip it away
+    // (CMX-32). The "⋯" trigger
     // (lucide `more-vertical`) opens the same Wire/Share/Orchestrator/Pin menu
     // the old combined badge used to — same togglePaneOverflow, same `menu =
     // btn.nextElementSibling` contract, so the menu's rows and all their live
@@ -1356,7 +1360,7 @@ function paneHead(wid, draggable) {
     // untouched, just anchored at a plain button instead of the pill. The
     // pane № (Alt+N jump target) moved OUT of the header entirely, down to
     // the bottom bar — see _ctxBarHTML.
-    const dot = `<span class="gs-dot term-status-dot" data-status-for="${attrEsc(wid)}" data-wid="${attrEsc(wid)}" title="…"></span>`;
+    const dot = `<span class="gs-dot-ring" data-wid="${attrEsc(wid)}"><span class="gs-dot term-status-dot" data-status-for="${attrEsc(wid)}" data-wid="${attrEsc(wid)}" title="…"></span></span>`;
     // Wall redesign slice 1 (docs/wall-redesign.md): the header's state pill.
     // CMX-393: the WORD only — the SHAPE is `.gs-dot` at the head's far left,
     // and a glyph in here drew every state twice (`● ● working`). Shape + word

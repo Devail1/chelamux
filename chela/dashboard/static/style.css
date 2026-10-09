@@ -360,8 +360,15 @@ body {
 }
 /* Orchestrator ownership: a SEPARATE non-hue ring (an outline, not a box-shadow,
    so it never collides with the waiting-state glow above) — updated in lockstep
-   with the menu's Orchestrator row by _updateOrchBtns (terminals.js). */
-.gs-dot.gs-dot-orch { outline: 2px solid var(--ok-blue); outline-offset: 1px; }
+   with the menu's Orchestrator row by _updateOrchBtns (terminals.js).
+   CMX-32: the ring lives on `.gs-dot-ring`, the plain WRAPPER around `.gs-dot`,
+   never on the dot itself. The dot's `done` (check) and `waiting` (triangle)
+   shapes are `clip-path`s, and a clip-path clips everything outside the shape,
+   outline included — so a ring on the dot vanished exactly when the orchestrator
+   finished or needed a decision. The wrapper carries no clip-path in any state;
+   tests/wallnav.test.mjs (CMX-32) asserts the ring resolves for all four. */
+.gs-dot-ring { display: inline-flex; flex: 0 0 auto; border-radius: 50%; }
+.gs-dot-ring.gs-dot-orch { outline: 2px solid var(--ok-blue); outline-offset: 1px; }
 
 /* --- Wall redesign slice 1 (docs/wall-redesign.md): the header's state pill.
    Wall-only (paneHead's `draggable` gate — single mode renders none of this,
