@@ -16,12 +16,18 @@ from chela.telegram import media
 
 
 class _FakeFile:
-    """A Telegram File whose ``download_to_drive`` writes a placeholder byte."""
+    """A Telegram File whose ``download_to_drive`` writes a placeholder byte.
 
-    def __init__(self, downloads: list):
+    Records each download's timeout kwargs in ``download_timeouts`` so the file-fetch
+    leg's read timeout is as observable as getFile's (the CMX-63 timeout was on it).
+    """
+
+    def __init__(self, downloads: list, download_timeouts: list | None = None):
         self._downloads = downloads
+        self._download_timeouts = download_timeouts if download_timeouts is not None else []
 
-    async def download_to_drive(self, path, **_timeouts) -> None:
+    async def download_to_drive(self, path, **timeouts) -> None:
+        self._download_timeouts.append(timeouts)
         self._downloads.append(str(path))
         with open(path, "wb") as fh:
             fh.write(b"x")
@@ -272,13 +278,14 @@ class _ScriptedDoc:
         self.downloads: list[str] = []
         self.get_file_calls = 0
         self.timeouts: list[dict] = []
+        self.download_timeouts: list[dict] = []
 
     async def get_file(self, **timeouts):
         self.get_file_calls += 1
         self.timeouts.append(timeouts)
         if self._errors:
             raise self._errors.pop(0)
-        return _FakeFile(self.downloads)
+        return _FakeFile(self.downloads, self.download_timeouts)
 
 
 @pytest.fixture
@@ -307,6 +314,9 @@ def test_media_fetch_uses_longer_read_timeout(tmp_path, no_backoff):
     doc = _ScriptedDoc([])
     _run_doc(doc, tmp_path)
     assert doc.timeouts == [{"read_timeout": media.MEDIA_READ_TIMEOUT}]
+    # The download itself (not just getFile) gets the longer timeout: the CMX-63
+    # ReadTimeout was on the file fetch.
+    assert doc.download_timeouts == [{"read_timeout": media.MEDIA_READ_TIMEOUT}]
     assert media.MEDIA_READ_TIMEOUT > 5  # PTB's default read timeout
 
 
