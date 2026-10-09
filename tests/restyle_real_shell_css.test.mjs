@@ -37,7 +37,7 @@ const AGENTS = [
     { name: 'a-working', window_id: '@1', online: true, session_status: 'busy', cwd: '/p/x' },
     { name: 'b-waiting', window_id: '@2', online: true, session_status: 'waiting', needs_human: true, cwd: '/p/x' },
     { name: 'c-idle', window_id: '@3', online: true, session_status: 'idle', cwd: '/p/x' },
-    { name: 'd-done', window_id: '@4', online: true, session_status: 'idle', done: true, pr: { url: 'https://example.invalid/pr/1' }, cwd: '/p/x' },
+    { name: 'd-done', window_id: '@4', online: true, session_status: 'idle', done: true, pr: { url: 'https://example.invalid/pr/1', state: 'open' }, cwd: '/p/x' },
 ];
 const STATE_OF = { '@1': 'working', '@2': 'waiting', '@3': 'idle', '@4': 'done' };
 

@@ -551,7 +551,7 @@ test('non-hue cue — wall .gs-state pill: every tileState() result carries a gl
         { label: 'idle', agent: null, wants: false },
         { label: 'working', agent: { session_status: 'busy' }, wants: false },
         { label: 'needs-you (waiting)', agent: {}, wants: true },
-        { label: 'done', agent: { session_status: 'idle', pr: { url: 'https://x' } }, wants: false },
+        { label: 'done', agent: { session_status: 'idle', pr: { url: 'https://x', state: 'open' } }, wants: false },
         { label: 'unknown', agent: { claude_running: true, session_status: null }, wants: false },
     ];
     for (const c of cases) {
