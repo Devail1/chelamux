@@ -27,12 +27,22 @@
 // The tile spec's "finished/done signal" is one of those proxies: a window
 // that is not busy, not blocked on a human, and carries an open PR reads as
 // "finished — PR up, awaiting review" (the same PR the meta row's chip shows,
-// see prChip below). No new backend field.
+// see prChip below).
+//
+// CMX-41: "open" must be CONFIRMED. Claude Code keeps re-writing a session's
+// pr-link record long after that PR merged, so the record's presence alone
+// advertised dead PRs as reviewable. /api/agents now resolves `pr.state`
+// (open/merged/closed/unknown, chela/pr_status.py); only a confirmed open,
+// non-draft PR counts. A missing or "unknown" state is NOT open — fail closed.
+export function prReviewable(pr) {
+    return !!(pr && pr.url && pr.state === 'open' && !pr.draft);
+}
+
 export function isFinished(agent, wants) {
     if (!agent) return false;
     if (wants) return false;
     if (agent.session_status === 'busy') return false;
-    return !!(agent.pr && agent.pr.url);
+    return prReviewable(agent.pr);
 }
 
 // glyph + word ALWAYS carry the state — colour is decoration on top (Liav is
@@ -123,15 +133,23 @@ export function recapView(agent) {
     return { text: agent.recap, tsTitle: agent.recap_ts || '' };
 }
 
-// The PR payload chela's transcript layer emits is `{url, number, repository,
-// ts}` (chela/transcripts.py PRLink.to_dict) — there is no "state"/"status"
-// field to show, so the chip is `#<number>` (or bare "PR" if number is
-// absent), never a fabricated state word. `repository` rides along for the
-// caller's tooltip.
+// The PR payload /api/agents emits is `{url, number, repository, ts, state,
+// draft}` (chela/transcripts.py PRLink.to_dict + chela/pr_status.py). The chip
+// is `#<number>` (or bare "PR" if number is absent); `flag` (the ⚑) is earned
+// only by a confirmed open, non-draft PR (CMX-41). A merged/closed/draft PR
+// says so in the label and reads dim; an unknown state is a neutral `#N` link
+// — no flag, no state word it cannot back up. `repository` rides along for
+// the caller's tooltip.
 export function prChip(pr) {
     if (!pr || !pr.url) return null;
-    const label = pr.number != null ? ('#' + pr.number) : 'PR';
-    return { label, url: pr.url, repository: pr.repository || '' };
+    const num = pr.number != null ? ('#' + pr.number) : 'PR';
+    const state = ['open', 'merged', 'closed'].includes(pr.state) ? pr.state : 'unknown';
+    const flag = prReviewable(pr);
+    let label = num;
+    if (state === 'merged' || state === 'closed') label = num + ' ' + state;
+    else if (state === 'open' && pr.draft) label = num + ' draft';
+    return { label, url: pr.url, repository: pr.repository || '', state, flag,
+             dim: state === 'merged' || state === 'closed' || (state === 'open' && !!pr.draft) };
 }
 
 // cost_usd of exactly 0 is a REAL value, not "missing" — only `== null` hides

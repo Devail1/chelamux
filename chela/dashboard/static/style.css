@@ -474,6 +474,8 @@ body {
     color: var(--ok-sky); text-decoration: none; pointer-events: auto;
 }
 .gs-pr:hover { text-decoration: underline; }
+/* CMX-41: a merged/closed/draft PR is history, not a call to action. */
+.gs-pr.gs-pr-dim { color: var(--text-dim); font-weight: 500; }
 
 /* CMX-417: the pane's tmux window id (`@N`), leading the bar on every
    surface — small, dim, monospace, so it reads as an address rather than one

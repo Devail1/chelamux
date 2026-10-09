@@ -997,7 +997,7 @@ test("CMX-377: the header dot reaches the 'done' class for a finished pane, not 
     const badge = tile(wid).querySelector('.gs-dot');
 
     AGENTS[0].session_status = 'idle';
-    AGENTS[0].pr = { url: 'https://github.com/x/y/pull/1' };
+    AGENTS[0].pr = { url: 'https://github.com/x/y/pull/1', state: 'open' };
     await terminals.termTick();
     assert.ok(badge.classList.contains('done'),
         "a finished pane (idle + open PR, tileState's own 'done' condition) must paint the header dot 'done' — " +
@@ -1039,7 +1039,7 @@ test('CMX-377: sidebar row and pane header dot use the SAME class for each of th
         { label: 'waiting (needs you)', row: { name: 'w2', window_id: '@w2', needs_human: true },
           pane: { needs_human: true } },
         { label: 'done', row: { name: 'w3', window_id: '@w3', session_status: 'idle', done: true },
-          pane: { session_status: 'idle', pr: { url: 'https://github.com/x/y/pull/1' } } },
+          pane: { session_status: 'idle', pr: { url: 'https://github.com/x/y/pull/1', state: 'open' } } },
         { label: 'idle', row: { name: 'w4', window_id: '@w4' }, pane: {} },
     ];
 
@@ -1400,7 +1400,7 @@ test('CMX-32: the orchestrator ring resolves visible, unclipped, for working, wa
         working: { session_status: 'busy' },
         waiting: { needs_human: true },
         idle: {},
-        done: { session_status: 'idle', pr: { url: 'https://github.com/x/y/pull/1' } },
+        done: { session_status: 'idle', pr: { url: 'https://github.com/x/y/pull/1', state: 'open' } },
     };
     const css = cssForViewport(CSS, DESKTOP);
     try {

@@ -51,7 +51,7 @@ test('tileState: busy and not blocked reads as working', () => {
 });
 
 test('tileState: idle with an open PR and not busy/blocked reads as done', () => {
-    const a = agent({ session_status: 'idle', pr: { url: 'https://x/1', number: 14 } });
+    const a = agent({ session_status: 'idle', pr: { url: 'https://x/1', number: 14, state: 'open' } });
     assert.deepEqual(tileState(a, wantsHuman(a)), { glyph: '✓', word: 'done', cls: 'done' });
 });
 
@@ -85,12 +85,12 @@ test('tileState: unknown is outranked by wantsHuman, same as every other state',
 test('isFinished: a busy pane with a PR is NOT finished — still working, PR is stale/in-flight', () => {
     // 🔴 GUARD: dropping the session_status !== 'busy' check would flip an
     // actively-working pane (that already opened a draft PR) to "done".
-    const a = agent({ session_status: 'busy', pr: { url: 'https://x/1' } });
+    const a = agent({ session_status: 'busy', pr: { url: 'https://x/1', state: 'open' } });
     assert.equal(isFinished(a, wantsHuman(a)), false);
 });
 
 test('isFinished: a blocked pane with a PR is NOT finished — it wants a human first', () => {
-    const a = agent({ needs_human: true, pr: { url: 'https://x/1' } });
+    const a = agent({ needs_human: true, pr: { url: 'https://x/1', state: 'open' } });
     assert.equal(isFinished(a, wantsHuman(a)), false);
 });
 
@@ -122,7 +122,7 @@ test('actionVerb: a calm pane (no wantsHuman) gets no verb at all', () => {
 });
 
 test('actionBarKind: a done pane (no wantsHuman, finished) is a Review bar', () => {
-    const a = agent({ session_status: 'idle', pr: { url: 'https://x/1', number: 9 } });
+    const a = agent({ session_status: 'idle', pr: { url: 'https://x/1', number: 9, state: 'open' } });
     assert.deepEqual(actionBarKind(a, wantsHuman(a)), { kind: 'review', label: 'Review' });
 });
 
@@ -168,12 +168,66 @@ test('prChip: no pr, or a pr with no url -> exactly null', () => {
     assert.strictEqual(prChip({ number: 14 }), null);
 });
 
-test('prChip: a real pr renders "#<number>", not a fabricated state word', () => {
-    // chela/transcripts.py's PRLink.to_dict has no state/status field — the
-    // chip must not invent one.
+test('prChip: a pr with no resolved state is a neutral "#<number>" — no flag, no state word', () => {
+    // CMX-41: an unknown state (gh failed, or no state field at all) must not
+    // read as OK — the chip links the PR but never earns the ⚑.
     const v = prChip({ url: 'https://x/1', number: 14, repository: 'chela' });
     assert.equal(v.label, '#14');
     assert.equal(v.url, 'https://x/1');
+    assert.equal(v.flag, false);
+    assert.equal(v.state, 'unknown');
+    assert.equal(prChip({ url: 'https://x/1', number: 14, state: 'unknown' }).flag, false);
+});
+
+test('prChip: a confirmed open PR earns the flag, plain "#<number>"', () => {
+    const v = prChip({ url: 'https://x/1', number: 14, state: 'open', draft: false });
+    assert.equal(v.label, '#14');
+    assert.equal(v.flag, true);
+    assert.equal(v.dim, false);
+});
+
+test('prChip: a MERGED PR reads "#N merged", dim, no flag (CMX-41)', () => {
+    // 🔴 GUARD: the footer advertised `⚑ #613` for a PR that merged the day before.
+    const v = prChip({ url: 'https://x/613', number: 613, state: 'merged' });
+    assert.equal(v.label, '#613 merged');
+    assert.equal(v.flag, false);
+    assert.equal(v.dim, true);
+});
+
+test('prChip: closed and draft PRs say so and earn no flag', () => {
+    const c = prChip({ url: 'https://x/1', number: 1, state: 'closed' });
+    assert.deepEqual([c.label, c.flag, c.dim], ['#1 closed', false, true]);
+    const d = prChip({ url: 'https://x/1', number: 1, state: 'open', draft: true });
+    assert.deepEqual([d.label, d.flag, d.dim], ['#1 draft', false, true]);
+});
+
+// --- CMX-41: the Review bar needs a CONFIRMED open PR ------------------------
+
+test('actionBarKind: an idle pane whose latest pr-link points at a MERGED PR gets NO Review bar', () => {
+    // 🔴 GUARD: Claude Code keeps re-writing a session's pr-link record after the
+    // merge; reading its presence alone put "✓ PR ready for review" on a dead PR.
+    const a = agent({ session_status: 'idle', pr: { url: 'https://x/613', number: 613, state: 'merged' } });
+    assert.equal(actionBarKind(a, wantsHuman(a)), null);
+    assert.equal(isFinished(a, wantsHuman(a)), false);
+    assert.notEqual(tileState(a, wantsHuman(a)).cls, 'done');
+});
+
+test('actionBarKind: a CLOSED PR gets no Review bar', () => {
+    const a = agent({ session_status: 'idle', pr: { url: 'https://x/1', number: 1, state: 'closed' } });
+    assert.equal(actionBarKind(a, wantsHuman(a)), null);
+});
+
+test('actionBarKind: a DRAFT PR gets no Review bar — it is not ready for review', () => {
+    const a = agent({ session_status: 'idle', pr: { url: 'https://x/1', number: 1, state: 'open', draft: true } });
+    assert.equal(actionBarKind(a, wantsHuman(a)), null);
+});
+
+test('actionBarKind: a lookup failure (state unknown, or absent) makes NO "ready" claim', () => {
+    // 🔴 GUARD: fail closed — unknown must never read as open.
+    const u = agent({ session_status: 'idle', pr: { url: 'https://x/1', number: 1, state: 'unknown' } });
+    assert.equal(actionBarKind(u, wantsHuman(u)), null);
+    const n = agent({ session_status: 'idle', pr: { url: 'https://x/1', number: 1 } });
+    assert.equal(actionBarKind(n, wantsHuman(n)), null);
 });
 
 test('prChip: a pr with a url but no number falls back to bare "PR"', () => {
@@ -202,7 +256,7 @@ test('rankOrder: needs-you (0) -> busy/working (1) -> idle (2) -> done (3), acro
     // Deliberately shuffled input (done, idle, busy, needs-you) — the assert
     // pins the CANONICAL order, so it only passes if every tier is read in the
     // right place.
-    const done = agent({ window_id: '@done', session_status: 'idle', pr: { url: 'https://x/1' } });
+    const done = agent({ window_id: '@done', session_status: 'idle', pr: { url: 'https://x/1', state: 'open' } });
     const idle = agent({ window_id: '@idle', session_status: 'idle' });
     const busy = agent({ window_id: '@busy', session_status: 'busy' });
     const needsYou = agent({ window_id: '@needs', needs_human: true });
@@ -259,7 +313,7 @@ test('rankOrder: an unknown pane (claude running, status unresolved) ranks with 
     // unknown-specific tier, so it must fall into the same bucket idle does.
     const busy = agent({ window_id: '@busy', session_status: 'busy' });
     const unknown = agent({ window_id: '@unknown', session_status: null, claude_running: true });
-    const done = agent({ window_id: '@done', session_status: 'idle', pr: { url: 'https://x/1' } });
+    const done = agent({ window_id: '@done', session_status: 'idle', pr: { url: 'https://x/1', state: 'open' } });
     const list = [done, unknown, busy];
     const wantsByWid = { '@done': false, '@unknown': false, '@busy': false };
     assert.deepEqual(rankOrder(list, wantsByWid), ['@busy', '@unknown', '@done']);

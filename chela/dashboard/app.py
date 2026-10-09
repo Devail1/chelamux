@@ -28,7 +28,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, probecache, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, pr_status, probecache, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -295,9 +295,21 @@ def api_agents():
     # Native busy/idle/waiting from `claude agents --json` (read once, keyed by pid).
     status_map = agent_manager.session_status_map()
 
+    # CMX-41: a transcript's pr-link outlives its PR (Claude Code keeps re-writing it after
+    # the merge). Read the run rows ONCE per request for their terminal pr_state; anything
+    # else goes through pr_status's cached gh lookup, never one gh spawn per pane per tick.
+    try:
+        pr_run_states = pr_status.runs_pr_states(dispatcher.list_runs())
+    except Exception:
+        log.exception("api_agents: list_runs failed; PR state falls back to gh")
+        pr_run_states = {}
+
     agents = []
     for name, window_id in windows.items():
         transcript = transcripts.agent_transcript_summary(name, window_id=window_id)
+        pr = transcript["pr"]
+        if pr:
+            pr = {**pr, **pr_status.lookup(pr.get("url"), pr_run_states)}
 
         # Map window -> child claude pid -> session status + cwd. No claude pid
         # means a plain shell (or a dead session): not running, never "thinking".
@@ -371,7 +383,9 @@ def api_agents():
             "schedule_next_run": agent_schedule_summary.get(name, {}).get("next_run"),
             "recap": transcript["recap"],
             "recap_ts": transcript["recap_ts"],
-            "pr": transcript["pr"],
+            # {url, number, repository, ts, state, draft} — `state` is open/merged/closed/
+            # unknown, and only a confirmed open + non-draft PR reads as reviewable.
+            "pr": pr,
             "ai_title": transcript.get("ai_title"),
         })
 

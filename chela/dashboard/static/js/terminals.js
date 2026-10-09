@@ -2690,8 +2690,12 @@ function _applyWallTileFrame(agents) {
         if (!chip) { el.hidden = true; el.removeAttribute('href'); el.textContent = ''; return; }
         el.hidden = false;
         el.href = chip.url;
-        el.textContent = '⚑ ' + chip.label;
-        el.title = 'Open PR ' + chip.label + (chip.repository ? ' — ' + chip.repository : '');
+        // CMX-41: the ⚑ is earned by a confirmed open PR only; merged/closed/
+        // draft read dim with their state word, unknown is a bare `#N` link.
+        el.textContent = (chip.flag ? '⚑ ' : '') + chip.label;
+        el.classList.toggle('gs-pr-dim', chip.dim);
+        el.title = 'Open PR ' + chip.label + (chip.repository ? ' — ' + chip.repository : '')
+            + (chip.state === 'unknown' ? ' (state unknown)' : '');
     });
 
     document.querySelectorAll('#panel-terminals .term-action-bar[data-action-for]').forEach(el => {
