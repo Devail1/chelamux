@@ -191,3 +191,27 @@ test('agent-detail "← Back" (found branch) also returns to Work, not the delet
     window.chela.selectAgent('cmx279-rework-known-agent');
     _assertBackLinkTargetsWork('found branch');
 });
+
+// --- CMX-41: the agent-detail PR badge says when the PR is history ----------
+//
+// A transcript's pr-link outlives the merge, so the detail header's "PR #N"
+// badge must carry the resolved state for a merged/closed PR — and nothing
+// for open/draft/unknown, where it has no history to report. Read back off
+// the real renderAgentDetail paint, not the source.
+test('CMX-41: agent-detail PR badge reads "PR #N · merged/closed" for a dead PR, bare "PR #N" otherwise', () => {
+    const URL = 'https://github.com/acme/widgets/pull/613';
+    const CASES = [
+        ['merged', 'PR #613 · merged'], ['closed', 'PR #613 · closed'],
+        ['open', 'PR #613'], ['unknown', 'PR #613'], [undefined, 'PR #613'],
+    ];
+    for (const [state, want] of CASES) {
+        nav.renderNav();
+        util.setAgentsCache([{ name: 'cmx41-pr-agent', online: true,
+            pr: { url: URL, number: 613, state } }]);
+        window.chela.selectAgent('cmx41-pr-agent');
+        const badge = document.querySelector('#agent-detail .pr-badge');
+        assert.ok(badge, `state=${state}: no .pr-badge rendered`);
+        assert.equal(badge.textContent, want, `state=${state}: badge reads "${badge.textContent}"`);
+        assert.equal(badge.getAttribute('href'), URL);
+    }
+});

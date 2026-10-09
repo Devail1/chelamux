@@ -1903,3 +1903,62 @@ test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and r
         terminals._refreshPaneLabels();
     }
 });
+
+// CMX-41 — THE RENDERED PR CHIP AND REVIEW BAR FOLLOW THE PR'S REAL STATE. wall_tile.test.mjs
+// pins prChip/actionBarKind at the model layer, but a judge round showed the DOM write in
+// _applyWallTileFrame was unguarded: `el.textContent = '⚑ ' + chip.label` (flag on every
+// state) stayed green, so a MERGED #613 rendered "⚑ #613 merged". This drives the REAL
+// repaint through termTick for every state and reads back what a human sees: the chip's
+// exact text, its dim class, its tooltip, and whether the "ready for review" bar exists.
+test('CMX-41: the rendered .gs-pr chip and Review bar claim "ready" only for a confirmed open, non-draft PR', async () => {
+    const URL = 'https://github.com/acme/widgets/pull/613';
+    const CASES = [
+        { state: 'open', draft: false, text: '⚑ #613', dim: false, review: true },
+        { state: 'open', draft: true, text: '#613 draft', dim: true, review: false },
+        { state: 'merged', draft: false, text: '#613 merged', dim: true, review: false },
+        { state: 'closed', draft: false, text: '#613 closed', dim: true, review: false },
+        { state: 'unknown', draft: false, text: '#613', dim: false, review: false },
+        { state: undefined, draft: undefined, text: '#613', dim: false, review: false },
+    ];
+    const t = tile('@1');
+    const chip = t.querySelector('.gs-pr[data-pr-for]');
+    const bar = t.querySelector('.term-action-bar[data-action-for]');
+    assert.ok(chip, 'every wall tile carries a .gs-pr chip slot');
+    assert.ok(bar, 'every wall tile carries an action bar slot');
+
+    for (const c of CASES) {
+        const name = `state=${c.state} draft=${c.draft}`;
+        Object.assign(AGENTS[0], { session_status: 'idle', needs_human: undefined,
+            pr: { url: URL, number: 613, repository: 'acme/widgets', state: c.state, draft: c.draft } });
+        await terminals.termTick();
+
+        assert.equal(chip.hidden, false, `${name}: a PR link is always shown as a chip`);
+        assert.equal(chip.getAttribute('href'), URL, `${name}: the chip links to the PR`);
+        assert.equal(chip.textContent, c.text, `${name}: the chip reads "${chip.textContent}"`);
+        assert.equal(chip.textContent.includes('⚑'), c.review,
+            `${name}: the ⚑ is earned only by a confirmed open, non-draft PR`);
+        assert.equal(chip.classList.contains('gs-pr-dim'), c.dim, `${name}: dim class`);
+        assert.equal(chip.title.includes('(state unknown)'), c.state !== 'open' && c.state !== 'merged' && c.state !== 'closed',
+            `${name}: the tooltip says when the state is unknown — "${chip.title}"`);
+
+        const ready = !bar.hidden && /ready for review/.test(bar.textContent);
+        assert.equal(ready, c.review, `${name}: "ready for review" bar shown=${ready}`);
+        assert.equal(bar.classList.contains('action-review'), c.review, `${name}: action-review class`);
+        if (c.review) {
+            assert.equal(bar.querySelector('a.term-action-btn').getAttribute('href'), URL,
+                'the Review button opens the PR itself');
+        } else {
+            assert.equal(bar.hidden, true, `${name}: no action bar at all for a PR that is not reviewable`);
+        }
+    }
+
+    // No PR at all ⇒ no chip, no bar.
+    delete AGENTS[0].pr;
+    await terminals.termTick();
+    assert.equal(chip.hidden, true);
+    assert.equal(chip.textContent, '');
+    assert.equal(bar.hidden, true);
+
+    delete AGENTS[0].session_status; delete AGENTS[0].needs_human;
+    await terminals.termTick();
+});

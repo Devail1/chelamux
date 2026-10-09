@@ -85,6 +85,34 @@ def test_lookup_is_cached_within_ttl_and_refreshed_after():
         assert len(gh.calls) == 2
 
 
+def test_a_merged_answer_is_cached_past_the_ttl():
+    """A merged PR cannot un-merge: once gh says MERGED, no tick ever asks again."""
+    gh = _GH({"state": "MERGED", "isDraft": False})
+    clock = [1000.0]
+    with patch("chela.pr_status.subprocess.run", gh), \
+         patch("chela.pr_status.time.monotonic", lambda: clock[0]):
+        assert pr_status.lookup(URL)["state"] == "merged"
+        clock[0] += pr_status.TTL_SECONDS * 10
+        assert pr_status.lookup(URL)["state"] == "merged"
+    assert len(gh.calls) == 1
+
+
+@pytest.mark.parametrize("state", ["MERGED", "CLOSED"])
+def test_draft_is_only_ever_reported_on_an_open_pr(state):
+    """gh can echo isDraft=true on a closed draft — ``draft`` describes an OPEN PR only."""
+    with patch("chela.pr_status.subprocess.run", _GH({"state": state, "isDraft": True})):
+        assert pr_status.lookup(URL) == {"state": state.lower(), "draft": False}
+
+
+def test_a_cached_answer_is_a_copy_not_the_cache_entry():
+    """``/api/agents`` merges the answer into a pane's pr dict; mutating it must not poison the cache."""
+    with patch("chela.pr_status.subprocess.run", _GH({"state": "OPEN", "isDraft": False})):
+        pr_status.lookup(URL)["state"] = "garbage"
+        hit = pr_status.lookup(URL)
+        hit["state"] = "garbage"
+        assert pr_status.lookup(URL) == {"state": "open", "draft": False}
+
+
 def test_a_failed_lookup_is_cached_too():
     """A dead network must not turn into one gh spawn per pane per tick."""
     gh = _GH(None, rc=1)
