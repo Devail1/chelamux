@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from chela.telegram import media
 
 
@@ -19,7 +21,7 @@ class _FakeFile:
     def __init__(self, downloads: list):
         self._downloads = downloads
 
-    async def download_to_drive(self, path) -> None:
+    async def download_to_drive(self, path, **_timeouts) -> None:
         self._downloads.append(str(path))
         with open(path, "wb") as fh:
             fh.write(b"x")
@@ -36,7 +38,7 @@ class _FakePhoto:
         self._fail = fail
         self.get_file_calls = 0
 
-    async def get_file(self):
+    async def get_file(self, **_timeouts):
         self.get_file_calls += 1
         if self._fail:
             raise RuntimeError("getFile rejected (too big)")
@@ -53,7 +55,7 @@ class _FakeDoc:
         self._fail = fail
         self.get_file_calls = 0
 
-    async def get_file(self):
+    async def get_file(self, **_timeouts):
         self.get_file_calls += 1
         if self._fail:
             raise RuntimeError("getFile rejected")
@@ -239,3 +241,125 @@ def test_delivery_failure_is_reported(tmp_path):
     ))
     assert len(deliver.calls) == 1
     assert msg.replies and "Couldn't deliver" in msg.replies[0]
+
+
+# --------------------------------------------------------------------------
+# CMX-63 — retry transient failures; report the REAL cause by exception type
+# --------------------------------------------------------------------------
+
+# PTB-shaped stand-ins (same class names + hierarchy as ``telegram.error``, where
+# BadRequest is a NetworkError subclass) so the suite needs no [telegram] extra.
+class NetworkError(Exception):
+    pass
+
+
+class TimedOut(NetworkError):
+    pass
+
+
+class BadRequest(NetworkError):
+    pass
+
+
+class _ScriptedDoc:
+    """A Document whose ``get_file`` raises each scripted error in turn, then succeeds."""
+
+    def __init__(self, errors, *, file_name="shot.png", file_size=None):
+        self.file_name = file_name
+        self.file_size = file_size
+        self.file_unique_id = "doc"
+        self._errors = list(errors)
+        self.downloads: list[str] = []
+        self.get_file_calls = 0
+        self.timeouts: list[dict] = []
+
+    async def get_file(self, **timeouts):
+        self.get_file_calls += 1
+        self.timeouts.append(timeouts)
+        if self._errors:
+            raise self._errors.pop(0)
+        return _FakeFile(self.downloads)
+
+
+@pytest.fixture
+def no_backoff(monkeypatch):
+    monkeypatch.setattr(media, "RETRY_BACKOFF", (0, 0))
+
+
+def _run_doc(doc, tmp_path):
+    msg = _FakeMsg(document=doc)
+    deliver = _Deliver()
+    asyncio.run(media.receive_document(
+        msg, 777, 4, resolve=_bound, deliver=deliver, docs_dir=tmp_path, clock=_CLOCK,
+    ))
+    return msg, deliver
+
+
+def test_timeout_twice_then_success_delivers(tmp_path, no_backoff):
+    doc = _ScriptedDoc([TimedOut("Timed out"), TimedOut("Timed out")])
+    msg, deliver = _run_doc(doc, tmp_path)
+    assert doc.get_file_calls == 3
+    assert len(deliver.calls) == 1 and "📎 file:" in deliver.calls[0][1]
+    assert msg.replies == ["📎 File sent to the agent: shot.png"]
+
+
+def test_media_fetch_uses_longer_read_timeout(tmp_path, no_backoff):
+    doc = _ScriptedDoc([])
+    _run_doc(doc, tmp_path)
+    assert doc.timeouts == [{"read_timeout": media.MEDIA_READ_TIMEOUT}]
+    assert media.MEDIA_READ_TIMEOUT > 5  # PTB's default read timeout
+
+
+def test_persistent_timeout_reports_timeout_not_size(tmp_path, no_backoff):
+    doc = _ScriptedDoc([TimedOut("Timed out")] * 10)
+    msg, deliver = _run_doc(doc, tmp_path)
+    assert doc.get_file_calls == len(media.RETRY_BACKOFF) + 1
+    assert deliver.calls == []
+    assert msg.replies == ["⏳ Download timed out (network). Please resend."]
+    assert "limit" not in msg.replies[0]
+
+
+def test_network_error_is_retried_and_reported_as_network(tmp_path, no_backoff):
+    doc = _ScriptedDoc([NetworkError("connection reset")] * 10)
+    msg, _ = _run_doc(doc, tmp_path)
+    assert doc.get_file_calls == len(media.RETRY_BACKOFF) + 1
+    assert msg.replies == ["⏳ Download timed out (network). Please resend."]
+
+
+def test_bad_request_too_big_reports_size_without_retry(tmp_path, no_backoff):
+    doc = _ScriptedDoc([BadRequest("File is too big")] * 10)
+    msg, deliver = _run_doc(doc, tmp_path)
+    assert doc.get_file_calls == 1  # a definitive answer — never retried
+    assert deliver.calls == []
+    assert len(msg.replies) == 1 and "download limit" in msg.replies[0]
+
+
+def test_other_bad_request_is_generic_not_size(tmp_path, no_backoff):
+    doc = _ScriptedDoc([BadRequest("Wrong file_id")] * 10)
+    msg, _ = _run_doc(doc, tmp_path)
+    assert doc.get_file_calls == 1
+    assert msg.replies == ["❌ Could not download the file (Wrong file_id)."]
+
+
+def test_known_oversize_in_update_skips_download(tmp_path, no_backoff):
+    doc = _ScriptedDoc([], file_size=25 * 1024 * 1024)
+    msg, deliver = _run_doc(doc, tmp_path)
+    assert doc.get_file_calls == 0
+    assert deliver.calls == []
+    assert len(msg.replies) == 1 and "too large" in msg.replies[0]
+
+
+def test_failure_classification_matches_real_ptb_errors():
+    error = pytest.importorskip("telegram.error")
+    assert media._failure_text(error.TimedOut()).startswith("⏳")
+    assert media._failure_text(error.NetworkError("boom")).startswith("⏳")
+    assert "download limit" in media._failure_text(error.BadRequest("File is too big"))
+    assert "limit" not in media._failure_text(error.BadRequest("Wrong file_id"))
+
+
+def test_warning_names_the_exception_class(tmp_path, no_backoff, caplog):
+    doc = _ScriptedDoc([TimedOut("Timed out")] * 10)
+    with caplog.at_level("WARNING", logger=media.log.name):
+        _run_doc(doc, tmp_path)
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "TimedOut" in warnings[0]

@@ -18,6 +18,7 @@ NOTICE file for the upstream copyright and attribution.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -29,6 +30,15 @@ log = logging.getLogger(__name__)
 # The Telegram Bot API caps bot downloads (getFile) at 20 MB; a larger file
 # cannot be fetched and is rejected before we attempt the download.
 MAX_FILE_BYTES = 20 * 1024 * 1024
+
+# Media fetches move far more bytes than an ordinary API call, so they get a longer
+# read timeout than PTB's 5 s default — a slow link timed out on a small phone
+# screenshot (CMX-63).
+MEDIA_READ_TIMEOUT = 60.0
+
+# Backoff (seconds) before each RETRY of a transient getFile/download failure;
+# its length is the number of retries, so ``len + 1`` attempts in all.
+RETRY_BACKOFF = (1.0, 3.0)
 
 # The line :func:`receive_photo` delivers ahead of a downloaded photo's path. Claude
 # Code turns that path into an attachment, so the agent's transcript records the turn
@@ -96,26 +106,75 @@ async def _reply(msg, text: str) -> None:
         log.debug("media reply failed", exc_info=True)
 
 
+def _class_names(exc: BaseException) -> set[str]:
+    """Every class name in ``exc``'s MRO — PTB-free exception matching."""
+    return {cls.__name__ for cls in type(exc).__mro__}
+
+
+def _is_too_big(exc: BaseException) -> bool:
+    """Telegram's own "file is too big" refusal (a ``BadRequest``)."""
+    return "BadRequest" in _class_names(exc) and "too big" in str(exc).lower()
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """A timeout / network blip worth retrying (and reporting as such).
+
+    PTB's ``BadRequest`` subclasses ``NetworkError`` but is a definitive answer
+    from Telegram, so it is never transient.
+    """
+    names = _class_names(exc)
+    if "BadRequest" in names:
+        return False
+    return bool(names & {"TimedOut", "NetworkError", "TimeoutError"})
+
+
+def _failure_text(exc: BaseException) -> str:
+    """The user-facing reply for a failed fetch, chosen by exception type.
+
+    Only Telegram's explicit "too big" error earns the size message — a timeout
+    must never be passed off as the 20 MB cap (CMX-63).
+    """
+    if _is_too_big(exc):
+        return (
+            "❌ Could not download the file: it exceeds Telegram's "
+            f"{_format_size(MAX_FILE_BYTES)} download limit for bots."
+        )
+    if _is_transient(exc):
+        return "⏳ Download timed out (network). Please resend."
+    reason = str(exc) or type(exc).__name__
+    return f"❌ Could not download the file ({reason})."
+
+
 async def _download(msg, tg_media, path: Path) -> "Path | None":
     """Fetch ``tg_media`` to ``path`` (creating ``documents/``), or None on failure.
 
-    A failed ``getFile``/download (e.g. a file over Telegram's 20 MB bot cap that
-    slipped the up-front size check) replies with a friendly note and returns None
-    instead of raising, so the update handler stays alive.
+    A transient failure (timeout / network error) is retried with
+    :data:`RETRY_BACKOFF`. A final failure replies with a note naming the real
+    cause (see :func:`_failure_text`) and returns None instead of raising, so the
+    update handler stays alive.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        tg_file = await tg_media.get_file()
-        await tg_file.download_to_drive(path)
-    except Exception:  # BadRequest for oversized files, or any transient fetch error
-        log.warning("media download failed", exc_info=True)
-        await _reply(
-            msg,
-            "❌ Could not download the file. It may exceed Telegram's "
-            f"{_format_size(MAX_FILE_BYTES)} download limit for bots.",
-        )
-        return None
-    return path
+    attempts = len(RETRY_BACKOFF) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            tg_file = await tg_media.get_file(read_timeout=MEDIA_READ_TIMEOUT)
+            await tg_file.download_to_drive(path, read_timeout=MEDIA_READ_TIMEOUT)
+            return path
+        except Exception as exc:  # classified below; never wedge the handler
+            if _is_transient(exc) and attempt < attempts:
+                log.info(
+                    "media download attempt %d/%d failed (%s); retrying",
+                    attempt, attempts, type(exc).__name__,
+                )
+                await asyncio.sleep(RETRY_BACKOFF[attempt - 1])
+                continue
+            log.warning(
+                "media download failed after %d attempt(s): %s: %s",
+                attempt, type(exc).__name__, exc, exc_info=True,
+            )
+            await _reply(msg, _failure_text(exc))
+            return None
+    return None  # unreachable: the loop always returns
 
 
 async def receive_photo(
