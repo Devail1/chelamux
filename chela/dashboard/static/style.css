@@ -3791,6 +3791,10 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
     opacity: 0; pointer-events: none; transition: opacity 0.15s ease, transform 0.15s ease;
     z-index: 50; display: flex; flex-direction: column; overflow: hidden;
+    /* CMX-57: the modal is the box its layout answers to, not the window — the
+       rail-vs-strip switch and the narrow row rules below are @container queries
+       on THIS, so they follow the dialog's own width wherever it is drawn. */
+    container: settings / inline-size;
 }
 .settings-modal.open { opacity: 1; pointer-events: auto; transform: translate(-50%, -50%) scale(1); }
 .settings-modal-head {
@@ -3824,7 +3828,18 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 }
 .settings-modal-foot a { color: var(--text-dim); text-decoration: underline; }
 .settings-modal-foot a:hover { color: var(--text); }
-.settings-tabpanels code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+.settings-tabpanels code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 11px; overflow-wrap: anywhere; }
+/* CMX-57: a command the user is told to run (the Update card's `pm2 restart …`)
+   gets its own block under the sentence: wrapped at spaces like text, a single
+   over-long token broken anywhere rather than pushing the card wide, and a
+   scroll box as the last resort — never `break-all`, which split "re|start". */
+.settings-tabpanels code.s-cmd {
+    display: block; max-width: 100%; box-sizing: border-box; margin-top: 4px;
+    padding: 4px 7px; overflow-x: auto; white-space: normal; overflow-wrap: anywhere;
+    text-align: left;
+}
+/* One argument = one unit: "chela-|daemon" split at its hyphen reads as two. */
+.settings-tabpanels code.s-cmd .s-cmd-arg { white-space: nowrap; }
 /* CMX-396: search across every tab. While a query is active (.searching) every
    panel with a hit shows at once, each under its tab's name, and the rest of
    the markup is only hidden by nav.js's .s-search-hide — never re-rendered. */
@@ -3844,21 +3859,47 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 
+/* Where the dialog sits IS a window question (it is position: fixed), so this
+   one stays @media. Everything inside it is @container settings, below. */
 @media (max-width: 640px) {
-    /* No room for a side rail on a phone — the tabs become a horizontal
-       scroller above the panel, same trade the mobile sidebar already makes
-       (off-canvas becomes overlay; here, a column becomes a row). */
     .settings-modal {
         top: 4vh; left: 3vw; transform: translate(0, 0) scale(0.97);
         width: 94vw; max-height: 92vh;
     }
     .settings-modal.open { transform: translate(0, 0) scale(1); }
+}
+
+/* No room for a side rail in a narrow dialog — the tabs become a horizontal
+   scroller above the panel, same trade the mobile sidebar already makes
+   (off-canvas becomes overlay; here, a column becomes a row). CMX-57: the strip
+   scrolls on its OWN (never the modal), and says so: nav.js
+   _syncSettingsTabFade() sets .fade-start / .fade-end while tabs are hidden off
+   that edge, and the mask fades the tabs out there. */
+@container settings (max-width: 620px) {
     .settings-modal-body { flex-direction: column; }
     .settings-tabs {
         flex: 0 0 auto; flex-direction: row; overflow-x: auto; overflow-y: hidden;
         border-right: none; border-bottom: 1px solid var(--border);
+        overscroll-behavior-x: contain; scrollbar-width: none;
     }
+    .settings-tabs::-webkit-scrollbar { display: none; }
     .settings-tab { flex: 0 0 auto; white-space: nowrap; }
+    /* A wrapped status detail reads as a paragraph under its badge, left-aligned:
+       right-aligned wrapped lines were the "ragged indent". */
+    .settings-modal .s-status-detail { flex-basis: 100%; text-align: left; }
+    .settings-modal .cost-table th, .settings-modal .cost-table td { padding-left: 6px; padding-right: 6px; }
+}
+.settings-tabs.fade-end {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+}
+.settings-tabs.fade-start {
+    -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent);
+    mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent);
+}
+.settings-tabs.fade-start.fade-end {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
 }
 
 /* Settings sections — each group of related controls is a card. */
@@ -3889,7 +3930,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     flex: 0 0 auto; min-width: 58px; font-size: 10px; text-transform: uppercase;
     letter-spacing: 0.04em; color: var(--accent);
 }
-.s-ex code { word-break: break-all; }
+.s-ex code { overflow-wrap: anywhere; }
 .s-exnote { color: var(--text-dim); font-size: 11px; }
 .s-row {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -3897,10 +3938,15 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 }
 .s-row:last-child { margin-bottom: 0; }
 .s-rowlabel { color: var(--text); font-size: 12px; }
+/* CMX-57: a select sizes to its LONGEST option ("bypassPermissions · ⚠ no prompts
+   at all"), and a flex item never shrinks below its content unless told
+   min-width: 0 — so at phone width it pushed the row past the card. It may now
+   shrink to the row (the closed select shows the chosen option, clipped). */
 .s-select {
     background: var(--surface); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 5px 10px; font-family: var(--ui-font); font-size: 12px;
     cursor: pointer;
+    flex: 0 1 auto; min-width: 0; max-width: 100%; text-overflow: ellipsis;
 }
 .s-select:hover { border-color: var(--accent); }
 /* Text input + inline save in a settings row (e.g. projects folder). */
@@ -3954,7 +4000,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 .s-status-dot { font-size: 9px; line-height: 1; }
 .s-status-label { color: var(--text); flex: 0 0 auto; }
 .s-status-detail {
-    color: var(--text-dim); font-size: 11px; word-break: break-all;
+    color: var(--text-dim); font-size: 11px; overflow-wrap: anywhere;
     flex: 1 1 auto; min-width: 0; text-align: right;
 }
 
@@ -4540,6 +4586,9 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     text-transform: uppercase; letter-spacing: .04em; font-weight: 600;
     padding: 6px 10px; border-bottom: 1px solid var(--border); }
 .cost-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); }
+/* CMX-57: the table scrolls inside its own box at phone width (like the Usage
+   table's .usage-scroll), never the Settings modal. */
+#cost-table { overflow-x: auto; }
 .cost-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .cost-project-row { background: var(--surface); font-weight: 600; }
 .cost-agent-row td:nth-child(2) { color: var(--text-dim); }
