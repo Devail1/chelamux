@@ -2985,18 +2985,21 @@ def _settings_status() -> dict:
     }
 
 
-def _stale_service_names() -> list[str]:
-    """Which running `chela-*` PM2 services predate the checked-out commit — see
-    `update.services_running_stale_code`. `commits_behind` answers "is the CHECKOUT in
-    sync"; this answers "is the RUNNING CODE the checkout" — a bare `git pull` (bypassing
-    `chela update`, which pulls AND restarts together) leaves the former true while the
-    latter is false, and `chela doctor` already reports exactly that gap (`repo.services_current`)
-    while this card said "UP TO DATE" about it (2026-08-02). Best-effort: an unreadable
-    result degrades to "no known-stale services" rather than failing the whole payload
-    over a fact this route doesn't otherwise depend on.
+def _service_freshness() -> tuple[list[str], list[str]]:
+    """``(stale, unknown)`` running `chela-*` PM2 services — see
+    `update.services_running_stale_code` (import-aware since CMX-56: a service is stale
+    only when a file IT runs changed since it started). `commits_behind` answers "is the
+    CHECKOUT in sync"; this answers "is the RUNNING CODE the checkout" — a bare `git pull`
+    (bypassing `chela update`) leaves the former true while the latter is false, and
+    `chela doctor` already reports exactly that gap (`repo.services_current`) while this
+    card said "UP TO DATE" about it (2026-08-02). Best-effort: an unreadable result
+    degrades to "no known-stale services" rather than failing the whole payload over a
+    fact this route doesn't otherwise depend on.
     """
     freshness = update.services_running_stale_code()
-    return freshness.stale if freshness.ok else []
+    if not freshness.ok:
+        return [], []
+    return freshness.stale, freshness.unknown
 
 
 def _update_status_payload() -> dict:
@@ -3009,14 +3012,14 @@ def _update_status_payload() -> dict:
         return {"ok": False, "git": False, "error": str(e)}
     if not status.ok:
         return {"ok": False, "error": status.error}
-    stale = _stale_service_names()
+    stale, unknown = _service_freshness()
     if status.error:
         # ok=True but carrying a note (no upstream configured) — not a fault, just
         # nothing this control can act on.
         return {"ok": True, "behind": 0, "ahead": 0, "branch": status.branch,
-                "note": status.error, "stale_services": stale}
+                "note": status.error, "stale_services": stale, "unknown_services": unknown}
     return {"ok": True, "behind": status.behind, "ahead": status.ahead, "branch": status.branch,
-            "stale_services": stale}
+            "stale_services": stale, "unknown_services": unknown}
 
 
 @app.route("/api/settings")
@@ -3080,8 +3083,13 @@ def api_update_apply():
         return jsonify({"ok": False, "error": str(e)}), 400
     if not status.ok:
         return jsonify({"ok": False, "error": status.error}), 400
+    # CMX-56: nothing to pull used to mean "do nothing" — while the card above the button
+    # listed services still running old code. Then the click restarts exactly those.
+    stale: list[str] = []
     if status.behind == 0:
-        return jsonify({"ok": True, "started": False, "detail": "already up to date"})
+        stale, _unknown = _service_freshness()
+        if not stale:
+            return jsonify({"ok": True, "started": False, "detail": "already up to date"})
 
     # CMX-199 rework: `chela update` restarts chela-daemon, and a mid-run restart
     # orphans any dispatched agent it interrupts — a hazard entirely separate from the
@@ -3119,7 +3127,7 @@ def api_update_apply():
     def _run():
         global _update_apply_started_at
         try:
-            result = update.apply()
+            result = update.restart_stale() if stale else update.apply()
             if not result.ok:
                 log.error("dashboard-triggered update refused at %r — %s",
                           result.step, result.error)
@@ -3134,7 +3142,11 @@ def api_update_apply():
             _update_apply_lock.release()
 
     threading.Thread(target=_run, daemon=True, name="dashboard-update-apply").start()
-    return jsonify({"ok": True, "started": True, "behind": status.behind})
+    if stale:
+        return jsonify({"ok": True, "started": True, "behind": 0, "restarting": stale,
+                        "detail": f"restarting {', '.join(stale)}"})
+    return jsonify({"ok": True, "started": True, "behind": status.behind,
+                    "detail": f"pulling {status.behind} commit(s), then restarting services"})
 
 
 @app.route("/api/launcher/pin", methods=["POST"])

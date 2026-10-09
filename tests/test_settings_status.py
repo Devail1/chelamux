@@ -213,7 +213,7 @@ def test_update_payload_reports_behind_count(client, monkeypatch):
                             ok=True, behind=5, ahead=0, branch="dev"))
     data = client.get("/api/settings").get_json()
     assert data["update"] == {"ok": True, "behind": 5, "ahead": 0, "branch": "dev",
-                               "stale_services": []}
+                               "stale_services": [], "unknown_services": []}
 
 
 def test_update_payload_is_clean_when_up_to_date(client, monkeypatch):
@@ -249,6 +249,7 @@ def test_update_payload_carries_the_no_upstream_note(client, monkeypatch):
     assert data["update"] == {
         "ok": True, "behind": 0, "ahead": 0, "branch": "dev",
         "note": "no upstream configured for this branch", "stale_services": [],
+        "unknown_services": [],
     }
 
 
@@ -287,11 +288,14 @@ def test_update_payload_reports_stale_services_even_with_nothing_to_pull(client,
                             ok=True, behind=0, ahead=0, branch="dev"))
     monkeypatch.setattr(dash.update, "services_running_stale_code",
                         lambda *a, **k: dash.update.ServiceFreshness(
-                            ok=True, stale=["chela-daemon", "chela-dashboard"]))
+                            ok=True, stale=["chela-daemon", "chela-dashboard"],
+                            unknown=["chela-agent-terminals"]))
     data = client.get("/api/settings").get_json()
+    # CMX-56: "unknown" travels separately — neither folded into stale nor dropped.
     assert data["update"] == {
         "ok": True, "behind": 0, "ahead": 0, "branch": "dev",
         "stale_services": ["chela-daemon", "chela-dashboard"],
+        "unknown_services": ["chela-agent-terminals"],
     }
 
 

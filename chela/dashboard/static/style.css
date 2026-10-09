@@ -3957,6 +3957,13 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     color: var(--text-dim); font-size: 11px; word-break: break-all;
     flex: 1 1 auto; min-width: 0; text-align: right;
 }
+/* CMX-56: the Update card's detail is a sentence with a command in it, not a path —
+   `break-all` split it mid-word on a phone. Give it its own line, wrap at words, and let
+   only the command break anywhere (it has no spaces worth waiting for). */
+#update-status-row .s-status-detail {
+    flex-basis: 100%; text-align: left; word-break: normal; overflow-wrap: anywhere;
+}
+#update-status-row .s-cmd { overflow-wrap: anywhere; word-break: break-word; }
 
 /* --- "+ new" popover --- */
 .popover {
