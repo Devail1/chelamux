@@ -1281,6 +1281,53 @@ def test_changes_requested_ANNOUNCES_ITSELF(tmp_path):
     assert inbox.stale_reason(sent_back[0], [dict(run)]) is None
 
 
+def test_an_AT_CAP_block_announces_ONLY_needs_human(tmp_path, monkeypatch):
+    """🔁🛑 CMX-58, measured live on CMX-40: a judge blocked a run that had just spent its
+    LAST round (cap 2 + 1 human-granted, rework_count=3), and the inbox first posted "sent
+    back for rework — rework 4 — the next dispatcher tick re-spawns it" — a round past the
+    cap, and a promise the very next tick broke by escalating. The orchestrator held the
+    queue over it. Across the whole edge (verdict lands → tick escalates), exactly ONE
+    notice may fire, and it is the needs_human one.
+
+    Seen to go red: emitting the rework notice before the cap check (dropping the at-cap
+    branch in `inbox.run_events`) fires `run_changes_requested` first."""
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, task_id="at-cap", workflow_path=str(wf.path), status="changes_requested",
+             rework_count=3, retry_count=1,
+             review_history=json.dumps([{"round": 4, "at": "t", "body": "still loose"}]))
+
+    events, seen = inbox.run_events([dict(dispatcher.resolve_run("at-cap"))], {})
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=_Source("at-cap")), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "attach_worktree") as attach, \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+        summary = dispatcher.tick(wf.path)
+    assert summary["escalated"] == 1 and attach.call_count == 0   # the cap logic was right
+
+    later, _ = inbox.run_events([dict(dispatcher.resolve_run("at-cap"))], seen)
+    kinds = [e["kind"] for e in events + later]
+    assert kinds == ["run_needs_human"], kinds
+    assert "rework cap reached 3/3" in later[0]["summary"]
+
+
+def test_a_below_cap_block_names_the_round_that_WILL_run(tmp_path, monkeypatch):
+    """🔁 CMX-58: the number is the round the re-spawn actually runs (count AFTER its bump),
+    out of the EFFECTIVE cap — human-granted rounds included."""
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "2")
+    with dispatcher._db() as conn:
+        _row(conn, status="changes_requested", rework_count=1, retry_count=1)
+
+    events, _ = inbox.run_events([dict(dispatcher.resolve_run("abc123"))], {})
+
+    assert [e["kind"] for e in events] == ["run_changes_requested"]
+    assert "rework 2 of 3" in events[0]["summary"]
+
+
 # --- (i) 🔴 the verdict cannot resurrect a run that MOVED ------------------------------
 
 def test_request_changes_will_not_resurrect_a_MERGED_run(tmp_path):
