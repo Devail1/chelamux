@@ -1,5 +1,5 @@
 """``chela.spawn`` — session-id pinning at spawn time (docs/AGENT_IDENTITY.md slice 2a)
-and ``--remote-control`` insertion (CMX-375).
+and ``--remote-control`` insertion (CMX-375; bare since CMX-34).
 
 No tmux: ``spawn_window``'s own tmux calls (``subprocess.run``, ``_send``) and its
 collaborators (``discovery.ensure_session``, ``discovery.get_all_windows``,
@@ -10,13 +10,15 @@ in the dedicated session-id store — without depending on a real tmux server (s
 """
 from __future__ import annotations
 
-import os
 import re
 import shlex
+from types import SimpleNamespace
 
 import pytest
 
-from chela import spawn
+from chela import main, spawn
+from chela.dashboard import app as dash
+from chela.telegram import newsession
 
 _SESSION_RE = re.compile(r"--session-id ([0-9a-f-]{36})")
 
@@ -179,38 +181,34 @@ def test_spawn_window_falls_back_to_an_unpinned_send_when_the_store_fails(
     assert "--session-id" not in launch
 
 
-# -- _add_remote_control / _remote_control_name (CMX-375) --------------------
+# -- _add_remote_control (CMX-375; bare since CMX-34) -------------------------
+#
+# CMX-34: the flag goes in BARE. A name froze the claude.ai/desktop sidebar title at
+# launch (`shell-3` for every home-dir window); with no name Claude Code shows its own
+# generated session title. Every assertion below is on the exact argv, so restoring a
+# name argument — any name — turns them RED.
 
-def test_add_remote_control_inserts_right_after_the_leading_claude_token():
-    assert spawn._add_remote_control("claude", "chelamux") == "claude --remote-control chelamux"
+def test_add_remote_control_inserts_a_bare_flag_right_after_the_leading_claude_token():
+    assert spawn._add_remote_control("claude") == "claude --remote-control"
+    assert shlex.split(spawn._add_remote_control("claude")) == ["claude", "--remote-control"]
 
 
 def test_add_remote_control_inserts_before_trailing_flags_never_appends():
-    to_send = spawn._add_remote_control("claude -p 'x'", "chelamux")
-    assert to_send == "claude --remote-control chelamux -p 'x'"
+    to_send = spawn._add_remote_control("claude -p 'x'")
+    assert to_send == "claude --remote-control -p 'x'"
 
 
 def test_add_remote_control_leaves_a_non_claude_command_untouched():
     command = "bash -c 'echo hi'"
-    assert spawn._add_remote_control(command, "chelamux") == command
+    assert spawn._add_remote_control(command) == command
 
 
-@pytest.mark.parametrize("name", ["my project", "foo; rm -rf /", "a && b", "$(evil)"])
-def test_add_remote_control_shell_quotes_the_name_into_a_single_argv(name):
-    to_send = spawn._add_remote_control("claude", name)
-    # Round-trips through real shell parsing as ONE argv element for --remote-control,
-    # never split by a space/metacharacter inside the name.
-    assert shlex.split(to_send) == ["claude", "--remote-control", name]
-
-
-def test_remote_control_name_uses_the_cwd_basename():
-    assert spawn._remote_control_name("shell-3", "/home/liav/projects/chelamux") == "chelamux"
-
-
-def test_remote_control_name_falls_back_to_window_name_at_home_or_root():
-    home = os.path.expanduser("~")
-    assert spawn._remote_control_name("shell-1", home) == "shell-1"
-    assert spawn._remote_control_name("shell-1", "/") == "shell-1"
+@pytest.mark.parametrize("command", ["claude 'fix the bug'", "claude mcp list"])
+def test_add_remote_control_never_swallows_a_following_positional_as_the_name(command):
+    """`[name]` is an OPTIONAL value: `claude --remote-control 'fix the bug'` would make
+    the prompt the session name. A command whose next token is a positional is left
+    untouched instead."""
+    assert spawn._add_remote_control(command) == command
 
 
 def test_spawn_window_adds_remote_control_by_default(monkeypatch, tmp_path):
@@ -221,7 +219,7 @@ def test_spawn_window_adds_remote_control_by_default(monkeypatch, tmp_path):
 
     assert result.ok
     launch = _launch(sent)
-    assert f"--remote-control {shlex.quote(tmp_path.name)}" in launch
+    assert "--remote-control" in launch
     # CMX-376: remote-control must be inserted into the ALREADY session-id-pinned
     # `to_send`, never re-applied to the original unpinned `command` — that would
     # silently discard the --session-id pin `_record_session_id` just succeeded at.
@@ -250,5 +248,60 @@ def test_spawn_window_remote_control_survives_a_command_with_no_wid(monkeypatch,
 
     assert result.ok
     launch = _launch(sent)
-    assert f"--remote-control {shlex.quote(tmp_path.name)}" in launch
-    assert "--session-id" not in launch
+    assert launch == "claude --remote-control"
+
+
+# -- CMX-34: every human-facing launcher sends a BARE --remote-control ----------
+#
+# The dashboard launcher, Telegram `/new` and `chela spawn` all funnel into
+# `spawn_window`; these drive each one from its OWN entry point, in both a home-dir cwd
+# (where the old name was the frozen `shell-N` placeholder) and a project cwd (where it
+# was the folder basename), and assert the argv that reaches tmux carries the flag with
+# no value after it. Restore any name argument in `_add_remote_control` → RED. (The
+# dashboard/main/newsession modules are imported at the top, never inside a test: the
+# `subprocess.run` stub is process-global, and import-time code calls it.)
+
+def _rc_value(launch: str) -> list[str]:
+    """The argv tokens of ``launch`` with the ``--session-id <uuid>`` pin dropped, so the
+    assertion is about exactly what follows ``--remote-control``."""
+    argv = shlex.split(launch)
+    if "--session-id" in argv:
+        i = argv.index("--session-id")
+        del argv[i:i + 2]
+    return argv
+
+
+def _via_dashboard(monkeypatch, cwd):
+    monkeypatch.setattr(dash.config, "TERMINALS_ENABLED", True)
+    monkeypatch.setattr(dash.launcher, "record_recent", lambda *a, **kw: None)
+    r = dash.app.test_client().post("/api/agents/spawn",
+                                    json={"cwd": str(cwd), "command": "claude"})
+    assert r.status_code == 200, r.get_json()
+
+
+def _via_telegram_new(monkeypatch, cwd):
+    monkeypatch.setattr(spawn.agent_manager, "DEFAULT_LAUNCH_CMD", "claude")
+    wid, err = newsession.launch_claude_window(cwd)
+    assert err is None and wid
+
+
+def _via_chela_spawn(monkeypatch, cwd):
+    monkeypatch.setattr(main.agent_manager, "DEFAULT_LAUNCH_CMD", "claude")
+    monkeypatch.setattr(main.launcher, "record_recent", lambda *a, **kw: None)
+    main.cmd_spawn(SimpleNamespace(cwd=str(cwd), launch_cmd=None))
+
+
+@pytest.mark.parametrize("launch_via", [_via_dashboard, _via_telegram_new, _via_chela_spawn],
+                         ids=["dashboard", "telegram-new", "chela-spawn"])
+@pytest.mark.parametrize("where", ["home", "project"])
+def test_every_launcher_sends_a_bare_remote_control(monkeypatch, tmp_path, launch_via, where):
+    home = tmp_path / "home"
+    project = home / "projects" / "chelamux"
+    project.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    sent = _patch_tmux(monkeypatch, wid="@42", remote_control=True)
+    monkeypatch.setattr(spawn.sessionids, "set_session_id", lambda wid, sid: None)
+
+    launch_via(monkeypatch, home if where == "home" else project)
+
+    assert _rc_value(_launch(sent)) == ["claude", "--remote-control"]

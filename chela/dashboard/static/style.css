@@ -38,6 +38,13 @@
     --text: #c9d1d9;
     --text-dim: #8b949e;
     --accent: #58a6ff;
+    /* CMX-37: the text/icon colour for anything painted ON a solid --accent
+       fill (hover rows, active chips, accent buttons). Every theme declares
+       its own — #fff fails WCAG AA on every accent we ship (1.3-3.7:1), and
+       warm's off-white accent made it vanish outright.
+       tests/test_on_accent_contrast.py holds each theme to >= 4.5:1 and fails
+       a rule that pairs an --accent fill with a literal white. */
+    --on-accent: #0d1117;
     --green: #3fb950;
     --yellow: #d29922;
     --red: #f85149;
@@ -92,51 +99,47 @@
    theme by tests/test_term_bg_sync.py. */
 body[data-theme="dim"] {            /* GitHub Dim — softer, lower contrast */
     --bg: #1c2128; --surface: #22272e; --border: #373e47;
-    --text: #adbac7; --text-dim: #768390; --accent: #539bf5;
+    --text: #adbac7; --text-dim: #768390; --accent: #539bf5; --on-accent: #1c2128;
     --green: #57ab5a; --yellow: #c69026; --red: #e5534b;
     --term-bg: #1c2128;   /* == term_themes.py dim xterm background */
 }
 body[data-theme="midnight"] {       /* deep navy/indigo */
     --bg: #0b1021; --surface: #151b33; --border: #28304f;
-    --text: #c4ccf0; --text-dim: #7d87b3; --accent: #7aa2f7;
+    --text: #c4ccf0; --text-dim: #7d87b3; --accent: #7aa2f7; --on-accent: #0b1021;
     --green: #9ece6a; --yellow: #e0af68; --red: #f7768e;
     --term-bg: #0b1021;   /* == term_themes.py midnight xterm background */
 }
 body[data-theme="nord"] {           /* Nord */
     --bg: #2e3440; --surface: #3b4252; --border: #434c5e;
-    --text: #e5e9f0; --text-dim: #81a1c1; --accent: #88c0d0;
+    --text: #e5e9f0; --text-dim: #81a1c1; --accent: #88c0d0; --on-accent: #2e3440;
     --green: #a3be8c; --yellow: #ebcb8b; --red: #bf616a;
     --term-bg: #2e3440;   /* == term_themes.py nord xterm background */
 }
 body[data-theme="gruvbox"] {        /* Gruvbox dark, warm */
     --bg: #282828; --surface: #32302f; --border: #504945;
-    --text: #ebdbb2; --text-dim: #a89984; --accent: #83a598;
+    --text: #ebdbb2; --text-dim: #a89984; --accent: #83a598; --on-accent: #282828;
     --green: #b8bb26; --yellow: #fabd2f; --red: #fb4934;
     --term-bg: #282828;   /* == term_themes.py gruvbox xterm background */
 }
 body[data-theme="solarized"] {      /* Solarized Dark */
     --bg: #002b36; --surface: #073642; --border: #0e4b59;
-    --text: #93a1a1; --text-dim: #657b83; --accent: #268bd2;
+    --text: #93a1a1; --text-dim: #657b83; --accent: #268bd2; --on-accent: #00141a;
     --green: #859900; --yellow: #b58900; --red: #dc322f;
     --term-bg: #002b36;   /* == term_themes.py solarized xterm background */
 }
 body[data-theme="rose"] {           /* Rosé Pine Moon — muted plum */
     --bg: #232136; --surface: #2a273f; --border: #393552;
-    --text: #e0def4; --text-dim: #908caa; --accent: #c4a7e7;
+    --text: #e0def4; --text-dim: #908caa; --accent: #c4a7e7; --on-accent: #232136;
     --green: #9ccfd8; --yellow: #f6c177; --red: #eb6f92;
     --term-bg: #232136;   /* == term_themes.py rose xterm background */
 }
 body[data-theme="warm"] {           /* warm greys, off-white accent (CMX-381) */
     --bg: #262624; --surface: #1f1e1d; --border: #35332f;
-    --text: #eceae4; --text-dim: #a39f95; --accent: #e9e4d8;
+    --text: #eceae4; --text-dim: #a39f95; --accent: #e9e4d8; --on-accent: #1c1b19;
     /* status: Okabe-Ito sky / orange / vermillion — never red-vs-green alone */
     --green: #56b4e9; --yellow: #e69f00; --red: #d55e00;
     --term-bg: #1c1b19;   /* == term_themes.py warm xterm background */
 }
-/* warm's accent is off-white: the one hover that paints #fff text ON the accent
-   would vanish, so it takes the dark ink the other on-accent rules already use. */
-body[data-theme="warm"] .pane-overflow-menu button.popover-item:hover,
-body[data-theme="warm"] .pane-overflow-menu button.popover-item:hover .ov-ic { color: #1c1b19; }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -360,8 +363,15 @@ body {
 }
 /* Orchestrator ownership: a SEPARATE non-hue ring (an outline, not a box-shadow,
    so it never collides with the waiting-state glow above) — updated in lockstep
-   with the menu's Orchestrator row by _updateOrchBtns (terminals.js). */
-.gs-dot.gs-dot-orch { outline: 2px solid var(--ok-blue); outline-offset: 1px; }
+   with the menu's Orchestrator row by _updateOrchBtns (terminals.js).
+   CMX-32: the ring lives on `.gs-dot-ring`, the plain WRAPPER around `.gs-dot`,
+   never on the dot itself. The dot's `done` (check) and `waiting` (triangle)
+   shapes are `clip-path`s, and a clip-path clips everything outside the shape,
+   outline included — so a ring on the dot vanished exactly when the orchestrator
+   finished or needed a decision. The wrapper carries no clip-path in any state;
+   tests/wallnav.test.mjs (CMX-32) asserts the ring resolves for all four. */
+.gs-dot-ring { display: inline-flex; flex: 0 0 auto; border-radius: 50%; }
+.gs-dot-ring.gs-dot-orch { outline: 2px solid var(--ok-blue); outline-offset: 1px; }
 
 /* --- Wall redesign slice 1 (docs/wall-redesign.md): the header's state pill.
    Wall-only (paneHead's `draggable` gate — single mode renders none of this,
@@ -467,6 +477,8 @@ body {
     color: var(--ok-sky); text-decoration: none; pointer-events: auto;
 }
 .gs-pr:hover { text-decoration: underline; }
+/* CMX-41: a merged/closed/draft PR is history, not a call to action. */
+.gs-pr.gs-pr-dim { color: var(--text-dim); font-weight: 500; }
 
 /* CMX-417: the pane's tmux window id (`@N`), leading the bar on every
    surface — small, dim, monospace, so it reads as an address rather than one
@@ -634,7 +646,7 @@ body {
 .gs-mobile-full-btn { display: none; }
 .gs-mobile-full-btn svg { vertical-align: middle; }
 .gs-keys button:hover { border-color: var(--accent); }
-.gs-keys button.btn-accent { background: var(--accent); color: #0d1117; border-color: var(--accent); }
+.gs-keys button.btn-accent { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 /* × kill — only rendered for non-managed sessions. Red hover signals it's
    destructive, distinct from the neutral nav keys beside it. */
 .gs-keys button.gs-kill-btn { font-size: 12px; padding: 4px 7px; }
@@ -662,8 +674,8 @@ body {
     padding: 7px 10px; font-size: 12px; text-align: left; line-height: 1.3;
     font: inherit; border: 0; background: none; border-radius: 4px; color: var(--text);
 }
-.pane-overflow-menu button.popover-item:hover { background: var(--accent); color: #fff; }
-.pane-overflow-menu button.popover-item:hover .ov-ic { color: #fff; }
+.pane-overflow-menu button.popover-item:hover { background: var(--accent); color: var(--on-accent); }
+.pane-overflow-menu button.popover-item:hover .ov-ic { color: var(--on-accent); }
 
 /* --- collab: share button + presence facepile ------------------------------ */
 /* Share/Orchestrator/Pin: neutral until active, then a solid colour fill so
@@ -675,7 +687,7 @@ body {
    source order — `.pane-overflow-menu button.X.on` (0,3,1) outranks
    `.pane-overflow-menu button.popover-item` (0,2,1) unconditionally, unlike a
    bare `.X.on` (0,2,0) would. */
-.pane-overflow-menu button.gs-share-btn.on { color: #0d1117; background: var(--accent); }
+.pane-overflow-menu button.gs-share-btn.on { color: var(--on-accent); background: var(--accent); }
 .pane-overflow-menu button.gs-orch-btn.on { color: #0d1117; background: var(--ok-blue); }
 .pane-overflow-menu button.gs-pin-btn.on { color: #0d1117; background: var(--yellow); }
 .gs-share-btn.on .ov-ic, .gs-orch-btn.on .ov-ic, .gs-pin-btn.on .ov-ic { color: inherit; }
@@ -685,10 +697,10 @@ body {
 .gs-share-count {
     margin-left: auto; min-width: 14px; height: 14px;
     padding: 0 3px; border-radius: 999px; box-sizing: border-box;
-    background: var(--accent); color: #0d1117;
+    background: var(--accent); color: var(--on-accent);
     font-size: 9px; font-weight: 700; line-height: 12px; text-align: center;
 }
-.gs-share-btn.on .gs-share-count { border: 1px solid #0d1117; }
+.gs-share-btn.on .gs-share-count { border: 1px solid var(--on-accent); }
 
 /* --- per-pane layout pin: exempt from grid-preset auto-reflow (CMX-108) ---- */
 /* A dashed accent border on the tile itself — distinct from the solid
@@ -981,7 +993,7 @@ body {
     background: transparent; color: var(--text); border: 1px solid var(--border);
 }
 .shares-sheet .ss-mode-opt[aria-pressed="true"] {
-    background: var(--accent); border-color: var(--accent); color: #0d1117; font-weight: 700; cursor: default;
+    background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 700; cursor: default;
 }
 .shares-sheet .ss-mode-opt-unsafe { border-color: var(--ok-vermillion, #d55e00); }
 .shares-sheet .ss-mode-opt-unsafe[aria-pressed="true"] { background: var(--ok-vermillion, #d55e00); border-color: var(--ok-vermillion, #d55e00); color: #fff; }
@@ -1094,7 +1106,7 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
 /* The restore affordance: while maximized, the max/restore button goes
    accent-filled with a halo so the exit is unmistakable without a banner. */
 .pane-maximized .gs-max-btn {
-    background: var(--accent); color: var(--bg); border-radius: 5px;
+    background: var(--accent); color: var(--on-accent); border-radius: 5px;
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 /* Always-on taskbar below the stage: one chip per wall pane (visible = accent
@@ -2451,7 +2463,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 
 .kanban-filter-chip:hover { color: var(--text); border-color: var(--accent); }
-.kanban-filter-chip.active { background: var(--accent); border-color: var(--accent); color: #0d1117; font-weight: 600; }
+.kanban-filter-chip.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 
 .kanban-board {
     display: grid;
@@ -2614,7 +2626,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     font-family: inherit;
     line-height: 1.4;
 }
-.kanban-promote-btn:hover:not(:disabled) { background: var(--accent); color: #0d1117; border-color: var(--accent); }
+.kanban-promote-btn:hover:not(:disabled) { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 .kanban-promote-btn:disabled { opacity: 0.6; cursor: wait; }
 
 .kanban-promote-toast {
@@ -3002,7 +3014,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
        not hue alone. */
     .kanban-layout-btn.active {
         background: var(--accent);
-        color: #0d1117;
+        color: var(--on-accent);
         font-weight: 700;
         box-shadow: inset 0 0 0 2px var(--accent);
     }
@@ -3046,7 +3058,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     .kanban-nav-chip.active {
         background: var(--accent);
         border-color: var(--accent);
-        color: #0d1117;
+        color: var(--on-accent);
         font-weight: 700;
         box-shadow: inset 0 0 0 2px var(--accent);
     }
@@ -3957,7 +3969,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     max-height: 70vh; overflow-y: auto;
 }
 .popover-item { padding: 7px 10px; cursor: pointer; border-radius: 4px; font-size: 12px; }
-.popover-item:hover { background: var(--accent); color: #fff; }
+.popover-item:hover { background: var(--accent); color: var(--on-accent); }
 .popover-item.popover-note { cursor: default; color: var(--text-dim); }
 .popover-item.popover-note:hover { background: transparent; color: var(--text-dim); }
 .popover-hint { opacity: 0.7; }
@@ -3968,7 +3980,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 .overflow-menu .ov-item { display: flex; align-items: center; gap: 10px; }
 .overflow-menu .ov-ic { flex: 0 0 16px; display: inline-flex; align-items: center; color: var(--text-dim); }
 .overflow-menu .ov-ic svg { display: block; }
-.overflow-menu .ov-item:hover .ov-ic { color: #fff; }
+.overflow-menu .ov-item:hover .ov-ic { color: var(--on-accent); }
 .popover-sep { height: 1px; margin: 4px 6px; background: var(--border); }
 .overflow-menu .ov-stat {
     display: flex; align-items: center; justify-content: space-between; gap: 14px;
@@ -4270,7 +4282,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     /* Ctrl modifier — armed (outlined) vs locked (filled). */
     .kb2-mod { font-size: 11px; }
     .term-keybar[data-ctrl="armed"] #kb2-ctrl { border-color: var(--accent); color: var(--accent); }
-    .term-keybar[data-ctrl="locked"] #kb2-ctrl { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .term-keybar[data-ctrl="locked"] #kb2-ctrl { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 
     /* Ctrl-letter layer: hidden until Ctrl is engaged. */
     .kb2-ctrl-letters { display: none; align-items: center; gap: 5px; }

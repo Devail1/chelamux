@@ -20,7 +20,7 @@ const BRANCH = 'feature/an-extremely-long-branch-name-that-would-never-fit-' + '
 const AGENTS = ['@1', '@2', '@3', '@32'].map((wid, i) => ({
     name: i === 3 ? LONG : `agent-${i}`, window_id: wid, online: true, session_status: 'busy',
     cwd: '/p/x', ai_title: 'Refactor the flux capacitor',
-    pr: { url: 'https://example.invalid/pr/1234', number: 1234 },
+    pr: { url: 'https://example.invalid/pr/1234', number: 1234, state: 'open' },
 }));
 const CONTEXT = AGENTS.map(a => ({
     window_id: a.window_id, used_pct: 74, used: '147.5K', total: '1M',

@@ -302,7 +302,9 @@ def _spawn_and_capture_launch(monkeypatch) -> str:
 def test_spawn_orchestrator_window_adds_remote_control_by_default(monkeypatch):
     monkeypatch.setattr(autolaunch.config, "remote_control_enabled", lambda: True)
     launch = _spawn_and_capture_launch(monkeypatch)
-    assert f"--remote-control {autolaunch.WINDOW_NAME}" in launch
+    # CMX-34: BARE — no name, so claude.ai shows Claude's own session title. Restore the
+    # `WINDOW_NAME` argument → the flag is followed by it, not by the next flag → RED.
+    assert launch.startswith("claude --remote-control --")
 
 
 def test_spawn_orchestrator_window_omits_remote_control_when_disabled(monkeypatch):

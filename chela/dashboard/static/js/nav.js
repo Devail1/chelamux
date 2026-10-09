@@ -841,7 +841,9 @@ function renderAgentDetail() {
 
     let pr = '';
     if (a.pr && a.pr.url) {
-        const label = a.pr.number ? `PR #${a.pr.number}` : 'PR';
+        // CMX-41: say when the PR is history — a transcript's pr-link outlives the merge.
+        const st = (a.pr.state === 'merged' || a.pr.state === 'closed') ? ` · ${a.pr.state}` : '';
+        const label = (a.pr.number ? `PR #${a.pr.number}` : 'PR') + st;
         pr = ` <a class="pr-badge" href="${attrEsc(a.pr.url)}" target="_blank" rel="noopener noreferrer">${escHtml(label)}</a>`;
     }
 

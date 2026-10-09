@@ -235,6 +235,13 @@ history lives in `git log`.
 
 ### Fixed
 
+- **The Wall no longer advertises a merged or closed PR as ready for review.** Claude Code
+  keeps re-writing a session's PR link after the PR merges, so a pane showed
+  "✓ PR ready for review" and `⚑ #N` for a dead PR. `/api/agents` now resolves the PR's
+  state (a run record's merged/closed state, else a cached `gh pr view`). The Review bar
+  and ⚑ need a confirmed open, non-draft PR. A merged, closed or draft PR shows a dim
+  `#N merged`/`#N closed`/`#N draft` chip, and a failed lookup shows a plain `#N`. (CMX-41, #620)
+
 - **`render_prompt` fails loudly on an unknown `{{var}}` instead of shipping it verbatim.**
   A misspelled variable in a `WORKFLOW.md` prompt template (or the built-in first-dispatch and
   rework prompts) now raises `TemplateRenderError` naming every unresolved reference, instead

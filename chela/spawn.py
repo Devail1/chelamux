@@ -28,7 +28,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import shlex
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -169,39 +168,30 @@ def _record_session_id(wid: str, session_id: str) -> bool:
         return False
 
 
-def _remote_control_name(window_name: str, cwd: str) -> str:
-    """The ``--remote-control`` session name: the project (``cwd``'s basename).
+def _add_remote_control(command: str) -> str:
+    """Insert a bare ``--remote-control`` right after the leading ``claude`` token.
 
-    Mirrors the fallback half of :func:`chela.telegram.reconcile.topic_name_for` (not
-    imported from here — that module is telegram-specific, this one is not) so the
-    claude.ai session name reads the same as the Telegram topic that auto-topics binds
-    to the window shortly after: the project directory, not the generic ``shell-N``
-    tmux gave the window at spawn time. Falls back to ``window_name`` when the cwd
-    carries no useful basename — the filesystem root, or the user's home directory
-    (which would otherwise collapse to the login name).
-    """
-    normalized = os.path.normpath(cwd)
-    home = os.path.normpath(os.path.expanduser("~"))
-    if normalized in (home, os.sep):
-        return window_name
-    return os.path.basename(normalized) or window_name
-
-
-def _add_remote_control(command: str, name: str) -> str:
-    """Insert ``--remote-control <name>`` right after the leading ``claude`` token.
+    Bare on purpose (CMX-34): with no name, Claude Code shows its own generated session
+    title in the claude.ai / desktop sidebar — which already groups sessions by project
+    folder. A name passed here was frozen at launch (the ``shell-N`` placeholder for a
+    home-dir window), and later tmux renames never reached Claude Code. Telegram topic
+    naming (:func:`chela.telegram.reconcile.topic_name_for`) is separate and unaffected.
 
     Same insert-never-append discipline as :func:`_pin_session_id` (see its
     docstring): appending would land the flag on whatever a chained command actually
     runs last, so this only ever touches a command whose FIRST token is a bare
     ``claude`` — anything else (no command, or one not starting with ``claude``) is
-    returned untouched. ``name`` is shell-quoted so a project/window name containing
-    a space or a shell metacharacter still arrives as a single argv element.
+    returned untouched. ``[name]`` is an OPTIONAL value, so the flag would swallow a
+    following positional (a prompt, a subcommand) as the session name; a command whose
+    next token is not a flag is therefore returned untouched too.
     """
     m = _LEADING_CLAUDE_RE.match(command)
     if not m:
         return command
-    cut = m.end()
-    return f"{command[:cut]} --remote-control {shlex.quote(name)}{command[cut:]}"
+    rest = command[m.end():]
+    if rest.strip() and not rest.lstrip().startswith("-"):
+        return command
+    return f"{command[:m.end()]} --remote-control{rest}"
 
 
 def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> SpawnResult:
@@ -230,11 +220,10 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
       :mod:`chela.sessionids`) — recording only, for now (docs/AGENT_IDENTITY.md
       slice 2a). A record failure sends ``command`` unpinned instead;
     * if ``command`` is given and :func:`chela.config.remote_control_enabled` (read per call), insert
-      Claude Code's own ``--remote-control <name>`` (:func:`_add_remote_control`) —
+      Claude Code's own bare ``--remote-control`` (:func:`_add_remote_control`) —
       every window this function opens is one chela started FOR A HUMAN (the
       dashboard launcher, Telegram ``/new``, a resumed session), so it is reachable
-      from claude.ai too. ``name`` is the project directory
-      (:func:`_remote_control_name`), so the session reads distinguishably there;
+      from claude.ai too, under Claude's own generated session title;
     * ``send-keys`` the (possibly session-pinned, possibly remote-control-flagged)
       command — we start a shell and *send* the command rather than running it as the
       window command, so the pane survives the command exiting.
@@ -297,8 +286,8 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
             # insert right after the leading `claude` token regardless of what the
             # other already inserted there, so the order is harmless either way —
             # but doing session-id pinning first keeps its own metacharacter/override
-            # scan reading the caller's original command, never our own quoted name.
-            to_send = _add_remote_control(to_send, _remote_control_name(name, real))
+            # scan reading the caller's original command, never our own insertion.
+            to_send = _add_remote_control(to_send)
         _send(target, to_send)
 
     log.info("spawned window %s (%s) in %s%s", name, wid or "no-id", real,

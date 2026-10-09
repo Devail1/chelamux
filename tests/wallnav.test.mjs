@@ -997,7 +997,7 @@ test("CMX-377: the header dot reaches the 'done' class for a finished pane, not 
     const badge = tile(wid).querySelector('.gs-dot');
 
     AGENTS[0].session_status = 'idle';
-    AGENTS[0].pr = { url: 'https://github.com/x/y/pull/1' };
+    AGENTS[0].pr = { url: 'https://github.com/x/y/pull/1', state: 'open' };
     await terminals.termTick();
     assert.ok(badge.classList.contains('done'),
         "a finished pane (idle + open PR, tileState's own 'done' condition) must paint the header dot 'done' — " +
@@ -1039,7 +1039,7 @@ test('CMX-377: sidebar row and pane header dot use the SAME class for each of th
         { label: 'waiting (needs you)', row: { name: 'w2', window_id: '@w2', needs_human: true },
           pane: { needs_human: true } },
         { label: 'done', row: { name: 'w3', window_id: '@w3', session_status: 'idle', done: true },
-          pane: { session_status: 'idle', pr: { url: 'https://github.com/x/y/pull/1' } } },
+          pane: { session_status: 'idle', pr: { url: 'https://github.com/x/y/pull/1', state: 'open' } } },
         { label: 'idle', row: { name: 'w4', window_id: '@w4' }, pane: {} },
     ];
 
@@ -1360,8 +1360,9 @@ test('.gs-branch never grows past its own content — no flex-grow, no flex: 1',
 // subscribe/release round-trip — never a hardcoded paint.
 test('the header dot gains a ring iff its pane owns the decisions inbox, in lockstep with the menu row — CMX-117 E', async () => {
     const owner = '@2', other = '@1';
-    const ownerBadge = tile(owner).querySelector('.gs-dot');
-    const otherBadge = tile(other).querySelector('.gs-dot');
+    // CMX-32: the ring rides the dot's unclipped wrapper, not the dot (see 16b).
+    const ownerBadge = tile(owner).querySelector('.gs-dot-ring');
+    const otherBadge = tile(other).querySelector('.gs-dot-ring');
     const orchBtn = tile(owner).querySelector('.gs-orch-btn');
     assert.equal(ownerBadge.classList.contains('gs-dot-orch'), false, 'sanity: nobody owns the slot yet');
 
@@ -1374,6 +1375,68 @@ test('the header dot gains a ring iff its pane owns the decisions inbox, in lock
 
     await window.chela.orchestratorBtnClick(orchBtn, owner);   // release, leave state as found
     assert.equal(ownerBadge.classList.contains('gs-dot-orch'), false, 'releasing must remove the ring');
+});
+
+// 16b — CMX-32: THE ORCHESTRATOR RING STAYS VISIBLE IN EVERY STATUS STATE. The ring
+// used to be an `outline` on `.gs-dot` itself — but that dot's `done` (check) and
+// `waiting` (triangle) shapes are `clip-path`s, and a clip-path clips everything
+// outside the shape, outline included. So the ring showed only while the
+// orchestrator was working or idle, and vanished exactly when it finished or needed
+// a decision. This drives the REAL wall (subscribe through the real button, paint
+// each state through a real termTick), then mounts that tile's ACTUAL rendered
+// markup under the REAL style.css and reads the cascade back: the element wearing
+// `.gs-dot-orch` must resolve a solid outline, must contain the status dot, and
+// neither it nor any ancestor may carry a clip-path. Put the ring back on the dot
+// and `done`/`waiting` go red here.
+test('CMX-32: the orchestrator ring resolves visible, unclipped, for working, waiting, idle AND done', async (t) => {
+    const owner = '@2';
+    const agent = AGENTS[1];
+    const orchBtn = tile(owner).querySelector('.gs-orch-btn');
+    // The button TOGGLES — read its `.on` first, so a prior test that failed before
+    // releasing can't turn this subscribe into a release.
+    if (!orchBtn.classList.contains('on')) await window.chela.orchestratorBtnClick(orchBtn, owner);
+    assert.ok(orchBtn.classList.contains('on'), `sanity: ${owner} should own the decisions inbox now`);
+    const CASES = {
+        working: { session_status: 'busy' },
+        waiting: { needs_human: true },
+        idle: {},
+        done: { session_status: 'idle', pr: { url: 'https://github.com/x/y/pull/1', state: 'open' } },
+    };
+    const css = cssForViewport(CSS, DESKTOP);
+    try {
+        // One subtest per state, so a regression names EVERY state it breaks.
+        for (const [state, fields] of Object.entries(CASES)) await t.test(state, async () => {
+            Object.assign(agent, { session_status: undefined, pr: undefined, needs_human: undefined }, fields);
+            await terminals.termTick();
+            const dot = tile(owner).querySelector('.gs-dot');
+            assert.ok(dot.classList.contains(state), `sanity: the owner's dot should be painted "${state}"`);
+
+            const dom = new JSDOM(
+                `<!doctype html><html><head><style>${css}</style></head><body>` +
+                `<div class="panel" id="panel-terminals"><div id="term-stage">${tile(owner).outerHTML}</div></div>` +
+                '</body></html>', { pretendToBeVisual: true });
+            const w = dom.window;
+            const rings = w.document.querySelectorAll('.gs-dot-orch');
+            assert.equal(rings.length, 1, `${state}: expected exactly one element wearing the orchestrator ring`);
+            const ring = rings[0];
+            assert.ok(ring.querySelector('.gs-dot') || ring.classList.contains('gs-dot'),
+                `${state}: the ring must surround the pane's status dot`);
+            const cs = w.getComputedStyle(ring);
+            assert.match(cs.outline, /\bsolid\b/, `${state}: the ring element resolves no solid outline ("${cs.outline}")`);
+            assert.doesNotMatch(cs.outline, /\bnone\b|^0(px)?\b/, `${state}: the ring outline resolves empty ("${cs.outline}")`);
+            assert.notEqual(cs.display, 'none', `${state}: the ring element is display:none`);
+            for (let el = ring; el && el.nodeType === 1; el = el.parentElement) {
+                const clip = w.getComputedStyle(el).clipPath;
+                assert.ok(!clip || clip === 'none',
+                    `${state}: clip-path "${clip}" applies to <${el.tagName.toLowerCase()} class="${el.className}"> ` +
+                    'on the ring\'s path — it clips the outline away (CMX-32)');
+            }
+        });
+    } finally {
+        Object.assign(agent, { session_status: undefined, pr: undefined, needs_human: undefined });
+        await terminals.termTick();
+        if (orchBtn.classList.contains('on')) await window.chela.orchestratorBtnClick(orchBtn, owner);   // release
+    }
 });
 
 // 17 — WIRE-FROM-MENU: THE POPOVER CLOSES THE INSTANT THE DRAG STARTS, AND CLEANUP IS
@@ -1839,4 +1902,63 @@ test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and r
         util.setAgentsCache(AGENTS);
         terminals._refreshPaneLabels();
     }
+});
+
+// CMX-41 — THE RENDERED PR CHIP AND REVIEW BAR FOLLOW THE PR'S REAL STATE. wall_tile.test.mjs
+// pins prChip/actionBarKind at the model layer, but a judge round showed the DOM write in
+// _applyWallTileFrame was unguarded: `el.textContent = '⚑ ' + chip.label` (flag on every
+// state) stayed green, so a MERGED #613 rendered "⚑ #613 merged". This drives the REAL
+// repaint through termTick for every state and reads back what a human sees: the chip's
+// exact text, its dim class, its tooltip, and whether the "ready for review" bar exists.
+test('CMX-41: the rendered .gs-pr chip and Review bar claim "ready" only for a confirmed open, non-draft PR', async () => {
+    const URL = 'https://github.com/acme/widgets/pull/613';
+    const CASES = [
+        { state: 'open', draft: false, text: '⚑ #613', dim: false, review: true },
+        { state: 'open', draft: true, text: '#613 draft', dim: true, review: false },
+        { state: 'merged', draft: false, text: '#613 merged', dim: true, review: false },
+        { state: 'closed', draft: false, text: '#613 closed', dim: true, review: false },
+        { state: 'unknown', draft: false, text: '#613', dim: false, review: false },
+        { state: undefined, draft: undefined, text: '#613', dim: false, review: false },
+    ];
+    const t = tile('@1');
+    const chip = t.querySelector('.gs-pr[data-pr-for]');
+    const bar = t.querySelector('.term-action-bar[data-action-for]');
+    assert.ok(chip, 'every wall tile carries a .gs-pr chip slot');
+    assert.ok(bar, 'every wall tile carries an action bar slot');
+
+    for (const c of CASES) {
+        const name = `state=${c.state} draft=${c.draft}`;
+        Object.assign(AGENTS[0], { session_status: 'idle', needs_human: undefined,
+            pr: { url: URL, number: 613, repository: 'acme/widgets', state: c.state, draft: c.draft } });
+        await terminals.termTick();
+
+        assert.equal(chip.hidden, false, `${name}: a PR link is always shown as a chip`);
+        assert.equal(chip.getAttribute('href'), URL, `${name}: the chip links to the PR`);
+        assert.equal(chip.textContent, c.text, `${name}: the chip reads "${chip.textContent}"`);
+        assert.equal(chip.textContent.includes('⚑'), c.review,
+            `${name}: the ⚑ is earned only by a confirmed open, non-draft PR`);
+        assert.equal(chip.classList.contains('gs-pr-dim'), c.dim, `${name}: dim class`);
+        assert.equal(chip.title.includes('(state unknown)'), c.state !== 'open' && c.state !== 'merged' && c.state !== 'closed',
+            `${name}: the tooltip says when the state is unknown — "${chip.title}"`);
+
+        const ready = !bar.hidden && /ready for review/.test(bar.textContent);
+        assert.equal(ready, c.review, `${name}: "ready for review" bar shown=${ready}`);
+        assert.equal(bar.classList.contains('action-review'), c.review, `${name}: action-review class`);
+        if (c.review) {
+            assert.equal(bar.querySelector('a.term-action-btn').getAttribute('href'), URL,
+                'the Review button opens the PR itself');
+        } else {
+            assert.equal(bar.hidden, true, `${name}: no action bar at all for a PR that is not reviewable`);
+        }
+    }
+
+    // No PR at all ⇒ no chip, no bar.
+    delete AGENTS[0].pr;
+    await terminals.termTick();
+    assert.equal(chip.hidden, true);
+    assert.equal(chip.textContent, '');
+    assert.equal(bar.hidden, true);
+
+    delete AGENTS[0].session_status; delete AGENTS[0].needs_human;
+    await terminals.termTick();
 });
