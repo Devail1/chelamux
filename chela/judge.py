@@ -3157,7 +3157,8 @@ def format_battery(battery: dict) -> str:
     """The one-line ``chela peek`` rendering: the badge, the tally, the experiment now running."""
     line = battery["label"]
     if battery["state"] == BATTERY_TESTING:
-        line += f" (KILLED {battery['killed']} · SURVIVED {battery['survived']})"
+        line += (f" (KILLED {battery['killed']} · SURVIVED {battery['survived']}"
+                 f" · INVALID {battery['invalid']})")
         if battery.get("current"):
             line += f" — {battery['current']}"
     elif battery.get("log"):

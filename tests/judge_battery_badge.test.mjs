@@ -1,5 +1,5 @@
 // ⚖️ CMX-40 — a judge window's DETACHED mutation battery shows its live progress on the
-// pane's state pill, the sidebar row and the Work card, instead of "idle".
+// pane's state pill, its status dot / taskbar chip and the sidebar row, instead of "idle".
 //
 // The judge agent goes idle by design once it launches `chela judge run --detach`, and
 // Claude Code does not list a run it did not start — so before this the window read
@@ -14,15 +14,22 @@ import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { batteryState, tileState } from '../chela/dashboard/static/js/wallmodel.js';
-import { runStateBadges } from '../chela/dashboard/static/js/kanbanlinearmodel.js';
 
-const TESTING = { state: 'testing', done: 3, total: 6, label: '⚖️ testing · 3/6 · 15m' };
-const DIED = { state: 'died', done: 2, total: 6, label: '⚖️ judge run died — no verdict' };
+// `current` carries a guard text no surface may print: the dashboard draws the LABEL
+// (counts + elapsed) only — the experiment running now may be a held-out one (CMX-395),
+// and agents can read panes.
+const SECRET = 'SECRET-held-out-guard-text';
+const TESTING = { state: 'testing', done: 3, total: 6, label: '⚖️ testing · 3/6 · 15m',
+                  current: `guard.py: ${SECRET}` };
+const DIED = { state: 'died', done: 2, total: 6, label: '⚖️ judge run died — no verdict',
+               current: `guard.py: ${SECRET}` };
 
 const AGENTS = [
     { name: 'judge-a', window_id: '@40', online: true, cwd: '/p/a', claude_running: true,
       session_status: 'idle', judge_battery: TESTING },
     { name: 'judge-b', window_id: '@41', online: true, cwd: '/p/b', claude_running: true,
+      session_status: 'idle', judge_battery: DIED },
+    { name: 'judge-c', window_id: '@43', online: true, cwd: '/p/d', claude_running: true,
       session_status: 'idle', judge_battery: DIED },
     { name: 'plain', window_id: '@42', online: true, cwd: '/p/c', claude_running: true,
       session_status: 'idle', judge_battery: null },
@@ -92,6 +99,9 @@ before(async () => {
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();
     nav.renderSidebarAgents(AGENTS);
+    // A pane minimized to the taskbar: its CHIP carries the same status dot.
+    terminals.minimizePane('@43');
+    await terminals.renderTerminals();
 });
 
 const pill = wid => document.querySelector(`#panel-terminals .gs-state[data-state-for="${wid}"]`);
@@ -142,15 +152,44 @@ test('the agent\'s own busy / needs-you state still outranks the battery', () =>
     const a = { ...AGENTS[0], session_status: 'busy' };
     assert.equal(tileState(a, false).word, 'working');
     assert.equal(tileState(AGENTS[0], true).word, 'needs you');
-    assert.equal(batteryState(AGENTS[2]), null);
+    assert.equal(batteryState(AGENTS.find(a => a.name === 'plain')), null);
 });
 
-// --- the Work card -------------------------------------------------------------------
+// --- the pane-header status dot + the taskbar chip (CLASS, not just the label) --------
 
-test('a judging Work card shows the battery\'s progress instead of a bare "judging"', () => {
-    const labels = c => runStateBadges(c).map(b => b.label);
-    assert.deepEqual(labels({ judge_state: 'running', judge_battery: TESTING }), ['⚖️ testing · 3/6 · 15m']);
-    assert.deepEqual(labels({ judge_state: 'running', judge_battery: DIED }), ['⚖️ judge run died — no verdict']);
-    assert.deepEqual(labels({ judge_state: 'running', judge_battery: null }), ['⚖️ judging']);
-    assert.deepEqual(labels({ judge_state: 'clean', judge_battery: null }), []);
+// Every `.term-status-dot` the wall draws for a window: the pane header's dot and, for a
+// minimized pane, its taskbar chip. Asserted on the CLASS the CSS colours by — the label
+// text alone cannot catch a dot that still renders the idle shape.
+const dots = wid => [...document.querySelectorAll(`#panel-terminals .term-status-dot[data-status-for="${wid}"]`)];
+const DOT_STATES = ['working', 'waiting', 'idle', 'done'];
+const dotState = el => DOT_STATES.filter(c => el.classList.contains(c));
+
+test('while the battery runs, the judge pane\'s header dot reads WORKING — never idle', () => {
+    const els = dots('@40');
+    assert.ok(els.length >= 1, 'no status dot on the judge pane');
+    assert.ok(els.some(el => el.closest('.grid-stack-item-content, .term-pane')), 'setup: the dot must sit in the pane header');
+    for (const el of els) assert.deepEqual(dotState(el), ['working'], el.className);
+});
+
+test('a battery that died before a verdict: its taskbar chip dot reads WAITING — never idle', () => {
+    const chip = document.querySelector('#panel-terminals .min-chip .term-status-dot[data-status-for="@43"]');
+    assert.ok(chip, 'setup: the minimized judge pane must have a taskbar chip with a dot');
+    for (const wid of ['@41', '@43']) {
+        assert.ok(dots(wid).length >= 1, `setup: no dot for ${wid}`);
+        for (const el of dots(wid)) assert.deepEqual(dotState(el), ['waiting'], el.className);
+    }
+});
+
+test('negative control: a window with no battery has an IDLE dot', () => {
+    const els = dots('@42');
+    assert.ok(els.length >= 1, 'setup: the plain pane must render a dot');
+    for (const el of els) assert.deepEqual(dotState(el), ['idle'], el.className);
+});
+
+// --- a held-out experiment is never named on a dashboard surface -----------------------
+
+test('the experiment running now is never printed on the pane, chip or sidebar', () => {
+    assert.ok(pill('@40') && rowState('judge-a'), 'setup: the surfaces must render');
+    assert.ok(!document.body.innerHTML.includes(SECRET), 'a running experiment\'s guard text reached the DOM');
+    for (const el of [...dots('@40'), ...dots('@41'), ...dots('@43')]) assert.ok(!el.title.includes(SECRET), el.title);
 });

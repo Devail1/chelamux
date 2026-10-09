@@ -144,7 +144,7 @@ def test_peek_on_a_judge_window_prints_the_batterys_progress(_logs, monkeypatch)
     _write_status(_logs)
     p, lines = _peek(monkeypatch)
     assert p["judge_battery"]["label"] == "⚖️ testing · 3/6 · 15m"
-    assert lines == ["  judge:   ⚖️ testing · 3/6 · 15m (KILLED 2 · SURVIVED 1) — "
+    assert lines == ["  judge:   ⚖️ testing · 3/6 · 15m (KILLED 2 · SURVIVED 1 · INVALID 0) — "
                      "chela/wall.py: the ring is drawn"]
 
 
@@ -162,8 +162,8 @@ def test_peek_with_no_battery_prints_no_judge_line(_logs, monkeypatch):
 # --- /api/agents (the pane pill + the sidebar row read this) ------------------------------
 
 @contextmanager
-def _fleet():
-    live = {WINDOW: "@40", "plain": "@41"}
+def _fleet(window=WINDOW):
+    live = {window: "@40", "plain": "@41"}
     pids = {"@40": 1040, "@41": 1041}
     with (
         patch("chela.discovery.get_all_windows", return_value=dict(live)),
@@ -188,16 +188,6 @@ def test_api_agents_carries_the_battery_on_the_judge_window_only(_logs):
     assert rows["@40"]["session_status"] == "idle"          # what the pane USED to say
     assert rows["@40"]["judge_battery"]["label"] == "⚖️ testing · 3/6 · 15m"
     assert rows["@41"]["judge_battery"] is None
-
-
-def test_the_work_card_gets_the_battery_of_a_judging_run(_logs):
-    _write_status(_logs)
-    runs = [{"task_id": "T32", "branch_name": "liavacc/cmx-32-wall-ring",
-             "judge_state": judge.J_RUNNING},
-            {"task_id": "T33", "branch_name": "liavacc/cmx-32-wall-ring", "judge_state": "clean"}]
-    dash._attach_judge_battery(runs)
-    assert runs[0]["judge_battery"]["label"] == "⚖️ testing · 3/6 · 15m"
-    assert runs[1]["judge_battery"] is None
 
 
 # --- the producer: a REAL judge_run writes what the badge reads -------------------------
@@ -295,16 +285,71 @@ def test_the_newest_run_wins_whatever_order_the_files_are_written(_logs, order):
     assert (b["task_id"], b["done"]) == ("B", 1)
 
 
-def test_api_dispatcher_puts_the_battery_on_the_judging_awaiting_review_card(
-    _logs, monkeypatch,
-):
-    """GUARD (wiring): the Work board's `/api/dispatcher` attaches it — end to end."""
-    from tests.test_tasklists_dispatcher_api import _run, _setup
+def _every_surface(window: str) -> dict[str, str]:
+    """Everything an agent (or a human) can read about the battery right now: the model,
+    the `chela peek` text and the `/api/agents` row the pane pill / dot / sidebar draw."""
+    battery = judge.battery_for_window(window)
+    with (
+        patch.object(orchestrator.discovery, "get_windows_by_id", return_value={"@40": window}),
+        patch.object(orchestrator.discovery, "get_window_cwd_by_id", return_value="/w"),
+        patch.object(sessions, "transcript_for_window", return_value=None),
+        patch.object(agent_manager, "session_status_map",
+                     return_value={"by_pid": {7: "idle"}, "cwd_by_pid": {}}),
+        patch.object(agent_manager, "claude_pid", return_value=7),
+        patch.object(agent_manager, "window_type", return_value="claude"),
+    ):
+        peek_text = orchestrator.format_peek(orchestrator.peek("@40"))
+    with _fleet(window):
+        agents = dash.app.test_client().get("/api/agents").get_json()
+    return {"model": json.dumps(battery, ensure_ascii=False),
+            "label": battery["label"] if battery else "",
+            "peek": peek_text,
+            "api": json.dumps(agents, ensure_ascii=False)}
 
-    _write_status(_logs)
-    runs = [_run(status="awaiting_review", branch_name="liavacc/cmx-32-wall-ring",
-                 judge_state=judge.J_RUNNING, pr_url="https://example.invalid/pr/1")]
-    _setup(monkeypatch, _logs.parent, runs, entries={}, current_epoch="1-2")
-    data = dash.app.test_client().get("/api/dispatcher").get_json()
-    [card] = data["workflows"][0]["awaiting_review_runs"]
-    assert card["judge_battery"]["label"] == "⚖️ testing · 3/6 · 15m"
+
+def test_a_held_out_experiment_running_now_is_named_on_no_surface(
+    tmp_path, _logs, monkeypatch,
+):
+    """GUARD (CMX-395): a held-out experiment is staged as the CURRENT experiment of a REAL
+    run, and at every status write the run makes, every surface is read back — the model,
+    `chela peek` and `/api/agents`. Its guard text, and the ``file: guard`` label a visible
+    experiment gets, appear on none of them; only the counts do. Positive control: the
+    VISIBLE experiment's label does reach peek, so the surfaces really print `current`."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc124"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    window = judge.judge_window_name(dispatcher.resolve_run(task_id)["branch_name"])
+    secret = "SECRET-held-out-guard-text"
+    visible = "the off hue"
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [
+        _exp(guard=secret, held_out=True),                                      # runs FIRST
+        _exp(guard=visible, before='else "grey"', after='else "gray"'),
+    ]}))
+    snaps: list[tuple[dict, dict[str, str]]] = []
+    real_write = judge._write_run_status
+
+    def _spy(tid, status):
+        real_write(tid, status)
+        if tid == task_id:
+            snaps.append((dict(status), _every_surface(window)))
+
+    monkeypatch.setattr(judge, "_write_run_status", _spy)
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run(task_id, exp_file, cleanup=True, detached=True)
+    assert result["ok"], result
+
+    # Staged: the first experiment the run names is the held-out one, with a 0/2 count.
+    staged = [(st, sf) for st, sf in snaps if st.get("current")]
+    assert staged, snaps
+    first_status, first_surfaces = staged[0]
+    assert (first_status["done"], first_status["total"]) == (0, 2), first_status
+    assert "0/2" in first_surfaces["label"] and "0/2" in first_surfaces["peek"], first_surfaces
+
+    hidden_label = f"guard.py: {secret}"[:60]
+    for status, surfaces in snaps:
+        for where, text in surfaces.items():
+            assert secret not in text and hidden_label not in text, (where, status, text)
+    assert any(f"guard.py: {visible}" in sf["peek"] for _, sf in snaps), "positive control"
