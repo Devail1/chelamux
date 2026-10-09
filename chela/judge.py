@@ -3080,7 +3080,7 @@ def _read_status_retrying(path: Path, attempts: int = 3) -> dict | None:
     """The status json, re-read briefly if it was caught mid-write. The writer replaces it
     atomically, so a torn read means a non-atomic writer or a vanishing file — retried, then
     given up on (no badge beats a wrong one)."""
-    for i in range(1):
+    for i in range(attempts):
         status = _read_judge_lock(path)
         if status is not None:
             return status
