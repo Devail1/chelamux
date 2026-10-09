@@ -28,7 +28,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, probecache, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, userconfig
+from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, probecache, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -3550,6 +3550,52 @@ def api_cost():
         start = now - timedelta(days=30)
 
     return jsonify(context.windowed_cost(start, now))
+
+
+def _usage_window_names() -> dict[str, str]:
+    """``{session_id: window name}`` for every live chela window whose own session is
+    known — the Usage view labels those rows by window name (CMX-33's rule)."""
+    out = {}
+    for name, wid in discovery.get_all_windows().items():
+        sid = context.window_session(wid)
+        if sid:
+            out[sid] = name
+    return out
+
+
+@app.route("/api/usage")
+@require_auth
+def api_usage():
+    """The Cost tab's Usage view (CMX-38): 5h/7d limit bars + burn rate, and the top
+    token consumers over the last 30 min and today (UTC) across EVERY Claude Code
+    transcript — not only the chela windows that report a cost. See chela/usage.py."""
+    try:
+        names = _usage_window_names()
+    except Exception:  # noqa: BLE001 — tmux down still leaves the transcripts readable
+        log.debug("usage: window names unavailable", exc_info=True)
+        names = {}
+    return jsonify(usage.report(names))
+
+
+@app.route("/api/usage/roots", methods=["POST"])
+@require_auth
+def api_usage_roots():
+    """Set the extra transcript roots (absolute globs; ``null`` restores the default,
+    ``""`` or ``[]`` scans none). A relative entry is rejected 400, nothing stored."""
+    data = request.get_json(silent=True) or {}
+    raw = data.get("roots")
+    if raw is None:
+        userconfig.set_(usage.EXTRA_ROOTS_KEY, None)
+    else:
+        try:
+            roots = usage.normalize_roots(raw)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        # A list, even an empty one: set_ clears only None/"", so [] is stored as an
+        # explicit "scan no extra roots" rather than falling back to the default.
+        userconfig.set_(usage.EXTRA_ROOTS_KEY, roots)
+    return jsonify({"ok": True, "extra": usage.extra_roots(),
+                    "default": list(usage.DEFAULT_EXTRA_ROOTS)})
 
 
 @app.route("/api/resources")
