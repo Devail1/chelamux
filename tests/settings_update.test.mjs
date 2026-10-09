@@ -133,8 +133,35 @@ test('nothing to pull but stale services never renders as "Up to date"', async (
         'a checkout with stale running services still rendered as "Up to date"');
     assert.match(row.textContent, /chela-daemon/, 'the stale service names never reached the row');
     assert.match(row.textContent, /chela-dashboard/);
-    assert.equal(btn.disabled, true,
-        '"Update now" cannot fix a bare-pull staleness gap (apply() only restarts on an actual pull)');
+    // CMX-56: with nothing to pull, the click restarts exactly these — so the button is
+    // live, and says so instead of promising an update there is nothing to pull for.
+    assert.equal(btn.disabled, false, 'stale services listed over a dead button');
+    assert.equal(btn.textContent, 'Restart stale services (2)');
+});
+
+test('a service whose freshness is unknown is named as unknown, not stale and not hidden', async () => {
+    await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev', stale_services: [],
+        unknown_services: ['chela-agent-terminals'] });
+
+    const row = document.getElementById('update-status-row');
+    assert.match(row.textContent, /unknown for chela-agent-terminals/);
+    assert.equal(document.getElementById('update-apply-btn').disabled, true);
+});
+
+test('clicking Restart stale services says which services it is restarting', async () => {
+    await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev',
+        stale_services: ['chela-dashboard'] });
+    globalThis.confirm = () => true;
+    applyPayload = { ok: true, started: true, behind: 0, restarting: ['chela-dashboard'],
+        detail: 'restarting chela-dashboard' };
+
+    await window.chela.applyUpdate();
+    await flush();
+
+    const msg = document.getElementById('update-apply-msg');
+    assert.match(msg.textContent, /Restarting chela-dashboard/,
+        'a restart click gave no feedback naming what it restarted');
+    assert.match(msg.className, /\bok\b/);
 });
 
 // --- Counterweight — no stale services still renders "Up to date" -------------------

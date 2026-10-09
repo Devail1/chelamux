@@ -1746,23 +1746,31 @@ function _renderUpdateStatus(upd) {
     }
     const behind = upd.behind || 0;
     const stale = upd.stale_services || [];
+    const unknown = upd.unknown_services || [];
+    // CMX-56: a service whose start commit / code set couldn't be read is neither stale
+    // nor fresh — say so instead of folding it into either.
+    const unknownNote = unknown.length
+        ? ` · freshness unknown for ${escHtml(unknown.join(', '))}` : '';
+    if (btn) btn.dataset.mode = '';
     if (behind > 0) {
         row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>${behind} behind</span>
             <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — ${behind} commit(s) unpulled; running services are still serving what they last loaded</span>`;
-        if (btn) { btn.disabled = false; btn.textContent = 'Update now'; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Update now'; btn.dataset.mode = 'update'; }
     } else if (stale.length) {
         // The checkout itself is fully synced (nothing to pull) — but a bare `git pull`
         // run by hand, bypassing this control, can leave running services on the OLD
-        // code with nothing left for "Update now" to fix (`apply()` only restarts on an
-        // actual pull). Reporting "Up to date" here would repeat the exact gap `chela
-        // doctor`'s `repo.services_current` fact exists to catch (2026-08-02).
+        // code. Stale is import-aware (CMX-56): only a service whose OWN code changed
+        // since it started is listed. The button then restarts exactly these.
         row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>${stale.length} stale</span>
-            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull, but ${escHtml(stale.join(', '))} predate this code (probably a bare <code>git pull</code> bypassing this control) — restart with
-            <code class="s-cmd">pm2 restart ${stale.map(n => `<span class="s-cmd-arg">${escHtml(n)}</span>`).join(' ')}</code></span>`;
-        if (btn) { btn.disabled = true; btn.textContent = 'Update now'; }
+            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull, but code that ${escHtml(stale.join(', '))} ${stale.length === 1 ? 'runs' : 'run'} changed after ${stale.length === 1 ? 'it' : 'they'} started (or <code class="s-cmd">pm2 restart ${stale.map(n => `<span class="s-cmd-arg">${escHtml(n)}</span>`).join(' ')}</code>)${unknownNote}</span>`;
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = `Restart stale services (${stale.length})`;
+            btn.dataset.mode = 'restart';
+        }
     } else {
         row.innerHTML = `<span class="s-status-badge on"><span class="s-status-dot" aria-hidden="true">●</span>Up to date</span>
-            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull</span>`;
+            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull${unknownNote}</span>`;
         if (btn) { btn.disabled = true; btn.textContent = 'Update now'; }
     }
 }
@@ -1771,8 +1779,12 @@ async function applyUpdate() {
     const btn = document.getElementById('update-apply-btn');
     const msg = document.getElementById('update-apply-msg');
     const setMsg = (cls, t) => { if (msg) { msg.className = 's-savemsg ' + cls; msg.textContent = t; } };
-    if (!confirm('Pull, re-sync, and restart every running chela-* service (including this dashboard)?')) return;
-    if (btn) { btn.disabled = true; btn.textContent = 'Updating…'; }
+    const restartOnly = !!(btn && btn.dataset.mode === 'restart');
+    const idleLabel = btn ? btn.textContent : 'Update now';
+    if (!confirm(restartOnly
+        ? 'Nothing to pull. Re-sync deps and restart only the stale chela-* services?'
+        : 'Pull, re-sync, and restart every running chela-* service (including this dashboard)?')) return;
+    if (btn) { btn.disabled = true; btn.textContent = restartOnly ? 'Restarting…' : 'Updating…'; }
     setMsg('', 'Starting…');
     let resp;
     try {
@@ -1783,7 +1795,7 @@ async function applyUpdate() {
     }
     if (!resp || resp.error || resp.ok === false) {
         setMsg('err', (resp && resp.error) || 'Update refused.');
-        if (btn) { btn.disabled = false; btn.textContent = 'Update now'; }
+        if (btn) { btn.disabled = false; btn.textContent = idleLabel; }
         return;
     }
     if (!resp.started) {
@@ -1791,8 +1803,11 @@ async function applyUpdate() {
         _loadSettingsStatus();
         return;
     }
-    setMsg('ok', 'Started — pulling, re-syncing, and restarting services. This dashboard '
-        + 'may briefly disconnect; refresh in a few seconds to see the result.');
+    // CMX-56: every click ends in a message — the route's own `detail` names what it
+    // started ("restarting chela-dashboard", "pulling 3 commit(s)…").
+    const what = resp.detail ? resp.detail.charAt(0).toUpperCase() + resp.detail.slice(1) : 'Started';
+    setMsg('ok', `${what}. This dashboard may briefly disconnect if it restarts; `
+        + 'refresh in a few seconds to see the result.');
     // The pull may restart THIS process — nothing left to poll from here. Leave the
     // button disabled rather than re-enabling it against a page that's about to reload.
 }
