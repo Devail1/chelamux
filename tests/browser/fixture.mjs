@@ -164,9 +164,13 @@ export async function launchChromium() {
 /** A fresh context + page on the fixture at `viewport`, the Wall in a 2×2
  * preset, booted and settled. `storage` adds localStorage keys set before the
  * page's own scripts run (e.g. a persisted desktop sidebar collapse); `api`
- * overrides /api/ responses (see routeFixture). */
-export async function openDashboard(browser, { width, height, deviceScaleFactor = 1, storage = {}, api = {} }) {
-    const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor });
+ * overrides /api/ responses (see routeFixture); `touch` emulates a phone. */
+export async function openDashboard(browser, { width, height, deviceScaleFactor = 1, storage = {}, api = {}, touch = false }) {
+    // `touch` makes it a phone: `(pointer: coarse)` matches (CMX-409's 16px
+    // controls apply) and the viewport meta is honoured.
+    const context = await browser.newContext({
+        viewport: { width, height }, deviceScaleFactor, ...(touch ? { hasTouch: true, isMobile: true } : {}),
+    });
     await context.addInitScript(extra => {
         try {
             localStorage.setItem('pc_term_mode', 'wall');

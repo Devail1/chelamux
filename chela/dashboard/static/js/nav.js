@@ -928,6 +928,31 @@ function selectSettingsTab(tab) {
 function _paintSettingsTab(tab) {
     $$('.settings-tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
     $$('.settings-tabpanel').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
+    _revealSettingsTab(tab);
+}
+
+// CMX-57: at phone width the tab strip is a horizontal scroller — and "Cost · A…"
+// running off the edge gave no sign there was more. The strip scrolls on its own
+// (never the modal); these keep its edge fades honest (.fade-start / .fade-end =
+// "more tabs that way", style.css) and bring the selected tab into view.
+function _syncSettingsTabFade() {
+    const strip = document.getElementById('settings-tabs');
+    if (!strip) return;
+    const max = strip.scrollWidth - strip.clientWidth;
+    strip.classList.toggle('fade-start', max > 1 && strip.scrollLeft > 1);
+    strip.classList.toggle('fade-end', max > 1 && strip.scrollLeft < max - 1);
+}
+
+function _revealSettingsTab(tab) {
+    const strip = document.getElementById('settings-tabs');
+    const el = strip && strip.querySelector(`.settings-tab[data-tab="${tab}"]`);
+    if (el && strip.scrollWidth > strip.clientWidth) {
+        // Not scrollIntoView: that also scrolls every scrollable ANCESTOR, page included.
+        const s = strip.getBoundingClientRect(), r = el.getBoundingClientRect();
+        if (r.left < s.left) strip.scrollLeft -= s.left - r.left + 24;
+        else if (r.right > s.right) strip.scrollLeft += r.right - s.right + 24;
+    }
+    _syncSettingsTabFade();
 }
 
 // --- Settings search (CMX-396) ---------------------------------------------
@@ -1050,6 +1075,11 @@ function renderSettings(focus) {
         tabsHost.innerHTML = SETTINGS_TABS.map(t =>
             `<div class="settings-tab" data-tab="${t.id}" onclick="chela.selectSettingsTab(this.dataset.tab)">${escHtml(t.label)}</div>`
         ).join('');
+        if (!tabsHost.dataset.fadeWired) {
+            tabsHost.dataset.fadeWired = '1';
+            tabsHost.addEventListener('scroll', _syncSettingsTabFade, { passive: true });
+            window.addEventListener('resize', _syncSettingsTabFade);
+        }
     }
     const theme = localStorage.getItem('chela_theme') || 'dark';
     const termLatin = localStorage.getItem('chela_term_latin') || 'jetbrains';
@@ -1345,7 +1375,7 @@ function renderSettings(focus) {
             </div>
             <div class="s-row" data-keywords="e2e encrypted server worker">
                 <span class="s-rowlabel">Relay</span>
-                <code id="collab-relay" style="word-break:break-all;font-size:11px">…</code>
+                <code id="collab-relay" style="overflow-wrap:anywhere;font-size:11px">…</code>
             </div>
             <p class="s-desc">End-to-end encrypted — the relay (<code>CHELA_COLLAB_RELAY</code>)
             is a zero-knowledge fan-out that only ever sees ciphertext (keys are derived in your
@@ -1732,7 +1762,7 @@ function _renderUpdateStatus(upd) {
         // code. Stale is import-aware (CMX-56): only a service whose OWN code changed
         // since it started is listed. The button then restarts exactly these.
         row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>${stale.length} stale</span>
-            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull, but code that ${escHtml(stale.join(', '))} ${stale.length === 1 ? 'runs' : 'run'} changed after ${stale.length === 1 ? 'it' : 'they'} started (or <code class="s-cmd">pm2 restart ${escHtml(stale.join(' '))}</code>)${unknownNote}</span>`;
+            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull, but code that ${escHtml(stale.join(', '))} ${stale.length === 1 ? 'runs' : 'run'} changed after ${stale.length === 1 ? 'it' : 'they'} started (or <code class="s-cmd">pm2 restart ${stale.map(n => `<span class="s-cmd-arg">${escHtml(n)}</span>`).join(' ')}</code>)${unknownNote}</span>`;
         if (btn) {
             btn.disabled = false;
             btn.textContent = `Restart stale services (${stale.length})`;
