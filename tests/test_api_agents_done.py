@@ -118,7 +118,7 @@ def test_manual_name_flag_rides_on_each_row(client):
     must carry the per-window ``@chela_manual_name`` flag — True only for flagged ids."""
     with (
         _fleet(status={"@1": "idle", "@9": "idle"}),
-        patch("chela.agent_manager.manual_name_wids", return_value={"@1"}),
+        patch("chela.agent_manager.is_manual_name", side_effect=lambda wid: wid == "@1"),
     ):
         agents = _by_wid(client)
     assert agents["@1"]["manual_name"] is True

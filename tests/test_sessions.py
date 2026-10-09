@@ -1220,7 +1220,7 @@ def test_the_pane_map_reads_the_claude_process_not_the_pane(tmp_path, monkeypatc
 
     class Result:
         returncode = 0
-        stdout = "@2\tclaude\t/somewhere/else\t15499\n"
+        stdout = "@2\tclaude\t/somewhere/else\t15499\t\n"
 
     def fake_run(argv, **kw):
         calls.append(argv)
@@ -1246,7 +1246,7 @@ def test_a_pane_with_no_claude_process_degrades_to_the_pane_path(tmp_path, monke
 
     class Result:
         returncode = 0
-        stdout = "@5\tbash\t/home/u\t123\n"
+        stdout = "@5\tbash\t/home/u\t123\t\n"
 
     monkeypatch.setattr(sessions.subprocess, "run", lambda *a, **k: Result())
     pane = sessions._load_panes()["@5"]
@@ -1295,7 +1295,7 @@ def test_the_pane_map_resolves_a_wrapped_claude_end_to_end(tmp_path, monkeypatch
 
     class Result:
         returncode = 0
-        stdout = "@2\tnode14\t/somewhere/else\t15499\n"
+        stdout = "@2\tnode14\t/somewhere/else\t15499\t\n"
 
     monkeypatch.setattr(sessions.subprocess, "run", lambda *a, **k: Result())
     pane = sessions._load_panes()["@2"]

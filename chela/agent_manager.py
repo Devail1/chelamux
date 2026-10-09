@@ -746,19 +746,25 @@ def mark_manual_name(target: str) -> None:
         log.warning("Failed to mark %s as manually named: %s", target, e)
 
 
-def manual_name_wids() -> set[str]:
-    """Window ids in the session whose name is flagged manual. Empty on tmux failure."""
+def is_manual_name(window_id: str) -> bool:
+    """True if ``window_id``'s name carries the :data:`MANUAL_NAME_OPTION` flag.
+
+    From the shared pane snapshot inside a :func:`chela.probecache.batch` (no extra spawn
+    on the polled ``/api/agents``), else one ``display-message``. False on tmux failure.
+    """
+    batch = probecache.active()
+    if batch is not None:
+        pane = batch.pane(window_id)
+        return bool(pane and pane.manual_name)
     try:
         out = subprocess.run(
-            ["tmux", "list-windows", "-t", config.current_session(), "-F",
-             f"#{{window_id}}\t#{{{MANUAL_NAME_OPTION}}}"],
+            ["tmux", "display-message", "-p", "-t", f"{config.current_session()}:{window_id}",
+             f"#{{{MANUAL_NAME_OPTION}}}"],
             capture_output=True, text=True, timeout=5,
-        ).stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        log.warning("manual_name_wids: tmux list-windows failed: %s", e)
-        return set()
-    return {wid for wid, _, flag in (line.partition("\t") for line in out.splitlines())
-            if flag.strip() == "1"}
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return out.returncode == 0 and out.stdout.strip() == "1"
 
 
 def start_agent(agent_name: str, cmd: str | None = None) -> dict:

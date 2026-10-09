@@ -224,11 +224,26 @@ def test_mark_manual_name_sets_the_window_user_option(monkeypatch):
                            agent_manager.MANUAL_NAME_OPTION, "1"]]
 
 
-def test_manual_name_wids_reads_the_flag(monkeypatch):
-    fake = _FakeTmux("@1\t1\n@2\t\n@3\t0\n")
+def test_is_manual_name_reads_the_shared_pane_snapshot_in_a_batch(monkeypatch):
+    # Inside /api/agents' probe batch the flag comes off sessions.panes() — the SAME
+    # list-windows the poll already makes — so it costs no spawn.
+    from chela import probecache, sessions
+    snap = {"@1": sessions.Pane(wid="@1", manual_name=True), "@2": sessions.Pane(wid="@2")}
+    monkeypatch.setattr(sessions, "panes", lambda force=False: snap)
+    fake = _FakeTmux()
     monkeypatch.setattr(subprocess, "run", fake)
+    with probecache.batch():
+        assert agent_manager.is_manual_name("@1") is True
+        assert agent_manager.is_manual_name("@2") is False
+    assert fake.calls == []
+
+
+def test_is_manual_name_outside_a_batch_asks_tmux(monkeypatch):
     monkeypatch.setattr(config, "current_session", lambda: "sess")
-    assert agent_manager.manual_name_wids() == {"@1"}
+    for out, want in (("1\n", True), ("\n", False), ("0\n", False)):
+        monkeypatch.setattr(subprocess, "run", lambda cmd, out=out, **kw: types.SimpleNamespace(
+            returncode=0, stdout=out, stderr=""))
+        assert agent_manager.is_manual_name("@1") is want
 
 
 def test_is_generic_name_classifies_placeholders_vs_chosen_names():

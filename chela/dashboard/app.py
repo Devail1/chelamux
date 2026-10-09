@@ -304,14 +304,6 @@ def api_agents():
         log.exception("api_agents: list_runs failed; PR state falls back to gh")
         pr_run_states = {}
 
-    # CMX-62: windows a human renamed (dashboard rename) — their name outranks
-    # Claude's session title in the display. One tmux read per request.
-    try:
-        manual_wids = agent_manager.manual_name_wids()
-    except Exception:
-        log.exception("api_agents: manual-name read failed")
-        manual_wids = set()
-
     agents = []
     for name, window_id in windows.items():
         transcript = transcripts.agent_transcript_summary(name, window_id=window_id)
@@ -356,7 +348,8 @@ def api_agents():
             "online": True,
             "window_id": window_id,
             # CMX-62: a manual name always wins the display (over Claude's title).
-            "manual_name": window_id in manual_wids,
+            # Read off the shared pane snapshot — no extra spawn per poll.
+            "manual_name": agent_manager.is_manual_name(window_id),
             "shared": window_id in _SHARED,
             # 👁 / ⌨ / UNSANDBOXED for the share pill (CMX-403); None when not shared.
             "share_mode": _share_mode(window_id),
