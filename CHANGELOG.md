@@ -12,6 +12,15 @@ history lives in `git log`.
 
 ### Added
 
+- **The Cost tab has a Usage view: what is eating the plan limits, in tokens.** A "Cost |
+  Usage" toggle shows the 5h and 7d limit bars (from the freshest statusLine `rate_limits`,
+  with a %/h burn rate and whether it reaches 100% before the reset; missing, stale or reset
+  data shows as unknown, never 0%) and the top token consumers over the last 30 min and today
+  (UTC) across EVERY Claude Code transcript — judges, subagents, background sessions and, on
+  WSL, Windows-side ones (`/mnt/c/Users/*/.claude/projects` by default; set `usage_extra_roots`
+  in `~/.chela/config.json` or `CHELA_USAGE_EXTRA_ROOTS`, `[]` for none — the view shows the
+  roots read-only). Each row has its requests, token kinds, a weighted total and cache-hit
+  rate; a session under 50% hit over ≥10 requests and >1M tokens is flagged ▲ CACHE BROKEN. (CMX-38, #618)
 - **A held decisions inbox, or a clean PR nobody merges, now pushes one ntfy alert.** When the
   inbox queue's oldest event has waited past `CHELA_INBOX_HELD_ALERT_S` (default 30m), the
   announcer pushes once per held episode, naming the orchestrator's status and the last failed

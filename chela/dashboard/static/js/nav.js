@@ -9,7 +9,7 @@ import { _launcherData, launchProject, refreshLauncher } from './launcher.js';
 import { VIEWS } from './views.js';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg.js';
 import { refresh } from './main.js';
-import { refreshCost } from './cost.js';
+import { refreshCostTab } from './usage.js';
 import { resolveWindowId } from './windowid.js';
 
 // ---------------------------------------------------------------------------
@@ -922,7 +922,7 @@ function selectSettingsTab(tab) {
     if (_settingsQuery) clearSettingsSearch();
     _settingsTab = tab;
     _paintSettingsTab(tab);
-    if (tab === 'cost') refreshCost();
+    if (tab === 'cost') refreshCostTab();
 }
 
 function _paintSettingsTab(tab) {
@@ -1233,8 +1233,17 @@ function renderSettings(focus) {
         </div>
 
         <div class="settings-tabpanel" data-tab="cost">
-        <section class="settings-section" id="settings-cost" data-keywords="spend money usd dollars budget billing tokens">
+        <section class="settings-section" id="settings-cost" data-keywords="spend money usd dollars budget billing tokens usage limit rate cache">
             <h4>Cost</h4>
+            <div class="work-toolbar">
+                <div class="work-seg" id="cost-view" role="group" aria-label="Cost or usage">
+                    <button type="button" class="work-seg-btn cost-view-btn" data-view="cost" aria-pressed="true"
+                            onclick="chela.setCostView('cost')">Cost</button>
+                    <button type="button" class="work-seg-btn cost-view-btn" data-view="usage" aria-pressed="false"
+                            onclick="chela.setCostView('usage')">Usage</button>
+                </div>
+            </div>
+            <div id="cost-pane">
             <p class="s-desc">Fleet spend from the cost each agent's statusLine hook already
             reports (<code>cost.total_cost_usd</code>) — no separate accounting, just a read
             over data chela ingests anyway. Grouped by project, same convention the sidebar
@@ -1252,6 +1261,27 @@ function renderSettings(focus) {
                 </div>
             </div>
             <div id="cost-table"><div class="s-desc">Loading…</div></div>
+            </div>
+            <div id="usage-pane" hidden>
+            <p class="s-desc">Tokens, not dollars, read from EVERY Claude Code transcript —
+            judges, subagents, dispatched agents, background sessions, and any extra root
+            listed below — so a session with no statusLine still shows up. Limits come from the
+            freshest statusLine <code>rate_limits</code>.</p>
+            <div class="usage-limits" id="usage-limits"></div>
+            <div class="work-toolbar">
+                <div class="work-seg" id="usage-window" role="group" aria-label="Usage window">
+                    <button type="button" class="work-seg-btn usage-window-btn" data-win="30m" aria-pressed="true"
+                            onclick="chela.setUsageWindow('30m')">Last 30 min</button>
+                    <button type="button" class="work-seg-btn usage-window-btn" data-win="today" aria-pressed="false"
+                            onclick="chela.setUsageWindow('today')">Today (UTC)</button>
+                </div>
+            </div>
+            <div id="usage-table"><div class="s-desc">Loading…</div></div>
+            <p class="s-desc">Transcript roots: this host's own Claude Code projects dir plus
+            the extra roots set by <code>usage_extra_roots</code> in <code>~/.chela/config.json</code>
+            or <code>CHELA_USAGE_EXTRA_ROOTS</code> (absolute globs; <code>[]</code> scans none).</p>
+            <dl class="usage-roots" id="usage-roots"></dl>
+            </div>
         </section>
         </div>
 
