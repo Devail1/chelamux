@@ -304,6 +304,14 @@ def api_agents():
         log.exception("api_agents: list_runs failed; PR state falls back to gh")
         pr_run_states = {}
 
+    # CMX-62: windows a human renamed (dashboard rename) — their name outranks
+    # Claude's session title in the display. One tmux read per request.
+    try:
+        manual_wids = agent_manager.manual_name_wids()
+    except Exception:
+        log.exception("api_agents: manual-name read failed")
+        manual_wids = set()
+
     agents = []
     for name, window_id in windows.items():
         transcript = transcripts.agent_transcript_summary(name, window_id=window_id)
@@ -347,6 +355,8 @@ def api_agents():
             "name": name,
             "online": True,
             "window_id": window_id,
+            # CMX-62: a manual name always wins the display (over Claude's title).
+            "manual_name": window_id in manual_wids,
             "shared": window_id in _SHARED,
             # 👁 / ⌨ / UNSANDBOXED for the share pill (CMX-403); None when not shared.
             "share_mode": _share_mode(window_id),
@@ -2136,9 +2146,11 @@ def api_agents_rename(wid):
     Keyed by WINDOW ID, never by name: ids are stable across renames and unique,
     while names collide (two repos with the same basename). Body: ``{"name": ...}``.
 
-    The name must survive a reconcile tick, which it does because it isn't generic
-    (agent_manager.is_generic_name) — the auto-namers only fill in blanks. We also
-    lock the window against tmux's own renamers, so a shell-out can't clobber it.
+    A rename here is MANUAL (CMX-62): the window is flagged ``@chela_manual_name``
+    (agent_manager.mark_manual_name), so nothing ever overwrites it — not the
+    reconcile loop's duplicate rule, and not Claude's session title in the display.
+    We also lock the window against tmux's own renamers, so a shell-out can't
+    clobber it.
     """
     body = request.get_json(silent=True) or {}
     name = (body.get("name") or "").strip()
@@ -2166,6 +2178,7 @@ def api_agents_rename(wid):
         return jsonify({"ok": False, "error": err}), 500
 
     agent_manager.lock_window_name(target)
+    agent_manager.mark_manual_name(target)
     log.info("renamed %s: %s -> %s", wid, windows[wid], name)
     return jsonify({"ok": True, "wid": wid, "name": name})
 

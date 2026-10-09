@@ -170,39 +170,42 @@ test('CMX-377 round 2: the live agent row renders no .ar-type, .ar-role or .agen
     assert.ok(rowFor('bot').querySelector('.term-status-dot'), 'the row lost its status shape too');
 });
 
-// --- 1b. a session reads as a REAL name, not the generic "claude window" ---------
+// --- 1b. CMX-62: the row label = manual name > Claude's title > window name ------
 //
 // _agentLabel (nav.js) → _displayLabel (terminals.js) is the shared formatter for
-// both the sidebar row and the wall pane title. A name a human chose is shown
-// verbatim; a generic one (`shell-2`, or the bare `claude` tmux follows) is a blank
-// filled with the most meaningful thing known: the Claude session name, then the
-// repo, then the raw name. Driven through the REAL render into the REAL node.
+// both the sidebar row and the wall pane title. A MANUAL name (the server's
+// `manual_name` flag — set by the dashboard rename, never guessed from the string)
+// beats everything; else Claude's session title (`ai_title`, else the live
+// `session_name`) leads; else the window name. Nothing falls back to the cwd any
+// more — the window name IS the fallback. Driven through the REAL render into the
+// REAL node.
 const nameFor = name => rowFor(name).querySelector('.agent-row-name').textContent;
 
-test('a generic "claude" window shows its Claude session name, not "claude"', () => {
+test('CMX-62: a manual name beats Claude\'s title, the title beats the window name, else the name', () => {
     const rows = [
-        // human-chosen name — intent, shown verbatim even though a session name exists
-        { name: 'reviewer', window_id: '@1', session_name: 'ignore me', online: true },
-        // generic tmux-followed `claude` — the session name fills the blank
-        { name: 'claude', window_id: '@2', session_name: 'porting the wall', cwd: '/x/chelamux', online: true },
-        // generic, no session name — falls through to the repo (cwd basename)
-        { name: 'claude', window_id: '@3', cwd: '/home/u/projects/ccbot', online: true },
-        // generic shell in a repo — the pre-existing repo-basename behaviour holds
+        // manually renamed — its name wins even over an ai_title
+        { name: 'reviewer', window_id: '@1', manual_name: true, ai_title: 'Review the auth PR', online: true },
+        // not manual — Claude's title leads, however chosen-looking the name is
+        { name: 'billing-fix', window_id: '@2', ai_title: 'Open-MMO game on Windows PC', cwd: '/x/mmo', online: true },
+        // not manual, no ai_title — the live session name is the title
+        { name: 'shell-3', window_id: '@3', session_name: 'porting the wall', online: true },
+        // no title yet (first exchange hasn't happened) — the window name, NOT the repo
         { name: 'shell-1', window_id: '@4', cwd: '/home/u/projects/nautilus', online: true },
-        // generic, nothing to fill it with — the raw name, never a blank
-        { name: 'claude', window_id: '@5', online: true },
     ];
     util.setAgentsCache(rows);
     nav.renderSidebarAgents(rows);
 
-    assert.equal(nameFor('reviewer'), 'reviewer');       // chosen name wins over session_name
-    // The three 'claude' windows share a data-agent, so assert their resolved labels
-    // over the rendered nodes — each fell back a different rung of the same ladder.
-    const labels = [...document.querySelectorAll('#sidebar-agents .agent-row-name')].map(n => n.textContent);
-    assert.ok(labels.includes('porting the wall'), 'a generic claude window did not use its session name');
-    assert.ok(labels.includes('ccbot'), 'a generic claude window did not fall back to its repo');
-    assert.ok(labels.includes('nautilus'), 'a generic shell did not fall back to its repo');
-    assert.ok(labels.includes('claude'), 'a generic window with nothing to resolve lost its raw name');
+    assert.equal(nameFor('reviewer'), 'reviewer', 'a manual name must beat Claude\'s title');
+    assert.equal(nameFor('billing-fix'), 'Open-MMO game on Windows PC', 'Claude\'s title must beat the window name');
+    assert.equal(nameFor('shell-3'), 'porting the wall');
+    assert.equal(nameFor('shell-1'), 'shell-1', 'no title ⇒ the window name (never rewritten to the repo)');
+    // The short window name stays reachable as the secondary label (hover) when the
+    // title leads — and is absent when the name already IS the label.
+    const span = rowFor('billing-fix').querySelector('.agent-row-name');
+    assert.equal(span.dataset.key, 'billing-fix');
+    assert.equal(span.title, 'window: billing-fix');
+    assert.equal(rowFor('shell-1').querySelector('.agent-row-name').dataset.key, undefined);
+    assert.equal(rowFor('reviewer').querySelector('.agent-row-name').dataset.key, undefined);
 });
 
 test('a session name is ESCAPED — it is tmux/user-derived, never trusted into the DOM', () => {

@@ -111,3 +111,15 @@ def test_no_live_claude_pid_never_reads_done_even_with_evidence(client):
         agents = _by_wid(client)
     assert agents["@9"]["claude_running"] is False
     assert agents["@9"]["done"] is False
+
+
+def test_manual_name_flag_rides_on_each_row(client):
+    """CMX-62: the dashboard ranks a MANUAL name over Claude's title, so /api/agents
+    must carry the per-window ``@chela_manual_name`` flag — True only for flagged ids."""
+    with (
+        _fleet(status={"@1": "idle", "@9": "idle"}),
+        patch("chela.agent_manager.manual_name_wids", return_value={"@1"}),
+    ):
+        agents = _by_wid(client)
+    assert agents["@1"]["manual_name"] is True
+    assert agents["@9"]["manual_name"] is False

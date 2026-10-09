@@ -161,6 +161,8 @@ def _fleet(gh, runs=()):
               return_value={"recap": None, "recap_ts": None, "pr": dict(PR), "ai_title": None}),
         patch("chela.messenger.capture_pane", return_value=""),
         patch("chela.inbox.is_done", return_value=False),
+        # A tmux read (CMX-62) — stubbed so `gh.calls` counts only gh.
+        patch("chela.agent_manager.manual_name_wids", return_value=set()),
         patch("chela.pr_status.subprocess.run", gh),
     ):
         yield

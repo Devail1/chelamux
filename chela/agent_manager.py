@@ -22,36 +22,28 @@ log = logging.getLogger(__name__)
 # watching, so permission prompts are answerable. Override with CHELA_AGENT_CMD.
 DEFAULT_LAUNCH_CMD = os.environ.get("CHELA_AGENT_CMD", "claude")
 
-# Windows the reconcile loop must never rename. Empty by default — kept so
-# reconcile_window_names() has a single honored exclusion point if a deployment
-# ever needs to pin a window's name.
+# Windows the reconcile loop must never rename (not even to resolve a duplicate).
+# Empty by default — kept so reconcile_window_names() has a single honored
+# exclusion point if a deployment ever needs to pin a window's name.
 NEVER_MANAGE: set[str] = set()
 
 # Names nobody chose — a placeholder chela handed out (shell-N, the session
-# anchor) or one tmux's automatic-rename derived from the running command. A
-# window still carrying one of these has no intentional name, so chela is free to
-# fill it in from the cwd. ANYTHING ELSE IS A DELIBERATE NAME AND IS NEVER TOUCHED:
-# that is what makes a user rename stick (see is_generic_name).
+# anchor) or one tmux's automatic-rename derived from the running command. Since
+# CMX-62 nothing RENAMES a window for carrying one (reconcile only resolves
+# duplicates); the Telegram auto-topics still use it to title a topic after the
+# project rather than after ``shell-3`` (see is_generic_name).
 _GENERIC_SHELL_RE = re.compile(r"^shell(-\d+)?$", re.IGNORECASE)
 GENERIC_NAMES = {"bash", "zsh", "sh", "fish", "claude", "node", "python", "python3"}
 
 
 def is_generic_name(name: str) -> bool:
-    """True if ``name`` is a placeholder chela may auto-manage, not a chosen name.
+    """True if ``name`` is a placeholder (``shell-3``, a bare ``claude``/``bash``).
 
-    The whole rename story hangs off this predicate. The tmux window name is the
-    single source of truth for an agent's display name — wall panes, agent cards,
-    nav and the bound Telegram topic all read it — so the auto-namers must FILL IN
-    BLANKS AND NEVER OVERRIDE INTENT. A generic name (``shell-3``, or tmux's
-    command-follow ``claude``/``bash``) is a blank; anything else was chosen by a
-    human and is left alone.
-
-    Deriving intent from the name itself, rather than persisting a set of
-    "user-pinned" window ids, is deliberate: a sidecar pin file is a SECOND source
-    of truth (the very split-brain this replaces), it has to be pruned as windows
-    die, and — decisively — tmux REUSES window ids after a server restart (@0 comes
-    back), so a stale pin silently attaches to an unrelated new window. This needs
-    no state, survives restarts, and keeps tmux authoritative.
+    A naming HINT only: :mod:`chela.telegram.reconcile` titles a generic window's
+    topic after its project instead. It no longer drives any window rename — the
+    reconcile loop renames a window only to resolve a duplicate (CMX-62) — and it is
+    never how a MANUAL name is recognised: that is the explicit
+    :data:`MANUAL_NAME_OPTION` flag, not the string's shape.
     """
     n = (name or "").strip()
     if not n:
@@ -725,41 +717,48 @@ def lock_window_name(target: str) -> None:
             log.warning("Failed to lock %s on window %s: %s", option, target, e)
 
 
-def _name_window_to_cwd(window_id: str, start_dir: str) -> str | None:
-    """Rename a tmux window to its cwd basename and lock it.
+# A tmux window USER OPTION marking a name a human chose (CMX-62). Set by the
+# dashboard rename endpoint (:func:`mark_manual_name`); read back by the reconcile
+# loop and /api/agents. Recorded explicitly — never inferred from the name's shape —
+# and it lives on the window itself, so it dies with the window (no sidecar file, no
+# stale pin attaching to a reused window id after a tmux restart).
+#
+# A raw ``tmux rename-window`` by hand does NOT set it, and is deliberately NOT
+# detected: there is no reliable signal to read (a hand-started window was never
+# named by chela, so "differs from what chela last assigned" has nothing to compare
+# against). Such a name is still never rewritten — reconcile only ever renames a
+# DUPLICATE — but it does not outrank Claude's title in the display, and it is
+# renameable if it collides. Rename through the dashboard to make a name manual.
+MANUAL_NAME_OPTION = "@chela_manual_name"
 
-    A window running claude should reflect where it lives instead of a
-    stale/persisted name or tmux's automatic-rename clobbering it to "claude".
-    Adds a ``-N`` suffix on collision (excluding this window's own current
-    name). Returns the applied name, or None if it couldn't be set.
 
-    Same rule as the reconciler: this fills in a blank, it never overrides intent.
-    Starting claude in a window a human deliberately named ("billing-fix") keeps
-    that name — only a generic ``shell-N``/command-follow name gets replaced.
+def mark_manual_name(target: str) -> None:
+    """Flag ``target``'s current name as human-chosen (``@chela_manual_name=1``).
+
+    Best-effort like :func:`lock_window_name`: a tmux failure is logged, never raised.
     """
-    base = Path(start_dir).name
-    if not base:
-        return None
-    live = get_all_windows()
-    current = next((n for n, wid in live.items() if wid == window_id), None)
-    if current is not None and not is_generic_name(current):
-        return None
-    taken = {n for n, wid in live.items() if wid != window_id}
-    name, counter = base, 2
-    while name in taken:
-        name, counter = f"{base}-{counter}", counter + 1
-    target = f"{config.current_session()}:{window_id}"
     try:
         subprocess.run(
-            ["tmux", "rename-window", "-t", target, name],
+            ["tmux", "set-window-option", "-t", target, MANUAL_NAME_OPTION, "1"],
             capture_output=True, text=True, timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        log.warning("Failed to rename window %s to %s: %s", window_id, name, e)
-        return None
-    # Lock against both allow-rename (OSC) and automatic-rename (command follow).
-    lock_window_name(target)
-    return name
+        log.warning("Failed to mark %s as manually named: %s", target, e)
+
+
+def manual_name_wids() -> set[str]:
+    """Window ids in the session whose name is flagged manual. Empty on tmux failure."""
+    try:
+        out = subprocess.run(
+            ["tmux", "list-windows", "-t", config.current_session(), "-F",
+             f"#{{window_id}}\t#{{{MANUAL_NAME_OPTION}}}"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.warning("manual_name_wids: tmux list-windows failed: %s", e)
+        return set()
+    return {wid for wid, _, flag in (line.partition("\t") for line in out.splitlines())
+            if flag.strip() == "1"}
 
 
 def start_agent(agent_name: str, cmd: str | None = None) -> dict:
@@ -780,96 +779,106 @@ def start_agent(agent_name: str, cmd: str | None = None) -> dict:
     # process it spawns know this window's identity (self-peek / drive siblings).
     send_tmux(window_id, f"cd {start_dir} && {wid_env_prefix(window_id)}{launch}")
 
-    # Name the window after its cwd when we spawn claude in it, so it stops
-    # showing a stale/persisted name.
-    renamed = _name_window_to_cwd(window_id, start_dir)
+    # The window KEEPS its name (CMX-62: a name changes only to resolve a duplicate);
+    # just pin it so claude's shell-outs can't drift it to `git`/`node`.
+    lock_window_name(f"{config.current_session()}:{window_id}")
 
-    log.info(
-        "Started agent %s (%s) from %s%s",
-        agent_name, window_id, start_dir, f"; window -> {renamed}" if renamed else "",
-    )
+    log.info("Started agent %s (%s) from %s", agent_name, window_id, start_dir)
     return {"ok": True, "agent": agent_name, "detail": "started"}
 
 
-def reconcile_window_names() -> list[str]:
-    """Rename windows running claude to their cwd basename.
+def _orchestrated_name(name: str) -> bool:
+    """A dispatch (branch-named, ``owner/cmx-N-…``) or judge (``judge-…``) window name.
 
-    Periodic counterpart to the start_agent rename: catches claude sessions
-    started by hand (not via the dashboard Start button), so an ad-hoc shell
-    stops showing its shell-N / stale name once claude is running in it. Uses
-    the live pane cwd (matches what `claude agents --json` reports).
+    Those windows are found BY NAME by the dispatcher and the judge, so the duplicate
+    rule never renames one (CMX-62 leaves their naming out of scope).
+    """
+    return name.startswith("judge-") or "/" in name
+
+
+def reconcile_window_names() -> list[str]:
+    """Keep window names unique and locked. Rename ONLY to resolve a duplicate.
+
+    CMX-62. A window keeps the name it was given — ``shell-N``, a spawn/cwd name, a
+    hand-picked one, even one tmux drifted to ``git`` before it was locked. The
+    window name is a short, stable KEY (cost/context cache, telegram bindings,
+    ``chela peek/msg``, the inbox) and its display label is resolved separately (the
+    dashboard leads with Claude's session title), so there is nothing to "fix" in a
+    unique name. This used to rewrite every generic name to its cwd basename, which
+    renamed a freshly spawned ``shell-1`` to ``tradeplan-2`` within one tick.
+
+    Duplicates: when several windows share a name, the OLDEST (lowest window index)
+    keeps it and each newer one gets a collision-safe ``-N`` suffix. A MANUAL name
+    (``@chela_manual_name``, see :data:`MANUAL_NAME_OPTION`) always wins: it is never
+    renamed, it keeps the name over an older non-manual window, and when two manual
+    names collide both are left as they are and a warning is logged. Dispatch/judge
+    windows (:func:`_orchestrated_name`) and NEVER_MANAGE are never renamed either.
 
     It also (re)asserts the name lock — ``allow-rename off`` AND
-    ``automatic-rename off`` — on every managed claude window, INCLUDING one
-    whose name already matches its cwd. That already-correct case used to be
-    skipped before any lock ran, so a hand-started window kept tmux's default
-    ``automatic-rename on`` and its tile name flickered to the subcommand name
-    (git/node) on every shell-out. The lock is applied only when a window still
+    ``automatic-rename off`` — on every claude window, so tmux can't drift a name to
+    the subcommand claude shells out to. The lock is applied only when a window still
     has a rename mechanism live, so steady-state ticks touch tmux for nothing.
 
-    Leaves alone: NEVER_MANAGE windows and panes not running claude.
-    Collision-safe -N suffix. Returns a list of "old -> new" rename actions.
+    Returns a list of "old -> new" rename actions.
     """
     actions: list[str] = []
     try:
         out = subprocess.run(
             ["tmux", "list-windows", "-t", config.current_session(), "-F",
              "#{window_id}\t#{window_name}\t#{pane_current_command}\t"
-             "#{pane_current_path}\t#{automatic-rename}\t#{allow-rename}"],
+             "#{window_index}\t#{automatic-rename}\t#{allow-rename}\t"
+             f"#{{{MANUAL_NAME_OPTION}}}"],
             capture_output=True, text=True, timeout=5,
         ).stdout
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         log.warning("reconcile_window_names: tmux list-windows failed: %s", e)
         return actions
 
-    rows = [tuple(line.split("\t")) for line in out.splitlines() if line.count("\t") == 5]
-    live_names = {name: wid for wid, name, *_rest in rows}
+    rows = [tuple(line.split("\t")) for line in out.splitlines() if line.count("\t") == 6]
+    session = config.current_session()
 
-    for wid, name, cmd, cwd, auto, allow in rows:
-        if name in NEVER_MANAGE or "claude" not in cmd:
-            continue
-        base = Path(cwd).name
-        if not base:
-            continue
-        target = f"{config.current_session()}:{wid}"
-        # Assert the lock on any managed claude window whose name could still be
-        # clobbered — an already-correctly-named-but-unlocked window is exactly
-        # the flicker case. "0" is tmux's off; anything else (on/unset) needs it.
-        if auto != "0" or allow != "0":
-            lock_window_name(target)
-        # Only ever FILL IN A BLANK. A DELIBERATE name — one a human chose, via the
-        # dashboard rename or `tmux rename-window` — is left alone. Without this,
-        # every 30s tick renamed it straight back to the cwd basename, so a rename
-        # appeared to work and then silently reverted; the tmux name could never be
-        # the source of truth it now is.
-        #
-        # "Deliberate" is read off tmux itself rather than guessed from the string:
-        # a LOCKED name (automatic-rename off, `auto == "0"`) was set explicitly —
-        # both `rename-window` and our rename endpoint turn that option off — while
-        # a window with automatic-rename still ON is merely wearing whatever tmux
-        # last derived from its running command. That's what keeps a command-drifted
-        # name ("git", "node", any binary at all) auto-correctable without having to
-        # enumerate every command name on earth, while still protecting a chosen one.
-        # A generic name never counts as deliberate even when locked: `shell-3` is a
-        # placeholder we handed out, not a choice.
-        if auto == "0" and not is_generic_name(name):
-            continue
-        if name == base:
-            continue
-        target_name, counter = base, 2
-        while target_name in live_names and live_names[target_name] != wid:
-            target_name, counter = f"{base}-{counter}", counter + 1
-        if name == target_name:
-            continue
+    for wid, name, cmd, _idx, auto, allow, _manual in rows:
+        # "0" is tmux's off; anything else (on/unset) still lets tmux rename it.
+        if "claude" in cmd and name not in NEVER_MANAGE and (auto != "0" or allow != "0"):
+            lock_window_name(f"{session}:{wid}")
+
+    def _index(row) -> int:
         try:
-            subprocess.run(["tmux", "rename-window", "-t", target, target_name],
-                           capture_output=True, text=True, timeout=5)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            log.warning("reconcile_window_names: rename %s failed: %s", wid, e)
+            return int(row[3])
+        except ValueError:
+            return 0
+
+    groups: dict[str, list[tuple]] = {}
+    for row in sorted(rows, key=_index):
+        groups.setdefault(row[1], []).append(row)
+    taken = {row[1] for row in rows}
+
+    for name, group in groups.items():
+        if len(group) < 2:
             continue
-        live_names.pop(name, None)
-        live_names[target_name] = wid
-        actions.append(f"{name} -> {target_name}")
+        manual = [r for r in group if r[6].strip() == "1"]
+        if len(manual) > 1:
+            log.warning("reconcile_window_names: %d manually named windows share %r (%s);"
+                        " leaving them as they are", len(manual), name,
+                        ", ".join(r[0] for r in manual))
+        # Who keeps the name: every manual window; else the oldest window.
+        keepers = manual or group[:1]
+        for wid, _name, *_rest in group:
+            if any(k[0] == wid for k in keepers):
+                continue
+            if name in NEVER_MANAGE or _orchestrated_name(name):
+                continue
+            new, counter = f"{name}-2", 3
+            while new in taken:
+                new, counter = f"{name}-{counter}", counter + 1
+            try:
+                subprocess.run(["tmux", "rename-window", "-t", f"{session}:{wid}", new],
+                               capture_output=True, text=True, timeout=5)
+            except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+                log.warning("reconcile_window_names: rename %s failed: %s", wid, e)
+                continue
+            taken.add(new)
+            actions.append(f"{name} -> {new}")
     return actions
 
 
