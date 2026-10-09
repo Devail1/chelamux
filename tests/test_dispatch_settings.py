@@ -128,6 +128,8 @@ def test_registry_has_exactly_the_twelve_settings_inventory_knobs(mods):
         # ⏳⚖️ CMX-431: the battery-scaled judge wall.
         "judge_wall_base_seconds", "judge_wall_per_experiment_seconds",
         "judge_wall_ceiling_seconds", "judge_wall_grace_seconds",
+        # ⚖️🔓 CMX-61: the override approval window.
+        "override_wait_seconds",
     }
 
 
@@ -151,6 +153,8 @@ def test_exactly_four_knobs_are_restart_required(mods):
         # ⏳⚖️ CMX-431: the battery-scaled judge wall.
         "judge_wall_base_seconds", "judge_wall_per_experiment_seconds",
         "judge_wall_ceiling_seconds", "judge_wall_grace_seconds",
+        # ⚖️🔓 CMX-61: the override approval window.
+        "override_wait_seconds",
     }
 
 

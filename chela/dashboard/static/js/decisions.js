@@ -159,16 +159,47 @@ async function _refreshLog(reset = false) {
     await _render();
 }
 
+// ⚖️🔓 CMX-61 — `chela merge --override` requests waiting for the operator. A live
+// read (GET /api/overrides → gateanswer.pending_approvals), not the log: a request
+// must show as pending exactly until it is decided or expires, then disappear.
+let _overrides = [];
+
+async function _refreshOverrides() {
+    try {
+        const data = await api('/api/overrides');
+        _overrides = Array.isArray(data && data.pending) ? data.pending : [];
+    } catch (e) { /* transient — keep what we had until the next tick */ }
+    _renderOverrides();
+}
+
+function _overrideLeft(seconds) {
+    const s = Math.max(0, Math.round(seconds || 0));
+    return s < 120 ? `${s}s` : `${Math.floor(s / 60)} min`;
+}
+
+function _renderOverrides() {
+    const host = $('#decisions-overrides');
+    if (!host) return;
+    host.hidden = !_overrides.length;
+    host.innerHTML = _overrides.map(o => {
+        const m = o.meta || {};
+        const what = `${m.label || m.task_id || o.id} → ${m.base || '?'}`;
+        return `<div class="decisions-override">⚖️ Override pending: ${escHtml(what)}`
+            + ` <span class="ov-left">expires in ${escHtml(_overrideLeft(o.seconds_left))}</span>`
+            + ` <a href="/override/${encodeURIComponent(o.id)}" target="_blank" rel="noopener">Review</a></div>`;
+    }).join('');
+}
+
 // The one-time page-load seed (main.js) — a fresh read of both the owner and
 // the log, from scratch (reset=true). Nothing else calls this with reset=true.
 async function enterDecisions() {
-    await Promise.all([refreshOrchestratorStatus(), _refreshLog(true)]);
+    await Promise.all([refreshOrchestratorStatus(), _refreshLog(true), _refreshOverrides()]);
 }
 
 // The fallback poll under the SSE deltas — runs every refresh() tick (main.js),
 // unconditionally, regardless of which nav tab is on screen.
 async function tickDecisions() {
-    await Promise.all([refreshOrchestratorStatus(), _refreshLog()]);
+    await Promise.all([refreshOrchestratorStatus(), _refreshLog(), _refreshOverrides()]);
 }
 
 // The SSE `log` delta: the log's seq moved, so fetch from our own cursor (the

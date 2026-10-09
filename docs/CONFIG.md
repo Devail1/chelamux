@@ -202,6 +202,10 @@ separately and only the services that need one ever read:
 umask 077 && printf 'TELEGRAM_BOT_TOKEN=…\nTELEGRAM_CHAT_ID=…\n' > ~/.chela/secrets.env
 ```
 
+`TELEGRAM_OPERATOR_ID` (your numeric Telegram user id; comma-separate several) goes beside
+them: it is who may tap **Approve / Deny** on a `chela merge --override` card. Unset, the
+card still arrives but has no buttons — nobody in the chat can approve from Telegram.
+
 Neither file is ever committed. Both live under `$CHELA_DIR`, which is not the repo.
 
 ### Secrets stay out of the children chela launches

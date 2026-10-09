@@ -224,9 +224,14 @@ to the base branch from a Claude session are denied too — push them from a pla
 
 **The override.** `chela merge cmx-N --override --reason "<why>"` is the one way past the judge,
 and it is the operator's call: it opens an approval request (the gate-answer rendezvous,
-`chela.gateanswer`), pushes it over the notification channel, and waits
-`CHELA_OVERRIDE_WAIT_S` (default 300 s) for the operator to press **Approve** on the dashboard
-(`/override/<id>`) or run `chela merge-approve <id>` in a plain terminal. A timeout is a DENY.
+`chela.gateanswer`), pushes it over the notification channel (with an absolute
+`/override/<id>` link when `CHELA_DASHBOARD_PUBLIC_URL` is set), and waits the Dispatch tab's
+override approval window (`CHELA_OVERRIDE_WAIT_S`, default 900 s) for the operator to press
+**Approve** on the dashboard, tap **Approve** on the Telegram card `chela telegram` posts to
+the orchestrator's topic (only a user listed in `TELEGRAM_OPERATOR_ID` can; anyone else's tap
+is ignored, and without that variable the card carries no buttons), or run
+`chela merge-approve <id>` in a plain terminal. A timeout is a DENY. The request stays listed
+as pending in the dashboard's Decisions inbox until it is decided or expires.
 On approval it records `orchestrator.merge_override` (who approved, the head sha, the judge
 state it overrode, the reason) to the event log and the run's review history *before* merging,
 merges with `--match-head-commit` pinned to the approved head, and puts the reason in the

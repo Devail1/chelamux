@@ -468,6 +468,12 @@ DISPATCH_KNOBS: tuple[DispatchKnob, ...] = (
                  "Gate wait budget (human tap)", unit="s", floor=0),
     DispatchKnob("gate_max_waits", "CHELA_GATE_MAX_WAITS", 8, int,
                  "Concurrent gate-wait slots", floor=1),
+    # ⚖️🔓 CMX-61: how long `chela merge --override` waits for the operator. It sizes the
+    # WINDOW only — who may approve is unchanged (the operator, never the requesting
+    # session: chela.mergegate + the Telegram operator-id check), and a timeout is still a
+    # DENY. 15 min by default: 300s expired twice on a phone before anyone could act.
+    DispatchKnob("override_wait_seconds", "CHELA_OVERRIDE_WAIT_S", 900.0, float,
+                 "Override approval window (chela merge --override)", unit="s", floor=1),
 )
 
 _DISPATCH_BY_KEY = {k.key: k for k in DISPATCH_KNOBS}
@@ -624,6 +630,31 @@ def dashboard_port() -> int:
         return int(os.environ.get("CHELA_DASHBOARD_PORT", DEFAULT_DASHBOARD_PORT))
     except ValueError:
         return DEFAULT_DASHBOARD_PORT
+
+
+def dashboard_public_url() -> str:
+    """The dashboard's public base URL (``CHELA_DASHBOARD_PUBLIC_URL``, e.g. the tailnet
+    hostname a phone reaches it on) — ``""`` when unset or not an absolute http(s) URL.
+
+    The bind (:func:`dashboard_host`/:func:`dashboard_port`) is what the dashboard listens
+    on, usually loopback behind a proxy, so it is not a link anyone can open from another
+    device. A link that leaves this box is built from this, or not at all (CMX-61).
+    """
+    from urllib.parse import urlparse
+    raw = os.environ.get("CHELA_DASHBOARD_PUBLIC_URL", "").strip()
+    parsed = urlparse(raw)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return ""
+    return raw.rstrip("/")
+
+
+def dashboard_link(path: str) -> str | None:
+    """An ABSOLUTE dashboard URL for ``path`` — or None when no public URL is configured,
+    so a caller says so instead of printing a dead relative path (CMX-61)."""
+    base = dashboard_public_url()
+    if not base:
+        return None
+    return f"{base}/{path.lstrip('/')}"
 
 
 def dashboard_port_file() -> Path:

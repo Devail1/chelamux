@@ -95,16 +95,37 @@ GIT_TIMEOUT = dispatcher.GIT_NET_TIMEOUT_SECONDS
 # blocked sends the run to `changes_requested`, and one that gave up sends it to
 # `needs_human`. Those are exactly the runs an override exists for (#529).
 OVERRIDE_STATUSES = ("awaiting_review", "changes_requested", "needs_human")
-DEFAULT_OVERRIDE_WAIT_S = 300.0
+DEFAULT_OVERRIDE_WAIT_S = 900.0
 
 
 def override_wait_budget() -> float:
-    """Seconds an override waits for the operator — ``CHELA_OVERRIDE_WAIT_S``."""
+    """Seconds an override waits for the operator — the Dispatch tab's
+    ``override_wait_seconds`` knob (``CHELA_OVERRIDE_WAIT_S`` wins), read per call."""
     try:
-        budget = float(os.environ.get("CHELA_OVERRIDE_WAIT_S", DEFAULT_OVERRIDE_WAIT_S))
-    except ValueError:
+        budget = float(config.dispatch_value("override_wait_seconds"))
+    except (TypeError, ValueError):
         budget = DEFAULT_OVERRIDE_WAIT_S
     return max(0.0, budget)
+
+
+def _human_seconds(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    if seconds < 120:
+        return f"{seconds}s"
+    minutes, rest = divmod(seconds, 60)
+    return f"{minutes} min" + (f" {rest}s" if rest else "")
+
+
+def override_approve_hint(request_id: str) -> str:
+    """Where the operator approves ``request_id`` — an ABSOLUTE dashboard link when a public
+    URL is configured; otherwise it says so, rather than printing a relative path that no
+    phone can open (CMX-61)."""
+    link = config.dashboard_link(f"/override/{request_id}")
+    where = (f"Approve on the dashboard: {link}" if link else
+             "No dashboard link: CHELA_DASHBOARD_PUBLIC_URL is not set, so there is no "
+             "address to open from another device. Approve from the Telegram prompt")
+    return (f"{where} — or in a plain terminal: chela merge-approve {request_id}  "
+            "(deny: add --deny)")
 
 
 def _actor(explicit: str | None = None) -> str:
@@ -658,7 +679,8 @@ def _await_override(run: dict, *, base: str, head_sha: str | None, judge_state: 
     if budget <= 0 or not gateanswer.open_approval(request_id, question, budget, meta):
         return _refuse(
             task_id, "escalate",
-            "the override approval request could not be opened (CHELA_OVERRIDE_WAIT_S is 0, "
+            "the override approval request could not be opened (the override approval window "
+            "— CHELA_OVERRIDE_WAIT_S / the Dispatch tab — is 0, "
             "or chela's gates directory is not writable) — no approval, no override.",
             recommendation="Set CHELA_OVERRIDE_WAIT_S to a positive number of seconds and "
                             "retry `chela merge --override`.",
@@ -669,10 +691,9 @@ def _await_override(run: dict, *, base: str, head_sha: str | None, judge_state: 
     event_log.append("orchestrator.merge_override_requested",
                      f"override requested for {label}: {reason}",
                      payload={**meta, "request_id": request_id, "budget": budget})
-    approve_hint = (f"Approve on the dashboard: /override/{request_id} — or in a plain "
-                    f"terminal: chela merge-approve {request_id}  (deny: add --deny)")
+    approve_hint = override_approve_hint(request_id)
     if notify.enabled():
-        notify.send(f"{question}\n\n{approve_hint}\nExpires in {budget:.0f}s.",
+        notify.send(f"{question}\n\n{approve_hint}\nExpires in {_human_seconds(budget)}.",
                     title=f"chela: approve override of {label}?")
     if on_request is not None:
         try:

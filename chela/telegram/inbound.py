@@ -352,6 +352,7 @@ def build_application(
     refresh_mirror=None,
     toggle_mirror=None,
     launch_session=None,
+    approvals=None,
 ):
     """Build a ``python-telegram-bot`` Application wired to ``router``.
 
@@ -427,6 +428,12 @@ def build_application(
     reconcile provisions and binds its topic on the next tick, exactly like any other
     agent. Browser navigation state (current path + subdir list) lives in PTB's
     per-user ``context.user_data`` so callback payloads stay tiny.
+
+    ``approvals`` (optional, CMX-61) is a :class:`chela.telegram.approvals.ApprovalRelay`:
+    taps on an override card's Approve / Deny buttons (the ``ov:`` callbacks) go to its
+    ``on_tap`` with the PRESSING user's id — the operator-id check lives there, so a tap
+    from anyone else changes nothing — and the card is edited to show the outcome. Gated on
+    the bound chat like every other handler. ``None`` registers no such handler.
 
     ``on_topic_closed`` (optional) is a callable ``(thread_id) -> None`` invoked on
     a ``StatusUpdate.FORUM_TOPIC_CLOSED`` service message — Slice B's auto-topics
@@ -1051,6 +1058,26 @@ def build_application(
         # echoes the number rather than reading a label back off the keyboard.
         await query.answer(f"✓ Option {payload + 1}" if ok else "❌ send failed")
 
+    async def _on_override(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
+        """Approve / Deny an override from its card (CMX-61). The pressing user's id is
+        the authority — :meth:`ApprovalRelay.on_tap` refuses a non-operator outright."""
+        query = update.callback_query
+        if query is None or approvals is None:
+            return
+        if not _new_chat_ok(update):
+            await query.answer()            # not our chat — stop the spinner, do nothing
+            return
+        user = update.effective_user
+        toast, new_text = approvals.on_tap(
+            query.data or "", getattr(user, "id", None),
+            getattr(user, "username", None) or getattr(user, "full_name", "") or "")
+        await query.answer(toast or None)
+        if new_text:
+            try:                            # no reply_markup ⇒ the buttons go away
+                await query.edit_message_text(new_text)
+            except Exception:               # unchanged / deleted — the decision stands
+                log.debug("could not edit the override card", exc_info=True)
+
     # Our own @username, learned from the Bot API at startup (never hardcoded) and
     # cached here — it is needed on EVERY group command, and get_me() is a network
     # call. A dict so the _post_init/_on_message closures share one cell.
@@ -1094,6 +1121,11 @@ def build_application(
     application.add_handler(
         CallbackQueryHandler(_on_new_cb, pattern="^" + re.escape(NEW_CB_PREFIX))
     )
+    if approvals is not None:
+        from chela.telegram.approvals import OVERRIDE_CB_PREFIX
+        application.add_handler(
+            CallbackQueryHandler(_on_override, pattern="^" + re.escape(OVERRIDE_CB_PREFIX))
+        )
     application.add_handler(CallbackQueryHandler(_on_key))
     # Media handlers BEFORE the text catch-all (PTB runs one handler per group):
     # a photo/document pasted into a bound topic is downloaded and its path

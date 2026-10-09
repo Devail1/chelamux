@@ -4569,6 +4569,13 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
    it qualifies the result set (the popover filters a bounded buffer, not all
    history), it is not itself a result. Hidden when the box is empty. */
 .decisions-scope { font-size: 10px; color: var(--text-dim); margin: 0 0 6px; }
+/* CMX-61: pending `chela merge --override` approvals, above the log. */
+.decisions-overrides { border: 1px solid var(--yellow, #ca8a04); border-radius: 8px;
+    padding: 8px 10px; margin: 0 0 8px; font-size: 12px; }
+.decisions-override { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline;
+    padding: 4px 0; overflow-wrap: anywhere; }
+.decisions-override a { font-weight: 600; }
+.decisions-override .ov-left { color: var(--text-dim); }
 .decisions-list { border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
     max-height: 38vh; overflow-y: auto; }
 /* Sidebar-width row: the Feed's 5-column grid (56px 72px 108px auto 1fr, ~250px

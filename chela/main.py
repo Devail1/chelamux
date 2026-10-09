@@ -1582,6 +1582,17 @@ def _pane_loop(gate_watcher, registry, interval: int, stop) -> None:
         stop.wait(interval)
 
 
+def _approvals_loop(approvals, interval: int, stop) -> None:
+    """Post / settle `chela merge --override` approval cards (CMX-61), until stopped. Its
+    own thread so a flood-controlled relay never delays a request with a deadline."""
+    while not stop.is_set():
+        try:
+            approvals.poll()
+        except Exception:
+            log.exception("Telegram override-approval poll failed")
+        stop.wait(interval)
+
+
 def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
     """Auto-topics: reconcile the registry against the live fleet, until stopped.
 
@@ -1909,11 +1920,24 @@ def cmd_telegram(args) -> None:
         # go through it — a second writer would double-post the mirror. Its 📖 toggle
         # (CMX-57) goes through the watcher for the same reason: it re-draws that one
         # message with the gate's full option list instead of the pane.
+        # ⚖️🔓 CMX-61: `chela merge --override` requests, posted with Approve / Deny
+        # buttons to the orchestrator's topic (else General) — only a TELEGRAM_OPERATOR_ID
+        # user's tap counts. Inbound-only: without PTB nobody could press them.
+        from chela.telegram.approvals import ApprovalRelay
+        approvals = ApprovalRelay(
+            partial(bot.post, retry_flood=False),
+            partial(bot.edit, retry_flood=False),
+            thread=lambda: registry.thread_for_window(inbox.orchestrator_wid(inbox.load())),
+        )
+        if not approvals.operators:
+            log.warning("TELEGRAM_OPERATOR_ID is not set — override requests reach Telegram "
+                        "without Approve/Deny buttons")
         application = build_application(
             token, router,
             on_topic_closed=on_topic_closed,
             refresh_mirror=gate_watcher.refresh_mirror,
             toggle_mirror=gate_watcher.toggle_mirror,
+            approvals=approvals,
         )
     except ImportError as e:
         print(f"{e}\n(or run outbound-only:  chela telegram --no-inbound)", file=sys.stderr)
@@ -1933,6 +1957,9 @@ def cmd_telegram(args) -> None:
         target=_pane_loop,
         args=(gate_watcher, pane_windows, interval, stop),
         daemon=True,
+    ).start()
+    threading.Thread(
+        target=_approvals_loop, args=(approvals, interval, stop), daemon=True,
     ).start()
     if topic_api is not None:
         threading.Thread(
@@ -3391,9 +3418,10 @@ def main() -> None:
     )
     p_merge.add_argument(
         "--override", action="store_true",
-        help="⚖️🔓 Merge past the judge — ONLY after the operator approves it (dashboard "
-             "/override/<id>, or `chela merge-approve <id>` in a plain terminal). Waits "
-             "CHELA_OVERRIDE_WAIT_S (default 300s); a timeout refuses. CI red or "
+        help="⚖️🔓 Merge past the judge — ONLY after the operator approves it (Telegram "
+             "Approve/Deny buttons, dashboard /override/<id>, or `chela merge-approve <id>` "
+             "in a plain terminal). Waits the Dispatch tab's override approval window "
+             "(CHELA_OVERRIDE_WAIT_S, default 900s); a timeout refuses. CI red or "
              "not-mergeable still refuse. Audited.",
     )
 

@@ -3298,6 +3298,15 @@ def _override_same_origin() -> bool:
     return True
 
 
+@app.route("/api/overrides")
+@require_auth
+def api_overrides():
+    """Every `chela merge --override` request still waiting for the operator (CMX-61) —
+    shown in the decisions inbox until it is decided or expires. Read-only: deciding one
+    is the confirm page's POST below."""
+    return jsonify({"pending": gateanswer.pending_approvals()})
+
+
 @app.route("/override/<request_id>", methods=["GET", "POST"])
 @require_auth
 def override_confirm(request_id):

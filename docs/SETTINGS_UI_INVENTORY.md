@@ -35,7 +35,9 @@ then 44, until CMX-389 added `CHELA_OVERRIDE_WAIT_S`, group 4 — then 51, until
 added the seven sandboxed-share knobs, group 9 — then 57, until CMX-418 added the six
 web-mode knobs, group 9 — then 58, until CMX-420 added the proxy's `CHELA_PROXY_SESSION_DIR`,
 group 9 — then 59, until CMX-435 added `CHELA_SHARE_SANDBOX_SUBSCRIPTION`, group 9 — then 61,
-until CMX-26 added `CHELA_INBOX_HELD_ALERT_S` and `CHELA_CLEAN_UNMERGED_ALERT_S`, group 5) — every literal `CHELA_*` name a Python module in
+until CMX-26 added `CHELA_INBOX_HELD_ALERT_S` and `CHELA_CLEAN_UNMERGED_ALERT_S`, group 5 —
+still 61 after CMX-61, which moved `CHELA_OVERRIDE_WAIT_S` onto the Dispatch tab (group 3)
+and added `CHELA_DASHBOARD_PUBLIC_URL`, group 7) — every literal `CHELA_*` name a Python module in
 `chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
@@ -197,7 +199,11 @@ autonomous base branch — per-workflow `base_branch` still wins; the NEVER-list
 overridable by this, default `dev`; **restart_required**), `CHELA_GATE_WAIT_S` (how long a
 `PermissionRequest` gate waits for a tap, default `90.0`s, `0` allowed — never wait),
 `CHELA_GATE_MAX_WAITS` (concurrent gate-wait slots, default `8`, floor `1` — a
-`BoundedSemaphore` cannot be sized `0`), and CMX-431's battery-scaled judge wall:
+`BoundedSemaphore` cannot be sized `0`), `CHELA_OVERRIDE_WAIT_S` (how long `chela merge
+--override` waits for the operator's approval before refusing — a timeout is a DENY; default
+`900`s, floor `1`, read per call — CMX-61 moved it here from group 4: it sizes the window
+only, while WHO may approve stays the operator alone, enforced by `chela.mergegate` and the
+Telegram operator-id check, so a dashboard write cannot widen the approval boundary), and CMX-431's battery-scaled judge wall:
 `CHELA_JUDGE_WALL_BASE_S` / `CHELA_JUDGE_WALL_PER_EXPERIMENT_S` /
 `CHELA_JUDGE_WALL_CEILING_S` / `CHELA_JUDGE_WALL_GRACE_S` (defaults `600` / `360` /
 `10800` / `900` s, read per call — see `docs/RISK_LEVELS.md`).
@@ -207,10 +213,11 @@ are resolved once at their owning module's import (`chela/config.py` for the fir
 `chela/contract.py` for the fourth) — a dashboard write to any of those needs that process
 restarted; the other seven (`chela/config.py`'s `max_reworks()`/
 `judge_max_unknown_retries()`/`judge_max_concurrent()`/`worktree_disk_budget_bytes()`/
-`memory_slice_budget_bytes()`, `chela/gateanswer.py`'s `wait_budget()`/`max_waits()`) are
+`memory_slice_budget_bytes()`, `chela/gateanswer.py`'s `wait_budget()`/`max_waits()`, and
+CMX-61's `chela/contract.py` `override_wait_budget()`) are
 read per call and take effect on the next tick/request.
 
-### 4. Unattended-risk switches (5) — `trust-boundary`, keep env-file-only
+### 4. Unattended-risk switches (4) — `trust-boundary`, keep env-file-only
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -218,7 +225,6 @@ read per call and take effect on the next tick/request.
 | `CHELA_AUTO_UPDATE` | `false` | Fully-unattended self-update sweep — opt-in risk, same doc |
 | `CHELA_ORCHESTRATOR` | `false` | Auto-launches the embedded orchestrator persona, which holds `chela merge` authority |
 | `CHELA_RESTORE_RESUME` | `false` | Gates `chela restore --resume` (CMX-350) — without it the flag falls back to the read-only report; unlike the other three this never fires unattended, a human still has to type the flag |
-| `CHELA_OVERRIDE_WAIT_S` | `300` | How long `chela merge --override` waits for the operator's approval before refusing — a timeout is a DENY (CMX-389). Env-only on purpose: a dashboard-writable window on the one path past the judge is a process editing its own approval boundary |
 
 The first three are the ones `userconfig.py`'s doc-comment is warning about by name. A
 checkbox is a worse UX for "I read the escalation contract and accept the risk" than a
@@ -251,12 +257,13 @@ Status section already does for other facts), not a write control.
 | `CHELA_TELEGRAM_BIND_DISPATCHED` | `false` | Give dispatcher-spawned agents a topic eagerly vs lazily |
 | `CHELA_TELEGRAM_BINDINGS` | `$CHELA_DIR/telegram-bindings.json` | `internal-path` — override where bindings persist |
 
-### 7. Dashboard bind (2) — `trust-boundary`, keep env-file-only
+### 7. Dashboard bind (3) — `trust-boundary`, keep env-file-only
 
 | Variable | Default | Notes |
 |---|---|---|
 | `CHELA_DASH_HOST` | `127.0.0.1` | Baked into the rendered hooks-plugin manifest as a literal URL — see `docs/CONFIG.md`'s port section for why this one is unusually load-bearing |
 | `CHELA_DASHBOARD_PORT` | `5001` | Same |
+| `CHELA_DASHBOARD_PUBLIC_URL` | unset | The dashboard's address from another device (e.g. its tailnet URL). Links that leave the box — the override approval push and Telegram card (CMX-61) — are built from it; unset, they say so instead of printing a dead relative path |
 
 `userconfig.py` names this pair explicitly as the reason it refuses to hold "the bind
 host." A dashboard writing its own bind host is a process editing the boundary that makes
