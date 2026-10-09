@@ -5745,12 +5745,10 @@ def tick(workflow_path: str | Path) -> dict:
         ).fetchall():
             # ⚖️🎚️ CMX-405: the cap is THIS run's risk level's (high 5 / normal 4 / low 3),
             # not one global number — reaching it escalates exactly as the global one did.
-            cap = _rework_cap(row)
-            # 🔁🚪 CMX-237. A `chela retry` grants extra rounds ON TOP of the automatic
-            # budget — never folded into `cap` itself, so a run with no grant escalates at
-            # EXACTLY `cap`, same as before this existed.
-            effective_cap = cap + (row["retry_count"] or 0)
-            if (row["rework_count"] or 0) >= effective_cap:
+            # 🔁🚪 CMX-237: a `chela retry` grants extra rounds ON TOP of that budget — see
+            # `effective_rework_cap`, which the inbox reads too (CMX-58).
+            effective_cap = effective_rework_cap(row)
+            if rework_cap_reached(row):
                 _escalate(
                     conn, row,
                     f"rework cap reached ({row['rework_count'] or 0}/{effective_cap}) — the "
@@ -6226,6 +6224,21 @@ def _rework_cap(row) -> int:
     normal 4, low 3 by default, under the global ``CHELA_MAX_REWORKS`` ceiling). Every
     place that used to read the one global cap for a specific run reads this instead."""
     return max_reworks_for(_row_risk(row))
+
+
+def effective_rework_cap(row) -> int:
+    """🔁🚪 CMX-237. THIS run's rework budget INCLUDING human-granted rounds: its risk cap
+    plus every ``chela retry`` grant. The grant is never folded into :func:`_rework_cap`
+    itself, so a run with no grant escalates at EXACTLY its risk cap."""
+    return _rework_cap(row) + (row["retry_count"] or 0)
+
+
+def rework_cap_reached(row) -> bool:
+    """Is a ``changes_requested`` run out of rounds — will the next tick ESCALATE it to
+    ``needs_human`` instead of re-spawning it? The tick's own cap check (1d) and the inbox's
+    "sent back for rework" notice (CMX-58) both ask THIS, so the notice can never promise a
+    round the dispatcher is about to refuse."""
+    return (row["rework_count"] or 0) >= effective_rework_cap(row)
 
 
 def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection) -> bool:

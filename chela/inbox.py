@@ -1498,6 +1498,16 @@ def run_events(runs: list[dict], seen: dict[str, str],
                 f"📥 {label} NEEDS A HUMAN — reworks: {payload['rework_count']} · verdicts "
                 f"on the row: {len(reviews)} · {reason} — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+        elif status == "changes_requested" and _rework_cap_reached(run):
+            # 🔁🛑 CMX-58: decide cap-vs-rework BEFORE saying anything. A run whose verdict
+            # landed on its LAST allowed round sits in `changes_requested` only until the next
+            # tick's cap check (`dispatcher.tick` 1d) escalates it — no round will run. The
+            # notice below would number a round past the cap ("rework 4" of 3) and promise a
+            # re-spawn that never comes; measured live on CMX-40, it made the orchestrator
+            # hold the queue for nothing. Say NOTHING here: the `needs_human` edge that
+            # follows is the one true notice. The mark is still recorded above, so this
+            # stays silent on every later sample at this status.
+            pass
         elif status == "changes_requested":
             # ⛔ NOT a silent state (CMX-68 review). A run sits here waiting for a dispatcher
             # tick to re-spawn it — and if the queue is HELD, the WORKFLOW.md does not parse,
@@ -1512,7 +1522,11 @@ def run_events(runs: list[dict], seen: dict[str, str],
             payload["worktree_path"] = run.get("worktree_path")
             pr = run.get("pr_url")
             ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
-            nxt = (f"rework {payload['rework_count'] + 1}" if not run.get("last_error")
+            # The round that will ACTUALLY run (count after the respawn's bump), out of the
+            # effective cap including human-granted rounds — never above it, because an
+            # at-cap run never reaches this branch (CMX-58).
+            nxt = (f"rework {payload['rework_count'] + 1} of {_effective_rework_cap(run)}"
+                   if not run.get("last_error")
                    else f"RETRY after: {str(run['last_error'])[:60]}")
             out.append(_event(
                 "run_changes_requested",
@@ -1543,6 +1557,25 @@ def run_events(runs: list[dict], seen: dict[str, str],
                 f"{': ' + detail if detail else ''}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
     return out, fresh
+
+
+def _cap_fields(run: dict) -> dict:
+    """The three columns the dispatcher's cap check reads, tolerantly — this is fed a runs
+    snapshot (or a hand-built dict in a test), not a ``sqlite3.Row``."""
+    return {"rework_count": run.get("rework_count") or 0,
+            "retry_count": run.get("retry_count") or 0, "risk": run.get("risk")}
+
+
+def _effective_rework_cap(run: dict) -> int:
+    from chela import dispatcher
+    return dispatcher.effective_rework_cap(_cap_fields(run))
+
+
+def _rework_cap_reached(run: dict) -> bool:
+    """The dispatcher's OWN cap predicate (:func:`chela.dispatcher.rework_cap_reached`) —
+    never a re-derivation, so the notice and the escalation cannot disagree."""
+    from chela import dispatcher
+    return dispatcher.rework_cap_reached(_cap_fields(run))
 
 
 def _needs_human_reason(run: dict) -> str:
