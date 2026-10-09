@@ -394,6 +394,8 @@ body {
 .gs-state-done { color: var(--ok-sky); }
 .gs-state-idle { color: var(--text-dim); opacity: 0.85; }
 .gs-state-unknown { color: var(--text-dim); opacity: 0.85; border: 1px dashed currentColor; }
+.gs-state-testing { color: var(--ok-green); }
+.gs-state-died { color: var(--ok-vermillion); }
 
 .gs-menu-wrap { position: relative; flex: 0 0 auto; }
 .gs-menu-btn {

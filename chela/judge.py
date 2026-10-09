@@ -1582,6 +1582,16 @@ def _run_experiments(
     return report
 
 
+def _progress_label(raw_exp) -> str:
+    """⚖️ CMX-40: what the live badge names as the experiment running now. A held-out
+    experiment is never named (CMX-395) — not even on the operator's own pane."""
+    if not isinstance(raw_exp, dict):
+        return "a malformed experiment"
+    if raw_exp.get("held_out") is True:
+        return "a held-out experiment"
+    return f"{raw_exp.get('file') or '?'}: {str(raw_exp.get('guard') or '')[:60]}"
+
+
 def _apply_experiments(
     worktree: Path, test_cmd: str, items: list, baseline: SuiteResult, timeout: float,
     selector: "judge_select.Selector | None" = None,
@@ -1606,17 +1616,24 @@ def _apply_experiments(
     consistency re-run's contract.
     """
     outcomes: list[Outcome] = []
+
+    def _record(outcome: Outcome) -> None:
+        outcomes.append(outcome)
+        # ⚖️ CMX-40: the live KILLED/SURVIVED tally the judge pane's badge reads.
+        if heartbeat is not None:
+            heartbeat("outcome", verdict=outcome.verdict)
+
     for n, raw_exp in enumerate(items):
         if progress is not None:
             progress(n, len(items))
         if heartbeat is not None:
-            heartbeat("experiment")
+            heartbeat("experiment", label=_progress_label(raw_exp))
         exp, why = Experiment.parse(raw_exp)
         if exp is None:
             # A malformed HELD-OUT experiment stays held out: its raw repr carries the guard
             # text and the start of its diff, which must never reach the visible comment.
             hidden = isinstance(raw_exp, dict) and raw_exp.get("held_out") is True
-            outcomes.append(Outcome(
+            _record(Outcome(
                 Experiment(guard="(a malformed held-out experiment)" if hidden
                            else str(raw_exp)[:120], file="?", before="", after="",
                            held_out=hidden),
@@ -1629,7 +1646,7 @@ def _apply_experiments(
         except ValueError:
             # ⛔ `../../etc/hosts`. The judge writes to the filesystem; it writes INSIDE the
             # throwaway worktree or it does not write.
-            outcomes.append(Outcome(
+            _record(Outcome(
                 exp, INVALID, f"{exp.file} is outside the judge worktree", baseline, None, "",
             ))
             continue
@@ -1651,7 +1668,7 @@ def _apply_experiments(
                      "a held-out experiment" if exp.held_out
                      else f"{exp.file}: {exp.guard[:60]}",
                      outcome.verdict, outcome.measured_by)
-            outcomes.append(outcome)
+            _record(outcome)
         finally:
             # ⛔ ALWAYS. The next experiment's baseline is this file, unmutated.
             restored = True
@@ -2389,6 +2406,10 @@ def judge_run(
               "run_started_at": run_started, "detached": detached, "done": 0, "total": None,
               "progress_at": run_started, "phase": "setup", "baseline_seconds": None,
               "confirmations": 0,
+              # ⚖️ CMX-40: what the judge pane / `chela peek` show live — the
+              # window the badge belongs on, the running tally, and the current label.
+              "window": judge_window_name(run.get("branch_name") or ""),
+              "killed": 0, "survived": 0, "invalid": 0, "current": None,
               "log": str(judge_log_path(task_id)) if detached else None}
     _write_run_status(task_id, status)
 
@@ -2405,6 +2426,12 @@ def judge_run(
             status["confirmations"] = int(status.get("confirmations") or 0) + 1
         elif event == "consistency":
             status["phase"] = "consistency"
+        elif event == "experiment" and info.get("label"):
+            status["current"] = info["label"]
+        elif event == "outcome" and status.get("phase") != "consistency":
+            # The consistency stage RE-runs experiments already tallied — don't count twice.
+            key = {KILLED: "killed", SURVIVED: "survived"}.get(info.get("verdict"), "invalid")
+            status[key] = int(status.get(key) or 0) + 1
         _write_run_status(task_id, status)
 
     # ⛔ CMX-164: the judge worktree already exists on disk by this point (`_spawn_judge`
@@ -3035,6 +3062,108 @@ def live_judge_run(task_id: str, worktree: Path | None = None) -> dict | None:
     if worktree is not None and judge_lock_live(worktree):
         return _read_judge_lock(_judge_lock_path(worktree)) or {}
     return None
+
+
+# --- ⚖️ CMX-40: a detached battery's live progress, for the window that launched it -------
+#
+# Measured on CMX-32, 2026-10-08: the judge agent launched `chela judge run --detach` and
+# went idle, as designed — but its window then READ idle for the 15 minutes the battery ran,
+# because Claude Code only lists background tasks it started itself. Humans and the
+# orchestrator concluded the judge was stuck. The run's own status json (written above, by
+# the run, atomically) is the source of truth; this reads it for the judge's window.
+
+BATTERY_TESTING = "testing"
+BATTERY_DIED = "died"
+
+
+def _read_status_retrying(path: Path, attempts: int = 3) -> dict | None:
+    """The status json, re-read briefly if it was caught mid-write. The writer replaces it
+    atomically, so a torn read means a non-atomic writer or a vanishing file — retried, then
+    given up on (no badge beats a wrong one)."""
+    for i in range(attempts):
+        status = _read_judge_lock(path)
+        if status is not None:
+            return status
+        if not path.exists():
+            return None
+        if i + 1 < attempts:
+            time.sleep(0.02)
+    return None
+
+
+def format_elapsed(seconds: float | None) -> str:
+    if seconds is None:
+        return "?"
+    s = int(max(0.0, seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+
+
+def battery_label(battery: dict) -> str:
+    """``⚖️ testing · 3/6 · 15m`` — or ``⚖️ judge run died — no verdict``."""
+    if battery["state"] == BATTERY_DIED:
+        return "⚖️ judge run died — no verdict"
+    total = battery.get("total")
+    where = (f"{battery.get('done') or 0}/{total}" if isinstance(total, int)
+             else battery.get("phase") or "setup")
+    return f"⚖️ testing · {where} · {format_elapsed(battery.get('elapsed'))}"
+
+
+def battery_for_window(window_name: str) -> dict | None:
+    """The judge battery this window launched, as the badge needs it, or None.
+
+    ``state`` is ``testing`` while the run's pid is alive (identity-checked, so a recycled
+    pid reads as dead) and ``died`` when its status file outlived it: a run that FINISHES
+    removes that file itself in its ``finally`` (after the verdict is written), so a file
+    with a dead owner is a run that never reached a verdict. No file ⇒ None (no badge).
+    """
+    if not window_name or not window_name.startswith("judge-"):
+        return None
+    d = judge_logs_dir()
+    if not d.is_dir():
+        return None
+    best = None
+    for path in d.glob("*.json"):
+        status = _read_status_retrying(path)
+        if status is None or status.get("window") != window_name:
+            continue
+        started = status.get("run_started_at")
+        if best is None or (isinstance(started, (int, float))
+                            and started > (best.get("run_started_at") or 0)):
+            best = status
+    if best is None:
+        return None
+    alive = _judge_lock_owner_alive(best)
+    started = best.get("run_started_at")
+    battery = {
+        "state": BATTERY_TESTING if alive else BATTERY_DIED,
+        "task_id": best.get("task_id"), "pid": best.get("pid"),
+        "done": best.get("done") or 0, "total": best.get("total"),
+        "killed": best.get("killed") or 0, "survived": best.get("survived") or 0,
+        "invalid": best.get("invalid") or 0,
+        "phase": best.get("phase"), "current": best.get("current"),
+        "elapsed": (max(0.0, time.time() - started)
+                    if alive and isinstance(started, (int, float)) else None),
+        "log": best.get("log"),
+    }
+    battery["label"] = battery_label(battery)
+    return battery
+
+
+def format_battery(battery: dict) -> str:
+    """The one-line ``chela peek`` rendering: the badge, the tally, the experiment now running."""
+    line = battery["label"]
+    if battery["state"] == BATTERY_TESTING:
+        line += (f" (KILLED {battery['killed']} · SURVIVED {battery['survived']}"
+                 f" · INVALID {battery['invalid']})")
+        if battery.get("current"):
+            line += f" — {battery['current']}"
+    elif battery.get("log"):
+        line += f" — see {battery['log']}"
+    return line
 
 
 def detached_argv(ident: str, experiments: str | Path, *, cleanup: bool = True) -> list[str]:

@@ -65,11 +65,29 @@ export function isFinished(agent, wants) {
 export function tileState(agent, wants) {
     if (wants) return { glyph: '◆', word: 'needs you', cls: 'needs-you' };
     if (agent && agent.session_status === 'busy') return { glyph: '●', word: 'working', cls: 'working' };
+    const battery = batteryState(agent);
+    if (battery) return battery;
     if (isFinished(agent, wants)) return { glyph: '✓', word: 'done', cls: 'done' };
     if (agent && agent.claude_running && !agent.session_status) {
         return { glyph: '?', word: 'unknown', cls: 'unknown' };
     }
     return { glyph: '○', word: 'idle', cls: 'idle' };
+}
+
+// ⚖️ CMX-40: a judge window's DETACHED mutation battery (app.py `judge_battery`,
+// read from the run's own status json — judge.battery_for_window). The judge
+// agent goes idle by design once it launches the run, and Claude Code does not
+// list a run it did not start, so without this the pane read "idle" for the
+// whole battery. It sits under wants/busy (the agent's own state is more
+// specific when it has one) and OVER done/unknown/idle. A run whose pid died
+// before a verdict reads "died", never idle or done. Null when there is none —
+// the sidebar row is CMX-35's (it will reuse this model).
+export function batteryState(agent) {
+    const b = agent && agent.judge_battery;
+    if (!b) return null;
+    if (b.state === 'testing') return { glyph: '⚖', word: b.label, cls: 'testing' };
+    if (b.state === 'died') return { glyph: '✕', word: b.label, cls: 'died' };
+    return null;
 }
 
 // The state's tooltip. A sandboxed session's working/idle is derived from its

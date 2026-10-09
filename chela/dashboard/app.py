@@ -387,6 +387,9 @@ def api_agents():
             # unknown, and only a confirmed open + non-draft PR reads as reviewable.
             "pr": pr,
             "ai_title": transcript.get("ai_title"),
+            # ⚖️ CMX-40: a judge window's DETACHED battery — invisible to `claude agents`,
+            # so without this the window reads idle for the whole run. None otherwise.
+            "judge_battery": judge.battery_for_window(name),
         })
 
     # Belt-and-braces share revocation on session end (see _reap_shares).
