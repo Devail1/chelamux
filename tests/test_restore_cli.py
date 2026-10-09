@@ -415,6 +415,12 @@ def _drive(argv):
         main.main()
 
 
+# Every env var behind a default-OFF gate in `chela.config` (RESTORE_RESUME_ENABLED,
+# ORCHESTRATOR_ENABLED, AUTO_MERGE_ENABLED, AUTO_UPDATE_ENABLED).
+_OPT_IN_GATES = ("CHELA_RESTORE_RESUME", "CHELA_ORCHESTRATOR", "CHELA_AUTO_MERGE",
+                 "CHELA_AUTO_UPDATE")
+
+
 @pytest.fixture()
 def live_stores(tmp_path, monkeypatch):
     """A REAL temp CHELA_DIR with a dangling row in EVERY source restore reads.
@@ -440,6 +446,12 @@ def live_stores(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_DIR", str(chela_dir))
     monkeypatch.setenv("CHELA_INBOX_FILE", str(chela_dir / "inbox.json"))
     monkeypatch.setenv("CHELA_TELEGRAM_BINDINGS", str(chela_dir / "telegram-bindings.json"))
+    # CMX-31: the default-OFF opt-in gates, scrubbed before the `config` reload below. An
+    # operator who opted in (`CHELA_RESTORE_RESUME=true` in their chela.env, exported by
+    # their shell) otherwise reloads the gate OPEN, and the disabled-by-default guard goes
+    # red on their machine while passing in CI. A test that wants a gate open sets it itself.
+    for gate in _OPT_IN_GATES:
+        monkeypatch.delenv(gate, raising=False)
 
     # inbox.json carries TWO independent sources: the orchestrator's own registration
     # (plan's arm — the row objective 5 and CMX-82 are both about) and `watches`
@@ -1636,14 +1648,37 @@ def test_restores_help_documents_resume(capsys):
     assert "CHELA_RESTORE_RESUME" in out, "...and say how to actually enable it"
 
 
+@pytest.fixture(params=["unset", "operator-opted-in"])
+def operator_env(request, monkeypatch):
+    """The parent env the suite was launched from: clean (CI), or an operator who opted
+    into every gate (`CHELA_RESTORE_RESUME=true` in their chela.env, exported). Requested
+    BEFORE `live_stores` so it models what that fixture inherits — CMX-31: the guard below
+    must hold on both, because `live_stores` is what scrubs the opt-ins."""
+    for gate in _OPT_IN_GATES:
+        if request.param == "unset":
+            monkeypatch.delenv(gate, raising=False)
+        else:
+            monkeypatch.setenv(gate, "true")
+    # What `live_stores` will inherit, captured before it scrubs — so the test can prove
+    # the opted-in param really exported something rather than collapsing into "unset".
+    return request.param, os.environ.get("CHELA_RESTORE_RESUME")
+
+
 def test_chela_restore_resume_is_disabled_by_default_falls_back_to_read_only(
-        live_stores, tmp_path, capsys):
+        operator_env, live_stores, tmp_path, capsys):
     """🔴🔒 GUARD: `chela.config.RESTORE_RESUME_ENABLED` (CHELA_RESTORE_RESUME) must gate
     the launch — a fresh/external install must not silently relaunch tmux windows and
     Claude sessions the first time an operator types `--resume`. Without the env var set,
     `--resume` must behave exactly like a bare `chela restore`: nothing on disk changes,
     and `restore.resume` (the one function that can call `spawn_window`) is never called.
+
+    Runs under both `operator_env` params: "disabled by default" is about the code's
+    default, so the operator's own opt-in in the parent env must not open the gate here.
     """
+    param, inherited = operator_env
+    assert inherited == ("true" if param == "operator-opted-in" else None), (
+        f"operator_env[{param}] must hand live_stores the parent env it claims to model"
+    )
     from chela import restore as restore_mod
 
     called = []
