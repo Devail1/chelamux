@@ -277,3 +277,110 @@ def test_requeue_does_not_touch_linear_issues_that_are_done(tmp_path):
     team_ = Team(issue(1, "Done"))
     assert _src(tmp_path, team_).requeue_task("CMX-1") == "skipped"
     assert team_.updates() == []
+
+
+# --- 3. the guards the judge corrupted (rework round 1) ----------------------------------
+
+def test_a_requeued_row_whose_pr_merged_out_of_band_never_gets_a_second_run(
+        repo, team, launched, pr_closes):
+    """The claim's own merged-PR guard on a requeued row: the old PR merged anyway after
+    the requeue (someone merged it by hand on GitHub). The row is still `closed` +
+    `requeue_pending`, so the claim must refuse it ITSELF — no spawn, no fresh worktree."""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    old_wt = _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", requeue=True, force=True)["ok"]
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET pr_state='merged' WHERE task_id='CMX-33'")
+        conn.commit()
+
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 0
+    assert launched == []
+    assert not (old_wt.parent / "CMX-33-r2").exists()
+    assert _row("CMX-33")["branch_name"] == "cmx-33-task"   # never forked onto -r2
+
+
+def test_a_requeued_task_is_claimed_even_when_its_issue_is_not_back_in_todo(
+        repo, team, launched, pr_closes, monkeypatch):
+    """The requeue itself is the claim signal, not the tracker state: the tracker
+    projection failed (the issue stays In Review, where chela put it) and the next tick
+    still claims the fresh attempt. Nobody has to drag the issue back by hand."""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    monkeypatch.setattr(dispatcher, "_tracker_requeue", lambda run: None)
+    assert dispatcher.close_run("CMX-33", "brief changed", requeue=True, force=True)["ok"]
+    assert team.issues["CMX-33"]["state"]["name"] == "In Review"
+
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 1
+    assert launched == ["CMX-33"]
+    assert _row("CMX-33")["branch_name"] == "cmx-33-task-r2"
+
+
+def _post_close(repo, monkeypatch, payload):
+    from chela.dashboard import app as dash
+
+    return dash.app.test_client().post(
+        "/api/dispatcher/runs/CMX-33/close", json=payload,
+        headers={"Sec-Fetch-Site": "same-origin"})
+
+
+def test_the_board_requeue_button_requeues(repo, team, launched, pr_closes, monkeypatch):
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    resp = _post_close(repo, monkeypatch, {"reason": "brief changed", "requeue": True})
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["requeued"] is True
+    row = _row("CMX-33")
+    assert (row["status"], row["requeue_pending"]) == ("closed", 1)
+    assert pr_closes == [PR]
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 1
+
+
+def test_the_board_plain_close_does_not_requeue_and_needs_a_reason(
+        repo, team, launched, pr_closes, monkeypatch):
+    """NEGATIVE CONTROL for the button above, plus the reason-required 400."""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert _post_close(repo, monkeypatch, {"reason": "  ", "requeue": True}).status_code == 400
+    assert _row("CMX-33")["status"] == "awaiting_review"
+
+    resp = _post_close(repo, monkeypatch, {"reason": "brief changed"})
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["requeued"] is False
+    assert (_row("CMX-33")["requeue_pending"] or 0) == 0
+    assert pr_closes == []
+
+
+def _cli_close(**kw):
+    from chela import main
+
+    args = SimpleNamespace(run="CMX-33", reason="brief changed", force=True, close_pr=False,
+                           keep_pr=False, remove_worktree=False, requeue=False)
+    for k, v in kw.items():
+        setattr(args, k, v)
+    out = io.StringIO()
+    with redirect_stdout(out):
+        main.cmd_close(args)
+    return out.getvalue()
+
+
+def test_cli_requeue_with_keep_pr_is_refused_and_changes_nothing(
+        repo, team, launched, pr_closes, monkeypatch, capsys):
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    called = []
+    monkeypatch.setattr(dispatcher, "close_run", lambda *a, **k: called.append(k) or {})
+    with pytest.raises(SystemExit) as e:
+        _cli_close(requeue=True, keep_pr=True)
+    assert e.value.code == 2
+    assert "--keep-pr" in capsys.readouterr().err
+    assert called == []
+
+
+def test_cli_requeue_requeues_and_closes_the_old_pr(repo, team, launched, pr_closes):
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    text = _cli_close(requeue=True)
+    assert "requeued" in text and "will NOT be re-dispatched" not in text
+    row = _row("CMX-33")
+    assert (row["status"], row["requeue_pending"]) == ("closed", 1)
+    assert pr_closes == [PR]
