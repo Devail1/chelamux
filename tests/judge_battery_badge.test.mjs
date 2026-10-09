@@ -1,10 +1,11 @@
 // ⚖️ CMX-40 — a judge window's DETACHED mutation battery shows its live progress on the
-// pane's state pill, its status dot / taskbar chip and the sidebar row, instead of "idle".
+// pane's state pill and its status dot / taskbar chip, instead of "idle". (The sidebar row
+// is out of scope here — CMX-35's redesign picks it up.)
 //
 // The judge agent goes idle by design once it launches `chela judge run --detach`, and
 // Claude Code does not list a run it did not start — so before this the window read
 // "idle" for the whole battery (measured on CMX-32, 15 min). `/api/agents` now carries
-// `judge_battery` (judge.battery_for_window); these run the REAL main.js/nav.js/
+// `judge_battery` (judge.battery_for_window); these run the REAL main.js/
 // terminals.js in jsdom (same harness as tests/window_id.test.mjs) over three idle
 // windows: a live battery (3/6), one that died before a verdict, and one with none.
 //
@@ -93,23 +94,16 @@ before(async () => {
     globalThis.setInterval = () => 0;
     await import('../chela/dashboard/static/js/main.js');
     const util = await import('../chela/dashboard/static/js/util.js');
-    const nav = await import('../chela/dashboard/static/js/nav.js');
     const terminals = await import('../chela/dashboard/static/js/terminals.js');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();
-    nav.renderSidebarAgents(AGENTS);
     // A pane minimized to the taskbar: its CHIP carries the same status dot.
     terminals.minimizePane('@43');
     await terminals.renderTerminals();
 });
 
 const pill = wid => document.querySelector(`#panel-terminals .gs-state[data-state-for="${wid}"]`);
-const rowState = name => {
-    const row = [...document.querySelectorAll('#sidebar-agents .agent-row')]
-        .find(r => r.dataset.agent === name);
-    return row && row.querySelector('.ar-state');
-};
 
 // --- the judge pane's state pill ---------------------------------------------------
 
@@ -128,22 +122,6 @@ test('a battery that died before a verdict reads "died" on the pill — never id
 
 test('negative control: a window with no battery still reads plain idle', () => {
     assert.equal(pill('@42').textContent.trim(), 'idle');
-});
-
-// --- the sidebar row ----------------------------------------------------------------
-
-test('the sidebar row of a running battery says its progress, not idle', () => {
-    const el = rowState('judge-a');
-    assert.ok(el, 'no sidebar row for the judge window');
-    assert.equal(el.textContent, '⚖️ testing · 3/6 · 15m');
-    assert.ok(el.classList.contains('working'), el.className);
-});
-
-test('the sidebar row of a dead battery says it died, and wants a human', () => {
-    const el = rowState('judge-b');
-    assert.equal(el.textContent, '⚖️ judge run died — no verdict');
-    assert.ok(el.classList.contains('waiting'), el.className);
-    assert.equal(rowState('plain').textContent, 'idle');
 });
 
 // --- the model ----------------------------------------------------------------------
@@ -188,8 +166,8 @@ test('negative control: a window with no battery has an IDLE dot', () => {
 
 // --- a held-out experiment is never named on a dashboard surface -----------------------
 
-test('the experiment running now is never printed on the pane, chip or sidebar', () => {
-    assert.ok(pill('@40') && rowState('judge-a'), 'setup: the surfaces must render');
+test('the experiment running now is never printed on the pane or chip', () => {
+    assert.ok(pill('@40') && dots('@40').length, 'setup: the surfaces must render');
     assert.ok(!document.body.innerHTML.includes(SECRET), 'a running experiment\'s guard text reached the DOM');
     for (const el of [...dots('@40'), ...dots('@41'), ...dots('@43')]) assert.ok(!el.title.includes(SECRET), el.title);
 });

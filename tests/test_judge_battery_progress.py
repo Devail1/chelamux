@@ -194,10 +194,10 @@ def test_api_agents_carries_the_battery_on_the_judge_window_only(_logs):
 
 def test_judge_run_writes_the_tally_the_label_and_the_window(tmp_path, _logs, monkeypatch):
     """GUARD (wiring): every status write the run makes is captured, over a battery with one
-    of EACH verdict (KILLED, SURVIVED, INVALID) plus a held-out experiment, and with the
+    of EACH verdict (KILLED, SURVIVED, INVALID — both a path-escape and a MALFORMED one) plus a held-out experiment, and with the
     consistency re-run ON (the default sample re-runs the survivor and a killed one). Pins:
 
-    * the tally moves one verdict at a time, each to its OWN key, and ends at exactly 2/1/1 —
+    * the tally moves one verdict at a time, each to its OWN key, and ends at exactly 2/1/2, summing to the 5 processed —
       the consistency re-run re-adjudicates experiments already tallied and must not count
       them again (it demonstrably ran: some writes carry ``phase == "consistency"``);
     * the running experiment is named, except a held-out one, whose guard text never reaches
@@ -215,7 +215,8 @@ def test_judge_run_writes_the_tally_the_label_and_the_window(tmp_path, _logs, mo
     exp_file.write_text(json.dumps({"experiments": [
         _exp(),                                                         # KILLED
         _exp(guard="the off hue", before='else "grey"', after='else "gray"'),   # SURVIVED
-        _exp(guard="outside", file="../outside.py"),                    # INVALID
+        _exp(guard="outside", file="../outside.py"),                    # INVALID (path)
+        {"guard": "malformed", "file": "guard.py"},                     # INVALID (no diff)
         _exp(guard=secret, held_out=True),                              # KILLED, held out
     ]}))
     writes: list[dict] = []
@@ -235,15 +236,20 @@ def test_judge_run_writes_the_tally_the_label_and_the_window(tmp_path, _logs, mo
     assert result["consistency"].get("sampled") == 2, result     # the re-run really ran
     tallies = [(w["killed"], w["survived"], w["invalid"]) for w in writes]
     progression = [t for i, t in enumerate(tallies) if i == 0 or t != tallies[i - 1]]
-    assert progression == [(0, 0, 0), (1, 0, 0), (1, 1, 0), (1, 1, 1), (2, 1, 1)], tallies
+    assert progression == [(0, 0, 0), (1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 1, 2),
+                           (2, 1, 2)], tallies
     rerun = [w for w in writes if w["phase"] == "consistency"]
     assert rerun, writes
-    assert {(w["killed"], w["survived"], w["invalid"]) for w in rerun} == {(2, 1, 1)}, rerun
+    assert {(w["killed"], w["survived"], w["invalid"]) for w in rerun} == {(2, 1, 2)}, rerun
+    # Every experiment processed is counted exactly once — a malformed one's INVALID too.
+    last = writes[-1]
+    assert last["total"] == 5 and sum(tallies[-1]) == last["total"], writes[-1]
 
     currents = [w["current"] for w in writes]
     named = [c for i, c in enumerate(currents) if c and c not in currents[:i]]
     assert named == ["guard.py: the colourblind glyph cue", "guard.py: the off hue",
-                     "../outside.py: outside", "a held-out experiment"], currents
+                     "../outside.py: outside", "guard.py: malformed",
+                     "a held-out experiment"], currents
     assert not [w for w in writes if secret in json.dumps(w)], "held-out guard leaked"
 
     assert all(w["window"] == window for w in writes)

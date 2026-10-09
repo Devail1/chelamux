@@ -2406,7 +2406,7 @@ def judge_run(
               "run_started_at": run_started, "detached": detached, "done": 0, "total": None,
               "progress_at": run_started, "phase": "setup", "baseline_seconds": None,
               "confirmations": 0,
-              # ⚖️ CMX-40: what the judge pane / sidebar / `chela peek` show live — the
+              # ⚖️ CMX-40: what the judge pane / `chela peek` show live — the
               # window the badge belongs on, the running tally, and the current label.
               "window": judge_window_name(run.get("branch_name") or ""),
               "killed": 0, "survived": 0, "invalid": 0, "current": None,

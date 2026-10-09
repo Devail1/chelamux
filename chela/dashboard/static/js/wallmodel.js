@@ -71,7 +71,7 @@ export function tileState(agent, wants) {
 // whole battery. It sits under wants/busy (the agent's own state is more
 // specific when it has one) and OVER done/unknown/idle. A run whose pid died
 // before a verdict reads "died", never idle or done. Null when there is none —
-// the sidebar row (nav.js) reuses this so the two surfaces cannot disagree.
+// the sidebar row is CMX-35's (it will reuse this model).
 export function batteryState(agent) {
     const b = agent && agent.judge_battery;
     if (!b) return null;
