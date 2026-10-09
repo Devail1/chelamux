@@ -203,42 +203,96 @@ def test_the_work_card_gets_the_battery_of_a_judging_run(_logs):
 # --- the producer: a REAL judge_run writes what the badge reads -------------------------
 
 def test_judge_run_writes_the_tally_the_label_and_the_window(tmp_path, _logs, monkeypatch):
-    """GUARD (wiring): each experiment's verdict lands in the status json as it happens, the
-    running experiment is named, and the json names the judge window it belongs to — then
-    the run removes it, so a finished run shows no badge."""
+    """GUARD (wiring): every status write the run makes is captured, over a battery with one
+    of EACH verdict (KILLED, SURVIVED, INVALID) plus a held-out experiment, and with the
+    consistency re-run ON (the default sample re-runs the survivor and a killed one). Pins:
+
+    * the tally moves one verdict at a time, each to its OWN key, and ends at exactly 2/1/1 —
+      the consistency re-run re-adjudicates experiments already tallied and must not count
+      them again (it demonstrably ran: some writes carry ``phase == "consistency"``);
+    * the running experiment is named, except a held-out one, whose guard text never reaches
+      ANY write (CMX-395) — the badge names it only as "a held-out experiment";
+    * the json names the judge window it belongs to, and the run removes it when finished.
+    """
     monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
     task_id = "abc123"
     repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
     with dispatcher._db() as conn:
         _run_row(conn, repo, task_id)
     branch = dispatcher.resolve_run(task_id)["branch_name"]
+    secret = "SECRET-held-out-guard-text"
     exp_file = tmp_path / "experiments.json"
-    exp_file.write_text(json.dumps({"experiments": [_exp(), _exp(guard="again")]}))
-    seen: list[dict] = []
-    real_apply = judge._apply_experiments
+    exp_file.write_text(json.dumps({"experiments": [
+        _exp(),                                                         # KILLED
+        _exp(guard="the off hue", before='else "grey"', after='else "gray"'),   # SURVIVED
+        _exp(guard="outside", file="../outside.py"),                    # INVALID
+        _exp(guard=secret, held_out=True),                              # KILLED, held out
+    ]}))
+    writes: list[dict] = []
+    real_write = judge._write_run_status
 
-    def _apply(*a, progress=None, **kw):
-        if progress is None:
-            return real_apply(*a, **kw)
+    def _spy(tid, status):
+        if tid == task_id:
+            writes.append(json.loads(json.dumps(status)))
+        real_write(tid, status)
 
-        def _spy(done, total):
-            progress(done, total)
-            seen.append(json.loads((_logs / f"{task_id}.json").read_text()))
-        return real_apply(*a, progress=_spy, **kw)
-
-    monkeypatch.setattr(judge, "_apply_experiments", _apply)
+    monkeypatch.setattr(judge, "_write_run_status", _spy)
     window = judge.judge_window_name(branch)
     with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
-        judge.judge_run(task_id, exp_file, cleanup=True, detached=True)
+        result = judge.judge_run(task_id, exp_file, cleanup=True, detached=True)
 
-    assert [s["killed"] for s in seen] == [0, 1, 2], seen
-    assert all(s["survived"] == 0 for s in seen), seen
-    # `progress(n)` fires as experiment n starts, before it is named — so each snapshot
-    # names the experiment that just finished, and the last one names the last experiment.
-    assert [s["current"] for s in seen] == [
-        None, "guard.py: the colourblind glyph cue", "guard.py: again"], seen
-    assert seen[-1]["window"] == window
+    assert result["ok"], result
+    assert result["consistency"].get("sampled") == 2, result     # the re-run really ran
+    tallies = [(w["killed"], w["survived"], w["invalid"]) for w in writes]
+    progression = [t for i, t in enumerate(tallies) if i == 0 or t != tallies[i - 1]]
+    assert progression == [(0, 0, 0), (1, 0, 0), (1, 1, 0), (1, 1, 1), (2, 1, 1)], tallies
+    rerun = [w for w in writes if w["phase"] == "consistency"]
+    assert rerun, writes
+    assert {(w["killed"], w["survived"], w["invalid"]) for w in rerun} == {(2, 1, 1)}, rerun
+
+    currents = [w["current"] for w in writes]
+    named = [c for i, c in enumerate(currents) if c and c not in currents[:i]]
+    assert named == ["guard.py: the colourblind glyph cue", "guard.py: the off hue",
+                     "../outside.py: outside", "a held-out experiment"], currents
+    assert not [w for w in writes if secret in json.dumps(w)], "held-out guard leaked"
+
+    assert all(w["window"] == window for w in writes)
     assert judge.battery_for_window(window) is None            # finished ⇒ no badge
+
+
+@pytest.mark.parametrize("raw, label", [
+    ({"file": "a.py", "guard": "g", "held_out": True}, "a held-out experiment"),
+    ({"file": "a.py", "guard": "g", "held_out": "yes"}, "a.py: g"),     # only literal True
+    ({"file": "a.py", "guard": "x" * 80}, "a.py: " + "x" * 60),
+    ({"guard": "g"}, "?: g"),
+    ("not a dict", "a malformed experiment"),
+])
+def test_the_progress_label_names_a_visible_experiment_and_hides_a_held_out_one(raw, label):
+    assert judge._progress_label(raw) == label
+
+
+@pytest.mark.parametrize("seconds, text", [
+    (None, "?"), (-5, "0s"), (59, "59s"), (60, "1m"), (3599, "59m"), (3600, "1h00m"),
+    (2 * 3600 + 7 * 60 + 30, "2h07m"),
+])
+def test_elapsed_formats_seconds_minutes_and_hours(seconds, text):
+    assert judge.format_elapsed(seconds) == text
+
+
+def test_a_died_battery_has_no_elapsed_and_never_reads_testing(_logs):
+    _write_status(_logs, pid=_dead_pid())
+    b = judge.battery_for_window(WINDOW)
+    assert b["elapsed"] is None
+    assert "testing" not in b["label"] and "idle" not in b["label"]
+
+
+@pytest.mark.parametrize("order", [("A", "B", "C"), ("C", "B", "A"), ("B", "C", "A")])
+def test_the_newest_run_wins_whatever_order_the_files_are_written(_logs, order):
+    ages = {"A": 3000, "B": 600, "C": 1800}
+    for tid in order:
+        _write_status(_logs, task_id=tid, elapsed=ages[tid], done=ages[tid] // 600)
+    b = judge.battery_for_window(WINDOW)
+    assert (b["task_id"], b["done"]) == ("B", 1)
 
 
 def test_api_dispatcher_puts_the_battery_on_the_judging_awaiting_review_card(
