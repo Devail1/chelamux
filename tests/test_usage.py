@@ -273,7 +273,6 @@ def test_api_usage_and_roots(tmp_path, monkeypatch):
     assert body["limits"]["five_hour"]["used_pct"] is None
 
     client.post("/api/usage/roots", json={"roots": []})
-    usage._REPORT.clear()
     body = client.get("/api/usage").get_json()
     assert all(not r["cache_broken"] for r in body["windows"]["30m"]["rows"])
 
@@ -508,3 +507,216 @@ def test_report_cache_ttl(tmp_path, monkeypatch):
     assert cached["windows"]["30m"]["rows"][0]["requests"] == 1
     fresh = usage.report({}, now=NOW + usage.RESULT_TTL_S, roots=[])
     assert fresh["windows"]["30m"]["rows"][0]["requests"] == 2
+
+
+# ---------------------------------------------------------------------------
+# CMX-38 rework round 2: the production paths the first guards skipped — the
+# context_snapshots burn history, the report cache's roots key, and the
+# empty-vs-unset extra roots setting. Each is driven through report() / the HTTP
+# route the dashboard actually calls, never through a test-only argument.
+# ---------------------------------------------------------------------------
+
+def _snapshot_db(tmp_path, monkeypatch, rows):
+    """A real context_snapshots table (the daemon's), seeded with ``rows`` of
+    ``(t, five_pct, five_reset, seven_pct, seven_reset)``."""
+    from contextlib import closing
+    from datetime import datetime, timezone
+
+    from chela import context
+    d = tmp_path / "chela-db"
+    monkeypatch.setattr(context, "CHELA_DIR", d)
+    monkeypatch.setattr(context, "DB_PATH", d / "scheduler.db")
+    with closing(context._get_db()) as conn:
+        for t, fp, fr, sp, sr in rows:
+            conn.execute(
+                "INSERT INTO context_snapshots (agent, ts, rate_limit_pct, rate_limit_resets_at, "
+                "weekly_rl_pct, weekly_rl_resets_at) VALUES (?, ?, ?, ?, ?, ?)",
+                ("a", datetime.fromtimestamp(t, timezone.utc).isoformat(), fp, fr, sp, sr))
+        conn.commit()
+
+
+def test_report_burn_rate_comes_from_snapshot_history_after_a_restart(tmp_path, monkeypatch):
+    # A freshly started dashboard: the in-process ring is EMPTY (the autouse fixture
+    # cleared it) and has never seen an older sample. Only the daemon's
+    # context_snapshots history can give a rate — and report() must use it.
+    five_reset, seven_reset = NOW + 2 * 3600, NOW + 3 * 86400
+    _snapshot_db(tmp_path, monkeypatch, [(NOW - 20 * 60, 10.0, five_reset, 2.0, seven_reset)])
+    ctx = tmp_path / "ctx"
+    _cache(ctx, "a.json", NOW - 60, five=(40, five_reset), seven=(5, seven_reset))
+    monkeypatch.setattr(usage, "CONTEXT_CACHE_DIR", ctx)
+    monkeypatch.setattr(usage, "default_root", lambda: tmp_path / "projects")
+    assert usage._SAMPLES == []
+    lim = usage.report({}, now=NOW, roots=[])["limits"]
+    # 30 points in 19 min; and the 7d bar reads the WEEKLY columns, not the 5h ones.
+    assert lim["five_hour"]["burn_pct_per_h"] == pytest.approx(30 / (19 / 60), rel=1e-3)
+    assert lim["five_hour"]["hits_100_before_reset"] is True
+    assert lim["seven_day"]["burn_pct_per_h"] == pytest.approx(3 / (19 / 60), rel=1e-2)
+
+
+def test_report_without_snapshot_history_has_unknown_burn(tmp_path, monkeypatch):
+    # The control for the test above: same cache file, empty history -> unknown, so the
+    # rate there really came from the DB rows.
+    _snapshot_db(tmp_path, monkeypatch, [])
+    ctx = tmp_path / "ctx"
+    _cache(ctx, "a.json", NOW - 60, five=(40, NOW + 7200))
+    monkeypatch.setattr(usage, "CONTEXT_CACHE_DIR", ctx)
+    monkeypatch.setattr(usage, "default_root", lambda: tmp_path / "projects")
+    assert usage.report({}, now=NOW, roots=[])["limits"]["five_hour"]["burn_pct_per_h"] is None
+
+
+def test_report_cache_is_keyed_on_the_scanned_roots(tmp_path, monkeypatch):
+    root, extra = tmp_path / "projects", tmp_path / "win" / "projects"
+    root.mkdir()
+    _write(extra, "q/bot.jsonl", _bot_lines(n=12))
+    monkeypatch.setattr(usage, "default_root", lambda: root)
+    monkeypatch.setattr(usage, "CONTEXT_CACHE_DIR", tmp_path / "ctx")
+    with_extra = usage.report({}, now=NOW, roots=[str(extra)])
+    assert with_extra["windows"]["30m"]["rows"][0]["cache_broken"] is True
+    # Same instant — well inside the TTL — but other roots: must rescan, not serve the
+    # previous roots' rows.
+    without = usage.report({}, now=NOW, roots=[])
+    assert without["windows"]["30m"]["rows"] == []
+    assert without["roots"]["scanned"] == [str(root)]
+    # And back again, still inside the TTL.
+    assert usage.report({}, now=NOW + 1, roots=[str(extra)])["windows"]["30m"]["rows"]
+
+
+@pytest.mark.parametrize("stored, expected", [
+    (None, "DEFAULT"),       # never set -> the default /mnt/c root
+    ([], []),                # explicitly empty list -> scan nothing extra
+    ("", []),                # an empty string (hand-edited config) -> nothing extra
+    (["/x/*"], ["/x/*"]),
+    ([" ", "/y"], ["/y"]),
+])
+def test_extra_roots_empty_is_none_unset_is_default(monkeypatch, stored, expected):
+    from chela import userconfig
+    monkeypatch.setattr(userconfig, "get", lambda k, *a, **kw: stored if k == usage.EXTRA_ROOTS_KEY else None)
+    want = list(usage.DEFAULT_EXTRA_ROOTS) if expected == "DEFAULT" else expected
+    assert usage.extra_roots() == want
+
+
+def test_api_roots_empty_scans_no_extra_root_and_null_restores_default(tmp_path, monkeypatch):
+    # End to end through the route the gear menu posts to, with the DEFAULT root pointed
+    # at a real directory holding the 10-08 bot — so "fell back to the default" is
+    # visible as rows, and no _REPORT.clear() hides a stale cache between saves.
+    root, win = tmp_path / "projects", tmp_path / "win"
+    _write(root, "p/s.jsonl", _healthy_lines(n=3, start=int(time.time()) - 300))
+    _write(win / "u1" / "projects", "q/bot.jsonl", _bot_lines(n=12, start=int(time.time()) - 900))
+    for p in tmp_path.rglob("*.jsonl"):
+        os.utime(p, None)
+    monkeypatch.setattr(usage, "default_root", lambda: root)
+    monkeypatch.setattr(usage, "DEFAULT_EXTRA_ROOTS", (str(win / "*" / "projects"),))
+    monkeypatch.setattr(usage, "CONTEXT_CACHE_DIR", tmp_path / "ctx")
+    monkeypatch.setattr(dash, "_usage_window_names", lambda: {})
+    client = dash.app.test_client()
+
+    def broken():
+        return [r for r in client.get("/api/usage").get_json()["windows"]["30m"]["rows"] if r["cache_broken"]]
+
+    assert client.post("/api/usage/roots", json={"roots": None}).get_json()["extra"] == list(usage.DEFAULT_EXTRA_ROOTS)
+    assert len(broken()) == 1                      # unset -> default root scanned
+    for empty in ([], ""):
+        r = client.post("/api/usage/roots", json={"roots": empty})
+        assert r.status_code == 200 and r.get_json()["extra"] == []
+        assert broken() == []                      # saved empty -> no extra root, at once
+    client.post("/api/usage/roots", json={"roots": None})
+    assert len(broken()) == 1                      # null restores the default
+
+
+# ---------------------------------------------------------------------------
+# Per-file reader state and row facts — each rule asserted on its own value.
+# ---------------------------------------------------------------------------
+
+def test_rewritten_shorter_transcript_is_reparsed_from_scratch(tmp_path):
+    _write(tmp_path, "p/s.jsonl", [_line(NOW - 120, f"m{i}", f"r{i}") for i in range(3)])
+    assert _rows(tmp_path, NOW - 1800)[0]["requests"] == 3
+    _write(tmp_path, "p/s.jsonl", [_line(NOW - 60, "n0", "x0")])  # shrank: a rewrite
+    rows = _rows(tmp_path, NOW - 1800)
+    assert rows[0]["requests"] == 1 and rows[0]["last_ts"] == NOW - 60
+
+
+def test_reader_drops_records_before_the_day_start_from_its_state(tmp_path):
+    day0 = usage.utc_day_start(NOW)
+    p = _write(tmp_path, "p/s.jsonl", [_line(day0 - 60, "y", "y"), _line(day0 + 60, "t", "t")])
+    usage.collect([str(tmp_path)], day0)
+    assert [r["t"] for r in usage._FILES[str(p)].records] == [day0 + 60]
+    # A later scan with a later cutoff (day rollover) trims what was already held.
+    usage.collect([str(tmp_path)], day0 + 120)
+    assert usage._FILES[str(p)].records == []
+
+
+def test_reader_forgets_files_no_longer_in_scope(tmp_path):
+    p = _write(tmp_path, "p/s.jsonl", [_line(NOW - 60, "m", "r")])
+    usage.collect([str(tmp_path)], usage.utc_day_start(NOW))
+    assert str(p) in usage._FILES
+    p.unlink()
+    usage.collect([str(tmp_path)], usage.utc_day_start(NOW))
+    assert str(p) not in usage._FILES
+
+
+def test_row_carries_ai_title_majority_model_and_newest_ts(tmp_path):
+    lines = [
+        json.dumps({"type": "ai-title", "aiTitle": "Fix the cache"}),
+        _line(NOW - 50, "a", "a", model="claude-sonnet-5-5"),
+        _line(NOW - 300, "b", "b", model="claude-opus-5-5"),
+        _line(NOW - 200, "c", "c", model="claude-opus-5-5"),
+    ]
+    _write(tmp_path, "p/s.jsonl", lines)
+    row = _rows(tmp_path, NOW - 1800)[0]
+    assert row["ai_title"] == "Fix the cache"
+    assert row["model"] == "claude-opus-5-5"      # 2 of 3, though not the first seen
+    assert row["last_ts"] == NOW - 50             # newest, though not the last line
+
+
+def test_negative_or_non_int_token_counts_read_as_zero():
+    rec = usage.parse_line(json.dumps({
+        "type": "assistant", "timestamp": _iso(NOW), "requestId": "r",
+        "message": {"id": "m", "model": "x", "usage": {
+            "input_tokens": -5, "cache_creation_input_tokens": 2.5,
+            "cache_read_input_tokens": "9", "output_tokens": 7}}}))
+    assert (rec["in"], rec["cw"], rec["cr"], rec["out"]) == (0, 0, 0, 7)
+
+
+def test_parse_ts_requires_a_full_timestamp():
+    assert usage.parse_ts("2026-10-09T12:00:00Z") == NOW
+    assert usage.parse_ts("2026-10-09T12:00") is None
+
+
+def test_resolve_roots_dedupes_and_skips_non_dirs(tmp_path):
+    a = tmp_path / "a"
+    a.mkdir()
+    (tmp_path / "f").write_text("x")
+    (tmp_path / "link").symlink_to(a)
+    assert usage.resolve_roots([str(a), str(a), str(tmp_path / "link"), str(tmp_path / "f")]) == [str(a)]
+
+
+def test_top_n_caps_each_window(tmp_path, monkeypatch):
+    assert usage.TOP_N == 25
+    root = tmp_path / "projects"
+    for i in range(usage.TOP_N + 3):
+        _write(root, f"p/s{i}.jsonl", [_line(NOW - 60, f"m{i}", f"r{i}")])
+    monkeypatch.setattr(usage, "default_root", lambda: root)
+    monkeypatch.setattr(usage, "CONTEXT_CACHE_DIR", tmp_path / "ctx")
+    w = usage.report({}, now=NOW, roots=[])["windows"]
+    assert len(w["30m"]["rows"]) == usage.TOP_N and len(w["today"]["rows"]) == usage.TOP_N
+
+
+def test_sample_ring_records_each_reading_once_and_is_bounded(tmp_path, monkeypatch):
+    ctx = tmp_path / "ctx"
+    _cache(ctx, "a.json", NOW - 60, five=(40, NOW + 7200))
+    for _ in range(3):
+        usage.limits(ctx, now=NOW, history=False)
+    assert len(usage._SAMPLES) == 1
+    monkeypatch.setattr(usage, "_SAMPLES_MAX", 2)
+    for i in range(4):
+        _cache(ctx, "a.json", NOW - 50 + i, five=(40 + i, NOW + 7200))
+        usage.limits(ctx, now=NOW, history=False)
+    assert len(usage._SAMPLES) == 2 and usage._SAMPLES[-1][2] == 43
+
+
+def test_snapshot_history_older_than_eight_days_is_not_read(tmp_path, monkeypatch):
+    reset = NOW + 3600
+    _snapshot_db(tmp_path, monkeypatch, [(NOW - 9 * 86400, 1.0, reset, None, None),
+                                         (NOW - 20 * 60, 10.0, reset, None, None)])
+    got = usage._db_samples("five_hour", NOW - 8 * 86400)
+    assert [p for _, p, _ in got] == [10.0]
