@@ -391,6 +391,8 @@ body {
 .gs-state-done { color: var(--ok-sky); }
 .gs-state-idle { color: var(--text-dim); opacity: 0.85; }
 .gs-state-unknown { color: var(--text-dim); opacity: 0.85; border: 1px dashed currentColor; }
+.gs-state-testing { color: var(--ok-green); }
+.gs-state-died { color: var(--ok-vermillion); }
 
 .gs-menu-wrap { position: relative; flex: 0 0 auto; }
 .gs-menu-btn {
@@ -2676,6 +2678,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 .kanban-state-chip.st-done         { color: var(--text-dim); }
 /* 🗂️📐 CMX-23 — run-state badges that ride beside the status pill (kanbanlinearmodel.js). */
 .kanban-state-chip.st-judging      { color: var(--accent); border-color: rgba(88, 166, 255, 0.45); background: rgba(88, 166, 255, 0.10); }
+.kanban-state-chip.st-judge-died   { color: var(--red); border-color: rgba(248, 81, 73, 0.55); background: rgba(248, 81, 73, 0.14); font-weight: 600; }
 .kanban-state-chip.st-rework       { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }
 .kanban-state-chip.st-blocked-race { color: var(--red); border-color: rgba(248, 81, 73, 0.5); background: rgba(248, 81, 73, 0.10); }
 .kanban-state-chip.st-closed-unmerged { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }

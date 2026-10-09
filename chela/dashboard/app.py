@@ -373,6 +373,9 @@ def api_agents():
             "recap_ts": transcript["recap_ts"],
             "pr": transcript["pr"],
             "ai_title": transcript.get("ai_title"),
+            # ⚖️ CMX-40: a judge window's DETACHED battery — invisible to `claude agents`,
+            # so without this the window reads idle for the whole run. None otherwise.
+            "judge_battery": judge.battery_for_window(name),
         })
 
     # Belt-and-braces share revocation on session end (see _reap_shares).
@@ -3915,6 +3918,16 @@ def api_dispatcher_init():
     return jsonify(result)
 
 
+def _attach_judge_battery(runs: list[dict]) -> None:
+    """⚖️ CMX-40: a judging run's DETACHED battery progress (``3/6 · 15m``, or "died — no
+    verdict") onto its Work card, from the run's own status json. Only a run whose judge is
+    marked running pays the read; every other row gets None."""
+    for r in runs:
+        r["judge_battery"] = (
+            judge.battery_for_window(judge.judge_window_name(r.get("branch_name") or ""))
+            if r.get("judge_state") == judge.J_RUNNING else None)
+
+
 def _judge_live_status() -> str | None:
     """A cheap "reviewing cmx-N" note when the judge is mid-review, or None.
 
@@ -4121,6 +4134,7 @@ def api_dispatcher():
         }
 
         active, awaiting, recent = _runs_for_workflow(all_runs, str(wf_path))
+        _attach_judge_battery(awaiting)
         # Hide tasks from Open if they already have an in-flight run, so a
         # single TODO line never shows two cards. The strike on master only
         # lands when the PR merges, so without this filter an awaiting_review

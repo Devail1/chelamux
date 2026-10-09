@@ -27,7 +27,7 @@ import os
 import subprocess
 from datetime import datetime, timezone
 
-from chela import agent_manager, discovery, sandbox_status, sessions, transcripts
+from chela import agent_manager, discovery, judge, sandbox_status, sessions, transcripts
 
 # Per-turn character cap for the tail/query digests — enough to read intent
 # without dumping a whole essay per turn. `--all` is uncapped (full read).
@@ -127,6 +127,8 @@ def peek(wid: str) -> dict | None:
         "recap_ts": summary["recap_ts"],
         "pr": summary["pr"],
         "context": ctx,
+        # ⚖️ CMX-40: the detached judge battery this window launched (None if none).
+        "judge_battery": judge.battery_for_window(win["name"]),
     }
 
 
@@ -160,6 +162,8 @@ def format_peek(p: dict) -> str:
         f"  cwd:     {p['cwd'] or '?'}",
         f"  type:    {p['window_type']}",
     ]
+    if p.get("judge_battery"):
+        lines.append(f"  judge:   {judge.format_battery(p['judge_battery'])}")
     if p.get("session_name"):
         moved = (f" — moved to a {p.get('session_kind') or 'background'} session; "
                  "address it by this name" if p.get("session_moved") else "")

@@ -11,6 +11,7 @@ import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg
 import { refresh } from './main.js';
 import { refreshCost } from './cost.js';
 import { resolveWindowId } from './windowid.js';
+import { batteryState } from './wallmodel.js';
 
 // ---------------------------------------------------------------------------
 // Sidebar + canvas navigation (replaces the old tab bar)
@@ -291,8 +292,11 @@ function _agentRowHtml(a) {
     // already 'grey' (app.py gates it on session_status !== 'busy' && !needs_human),
     // so this never fights the working/waiting colours.
     const done = isDone(a);
-    const stWord = done ? 'done' : (_AGENT_STATUS_WORD[dot] || 'idle');
-    const stCls = done ? 'done' : (_SIDEBAR_DOT_CLASS[dot] || 'idle');
+    // ⚖️ CMX-40: a judge window whose detached battery is running (or died without a
+    // verdict) says so instead of "idle" — the SAME model the pane pill draws from.
+    const battery = dot === 'grey' ? batteryState(a) : null;
+    const stWord = battery ? battery.word : done ? 'done' : (_AGENT_STATUS_WORD[dot] || 'idle');
+    const stCls = battery ? _BATTERY_ROW_CLASS[battery.cls] : done ? 'done' : (_SIDEBAR_DOT_CLASS[dot] || 'idle');
     const label = _agentLabel(a);
 
     // Open-on-wall cue: a click on this row RESTORES a hidden pane vs merely
@@ -467,6 +471,7 @@ const _AGENT_STATUS_WORD = { green: 'working', yellow: 'waiting', grey: 'idle' }
 // Status colour → the pane dot's CSS state class, so the sidebar dot pulses
 // identically to the wall's .term-status-dot (working/waiting/idle).
 const _SIDEBAR_DOT_CLASS = { green: 'working', yellow: 'waiting', grey: 'idle' };
+const _BATTERY_ROW_CLASS = { testing: 'working', died: 'waiting' };
 
 // The fourth sidebar state (issue #475): idle, but the agent said something
 // since you last spoke. `a.done` is the server's word (inbox.is_done), not

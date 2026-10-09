@@ -111,7 +111,14 @@ export function trackerBoard(columns, cards) {
 export function runStateBadges(card) {
     const out = [];
     if (!card) return out;
-    if (card.judge_state === 'running') out.push({ label: '⚖️ judging', cls: 'st-judging' });
+    // ⚖️ CMX-40: the detached battery's own progress when it has one ("⚖️ testing · 3/6 · 15m"),
+    // and a battery that died without a verdict says so — never a bare "judging".
+    const battery = card.judge_battery;
+    if (card.judge_state === 'running' && battery && battery.state === 'died') {
+        out.push({ label: battery.label, cls: 'st-judge-died' });
+    } else if (card.judge_state === 'running') {
+        out.push({ label: battery && battery.state === 'testing' ? battery.label : '⚖️ judging', cls: 'st-judging' });
+    }
     if (card.judge_state === 'blocked_race') out.push({ label: '🧊 blocked race', cls: 'st-blocked-race' });
     const rework = Number(card.rework_count) || 0;
     if (rework > 0) out.push({ label: `🔁 rework ${rework}`, cls: 'st-rework' });
