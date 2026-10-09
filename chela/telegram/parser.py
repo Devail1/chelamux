@@ -19,7 +19,10 @@ import base64
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+from chela.telegram.media import INBOUND_IMAGE_MARKER
 
 # Placeholder Claude Code writes for an assistant turn that produced no text.
 _NO_CONTENT = "(no content)"
@@ -40,6 +43,51 @@ _RE_IMAGE_COORD_NOTE = re.compile(
     r"\[Image: original \d+x\d+, displayed at \d+x\d+\."
     r" Multiply coordinates by [\d.]+ to map to original image\.\]"
 )
+
+
+# The ``isMeta`` record Claude Code writes after a user turn with a pasted image:
+# "[Image: source: /tmp/chela-paste-images/<sha>.png]". Never relayed as text (every
+# ``isMeta`` record is dropped by its flag, not by this pattern); read ONLY to find
+# the image file when its user turn carried no base64 ``image`` block (CMX-36).
+_RE_IMAGE_SOURCE = re.compile(r"\[Image: source: (.+?)\]")
+
+# A source-path fallback uploads a file off disk, so it reads only these extensions.
+_IMAGE_EXT_MEDIA_TYPE = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+# A pasted image whose user turn has no text at all still needs a body to post.
+_IMAGE_ONLY_TEXT = "[Image]"
+
+
+def _is_peer_message(data: dict) -> bool:
+    """True for a cross-session peer message (``origin.kind == "peer"``).
+
+    Peer messages are ``isMeta`` too, but they are deliberately relayed so the
+    operator sees what other sessions told this one — the ONE ``isMeta`` kind that
+    is conversation rather than harness bookkeeping.
+    """
+    origin = data.get("origin")
+    return isinstance(origin, dict) and origin.get("kind") == "peer"
+
+
+def _image_from_source_path(path: str) -> tuple[str, bytes] | None:
+    """``(media_type, bytes)`` of the image file at ``path``, or None.
+
+    Only an existing regular file with an image extension is read — this is the
+    fallback for a pasted image whose user turn carried no ``image`` block.
+    """
+    media_type = _IMAGE_EXT_MEDIA_TYPE.get(Path(path).suffix.lower())
+    if media_type is None:
+        return None
+    try:
+        return media_type, Path(path).read_bytes()
+    except OSError:  # missing, a directory, unreadable
+        return None
 
 
 def _strip_image_note(text: str) -> str:
@@ -175,6 +223,11 @@ def parse_entries(
     out: list[Message] = []
     # Copy so we never mutate the caller's dict.
     pending = dict(pending) if pending else {}
+    # The latest user text event, so a following "[Image: source: …]" meta record
+    # can attach its file when that turn carried no image block. Cleared by any
+    # assistant record so a stray meta line never lands on an older turn.
+    last_user: Message | None = None
+    last_user_had_blocks = False
 
     for data in entries:
         if data.get("type") not in ("user", "assistant"):
@@ -188,6 +241,7 @@ def parse_entries(
             content = [{"type": "text", "text": str(content)}] if content else []
 
         if data["type"] == "assistant":
+            last_user = None
             for block in content:
                 if not isinstance(block, dict):
                     continue
@@ -245,7 +299,23 @@ def parse_entries(
                         Message("user", "text", f"Loaded skill: {name or 'unknown'}", timestamp=ts)
                     )
                     continue
+            if data.get("isMeta") and not _is_peer_message(data):
+                # Harness bookkeeping, never a user turn (CMX-36): the pasted-image
+                # "[Image: source: …]" line, the Read tool's coordinate note,
+                # scheduled-task prompts, idle notices, command caveats. Filtered by
+                # the FLAG, so a new meta kind can't leak as 👤 either. The one
+                # thing read out of it is a pasted image's source path, used only
+                # when that image's own turn carried no base64 block.
+                if last_user is not None and not last_user_had_blocks:
+                    for block in content:
+                        t = block.get("text", "") if isinstance(block, dict) else block
+                        m = _RE_IMAGE_SOURCE.search(t) if isinstance(t, str) else None
+                        image = _image_from_source_path(m.group(1)) if m else None
+                        if image is not None:
+                            last_user.images = (last_user.images or []) + [image]
+                continue
             user_text: list[str] = []
+            user_images: list[tuple[str, bytes]] = []
             for block in content:
                 if not isinstance(block, dict):
                     if isinstance(block, str) and _strip_image_note(block):
@@ -275,9 +345,25 @@ def parse_entries(
                     t = _strip_image_note(block.get("text", ""))
                     if t and not _RE_SYSTEM_TAGS.search(t):
                         user_text.append(t)
-            if user_text:
-                combined = "\n".join(user_text).strip()
-                if combined:
-                    out.append(Message("user", "text", combined, timestamp=ts))
+                elif btype == "image":
+                    # An image pasted into the terminal/wall (CMX-36) — relayed
+                    # as a photo after this turn's text, like a tool_result's.
+                    user_images.extend(_tool_result_images([block]) or [])
+            combined = "\n".join(user_text).strip()
+            if not combined and not user_images:
+                continue
+            if INBOUND_IMAGE_MARKER in combined:
+                # A photo that ARRIVED from Telegram: it is already in the topic,
+                # so it must not echo back into it — and no source-path fallback
+                # may re-attach it either.
+                out.append(Message("user", "text", combined, timestamp=ts))
+                last_user, last_user_had_blocks = None, True
+                continue
+            msg = Message(
+                "user", "text", combined or _IMAGE_ONLY_TEXT,
+                timestamp=ts, images=user_images or None,
+            )
+            out.append(msg)
+            last_user, last_user_had_blocks = msg, bool(user_images)
 
     return out, pending
