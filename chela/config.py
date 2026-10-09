@@ -1125,7 +1125,7 @@ WALL_TILE_DISPATCHED = os.environ.get("CHELA_WALL_TILE_DISPATCHED", "false").str
 INBOX_ENABLED = os.environ.get("CHELA_INBOX_ENABLED", "true").strip().lower() not in ("false", "0", "no", "off")
 
 # Claude Code's own `--remote-control [name]` (2.1.280+): lets that session be driven
-# from claude.ai. ON by default for every window chela opens FOR THE USER — the
+# from claude.ai. chela passes it BARE (CMX-34) so claude.ai shows Claude's own title. ON by default for every window chela opens FOR THE USER — the
 # dashboard launcher, the Telegram `/new` bridge, and the auto-launched orchestrator
 # persona (`chela/spawn.py`, `chela/personas/autolaunch.py`) — so a session started
 # from a phone or the wall is reachable from claude.ai too. ⛔ NEVER applied to a
