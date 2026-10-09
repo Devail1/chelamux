@@ -153,3 +153,25 @@ test('the 30m / Today switch re-renders from that window', async () => {
     const on = document.querySelector('#usage-window .usage-window-btn.active');
     assert.equal(on && on.dataset.win, 'today');
 });
+
+test('a burn that stays under 100% renders the projection, not the REACHES flag', async () => {
+    const saved = PAYLOAD.limits;
+    PAYLOAD.limits = {
+        five_hour: { used_pct: 12, resets_at: NOW + 3600, burn_pct_per_h: 6,
+            projected_pct: 18, hits_100_before_reset: false },
+        seven_day: { used_pct: 30, resets_at: NOW + 86400, burn_pct_per_h: null,
+            projected_pct: null, hits_100_before_reset: null },
+    };
+    try {
+        await openUsage();
+        const five = document.querySelector('.usage-limit[data-limit="5h"]');
+        assert.match(five.textContent, /projected 18% at reset/);
+        assert.doesNotMatch(five.textContent, /REACHES 100%/);
+        assert.match(five.textContent, /burn 6\.0%\/h/);
+        const seven = document.querySelector('.usage-limit[data-limit="7d"]');
+        assert.match(seven.textContent, /burn n\/a/);
+        assert.doesNotMatch(seven.textContent, /projected|REACHES/);
+    } finally {
+        PAYLOAD.limits = saved;
+    }
+});
