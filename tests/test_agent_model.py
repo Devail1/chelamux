@@ -334,3 +334,14 @@ def test_the_judge_model_is_not_exposed_as_a_setting(mods, client):
     body = client.get("/api/config").get_json()
     assert "judge_model" not in body
     assert "agent_judge_model" not in body
+
+
+def test_dispatched_agent_and_judge_never_get_remote_control(mods, monkeypatch):
+    """CMX-34 (unchanged since CMX-375): `--remote-control` is only for windows chela
+    opens FOR A HUMAN. Even with it switched ON, the dispatcher's unattended coding agent
+    and judge commands carry no `--remote-control`."""
+    config, _, dispatcher = mods
+    monkeypatch.setattr(config, "remote_control_enabled", lambda: True)
+    for role in ("coding", "judge"):
+        cmd, _ = dispatcher.resolve_agent_cmd(_wf(), role)
+        assert "--remote-control" not in cmd
