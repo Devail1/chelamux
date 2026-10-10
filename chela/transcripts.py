@@ -23,7 +23,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -422,9 +422,15 @@ def _resolve_agent_transcript(agent_name: str, window_id: str | None = None) -> 
 
 
 def summary_for_path(path: Path | None) -> dict:
-    """`{"recap", "recap_ts", "pr", "ai_title"}` for a transcript path (or all None)."""
+    """`{"recap", "recap_ts", "pr", "ai_title", "last_activity"}` for a transcript path
+    (or all None).
+
+    ``last_activity`` is the transcript's last write (ISO, UTC) — Claude Code appends on
+    every turn, so it is when the session last did anything (CMX-66: the sidebar's Last
+    activity filter, Date grouping and sort). One ``stat``; None when it cannot be read.
+    """
     if path is None:
-        return {"recap": None, "recap_ts": None, "pr": None, "ai_title": None}
+        return {"recap": None, "recap_ts": None, "pr": None, "ai_title": None, "last_activity": None}
     rec = _latest_recap_record(path)
     pr = latest_pr(path)
     return {
@@ -432,7 +438,15 @@ def summary_for_path(path: Path | None) -> dict:
         "recap_ts": rec.get("timestamp") if rec else None,
         "pr": pr.to_dict() if pr else None,
         "ai_title": latest_ai_title(path),
+        "last_activity": _mtime_iso(path),
     }
+
+
+def _mtime_iso(path: Path) -> str | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+    except (OSError, ValueError, OverflowError):
+        return None
 
 
 def iter_turns(path: Path, include_sidechain: bool = False) -> Iterator[dict]:

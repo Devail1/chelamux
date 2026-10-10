@@ -388,7 +388,7 @@ test('the run row\'s menu opens on right-click and on ⋯, and "Open judge pane"
     const row = () => host().querySelector('.agent-row[data-run="CMX-37"]');
     fire(row(), 'oncontextmenu');
     assert.equal(menu('row-menu').style.display, 'block');
-    assert.deepEqual(menuItems('row-menu').map(i => i.text), ['Open agent pane', 'Open judge pane']);
+    assert.deepEqual(menuItems('row-menu').map(i => i.text), ['Open agent pane', 'Open judge pane', 'Move to group…']);
     clickMenu('row-menu', 'Open judge pane');
     assert.equal(document.querySelector('#agent-detail .detail-title').textContent, 'judge-liavacc/cmx-37-theme');
     fire(row().querySelector('.row-more'));
@@ -423,8 +423,8 @@ test('row content follows CMX-62\'s label and keeps the state word + ctx; the or
     assert.ok(row.querySelector('.term-status-dot').classList.contains('working'));
 });
 
-test('model: groupSidebar takes the grouping MODE (the hook part 2 extends) and refuses one it does not know', () => {
-    assert.throws(() => groupSidebar([], { wants, mode: 'date' }), /unknown sidebar grouping mode/);
+test('model: groupSidebar takes the grouping MODE (CMX-66 added the others) and refuses one it does not know', () => {
+    assert.throws(() => groupSidebar([], { wants, mode: 'galaxy' }), /unknown sidebar grouping mode/);
     const m = groupSidebar([{ name: 'a', window_id: '@1', cwd: '/x/a' }], { wants });
     assert.deepEqual(m.groups.map(g => g.label), ['a']);
     assert.deepEqual(folderLabels(['/x/a', OTHER_KEY, DISPATCHED_KEY]), { '/x/a': 'a', [OTHER_KEY]: 'Other', [DISPATCHED_KEY]: 'Dispatched' });

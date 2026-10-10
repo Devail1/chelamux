@@ -67,6 +67,14 @@ class Batch:
             found = self._panes.get(wid)
         return found
 
+    def peek(self, wid: str):
+        """The snapshot's :class:`chela.sessions.Pane` for ``wid`` — only if this request
+        has ALREADY taken the snapshot (None otherwise). Never reads tmux: for an extra
+        fact off a pane the endpoint has just probed (CMX-66's ``created``), so it can add
+        no spawn of its own.
+        """
+        return self._panes.get(wid) if self._panes is not None else None
+
 
 _ACTIVE: ContextVar[Batch | None] = ContextVar("chela_probe_batch", default=None)
 

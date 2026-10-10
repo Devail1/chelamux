@@ -11,7 +11,7 @@ import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg
 import { refresh } from './main.js';
 import { refreshCostTab } from './usage.js';
 import { resolveWindowId } from './windowid.js';
-import { DISPATCHED_KEY, groupSidebar, isArchivable, moveGroup, primaryWindow, runLabel, runState } from './sidebarmodel.js';
+import { DISPATCHED_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, groupSidebar, isArchivable, moveGroup, normalizeView, primaryWindow, runLabel, runState } from './sidebarmodel.js';
 
 // ---------------------------------------------------------------------------
 // Sidebar + canvas navigation (replaces the old tab bar)
@@ -273,7 +273,11 @@ function _agentLabel(a) {
 const SB_COLLAPSED_KEY = 'chela_grp_collapsed';
 const SB_ORDER_KEY = 'chela_sb_group_order';
 const SB_ARCHIVED_KEY = 'chela_sb_archived';
-const SB_SHOW_ARCHIVED_KEY = 'chela_sb_show_archived';
+// CMX-66: the VIEW menu's choices ({status, env, activity, groupBy, sort, showEmpty,
+// showPR} — sidebarmodel.normalizeView) and the custom groups ({groups: [{id, name}],
+// assign: {itemKey: id}}). Part 1's "show archived" toggle is now Status ▸ All.
+const SB_VIEW_KEY = 'chela_sb_view';
+const SB_CUSTOM_KEY = 'chela_sb_custom_groups';
 
 // `mem` is the session-only stand-in, used ONLY while storage throws: the list
 // rebuilds on every tick, so without it a click on a blocked-storage page would undo
@@ -315,8 +319,33 @@ function _saveArchived(s) {
     _memArchived = [...s];
     _lsSet(SB_ARCHIVED_KEY, _memArchived);
 }
-let _memShowArchived = '0';
-function _showArchived() { return _lsRead(SB_SHOW_ARCHIVED_KEY, _memShowArchived) === '1'; }
+function _lsObj(key, mem) {
+    const raw = _lsRead(key, mem == null ? null : JSON.stringify(mem));
+    try {
+        const v = JSON.parse(raw || 'null');
+        return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+    } catch { return null; }
+}
+
+let _memView = null;
+function _view() { return normalizeView(_lsObj(SB_VIEW_KEY, _memView)); }
+function _saveView(v) {
+    _memView = normalizeView(v);
+    _lsSet(SB_VIEW_KEY, _memView);
+}
+
+let _memCustom = null;
+function _custom() {
+    const c = _lsObj(SB_CUSTOM_KEY, _memCustom) || {};
+    const groups = Array.isArray(c.groups)
+        ? c.groups.filter(g => g && typeof g.id === 'string' && typeof g.name === 'string') : [];
+    const assign = c.assign && typeof c.assign === 'object' && !Array.isArray(c.assign) ? c.assign : {};
+    return { groups, assign };
+}
+function _saveCustom(c) {
+    _memCustom = { groups: c.groups, assign: c.assign };
+    _lsSet(SB_CUSTOM_KEY, _memCustom);
+}
 
 // The last render's model — what the group/row menus act on (they open off a click on
 // what is on screen, so they read the same grouping the screen was drawn from).
@@ -393,9 +422,14 @@ function _agentRowHtml(a, o = {}) {
     const rowTitle = tail ? `${head}\n${tail}` : head;
 
     const wallSuffix = onWall ? ' — open on the wall' : '';
-    const runAttr = o.runId ? ` data-run="${attrEsc(o.runId)}" oncontextmenu="chela.openRowMenu(event, this.dataset.run)"` : '';
-    const more = o.runId
-        ? `<button class="row-more" title="Run menu" aria-label="Run menu" onclick="event.stopPropagation(); chela.openRowMenu(event, this.closest('.agent-row').dataset.run)">${lucideIcon('ellipsis', 14)}</button>`
+    // Every row has a menu (right-click, or its ⋯ on touch): a run's opens its agent or
+    // judge pane, and every row can be moved to a custom group (CMX-66). Keyed on the
+    // row's item key — the window id / run id, never the label.
+    const runAttr = (o.runId ? ` data-run="${attrEsc(o.runId)}"` : '')
+        + (o.itemKey ? ` data-item="${attrEsc(o.itemKey)}" oncontextmenu="chela.openRowMenu(event, this.dataset.item)"` : '');
+    const menuName = o.runId ? 'Run menu' : 'Row menu';
+    const more = o.itemKey
+        ? `<button class="row-more" title="${menuName}" aria-label="${menuName}" onclick="event.stopPropagation(); chela.openRowMenu(event, this.closest('.agent-row').dataset.item)">${lucideIcon('ellipsis', 14)}</button>`
         : '';
     return `<div class="agent-row rich${active}${wallCls}${o.cls ? ' ' + o.cls : ''}" data-agent="${attrEsc(a.name)}"${runAttr} title="${attrEsc(rowTitle + wallSuffix)}"
         onclick="chela.selectAgent(this.dataset.agent)">
@@ -412,29 +446,50 @@ function _agentRowHtml(a, o = {}) {
 // row, labelled `CMX-37 · <title>`, showing the RUN's state (working / judging /
 // rework / awaiting review / needs human). A click opens the agent pane (the judge's
 // once the agent has finished); the row menu also offers the judge pane.
-function _runRowHtml(it, extraCls) {
+function _runRowHtml(it, extraCls, showPR) {
     const a = primaryWindow(it);
     const st = runState(it, wantsHuman);
     const label = runLabel(it);
     const wins = [it.agent && `agent ${it.agent.name} · ${it.agent.window_id}`,
         it.judge && `judge ${it.judge.name} · ${it.judge.window_id}`].filter(Boolean).join('\n');
     return _agentRowHtml(a, {
-        label, stWord: st.word, stCls: st.shape, runId: it.run.task_id,
+        label, stWord: st.word, stCls: st.shape, runId: it.run.task_id, itemKey: it.key,
         titleHead: `${label} — ${st.word}`, titleExtra: wins,
         cls: ['run-row', extraCls].filter(Boolean).join(' '),
+        badge: showPR ? _prBadgeHtml(it) : '',
     });
 }
 
-function _itemRowHtml(it, archived) {
+// The PR badge on a dispatched run's row (View ▸ Show PR status, CMX-66): `#N` from the
+// run's own pr_url, with its state (open / draft / merged / closed) when a window's
+// transcript names the same PR (app.py's `a.pr`, already state-resolved). No PR yet → none.
+const _PR_NUM_RE = /\/pull\/(\d+)/;
+function _prBadgeHtml(it) {
+    const url = it.run && it.run.pr_url;
+    const m = url ? _PR_NUM_RE.exec(String(url)) : null;
+    if (!m) return '';
+    const pr = it.windows.map(w => w && w.pr).find(p => p && p.url === url) || null;
+    const state = pr ? (pr.draft && pr.state === 'open' ? 'draft' : pr.state) : '';
+    const known = ['open', 'draft', 'merged', 'closed'].includes(state);
+    const title = `PR #${m[1]}${known ? ` · ${state}` : ''}`;
+    return `<span class="ar-pr${known ? ' ' + state : ''}" data-pr="${attrEsc(m[1])}" title="${attrEsc(title)}">#${escHtml(m[1])}</span>`;
+}
+
+function _itemRowHtml(it, archived, showPR = true) {
     const cls = archived ? 'archived' : '';
-    if (it.kind === 'run') return _runRowHtml(it, cls);
-    return _agentRowHtml(it.agent, cls ? { cls } : {});
+    if (it.kind === 'run') return _runRowHtml(it, cls, showPR);
+    return _agentRowHtml(it.agent, { itemKey: it.key, ...(cls ? { cls } : {}) });
 }
 
 // A folder group's header — the desktop's quiet header: dim small folder name, a `>`
 // chevron, and at the right a ⋯ (the group menu, for touch: there is no right-click on
 // a phone) and a `+` (a new session in THIS folder). Right-click opens the same menu.
-function _groupHtml(g, collapsed, archivedKeys) {
+function _groupHtml(g, collapsed, archivedKeys, showPR) {
+    if (g.flat) {
+        // Group by ▸ None: one flat list, no header.
+        const flatRows = g.items.map(it => _itemRowHtml(it, archivedKeys.has(it.key), showPR)).join('');
+        return `<div class="side-group flat" data-g="${attrEsc(g.key)}"><div class="group-rows">${flatRows}</div></div>`;
+    }
     const isColl = collapsed.has(g.key);
     const n = g.items.length;
     const count = g.key === DISPATCHED_KEY ? `<span class="group-count" title="${n} run${n === 1 ? '' : 's'}">${n}</span>` : '';
@@ -442,8 +497,9 @@ function _groupHtml(g, collapsed, archivedKeys) {
         ? `<button class="group-add" data-g="${attrEsc(g.key)}" title="New session in ${attrEsc(g.label)}" aria-label="New session in ${attrEsc(g.label)}"
              onclick="event.stopPropagation(); chela.groupNewSession(this.dataset.g)">${lucideIcon('plus', 14)}</button>`
         : '';
-    const rows = g.items.map(it => _itemRowHtml(it, archivedKeys.has(it.key))).join('');
-    return `<div class="side-group${isColl ? ' collapsed' : ''}" data-g="${attrEsc(g.key)}">
+    const rows = g.items.map(it => _itemRowHtml(it, archivedKeys.has(it.key), showPR)).join('');
+    const empty = !g.items.length ? ' empty' : '';
+    return `<div class="side-group${isColl ? ' collapsed' : ''}${empty}" data-g="${attrEsc(g.key)}">
         <div class="group-head" data-g="${attrEsc(g.key)}" aria-expanded="${isColl ? 'false' : 'true'}"
              onclick="chela.toggleGroup(this.dataset.g)" oncontextmenu="chela.openGroupMenu(event, this.dataset.g)">
             <span class="group-name" title="${attrEsc(g.cwd || g.label)}">${escHtml(g.label)}</span>${count}
@@ -473,13 +529,20 @@ function renderSidebarAgents(agents) {
     // Pinned — the ONE session holding the decisions-inbox slot (the orchestrator,
     // orchestratorState().wid), and Needs you — rows blocked on a human. Each row shows
     // in exactly one place. A dispatched run is ONE row, in the "Dispatched" group.
+    //
+    // CMX-66: the VIEW menu (the sliders button on the Sessions header) picks what shows
+    // (Status / Environment / Last activity), how it groups (Date / Folder / State /
+    // Custom groups / None) and how each group sorts — per viewer, in localStorage.
     const orchWid = orchestratorState().wid;
     const archived = _archivedSet();
-    const showArchived = _showArchived();
+    const view = _view();
+    const custom = _custom();
     const model = groupSidebar(rows, {
-        mode: 'folder', wants: wantsHuman, orchWid, order: _groupOrder(),
-        archived, showArchived, sort: 'name', labelOf: _itemLabel,
+        mode: view.groupBy, wants: wantsHuman, orchWid, order: _groupOrder(),
+        archived, status: view.status, env: view.env, activityDays: VIEW_ACTIVITY[view.activity],
+        now: Date.now(), sort: view.sort, labelOf: _itemLabel, showEmpty: view.showEmpty, custom,
     });
+    const showArchived = view.status !== 'active';
 
     // An archived row that came back to life (busy, waiting) or whose window is gone
     // leaves the archive — so it is not silently re-hidden the next time it settles,
@@ -487,6 +550,11 @@ function renderSidebarAgents(agents) {
     const shownArchived = new Set(model.hidden);
     const prune = [...archived].filter(k => !shownArchived.has(k));
     if (prune.length) { prune.forEach(k => archived.delete(k)); _saveArchived(archived); }
+    // A custom-group assignment for a WINDOW that is gone is dropped (a recycled @N must
+    // not inherit it); a run's (`run:CMX-N`) is kept — a run outlives its windows.
+    const liveKeys = new Set(rows.filter(Boolean).map(a => `w:${a.window_id || a.name}`));
+    const goneW = Object.keys(custom.assign).filter(k => k.startsWith('w:') && !liveKeys.has(k));
+    if (goneW.length) { goneW.forEach(k => delete custom.assign[k]); _saveCustom(custom); }
 
     const items = new Map();
     for (const it of [...model.pinned, ...model.needsYou, ...model.groups.flatMap(g => [...g.items, ...g.archived])]) {
@@ -498,17 +566,18 @@ function renderSidebarAgents(agents) {
     if (model.pinned.length) {
         html += `<div class="side-triage side-pinned">
             <div class="triage-head">Pinned <span class="triage-count">${model.pinned.length}</span></div>
-            ${model.pinned.map(it => _itemRowHtml(it, false)).join('')}
+            ${model.pinned.map(it => _itemRowHtml(it, false, view.showPR)).join('')}
         </div>`;
     }
     if (model.needsYou.length) {
         html += `<div class="side-triage side-needs-you">
             <div class="triage-head">Needs you <span class="triage-count">${model.needsYou.length}</span></div>
-            ${model.needsYou.map(it => _itemRowHtml(it, false)).join('')}
+            ${model.needsYou.map(it => _itemRowHtml(it, false, view.showPR)).join('')}
         </div>`;
     }
     const collapsed = _collapsedGroups();
-    for (const g of model.groups) html += _groupHtml(g, collapsed, shownArchived);
+    for (const g of model.groups) html += _groupHtml(g, collapsed, shownArchived, view.showPR);
+    if (!html) html = '<div class="side-empty">No sessions match this view</div>';
     if (model.hidden.length || showArchived) {
         const n = model.hidden.length;
         html += `<button class="side-archived-toggle" onclick="chela.toggleShowArchived()">${
@@ -567,7 +636,7 @@ function _openMenu(m, ev, html, onAct) {
 }
 
 function hideSideMenus() {
-    for (const id of ['group-menu', 'row-menu']) {
+    for (const id of ['group-menu', 'row-menu', 'view-menu']) {
         const m = document.getElementById(id);
         if (m) m.style.display = 'none';
     }
@@ -625,9 +694,11 @@ function groupMenuAction(key, act) {
     renderSidebarAgents(_agentsCache || []);
 }
 
+// The foot link: "Show archived (N)" is View ▸ Status ▸ All, "Hide archived" is back
+// to Active.
 function toggleShowArchived() {
-    _memShowArchived = _showArchived() ? '0' : '1';
-    _lsSet(SB_SHOW_ARCHIVED_KEY, _memShowArchived);
+    const v = _view();
+    _saveView({ ...v, status: v.status === 'active' ? 'all' : 'active' });
     renderSidebarAgents(_agentsCache || []);
 }
 
@@ -641,14 +712,215 @@ function groupNewSession(key) {
     return launchProject(g.cwd, { fresh: true });
 }
 
-// A run row's menu: open the agent pane or the judge pane.
-function openRowMenu(ev, runId) {
-    const it = _sb.items.get(`run:${runId}`);
+// A row's menu: a run's opens its agent or judge pane; every row can be moved to a
+// custom group (CMX-66). `key` is the row's item key (a bare run id still resolves).
+function openRowMenu(ev, key) {
+    const it = _sb.items.get(key) || _sb.items.get(`run:${key}`);
     if (!it) return;
     let html = '';
-    if (it.agent) html += _menuItem('Open agent pane', 'agent');
-    html += _menuItem('Open judge pane', 'judge', { disabled: !it.judge });
-    _openMenu(_menuEl('row-menu'), ev, html, act => _openPane(act === 'judge' ? it.judge : it.agent));
+    if (it.kind === 'run') {
+        if (it.agent) html += _menuItem('Open agent pane', 'agent');
+        html += _menuItem('Open judge pane', 'judge', { disabled: !it.judge }) + _SEP;
+    }
+    html += _menuItem('Move to group…', 'move');
+    const m = _menuEl('row-menu');
+    _openMenu(m, ev, html, act => {
+        if (act === 'move') return _openMoveMenu(m, it.key);
+        _openPane(act === 'judge' ? it.judge : it.agent);
+    });
+}
+
+// "Move to group…" — a second page of the same popover (tap-reachable: no hover
+// flyout): every custom group, Ungrouped, and New group…. The current one is ✓.
+function _openMoveMenu(m, itemKey) {
+    const c = _custom();
+    const cur = c.assign[itemKey];
+    const has = cur != null && c.groups.some(g => g.id === cur);
+    const html = _vmBack('Move to group')
+        + c.groups.map(g => _vmChoice(g.name, `to:${g.id}`, g.id === cur)).join('')
+        + _vmChoice('Ungrouped', 'to:', !has)
+        + _SEP + _menuItem('New group…', 'new');
+    _showMenuPage(m, html, act => {
+        if (act === 'back') return openRowMenu(null, itemKey);
+        hideSideMenus();
+        if (act === 'new') {
+            const g = newCustomGroup();
+            if (g) moveToGroup(itemKey, g.id);
+            return;
+        }
+        if (act.startsWith('to:')) moveToGroup(itemKey, act.slice(3) || null);
+    });
+}
+
+// Assign a row (by its STABLE item key) to custom group `id`, or to Ungrouped (null).
+function moveToGroup(itemKey, id) {
+    const c = _custom();
+    if (id && c.groups.some(g => g.id === id)) c.assign[itemKey] = id;
+    else delete c.assign[itemKey];
+    _saveCustom(c);
+    renderSidebarAgents(_agentsCache || []);
+}
+
+function _askName(msg, dflt = '') {
+    try { return (window.prompt(msg, dflt) || '').trim(); }
+    catch { return ''; }
+}
+
+function newCustomGroup(name) {
+    const n = name != null ? String(name).trim() : _askName('New group name:');
+    if (!n) return null;
+    const c = _custom();
+    const g = { id: `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, name: n };
+    c.groups.push(g);
+    _saveCustom(c);
+    renderSidebarAgents(_agentsCache || []);
+    return g;
+}
+
+function renameCustomGroup(id, name) {
+    const c = _custom();
+    const g = c.groups.find(x => x.id === id);
+    if (!g) return;
+    const n = name != null ? String(name).trim() : _askName('Rename group:', g.name);
+    if (!n) return;
+    g.name = n;
+    _saveCustom(c);
+    renderSidebarAgents(_agentsCache || []);
+}
+
+// Deleting a group moves its rows to Ungrouped — it never hides or closes them.
+function deleteCustomGroup(id) {
+    const c = _custom();
+    c.groups = c.groups.filter(g => g.id !== id);
+    for (const [k, v] of Object.entries(c.assign)) if (v === id) delete c.assign[k];
+    _saveCustom(c);
+    renderSidebarAgents(_agentsCache || []);
+}
+
+// --- The VIEW menu (CMX-66) ----------------------------------------------------------
+// The sliders button on the Sessions header — the desktop's view menu: Status /
+// Environment / Last activity / Group by / Sort by (each a submenu showing its current
+// value at the right, behind a chevron), Custom groups, and the Show empty groups / Show
+// PR status toggles. A submenu is a second PAGE of the same popover (‹ back at its top),
+// so it is reachable by tap on a phone — there is no hover-only flyout. Choosing keeps
+// the menu open, so several choices take one trip.
+
+const _STATUS_LABEL = { active: 'Active', all: 'All', archived: 'Archived' };
+const _ENV_LABEL = { interactive: 'Interactive', dispatched: 'Dispatched agents', judge: 'Judges', background: 'Background sessions' };
+const _ACTIVITY_LABEL = { '1d': '1d', '7d': '7d', '30d': '30d', all: 'All' };
+const _GROUP_LABEL = { date: 'Date', folder: 'Folder', state: 'State', custom: 'Custom groups', none: 'None' };
+const _SORT_LABEL = { activity: 'Last activity', name: 'Name', created: 'Created' };
+
+const _CHECK = '<span class="vm-check" aria-hidden="true">✓</span>';
+
+function _vmSub(label, value, act) {
+    return `<div class="popover-item vm-item" role="menuitem" aria-haspopup="menu" data-act="${attrEsc(act)}">`
+        + `<span class="vm-label">${escHtml(label)}</span><span class="vm-val">${escHtml(value)}</span>`
+        + `<span class="vm-chev">${lucideIcon('chevron-right', 12)}</span></div>`;
+}
+function _vmChoice(label, act, on, role = 'menuitemradio') {
+    return `<div class="popover-item vm-item${on ? ' on' : ''}" role="${role}" aria-checked="${on ? 'true' : 'false'}" data-act="${attrEsc(act)}">`
+        + `<span class="vm-label">${escHtml(label)}</span>${on ? _CHECK : ''}</div>`;
+}
+function _vmBack(title) {
+    return `<div class="popover-item vm-back" role="menuitem" data-act="back">`
+        + `<span class="vm-chev back">${lucideIcon('chevron-right', 12)}</span><span class="vm-label">${escHtml(title)}</span></div>` + _SEP;
+}
+
+// Swap the open popover's content for another page, keeping it open and anchored.
+function _showMenuPage(m, html, onAct) {
+    m.innerHTML = html;
+    m.onclick = e => {
+        const el = e.target.closest('[data-act]');
+        e.stopPropagation();
+        if (el) onAct(el.dataset.act);
+    };
+    const placed = _placedPopovers.get(m);
+    if (placed && placed.anchor.isConnected) placePopover(m, placed.anchor, placed.opts);
+}
+
+function _viewPageHtml(page) {
+    const v = _view();
+    if (page === 'status') {
+        return _vmBack('Status') + VIEW_STATUS.map(k => _vmChoice(_STATUS_LABEL[k], `status:${k}`, v.status === k)).join('');
+    }
+    if (page === 'env') {
+        return _vmBack('Environment')
+            + ENV_KINDS.map(k => _vmChoice(_ENV_LABEL[k], `env:${k}`, v.env.includes(k), 'menuitemcheckbox')).join('');
+    }
+    if (page === 'activity') {
+        return _vmBack('Last activity')
+            + Object.keys(VIEW_ACTIVITY).map(k => _vmChoice(_ACTIVITY_LABEL[k], `activity:${k}`, v.activity === k)).join('');
+    }
+    if (page === 'group') {
+        // None sits apart, below a divider, as on the desktop
+        return _vmBack('Group by')
+            + GROUP_MODES.filter(k => k !== 'none').map(k => _vmChoice(_GROUP_LABEL[k], `group:${k}`, v.groupBy === k)).join('')
+            + _SEP + _vmChoice(_GROUP_LABEL.none, 'group:none', v.groupBy === 'none');
+    }
+    if (page === 'sort') {
+        return _vmBack('Sort by') + SORTS.map(k => _vmChoice(_SORT_LABEL[k], `sort:${k}`, v.sort === k)).join('');
+    }
+    if (page === 'custom') {
+        const c = _custom();
+        let html = _vmBack('Custom groups');
+        for (const g of c.groups) {
+            html += `<div class="popover-item vm-item vm-group" role="none"><span class="vm-label">${escHtml(g.name)}</span>`
+                + `<button class="vm-mini" role="menuitem" data-act="rename:${attrEsc(g.id)}">Rename</button>`
+                + `<button class="vm-mini" role="menuitem" data-act="delete:${attrEsc(g.id)}">Delete</button></div>`;
+        }
+        if (!c.groups.length) html += _menuItem('No custom groups yet', '', { disabled: true });
+        return html + _SEP + _menuItem('New group…', 'custom-new');
+    }
+    const n = v.env.length;
+    return _vmSub('Status', _STATUS_LABEL[v.status], 'page:status')
+        + _vmSub('Environment', `${n} selected`, 'page:env')
+        + _vmSub('Last activity', _ACTIVITY_LABEL[v.activity], 'page:activity')
+        + _SEP
+        + _vmSub('Group by', _GROUP_LABEL[v.groupBy], 'page:group')
+        + _vmSub('Sort by', _SORT_LABEL[v.sort], 'page:sort')
+        + _vmSub('Custom groups', String(_custom().groups.length), 'page:custom')
+        + _SEP
+        + _vmChoice('Show empty groups', 'toggle:showEmpty', v.showEmpty, 'menuitemcheckbox')
+        + _vmChoice('Show PR status', 'toggle:showPR', v.showPR, 'menuitemcheckbox');
+}
+
+function openViewMenu(ev) {
+    const m = _menuEl('view-menu');
+    m.classList.add('view-menu');
+    _openMenu(m, ev, _viewPageHtml('main'), () => {});
+    _showViewPage(m, 'main');
+}
+
+function _showViewPage(m, page) {
+    _showMenuPage(m, _viewPageHtml(page), act => {
+        const back = page === 'main' ? 'main' : page;
+        if (act === 'back') return _showViewPage(m, 'main');
+        if (act.startsWith('page:')) return _showViewPage(m, act.slice(5));
+        if (act === 'custom-new') { newCustomGroup(); return _showViewPage(m, 'custom'); }
+        if (act.startsWith('rename:')) { renameCustomGroup(act.slice(7)); return _showViewPage(m, 'custom'); }
+        if (act.startsWith('delete:')) { deleteCustomGroup(act.slice(7)); return _showViewPage(m, 'custom'); }
+        viewMenuAction(act);
+        // a single choice returns to the top page (its new value showing); a multi-select
+        // or a toggle stays where it is
+        _showViewPage(m, act.startsWith('env:') || act.startsWith('toggle:') ? back : 'main');
+    });
+}
+
+// Apply one view-menu choice (`status:all`, `env:judge` (toggles), `activity:30d`,
+// `group:state`, `sort:name`, `toggle:showEmpty`) and re-render. Callable directly.
+function viewMenuAction(act) {
+    const v = _view();
+    const [k, val] = String(act).split(':');
+    if (k === 'status') v.status = val;
+    else if (k === 'activity') v.activity = val;
+    else if (k === 'group') v.groupBy = val;
+    else if (k === 'sort') v.sort = val;
+    else if (k === 'env') v.env = v.env.includes(val) ? v.env.filter(x => x !== val) : [...v.env, val];
+    else if (k === 'toggle' && (val === 'showEmpty' || val === 'showPR')) v[val] = !v[val];
+    else return;
+    _saveView(v);
+    renderSidebarAgents(_agentsCache || []);
 }
 
 // Open (never toggle) a window's pane: unlike a row click (selectAgent), which
@@ -2851,8 +3123,8 @@ function closeShortcuts() {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { _closeRecentUndoToast, closeShortcuts, groupMenuAction, groupNewSession, openGroupMenu, openRowMenu, toggleGroup, toggleShowArchived, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
+export { _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, renameCustomGroup, toggleGroup, toggleShowArchived, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyUpdate, groupMenuAction, groupNewSession, hideSideMenus, openGroupMenu, openRowMenu, toggleShowArchived, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
+Object.assign(window.chela, { applyUpdate, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
