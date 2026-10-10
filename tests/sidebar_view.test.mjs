@@ -406,6 +406,44 @@ test('Group by Custom groups: create, assign via the row menu, unassigned → Un
         'a deleted group must not leave assignments behind (a group re-created later would re-capture them)');
 });
 
+// CMX-74 (Liav, 2026-10-10: "what is this move to group? it doesn't do anything").
+test('CMX-74: outside Custom groups no row offers "Move to group…" — a plain row has no menu at all', () => {
+    const rows = [
+        win('plain'),
+        win('liavacc/cmx-37-theme', { cwd: `${WT}/CMX-37`, dispatched: true, run: runCard('CMX-37', 'Theme', 'agent') }),
+    ];
+    for (const mode of ['folder', 'date', 'state', 'none']) {
+        view(`group:${mode}`);
+        render(rows);
+        const plain = host().querySelector('.agent-row[data-agent="plain"]');
+        assert.equal(plain.querySelector('.row-more'), null, `${mode}: a plain row has a ⋯ whose menu would be empty`);
+        assert.equal(plain.getAttribute('oncontextmenu'), null, `${mode}: a plain row opens an empty right-click menu`);
+        const run = host().querySelector('.agent-row[data-run="CMX-37"]');
+        fire(run.querySelector('.row-more'));
+        assert.equal(menu('row-menu').style.display, 'block');
+        assert.deepEqual(menuRows('row-menu').map(r => r.label), ['Open agent pane', 'Open judge pane'],
+            `${mode}: the run menu offers a move that would be invisible`);
+        window.chela.hideSideMenus();
+    }
+});
+
+test('CMX-74: under Custom groups, tapping "Move to group…" SHOWS its page and a choice moves the row', () => {
+    render([win('a1'), win('b1')]);
+    view('group:custom');
+    nav.newCustomGroup('Infra');
+    const plain = host().querySelector('.agent-row[data-agent="a1"]');
+    assert.ok(plain.getAttribute('oncontextmenu'), 'a plain row has no right-click menu under Custom groups');
+    fire(plain.querySelector('.row-more'));
+    assert.deepEqual(menuRows('row-menu').map(r => r.label), ['Move to group…']);
+    tap('row-menu', 'Move to group…');
+    // the tap's own handler hides every side menu first — the move page must come back
+    assert.equal(menu('row-menu').style.display, 'block', 'the move page was drawn into a hidden popover');
+    assert.deepEqual(menuRows('row-menu').map(r => r.label), ['Move to group', 'Infra', 'Ungrouped', 'New group…']);
+    tap('row-menu', 'Infra');
+    assert.deepEqual(rowsUnder('Infra'), ['a1']);
+    assert.deepEqual(rowsUnder('Ungrouped'), ['b1']);
+});
+
 test('a custom group SURVIVES a window rename — it is keyed on the window id, not the label', () => {
     const a = win('old-name', { ai_title: 'Old title' });
     render([a, win('other')]);
@@ -720,7 +758,7 @@ test('Show PR status: a badge\'s state comes ONLY from a window whose transcript
     assert.equal(b().getAttribute('title'), 'PR #801 · open');
 });
 
-test('Show PR status off hides the badge on EVERY run row — Pinned, Needs you, a folder group, and Group by None', async () => {
+test('Show PR status off hides the badge on EVERY run row — the orchestrator\'s, Needs you, a folder group, and Group by None', async () => {
     const card = (task, n, over = {}) => runCard(task, 'X', 'agent', { pr_url: `https://github.com/o/r/pull/${n}`, ...over });
     const rows = () => [
         win('liavacc/cmx-82-x', { window_id: '@982', cwd: `${WT}/CMX-82`, dispatched: true, run: card('CMX-82', 882) }),
@@ -734,7 +772,9 @@ test('Show PR status off hides the badge on EVERY run row — Pinned, Needs you,
     try {
         render(rows());
         // the fixture really puts a run row in each place
-        assert.ok(host().querySelector('.side-pinned .agent-row[data-run="CMX-82"]'), 'CMX-82 is not Pinned');
+        // CMX-72: the orchestrator is no longer Pinned — its run row sits in Dispatched
+        assert.equal(host().querySelector('.side-pinned'), null, 'a Pinned cluster came back');
+        assert.ok(group(DISPATCHED_KEY).querySelector('.agent-row[data-run="CMX-82"]'), 'the orchestrator\'s CMX-82 is not in Dispatched');
         assert.ok(host().querySelector('.side-needs-you .agent-row[data-run="CMX-83"]'), 'CMX-83 is not under Needs you');
         assert.ok(group(DISPATCHED_KEY).querySelector('.agent-row[data-run="CMX-84"]'), 'CMX-84 is not in Dispatched');
         assert.deepEqual(badged(), ['CMX-82', 'CMX-83', 'CMX-84'], 'Show PR status on: every run row has its badge');
@@ -768,24 +808,27 @@ test('a view that filters out EVERY row says so — an empty-state line, never a
     view('activity:7d');
 });
 
-test('Show empty groups: Other\'s "+" stays reachable, and opens the HOME dir, when every Other row is filtered out', () => {
+// CMX-72 made the home dir a folder group of its own ("Other" is only for cwd-less
+// windows, and has no "+"), so the "+" that must survive the filter is the HOME group's.
+test('Show empty groups: the home folder\'s "+" stays reachable, and opens the HOME dir, when its rows are filtered out', () => {
     render([
         win('proj', { cwd: '/srv/code/alpha' }),
         win('no-cwd', { cwd: null, last_activity: ago(40 * DAY) }),
         win('in-home', { cwd: '/home/u', cwd_is_home: true, last_activity: ago(40 * DAY) }),
     ]);
-    assert.deepEqual(groupKeys(), ['/srv/code/alpha'], 'both Other rows are older than 7d');
+    assert.deepEqual(groupKeys(), ['/srv/code/alpha'], 'the home and the cwd-less rows are older than 7d');
     view('toggle:showEmpty');
-    assert.deepEqual(groupKeys(), ['/srv/code/alpha', OTHER_KEY]);
-    assert.deepEqual(rowsIn(OTHER_KEY), []);
-    const add = group(OTHER_KEY).querySelector('.group-add');
-    assert.ok(add, 'the empty Other group lost its "+"');
+    assert.deepEqual(groupKeys(), ['/srv/code/alpha', '/home/u', OTHER_KEY]);
+    assert.deepEqual(rowsIn('/home/u'), []);
+    assert.equal(group(OTHER_KEY).querySelector('.group-add'), null, 'Other has no folder to open a session in');
+    const add = group('/home/u').querySelector('.group-add');
+    assert.ok(add, 'the empty home group lost its "+"');
     fire(add);
     assert.deepEqual(spawns, [{ cwd: '/home/u', command: 'claude' }]);
     view('toggle:showEmpty');   // back to the default (the in-memory view outlives beforeEach)
-    // the model directly: the Other group's cwd is a home-dir session's, however it is filtered
+    // the model directly: the home group's cwd is the home dir, however it is filtered
     const m = groupSidebar([
         { name: 'h', window_id: '@1', cwd: '/home/u', cwd_is_home: true, last_activity: Date.now() - 40 * DAY },
     ], { wants, activityDays: 1, showEmpty: true });
-    assert.deepEqual(m.groups.map(g => [g.key, g.items.length, g.cwd]), [[OTHER_KEY, 0, '/home/u']]);
+    assert.deepEqual(m.groups.map(g => [g.key, g.items.length, g.cwd]), [['/home/u', 0, '/home/u']]);
 });

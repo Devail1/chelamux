@@ -422,13 +422,18 @@ function _agentRowHtml(a, o = {}) {
     const rowTitle = tail ? `${head}\n${tail}` : head;
 
     const wallSuffix = onWall ? ' — open on the wall' : '';
-    // Every row has a menu (right-click, or its ⋯ on touch): a run's opens its agent or
-    // judge pane, and every row can be moved to a custom group (CMX-66). Keyed on the
-    // row's item key — the window id / run id, never the label.
+    // A row's menu (right-click, or its ⋯ on touch): a run's opens its agent or judge
+    // pane, and under Custom groups every row can be moved to a custom group (CMX-66).
+    // Keyed on the row's item key — the window id / run id, never the label.
+    // CMX-74: a plain session's menu holds only "Move to group…", which is offered only
+    // under Group by ▸ Custom groups — elsewhere it has no menu at all (no ⋯, no
+    // right-click), rather than one that opens empty.
+    const hasMenu = !!o.itemKey && (!!o.runId || _rowMenuMoves());
     const runAttr = (o.runId ? ` data-run="${attrEsc(o.runId)}"` : '')
-        + (o.itemKey ? ` data-item="${attrEsc(o.itemKey)}" oncontextmenu="chela.openRowMenu(event, this.dataset.item)"` : '');
+        + (o.itemKey ? ` data-item="${attrEsc(o.itemKey)}"` : '')
+        + (hasMenu ? ' oncontextmenu="chela.openRowMenu(event, this.dataset.item)"' : '');
     const menuName = o.runId ? 'Run menu' : 'Row menu';
-    const more = o.itemKey
+    const more = hasMenu
         ? `<button class="row-more" title="${menuName}" aria-label="${menuName}" onclick="event.stopPropagation(); chela.openRowMenu(event, this.closest('.agent-row').dataset.item)">${lucideIcon('ellipsis', 14)}</button>`
         : '';
     return `<div class="agent-row rich${active}${wallCls}${o.cls ? ' ' + o.cls : ''}" data-agent="${attrEsc(a.name)}"${runAttr} title="${attrEsc(rowTitle + wallSuffix)}"
@@ -705,17 +710,26 @@ function groupNewSession(key) {
     return launchProject(g.cwd, { fresh: true });
 }
 
-// A row's menu: a run's opens its agent or judge pane; every row can be moved to a
-// custom group (CMX-66). `key` is the row's item key (a bare run id still resolves).
+// CMX-74: "Move to group…" is offered only while the sidebar is grouped by Custom
+// groups — the only mode that DRAWS custom groups. Anywhere else the move would be
+// saved and invisible, so the item read as dead (Liav, 2026-10-10).
+function _rowMenuMoves() { return _view().groupBy === 'custom'; }
+
+// A row's menu: a run's opens its agent or judge pane; under Custom groups every row
+// can be moved to a custom group (CMX-66). `key` is the row's item key (a bare run id
+// still resolves).
 function openRowMenu(ev, key) {
     const it = _sb.items.get(key) || _sb.items.get(`run:${key}`);
     if (!it) return;
+    const moves = _rowMenuMoves();
     let html = '';
     if (it.kind === 'run') {
         if (it.agent) html += _menuItem('Open agent pane', 'agent');
-        html += _menuItem('Open judge pane', 'judge', { disabled: !it.judge }) + _SEP;
+        html += _menuItem('Open judge pane', 'judge', { disabled: !it.judge });
+        if (moves) html += _SEP;
     }
-    html += _menuItem('Move to group…', 'move');
+    if (moves) html += _menuItem('Move to group…', 'move');
+    if (!html) return;
     const m = _menuEl('row-menu');
     _openMenu(m, ev, html, act => {
         if (act === 'move') return _openMoveMenu(m, it.key);
@@ -821,8 +835,12 @@ function _vmBack(title) {
 }
 
 // Swap the open popover's content for another page, keeping it open and anchored.
+// CMX-74: it re-SHOWS the popover too — _openMenu's click handler hides every side
+// menu before it runs the action, so a page opened from a menu item ("Move to group…")
+// was drawn into a hidden popover and the tap looked like it did nothing.
 function _showMenuPage(m, html, onAct) {
     m.innerHTML = html;
+    m.style.display = 'block';
     m.onclick = e => {
         const el = e.target.closest('[data-act]');
         e.stopPropagation();
