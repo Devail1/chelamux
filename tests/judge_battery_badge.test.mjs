@@ -14,6 +14,7 @@
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { readFileSync } from 'node:fs';
 import { batteryState, tileState } from '../chela/dashboard/static/js/wallmodel.js';
 
 // `current` carries a guard text no surface may print: the dashboard draws the LABEL
@@ -34,6 +35,11 @@ const AGENTS = [
       session_status: 'idle', judge_battery: DIED },
     { name: 'plain', window_id: '@42', online: true, cwd: '/p/c', claude_running: true,
       session_status: 'idle', judge_battery: null },
+    // CMX-67 (from CMX-53): an idle pane with a confirmed open PR — the wall's
+    // "PR open" state (it read "done", which collided with the sidebar's done).
+    { name: 'pr-up', window_id: '@44', online: true, cwd: '/p/e', claude_running: true,
+      session_status: 'idle', judge_battery: null,
+      pr: { url: 'https://example.invalid/pr/7', number: 7, state: 'open', draft: false } },
 ];
 
 const PANEL = `
@@ -122,6 +128,32 @@ test('a battery that died before a verdict reads "died" on the pill — never id
 
 test('negative control: a window with no battery still reads plain idle', () => {
     assert.equal(pill('@42').textContent.trim(), 'idle');
+});
+
+// --- CMX-67 / CMX-53: the wall tile's "done" is "PR open" -----------------------------
+
+test('a pane with a confirmed open PR reads "PR open" on the wall pill (class gs-state-pr-open), never "done"', () => {
+    const el = pill('@44');
+    assert.ok(el, 'no state pill on the PR pane');
+    assert.equal(el.textContent.trim(), 'PR open');
+    assert.ok(el.classList.contains('gs-state-pr-open'), el.className);
+    assert.ok(!el.classList.contains('gs-state-done'), el.className);
+    // its dot keeps the shared dot vocabulary's check shape (the CSS shape class)
+    const d = document.querySelector('#panel-terminals .term-status-dot[data-status-for="@44"]');
+    assert.ok(d && d.classList.contains('done'), d && d.className);
+});
+
+test('style.css colours the renamed class — .gs-state-pr-open, with no stale .gs-state-done left', () => {
+    // jsdom loads no stylesheet, so the rule itself is read off the file
+    const css = readFileSync(new URL('../chela/dashboard/static/style.css', import.meta.url), 'utf8');
+    assert.match(css, /\.gs-state-pr-open\s*\{[^}]*color:/);
+    assert.doesNotMatch(css, /\.gs-state-done\b/);
+});
+
+test('a live battery outranks an open PR on the judge pane (CMX-60\'s precedence holds after the rename)', () => {
+    const a = { ...AGENTS.find(x => x.name === 'pr-up'), judge_battery: TESTING };
+    assert.equal(tileState(a, false).word, '⚖️ testing · 3/6 · 15m');
+    assert.equal(tileState({ ...a, judge_battery: null }, false).word, 'PR open');
 });
 
 // --- the model ----------------------------------------------------------------------
