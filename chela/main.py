@@ -2913,14 +2913,24 @@ def cmd_close(args) -> None:
 
     An OPEN PR gets the reason as a comment. Whether to close it too is ``--close-pr`` /
     ``--keep-pr``; with neither, an interactive terminal is asked, anything else keeps it open.
+
+    🗂️🔁 ``--requeue`` (CMX-65) also makes the task claimable again: the next tick dispatches
+    a FRESH attempt on its own ``-r<N>`` branch and worktree. It closes the old PR, and works
+    on an already-closed run too. Without it, ``close`` stays terminal — and says so.
     """
     if _WINDOW_ID_RE.fullmatch(args.run or ""):
         _close_window(args)
         return
+    requeue = getattr(args, "requeue", False)
     if not args.reason:
-        print("close: --reason is required to close a run", file=sys.stderr)
+        print(f"close: --reason is required to {'requeue' if requeue else 'close'} a run",
+              file=sys.stderr)
         sys.exit(2)
-    close_pr = args.close_pr
+    if requeue and args.keep_pr:
+        print("close: --requeue closes the old PR (the fresh attempt opens its own) — it "
+              "cannot be combined with --keep-pr", file=sys.stderr)
+        sys.exit(2)
+    close_pr = args.close_pr or requeue
     if not close_pr and not args.keep_pr:
         run = dispatcher.resolve_run(args.run)
         if run is not None and dispatcher.pr_is_open(run) and sys.stdin.isatty():
@@ -2933,6 +2943,7 @@ def cmd_close(args) -> None:
         args.run, args.reason, force=args.force, close_pr=close_pr,
         remove_worktree=args.remove_worktree,
         by=f"terminal:{os.environ.get('USER') or 'operator'}",
+        requeue=requeue,
     )
     if not result.get("ok"):
         print(f"close: {result.get('error', 'unknown error')}")
@@ -2940,6 +2951,14 @@ def cmd_close(args) -> None:
     forced = " (forced)" if result.get("forced") else ""
     print(f"🗂️✖️ Run {result['task_id']} ({result.get('branch_name') or '?'}) "
           f"{result.get('from_status')} → closed{forced} — {result['reason']}")
+    if result.get("requeued"):
+        print("  🔁 requeued — the next dispatcher tick claims a FRESH attempt on a new branch "
+              "and worktree (this run's are kept, never reused)")
+    else:
+        # CMX-65: say it out loud — moving the issue back to Todo does NOT bring it back.
+        print(f"  ⚠ {result['task_id']} will NOT be re-dispatched: a closed run is terminal, "
+              "even if its issue is moved back to Todo. To requeue it: "
+              f"{result.get('requeue_hint')}")
     if result.get("window_killed"):
         print("  window killed")
     if result.get("pr_open"):
@@ -3448,7 +3467,8 @@ def main() -> None:
     p_close = sub.add_parser(
         "close",
         help="🗂️✖️ Mark an abandoned or superseded run CLOSED with a visible reason, instead "
-             "of leaving it as a FAILED card. Never re-claimed; slot freed; branch kept",
+             "of leaving it as a FAILED card. Never re-claimed (unless --requeue); slot freed; "
+             "branch kept",
     )
     p_close.add_argument(
         "run",
@@ -3477,6 +3497,12 @@ def main() -> None:
                                "posted as a comment)")
     p_close.add_argument("--remove-worktree", action="store_true",
                          help="Also remove the run's worktree (default: kept)")
+    p_close.add_argument(
+        "--requeue", action="store_true",
+        help="Also make the task claimable again: the next tick dispatches a FRESH attempt "
+             "on a new branch/worktree (-r2, -r3, …). Closes the old PR. Works on an "
+             "already-closed run. Refused when the run's PR merged",
+    )
 
     # escalate — the ONE structured way to hand a decision to the human
     p_esc = sub.add_parser(

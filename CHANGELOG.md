@@ -12,6 +12,13 @@ history lives in `git log`.
 
 ### Added
 
+- **`chela close <run> --requeue` makes a closed task claimable again.** The next tick claims
+  a fresh attempt (attempt 1) on its own `-r<N>` branch and worktree, never the closed run's.
+  The old PR is closed, the requeue is recorded in the review history, and a run whose PR
+  merged is refused. Without `--requeue`, `close` stays terminal, and it now says so: it
+  prints that the task will not be re-dispatched and the command that requeues it. Moving
+  the issue back to Todo by hand does not requeue it. (CMX-65, #627)
+
 - **The Cost tab has a Usage view: what is eating the plan limits, in tokens.** A "Cost |
   Usage" toggle shows the 5h and 7d limit bars (from the freshest statusLine `rate_limits`,
   with a %/h burn rate and whether it reaches 100% before the reset; missing, stale or reset

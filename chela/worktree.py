@@ -17,8 +17,12 @@ def ensure_worktree(
     task_number: int,
     root: Path,
     branch: str | None = None,
+    name: str | None = None,
 ) -> tuple[Path, bool]:
     """Idempotent AND collision-proof. Returns (worktree_path, created) for task_id.
+
+    ``name`` (CMX-65) overrides the directory name (default ``task_id``): a requeued
+    attempt (``<task_id>-r2``) must not land on the closed run's kept worktree.
 
     `created` is True when this call freshly created the worktree — including when it
     had to clear a collision to do so — and False only when a LIVE worktree for the
@@ -54,7 +58,7 @@ def ensure_worktree(
     """
     # 📐🔗 CMX-432: a tracker that names its own branches (Linear) passes `branch`.
     branch = branch or f"{project_key.lower()}-{task_number}"
-    wt_path = (root / task_id).resolve()
+    wt_path = (root / (name or task_id)).resolve()
 
     # (1) Drop administrative records for worktrees whose directory is already gone —
     # otherwise `git worktree list` still reports one as live and it would wrongly
