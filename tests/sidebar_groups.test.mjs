@@ -14,7 +14,7 @@ import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, flush } from './js_helpers/dashboard_dom.mjs';
 import {
-    DISPATCHED_KEY, OTHER_KEY, buildItems, folderKey, folderLabels, groupSidebar, isArchivable, runState,
+    DISPATCHED_KEY, OTHER_KEY, buildItems, folderKey, folderLabels, groupSidebar, isArchivable, moveGroup, runState,
 } from '../chela/dashboard/static/js/sidebarmodel.js';
 
 const BODY = `
@@ -121,6 +121,20 @@ test('home-dir and cwd-less rows land in "Other", at the bottom', () => {
     // its "+" opens a session in the home dir it knows about
     fire(group(OTHER_KEY).querySelector('.group-add'));
     assert.deepEqual(spawns, [{ cwd: '/home/u', command: 'claude' }]);
+});
+
+test('the server\'s cwd_is_home flag ALONE routes a home dir the path regex cannot recognise to "Other"', () => {
+    // a home dir that is not /home/<user> (a symlinked or relocated $HOME): only the
+    // server knows it is home, and its word must win — the regex is just the fallback
+    const home = '/mnt/data/liav';
+    assert.equal(folderKey({ cwd: home, cwd_is_home: true }), OTHER_KEY);
+    assert.equal(folderKey({ cwd: home }), home);   // without the flag it is a project
+    render([
+        win('relocated-home', { cwd: home, cwd_is_home: true }),
+        win('proj', { cwd: '/srv/code/zeta' }),
+    ]);
+    assert.deepEqual(groupKeys(), ['/srv/code/zeta', OTHER_KEY]);
+    assert.deepEqual(rowsIn(OTHER_KEY), ['relocated-home']);
 });
 
 test('a basename collision is disambiguated by the parent path, like the desktop', () => {
@@ -414,4 +428,105 @@ test('model: groupSidebar takes the grouping MODE (the hook part 2 extends) and 
     const m = groupSidebar([{ name: 'a', window_id: '@1', cwd: '/x/a' }], { wants });
     assert.deepEqual(m.groups.map(g => g.label), ['a']);
     assert.deepEqual(folderLabels(['/x/a', OTHER_KEY, DISPATCHED_KEY]), { '/x/a': 'a', [OTHER_KEY]: 'Other', [DISPATCHED_KEY]: 'Dispatched' });
+});
+
+// --- model invariants, each pinned by a fixture where it is the ONLY thing that decides
+// (docs/defeat_shapes/432b: put a non-member through every discriminator) -------------
+
+test('model: the run card ALONE routes a window to "Dispatched" — no dispatched flag, no worktree cwd', () => {
+    assert.equal(folderKey({ cwd: '/srv/code/chelamux', run: runCard('CMX-9', 't', 'agent') }), DISPATCHED_KEY);
+    assert.equal(folderKey({ cwd: '/srv/code/chelamux' }), '/srv/code/chelamux', 'control: the card is the only difference');
+});
+
+test('model: /root is a home dir — it lands in "Other", not a group called "root"', () => {
+    assert.equal(folderKey({ cwd: '/root' }), OTHER_KEY);
+    assert.equal(folderKey({ cwd: '/home/u' }), OTHER_KEY);
+    assert.equal(folderKey({ cwd: '/srv/root' }), '/srv/root', 'control: a folder merely NAMED root is a project');
+});
+
+test('model: every SETTLED run state (done, closed, failed) is archivable — and nothing else is', () => {
+    const arch = status => isArchivable(buildItems([
+        { name: 'a', window_id: '@8', claude_running: false, run: { task_id: 'CMX-9', status, role: 'agent' } },
+    ])[0], { wants });
+    for (const s of ['done', 'closed', 'failed']) assert.equal(arch(s), true, `${s} must be archivable`);
+    for (const s of ['claimed', 'running', 'awaiting_review', 'changes_requested', 'needs_human'])
+        assert.equal(arch(s), false, `${s} must NOT be archivable`);
+});
+
+test('model: a run folds its windows whatever order they arrive in — the AGENT is primary and its card is the run\'s', () => {
+    const j1 = { name: 'j1', window_id: '@2', run: runCard('CMX-9', 'T', 'judge') };
+    const j2 = { name: 'j2', window_id: '@3', run: runCard('CMX-9', 'T', 'judge') };
+    const ag = { name: 'ag', window_id: '@1', run: runCard('CMX-9', 'T', 'agent') };
+    const [it] = buildItems([j1, j2, ag]);
+    assert.equal(it.agent, ag);
+    assert.equal(it.judge, j1, 'the first judge window the server listed is the run\'s judge');
+    assert.equal(it.run.role, 'agent', 'the run card comes from the agent window, not the judge seen first');
+    assert.deepEqual(it.windows, [j1, j2, ag]);
+});
+
+test('model: Move up / down stops at the ends and keeps off-screen groups in the stored order', () => {
+    assert.equal(moveGroup(['a', 'b', 'c'], [], 'a', -1), null, 'the top group cannot move up');
+    assert.equal(moveGroup(['a', 'b', 'c'], [], 'c', +1), null, 'the bottom group cannot move down');
+    assert.equal(moveGroup(['a', 'b'], [], 'zz', +1), null, 'an unknown group does not move');
+    assert.deepEqual(moveGroup(['a', 'b', 'c'], ['gone', 'b', 'a'], 'c', -1), ['a', 'c', 'b', 'gone'],
+        'a folder with no session today keeps its place for when it comes back');
+});
+
+test('model: sort by name is NUMERIC — CMX-100 sorts after CMX-37, not between CMX-10 and CMX-11', () => {
+    const rows = ['CMX-100', 'CMX-37', 'CMX-11', 'CMX-10'].map((n, i) => ({ name: n, window_id: `@${i}`, cwd: '/x/a' }));
+    const m = groupSidebar(rows, { wants, labelOf: it => it.agent.name });
+    assert.deepEqual(m.groups[0].items.map(it => it.agent.name), ['CMX-10', 'CMX-11', 'CMX-37', 'CMX-100']);
+});
+
+// docs/defeat_shapes/420: the render re-checks isArchivable and prunes the archive set, so
+// an "Archive all" that ADDED a live row would still render right. The invariant is on the
+// action itself — so read every write it makes to the archive store, not the end state.
+test('"Archive all" never WRITES a live row into the archive — not even one the render would re-show', () => {
+    const working = win('working', { cwd: '/srv/code/mix', session_status: 'busy' });
+    const idle = win('idle-unfinished', { cwd: '/srv/code/mix' });
+    const finished = win('finished', { cwd: '/srv/code/mix', done: true });
+    render([working, idle, finished]);
+    const writes = [];
+    // jsdom's Storage stores an own-property assignment as a KEY, so spy on the prototype
+    const proto = Object.getPrototypeOf(localStorage);
+    const realSet = proto.setItem;
+    proto.setItem = function (k, v) {
+        if (k === 'chela_sb_archived') writes.push(JSON.parse(v));
+        return realSet.call(this, k, v);
+    };
+    try { nav.groupMenuAction('/srv/code/mix', 'archive'); }
+    finally { proto.setItem = realSet; }
+    assert.ok(writes.length > 0, 'Archive all wrote nothing');
+    for (const w of writes) {
+        assert.deepEqual(w, [`w:${finished.window_id}`],
+            `Archive all wrote ${JSON.stringify(w)} — only the finished row may be archived`);
+    }
+});
+
+test('the Archive all count excludes rows already archived, and is DISABLED at 0', () => {
+    render([win('f1', { cwd: '/srv/code/mix', done: true }), win('f2', { cwd: '/srv/code/mix', done: true }),
+        win('live', { cwd: '/srv/code/mix', session_status: 'busy' })]);
+    nav.groupMenuAction('/srv/code/mix', 'archive');
+    fire(host().querySelector('.side-archived-toggle'));   // show archived: both f rows on screen again
+    fire(group('/srv/code/mix').querySelector('.group-more'));
+    const item = menuItems('group-menu').find(i => i.text.startsWith('Archive all'));
+    assert.equal(item.text, 'Archive all (0)', 'rows already archived are not counted again');
+    assert.equal(item.disabled, true, 'Archive all with nothing to archive must be disabled');
+    window.chela.hideSideMenus();
+});
+
+test('Collapse all keeps groups collapsed earlier that are off screen now', () => {
+    localStorage.setItem('chela_grp_collapsed', JSON.stringify(['/srv/code/away']));
+    render([win('a', { cwd: '/srv/code/alpha' })]);
+    nav.groupMenuAction('/srv/code/alpha', 'collapse-all');
+    assert.deepEqual(JSON.parse(localStorage.getItem('chela_grp_collapsed')).sort(), ['/srv/code/alpha', '/srv/code/away']);
+});
+
+test('"New session" is offered only by a group with a folder to open it in', () => {
+    render([win('nocwd', { cwd: null }), win('liavacc/cmx-9', { cwd: `${WT}/CMX-9`, dispatched: true, run: runCard('CMX-9', 'T', 'agent') })]);
+    for (const key of [OTHER_KEY, DISPATCHED_KEY]) {
+        fire(group(key).querySelector('.group-more'));
+        assert.ok(!menuItems('group-menu').some(i => i.text === 'New session'), `${key} offered New session with no folder`);
+        window.chela.hideSideMenus();
+    }
 });

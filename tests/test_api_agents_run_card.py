@@ -95,3 +95,32 @@ def test_cwd_is_home_is_true_only_for_the_home_dir_itself():
     assert agents["@1"]["cwd_is_home"] is True
     assert agents["@4"]["cwd_is_home"] is False
     assert agents["@7"]["cwd_is_home"] is False   # no cwd at all
+
+
+def test_a_stale_run_row_on_a_recycled_live_id_never_folds_a_human_window_into_a_run():
+    """tmux re-issues ``@N`` after a restart, so a finished run's recorded id can be a
+    HUMAN's window this boot. The run card is attached only to ids in the epoch/name-checked
+    ``dispatched`` set — a row merely RECORDING a live id must not make it a run's agent
+    (or judge) window, or the sidebar folds a human's session into Dispatched."""
+    stale = [
+        {"task_id": "CMX-9", "title": "Long gone", "status": "done", "window_id": "@4",
+         "window_name": "liavacc/cmx-9-old", "judge_window_id": "@1"},
+    ]
+    agents = _by_wid(runs=stale)
+    # the precondition this test is about: the stale row's ids ARE live windows
+    assert {"@4", "@1"} <= set(agents)
+    assert agents["@4"]["dispatched"] is False
+    assert agents["@4"]["run"] is None    # agent id recycled to the human's shell
+    assert agents["@1"]["run"] is None    # judge id recycled to the orchestrator
+    # and the same row against the REAL fleet still cards the windows it does own
+    assert _by_wid(runs=RUNS + stale)["@4"]["run"] is None
+
+
+def test_only_a_claimed_row_is_matched_by_name_a_newer_settled_row_with_no_id_is_not():
+    """The name match is the CLAIM gap's rule only (CMX-308). A newer row in any other
+    status that never recorded an id (failed before spawn) and happens to share a live
+    window's name must not steal that window from the run that does own it."""
+    ghost = {"task_id": "CMX-50", "title": "Never spawned", "status": "failed",
+             "window_id": None, "window_name": "liavacc/cmx-37-theme"}
+    agents = _by_wid(runs=[ghost] + RUNS)
+    assert agents["@7"]["run"]["task_id"] == "CMX-37"
