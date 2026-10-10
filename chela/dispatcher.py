@@ -4249,6 +4249,11 @@ def pr_is_open(run: dict) -> bool:
     return bool(run.get("pr_url")) and run.get("pr_state") not in ("merged", "closed")
 
 
+# 🗂️🔁 CMX-68. What the Work board and `chela doctor` say about a `closed` run whose task is
+# still in its tracker's READY state with no requeue pending: nothing will ever claim it.
+CLOSED_RUN_STALL = "closed run blocks this task: requeue or refile"
+
+
 def requeue_hint(task_id: str) -> str:
     """The exact command that makes a closed task claimable again."""
     return f"chela close {task_id} --requeue --reason '…'"
@@ -6236,6 +6241,24 @@ def _tracker_requeue(run: dict) -> str | None:
     except sqlite3.Error:
         log.warning("close: could not reset the tracker edge for %s", run["task_id"])
     return outcome
+
+
+def closed_run_stalls(runs: list[dict], ready_ids) -> list[dict]:
+    """🗂️🔁 CMX-68 — the ``closed`` runs (no requeue pending) whose task is STILL in the
+    tracker's ready state. ``closed`` is in :data:`NOT_CLAIMABLE`, so such a task is never
+    claimed again — CMX-33 sat in Todo ~11 hours that way, its dependants with it. Pure:
+    the caller passes only ONE workflow's runs and that workflow's :func:`ready_task_ids`
+    (task ids are per tracker, so a cross-workflow join would invent stalls)."""
+    ready = set(ready_ids or ())
+    return [
+        {"task_id": r.get("task_id"), "title": r.get("title"),
+         "workflow_path": r.get("workflow_path"), "branch_name": r.get("branch_name"),
+         "pr_url": r.get("pr_url"), "close_reason": r.get("close_reason"),
+         "hint": requeue_hint(r.get("task_id") or "")}
+        for r in runs
+        if r.get("status") == "closed" and not r.get("requeue_pending")
+        and r.get("task_id") in ready
+    ]
 
 
 def ready_task_ids(source, open_tasks: list[Task] | None = None) -> set[str] | None:

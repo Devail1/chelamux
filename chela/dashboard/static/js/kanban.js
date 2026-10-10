@@ -7,7 +7,7 @@ import { displayTitle, riskChip } from './taskmodalmodel.js';
 import { knInline } from './knowledge.js';
 import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from './kanbanlanemodel.js';
 import { runStateBadges, trackerBoard, trackerColumns } from './kanbanlinearmodel.js';
-import { runCardNote } from './runstate.js';
+import { runCardNote, runCloseAction, runStallNote } from './runstate.js';
 
 // ---------------------------------------------------------------------------
 // Render: the Board segment of WORK (the global cross-workflow kanban)
@@ -222,6 +222,16 @@ function _kCard(card) {
     const err = note
         ? `<div class="${note.closed ? 'kanban-card-closed-note' : 'kanban-card-error'}" title="${attrEsc(note.text)}">${escHtml(note.text.slice(0, 120))}</div>`
         : '';
+    // 🗂️🔁 CMX-68: a closed run holding a READY task — on the closed card AND the open one.
+    const stallNote = runStallNote(card);
+    const stall = stallNote
+        ? `<div class="kanban-card-stall" title="${attrEsc(stallNote)}">${escHtml(stallNote)}</div>`
+        : '';
+    const closeAct = runCloseAction(card);
+    const closeBtn = closeAct
+        ? `<button class="kanban-requeue-btn" type="button" data-run-id="${tid}"
+                   onclick="event.stopPropagation();chela.kanbanCloseRun(this)">${escHtml(closeAct.label)}</button>`
+        : '';
     // Under the project-key scheme the branch is just the lowercase display id
     // (e.g. PCLW-11 → pclw-11), so a branch chip would duplicate kanban-card-id.
     // Render it only when the branch differs — keeps it for legacy dogfood/<sha>
@@ -305,8 +315,10 @@ function _kCard(card) {
             ${pr}
             ${ci}
             ${merge}
+            ${closeBtn}
         </div>
         ${err}
+        ${stall}
     </div>`;
 }
 
@@ -395,6 +407,39 @@ async function kanbanMergePR(btn) {
         return;
     }
     // Don't optimistically mutate UI state — let the next poll move the card.
+    pollWork();
+}
+
+// 🗂️🔁 CMX-68 — "Close & requeue" / "Requeue": `chela close <run> --requeue --reason …`.
+// Both labels REQUEUE — a plain close from here would leave the task stalled again.
+async function kanbanCloseRun(btn) {
+    const taskId = btn.dataset.runId;
+    const reason = (prompt(`Requeue ${taskId} — why? (recorded in its review history; the `
+        + 'old PR is closed and the next tick claims a fresh attempt on a new branch)') || '').trim();
+    if (!reason) return;
+    const originalLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Working…';
+    let resp, data = {};
+    try {
+        resp = await fetch(`/api/dispatcher/runs/${encodeURIComponent(taskId)}/close`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason, requeue: true }),
+        });
+        try { data = await resp.json(); } catch (_) { data = {}; }
+    } catch (e) {
+        _kanbanMergeToast(btn, String(e));
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+        return;
+    }
+    if (!resp.ok || !data.ok) {
+        _kanbanMergeToast(btn, data.error || `HTTP ${resp.status}`);
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+        return;
+    }
     pollWork();
 }
 
@@ -595,6 +640,8 @@ function _kanbanFlatten(data) {
                 body: t.body,
                 // CMX-5: the Linear issue URL (null for a markdown/gh_issues task).
                 tracker_url: t.tracker_url || null,
+                // CMX-68: a closed run (no requeue) holds this task — see runStallNote.
+                closed_run_stall: t.closed_run_stall || null,
                 workflow_path: wf.path,
                 project_key: wf.project_key || null,
             });
@@ -837,4 +884,4 @@ export { renderKanban };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { kanbanDeleteClick, kanbanDeleteConfirm, kanbanMergeAll, kanbanMergePR, kanbanNavTo, kanbanPromoteBacklog, openTaskModalFromCard, setKanbanFilter, setKanbanLayout, toggleKanbanCol });
+Object.assign(window.chela, { kanbanCloseRun, kanbanDeleteClick, kanbanDeleteConfirm, kanbanMergeAll, kanbanMergePR, kanbanNavTo, kanbanPromoteBacklog, openTaskModalFromCard, setKanbanFilter, setKanbanLayout, toggleKanbanCol });
