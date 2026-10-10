@@ -3163,6 +3163,72 @@ def _unresolved_depends_report(_declared: None, obs: Observation) -> list[Findin
     return out
 
 
+# --- fact: a closed run silently blocking a READY task (CMX-68) -----------------------
+#
+# `closed` is in NOT_CLAIMABLE (CMX-265), so a task whose run was closed is never claimed
+# again — even when a human moves its issue back to Todo expecting a fresh dispatch.
+# CMX-33 sat in Todo ~11 hours that way, with its dependants stalled behind it and no
+# signal anywhere. The exit is explicit (`chela close <run> --requeue`) or a refile; this
+# fact is what makes the stall visible until one of them happens.
+
+def _closed_run_stalls_scan() -> list[dict] | None:
+    """Every `closed` run (no requeue pending) whose task is in its tracker's READY state,
+    across every dispatched workflow — :func:`dispatcher.closed_run_stalls` over a fresh
+    tracker read, each workflow's closed runs joined against ITS OWN ready ids only. None
+    when a tracker holding such a run could not be read: "could not read" is never "no
+    stalls"."""
+    from chela import dispatcher                 # lazy: doctor must import cheaply
+
+    if not Path(dispatcher.DB_PATH).exists():
+        return []
+    closed = [r for r in dispatcher.list_runs()
+              if r.get("status") == "closed" and not r.get("requeue_pending")]
+    out: list[dict] = []
+    for wf_path in sorted({str(r.get("workflow_path")) for r in closed}):
+        path = Path(wf_path)
+        if not path.exists():
+            continue                             # no workflow ⇒ nothing will claim it anyway
+        try:
+            ready = dispatcher.ready_task_ids(get_source(load_workflow(path)))
+        except Exception:
+            ready = None
+        if ready is None:
+            return None
+        own = [r for r in closed if str(r.get("workflow_path")) == wf_path]
+        out.extend(dispatcher.closed_run_stalls(own, ready))
+    return out
+
+
+def _closed_run_stalls_read() -> Observation:
+    rows = _closed_run_stalls_scan()
+    if rows is None:
+        return cannot_verify("a tracker holding a closed run could not be read — a "
+                             "closed task waiting in its ready state cannot be ruled out")
+    return observed(rows)
+
+
+def _closed_run_stalls_report(_declared: None, obs: Observation) -> list[Finding]:
+    from chela import dispatcher                 # lazy: doctor must import cheaply
+
+    rows = obs.value
+    if not rows:
+        return [Finding(OK, "no closed run is blocking a task in its tracker's ready state")]
+    out = []
+    for row in rows:
+        pr = f" (PR {row['pr_url']})" if row.get("pr_url") else ""
+        why = f" Closed because: {row['close_reason']}." if row.get("close_reason") else ""
+        out.append(Finding(
+            ERROR,
+            f"{row['task_id']}: {dispatcher.CLOSED_RUN_STALL}",
+            f"Its run{pr} is `closed` — terminal, never claimed again — yet the task is in "
+            f"its tracker's READY state, so it waits there forever (and so does anything "
+            f"blocked on it).{why} Moving the issue to Todo does NOT requeue it. Requeue: "
+            f"`{row['hint']}` (a fresh attempt on a new branch), or refile it as a new "
+            "task and close this one out of the ready state.",
+        ))
+    return out
+
+
 # --- the registry ---------------------------------------------------------------------
 
 def facts() -> list[Fact]:
@@ -3568,6 +3634,18 @@ def facts() -> list[Fact]:
             declare=lambda: None,
             read_back=_unresolved_depends_read,
             report=_unresolved_depends_report,
+        ),
+        Fact(
+            name="dispatch.closed_run_stalls",
+            declared_by="nothing — chela never predicts this; a closed run either sits on "
+                        "a task its tracker still calls READY, or it doesn't (CMX-68)",
+            owned_by="each closed run's own tracker (its ready state — Linear's Todo; every "
+                     "open task for markdown/gh_issues) joined against the dispatcher's runs "
+                     "table, where `closed` without requeue_pending is never claimed",
+            declare=lambda: None,
+            read_back=_closed_run_stalls_read,
+            report=_closed_run_stalls_report,
+            unverifiable_level=WARN,      # a tracker read is network: offline is not broken
         ),
     ]
 

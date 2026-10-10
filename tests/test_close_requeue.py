@@ -7,8 +7,10 @@ two issues blocked on it stalled too.
 
 These pin both halves of the fix:
 
-* WITHOUT ``--requeue`` a close stays terminal (the CMX-265 intent), but ``chela close``
-  says so out loud: the task will not be re-dispatched, and here is how to requeue it.
+* WITHOUT ``--requeue`` a close stays terminal (the CMX-265 intent), but the stall is LOUD:
+  ``chela close`` says the task will not be re-dispatched, and (CMX-68) ``chela doctor``
+  (``dispatch.closed_run_stalls``) and the Work board say "closed run blocks this task:
+  requeue or refile" for as long as the task waits in its tracker's ready state.
 * ``chela close <run> --requeue`` closes the old PR, puts the issue back in Todo, and the
   next tick claims a FRESH attempt on a NEW branch and worktree — never the closed run's.
   A run whose PR merged is refused.
@@ -26,9 +28,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from chela import dispatcher
+from chela import dispatcher, runtime_truth
 from tests import test_linear_workflow_states as _linear
-from tests.test_linear_workflow_states import Team, _row, _seed, issue
+from tests.test_linear_workflow_states import Team, _row, _seed, _set, issue
 
 # The real-git repo, the in-memory Linear team and the stubbed agent launch — shared with
 # the CMX-23 suite, re-registered here as this module's own fixtures.
@@ -71,6 +73,11 @@ def _old_attempt(repo, status="awaiting_review", **cols):
     return worktree
 
 
+def _stall_findings():
+    return [f for f in runtime_truth.audit(runtime_truth.fact("dispatch.closed_run_stalls"))
+            if f.level != runtime_truth.OK]
+
+
 # --- 1. close WITHOUT requeue + the issue back in Todo ⇒ not claimed, and SAID so ---------
 
 def test_a_closed_task_moved_back_to_todo_is_not_claimed(
@@ -85,6 +92,154 @@ def test_a_closed_task_moved_back_to_todo_is_not_claimed(
     assert dispatcher.tick(_wf(repo))["dispatched"] == 0
     assert launched == []
     assert _row("CMX-33")["status"] == "closed"
+
+
+def test_doctor_flags_a_closed_task_moved_back_to_todo(repo, team, pr_closes):
+    """🗂️🔁 CMX-68 — the stall above is never silent: doctor names the task, the stall, and
+    the way out."""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", force=True)["ok"]
+    team.issues["CMX-33"]["state"] = {"name": "Todo", "type": "unstarted"}
+
+    findings = _stall_findings()
+    assert len(findings) == 1, findings
+    assert findings[0].level == runtime_truth.ERROR
+    assert "CMX-33" in findings[0].title
+    assert dispatcher.CLOSED_RUN_STALL in findings[0].title
+    assert "chela close CMX-33 --requeue" in findings[0].detail
+
+
+def test_a_closed_task_that_left_the_ready_state_is_not_a_stall(repo, team, pr_closes):
+    """NEGATIVE CONTROL: the same closed run, its issue still Canceled (nothing waits on
+    it) — no finding. So the finding above is about the READY state, not about `closed`."""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", force=True)["ok"]
+    assert _stall_findings() == []
+
+
+def test_a_requeued_task_is_not_a_stall(repo, team, pr_closes):
+    """`requeue_pending` is the way out: once set, the next tick claims it — not a stall."""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", requeue=True, force=True)["ok"]
+    assert team.issues["CMX-33"]["state"]["name"] == "Todo"
+    assert _stall_findings() == []
+
+
+def _stub_trackers(monkeypatch, ready_by_wf: dict, *, unreadable: set = frozenset()):
+    """Each workflow file's own tracker: ``ready_by_wf[path]`` are its ready (open) ids;
+    a path in ``unreadable`` is a tracker whose read FAILED (``read_failed``)."""
+    monkeypatch.setattr(runtime_truth, "load_workflow", lambda p: SimpleNamespace(path=p))
+
+    def source(wf):
+        key = str(Path(wf.path))
+        return SimpleNamespace(
+            list_open_tasks=lambda: [SimpleNamespace(id=i) for i in ready_by_wf.get(key, ())],
+            read_failed=key in unreadable)
+
+    monkeypatch.setattr(runtime_truth, "get_source", source)
+
+
+def _closed_on(wf: Path, task_id: str):
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, attempt, started_at) "
+            "VALUES (?, ?, 't', 'closed', 1, ?)",
+            (task_id, str(wf.resolve()), dispatcher._now()))
+        conn.commit()
+
+
+def test_doctor_cannot_verify_when_a_tracker_holding_a_closed_run_is_unreadable(
+        repo, monkeypatch):
+    """An unreadable tracker is CANNOT VERIFY — never "no stalls": a stall it never read
+    cannot be ruled out."""
+    wf = _wf(repo).resolve()
+    _closed_on(wf, "CMX-33")
+    _stub_trackers(monkeypatch, {str(wf): ["CMX-33"]}, unreadable={str(wf)})
+    findings = runtime_truth.audit(runtime_truth.fact("dispatch.closed_run_stalls"))
+    assert len(findings) == 1, findings
+    assert "CANNOT VERIFY" in findings[0].title
+    assert findings[0].level == runtime_truth.WARN
+
+
+def test_doctor_joins_each_closed_run_only_against_its_own_workflows_ready_ids(
+        repo, monkeypatch, tmp_path):
+    """Task ids are per tracker: workflow B having a ready ``CMX-33`` says nothing about
+    workflow A's closed ``CMX-33``. Only B's own closed run on B's own ready task is one."""
+    a = _wf(repo).resolve()
+    b = tmp_path / "other" / "WORKFLOW.md"
+    b.parent.mkdir()
+    b.write_text("x\n")
+    _closed_on(a, "CMX-33")          # A's tracker: CMX-33 is NOT ready (left the state)
+    _closed_on(b, "CMX-7")           # B's tracker: CMX-7 IS ready — the one real stall
+    _stub_trackers(monkeypatch, {str(a): [], str(b.resolve()): ["CMX-33", "CMX-7"]})
+    findings = _stall_findings()
+    assert [f.title.split(":")[0] for f in findings] == ["CMX-7"], findings
+
+
+def test_the_work_board_flags_the_stall_on_the_open_card_and_the_closed_run(
+        repo, team, pr_closes, monkeypatch):
+    from chela.dashboard import app as dash
+
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", force=True)["ok"]
+    team.issues["CMX-33"]["state"] = {"name": "Todo", "type": "unstarted"}
+
+    monkeypatch.setattr(dash, "_discover_dispatch_workflows",
+                        lambda runs: [_wf(repo).resolve()])
+    monkeypatch.setattr(dash.tasklists, "progress_for_run", lambda *a: None)
+    data = dash.app.test_client().get(
+        "/api/dispatcher", headers={"Sec-Fetch-Site": "same-origin"}).get_json()
+    wf = data["workflows"][0]
+    card = next(t for t in wf["open_tasks"] if t["id"] == "CMX-33")
+    assert card["closed_run_stall"] == dispatcher.CLOSED_RUN_STALL
+    run = next(r for r in wf["recent_runs"] if r["task_id"] == "CMX-33")
+    assert run["closed_run_stall"] == dispatcher.CLOSED_RUN_STALL
+
+
+def test_the_work_board_flags_a_stall_older_than_the_ten_recent_runs(
+        repo, team, pr_closes, monkeypatch):
+    """`recent_runs` is capped at 10; a closed run that fell off it blocks its task just the
+    same. The stall is computed over ALL of the workflow's runs."""
+    from chela.dashboard import app as dash
+
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", force=True)["ok"]
+    _set("CMX-33", started_at="2000-01-01T00:00:00+00:00")
+    for n in range(1, 12):                    # 11 NEWER finished runs push it off `recent`
+        _seed(repo, f"CMX-{100 + n}", "done", pr_state="merged")
+    team.issues["CMX-33"]["state"] = {"name": "Todo", "type": "unstarted"}
+
+    monkeypatch.setattr(dash, "_discover_dispatch_workflows",
+                        lambda runs: [_wf(repo).resolve()])
+    monkeypatch.setattr(dash.tasklists, "progress_for_run", lambda *a: None)
+    data = dash.app.test_client().get(
+        "/api/dispatcher", headers={"Sec-Fetch-Site": "same-origin"}).get_json()
+    wf = data["workflows"][0]
+    assert "CMX-33" not in {r["task_id"] for r in wf["recent_runs"]}   # the scenario holds
+    card = next(t for t in wf["open_tasks"] if t["id"] == "CMX-33")
+    assert card["closed_run_stall"] == dispatcher.CLOSED_RUN_STALL
+
+
+def test_the_board_close_route_requeues_only_when_asked(repo, team, pr_closes, monkeypatch):
+    """`POST /api/dispatcher/runs/<id>/close` with requeue=true is `chela close --requeue`."""
+    from chela.dashboard import app as dash
+
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", force=True)["ok"]
+    client = dash.app.test_client()
+    h = {"Sec-Fetch-Site": "same-origin"}
+    assert client.post("/api/dispatcher/runs/CMX-33/close", json={"requeue": True},
+                       headers=h).status_code == 400               # a reason is required
+    resp = client.post("/api/dispatcher/runs/CMX-33/close",
+                       json={"reason": "stalled", "requeue": True}, headers=h)
+    assert resp.status_code == 200, resp.get_json()
+    assert _row("CMX-33")["requeue_pending"] == 1
 
 
 def test_chela_close_says_the_task_will_not_be_redispatched_and_how_to_requeue(

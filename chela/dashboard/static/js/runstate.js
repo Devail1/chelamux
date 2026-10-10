@@ -58,3 +58,29 @@ export function runCardNote(run) {
     const err = run && run.last_error ? String(run.last_error) : '';
     return err ? { text: err, closed: false } : null;
 }
+
+// 🗂️🔁 CMX-68. A `closed` run is never claimed again — so a closed run whose task the tracker
+// still calls READY (Todo) is a SILENT stall: CMX-33 sat in Todo ~11 hours that way, its
+// dependants with it. The server sets `closed_run_stall` (dispatcher.CLOSED_RUN_STALL) on
+// both the closed run's card and the open task's card; this is the line they show. null
+// when the card is not stalled.
+export function runStallNote(card) {
+    const msg = card && card.closed_run_stall ? String(card.closed_run_stall).trim() : '';
+    return msg ? `⚠ ${msg}` : null;
+}
+
+// The requeue action a card offers (`POST /api/dispatcher/runs/<id>/close`, requeue=true),
+// or null: "Requeue" on a STALLED closed run or the open task it holds (the explicit way
+// back — `chela close --requeue`); "Close & requeue" on any run a human may walk away from.
+// A closed run that is not stalled offers nothing (nothing is waiting on it), and neither
+// does a run whose PR merged: that work shipped, and the server refuses it anyway.
+const REQUEUE_CLOSABLE = new Set(['claimed', 'running', 'awaiting_review', 'changes_requested',
+                                  'needs_human', 'failed']);
+export function runCloseAction(card) {
+    if (!card || !card.task_id || card.pr_state === 'merged') return null;
+    if (card.status === 'closed' || card.status === 'open') {
+        // The open task's card carries the same task_id as the closed run that holds it.
+        return card.closed_run_stall ? { label: 'Requeue' } : null;
+    }
+    return REQUEUE_CLOSABLE.has(card.status) ? { label: 'Close & requeue' } : null;
+}
