@@ -414,7 +414,9 @@ test('the run row\'s menu opens on right-click and on ⋯, and "Open judge pane"
     const row = () => host().querySelector('.agent-row[data-run="CMX-37"]');
     fire(row(), 'oncontextmenu');
     assert.equal(menu('row-menu').style.display, 'block');
-    assert.deepEqual(menuItems('row-menu').map(i => i.text), ['Open agent pane', 'Open judge pane', 'Move to group…']);
+    // CMX-74: Group by Folder (the default) draws no custom groups, so the menu offers
+    // no "Move to group…" — a move there would be saved and invisible.
+    assert.deepEqual(menuItems('row-menu').map(i => i.text), ['Open agent pane', 'Open judge pane']);
     clickMenu('row-menu', 'Open judge pane');
     assert.equal(document.querySelector('#agent-detail .detail-title').textContent, 'judge-liavacc/cmx-37-theme');
     fire(row().querySelector('.row-more'));
