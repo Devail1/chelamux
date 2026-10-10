@@ -771,49 +771,40 @@ test('CMX-359: an idle agent with no `done` evidence still reads plain "idle" �
     assert.equal(rowFor('untouched-two').querySelector('.ar-state').textContent, 'idle');
 });
 
-test('CMX-359: `done` agents float into their own "Finished" cluster, decoupled from project groups', () => {
+// CMX-35 retired the "Finished" cluster: the sidebar groups by FOLDER now (the desktop
+// app's look), and a done row stays in its folder — its check shape and the word
+// "done" carry the state. It must still render exactly once.
+test('CMX-35: a `done` agent stays in its folder group — no Finished cluster, rendered once', () => {
     nav.renderSidebarAgents([
         agent('done-agent', { window_id: '@2', session_status: 'idle', done: true, cwd: '/home/x/proj' }),
         agent('plain-agent', { window_id: '@3', session_status: 'idle', cwd: '/home/x/proj' }),
     ]);
-    const cluster = document.querySelector('#sidebar-agents .side-finished');
-    assert.ok(cluster, 'no .side-finished cluster rendered for a done agent');
-    assert.ok(cluster.querySelector('.agent-row[data-agent="done-agent"]'),
-        'the done agent must render INSIDE the Finished cluster');
-    assert.equal(cluster.querySelectorAll('.agent-row').length, 1,
-        'a non-done agent must not be swept into the Finished cluster');
-    assert.equal(cluster.querySelector('.triage-count').textContent, '1');
-    // 🔴 GUARD (CMX-359 rework round 1): the two checks above only prove the Finished
-    // cluster's OWN contents are right — they say nothing about whether `done-agent`
-    // is ALSO still sitting in its project group below. Dropping `&& !isDone(a)` from
-    // `rest`'s filter (nav.js:385) leaves the Finished cluster untouched (it is built
-    // from `rows`, not `rest`) while ALSO leaving the done row in `rest`, so it renders
-    // a SECOND time in its project group — "each agent shows in exactly one place" is
-    // exactly the invariant this test's own title claims, and neither assertion above
-    // can see a duplicate.
-    assert.equal(
-        document.querySelectorAll('#sidebar-agents .agent-row[data-agent="done-agent"]').length, 1,
-        'the done agent rendered more than once — it must be lifted OUT of its project ' +
-        'group when it floats into the Finished cluster, not merely copied into both');
+    assert.equal(document.querySelector('#sidebar-agents .side-finished'), null,
+        'a Finished cluster rendered — CMX-35 groups done rows in their folder');
+    const group = document.querySelector('#sidebar-agents .side-group[data-g="/home/x/proj"]');
+    assert.ok(group, 'no folder group for /home/x/proj');
+    assert.ok(group.querySelector('.agent-row[data-agent="done-agent"]'), 'the done row is not in its folder group');
+    assert.equal(group.querySelector('.agent-row[data-agent="done-agent"] .ar-state').textContent, 'done');
+    assert.equal(document.querySelectorAll('#sidebar-agents .agent-row[data-agent="done-agent"]').length, 1,
+        'the done agent rendered more than once');
 });
 
-test('CMX-359: "Needs you" outranks "Finished" — a row can only ever appear in one cluster', () => {
+test('CMX-359: "Needs you" outranks "done" — a row can only ever appear in one place', () => {
     // The server never actually emits both flags together (app.py gates `done` on
     // `!needs_human`), but nav.js's own partition must still resolve the conflict
     // the same way if it ever saw one: wantsHuman wins, so the row is never
-    // duplicated into both clusters.
+    // duplicated into the Needs-you cluster AND its folder.
     nav.renderSidebarAgents([
         agent('blocked-and-done', { session_status: 'waiting', done: true }),
     ]);
-    const needsYou = document.querySelector('#sidebar-agents .side-triage:not(.side-finished)');
-    const finished = document.querySelector('#sidebar-agents .side-finished');
+    const needsYou = document.querySelector('#sidebar-agents .side-needs-you');
     assert.ok(needsYou && needsYou.querySelector('.agent-row[data-agent="blocked-and-done"]'),
         'a waiting agent must render in the "Needs you" cluster');
-    assert.ok(!finished, 'a row already claimed by "Needs you" must not also spawn a "Finished" cluster');
+    assert.equal(document.querySelectorAll('#sidebar-agents .agent-row[data-agent="blocked-and-done"]').length, 1,
+        'a row already claimed by "Needs you" must not also render in its folder group');
 });
 
-// --- CMX-377: the mockup's group order — Pinned (if any), then per-project, then
-// Finished last -----------------------------------------------------------------
+// --- CMX-377 / CMX-35: the group order — Pinned (if any), Needs you, then the folders --
 
 // CMX-377 round 2 rework: extended with the no-refetch WIRING assertion that
 // used to live on the retired .ar-role WIRING test (see this file's "1d"
@@ -864,20 +855,17 @@ test('CMX-377: the orchestrator session renders inside a "Pinned" cluster, lifte
     }
 });
 
-test('CMX-377: "Finished" renders AFTER the project groups in the actual DOM order, not before them', () => {
+test('CMX-35: "Needs you" renders BEFORE the folder groups in the actual DOM order', () => {
     nav.renderSidebarAgents([
-        agent('done-one', { window_id: '@2', session_status: 'idle', done: true, cwd: '/home/x/proj-b' }),
+        agent('blocked-one', { window_id: '@2', session_status: 'waiting', cwd: '/home/x/proj-b' }),
         agent('plain-one', { window_id: '@3', session_status: 'idle', cwd: '/home/x/proj-b' }),
-        agent('plain-two', { window_id: '@4', session_status: 'idle', cwd: '/home/x/proj-b' }),
     ]);
     const host = document.getElementById('sidebar-agents');
-    const finishedIdx = [...host.children].findIndex(el => el.classList.contains('side-finished'));
+    const needsIdx = [...host.children].findIndex(el => el.classList.contains('side-needs-you'));
     const groupIdx = [...host.children].findIndex(el => el.classList.contains('side-group'));
-    assert.ok(finishedIdx >= 0, 'no "Finished" cluster rendered');
-    assert.ok(groupIdx >= 0, 'no project group rendered (fixture needs 2+ sessions sharing a project)');
-    assert.ok(finishedIdx > groupIdx,
-        `"Finished" (child ${finishedIdx}) must come AFTER the project groups (child ${groupIdx}) in DOM order — ` +
-        'the mockup\'s group order is Pinned, per-project, then Finished last');
+    assert.ok(needsIdx >= 0, 'no "Needs you" cluster rendered');
+    assert.ok(groupIdx >= 0, 'no folder group rendered');
+    assert.ok(needsIdx < groupIdx, '"Needs you" must sit above the folder groups');
 });
 
 // --- CMX-377: New session button + jump-to search, ahead of nav (rendered-DOM,

@@ -211,7 +211,7 @@ def index():
 # API: Agents
 # ---------------------------------------------------------------------------
 
-def _dispatched_wids(windows: dict[str, str]) -> set[str]:
+def _dispatched_wids(windows: dict[str, str], runs: list[dict] | None = None) -> set[str]:
     """The window ids the DISPATCHER owns — the SAME authority the Telegram bridge uses.
 
     :func:`chela.telegram.reconcile.dispatched_window_ids` reads the ``runs`` table (the
@@ -231,7 +231,49 @@ def _dispatched_wids(windows: dict[str, str]) -> set[str]:
     from chela.telegram.reconcile import dispatched_window_ids
 
     live = {wid: name for name, wid in windows.items()}
-    return dispatched_window_ids(live_windows=live)
+    return dispatched_window_ids(runs=runs, live_windows=live)
+
+
+def _run_cards(windows: dict[str, str], dispatched: set[str], runs: list[dict]) -> dict[str, dict]:
+    """``{window_id: run}`` for every DISPATCHED window: which run it belongs to, and
+    whether it is that run's agent or its judge (CMX-35 — the sidebar folds the two into
+    ONE row per run, labelled ``CMX-N · <title>``).
+
+    Only ids already in ``dispatched`` are considered — that set is the epoch- and
+    name-checked authority (:func:`_dispatched_wids`); this only says WHICH row owns each
+    one. ``runs`` is newest first (``list_runs``), so a recycled id resolves to the newest
+    row that recorded it. A ``claimed`` row with no id yet is matched by its recorded
+    ``window_name``, the same spawn-gap rule ``dispatched_window_ids`` applies.
+    """
+    out: dict[str, dict] = {}
+
+    def _card(row: dict, role: str) -> dict:
+        return {
+            "task_id": row.get("task_id"),
+            "title": row.get("title") or "",
+            "status": row.get("status"),
+            "judge_state": row.get("judge_state") or "",
+            "role": role,
+            "pr_url": row.get("pr_url"),
+        }
+
+    for row in runs:
+        wid = str(row.get("window_id") or "").strip()
+        if not wid and row.get("status") == "claimed":
+            wid = windows.get(str(row.get("window_name") or "").strip(), "")
+        if wid in dispatched and wid not in out:
+            out[wid] = _card(row, "agent")
+        jwid = str(row.get("judge_window_id") or "").strip()
+        if jwid in dispatched and jwid not in out:
+            out[jwid] = _card(row, "judge")
+    return out
+
+
+def _is_home(cwd: str) -> bool:
+    try:
+        return os.path.realpath(cwd) == os.path.realpath(os.path.expanduser("~"))
+    except (OSError, ValueError):
+        return False
 
 
 def _needs_human(wid: str, sess_status: str | None, dispatched: bool) -> bool:
@@ -274,7 +316,15 @@ def api_agents():
     _sync_shares()   # CMX-434: shares hosted by `chela collab` survive our restarts
     windows = discovery.get_all_windows()
     tasks = scheduler.list_tasks()
-    dispatched = _dispatched_wids(windows)
+    # One read of the runs table per request: it feeds the dispatched set, each window's
+    # run card (CMX-35) and the PR states below.
+    try:
+        runs = dispatcher.list_runs()
+    except Exception:
+        log.exception("api_agents: list_runs failed; no run cards, PR state falls back to gh")
+        runs = None
+    dispatched = _dispatched_wids(windows, runs)
+    run_cards = _run_cards(windows, dispatched, runs or [])
 
     # Build set of agents with enabled schedules + schedule summary
     scheduled_agents = {t.agent_name for t in tasks if t.enabled}
@@ -298,11 +348,7 @@ def api_agents():
     # CMX-41: a transcript's pr-link outlives its PR (Claude Code keeps re-writing it after
     # the merge). Read the run rows ONCE per request for their terminal pr_state; anything
     # else goes through pr_status's cached gh lookup, never one gh spawn per pane per tick.
-    try:
-        pr_run_states = pr_status.runs_pr_states(dispatcher.list_runs())
-    except Exception:
-        log.exception("api_agents: list_runs failed; PR state falls back to gh")
-        pr_run_states = {}
+    pr_run_states = pr_status.runs_pr_states(runs)
 
     agents = []
     for name, window_id in windows.items():
@@ -371,12 +417,18 @@ def api_agents():
             # pops out the moment it wants a human. Both are facts about the window, so
             # they ship on every row — the *behaviour* they drive is the client's.
             "dispatched": is_dispatched,
+            # CMX-35: the run this dispatched window belongs to, and whether it is the
+            # run's agent or its judge. None for every window the dispatcher does not own.
+            "run": run_cards.get(window_id),
             "needs_human": needs_human,
             "done": done,
             "liveness": liveness,
             "health": health,
             "status": sess_status,
             "cwd": sess_cwd,
+            # CMX-35: a session sitting in the home dir has no project — the sidebar's
+            # "Other" group. Decided here, where the home dir is known.
+            "cwd_is_home": bool(sess_cwd) and _is_home(sess_cwd),
             # The live session's own name — after a move to a background session, the
             # name peers must address (ListAgents/SendMessage), not the window's.
             "session_name": entry["name"] if entry else None,

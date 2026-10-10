@@ -98,10 +98,11 @@ function _samePath(a, b) {
 // Launch `claude` (default) or a plain shell in `path`. Dedup: a claude launch
 // into a dir that already has a live claude agent focuses that pane on the wall
 // rather than spawning a duplicate. Plain-shell launches always spawn (you may
-// want several shells in one repo).
+// want several shells in one repo). `fresh` (a sidebar group's "+", CMX-35) skips
+// the dedup too: that "+" asks for ANOTHER session in a folder that already has one.
 async function launchProject(path, opts) {
     opts = opts || {};
-    if (!opts.shell) {
+    if (!opts.shell && !opts.fresh) {
         const existing = (_agentsCache || []).find(a => a.claude_running && _samePath(a.cwd, path));
         if (existing) {
             if (typeof focusPaneByWid === 'function') focusPaneByWid(existing.window_id);

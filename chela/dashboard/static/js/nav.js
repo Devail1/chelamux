@@ -11,6 +11,7 @@ import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg
 import { refresh } from './main.js';
 import { refreshCostTab } from './usage.js';
 import { resolveWindowId } from './windowid.js';
+import { DISPATCHED_KEY, groupSidebar, isArchivable, moveGroup, primaryWindow, runLabel, runState } from './sidebarmodel.js';
 
 // ---------------------------------------------------------------------------
 // Sidebar + canvas navigation (replaces the old tab bar)
@@ -264,25 +265,78 @@ function _agentLabel(a) {
     return a ? a.name : '';
 }
 
-// Collapsed-group state persists in localStorage — the list rebuilds on every
-// tick, so DOM-only state would be lost.
-function _collapsedGroups() {
-    try { return new Set(JSON.parse(localStorage.getItem('chela_grp_collapsed') || '[]')); }
-    catch { return new Set(); }
+// --- Per-viewer sidebar state (CMX-35) ---------------------------------------
+// Collapsed groups, the group order (Move up / Move down), the archived rows and the
+// "show archived" toggle are this VIEWER's, so they live in localStorage — and every
+// read and write is wrapped: a private window, blocked site data or a throwing
+// accessor must leave a sidebar that still renders (just one that forgets).
+const SB_COLLAPSED_KEY = 'chela_grp_collapsed';
+const SB_ORDER_KEY = 'chela_sb_group_order';
+const SB_ARCHIVED_KEY = 'chela_sb_archived';
+const SB_SHOW_ARCHIVED_KEY = 'chela_sb_show_archived';
+
+// `mem` is the session-only stand-in, used ONLY while storage throws: the list
+// rebuilds on every tick, so without it a click on a blocked-storage page would undo
+// itself on the next render. When storage works, storage is the whole truth.
+function _lsRead(key, mem) {
+    try { return localStorage.getItem(key); }
+    catch { return mem; }
 }
-function toggleGroup(name) {
+function _lsList(key, mem) {
+    const raw = _lsRead(key, mem == null ? null : JSON.stringify(mem));
+    try {
+        const v = JSON.parse(raw || '[]');
+        return Array.isArray(v) ? v : [];
+    } catch { return []; }
+}
+function _lsSet(key, value) {
+    try { localStorage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value)); }
+    catch { /* storage unavailable — the in-memory copy carries it for this session */ }
+}
+
+let _memCollapsed = null;
+function _collapsedGroups() { return new Set(_lsList(SB_COLLAPSED_KEY, _memCollapsed)); }
+function _saveCollapsed(s) {
+    _memCollapsed = [...s];
+    _lsSet(SB_COLLAPSED_KEY, _memCollapsed);
+}
+function toggleGroup(key) {
     const s = _collapsedGroups();
-    if (s.has(name)) s.delete(name); else s.add(name);
-    localStorage.setItem('chela_grp_collapsed', JSON.stringify([...s]));
+    if (s.has(key)) s.delete(key); else s.add(key);
+    _saveCollapsed(s);
     renderSidebarAgents(_agentsCache || []);
 }
 
-// One richer agent row (CMX-377 row format: status mark · title, then a second
-// line "<state> · <ctx%> ctx", with the relative time right-aligned — the
-// approved mockup's `renderVals()` row shape). onclick reads data-agent
-// (handler is on the row, so `this` is the row no matter which child was
-// clicked).
-function _agentRowHtml(a) {
+let _memOrder = null;
+function _groupOrder() { return _lsList(SB_ORDER_KEY, _memOrder); }
+let _memArchived = null;
+function _archivedSet() { return new Set(_lsList(SB_ARCHIVED_KEY, _memArchived)); }
+function _saveArchived(s) {
+    _memArchived = [...s];
+    _lsSet(SB_ARCHIVED_KEY, _memArchived);
+}
+let _memShowArchived = '0';
+function _showArchived() { return _lsRead(SB_SHOW_ARCHIVED_KEY, _memShowArchived) === '1'; }
+
+// The last render's model — what the group/row menus act on (they open off a click on
+// what is on screen, so they read the same grouping the screen was drawn from).
+let _sb = { groups: [], pinned: [], needsYou: [], items: new Map() };
+
+// An item's display label: a run reads `CMX-37 · <title>`; a window reads its CMX-62
+// label (manual name > Claude's title > window name).
+function _itemLabel(it) {
+    return it.kind === 'run' ? runLabel(it) : _agentLabel(it.agent);
+}
+
+// One sidebar row. `a` is the window the row opens; `o` overrides what a plain window
+// row would show — a run row passes its own label, state and tooltip, and a `badge`
+// slot (empty here) is where later parts hang a PR / judge-progress badge (CMX-66/67).
+//
+// The row face is the desktop's: a status SHAPE, then ONE line — the title, truncated
+// with an ellipsis — and the state word kept small and dim at the right. ctx% and the
+// window id stay in the row (.ar-sub, CMX-230/CMX-417) but only show on hover, or when
+// the context is running hot; the relative time moved into the tooltip.
+function _agentRowHtml(a, o = {}) {
     const dot = agentDotColor(a);
     const active = a.name === _detailAgent ? ' active' : '';
     // `done` (issue #475): a REGULAR session that is idle AND has an assistant
@@ -291,9 +345,9 @@ function _agentRowHtml(a) {
     // already 'grey' (app.py gates it on session_status !== 'busy' && !needs_human),
     // so this never fights the working/waiting colours.
     const done = isDone(a);
-    const stWord = done ? 'done' : (_AGENT_STATUS_WORD[dot] || 'idle');
-    const stCls = done ? 'done' : (_SIDEBAR_DOT_CLASS[dot] || 'idle');
-    const label = _agentLabel(a);
+    const stWord = o.stWord || (done ? 'done' : (_AGENT_STATUS_WORD[dot] || 'idle'));
+    const stCls = o.stCls || (done ? 'done' : (_SIDEBAR_DOT_CLASS[dot] || 'idle'));
+    const label = o.label || _agentLabel(a);
 
     // Open-on-wall cue: a click on this row RESTORES a hidden pane vs merely
     // FOCUSES one already visible — worth knowing before you click. True only when
@@ -305,61 +359,101 @@ function _agentRowHtml(a) {
 
     const c = a.window_id ? _ctxByWid[a.window_id] : null;
     let ctxChip = '';
+    let ctxHot = false;
     if (c && c.used_pct != null) {
         const p = Math.round(c.used_pct);
         const cls = p > 80 ? 'danger' : p > 60 ? 'warn' : '';
+        ctxHot = !!cls;
         ctxChip = `<span class="ar-ctx ${cls}" title="context ${p}%">${p}%</span>`;
     }
 
-    // CMX-377: the row's right-aligned relative time. recap_ts is the only
-    // per-agent timestamp the API carries (the same field the pre-restyle row
-    // used for its inline age) — reused here as the row's "ago", not
-    // re-derived. Absent (no recap yet) -> no time shown, not a fabricated one.
+    // CMX-377: the row's relative time. recap_ts is the only per-agent timestamp the
+    // API carries. Absent (no recap yet) -> no time shown, not a fabricated one.
     let age = '';
     if (a.recap_ts) age = ageStr((Date.now() - new Date(a.recap_ts)) / 1000).replace(' ago', '');
     const ago = age ? `<span class="ar-ago">${escHtml(age)}</span>` : '';
 
-    // Second line: "<state> · <ctx%> ctx" — .ar-state and .ar-ctx keep their
-    // exact pre-existing markup (tests/dashboard_scale_nav_a11y.test.mjs's
-    // non-hue-cue GUARD 3b/GUARD 4 assert those two spans verbatim), just
-    // recomposed together instead of ctx% living on the top line.
-    // CMX-417: then the tmux window id ("idle · 74% ctx · @32"), so a row can be
-    // matched to the `@N` that `chela peek`, inbox notices and peer messages use
-    // without opening the pane. Same id the pane footer shows (_ctxBarHTML).
+    // "<state> · <ctx%> ctx · @N" — .ar-state and .ar-ctx keep their exact markup
+    // (tests/dashboard_scale_nav_a11y.test.mjs's non-hue-cue GUARD 3b/GUARD 4), and the
+    // text reads the same as before; the ctx and id parts are wrapped only so the CSS
+    // can keep them off the one-line row face until hover. CMX-417: the tmux window id
+    // is the `@N` that `chela peek`, inbox notices and peer messages use.
     const sub = `<span class="ar-state ${stCls}">${stWord}</span>`
-        + (ctxChip ? ` · ${ctxChip} ctx` : '')
-        + (a.window_id ? ` · <span class="ar-wid">${escHtml(a.window_id)}</span>` : '');
+        + (ctxChip ? `<span class="ar-more ar-ctx-part${ctxHot ? ' hot' : ''}"> · ${ctxChip} ctx</span>` : '')
+        + (a.window_id ? `<span class="ar-more"> · <span class="ar-wid">${escHtml(a.window_id)}</span></span>` : '');
 
     const type = _agentType(a);
-    // Whatever CMX-146's ai_title / the occasional away_summary recap used to
-    // add as extra lines now rides the row's own tooltip instead of a third
-    // rendered line, so the data is not silently lost by the 2-line row format
-    // the mockup specifies — just no longer competing for vertical space.
+    // CMX-146's ai_title / the away_summary recap ride the row's tooltip.
     const extra = [a.ai_title, a.recap].filter(Boolean).join(' — ');
     // CMX-62: when Claude's title leads the row, the short window NAME (the key
     // `chela peek/msg` and the bindings use) is the secondary label — on hover.
-    const key = label !== a.name ? a.name : '';
-    const head = [label + (key ? ` (${key})` : ''), a.window_id].filter(Boolean).join(' · ');
-    const rowTitle = extra ? `${head}\n${extra}` : head;
+    const key = !o.label && label !== a.name ? a.name : '';
+    const head = o.titleHead || [label + (key ? ` (${key})` : ''), a.window_id].filter(Boolean).join(' · ');
+    const tail = [o.titleExtra || extra, age ? `${age} ago` : ''].filter(Boolean).join('\n');
+    const rowTitle = tail ? `${head}\n${tail}` : head;
 
     const wallSuffix = onWall ? ' — open on the wall' : '';
-    // CMX-377 round 2: the row is exactly status mark · title · "state · ctx" ·
-    // time, per the approved mockup — the .ar-type harness-letter badge, the
-    // .ar-role crown/bot icon, and the .agent-pin favorite star are all dropped
-    // from the row face (verdict on PR #529 round 2). Role is conveyed by
-    // grouping alone (the orchestrator's own Pinned cluster); pinning a cwd to
-    // Launch favorites still lives in the "+" launch menu, its other surface.
-    // _agentType/_typeGlyph/_agentRole are unchanged and still back the dead/
-    // dispatcher recent-session rows (renderRecentSessions), a different,
-    // out-of-mockup surface.
-    return `<div class="agent-row rich${active}${wallCls}" data-agent="${attrEsc(a.name)}" title="${attrEsc(rowTitle + wallSuffix)}"
+    const runAttr = o.runId ? ` data-run="${attrEsc(o.runId)}" oncontextmenu="chela.openRowMenu(event, this.dataset.run)"` : '';
+    const more = o.runId
+        ? `<button class="row-more" title="Run menu" aria-label="Run menu" onclick="event.stopPropagation(); chela.openRowMenu(event, this.closest('.agent-row').dataset.run)">${lucideIcon('ellipsis', 14)}</button>`
+        : '';
+    return `<div class="agent-row rich${active}${wallCls}${o.cls ? ' ' + o.cls : ''}" data-agent="${attrEsc(a.name)}"${runAttr} title="${attrEsc(rowTitle + wallSuffix)}"
         onclick="chela.selectAgent(this.dataset.agent)">
-        <span class="term-status-dot ${stCls}" title="${attrEsc(type)} · ${stWord}"></span>
+        <span class="term-status-dot ${stCls}" title="${attrEsc(o.runId ? 'run' : type)} · ${stWord}"></span>
         <div class="ar-main">
             <span class="agent-row-name"${key ? ` data-key="${attrEsc(key)}" title="${attrEsc(`window: ${key}`)}"` : ''}>${escHtml(label)}</span>
-            <div class="ar-sub">${sub}</div>
+            <div class="ar-sub">${sub}${o.badge || ''}</div>
         </div>
-        ${ago}
+        ${ago}${more}
+    </div>`;
+}
+
+// A dispatched RUN's one row (CMX-35): its agent window and its judge window are ONE
+// row, labelled `CMX-37 · <title>`, showing the RUN's state (working / judging /
+// rework / awaiting review / needs human). A click opens the agent pane (the judge's
+// once the agent has finished); the row menu also offers the judge pane.
+function _runRowHtml(it, extraCls) {
+    const a = primaryWindow(it);
+    const st = runState(it, wantsHuman);
+    const label = runLabel(it);
+    const wins = [it.agent && `agent ${it.agent.name} · ${it.agent.window_id}`,
+        it.judge && `judge ${it.judge.name} · ${it.judge.window_id}`].filter(Boolean).join('\n');
+    return _agentRowHtml(a, {
+        label, stWord: st.word, stCls: st.shape, runId: it.run.task_id,
+        titleHead: `${label} — ${st.word}`, titleExtra: wins,
+        cls: ['run-row', extraCls].filter(Boolean).join(' '),
+    });
+}
+
+function _itemRowHtml(it, archived) {
+    const cls = archived ? 'archived' : '';
+    if (it.kind === 'run') return _runRowHtml(it, cls);
+    return _agentRowHtml(it.agent, cls ? { cls } : {});
+}
+
+// A folder group's header — the desktop's quiet header: dim small folder name, a `>`
+// chevron, and at the right a ⋯ (the group menu, for touch: there is no right-click on
+// a phone) and a `+` (a new session in THIS folder). Right-click opens the same menu.
+function _groupHtml(g, collapsed, archivedKeys) {
+    const isColl = collapsed.has(g.key);
+    const n = g.items.length;
+    const count = g.key === DISPATCHED_KEY ? `<span class="group-count" title="${n} run${n === 1 ? '' : 's'}">${n}</span>` : '';
+    const add = g.cwd
+        ? `<button class="group-add" data-g="${attrEsc(g.key)}" title="New session in ${attrEsc(g.label)}" aria-label="New session in ${attrEsc(g.label)}"
+             onclick="event.stopPropagation(); chela.groupNewSession(this.dataset.g)">${lucideIcon('plus', 14)}</button>`
+        : '';
+    const rows = g.items.map(it => _itemRowHtml(it, archivedKeys.has(it.key))).join('');
+    return `<div class="side-group${isColl ? ' collapsed' : ''}" data-g="${attrEsc(g.key)}">
+        <div class="group-head" data-g="${attrEsc(g.key)}" aria-expanded="${isColl ? 'false' : 'true'}"
+             onclick="chela.toggleGroup(this.dataset.g)" oncontextmenu="chela.openGroupMenu(event, this.dataset.g)">
+            <span class="group-name" title="${attrEsc(g.cwd || g.label)}">${escHtml(g.label)}</span>${count}
+            <span class="group-caret">${lucideIcon('chevron-right', 12)}</span>
+            <span class="group-actions">
+                <button class="group-more" data-g="${attrEsc(g.key)}" title="Group menu" aria-label="${attrEsc(g.label)} menu"
+                    onclick="event.stopPropagation(); chela.openGroupMenu(event, this.dataset.g)">${lucideIcon('ellipsis', 14)}</button>${add}
+            </span>
+        </div>
+        <div class="group-rows">${rows}</div>
     </div>`;
 }
 
@@ -374,95 +468,199 @@ function renderSidebarAgents(agents) {
         return;
     }
 
-    // CMX-377: Pinned — the ONE session holding the decisions-inbox slot
-    // (orchestratorState().wid, the same fact _agentRole already reads for the
-    // crown badge), lifted into its own top cluster — the mockup's "Pinned"
-    // group (its sample data's single Pinned row is literally the orchestrator
-    // session). Reuses the existing orchestrator concept rather than inventing
-    // a new pin feature with its own backend state; "if any" per the brief —
-    // the cluster simply doesn't render when nothing is subscribed.
+    // CMX-35: grouped by PROJECT FOLDER, like the desktop app (sidebarmodel.js). Two
+    // clusters still sit above the folders, because they are about YOU, not a folder:
+    // Pinned — the ONE session holding the decisions-inbox slot (the orchestrator,
+    // orchestratorState().wid), and Needs you — rows blocked on a human. Each row shows
+    // in exactly one place. A dispatched run is ONE row, in the "Dispatched" group.
     const orchWid = orchestratorState().wid;
-    const pinned = orchWid ? rows.filter(a => a.window_id === orchWid) : [];
-    const pinnedNames = new Set(pinned.map(a => a.name));
-    const unpinned = rows.filter(a => !pinnedNames.has(a.name));
+    const archived = _archivedSet();
+    const showArchived = _showArchived();
+    const model = groupSidebar(rows, {
+        mode: 'folder', wants: wantsHuman, orchWid, order: _groupOrder(),
+        archived, showArchived, sort: 'name', labelOf: _itemLabel,
+    });
 
-    // Triage: agents waiting on input float into a "Needs you" cluster above the
-    // project groups. Each agent shows in exactly one place — lifted out of its
-    // group while it's blocked, like a starred item. `done` sessions get the same
-    // treatment (issue #475's actual payoff — the badge alone can't be scanned at
-    // a glance the way a cluster can): idle-with-unread-output floats into its own
-    // "Finished" cluster — per the brief's group order, LAST, after the project
-    // groups — so it decays back among them the moment you prompt it again (the
-    // next poll sees a.done go false).
-    const waiting = unpinned.filter(wantsHuman)
-        .sort((a, b) => a.name.localeCompare(b.name));
-    const finished = unpinned.filter(a => !wantsHuman(a) && isDone(a))
-        .sort((a, b) => a.name.localeCompare(b.name));
-    const rest = unpinned.filter(a => !wantsHuman(a) && !isDone(a));
+    // An archived row that came back to life (busy, waiting) or whose window is gone
+    // leaves the archive — so it is not silently re-hidden the next time it settles,
+    // and a recycled @N never inherits an old row's archived flag.
+    const shownArchived = new Set(model.hidden);
+    const prune = [...archived].filter(k => !shownArchived.has(k));
+    if (prune.length) { prune.forEach(k => archived.delete(k)); _saveArchived(archived); }
+
+    const items = new Map();
+    for (const it of [...model.pinned, ...model.needsYou, ...model.groups.flatMap(g => [...g.items, ...g.archived])]) {
+        items.set(it.key, it);
+    }
+    _sb = { ...model, items };
 
     let html = '';
-    if (pinned.length) {
+    if (model.pinned.length) {
         html += `<div class="side-triage side-pinned">
-            <div class="triage-head">Pinned <span class="triage-count">${pinned.length}</span></div>
-            ${pinned.map(_agentRowHtml).join('')}
+            <div class="triage-head">Pinned <span class="triage-count">${model.pinned.length}</span></div>
+            ${model.pinned.map(it => _itemRowHtml(it, false)).join('')}
         </div>`;
     }
-    if (waiting.length) {
-        html += `<div class="side-triage">
-            <div class="triage-head">Needs you <span class="triage-count">${waiting.length}</span></div>
-            ${waiting.map(_agentRowHtml).join('')}
+    if (model.needsYou.length) {
+        html += `<div class="side-triage side-needs-you">
+            <div class="triage-head">Needs you <span class="triage-count">${model.needsYou.length}</span></div>
+            ${model.needsYou.map(it => _itemRowHtml(it, false)).join('')}
         </div>`;
     }
-
-    // Partition the rest by project (cwd basename). A project earns a collapsible
-    // group header only when 2+ sessions share it; lone sessions render as plain
-    // rows (their label is already the repo name, so a header would just repeat
-    // it). Entries — single rows and groups alike — interleave alphabetically by
-    // project so the order is stable as sessions come and go.
-    const byProj = {};
-    rest.forEach(a => { const k = _agentProject(a) || '~other'; (byProj[k] = byProj[k] || []).push(a); });
     const collapsed = _collapsedGroups();
-
-    const entries = Object.keys(byProj).map(k => {
-        const list = byProj[k].sort((a, b) => _agentLabel(a).localeCompare(_agentLabel(b)));
-        // ~other holds cwd-less shells; never collapse them into a "other" group —
-        // render each as its own row.
-        const grouped = list.length >= 2 && k !== '~other';
-        return { key: k, list, grouped, sortKey: grouped ? k : _agentLabel(list[0]) };
-    });
-    // Explode the ~other bucket into individual single-row entries.
-    const flatEntries = [];
-    for (const e of entries) {
-        if (e.key === '~other') e.list.forEach(a => flatEntries.push({ list: [a], grouped: false, sortKey: _agentLabel(a) }));
-        else flatEntries.push(e);
+    for (const g of model.groups) html += _groupHtml(g, collapsed, shownArchived);
+    if (model.hidden.length || showArchived) {
+        const n = model.hidden.length;
+        html += `<button class="side-archived-toggle" onclick="chela.toggleShowArchived()">${
+            showArchived ? 'Hide archived' : `Show archived (${n})`}</button>`;
     }
-    flatEntries.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
-
-    for (const e of flatEntries) {
-        if (!e.grouped) { html += e.list.map(_agentRowHtml).join(''); continue; }
-        const isColl = collapsed.has(e.key);
-        const working = e.list.filter(a => agentDotColor(a) === 'green').length;
-        html += `<div class="side-group${isColl ? ' collapsed' : ''}">
-            <div class="group-head" data-g="${attrEsc(e.key)}" onclick="chela.toggleGroup(this.dataset.g)">
-                <span class="group-caret">▾</span>
-                <span class="group-name" title="${attrEsc(e.key)}">${escHtml(e.key)}</span>
-                ${working ? `<span class="group-dot working" title="${working} working"></span>` : ''}
-                <span class="group-count">${e.list.length}</span>
-            </div>
-            <div class="group-rows">${e.list.map(_agentRowHtml).join('')}</div>
-        </div>`;
-    }
-
-    // Finished renders LAST (brief's group order: Pinned, then per-project, then
-    // Finished) — after the project groups, not ahead of them.
-    if (finished.length) {
-        html += `<div class="side-triage side-finished">
-            <div class="triage-head">Finished <span class="triage-count">${finished.length}</span></div>
-            ${finished.map(_agentRowHtml).join('')}
-        </div>`;
-    }
-
     host.innerHTML = html;
+}
+
+// --- The group menu (CMX-35) -------------------------------------------------
+// Right-click a group header, or tap its ⋯ (phones have no right-click). Grouped by
+// dividers like the desktop's: New session · Move up / Move down · Collapse all /
+// Expand all · Archive all (N).
+//
+// "Archive all" HIDES rows, it never kills a window: it hides the group's FINISHED rows
+// (a `done` session, a window with no Claude left in it, a settled run — see
+// sidebarmodel.isArchivable) from the sidebar, reversibly ("Show archived" at the foot
+// of the list, and "Unarchive" here). A row that is working, blocked on you, the
+// orchestrator or a judge mid-battery is never archived, and an archived row that wakes
+// up comes back on its own.
+
+function _menuEl(id) {
+    let m = document.getElementById(id);
+    if (!m) {
+        m = document.createElement('div');
+        m.id = id;
+        m.className = 'popover side-menu';
+        m.setAttribute('role', 'menu');
+        m.style.display = 'none';
+        document.body.appendChild(m);
+    }
+    return m;
+}
+
+function _menuItem(label, action, { disabled = false } = {}) {
+    return `<div class="popover-item${disabled ? ' disabled' : ''}" role="menuitem"
+        ${disabled ? 'aria-disabled="true"' : `data-act="${attrEsc(action)}"`}>${escHtml(label)}</div>`;
+}
+
+const _SEP = '<div class="popover-sep"></div>';
+
+function _openMenu(m, ev, html, onAct) {
+    if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+    hideSideMenus();
+    m.innerHTML = html;
+    m.onclick = e => {
+        const el = e.target.closest('[data-act]');
+        e.stopPropagation();
+        if (!el) return;
+        hideSideMenus();
+        onAct(el.dataset.act);
+    };
+    m.style.display = 'block';
+    const anchor = (ev && ev.currentTarget && ev.currentTarget.getBoundingClientRect) ? ev.currentTarget : null;
+    if (anchor) placePopover(m, anchor, { gap: 4 });
+    setTimeout(() => document.addEventListener('click', hideSideMenus, { once: true }), 0);
+}
+
+function hideSideMenus() {
+    for (const id of ['group-menu', 'row-menu']) {
+        const m = document.getElementById(id);
+        if (m) m.style.display = 'none';
+    }
+}
+
+function _archivableIn(g) {
+    const orchWid = orchestratorState().wid;
+    return g.items.filter(it => isArchivable(it, { wants: wantsHuman, orchWid }));
+}
+
+function openGroupMenu(ev, key) {
+    const groups = _sb.groups;
+    const i = groups.findIndex(g => g.key === key);
+    if (i < 0) return;
+    const g = groups[i];
+    const archivedHere = new Set(g.archived.map(it => it.key));
+    const n = _archivableIn(g).filter(it => !archivedHere.has(it.key)).length;
+    let html = '';
+    if (g.cwd) html += _menuItem('New session', 'new') + _SEP;
+    html += _menuItem('Move up', 'up', { disabled: i === 0 })
+        + _menuItem('Move down', 'down', { disabled: i === groups.length - 1 })
+        + _SEP
+        + _menuItem('Collapse all', 'collapse-all')
+        + _menuItem('Expand all', 'expand-all')
+        + _SEP
+        + _menuItem(`Archive all (${n})`, 'archive', { disabled: n === 0 });
+    if (g.archived.length) html += _menuItem(`Unarchive all (${g.archived.length})`, 'unarchive');
+    _openMenu(_menuEl('group-menu'), ev, html, act => groupMenuAction(key, act));
+}
+
+// The menu's actions, callable directly (tests and keyboard paths use the same entry).
+function groupMenuAction(key, act) {
+    const groups = _sb.groups;
+    const g = groups.find(x => x.key === key);
+    if (!g) return;
+    if (act === 'new') return groupNewSession(key);
+    if (act === 'up' || act === 'down') {
+        const keys = groups.map(x => x.key);
+        const next = moveGroup(keys, _groupOrder(), key, act === 'up' ? -1 : 1);
+        if (next) { _memOrder = next; _lsSet(SB_ORDER_KEY, next); }
+    } else if (act === 'collapse-all') {
+        _saveCollapsed(new Set([..._collapsedGroups(), ...groups.map(x => x.key)]));
+    } else if (act === 'expand-all') {
+        const keys = new Set(groups.map(x => x.key));
+        _saveCollapsed(new Set([..._collapsedGroups()].filter(k => !keys.has(k))));
+    } else if (act === 'archive') {
+        const s = _archivedSet();
+        _archivableIn(g).forEach(it => s.add(it.key));
+        _saveArchived(s);
+    } else if (act === 'unarchive') {
+        const s = _archivedSet();
+        g.archived.forEach(it => s.delete(it.key));
+        _saveArchived(s);
+    }
+    renderSidebarAgents(_agentsCache || []);
+}
+
+function toggleShowArchived() {
+    _memShowArchived = _showArchived() ? '0' : '1';
+    _lsSet(SB_SHOW_ARCHIVED_KEY, _memShowArchived);
+    renderSidebarAgents(_agentsCache || []);
+}
+
+// `+` on a group header: a NEW session in that group's folder, through the launcher's
+// own spawn path (/api/agents/spawn — `chela spawn` semantics, remote control per
+// Settings). `fresh` skips the launcher's focus-the-existing-agent dedup: the header's
+// `+` exists precisely to open another session where one already runs.
+function groupNewSession(key) {
+    const g = _sb.groups.find(x => x.key === key);
+    if (!g || !g.cwd || typeof launchProject !== 'function') return;
+    return launchProject(g.cwd, { fresh: true });
+}
+
+// A run row's menu: open the agent pane or the judge pane.
+function openRowMenu(ev, runId) {
+    const it = _sb.items.get(`run:${runId}`);
+    if (!it) return;
+    let html = '';
+    if (it.agent) html += _menuItem('Open agent pane', 'agent');
+    html += _menuItem('Open judge pane', 'judge', { disabled: !it.judge });
+    _openMenu(_menuEl('row-menu'), ev, html, act => _openPane(act === 'judge' ? it.judge : it.agent));
+}
+
+// Open (never toggle) a window's pane: unlike a row click (selectAgent), which
+// minimizes a pane that is already open, a menu's "Open … pane" always lands on it.
+function _openPane(w) {
+    if (!w) return;
+    if (TERMINALS_ON && w.window_id && typeof focusPaneByWid === 'function') {
+        if (!isWallVisible()) setTermMode('wall');
+        focusPaneByWid(w.window_id);
+        return;
+    }
+    showAgentDetail(w.name);
 }
 
 // Status colour → human word, for the dot's tooltip.
@@ -2653,8 +2851,8 @@ function closeShortcuts() {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { _closeRecentUndoToast, closeShortcuts, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
+export { _closeRecentUndoToast, closeShortcuts, groupMenuAction, groupNewSession, openGroupMenu, openRowMenu, toggleGroup, toggleShowArchived, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyUpdate, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
+Object.assign(window.chela, { applyUpdate, groupMenuAction, groupNewSession, hideSideMenus, openGroupMenu, openRowMenu, toggleShowArchived, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });

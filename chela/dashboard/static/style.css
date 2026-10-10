@@ -3412,69 +3412,112 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 .side-item.active .side-item-icon { color: var(--accent); }
 .agent-row .agent-row-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* ---- Triage cluster: Pinned / Needs you / Finished — lifted above (or,
-   for Finished, rendered after) the project groups. CMX-377 round 2: the
+/* ---- Triage clusters: Pinned / Needs you — lifted above the folder groups
+   (CMX-35 retired the Finished cluster: a done row stays in its folder, with
+   the check shape and the word "done"). CMX-377 round 2: the
    bordered, tinted card (amber for Pinned, since it shared Needs-you's
    yellow vocabulary with no override of its own; sky-blue for Finished) is
    gone — the approved mockup's groups are a plain dim label with no box at
    all, same idiom as the plain project .group-head below. No side margin:
    the card used to supply its own padding; a plain label doesn't need it. */
-.side-triage { margin: 2px 0 12px; }
+.side-triage { margin: 2px 0 6px; }
 .triage-head {
-    display: flex; align-items: center; gap: 7px; padding: 3px 6px 6px;
-    font-size: 11px; color: var(--text-dim);
+    display: flex; align-items: center; gap: 4px; padding: 3px 10px; min-height: 26px;
+    font-size: 11.5px; color: var(--text-dim);
 }
-.triage-count {
-    min-width: 16px; text-align: center; padding: 0 5px; border-radius: 999px;
-    font-size: 10px; font-weight: 600; line-height: 16px;
-    background: var(--surface); color: var(--text-dim);
-}
+.triage-count { font-size: 11px; font-variant-numeric: tabular-nums; }
+.triage-count::before { content: '· '; }
 
-/* ---- Project groups: collapsible header with a session count + working-dot
-   rollup. Only emitted when 2+ sessions share a repo. */
-.side-group { margin-bottom: 1px; }
+/* ---- Folder groups (CMX-35): the Claude desktop app's Code sidebar look. A
+   group header is QUIET — dim small folder name, a `>` chevron, and at the right
+   a ⋯ (the group menu; touch has no right-click) and a `+` (new session in this
+   folder). No boxes, no borders, no nesting rule: rows sit under their header
+   with generous vertical rhythm, and only hover paints anything. Colours are
+   chela's own theme tokens, never the desktop's. */
+.side-group { margin-top: 10px; }
 .group-head {
-    display: flex; align-items: center; gap: 6px; padding: 5px 10px;
-    cursor: pointer; border-radius: 7px; font-size: 11px; color: var(--text-dim);
-    transition: background 0.12s, color 0.12s;
+    display: flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; min-height: 26px;
+    cursor: pointer; border-radius: 7px; font-size: 11.5px; color: var(--text-dim);
+    transition: color 0.12s;
+    -webkit-user-select: none; user-select: none;
 }
-.group-head:hover { background: var(--surface); color: var(--text); }
-.group-caret { font-size: 9px; opacity: 0.7; transition: transform 0.15s ease; }
-.side-group.collapsed .group-caret { transform: rotate(-90deg); }
-.side-group.collapsed .group-rows { display: none; }
+.group-head:hover { color: var(--text); }
 .group-name {
-    flex: 1; font-weight: 600; color: var(--text);
+    flex: 0 1 auto; min-width: 0; font-weight: 400;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.group-dot {
-    flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%;
-    background: var(--green); box-shadow: 0 0 5px -1px var(--green);
+/* `· 3` — the Dispatched group's run count. Plain dim text, not a pill. */
+.group-count { flex: 0 0 auto; font-size: 11px; font-variant-numeric: tabular-nums; }
+.group-count::before { content: '· '; }
+/* The chevron points right (`>`) while the group is folded, down while open —
+   and, like the desktop, an open group only shows it on hover. */
+.group-caret { flex: 0 0 auto; display: inline-flex; opacity: 0.8; transition: transform 0.15s ease, opacity 0.12s; transform: rotate(90deg); }
+.side-group:not(.collapsed) .group-caret { opacity: 0; }
+.side-group:not(.collapsed) .group-head:hover .group-caret,
+.side-group:not(.collapsed) .group-head:focus-within .group-caret { opacity: 0.8; }
+.side-group.collapsed .group-caret { transform: none; }
+.side-group.collapsed .group-rows { display: none; }
+.group-actions { margin-left: auto; flex: 0 0 auto; display: inline-flex; align-items: center; gap: 2px; }
+.group-add, .group-more, .row-more {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px;
+    background: transparent; color: var(--text-dim); cursor: pointer;
+    transition: background 0.12s, color 0.12s, opacity 0.12s;
 }
-.group-count {
-    font-size: 10px; font-weight: 600; color: var(--text-dim);
-    padding: 0 6px; border-radius: 999px; background: var(--surface);
-}
-/* Nesting guide so grouped rows read as children of their header. */
-.group-rows { margin-left: 9px; padding-left: 3px; border-left: 1px solid var(--border); }
+.group-add:hover, .group-more:hover, .row-more:hover { background: var(--surface); color: var(--text); }
+.group-add:focus-visible, .group-more:focus-visible, .row-more:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* ⋯ stays visible — dimmer than `+` — so the menu is reachable by tap. On a
+   pointer that can hover it brightens with its header. */
+.group-more { opacity: 0.55; }
+.group-head:hover .group-more, .group-more:focus-visible { opacity: 1; }
+.group-rows { display: flex; flex-direction: column; gap: 1px; margin-top: 2px; }
 
-/* ---- Richer agent rows: name + ctx% on the top line, live state · age · recap
-   beneath, so you read what a session is doing without opening it. */
-.agent-row.rich { align-items: flex-start; gap: 8px; }
-/* CMX-137's on-wall ring + CMX-146's ai-title line made SESSION rows denser — give
-   them more vertical breathing room than the tight 1px .side-list default (nav rows
-   are left untouched). Scoped to the sessions list + its per-project groups. */
-#sidebar-agents { gap: 5px; }
-#sidebar-agents .group-rows { gap: 5px; }
+/* ---- Rows: a status SHAPE, then ONE line — the title, ellipsised — with the
+   state word small and dim at the right. ctx% and the @window id stay in the
+   row's .ar-sub (CMX-230 / CMX-417) but only surface on hover, or when the
+   context is running hot; the relative time lives in the tooltip. */
+.agent-row.rich { align-items: center; gap: 9px; padding: 6px 8px 6px 10px; }
+#sidebar-agents { gap: 1px; }
 /* 10px status dot — matches the collapsed rail (body.sidebar-collapsed .agent-row.rich
    .term-status-dot) so folding doesn't resize it. Scoped to the rich row, so the 8px
    base still holds for the wall pane dots and term pills. */
-.agent-row.rich .term-status-dot { margin-top: 4px; flex: 0 0 auto; width: 10px; height: 10px; }
-.agent-row.rich.active::before { height: 22px; }
-/* Open-on-wall cue: a faint ring on rows whose pane is live on the wall (not docked
-   to the min-dock) — so a click reads as "focus" vs "restore" before you make it.
-   Deliberately quieter than .active (a fill + rail): a 1px inset ring only. */
-.agent-row.on-wall { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 32%, var(--border)); }
-.agent-row.on-wall:hover { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 50%, var(--border)); }
+.agent-row.rich .term-status-dot { flex: 0 0 auto; width: 10px; height: 10px; }
+.agent-row.rich.active::before { height: 16px; }
+.agent-row.rich .ar-main { flex-direction: row; align-items: baseline; gap: 8px; }
+.agent-row.rich .agent-row-name { flex: 1 1 auto; min-width: 0; font-size: 12.5px; }
+.agent-row.rich .ar-sub { flex: 0 0 auto; font-size: 10.5px; gap: 0; opacity: 0.85; }
+.agent-row.rich .ar-state { font-weight: 500; text-transform: none; }
+.agent-row.rich .ar-more { display: none; white-space: nowrap; }
+.agent-row.rich .ar-ctx-part.hot,
+.agent-row.rich:hover .ar-more,
+.agent-row.rich:focus-within .ar-more { display: inline; }
+.agent-row.rich .ar-ago { display: none; }
+/* An idle row is the common case — its word stays out of the way. */
+.agent-row.rich .ar-state.idle { opacity: 0.7; }
+.agent-row.rich.archived { opacity: 0.55; }
+.agent-row.rich .row-more { width: 20px; height: 20px; margin: -2px -4px -2px 0; opacity: 0.55; }
+.agent-row.rich:hover .row-more { opacity: 1; }
+/* Open-on-wall cue: a click on the row RESTORES a hidden pane vs merely FOCUSES
+   one already visible. A faint fill, not a ring — no borders around rows. */
+.agent-row.on-wall { background: color-mix(in srgb, var(--surface) 55%, transparent); }
+/* "Show archived (N)" — the reversible half of a group's "Archive all". */
+.side-archived-toggle {
+    align-self: flex-start; margin: 10px 0 2px 10px; padding: 2px 0; border: 0; background: none;
+    color: var(--text-dim); font: inherit; font-size: 11px; cursor: pointer;
+}
+.side-archived-toggle:hover { color: var(--text); text-decoration: underline; }
+/* A compact menu, dividers between action groups (.popover-sep). */
+.side-menu { min-width: 168px; }
+.side-menu .popover-item { padding: 6px 10px; }
+.side-menu .popover-item.disabled { opacity: 0.45; cursor: default; }
+.side-menu .popover-item.disabled:hover { background: transparent; color: inherit; }
+/* Judging (a dispatched run's judge is testing it) — a diamond, its own
+   silhouette next to working's dot, waiting's triangle, idle's ring, done's check. */
+.term-status-dot.judging {
+    border-radius: 1px; clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
+    background: var(--ok-sky); box-shadow: none;
+}
+
 /* Window-type cue (recent/dispatcher rows only — CMX-377 round 2 dropped it
    from the live agent row face; see nav.js's _agentRowHtml comment). A GLYPH,
    never colour alone, so it still reads desaturated. */
@@ -3609,7 +3652,9 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     body.sidebar-collapsed .triage-head,
     body.sidebar-collapsed .agent-row .ar-main,
     body.sidebar-collapsed .agent-row .recent-resume,
-    body.sidebar-collapsed .agent-row .recent-dismiss { display: none; }
+    body.sidebar-collapsed .agent-row .recent-dismiss,
+    body.sidebar-collapsed .agent-row .row-more,
+    body.sidebar-collapsed .side-archived-toggle { display: none; }
 
     /* The section heads are gone, so a rule stands in for the section break. */
     body.sidebar-collapsed .side-section { margin-bottom: 10px; }
