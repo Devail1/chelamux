@@ -140,6 +140,80 @@ test('Status: Active hides archived rows, All shows both, Archived shows only th
     assert.deepEqual(shown(), ['live']);
 });
 
+test('Status Active: a group whose rows are ALL archived stays, and its menu can Unarchive all', () => {
+    const groupItems = () => [...menu('group-menu').querySelectorAll('.popover-item')].map(i => i.textContent.trim());
+    render([win('live'), win('fin-a', { cwd: '/srv/code/gone', done: true }),
+        win('fin-b', { cwd: '/srv/code/gone', done: true }), win('fin-c', { done: true })]);
+    nav.groupMenuAction('/srv/code/gone', 'archive');
+    nav.groupMenuAction('/srv/code/alpha', 'archive');
+    // Active: the archived rows are hidden, but each group still knows it holds them
+    assert.deepEqual(shown(), ['live']);
+    assert.ok(group('/srv/code/gone'), 'an all-archived group must stay under Active (its Unarchive all is its only way back)');
+    assert.deepEqual(rowsIn('/srv/code/gone'), []);
+    fire(group('/srv/code/gone').querySelector('.group-more'));
+    assert.ok(groupItems().includes('Unarchive all (2)'), `got ${JSON.stringify(groupItems())}`);
+    window.chela.hideSideMenus();
+    fire(group('/srv/code/alpha').querySelector('.group-more'));
+    assert.ok(groupItems().includes('Unarchive all (1)'), `mixed group, got ${JSON.stringify(groupItems())}`);
+    window.chela.hideSideMenus();
+    // and it works FROM Active — the rows come back without switching Status
+    nav.groupMenuAction('/srv/code/gone', 'unarchive');
+    assert.deepEqual(rowsIn('/srv/code/gone').sort(), ['fin-a', 'fin-b']);
+    assert.deepEqual(shown().sort(), ['fin-a', 'fin-b', 'live']);
+});
+
+test('Status Archived: the foot link reads "Hide archived" and leads back to Active', () => {
+    render([win('live'), win('finished', { done: true })]);
+    nav.groupMenuAction('/srv/code/alpha', 'archive');
+    const foot = () => host().querySelector('.side-archived-toggle');
+    assert.equal(foot().textContent, 'Show archived (1)');
+    view('status:archived');
+    assert.equal(foot().textContent, 'Hide archived', 'Status Archived is a showing-archived state');
+    fire(foot());
+    assert.deepEqual(shown(), ['live']);
+    assert.equal(foot().textContent, 'Show archived (1)');
+});
+
+test('model: part 1\'s `showArchived` still means Status All; Show empty keeps a folder only the saved order knows', () => {
+    const rows = [{ name: 'f', window_id: '@95', cwd: '/m/one', done: true }];
+    const archived = new Set(['w:@95']);
+    const keys = m => m.groups.flatMap(g => g.items.map(it => it.key));
+    assert.deepEqual(keys(groupSidebar(rows, { wants, archived, showArchived: true })), ['w:@95']);
+    assert.deepEqual(keys(groupSidebar(rows, { wants, archived })), []);
+    assert.deepEqual(keys(groupSidebar(rows, { wants, archived, showArchived: true, status: 'active' })), [],
+        'an explicit status wins over the legacy flag');
+    const m = groupSidebar([], { wants, showEmpty: true, order: ['/m/gone', '~dispatched'] });
+    assert.deepEqual(m.groups.map(g => [g.key, g.cwd]), [['/m/gone', '/m/gone']],
+        'a saved folder with no session left keeps its header and its "+" folder');
+    assert.deepEqual(groupSidebar([], { wants, order: ['/m/gone'] }).groups, []);
+});
+
+test('model: under EVERY grouping and status, each archived row is in exactly one group\'s `archived`', () => {
+    const a = [
+        { name: 'live', window_id: '@91', cwd: '/m/one', session_status: 'idle', last_activity: ago(3600e3) },
+        { name: 'arch1', window_id: '@92', cwd: '/m/one', done: true, last_activity: ago(3600e3) },
+        { name: 'arch2', window_id: '@93', cwd: '/m/two', done: true, last_activity: ago(2 * DAY) },
+    ];
+    const archived = new Set(['w:@92', 'w:@93']);
+    const custom = { groups: [{ id: 'g1', name: 'G' }], assign: { 'w:@93': 'g1' } };
+    for (const mode of ['date', 'folder', 'state', 'custom', 'none']) {
+        for (const status of ['active', 'all', 'archived']) {
+            const m = groupSidebar(a, { wants, mode, status, archived, custom });
+            const where = `${mode}/${status}`;
+            const archKeys = m.groups.flatMap(g => g.archived.map(it => it.key)).sort();
+            assert.deepEqual(archKeys, ['w:@92', 'w:@93'], `${where}: archived per group`);
+            const itemKeys = m.groups.flatMap(g => g.items.map(it => it.key)).sort();
+            const want = { active: ['w:@91'], all: ['w:@91', 'w:@92', 'w:@93'], archived: ['w:@92', 'w:@93'] }[status];
+            assert.deepEqual(itemKeys, want, `${where}: rendered rows`);
+            assert.deepEqual([...m.hidden].sort(), ['w:@92', 'w:@93'], `${where}: hidden`);
+            // an archived row sits in the group its row would render in
+            for (const g of m.groups) for (const it of g.archived) {
+                if (status !== 'active') assert.ok(g.items.includes(it), `${where}: ${it.key} archived in a different group`);
+            }
+        }
+    }
+});
+
 // --- Environment -------------------------------------------------------------------------
 
 test('Environment: each kind filters its rows; the default is everything except Judges', () => {
