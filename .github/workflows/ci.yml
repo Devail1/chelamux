@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.13"]
     steps:
       # CMX-305: tests/test_judge.py's added-defeat-shape-file numbering guard derives the
       # CMX task number from `git rev-parse --abbrev-ref HEAD` and diffs against

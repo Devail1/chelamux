@@ -94,7 +94,7 @@ The validation prototype this doc required for slice 4 was built (2026-07-26) be
 
 ## Verification (whole workstream)
 
-- Per-slice: pure-logic guards go **RED** under corruption (orchestrator reads the assertions, not the pass count); CI green on 3.11 + 3.12; **manual render pass** on an isolated dashboard instance with a screenshot before merge.
+- Per-slice: pure-logic guards go **RED** under corruption (orchestrator reads the assertions, not the pass count); CI green on 3.11 + 3.13; **manual render pass** on an isolated dashboard instance with a screenshot before merge.
 - Slices 4 & 5 got a **validation prototype/artifact first** (like the direction study), because auto-layout and drag-swap are interaction-novel and un-judgeable by CI. **This paid for itself: both slices were closed without a dispatch** — 5 skipped once scoping found Lock mode already did it, 4 declined once the prototype measured what each geometry actually buys.
 - No regression to transport (ttyd/poll/SSE), minimize-dock, share/wire/orchestrator, or mobile single-mode.
 

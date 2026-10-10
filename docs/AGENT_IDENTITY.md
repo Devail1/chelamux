@@ -335,7 +335,7 @@ a declared unknown, check what the consumer renders for the absent case before c
 ## Verification (whole workstream)
 
 - Per slice: guards go **RED** under corruption (read the assertions, not the pass count);
-  CI green on 3.11 + 3.12; **and** `--color=no` when parsing pytest output yourself, because
+  CI green on 3.11 + 3.13; **and** `--color=no` when parsing pytest output yourself, because
   `FORCE_COLOR=3` is set in the live daemon environment.
 - **Confirm the baseline is green before believing a corruption.** A pre-existing
   environment-dependent failure makes every corruption look caught.
