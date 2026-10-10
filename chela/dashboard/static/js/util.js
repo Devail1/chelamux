@@ -56,6 +56,10 @@ const _LUCIDE = {
     // `chevron-down` — the Wall's collapsible layout toolbar (terminals.js
     // _reflectGridRow, CMX-397); rotated a half-turn while the row is open.
     'chevron-down': '<path d="m6 9 6 6 6-6"/>',
+    // `chevron-right` / `ellipsis` — a sidebar folder group's collapse chevron and its
+    // ⋯ group-menu button (nav.js _groupHtml, CMX-35).
+    'chevron-right': '<path d="m9 18 6-6-6-6"/>',
+    'ellipsis': '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
     // `plus` — the sidebar's "New session" button (CMX-377, index.html).
     'plus': '<path d="M5 12h14"/><path d="M12 5v14"/>',
     // `search` — the sidebar's jump-to-session input (CMX-377, index.html).
