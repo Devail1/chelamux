@@ -37,6 +37,9 @@ REPO = Path(__file__).resolve().parent.parent
 TMUX_BIN = shutil.which("tmux")
 SESSION = "archive-test"
 SID = "aaaaaaaa-1111-2222-3333-444444444444"
+SID2 = "bbbbbbbb-1111-2222-3333-444444444444"
+# captured before any fixture stubs it, for the tests that need the real sweep
+_REAL_DROP = sa.drop_resumed_elsewhere
 
 _DRIVER = """
 import json, sys
@@ -512,3 +515,127 @@ def test_a_failed_unarchive_spawn_refuses_and_KEEPS_the_archive_record(monkeypat
     assert key in sa._load()["sessions"], "a session that was NOT resumed must stay archived"
     assert pinned == [], "nothing may be recorded against a window that never opened"
     assert sa.pending_rebinds("e1") == {}, "no topic is requested for a failed resume"
+
+
+# --- restore fidelity: what the archive records is what the resume restores --------------
+
+def test_archive_records_the_panes_manual_name_flag_and_remote_control_name(facts, monkeypatch,
+                                                                           tmp_path):
+    from chela import sessions
+
+    pane = sessions.Pane("@5", path=str(tmp_path), manual_name=True)
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {"@5": pane})
+    monkeypatch.setattr(sa, "_rc_name", lambda wid, name: f"RC {name}")
+    out = sa.archive_window("@5", orch_wid="@1", dispatched=set())
+    assert out.ok
+    rec = sa._load()["sessions"][f"s:{SID}"]
+    assert rec["manual_name"] is True, "a hand-renamed window is recorded as hand-renamed"
+    assert rec["rc_name"] == "RC proj", "the Remote Control name is recorded for the resume"
+
+
+@pytest.mark.parametrize("pushed,expected", [("My Proj", "My Proj"), (None, None),
+                                             ("(unknown)", "mywin")])
+def test_rc_name_reads_the_windows_remote_control_name(monkeypatch, pushed, expected):
+    from chela import rc_rename
+
+    assert rc_rename.UNKNOWN_PUSHED == "(unknown)"
+    monkeypatch.setattr(rc_rename, "current_name", lambda wid: pushed)
+    assert sa._rc_name("@5", "mywin") == expected
+
+
+@pytest.fixture
+def resume(monkeypatch, tmp_path):
+    """Unarchive in-process: the spawn and the manual-name flag are spied, never real."""
+    from types import SimpleNamespace
+
+    from chela import agent_manager, sessionids
+
+    monkeypatch.setattr(sa, "_STORE", tmp_path / "sidebar-archive.json")
+    monkeypatch.setattr(sa, "_REBINDS", tmp_path / "topic-rebinds.json")
+    monkeypatch.setattr(sa.epoch, "current", lambda: "e1")
+    calls, marked = [], []
+
+    def spawn(cwd, **kw):
+        calls.append({"cwd": str(cwd), **kw})
+        return SimpleNamespace(ok=True, error=None, wid="@9", name=kw.get("name"), cwd=str(cwd))
+    monkeypatch.setattr(spawn_mod, "spawn_window", spawn)
+    monkeypatch.setattr(agent_manager, "mark_manual_name", lambda wid: marked.append(wid))
+    monkeypatch.setattr(sessionids, "set_session_id", lambda wid, sid: None)
+
+    def archive(**fields):
+        key = f"s:{SID}"
+        with sa._LOCK:
+            sa._save({"hidden": {}, "sessions": {key: {
+                "key": key, "session_id": SID, "cwd": str(tmp_path), "name": "mywin",
+                **fields}}})
+        return sa.unarchive_session(key)
+    return SimpleNamespace(archive=archive, calls=calls, marked=marked, cwd=str(tmp_path))
+
+
+def test_unarchive_resumes_under_the_remote_control_name_and_the_manual_name_it_had(resume):
+    out = resume.archive(rc_name="My Proj", manual_name=True)
+    assert out.ok
+    assert resume.calls == [{"cwd": resume.cwd, "command": f"claude --resume {SID}",
+                             "name": "mywin", "remote_control_name": "My Proj"}]
+    assert resume.marked == ["@9"], "a hand-renamed window stays hand-renamed after resume"
+
+
+def test_unarchive_without_remote_control_or_a_manual_name_restores_neither(resume):
+    out = resume.archive(rc_name=None, manual_name=False)
+    assert out.ok
+    assert [c["remote_control_name"] for c in resume.calls] == [None]
+    assert resume.marked == [], "an auto-named window must not come back flagged hand-renamed"
+
+
+def test_drop_resumed_elsewhere_forgets_only_the_sessions_running_again(monkeypatch, tmp_path):
+    monkeypatch.setattr(sa, "_STORE", tmp_path / "sidebar-archive.json")
+    with sa._LOCK:
+        sa._save({"hidden": {"run:CMX-5": {}}, "sessions": {
+            f"s:{SID}": {"key": f"s:{SID}", "session_id": SID},
+            f"s:{SID2}": {"key": f"s:{SID2}", "session_id": SID2}}})
+    asked = []
+    gone = _REAL_DROP(lambda sid: (asked.append(sid), sid == SID)[1])
+    assert gone == [f"s:{SID}"]
+    assert sorted(asked) == sorted([SID, SID2])
+    assert list(sa._load()["sessions"]) == [f"s:{SID2}"], "a session still closed stays archived"
+    assert sa.archived_session_ids() == {SID2}
+
+
+def test_the_archive_route_sweeps_out_a_session_resumed_by_hand(client, monkeypatch):
+    from chela import sessions
+
+    monkeypatch.setattr(sa, "drop_resumed_elsewhere", _REAL_DROP)
+    with sa._LOCK:
+        sa._save({"hidden": {}, "sessions": {
+            f"s:{SID}": {"key": f"s:{SID}", "session_id": SID},
+            f"s:{SID2}": {"key": f"s:{SID2}", "session_id": SID2}}})
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+    monkeypatch.setattr(sessions, "wid_for_session",
+                        lambda sid, pane_map=None: "@3" if sid == SID else None)
+    body = client.app.test_client().get("/api/sidebar/archive").get_json()
+    assert [r["session_id"] for r in body["sessions"]] == [SID2]
+
+
+# --- every refusal on its own: each is the ONLY reason the fixture refuses -----------------
+
+def test_a_window_that_is_not_live_is_refused(facts):
+    out = sa.archive_window("@99", orch_wid="@1", dispatched=set())
+    assert not out.ok and out.status == 404 and facts == [] and _no_record()
+
+
+def test_an_unreadable_working_directory_is_refused(facts, monkeypatch):
+    from chela import discovery
+
+    monkeypatch.setattr(discovery, "get_window_cwd_by_id", lambda wid: None)
+    out = sa.archive_window("@5", orch_wid="@1", dispatched=set())
+    assert not out.ok and "working directory" in out.error
+    assert facts == [] and _no_record(), "nowhere to resume into ⇒ the window must stay open"
+
+
+@pytest.mark.parametrize("fields", [{"session_id": ""}, {"session_id": "x; rm -rf ~"},
+                                    {"cwd": "/nonexistent/chela-archive-test"}])
+def test_unarchive_refuses_an_unusable_record_and_keeps_it(resume, fields):
+    out = resume.archive(**fields)
+    assert not out.ok and out.status == 409
+    assert resume.calls == [], "nothing may be spawned for a record that cannot be resumed"
+    assert f"s:{SID}" in sa._load()["sessions"], "the record stays archived"
