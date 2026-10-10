@@ -414,60 +414,51 @@ function _isManaged(wid) {
 // the two layers can't disagree.
 try { localStorage.removeItem('pc_pane_titles'); } catch (e) { /* private mode */ }
 
-// Names tmux auto-assigns and never a human — a numbered shell, or a bare
-// command tmux follows (`claude`, `bash`, …). Mirrors the server's
-// is_generic_name() so both layers agree on what counts as a fillable blank.
-const _GENERIC_NAMES = new Set(['bash', 'zsh', 'sh', 'fish', 'claude', 'node', 'python', 'python3']);
-function _isGenericName(name) {
-    const n = (name || '').trim();
-    if (!n) return true;
-    return /^shell(-\d+)?$/i.test(n) || _GENERIC_NAMES.has(n.toLowerCase());
+// Claude's session title for a window — its auto-generated `ai_title` (CMX-146),
+// else the live session's name. '' until the first exchange has produced one.
+function _claudeTitle(a) {
+    return (a && (a.ai_title || a.session_name)) || '';
 }
 
-// Friendly display label for a window, shared by agent cards + terminal panes so
-// the two stay aligned. This is a FORMATTER over the real name, not a second name.
-// A name a human chose is intent and is shown verbatim (same rule the server's
-// is_generic_name() applies). A generic name (`shell-2`, or a bare `claude`) is a
-// blank we fill with the most meaningful thing we know, in order: the Claude
-// session name, then the repo (cwd basename — so cards read as the project, not
-// shell-1/claude, and generic siblings in one repo get a trailing index), then
-// the raw name; a literal placeholder only if even that is empty.
+// Display label for a window, shared by the sidebar row + the pane header so the
+// two stay aligned (CMX-62, Liav's order): a MANUAL name (renamed by a human —
+// the server's `manual_name` flag, never guessed from the string) > Claude's
+// session title > the window name. The window name itself is a short stable KEY
+// that never changes to follow the title; it rides along as the secondary label
+// (_paneKeyLabel) whenever the title leads.
 //
 // NB: this only changes what a label RESOLVES to. It must never leak into the
 // wall's `_termSig`, which is keyed on window ids alone — else buildWall reloads
 // every live iframe on a relabel (CMX-67/71).
 function _displayLabel(wid) {
-    const cache = _agentsCache || [];
-    const a = cache.find(x => x.window_id === wid);
-    const name = a ? a.name : wid;
-    if (!_isGenericName(name)) return name;
-    if (a && a.session_name) return a.session_name;
-    const baseOf = x => (x && x.cwd) ? (x.cwd.replace(/\/+$/, '').split('/').pop() || '') : '';
-    const base = baseOf(a);
-    if (base) {
-        // Only siblings that also fall through to their repo (no chosen name, no
-        // session name) share the numbering, so the indices stay contiguous.
-        const siblings = cache.filter(x => _isGenericName(x.name) && !x.session_name && baseOf(x) === base);
-        if (siblings.length > 1) {
-            siblings.sort((x, y) => x.name.localeCompare(y.name));
-            return `${base} ${siblings.findIndex(x => x.window_id === wid) + 1}`;
-        }
-        return base;
-    }
-    return name || 'claude window';
+    const a = (_agentsCache || []).find(x => x.window_id === wid);
+    if (!a) return wid;
+    if (a.manual_name) return a.name;
+    return _claudeTitle(a) || a.name || 'claude window';
+}
+
+// The window name, when the label is NOT already showing it (i.e. the title leads)
+// — '' otherwise, so the secondary slot never repeats the primary.
+function _paneKeyLabel(wid) {
+    const a = _agentByWid(wid);
+    if (!a || !a.name) return '';
+    return _displayLabel(wid) === a.name ? '' : a.name;
 }
 
 function _paneTitle(wid) {
     return _displayLabel(wid);
 }
 
-// Claude Code's own auto-generated session title (CMX-146) — a distinct record
-// from the pane's name (tmux window name / rename), so it rides ALONGSIDE it
-// as a dim subtitle rather than replacing it. '' (not shown) until Claude has
-// written a first `ai-title` record for the session.
+// The dim subtitle under the pane title. Whatever the title did NOT take: the
+// window name when Claude's title leads (CMX-62), else Claude's own `ai_title`
+// (CMX-146) riding alongside a manual/window name. '' (not shown) when there is
+// nothing distinct to add.
 function _paneAiTitle(wid) {
+    const key = _paneKeyLabel(wid);
+    if (key) return key;
     const a = _agentByWid(wid);
-    return (a && a.ai_title) || '';
+    const t = (a && a.ai_title) || '';
+    return t && t !== _displayLabel(wid) ? t : '';
 }
 
 // Rename the WINDOW (not a local label): POST the new name, which renames the tmux
@@ -3998,7 +3989,7 @@ if (window.visualViewport) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

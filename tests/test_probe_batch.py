@@ -405,13 +405,14 @@ def test_without_proc_a_refresh_is_one_ps_not_a_spawn_per_fact(no_proc, tmp_path
             seen.append(list(argv))
             if argv[:2] == ["tmux", "list-windows"]:
                 return subprocess.CompletedProcess(
-                    argv, 0, stdout=f"@1\tpython3\t{cwd}\t{os.getpid()}\n", stderr="")
+                    argv, 0, stdout=f"@1\tpython3\t{cwd}\t{os.getpid()}\t1\n", stderr="")
             return real_run(argv, **kw)
 
         monkeypatch.setattr(sessions.subprocess, "run", run)
         pane = sessions._load_panes()["@1"]
         assert pane.claude_pid == child.pid
         assert pane.direct_claude_pid == child.pid
+        assert pane.manual_name is True       # CMX-62: the @chela_manual_name column
         assert pane.resumed == expect_resumed == SID
         assert pane.started is not None and abs(pane.started - time.time()) < 120
         if shutil.which("lsof"):

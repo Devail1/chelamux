@@ -48,7 +48,10 @@ const AGENTS = [
     // branch is read back exactly — a fixture parked on empty extras let a
     // tooltip that dropped the id on the two-line branch stay green (judge,
     // round 1; docs/defeat_shapes/352b-…).
-    { name: 'alpha', window_id: '@3', online: true, cwd: '/p/alpha',
+    // `manual_name`: alpha's NAME leads its label even though it carries an
+    // ai_title (CMX-62 — a manual rename beats Claude's title), so these tests keep
+    // reading "alpha" as the row/palette label.
+    { name: 'alpha', window_id: '@3', online: true, cwd: '/p/alpha', manual_name: true,
       ai_title: 'Refactor the flux capacitor', recap: 'Tests green, PR open' },
     { name: LONG, window_id: '@32', online: true, cwd: '/p/long' },
 ];

@@ -255,10 +255,10 @@ function updateCtxCache(ctx) {
     _ctxByWid = m;
 }
 
-// Friendly label, shared with the wall panes (_displayLabel): a custom rename
-// wins, else a generic shell-N is relabelled to its repo, else the raw name —
-// so a session reads identically in the sidebar and on its pane title. Falls
-// back to the raw name when terminals.js isn't loaded.
+// Friendly label, shared with the wall panes (_displayLabel): a manual rename
+// wins, else Claude's session title, else the window name (CMX-62) — so a
+// session reads identically in the sidebar and on its pane title. Falls back to
+// the raw name when terminals.js isn't loaded.
 function _agentLabel(a) {
     if (typeof _displayLabel === 'function' && a && a.window_id) return _displayLabel(a.window_id);
     return a ? a.name : '';
@@ -336,7 +336,10 @@ function _agentRowHtml(a) {
     // rendered line, so the data is not silently lost by the 2-line row format
     // the mockup specifies — just no longer competing for vertical space.
     const extra = [a.ai_title, a.recap].filter(Boolean).join(' — ');
-    const head = a.window_id ? `${label} · ${a.window_id}` : label;
+    // CMX-62: when Claude's title leads the row, the short window NAME (the key
+    // `chela peek/msg` and the bindings use) is the secondary label — on hover.
+    const key = label !== a.name ? a.name : '';
+    const head = [label + (key ? ` (${key})` : ''), a.window_id].filter(Boolean).join(' · ');
     const rowTitle = extra ? `${head}\n${extra}` : head;
 
     const wallSuffix = onWall ? ' — open on the wall' : '';
@@ -353,7 +356,7 @@ function _agentRowHtml(a) {
         onclick="chela.selectAgent(this.dataset.agent)">
         <span class="term-status-dot ${stCls}" title="${attrEsc(type)} · ${stWord}"></span>
         <div class="ar-main">
-            <span class="agent-row-name">${escHtml(label)}</span>
+            <span class="agent-row-name"${key ? ` data-key="${attrEsc(key)}" title="${attrEsc(`window: ${key}`)}"` : ''}>${escHtml(label)}</span>
             <div class="ar-sub">${sub}</div>
         </div>
         ${ago}

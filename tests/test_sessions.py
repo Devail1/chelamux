@@ -1220,7 +1220,7 @@ def test_the_pane_map_reads_the_claude_process_not_the_pane(tmp_path, monkeypatc
 
     class Result:
         returncode = 0
-        stdout = "@2\tclaude\t/somewhere/else\t15499\n"
+        stdout = "@2\tclaude\t/somewhere/else\t15499\t\n"
 
     def fake_run(argv, **kw):
         calls.append(argv)
@@ -1246,12 +1246,26 @@ def test_a_pane_with_no_claude_process_degrades_to_the_pane_path(tmp_path, monke
 
     class Result:
         returncode = 0
-        stdout = "@5\tbash\t/home/u\t123\n"
+        stdout = "@5\tbash\t/home/u\t123\t\n"
 
     monkeypatch.setattr(sessions.subprocess, "run", lambda *a, **k: Result())
     pane = sessions._load_panes()["@5"]
     assert pane.claude_pid is None and pane.resumed is None
     assert pane.origin == "/home/u"                # the pane path, as a last resort
+
+
+def test_the_pane_map_reads_the_manual_name_flag_as_exactly_one(tmp_path, monkeypatch):
+    """CMX-62: the ``@chela_manual_name`` column is manual ONLY when it reads ``1`` — an
+    unset option (empty) or a cleared one (``0``) is not, and each window gets its own."""
+    monkeypatch.setattr(sessions, "PROC", tmp_path / "nonexistent")
+
+    class Result:
+        returncode = 0
+        stdout = "@1\tbash\t/a\t1\t1\n@2\tbash\t/b\t2\t0\n@3\tbash\t/c\t3\t\n"
+
+    monkeypatch.setattr(sessions.subprocess, "run", lambda *a, **k: Result())
+    panes = sessions._load_panes()
+    assert {w: p.manual_name for w, p in panes.items()} == {"@1": True, "@2": False, "@3": False}
 
 
 # --- _looks_like_claude: the tolerant match (CMX-160) --------------------------------
@@ -1295,7 +1309,7 @@ def test_the_pane_map_resolves_a_wrapped_claude_end_to_end(tmp_path, monkeypatch
 
     class Result:
         returncode = 0
-        stdout = "@2\tnode14\t/somewhere/else\t15499\n"
+        stdout = "@2\tnode14\t/somewhere/else\t15499\t\n"
 
     monkeypatch.setattr(sessions.subprocess, "run", lambda *a, **k: Result())
     pane = sessions._load_panes()["@2"]

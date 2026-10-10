@@ -372,7 +372,7 @@ def test_correlation_reads_tmux_once_not_the_pane(monkeypatch, tmp_path):
 
     class Result:
         returncode = 0
-        stdout = "@3\tclaude\t/repo\t100\n@4\tbash\t/other\t200\n"
+        stdout = "@3\tclaude\t/repo\t100\t\n@4\tbash\t/other\t200\t\n"
 
     def fake_run(argv, **kw):
         calls.append(argv)

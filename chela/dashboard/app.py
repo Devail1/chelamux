@@ -347,6 +347,9 @@ def api_agents():
             "name": name,
             "online": True,
             "window_id": window_id,
+            # CMX-62: a manual name always wins the display (over Claude's title).
+            # Read off the shared pane snapshot — no extra spawn per poll.
+            "manual_name": agent_manager.is_manual_name(window_id),
             "shared": window_id in _SHARED,
             # 👁 / ⌨ / UNSANDBOXED for the share pill (CMX-403); None when not shared.
             "share_mode": _share_mode(window_id),
@@ -2136,9 +2139,11 @@ def api_agents_rename(wid):
     Keyed by WINDOW ID, never by name: ids are stable across renames and unique,
     while names collide (two repos with the same basename). Body: ``{"name": ...}``.
 
-    The name must survive a reconcile tick, which it does because it isn't generic
-    (agent_manager.is_generic_name) — the auto-namers only fill in blanks. We also
-    lock the window against tmux's own renamers, so a shell-out can't clobber it.
+    A rename here is MANUAL (CMX-62): the window is flagged ``@chela_manual_name``
+    (agent_manager.mark_manual_name), so nothing ever overwrites it — not the
+    reconcile loop's duplicate rule, and not Claude's session title in the display.
+    We also lock the window against tmux's own renamers, so a shell-out can't
+    clobber it.
     """
     body = request.get_json(silent=True) or {}
     name = (body.get("name") or "").strip()
@@ -2166,6 +2171,7 @@ def api_agents_rename(wid):
         return jsonify({"ok": False, "error": err}), 500
 
     agent_manager.lock_window_name(target)
+    agent_manager.mark_manual_name(target)
     log.info("renamed %s: %s -> %s", wid, windows[wid], name)
     return jsonify({"ok": True, "wid": wid, "name": name})
 

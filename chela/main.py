@@ -264,9 +264,9 @@ def cmd_run(args) -> None:
             if executed:
                 log.info("Scheduler executed %d task(s)", executed)
 
-            # Relabel any hand-started/resumed claude window to its cwd basename
-            # (the dashboard Start button already names windows; this catches the
-            # ones launched directly in tmux). Idempotent — only acts on a mismatch.
+            # Keep window names unique + locked: renames ONLY a duplicate (the newer
+            # window gets `-N`; a manual name never moves). A unique name is left
+            # alone (CMX-62). Idempotent — steady state does nothing.
             try:
                 renamed = agent_manager.reconcile_window_names()
                 if renamed:

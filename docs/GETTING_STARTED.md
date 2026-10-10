@@ -55,7 +55,7 @@ The whole fleet runs as **one Claude account** and shares its rate limits.
 ## 3. See what chela sees
 
 Make a tmux session whose **windows are your agents** (the window name is the
-agent's display name):
+agent's short, stable key — what `chela peek`/`msg` and the Telegram bindings use):
 
 ```bash
 tmux new-session -d -s chela -n researcher
@@ -63,6 +63,14 @@ uv run chela status            # lists the windows chela can drive
 ```
 
 > The session is named `chela` by default; override with `CHELA_TMUX_SESSION`.
+
+> **Window names.** chela never rewrites a unique window name; it renames a window only
+> when two share a name (the newer one gets a `-N` suffix). The dashboard **labels** an
+> agent by Claude's session title once it has one, with the window name shown secondary.
+> To pin a label of your own, rename the window **from the dashboard**: that marks it
+> manual (`@chela_manual_name`), so it beats Claude's title and is never the one
+> suffixed. A raw `tmux rename-window` does **not** count as manual: Claude's title
+> still leads the label, and the window can be suffixed if it collides.
 
 ## 4. Start the daemon — this is the engine
 

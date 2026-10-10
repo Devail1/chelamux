@@ -8,7 +8,7 @@ the name back from tmux, so it lands everywhere at once.
 
 Covered here: the endpoint (validation, wid-keying, collisions, the name lock) and
 the Telegram propagation (a bound topic follows its window's name). The other half —
-that a rename SURVIVES the 30s reconcile tick instead of being reverted — lives in
+that a rename SURVIVES the 30s reconcile tick (and wins a duplicate) — lives in
 tests/test_agent_manager_naming.py, which is where the reconciler's tests are.
 
 No live tmux: ``subprocess.run`` is monkeypatched.
@@ -70,8 +70,11 @@ def test_rename_renames_the_tmux_window_and_locks_the_name(client, tmux):
     # Targeted BY WINDOW ID (stable, unique) — never by name, which collides.
     target, name = tmux.renames()[0]
     assert target.endswith(":@2") and name == "billing-fix"
-    # Locked against tmux's own renamers, so a shell-out can't clobber the new name.
-    assert tmux.set_options() == {"allow-rename": "off", "automatic-rename": "off"}
+    # Locked against tmux's own renamers, so a shell-out can't clobber the new name,
+    # and FLAGGED manual (CMX-62) — so nothing (reconcile's duplicate rule, Claude's
+    # title in the display) ever overrides it.
+    assert tmux.set_options() == {"allow-rename": "off", "automatic-rename": "off",
+                                  "@chela_manual_name": "1"}
 
 
 @pytest.mark.parametrize("bad", ["", "   ", "has space", "colon:name", "dot.name", "sl/ash"])
