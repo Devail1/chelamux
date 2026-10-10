@@ -62,7 +62,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from chela import config, envutil, event_log, inbox
+from chela import config, envutil, event_log, inbox, rc_rename
 from chela.config import TMUX_SESSION
 from chela.messenger import messaging_socket_launch_arg
 from chela.personas import ORCHESTRATOR_PROMPT, lease
@@ -273,8 +273,13 @@ def _spawn_orchestrator_window(repo_dir: str) -> str:
     # dashboard/`/new` sessions in chela/spawn.py (never the dispatcher's unattended
     # agents/judges). Reuses spawn's insert-after-leading-`claude` helper rather than
     # a second copy of that discipline.
+    # CMX-39: named after the window, like every other launcher. The window keeps its fixed
+    # WINDOW_NAME (it is how a stale orchestrator window is found and cleared above).
     if config.remote_control_enabled():
-        cmd = _add_remote_control(cmd)
+        rc_cmd = _add_remote_control(cmd, WINDOW_NAME)
+        if rc_cmd != cmd:
+            rc_rename.mark_launched(f"{TMUX_SESSION}:{target}", WINDOW_NAME)
+        cmd = rc_cmd
     # CMX-223: a chela-owned, deterministic peer-messaging socket path, same as the
     # dispatcher's own agents — lets messenger.send_peer address this window without
     # guessing it from our own env. None (path would overflow the sun_path ceiling)

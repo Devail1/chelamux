@@ -181,34 +181,37 @@ def test_spawn_window_falls_back_to_an_unpinned_send_when_the_store_fails(
     assert "--session-id" not in launch
 
 
-# -- _add_remote_control (CMX-375; bare since CMX-34) -------------------------
+# -- _add_remote_control (CMX-375; named after the window since CMX-39) -------
 #
-# CMX-34: the flag goes in BARE. A name froze the claude.ai/desktop sidebar title at
-# launch (`shell-3` for every home-dir window); with no name Claude Code shows its own
-# generated session title. Every assertion below is on the exact argv, so restoring a
-# name argument — any name — turns them RED.
+# CMX-39: the flag carries the WINDOW NAME, so claude.ai / the desktop show exactly the
+# chela window name. (CMX-34's bare flag gave a random `<host>-<words>` name.)
 
-def test_add_remote_control_inserts_a_bare_flag_right_after_the_leading_claude_token():
-    assert spawn._add_remote_control("claude") == "claude --remote-control"
-    assert shlex.split(spawn._add_remote_control("claude")) == ["claude", "--remote-control"]
+def test_add_remote_control_inserts_the_name_right_after_the_leading_claude_token():
+    assert spawn._add_remote_control("claude", "chelamux") == "claude --remote-control chelamux"
+    assert shlex.split(spawn._add_remote_control("claude", "chelamux")) == [
+        "claude", "--remote-control", "chelamux"]
+
+
+def test_add_remote_control_shlex_quotes_the_name():
+    to_send = spawn._add_remote_control("claude", "it's mine")
+    assert shlex.split(to_send) == ["claude", "--remote-control", "it's mine"]
 
 
 def test_add_remote_control_inserts_before_trailing_flags_never_appends():
-    to_send = spawn._add_remote_control("claude -p 'x'")
-    assert to_send == "claude --remote-control -p 'x'"
+    to_send = spawn._add_remote_control("claude -p 'x'", "proj")
+    assert to_send == "claude --remote-control proj -p 'x'"
 
 
 def test_add_remote_control_leaves_a_non_claude_command_untouched():
     command = "bash -c 'echo hi'"
-    assert spawn._add_remote_control(command) == command
+    assert spawn._add_remote_control(command, "proj") == command
 
 
 @pytest.mark.parametrize("command", ["claude 'fix the bug'", "claude mcp list"])
-def test_add_remote_control_never_swallows_a_following_positional_as_the_name(command):
-    """`[name]` is an OPTIONAL value: `claude --remote-control 'fix the bug'` would make
-    the prompt the session name. A command whose next token is a positional is left
-    untouched instead."""
-    assert spawn._add_remote_control(command) == command
+def test_add_remote_control_leaves_a_command_with_a_positional_untouched(command):
+    """CMX-34's positional guard, kept: a command whose next token is a positional (a
+    prompt, a subcommand) is left untouched rather than getting a flag wedged before it."""
+    assert spawn._add_remote_control(command, "proj") == command
 
 
 def test_spawn_window_adds_remote_control_by_default(monkeypatch, tmp_path):
@@ -248,16 +251,17 @@ def test_spawn_window_remote_control_survives_a_command_with_no_wid(monkeypatch,
 
     assert result.ok
     launch = _launch(sent)
-    assert launch == "claude --remote-control"
+    assert launch == f"claude --remote-control {tmp_path.name}"
 
 
-# -- CMX-34: every human-facing launcher sends a BARE --remote-control ----------
+# -- CMX-39: every human-facing launcher names the window from its folder and passes
+#    that exact name as --remote-control <name> -------------------------------------
 #
 # The dashboard launcher, Telegram `/new` and `chela spawn` all funnel into
-# `spawn_window`; these drive each one from its OWN entry point, in both a home-dir cwd
-# (where the old name was the frozen `shell-N` placeholder) and a project cwd (where it
-# was the folder basename), and assert the argv that reaches tmux carries the flag with
-# no value after it. Restore any name argument in `_add_remote_control` → RED. (The
+# `spawn_window`; these drive each one from its OWN entry point, in a home-dir cwd (→ the
+# login) and a project cwd (→ the folder basename), with and without a same-named window
+# already open (→ the `-N` suffix), and assert BOTH the tmux window name and the argv
+# that reaches tmux. Restore `shell-N` as the creation name → RED. (The
 # dashboard/main/newsession modules are imported at the top, never inside a test: the
 # `subprocess.run` stub is process-global, and import-time code calls it.)
 
@@ -293,15 +297,48 @@ def _via_chela_spawn(monkeypatch, cwd):
 
 @pytest.mark.parametrize("launch_via", [_via_dashboard, _via_telegram_new, _via_chela_spawn],
                          ids=["dashboard", "telegram-new", "chela-spawn"])
-@pytest.mark.parametrize("where", ["home", "project"])
-def test_every_launcher_sends_a_bare_remote_control(monkeypatch, tmp_path, launch_via, where):
+@pytest.mark.parametrize("where,taken,expected", [
+    ("home", set(), "operator"),
+    ("home", {"operator"}, "operator-2"),
+    ("project", set(), "chelamux"),
+    ("project", {"chelamux", "chelamux-2"}, "chelamux-3"),
+])
+def test_every_launcher_names_the_window_from_its_folder_and_passes_it_to_remote_control(
+        monkeypatch, tmp_path, launch_via, where, taken, expected):
     home = tmp_path / "home"
     project = home / "projects" / "chelamux"
     project.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOGNAME", "operator")
+    monkeypatch.setenv("USER", "operator")
     sent = _patch_tmux(monkeypatch, wid="@42", remote_control=True)
+    monkeypatch.setattr(spawn.discovery, "get_all_windows",
+                        lambda: {n: f"@{i}" for i, n in enumerate(taken)})
     monkeypatch.setattr(spawn.sessionids, "set_session_id", lambda wid, sid: None)
+    tmux_calls: list[list[str]] = []
+
+    def run(argv, *a, **kw):
+        tmux_calls.append(list(argv))
+        return _Proc("@42")
+    monkeypatch.setattr(spawn.subprocess, "run", run)
 
     launch_via(monkeypatch, home if where == "home" else project)
 
-    assert _rc_value(_launch(sent)) == ["claude", "--remote-control"]
+    new_window = next(c for c in tmux_calls if c[:2] == ["tmux", "new-window"])
+    assert new_window[new_window.index("-n") + 1] == expected
+    assert _rc_value(_launch(sent)) == ["claude", "--remote-control", expected]
+    # ...and the window is marked as a Remote Control session already showing that name,
+    # which is what makes a later rename push `/rename` (chela.rc_rename).
+    assert ["tmux", "set-window-option", "-t", "@42", "@chela_rc_name", expected] in tmux_calls
+
+
+def test_spawn_window_without_remote_control_marks_nothing(monkeypatch, tmp_path):
+    sent = _patch_tmux(monkeypatch, wid="@42", remote_control=False)
+    monkeypatch.setattr(spawn.sessionids, "set_session_id", lambda wid, sid: None)
+    tmux_calls: list[list[str]] = []
+    monkeypatch.setattr(spawn.subprocess, "run",
+                        lambda argv, *a, **kw: tmux_calls.append(list(argv)) or _Proc("@42"))
+
+    assert spawn.spawn_window(tmp_path, command="claude").ok
+    assert "--remote-control" not in _launch(sent)
+    assert not any("@chela_rc_name" in c for c in tmux_calls)

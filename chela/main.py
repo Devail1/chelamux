@@ -46,6 +46,7 @@ from chela import (
     notify,
     okf,
     orchestrator,
+    rc_rename,
     restore,
     roster,
     rooms,
@@ -273,6 +274,12 @@ def cmd_run(args) -> None:
                     log.info("Reconciled window names: %s", ", ".join(renamed))
             except Exception:
                 log.exception("Window-name reconcile failed")
+            # CMX-39: retry every queued `/rename` (a rename that landed while its Remote
+            # Control session was busy or had a draft) — sends only to idle, empty prompts.
+            try:
+                rc_rename.flush_pending()
+            except Exception:
+                log.exception("Remote Control rename flush failed")
 
             now = time.time()
             if stop.stopping:

@@ -219,7 +219,7 @@ def refuses_paste(window_id: str) -> str | None:
     return mode if mode in UNSAFE_INPUT_MODES else None
 
 
-def send_tmux(window_id: str, text: str) -> bool:
+def send_tmux(window_id: str, text: str, *, interrupt: bool = True) -> bool:
     """Send text to a tmux window. Returns True on success.
 
     Uses load-buffer + ``paste-buffer -p`` (bracketed paste) for multi-line text so
@@ -237,6 +237,10 @@ def send_tmux(window_id: str, text: str) -> bool:
     Refusing by returning False — rather than sending — is what lets a durable sender HOLD
     its item: the decisions inbox leaves the event queued and re-tries on a later tick, so
     nothing is lost by waiting for the pane to be prose again.
+
+    ``interrupt=False`` skips the Escape a slash command is normally preceded by — for a
+    caller that already verified the session idle and must never cancel a turn
+    (:mod:`chela.rc_rename`).
     """
     target = f"{config.current_session()}:{window_id}"
     unsafe = refuses_paste(window_id)
@@ -246,7 +250,7 @@ def send_tmux(window_id: str, text: str) -> bool:
                     "EXECUTED as a shell command" if unsafe == "bash" else "stored as memory")
         return False
     try:
-        if text.startswith("/"):
+        if interrupt and text.startswith("/"):
             # Slash commands: send Escape first to interrupt any in-progress
             # response and return Claude Code to the prompt.
             subprocess.run(

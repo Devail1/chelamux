@@ -49,7 +49,7 @@ working / needs you / done / idle) and **Work** (the dispatch board, runs and sc
 plus Settings. Recently shipped:
 
 - **Merges go through the judge.** A PreToolUse hook denies a direct `gh pr merge`; `chela merge` lands only a PR the judge passed on its current head, and `--override` waits for your approval and is audited.
-- **Remote Control per session.** New sessions launch with `--remote-control`, and a Settings switch turns that off without a restart.
+- **Remote Control per session.** New sessions launch with `--remote-control <window name>`, so claude.ai and the desktop show the chela window name (renames follow), and a Settings switch turns that off without a restart.
 - **Themes reach the terminals.** Every theme — including the new `warm` — recolours the live terminals too, not just the chrome.
 - **One-tap New session on a phone.** A "+" beside the menu button opens the New-session menu.
 - **Named peer messages.** chela's messages arrive in a session as *Message from @chela*, not as an anonymous block.

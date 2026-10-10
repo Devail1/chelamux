@@ -71,6 +71,17 @@ uv run chela status            # lists the windows chela can drive
 > manual (`@chela_manual_name`), so it beats Claude's title and is never the one
 > suffixed. A raw `tmux rename-window` does **not** count as manual: Claude's title
 > still leads the label, and the window can be suffixed if it collides.
+>
+> **New windows and Remote Control.** A window chela opens (dashboard launcher, Telegram
+> `/new`, `chela spawn`, a resume) is named after its folder — the cwd basename, or your
+> login for the home dir, with a `-N` suffix if taken — and Claude Code starts with
+> `--remote-control <that name>`, so claude.ai and the Claude desktop show the same name.
+> When chela later renames the window (a dashboard rename, a duplicate's `-N`), it types
+> `/rename <new name>` into the session — but only once the session is idle and its prompt
+> is empty; until then the rename waits, so it never interrupts a turn or touches a draft.
+> The other direction does not sync: a rename made **in the desktop app** never reaches
+> chela (Claude Code exposes no API for it), and chela's next rename overwrites it.
+> Dispatched agents and judges get no Remote Control.
 
 ## 4. Start the daemon — this is the engine
 

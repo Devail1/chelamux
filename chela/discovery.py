@@ -14,8 +14,8 @@ from chela.config import IGNORE_WINDOWS
 log = logging.getLogger(__name__)
 
 # Name of the window ensure_session() creates to anchor a freshly created session
-# (tmux has no windowless session). Matches the wall's shell-N scheme so it reads
-# as an ordinary tile rather than a stray artefact.
+# (tmux has no windowless session). A plain placeholder shell — never a Claude Code
+# session, so (unlike a launcher's window, CMX-39) its name never reaches claude.ai.
 ANCHOR_WINDOW = "shell-1"
 
 
@@ -95,8 +95,8 @@ def ensure_session(session: str | None = None) -> bool:
     call is simply absorbed. Note ``-A -d`` exits NONZERO with no tty ("open terminal
     failed") even on success, so the exit code is ignored — ``has-session`` alone decides.
 
-    A session must own at least one window, so the anchor window is named to match the
-    wall's own scheme (``shell-1``, cf. :func:`chela.spawn.next_shell_name`); passing ``-n``
+    A session must own at least one window, so an anchor window (``shell-1``) is
+    created with it; passing ``-n``
     is itself what pins automatic-rename off, so no follow-up option write is needed.
 
     🧯 CMX-21 — a heal must never resurrect the LIVE server polluted, or on the wrong

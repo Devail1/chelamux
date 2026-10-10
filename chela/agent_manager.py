@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-from chela import config, probecache
+from chela import config, probecache, rc_rename
 from chela.discovery import get_window_id, get_window_cwd, get_all_windows, get_windows_by_id
 from chela.messenger import send_tmux
 
@@ -767,6 +767,54 @@ def is_manual_name(window_id: str) -> bool:
     return out.returncode == 0 and out.stdout.strip() == "1"
 
 
+# What a window name may contain — the same charset the dashboard rename API enforces.
+_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _login() -> str:
+    """The operator's login, sanitized to the window-name charset (``user`` if unknown)."""
+    try:
+        import getpass
+        login = getpass.getuser()
+    except Exception:  # noqa: BLE001 — no passwd entry / no env: a name is still owed
+        login = ""
+    return _NAME_UNSAFE_RE.sub("-", login).strip("-") or "user"
+
+
+def unique_name(base: str, taken: set[str]) -> str:
+    """``base`` if no live window has it, else the first free ``base-2``, ``base-3``, ….
+
+    The ONE collision-safe ``-N`` rule (CMX-39): launchers use it to name a new window
+    (:func:`window_name_for_cwd`) and the reconcile loop uses it to rename a duplicate
+    (:func:`reconcile_window_names`), so a fresh window and a deduplicated one can never
+    pick a suffix by two different schemes.
+    """
+    if base not in taken:
+        return base
+    counter = 2
+    while f"{base}-{counter}" in taken:
+        counter += 1
+    return f"{base}-{counter}"
+
+
+def window_name_for_cwd(cwd: str | os.PathLike, taken: set[str]) -> str:
+    """The name a NEW window opened in ``cwd`` gets: its folder (CMX-39).
+
+    ``<cwd basename>``, or ``<login>`` for the home dir or ``/`` (a basename of ``liav``
+    or ``""`` says nothing), sanitized to ``[A-Za-z0-9_-]`` and made unique with
+    :func:`unique_name`. This name is also what Claude Code's ``--remote-control`` shows
+    in claude.ai / the desktop, and since CMX-62 nothing renames a unique window, so a
+    placeholder (the old ``shell-N``) would be frozen there for the window's lifetime.
+    """
+    real = os.path.realpath(os.path.expanduser(str(cwd)))
+    home = os.path.realpath(os.path.expanduser("~"))
+    if real in (home, os.sep):
+        base = _login()
+    else:
+        base = _NAME_UNSAFE_RE.sub("-", os.path.basename(real)).strip("-") or _login()
+    return unique_name(base, taken)
+
+
 def start_agent(agent_name: str, cmd: str | None = None) -> dict:
     """Start a claude session in the agent's directory."""
     window_id = get_window_id(agent_name)
@@ -874,9 +922,7 @@ def reconcile_window_names() -> list[str]:
                 continue
             if name in NEVER_MANAGE or _orchestrated_name(name):
                 continue
-            new, counter = f"{name}-2", 3
-            while new in taken:
-                new, counter = f"{name}-{counter}", counter + 1
+            new = unique_name(name, taken)
             try:
                 subprocess.run(["tmux", "rename-window", "-t", f"{session}:{wid}", new],
                                capture_output=True, text=True, timeout=5)
@@ -885,6 +931,9 @@ def reconcile_window_names() -> list[str]:
                 continue
             taken.add(new)
             actions.append(f"{name} -> {new}")
+            # CMX-39: a Remote Control session shows the window name in claude.ai / the
+            # desktop — push the new one (queued until the session is idle and empty).
+            rc_rename.request(wid, new)
     return actions
 
 

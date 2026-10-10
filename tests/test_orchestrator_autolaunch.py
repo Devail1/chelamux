@@ -302,9 +302,24 @@ def _spawn_and_capture_launch(monkeypatch) -> str:
 def test_spawn_orchestrator_window_adds_remote_control_by_default(monkeypatch):
     monkeypatch.setattr(autolaunch.config, "remote_control_enabled", lambda: True)
     launch = _spawn_and_capture_launch(monkeypatch)
-    # CMX-34: BARE — no name, so claude.ai shows Claude's own session title. Restore the
-    # `WINDOW_NAME` argument → the flag is followed by it, not by the next flag → RED.
-    assert launch.startswith("claude --remote-control --")
+    # CMX-39: named after the window, like every launcher — claude.ai shows `orchestrator`.
+    assert launch.startswith(f"claude --remote-control {autolaunch.WINDOW_NAME} --")
+
+
+def test_spawn_orchestrator_window_marks_its_remote_control_name(monkeypatch):
+    """CMX-39: marked as a Remote Control session, so a later rename pushes `/rename`."""
+    monkeypatch.setattr(autolaunch.config, "remote_control_enabled", lambda: True)
+    calls: list[list[str]] = []
+
+    def fake_run(argv, *a, **k):
+        calls.append(list(argv))
+        out = "@42\n" if argv[:2] == ["tmux", "new-window"] else ""
+        return SimpleNamespace(stdout=out, returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    autolaunch._spawn_orchestrator_window("/tmp/repo")
+    assert ["tmux", "set-window-option", "-t", f"{autolaunch.TMUX_SESSION}:@42",
+            "@chela_rc_name", autolaunch.WINDOW_NAME] in calls
 
 
 def test_spawn_orchestrator_window_omits_remote_control_when_disabled(monkeypatch):
