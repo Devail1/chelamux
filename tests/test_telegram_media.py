@@ -22,12 +22,17 @@ class _FakeFile:
     leg's read timeout is as observable as getFile's (the CMX-63 timeout was on it).
     """
 
-    def __init__(self, downloads: list, download_timeouts: list | None = None):
+    def __init__(self, downloads: list, download_timeouts: list | None = None,
+                 download_errors: list | None = None):
         self._downloads = downloads
         self._download_timeouts = download_timeouts if download_timeouts is not None else []
+        # Shared, consumed in order across attempts (each attempt gets a fresh File).
+        self._download_errors = download_errors if download_errors is not None else []
 
     async def download_to_drive(self, path, **timeouts) -> None:
         self._download_timeouts.append(timeouts)
+        if self._download_errors:
+            raise self._download_errors.pop(0)
         self._downloads.append(str(path))
         with open(path, "wb") as fh:
             fh.write(b"x")
@@ -270,7 +275,7 @@ class BadRequest(NetworkError):
 class _ScriptedDoc:
     """A Document whose ``get_file`` raises each scripted error in turn, then succeeds."""
 
-    def __init__(self, errors, *, file_name="shot.png", file_size=None):
+    def __init__(self, errors, *, file_name="shot.png", file_size=None, download_errors=()):
         self.file_name = file_name
         self.file_size = file_size
         self.file_unique_id = "doc"
@@ -279,18 +284,32 @@ class _ScriptedDoc:
         self.get_file_calls = 0
         self.timeouts: list[dict] = []
         self.download_timeouts: list[dict] = []
+        self.download_errors = list(download_errors)
 
     async def get_file(self, **timeouts):
         self.get_file_calls += 1
         self.timeouts.append(timeouts)
         if self._errors:
             raise self._errors.pop(0)
-        return _FakeFile(self.downloads, self.download_timeouts)
+        return _FakeFile(self.downloads, self.download_timeouts, self.download_errors)
 
 
 @pytest.fixture
 def no_backoff(monkeypatch):
-    monkeypatch.setattr(media, "RETRY_BACKOFF", (0, 0))
+    """Record each backoff ``asyncio.sleep`` duration instead of sleeping.
+
+    The shipped ``RETRY_BACKOFF`` stays in force (never zeroed): zeroing it made a
+    retry that hammers with ``sleep(0)`` indistinguishable from one that backs off
+    (DEFEAT_SHAPES #63c). Only ``media``'s own ``asyncio`` is swapped, so the event
+    loop driving the test is untouched.
+    """
+    sleeps: list[float] = []
+
+    async def _sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(media, "asyncio", type("_Asyncio", (), {"sleep": staticmethod(_sleep)}))
+    return sleeps
 
 
 def _run_doc(doc, tmp_path):
@@ -306,6 +325,9 @@ def test_timeout_twice_then_success_delivers(tmp_path, no_backoff):
     doc = _ScriptedDoc([TimedOut("Timed out"), TimedOut("Timed out")])
     msg, deliver = _run_doc(doc, tmp_path)
     assert doc.get_file_calls == 3
+    # Each retry waited its scheduled backoff — not an immediate re-hammer.
+    assert no_backoff == list(media.RETRY_BACKOFF)
+    assert all(d > 0 for d in no_backoff)
     assert len(deliver.calls) == 1 and "📎 file:" in deliver.calls[0][1]
     assert msg.replies == ["📎 File sent to the agent: shot.png"]
 
@@ -324,6 +346,7 @@ def test_persistent_timeout_reports_timeout_not_size(tmp_path, no_backoff):
     doc = _ScriptedDoc([TimedOut("Timed out")] * 10)
     msg, deliver = _run_doc(doc, tmp_path)
     assert doc.get_file_calls == len(media.RETRY_BACKOFF) + 1
+    assert no_backoff == list(media.RETRY_BACKOFF)
     assert deliver.calls == []
     assert msg.replies == ["⏳ Download timed out (network). Please resend."]
     assert "limit" not in msg.replies[0]
@@ -340,6 +363,7 @@ def test_bad_request_too_big_reports_size_without_retry(tmp_path, no_backoff):
     doc = _ScriptedDoc([BadRequest("File is too big")] * 10)
     msg, deliver = _run_doc(doc, tmp_path)
     assert doc.get_file_calls == 1  # a definitive answer — never retried
+    assert no_backoff == []
     assert deliver.calls == []
     assert len(msg.replies) == 1 and "download limit" in msg.replies[0]
 
@@ -349,6 +373,16 @@ def test_other_bad_request_is_generic_not_size(tmp_path, no_backoff):
     msg, _ = _run_doc(doc, tmp_path)
     assert doc.get_file_calls == 1
     assert msg.replies == ["❌ Could not download the file (Wrong file_id)."]
+
+
+def test_download_leg_timeout_is_retried_and_delivers(tmp_path, no_backoff):
+    # The CMX-63 ReadTimeout was on the file fetch itself, not on getFile.
+    doc = _ScriptedDoc([], download_errors=[TimedOut("Timed out")])
+    msg, deliver = _run_doc(doc, tmp_path)
+    assert doc.get_file_calls == 2
+    assert no_backoff == [media.RETRY_BACKOFF[0]]
+    assert len(deliver.calls) == 1
+    assert msg.replies == ["📎 File sent to the agent: shot.png"]
 
 
 def test_known_oversize_in_update_skips_download(tmp_path, no_backoff):
