@@ -3,8 +3,9 @@
 Every rename chela makes of a chela-launched Remote Control window — a manual dashboard
 rename, the reconcile loop's duplicate ``-N`` — queues ``/rename <new name>`` through
 :func:`chela.rc_rename.request`, and it is typed into the session ONLY when that session
-is idle with an empty prompt (a ghost suggestion counts as empty; a typed draft does not).
-Otherwise it stays queued and the daemon's :func:`chela.rc_rename.flush_pending` retries.
+has an empty prompt, busy or idle (CMX-70; a ghost suggestion counts as empty; a typed
+draft, a ``waiting`` permission dialog, or an unreadable status/pane does not). Otherwise it
+stays queued and the daemon's :func:`chela.rc_rename.flush_pending` retries.
 
 No live tmux: a fake tmux keeps per-window user options, and the send/capture/status
 seams are stubbed.
@@ -83,6 +84,7 @@ class _Session:
 @pytest.fixture
 def tmux(monkeypatch):
     monkeypatch.setattr(config, "current_session", lambda: "sess")
+    monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: None)
     fake = _FakeTmux({"@2": {rc_rename.PUSHED_OPTION: "shell-old"}})
     monkeypatch.setattr(subprocess, "run", fake)
     return fake
@@ -132,23 +134,117 @@ def test_renaming_back_to_the_pushed_name_sends_nothing(monkeypatch, tmux):
     assert rc_rename.PENDING_OPTION not in tmux.options["@2"]
 
 
-# --- delivery safety: idle AND empty, else queued -------------------------------------------
+# --- legacy windows: launched before CMX-39, no @chela_rc_name (CMX-70) ---------------------
 
-@pytest.mark.parametrize("status", ["busy", "waiting", None])
-def test_a_session_that_is_not_idle_does_not_receive_it_until_idle(monkeypatch, tmux, status):
-    s = _Session(monkeypatch, status=status)
+def _legacy(monkeypatch, *, argv, registry=None):
+    from chela import sessions
+    monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: 4242 if wid == "@7" else None)
+    monkeypatch.setattr(sessions, "_cmdline_argv",
+                        lambda pid: list(argv) if pid == 4242 else [])
+    monkeypatch.setattr(sessions, "registry_entry",
+                        lambda pid: registry if pid == 4242 else None)
 
-    assert rc_rename.request("@2", "billing-fix") == "busy"
+
+@pytest.mark.parametrize("argv,pushed", [
+    (["claude", "--remote-control"], rc_rename.UNKNOWN_PUSHED),
+    (["claude", "--remote-control", "--resume", "x"], rc_rename.UNKNOWN_PUSHED),
+    (["claude", "--remote-control", "old-name"], "old-name"),
+    (["claude", "--remote-control=old-name"], "old-name"),
+], ids=["bare", "bare-then-flag", "with-value", "equals-value"])
+def test_a_legacy_window_running_remote_control_is_eligible(monkeypatch, tmux, argv, pushed):
+    s = _Session(monkeypatch)
+    tmux.options = {"@7": {}}
+    _legacy(monkeypatch, argv=argv)
+
+    assert rc_rename.live_remote_control("@7") == pushed
+    assert rc_rename.request("@7", "billing-fix") == "sent"
+    assert s.texts() == ["/rename billing-fix"]
+    assert tmux.options["@7"][rc_rename.PUSHED_OPTION] == "billing-fix"
+
+
+def test_a_legacy_window_with_remote_control_on_in_its_session_record_is_eligible(
+        monkeypatch, tmux):
+    """Remote Control turned on without the flag: Claude Code's record carries a bridge id."""
+    s = _Session(monkeypatch)
+    tmux.options = {"@7": {}}
+    _legacy(monkeypatch, argv=["claude"],
+            registry={"name": "desk-9f", "bridgeSessionId": "session_x"})
+
+    assert rc_rename.live_remote_control("@7") == "desk-9f"
+    assert rc_rename.request("@7", "billing-fix") == "sent"
+    assert s.texts() == ["/rename billing-fix"]
+
+
+def test_a_legacy_window_already_holding_the_name_marks_it_and_sends_nothing(
+        monkeypatch, tmux):
+    s = _Session(monkeypatch)
+    tmux.options = {"@7": {}}
+    _legacy(monkeypatch, argv=["claude", "--remote-control", "billing-fix"])
+
+    assert rc_rename.request("@7", "billing-fix") == "current"
+    assert s.sent == []
+    assert tmux.options["@7"][rc_rename.PUSHED_OPTION] == "billing-fix"
+
+
+def test_a_legacy_window_without_remote_control_stays_not_rc(monkeypatch, tmux):
+    s = _Session(monkeypatch)
+    tmux.options = {"@7": {}}
+    _legacy(monkeypatch, argv=["claude", "--resume", "x"], registry={"name": "n"})
+
+    assert rc_rename.live_remote_control("@7") is None
+    assert rc_rename.request("@7", "billing-fix") == "not-rc"
+    assert s.sent == []
+    assert tmux.options["@7"] == {}
+
+
+# --- delivery safety: an EMPTY prompt, else queued (CMX-70) -------------------------------
+
+def test_a_busy_session_with_an_empty_prompt_receives_it_at_once(monkeypatch, tmux):
+    """CMX-70: /rename typed mid-turn takes effect immediately — holding for idle only delayed it."""
+    s = _Session(monkeypatch, status="busy", pane=GHOST)
+
+    assert rc_rename.request("@2", "billing-fix") == "sent"
+    assert s.texts() == ["/rename billing-fix"]
+    assert s.sent[0][2] == {"interrupt": False}              # never an Escape mid-turn
+    assert rc_rename.PENDING_OPTION not in tmux.options["@2"]
+
+
+def test_a_busy_session_with_a_typed_draft_stays_queued(monkeypatch, tmux):
+    s = _Session(monkeypatch, status="busy", pane=DRAFT)
+
+    assert rc_rename.request("@2", "billing-fix") == "draft"
     assert s.sent == []
     assert tmux.options["@2"][rc_rename.PENDING_OPTION] == "billing-fix"
-    assert rc_rename.flush_pending() == {"@2": "busy"}       # still busy: still held
+
+    s.pane = EMPTY
+    assert rc_rename.flush_pending() == {"@2": "sent"}
+    assert s.texts() == ["/rename billing-fix"]
+
+
+def test_a_waiting_permission_dialog_never_receives_it(monkeypatch, tmux):
+    """Keys typed into a permission dialog would ANSWER it — even when the pane reads empty."""
+    s = _Session(monkeypatch, status="waiting", pane=EMPTY)
+
+    assert rc_rename.request("@2", "billing-fix") == "waiting"
+    assert s.sent == []
+    assert tmux.options["@2"][rc_rename.PENDING_OPTION] == "billing-fix"
+    assert rc_rename.flush_pending() == {"@2": "waiting"}
     assert s.sent == []
 
     s.status = "idle"
     assert rc_rename.flush_pending() == {"@2": "sent"}
-    assert s.texts() == ["/rename billing-fix"]
-    assert rc_rename.PENDING_OPTION not in tmux.options["@2"]
     assert rc_rename.flush_pending() == {}                  # nothing re-sent
+
+
+@pytest.mark.parametrize("status,pane", [(None, EMPTY), ("shell", EMPTY), ("busy", "")],
+                         ids=["no-status", "unrecognised-status", "unreadable-pane"])
+def test_an_unreadable_status_or_pane_stays_queued(monkeypatch, tmux, status, pane):
+    """Unknown never reads as OK."""
+    s = _Session(monkeypatch, status=status, pane=pane)
+
+    assert rc_rename.request("@2", "billing-fix") == "unknown"
+    assert s.sent == []
+    assert tmux.options["@2"][rc_rename.PENDING_OPTION] == "billing-fix"
 
 
 @pytest.mark.parametrize("pane", [DRAFT, NO_PROMPT], ids=["typed-draft", "no-prompt"])
@@ -190,7 +286,7 @@ def test_a_failed_send_stays_queued_and_is_logged(monkeypatch, tmux, caplog):
 
 
 def test_the_latest_rename_wins_while_queued(monkeypatch, tmux):
-    s = _Session(monkeypatch, status="busy")
+    s = _Session(monkeypatch, status="waiting")
     rc_rename.request("@2", "first")
     rc_rename.request("@2", "second")
     s.status = "idle"

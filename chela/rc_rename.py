@@ -9,21 +9,27 @@ manual one from the dashboard, the reconcile loop's duplicate ``-N`` — goes th
 function here, :func:`request`, which queues ``/rename <new name>``.
 
 **Delivery is the dangerous half.** ``/rename`` is typed into somebody's prompt. It is
-sent ONLY when the session is idle (the native ``claude agents --json`` status, never a
-pane guess) AND its prompt is empty — read off an SGR-aware capture, because Claude Code's
+sent whenever that prompt is EMPTY — read off an SGR-aware capture, because Claude Code's
 grey ghost SUGGESTION in an empty prompt reads exactly like a typed draft in a plain one
-(see :func:`chela.dispatcher._drop_ghost_suggestion`). Busy, waiting, a real draft, a status
-we can't read: the rename stays queued and the daemon retries every tick
-(:func:`flush_pending`). It never interrupts a turn and never touches a draft.
+(see :func:`chela.dispatcher._drop_ghost_suggestion`). A busy session is fine (CMX-70):
+measured live, ``/rename`` typed mid-turn takes effect at once — the reply sent from inside
+that same turn already carried the new name — and leaves the prompt empty again, so holding
+it for ``idle`` only delayed it, by hours on a long foreground run. Still held: a real typed
+draft, a ``waiting`` session (its permission dialog would take the keystrokes as an answer),
+and a status or pane we can't read (the native ``claude agents --json`` status, never a pane
+guess — unknown never reads as OK). Held renames stay queued and the daemon retries every
+tick (:func:`flush_pending`). It never sends Escape and never touches a draft.
 
 **State lives on the window**, as tmux user options, like ``@chela_manual_name``: it dies
 with the window, needs no sidecar file, and both processes that rename (the dashboard and
 the daemon) see the same queue.
 
 * :data:`PUSHED_OPTION` — the name Claude Code was last given (set at launch to the
-  ``--remote-control`` value). Its presence is also what marks a window as a chela-launched
-  Remote Control session: a window without it (a dispatcher agent, a judge, a plain shell, a
-  launch with Remote Control off) never gets ``/rename``.
+  ``--remote-control`` value). Its presence is also what marks a window as a Remote Control
+  session: a window without it (a dispatcher agent, a judge, a plain shell, a launch with
+  Remote Control off) never gets ``/rename``. A window launched before CMX-39 has no option
+  yet; :func:`request` backfills it when the window's live claude runs ``--remote-control``
+  or Claude Code's own session record shows Remote Control on (:func:`live_remote_control`).
 * :data:`PENDING_OPTION` — the name waiting to be pushed.
 
 Out of scope: a rename made IN the desktop app does not come back to chela — Claude Code
@@ -89,13 +95,54 @@ def request(wid: str, new_name: str) -> str:
     """
     pushed = _get_option(wid, PUSHED_OPTION)
     if not pushed:
-        return "not-rc"
+        pushed = live_remote_control(wid)
+        if not pushed:
+            return "not-rc"
+        # CMX-70: a window launched before CMX-39 runs Remote Control but was never marked.
+        mark_launched(_target(wid), pushed)
     if not _SAFE_NAME_RE.match(new_name or ""):
         log.warning("rc_rename: not pushing unsafe name %r to %s", new_name, wid)
         return "unsafe"
     _set_option(_target(wid), PENDING_OPTION, new_name)
     log.info("rc_rename: queued /rename %s for %s (was %s)", new_name, wid, pushed)
     return deliver(wid, new_name, pushed)
+
+
+# What :func:`live_remote_control` records as "pushed" when the live session runs Remote
+# Control but names itself nowhere we can read — any real rename differs from it.
+UNKNOWN_PUSHED = "(unknown)"
+
+
+def _argv_remote_control(argv: list[str]) -> str | None:
+    """``""`` for a bare ``--remote-control``, its value when it has one, else None."""
+    for i, arg in enumerate(argv):
+        if arg.startswith("--remote-control="):
+            return arg.split("=", 1)[1]
+        if arg == "--remote-control":
+            nxt = argv[i + 1] if i + 1 < len(argv) else ""
+            return "" if nxt.startswith("-") else nxt
+    return None
+
+
+def live_remote_control(wid: str) -> str | None:
+    """The Remote Control name of ``wid``'s LIVE claude, or None when it does not run one.
+
+    Remote Control is on when the process was started with ``--remote-control`` (any value,
+    or none) or Claude Code's own session record (:func:`chela.sessions.registry_entry`,
+    pid-reuse checked) carries a ``bridgeSessionId``. The name is the record's ``name``,
+    else the flag's value, else :data:`UNKNOWN_PUSHED`. No claude process ⇒ None.
+    """
+    from chela import agent_manager, sessions
+
+    pid = agent_manager.claude_pid(wid)
+    if not pid:
+        return None
+    flag = _argv_remote_control(sessions._cmdline_argv(pid))
+    entry = sessions.registry_entry(pid) or {}
+    if flag is None and not entry.get("bridgeSessionId"):
+        return None
+    name = entry.get("name") if isinstance(entry.get("name"), str) else ""
+    return name or flag or UNKNOWN_PUSHED
 
 
 def _status(wid: str) -> str | None:
@@ -116,12 +163,13 @@ def prompt_is_empty(ansi_pane: str) -> bool:
 
 
 def deliver(wid: str, name: str, pushed: str | None = None) -> str:
-    """Type ``/rename <name>`` into ``wid`` iff it is idle with an empty prompt.
+    """Type ``/rename <name>`` into ``wid`` iff its prompt is empty — busy or idle (CMX-70).
 
     Returns ``"sent"``, ``"current"`` (already the pushed name — nothing typed),
-    ``"busy"`` (status not ``idle``), ``"draft"`` (prompt not empty), or ``"failed"``
-    (the send itself failed — logged; stays queued). Anything but ``sent``/``current``
-    leaves :data:`PENDING_OPTION` set for the next :func:`flush_pending`.
+    ``"waiting"`` (a permission dialog is up — keys would answer it), ``"unknown"`` (no
+    readable status or pane), ``"draft"`` (prompt not empty), or ``"failed"`` (the send
+    itself failed — logged). Anything but ``sent``/``current`` leaves
+    :data:`PENDING_OPTION` set for the next :func:`flush_pending`.
     """
     from chela import messenger
 
@@ -131,10 +179,17 @@ def deliver(wid: str, name: str, pushed: str | None = None) -> str:
         _set_option(_target(wid), PENDING_OPTION, None)
         return "current"
     status = _status(wid)
-    if status != "idle":
-        log.debug("rc_rename: %s is %s — /rename %s stays queued", wid, status, name)
-        return "busy"
-    if not prompt_is_empty(messenger.capture_pane(wid, ansi=True)):
+    if status == "waiting":
+        log.debug("rc_rename: %s is waiting on a dialog — /rename %s stays queued", wid, name)
+        return "waiting"
+    if status not in ("idle", "busy"):
+        log.debug("rc_rename: %s status is %r — /rename %s stays queued", wid, status, name)
+        return "unknown"
+    pane = messenger.capture_pane(wid, ansi=True)
+    if not pane:
+        log.debug("rc_rename: %s pane unreadable — /rename %s stays queued", wid, name)
+        return "unknown"
+    if not prompt_is_empty(pane):
         log.debug("rc_rename: %s has a draft in its prompt — /rename %s stays queued",
                   wid, name)
         return "draft"

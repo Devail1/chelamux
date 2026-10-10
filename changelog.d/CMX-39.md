@@ -6,6 +6,8 @@
   login for the home dir, collision-safe `-N` — instead of a `shell-N` placeholder, and
   starts Claude Code with `--remote-control <window name>` (the auto-launched orchestrator
   passes `orchestrator`). A dashboard rename or a duplicate's `-N` suffix queues
-  `/rename <new name>`, typed into the session only when it is idle with an empty prompt (a
-  ghost suggestion counts as empty, a typed draft does not); the daemon retries a held rename
-  every tick. A rename made in the desktop app does not sync back. (CMX-39)
+  `/rename <new name>`, typed into the session whenever its prompt is empty, busy or idle (a
+  ghost suggestion counts as empty; a typed draft, a permission dialog or an unreadable
+  status holds it); the daemon retries a held rename every tick. A window launched before
+  this, whose live claude runs `--remote-control` or has Remote Control on, gets renamed
+  too. A rename made in the desktop app does not sync back. (CMX-39, CMX-70)
