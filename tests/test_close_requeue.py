@@ -225,6 +225,64 @@ def test_the_work_board_flags_a_stall_older_than_the_ten_recent_runs(
     assert card["closed_run_stall"] == dispatcher.CLOSED_RUN_STALL
 
 
+def test_the_work_board_never_flags_a_requeued_closed_run(
+        repo, team, pr_closes, monkeypatch):
+    """The board passes EVERY run to `dispatcher.closed_run_stalls` (doctor pre-filters), so
+    this is where the helper's own `requeue_pending` filter is pinned: a requeued run whose
+    task is back in Todo is waiting for the next tick, not stalled."""
+    from chela.dashboard import app as dash
+
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", requeue=True, force=True)["ok"]
+    assert team.issues["CMX-33"]["state"]["name"] == "Todo"     # the scenario: READY
+    assert _row("CMX-33")["requeue_pending"] == 1
+
+    monkeypatch.setattr(dash, "_discover_dispatch_workflows",
+                        lambda runs: [_wf(repo).resolve()])
+    monkeypatch.setattr(dash.tasklists, "progress_for_run", lambda *a: None)
+    data = dash.app.test_client().get(
+        "/api/dispatcher", headers={"Sec-Fetch-Site": "same-origin"}).get_json()
+    wf = data["workflows"][0]
+    for t in wf["open_tasks"]:
+        assert not t.get("closed_run_stall"), t
+    for r in wf["recent_runs"]:
+        assert not r.get("closed_run_stall"), r
+
+
+def test_closed_run_stalls_skips_a_requeue_pending_run():
+    """The pure helper, directly: same closed run, same READY id — only `requeue_pending`
+    differs, and only the un-requeued one is a stall."""
+    row = {"task_id": "CMX-33", "status": "closed", "workflow_path": "/w"}
+    assert [s["task_id"] for s in dispatcher.closed_run_stalls([row], {"CMX-33"})] == ["CMX-33"]
+    assert dispatcher.closed_run_stalls([{**row, "requeue_pending": 1}], {"CMX-33"}) == []
+
+
+def test_the_board_close_route_without_requeue_true_is_a_plain_close(
+        repo, team, pr_closes, monkeypatch):
+    """Only the literal `requeue: true` requeues. Omitted, false, or a truthy non-bool
+    (`"yes"`, 1) is a plain close: the run is closed, NOT requeue_pending, and the issue
+    is Canceled — not put back in Todo."""
+    from chela.dashboard import app as dash
+
+    client = dash.app.test_client()
+    h = {"Sec-Fetch-Site": "same-origin"}
+    for payload in ({"reason": "stalled"}, {"reason": "stalled", "requeue": False},
+                    {"reason": "stalled", "requeue": "yes"},
+                    {"reason": "stalled", "requeue": 1}):
+        with dispatcher._db() as conn:                  # each payload on a fresh run
+            conn.execute("DELETE FROM runs WHERE task_id='CMX-33'")
+            conn.commit()
+        team.issues = {"CMX-33": issue(33, "In Review")}
+        _old_attempt(repo)
+        resp = client.post("/api/dispatcher/runs/CMX-33/close", json=payload, headers=h)
+        assert resp.status_code == 200, (payload, resp.get_json())
+        row = _row("CMX-33")
+        assert row["status"] == "closed", payload
+        assert not row["requeue_pending"], payload
+        assert team.issues["CMX-33"]["state"]["name"] == "Canceled", payload
+
+
 def test_the_board_close_route_requeues_only_when_asked(repo, team, pr_closes, monkeypatch):
     """`POST /api/dispatcher/runs/<id>/close` with requeue=true is `chela close --requeue`."""
     from chela.dashboard import app as dash
