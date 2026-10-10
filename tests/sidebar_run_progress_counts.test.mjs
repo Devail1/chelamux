@@ -147,10 +147,10 @@ test('every count shown equals the rows it heads — staged with 2-3 rows per cl
         // Dispatched: 2 runs (one of them two windows — still one row)
         ...judgedRun('CMX-91', TESTING),
         win('liavacc/cmx-92-y', { cwd: `${WT}/CMX-92`, dispatched: true, run: runCard('CMX-92', 'Run CMX-92', 'agent') }),
-        // folder groups: 2 and 3 rows
-        win('a-1', { cwd: '/srv/code/alpha' }), win('a-2', { cwd: '/srv/code/alpha' }),
+        // folder groups: 2 and 3 rows (alpha's second row is the orchestrator, below)
+        win('a-1', { cwd: '/srv/code/alpha' }),
         win('b-1', { cwd: '/srv/code/beta' }), win('b-2', { cwd: '/srv/code/beta' }), win('b-3', { cwd: '/srv/code/beta' }),
-        // the orchestrator — Pinned
+        // the orchestrator — in its folder group, not pinned (CMX-72)
         { ...win('orch', { cwd: '/srv/code/alpha' }), window_id: '@900' },
     ];
     util.setAgentsCache(rows);
@@ -162,9 +162,7 @@ test('every count shown equals the rows it heads — staged with 2-3 rows per cl
         // the staged lengths, so a constant count cannot pass
         assert.equal(byName['Needs you'] && byName['Needs you'].count, '3');
         assert.equal(byName[DISPATCHED_KEY] && byName[DISPATCHED_KEY].count, '2');
-        // Pinned holds the ONE orchestrator slot by construction (the inbox has one
-        // owner), so it cannot be staged with 2-3 — it is still held to its rows.
-        assert.equal(byName.Pinned && byName.Pinned.count, '1');
+        assert.equal(byName.Pinned, undefined, 'the orchestrator was lifted into a Pinned cluster');
         for (const c of got) assert.equal(c.count, String(c.rows), `${c.name}: count ${c.count} ≠ ${c.rows} rows`);
         // folder groups show NO count (the desktop's quiet header) — so none can drift
         const folders = [...host().querySelectorAll('.side-group')].filter(g => g.dataset.g.startsWith('/'));

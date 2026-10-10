@@ -341,11 +341,12 @@ test('Group by State: Working / Needs you / Idle / Completed — the orchestrato
     assert.deepEqual(rowsUnder('Idle'), ['idle']);
     assert.deepEqual(rowsUnder('Completed').sort(), ['finished', 'liavacc/cmx-3-z']);
     assert.equal(host().querySelector('.side-needs-you'), null, 'in State mode, Needs you is a group, not a second cluster');
-    // the orchestrator (the decisions-inbox holder) keeps its Pinned mark in State mode
+    // the orchestrator (the decisions-inbox holder) is not pinned (CMX-72): in State mode
+    // it groups by its state like any other row
     const m = groupSidebar([{ name: 'orch', window_id: '@1', session_status: 'busy' }, { name: 'w', window_id: '@2' }],
         { wants, mode: 'state', orchWid: '@1' });
-    assert.deepEqual(m.pinned.map(i => i.agent.name), ['orch']);
-    assert.ok(m.groups.every(g => g.items.every(i => i.agent.name !== 'orch')));
+    assert.equal(m.pinned, undefined);
+    assert.deepEqual(m.groups.find(g => g.key === '~state:working').items.map(i => i.agent.name), ['orch']);
 });
 
 test('Group by None: one flat list, no headers; a run is still ONE row', () => {
@@ -532,13 +533,13 @@ test('a THROWING localStorage still renders, and the view menu still works for t
 
 // --- the pure model directly ---------------------------------------------------------------
 
-test('model: the filters never hide the pinned orchestrator or a row blocked on you', () => {
+test('model: the filters never hide the orchestrator or a row blocked on you', () => {
     const orch = { name: 'orch', window_id: '@1', cwd: '/x', session_moved: false, last_activity: ago(99 * DAY) };
     const blocked = { name: 'b', window_id: '@2', cwd: '/x', session_status: 'waiting', last_activity: ago(99 * DAY) };
     const m = groupSidebar([orch, blocked], { wants, orchWid: '@1', env: [], activityDays: 1, status: 'archived' });
-    assert.deepEqual(m.pinned.map(i => i.agent.name), ['orch']);
     assert.deepEqual(m.needsYou.map(i => i.agent.name), ['b']);
-    assert.equal(m.groups.length, 0);
+    // the orchestrator is in its folder group (CMX-72), still past every filter
+    assert.deepEqual(m.groups.map(g => [g.key, g.items.map(i => i.agent.name)]), [['/x', ['orch']]]);
     assert.ok(groupSidebar([{ name: 'r', window_id: '@3', run: { task_id: 'T' } }], { wants, mode: 'none' })
         .groups[0].items.length === 1);
     assert.equal(DISPATCHED_KEY, '~dispatched');

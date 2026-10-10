@@ -349,7 +349,7 @@ function _saveCustom(c) {
 
 // The last render's model — what the group/row menus act on (they open off a click on
 // what is on screen, so they read the same grouping the screen was drawn from).
-let _sb = { groups: [], pinned: [], needsYou: [], items: new Map() };
+let _sb = { groups: [], needsYou: [], items: new Map() };
 
 // An item's display label: a run reads `CMX-37 · <title>`; a window reads its CMX-62
 // label (manual name > Claude's title > window name).
@@ -524,11 +524,10 @@ function renderSidebarAgents(agents) {
         return;
     }
 
-    // CMX-35: grouped by PROJECT FOLDER, like the desktop app (sidebarmodel.js). Two
-    // clusters still sit above the folders, because they are about YOU, not a folder:
-    // Pinned — the ONE session holding the decisions-inbox slot (the orchestrator,
-    // orchestratorState().wid), and Needs you — rows blocked on a human. Each row shows
-    // in exactly one place. A dispatched run is ONE row, in the "Dispatched" group.
+    // CMX-35: grouped by PROJECT FOLDER, like the desktop app (sidebarmodel.js). One
+    // cluster sits above the folders, because it is about YOU, not a folder: Needs you —
+    // rows blocked on a human. The orchestrator is not pinned (CMX-72): it sits in its
+    // folder group like any other session. Each row shows in exactly one place. A dispatched run is ONE row, in the "Dispatched" group.
     //
     // CMX-66: the VIEW menu (the sliders button on the Sessions header) picks what shows
     // (Status / Environment / Last activity), how it groups (Date / Folder / State /
@@ -557,18 +556,12 @@ function renderSidebarAgents(agents) {
     if (goneW.length) { goneW.forEach(k => delete custom.assign[k]); _saveCustom(custom); }
 
     const items = new Map();
-    for (const it of [...model.pinned, ...model.needsYou, ...model.groups.flatMap(g => [...g.items, ...g.archived])]) {
+    for (const it of [...model.needsYou, ...model.groups.flatMap(g => [...g.items, ...g.archived])]) {
         items.set(it.key, it);
     }
     _sb = { ...model, items };
 
     let html = '';
-    if (model.pinned.length) {
-        html += `<div class="side-triage side-pinned">
-            <div class="triage-head">Pinned <span class="triage-count">${model.pinned.length}</span></div>
-            ${model.pinned.map(it => _itemRowHtml(it, false, view.showPR)).join('')}
-        </div>`;
-    }
     if (model.needsYou.length) {
         html += `<div class="side-triage side-needs-you">
             <div class="triage-head">Needs you <span class="triage-count">${model.needsYou.length}</span></div>

@@ -33,20 +33,15 @@ function _segments(p) {
     return _norm(p).split('/').filter(Boolean);
 }
 
-// The fallback when the server did not say (`cwd_is_home` is app.py's word, decided
-// where the home dir is known): a bare /home/<user>, /Users/<user> or /root.
-function _looksHome(p) {
-    return /^\/(home|Users)\/[^/]+$/.test(p) || p === '/root';
-}
-
 // The folder group an agent window belongs to: its cwd, or one of the two catch-alls.
+// The home dir is a folder like any other (CMX-72): its group is named after its
+// basename, with the same `+` and menu. "Other" is only for a window with no cwd.
 export function folderKey(a) {
     if (!a) return OTHER_KEY;
     if (a.run || a.dispatched) return DISPATCHED_KEY;
     const cwd = _norm(a.cwd);
     if (!cwd) return OTHER_KEY;
     if (cwd.includes(WORKTREE_SEG)) return DISPATCHED_KEY;
-    if (a.cwd_is_home || _looksHome(cwd)) return OTHER_KEY;
     return cwd;
 }
 
@@ -386,7 +381,6 @@ function _sortItems(items, sort, labelOf) {
 }
 
 // The whole sidebar, as data:
-//   pinned    the orchestrator's row (the decisions-inbox holder), lifted to the top
 //   needsYou  rows blocked on a human, lifted above the groups ("Needs you") — in the
 //             State grouping they are its "Needs you" group instead
 //   groups    [{key, label, cwd, items, archived, flat?}] in display order
@@ -399,8 +393,11 @@ function _sortItems(items, sort, labelOf) {
 // `now`, `sort` (activity / name / created), `labelOf` (an item's display label),
 // `showEmpty`, `custom` ({groups: [{id, name}], assign: {itemKey: id}}).
 //
-// What the filters NEVER hide: the pinned orchestrator, and a row blocked on you — a
-// filter is a way to tidy the list, not a way to miss a human gate.
+// The orchestrator (`orchWid`, the decisions-inbox holder) is NOT lifted out of its
+// group (CMX-72) — it sits in its folder like any other session.
+//
+// What the filters NEVER hide: the orchestrator, and a row blocked on you — a filter is
+// a way to tidy the list, not a way to miss a human gate.
 export function groupSidebar(agents, opts = {}) {
     const { mode = 'folder', wants, orchWid = null, order = [], archived = new Set(),
         showArchived = false, env = null, activityDays = null, now = Date.now(),
@@ -411,16 +408,15 @@ export function groupSidebar(agents, opts = {}) {
     const items = buildItems(agents);
     const envSet = env ? new Set(env) : null;
     const cutoff = activityDays ? now - activityDays * 86400000 : null;
-    const pinned = [];
     const needsYou = [];
     const hidden = [];
     const kept = [];          // [item, isArchived]
     const allFolders = new Set();
     for (const it of items) {
         const prim = primaryWindow(it);
-        if (orchWid && it.windows.some(a => a.window_id === orchWid)) { pinned.push(it); continue; }
         if (it.windows.some(a => wants(a))) { needsYou.push(it); continue; }
         if (mode === 'folder') allFolders.add(it.kind === 'run' ? DISPATCHED_KEY : folderKey(prim));
+        if (orchWid && it.windows.some(a => a.window_id === orchWid)) { kept.push([it, false]); continue; }
         // Archived only while it is still archivable: a row that wakes up (busy, waiting)
         // is shown again whatever the archive set says.
         const isArch = archived.has(it.key) && isArchivable(it, { wants, orchWid });
@@ -480,23 +476,13 @@ export function groupSidebar(agents, opts = {}) {
 
     const labels = folderLabels([...byKey.keys()].filter(k => !byKey.get(k).label && !byKey.get(k).flat));
     let groups = [...byKey.values()].map(g => {
-        // The folder a "+" opens a new session in. Other has none of its own: use a
-        // home-dir session's cwd when there is one.
-        let cwd = null;
-        if (mode === 'folder') {
-            if (g.key !== OTHER_KEY && g.key !== DISPATCHED_KEY) cwd = g.key;
-            else if (g.key === OTHER_KEY) {
-                const pool = [...g.items, ...items.filter(it => folderKey(primaryWindow(it)) === OTHER_KEY && it.kind !== 'run')];
-                const home = pool.map(primaryWindow).find(a => a && a.cwd);
-                cwd = home ? home.cwd : null;
-            }
-        }
+        // The folder a "+" opens a new session in; Other and Dispatched have none.
+        const cwd = mode === 'folder' && g.key !== OTHER_KEY && g.key !== DISPATCHED_KEY ? g.key : null;
         const label = g.label != null ? g.label : labels[g.key];
         return { ...g, label, cwd, items: _sortItems(g.items, sort, labelOf) };
     });
     if (!showEmpty) groups = groups.filter(g => g.items.length || g.archived.length || g.flat);
     return {
-        pinned,
         needsYou: _sortItems(lifted, sort, labelOf),
         groups: orderGroups(groups, order),
         hidden,

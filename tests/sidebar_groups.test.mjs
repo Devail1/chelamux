@@ -109,32 +109,58 @@ test('rows group by cwd — two differently-named windows in one folder share ON
     assert.equal(labelOf('/srv/code/gamma'), 'gamma');
 });
 
-test('home-dir and cwd-less rows land in "Other", at the bottom', () => {
+// CMX-72: the home dir is a folder like any other — Liav, from the phone: "both the
+// pinned and what's under other should go under liavedunix". "Other" is only for a
+// window with no cwd at all.
+test('CMX-72: two home-dir sessions form ONE group named after the home folder — no "Other"', () => {
     render([
-        win('in-home', { cwd: '/home/u', cwd_is_home: true }),
-        win('no-cwd', { cwd: null }),
+        win('home-1', { cwd: '/home/u', cwd_is_home: true }),
+        win('home-2', { cwd: '/home/u/', cwd_is_home: true }),
         win('proj', { cwd: '/srv/code/zeta' }),
     ]);
-    assert.deepEqual(groupKeys(), ['/srv/code/zeta', OTHER_KEY]);
-    assert.equal(labelOf(OTHER_KEY), 'Other');
-    assert.deepEqual(rowsIn(OTHER_KEY).sort(), ['in-home', 'no-cwd']);
-    // its "+" opens a session in the home dir it knows about
-    fire(group(OTHER_KEY).querySelector('.group-add'));
+    assert.deepEqual(groupKeys().sort(), ['/home/u', '/srv/code/zeta']);
+    assert.equal(group(OTHER_KEY), null, 'a home-dir session still produced an "Other" group');
+    assert.equal(labelOf('/home/u'), 'u');
+    assert.deepEqual(rowsIn('/home/u').sort(), ['home-1', 'home-2']);
+    // its "+" opens a session in the home dir
+    fire(group('/home/u').querySelector('.group-add'));
     assert.deepEqual(spawns, [{ cwd: '/home/u', command: 'claude' }]);
 });
 
-test('the server\'s cwd_is_home flag ALONE routes a home dir the path regex cannot recognise to "Other"', () => {
-    // a home dir that is not /home/<user> (a symlinked or relocated $HOME): only the
-    // server knows it is home, and its word must win — the regex is just the fallback
-    const home = '/mnt/data/liav';
-    assert.equal(folderKey({ cwd: home, cwd_is_home: true }), OTHER_KEY);
-    assert.equal(folderKey({ cwd: home }), home);   // without the flag it is a project
+test('CMX-72: a window with no cwd is still "Other", at the bottom', () => {
     render([
-        win('relocated-home', { cwd: home, cwd_is_home: true }),
+        win('no-cwd', { cwd: null }),
+        win('home', { cwd: '/home/u', cwd_is_home: true }),
         win('proj', { cwd: '/srv/code/zeta' }),
     ]);
-    assert.deepEqual(groupKeys(), ['/srv/code/zeta', OTHER_KEY]);
-    assert.deepEqual(rowsIn(OTHER_KEY), ['relocated-home']);
+    assert.equal(groupKeys()[groupKeys().length - 1], OTHER_KEY);
+    assert.equal(labelOf(OTHER_KEY), 'Other');
+    assert.deepEqual(rowsIn(OTHER_KEY), ['no-cwd']);
+    assert.equal(folderKey({ cwd: '' }), OTHER_KEY);
+});
+
+test('CMX-72: the orchestrator sits in its folder group — it is not pinned', () => {
+    const m = groupSidebar([
+        { name: 'orch', window_id: '@1', cwd: '/home/u', cwd_is_home: true },
+        { name: 'home-2', window_id: '@2', cwd: '/home/u', cwd_is_home: true },
+    ], { wants, orchWid: '@1' });
+    assert.equal(m.pinned, undefined, 'the model still lifts a "pinned" cluster');
+    assert.deepEqual(m.groups.map(g => g.key), ['/home/u']);
+    assert.deepEqual(m.groups[0].items.map(i => i.agent.name).sort(), ['home-2', 'orch']);
+});
+
+test('CMX-72: a home folder whose basename matches another folder is told apart by its parent', () => {
+    const labels = folderLabels(['/home/u', '/srv/u', '/root', '/x/root']);
+    assert.equal(labels['/home/u'], 'u · home');
+    assert.equal(labels['/srv/u'], 'u · srv');
+    assert.equal(labels['/root'], 'root');
+    assert.equal(labels['/x/root'], 'root · x');
+    render([
+        win('h', { cwd: '/home/u', cwd_is_home: true }),
+        win('s', { cwd: '/srv/u' }),
+    ]);
+    assert.equal(labelOf('/home/u'), 'u · home');
+    assert.equal(labelOf('/srv/u'), 'u · srv');
 });
 
 test('a basename collision is disambiguated by the parent path, like the desktop', () => {
@@ -415,7 +441,7 @@ test('model: a run\'s state reads as a word AND a shape', () => {
 
 // --- 5. row content ----------------------------------------------------------------
 
-test('row content follows CMX-62\'s label and keeps the state word + ctx; the orchestrator stays Pinned', () => {
+test('row content follows CMX-62\'s label and keeps the state word + ctx', () => {
     render([win('shell-1', { cwd: '/srv/code/alpha', ai_title: 'Fix the reconcile loop', session_status: 'busy' })]);
     const row = host().querySelector('.agent-row[data-agent="shell-1"]');
     assert.equal(row.querySelector('.agent-row-name').textContent, 'Fix the reconcile loop');
@@ -438,10 +464,10 @@ test('model: the run card ALONE routes a window to "Dispatched" — no dispatche
     assert.equal(folderKey({ cwd: '/srv/code/chelamux' }), '/srv/code/chelamux', 'control: the card is the only difference');
 });
 
-test('model: /root is a home dir — it lands in "Other", not a group called "root"', () => {
-    assert.equal(folderKey({ cwd: '/root' }), OTHER_KEY);
-    assert.equal(folderKey({ cwd: '/home/u' }), OTHER_KEY);
-    assert.equal(folderKey({ cwd: '/srv/root' }), '/srv/root', 'control: a folder merely NAMED root is a project');
+test('model: a home dir (/root, /home/u, or one only the server flags) is its own folder key (CMX-72)', () => {
+    assert.equal(folderKey({ cwd: '/root' }), '/root');
+    assert.equal(folderKey({ cwd: '/home/u' }), '/home/u');
+    assert.equal(folderKey({ cwd: '/mnt/data/u', cwd_is_home: true }), '/mnt/data/u');
 });
 
 test('model: every SETTLED run state (done, closed, failed) is archivable — and nothing else is', () => {
