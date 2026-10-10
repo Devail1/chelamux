@@ -12,9 +12,10 @@
 // own. The run each window belongs to is the server's `a.run` card (app.py
 // `_run_cards`, read off the runs table) — never a guess from the window name.
 //
-// Hooks for the later parts (CMX-66 view menu, CMX-67 judge progress): `groupSidebar`
-// takes the grouping MODE and the sort as options (only 'folder' / 'name' exist here),
-// and a row's `badge` slot is the renderer's to fill.
+// CMX-66 (part 2) adds the VIEW menu's model: which rows the filters keep (Status /
+// Environment / Last activity), the other grouping MODES (Date / State / Custom groups /
+// None), the sorts (Last activity / Name / Created) and the empty groups. A row's
+// `badge` slot stays the renderer's to fill (the PR badge, CMX-67's judge progress).
 
 export const OTHER_KEY = '~other';
 export const DISPATCHED_KEY = '~dispatched';
@@ -173,7 +174,7 @@ export function isArchivable(item, { wants, orchWid } = {}) {
 // Other at the bottom (where the desktop puts it).
 export function orderGroups(groups, stored) {
     const pos = new Map((stored || []).map((k, i) => [k, i]));
-    const rank = g => (g.key === OTHER_KEY ? 2 : g.key === DISPATCHED_KEY ? 1 : 0);
+    const rank = g => (g.rank != null ? g.rank : g.key === OTHER_KEY ? 2 : g.key === DISPATCHED_KEY ? 1 : 0);
     const dflt = [...groups].sort((a, b) => rank(a) - rank(b) || a.label.localeCompare(b.label));
     const di = new Map(dflt.map((g, i) => [g.key, i]));
     return [...groups].sort((a, b) => {
@@ -197,60 +198,285 @@ export function moveGroup(keys, stored, key, dir) {
     return [...order, ...(stored || []).filter(k => !order.includes(k))];
 }
 
+// --- The VIEW menu (CMX-66) ---------------------------------------------------------
+
+// The choices, their defaults, and what a stored value is allowed to be. A stored view
+// that is missing a field, or holds one this build does not know, falls back field by
+// field — a viewer's choices survive an upgrade that adds or drops an option.
+export const VIEW_STATUS = ['active', 'all', 'archived'];
+// The session kinds the Environment filter selects between. CMX-28's "background" is a
+// window whose agent moved to a Claude Code background session.
+export const ENV_KINDS = ['interactive', 'dispatched', 'judge', 'background'];
+export const VIEW_ACTIVITY = { '1d': 1, '7d': 7, '30d': 30, all: null };
+export const GROUP_MODES = ['date', 'folder', 'state', 'custom', 'none'];
+export const SORTS = ['activity', 'name', 'created'];
+export const VIEW_DEFAULTS = Object.freeze({
+    status: 'active',
+    // Everything except Judges: a judge window is a dispatched run's reviewer, and the
+    // run's own row already says "judging" — the bare judge window is noise by default.
+    env: ['interactive', 'dispatched', 'background'],
+    activity: '7d',
+    groupBy: 'folder',
+    sort: 'activity',
+    showEmpty: false,
+    showPR: true,
+});
+
+export function normalizeView(raw) {
+    const v = (raw && typeof raw === 'object') ? raw : {};
+    const d = VIEW_DEFAULTS;
+    return {
+        status: VIEW_STATUS.includes(v.status) ? v.status : d.status,
+        env: Array.isArray(v.env) ? ENV_KINDS.filter(k => v.env.includes(k)) : [...d.env],
+        activity: Object.prototype.hasOwnProperty.call(VIEW_ACTIVITY, v.activity) ? v.activity : d.activity,
+        groupBy: GROUP_MODES.includes(v.groupBy) ? v.groupBy : d.groupBy,
+        sort: SORTS.includes(v.sort) ? v.sort : d.sort,
+        showEmpty: typeof v.showEmpty === 'boolean' ? v.showEmpty : d.showEmpty,
+        showPR: typeof v.showPR === 'boolean' ? v.showPR : d.showPR,
+    };
+}
+
+// One window's session kind. A judge is a judge even before its run card lands (the
+// dispatcher names its window `judge-…`); a dispatched worker stays "dispatched" even
+// after it moves to a background session.
+export function windowKind(a) {
+    if (!a) return 'interactive';
+    if ((a.run && a.run.role === 'judge') || String(a.name || '').startsWith('judge-')) return 'judge';
+    if (a.run || a.dispatched) return 'dispatched';
+    if (a.session_moved) return 'background';
+    return 'interactive';
+}
+
+// The kinds a ROW is: a run row is a dispatched run whatever windows it has left (its
+// agent may have finished and killed its window while the judge works), and also a
+// judge's when one of its windows is the judge. A row shows when ANY of its kinds is
+// selected — so hiding Judges never hides a run's one row.
+export function itemKinds(item) {
+    const s = new Set((item.windows || []).map(windowKind));
+    if (item.kind === 'run') s.add('dispatched');
+    return s;
+}
+
+function _ts(v) {
+    if (v == null || v === '') return null;
+    const t = typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : Date.parse(v);
+    return Number.isFinite(t) ? t : null;
+}
+
+// When the row was last active (ms, or null when nothing says): the newest of its
+// windows' `last_activity` (the transcript's last write, app.py) and recap time, else
+// when it was created.
+export function activityTs(item) {
+    let best = null;
+    for (const a of item.windows || []) {
+        for (const t of [_ts(a.last_activity), _ts(a.recap_ts)]) {
+            if (t != null && (best == null || t > best)) best = t;
+        }
+    }
+    return best != null ? best : createdTs(item);
+}
+
+// When the row was created (ms, or null): its earliest window's start.
+export function createdTs(item) {
+    let best = null;
+    for (const a of item.windows || []) {
+        const t = _ts(a.created);
+        if (t != null && (best == null || t < best)) best = t;
+    }
+    return best;
+}
+
+// Is something HAPPENING on this row right now — working, blocked on you, a judge
+// battery running, a run in flight? The Last-activity filter never hides one of these,
+// however old its timestamps read.
+export function isLive(item, wants) {
+    for (const a of item.windows || []) {
+        if (!a) continue;
+        if (a.session_status === 'busy' || (wants && wants(a))) return true;
+        if (a.judge_battery && a.judge_battery.state === 'testing') return true;
+    }
+    if (item.kind === 'run') return ['working', 'judging', 'waiting'].includes(runState(item, wants || (() => false)).shape);
+    return false;
+}
+
+// The row's State group: needs (blocked on you) / working / completed / idle.
+export function itemState(item, wants) {
+    const w = wants || (() => false);
+    if (item.kind === 'run') {
+        const st = runState(item, w);
+        if (st.shape === 'waiting') return 'needs';
+        if (st.shape === 'working' || st.shape === 'judging') return 'working';
+        const run = item.run || {};
+        if (RUN_SETTLED.has(run.status) || run.status === 'awaiting_review') return 'completed';
+        return 'idle';
+    }
+    const a = item.agent || {};
+    if (w(a)) return 'needs';
+    if (a.session_status === 'busy' || (a.judge_battery && a.judge_battery.state === 'testing')) return 'working';
+    if (a.done) return 'completed';
+    return 'idle';
+}
+
+export const STATE_GROUPS = [
+    { key: '~state:working', id: 'working', label: 'Working' },
+    { key: '~state:needs', id: 'needs', label: 'Needs you' },
+    { key: '~state:idle', id: 'idle', label: 'Idle' },
+    { key: '~state:completed', id: 'completed', label: 'Completed' },
+];
+
+export const DATE_GROUPS = [
+    { key: '~date:today', label: 'Today' },
+    { key: '~date:yesterday', label: 'Yesterday' },
+    { key: '~date:week', label: 'This week' },
+    { key: '~date:older', label: 'Older' },
+];
+
+// Which Date group a timestamp falls in, by the viewer's calendar days: today,
+// yesterday, the five days before that ("This week"), or older. Unknown → Older.
+export function dateBucket(ts, now) {
+    if (ts == null) return '~date:older';
+    const d = new Date(now);
+    const today = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    const DAY = 86400000;
+    if (ts >= today) return '~date:today';
+    if (ts >= today - DAY) return '~date:yesterday';
+    if (ts >= today - 6 * DAY) return '~date:week';
+    return '~date:older';
+}
+
+export const UNGROUPED_KEY = '~ungrouped';
+export const FLAT_KEY = '~all';
+export function customKey(id) { return `~custom:${id}`; }
+
 function _sortItems(items, sort, labelOf) {
     // numeric: CMX-100 sorts after CMX-37, not between CMX-10 and CMX-11
-    if (sort === 'name') return [...items].sort((a, b) => labelOf(a).localeCompare(labelOf(b), undefined, { numeric: true }));
+    const byName = (a, b) => labelOf(a).localeCompare(labelOf(b), undefined, { numeric: true });
+    if (sort === 'name') return [...items].sort(byName);
+    if (sort === 'activity' || sort === 'created') {
+        const f = sort === 'activity' ? activityTs : createdTs;
+        // newest first; a row nothing dates sinks to the bottom, by name
+        return [...items].sort((a, b) => {
+            const ta = f(a), tb = f(b);
+            if (ta == null || tb == null) return (ta == null) - (tb == null) || byName(a, b);
+            return tb - ta || byName(a, b);
+        });
+    }
     return items;
 }
 
 // The whole sidebar, as data:
 //   pinned    the orchestrator's row (the decisions-inbox holder), lifted to the top
-//   needsYou  rows blocked on a human, lifted above the groups ("Needs you")
-//   groups    [{key, label, cwd, items, archived}] in display order
-//   archived  keys of archived rows that are currently HIDDEN (for the counts)
-// Options: `mode` (only 'folder' exists — CMX-66 adds the others), `wants` (util.js's
+//   needsYou  rows blocked on a human, lifted above the groups ("Needs you") — in the
+//             State grouping they are its "Needs you" group instead
+//   groups    [{key, label, cwd, items, archived, flat?}] in display order
+//   hidden    keys of archived rows that are still archivable (archive-set pruning and
+//             the "Show archived (N)" count)
+// Options: `mode` (folder / date / state / custom / none), `wants` (util.js's
 // wantsHuman), `orchWid`, `order` (persisted group order), `archived` (a Set of item
-// keys), `showArchived`, `sort`, `labelOf` (an item's display label, for sorting).
+// keys), `status` (active / all / archived — `showArchived` is part 1's spelling of
+// 'all'), `env` (the session kinds to show; null = all), `activityDays` (null = all),
+// `now`, `sort` (activity / name / created), `labelOf` (an item's display label),
+// `showEmpty`, `custom` ({groups: [{id, name}], assign: {itemKey: id}}).
+//
+// What the filters NEVER hide: the pinned orchestrator, and a row blocked on you — a
+// filter is a way to tidy the list, not a way to miss a human gate.
 export function groupSidebar(agents, opts = {}) {
     const { mode = 'folder', wants, orchWid = null, order = [], archived = new Set(),
-        showArchived = false, sort = 'name', labelOf = it => it.key } = opts;
-    if (mode !== 'folder') throw new Error(`unknown sidebar grouping mode: ${mode}`);
+        showArchived = false, env = null, activityDays = null, now = Date.now(),
+        sort = 'name', labelOf = it => it.key, showEmpty = false,
+        custom = { groups: [], assign: {} } } = opts;
+    const status = opts.status || (showArchived ? 'all' : 'active');
+    if (!GROUP_MODES.includes(mode)) throw new Error(`unknown sidebar grouping mode: ${mode}`);
     const items = buildItems(agents);
+    const envSet = env ? new Set(env) : null;
+    const cutoff = activityDays ? now - activityDays * 86400000 : null;
     const pinned = [];
     const needsYou = [];
-    const byKey = new Map();
     const hidden = [];
+    const kept = [];          // [item, isArchived]
+    const allFolders = new Set();
     for (const it of items) {
         const prim = primaryWindow(it);
         if (orchWid && it.windows.some(a => a.window_id === orchWid)) { pinned.push(it); continue; }
         if (it.windows.some(a => wants(a))) { needsYou.push(it); continue; }
-        const key = it.kind === 'run' ? DISPATCHED_KEY : folderKey(prim);
-        if (!byKey.has(key)) byKey.set(key, { key, items: [], archived: [] });
-        const g = byKey.get(key);
-        // Hidden only while it is still archivable: a row that wakes up (busy, waiting)
+        if (mode === 'folder') allFolders.add(it.kind === 'run' ? DISPATCHED_KEY : folderKey(prim));
+        // Archived only while it is still archivable: a row that wakes up (busy, waiting)
         // is shown again whatever the archive set says.
-        if (archived.has(it.key) && isArchivable(it, { wants, orchWid })) {
-            g.archived.push(it);
-            hidden.push(it.key);
-            if (!showArchived) continue;
+        const isArch = archived.has(it.key) && isArchivable(it, { wants, orchWid });
+        if (isArch) hidden.push(it.key);
+        if (status === 'archived' && !isArch) continue;
+        if (envSet && ![...itemKinds(it)].some(k => envSet.has(k))) continue;
+        if (cutoff != null && !isLive(it, wants)) {
+            const t = activityTs(it);
+            if (t != null && t < cutoff) continue;
         }
-        g.items.push(it);
+        kept.push([it, isArch]);
     }
-    const labels = folderLabels([...byKey.keys()]);
-    const groups = [...byKey.values()].map(g => {
+
+    // The candidate groups, in a mode's own fixed order (rank); folders are found.
+    const byKey = new Map();
+    const ensure = (key, extra = {}) => {
+        if (!byKey.has(key)) byKey.set(key, { key, items: [], archived: [], ...extra });
+        return byKey.get(key);
+    };
+    const customIds = new Set((custom.groups || []).map(g => g.id));
+    if (mode === 'state') STATE_GROUPS.forEach((g, i) => ensure(g.key, { label: g.label, rank: i }));
+    if (mode === 'date') DATE_GROUPS.forEach((g, i) => ensure(g.key, { label: g.label, rank: i }));
+    if (mode === 'custom') {
+        (custom.groups || []).forEach((g, i) => ensure(customKey(g.id), { label: g.name, rank: i }));
+        ensure(UNGROUPED_KEY, { label: 'Ungrouped', rank: 1e6 });
+    }
+    if (mode === 'none') ensure(FLAT_KEY, { label: '', rank: 0, flat: true });
+    if (mode === 'folder' && showEmpty) {
+        for (const k of allFolders) ensure(k);
+        for (const k of order) if (typeof k === 'string' && k.startsWith('/')) ensure(k);
+    }
+
+    const keyOf = it => {
+        if (mode === 'none') return FLAT_KEY;
+        if (mode === 'state') return `~state:${itemState(it, wants)}`;
+        if (mode === 'date') return isLive(it, wants) ? '~date:today' : dateBucket(activityTs(it), now);
+        if (mode === 'custom') {
+            // keyed on the row's STABLE identity (window id / run id), never its label
+            const id = (custom.assign || {})[it.key];
+            return id != null && customIds.has(id) ? customKey(id) : UNGROUPED_KEY;
+        }
+        return it.kind === 'run' ? DISPATCHED_KEY : folderKey(primaryWindow(it));
+    };
+    for (const [it, isArch] of kept) {
+        const g = ensure(keyOf(it));
+        if (isArch) g.archived.push(it);
+        // Status "Active" hides an archived row, but its group still knows it has one
+        // (the group menu's "Unarchive all").
+        if (!isArch || status !== 'active') g.items.push(it);
+    }
+    // In the State grouping, "Needs you" is a group like the others.
+    let lifted = needsYou;
+    if (mode === 'state') {
+        byKey.get('~state:needs').items.unshift(...needsYou);
+        lifted = [];
+    }
+
+    const labels = folderLabels([...byKey.keys()].filter(k => !byKey.get(k).label && !byKey.get(k).flat));
+    let groups = [...byKey.values()].map(g => {
         // The folder a "+" opens a new session in. Other has none of its own: use a
         // home-dir session's cwd when there is one.
         let cwd = null;
-        if (g.key !== OTHER_KEY && g.key !== DISPATCHED_KEY) cwd = g.key;
-        else if (g.key === OTHER_KEY) {
-            const home = [...g.items, ...g.archived].map(primaryWindow).find(a => a && a.cwd);
-            cwd = home ? home.cwd : null;
+        if (mode === 'folder') {
+            if (g.key !== OTHER_KEY && g.key !== DISPATCHED_KEY) cwd = g.key;
+            else if (g.key === OTHER_KEY) {
+                const pool = [...g.items, ...items.filter(it => folderKey(primaryWindow(it)) === OTHER_KEY && it.kind !== 'run')];
+                const home = pool.map(primaryWindow).find(a => a && a.cwd);
+                cwd = home ? home.cwd : null;
+            }
         }
-        return { ...g, label: labels[g.key], cwd, items: _sortItems(g.items, sort, labelOf) };
+        const label = g.label != null ? g.label : labels[g.key];
+        return { ...g, label, cwd, items: _sortItems(g.items, sort, labelOf) };
     });
+    if (!showEmpty) groups = groups.filter(g => g.items.length || g.archived.length || g.flat);
     return {
         pinned,
-        needsYou: _sortItems(needsYou, sort, labelOf),
+        needsYou: _sortItems(lifted, sort, labelOf),
         groups: orderGroups(groups, order),
         hidden,
     };

@@ -116,6 +116,10 @@
         <div class="side-head">
           <span class="side-title">Sessions</span>
           <span class="side-count" id="hdr-agents">-/-</span>
+          <!-- CMX-66: the VIEW menu — Status / Environment / Last activity / Group by /
+               Sort by / Custom groups / Show empty groups / Show PR status. -->
+          <button class="side-view-btn" id="btn-sidebar-view" type="button" title="View options"
+                  aria-label="View options" aria-haspopup="menu" onclick="chela.openViewMenu(event)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg></button>
         </div>
         <div class="side-list" id="sidebar-agents">
           <div class="side-empty">No agents</div>

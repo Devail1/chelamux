@@ -269,6 +269,31 @@ def _run_cards(windows: dict[str, str], dispatched: set[str], runs: list[dict]) 
     return out
 
 
+def _window_started(wid: str, cpid: int | None) -> str | None:
+    """When ``wid``'s Claude process (``cpid``) started, ISO UTC — the sidebar's "Created"
+    (CMX-66). None for a window with no Claude in it, or when it cannot be read.
+
+    Inside the request's probe batch it is the shared pane snapshot's ``Pane.started``
+    (:meth:`probecache.Batch.peek` — the snapshot ``claude_pid`` just took, so no spawn),
+    provided that pane names the same process; otherwise one
+    :func:`chela.sessions.proc_started` read of ``cpid`` — so the batched and per-window
+    paths answer the same (``tests/test_probe_batch.py``'s golden test).
+    """
+    if cpid is None:
+        return None
+    from chela import sessions          # deferred, like probecache's own use of it
+
+    b = probecache.active()
+    pane = b.peek(wid) if b is not None else None
+    started = pane.started if pane is not None and pane.claude_pid == cpid else sessions.proc_started(cpid)
+    if not isinstance(started, (int, float)):
+        return None
+    try:
+        return datetime.fromtimestamp(started, tz=timezone.utc).isoformat()
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
 def _is_home(cwd: str) -> bool:
     try:
         return os.path.realpath(cwd) == os.path.realpath(os.path.expanduser("~"))
@@ -438,6 +463,10 @@ def api_agents():
             "schedule_next_run": agent_schedule_summary.get(name, {}).get("next_run"),
             "recap": transcript["recap"],
             "recap_ts": transcript["recap_ts"],
+            # CMX-66: the sidebar's Last activity (the transcript's last write) and
+            # Created (the window's Claude process start). Either may be None.
+            "last_activity": transcript.get("last_activity"),
+            "created": _window_started(window_id, cpid),
             # {url, number, repository, ts, state, draft} — `state` is open/merged/closed/
             # unknown, and only a confirmed open + non-draft PR reads as reviewable.
             "pr": pr,
