@@ -12,7 +12,8 @@ import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 import {
-    DISPATCHED_KEY, VIEW_DEFAULTS, dateBucket, groupSidebar, isLive, itemKinds, buildItems, normalizeView, windowKind,
+    DISPATCHED_KEY, VIEW_DEFAULTS, activityTs, createdTs, dateBucket, groupSidebar, isLive, itemKinds, itemState, buildItems,
+    normalizeView, windowKind,
 } from '../chela/dashboard/static/js/sidebarmodel.js';
 
 const BODY = `
@@ -467,4 +468,137 @@ test('model: the filters never hide the pinned orchestrator or a row blocked on 
     assert.ok(groupSidebar([{ name: 'r', window_id: '@3', run: { task_id: 'T' } }], { wants, mode: 'none' })
         .groups[0].items.length === 1);
     assert.equal(DISPATCHED_KEY, '~dispatched');
+});
+
+// --- CMX-66 rework: guards that pin each claimed invariant directly ----------------------
+// (the judge's mutations survived the tests above: a badge test that only rendered
+// `merged`, a sort test whose rows all had a last_activity, and no recap-only row.)
+
+test('Show PR status: the badge renders EACH state — open, draft (an open draft), merged, closed — and no state when nothing names the PR', () => {
+    const cases = [
+        ['CMX-91', { state: 'open', draft: false }, 'open'],
+        ['CMX-92', { state: 'open', draft: true }, 'draft'],
+        ['CMX-93', { state: 'merged', draft: true }, 'merged'],   // a draft flag never outranks merged/closed
+        ['CMX-94', { state: 'closed', draft: false }, 'closed'],
+        ['CMX-95', null, null],                                   // the run's PR, but no window names it
+    ];
+    render(cases.map(([task, pr], i) => {
+        const url = `https://github.com/o/r/pull/${700 + i}`;
+        return win(`liavacc/${task.toLowerCase()}-x`, { cwd: `${WT}/${task}`, dispatched: true,
+            run: runCard(task, 'X', 'agent', { pr_url: url }), ...(pr ? { pr: { url, ...pr } } : {}) });
+    }));
+    const STATES = ['open', 'draft', 'merged', 'closed'];
+    cases.forEach(([task, , want], i) => {
+        const b = host().querySelector(`.agent-row[data-run="${task}"] .ar-pr`);
+        assert.ok(b, `${task}: no PR badge`);
+        assert.equal(b.textContent, `#${700 + i}`);
+        assert.deepEqual(STATES.filter(s => b.classList.contains(s)), want ? [want] : [], `${task}: the badge's state class`);
+        assert.equal(b.getAttribute('title'), want ? `PR #${700 + i} · ${want}` : `PR #${700 + i}`, `${task}: the badge's title`);
+    });
+    // a run with no PR yet has no badge
+    render([win('liavacc/cmx-96-x', { cwd: `${WT}/CMX-96`, dispatched: true, run: runCard('CMX-96', 'X', 'agent') })]);
+    assert.equal(host().querySelector('.agent-row[data-run="CMX-96"] .ar-pr'), null);
+});
+
+test('a row\'s last activity is the NEWEST of its windows\' last_activity AND recap_ts', () => {
+    // `recap` was written after the transcript's last write: its recap time is what dates it
+    render([
+        win('recap', { last_activity: ago(10 * DAY), recap_ts: ago(60e3) }),
+        win('mid', { last_activity: ago(3600e3) }),
+        win('lastact', { last_activity: ago(30e3), recap_ts: ago(20 * DAY) }),
+    ]);
+    assert.deepEqual(rowsIn('/srv/code/alpha'), ['lastact', 'recap', 'mid'], 'sorted by the newer of the two');
+    view('activity:1d');
+    assert.deepEqual(shown().sort(), ['lastact', 'mid', 'recap'], 'a fresh recap_ts keeps a row inside 1d');
+    // the model directly, numeric (epoch seconds) recap_ts included, across a run's two windows
+    const [run] = buildItems([
+        { name: 'agent', window_id: '@1', last_activity: 1000, run: { task_id: 'T', role: 'agent' } },
+        { name: 'judge-x', window_id: '@2', last_activity: 1500, recap_ts: 2000, run: { task_id: 'T', role: 'judge' } },
+    ]);
+    assert.equal(activityTs(run), 2000 * 1000);
+    // nothing dates its activity → when it was created
+    const [plain] = buildItems([{ name: 'p', window_id: '@3', created: 4000 }]);
+    assert.equal(activityTs(plain), 4000 * 1000);
+});
+
+test('Sort by Last activity / Created: a row nothing dates sinks to the BOTTOM (by name), whatever the input order', () => {
+    const rows = [
+        win('a-undated', { last_activity: null, created: null }),
+        win('m-old', { last_activity: ago(5 * 3600e3), created: ago(5 * DAY) }),
+        win('b-undated', { last_activity: null, created: null }),
+        win('z-new', { last_activity: ago(60e3), created: ago(1 * DAY) }),
+    ];
+    for (const input of [rows, [...rows].reverse()]) {
+        render(input);
+        assert.deepEqual(rowsIn('/srv/code/alpha'), ['z-new', 'm-old', 'a-undated', 'b-undated'], 'activity sort');
+        view('sort:created');
+        assert.deepEqual(rowsIn('/srv/code/alpha'), ['z-new', 'm-old', 'a-undated', 'b-undated'], 'created sort');
+        view('sort:activity');
+    }
+});
+
+test('model: createdTs is the EARLIEST window\'s start; dateBucket\'s day boundaries', () => {
+    const [run] = buildItems([
+        { name: 'agent', window_id: '@1', created: 3000, run: { task_id: 'T', role: 'agent' } },
+        { name: 'judge-x', window_id: '@2', created: 2000, run: { task_id: 'T', role: 'judge' } },
+        { name: 'judge-y', window_id: '@3', created: 5000, run: { task_id: 'T', role: 'judge' } },
+    ]);
+    assert.equal(createdTs(run), 2000 * 1000);
+    assert.equal(createdTs(buildItems([{ name: 'n', window_id: '@4' }])[0]), null);
+    const now = new Date(2026, 9, 10, 15, 0, 0).getTime();
+    const mid = new Date(2026, 9, 10).getTime();
+    const D = 86400000;
+    assert.equal(dateBucket(now, now), '~date:today');
+    assert.equal(dateBucket(mid, now), '~date:today');
+    assert.equal(dateBucket(mid - 1, now), '~date:yesterday');
+    assert.equal(dateBucket(mid - D, now), '~date:yesterday');
+    assert.equal(dateBucket(mid - D - 1, now), '~date:week');
+    assert.equal(dateBucket(mid - 6 * D, now), '~date:week');
+    assert.equal(dateBucket(mid - 6 * D - 1, now), '~date:older');
+});
+
+test('model: isLive and itemState for every live shape — busy, waiting, judge battery testing, run working/judging/waiting', () => {
+    const one = a => buildItems([{ name: 'w', window_id: '@9', ...a }])[0];
+    const run = (st, over = {}) => buildItems([{ name: 'r', window_id: '@8', run: { task_id: 'R', role: 'agent', status: st, ...over } }])[0];
+    assert.equal(isLive(one({ session_status: 'busy' }), wants), true);
+    assert.equal(isLive(one({ session_status: 'waiting' }), wants), true);
+    assert.equal(isLive(one({ judge_battery: { state: 'testing' } }), wants), true);
+    assert.equal(isLive(one({ session_status: 'idle' }), wants), false);
+    assert.equal(isLive(one({ judge_battery: { state: 'done' } }), wants), false);
+    assert.equal(isLive(run('running'), wants), true);
+    assert.equal(isLive(run('changes_requested'), wants), true);
+    assert.equal(isLive(run('awaiting_review', { judge_state: 'running' }), wants), true);
+    assert.equal(isLive(run('needs_human'), wants), true);
+    assert.equal(isLive(run('done'), wants), false);
+    assert.equal(isLive(run('awaiting_review', { judge_state: 'clean' }), wants), false);
+    assert.equal(itemState(one({ session_status: 'busy' }), wants), 'working');
+    assert.equal(itemState(one({ judge_battery: { state: 'testing' } }), wants), 'working');
+    assert.equal(itemState(one({ session_status: 'waiting' }), wants), 'needs');
+    assert.equal(itemState(one({ done: true }), wants), 'completed');
+    assert.equal(itemState(one({}), wants), 'idle');
+    assert.equal(itemState(run('running'), wants), 'working');
+    assert.equal(itemState(run('awaiting_review', { judge_state: 'running' }), wants), 'working');
+    assert.equal(itemState(run('needs_human'), wants), 'needs');
+    assert.equal(itemState(run('awaiting_review', { judge_state: 'clean' }), wants), 'completed');
+    for (const s of ['done', 'closed', 'failed']) assert.equal(itemState(run(s), wants), 'completed', s);
+    assert.equal(itemState(run('queued'), wants), 'idle');
+});
+
+test('model: the Last-activity cutoff — a row exactly at the cutoff is kept, one ms older is not', () => {
+    const now = Date.UTC(2026, 9, 10, 12);
+    const at = { name: 'at', window_id: '@1', cwd: '/x', last_activity: now - 86400000 };
+    const past = { name: 'past', window_id: '@2', cwd: '/x', last_activity: now - 86400000 - 1 };
+    const m = groupSidebar([at, past], { wants, activityDays: 1, now, mode: 'none' });
+    assert.deepEqual(m.groups[0].items.map(i => i.agent.name), ['at']);
+});
+
+test('model: normalizeView falls back FIELD BY FIELD and keeps every valid stored value', () => {
+    const good = { status: 'archived', env: ['judge', 'background'], activity: '30d', groupBy: 'state',
+        sort: 'created', showEmpty: true, showPR: false };
+    assert.deepEqual(normalizeView(good), good);
+    assert.deepEqual(normalizeView({ ...good, activity: 'all' }).activity, 'all');
+    const bad = normalizeView({ status: 'x', env: 'judge', activity: '2d', groupBy: 'x', sort: 'x', showEmpty: 'yes', showPR: 0 });
+    assert.deepEqual(bad, { ...VIEW_DEFAULTS, env: [...VIEW_DEFAULTS.env] });
+    assert.deepEqual(VIEW_DEFAULTS.env, ['interactive', 'dispatched', 'background'], 'the default is everything except Judges');
+    assert.deepEqual(normalizeView({ env: [] }).env, [], 'an empty selection is a choice, not garbage');
 });
