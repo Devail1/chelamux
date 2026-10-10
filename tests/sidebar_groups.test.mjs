@@ -13,6 +13,7 @@
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, flush } from './js_helpers/dashboard_dom.mjs';
+import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 import {
     DISPATCHED_KEY, OTHER_KEY, buildItems, folderKey, folderLabels, groupSidebar, isArchivable, moveGroup, runState,
 } from '../chela/dashboard/static/js/sidebarmodel.js';
@@ -27,6 +28,8 @@ const BODY = `
 // Every POST /api/agents/spawn the launcher makes, body parsed.
 const spawns = [];
 let nav, util;
+// CMX-75: the archive is SERVER state — this stands in for /api/sidebar/archive.
+const server = fakeArchiveServer(() => util && util._agentsCache);
 
 before(async () => {
     ({ modules: { util, nav } } = await bootDashboardDom({
@@ -37,6 +40,8 @@ before(async () => {
         terminalsEnabled: false,
         fetchImpl: (url, opts) => {
             if (String(url).includes('/api/agents/spawn')) spawns.push(JSON.parse(opts.body));
+            const faked = server.handle(url, opts);
+            if (faked !== undefined) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(faked) });
             const u = String(url);
             // the list endpoints answer with an empty list, the rest with an empty object
             const body = u.includes('/api/agents/spawn') ? { ok: true } : /\/api\/(agents|summary)/.test(u) ? [] : {};
@@ -46,9 +51,11 @@ before(async () => {
     }));
 });
 
-beforeEach(() => {
+beforeEach(async () => {
     localStorage.clear();
     spawns.length = 0;
+    server.reset();
+    await nav.refreshArchive();   // the page's copy of the archive, re-read from the (reset) server
 });
 
 const wants = a => !!a && (a.needs_human === true || a.session_status === 'waiting');
@@ -212,13 +219,16 @@ function withThrowingStorage(fn) {
     Object.defineProperty(globalThis, 'localStorage', {
         value: { getItem: boom, setItem: boom, removeItem: boom, clear: boom }, writable: true, configurable: true,
     });
-    try { return fn(); } finally {
+    let out;
+    try { out = fn(); } catch (e) { restore(); throw e; }
+    function restore() {
         Object.defineProperty(globalThis, 'localStorage', { value: real, writable: true, configurable: true });
     }
+    return out && typeof out.then === 'function' ? out.finally(restore) : (restore(), out);
 }
 
-test('a THROWING localStorage still renders, and collapse / order / archive still work for the session', () => {
-    withThrowingStorage(() => {
+test('a THROWING localStorage still renders, and collapse / order / archive still work for the session', async () => {
+    await withThrowingStorage(async () => {
         const rows = [
             win('a', { cwd: '/srv/code/alpha' }),
             win('b', { cwd: '/srv/code/beta' }),
@@ -230,7 +240,7 @@ test('a THROWING localStorage still renders, and collapse / order / archive stil
         assert.ok(group('/srv/code/alpha').classList.contains('collapsed'));
         nav.groupMenuAction('/srv/code/beta', 'up');
         assert.deepEqual(groupKeys(), ['/srv/code/beta', '/srv/code/alpha']);
-        nav.groupMenuAction('/srv/code/beta', 'archive');
+        await nav.groupMenuAction('/srv/code/beta', 'archive');
         assert.deepEqual(rowsIn('/srv/code/beta'), ['b']);
     });
 });
@@ -283,7 +293,11 @@ test('Collapse all / Expand all fold and unfold every group', () => {
 
 // --- 4b. Archive all --------------------------------------------------------------
 
-test('"Archive all" on a MIXED group hides only finished rows — never a running one — and is reversible', () => {
+const archivedSection = () => host().querySelector('.side-group.side-archived');
+const archivedRows = () => [...(archivedSection() || { querySelectorAll: () => [] }).querySelectorAll('.agent-row')]
+    .map(r => r.dataset.agent || (r.querySelector('.agent-row-name') || {}).textContent);
+
+test('"Archive all" on a MIXED group archives only finished rows — never a running one — and Unarchive resumes', async () => {
     const rows = [
         win('working', { cwd: '/srv/code/mix', session_status: 'busy' }),
         win('finished', { cwd: '/srv/code/mix', done: true }),
@@ -296,33 +310,116 @@ test('"Archive all" on a MIXED group hides only finished rows — never a runnin
     assert.ok(menuItems('group-menu').some(i => i.text === 'Archive all (2)'),
         `expected "Archive all (2)", got ${JSON.stringify(menuItems('group-menu').map(i => i.text))}`);
     clickMenu('group-menu', 'Archive all (2)');
+    await flush();
+    const posted = server.calls.filter(c => c.method === 'POST' && c.path === '/api/sidebar/archive');
+    assert.equal(posted.length, 1, 'Archive all is ONE request to the server');
+    assert.deepEqual(posted[0].body.keys.sort(), [`w:${rows[1].window_id}`, `w:${rows[2].window_id}`].sort(),
+        'only the finished rows are sent to be archived');
     assert.deepEqual(rowsIn('/srv/code/mix').sort(), ['idle-unfinished', 'working'],
-        'Archive all must hide the finished rows and keep the running/idle ones');
+        'the closed windows leave their group at once');
     assert.ok(host().querySelector('.side-needs-you .agent-row[data-agent="blocked"]'),
         'the waiting row must stay in Needs you');
     const toggle = host().querySelector('.side-archived-toggle');
     assert.equal(toggle.textContent, 'Show archived (2)');
-    // reversible: show them (dimmed), then unarchive
+    // Status Active: no Archived section at all
+    assert.equal(archivedSection(), null);
     fire(toggle);
-    assert.deepEqual(rowsIn('/srv/code/mix').sort(), ['dead-shell', 'finished', 'idle-unfinished', 'working']);
-    assert.ok(group('/srv/code/mix').querySelector('.agent-row[data-agent="finished"]').classList.contains('archived'));
-    fire(group('/srv/code/mix').querySelector('.group-more'));
-    clickMenu('group-menu', 'Unarchive all (2)');
-    fire(host().querySelector('.side-archived-toggle'));   // hide archived again
-    assert.deepEqual(rowsIn('/srv/code/mix').sort(), ['dead-shell', 'finished', 'idle-unfinished', 'working']);
-    assert.equal(host().querySelector('.side-archived-toggle'), null);
+    assert.deepEqual(rowsIn('/srv/code/mix').sort(), ['idle-unfinished', 'working'],
+        'an archived row is never drawn inside its folder group');
+    assert.deepEqual(archivedRows().sort(), ['dead-shell', 'finished']);
+    // Unarchive = resume: the server is asked, and the session comes back as a live window
+    const btn = archivedSection().querySelector(`.row-unarchive[data-item="s:sid-${rows[1].window_id.slice(1)}"]`);
+    assert.ok(btn, 'each archived session row carries an Unarchive button');
+    fire(btn);
+    await flush();
+    await flush();
+    const un = server.calls.filter(c => c.path === '/api/sidebar/unarchive');
+    assert.deepEqual(un.map(c => c.body.keys), [[`s:sid-${rows[1].window_id.slice(1)}`]]);
+    assert.ok(rowsIn('/srv/code/mix').includes('finished'), 'the resumed session is a live row again');
+    assert.deepEqual(archivedRows(), ['dead-shell']);
 });
 
-test('an archived row that comes back to life is shown again, and leaves the archive', () => {
-    const finished = win('revived', { cwd: '/srv/code/mix', done: true });
-    const keep = win('other', { cwd: '/srv/code/mix' });
-    render([finished, keep]);
-    nav.groupMenuAction('/srv/code/mix', 'archive');
-    assert.deepEqual(rowsIn('/srv/code/mix'), ['other']);
-    render([{ ...finished, done: false, session_status: 'busy' }, keep]);
-    assert.deepEqual(rowsIn('/srv/code/mix').sort(), ['other', 'revived'], 'a busy row was kept hidden');
-    assert.deepEqual(JSON.parse(localStorage.getItem('chela_sb_archived')), [],
+test('a refused archive (no session id) leaves the window where it is and SAYS so', async () => {
+    const said = [];
+    const realAlert = window.alert;
+    window.alert = m => said.push(m);
+    globalThis.alert = window.alert;
+    try {
+        const rows = [win('unknown', { cwd: '/srv/code/mix', done: true, no_session: true })];
+        render(rows);
+        await nav.groupMenuAction('/srv/code/mix', 'archive');
+        assert.deepEqual(rowsIn('/srv/code/mix'), ['unknown'], 'a refused window keeps its row');
+        assert.equal(server.st.sessions.length, 0);
+        assert.equal(said.length, 1, 'the refusal is shown, not swallowed');
+        assert.match(said[0], /session id cannot be determined/);
+    } finally {
+        window.alert = realAlert;
+        globalThis.alert = realAlert;
+    }
+});
+
+test('a hidden row that comes back to life is shown again, and leaves the SERVER archive', async () => {
+    const run = (status) => win('liavacc/cmx-5', { cwd: `${WT}/CMX-5`, dispatched: true, run: runCard('CMX-5', 'T', 'agent', { status }) });
+    const settled = run('done');
+    render([settled]);
+    await nav.groupMenuAction(DISPATCHED_KEY, 'archive');
+    assert.deepEqual(server.st.hidden, ['run:CMX-5'], 'a settled run is HIDDEN, not closed');
+    assert.equal(group(DISPATCHED_KEY), null);
+    render([{ ...settled, run: { ...settled.run, status: 'running' } }]);
+    assert.ok(group(DISPATCHED_KEY), 'a woken run was kept hidden');
+    await flush();
+    assert.deepEqual(server.st.hidden, [],
         'a woken row must leave the archive, or it is re-hidden the moment it settles');
+});
+
+// docs/defeat_shapes/420: the render re-checks isArchivable and prunes the archive set, so
+// an "Archive all" that SENT a live row would still render right. The invariant is on the
+// action itself — so read every request it makes, not the end state.
+test('"Archive all" never SENDS a live row to be archived — not even one the render would re-show', async () => {
+    const working = win('working', { cwd: '/srv/code/mix', session_status: 'busy' });
+    const idle = win('idle-unfinished', { cwd: '/srv/code/mix' });
+    const finished = win('finished', { cwd: '/srv/code/mix', done: true });
+    render([working, idle, finished]);
+    await nav.groupMenuAction('/srv/code/mix', 'archive');
+    const sent = server.calls.filter(c => c.method === 'POST' && c.path === '/api/sidebar/archive');
+    assert.ok(sent.length > 0, 'Archive all sent nothing');
+    for (const c of sent) {
+        assert.deepEqual(c.body.keys, [`w:${finished.window_id}`],
+            `Archive all sent ${JSON.stringify(c.body.keys)} — only the finished row may be archived`);
+    }
+});
+
+test('the Archive all count is the group\'s archivable rows, and is DISABLED at 0', async () => {
+    render([win('f1', { cwd: '/srv/code/mix', done: true }), win('f2', { cwd: '/srv/code/mix', done: true }),
+        win('live', { cwd: '/srv/code/mix', session_status: 'busy' })]);
+    fire(group('/srv/code/mix').querySelector('.group-more'));
+    assert.ok(menuItems('group-menu').some(i => i.text === 'Archive all (2)'));
+    window.chela.hideSideMenus();
+    await nav.groupMenuAction('/srv/code/mix', 'archive');
+    fire(host().querySelector('.side-archived-toggle'));   // show archived: in the Archived section
+    fire(group('/srv/code/mix').querySelector('.group-more'));
+    const item = menuItems('group-menu').find(i => i.text.startsWith('Archive all'));
+    assert.equal(item.text, 'Archive all (0)', 'rows already archived are not counted again');
+    assert.equal(item.disabled, true, 'Archive all with nothing to archive must be disabled');
+    assert.ok(!menuItems('group-menu').some(i => i.text.startsWith('Unarchive all')),
+        'archived rows live in the Archived section now, not in a group menu');
+    window.chela.hideSideMenus();
+});
+
+test('the browser\'s old localStorage archive is imported ONCE, as hidden — never closing a window', async () => {
+    const w = win('old', { cwd: '/srv/code/mix', done: true });
+    localStorage.setItem('chela_sb_archived', JSON.stringify([`w:${w.window_id}`, 'run:CMX-3']));
+    render([w]);
+    await nav.refreshArchive();
+    const mig = server.calls.filter(c => c.path === '/api/sidebar/archive/migrate');
+    assert.deepEqual(mig.map(c => c.body.keys), [[`w:${w.window_id}`, 'run:CMX-3']]);
+    assert.equal(localStorage.getItem('chela_sb_archived'), null, 'the old key is removed once imported');
+    assert.ok(!server.calls.some(c => c.path === '/api/sidebar/archive' && c.method === 'POST'),
+        'a migration must never archive (= close) a window');
+    await nav.refreshArchive();
+    assert.equal(server.calls.filter(c => c.path === '/api/sidebar/archive/migrate').length, 1, 'only once');
+    render([w]);
+    assert.equal(group('/srv/code/mix'), null, 'the migrated row is hidden');
 });
 
 test('model: isArchivable is false for anything live — busy, waiting, needs_human, orchestrator, judge mid-battery', () => {
@@ -504,43 +601,6 @@ test('model: sort by name is NUMERIC — CMX-100 sorts after CMX-37, not between
     const rows = ['CMX-100', 'CMX-37', 'CMX-11', 'CMX-10'].map((n, i) => ({ name: n, window_id: `@${i}`, cwd: '/x/a' }));
     const m = groupSidebar(rows, { wants, labelOf: it => it.agent.name });
     assert.deepEqual(m.groups[0].items.map(it => it.agent.name), ['CMX-10', 'CMX-11', 'CMX-37', 'CMX-100']);
-});
-
-// docs/defeat_shapes/420: the render re-checks isArchivable and prunes the archive set, so
-// an "Archive all" that ADDED a live row would still render right. The invariant is on the
-// action itself — so read every write it makes to the archive store, not the end state.
-test('"Archive all" never WRITES a live row into the archive — not even one the render would re-show', () => {
-    const working = win('working', { cwd: '/srv/code/mix', session_status: 'busy' });
-    const idle = win('idle-unfinished', { cwd: '/srv/code/mix' });
-    const finished = win('finished', { cwd: '/srv/code/mix', done: true });
-    render([working, idle, finished]);
-    const writes = [];
-    // jsdom's Storage stores an own-property assignment as a KEY, so spy on the prototype
-    const proto = Object.getPrototypeOf(localStorage);
-    const realSet = proto.setItem;
-    proto.setItem = function (k, v) {
-        if (k === 'chela_sb_archived') writes.push(JSON.parse(v));
-        return realSet.call(this, k, v);
-    };
-    try { nav.groupMenuAction('/srv/code/mix', 'archive'); }
-    finally { proto.setItem = realSet; }
-    assert.ok(writes.length > 0, 'Archive all wrote nothing');
-    for (const w of writes) {
-        assert.deepEqual(w, [`w:${finished.window_id}`],
-            `Archive all wrote ${JSON.stringify(w)} — only the finished row may be archived`);
-    }
-});
-
-test('the Archive all count excludes rows already archived, and is DISABLED at 0', () => {
-    render([win('f1', { cwd: '/srv/code/mix', done: true }), win('f2', { cwd: '/srv/code/mix', done: true }),
-        win('live', { cwd: '/srv/code/mix', session_status: 'busy' })]);
-    nav.groupMenuAction('/srv/code/mix', 'archive');
-    fire(host().querySelector('.side-archived-toggle'));   // show archived: both f rows on screen again
-    fire(group('/srv/code/mix').querySelector('.group-more'));
-    const item = menuItems('group-menu').find(i => i.text.startsWith('Archive all'));
-    assert.equal(item.text, 'Archive all (0)', 'rows already archived are not counted again');
-    assert.equal(item.disabled, true, 'Archive all with nothing to archive must be disabled');
-    window.chela.hideSideMenus();
 });
 
 test('Collapse all keeps groups collapsed earlier that are off screen now', () => {

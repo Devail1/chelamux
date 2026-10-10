@@ -11,6 +11,7 @@
 import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
+import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 import {
     DISPATCHED_KEY, OTHER_KEY, VIEW_DEFAULTS, activityTs, createdTs, dateBucket, groupSidebar, isLive, itemKinds, itemState, buildItems,
     normalizeView, windowKind,
@@ -30,6 +31,8 @@ let nav, util, orch;
 // group's "+" posted
 let orchStatus = {};
 const spawns = [];
+// CMX-75: the archive is SERVER state — this stands in for /api/sidebar/archive.
+const server = fakeArchiveServer(() => util && util._agentsCache);
 
 before(async () => {
     ({ modules: { util, nav, orchestrator: orch } } = await bootDashboardDom({
@@ -39,6 +42,8 @@ before(async () => {
         fetchImpl: (url, opts) => {
             const u = String(url);
             if (u.includes('/api/agents/spawn')) spawns.push(JSON.parse(opts.body));
+            const faked = server.handle(url, opts);
+            if (faked !== undefined) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(faked) });
             const body = u.includes('/api/orchestrator/status') ? orchStatus
                 : u.includes('/api/agents/spawn') ? { ok: true }
                 : /\/api\/(agents|summary)/.test(u) ? [] : {};
@@ -48,7 +53,9 @@ before(async () => {
     }));
 });
 
-beforeEach(() => {
+beforeEach(async () => {
+    server.reset();
+    await nav.refreshArchive();
     localStorage.clear();
     spawns.length = 0;
     // a choice is also kept in memory (for a throwing storage) — reset it to the defaults
@@ -136,44 +143,64 @@ test('the view menu opens from the header button, shows each submenu\'s value + 
 
 // --- Status ---------------------------------------------------------------------------
 
-test('Status: Active hides archived rows, All shows both, Archived shows only them', () => {
+const archSection = () => host().querySelector('.side-group.side-archived');
+const archNames = () => [...(archSection() ? archSection().querySelectorAll('.agent-row') : [])]
+    .map(r => (r.querySelector('.agent-row-name') || {}).textContent);
+const inGroups = () => [...host().querySelectorAll('.side-group:not(.side-archived) .agent-row')]
+    .map(r => (r.querySelector('.agent-row-name') || {}).textContent);
+
+test('Status: Active hides archived rows, All adds the Archived section at the BOTTOM, Archived shows only it', async () => {
     const rows = [win('live'), win('finished', { done: true })];
     render(rows);
-    nav.groupMenuAction('/srv/code/alpha', 'archive');
+    await nav.groupMenuAction('/srv/code/alpha', 'archive');
     assert.deepEqual(shown(), ['live']);
+    assert.equal(archSection(), null, 'Active keeps hiding the archive');
     view('status:all');
-    assert.deepEqual(shown().sort(), ['finished', 'live']);
+    assert.deepEqual(inGroups(), ['live'], 'an archived row is never rendered inside a folder group');
+    const sections = [...host().querySelectorAll('.side-group')];
+    assert.equal(sections[sections.length - 1], archSection(), 'the Archived section is the LAST group');
+    assert.ok(archSection().classList.contains('collapsed'), 'collapsed by default, like the desktop');
+    assert.equal(archSection().querySelector('.group-name').textContent, 'Archived');
+    assert.equal(archSection().querySelector('.archived-count').textContent, '1');
+    assert.deepEqual(archNames(), ['finished']);
+    fire(archSection().querySelector('.group-head'));
+    assert.ok(!archSection().classList.contains('collapsed'), 'expanding lists them');
     view('status:archived');
-    assert.deepEqual(shown(), ['finished']);
+    assert.deepEqual(inGroups(), []);
+    assert.deepEqual(archNames(), ['finished']);
+    assert.ok(!archSection().classList.contains('collapsed'), 'Status Archived shows the section open');
     view('status:active');
     assert.deepEqual(shown(), ['live']);
 });
 
-test('Status Active: a group whose rows are ALL archived stays, and its menu can Unarchive all', () => {
-    const groupItems = () => [...menu('group-menu').querySelectorAll('.popover-item')].map(i => i.textContent.trim());
-    render([win('live'), win('fin-a', { cwd: '/srv/code/gone', done: true }),
-        win('fin-b', { cwd: '/srv/code/gone', done: true }), win('fin-c', { done: true })]);
-    nav.groupMenuAction('/srv/code/gone', 'archive');
-    nav.groupMenuAction('/srv/code/alpha', 'archive');
-    // Active: the archived rows are hidden, but each group still knows it holds them
-    assert.deepEqual(shown(), ['live']);
-    assert.ok(group('/srv/code/gone'), 'an all-archived group must stay under Active (its Unarchive all is its only way back)');
-    assert.deepEqual(rowsIn('/srv/code/gone'), []);
-    fire(group('/srv/code/gone').querySelector('.group-more'));
-    assert.ok(groupItems().includes('Unarchive all (2)'), `got ${JSON.stringify(groupItems())}`);
-    window.chela.hideSideMenus();
-    fire(group('/srv/code/alpha').querySelector('.group-more'));
-    assert.ok(groupItems().includes('Unarchive all (1)'), `mixed group, got ${JSON.stringify(groupItems())}`);
-    window.chela.hideSideMenus();
-    // and it works FROM Active — the rows come back without switching Status
-    nav.groupMenuAction('/srv/code/gone', 'unarchive');
-    assert.deepEqual(rowsIn('/srv/code/gone').sort(), ['fin-a', 'fin-b']);
-    assert.deepEqual(shown().sort(), ['fin-a', 'fin-b', 'live']);
+test('the Archived section holds EVERY archived row — closed sessions and hidden runs, from every folder — and counts them', async () => {
+    const r1 = win('fin-a', { cwd: '/srv/code/gone', done: true });
+    const r2 = win('fin-b', { cwd: '/srv/code/gone', done: true });
+    const r3 = win('fin-c', { done: true });
+    const run = win('liavacc/cmx-8', { cwd: `${WT}/CMX-8`, dispatched: true, run: runCard('CMX-8', 'Eight', 'agent', { status: 'done' }) });
+    render([win('live'), r1, r2, r3, run]);
+    await nav.groupMenuAction('/srv/code/gone', 'archive');
+    await nav.groupMenuAction('/srv/code/alpha', 'archive');
+    await nav.groupMenuAction(DISPATCHED_KEY, 'archive');
+    view('status:all');
+    assert.equal(group('/srv/code/gone'), null, 'a folder whose rows are all archived has no group of its own');
+    assert.equal(group(DISPATCHED_KEY), null);
+    const n = host().querySelectorAll('.side-archived .agent-row').length;
+    assert.equal(n, 4);
+    assert.equal(archSection().querySelector('.archived-count').textContent, String(n),
+        'the section count equals the number of archived rows');
+    assert.equal(host().querySelectorAll('.side-archived .row-unarchive').length, n, 'each row has Unarchive');
+    assert.equal(host().querySelector('.side-archived-toggle').textContent, 'Hide archived');
+    // Unarchive on the hidden RUN shows it again (no resume — its windows were never closed)
+    fire(archSection().querySelector('.row-unarchive[data-item="run:CMX-8"]'));
+    await new Promise(r => setTimeout(r, 0));
+    assert.ok(group(DISPATCHED_KEY), 'the unhidden run is back in Dispatched');
+    assert.deepEqual(server.st.hidden, []);
 });
 
-test('Status Archived: the foot link reads "Hide archived" and leads back to Active', () => {
+test('Status Archived: the foot link reads "Hide archived" and leads back to Active', async () => {
     render([win('live'), win('finished', { done: true })]);
-    nav.groupMenuAction('/srv/code/alpha', 'archive');
+    await nav.groupMenuAction('/srv/code/alpha', 'archive');
     const foot = () => host().querySelector('.side-archived-toggle');
     assert.equal(foot().textContent, 'Show archived (1)');
     view('status:archived');
@@ -183,42 +210,46 @@ test('Status Archived: the foot link reads "Hide archived" and leads back to Act
     assert.equal(foot().textContent, 'Show archived (1)');
 });
 
+test('archive state is read from the SERVER: what another device archived shows here', async () => {
+    render([win('live')]);
+    server.st.sessions.push({ key: 's:sid-x', session_id: 'sid-x', name: 'elsewhere', cwd: '/srv/code/beta', archived_at: 1 });
+    await nav.refreshArchive();
+    nav.renderSidebarAgents(util._agentsCache);
+    assert.equal(host().querySelector('.side-archived-toggle').textContent, 'Show archived (1)');
+    view('status:archived');
+    assert.deepEqual(archNames(), ['elsewhere']);
+});
+
 test('model: part 1\'s `showArchived` still means Status All; Show empty keeps a folder only the saved order knows', () => {
     const rows = [{ name: 'f', window_id: '@95', cwd: '/m/one', done: true }];
     const archived = new Set(['w:@95']);
     const keys = m => m.groups.flatMap(g => g.items.map(it => it.key));
-    assert.deepEqual(keys(groupSidebar(rows, { wants, archived, showArchived: true })), ['w:@95']);
-    assert.deepEqual(keys(groupSidebar(rows, { wants, archived })), []);
-    assert.deepEqual(keys(groupSidebar(rows, { wants, archived, showArchived: true, status: 'active' })), [],
-        'an explicit status wins over the legacy flag');
+    assert.deepEqual(groupSidebar(rows, { wants, archived, showArchived: true }).archived.map(it => it.key), ['w:@95']);
+    assert.deepEqual(keys(groupSidebar(rows, { wants, archived, showArchived: true })), []);
+    assert.deepEqual(keys(groupSidebar(rows, { wants })), ['w:@95']);
     const m = groupSidebar([], { wants, showEmpty: true, order: ['/m/gone', '~dispatched'] });
     assert.deepEqual(m.groups.map(g => [g.key, g.cwd]), [['/m/gone', '/m/gone']],
         'a saved folder with no session left keeps its header and its "+" folder');
     assert.deepEqual(groupSidebar([], { wants, order: ['/m/gone'] }).groups, []);
 });
 
-test('model: under EVERY grouping and status, each archived row is in exactly one group\'s `archived`', () => {
+test('model: under EVERY grouping and status, an archived row is in NO group and once in `archived`', () => {
     const a = [
         { name: 'live', window_id: '@91', cwd: '/m/one', session_status: 'idle', last_activity: ago(3600e3) },
         { name: 'arch1', window_id: '@92', cwd: '/m/one', done: true, last_activity: ago(3600e3) },
         { name: 'arch2', window_id: '@93', cwd: '/m/two', done: true, last_activity: ago(2 * DAY) },
     ];
     const archived = new Set(['w:@92', 'w:@93']);
+    const sessions = [{ key: 's:abc', session_id: 'abc', name: 'closed', cwd: '/m/one' }];
     const custom = { groups: [{ id: 'g1', name: 'G' }], assign: { 'w:@93': 'g1' } };
     for (const mode of ['date', 'folder', 'state', 'custom', 'none']) {
         for (const status of ['active', 'all', 'archived']) {
-            const m = groupSidebar(a, { wants, mode, status, archived, custom });
+            const m = groupSidebar(a, { wants, mode, status, archived, custom, sessions });
             const where = `${mode}/${status}`;
-            const archKeys = m.groups.flatMap(g => g.archived.map(it => it.key)).sort();
-            assert.deepEqual(archKeys, ['w:@92', 'w:@93'], `${where}: archived per group`);
+            assert.deepEqual(m.archived.map(it => it.key).sort(), ['s:abc', 'w:@92', 'w:@93'], `${where}: archived`);
             const itemKeys = m.groups.flatMap(g => g.items.map(it => it.key)).sort();
-            const want = { active: ['w:@91'], all: ['w:@91', 'w:@92', 'w:@93'], archived: ['w:@92', 'w:@93'] }[status];
-            assert.deepEqual(itemKeys, want, `${where}: rendered rows`);
+            assert.deepEqual(itemKeys, status === 'archived' ? [] : ['w:@91'], `${where}: grouped rows`);
             assert.deepEqual([...m.hidden].sort(), ['w:@92', 'w:@93'], `${where}: hidden`);
-            // an archived row sits in the group its row would render in
-            for (const g of m.groups) for (const it of g.archived) {
-                if (status !== 'active') assert.ok(g.items.includes(it), `${where}: ${it.key} archived in a different group`);
-            }
         }
     }
 });

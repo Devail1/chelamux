@@ -13,6 +13,10 @@ import { refreshCostTab } from './usage.js';
 import { resolveWindowId } from './windowid.js';
 import { DISPATCHED_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, groupSidebar, isArchivable, moveGroup, normalizeView, primaryWindow, runLabel, runState } from './sidebarmodel.js';
 
+// The ONE Archived section at the bottom of the sidebar (CMX-75) — its collapse state
+// rides the collapsed-groups set under this key.
+const ARCHIVED_SECTION_KEY = '~archived';
+
 // ---------------------------------------------------------------------------
 // Sidebar + canvas navigation (replaces the old tab bar)
 //
@@ -266,12 +270,14 @@ function _agentLabel(a) {
 }
 
 // --- Per-viewer sidebar state (CMX-35) ---------------------------------------
-// Collapsed groups, the group order (Move up / Move down), the archived rows and the
-// "show archived" toggle are this VIEWER's, so they live in localStorage — and every
+// Collapsed groups, the group order (Move up / Move down) and the view are this VIEWER's,
+// so they live in localStorage — and every
 // read and write is wrapped: a private window, blocked site data or a throwing
 // accessor must leave a sidebar that still renders (just one that forgets).
 const SB_COLLAPSED_KEY = 'chela_grp_collapsed';
 const SB_ORDER_KEY = 'chela_sb_group_order';
+// Pre-CMX-75 the archive lived here, per browser. It is chela state now (_arch, below);
+// whatever a browser still holds is imported ONCE (_migrateArchive) and then removed.
 const SB_ARCHIVED_KEY = 'chela_sb_archived';
 // CMX-66: the VIEW menu's choices ({status, env, activity, groupBy, sort, showEmpty,
 // showPR} — sidebarmodel.normalizeView) and the custom groups ({groups: [{id, name}],
@@ -313,11 +319,98 @@ function toggleGroup(key) {
 
 let _memOrder = null;
 function _groupOrder() { return _lsList(SB_ORDER_KEY, _memOrder); }
-let _memArchived = null;
-function _archivedSet() { return new Set(_lsList(SB_ARCHIVED_KEY, _memArchived)); }
-function _saveArchived(s) {
-    _memArchived = [...s];
-    _lsSet(SB_ARCHIVED_KEY, _memArchived);
+// --- The archive (CMX-75) — SERVER state, not this browser's -----------------
+// chela/sidebar_archive.py, behind /api/sidebar/archive: `hidden` (row keys hidden only —
+// a settled dispatched run) and `sessions` (CLOSED human sessions, each with what it
+// takes to resume it). Every device reads the same set. `loaded` stays false until the
+// first answer, so nothing is pruned off an archive this page has not seen yet.
+let _arch = { hidden: [], sessions: [], loaded: false };
+function _archivedSet() { return new Set(_arch.hidden); }
+function _setArchive(st) {
+    if (!st || typeof st !== 'object') return;
+    _arch = {
+        hidden: Array.isArray(st.hidden) ? st.hidden.filter(k => typeof k === 'string') : [],
+        sessions: Array.isArray(st.sessions) ? st.sessions.filter(r => r && typeof r.key === 'string') : [],
+        loaded: true,
+    };
+}
+function _postJson(path, body) {
+    return api(path, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+}
+// What the server refused, said once — a refusal is a decision the user should see.
+function _sayRefused(res) {
+    const r = res && Array.isArray(res.refused) ? res.refused : [];
+    if (r.length && typeof alert === 'function') alert(r.map(x => x.error || x.key).join('\n'));
+}
+// One-time import of this browser's old localStorage archive. Those keys only ever meant
+// HIDE, and the server imports them as hidden — a page load never closes a window.
+let _migrating = false;
+async function _migrateArchive() {
+    if (_migrating) return;
+    const old = _lsList(SB_ARCHIVED_KEY, null);
+    if (!old.length) return;
+    _migrating = true;
+    try {
+        const res = await _postJson('/api/sidebar/archive/migrate', { keys: old });
+        if (res && res.ok) {
+            _setArchive(res.state);
+            try { localStorage.removeItem(SB_ARCHIVED_KEY); } catch { /* storage blocked */ }
+        }
+    } catch { /* the next refresh retries */ }
+    _migrating = false;
+}
+async function refreshArchive() {
+    try {
+        const st = await api('/api/sidebar/archive');
+        if (st && Array.isArray(st.hidden)) _setArchive(st);
+    } catch { /* transient — keep the last answer */ }
+    await _migrateArchive();
+}
+// Archive rows by item key: a plain session is CLOSED server-side (resumable from the
+// Archived section), a settled run is hidden. Refusals are reported, never swallowed.
+async function archiveKeys(keys) {
+    if (!keys || !keys.length) return null;
+    let res = null;
+    try { res = await _postJson('/api/sidebar/archive', { keys }); } catch { /* below */ }
+    if (res && res.state) _setArchive(res.state);
+    // The windows the server CLOSED are gone now — drop them before the next poll says so,
+    // or their rows would sit in their groups beside their own Archived entries.
+    const closed = new Set(res && Array.isArray(res.closed) ? res.closed : []);
+    if (closed.size) setAgentsCache((_agentsCache || []).filter(a => !(a && closed.has(a.window_id))));
+    renderSidebarAgents(_agentsCache || []);
+    if (!res) { if (typeof alert === 'function') alert('Archive failed — the dashboard did not answer.'); }
+    else _sayRefused(res);
+    return res;
+}
+// Unarchive rows: a closed session is RESUMED (a new window, same cwd + name, `claude
+// --resume`, its Telegram topic reopened); a hidden row is shown again.
+async function unarchiveKeys(keys) {
+    if (!keys || !keys.length) return null;
+    let res = null;
+    try { res = await _postJson('/api/sidebar/unarchive', { keys }); } catch { /* below */ }
+    if (res && res.state) _setArchive(res.state);
+    renderSidebarAgents(_agentsCache || []);
+    if (!res) { if (typeof alert === 'function') alert('Unarchive failed — the dashboard did not answer.'); }
+    else _sayRefused(res);
+    return res;
+}
+// Hidden rows that woke up (busy, waiting) or whose window is gone leave the archive, so
+// a woken row is not re-hidden the moment it settles and a recycled @N never inherits an
+// old row's flag. One request in flight at a time.
+let _pruning = false;
+function _pruneHidden(stillHidden) {
+    if (!_arch.loaded || _pruning) return;
+    const keep = new Set(stillHidden);
+    const prune = _arch.hidden.filter(k => !keep.has(k));
+    if (!prune.length) return;
+    _pruning = true;
+    _arch = { ..._arch, hidden: _arch.hidden.filter(k => keep.has(k)) };
+    _postJson('/api/sidebar/unarchive', { keys: prune })
+        .then(res => { if (res && res.state) _setArchive(res.state); })
+        .catch(() => {})
+        .finally(() => { _pruning = false; });
 }
 function _lsObj(key, mem) {
     const raw = _lsRead(key, mem == null ? null : JSON.stringify(mem));
@@ -482,17 +575,84 @@ function _prBadgeHtml(it) {
 
 function _itemRowHtml(it, archived, showPR = true) {
     const cls = archived ? 'archived' : '';
+    if (it.kind === 'session') return _sessionRowHtml(it);
     if (it.kind === 'run') return _runRowHtml(it, cls, showPR);
     return _agentRowHtml(it.agent, { itemKey: it.key, ...(cls ? { cls } : {}) });
+}
+
+// The Unarchive button an archived row carries (CMX-75). On a closed session it RESUMES
+// it; on a hidden row it shows it again.
+function _unarchiveBtn(key, resume) {
+    const what = resume ? 'Unarchive — resume this session in a new window' : 'Unarchive';
+    return `<button class="row-unarchive" data-item="${attrEsc(key)}" title="${attrEsc(what)}" aria-label="${attrEsc(what)}"
+        onclick="event.stopPropagation(); chela.unarchiveRow(this, this.dataset.item)">Unarchive</button>`;
+}
+
+// A CLOSED session's row (CMX-75): no window to open — only its resume record. Its name,
+// the folder it resumes in, and Unarchive.
+function _sessionRowHtml(it) {
+    const r = it.record || {};
+    const label = r.name || r.session_id || it.key;
+    const folder = String(r.cwd || '').replace(/\/+$/, '').split('/').pop() || r.cwd || '';
+    const when = r.archived_at ? ageStr(Date.now() / 1000 - r.archived_at) : '';
+    const title = [`${label} — archived (closed)`, r.cwd, when && `archived ${when}`].filter(Boolean).join('\n');
+    return `<div class="agent-row rich archived session-row" data-item="${attrEsc(it.key)}" title="${attrEsc(title)}">
+        <span class="term-status-dot idle" title="archived"></span>
+        <div class="ar-main">
+            <span class="agent-row-name">${escHtml(label)}</span>
+            <div class="ar-sub"><span class="ar-state idle">archived</span>${folder ? `<span class="ar-more"> · ${escHtml(folder)}</span>` : ''}</div>
+        </div>
+        ${_unarchiveBtn(it.key, true)}
+    </div>`;
+}
+
+// The ONE "Archived (N)" section at the BOTTOM of the sidebar (CMX-75, like the desktop):
+// collapsed by default, every archived row in it — never inside a folder group. Under
+// Status ▸ Archived it is the whole list, so it is shown open.
+function _archivedSectionHtml(rows, collapsed, forceOpen, showPR) {
+    const isColl = !forceOpen && !collapsed.has(`${ARCHIVED_SECTION_KEY}:open`);
+    const n = rows.length;
+    const body = rows.map(it => {
+        if (it.kind === 'session') return _sessionRowHtml(it);
+        const html = _itemRowHtml(it, true, showPR);
+        // a hidden live row: the same row, plus its Unarchive
+        return html.replace(/<\/div>\s*$/, `${_unarchiveBtn(it.key, false)}</div>`);
+    }).join('');
+    return `<div class="side-group side-archived${isColl ? ' collapsed' : ''}" data-g="${ARCHIVED_SECTION_KEY}">
+        <div class="group-head" data-g="${ARCHIVED_SECTION_KEY}" aria-expanded="${isColl ? 'false' : 'true'}"
+             onclick="chela.toggleArchivedSection()">
+            <span class="group-name">Archived</span><span class="group-count archived-count" title="${n} archived">${n}</span>
+            <span class="group-caret">${lucideIcon('chevron-right', 12)}</span>
+        </div>
+        <div class="group-rows">${body}</div>
+    </div>`;
+}
+
+// The section is COLLAPSED by default, so what is persisted is that it was OPENED.
+function toggleArchivedSection() {
+    const s = _collapsedGroups();
+    const k = `${ARCHIVED_SECTION_KEY}:open`;
+    if (s.has(k)) s.delete(k); else s.add(k);
+    _saveCollapsed(s);
+    renderSidebarAgents(_agentsCache || []);
+}
+
+// A row's Unarchive. Disabled at once: a slow resume must not be double-clicked into two
+// windows for one session.
+async function unarchiveRow(btn, key) {
+    if (btn) { if (btn.disabled) return; btn.disabled = true; btn.textContent = 'Resuming…'; }
+    const res = await unarchiveKeys([key]);
+    if (res && Array.isArray(res.resumed) && res.resumed.length) await refreshSidebar();
+    return res;
 }
 
 // A folder group's header — the desktop's quiet header: dim small folder name, a `>`
 // chevron, and at the right a ⋯ (the group menu, for touch: there is no right-click on
 // a phone) and a `+` (a new session in THIS folder). Right-click opens the same menu.
-function _groupHtml(g, collapsed, archivedKeys, showPR) {
+function _groupHtml(g, collapsed, showPR) {
     if (g.flat) {
         // Group by ▸ None: one flat list, no header.
-        const flatRows = g.items.map(it => _itemRowHtml(it, archivedKeys.has(it.key), showPR)).join('');
+        const flatRows = g.items.map(it => _itemRowHtml(it, false, showPR)).join('');
         return `<div class="side-group flat" data-g="${attrEsc(g.key)}"><div class="group-rows">${flatRows}</div></div>`;
     }
     const isColl = collapsed.has(g.key);
@@ -502,7 +662,7 @@ function _groupHtml(g, collapsed, archivedKeys, showPR) {
         ? `<button class="group-add" data-g="${attrEsc(g.key)}" title="New session in ${attrEsc(g.label)}" aria-label="New session in ${attrEsc(g.label)}"
              onclick="event.stopPropagation(); chela.groupNewSession(this.dataset.g)">${lucideIcon('plus', 14)}</button>`
         : '';
-    const rows = g.items.map(it => _itemRowHtml(it, archivedKeys.has(it.key), showPR)).join('');
+    const rows = g.items.map(it => _itemRowHtml(it, false, showPR)).join('');
     const empty = !g.items.length ? ' empty' : '';
     return `<div class="side-group${isColl ? ' collapsed' : ''}${empty}" data-g="${attrEsc(g.key)}">
         <div class="group-head" data-g="${attrEsc(g.key)}" aria-expanded="${isColl ? 'false' : 'true'}"
@@ -545,15 +705,13 @@ function renderSidebarAgents(agents) {
         mode: view.groupBy, wants: wantsHuman, orchWid, order: _groupOrder(),
         archived, status: view.status, env: view.env, activityDays: VIEW_ACTIVITY[view.activity],
         now: Date.now(), sort: view.sort, labelOf: _itemLabel, showEmpty: view.showEmpty, custom,
+        sessions: _arch.sessions,
     });
     const showArchived = view.status !== 'active';
 
-    // An archived row that came back to life (busy, waiting) or whose window is gone
-    // leaves the archive — so it is not silently re-hidden the next time it settles,
-    // and a recycled @N never inherits an old row's archived flag.
-    const shownArchived = new Set(model.hidden);
-    const prune = [...archived].filter(k => !shownArchived.has(k));
-    if (prune.length) { prune.forEach(k => archived.delete(k)); _saveArchived(archived); }
+    // A hidden row that came back to life (busy, waiting) or whose window is gone leaves
+    // the archive (server-side — every device sees it come back).
+    _pruneHidden(model.hidden);
     // A custom-group assignment for a WINDOW that is gone is dropped (a recycled @N must
     // not inherit it); a run's (`run:CMX-N`) is kept — a run outlives its windows.
     const liveKeys = new Set(rows.filter(Boolean).map(a => `w:${a.window_id || a.name}`));
@@ -561,7 +719,7 @@ function renderSidebarAgents(agents) {
     if (goneW.length) { goneW.forEach(k => delete custom.assign[k]); _saveCustom(custom); }
 
     const items = new Map();
-    for (const it of [...model.needsYou, ...model.groups.flatMap(g => [...g.items, ...g.archived])]) {
+    for (const it of [...model.needsYou, ...model.groups.flatMap(g => g.items), ...model.archived]) {
         items.set(it.key, it);
     }
     _sb = { ...model, items };
@@ -574,10 +732,14 @@ function renderSidebarAgents(agents) {
         </div>`;
     }
     const collapsed = _collapsedGroups();
-    for (const g of model.groups) html += _groupHtml(g, collapsed, shownArchived, view.showPR);
+    for (const g of model.groups) html += _groupHtml(g, collapsed, view.showPR);
+    // CMX-75: every archived row in ONE section at the bottom — Status All / Archived.
+    if (showArchived && model.archived.length) {
+        html += _archivedSectionHtml(model.archived, collapsed, view.status === 'archived', view.showPR);
+    }
     if (!html) html = '<div class="side-empty">No sessions match this view</div>';
-    if (model.hidden.length || showArchived) {
-        const n = model.hidden.length;
+    if (model.archived.length || showArchived) {
+        const n = model.archived.length;
         html += `<button class="side-archived-toggle" onclick="chela.toggleShowArchived()">${
             showArchived ? 'Hide archived' : `Show archived (${n})`}</button>`;
     }
@@ -589,12 +751,13 @@ function renderSidebarAgents(agents) {
 // dividers like the desktop's: New session · Move up / Move down · Collapse all /
 // Expand all · Archive all (N).
 //
-// "Archive all" HIDES rows, it never kills a window: it hides the group's FINISHED rows
-// (a `done` session, a window with no Claude left in it, a settled run — see
-// sidebarmodel.isArchivable) from the sidebar, reversibly ("Show archived" at the foot
-// of the list, and "Unarchive" here). A row that is working, blocked on you, the
-// orchestrator or a judge mid-battery is never archived, and an archived row that wakes
-// up comes back on its own.
+// "Archive all" archives the group's FINISHED rows (a `done` session, a window with no
+// Claude left in it, a settled run — see sidebarmodel.isArchivable), like the desktop
+// app (CMX-75): a plain session's window is CLOSED, server-side, after its resume record
+// is written (and refused when its session id is unknown); a settled run is only hidden.
+// Each comes back from the "Archived (N)" section at the bottom (Unarchive = resume). A
+// row that is working, blocked on you, the orchestrator or a judge mid-battery is never
+// archived, and a hidden row that wakes up comes back on its own.
 
 function _menuEl(id) {
     let m = document.getElementById(id);
@@ -650,8 +813,7 @@ function openGroupMenu(ev, key) {
     const i = groups.findIndex(g => g.key === key);
     if (i < 0) return;
     const g = groups[i];
-    const archivedHere = new Set(g.archived.map(it => it.key));
-    const n = _archivableIn(g).filter(it => !archivedHere.has(it.key)).length;
+    const n = _archivableIn(g).length;
     let html = '';
     if (g.cwd) html += _menuItem('New session', 'new') + _SEP;
     html += _menuItem('Move up', 'up', { disabled: i === 0 })
@@ -661,7 +823,6 @@ function openGroupMenu(ev, key) {
         + _menuItem('Expand all', 'expand-all')
         + _SEP
         + _menuItem(`Archive all (${n})`, 'archive', { disabled: n === 0 });
-    if (g.archived.length) html += _menuItem(`Unarchive all (${g.archived.length})`, 'unarchive');
     _openMenu(_menuEl('group-menu'), ev, html, act => groupMenuAction(key, act));
 }
 
@@ -681,13 +842,8 @@ function groupMenuAction(key, act) {
         const keys = new Set(groups.map(x => x.key));
         _saveCollapsed(new Set([..._collapsedGroups()].filter(k => !keys.has(k))));
     } else if (act === 'archive') {
-        const s = _archivedSet();
-        _archivableIn(g).forEach(it => s.add(it.key));
-        _saveArchived(s);
-    } else if (act === 'unarchive') {
-        const s = _archivedSet();
-        g.archived.forEach(it => s.delete(it.key));
-        _saveArchived(s);
+        // async: the server closes / hides, then answers with the new archive
+        return archiveKeys(_archivableIn(g).map(it => it.key));
     }
     renderSidebarAgents(_agentsCache || []);
 }
@@ -973,6 +1129,7 @@ async function refreshSidebar() {
         ]);
         setAgentsCache(agents || []);
         if (ctx) updateCtxCache(ctx);
+        await refreshArchive();
         renderSidebarAgents(_agentsCache);
     } catch (e) {
         // transient — keep the last render; the next tick retries.
@@ -3134,8 +3291,8 @@ function closeShortcuts() {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, renameCustomGroup, toggleGroup, toggleShowArchived, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
+export { archiveKeys, refreshArchive, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, renameCustomGroup, toggleGroup, toggleShowArchived, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyUpdate, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
+Object.assign(window.chela, { applyUpdate, archiveKeys, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });

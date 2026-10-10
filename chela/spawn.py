@@ -180,7 +180,9 @@ def _add_remote_control(command: str, name: str) -> str:
     return f"{command[:m.end()]} --remote-control {shlex.quote(name)}{rest}"
 
 
-def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> SpawnResult:
+def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
+                 name: str | None = None,
+                 remote_control_name: str | None = None) -> SpawnResult:
     """Open ONE tmux window in ``cwd`` and, if given, launch ``command`` in it.
 
     The single window-creation path both the dashboard launcher and the Telegram ``/new``
@@ -219,6 +221,12 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
     Command VALIDATION is the caller's job, done before calling here: the dashboard vets a
     user-supplied ``command`` against its ``claude``-only allowlist (untrusted input);
     ``/new`` passes the trusted :data:`chela.agent_manager.DEFAULT_LAUNCH_CMD`.
+
+    CMX-75 — bringing an archived session back: ``name`` asks for that window name instead
+    of the folder's (kept collision-safe with the same ``-N`` rule; a name outside the
+    ``[A-Za-z0-9_-]`` charset falls back to the folder name), and ``remote_control_name``
+    restores the session's Remote Control under the name it had — applied even when the
+    setting is now off, because the session HAD it (the archive recorded that).
     """
     real = os.path.realpath(os.path.expanduser(str(cwd)))
     if not os.path.isdir(real):
@@ -234,7 +242,11 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
     envutil.scrub_tmux_secrets()    # CMX-425: the window inherits the server's global env
 
     session = config.current_session()
-    name = agent_manager.window_name_for_cwd(real, set(discovery.get_all_windows()))
+    taken = set(discovery.get_all_windows())
+    if name and _WINDOW_NAME_RE.match(name):
+        name = agent_manager.unique_name(name, taken)
+    else:
+        name = agent_manager.window_name_for_cwd(real, taken)
     if not _WINDOW_NAME_RE.match(name):
         return SpawnResult(ok=False, error=f"invalid window name: {name}")
     target = f"{session}:{name}"
@@ -269,15 +281,16 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
             pinned, session_id = _pin_session_id(command, str(uuid.uuid4()))
             if session_id and _record_session_id(wid, session_id):
                 to_send = pinned
-        if config.remote_control_enabled():
+        if remote_control_name or config.remote_control_enabled():
             # Applied AFTER session-id pinning (on `to_send`, not `command`): both
             # insert right after the leading `claude` token regardless of what the
             # other already inserted there, so the order is harmless either way —
             # but doing session-id pinning first keeps its own metacharacter/override
             # scan reading the caller's original command, never our own insertion.
-            rc_sent = _add_remote_control(to_send, name)
+            rc = remote_control_name or name
+            rc_sent = _add_remote_control(to_send, rc)
             if rc_sent != to_send:
-                rc_rename.mark_launched(wid if have_wid else target, name)
+                rc_rename.mark_launched(wid if have_wid else target, rc)
             to_send = rc_sent
         _send(target, to_send)
 
