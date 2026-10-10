@@ -205,9 +205,20 @@ def test_an_unsafe_name_is_never_typed(monkeypatch, tmux):
 
 
 def test_the_daemon_tick_flushes_the_queue(monkeypatch):
+    """🔴 WIRING — drives ONE real pass of ``cmd_run``'s loop (the harness
+    ``tests/test_context.py::_run_one_daemon_tick`` uses) and proves the loop calls
+    ``flush_pending``. A source-substring check could not fail: dead-coding the call
+    (``if False: rc_rename.flush_pending()``) leaves the text intact (defeat shape 01)."""
     import chela.main as main
-    import inspect
-    assert "rc_rename.flush_pending()" in inspect.getsource(main)
+    from tests.test_context import _run_one_daemon_tick
+
+    _run_one_daemon_tick(monkeypatch)
+    calls: list[int] = []
+    monkeypatch.setattr(main.rc_rename, "flush_pending", lambda: calls.append(1) or {})
+
+    main.cmd_run(types.SimpleNamespace())
+
+    assert calls == [1], "the daemon tick never flushed the queued /rename"
 
 
 # --- the messenger seam ---------------------------------------------------------------------
