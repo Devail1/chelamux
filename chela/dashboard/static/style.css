@@ -391,7 +391,7 @@ body {
 }
 .gs-state-working { color: var(--ok-green); }
 .gs-state-needs-you { color: var(--ok-orange); }
-.gs-state-done { color: var(--ok-sky); }
+.gs-state-pr-open { color: var(--ok-sky); }
 .gs-state-idle { color: var(--text-dim); opacity: 0.85; }
 .gs-state-unknown { color: var(--text-dim); opacity: 0.85; border: 1px dashed currentColor; }
 .gs-state-testing { color: var(--ok-green); }

@@ -50,12 +50,12 @@ test('tileState: busy and not blocked reads as working', () => {
     assert.deepEqual(tileState(a, wantsHuman(a)), { glyph: '●', word: 'working', cls: 'working' });
 });
 
-test('tileState: idle with an open PR and not busy/blocked reads as done', () => {
+test('tileState: idle with an open PR and not busy/blocked reads as PR open (CMX-53: not "done")', () => {
     const a = agent({ session_status: 'idle', pr: { url: 'https://x/1', number: 14, state: 'open' } });
-    assert.deepEqual(tileState(a, wantsHuman(a)), { glyph: '✓', word: 'done', cls: 'done' });
+    assert.deepEqual(tileState(a, wantsHuman(a)), { glyph: '✓', word: 'PR open', cls: 'pr-open' });
 });
 
-test('tileState: idle with no PR is plain idle, not done', () => {
+test('tileState: idle with no PR is plain idle, not PR open', () => {
     const a = agent({ session_status: 'idle' });
     assert.equal(tileState(a, wantsHuman(a)).cls, 'idle');
 });
@@ -209,7 +209,7 @@ test('actionBarKind: an idle pane whose latest pr-link points at a MERGED PR get
     const a = agent({ session_status: 'idle', pr: { url: 'https://x/613', number: 613, state: 'merged' } });
     assert.equal(actionBarKind(a, wantsHuman(a)), null);
     assert.equal(isFinished(a, wantsHuman(a)), false);
-    assert.notEqual(tileState(a, wantsHuman(a)).cls, 'done');
+    assert.notEqual(tileState(a, wantsHuman(a)).cls, 'pr-open');
 });
 
 test('actionBarKind: a CLOSED PR gets no Review bar', () => {

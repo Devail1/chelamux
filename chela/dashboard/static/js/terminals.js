@@ -1765,14 +1765,14 @@ function _statusDot(wid) {
 }
 
 // CMX-377: the dot's class vocabulary is working/waiting/idle/done — tileState()'s
-// own cls names ('needs-you'/'unknown') are remapped onto it so the pane header's
+// own cls names ('needs-you'/'pr-open'/'unknown') are remapped onto it so the pane header's
 // dot, the taskbar dock chips and the mobile switcher pills all share the EXACT
 // same shape/colour rules as the sidebar row (style.css's `.term-status-dot.*`) —
 // 'unknown' (claude_running but no resolved session_status) reads as the idle
 // shape rather than inventing a fifth silhouette the brief never asked for.
 // CMX-40: a running judge battery is work (working); a battery that died without
 // a verdict wants a human (waiting).
-const _TILE_CLS_TO_DOT = { 'needs-you': 'waiting', working: 'working', done: 'done', unknown: 'idle', idle: 'idle',
+const _TILE_CLS_TO_DOT = { 'needs-you': 'waiting', working: 'working', 'pr-open': 'done', unknown: 'idle', idle: 'idle',
                            testing: 'working', died: 'waiting' };
 
 // Colour the live status marks (pane headers + taskbar chips) from /api/agents.
