@@ -384,3 +384,77 @@ def test_cli_requeue_requeues_and_closes_the_old_pr(repo, team, launched, pr_clo
     row = _row("CMX-33")
     assert (row["status"], row["requeue_pending"]) == ("closed", 1)
     assert pr_closes == [PR]
+
+
+# --- 4. the guards the judge corrupted (rework round 2) ----------------------------------
+
+def test_a_second_requeue_takes_r3_never_the_r2_runs_kept_branch_or_worktree(
+        repo, team, launched, pr_closes):
+    """`requeue_count` must survive the requeued claim. If the claim reset it, the next
+    `--requeue` would count from 0 again and the third attempt would land on `-r2` — the
+    branch and the KEPT worktree of the attempt that was just closed."""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", requeue=True, force=True)["ok"]
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 1
+    row = _row("CMX-33")
+    assert (row["branch_name"], row["requeue_count"]) == ("cmx-33-task-r2", 1)
+    r2_wt = Path(row["worktree_path"])
+
+    assert dispatcher.close_run("CMX-33", "brief changed again", requeue=True,
+                                force=True)["ok"]
+    assert _row("CMX-33")["requeue_count"] == 2
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 1
+    row = _row("CMX-33")
+    assert row["branch_name"] == "cmx-33-task-r3"
+    assert Path(row["worktree_path"]).name == "CMX-33-r3"
+    assert Path(row["worktree_path"]) != r2_wt and r2_wt.is_dir()
+    assert launched == ["CMX-33", "CMX-33"]
+
+
+MD_WORKFLOW = """---
+project_key: CMX
+tracker:
+  kind: markdown
+  path: TODO.md
+workspace:
+  root: {root}
+  base_branch: dev
+---
+brief: {{{{task_body}}}}
+"""
+
+
+def test_a_requeued_markdown_task_gets_a_fresh_r2_branch_never_the_closed_runs(
+        repo, launched, pr_closes):
+    """A tracker with NO branch name of its own (markdown, gh_issues): the branch is
+    `<key>-<N>`, so without the `-r<N>` arm a requeue would hand the fresh attempt the
+    CLOSED run's `cmx-<N>` — every other requeue test runs on Linear's `task.branch`."""
+    state = Path(dispatcher.CHELA_DIR)
+    (repo / "WORKFLOW.md").write_text(MD_WORKFLOW.format(root=state / "worktrees"))
+    (repo / "TODO.md").write_text("- [ ] window naming\n")
+    wf = dispatcher.load_workflow(_wf(repo))
+    task = next(t for t in dispatcher.get_source(wf).list_open_tasks()
+                if t.title == "window naming")
+    root = dispatcher.resolve_workspace_root(wf)
+    old_wt, _ = dispatcher.ensure_worktree(repo, task.id, "dev", "CMX", 7, root,
+                                           branch="cmx-7")
+    _seed(repo, task.id, "awaiting_review", branch_name="cmx-7",
+          worktree_path=str(old_wt), task_number=7, pr_url=PR, pr_state="open")
+
+    assert dispatcher.close_run(task.id, "brief changed", requeue=True, force=True)["ok"]
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 1
+    assert launched == [task.id]
+    row = _row(task.id)
+    assert row["branch_name"] == "cmx-7-r2"
+    assert Path(row["worktree_path"]) != old_wt and old_wt.is_dir()
+
+
+def test_ready_task_ids_is_none_when_the_tracker_read_failed():
+    """"Could not read" is never "nothing is ready": an empty set here would make doctor
+    report NO stall on a tracker it never actually read."""
+    failed = SimpleNamespace(list_open_tasks=lambda: [], read_failed=True)
+    assert dispatcher.ready_task_ids(failed) is None
+    assert dispatcher.ready_task_ids(failed, open_tasks=[]) is None
+    ok = SimpleNamespace(list_open_tasks=lambda: [], read_failed=False)
+    assert dispatcher.ready_task_ids(ok) == set()                    # control
