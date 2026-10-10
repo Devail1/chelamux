@@ -54,7 +54,9 @@ export function isFinished(agent, wants) {
 //      "busy" to `claude agents --json` (app.py::_needs_human's docstring) —
 //      checking busy first would misread a gated pane as "working".
 //   2. session_status === 'busy' → working.
-//   3. isFinished → done.
+//   3. isFinished → PR open. (CMX-53: the wall's word was "done", which collided with
+//      the sidebar's done/finished — a session with an answered turn — though the two
+//      mean different things. On the wall it means exactly "a reviewable PR is up".)
 //   4. claude_running but session_status could not be resolved → unknown
 //      (docs/AGENT_IDENTITY.md slice 1: a pane chela cannot read a status for
 //      is NOT the same fact as one it confirmed is idle — collapsing the two
@@ -67,7 +69,7 @@ export function tileState(agent, wants) {
     if (agent && agent.session_status === 'busy') return { glyph: '●', word: 'working', cls: 'working' };
     const battery = batteryState(agent);
     if (battery) return battery;
-    if (isFinished(agent, wants)) return { glyph: '✓', word: 'done', cls: 'done' };
+    if (isFinished(agent, wants)) return { glyph: '✓', word: 'PR open', cls: 'pr-open' };
     if (agent && agent.claude_running && !agent.session_status) {
         return { glyph: '?', word: 'unknown', cls: 'unknown' };
     }
@@ -79,7 +81,7 @@ export function tileState(agent, wants) {
 // agent goes idle by design once it launches the run, and Claude Code does not
 // list a run it did not start, so without this the pane read "idle" for the
 // whole battery. It sits under wants/busy (the agent's own state is more
-// specific when it has one) and OVER done/unknown/idle. A run whose pid died
+// specific when it has one) and OVER PR open/unknown/idle. A run whose pid died
 // before a verdict reads "died", never idle or done. Null when there is none —
 // the sidebar row is CMX-35's (it will reuse this model).
 export function batteryState(agent) {

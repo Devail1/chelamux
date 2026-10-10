@@ -521,7 +521,7 @@ describe('CMX-393 desktop 1440: one-row sidebar foot, inbox in the head, one sta
             };
         }));
         assert.equal(heads.length, AGENTS.length, 'expected one pane header per fixture agent');
-        const WORD = { working: 'working', waiting: 'needs you', idle: 'idle', done: 'done' };
+        const WORD = { working: 'working', waiting: 'needs you', idle: 'idle', done: 'PR open' };  // CMX-67: the wall's word (its dot shape stays done)
         for (const h of heads) {
             const state = STATE_OF[h.wid];
             assert.equal(h.shapes, 1, `${h.wid}: the header carries ${h.shapes} status-shape elements, want exactly 1`);

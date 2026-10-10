@@ -17,6 +17,8 @@
 // None), the sorts (Last activity / Name / Created) and the empty groups. A row's
 // `badge` slot stays the renderer's to fill (the PR badge, CMX-67's judge progress).
 
+import { batteryState } from './wallmodel.js';
+
 export const OTHER_KEY = '~other';
 export const DISPATCHED_KEY = '~dispatched';
 // Where the dispatcher puts a run's worktree. A session sitting in one is dispatched
@@ -120,11 +122,30 @@ export function primaryWindow(item) {
 //   awaiting review  a PR waits on a reviewer
 //   needs human      the rework loop hit its cap and stopped
 // A window of the run blocked on a prompt outranks them all: that is "waiting".
+//
+// CMX-67: the judge's DETACHED battery (`judge_battery` on the judge window's
+// /api/agents record — CMX-40's model, wallmodel.batteryState, not recomputed here)
+// is the run's live judge progress. While its pid is alive the row reads the battery's
+// own label (`⚖️ testing · 3/6 · 15m` — counts and elapsed only, never the experiment
+// running now: it may be a held-out one). A pid that died before a verdict reads
+// "judge run died", with the needs-a-human shape — never idle or awaiting review. A
+// recorded verdict outranks a leftover dead status file: that run DID finish.
+export function runBattery(item) {
+    const ws = item ? [item.judge, ...(item.windows || [])].filter(Boolean) : [];
+    const all = ws.map(batteryState).filter(Boolean);
+    return all.find(b => b.cls === 'testing') || all[0] || null;
+}
+
 export function runState(item, wants) {
     const run = (item && item.run) || {};
     const st = run.status;
     const judging = { word: 'judging', shape: 'judging' };
     if ((item.windows || []).some(a => wants(a))) return { word: 'waiting', shape: 'waiting' };
+    const battery = runBattery(item);
+    if (battery && battery.cls === 'testing') return { word: battery.word, shape: 'judging' };
+    if (battery && battery.cls === 'died' && (!run.judge_state || run.judge_state === 'running')) {
+        return { word: battery.word, shape: 'waiting' };
+    }
     if (run.judge_state === 'running') return judging;
     if (st === 'claimed' || st === 'running') return { word: 'working', shape: 'working' };
     if (st === 'changes_requested') return { word: 'rework', shape: 'working' };
