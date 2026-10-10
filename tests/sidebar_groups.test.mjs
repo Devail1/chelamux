@@ -325,6 +325,20 @@ test('a worktree cwd lands in "Dispatched" — never a group named after the wor
     assert.equal(folderKey({ cwd: `${WT}/CMX-41/sub` }), DISPATCHED_KEY);
 });
 
+// docs/defeat_shapes/62b: each clause of `a.run || a.dispatched || <worktree cwd>` needs a
+// fixture where it is the ONLY one true. Here it is `dispatched` alone: no run card yet, and
+// a cwd outside the worktrees that, by itself, would name a human folder group.
+test('a dispatched window with no run card yet (non-worktree cwd) still lands in "Dispatched"', () => {
+    assert.equal(folderKey({ cwd: '/srv/code/chelamux', dispatched: true }), DISPATCHED_KEY);
+    assert.equal(folderKey({ cwd: '/srv/code/chelamux' }), '/srv/code/chelamux', 'control: the flag is the only difference');
+    render([
+        win('early-run', { cwd: '/srv/code/chelamux', dispatched: true }),
+        win('human', { cwd: '/srv/code/other' }),
+    ]);
+    assert.deepEqual(groupKeys(), ['/srv/code/other', DISPATCHED_KEY]);
+    assert.deepEqual(rowsIn(DISPATCHED_KEY), ['early-run']);
+});
+
 test('an agent window and its judge window are ONE row per run, labelled "CMX-N · <title>"', () => {
     render([
         win('liavacc/cmx-37-theme', { cwd: `${WT}/CMX-37`, dispatched: true,

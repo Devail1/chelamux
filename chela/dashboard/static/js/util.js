@@ -61,7 +61,7 @@ const _LUCIDE = {
     'chevron-right': '<path d="m9 18 6-6-6-6"/>',
     'ellipsis': '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
     // `plus` — the sidebar's "New session" button (CMX-377, index.html).
-    'plus':'<path d="M5 12h14"/><path d="M12 5v14"/>',
+    'plus': '<path d="M5 12h14"/><path d="M12 5v14"/>',
     // `search` — the sidebar's jump-to-session input (CMX-377, index.html).
     'search': '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
 };
