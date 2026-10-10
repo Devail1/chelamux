@@ -528,3 +528,88 @@ def test_clear_closed_attempt_resets_every_non_kept_column_and_keeps_the_identit
         else:
             assert row[name] == defaults[name], (
                 f"{name} kept the closed attempt's {row[name]!r} (default {defaults[name]!r})")
+
+
+# --- the CALL SITES: a requeued claim, and a requeued claim that fails to spawn -----------
+
+def _poison_closed_attempt(task_id) -> dict:
+    """Every per-attempt column the closed run's seed left empty gets a recognisable value
+    (judge, CI, retry counter, nudges, …) — enumerated from the live schema, so a column
+    added later is covered too. Returns {column: sentinel}."""
+    with dispatcher._db() as conn:
+        row = dict(conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone())
+        cols = list(conn.execute("PRAGMA table_info(runs)"))
+        poison = {name: (7 if "INT" in (typ or "").upper() else f"old-{name}")
+                  for _cid, name, typ, _nn, _d, _pk in cols
+                  if name not in _IDENTITY and row[name] in (None, 0, "")
+                  and name not in ("requeue_pending", "pr_state", "close_reason")}
+        conn.execute(f"UPDATE runs SET {', '.join(f'{k}=?' for k in poison)} "
+                     "WHERE task_id=?", (*poison.values(), task_id))
+        conn.commit()
+    assert poison, "nothing to poison — the seed fills every column?"
+    return poison
+
+
+def _leaked(task_id, poison) -> list[str]:
+    row = _row(task_id)
+    return sorted(k for k, v in poison.items() if row[k] == v)
+
+
+def test_a_requeued_claim_carries_nothing_of_the_closed_attempt(
+        repo, team, launched, pr_closes):
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    poison = _poison_closed_attempt("CMX-33")
+    assert dispatcher.close_run("CMX-33", "brief changed", requeue=True, force=True)["ok"]
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 1
+    assert _row("CMX-33")["status"] == "running"
+    assert _leaked("CMX-33", poison) == []
+
+
+def test_a_requeued_claim_that_fails_to_spawn_carries_nothing_of_the_closed_attempt(
+        repo, team, launched, pr_closes, monkeypatch):
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    poison = _poison_closed_attempt("CMX-33")
+    assert dispatcher.close_run("CMX-33", "brief changed", requeue=True, force=True)["ok"]
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk hiccup")
+
+    monkeypatch.setattr(dispatcher, "ensure_worktree", boom)
+    dispatcher.tick(_wf(repo))
+    assert _row("CMX-33")["status"] == "failed"
+    assert _leaked("CMX-33", poison) == []
+
+
+def test_a_requeued_markdown_attempt_that_dies_retries_on_its_own_r2_branch(
+        repo, launched, pr_closes):
+    """The markdown/gh_issues arm (no tracker branch name): the -r2 attempt pushed, then
+    died. Its retry keeps `cmx-7-r2` — a fresh name would skip to `cmx-7-r2-2` because
+    origin already has `-r2`."""
+    state = Path(dispatcher.CHELA_DIR)
+    (repo / "WORKFLOW.md").write_text(MD_WORKFLOW.format(root=state / "worktrees"))
+    (repo / "TODO.md").write_text("- [ ] window naming\n")
+    wf = dispatcher.load_workflow(_wf(repo))
+    task = next(t for t in dispatcher.get_source(wf).list_open_tasks()
+                if t.title == "window naming")
+    root = dispatcher.resolve_workspace_root(wf)
+    old_wt, _ = dispatcher.ensure_worktree(repo, task.id, "dev", "CMX", 7, root,
+                                           branch="cmx-7")
+    _seed(repo, task.id, "awaiting_review", branch_name="cmx-7",
+          worktree_path=str(old_wt), task_number=7, pr_url=PR, pr_state="open")
+    assert dispatcher.close_run(task.id, "brief changed", requeue=True, force=True)["ok"]
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 1
+    r2_wt = _row(task.id)["worktree_path"]
+    assert _row(task.id)["branch_name"] == "cmx-7-r2"
+    subprocess.run(["git", "-C", r2_wt, "push", "-q", "origin", "HEAD:cmx-7-r2"],
+                   check=True, capture_output=True)
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET status='failed' WHERE task_id=?", (task.id,))
+        conn.commit()
+
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 1
+    row = _row(task.id)
+    assert (row["status"], row["attempt"]) == ("running", 2)
+    assert row["branch_name"] == "cmx-7-r2"
+    assert row["worktree_path"] == r2_wt
