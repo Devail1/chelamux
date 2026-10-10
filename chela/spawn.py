@@ -28,11 +28,12 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shlex
 import subprocess
 import uuid
 from dataclasses import dataclass
 
-from chela import agent_manager, config, discovery, envutil, sessionids
+from chela import agent_manager, config, discovery, envutil, rc_rename, sessionids
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ log = logging.getLogger(__name__)
 _WID_RE = re.compile(r"@\d+")
 
 # A generated window name must satisfy the same charset the dashboard rename API enforces
-# (letters, digits, '-' or '_'). ``shell-N`` always does; this asserts the invariant so a
+# (letters, digits, '-' or '_'). ``window_name_for_cwd`` sanitizes to it; this asserts the invariant so a
 # future change to the name scheme can't silently produce a name tmux/the API would reject.
 _WINDOW_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -82,20 +83,6 @@ class SpawnResult:
     wid: str | None = None
     cwd: str | None = None
     error: str | None = None
-
-
-def next_shell_name(existing: set[str]) -> str:
-    """Smallest ``shell-N`` (N >= 1) not already a live window name.
-
-    A generic ``shell-N`` on purpose: the auto-topics reconcile then names the resulting
-    topic after the PROJECT — the cwd basename — rather than after ``shell-3``
-    (:func:`chela.telegram.reconcile.topic_name_for` keys off
-    :func:`chela.agent_manager.is_generic_name`).
-    """
-    n = 1
-    while f"shell-{n}" in existing:
-        n += 1
-    return f"shell-{n}"
 
 
 def _send(target: str, text: str) -> None:
@@ -168,22 +155,21 @@ def _record_session_id(wid: str, session_id: str) -> bool:
         return False
 
 
-def _add_remote_control(command: str) -> str:
-    """Insert a bare ``--remote-control`` right after the leading ``claude`` token.
+def _add_remote_control(command: str, name: str) -> str:
+    """Insert ``--remote-control <name>`` right after the leading ``claude`` token.
 
-    Bare on purpose (CMX-34): with no name, Claude Code shows its own generated session
-    title in the claude.ai / desktop sidebar — which already groups sessions by project
-    folder. A name passed here was frozen at launch (the ``shell-N`` placeholder for a
-    home-dir window), and later tmux renames never reached Claude Code. Telegram topic
-    naming (:func:`chela.telegram.reconcile.topic_name_for`) is separate and unaffected.
+    ``name`` is the window's own name (CMX-39), ``shlex``-quoted, so claude.ai / the
+    desktop show exactly the chela window name from launch. (A bare flag — CMX-34 — gave
+    a random ``<host>-<words>`` name that Claude never replaced.) Later renames reach the
+    session through ``/rename`` (:mod:`chela.rc_rename`), not through this flag.
 
     Same insert-never-append discipline as :func:`_pin_session_id` (see its
     docstring): appending would land the flag on whatever a chained command actually
     runs last, so this only ever touches a command whose FIRST token is a bare
     ``claude`` — anything else (no command, or one not starting with ``claude``) is
-    returned untouched. ``[name]`` is an OPTIONAL value, so the flag would swallow a
-    following positional (a prompt, a subcommand) as the session name; a command whose
-    next token is not a flag is therefore returned untouched too.
+    returned untouched. A command whose next token is a positional (a prompt, a
+    subcommand) is returned untouched too — kept from CMX-34, where the flag's OPTIONAL
+    value would have swallowed it.
     """
     m = _LEADING_CLAUDE_RE.match(command)
     if not m:
@@ -191,7 +177,7 @@ def _add_remote_control(command: str) -> str:
     rest = command[m.end():]
     if rest.strip() and not rest.lstrip().startswith("-"):
         return command
-    return f"{command[:m.end()]} --remote-control{rest}"
+    return f"{command[:m.end()]} --remote-control {shlex.quote(name)}{rest}"
 
 
 def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> SpawnResult:
@@ -205,7 +191,8 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
     * ensure the chela session exists — a missing session is an expected boot-ordering
       condition, so create it rather than fail (:func:`chela.discovery.ensure_session`);
       only tmux being wholly unreachable fails the spawn;
-    * pick the next free ``shell-N`` name and open the window with ``-P -F '#{window_id}'``
+    * name the window after its folder — ``<cwd basename>``, ``<login>`` for the home dir,
+      collision-safe ``-N`` (:func:`chela.agent_manager.window_name_for_cwd`) — and open the window with ``-P -F '#{window_id}'``
       so the spawn is addressable by id, targeting ``<session>:`` (trailing ``:`` forces
       session resolution — a bare session name is ambiguous to tmux when a *window* shares
       it);
@@ -220,10 +207,11 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
       :mod:`chela.sessionids`) — recording only, for now (docs/AGENT_IDENTITY.md
       slice 2a). A record failure sends ``command`` unpinned instead;
     * if ``command`` is given and :func:`chela.config.remote_control_enabled` (read per call), insert
-      Claude Code's own bare ``--remote-control`` (:func:`_add_remote_control`) —
+      Claude Code's own ``--remote-control <window name>`` (:func:`_add_remote_control`) —
       every window this function opens is one chela started FOR A HUMAN (the
       dashboard launcher, Telegram ``/new``, a resumed session), so it is reachable
-      from claude.ai too, under Claude's own generated session title;
+      from claude.ai too, under the chela window name — and mark the window so later
+      renames are pushed with ``/rename`` (:func:`chela.rc_rename.mark_launched`);
     * ``send-keys`` the (possibly session-pinned, possibly remote-control-flagged)
       command — we start a shell and *send* the command rather than running it as the
       window command, so the pane survives the command exiting.
@@ -246,7 +234,7 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
     envutil.scrub_tmux_secrets()    # CMX-425: the window inherits the server's global env
 
     session = config.current_session()
-    name = next_shell_name(set(discovery.get_all_windows()))
+    name = agent_manager.window_name_for_cwd(real, set(discovery.get_all_windows()))
     if not _WINDOW_NAME_RE.match(name):
         return SpawnResult(ok=False, error=f"invalid window name: {name}")
     target = f"{session}:{name}"
@@ -287,7 +275,10 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None) -> Spawn
             # other already inserted there, so the order is harmless either way —
             # but doing session-id pinning first keeps its own metacharacter/override
             # scan reading the caller's original command, never our own insertion.
-            to_send = _add_remote_control(to_send)
+            rc_sent = _add_remote_control(to_send, name)
+            if rc_sent != to_send:
+                rc_rename.mark_launched(wid if have_wid else target, name)
+            to_send = rc_sent
         _send(target, to_send)
 
     log.info("spawned window %s (%s) in %s%s", name, wid or "no-id", real,

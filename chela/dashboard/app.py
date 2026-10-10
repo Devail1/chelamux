@@ -28,7 +28,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, pr_status, probecache, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, usage, userconfig
+from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -2115,8 +2115,8 @@ def api_agents_rediscover():
 
 
 # tmux reserves ':' (window index) and '.' (pane index) in target specs, so a
-# window name containing either is unaddressable. Our generated shell-N names
-# never hit this, but validate defensively before shelling out.
+# window name containing either is unaddressable. Our generated folder names
+# (agent_manager.window_name_for_cwd) never hit this, but validate defensively before shelling out.
 _WINDOW_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # Only `claude` (optionally with args) may be auto-launched into a fresh window.
 # A plain shell is the no-command default; this keeps the spawn endpoint's reach
@@ -2173,6 +2173,9 @@ def api_agents_rename(wid):
     agent_manager.lock_window_name(target)
     agent_manager.mark_manual_name(target)
     log.info("renamed %s: %s -> %s", wid, windows[wid], name)
+    # CMX-39: a Remote Control session shows the window name in claude.ai / the desktop —
+    # push the new one (queued until that session is idle with an empty prompt).
+    rc_rename.request(wid, name)
     return jsonify({"ok": True, "wid": wid, "name": name})
 
 

@@ -321,7 +321,7 @@ typing (`/api/config`); env-locked like Remote Control.
 | `CHELA_WID` | none | `identity` | Injected into every dispatched window's env; not a preference |
 
 **WIRED (CMX-382):** `CHELA_REMOTE_CONTROL` (default `true`) — Claude Code's own
-bare `--remote-control` (no name — CMX-34) on every window chela opens FOR A HUMAN (`chela/spawn.py`,
+`--remote-control <window name>` (CMX-39; renames follow via `/rename`, `chela/rc_rename.py`) on every window chela opens FOR A HUMAN (`chela/spawn.py`,
 `chela/personas/autolaunch.py`), never on a dispatcher-launched agent/judge
 (`chela/dispatcher.py::resolve_agent_cmd`). Now `config.remote_control_enabled()`, read per
 call through `dashboard_setting("remote_control", …)` — env beats `config.json` beats ON —
