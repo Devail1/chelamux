@@ -613,3 +613,98 @@ def test_a_requeued_markdown_attempt_that_dies_retries_on_its_own_r2_branch(
     assert (row["status"], row["attempt"]) == ("running", 2)
     assert row["branch_name"] == "cmx-7-r2"
     assert row["worktree_path"] == r2_wt
+
+
+# --- 6. the four guards the CMX-65 judge left SURVIVED (round 6, CMX-69) ------------------
+
+def test_a_requeued_claims_row_names_its_own_live_window(
+        repo, team, pr_closes, monkeypatch):
+    """The fresh row's ``window_name`` is the window the requeued attempt was launched in —
+    never the closed run's, never NULL. Every window-addressed path (``chela peek``, the
+    liveness check, ``chela close``'s kill) resolves the run through this column; NULL or
+    the closed run's name points them at nothing, or at the wrong window."""
+    windows: list[str] = []
+    monkeypatch.setattr(dispatcher, "_launch_agent",
+                        lambda wf, task_id, window, *a, **kw: windows.append(window))
+    monkeypatch.setattr(dispatcher, "_run_critic", lambda *a, **k: None)
+    monkeypatch.setattr(dispatcher, "_read_pr_url", lambda *a, **k: None)
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo, window_name="cmx-33-task")
+    assert dispatcher.close_run("CMX-33", "brief changed", requeue=True, force=True)["ok"]
+
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 1
+    row = _row("CMX-33")
+    assert windows == ["cmx-33-task-r2"]
+    assert row["window_name"] == "cmx-33-task-r2" == row["branch_name"]
+    assert row["window_name"] != "cmx-33-task"
+
+
+def test_requeue_never_moves_an_archived_linear_issue_back_to_ready(tmp_path):
+    """An ARCHIVED issue is off the board on purpose (the archive sweep, or a human) — even
+    one in a ``canceled``-type state, the very state a requeue otherwise resurrects from.
+    ``requeue_task`` must skip it, never write it back to Todo."""
+    from tests.test_linear_workflow_states import _src
+
+    archived = issue(1, "Canceled")
+    archived["archivedAt"] = "2026-10-01T00:00:00.000Z"
+    team_ = Team(archived)
+    assert _src(tmp_path, team_).requeue_task("CMX-1") == "skipped"
+    assert team_.updates() == []
+
+    # Control: the same Canceled issue, NOT archived, IS moved back to Todo.
+    live = Team(issue(1, "Canceled"))
+    assert _src(tmp_path, live).requeue_task("CMX-1") == "set"
+    assert live.updates() == [("uuid-1", "st-todo")]
+
+
+def test_requeueing_an_already_closed_run_closes_the_pr_its_plain_close_left_open(
+        repo, team, launched, pr_closes):
+    """A plain ``chela close`` (no ``--close-pr``) leaves the PR open with a comment. The
+    later ``--requeue`` of that ALREADY-closed run must still close it: the fresh attempt
+    opens its own PR, and two open PRs for one task is the fork CMX-265 forbids."""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", force=True)["ok"]
+    assert pr_closes == []                             # the plain close left it open
+    assert _row("CMX-33")["status"] == "closed"
+
+    assert dispatcher.close_run("CMX-33", "run it again", requeue=True)["ok"]
+    assert pr_closes == [PR]
+
+
+def test_a_requeue_is_spent_even_when_its_claim_fails_to_spawn(
+        repo, team, launched, pr_closes, monkeypatch):
+    """``requeue_pending`` is spent by the claim it bought, ALSO when that claim fails to
+    spawn. If the failed row kept it, the ordinary retry would inherit it, and the next time
+    that attempt's row became ``closed`` by any path (reconcile's closed-PR branch writes
+    ``status='closed'`` and nothing else) it would be re-claimed as a requeue nobody asked
+    for. (``_poison_closed_attempt`` cannot see this column: the close itself sets it.)"""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", requeue=True, force=True)["ok"]
+
+    real = dispatcher.ensure_worktree
+    calls = {"n": 0}
+
+    def flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("disk hiccup")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(dispatcher, "ensure_worktree", flaky)
+    dispatcher.tick(_wf(repo))
+    row = _row("CMX-33")
+    assert row["status"] == "failed"
+    assert (row["requeue_pending"] or 0) == 0
+
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 1     # the ordinary retry
+    assert launched == ["CMX-33"]
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET status='closed' WHERE task_id='CMX-33'")
+        conn.commit()
+    assert dispatcher.run_is_terminal(dict(_row("CMX-33")))
+    team.issues["CMX-33"]["state"] = {"name": "Todo", "type": "unstarted"}
+    for _ in range(2):
+        assert dispatcher.tick(_wf(repo))["dispatched"] == 0
+    assert launched == ["CMX-33"]
