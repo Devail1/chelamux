@@ -1254,6 +1254,20 @@ def test_a_pane_with_no_claude_process_degrades_to_the_pane_path(tmp_path, monke
     assert pane.origin == "/home/u"                # the pane path, as a last resort
 
 
+def test_the_pane_map_reads_the_manual_name_flag_as_exactly_one(tmp_path, monkeypatch):
+    """CMX-62: the ``@chela_manual_name`` column is manual ONLY when it reads ``1`` — an
+    unset option (empty) or a cleared one (``0``) is not, and each window gets its own."""
+    monkeypatch.setattr(sessions, "PROC", tmp_path / "nonexistent")
+
+    class Result:
+        returncode = 0
+        stdout = "@1\tbash\t/a\t1\t1\n@2\tbash\t/b\t2\t0\n@3\tbash\t/c\t3\t\n"
+
+    monkeypatch.setattr(sessions.subprocess, "run", lambda *a, **k: Result())
+    panes = sessions._load_panes()
+    assert {w: p.manual_name for w, p in panes.items()} == {"@1": True, "@2": False, "@3": False}
+
+
 # --- _looks_like_claude: the tolerant match (CMX-160) --------------------------------
 
 def test_a_claude_reporting_as_something_else_is_still_found(tmp_path, monkeypatch):

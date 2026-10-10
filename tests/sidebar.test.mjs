@@ -189,6 +189,9 @@ test('CMX-62: a manual name beats Claude\'s title, the title beats the window na
         { name: 'billing-fix', window_id: '@2', ai_title: 'Open-MMO game on Windows PC', cwd: '/x/mmo', online: true },
         // not manual, no ai_title — the live session name is the title
         { name: 'shell-3', window_id: '@3', session_name: 'porting the wall', online: true },
+        // BOTH titles present — Claude's ai_title is the one that leads, not the
+        // live session name (each record armed alone above can't tell the order)
+        { name: 'shell-5', window_id: '@5', ai_title: 'Fix the reconcile loop', session_name: 'stale session name', online: true },
         // no title yet (first exchange hasn't happened) — the window name, NOT the repo
         { name: 'shell-1', window_id: '@4', cwd: '/home/u/projects/nautilus', online: true },
     ];
@@ -198,6 +201,7 @@ test('CMX-62: a manual name beats Claude\'s title, the title beats the window na
     assert.equal(nameFor('reviewer'), 'reviewer', 'a manual name must beat Claude\'s title');
     assert.equal(nameFor('billing-fix'), 'Open-MMO game on Windows PC', 'Claude\'s title must beat the window name');
     assert.equal(nameFor('shell-3'), 'porting the wall');
+    assert.equal(nameFor('shell-5'), 'Fix the reconcile loop', 'ai_title must outrank the live session name');
     assert.equal(nameFor('shell-1'), 'shell-1', 'no title ⇒ the window name (never rewritten to the repo)');
     // The short window name stays reachable as the secondary label (hover) when the
     // title leads — and is absent when the name already IS the label.

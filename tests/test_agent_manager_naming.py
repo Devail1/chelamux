@@ -253,3 +253,128 @@ def test_is_generic_name_classifies_placeholders_vs_chosen_names():
         assert agent_manager.is_generic_name(placeholder) is True, placeholder
     for chosen in ("billing-fix", "chelamux", "nautilus", "shell-fix", "my-shell"):
         assert agent_manager.is_generic_name(chosen) is False, chosen
+
+
+# --- CMX-62 round 2: every arm of the duplicate rule, armed on its own ----------
+#
+# Each test below arms ONE clause the earlier fixtures never reached alone (judge,
+# round 1: a held-out corruption survived — docs/defeat_shapes/62b-…).
+
+def test_reconcile_three_way_duplicate_gives_each_newer_window_a_distinct_suffix(monkeypatch):
+    # Two newer windows share the name with the oldest: each gets its OWN suffix —
+    # a renamed window's new name is taken for the next one (else both land on -2,
+    # which is a fresh duplicate).
+    actions, fake = _reconcile(monkeypatch,
+                               ("@5", "shell-1", "claude", 5, "0", "0"),
+                               ("@1", "shell-1", "claude", 1, "0", "0"),
+                               ("@3", "shell-1", "claude", 3, "0", "0"))
+    renames = [(c[3], c[4]) for c in fake.calls if c[:2] == ["tmux", "rename-window"]]
+    assert renames == [("sess:@3", "shell-1-2"), ("sess:@5", "shell-1-3")]
+    assert actions == ["shell-1 -> shell-1-2", "shell-1 -> shell-1-3"]
+
+
+def test_reconcile_window_age_is_the_numeric_index_not_its_string(monkeypatch):
+    # Index 10 is NEWER than index 9 — a string sort would call "10" the older.
+    _, fake = _reconcile(monkeypatch,
+                         ("@10", "tradeplan", "claude", 10, "0", "0"),
+                         ("@9", "tradeplan", "claude", 9, "0", "0"))
+    renames = [(c[3], c[4]) for c in fake.calls if c[:2] == ["tmux", "rename-window"]]
+    assert renames == [("sess:@10", "tradeplan-2")]
+
+
+def test_reconcile_manual_flag_is_exactly_one_not_any_value(monkeypatch):
+    # The flag is "1"; an explicit "0" (an unset/cleared option) is NOT manual, so the
+    # older window keeps the name and the "0" one — the newer — is suffixed.
+    _, fake = _reconcile(monkeypatch,
+                         ("@1", "billing", "claude", 1, "0", "0"),
+                         ("@2", "billing", "claude", 2, "0", "0", "0"))
+    renames = [(c[3], c[4]) for c in fake.calls if c[:2] == ["tmux", "rename-window"]]
+    assert renames == [("sess:@2", "billing-2")]
+
+
+def test_reconcile_two_manual_names_still_suffix_a_non_manual_third(monkeypatch, caplog):
+    # Two manual windows collide (warned, both kept) — and a non-manual window that
+    # shares the name is STILL renamed: the manual collision doesn't freeze the group.
+    with caplog.at_level("WARNING", logger="chela.agent_manager"):
+        actions, fake = _reconcile(monkeypatch,
+                                   ("@1", "billing", "claude", 1, "0", "0"),
+                                   ("@2", "billing", "claude", 2, "0", "0", "1"),
+                                   ("@3", "billing", "claude", 3, "0", "0", "1"))
+    renames = [(c[3], c[4]) for c in fake.calls if c[:2] == ["tmux", "rename-window"]]
+    assert renames == [("sess:@1", "billing-2")]
+    assert actions == ["billing -> billing-2"]
+    assert [r for r in caplog.records if r.levelname == "WARNING" and "billing" in r.getMessage()]
+
+
+def test_reconcile_one_manual_name_logs_no_warning(monkeypatch, caplog):
+    # The warning is for a MANUAL-vs-MANUAL collision only; one manual window winning
+    # a duplicate is the normal case and must not cry wolf.
+    with caplog.at_level("WARNING", logger="chela.agent_manager"):
+        _reconcile(monkeypatch,
+                   ("@1", "billing", "claude", 1, "0", "0"),
+                   ("@2", "billing", "claude", 2, "0", "0", "1"))
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_reconcile_never_renames_a_judge_window_without_a_slash(monkeypatch):
+    # The judge clause on its own — a `judge-…` name with no `/` in it, so the
+    # dispatch-branch clause can't be what spares it.
+    actions, fake = _reconcile(monkeypatch,
+                               ("@1", "judge-cmx-5", "claude", 1, "0", "0"),
+                               ("@2", "judge-cmx-5", "claude", 2, "0", "0"))
+    assert actions == []
+    assert fake.renames() == []
+
+
+def test_reconcile_never_renames_a_dispatch_window_without_a_judge_prefix(monkeypatch):
+    actions, fake = _reconcile(monkeypatch,
+                               ("@1", "x/cmx-2-fix", "claude", 1, "0", "0"),
+                               ("@2", "x/cmx-2-fix", "claude", 2, "0", "0"))
+    assert actions == []
+    assert fake.renames() == []
+
+
+def test_reconcile_honours_never_manage_on_a_duplicate(monkeypatch):
+    monkeypatch.setattr(agent_manager, "NEVER_MANAGE", {"pinned"})
+    actions, fake = _reconcile(monkeypatch,
+                               ("@1", "pinned", "claude", 1, "0", "0"),
+                               ("@2", "pinned", "claude", 2, "0", "0"))
+    assert actions == []
+    assert fake.renames() == []
+
+
+def test_reconcile_locks_when_only_allow_rename_is_still_on(monkeypatch):
+    # Either live mechanism needs the lock — here automatic-rename is already off but
+    # allow-rename (OSC titles) is not.
+    actions, fake = _reconcile(monkeypatch, ("@9", "nautilus", "claude", 1, "0", "1"))
+    assert actions == []
+    assert fake.set_options() == {"allow-rename": "off", "automatic-rename": "off"}
+
+
+def test_reconcile_skips_a_failed_rename_and_reports_no_action(monkeypatch):
+    # A tmux failure renaming the newer duplicate is logged, never reported as done.
+    fake = _FakeTmux(_rows(("@1", "tradeplan", "claude", 1, "0", "0"),
+                           ("@2", "tradeplan", "claude", 2, "0", "0")))
+
+    def run(cmd, **kw):
+        if cmd[:2] == ["tmux", "rename-window"]:
+            raise subprocess.TimeoutExpired(cmd, 5)
+        return fake(cmd, **kw)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(config, "current_session", lambda: "sess")
+    assert agent_manager.reconcile_window_names() == []
+
+
+def test_is_manual_name_is_false_when_tmux_fails(monkeypatch):
+    # A failed display-message (dead window, no server) whose stdout still says "1"
+    # must not read as manual — the returncode gates it.
+    monkeypatch.setattr(config, "current_session", lambda: "sess")
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: types.SimpleNamespace(
+        returncode=1, stdout="1\n", stderr="can't find window"))
+    assert agent_manager.is_manual_name("@1") is False
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), types.SimpleNamespace(
+        returncode=0, stdout="1\n", stderr=""))[1])
+    assert agent_manager.is_manual_name("@4") is True
+    assert calls == [["tmux", "display-message", "-p", "-t", "sess:@4", "#{@chela_manual_name}"]]

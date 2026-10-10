@@ -1895,6 +1895,18 @@ test('CMX-62: pane header — manual name beats the title, the title beats the w
         assert.equal(tile('@2').querySelector('.gs-grip .pane-subtitle').textContent, 'bravo');
         assert.equal(paneTitle('@3'), 'charlie', 'no title ⇒ the window name');
         assert.equal(tile('@3').querySelector('.gs-grip .pane-subtitle'), null);
+
+        // A manual name whose ai_title says the same thing: nothing distinct to add,
+        // so no subtitle repeating the header. And with both titles present the
+        // ai_title — not the live session name — leads a non-manual header.
+        util.setAgentsCache(AGENTS.map(a =>
+            a.window_id === '@1' ? { ...a, manual_name: true, ai_title: 'alpha' }
+                : a.window_id === '@2' ? { ...a, ai_title: 'Open-MMO game', session_name: 'stale session' } : a));
+        terminals._refreshPaneLabels();
+        assert.equal(paneTitle('@1'), 'alpha');
+        assert.equal(tile('@1').querySelector('.gs-grip .pane-subtitle'), null,
+            'a subtitle that only repeats the header must not render');
+        assert.equal(paneTitle('@2'), 'Open-MMO game', 'ai_title must outrank the live session name');
     } finally {
         util.setAgentsCache(AGENTS);
         terminals._refreshPaneLabels();
