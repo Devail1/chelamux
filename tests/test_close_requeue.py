@@ -258,6 +258,94 @@ def test_closed_run_stalls_skips_a_requeue_pending_run():
     assert dispatcher.closed_run_stalls([{**row, "requeue_pending": 1}], {"CMX-33"}) == []
 
 
+# Every status a run row can carry. Only `closed` is terminal-and-never-claimed; an active,
+# in-review, done or failed run on a READY task is not the CMX-33 stall.
+_EVERY_STATUS = sorted({*dispatcher.NOT_CLAIMABLE, *dispatcher.RECONCILE_MERGE_STATUSES,
+                        "failed", "queued", "merged", ""})
+
+
+@pytest.mark.parametrize("status", [s for s in _EVERY_STATUS if s != "closed"])
+def test_closed_run_stalls_flags_only_a_closed_run(status):
+    """The pure helper, directly: the SAME ready task, the same no-requeue row — only the
+    status differs. `closed` is a stall; every other status is not."""
+    row = {"task_id": "CMX-33", "workflow_path": "/w"}
+    assert [s["task_id"] for s in dispatcher.closed_run_stalls(
+        [{**row, "status": "closed"}], {"CMX-33"})] == ["CMX-33"]       # positive control
+    assert dispatcher.closed_run_stalls([{**row, "status": status}], {"CMX-33"}) == []
+
+
+def _board(repo, monkeypatch):
+    from chela.dashboard import app as dash
+
+    monkeypatch.setattr(dash, "_discover_dispatch_workflows",
+                        lambda runs: [_wf(repo).resolve()])
+    monkeypatch.setattr(dash.tasklists, "progress_for_run", lambda *a: None)
+    data = dash.app.test_client().get(
+        "/api/dispatcher", headers={"Sec-Fetch-Site": "same-origin"}).get_json()
+    return data["workflows"][0]
+
+
+def _flagged(wf) -> set[str]:
+    cards = (*wf["open_tasks"], *wf["active_runs"], *wf["awaiting_review_runs"],
+             *wf["recent_runs"])
+    return {c.get("id") or c.get("task_id") for c in cards if c.get("closed_run_stall")}
+
+
+def test_the_work_board_flags_only_the_closed_run_never_an_in_flight_or_finished_one(
+        repo, team, pr_closes, monkeypatch):
+    """The board passes EVERY run of the workflow to `closed_run_stalls` (doctor keeps only
+    closed ones), so this is where the helper's `status == "closed"` clause is pinned end to
+    end: an active, in-review, done and failed run, each on a task the tracker calls READY,
+    sit next to ONE closed run on a ready task — and only the closed one is flagged."""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", force=True)["ok"]
+    team.issues["CMX-33"]["state"] = {"name": "Todo", "type": "unstarted"}
+    others = ["claimed", "running", *dispatcher.REVIEW_STATUSES, "done", "failed"]
+    for n, status in enumerate(others, start=40):
+        _seed(repo, f"CMX-{n}", status)
+        team.issues[f"CMX-{n}"] = issue(n, "Todo")                      # each one READY
+
+    wf = _board(repo, monkeypatch)
+    seen = {r["task_id"] for r in (*wf["active_runs"], *wf["awaiting_review_runs"],
+                                   *wf["recent_runs"])}
+    assert {f"CMX-{n}" for n in range(40, 40 + len(others))} <= seen   # the scenario holds
+    assert _flagged(wf) == {"CMX-33"}
+
+
+def test_a_closed_task_open_but_not_ready_is_not_a_stall(repo, team, pr_closes, monkeypatch):
+    """Open is not READY: a closed run whose issue sits in Backlog (open, but never claimed
+    from) waits on a human decision, not on chela — neither doctor nor the board flags it.
+    So both read the tracker's READY set, not merely its open set."""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", force=True)["ok"]
+    team.issues["CMX-33"]["state"] = {"name": "Backlog", "type": "backlog"}
+
+    assert _stall_findings() == []
+    wf = _board(repo, monkeypatch)
+    assert "CMX-33" in {t["id"] for t in wf["open_tasks"]}             # open on the board
+    assert _flagged(wf) == set()
+
+    team.issues["CMX-33"]["state"] = {"name": "Todo", "type": "unstarted"}   # control
+    assert [f.title.split(":")[0] for f in _stall_findings()] == ["CMX-33"]
+    assert _flagged(_board(repo, monkeypatch)) == {"CMX-33"}
+
+
+def test_doctor_skips_a_closed_run_whose_workflow_file_is_gone(repo, monkeypatch, tmp_path):
+    """No workflow file ⇒ nothing will ever claim from it: that is no stall, and NOT a
+    CANNOT VERIFY (a tracker that was never there is not an unreadable one). A live
+    workflow's real stall beside it is still reported."""
+    live = _wf(repo).resolve()
+    gone = tmp_path / "deleted" / "WORKFLOW.md"
+    _closed_on(gone, "CMX-9")
+    _closed_on(live, "CMX-33")
+    _stub_trackers(monkeypatch, {str(live): ["CMX-33"], str(gone.resolve()): ["CMX-9"]})
+    findings = runtime_truth.audit(runtime_truth.fact("dispatch.closed_run_stalls"))
+    assert [f.title.split(":")[0] for f in findings] == ["CMX-33"], findings
+    assert findings[0].level == runtime_truth.ERROR
+
+
 def test_the_board_close_route_without_requeue_true_is_a_plain_close(
         repo, team, pr_closes, monkeypatch):
     """Only the literal `requeue: true` requeues. Omitted, false, or a truthy non-bool

@@ -663,3 +663,27 @@ test('kanbanCloseRun: a running card\'s Close & requeue button posts requeue=tru
     assert.equal(posts.length, 1);
     assert.equal(posts[0].body.requeue, true, 'Close & requeue posted a PLAIN close');
 });
+
+test('renderKanban: the stalling CLOSED run\'s own card shows the stall and Requeue; an unstalled closed one shows neither', async () => {
+    renderKanban(_payload([], {
+        recent_runs: [
+            _run({ task_id: 'CMX-33', status: 'closed', pr_state: 'closed', closed_run_stall: STALL }),
+            _run({ task_id: 'CMX-34', status: 'closed', pr_state: 'closed', closed_run_stall: null }),
+        ],
+    }));
+    const byId = id => [...document.querySelectorAll('#kanban-board .kanban-card')]
+        .find(c => c.textContent.includes(id));
+    const stalled = byId('CMX-33');
+    assert.ok(stalled, 'the closed run lost its card');
+    assert.match(stalled.querySelector('.kanban-card-stall')?.textContent || '', /closed run blocks this task/);
+    const btn = stalled.querySelector('.kanban-requeue-btn');
+    assert.ok(btn && btn.textContent.trim() === 'Requeue');
+    const quiet = byId('CMX-34');
+    assert.ok(quiet);
+    assert.equal(quiet.querySelector('.kanban-card-stall'), null);
+    assert.equal(quiet.querySelector('.kanban-requeue-btn'), null);
+    const posts = await _clickAndCapture(btn);
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].url, '/api/dispatcher/runs/CMX-33/close');
+    assert.equal(posts[0].body.requeue, true, 'Requeue on the closed card posted a PLAIN close');
+});

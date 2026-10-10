@@ -91,3 +91,18 @@ test('runCloseAction: Requeue only where a closed run is stalling; never on a me
   assert.equal(runCloseAction({ task_id: 'X', status: 'awaiting_review', pr_state: 'merged' }), null);
   assert.equal(runCloseAction({ task_id: 'X', status: 'done' }), null);
 });
+
+test('runCloseAction: every walk-away-able status offers Close & requeue; done/unknown never do', () => {
+  for (const status of ['claimed', 'running', 'awaiting_review', 'changes_requested',
+                        'needs_human', 'failed']) {
+    assert.deepEqual(runCloseAction({ task_id: 'X', status }), { label: 'Close & requeue' }, status);
+    // a merged PR shipped — whatever the run status says, nothing to requeue
+    assert.equal(runCloseAction({ task_id: 'X', status, pr_state: 'merged' }), null, status);
+  }
+  for (const status of ['done', 'queued', 'bogus', '', undefined]) {
+    assert.equal(runCloseAction({ task_id: 'X', status }), null, String(status));
+  }
+  assert.equal(runCloseAction({ status: 'running' }), null, 'no task_id ⇒ nothing to post');
+  assert.equal(runCloseAction({ task_id: 'X', status: 'closed', closed_run_stall: 'x',
+                                pr_state: 'merged' }), null);
+});
