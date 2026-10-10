@@ -482,3 +482,49 @@ def test_a_requeued_attempt_that_dies_retries_on_its_own_r2_branch(
     assert row["branch_name"] == "cmx-33-task-r2"
     assert row["worktree_path"] == r2_wt
     assert row["requeue_count"] == 1
+
+
+# --- _clear_closed_attempt: EVERY column, enumerated from the live schema -----------------
+
+# The task's own identity — the only columns a requeued attempt carries over. Pinned here,
+# by value: adding a per-attempt column (judge, CI, retry counter, PR, window) to the keep
+# set would let the closed attempt's verdict leak into the fresh one.
+_IDENTITY = frozenset({
+    "task_id", "workflow_path", "title", "status", "attempt", "started_at", "task_number",
+    "brief", "risk", "risk_reason", "tracker_url", "review_history", "requeue_count",
+    "last_error",
+})
+
+
+def test_requeue_keep_is_exactly_the_tasks_identity():
+    assert dispatcher._REQUEUE_KEEP == _IDENTITY
+    for name in dispatcher._REQUEUE_KEEP:
+        assert not name.startswith(("judge", "ci_", "pr_", "retry", "rework", "window")), name
+
+
+def test_clear_closed_attempt_resets_every_non_kept_column_and_keeps_the_identity(repo):
+    """Every column of ``runs`` holds a non-default value; after the clear, each kept column
+    still holds it and EVERY other one is back at its schema default. Driven by ``PRAGMA
+    table_info``, so a reset narrowed to a hand list (or a column dropped from the keep
+    set) leaves a column wrong and goes red."""
+    _seed(repo, "CMX-33", "closed", task_number=33)
+    with dispatcher._db() as conn:
+        cols = list(conn.execute("PRAGMA table_info(runs)"))
+        assert len(cols) > len(_IDENTITY)           # there IS something to reset
+        sentinel = {name: (7 if "INT" in (typ or "").upper() else f"old-{name}")
+                    for _cid, name, typ, _nn, _d, _pk in cols if name != "task_id"}
+        conn.execute(f"UPDATE runs SET {', '.join(f'{k}=?' for k in sentinel)} "
+                     "WHERE task_id='CMX-33'", tuple(sentinel.values()))
+        dispatcher._clear_closed_attempt(conn, "CMX-33", dispatcher._REQUEUE_KEEP)
+        conn.commit()
+        row = dict(conn.execute("SELECT * FROM runs WHERE task_id='CMX-33'").fetchone())
+        defaults = {name: (conn.execute(f"SELECT {d}").fetchone()[0] if d is not None else None)
+                    for _cid, name, _t, _nn, d, _pk in cols}
+
+    assert row["task_id"] == "CMX-33"
+    for name, value in sentinel.items():
+        if name in _IDENTITY:
+            assert row[name] == value, f"{name} is identity and must survive the requeue"
+        else:
+            assert row[name] == defaults[name], (
+                f"{name} kept the closed attempt's {row[name]!r} (default {defaults[name]!r})")
