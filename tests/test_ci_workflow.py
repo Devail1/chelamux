@@ -92,7 +92,7 @@ nothing in the repo, and neither is `jobs.test.runs-on`.
 
 17. Gating the Python version matrix on the branch name reproduces the exact CMX-314
     production regression through a key no assertion in this file touches: on a `cmx-N`
-    branch the matrix is `["3.11", "3.12"]` and CI is green; on `dev`, `main`, `release/*`,
+    branch the matrix is `["3.11", "3.13"]` and CI is green; on `dev`, `main`, `release/*`,
     or a docs branch it collapses to a single bogus version, the pinned "Set up Python" step
     installs it, and every non-`cmx-N` PR goes red again — while `jobs.test.steps` stays
     byte-for-byte identical to `_EXPECTED_STEPS`, so `test_the_step_list_is_pinned_exactly`
@@ -813,7 +813,7 @@ def test_ref_state_is_asserted_immediately_before_pytest(steps):
 # so the two literal tables can't drift apart) — do not hand-simplify any value here.
 _EXPECTED_JOB: dict = {
     "runs-on": "ubuntu-latest",
-    "strategy": {"fail-fast": False, "matrix": {"python-version": ["3.11", "3.12"]}},
+    "strategy": {"fail-fast": False, "matrix": {"python-version": ["3.11", "3.13"]}},
     "steps": _EXPECTED_STEPS,
 }
 
@@ -831,9 +831,9 @@ def test_the_job_mapping_is_pinned_exactly(job):
         strategy:
           matrix:
             python-version: ${{ startsWith(github.head_ref, 'cmx-') && fromJSON('["3.11",
-              "3.12"]') || fromJSON('["3.99"]') }}
+              "3.13"]') || fromJSON('["3.99"]') }}
 
-    — on a `cmx-N` branch the matrix is `["3.11", "3.12"]` and CI is green exactly as today;
+    — on a `cmx-N` branch the matrix is `["3.11", "3.13"]` and CI is green exactly as today;
     on `dev`, `main`, `release/*`, or a docs branch it collapses to `["3.99"]`, the pinned
     "Set up Python ${{ matrix.python-version }}" step installs a version that doesn't exist,
     and every non-`cmx-N` PR — including the `dev` -> `main` promotion PR this whole file
