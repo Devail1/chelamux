@@ -430,3 +430,85 @@ def test_pending_rebinds_drop_another_epoch_and_expired_requests(monkeypatch, tm
     assert sa.pending_rebinds("e1", now=time.time() + sa.REBIND_TTL_SECONDS + 1) == {}
     sa.settle_rebinds({}, "e1")
     assert sa.pending_rebinds("e1") == {}
+
+
+class _OneTick:
+    """A ``stop`` event that lets exactly one reconcile tick run."""
+
+    def __init__(self):
+        self.ticks = 0
+
+    def is_set(self):
+        self.ticks += 1
+        return self.ticks > 1
+
+    def wait(self, _interval):
+        return None
+
+
+def test_the_daemons_reconcile_loop_hands_the_sidebars_rebind_to_reconcile(monkeypatch, tmp_path):
+    """The WIRING, not just reconcile_bindings: one real tick of ``_reconcile_loop`` must read
+    the sidebar's pending rebind and give the resumed window its OLD topic back. A loop that
+    stopped passing ``rebinds=`` would still bind @9 — to a brand-new topic — so assert the
+    thread id and that nothing was created, never merely "bound"."""
+    from chela import main as main_mod
+    from chela import telegram as tg
+
+    monkeypatch.setattr(sa, "_REBINDS", tmp_path / "topic-rebinds.json")
+    monkeypatch.setattr(sa.epoch, "current", lambda: "e1")
+    monkeypatch.setattr(main_mod.epoch, "current", lambda: "e1")
+    monkeypatch.setattr(main_mod.roster, "record", lambda *a, **k: None)
+    monkeypatch.setattr(main_mod, "BIND_DISPATCHED", False)
+    monkeypatch.setattr(tg, "live_agent_windows", lambda: ({"@9": "myproj"}, ["@9"]))
+    monkeypatch.setattr(tg, "dispatched_window_ids", lambda **k: set())
+    monkeypatch.setattr(tg, "sync_pinned_titles", lambda *a, **k: False)
+    monkeypatch.setattr("chela.discovery.get_window_cwd_by_id", lambda wid: str(tmp_path))
+    sa.request_rebind("@9", "77")
+    reg = BindingRegistry("1")
+    monkeypatch.setattr(reg, "save", lambda: None)
+    api = _Topics()
+
+    main_mod._reconcile_loop(reg, api, 0, _OneTick())
+
+    assert reg.thread_for_window("@9") == "77", \
+        f"the resumed window must get its OLD topic back, got {reg.thread_for_window('@9')!r}"
+    assert ("reopen", "77") in api.calls
+    assert not any(c[0] == "create" for c in api.calls), api.calls
+    assert sa.pending_rebinds("e1") == {}, "a consumed rebind is settled off disk"
+
+
+def test_a_done_run_whose_judge_battery_is_still_running_is_refused(client, monkeypatch):
+    # status alone says settled; the running judge is the ONLY thing that says otherwise
+    monkeypatch.setattr(client.dispatcher, "list_runs",
+                        lambda: [{"task_id": "CMX-5", "status": "done", "judge_state": "running"}])
+    body = client.app.test_client().post("/api/sidebar/archive", json={"keys": ["run:CMX-5"]}).get_json()
+    assert not body["ok"] and [r["key"] for r in body["refused"]] == ["run:CMX-5"]
+    assert body["archived"] == []
+    assert sa.state()["hidden"] == []
+
+
+def test_a_failed_unarchive_spawn_refuses_and_KEEPS_the_archive_record(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from chela import sessionids
+
+    monkeypatch.setattr(sa, "_STORE", tmp_path / "sidebar-archive.json")
+    monkeypatch.setattr(sa, "_REBINDS", tmp_path / "topic-rebinds.json")
+    monkeypatch.setattr(sa.epoch, "current", lambda: "e1")
+    key = f"s:{SID}"
+    with sa._LOCK:
+        sa._save({"hidden": {}, "sessions": {key: {
+            "key": key, "session_id": SID, "cwd": str(tmp_path), "name": "mywin",
+            "thread_id": "77"}}})
+    # a failed spawn that still reports a wid — the refusal must not lean on wid being empty
+    monkeypatch.setattr(spawn_mod, "spawn_window", lambda *a, **k: SimpleNamespace(
+        ok=False, error="tmux said no", wid="@9", name="mywin", cwd=str(tmp_path)))
+    pinned = []
+    monkeypatch.setattr(sessionids, "set_session_id", lambda wid, sid: pinned.append(wid))
+
+    out = sa.unarchive_session(key)
+
+    assert not out.ok and out.error == "tmux said no"
+    assert key in sa._load()["sessions"], "a session that was NOT resumed must stay archived"
+    assert pinned == [], "nothing may be recorded against a window that never opened"
+    assert sa.pending_rebinds("e1") == {}, "no topic is requested for a failed resume"
