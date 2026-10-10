@@ -12,7 +12,7 @@ import { before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 import {
-    DISPATCHED_KEY, VIEW_DEFAULTS, activityTs, createdTs, dateBucket, groupSidebar, isLive, itemKinds, itemState, buildItems,
+    DISPATCHED_KEY, OTHER_KEY, VIEW_DEFAULTS, activityTs, createdTs, dateBucket, groupSidebar, isLive, itemKinds, itemState, buildItems,
     normalizeView, windowKind,
 } from '../chela/dashboard/static/js/sidebarmodel.js';
 
@@ -25,23 +25,32 @@ const BODY = `
 <div id="agent-detail"></div>
 <span id="hdr-agents"></span><span id="hdr-next"></span><span id="hdr-updated"></span>`;
 
-let nav, util;
+let nav, util, orch;
+// what /api/orchestrator/status answers (a test sets it to Pin a row), and the spawns a
+// group's "+" posted
+let orchStatus = {};
+const spawns = [];
 
 before(async () => {
-    ({ modules: { util, nav } } = await bootDashboardDom({
+    ({ modules: { util, nav, orchestrator: orch } } = await bootDashboardDom({
         body: BODY,
         canvasStub: true,
         terminalsEnabled: false,
-        fetchImpl: url => {
-            const body = /\/api\/(agents|summary)/.test(String(url)) ? [] : {};
+        fetchImpl: (url, opts) => {
+            const u = String(url);
+            if (u.includes('/api/agents/spawn')) spawns.push(JSON.parse(opts.body));
+            const body = u.includes('/api/orchestrator/status') ? orchStatus
+                : u.includes('/api/agents/spawn') ? { ok: true }
+                : /\/api\/(agents|summary)/.test(u) ? [] : {};
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
         },
-        extraModules: ['util.js', 'nav.js'],
+        extraModules: ['util.js', 'nav.js', 'orchestrator.js'],
     }));
 });
 
 beforeEach(() => {
     localStorage.clear();
+    spawns.length = 0;
     // a choice is also kept in memory (for a throwing storage) — reset it to the defaults
     nav.viewMenuAction('group:folder');
     localStorage.clear();
@@ -676,4 +685,107 @@ test('model: normalizeView falls back FIELD BY FIELD and keeps every valid store
     assert.deepEqual(bad, { ...VIEW_DEFAULTS, env: [...VIEW_DEFAULTS.env] });
     assert.deepEqual(VIEW_DEFAULTS.env, ['interactive', 'dispatched', 'background'], 'the default is everything except Judges');
     assert.deepEqual(normalizeView({ env: [] }).env, [], 'an empty selection is a choice, not garbage');
+});
+
+// --- CMX-73: the four render guards the CMX-66 judge left SURVIVED -----------------------
+
+test('Show PR status: a badge\'s state comes ONLY from a window whose transcript names THAT PR', () => {
+    const mine = 'https://github.com/o/r/pull/801';
+    // the run's agent window's transcript still names an OLDER, merged PR; the judge
+    // window names a closed third one. Neither is this run's PR: the badge has no state.
+    render([
+        win('liavacc/cmx-81-x', { cwd: `${WT}/CMX-81`, dispatched: true,
+            run: runCard('CMX-81', 'X', 'agent', { pr_url: mine }),
+            pr: { url: 'https://github.com/o/r/pull/790', state: 'merged', draft: false } }),
+        win('judge-cmx-81', { cwd: `${WT}/CMX-81`, dispatched: true,
+            run: runCard('CMX-81', 'X', 'judge', { pr_url: mine }),
+            pr: { url: 'https://github.com/o/r/pull/795', state: 'closed', draft: false } }),
+    ]);
+    const b = () => host().querySelector('.agent-row[data-run="CMX-81"] .ar-pr');
+    assert.ok(b(), 'the run has a PR: it still gets its #N badge');
+    assert.equal(b().textContent, '#801');
+    assert.deepEqual(['open', 'draft', 'merged', 'closed'].filter(c => b().classList.contains(c)), [],
+        'another PR\'s state leaked onto this run\'s badge');
+    assert.equal(b().getAttribute('title'), 'PR #801');
+    // control: once the judge window's transcript names THIS PR, its state shows
+    render([
+        win('liavacc/cmx-81-x', { cwd: `${WT}/CMX-81`, dispatched: true,
+            run: runCard('CMX-81', 'X', 'agent', { pr_url: mine }),
+            pr: { url: 'https://github.com/o/r/pull/790', state: 'merged', draft: false } }),
+        win('judge-cmx-81', { cwd: `${WT}/CMX-81`, dispatched: true,
+            run: runCard('CMX-81', 'X', 'judge', { pr_url: mine }),
+            pr: { url: mine, state: 'open', draft: false } }),
+    ]);
+    assert.ok(b().classList.contains('open'));
+    assert.equal(b().getAttribute('title'), 'PR #801 · open');
+});
+
+test('Show PR status off hides the badge on EVERY run row — Pinned, Needs you, a folder group, and Group by None', async () => {
+    const card = (task, n, over = {}) => runCard(task, 'X', 'agent', { pr_url: `https://github.com/o/r/pull/${n}`, ...over });
+    const rows = () => [
+        win('liavacc/cmx-82-x', { window_id: '@982', cwd: `${WT}/CMX-82`, dispatched: true, run: card('CMX-82', 882) }),
+        win('liavacc/cmx-83-x', { cwd: `${WT}/CMX-83`, dispatched: true, run: card('CMX-83', 883), session_status: 'waiting' }),
+        win('liavacc/cmx-84-x', { cwd: `${WT}/CMX-84`, dispatched: true, run: card('CMX-84', 884) }),
+    ];
+    const badged = () => [...host().querySelectorAll('.agent-row .ar-pr')]
+        .map(b => b.closest('.agent-row').dataset.run).sort();
+    orchStatus = { ok: true, wid: '@982' };
+    await orch.refreshOrchestratorStatus();
+    try {
+        render(rows());
+        // the fixture really puts a run row in each place
+        assert.ok(host().querySelector('.side-pinned .agent-row[data-run="CMX-82"]'), 'CMX-82 is not Pinned');
+        assert.ok(host().querySelector('.side-needs-you .agent-row[data-run="CMX-83"]'), 'CMX-83 is not under Needs you');
+        assert.ok(group(DISPATCHED_KEY).querySelector('.agent-row[data-run="CMX-84"]'), 'CMX-84 is not in Dispatched');
+        assert.deepEqual(badged(), ['CMX-82', 'CMX-83', 'CMX-84'], 'Show PR status on: every run row has its badge');
+        view('toggle:showPR');
+        assert.deepEqual(badged(), [], 'Show PR status off: no run row may keep a badge');
+        view('group:none');
+        assert.ok(host().querySelector('.side-group.flat .agent-row[data-run="CMX-84"]'), 'CMX-84 is not in the flat list');
+        assert.deepEqual(badged(), [], 'Group by None, Show PR status off');
+        view('toggle:showPR');
+        assert.deepEqual(badged(), ['CMX-82', 'CMX-83', 'CMX-84'], 'Group by None, Show PR status on');
+    } finally {
+        orchStatus = {};
+        await orch.refreshOrchestratorStatus();
+    }
+});
+
+test('a view that filters out EVERY row says so — an empty-state line, never a blank sidebar', () => {
+    render([win('stale-a', { last_activity: ago(40 * DAY) }), win('stale-b', { cwd: '/srv/code/beta', last_activity: ago(40 * DAY) })]);
+    assert.deepEqual(shown(), []);
+    const empty = host().querySelector('.side-empty');
+    assert.ok(empty, 'every row filtered out, and the sidebar is blank');
+    assert.equal(empty.textContent, 'No sessions match this view');
+    // the same through the Environment filter: nothing selected
+    view('activity:all');
+    assert.equal(host().querySelector('.side-empty'), null, 'control: rows shown, no empty line');
+    for (const k of VIEW_DEFAULTS.env) view(`env:${k}`);
+    assert.deepEqual(shown(), []);
+    assert.equal((host().querySelector('.side-empty') || {}).textContent, 'No sessions match this view');
+    // the view is also kept in memory, which beforeEach does not reset: put it back
+    for (const k of VIEW_DEFAULTS.env) view(`env:${k}`);
+    view('activity:7d');
+});
+
+test('Show empty groups: Other\'s "+" stays reachable, and opens the HOME dir, when every Other row is filtered out', () => {
+    render([
+        win('proj', { cwd: '/srv/code/alpha' }),
+        win('no-cwd', { cwd: null, last_activity: ago(40 * DAY) }),
+        win('in-home', { cwd: '/home/u', cwd_is_home: true, last_activity: ago(40 * DAY) }),
+    ]);
+    assert.deepEqual(groupKeys(), ['/srv/code/alpha'], 'both Other rows are older than 7d');
+    view('toggle:showEmpty');
+    assert.deepEqual(groupKeys(), ['/srv/code/alpha', OTHER_KEY]);
+    assert.deepEqual(rowsIn(OTHER_KEY), []);
+    const add = group(OTHER_KEY).querySelector('.group-add');
+    assert.ok(add, 'the empty Other group lost its "+"');
+    fire(add);
+    assert.deepEqual(spawns, [{ cwd: '/home/u', command: 'claude' }]);
+    view('toggle:showEmpty');   // back to the default (the in-memory view outlives beforeEach)
+    // the model directly: the Other group's cwd is a home-dir session's, however it is filtered
+    const m = groupSidebar([
+        { name: 'h', window_id: '@1', cwd: '/home/u', cwd_is_home: true, last_activity: Date.now() - 40 * DAY },
+    ], { wants, activityDays: 1, showEmpty: true });
+    assert.deepEqual(m.groups.map(g => [g.key, g.items.length, g.cwd]), [[OTHER_KEY, 0, '/home/u']]);
 });
