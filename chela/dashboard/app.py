@@ -28,7 +28,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, spawn, starter, tasklists, transcripts, update, usage, userconfig
+from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, spawn, starter, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -2499,7 +2499,9 @@ def api_restore():
     _require_terminals()
     owned = _dispatcher_owned_wid_epochs()
     terminal_wid_epochs, terminal_cwds = _terminal_run_claims()
-    dismissed = dismissed_sessions.ids()
+    # CMX-75: a session the sidebar archived (closed) is offered by its Archived section's
+    # Unarchive, never a second time here.
+    dismissed = dismissed_sessions.ids() | sidebar_archive.archived_session_ids()
     candidates = [v for v in _restore_verdicts()
                   if v.verdict == "MANUAL" and v.manual_command()
                   and v.session_id not in dismissed]
@@ -2620,6 +2622,140 @@ def api_restore_resume():
                     exc_info=True)
 
     return jsonify({"ok": True, "name": result.name, "cwd": result.cwd, "wid": result.wid})
+
+
+# ---------------------------------------------------------------------------
+# API: the sidebar archive (CMX-75) — server-side, and archiving a session CLOSES it
+#
+# The archive used to be a per-browser localStorage hide list; it is now chela state
+# (:mod:`chela.sidebar_archive`), so every device agrees. A row's item key says what
+# archiving it means:
+#   w:@N        a HUMAN session — record how to resume it, then close its window
+#   run:CMX-N   a SETTLED dispatched run — hidden only; its windows are the dispatcher's
+#   s:<sid>     an archived (closed) session — Unarchive resumes it in a new window
+# ---------------------------------------------------------------------------
+
+_RUN_SETTLED = frozenset({"done", "closed", "failed"})
+
+
+def _keys_from_body() -> list[str] | None:
+    keys = (request.get_json(silent=True) or {}).get("keys")
+    if not isinstance(keys, list) or not keys or not all(sidebar_archive.valid_key(k) for k in keys):
+        return None
+    return list(dict.fromkeys(keys))
+
+
+def _run_settled(task_id: str, runs: list[dict]) -> bool:
+    """Is ``task_id``'s newest run settled (done / closed / failed, no judge running)? Its
+    row is the authority, not the client's view of it."""
+    row = next((r for r in runs if str(r.get("task_id")) == task_id), None)
+    return (row is not None and row.get("status") in _RUN_SETTLED
+            and row.get("judge_state") != "running")
+
+
+@app.route("/api/sidebar/archive", methods=["GET"])
+@require_auth
+def api_sidebar_archive_state():
+    """The archive every device renders: ``{hidden: [keys], sessions: [records]}``. An
+    archived session that is running again (resumed by hand) leaves the archive here."""
+    if config.TERMINALS_ENABLED:
+        try:
+            from chela import sessions
+
+            pane_map = sessions.panes()
+            sidebar_archive.drop_resumed_elsewhere(
+                lambda sid: sessions.wid_for_session(sid, pane_map) is not None)
+        except Exception:  # noqa: BLE001 — a probe hiccup only delays that cleanup
+            log.warning("sidebar archive: live-session sweep failed", exc_info=True)
+    return jsonify(sidebar_archive.state())
+
+
+@app.route("/api/sidebar/archive", methods=["POST"])
+@require_auth
+def api_sidebar_archive():
+    """Archive rows. Body ``{keys: [item keys]}``. Each key is handled on its own and the
+    answer says which were archived and which were refused (and why) — one refusal never
+    blocks the rest. Refusals are :func:`chela.sidebar_archive.archive_window`'s (a
+    busy / waiting / orchestrator / dispatched window, an unknown session id) plus, for a
+    run, one that has not settled."""
+    keys = _keys_from_body()
+    if keys is None:
+        return jsonify({"ok": False, "error": "keys must be a non-empty list of item keys"}), 400
+    try:
+        runs = dispatcher.list_runs()
+    except Exception:  # noqa: BLE001 — without the runs table nothing dispatched is provable
+        log.exception("sidebar archive: list_runs failed")
+        runs = None
+    archived, closed, refused = [], [], []
+    for key in keys:
+        kind, _, ref = key.partition(":")
+        if kind == "run":
+            if runs is None or not _run_settled(ref, runs):
+                refused.append({"key": key, "error": f"{ref} has not settled — not archived"})
+                continue
+            sidebar_archive.hide([key])
+            archived.append(key)
+        elif kind == "w":
+            if not config.TERMINALS_ENABLED:
+                refused.append({"key": key, "error": "terminals are off — a session cannot be "
+                                                     "closed (or resumed) from here"})
+                continue
+            if runs is None:
+                refused.append({"key": key, "error": "the runs table cannot be read, so a "
+                                                     "dispatched window cannot be ruled out"})
+                continue
+            windows = discovery.get_all_windows()
+            out = sidebar_archive.archive_window(
+                ref, orch_wid=inbox.orchestrator_wid(),
+                dispatched=_dispatched_wids(windows, runs))
+            if out.ok:
+                archived.append(out.record["key"])
+                closed.append(ref)
+            else:
+                refused.append({"key": key, "error": out.error})
+        else:
+            refused.append({"key": key, "error": "already archived"})
+    return jsonify({"ok": not refused, "archived": archived, "closed": closed,
+                    "refused": refused, "state": sidebar_archive.state()})
+
+
+@app.route("/api/sidebar/unarchive", methods=["POST"])
+@require_auth
+def api_sidebar_unarchive():
+    """Unarchive rows. Body ``{keys}``. A closed session (``s:``) is RESUMED — a new window,
+    same cwd and name, ``claude --resume`` — and its Telegram topic reopened; a hidden row
+    is simply shown again."""
+    keys = _keys_from_body()
+    if keys is None:
+        return jsonify({"ok": False, "error": "keys must be a non-empty list of item keys"}), 400
+    resumed, refused = [], []
+    hidden = [k for k in keys if not k.startswith("s:")]
+    if hidden:
+        sidebar_archive.unhide(hidden)
+    for key in keys:
+        if not key.startswith("s:"):
+            continue
+        if not config.TERMINALS_ENABLED:
+            refused.append({"key": key, "error": "terminals are off — cannot resume a session"})
+            continue
+        out = sidebar_archive.unarchive_session(key)
+        if out.ok:
+            resumed.append({"key": key, "wid": out.wid, "name": out.name})
+        else:
+            refused.append({"key": key, "error": out.error})
+    return jsonify({"ok": not refused, "unhidden": hidden, "resumed": resumed,
+                    "refused": refused, "state": sidebar_archive.state()})
+
+
+@app.route("/api/sidebar/archive/migrate", methods=["POST"])
+@require_auth
+def api_sidebar_archive_migrate():
+    """One-time import of a browser's old localStorage archive (pre-CMX-75). Those keys
+    only ever meant HIDE, so they are imported as hidden — nothing is closed on a page load."""
+    keys = _keys_from_body()
+    if keys is None:
+        return jsonify({"ok": False, "error": "keys must be a non-empty list of item keys"}), 400
+    return jsonify({"ok": True, "state": sidebar_archive.hide([k for k in keys if not k.startswith("s:")])})
 
 
 # ---------------------------------------------------------------------------
