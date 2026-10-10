@@ -40,6 +40,16 @@ history lives in `git log`.
   that supersedes it. Each edge is written once, and a failed write never blocks anything. A run whose window
   died is re-claimed from In Progress or In Review while it has retries left. (CMX-23, #607)
 
+### Fixed
+
+- **A Telegram photo or file that times out downloading no longer claims it exceeded the 20 MB
+  limit.** The bridge retries a timeout or network error (3 attempts, with backoff) and gives
+  both the getFile call and the download a 60s read timeout. If it still fails, the reply names
+  the real cause: "⏳ Download timed out (network). Please resend." for a timeout, the size
+  message only when Telegram says "file is too big" or the update's `file_size` is over 20 MB
+  (then no download is attempted), and "Could not download the file (<reason>)" otherwise. The warning
+  log line includes the exception class. (CMX-63, #628)
+
 ## [0.14.0] — 2026-09-30
 
 ### Added
