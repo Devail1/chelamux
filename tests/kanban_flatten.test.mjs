@@ -588,33 +588,3 @@ test('renderKanban: a failed run still shows its error line', () => {
     assert.ok(err, 'a failed run lost its error line');
     assert.equal(err.textContent, 'tmux window disappeared');
 });
-
-// --- 🗂️🔁 CMX-65 — the OPEN task's card carries the server's closed_run_stall ----------
-//
-// runstate.test.mjs pins runStallNote/runCloseAction on hand-built cards, but nothing
-// proved _kanbanFlatten copies `closed_run_stall` off `open_tasks` onto the card: a
-// mutation hard-coding it to null left the whole suite green while the stalled Todo card
-// went silent again — the exact CMX-33 failure. This renders the real board and reads the
-// open card's DOM.
-
-test('renderKanban: an open task held by a closed run shows the stall and a Requeue button', () => {
-    const stall = 'closed run blocks this task: requeue or refile';
-    renderKanban(_payload([], {
-        open_tasks: [{ id: 'CMX-33', title: 'window naming', closed_run_stall: stall }],
-    }));
-    const cards = [...document.querySelectorAll('#kanban-board .kanban-card')];
-    assert.equal(cards.length, 1, 'expected exactly the one open card');
-    const note = cards[0].querySelector('.kanban-card-stall');
-    assert.ok(note, 'the open card dropped the server\'s closed_run_stall — no stall note');
-    assert.match(note.textContent, /closed run blocks this task/);
-    const btn = cards[0].querySelector('.kanban-requeue-btn');
-    assert.ok(btn && btn.textContent.trim() === 'Requeue', 'no Requeue button on the stalled open card');
-});
-
-test('renderKanban: an open task with no stall shows neither note nor Requeue (control)', () => {
-    renderKanban(_payload([], { open_tasks: [{ id: 'CMX-34', title: 'fine' }] }));
-    const card = document.querySelector('#kanban-board .kanban-card');
-    assert.ok(card);
-    assert.equal(card.querySelector('.kanban-card-stall'), null);
-    assert.equal(card.querySelector('.kanban-requeue-btn'), null);
-});

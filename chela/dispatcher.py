@@ -97,8 +97,8 @@ REVIEW_STATUSES = ("awaiting_review", "changes_requested", "needs_human")
 # already owns its branch, worktree and PR, and re-claiming the same task_id would fork
 # a second worktree behind a PR nobody is looking at. The ONE way back is explicit
 # (CMX-65): `chela close <run> --requeue` sets `requeue_pending`, and the claim loop takes
-# that row as a fresh attempt on a NEW branch/worktree. A closed task left in the tracker's
-# ready state WITHOUT it is flagged (`closed_run_stalls`), never silently skipped forever.
+# that row as a fresh attempt on a NEW branch/worktree. Without it, `chela close` says
+# out loud that the task will never be re-dispatched, and how to requeue it.
 NOT_CLAIMABLE = (*ACTIVE_STATUSES, *REVIEW_STATUSES, "done", "closed")
 
 # Statuses whose PR can still merge OUT OF BAND (a hand `gh pr merge`, never through
@@ -4249,11 +4249,6 @@ def pr_is_open(run: dict) -> bool:
     return bool(run.get("pr_url")) and run.get("pr_state") not in ("merged", "closed")
 
 
-# 🗂️🔁 CMX-65. What a board / doctor / `chela close` says about a `closed` run whose task is
-# still in the tracker's READY state with no requeue: nothing will ever claim it again.
-CLOSED_RUN_STALL = "closed run blocks this task: requeue or refile"
-
-
 def requeue_hint(task_id: str) -> str:
     """The exact command that makes a closed task claimable again."""
     return f"chela close {task_id} --requeue --reason '…'"
@@ -4293,8 +4288,7 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
     always closed (a fresh attempt opens its own; two PRs for one task is the fork CMX-265
     forbids), the tracker issue goes back to its ready state instead of Canceled, and the
     requeue is recorded in the review history. It also accepts a run that is ALREADY
-    ``closed`` — that is how a task closed without ``--requeue`` (a stall doctor and the board
-    flag, :data:`CLOSED_RUN_STALL`) is put back in the queue. A run whose PR MERGED is
+    ``closed`` — that is how a task closed without ``--requeue`` is put back in the queue. A run whose PR MERGED is
     refused: it shipped, and follow-up work is a new task.
     """
     reason = (reason or "").strip()
@@ -6242,24 +6236,6 @@ def _tracker_requeue(run: dict) -> str | None:
     except sqlite3.Error:
         log.warning("close: could not reset the tracker edge for %s", run["task_id"])
     return outcome
-
-
-def closed_run_stalls(runs: list[dict], ready_ids) -> list[dict]:
-    """🗂️🔁 CMX-65 — the ``closed`` runs (no requeue pending) whose task is STILL in the
-    tracker's ready state. ``closed`` is in :data:`NOT_CLAIMABLE`, so such a task is never
-    claimed again — and before CMX-65 it sat in Todo with no run and no signal anywhere
-    (CMX-33: ~11 hours, its dependants stalled with it). Pure: ``ready_ids`` is whatever
-    :func:`ready_task_ids` read for the run's workflow."""
-    ready = set(ready_ids or ())
-    return [
-        {"task_id": r.get("task_id"), "title": r.get("title"),
-         "workflow_path": r.get("workflow_path"), "branch_name": r.get("branch_name"),
-         "pr_url": r.get("pr_url"), "close_reason": r.get("close_reason"),
-         "hint": requeue_hint(r.get("task_id") or "")}
-        for r in runs
-        if r.get("status") == "closed" and not r.get("requeue_pending")
-        and r.get("task_id") in ready
-    ]
 
 
 def ready_task_ids(source, open_tasks: list[Task] | None = None) -> set[str] | None:

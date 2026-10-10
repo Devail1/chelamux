@@ -4190,8 +4190,6 @@ def api_dispatcher():
         project_key: str | None = None
         url_by_id: dict[str, str] = {}
         state_by_id: dict[str, str] = {}
-        # 🗂️🔁 CMX-65: the closed runs (no requeue) whose task the tracker still calls READY.
-        stalled_ids: set[str] = set()
 
         if exists:
             try:
@@ -4223,12 +4221,6 @@ def api_dispatcher():
                 workflow_states = getattr(source, "workflow_states", None)
                 if workflow_states is not None:
                     entry["tracker_columns"] = workflow_states()
-                # Over ALL runs, not `recent` (capped at 10): an older closed run blocks
-                # its task just the same. Ready ids are this tracker's, so no cross-talk.
-                stalled_ids = {
-                    s["task_id"] for s in dispatcher.closed_run_stalls(
-                        all_runs, dispatcher.ready_task_ids(source, open_tasks) or ())
-                }
                 entry["open_tasks"] = []
                 for t in open_tasks:
                     if t.id in in_flight_ids:
@@ -4267,10 +4259,6 @@ def api_dispatcher():
                         # retitled/deleted dependency. These can never resolve on
                         # their own; see `dispatcher._ready`.
                         "unresolved_depends": sorted(set(unmet) - known_ids),
-                        # 🗂️🔁 CMX-65: a closed run (no requeue) holds this task — it is
-                        # never claimed. The card says so, and how to get out.
-                        "closed_run_stall": (dispatcher.CLOSED_RUN_STALL
-                                             if t.id in stalled_ids else None),
                     })
 
                 backlog_path = (wf.path.parent / "BACKLOG.md").resolve()
@@ -4335,8 +4323,6 @@ def api_dispatcher():
             # whenever the run can't be joined to a live session's task directory; see
             # tasklists.progress_for_run.
             r["tasks"] = tasklists.progress_for_run(r, session_entries, current_epoch)
-            r["closed_run_stall"] = (dispatcher.CLOSED_RUN_STALL
-                                     if r.get("task_id") in stalled_ids else None)
         entry["active_runs"] = active
         entry["awaiting_review_runs"] = awaiting
         entry["recent_runs"] = recent
@@ -4979,23 +4965,6 @@ def api_dispatcher_run_merge(task_id: str):
     result = _merge_one(row)
     status = result.pop("status", 200 if result.get("ok") else 502)
     return jsonify(result), status
-
-
-@app.route("/api/dispatcher/runs/<task_id>/close", methods=["POST"])
-@require_auth
-def api_dispatcher_run_close(task_id: str):
-    """🗂️🔁 CMX-65 — the board's "Close & requeue" / "Requeue": ``dispatcher.close_run``,
-    exactly as ``chela close <run> --reason … [--requeue]`` runs it. Payload
-    ``{reason, requeue}``. A requeue closes the old PR; a plain close leaves it open (the
-    reason is posted on it). Never ``force`` from here: a busy agent is refused, the same
-    as the CLI without ``--force``."""
-    data = request.get_json(silent=True) or {}
-    reason = str(data.get("reason") or "").strip()
-    requeue = bool(data.get("requeue"))
-    if not reason:
-        return jsonify({"ok": False, "error": "a reason is required"}), 400
-    result = dispatcher.close_run(task_id, reason, requeue=requeue, by="dashboard")
-    return jsonify(result), (200 if result.get("ok") else 409)
 
 
 @app.route("/api/dispatcher/merge-all", methods=["POST"])

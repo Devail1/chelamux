@@ -186,10 +186,6 @@ def fleet(tmp_path, monkeypatch, request):
     # `dispatcher.DB_PATH` is cached at import time against the developer's actual
     # ~/.chela, not this fixture's temp one.
     monkeypatch.setattr(runtime_truth, "_blocked_race_scan", lambda: {})
-    # dispatch.closed_run_stalls: no closed run holds a task its tracker calls ready
-    # (CMX-65) — stubbed for the same cached-DB_PATH reason, and because the real scan
-    # reads each tracker over the network.
-    monkeypatch.setattr(runtime_truth, "_closed_run_stalls_scan", lambda: [])
 
     # the collector: it executes every .test.mjs on disk
     monkeypatch.setattr(
@@ -599,18 +595,6 @@ def _break_judge_blocked_race(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
-def _break_closed_run_stalls(tmp_path, monkeypatch):
-    """CMX-65, the CMX-33 incident: its run was force-closed because the brief changed and
-    the issue moved back to Todo by hand — but `closed` is never claimed again, so it sat
-    there ~11 hours with no run and no signal, its dependants stalled behind it."""
-    monkeypatch.setattr(runtime_truth, "_closed_run_stalls_scan", lambda: [{
-        "task_id": "CMX-33", "title": "window naming", "workflow_path": "/w/WORKFLOW.md",
-        "branch_name": "cmx-33-window-naming", "pr_url": None,
-        "close_reason": "brief changed", "hint": "chela close CMX-33 --requeue --reason '…'",
-    }])
-    return doctor.ERROR
-
-
 def _break_judge_live_runs(tmp_path, monkeypatch):
     """CMX-411: a detached judge run is still going PAST the judge wall — nothing is
     bounding it any more (the daemon is down, or the watchdog's stop failed). This test
@@ -694,7 +678,6 @@ CORRUPTIONS = {
     "restore.dead_epoch_rows": _break_restore_dead_epoch,
     "dispatch.unresolved_depends": _break_unresolved_depends,
     "judge.blocked_race": _break_judge_blocked_race,
-    "dispatch.closed_run_stalls": _break_closed_run_stalls,
     "judge.live_runs": _break_judge_live_runs,
 }
 

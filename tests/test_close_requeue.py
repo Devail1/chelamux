@@ -7,9 +7,8 @@ two issues blocked on it stalled too.
 
 These pin both halves of the fix:
 
-* WITHOUT ``--requeue`` a close stays terminal (the CMX-265 intent), but the stall is LOUD:
-  ``chela doctor`` (``dispatch.closed_run_stalls``), the Work board and ``chela close``
-  itself all say "closed run blocks this task: requeue or refile".
+* WITHOUT ``--requeue`` a close stays terminal (the CMX-265 intent), but ``chela close``
+  says so out loud: the task will not be re-dispatched, and here is how to requeue it.
 * ``chela close <run> --requeue`` closes the old PR, puts the issue back in Todo, and the
   next tick claims a FRESH attempt on a NEW branch and worktree — never the closed run's.
   A run whose PR merged is refused.
@@ -20,13 +19,14 @@ in-memory ``Team`` fake from ``test_linear_workflow_states``.
 from __future__ import annotations
 
 import io
+import subprocess
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from chela import dispatcher, runtime_truth
+from chela import dispatcher
 from tests import test_linear_workflow_states as _linear
 from tests.test_linear_workflow_states import Team, _row, _seed, issue
 
@@ -71,14 +71,9 @@ def _old_attempt(repo, status="awaiting_review", **cols):
     return worktree
 
 
-def _stall_findings():
-    return [f for f in runtime_truth.audit(runtime_truth.fact("dispatch.closed_run_stalls"))
-            if f.level != runtime_truth.OK]
-
-
 # --- 1. close WITHOUT requeue + the issue back in Todo ⇒ not claimed, and SAID so ---------
 
-def test_a_closed_task_moved_back_to_todo_is_not_claimed_and_doctor_flags_it(
+def test_a_closed_task_moved_back_to_todo_is_not_claimed(
         repo, team, launched, pr_closes):
     team.issues = {"CMX-33": issue(33, "In Review")}
     _old_attempt(repo)
@@ -90,44 +85,6 @@ def test_a_closed_task_moved_back_to_todo_is_not_claimed_and_doctor_flags_it(
     assert dispatcher.tick(_wf(repo))["dispatched"] == 0
     assert launched == []
     assert _row("CMX-33")["status"] == "closed"
-
-    # ...but it is never silent: doctor names the task, the stall, and the way out.
-    findings = _stall_findings()
-    assert len(findings) == 1, findings
-    assert findings[0].level == runtime_truth.ERROR
-    assert "CMX-33" in findings[0].title
-    assert dispatcher.CLOSED_RUN_STALL in findings[0].title
-    assert "chela close CMX-33 --requeue" in findings[0].detail
-
-
-def test_a_closed_task_that_left_the_ready_state_is_not_a_stall(repo, team, pr_closes):
-    """NEGATIVE CONTROL: the same closed run, its issue still Canceled (nothing waits on
-    it) — no finding. So the finding above is about the READY state, not about `closed`."""
-    team.issues = {"CMX-33": issue(33, "In Review")}
-    _old_attempt(repo)
-    assert dispatcher.close_run("CMX-33", "brief changed", force=True)["ok"]
-    assert _stall_findings() == []
-
-
-def test_the_work_board_flags_the_stall_on_the_open_card_and_the_closed_run(
-        repo, team, pr_closes, monkeypatch):
-    from chela.dashboard import app as dash
-
-    team.issues = {"CMX-33": issue(33, "In Review")}
-    _old_attempt(repo)
-    assert dispatcher.close_run("CMX-33", "brief changed", force=True)["ok"]
-    team.issues["CMX-33"]["state"] = {"name": "Todo", "type": "unstarted"}
-
-    monkeypatch.setattr(dash, "_discover_dispatch_workflows",
-                        lambda runs: [_wf(repo).resolve()])
-    monkeypatch.setattr(dash.tasklists, "progress_for_run", lambda *a: None)
-    data = dash.app.test_client().get(
-        "/api/dispatcher", headers={"Sec-Fetch-Site": "same-origin"}).get_json()
-    wf = data["workflows"][0]
-    card = next(t for t in wf["open_tasks"] if t["id"] == "CMX-33")
-    assert card["closed_run_stall"] == dispatcher.CLOSED_RUN_STALL
-    run = next(r for r in wf["recent_runs"] if r["task_id"] == "CMX-33")
-    assert run["closed_run_stall"] == dispatcher.CLOSED_RUN_STALL
 
 
 def test_chela_close_says_the_task_will_not_be_redispatched_and_how_to_requeue(
@@ -180,7 +137,6 @@ def test_requeue_claims_a_fresh_attempt_on_a_new_branch_and_worktree(
         "requeued", "cmx-33-task", PR)
     assert team.issues["CMX-33"]["state"]["name"] == "In Progress"
     assert pr_closes == [PR]                           # the old PR was never touched again
-    assert _stall_findings() == []
 
 
 def test_requeue_on_a_run_whose_pr_merged_is_refused(repo, team, launched, pr_closes):
@@ -253,19 +209,6 @@ def test_without_requeue_close_stays_terminal(repo, team, launched, pr_closes):
     assert not (Path(_row("CMX-33")["worktree_path"]).parent / "CMX-33-r2").exists()
 
 
-def test_requeue_unit_ready_ids_and_stalls():
-    """The pure join: only a `closed`, NOT-requeued run on a READY task is a stall."""
-    runs = [
-        {"task_id": "A", "status": "closed", "requeue_pending": 0},
-        {"task_id": "B", "status": "closed", "requeue_pending": 1},
-        {"task_id": "C", "status": "failed"},
-        {"task_id": "D", "status": "closed", "requeue_pending": 0},
-    ]
-    stalls = dispatcher.closed_run_stalls(runs, {"A", "B", "C"})
-    assert [s["task_id"] for s in stalls] == ["A"]
-    assert stalls[0]["hint"] == "chela close A --requeue --reason '…'"
-
-
 def test_a_requeued_closed_run_is_not_terminal():
     assert dispatcher.run_is_terminal({"status": "closed"})
     assert not dispatcher.run_is_terminal({"status": "closed", "requeue_pending": 1})
@@ -313,41 +256,6 @@ def test_a_requeued_task_is_claimed_even_when_its_issue_is_not_back_in_todo(
     assert dispatcher.tick(_wf(repo))["dispatched"] == 1
     assert launched == ["CMX-33"]
     assert _row("CMX-33")["branch_name"] == "cmx-33-task-r2"
-
-
-def _post_close(repo, monkeypatch, payload):
-    from chela.dashboard import app as dash
-
-    return dash.app.test_client().post(
-        "/api/dispatcher/runs/CMX-33/close", json=payload,
-        headers={"Sec-Fetch-Site": "same-origin"})
-
-
-def test_the_board_requeue_button_requeues(repo, team, launched, pr_closes, monkeypatch):
-    team.issues = {"CMX-33": issue(33, "In Review")}
-    _old_attempt(repo)
-    resp = _post_close(repo, monkeypatch, {"reason": "brief changed", "requeue": True})
-    assert resp.status_code == 200, resp.get_json()
-    assert resp.get_json()["requeued"] is True
-    row = _row("CMX-33")
-    assert (row["status"], row["requeue_pending"]) == ("closed", 1)
-    assert pr_closes == [PR]
-    assert dispatcher.tick(_wf(repo))["dispatched"] == 1
-
-
-def test_the_board_plain_close_does_not_requeue_and_needs_a_reason(
-        repo, team, launched, pr_closes, monkeypatch):
-    """NEGATIVE CONTROL for the button above, plus the reason-required 400."""
-    team.issues = {"CMX-33": issue(33, "In Review")}
-    _old_attempt(repo)
-    assert _post_close(repo, monkeypatch, {"reason": "  ", "requeue": True}).status_code == 400
-    assert _row("CMX-33")["status"] == "awaiting_review"
-
-    resp = _post_close(repo, monkeypatch, {"reason": "brief changed"})
-    assert resp.status_code == 200, resp.get_json()
-    assert resp.get_json()["requeued"] is False
-    assert (_row("CMX-33")["requeue_pending"] or 0) == 0
-    assert pr_closes == []
 
 
 def _cli_close(**kw):
@@ -451,10 +359,126 @@ def test_a_requeued_markdown_task_gets_a_fresh_r2_branch_never_the_closed_runs(
 
 
 def test_ready_task_ids_is_none_when_the_tracker_read_failed():
-    """"Could not read" is never "nothing is ready": an empty set here would make doctor
-    report NO stall on a tracker it never actually read."""
+    """"Could not read" is never "nothing is ready": an empty set here would read as "no
+    task is waiting" on a tracker that was never actually read."""
     failed = SimpleNamespace(list_open_tasks=lambda: [], read_failed=True)
     assert dispatcher.ready_task_ids(failed) is None
     assert dispatcher.ready_task_ids(failed, open_tasks=[]) is None
     ok = SimpleNamespace(list_open_tasks=lambda: [], read_failed=False)
     assert dispatcher.ready_task_ids(ok) == set()                    # control
+
+
+def test_ready_task_ids_reads_the_failure_the_listing_itself_just_set():
+    """The listing is what sets ``read_failed`` (Linear: :meth:`list_open_tasks`). A check
+    made BEFORE the read — or one that trusts the stale flag of an earlier, good read —
+    would answer a set for a read that just failed."""
+    class Flaky:
+        read_failed = False                       # the previous read was fine
+
+        def list_open_tasks(self):
+            self.read_failed = True               # ...this one is not
+            return []
+
+    assert dispatcher.ready_task_ids(Flaky()) is None
+
+
+# --- 5. the six guards the scope cut names (rework round 3) ------------------------------
+
+def test_ready_task_ids_narrows_linear_to_its_ready_state(tmp_path):
+    """A tracker WITH states draws from its READY state only (Linear: Todo). Backlog is a
+    human parking it; In Progress / In Review are chela's own edges — none of them is
+    "waiting for a claim". Without the narrowing every open issue would read as ready."""
+    from tests.test_linear_workflow_states import _src
+
+    team_ = Team(issue(1, "Todo"), issue(2, "Backlog"), issue(3, "In Review"), issue(4, "Todo"))
+    src = _src(tmp_path, team_)
+    assert dispatcher.ready_task_ids(src) == {"CMX-1", "CMX-4"}
+    # The same tasks handed in already read (the dashboard's path) narrow the same way.
+    src2 = _src(tmp_path, team_)
+    assert dispatcher.ready_task_ids(src2, src2.list_open_tasks()) == {"CMX-1", "CMX-4"}
+    # Control: the open set really holds the parked ones — the narrowing is what drops them.
+    assert {t.id for t in src2.list_open_tasks()} == {"CMX-1", "CMX-2", "CMX-3", "CMX-4"}
+
+
+def test_ready_task_ids_of_a_tracker_without_states_is_every_open_task():
+    """Control for the narrowing: markdown / gh_issues have no ``claimable`` — every open
+    task is ready."""
+    tasks = [SimpleNamespace(id="a"), SimpleNamespace(id="b")]
+    plain = SimpleNamespace(list_open_tasks=lambda: tasks, read_failed=False)
+    assert dispatcher.ready_task_ids(plain) == {"a", "b"}
+
+
+def test_a_requeued_claim_is_attempt_1_with_zeroed_rework_counters(
+        repo, team, launched, pr_closes):
+    """A FRESH attempt: the closed run was on attempt 2 with two rework rounds behind it.
+    Inheriting either would start the requeued task one failure from the attempt cap, or
+    already AT its rework cap — the "fresh" attempt would be dead on arrival."""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    wf = dispatcher.load_workflow(_wf(repo))
+    root = dispatcher.resolve_workspace_root(wf)
+    worktree, _ = dispatcher.ensure_worktree(repo, "CMX-33", "dev", "CMX", 33, root,
+                                             branch="cmx-33-task")
+    _seed(repo, "CMX-33", "changes_requested", attempt=2, branch_name="cmx-33-task",
+          worktree_path=str(worktree), task_number=33, pr_url=PR, pr_state="open",
+          rework_count=2)
+    assert dispatcher.close_run("CMX-33", "brief changed", requeue=True, force=True)["ok"]
+    assert (_row("CMX-33")["attempt"], _row("CMX-33")["rework_count"]) == (2, 2)
+
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 1
+    row = _row("CMX-33")
+    assert row["status"] == "running"
+    assert row["attempt"] == 1
+    assert (row["rework_count"] or 0) == 0
+    assert not dispatcher.rework_cap_reached(row)
+
+
+def test_a_requeue_is_consumed_by_its_claim_so_a_later_close_is_terminal_again(
+        repo, team, launched, pr_closes):
+    """``requeue_pending`` is spent by the claim it bought. If it survived, the next time
+    the fresh attempt's row became ``closed`` by ANY path — here reconcile's closed-PR
+    branch, which writes ``status='closed'`` and nothing else — it would be re-claimed
+    as a requeue no human asked for."""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", requeue=True, force=True)["ok"]
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 1
+    row = _row("CMX-33")
+    assert (row["requeue_pending"] or 0) == 0
+    assert row["requeue_count"] == 1                  # the counter is kept; the flag is spent
+
+    # The -r2 attempt's PR is closed on GitHub; reconcile marks the row closed — terminal.
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET status='closed' WHERE task_id='CMX-33'")
+        conn.commit()
+    assert dispatcher.run_is_terminal(dict(_row("CMX-33")))
+    team.issues["CMX-33"]["state"] = {"name": "Todo", "type": "unstarted"}
+    for _ in range(2):
+        assert dispatcher.tick(_wf(repo))["dispatched"] == 0
+    assert launched == ["CMX-33"]
+    assert _row("CMX-33")["branch_name"] == "cmx-33-task-r2"
+
+
+def test_a_requeued_attempt_that_dies_retries_on_its_own_r2_branch(
+        repo, team, launched, pr_closes):
+    """The requeued attempt's own failed retry is a RETRY, not a second requeue: it keeps
+    the ``-r2`` branch and worktree it took (never ``-r3``, never the closed run's), the
+    attempt counter advances, and ``requeue_count`` does not grow."""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _old_attempt(repo)
+    assert dispatcher.close_run("CMX-33", "brief changed", requeue=True, force=True)["ok"]
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 1
+    r2_wt = _row("CMX-33")["worktree_path"]
+    # The -r2 attempt pushed before it died — the realistic case, and the one that tells a
+    # retry (keep `-r2`) from a fresh claim (which must skip a name origin already has).
+    subprocess.run(["git", "-C", r2_wt, "push", "-q", "origin", "HEAD:cmx-33-task-r2"],
+                   check=True, capture_output=True)
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET status='failed' WHERE task_id='CMX-33'")
+        conn.commit()
+
+    assert dispatcher.tick(_wf(repo))["dispatched"] == 1
+    row = _row("CMX-33")
+    assert (row["status"], row["attempt"]) == ("running", 2)
+    assert row["branch_name"] == "cmx-33-task-r2"
+    assert row["worktree_path"] == r2_wt
+    assert row["requeue_count"] == 1
