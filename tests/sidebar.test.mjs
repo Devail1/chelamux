@@ -806,21 +806,21 @@ test('CMX-359: "Needs you" outranks "done" — a row can only ever appear in one
 
 // --- CMX-377 / CMX-35: the group order — Pinned (if any), Needs you, then the folders --
 
-// CMX-377 round 2 rework: extended with the no-refetch WIRING assertion that
-// used to live on the retired .ar-role WIRING test (see this file's "1d"
-// section header) — subscribing must move the row off the real
-// onOrchestratorChange listener (no renderSidebarAgents call from the test
-// itself, between subscribe and the assertions below), and without re-polling
-// /api/agents.
-test('CMX-377: the orchestrator session renders inside a "Pinned" cluster, lifted out of every other group', async () => {
+// CMX-72 (replaces CMX-377's "Pinned" cluster): holding the orchestrator slot no longer
+// lifts the row anywhere — it stays in its folder group, exactly once, before and after
+// a real subscribe / release round trip (redrawn off onOrchestratorChange, no refetch).
+test('CMX-72: the orchestrator session stays in its folder group — no "Pinned" cluster', async () => {
     const rows = [
         agent('orch', { window_id: '@1', cwd: '/home/x/proj-a' }),
         agent('teammate', { window_id: '@2', cwd: '/home/x/proj-a' }),
     ];
     util.setAgentsCache(rows);
     nav.renderSidebarAgents(rows);
-    assert.equal(document.querySelector('#sidebar-agents .side-pinned'), null,
-        'a "Pinned" cluster rendered before anything ever held the orchestrator/decisions-inbox slot');
+    const inProjA = () => {
+        const g = [...document.querySelectorAll('#sidebar-agents .side-group')].find(x => x.dataset.g === '/home/x/proj-a');
+        return g ? [...g.querySelectorAll('.agent-row')].map(r => r.dataset.agent).sort() : [];
+    };
+    assert.deepEqual(inProjA(), ['orch', 'teammate']);
 
     const prevFetch = globalThis.fetch;
     let sawAgentsFetch = false;
@@ -829,27 +829,16 @@ test('CMX-377: the orchestrator session renders inside a "Pinned" cluster, lifte
         return prevFetch(url, opts);
     };
     try {
-        // No renderSidebarAgents call here — onOrchestratorChange must be the
-        // thing that redraws the row off the REAL subscribe round trip.
         await orchestrator.orchestratorSubscribe('@1');
-
-        const pinned = document.querySelector('#sidebar-agents .side-pinned');
-        assert.ok(pinned, 'subscribing the orchestrator did not produce a "Pinned" cluster ("if any" — it must appear once one exists)');
-        assert.ok(pinned.querySelector('.agent-row[data-agent="orch"]'),
-            'the orchestrator row is not inside the "Pinned" cluster');
-        assert.equal(document.querySelectorAll('#sidebar-agents .agent-row[data-agent="orch"]').length, 1,
-            'the orchestrator row rendered more than once — it must be lifted OUT of its project group ' +
-            'once pinned, not merely copied into both');
-        assert.ok(!pinned.contains(document.querySelector('.agent-row[data-agent="teammate"]')),
-            'a non-orchestrator row leaked into the "Pinned" cluster');
-        assert.equal(sawAgentsFetch, false,
-            'the Pinned-cluster redraw refetched /api/agents — it must redraw off the already-cached agent list, not re-poll');
-
-        await orchestrator.orchestratorRelease('@1');
         assert.equal(document.querySelector('#sidebar-agents .side-pinned'), null,
-            'the "Pinned" cluster survived orchestratorRelease — onOrchestratorChange did not redraw on release either');
-        assert.equal(sawAgentsFetch, false,
-            'the release redraw refetched /api/agents — it must redraw off the already-cached agent list, not re-poll');
+            'subscribing the orchestrator produced a "Pinned" cluster — the orchestrator is not auto-pinned');
+        assert.deepEqual(inProjA(), ['orch', 'teammate'],
+            'the orchestrator row left its folder group once it held the decisions-inbox slot');
+        assert.equal(document.querySelectorAll('#sidebar-agents .agent-row[data-agent="orch"]').length, 1,
+            'the orchestrator row rendered more than once');
+        assert.equal(sawAgentsFetch, false, 'the orchestrator redraw refetched /api/agents');
+        await orchestrator.orchestratorRelease('@1');
+        assert.deepEqual(inProjA(), ['orch', 'teammate']);
     } finally {
         globalThis.fetch = prevFetch;
     }
