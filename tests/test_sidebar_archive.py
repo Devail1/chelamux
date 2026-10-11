@@ -745,3 +745,25 @@ def test_unarchive_refuses_an_unusable_record_and_keeps_it(resume, fields):
     assert not out.ok and out.status == 409
     assert resume.calls == [], "nothing may be spawned for a record that cannot be resumed"
     assert f"s:{SID}" in sa._load()["sessions"], "the record stays archived"
+
+
+def test_the_real_reopen_counts_an_already_open_topic_as_open_and_a_real_failure_as_not():
+    from chela.telegram.reconcile import TopicManager
+
+    replies = {
+        "ok": {"ok": True, "result": True},
+        "already": {"ok": False, "error_code": 400, "description": "Bad Request: TOPIC_NOT_MODIFIED"},
+        "gone": {"ok": False, "error_code": 400, "description": "Bad Request: message thread not found"},
+    }
+    sent = []
+
+    def transport(which):
+        def call(method, params):
+            sent.append((method, params))
+            return replies[which]
+        return call
+
+    for which, want in (("ok", True), ("already", True), ("gone", False)):
+        tm = TopicManager("tok", "-100", transport=transport(which))
+        assert tm.reopen_topic("77") is want, which
+    assert sent[0] == ("reopenForumTopic", {"chat_id": "-100", "message_thread_id": "77"})
