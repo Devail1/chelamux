@@ -339,6 +339,23 @@ test('"Archive all" on a MIXED group archives only finished rows — never a run
     assert.deepEqual(archivedRows(), ['dead-shell']);
 });
 
+test('a double-click on Unarchive resumes the session ONCE — the button is disabled at once', async () => {
+    const rows = [win('finished', { cwd: '/srv/code/dbl', done: true }), win('working', { cwd: '/srv/code/dbl', session_status: 'busy' })];
+    render(rows);
+    fire(group('/srv/code/dbl').querySelector('.group-more'));
+    clickMenu('group-menu', 'Archive all (1)');
+    await flush();
+    fire(host().querySelector('.side-archived-toggle'));
+    const btn = archivedSection().querySelector(`.row-unarchive[data-item="s:sid-${rows[0].window_id.slice(1)}"]`);
+    assert.ok(btn, 'the archived session row carries an Unarchive button');
+    fire(btn);
+    fire(btn);
+    await flush();
+    await flush();
+    const un = server.calls.filter(c => c.path === '/api/sidebar/unarchive');
+    assert.equal(un.length, 1, 'a second click must never resume the same session into a second window');
+});
+
 test('a refused archive (no session id) leaves the window where it is and SAYS so', async () => {
     const said = [];
     const realAlert = window.alert;

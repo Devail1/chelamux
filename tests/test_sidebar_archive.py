@@ -370,6 +370,69 @@ def test_a_window_key_routes_to_archive_window_with_the_dispatched_set(client, m
     assert seen == {"wid": "@5", "dispatched": {"@7"}}
 
 
+def _no_archive_window(client, monkeypatch):
+    killed = []
+    monkeypatch.setattr(sa, "close_window", lambda wid: killed.append(wid))
+    monkeypatch.setattr(sa, "archive_window",
+                        lambda *a, **k: pytest.fail("this archive must be refused before any close"))
+    return killed
+
+
+def test_with_terminals_off_a_window_archive_is_refused_and_nothing_closes(client, monkeypatch):
+    monkeypatch.setattr(client.config, "TERMINALS_ENABLED", False)
+    monkeypatch.setattr(client.dispatcher, "list_runs", lambda: [])
+    killed = _no_archive_window(client, monkeypatch)
+    body = client.app.test_client().post("/api/sidebar/archive", json={"keys": ["w:@5"]}).get_json()
+    assert not body["ok"] and [r["key"] for r in body["refused"]] == ["w:@5"]
+    assert body["closed"] == [] and killed == []
+    assert sa.state()["hidden"] == []
+
+
+def test_an_unreadable_runs_table_refuses_a_window_archive_and_a_run_archive(client, monkeypatch):
+    def boom():
+        raise RuntimeError("db locked")
+    monkeypatch.setattr(client.dispatcher, "list_runs", boom)
+    killed = _no_archive_window(client, monkeypatch)
+    body = client.app.test_client().post(
+        "/api/sidebar/archive", json={"keys": ["w:@5", "run:CMX-5"]}).get_json()
+    assert not body["ok"]
+    assert sorted(r["key"] for r in body["refused"]) == ["run:CMX-5", "w:@5"], \
+        "without the runs table a dispatched window cannot be ruled out"
+    assert body["closed"] == [] and body["archived"] == [] and killed == []
+    assert sa.state()["hidden"] == []
+
+
+def test_an_already_archived_session_key_is_refused_not_re_archived(client, monkeypatch):
+    monkeypatch.setattr(client.dispatcher, "list_runs", lambda: [])
+    _no_archive_window(client, monkeypatch)
+    body = client.app.test_client().post("/api/sidebar/archive", json={"keys": [f"s:{SID}"]}).get_json()
+    assert not body["ok"] and body["refused"][0]["key"] == f"s:{SID}"
+
+
+def test_with_terminals_off_unarchive_never_resumes_a_session(client, monkeypatch):
+    monkeypatch.setattr(client.config, "TERMINALS_ENABLED", False)
+    monkeypatch.setattr(sa, "unarchive_session",
+                        lambda key: pytest.fail("no resume where there is no terminal"))
+    body = client.app.test_client().post("/api/sidebar/unarchive", json={"keys": [f"s:{SID}"]}).get_json()
+    assert not body["ok"] and body["resumed"] == [] and body["refused"][0]["key"] == f"s:{SID}"
+
+
+def test_a_successful_resume_is_reported_as_resumed_and_nothing_refused(client, monkeypatch):
+    monkeypatch.setattr(sa, "unarchive_session",
+                        lambda key: sa.Outcome(ok=True, wid="@9", name="myproj"))
+    body = client.app.test_client().post("/api/sidebar/unarchive", json={"keys": [f"s:{SID}"]}).get_json()
+    assert body["ok"] and body["refused"] == []
+    assert body["resumed"] == [{"key": f"s:{SID}", "wid": "@9", "name": "myproj"}]
+
+
+def test_a_failed_resume_is_reported_as_refused_not_resumed(client, monkeypatch):
+    monkeypatch.setattr(sa, "unarchive_session",
+                        lambda key: sa.Outcome(ok=False, error="spawn failed"))
+    body = client.app.test_client().post("/api/sidebar/unarchive", json={"keys": [f"s:{SID}"]}).get_json()
+    assert not body["ok"] and body["resumed"] == []
+    assert body["refused"] == [{"key": f"s:{SID}", "error": "spawn failed"}]
+
+
 def test_the_old_localStorage_import_only_HIDES(client, monkeypatch):
     monkeypatch.setattr(sa, "archive_window", lambda *a, **k: pytest.fail("migration must not close"))
     body = client.app.test_client().post("/api/sidebar/archive/migrate",
