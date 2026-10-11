@@ -2246,6 +2246,11 @@ def cmd_task_finished(args) -> None:
     these flags exist) but prints a loud warning — nothing downstream reads it, on
     purpose: an old, in-flight agent must not be broken by a check it was never told to
     run.
+
+    📝 CMX-52: ``--handoff TEXT`` is the agent's note for its reviewer — persisted on the run
+    (``runs.handoff``) by the daemon along with the transition, and shown sanitised in the
+    inbox notice and on the Dispatch board. Omitting it stores nothing (NULL); ``--handoff
+    ""`` stores an explicit empty note. Never a gate, never part of ``critic_notes``.
     """
     experiments = getattr(args, "self_check_experiments", None)
     no_new_guards = getattr(args, "no_new_guards", False)
@@ -2294,7 +2299,9 @@ def cmd_task_finished(args) -> None:
               "--self-check-experiments <path> (or --no-new-guards if this PR truly adds "
               "no guards) next time.")
 
-    result = dispatcher.request_task_finished(args.task_id)
+    result = dispatcher.request_task_finished(
+        args.task_id, handoff=getattr(args, "handoff", None),
+    )
     if not result.get("ok"):
         print(f"task-finished: {result.get('error', 'unknown error')}")
         sys.exit(1)
@@ -3780,6 +3787,12 @@ def main() -> None:
         help="This run added or changed no test/guard — the honest opt-out from "
              "--self-check-experiments. Cross-checked (report-only, never blocking) "
              "against this run's own diff for tests/ changes.",
+    )
+    p_tf.add_argument(
+        "--handoff", metavar="TEXT", default=None,
+        help="📝 CMX-52: a note for whoever reviews this run (what changed, what to look "
+             "at, what was assumed). Persisted on the run and shown in the inbox notice "
+             "and on the Dispatch board. Informational only — never a gate.",
     )
 
     # request-push — commit locally, then ask the DAEMON to push + open the PR

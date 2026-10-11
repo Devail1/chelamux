@@ -2747,6 +2747,14 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     word-break: break-word;
 }
 
+/* CMX-52: the agent's own handoff note — informational, dim, never a warning colour. */
+.kanban-card-handoff {
+    color: var(--text-dim);
+    font-size: 10px;
+    margin-top: 4px;
+    word-break: break-word;
+}
+
 /* CMX-68: a closed run silently holding a READY task — a warning, not a note. */
 .kanban-card-stall {
     color: var(--yellow, #d29922);
