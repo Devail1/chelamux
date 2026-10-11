@@ -218,7 +218,7 @@ read per call and take effect on the next tick/request.
 | `CHELA_AUTO_UPDATE` | `false` | Fully-unattended self-update sweep — opt-in risk, same doc |
 | `CHELA_ORCHESTRATOR` | `false` | Auto-launches the embedded orchestrator persona, which holds `chela merge` authority |
 | `CHELA_RESTORE_RESUME` | `false` | Gates `chela restore --resume` (CMX-350) — without it the flag falls back to the read-only report; unlike the other three this never fires unattended, a human still has to type the flag |
-| `CHELA_OVERRIDE_WAIT_S` | `300` | How long `chela merge --override` waits for the operator's approval before refusing — a timeout is a DENY (CMX-389). Env-only on purpose: a dashboard-writable window on the one path past the judge is a process editing its own approval boundary |
+| `CHELA_OVERRIDE_WAIT_S` | `86400` | The safety TTL of an override request (`chela merge --override` / `chela override request`): a request nobody decided expires after this many seconds, no merge (CMX-389; a TTL since CMX-79, when the request stopped blocking). Env-only on purpose: a dashboard-writable window on the one path past the judge is a process editing its own approval boundary |
 
 The first three are the ones `userconfig.py`'s doc-comment is warning about by name. A
 checkbox is a worse UX for "I read the escalation contract and accept the risk" than a

@@ -164,6 +164,15 @@ def test_self_approval_of_an_override_is_denied(world):
         world, "curl -s -X POST -d decision=approve http://127.0.0.1:5001/override/override-abc"))
 
 
+def test_a_python_call_into_the_override_approval_is_denied(world):
+    """CMX-79: an approval completes the merge by itself, so its in-process spelling
+    (`chela.overrides.decide`) is the operator's too — not a Claude session's."""
+    assert _denied(_run_hook(
+        world, "uv run python -c 'from chela import overrides; "
+               "overrides.decide(\"override-abc\", True, \"me\")'"))
+    assert not _denied(_run_hook(world, "uv run python -c 'from chela import overrides'"))
+
+
 # --- the dashboard is DOWN, and the gate still holds ------------------------------------
 
 def test_the_hook_runs_with_the_dashboard_down_and_still_denies(world):
