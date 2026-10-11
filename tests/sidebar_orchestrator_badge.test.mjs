@@ -151,3 +151,23 @@ test('CMX-76: with no orchestrator the inbox icon only opens the log, as before'
     assert.equal(nav.jumpToOrchestrator(), false);
     assert.equal(document.getElementById('btn-decisions').getAttribute('aria-label'), 'Decisions inbox');
 });
+
+// CMX-81: an idle session is archivable — but never the orchestrator, idle or not.
+test('CMX-81: the idle orchestrator is NOT archivable — its row Archive is disabled and Archive all skips it', async () => {
+    await setOrchestrator('@1');
+    render();
+    const items = id => [...document.getElementById(id).querySelectorAll('.popover-item')]
+        .map(i => ({ text: i.textContent.trim(), disabled: i.classList.contains('disabled') }));
+    const archiveOf = name => {
+        window.chela.hideSideMenus();
+        nav.openRowMenu(null, rowFor(name).dataset.item);
+        return items('row-menu').find(i => i.text === 'Archive');
+    };
+    assert.equal(archiveOf('orch').disabled, true, 'the orchestrator\'s row offers an enabled Archive');
+    assert.equal(archiveOf('home-2').disabled, false, 'control: its idle neighbour is archivable');
+    window.chela.hideSideMenus();
+    nav.openGroupMenu(null, '/home/u');
+    assert.ok(items('group-menu').some(i => i.text === 'Archive all (1)'),
+        `expected "Archive all (1)", got ${JSON.stringify(items('group-menu').map(i => i.text))}`);
+    window.chela.hideSideMenus();
+});

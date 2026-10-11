@@ -145,7 +145,7 @@ def hook_timeout(event: str) -> int:
 
 
 # The event "timestamps on messages in the live terminal" maps to now (CMX-285,
-# correcting CMX-277's own mechanism — see docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md).
+# correcting CMX-277's own mechanism — see docs/archive/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md).
 # CMX-277 used `systemMessage` on `UserPromptSubmit`/`Stop`, which Claude Code renders as
 # its OWN separate `<Line>` above/below the message — visible, but not what Liav meant by
 # "timestamps": his verdict on the shipped version was that it "doesn't seem to be
@@ -465,9 +465,10 @@ EXPECTED_HOOKS_FINGERPRINT: dict[str, str] = {
     "0.2.5": "263899bd7498c96fbf17e12caf9d6af9ba7c93873b1757d1edc087ad3ddcb642",
     "0.2.6": "01a9a9986126083ab87b76645e3b2003265935457736d0052ecfd7021506dec9",
     "0.2.7": "364a0f11ba0f6d65e080c643993646b6013af71b4d6bae29338c67208b65861c",
+    "0.2.8": "87e04275ea69f8d12dd33217c8360e3a50edb3385054adcb6191ef197b139b79",
 }
 
-PLUGIN_VERSION = "0.2.7"
+PLUGIN_VERSION = "0.2.8"
 
 
 def plugin_manifest() -> dict:

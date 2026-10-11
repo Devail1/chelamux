@@ -663,3 +663,33 @@ def decode_callback(data: str) -> tuple[str, Any] | None:
     if index < 0 or index > 50:
         return None
     return ("select", index)
+
+
+# ⚖️🔓 CMX-79 — the one-tap Approve / Deny on an override request (``chela merge
+# --override`` / ``chela override request``). ``ov:a:<id>`` approves, ``ov:d:<id>`` denies.
+# The request id is in the payload for the same reason the ``qa:h:`` taps carry their
+# gate's id: a tap that lands after the request was decided must be refused, never
+# re-applied to whatever is pending by then. ``override-`` + 24 hex = 33 chars, so the
+# payload (38) is well inside Telegram's 64-byte cap.
+OVERRIDE_CB_PREFIX = "ov:"
+_OVERRIDE_APPROVE = "ov:a:"
+_OVERRIDE_DENY = "ov:d:"
+
+
+def override_reply_markup(request_id: str) -> dict:
+    """The ✅ Approve / ❌ Deny keyboard for one pending override request."""
+    return {"inline_keyboard": [[
+        {"text": "✅ Approve", "callback_data": f"{_OVERRIDE_APPROVE}{request_id}"},
+        {"text": "❌ Deny", "callback_data": f"{_OVERRIDE_DENY}{request_id}"},
+    ]]}
+
+
+def decode_override_callback(data: str) -> tuple[bool, str] | None:
+    """``(approve, request_id)`` for an ``ov:`` tap, or None if not ours / malformed."""
+    for prefix, approve in ((_OVERRIDE_APPROVE, True), (_OVERRIDE_DENY, False)):
+        if data.startswith(prefix):
+            request_id = data[len(prefix):]
+            if request_id.startswith("override-") and _valid_tuid(request_id):
+                return approve, request_id
+            return None
+    return None

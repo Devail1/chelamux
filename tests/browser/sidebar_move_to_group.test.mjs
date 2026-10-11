@@ -67,7 +67,7 @@ describe(`CMX-74 phone ${W}×${H}, Group by Custom groups: Move to group… work
         ready();
         assert.equal(await groupOf(page, 'c-idle'), 'Ungrouped', 'the fixture row did not start Ungrouped');
         await page.locator(`${ROW} .row-more`).tap();
-        assert.deepEqual(await rowMenu(page), ['Move to group…']);
+        assert.deepEqual(await rowMenu(page), ['Move to group…', 'Archive']);   // CMX-81: every row's own Archive
         await tapMenu(page, 'Move to group…');
         assert.deepEqual(await rowMenu(page), ['Move to group', 'Infra', 'Ungrouped', 'New group…'],
             'tapping "Move to group…" did not leave its page on screen');
@@ -86,8 +86,9 @@ describe(`CMX-74 phone ${W}×${H}, Group by Folder (default): no dead Move item`
     });
     after(() => context && context.close());
 
-    test('a plain session row has no ⋯ — its only item would have been the invisible move', async () => {
+    test('a plain session row\'s ⋯ offers no invisible move — only its own Archive (CMX-81)', async () => {
         ready();
-        assert.equal(await page.locator(`${ROW} .row-more`).count(), 0);
+        await page.locator(`${ROW} .row-more`).tap();
+        assert.deepEqual(await rowMenu(page), ['Archive']);
     });
 });

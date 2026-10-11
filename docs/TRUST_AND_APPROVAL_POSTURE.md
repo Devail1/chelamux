@@ -2,7 +2,7 @@
 
 > Written to satisfy Symphony SPEC §1 / §10.5's MUST that an implementation "document its
 > chosen approval, sandbox, and operator-confirmation posture" — see
-> `docs/SYMPHONY_CONFORMANCE_2026-09-13.md` G6. Nothing here is new behavior: every claim
+> `docs/archive/SYMPHONY_CONFORMANCE_2026-09-13.md` G6. Nothing here is new behavior: every claim
 > below already exists in code or in another doc; this page exists so a conformance
 > reader (or an operator) has one place to point at instead of four.
 
@@ -50,9 +50,23 @@ and what does its output need before it changes anything real.**
 - **A shared memory ceiling bounds the box, not just one job** — `chela/memcap.py`
   (CMX-264); see `docs/RESOURCE_ISOLATION.md` for the incident that made a per-job cap
   provably insufficient.
-- **Full per-agent process/filesystem sandboxing does not exist yet**, and is the named,
-  hard blocker on ever running the orchestrator unattended — see "Shared-pane isolation"
-  in `docs/ESCALATION_CONTRACT.md`.
+- **A per-agent sandbox boundary is implemented and measured, but OFF for chelamux's own
+  dispatch — so in practice its agents still run unsandboxed.** `chela/sandbox.py`
+  (CMX-369, #518) launches an agent with a chela-owned Claude Code sandbox settings file:
+  writes outside the worktree denied except the `uv` cache (so `~/.chela` is out of reach),
+  a strict network allowlist (GitHub, PyPI, npm), no unsandboxed-command escape hatch, and
+  the `gh` token file (`~/.config/gh/hosts.yml`) denied. The push and the PR open moved to
+  the daemon (`chela request-push`) so a sandboxed agent never needs the token. It is
+  **opt-in per workflow** (`agent.sandbox: true` in `WORKFLOW.md`, default off) and applies
+  to the **coding and rework roles only**; the judge is never sandboxed
+  (`sandbox_launch_arg`). The trial on chelamux (2026-09-15) proved the boundary holds but
+  was reverted: about 110 tests need a real tmux socket and `api.telegram.org`, which the
+  boundary denies, so every sandboxed run parked before `task-finished`. It stays off until
+  those tests are socket-free — `WORKFLOW.md`'s `agent:` block records why. What was
+  measured, and what the sandbox does and does not cover, is in
+  [SANDBOX_BOUNDARY.md](SANDBOX_BOUNDARY.md). Isolating *shared panes* is a separate, still
+  open blocker on running the orchestrator unattended — see "Shared-pane isolation" in
+  `docs/ESCALATION_CONTRACT.md`.
 
 ## 3. What a dispatched agent's output needs before it changes anything real (approval)
 
@@ -109,7 +123,7 @@ On a public repo, a dispatched brief, its PR, and — for a `gh_issues` tracker 
 triggering issue's body are all public by construction. The `require_label` gate in §1 is
 what actually stands between a stranger opening an issue and code executing on the
 operator's machine; nothing downstream of dispatch is a substitute for it. See
-`docs/SYMPHONY_CONFORMANCE_2026-09-13.md` G2 for the fuller tradeoff if a workflow ever
+`docs/archive/SYMPHONY_CONFORMANCE_2026-09-13.md` G2 for the fuller tradeoff if a workflow ever
 migrates its tracker from `markdown` to `gh_issues`.
 
 ## Where each of these is enforced, for a conformance reader
@@ -117,7 +131,7 @@ migrates its tracker from `markdown` to `gh_issues`.
 | Posture question | Enforced in | Documented in |
 |---|---|---|
 | Who may trigger a dispatch | `chela/sources/gh_issues.py`, `chela/sources/markdown.py` | this doc §1 |
-| What a running agent may do | `chela/dispatcher.py::resolve_agent_cmd`, `chela/workflow.py::workspace_escape`, `chela/memcap.py` | this doc §2, `RESOURCE_ISOLATION.md` |
+| What a running agent may do | `chela/dispatcher.py::resolve_agent_cmd`, `chela/workflow.py::workspace_escape`, `chela/memcap.py`, `chela/sandbox.py` (opt-in, off for chelamux) | this doc §2, `RESOURCE_ISOLATION.md`, `SANDBOX_BOUNDARY.md` |
 | What approves a merge | `chela/judge.py`, `chela/contract.py::merge` | this doc §3, `ESCALATION_CONTRACT.md` |
 | What a human must decide instead of the orchestrator | `chela/contract.py::escalate` | `ESCALATION_CONTRACT.md`'s decision taxonomy |
 

@@ -862,6 +862,17 @@ def _event(kind: str, summary: str, payload: dict, *, wid: str | None = None,
     return event
 
 
+def enqueue(kind: str, summary: str, payload: dict) -> bool:
+    """Queue one event for the orchestrator from OUTSIDE the daemon's scan — e.g. an
+    override request that ended without a merge (:mod:`chela.overrides`). Delivered on the
+    next tick through the same gates as every other event. False when the inbox is off."""
+    if not enabled():
+        return False
+    with locked_store() as store:
+        store["queue"].append(_event(kind, summary, payload))
+    return True
+
+
 def render(event: dict) -> str:
     """The one line an event renders to. Legacy queues held a pre-rendered ``text``.
 

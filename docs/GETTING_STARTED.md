@@ -9,7 +9,8 @@ opens a PR on its own. Roughly 10 minutes. For the full reference, see the
 - **Python ≥ 3.11**, **`tmux`**, **`git`**
 - [`uv`](https://docs.astral.sh/uv/) — the package manager chela uses
 - the **`claude` CLI** on your `PATH` ([Claude Code](https://claude.com/claude-code))
-- **`gh`** (GitHub CLI) — only needed for the dispatcher's PR flow
+- **`gh`** (GitHub CLI), logged in (`gh auth login`) — the daemon uses it to push branches
+  and open PRs
 
 > **macOS works.** chela is developed on Linux but runs on macOS (a POSIX
 > `/proc` fallback covers the process/window facts). If TUI glyphs render as
@@ -19,27 +20,28 @@ opens a PR on its own. Roughly 10 minutes. For the full reference, see the
 
 ```bash
 git clone https://github.com/Devail1/chelamux && cd chelamux
-uv sync                       # core only (two small deps, no Flask)
+uv sync --all-extras          # core + dashboard + Telegram bridge
 uv run chela status
 ```
 
-Want the dashboard + live terminal wall too? It's a separate, optional install
-so the CLI stays lean:
+That is the one install path. `--all-extras` installs everything in one command, which
+matters: `uv sync --extra X` *replaces* the environment instead of adding to it, so naming
+extras one at a time leaves you with only the last one. (A headless box that will never run
+the dashboard or the Telegram bridge can use plain `uv sync`, which installs only the core.)
 
-```bash
-uv sync --extra dashboard
+Then, **inside Claude Code**, add the hooks plugin. It powers blocked-agent handling,
+answering from your phone, and the merge gate that stops an agent from running
+`gh pr merge` itself ([HOOKS.md](HOOKS.md)):
+
+```
+/plugin marketplace add Devail1/chelamux
+/plugin install chela@chela
 ```
 
-The Telegram bridge (`chela telegram`) is its own extra as well:
-
-```bash
-uv sync --extra telegram
-```
-
-> ⚠️ **Ask for every extra you want in ONE command.** `uv sync --extra X` *replaces*
-> the environment rather than adding to it, so running the two lines above in sequence
-> leaves you with telegram and **no dashboard**. For both:
-> `uv sync --extra dashboard --extra telegram` (or `uv sync --all-extras`).
+Configuration is optional: chela runs on built-in defaults. When you want to change
+something, copy [`examples/chela.env`](../examples/chela.env) to `~/.chela/chela.env` and
+edit it ([CONFIG.md](CONFIG.md)); `uv run chela doctor` checks that what is running matches
+it.
 
 ## 2. Authenticate Claude once
 
@@ -63,30 +65,11 @@ uv run chela status            # lists the windows chela can drive
 ```
 
 > The session is named `chela` by default; override with `CHELA_TMUX_SESSION`.
+> Windows chela opens for you (the dashboard launcher, Telegram `/new`, `chela spawn <dir>`)
+> are named after their folder.
 
-> **Window names.** chela never rewrites a unique window name; it renames a window only
-> when two share a name (the newer one gets a `-N` suffix). The dashboard **labels** an
-> agent by Claude's session title once it has one, with the window name shown secondary.
-> To pin a label of your own, rename the window **from the dashboard**: that marks it
-> manual (`@chela_manual_name`), so it beats Claude's title and is never the one
-> suffixed. A raw `tmux rename-window` does **not** count as manual: Claude's title
-> still leads the label, and the window can be suffixed if it collides.
->
-> **New windows and Remote Control.** A window chela opens (dashboard launcher, Telegram
-> `/new`, `chela spawn`, a resume) is named after its folder — the cwd basename, or your
-> login for the home dir, with a `-N` suffix if taken — and Claude Code starts with
-> `--remote-control <that name>`, so claude.ai and the Claude desktop show the same name.
-> When chela later renames the window (a dashboard rename, a duplicate's `-N`), it types
-> `/rename <new name>` into the session — but only once the session is idle and its prompt
-> is empty; until then the rename waits, so it never interrupts a turn or touches a draft.
-> The other direction does not sync: a rename made **in the desktop app** never reaches
-> chela (Claude Code exposes no API for it), and chela's next rename overwrites it.
-> A `claude` you type yourself in such a window (a "+ New shell", or after the first
-> session exits) gets the same flag: chela defines a `claude` shell function there while
-> the setting is on. `-p`/`--print`, `--help`/`--version`, a prompt or subcommand, or your
-> own `--remote-control` pass through unchanged. Turning the setting off affects new
-> windows only — an already-open shell keeps the function until it exits.
-> Dispatched agents and judges get no Remote Control.
+> **Window names** and how they line up with Remote Control on claude.ai are described in
+> [DASHBOARD.md](DASHBOARD.md#window-names-and-remote-control).
 
 ## 4. Start the daemon — this is the engine
 
@@ -101,8 +84,10 @@ uv run chela run               # leave this running
 
 ## 5. Your first dispatched agent
 
-This is the headline feature: a `- [ ] task` line becomes a git worktree → an
-agent that implements it → a PR, reviewed by an adversarial judge.
+This is the headline feature: a task becomes a git worktree → an agent that implements
+it → a PR, reviewed by an adversarial judge. The queue can be a markdown `TODO.md` (shown
+here, nothing to sign up for), GitHub issues, or a Linear team — for Linear, follow
+[LINEAR_TRACKER.md](LINEAR_TRACKER.md) instead of copying `TODO.md`.
 
 ```bash
 # In a repo you own (with a GitHub remote), seed the two files from the examples:
@@ -127,10 +112,13 @@ enforces:
   **VERIFY.** `mytool --version` prints the version.
 ```
 
-On the next dispatch pass the daemon claims the task, spins up a worktree, runs
-the agent, strikes the `- [ ]` line, and opens a PR. Watch it on the dashboard
+On the next dispatch pass the daemon claims the task, spins up a worktree, runs the
+agent, and pushes and opens the PR for it. Watch it on the dashboard
 (`uv run chela dashboard`, then <http://127.0.0.1:5001>) or with `uv run chela
-dispatch-runs`. **Auto-merge is off by default** — the PR waits for you to merge.
+dispatch-runs`. **Auto-merge is off by default.** When the judge passes the PR, merge it
+with `uv run chela merge <run>`; the dispatcher then strikes the `- [ ]` line on your base
+branch. What to do when a run stops for a human — retry, reopen, override, close — is in
+[RUNS.md](RUNS.md).
 
 > **Guard discipline is the contract.** Every guard must go **RED** when the thing
 > it protects is broken — the judge corrupts each guard in a throwaway worktree and
@@ -162,7 +150,9 @@ lacks it, not chela.
 
 ## Where to go next
 
-- [README](../README.md) — the full feature tour
+- [README](../README.md) — what's new, and the full documentation map
+- [docs/RUNS.md](RUNS.md) — a dispatched run from claim to merge, and every command on the way
+- [docs/DASHBOARD.md](DASHBOARD.md) — the Wall, the sidebar, the Work board and the Usage view
 - [docs/CONFIG.md](CONFIG.md) — the environment, precedence, and PM2 migration
 - [docs/HOOKS.md](HOOKS.md) · [docs/EVENTS.md](EVENTS.md) — how the plugin and event log work
 - [WORKFLOW.md](../WORKFLOW.md) — the dispatch prompt agents run against

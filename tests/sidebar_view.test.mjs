@@ -150,7 +150,7 @@ const inGroups = () => [...host().querySelectorAll('.side-group:not(.side-archiv
     .map(r => (r.querySelector('.agent-row-name') || {}).textContent);
 
 test('Status: Active hides archived rows, All adds the Archived section at the BOTTOM, Archived shows only it', async () => {
-    const rows = [win('live'), win('finished', { done: true })];
+    const rows = [win('live', { session_status: 'busy' }), win('finished', { done: true })];
     render(rows);
     await nav.groupMenuAction('/srv/code/alpha', 'archive');
     assert.deepEqual(shown(), ['live']);
@@ -178,7 +178,7 @@ test('the Archived section holds EVERY archived row — closed sessions and hidd
     const r2 = win('fin-b', { cwd: '/srv/code/gone', done: true });
     const r3 = win('fin-c', { done: true });
     const run = win('liavacc/cmx-8', { cwd: `${WT}/CMX-8`, dispatched: true, run: runCard('CMX-8', 'Eight', 'agent', { status: 'done' }) });
-    render([win('live'), r1, r2, r3, run]);
+    render([win('live', { session_status: 'busy' }), r1, r2, r3, run]);
     await nav.groupMenuAction('/srv/code/gone', 'archive');
     await nav.groupMenuAction('/srv/code/alpha', 'archive');
     await nav.groupMenuAction(DISPATCHED_KEY, 'archive');
@@ -199,7 +199,7 @@ test('the Archived section holds EVERY archived row — closed sessions and hidd
 });
 
 test('Status Archived: the foot link reads "Hide archived" and leads back to Active', async () => {
-    render([win('live'), win('finished', { done: true })]);
+    render([win('live', { session_status: 'busy' }), win('finished', { done: true })]);
     await nav.groupMenuAction('/srv/code/alpha', 'archive');
     const foot = () => host().querySelector('.side-archived-toggle');
     assert.equal(foot().textContent, 'Show archived (1)');
@@ -438,7 +438,7 @@ test('Group by Custom groups: create, assign via the row menu, unassigned → Un
 });
 
 // CMX-74 (Liav, 2026-10-10: "what is this move to group? it doesn't do anything").
-test('CMX-74: outside Custom groups no row offers "Move to group…" — a plain row has no menu at all', () => {
+test('CMX-74: outside Custom groups no row offers "Move to group…" — a plain row\'s menu is just Archive (CMX-81)', () => {
     const rows = [
         win('plain'),
         win('liavacc/cmx-37-theme', { cwd: `${WT}/CMX-37`, dispatched: true, run: runCard('CMX-37', 'Theme', 'agent') }),
@@ -447,12 +447,14 @@ test('CMX-74: outside Custom groups no row offers "Move to group…" — a plain
         view(`group:${mode}`);
         render(rows);
         const plain = host().querySelector('.agent-row[data-agent="plain"]');
-        assert.equal(plain.querySelector('.row-more'), null, `${mode}: a plain row has a ⋯ whose menu would be empty`);
-        assert.equal(plain.getAttribute('oncontextmenu'), null, `${mode}: a plain row opens an empty right-click menu`);
+        fire(plain.querySelector('.row-more'));
+        assert.deepEqual(menuRows('row-menu').map(r => r.label), ['Archive'],
+            `${mode}: the plain row's menu offers a move that would be invisible`);
+        window.chela.hideSideMenus();
         const run = host().querySelector('.agent-row[data-run="CMX-37"]');
         fire(run.querySelector('.row-more'));
         assert.equal(menu('row-menu').style.display, 'block');
-        assert.deepEqual(menuRows('row-menu').map(r => r.label), ['Open agent pane', 'Open judge pane'],
+        assert.deepEqual(menuRows('row-menu').map(r => r.label), ['Open agent pane', 'Open judge pane', 'Archive'],
             `${mode}: the run menu offers a move that would be invisible`);
         window.chela.hideSideMenus();
     }
@@ -465,7 +467,7 @@ test('CMX-74: under Custom groups, tapping "Move to group…" SHOWS its page and
     const plain = host().querySelector('.agent-row[data-agent="a1"]');
     assert.ok(plain.getAttribute('oncontextmenu'), 'a plain row has no right-click menu under Custom groups');
     fire(plain.querySelector('.row-more'));
-    assert.deepEqual(menuRows('row-menu').map(r => r.label), ['Move to group…']);
+    assert.deepEqual(menuRows('row-menu').map(r => r.label), ['Move to group…', 'Archive']);
     tap('row-menu', 'Move to group…');
     // the tap's own handler hides every side menu first — the move page must come back
     assert.equal(menu('row-menu').style.display, 'block', 'the move page was drawn into a hidden popover');

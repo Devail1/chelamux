@@ -17,6 +17,7 @@ The level comes **only from the tracker** — never from the agent working the t
 |---|---|
 | markdown (`TODO.md`) | a `<!-- risk: high -->` / `<!-- risk: normal -->` / `<!-- risk: low -->` marker on the bullet line |
 | `gh_issues` | a `risk:high` / `risk:normal` / `risk:low` label (several → the highest) |
+| `linear` | a `risk:high` / `risk:normal` / `risk:low` label on the issue (several → the highest; `chela/sources/linear.py`) |
 
 Like every `<!-- ... -->` marker it is stripped from the bare title, so adding, changing
 or removing it **does not change the task id** (CMX-384) and never breaks a `depends:`

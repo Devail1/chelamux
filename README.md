@@ -13,21 +13,49 @@
 
 **A tiny control plane that puts a fleet of Claude Code agents to work — unattended.**
 
-Most tmux + Claude Code tools help you *talk to and supervise* agents. chela is for
-**handing them work and walking away**. It runs as a small daemon over a single tmux
-session and does three things:
+chela runs as a small daemon over one tmux session. It **schedules** long-lived agents
+(poke a pane every `1h`, on `0 */8 * * *`, or once), **dispatches** a task queue — Linear,
+GitHub issues or a markdown `TODO.md` — into one git worktree, one agent and one PR per task,
+with an adversarial **judge** in front of every merge, and **closes the loop** by pushing
+completions, blocks and deaths back into your orchestrator agent's own session. You watch it
+however you already watch tmux: `tmux attach`, [Mosh](https://mosh.org/), Telegram, or the
+live terminal-wall dashboard.
 
-- **Schedules** long-lived agents — poke an agent's pane on an interval or cron
-  (`every 1h`, `0 */8 * * *`, a one-shot timestamp).
-- **Dispatches** work — turn a markdown `TODO.md` (or GitHub issues, or Linear) into one
-  **git worktree per task**, spawn an agent in it, and let it **open a PR** — which an
-  adversarial judge re-reviews before it reaches you.
-- **Closes the loop** — an orchestrator is just another agent, and it can only act when
-  something messages it, so an agent *finishing* is invisible to it. chela pushes
-  completions, blocks and deaths back into the orchestrator's own session.
+## Install
 
-You watch them however you already watch tmux — `tmux attach`, [Mosh](https://mosh.org/),
-or the **live terminal-wall dashboard**.
+You need Linux or macOS, Python ≥ 3.11, `tmux`, `git`, [`uv`](https://docs.astral.sh/uv/),
+the `claude` CLI on `PATH`, and `gh` (for the dispatcher's PR flow).
+
+```bash
+git clone https://github.com/Devail1/chelamux && cd chelamux
+uv sync --all-extras          # core + dashboard + Telegram bridge, in one command
+claude                        # then /login once — every agent reuses this login
+```
+
+chela never touches credentials: it drives the `claude` CLI in your tmux windows, so the
+whole fleet runs as **one Claude account** and shares its 5h / 7d limits. Inside Claude
+Code, add the hooks plugin too — `/plugin marketplace add Devail1/chelamux`, then
+`/plugin install chela@chela` — it powers blocked-agent handling, answering from your phone,
+and the merge gate ([docs/HOOKS.md](docs/HOOKS.md)).
+
+## First run
+
+```bash
+tmux new-session -d -s chela -n researcher        # a window = an agent
+uv run chela status                               # what chela sees
+uv run chela schedule add researcher --every 1h --prompt "Run your research cycle."
+uv run chela run                                  # the daemon — leave it running
+uv run chela dashboard                            # http://127.0.0.1:5001
+```
+
+> **`chela run` is the engine, not a helper.** The scheduler, the dispatcher, the
+> needs-input scan and the decisions inbox all live in its loop. Kill it and nothing *looks*
+> broken — the dashboard still works and agents still run — but the fleet stops doing
+> anything by itself.
+
+To dispatch work, follow [**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md) (about
+10 minutes, clone to a first agent-opened PR). Prefer an agent to set it up? Copy
+[`skills/chela-setup`](skills/chela-setup/SKILL.md) into `~/.claude/skills/`.
 
 <table align="center">
   <tr>
@@ -44,101 +72,47 @@ or the **live terminal-wall dashboard**.
 
 <p align="center"><sub>Recorded from a synthetic demo fleet (<a href="scripts/demo/"><code>scripts/demo/</code></a>) — re-record with <code>scripts/demo/record.sh</code>.</sub></p>
 
-The dashboard has two views — **Wall** (every agent's live terminal, each marked
-working / needs you / done / idle) and **Work** (the dispatch board, runs and schedules) —
-plus Settings. Recently shipped:
+## What's new in 0.15
 
-- **Merges go through the judge.** A PreToolUse hook denies a direct `gh pr merge`; `chela merge` lands only a PR the judge passed on its current head, and `--override` waits for your approval and is audited.
-- **Remote Control per session.** New sessions launch with `--remote-control <window name>`, so claude.ai and the desktop show the chela window name (renames follow), and a Settings switch turns that off without a restart.
-- **Themes reach the terminals.** Every theme — including the new `warm` — recolours the live terminals too, not just the chrome.
-- **One-tap New session on a phone.** A "+" beside the menu button opens the New-session menu.
-- **Named peer messages.** chela's messages arrive in a session as *Message from @chela*, not as an anonymous block.
-- **<kbd>Ctrl</kbd>+<kbd>,</kbd> opens Settings** (<kbd>⌘</kbd>+<kbd>,</kbd> on macOS), and a search box filters every setting.
+- **Linear is a first-class queue.** `tracker: kind: linear` reads a team's issues (ready
+  state `Todo`, `risk:high|normal|low` labels), the Work board mirrors the team's workflow
+  states, and "New task" creates the issue — [docs/LINEAR_TRACKER.md](docs/LINEAR_TRACKER.md).
+- **Override is one tap.** `chela merge --override --reason …` files a request and returns;
+  approving it (a Telegram button, the dashboard, or `chela merge-approve`) completes the
+  merge after re-checking head, CI and mergeability — [docs/RUNS.md](docs/RUNS.md).
+- **A closed task can come back.** `chela close <run> --requeue` re-dispatches it on a fresh
+  branch, and `chela doctor` plus a Work-board **Requeue** button flag a closed run that
+  stalls a ready task.
+- **A sidebar like the Claude desktop app's** — folder groups, one row per dispatched run
+  with live judge progress, a VIEW menu, an orchestrator badge, and Archive that closes a
+  session (Unarchive resumes it) — [docs/DASHBOARD.md](docs/DASHBOARD.md).
+- **Usage view** (in Settings, beside spend): 5h / 7d limit bars, burn rate, and the top
+  token consumers across every transcript.
+- **Window names match Remote Control.** A new window is named after its folder and launches
+  with `--remote-control <that name>`; a dashboard rename types `/rename` into the session.
 
-<p align="center"><strong><a href="https://chela.pages.dev/docs">📖 Full documentation →</a></strong></p>
-
----
-
-## Install
-
-Requires Python ≥ 3.11, `tmux`, `git`, the `claude` CLI on `PATH` (plus `gh` for the
-dispatcher's PR flow). chela uses [`uv`](https://docs.astral.sh/uv/).
-
-```bash
-git clone https://github.com/Devail1/chelamux && cd chelamux
-uv sync --all-extras          # core + dashboard + Telegram bridge
-uv run chela status
-```
-
-The core has two small deps; the **dashboard + live terminal wall** and the **Telegram
-bridge** are optional extras. ⚠️ `uv sync --extra X` *replaces* the environment — it drops
-any extra you don't name, so ask for every one you want in a single command.
-
-**Authenticate Claude once.** chela never touches credentials — it drives the `claude` CLI
-inside your tmux windows, and every agent reuses the cached `~/.claude` login. The whole
-fleet therefore runs as **one Claude account** and shares its 5h / 7d rate limits.
-
-**Recommended:** add the hooks plugin — one line inside Claude Code
-(`/plugin marketplace add Devail1/chelamux`). It is what makes blocked-agent handling,
-answering from your phone, and the needs-you signal work well.
-
-## Quickstart
-
-```bash
-# 1. A tmux session whose windows are your agents (window name = agent name)
-tmux new-session -d -s chela -n researcher
-
-# 2. See what chela can see
-uv run chela status
-
-# 3. Schedule one
-uv run chela schedule add researcher --every 1h --prompt "Run your research cycle."
-
-# 4. Start the daemon — NOT optional (see below)
-uv run chela run
-
-# 5. Dispatch a TODO list into pull requests
-uv run chela dispatch /path/to/repo/WORKFLOW.md
-```
-
-> **`chela run` is the engine, not a helper.** Everything autonomous lives in its loop —
-> the scheduler, the dispatcher, the needs-input scan, the decisions inbox. Kill it and
-> nothing *looks* broken: the dashboard still works and agents still run, the fleet just
-> quietly stops doing anything by itself. If schedules seem stuck, check it is alive first.
-
-New here? [**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md) is a ~10-minute
-clone-to-first-dispatched-agent walkthrough. Prefer to have an agent set it up? Copy
-[`skills/chela-setup`](skills/chela-setup/SKILL.md) into `~/.claude/skills/`.
+Full list: [CHANGELOG.md](CHANGELOG.md).
 
 ## Documentation
 
-Everything lives at **[chela.pages.dev/docs](https://chela.pages.dev/docs)**:
+**[chela.pages.dev/docs](https://chela.pages.dev/docs)** is the user guide — concepts,
+scheduling, dispatching, the orchestration loop, agent rooms, permission modes, the
+dashboard, collaborative terminals, the command reference and configuration.
 
-| | |
-|---|---|
-| [Quickstart](https://chela.pages.dev/docs#quickstart) · [Concepts](https://chela.pages.dev/docs#concepts) | tmux as the source of truth, one window per agent |
-| [Scheduling](https://chela.pages.dev/docs#scheduling) | intervals, cron, standing context |
-| [Dispatching work](https://chela.pages.dev/docs#dispatch) | a tracker (`TODO.md` / GitHub issues / Linear) → worktree → agent → PR, and the judge |
-| [The orchestration loop](https://chela.pages.dev/docs#orchestration) | the decisions inbox, and the rules that make writing into a live session safe |
-| [Agent rooms](https://chela.pages.dev/docs#rooms) | agents that can actually talk to each other |
-| [Agent autonomy](https://chela.pages.dev/docs#autonomy) | permission modes, and the resource-isolation gap |
-| [Dashboard &amp; the wall](https://chela.pages.dev/docs#dashboard) | live terminals, context bars, rate-limit pills |
-| [Collaborative terminals](https://chela.pages.dev/docs#collab) | share a session, end-to-end encrypted |
-| [Command reference](https://chela.pages.dev/docs#cli) · [Configuration](https://chela.pages.dev/docs#config) | every command, every env var |
-| [Remote access &amp; security](https://chela.pages.dev/docs#security) | the loopback guard and how to front it |
-| [How it works](https://chela.pages.dev/docs#internals) | internals, the HTTP API, and why not a structured agent protocol |
-
-In-repo references: [HOOKS.md](docs/HOOKS.md) · [EVENTS.md](docs/EVENTS.md) ·
-[CONFIG.md](docs/CONFIG.md) · [RESOURCE_ISOLATION.md](docs/RESOURCE_ISOLATION.md) ·
-[AGENT_IDENTITY.md](docs/AGENT_IDENTITY.md) · [ESCALATION_CONTRACT.md](docs/ESCALATION_CONTRACT.md) ·
+In-repo references ([index](docs/README.md)): [GETTING_STARTED.md](docs/GETTING_STARTED.md) ·
+[RUNS.md](docs/RUNS.md) · [DASHBOARD.md](docs/DASHBOARD.md) · [CONFIG.md](docs/CONFIG.md) ·
+[LINEAR_TRACKER.md](docs/LINEAR_TRACKER.md) · [RISK_LEVELS.md](docs/RISK_LEVELS.md) ·
+[HOOKS.md](docs/HOOKS.md) · [EVENTS.md](docs/EVENTS.md) ·
 [TRUST_AND_APPROVAL_POSTURE.md](docs/TRUST_AND_APPROVAL_POSTURE.md) ·
-[design notes](docs/README.md#design-records--context-not-instructions).
+[ESCALATION_CONTRACT.md](docs/ESCALATION_CONTRACT.md) ·
+[RESOURCE_ISOLATION.md](docs/RESOURCE_ISOLATION.md).
 
 ## Status
 
-Early. Core (scheduler + dispatcher + messaging) is solid and tested. The dashboard and
-live terminal wall are first-class but ship as a separate install to keep the core lean
-for headless use. The wall serves **writable shells**, so it is on by default but
+Early. Core (scheduler + dispatcher + messaging) is solid and tested; CI runs the suite on
+Python 3.11 and 3.13. The dashboard and live terminal wall are first-class but ship as an
+optional extra, so a headless install can skip them (`uv sync` alone is core only). The
+wall serves **writable shells**, so it is on by default but
 **loopback-guarded** — a non-loopback bind refuses it unless you set
 `CHELA_TERMINALS_EXPOSE=true`. Front it with a tailnet or an SSH tunnel.
 

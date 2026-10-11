@@ -190,7 +190,7 @@
   <h1>Put a fleet of Claude Code agents<br>to work — <span class="accent">unattended.</span></h1>
   <p class="sub">
     chela is a tiny control plane over a single tmux session. It <strong>schedules</strong>
-    agents, <strong>dispatches</strong> a TODO list into pull requests, <strong>tells you the
+    agents, <strong>dispatches</strong> a task queue (Linear, GitHub issues or a <code>TODO.md</code>) into pull requests, <strong>tells you the
     moment one finishes or blocks</strong>, and streams the whole fleet on one <strong>live
     terminal wall</strong> — which you can <strong>share, end-to-end encrypted</strong>. You walk
     away; the agents keep working.
@@ -233,9 +233,9 @@ uv run chela run</pre>
     </div>
     <div class="card">
       <span class="ic">⇶</span>
-      <h3>Dispatch TODOs → PRs</h3>
-      <p>Point chela at a <code>WORKFLOW.md</code>. Each open <code>- [ ]</code> becomes a git
-      worktree, an agent that implements it, and a pull request — which an <strong>adversarial
+      <h3>Dispatch tasks → PRs</h3>
+        <p>Point chela at a <code>WORKFLOW.md</code>. Each ready task — a Linear issue, a GitHub issue or a <code>- [ ]</code> line — becomes a git
+        worktree, an agent that implements it, and a pull request — which an <strong>adversarial
       judge</strong> re-reviews before it reaches you.</p>
     </div>
     <div class="card">
@@ -250,7 +250,7 @@ uv run chela run</pre>
       <span class="ic">▦</span>
       <h3>The wall</h3>
       <p>A live grid of every agent's terminal — drag, lock, maximize — each pane marked
-      <em>working</em>, <em>needs you</em>, <em>done</em> or <em>idle</em>, with a context-window bar
+      <em>working</em>, <em>needs you</em>, <em>PR open</em> or <em>idle</em>, with a context-window bar
       and 5h / weekly rate-limit readouts. Its sibling view, <strong>Work</strong>, holds the dispatch
       board, runs and schedules.</p>
     </div>
@@ -259,7 +259,7 @@ uv run chela run</pre>
       <div class="card-body">
         <h3>Collaborative terminals <span class="badge">END-TO-END ENCRYPTED</span></h3>
         <p>Share any agent's live terminal over the internet with a link + a pairing code —
-        <strong>full-access</strong> (watch, type, scroll), multi-user with live Figma-style
+          view-only by default, typing only into a sandboxed session you allow — multi-user with live Figma-style
         cursors and a presence facepile, and mobile-friendly. The relay in the middle only ever
         sees ciphertext; the keys never leave the browsers.</p>
         <a class="more" href="#collab">See how it works →</a>
@@ -271,8 +271,7 @@ uv run chela run</pre>
 <section id="collab" class="wrap">
   <div class="section-head">
     <h2>Share a live terminal — end-to-end encrypted</h2>
-    <p>Hand someone a link and a pairing code. They watch, type, and scroll the same session
-    in their browser — everyone sees everyone as live cursors — and the relay in the middle
+    <p>Hand someone a link and a pairing code. They watch the same session in their browser (and type, in a sandboxed session you allow) — everyone sees everyone as live cursors — and the relay in the middle
     only ever sees ciphertext. chela is web-first collaboration, over the public internet.</p>
   </div>
 
@@ -331,36 +330,36 @@ uv run chela run</pre>
 </section>
 
 <section id="new" class="wrap">
-  <div class="section-head">
-    <h2>Recently shipped</h2>
-  </div>
-  <div class="how-grid">
-    <div class="how-item">
-      <h4>Merges go through the judge</h4>
-      <p>A PreToolUse hook denies a direct <code>gh pr merge</code>; <code>chela merge</code> lands only a PR the judge passed on its current head, and <code>--override</code> waits for your approval and is audited.</p>
+    <div class="section-head">
+      <h2>New in 0.15</h2>
     </div>
-    <div class="how-item">
-      <h4>Remote Control per session</h4>
-      <p>New sessions launch with <code>--remote-control</code>; a Settings switch turns it off without a restart.</p>
+    <div class="how-grid">
+      <div class="how-item">
+        <h4>Linear is a first-class queue</h4>
+        <p><code>tracker: kind: linear</code> reads a team's issues, <code>risk:high|normal|low</code> labels size the judge, the Work board mirrors the team's states, and <strong>New task</strong> creates the issue.</p>
+      </div>
+      <div class="how-item">
+        <h4>Override in one tap</h4>
+        <p><code>chela merge --override</code> files a request and returns. Approve it with a Telegram button, the dashboard or <code>chela merge-approve</code>, and the approval completes the merge.</p>
+      </div>
+      <div class="how-item">
+        <h4>Closed tasks can come back</h4>
+        <p><code>chela close --requeue</code> re-dispatches a task on a fresh branch; <code>chela doctor</code> and a Work-board <strong>Requeue</strong> button flag a closed run that stalls a ready task.</p>
+      </div>
+      <div class="how-item">
+        <h4>A desktop-app sidebar</h4>
+        <p>Folder groups, one row per dispatched run with live judge progress, a VIEW menu, an orchestrator badge — and Archive closes a session, Unarchive resumes it.</p>
+      </div>
+      <div class="how-item">
+        <h4>Usage view</h4>
+        <p>5h / 7d limit bars, burn rate, and the top token consumers across every transcript — in Settings, beside spend.</p>
+      </div>
+      <div class="how-item">
+        <h4>Names that match Remote Control</h4>
+        <p>A window is named after its folder and launches with <code>--remote-control &lt;name&gt;</code>; a dashboard rename reaches claude.ai too.</p>
+      </div>
     </div>
-    <div class="how-item">
-      <h4>Themes reach the terminals</h4>
-      <p>Every theme — including the new <code>warm</code> — recolours the live terminals too, not just the chrome.</p>
-    </div>
-    <div class="how-item">
-      <h4>One-tap New session on a phone</h4>
-      <p>A “+” beside the menu button opens the New-session menu directly.</p>
-    </div>
-    <div class="how-item">
-      <h4>Named peer messages</h4>
-      <p>chela's messages arrive in a session as <em>Message from @chela</em>, not as an anonymous block.</p>
-    </div>
-    <div class="how-item">
-      <h4>Ctrl+, opens Settings</h4>
-      <p>⌘, on macOS — and a search box filters every setting across every tab.</p>
-    </div>
-  </div>
-</section>
+  </section>
 
 <section id="how" class="how">
   <div class="wrap">
@@ -394,22 +393,14 @@ uv run chela run</pre>
 <section id="install" class="wrap" style="max-width:680px">
   <div class="pitch" style="margin-bottom:24px">
     <h2>Install</h2>
-    <p>Linux or macOS, Python ≥ 3.11, <code>tmux</code>, <code>git</code>, and the <code>claude</code> CLI.
-    The core is two small deps; the dashboard + live wall ship as a separate install to keep the core lean.</p>
+    <p>Linux or macOS, Python ≥ 3.11, <code>tmux</code>, <code>git</code>, <code>uv</code>, <code>gh</code> and the <code>claude</code> CLI.
+      One command installs everything; a headless box can use plain <code>uv sync</code> (core only).</p>
   </div>
   <div class="install" style="margin-top:0">
-    <pre><span class="c"># core</span>
-git clone https://github.com/Devail1/chelamux && cd chelamux
-uv sync
+    <pre>git clone https://github.com/Devail1/chelamux && cd chelamux
+uv sync --all-extras        <span class="c"># core + dashboard + Telegram bridge, in one command</span>
 uv run chela status
-
-<span class="c"># dashboard + live terminal wall (separate install — keeps the core lean)</span>
-uv sync --extra dashboard
-uv run chela dashboard
-
-<span class="c"># want the Telegram bridge too? name every extra in ONE command —</span>
-<span class="c"># `uv sync --extra X` replaces the env and drops the ones you leave out</span>
-uv sync --extra dashboard --extra telegram
+uv run chela dashboard      <span class="c"># http://127.0.0.1:5001</span>
 
 <span class="c"># does what's running still match your config?</span>
 uv run chela doctor</pre>

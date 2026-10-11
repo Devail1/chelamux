@@ -3493,7 +3493,7 @@ def _session_start_recap(body: dict, explicit_wid: str | None = None):
 # ⚖️🔓 CMX-389 — the operator's confirm for `chela merge --override`
 # ---------------------------------------------------------------------------
 #
-# The request id is unguessable (gateanswer.new_request_id) and IS the URL, so a page can
+# The request id is unguessable (overrides.new_request_id) and IS the URL, so a page can
 # only be opened by someone the CLI/notification told. A POST from another site is refused
 # (Origin / Sec-Fetch-Site), so a page in the operator's browser cannot approve on their
 # behalf. A Claude session curling this route is denied by the merge-gate hook
@@ -3531,37 +3531,52 @@ def _override_same_origin() -> bool:
 @require_auth
 def override_confirm(request_id):
     from html import escape
-    req = gateanswer.approval(request_id)
+
+    from chela import overrides
+    overrides.sweep()
+    req = overrides.load(request_id)
     if request.method == "POST":
         if not _override_same_origin():
             abort(403)
         decision = request.form.get("decision", "")
         if decision not in ("approve", "deny"):
             abort(400)
-        ok, why = gateanswer.answer_approval(request_id, decision == "approve",
-                                             by="dashboard")
-        body = (f"<h1>{'✅' if ok else '⌛'} {escape(why.capitalize())}</h1>"
-                "<p>The waiting <code>chela merge --override</code> picks this up on its "
-                "next poll.</p>" if ok else
-                f"<h1>⌛ {escape(why.capitalize())}</h1><p>Nothing was changed.</p>")
+        # Approve COMPLETES the merge here (CMX-79), re-checking head/CI/mergeable live.
+        out = overrides.decide(request_id, decision == "approve", by="dashboard",
+                               channel="dashboard")
+        state = out.get("state")
+        if state == overrides.MERGED:
+            body = (f"<h1>✅ Approved and merged</h1><p>Merge commit "
+                    f"<code>{escape((out.get('merge_commit_sha') or '?')[:12])}</code>.</p>")
+        elif state == overrides.DENIED and out.get("ok"):
+            body = "<h1>✅ Denied</h1><p>Nothing was merged.</p>"
+        else:
+            body = (f"<h1>⌛ Not merged</h1><p>{escape(str(out.get('detail') or state))}</p>"
+                    "<p>Nothing was merged.</p>")
+        ok = state in (overrides.MERGED, overrides.DENIED) and out.get("ok")
         return Response(_OVERRIDE_PAGE.format(body=body), status=200 if ok else 410,
                         mimetype="text/html")
-    if req is None:
-        body = ("<h1>⌛ No override is waiting here</h1><p>It was already decided, or it "
-                "timed out (a timeout is a deny). Nothing will merge from this page.</p>")
+    if req is None or req.get("state") != overrides.PENDING:
+        shown = (req or {}).get("state")
+        detail = (req or {}).get("detail")
+        body = ("<h1>⌛ No override is waiting here</h1><p>"
+                + (escape(f"It is {shown}" + (f": {detail}" if detail else "") + ".")
+                   if shown else "There is no such request.")
+                + " Nothing will merge from this page.</p>")
         return Response(_OVERRIDE_PAGE.format(body=body), status=404, mimetype="text/html")
-    meta = req.get("meta") or {}
+    left = max(0.0, (req.get("deadline") or 0) - time.time())
     rows = "".join(
         f"<dt>{escape(k)}</dt><dd>{escape(str(v))}</dd>" for k, v in (
-            ("Run", meta.get("label")), ("PR", meta.get("pr_url")),
-            ("Into", meta.get("base")), ("Head", meta.get("head_sha")),
-            ("Judge", meta.get("judge_state") or "never ran"),
-            ("Reason", meta.get("reason")), ("Asked by", meta.get("actor")),
-            ("Expires in", f"{req['seconds_left']:.0f}s")))
+            ("Run", req.get("label")), ("PR", req.get("pr_url")),
+            ("Into", req.get("base")), ("Head", req.get("head_sha")),
+            ("Judge", req.get("judge_state") or "never ran"),
+            ("Reason", req.get("reason")), ("Asked by", req.get("actor")),
+            ("Expires in", f"{left:.0f}s")))
     body = ("<h1>⚖️ Approve merging past the judge?</h1>"
             f"<p>{escape(str(req.get('question') or ''))}</p><dl>{rows}</dl>"
-            "<p>CI is green and GitHub reports the PR mergeable — this skips ONLY the "
-            "judge, and is recorded (who, head, judge state, reason).</p>"
+            "<p>Approving merges NOW — after re-checking that the head is still this commit, "
+            "CI is green and GitHub reports the PR mergeable. It skips ONLY the judge, and "
+            "is recorded (who, head, judge state, reason).</p>"
             '<form method="post"><button class="ok" name="decision" value="approve">'
             'Approve override</button><button class="no" name="decision" value="deny">'
             "Deny</button></form>")
@@ -3622,7 +3637,7 @@ def api_hooks(event):
         # hooks.ingest, so this display-only decoration never touches the event log (a
         # firehose of near-duplicate "message display" records nobody would read) and
         # stays off the hot path — no wid resolution, no disk write — even when
-        # config.TERMINAL_TIMESTAMPS is False. See docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md
+        # config.TERMINAL_TIMESTAMPS is False. See docs/archive/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md
         # and hooks.message_display_response.
         if config.TERMINAL_TIMESTAMPS and isinstance(body, dict):
             return jsonify(hooks.message_display_response(body))
