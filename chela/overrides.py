@@ -174,6 +174,8 @@ def create(meta: dict, *, ttl_s: float | None = None) -> dict | None:
 
 def set_fields(request_id: str, **fields) -> dict | None:
     """Merge ``fields`` into a request under its lock (the Telegram relay's bookkeeping)."""
+    if not valid_id(request_id):
+        return None
     with _locked(request_id):
         rec = load(request_id)
         if rec is None:
@@ -266,6 +268,9 @@ def decide(request_id: str, approve: bool, by: str, *, channel: str = "terminal"
     if why:
         return {"ok": False, "state": None, "detail": why, "refused": True}
     by = (by or "").strip() or "unknown"
+    if not valid_id(request_id):
+        # Before the lock: its file is named from the id, so a malformed one never touches disk.
+        return {"ok": False, "state": None, "detail": "no such override request"}
     with _locked(request_id):
         rec = load(request_id)
         if rec is None:

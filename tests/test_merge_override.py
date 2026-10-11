@@ -624,3 +624,190 @@ def test_the_dashboard_confirm_page_approves_and_merges(repo):
     assert overrides.load(rid)["decided_by"] == "dashboard"
     gone = client.get(f"/override/{rid}")
     assert gone.status_code == 404
+
+
+# --- rework 2: each guard asserts its invariant on the real path ---------------------------
+
+def test_merge_approve_cli_deny_denies_and_merges_nothing(repo, capsys):
+    """🔴 GUARD: `chela merge-approve <id> --deny` DENIES — the flag reaches `decide` as
+    approve=False. Hard-wire it to approve and this merges → RED."""
+    from chela import main
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github() as squash:
+        main.cmd_merge_approve(SimpleNamespace(request=rid, deny=True))
+    squash.assert_not_called()
+    rec = overrides.load(rid)
+    assert rec["state"] == overrides.DENIED and rec["merge_commit_sha"] is None
+    out = capsys.readouterr().out
+    assert "denied" in out and "approved and merged" not in out
+    assert event_log.read(types=["orchestrator.merge_override_denied"])["events"]
+    assert not event_log.read(types=["orchestrator.merge_override"])["events"]
+    assert dispatcher.merge_overrides(dispatcher.resolve_run("t1")) == []
+
+
+def test_a_bot_tap_on_the_real_callback_handler_is_refused():
+    """🔴 GUARD (wiring): the handler must pass the tapping account's `is_bot` through to the
+    tap — a bot's tap from the BOUND chat decides nothing. Drop the wiring → RED."""
+    import asyncio
+    calls: list = []
+
+    def decide(rid, approve, by, channel="terminal"):
+        calls.append((rid, approve, channel))
+        return {"ok": True, "state": overrides.MERGED, "merge_commit_sha": "m" * 40}
+
+    on_override = _override_handler(decide)
+    rid = "override-" + "0" * 24
+    bot_tap = SimpleNamespace(callback_query=_Query(f"ov:a:{rid}", is_bot=True),
+                              effective_chat=SimpleNamespace(id=777))
+    asyncio.run(on_override(bot_tap, None))
+    assert calls == []
+    answer, = bot_tap.callback_query.answers
+    assert "bot" in answer and "Merged" not in answer
+    human_tap = SimpleNamespace(callback_query=_Query(f"ov:a:{rid}", is_bot=False),
+                                effective_chat=SimpleNamespace(id=777))
+    asyncio.run(on_override(human_tap, None))
+    assert calls == [(rid, True, "telegram")]
+
+
+def _decided(repo, how: str) -> str:
+    """A request moved out of `pending` BEFORE the relay ever saw it."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    if how == "denied":
+        overrides.decide(rid, False, "terminal:op")
+    elif how == "merged":
+        with _github():
+            overrides.decide(rid, True, "terminal:op")
+    elif how == "failed":
+        with _github(ci=CI_FAILING):
+            overrides.decide(rid, True, "terminal:op")
+    elif how == "expired":
+        with dispatcher._db() as conn:
+            conn.execute("UPDATE runs SET pr_head_sha=? WHERE task_id='t1'", (MOVED,))
+            conn.commit()
+        overrides.sweep()
+    elif how == "merging":
+        overrides.set_fields(rid, state=overrides.MERGING)
+    assert overrides.load(rid)["state"] == how
+    return rid
+
+
+@pytest.mark.parametrize("how", ["denied", "merged", "failed", "expired", "merging"])
+def test_the_relay_posts_no_buttons_for_a_request_decided_before_it_saw_it(repo, how):
+    """🔴 GUARD: only a request still PENDING gets a new Telegram message (with buttons).
+    One decided before the bridge saw it gets NOTHING — no post, no edit, no buttons."""
+    _decided(repo, how)
+    bot = _FakeBot()
+    relay = _relay(bot)
+    relay.tick()
+    relay.tick()
+    assert bot.posts == [] and bot.edits == []
+
+
+def test_the_relay_edits_an_outcome_once_not_every_tick(repo):
+    """🔴 GUARD: a message already showing its outcome is not re-edited on every tick."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    bot = _FakeBot()
+    relay = _relay(bot)
+    relay.tick()
+    overrides.decide(rid, False, "terminal:op")
+    for _ in range(3):
+        relay.tick()
+    assert len(bot.posts) == 1 and len(bot.edits) == 1
+    assert overrides.load(rid)["telegram"]["rendered"] == overrides.DENIED
+
+
+def test_pending_excludes_a_request_past_its_deadline_even_unswept(repo):
+    """🔴 GUARD: `pending()` itself filters on the deadline — a request past its TTL that no
+    sweep has touched yet is neither offered for approval nor reused for a new ask."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    assert [r["id"] for r in overrides.pending()] == [rid]
+    overrides.set_fields(rid, deadline=time.time() - 1)
+    assert overrides.load(rid)["state"] == overrides.PENDING      # not swept
+    assert overrides.pending() == []
+    with patch.object(overrides, "sweep", lambda *a, **k: []):
+        again = _request()
+    assert again["request_id"] != rid and not again.get("existing")
+
+
+def test_merge_approve_cli_lists_only_live_requests(repo, capsys):
+    from chela import main
+    _seed(repo)
+    rid = _request()["request_id"]
+    with patch.object(overrides, "sweep", lambda *a, **k: []):
+        main.cmd_merge_approve(SimpleNamespace(request=None, deny=False))
+        assert rid in capsys.readouterr().out
+        overrides.set_fields(rid, deadline=time.time() - 1)
+        main.cmd_merge_approve(SimpleNamespace(request=None, deny=False))
+    out = capsys.readouterr().out
+    assert rid not in out and "No override is waiting" in out
+
+
+@pytest.mark.parametrize("ci,mergeable,head", [(CI_FAILING, "MERGEABLE", HEAD),
+                                               (CI_PASSING, "MERGEABLE", MOVED)])
+def test_a_failed_or_expired_tap_never_reads_as_merged_or_denied(repo, ci, mergeable, head):
+    from chela.telegram.overridewatch import handle_override_tap
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github(ci=ci, mergeable=mergeable, head=head) as squash:
+        toast = handle_override_tap(f"ov:a:{rid}")
+    squash.assert_not_called()
+    assert toast.startswith("Not merged") and "Denied" not in toast
+    assert overrides.load(rid)["state"] in (overrides.FAILED, overrides.EXPIRED)
+
+
+def test_a_failed_dashboard_approval_never_reads_as_merged_or_denied(repo):
+    pytest.importorskip("flask")
+    from chela.dashboard.app import app
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github(ci=CI_FAILING) as squash:
+        resp = app.test_client().post(f"/override/{rid}", data={"decision": "approve"})
+    squash.assert_not_called()
+    assert resp.status_code == 410
+    assert b"Approved and merged" not in resp.data and b"Denied" not in resp.data
+    assert b"Not merged" in resp.data
+
+
+def test_the_dashboard_deny_denies_and_merges_nothing(repo):
+    pytest.importorskip("flask")
+    from chela.dashboard.app import app
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github() as squash:
+        resp = app.test_client().post(f"/override/{rid}", data={"decision": "deny"})
+    squash.assert_not_called()
+    assert resp.status_code == 200 and b"Denied" in resp.data
+    assert overrides.load(rid)["state"] == overrides.DENIED
+
+
+@pytest.mark.parametrize("raw,expected", [("garbage", 24 * 3600.0), ("-5", 0.0), ("90", 90.0)])
+def test_the_ttl_env_parses_safely(monkeypatch, raw, expected):
+    monkeypatch.setenv(overrides.TTL_ENV, raw)
+    assert overrides.ttl() == expected
+
+
+def test_a_request_without_a_head_is_never_recorded():
+    assert overrides.create({"task_id": "t1"}) is None
+    assert overrides.create({"task_id": "t1", "head_sha": ""}) is None
+    assert overrides.all_requests() == []
+
+
+@pytest.mark.parametrize("bad", ["../../etc/passwd", "override-xyz", "override-" + "0" * 23, ""])
+def test_a_malformed_request_id_resolves_nothing(repo, bad):
+    _seed(repo)
+    _request()
+    assert overrides.load(bad) is None
+    with _github() as squash:
+        out = overrides.decide(bad, True, "terminal:op")
+    squash.assert_not_called()
+    assert out["ok"] is False and out["state"] is None
+    assert overrides.set_fields(bad, state=overrides.MERGED) is None
+    # a malformed id never names a file — not in the store, not anywhere it points to
+    assert {p.name for p in overrides.store_dir().glob("*.lock")} == {
+        f"{r['id']}.lock" for r in overrides.all_requests()}
+    assert not [p for p in repo.parent.rglob("*.lock") if "passwd" in p.name]
+    assert len(overrides.pending()) == 1
