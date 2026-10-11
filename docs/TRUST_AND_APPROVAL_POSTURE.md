@@ -39,6 +39,44 @@ and what does its output need before it changes anything real.**
 - **No ambient MCP servers.** Every dispatched window (coding agent, rework, judge) runs
   with `--strict-mcp-config`, so it never inherits the operator's own interactive
   `~/.claude.json` `mcpServers` (`dispatcher.py:302-312`, `AGENT_BASE_CMD`).
+- **A dispatched agent inherits an environment ALLOWLIST, not the daemon's env** (CMX-45).
+  An agent's pane starts from the tmux server's global environment, which is the daemon's
+  world: an audit by name on 2026-10-11 found the daemon's own env plus `chela.env`
+  (`CHELA_NOTIFY_URL`, the dashboard/collab/terminal knobs), ~40 pm2 bookkeeping vars
+  (`args`, `env`, `status`, `cwd`, `axm_*`, `pm_*`, a var named after the pm2 process —
+  some of them not even valid shell identifiers, so no `unset` can remove them),
+  `NODE_CHANNEL_*`, WSL interop (`WSL_INTEROP`, `WSLENV`), shell-prompt state, and the
+  operator's Claude session markers. `_launch_agent` therefore runs the agent command
+  (coding, rework and judge alike — one launch path) under `env -i` with only these names
+  passed through, each only if set (`chela/envutil.py::AGENT_ENV_ALLOW`,
+  `agent_env_cmd`):
+
+  | Group | Names |
+  |---|---|
+  | who / where | `HOME` `USER` `LOGNAME` `SHELL` `PATH` `PWD` `TMPDIR` `TZ` |
+  | terminal + locale | `TERM` `COLORTERM` `LANG` `LANGUAGE` `LC_ALL` `LC_CTYPE` `LC_MESSAGES` `LC_COLLATE` `LC_NUMERIC` `LC_TIME` |
+  | per-user runtime | `XDG_RUNTIME_DIR` `XDG_CONFIG_HOME` `XDG_CACHE_HOME` `XDG_DATA_HOME` `XDG_STATE_HOME` `XDG_DATA_DIRS` `XDG_CONFIG_DIRS` `DBUS_SESSION_BUS_ADDRESS` |
+  | tmux self-location | `TMUX` `TMUX_PANE` |
+  | chela self-identity | `CHELA_WID` `CHELA_DIR` `CHELA_TMUX_SESSION` `CHELA_ENV_FILE` |
+  | node (nvm) | `NVM_DIR` `NVM_BIN` `NVM_INC` |
+  | Claude Code config | `CLAUDE_CONFIG_DIR` `ANTHROPIC_BASE_URL` `ANTHROPIC_MODEL` |
+  | display | `DISPLAY` `WAYLAND_DISPLAY` |
+  | credentials it cannot work without | `ANTHROPIC_API_KEY` `ANTHROPIC_AUTH_TOKEN` `CLAUDE_CODE_OAUTH_TOKEN` `GH_TOKEN` `GITHUB_TOKEN` (`FORWARDED_SECRET_VARS`) |
+
+  Everything else is out by default — including proxies, `SSH_AUTH_SOCK`, CA-bundle
+  overrides and editor vars. An operator who needs one adds it by name to
+  `CHELA_CHILD_ENV_FORWARD` (the same list hooks use); a name that is not a plain identifier
+  is dropped, since it is interpolated into a shell line. The values are expanded by the
+  pane's own shell (`${NAME+"NAME=$NAME"}`), so none is typed into the pane or logged.
+  This replaces CMX-115's strip-list (`unset CHELA_NOTIFY_URL`), which removed one known
+  name and passed every unknown one. It complements, and does not replace, CMX-425/CMX-21's
+  scrub of the tmux server's global table (`envutil.scrub_tmux_secrets`), which protects
+  every *other* window. Limits: the allowlist governs what the agent process *inherits*;
+  a `chela` subcommand the agent runs still re-sources `chela.env` at import (the config
+  contract), and the agent can read any file its uid can — env hygiene is not a sandbox
+  (see the sandbox bullet below). Guarded by `tests/test_agent_env_strip.py`, which types
+  the exact launch lines into a real `bash`/`dash` and checks a sentinel daemon var is gone
+  while `CHELA_WID` and `PATH` remain.
 - **The judge's model is a fixed floor, not a fleet setting.** `DEFAULT_JUDGE_MODEL` is
   pinned to a capable model and never follows the coding-agent Settings model, so a
   cheaper fleet default cannot quietly weaken the adversarial pass
@@ -131,7 +169,7 @@ migrates its tracker from `markdown` to `gh_issues`.
 | Posture question | Enforced in | Documented in |
 |---|---|---|
 | Who may trigger a dispatch | `chela/sources/gh_issues.py`, `chela/sources/markdown.py` | this doc §1 |
-| What a running agent may do | `chela/dispatcher.py::resolve_agent_cmd`, `chela/workflow.py::workspace_escape`, `chela/memcap.py`, `chela/sandbox.py` (opt-in, off for chelamux) | this doc §2, `RESOURCE_ISOLATION.md`, `SANDBOX_BOUNDARY.md` |
+| What a running agent may do | `chela/dispatcher.py::resolve_agent_cmd`, `chela/envutil.py::agent_env_cmd`, `chela/workflow.py::workspace_escape`, `chela/memcap.py`, `chela/sandbox.py` (opt-in, off for chelamux) | this doc §2, `RESOURCE_ISOLATION.md`, `SANDBOX_BOUNDARY.md` |
 | What approves a merge | `chela/judge.py`, `chela/contract.py::merge` | this doc §3, `ESCALATION_CONTRACT.md` |
 | What a human must decide instead of the orchestrator | `chela/contract.py::escalate` | `ESCALATION_CONTRACT.md`'s decision taxonomy |
 

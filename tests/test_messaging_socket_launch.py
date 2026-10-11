@@ -14,6 +14,7 @@ import sqlite3
 from types import SimpleNamespace
 
 from chela.workflow import WorkflowDef
+from chela.envutil import unwrap_agent_env_cmd
 
 
 def _wf(tmp_path):
@@ -61,7 +62,7 @@ def test_launch_agent_carries_the_deterministic_messaging_socket_flag(monkeypatc
         hook_vars={}, fresh_worktree=False,
     )
 
-    claude_line = next(line for line in sent if line.startswith("claude"))
+    claude_line = next(c for c in map(unwrap_agent_env_cmd, sent) if c.startswith("claude"))
     expected = deterministic_peer_socket_path("@100")
     assert expected == config.CHELA_DIR / "socks" / "100.sock"
     assert f"--messaging-socket-path {expected}" in claude_line
@@ -86,7 +87,7 @@ def test_launch_agent_omits_the_flag_when_the_socket_path_would_overflow(monkeyp
         hook_vars={}, fresh_worktree=False,
     )
 
-    claude_line = next(line for line in sent if line.startswith("claude"))
+    claude_line = next(c for c in map(unwrap_agent_env_cmd, sent) if c.startswith("claude"))
     assert "--messaging-socket-path" not in claude_line
 
 
@@ -113,7 +114,7 @@ def test_spawn_judge_also_carries_the_messaging_socket_flag(monkeypatch, tmp_pat
                          lambda *_a, **_k: (tmp_path / "judge-abc123", True))
     assert dispatcher._spawn_judge(wf, row, "deadbeef", conn) is True
 
-    claude_line = next(line for line in sent if line.startswith("claude"))
+    claude_line = next(c for c in map(unwrap_agent_env_cmd, sent) if c.startswith("claude"))
     assert "--messaging-socket-path" in claude_line
 
 
@@ -139,5 +140,5 @@ def test_spawn_orchestrator_window_carries_the_messaging_socket_flag(monkeypatch
     target = autolaunch._spawn_orchestrator_window(str(tmp_path))
     assert target == "@200"
 
-    claude_line = next(line for line in sent if line.startswith("claude"))
+    claude_line = next(c for c in map(unwrap_agent_env_cmd, sent) if c.startswith("claude"))
     assert f"--messaging-socket-path {config.CHELA_DIR / 'socks' / '200.sock'}" in claude_line

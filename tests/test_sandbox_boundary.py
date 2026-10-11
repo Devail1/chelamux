@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 from chela import sandbox
 from chela.workflow import WorkflowDef
+from chela.envutil import unwrap_agent_env_cmd
 
 
 def _wf(tmp_path, **agent):
@@ -215,7 +216,7 @@ def test_launch_agent_carries_settings_flag_when_workflow_opts_in(monkeypatch, t
         hook_vars={}, fresh_worktree=False,
     )
 
-    claude_line = next(line for line in sent if line.startswith("claude"))
+    claude_line = next(c for c in map(unwrap_agent_env_cmd, sent) if c.startswith("claude"))
     expected = sandbox.sandbox_settings_path()
     assert f"--settings {expected}" in claude_line
     # Not just the flag string: the file it points at must actually exist, or the
@@ -240,7 +241,7 @@ def test_launch_agent_omits_settings_flag_when_workflow_has_not_opted_in(monkeyp
         hook_vars={}, fresh_worktree=False,
     )
 
-    claude_line = next(line for line in sent if line.startswith("claude"))
+    claude_line = next(c for c in map(unwrap_agent_env_cmd, sent) if c.startswith("claude"))
     assert "--settings" not in claude_line
     assert not sandbox.sandbox_settings_path().exists()
 
@@ -273,5 +274,5 @@ def test_spawn_judge_never_carries_the_settings_flag_even_when_the_workflow_opts
                          lambda *_a, **_k: (tmp_path / "judge-abc123", True))
     assert dispatcher._spawn_judge(wf, row, "deadbeef", conn) is True
 
-    claude_line = next(line for line in sent if line.startswith("claude"))
+    claude_line = next(c for c in map(unwrap_agent_env_cmd, sent) if c.startswith("claude"))
     assert "--settings" not in claude_line

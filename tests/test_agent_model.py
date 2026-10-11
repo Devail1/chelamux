@@ -27,6 +27,7 @@ import pytest
 
 from chela.sources import Task
 from chela.workflow import WorkflowDef
+from chela.envutil import unwrap_agent_env_cmd
 
 
 @pytest.fixture()
@@ -197,8 +198,8 @@ def _sent_claude_cmd(run_mock) -> str | None:
         argv = c.args[0] if c.args else c.kwargs.get("args")
         if isinstance(argv, list) and "send-keys" in argv:
             for a in argv:
-                if isinstance(a, str) and a.startswith("claude"):
-                    return a
+                if isinstance(a, str) and unwrap_agent_env_cmd(a).startswith("claude"):
+                    return unwrap_agent_env_cmd(a)
     return None
 
 

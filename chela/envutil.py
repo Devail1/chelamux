@@ -66,6 +66,7 @@ session's ``CLAUDE_CODE_SESSION_ID``/``CLAUDE_CODE_CHILD_SESSION`` (transcripts 
 from __future__ import annotations
 
 import os
+import re
 import socket
 import subprocess
 import urllib.parse
@@ -276,3 +277,67 @@ def tmux_env_pollution(env: Mapping[str, str],
     if missing:
         found["TMUX_TMPDIR"] = f"{missing} does not exist — tmux falls back to the default socket"
     return found
+
+
+# --- 🔒 CMX-45: the env a dispatched agent / judge is launched with — an ALLOWLIST --------
+#
+# Everything above is a deny-list: it names what to drop and passes the rest. That is right
+# for a hook or a suite (they run AS the operator) but wrong for an agent, whose pane starts
+# from the tmux server's global table — measured 2026-10-11 (names only) it carried ~40
+# pm2 bookkeeping vars no pattern above catches (``args``, ``env``, ``status``, ``cwd``,
+# ``axm_*``, a var named after the pm2 process…), ``CHELA_NOTIFY_URL``, shell-prompt and
+# WSL-interop state. So the agent command runs under ``env -i`` with only these names
+# passed through, each only if it is set (``${NAME+"NAME=$NAME"}``: the pane shell expands
+# it, so no value is ever typed into the pane or logged). A var nobody listed is OUT.
+
+AGENT_ENV_ALLOW = (
+    # who / where — the agent's tools (git, gh, uv, claude) resolve their config from HOME
+    "HOME", "USER", "LOGNAME", "SHELL", "PATH", "PWD", "TMPDIR", "TZ",
+    # terminal + locale — Claude Code draws a TUI
+    "TERM", "COLORTERM", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
+    "LC_COLLATE", "LC_NUMERIC", "LC_TIME",
+    # the per-user runtime — `systemd --user` (memcap), dbus, XDG config/cache dirs
+    "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+    "XDG_STATE_HOME", "XDG_DATA_DIRS", "XDG_CONFIG_DIRS", "DBUS_SESSION_BUS_ADDRESS",
+    # tmux self-location — `chela task-finished` / peer messaging find their own pane
+    "TMUX", "TMUX_PANE",
+    # chela self-identity — the window id, and where chela's own state + config live (every
+    # `chela` subcommand re-reads the rest of its config from chela.env itself)
+    "CHELA_WID", "CHELA_DIR", "CHELA_TMUX_SESSION", "CHELA_ENV_FILE",
+    # node via nvm (the JS suites)
+    "NVM_DIR", "NVM_BIN", "NVM_INC",
+    # Claude Code's non-secret config
+    "CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+    # a display, for the browser-driven checks
+    "DISPLAY", "WAYLAND_DISPLAY",
+)
+
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def agent_env_names(src: Mapping[str, str] | None = None) -> list[str]:
+    """The names a dispatched agent inherits: :data:`AGENT_ENV_ALLOW`, the credentials it
+    cannot work without (:data:`FORWARDED_SECRET_VARS`), and the operator's
+    ``CHELA_CHILD_ENV_FORWARD`` names (read from ``src``, default ``os.environ``). A forward
+    name that is not a plain identifier is DROPPED — it is interpolated into a shell line."""
+    names = set(AGENT_ENV_ALLOW) | forwarded_names(src)
+    return sorted(n for n in names if _ENV_NAME.fullmatch(n))
+
+
+def agent_env_cmd(cmd: str, src: Mapping[str, str] | None = None) -> str:
+    """``cmd`` wrapped so it starts from an EMPTY environment plus :func:`agent_env_names`.
+
+    Shell-portable (bash, dash, zsh): ``${NAME+"NAME=$NAME"}`` expands to one word when
+    NAME is set (even to "") and to nothing when it is unset, so an unset name is not
+    turned into an empty one."""
+    keep = " ".join(f'${{{n}+"{n}=${n}"}}' for n in agent_env_names(src))
+    return f"env -i {keep} {cmd}"
+
+
+_AGENT_ENV_PREFIX = re.compile(r'^env -i (?:\$\{[A-Za-z_][A-Za-z0-9_]*\+"[^"]*"\} )*')
+
+
+def unwrap_agent_env_cmd(line: str) -> str:
+    """The inverse of :func:`agent_env_cmd`: ``line`` minus its ``env -i …`` prefix (the
+    command the agent actually runs), or ``line`` unchanged when it carries none."""
+    return _AGENT_ENV_PREFIX.sub("", line, count=1)
