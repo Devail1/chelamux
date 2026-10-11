@@ -17,6 +17,8 @@ after(() => browser && browser.close());
 
 const W = 390, H = 844;
 const ROW = '.agent-row[data-agent="c-idle"]';
+// The pre-CMX-82 localStorage keys: the page imports them into the (fixture's) server
+// layout on load, as a first device does.
 const CUSTOM = {
     chela_sb_view: JSON.stringify({ groupBy: 'custom' }),
     chela_sb_custom_groups: JSON.stringify({ groups: [{ id: 'g1', name: 'Infra' }], assign: {} }),

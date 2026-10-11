@@ -53,6 +53,19 @@ const GLOBAL_WINDOW_PROPS = ['window', 'document', 'localStorage', 'navigator', 
     'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
     'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame'];
 
+/** Point the page globals (`window`, `document`, `localStorage`, …) at `dom`'s window —
+ * what bootDashboardDom does before it loads the modules, and what a two-page suite calls
+ * to switch which page the globals (and so the next call into its modules) act on. */
+export function activateDom(dom) {
+    for (const k of GLOBAL_WINDOW_PROPS) {
+        // defineProperty, NOT assignment: from node 21 `globalThis.navigator` has
+        // only a getter, and plain assignment throws.
+        Object.defineProperty(globalThis, k, {
+            value: dom.window[k], writable: true, configurable: true,
+        });
+    }
+}
+
 /** Flush one microtask turn — e.g. a fetch().then(json).then(render) chain
  * queued by a poll that fires unawaited on boot — without advancing a timer. */
 export function flush() {
@@ -85,6 +98,10 @@ export function flush() {
  * @param {string[]} [extraModules] - dashboard module paths (relative to
  *   `chela/dashboard/static/js/`, e.g. `'kanban.js'`) to import AFTER
  *   main.js and return, keyed by their filename minus `.js`.
+ * @param {string} [jsRoot] - a URL (ending in `/`) of the `static/js/` directory to
+ *   import from. Defaults to the repo's. A suite that needs TWO independent pages (two
+ *   devices — tests/sidebar_layout_shared.test.mjs) boots each from its own copy, so
+ *   each gets its own module instances; it switches between them with activateDom().
  * @returns {Promise<{dom: JSDOM, chela: object, modules: Record<string,object>}>}
  */
 export async function bootDashboardDom({
@@ -95,16 +112,11 @@ export async function bootDashboardDom({
     fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) }),
     seedLocalStorage,
     extraModules = [],
+    jsRoot = new URL('../../chela/dashboard/static/js/', import.meta.url).href,
 } = {}) {
     const dom = new JSDOM(`<!doctype html><html><body>${body}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    for (const k of GLOBAL_WINDOW_PROPS) {
-        // defineProperty, NOT assignment: from node 21 `globalThis.navigator` has
-        // only a getter, and plain assignment throws.
-        Object.defineProperty(globalThis, k, {
-            value: dom.window[k], writable: true, configurable: true,
-        });
-    }
+    activateDom(dom);
     const phoneMatches = typeof phone === 'function' ? phone : () => phone;
     dom.window.matchMedia = q => ({
         media: q, matches: phoneMatches() && /max-width:\s*768px/.test(q),
@@ -124,11 +136,11 @@ export async function bootDashboardDom({
     globalThis.setInterval = () => 0;   // main.js arms poll timers a test has no use for
     globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = terminalsEnabled;
 
-    await import('../../chela/dashboard/static/js/main.js');
+    await import(new URL('main.js', jsRoot).href);
     const modules = {};
     for (const path of extraModules) {
         const name = path.replace(/\.js$/, '');
-        modules[name] = await import(`../../chela/dashboard/static/js/${path}`);
+        modules[name] = await import(new URL(path, jsRoot).href);
     }
     return { dom, chela: globalThis.window.chela, modules };
 }
