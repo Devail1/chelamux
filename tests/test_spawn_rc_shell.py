@@ -34,7 +34,8 @@ def _scratch_chela_dir(tmp_path, monkeypatch):
 
 def _stubs(tmp_path: Path, live_name: str = "") -> tuple[Path, Path, Path]:
     """A bin dir with stub ``claude`` (argv → one line per arg, exits 7) and ``tmux`` (logs
-    each call; ``display-message`` answers ``live_name``)."""
+    each call one line, every argument bracketed so a word-split shows; ``display-message``
+    answers ``live_name``)."""
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     argv_log, tmux_log = tmp_path / "claude.argv", tmp_path / "tmux.log"
@@ -43,7 +44,8 @@ def _stubs(tmp_path: Path, live_name: str = "") -> tuple[Path, Path, Path]:
     (bindir / "claude").write_text(
         f'#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done > {argv_log}\nexit 7\n')
     (bindir / "tmux").write_text(
-        f'#!/bin/sh\necho "$*" >> {tmux_log}\n'
+        f'#!/bin/sh\nfor a in "$@"; do printf "[%s]" "$a"; done >> {tmux_log}\n'
+        f'echo >> {tmux_log}\n'
         f'[ "$1" = display-message ] && printf "%s" {live_name!r}\nexit 0\n')
     for f in ("claude", "tmux"):
         (bindir / f).chmod(0o755)
@@ -55,7 +57,10 @@ def _type(tmp_path: Path, definition: str, typed: str, live_name: str = "",
     """Define the wrapper, then run ``typed`` as the human would (then ``after``, whose
     stdout is returned too). Returns (argv, tmux log, stdout)."""
     bindir, argv_log, tmux_log = _stubs(tmp_path, live_name)
-    env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
+    # FUNCNEST=1: the wrapper must reach the real binary through `command claude`. Calling
+    # itself instead is argv-identical (the inner call sees --remote-control and passes
+    # through), so only a nesting limit tells the two apart.
+    env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "FUNCNEST": "1"}
     # `typed` must hand back the stub's exit status (7) — the wrapper is transparent to `$?`.
     script = f'{definition}\n{typed}\n[ $? -eq 7 ] || exit 99\n{after}'
     proc = _REAL_RUN(["bash", "-c", script], env=env,
@@ -66,14 +71,24 @@ def _type(tmp_path: Path, definition: str, typed: str, live_name: str = "",
     return argv, calls, proc.stdout
 
 
+def _tmux(*args: str) -> str:
+    """One logged tmux call, in the stub's bracketed form."""
+    return "".join(f"[{a}]" for a in args)
+
+
 def _new_shell(monkeypatch, tmp_path, *, rc: bool, command: str | None = None,
                wid: str = "@42") -> list[str]:
     """Open a window through the real ``spawn_window`` — a "+ New shell" one (no command)
     unless ``command`` is given."""
     sent = _patch_tmux(monkeypatch, wid=wid, remote_control=rc)
+    # Re-spy `_send` keeping the TARGET too: every keystroke must go into the new window.
+    targets: list[str] = []
+    monkeypatch.setattr(spawn, "_send",
+                        lambda target, text: (targets.append(target), sent.append(text)))
     workdir = tmp_path / "proj"
     workdir.mkdir()
     assert spawn.spawn_window(workdir, command=command).ok
+    assert sent and set(targets) == {f"{spawn.config.current_session()}:proj"}, targets
     return sent
 
 
@@ -95,7 +110,7 @@ def test_typed_claude_launches_with_remote_control_and_marks_the_window(
     definition = _definition(_new_shell(monkeypatch, tmp_path, rc=True))
     argv, calls, _ = _type(tmp_path, definition, "claude")
     assert argv == ["--remote-control", "proj"]
-    assert f"set-window-option -t @42 {rc_rename.PUSHED_OPTION} proj" in calls
+    assert _tmux("set-window-option", "-t", "@42", rc_rename.PUSHED_OPTION, "proj") in calls
 
 
 def test_typed_claude_keeps_its_own_flags_after_the_insert(monkeypatch, tmp_path):
@@ -108,15 +123,32 @@ def test_typed_claude_uses_the_windows_live_name_after_a_rename(monkeypatch, tmp
     definition = _definition(_new_shell(monkeypatch, tmp_path, rc=True))
     argv, calls, _ = _type(tmp_path, definition, "claude", live_name="renamed")
     assert argv == ["--remote-control", "renamed"]
-    assert f"{rc_rename.PUSHED_OPTION} renamed" in calls
+    assert _tmux(rc_rename.PUSHED_OPTION, "renamed") in calls
+
+
+def test_a_live_name_with_spaces_stays_one_argument(monkeypatch, tmp_path):
+    """A human may rename the window to anything — the name is ONE argv word both to claude
+    and to the tmux mark."""
+    definition = _definition(_new_shell(monkeypatch, tmp_path, rc=True))
+    argv, calls, _ = _type(tmp_path, definition, "claude -c", live_name="my  proj")
+    assert argv == ["--remote-control", "my  proj", "-c"]
+    assert calls.splitlines()[-1] == _tmux(
+        "set-window-option", "-t", "@42", rc_rename.PUSHED_OPTION, "my  proj")
+
+
+def test_a_flag_inside_an_argument_value_does_not_skip(monkeypatch, tmp_path):
+    """The skip scan reads whole arguments: ``-p`` inside a quoted VALUE is not ``-p``."""
+    definition = _definition(_new_shell(monkeypatch, tmp_path, rc=True))
+    argv, _, _ = _type(tmp_path, definition, "claude --append-system-prompt 'use -p never'")
+    assert argv == ["--remote-control", "proj", "--append-system-prompt", "use -p never"]
 
 
 def test_typed_claude_reads_and_marks_this_windows_id(monkeypatch, tmp_path):
     definition = _definition(_new_shell(monkeypatch, tmp_path, rc=True))
     _, calls, _ = _type(tmp_path, definition, "claude", live_name="renamed")
     assert calls.splitlines() == [
-        "display-message -p -t @42 #W",
-        f"set-window-option -t @42 {rc_rename.PUSHED_OPTION} renamed",
+        _tmux("display-message", "-p", "-t", "@42", "#W"),
+        _tmux("set-window-option", "-t", "@42", rc_rename.PUSHED_OPTION, "renamed"),
     ]
 
 
@@ -142,8 +174,8 @@ def test_no_window_id_falls_back_to_the_session_target(monkeypatch, tmp_path):
     assert not any(t.startswith("export CHELA_WID") for t in sent)
     _, calls, _ = _type(tmp_path, _definition(sent), "claude")
     assert calls.splitlines() == [
-        "display-message -p -t chela:proj #W",
-        f"set-window-option -t chela:proj {rc_rename.PUSHED_OPTION} proj",
+        _tmux("display-message", "-p", "-t", "chela:proj", "#W"),
+        _tmux("set-window-option", "-t", "chela:proj", rc_rename.PUSHED_OPTION, "proj"),
     ]
 
 
@@ -174,6 +206,8 @@ def test_chelas_own_launch_through_the_wrapper_carries_one_remote_control(
 
 @pytest.mark.parametrize("typed", [
     "claude -p hello",
+    "claude -p 'two  words'",
+    "claude --remote-control 'my  name' -c",
     "claude --print hello",
     "claude --model opus -p hello",
     "claude --remote-control mine",
