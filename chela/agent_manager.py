@@ -806,13 +806,16 @@ def window_name_for_cwd(cwd: str | os.PathLike, taken: set[str]) -> str:
     in claude.ai / the desktop, and since CMX-62 nothing renames a unique window, so a
     placeholder (the old ``shell-N``) would be frozen there for the window's lifetime.
     """
+    return unique_name(_name_base(cwd), taken)
+
+
+def _name_base(cwd: str | os.PathLike) -> str:
+    """The un-suffixed name :func:`window_name_for_cwd` derives from ``cwd``."""
     real = os.path.realpath(os.path.expanduser(str(cwd)))
     home = os.path.realpath(os.path.expanduser("~"))
     if real in (home, os.sep):
-        base = _login()
-    else:
-        base = _NAME_UNSAFE_RE.sub("-", os.path.basename(real)).strip("-") or _login()
-    return unique_name(base, taken)
+        return _login()
+    return _NAME_UNSAFE_RE.sub("-", os.path.basename(real)).strip("-") or _login()
 
 
 def start_agent(agent_name: str, cmd: str | None = None) -> dict:
@@ -934,6 +937,110 @@ def reconcile_window_names() -> list[str]:
             # CMX-39: a Remote Control session shows the window name in claude.ai / the
             # desktop — push the new one (queued until the session is idle and empty).
             rc_rename.request(wid, new)
+    return actions
+
+
+# The folder a window's auto-generated name was last derived from (CMX-83). Set when
+# :func:`follow_folder_names` renames a window; before that the window's spawn folder
+# (``#{pane_start_path}``, which is where :func:`window_name_for_cwd` named it) stands in.
+NAME_CWD_OPTION = "@chela_name_cwd"
+
+
+def _is_auto_name(name: str, folder: str) -> bool:
+    """True if ``name`` is what :func:`window_name_for_cwd` makes for ``folder``: its base,
+    or the base with a collision ``-N`` suffix."""
+    base = _name_base(folder)
+    return name == base or bool(re.fullmatch(re.escape(base) + r"-\d+", name))
+
+
+def follow_folder_names(pending: dict[str, str]) -> list[str]:
+    """Re-derive a still-AUTO window name when its session moves folder (CMX-83).
+
+    A window is named once at spawn, from its folder (:func:`window_name_for_cwd`). When
+    the session later works somewhere else — a window opened in ``~`` (``liavedunix-3``)
+    whose Claude runs in ``~/projects/cute-animals`` — the sidebar groups it under the new
+    folder while its name still says the old one. This renames such a window to
+    ``window_name_for_cwd(<new folder>, taken)``.
+
+    Only a name chela generated and nobody changed: it must still equal what
+    :func:`window_name_for_cwd` made for the folder it was derived from (its
+    :data:`NAME_CWD_OPTION`, else its spawn folder), ``-N`` form included. Never renamed:
+    a MANUAL name (``@chela_manual_name``), the orchestrator's window
+    (:func:`chela.inbox.orchestrator_wid`), dispatch/judge windows
+    (:func:`_orchestrated_name` — their name is the branch) and NEVER_MANAGE.
+
+    The folder is the one the sidebar groups by — the live session's ``cwd`` in
+    ``claude agents --json`` (:func:`session_entry`) — so the two cannot disagree. No
+    session, no folder, no rename. Debounced: ``pending`` (``{wid: folder}``, owned by the
+    caller and kept across ticks) remembers a move, and the rename lands only when the
+    NEXT tick sees the same folder. The rename goes the normal way: ``tmux
+    rename-window`` (the Telegram topic follows the window name on its own reconcile)
+    and :func:`chela.rc_rename.request` for the Remote Control name.
+
+    Returns a list of "old -> new" rename actions.
+    """
+    from chela import inbox
+
+    actions: list[str] = []
+    session = config.current_session()
+    try:
+        out = subprocess.run(
+            ["tmux", "list-windows", "-t", session, "-F",
+             "#{window_id}\t#{window_name}\t#{pane_start_path}\t"
+             f"#{{{NAME_CWD_OPTION}}}\t#{{{MANUAL_NAME_OPTION}}}"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.warning("follow_folder_names: tmux list-windows failed: %s", e)
+        return actions
+    rows = [line.split("\t") for line in out.splitlines() if line.count("\t") == 4]
+    live = {r[0] for r in rows}
+    for wid in list(pending):
+        if wid not in live:
+            pending.pop(wid)
+    taken = {r[1] for r in rows}
+    try:
+        orchestrator = inbox.orchestrator_wid()
+    except Exception:  # noqa: BLE001 — an unreadable inbox must not rename the orchestrator
+        log.warning("follow_folder_names: orchestrator unknown; skipping this tick")
+        return actions
+    status_map = None
+
+    for wid, name, start_path, name_cwd, manual in rows:
+        if (manual.strip() == "1" or wid == orchestrator or name in NEVER_MANAGE
+                or _orchestrated_name(name)):
+            pending.pop(wid, None)
+            continue
+        derived_from = name_cwd or start_path
+        if not derived_from or not _is_auto_name(name, derived_from):
+            pending.pop(wid, None)
+            continue
+        if status_map is None:
+            status_map = session_status_map()
+        entry = session_entry(claude_pid(wid), status_map)
+        folder = entry["cwd"] if entry else None
+        if not folder or _name_base(folder) == _name_base(derived_from):
+            pending.pop(wid, None)
+            continue
+        if pending.get(wid) != folder:
+            pending[wid] = folder        # first sighting — rename only if it holds a tick
+            continue
+        pending.pop(wid)
+        new = window_name_for_cwd(folder, taken - {name})
+        target = f"{session}:{wid}"
+        try:
+            subprocess.run(["tmux", "rename-window", "-t", target, new],
+                           capture_output=True, text=True, timeout=5)
+            subprocess.run(["tmux", "set-window-option", "-t", target, NAME_CWD_OPTION,
+                            os.path.realpath(folder)],
+                           capture_output=True, text=True, timeout=5)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            log.warning("follow_folder_names: rename %s failed: %s", wid, e)
+            continue
+        taken.discard(name)
+        taken.add(new)
+        actions.append(f"{name} -> {new}")
+        rc_rename.request(wid, new)
     return actions
 
 

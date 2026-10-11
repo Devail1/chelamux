@@ -218,7 +218,14 @@ def test_supervisor_heal_create_from_a_polluted_env_is_clean(env, sock):
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         assert _wait(lambda: _has_session(env, sock)), "supervisor never healed"
-        leaked = set(_global_env(env, sock)) & (set(POLLUTION) | {"TMUX_TMPDIR"})
+
+        # The session exists the instant ensure_session's create runs, a beat BEFORE its
+        # `set-environment -gu` scrub (CMX-83: reading here raced it, ~1 run in 3). Wait
+        # for the heal to settle; a scrub that never runs still leaves the leak and fails.
+        def _leaked():
+            return set(_global_env(env, sock)) & (set(POLLUTION) | {"TMUX_TMPDIR"})
+        _wait(lambda: not _leaked(), timeout=5.0)
+        leaked = _leaked()
         assert not leaked, f"supervisor heal handed every window: {sorted(leaked)}"
     finally:
         _reap(proc)
