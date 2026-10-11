@@ -108,6 +108,18 @@ def test_asking_twice_for_the_same_head_opens_one_request(repo):
     assert len(overrides.all_requests()) == 1
 
 
+def test_asking_again_after_a_new_push_opens_a_fresh_request_for_the_new_head(repo):
+    """🔴 GUARD: a pending request is reused only for the SAME head. After a push, asking
+    again must bind a NEW request to the new head, never hand back the stale one."""
+    _seed(repo)
+    first = _request()
+    second = _request(head=MOVED)
+    assert second["ok"] is True and not second.get("existing"), second
+    assert second["request_id"] != first["request_id"]
+    assert second["head_sha"] == MOVED
+    assert overrides.load(second["request_id"])["head_sha"] == MOVED
+
+
 @pytest.mark.parametrize("ci,mergeable", [(CI_FAILING, "MERGEABLE"), (CI_PASSING, "CONFLICTING")])
 def test_a_request_is_refused_on_red_ci_or_a_conflict(repo, ci, mergeable):
     """The override skips the JUDGE only — red CI / a conflict refuse before any request."""
@@ -163,6 +175,26 @@ def test_approve_merges_exactly_once_through_the_merge_path_with_the_audit(repo,
     merged, = event_log.read(types=["orchestrator.merge"])["events"]
     assert merged["payload"]["override"]["approved_by"] == "terminal:op"
     assert told == []
+
+
+def test_the_override_audit_is_on_the_run_row_before_the_squash_merge(repo, told):
+    """🔴 GUARD: reconcile must never see the PR merged while the run row lacks the
+    override — so the audit is recorded on the row BEFORE `_squash_merge` runs."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    on_row_at_merge: list = []
+
+    def squash(*a, **kw):
+        on_row_at_merge.append(dispatcher.merge_overrides(dispatcher.resolve_run("t1")))
+        return {"ok": True, "merge_commit_sha": "m" * 40}
+
+    with _github() as mock:
+        mock.side_effect = squash
+        out = overrides.decide(rid, True, "terminal:op")
+    assert out["state"] == overrides.MERGED, out
+    assert len(on_row_at_merge) == 1 and len(on_row_at_merge[0]) == 1, \
+        "the override must already be on the run row when the squash-merge runs"
+    assert on_row_at_merge[0][0]["head_sha"] == HEAD
 
 
 def test_approve_after_the_head_moved_expires_and_tells_the_operator(repo, told):
