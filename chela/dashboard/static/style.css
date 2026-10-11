@@ -3577,6 +3577,12 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 .agent-row.rich .ar-pr.draft { border-style: dashed; }
 .agent-row.rich .ar-pr.merged { border-color: var(--accent); color: var(--text); }
 .agent-row.rich .ar-pr.closed { text-decoration: line-through; }
+/* CMX-76: the orchestrator's row badge — the word "orchestrator", outlined like the PR
+   badge (no hue cue: the operator is red-weak). */
+.agent-row.rich .ar-orch {
+    margin-left: 6px; padding: 0 5px; border: 1px solid var(--border); border-radius: 999px;
+    font-size: 10px; color: var(--text-dim); white-space: nowrap;
+}
 /* Show empty groups: a folder header with no matching session keeps its `+`. */
 .side-group.empty .group-rows { display: none; }
 .side-group.flat { margin-top: 4px; }
