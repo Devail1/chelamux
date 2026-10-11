@@ -10,6 +10,8 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-10-11
+
 ### Added
 
 - **`chela close <run> --requeue` makes a closed task claimable again.** The next tick claims
@@ -36,6 +38,242 @@ history lives in `git log`.
   30m) pushes once. `chela doctor` gains an `inbox.held` fact that goes red while the queue is
   held. (CMX-26, #610)
 
+- **`chela spawn <cwd> [--command CMD]` opens an agent window from the terminal.** It runs
+  through the same `spawn_window` path as the dashboard launcher and Telegram `/new`. With no
+  `--command` it launches `$CHELA_AGENT_CMD` (default `claude`), not the bare shell that
+  `spawn_window` opens on its own. It prints the new `@N` and cwd, and adds the cwd to the
+  launcher's Recent list on a best-effort basis. (CMX-13)
+- **`chela close @N` kills one chela window, so nobody has to reach for raw
+  `tmux kill-window`.** It refuses a window that is not live in the chela session, the
+  orchestrator's own window unless `--orchestrator` is passed, and a window that an
+  in-flight dispatched run still claims unless `--force` is passed. For that last case,
+  `chela close <task> --reason …` is the right tool. Closing a run by id works as before.
+  (CMX-13)
+
+- **A profile of chela's services under normal load (`docs/perf/2026-10-profile.md`).**
+  The dashboard spends most of its CPU starting processes. About 90% of its tmux and pgrep
+  spawns come from `/api/agents` and `/api/agents/context`, which probe each window
+  separately every 4 s per open Wall tab. The cost grows linearly: 7% of a core at 5
+  windows, 73% at 40. The report ranks three fixes: batch the probes through the existing
+  `sessions.panes()`, remove a 36-second CPU burst in `chela doctor`, and have Telegram
+  capture only panes that changed. It also lists what is not worth doing, including
+  swapping Werkzeug for waitress. The isolated harness that produced the numbers is in
+  `docs/perf/2026-10-harness/`. No production code changed. (CMX-15)
+
+- **`chela doctor` fact `tmux.leaked_env`.** It goes red when tmux's global env holds a
+  proxy aimed at a dead localhost port, a Claude session marker, or a `TMUX_TMPDIR` whose
+  dir is missing. The daemon's doctor sweep pushes it once through the notify path.
+  (CMX-21)
+- The perf harness (`docs/perf/2026-10-harness/`) now passes `tmux -L chela-perf` on every
+  call. It refuses `kill-server` on the default socket, starts the ttyd supervisor under
+  `env -i` with an allowlist inside its own process group, and `stop.sh` reaps that whole
+  group. (CMX-21)
+
+- **A push when an agent is blocked by its permission classifier.** An auto-mode denial
+  never shows a prompt, so the session never reaches `waiting` and the needs-input push
+  stayed silent. `notify.DeniedWatch` now tails `hook.permission_denied` events and sends
+  one ntfy push per window per 10 minutes, from whichever process holds the announcer
+  lease (daemon or dashboard). (CMX-25, #609)
+
+- **A judge window shows its detached mutation battery's live progress instead of
+  "idle".** While `chela judge run --detach` runs, the judge pane's state pill reads
+  `⚖️ testing · 3/6 · 15m` (its status dot reads working), and `chela peek` on the window adds a
+  `judge:` line with the KILLED/SURVIVED/INVALID tally and the experiment running now (a held-out one
+  is never named). A run whose process died before a verdict reads `⚖️ judge run died — no
+  verdict`, never idle. The badge disappears when the run finishes. (CMX-40)
+
+- **`chela close <run> --reason "…"` — walk away from a run on purpose, with a visible
+  reason.** A run that was superseded or abandoned used to stay on the Work view as a
+  misleading FAILED card (for example "tmux window disappeared" after its idle window was
+  closed). Now it is marked `closed`: it is never claimed or retried again, its slot is
+  freed, the reason goes in its review history and a `run_closed` event, and the card reads
+  **"Closed — <reason>"**. It accepts `failed`, `needs_human`, `changes_requested`,
+  `awaiting_review`, `running` and `claimed` runs. A running or claimed run is refused
+  unless its window is gone or its agent is idle; `--force` overrides that. An open PR gets
+  the reason as a comment, `--close-pr` also closes it, and on a terminal with neither
+  `--close-pr` nor `--keep-pr` you are asked. The branch is never deleted, and the worktree
+  is kept unless you pass `--remove-worktree`. Restart `chela-daemon` and
+  `chela-dashboard` to pick it up. (CMX-406)
+
+- **`chela judge eval` — an offline eval of the judge's experiment DESIGN.** It runs only
+  the design step (the live judge prompt at each risk level, and the model returning its
+  experiments JSON) against a read-only copy of a PR's tree. It never runs a test suite.
+  Per risk level it reports recall on seeded and historical real regressions, the share of
+  proposed experiments that are contrived, validity (each experiment is checked with the
+  judge's own `apply_mutation` / `parse_check`), grader flips, and a decoy negative control.
+  Every score has a 95% interval. The dataset is 85 historical cases mined from this repo's
+  judge verdicts plus 4 seeded regressions. It is split train/test by PR, and a test-split
+  run prints aggregates only. The cost estimate prints before any model call, and nothing is
+  spent without `--yes`. `--limit`, `--max-cost` and a per-call budget cap the rest.
+  Subcommands: `mine`, `label`, `controls`, `spot-check`, `agreement`. It makes no change to
+  how the judge behaves. See `docs/JUDGE_EVAL.md`. (CMX-408)
+
+- **Drop or paste a file into a Wall terminal.** Dropping a file on a terminal pane, or
+  pasting one (a screenshot, "Copy image"), now saves it to that session's
+  `uploads/` folder and types `@uploads/<name> ` into the prompt, without sending it, so
+  Claude can read a file that lives on your phone or laptop and not on the host. A small
+  toast names the saved file, and an error toast explains a refusal. Files are never
+  overwritten (`-1`, `-2`… suffixes). A name with a path separator, `..`, or a leading dot
+  is refused, and so is a symlinked `uploads/`. Uploads are capped at 25 MB each
+  (`CHELA_UPLOAD_MAX_MB`) and 20 per minute (`CHELA_UPLOAD_PER_MINUTE`). Every upload
+  records an `upload.saved` or `upload.refused` event. It is for the operator only: a
+  share guest's request is refused whatever *Guest typing* says. Turn it off in
+  Settings → General → *File drop into terminals* (on by default, or `CHELA_FILE_DROP`).
+  Restart `chela-dashboard` to pick it up. (CMX-412)
+
+- **Every pane shows its tmux window id (`@N`).** The orchestrator, `chela peek @N`, inbox
+  notices and peer messages all address agents by `@N`, and the dashboard now shows it too:
+  as a small, dim `@N` at the start of each pane's bottom bar (click it to copy, with a
+  "Copied" toast), on each sidebar session row's second line and in its tooltip, and in the
+  ⌘K / "Jump to session" palette, where typing `@32` jumps straight to that window. The id
+  stays on one line at desktop and phone widths, however long the session or branch name.
+  It is the same id `chela status` prints and renumbers after a tmux restart, as tmux does.
+  Restart `chela-dashboard` to pick it up. (CMX-417)
+
+- **Web access for a sandboxed share session (opt-in, per session).** Start one with
+  **New session → Sandboxed session · allow web access…** or
+  `chela share-session <project> --web`. The default is still no network. The guest
+  container stays alone on its `--internal` network with no host address. One more
+  sidecar joins it: `chela/share_web_proxy.py`, a filtering HTTP(S) forward proxy that
+  carries all the guest's web traffic.
+  - The proxy resolves each name itself and refuses any private, loopback, link-local,
+    CGNAT, host or embedded-IPv4 address after resolution. It then connects to the
+    address it checked, so there is no DNS-rebinding window.
+  - It allows ports 80 and 443 only.
+  - It rate-limits each site (1 request/s by default) and all sites together.
+  - It logs every request to `~/.chela/share-web/<session>.log`.
+  - Optional `CHELA_SHARE_WEB_DENY` / `CHELA_SHARE_WEB_ALLOW` lists. Unset means any
+    public host.
+
+  The guest runs a locally built `chela-share-web` image with headless Chromium and a
+  `browse` command. Its WebFetch, curl and pip go through the proxy. The pane shows
+  **🌐 web**. The live share check now also verifies the mode the session was launched
+  with: a `none` session that gains a proxy variable, a web sidecar or any other network
+  member fails. See `docs/SHARE_SANDBOX.md` → *Web mode*. (CMX-418)
+
+- **Sandboxed sessions now relay to their Telegram topic.** Their transcript stays inside
+  the container, so the share proxy writes each completed turn (the assistant's text, with
+  each tool call as one line) to a per-session outbox that only the proxy sidecar mounts.
+  `chela telegram` reads that outbox for a window that verifies as sandboxed, with the
+  usual formatting, chunking and dedup, and `chela doctor` stops reporting such a window as
+  dead outbound while its outbox is current. Everything the session says now also reaches
+  the operator's topic (see `docs/SHARE_SANDBOX.md`). Turn it off for one session with
+  `chela telegram --sandbox-relay @N=off`. (CMX-420)
+
+- **Change a live share's mode without re-sharing.** Active shares now shows each share's
+  mode as a control: 👁 View only, ⌨ Allow typing, or ⚠ Full access — UNSANDBOXED. Switching
+  keeps the same link and pairing code, and a guest who already joined keeps the
+  connection. Dropping to View only applies at once. Going up passes the same checks as
+  creating a share with that mode: *Guest typing* on and a verified sandboxed window for
+  typing, or the typed window name for UNSANDBOXED, which then starts its own expiry and
+  binds the first guest to type. The guest sees "You can type now" or "View only now".
+  Every change records a `share.mode_changed` event (from, to, by). The pane's share row
+  shows the mode (👁 / ⌨ / ⚠), and each row in the sheet says what that share allows,
+  replacing the one sentence used for every share. Clicking *Share current session* on a
+  window that's already shared opens that share's row instead of looking like a new
+  share. Restart `chela-dashboard` to pick it up. (CMX-421)
+
+- **A Linear tracker: `tracker: kind: linear`.** A workflow can now take its queue from a
+  Linear team. The issue description is the brief. *Blocked by* relations hold a task the
+  same fail-closed way `depends:` does, and the claim order is priority, then the board's
+  manual order. Only the `ready_states` (default `Todo`) are claimed, but every state that
+  is not completed or canceled counts as open, so an issue Linear's GitHub integration
+  moved to In Progress is not mistaken for finished. A failed read (network, auth, rate
+  limit, malformed reply) never closes a run.
+
+  The run's id is the identifier (`CMX-12`), its number is Linear's, and its branch and
+  window are Linear's suggested branch name. That branch is never reused if the remote
+  already has it. A bare `cmx-12` that names both an old TODO.md-era run and a Linear run
+  resolves to the Linear one, never to an old finished run.
+
+  When a PR merges, chela marks the issue Done if it isn't already and archives it. A sweep
+  every 15 minutes archives any closed issue that is still unarchived. `chela doctor`
+  (`tracker.linear_issue_cap`) warns above 200 non-archived issues, since the free plan
+  stops at 250.
+
+  The API key is read only from `chela.env` as `LINEAR_API_KEY` and never from
+  `WORKFLOW.md`. It is never logged and never passed to agents, judges or hooks. Setup is
+  in `docs/LINEAR_TRACKER.md`. Existing workflows are unchanged. (CMX-432)
+
+- **Dismiss a session from the sidebar's "Recent sessions".** Each resumable row now has
+  a × (or swipe left on touch). The row leaves the list at once and an Undo toast offers
+  it back for a few seconds. With two or more rows, "Clear all" at the section header
+  dismisses them all after a confirmation. Dismissals are stored server-side
+  (`$CHELA_DIR/dismissed-sessions.json`, keyed by session id), so they hold on every
+  device. Dismissing only hides the row: the transcript and the restore records are kept,
+  and a dismissed session that comes back to life shows under Sessions as usual. (CMX-437)
+
+- **Work board: a Linear-backed card links to its Linear issue.** Every card for a Linear
+  task — queued, running, in review or done — shows its identifier as `CMX-12 ↗`, opening
+  the issue in a new tab without triggering the card's own click. The href is exactly the
+  `url` the Linear adapter fetched (recorded on the run at claim, in a new
+  `runs.tracker_url` column), never built from a workspace slug. Cards from markdown and
+  GitHub-issues workflows are unchanged. (CMX-5)
+
+- **"New task" in the dashboard creates a Linear issue.** On a workflow whose tracker is
+  `kind: linear`, the Work view's toolbar (and a ⌘K palette row) opens a form: title,
+  markdown description, priority and optional "blocked by" (open issues). Submit creates
+  the issue in the workflow's team, in its ready state, plus a `blocks` relation per
+  blocker. It is never created as a sub-issue. The browser posts to
+  `/api/dispatcher/linear/issue`, and only the dashboard calls Linear, so `LINEAR_API_KEY`
+  never reaches the page. Share guests are refused. A Linear error is shown and the typed
+  form is kept. The created issue shows in the queue on the refresh, linked to its Linear
+  page by the board's existing `CMX-N ↗` link (CMX-5). (CMX-6)
+
+- **A View menu for the dashboard sidebar, like the Claude desktop app's.** The sliders
+  button on the Sessions header picks what shows and how it is laid out:
+  **Status** (Active / All / Archived), **Environment** (Interactive, Dispatched agents,
+  Judges, Background sessions; all but Judges by default), **Last activity** (1d / 7d /
+  30d / All; default 7d), **Group by** (Date, Folder, State, Custom groups, None),
+  **Sort by** (Last activity, Name, Created), plus **Show empty groups** and **Show PR
+  status** (a `#N` PR badge on dispatched-run rows). Custom groups are created, renamed
+  and deleted in the menu and assigned from any row's menu ("Move to group…"); they
+  follow the window, not its name. Filters never hide a session that is working or
+  waiting on you, or the orchestrator. Choices are kept per browser. Submenus open by
+  tap, so the menu works on a phone. `/api/agents` now carries each window's
+  `last_activity` and `created`. (CMX-66)
+
+- **A closed run that silently blocks a READY task is now flagged, with a one-click way
+  out.** `chela doctor` reports `dispatch.closed_run_stalls`: a task in its tracker's ready
+  state whose run is `closed` (no requeue pending) is never claimed again, so doctor names it,
+  says "closed run blocks this task: requeue or refile", and gives the `--requeue` command. An
+  unreadable tracker reads CANNOT VERIFY, never "no stalls". On the Work board, the task's
+  card carries the same flag, computed over all of the workflow's runs and not only the 10
+  most recent. Its **Requeue** button (or **Close & requeue** on a run still in flight) runs
+  `chela close --requeue` through the new `POST /api/dispatcher/runs/<id>/close`. (CMX-68)
+
+- **A sandboxed guest can request more access, and the operator approves or denies it.**
+  Inside a sandboxed session, the guest or its Claude runs
+  `python3 ~/bin/chela-request mount|domain|operation <target> --why "…"`. The request goes
+  to a write-only route on the session's token proxy and lands in a host-only file. It does
+  nothing by itself, and the guest can't read it back or see the decision.
+  - The operator sees each request in the dashboard (the **🙋 N access requests** pill),
+    as an event in the log, and as a push when `CHELA_NOTIFY_URL` is set (ntfy or
+    Telegram). They can also run `chela share-requests` in a terminal. Approvals last
+    60 min by default.
+  - Mounts are read-only unless the guest asked for write and the operator ticks
+    *allow write*.
+  - An approved mount is applied by **re-launching** the guest container with it at
+    `/extra/<name>`. A running container is never widened. Expiry or revocation relaunches
+    the container without the mount.
+  - The secrets directories (`~/.ssh`, `~/.claude`, `~/.chela`, `~/.config`, `~/.secrets`,
+    …), `$HOME` and its ancestors, the tmux socket directory, system directories and
+    `/mnt/*` are refused even when approved, and so is a symlink into any of them. The
+    refusal is checked at approval, at launch and by the live sandbox check, and the UI
+    shows why.
+  - Domain approvals extend a web session's `CHELA_SHARE_WEB_ALLOW` list. Operations are
+    only recorded.
+  - Every request, approval, denial, refusal, expiry and revocation is a
+    `share.request_*` event. Stopping the share or turning *Guest typing* off revokes
+    every approval.
+  - Nothing approves automatically, and chela's merge-gate hook denies
+    `chela share-requests approve` and the approve route to Claude sessions. (CMX-7)
+
+- **Telegram Approve / Deny for override requests.** Each request is posted once to the
+  orchestrator's topic (task, PR link, judge state on the head, reason) with inline buttons,
+  and the message is edited to the outcome: merged `<sha>` / denied / expired / failed.
+  `chela override list [--all]` shows requests. (CMX-79)
+
 ### Changed
 
 - **With `tracker: kind: linear`, the Work board's columns are the team's Linear workflow
@@ -47,6 +285,205 @@ history lives in `git log`.
   that supersedes it. Each edge is written once, and a failed write never blocks anything. A run whose window
   died is re-claimed from In Progress or In Review while it has retries left. (CMX-23, #607)
 
+- **The Telegram pane watch re-captures only panes that changed.** Each tick it reads every
+  window's `#{window_activity}` in ONE `tmux list-windows` call and runs `capture-pane`
+  only for windows whose stamp moved since their last capture (or whose stamp is in the
+  same second that capture began, since the stamp is whole seconds). Unchanged windows are
+  handed their last captured text, so every detector, hook-log lookup and re-post backoff
+  still runs every tick. A full sweep re-captures every window at least every 30 s as a
+  backstop for changes that write no output. The transcript relay and the pane loop now
+  ask tmux for the server epoch once per tick (`epoch.per_tick()`), not once per window.
+  Measured at 40 idle windows: `capture-pane` spawns 1,160 → 92 per run and the
+  service's CPU 10.1–10.3% → 5.9–6.6% of a core. (CMX-18)
+
+- **The dashboard's polled endpoints no longer probe tmux and `pgrep` once per window.**
+  `/api/agents`, `/api/agents/context` and `/api/orchestrator/status` now read one shared
+  pane snapshot (`sessions.panes()`: one `tmux list-windows` plus `/proc`, cached ~1 s
+  across requests and tabs) and a shared tmux epoch, instead of 2–4 spawns per window per
+  poll. A window that is missing from the snapshot forces one fresh read, so new windows
+  still show on the next poll. The responses are unchanged: a golden test renders 5 and 20
+  real windows both ways and requires byte-identical output. On a host without `/proc`
+  (macOS), one `ps -axo` (plus one `lsof` for the claude cwds) now replaces the per-process
+  `pgrep`/`ps`/`lsof` calls in `sessions.panes()`. Measured with the CMX-15 harness (dashboard
+  alone, one phone tab on the Wall) at 5 / 20 / 40 windows: dashboard CPU 7.0 / 23.2 / 59.9% →
+  2.7 / 4.1 / 7.6% of a core, `/api/agents` p50 98 / 388 / 1,044 ms → 20 / 38 / 117 ms. (CMX-20)
+
+- **Sessions chela opens for a human now launch with a bare `--remote-control`.** chela
+  passed a name, frozen at launch: the `shell-N` placeholder for a home-dir window, the folder
+  name for a project. The claude.ai / desktop sidebar showed several sessions as "shell-3",
+  and later tmux renames never reached it. With no name, the sidebar shows Claude's own
+  generated session title; it already groups sessions by project folder. Applies to the
+  dashboard launcher, Telegram `/new`, `chela spawn` and the orchestrator persona. Dispatched
+  agents and judges still get no Remote Control. Running sessions keep their name until
+  relaunched. (CMX-34)
+
+- **The dashboard sidebar groups sessions by project folder, like the Claude desktop app.**
+  Each folder gets a quiet header with a `+` (a new session in that folder), a collapse
+  chevron and a group menu (right-click, or the ⋯ on touch): New session, Move up / Move
+  down, Collapse all / Expand all, and Archive all. Home-dir sessions sit in "Other" at the
+  bottom, and two folders with the same name are told apart by their parent path. Archive
+  all only hides finished rows from your sidebar (reversible via "Show archived"). It
+  never kills a window, and never hides one that is working or waiting on you.
+  Dispatched work is one row per run in a "Dispatched" group, `CMX-N · <title>`: the
+  agent and judge windows fold together, and the row shows the run's state. The
+  "Finished" cluster is gone: a done session stays in its folder. (CMX-35)
+
+- **The Remote Control name in claude.ai / the Claude desktop now equals the chela window
+  name, at launch and after every rename.** Every launcher (dashboard, Telegram `/new`,
+  `chela spawn`, resume) names a new window after its folder — the cwd basename, or the
+  login for the home dir, collision-safe `-N` — instead of a `shell-N` placeholder, and
+  starts Claude Code with `--remote-control <window name>` (the auto-launched orchestrator
+  passes `orchestrator`). A dashboard rename or a duplicate's `-N` suffix queues
+  `/rename <new name>`, typed into the session whenever its prompt is empty, busy or idle (a
+  ghost suggestion counts as empty; a typed draft, a permission dialog or an unreadable
+  status holds it); the daemon retries a held rename every tick. A window launched before
+  this, whose live claude runs `--remote-control` or has Remote Control on, gets renamed
+  too. A rename made in the desktop app does not sync back. (CMX-39, CMX-70)
+
+- **A judge takes minutes, not most of an hour.** Each mutation now runs only the tests that
+  can observe the mutated file: the test files that import it (Python and, transitively, JS),
+  tests that name it, and a per-test coverage map when `pytest-cov` is installed. Selection
+  stays inside what the baseline actually ran. The baseline is still one full-suite run, a
+  red subset is still final, and every subset survivor is re-run on the full suite before it
+  can block, so verdicts mean what they did. An unknown file type, a `conftest.py` or a
+  `test_cmd` that is not one pytest invocation runs the full suite, and
+  `judge.select_tests: false` turns selection off. The verdict header now shows how long the
+  judge took, and each experiment shows how many tests decided it. Held-out experiments
+  (CMX-395) are confirmed on the full suite exactly like visible ones, and the consistency
+  re-run replays each experiment's own first-run selection; a subset survivor the full suite
+  kills is never sampled for it, so it can never be counted flaky. Restart `chela-daemon` to
+  pick it up. (CMX-407)
+
+- **A dispatch pause now says that it holds the judges too, and lists what is still
+  running.** `chela dispatch --pause`, `--hold-status`, `chela doctor` and the Settings
+  "Work dispatcher" row now read "Held: new claims, judges and rework re-spawns. Still
+  finishing: N agent(s), M judge(s)", followed by each in-flight run's CMX id and how long
+  it has been running. The behaviour is unchanged: a hold starts no new agent of any kind
+  and stops nothing already running. The first tick after `--resume` judges any PR that
+  went green while the queue was held. Tests now pin both halves. (CMX-413)
+
+- **The Wall's top toolbar row is tighter and lines up with the sidebar.** The row that
+  holds the layout toggle and "+ New shell" is now exactly as tall as the sidebar's header,
+  so the first pane starts on the header's bottom rule instead of below it. Both controls
+  share one height, the gap between the row and the first pane is the same gap the Wall
+  leaves between panes, and the height saved goes to the panes rather than showing up as
+  empty space under the Wall. The expanded layout toolbar and the phone layout are
+  unchanged. Restart `chela-dashboard` to pick it up. (CMX-414)
+
+- **The shipped skills describe chela as it works now.** `orchestrate` teaches the merge
+  rule (`chela merge` only; the merge-gate hook denies `gh pr merge` and pushes to the base
+  branch; `--override` is approved by the operator), waiting on the judge's verdict rather
+  than on the PR opening, `review --request-changes`, `retry`/`reopen` after `needs_human`,
+  risk levels, held-out experiments, the tracker's first-line and marker rules, deploying by
+  import graph, and releases. `telegram-setup` and `telegram-send` now describe the
+  `chela telegram` bridge (a private forum group, auto-topics, the bindings file,
+  `secrets.env`) instead of three bare env vars. `chela-setup` matches the 0.14.0 install
+  (`--all-extras`, `chela.env`, the hooks plugin, the judge). `handoff` gains a `name`, an
+  `argument-hint`, the "this session, distilled" rule and its three live-state probes. Copy
+  the updated directories into `~/.claude/skills/` to pick them up. (CMX-415)
+- **A test now fails when a skill names a `chela` subcommand or flag the CLI no longer
+  has** (`tests/test_skills.py`), every `SKILL.md` must carry a `name` and `description`,
+  and `skills/` joins the private-strings sweep in `tests/test_public_media.py`. (CMX-415)
+
+- **The trusted-peer UNSANDBOXED share override can now last up to 14 days, and you pick
+  how long in the share dialog.** The dialog offers 30 min · 4 h · 1 day · 7 days ·
+  14 days, starting on `CHELA_SHARE_UNSANDBOXED_MINUTES` (still 30 when unset). That
+  setting's range is now 1–20160 minutes instead of 1–240. A pick longer than 4 h needs
+  the window name typed a second time, and the server refuses it without that. The chosen
+  expiry is recorded as `expires_at` in `share.unsandboxed_granted`. The red
+  "UNSANDBOXED — guest can type" banner and Active shares show the time left
+  (e.g. "12d 4h left"); a row's end time now names the day when it isn't today.
+  Upgrading a live share to UNSANDBOXED from Active shares offers the same picker and
+  needs the same second confirmation past 4 h. Expiry, Stop, the kill switch, the one-joiner binding and the
+  share reaper are unchanged. See `docs/SHARE_SANDBOX.md`. (CMX-419)
+
+- **chelamux's own dispatch queue moved from `TODO.md` to Linear.** The repo's
+  `WORKFLOW.md` now reads `tracker: kind: linear` (team `CMX`, ready state `Todo`, done
+  state `Done`). The markdown adapter and `TODO.md` handling are unchanged for every other
+  workflow. A test pins the repo's own tracker so a revert fails CI. (CMX-438)
+
+- **Window names change only to resolve a duplicate, and a manual rename always wins.** The
+  reconcile loop no longer rewrites a unique window name (`shell-N`, a spawn name, anything)
+  to its cwd basename — a freshly spawned `shell-1` used to become `tradeplan-2` within one
+  tick. When two windows share a name, the newer one (higher window index) gets a
+  collision-safe `-N`; the older keeps it. A dashboard rename now flags the window
+  `@chela_manual_name`, and a flagged name is never renamed: it keeps the name over a
+  non-manual duplicate, and two colliding manual names are both left alone with a warning.
+  The dashboard Start button no longer renames the window either; it only locks it. A raw
+  `tmux rename-window` is not detected as manual (rename through the dashboard for that),
+  though a unique name is never rewritten regardless.
+- **The sidebar row and pane header lead with Claude's session title.** Label order is
+  manual name > Claude's session title > window name; the short window name rides
+  secondary (the pane subtitle, the row's hover). No title yet ⇒ the window name — the old
+  cwd-basename fallback is gone. (CMX-62)
+
+- **Docs: the README, `docs/` and the landing site describe 0.15.** The README opens with
+  what chela is, one install command (`uv sync --all-extras`) and a first run, then a
+  "What's new in 0.15" list. Two new references: `docs/RUNS.md` (a dispatched run from claim
+  to merge — the judge, risk caps, `retry` / `reopen` / `close --requeue`, and the one-tap
+  override whose approval completes the merge) and `docs/DASHBOARD.md` (the sidebar's folder
+  groups, VIEW menu, orchestrator badge and Archive-closes / Unarchive-resumes, window naming
+  and Remote Control, the Linear Work board, the Usage view). `docs/GETTING_STARTED.md` has
+  one install path and no longer says the agent strikes its own `TODO.md` line or opens its
+  own PR. `docs/LINEAR_TRACKER.md` covers the state transitions and the Work board, and
+  `docs/RISK_LEVELS.md` the `risk:` label on a Linear issue. The landing pages drop stale
+  claims (a "full access" share — shares are view-only unless a sandboxed session allows
+  typing; an override that waits; a rework cap of 2). (CMX-71)
+- **Docs: `docs/TRUST_AND_APPROVAL_POSTURE.md` §2 no longer says per-agent sandboxing "does
+  not exist yet".** The sandbox boundary (`chela/sandbox.py`) is implemented and measured,
+  opt-in per workflow (`agent.sandbox: true`) for the coding and rework roles only, and off
+  for chelamux's own dispatch, so its agents still run unsandboxed. (CMX-71, CMX-47)
+- **Docs: spikes, upstream requests and the dated Symphony conformance review moved to
+  `docs/archive/`**, with every reference in code comments, tests and docs updated. (CMX-71)
+
+- **Archiving a session in the sidebar now closes it, like the Claude desktop app, and
+  Unarchive resumes it.** Before, Archive only hid the row in one browser: the window
+  kept running, and the phone and the laptop disagreed about what was archived. The
+  archive is now chela state (`~/.chela/sidebar-archive.json`), so every device shows the
+  same set. Archiving a finished session records its session id, folder, window name and
+  Remote Control name, then closes the window; its Telegram topic is closed. Unarchive
+  opens a new window in the same folder under the same name, runs `claude --resume`, and
+  reopens the same Telegram topic. Archive is refused when the session id cannot be
+  determined, and for a busy or waiting session or the orchestrator. A settled dispatched
+  run is only hidden, because its windows belong to the dispatcher. Archived rows now sit
+  in one collapsed **Archived (N)** section at the bottom of the sidebar (View ▸ Status
+  All or Archived), not inside their folders. A browser's old archive list is imported
+  once, as hidden rows, without closing anything. (CMX-75)
+
+- **CI now tests Python 3.11 and 3.13, and no longer 3.12.** 3.11 is the supported floor
+  (`requires-python = ">=3.11"`). 3.13 is what a live install runs today, and CI had never
+  tested it. The job count stays at two. `requires-python` and the documented ≥ 3.11 minimum
+  are unchanged. (CMX-77)
+
+- **`chela merge --override` no longer waits — it requests, and the approval merges.** The
+  command (or its request-only spelling, `chela override request cmx-N --reason "…"`) runs the
+  gate minus the judge, records one request bound to the PR's head SHA, prints the request id
+  and exits 0. When the operator approves — a one-tap **Approve** button in Telegram, the
+  dashboard's `/override/<id>`, or `chela merge-approve <id>` in a plain terminal — the merge
+  completes by itself through the normal merge path, after re-checking that the head is
+  unchanged, CI is green and the PR is mergeable. Any miss ⇒ no merge, the request is marked
+  failed/expired with the reason, and the operator is told. A new push expires a pending
+  request; `CHELA_OVERRIDE_WAIT_S` is now its safety TTL (default 24 h, was a 300 s wait).
+  (CMX-79)
+
+- **The Linear tracker keeps the 100 most recently finished issues visible and archives
+  only older ones.** Before, chela archived an issue as soon as it was Done or Canceled,
+  which emptied the board of recent history. A new `tracker:` option, `keep_done`
+  (default 100), sets how many finished issues stay unarchived, ranked by when they
+  finished. `keep_done: 0` archives every finished issue, as before. Open issues are never
+  archived and never count toward it. Closing a merged task now only marks it Done; the
+  sweep does the archiving, every 15 minutes and once right after a close. Once the sweep
+  has caught up, the free plan's headroom is 250 − open − `keep_done`. `chela doctor`
+  still WARNs above 200 non-archived issues, and now names lowering `keep_done` as the
+  fix. (CMX-8)
+
+- **Sidebar: an idle session can be archived, and every row has its own Archive.** A live
+  Claude session sitting idle (waiting for your next message) now counts in a group's
+  "Archive all (N)", and each row's menu (right-click, or its ⋯) has an **Archive** item,
+  enabled by the same rule and sent the same way. A busy session, one waiting on you, the
+  orchestrator, a judge mid-battery, an unsettled run, and a session whose status cannot be
+  read are still never archived. Dispatched runs are still only hidden, never closed. (CMX-81)
+
 ### Fixed
 
 - **A Telegram photo or file that times out downloading no longer claims it exceeded the 20 MB
@@ -56,6 +493,298 @@ history lives in `git log`.
   message only when Telegram says "file is too big" or the update's `file_size` is over 20 MB
   (then no download is attempted), and "Could not download the file (<reason>)" otherwise. The warning
   log line includes the exception class. (CMX-63, #628)
+
+- **Sandboxed share sessions keep their conversations across relaunches, so `/resume`
+  works.** The guest's HOME is a tmpfs, so every relaunch (a crash, an approved
+  `chela-request mount`, `chela share-session <name>` again) threw its transcripts away. Each
+  workspace now gets one owner-only host directory under `$CHELA_DIR/share-transcripts/`,
+  bind-mounted read-write at `~/.claude/projects` in that workspace's guest only — nothing
+  else of `~/.claude` is mounted. The launcher refuses to start if the directory can't be
+  made or any part of its path is a symlink, `python -m chela.share_sandbox check` accepts
+  exactly that mount and still fails on any other, and a guest's `chela-request mount` for it
+  (or for `CHELA_DIR`) is still refused. Relaunch the share windows to pick it up — only after
+  any live conversation in them is done, since it exists only in that window's tmpfs. (CMX-12)
+
+- **A docs-only PR is parked once for a human instead of being judged four times.** When
+  every file a PR changes is documentation (under `docs/` or `changelog.d/`, or a
+  top-level `*.md`/`*.rst`/LICENSE-style file other than `WORKFLOW.md`, `CLAUDE.md` or
+  `AGENTS.md`), the dispatcher no longer spawns a judge. It moves the run to `needs_human`
+  in one write ("docs-only — nothing to verify; needs a human OK / `chela merge
+  --override`") and the inbox sends one notice. A `.py` or other non-prose file under
+  `docs/` still counts as code, as does any PR that changes code alongside docs. The fix
+  also covers judges that do run: a `cannot_verify` that re-running the same commit cannot
+  change (docs-only, no `judge.test_cmd`, a deletion-heavy diff) now parks the run the same
+  way. Before, it used up the `judge_max_unknown_retries` retry budget, sending one notice
+  per attempt. Flaky unknowns are still retried. A parked run is still not mergeable without
+  a clean judge or a human override. (CMX-19)
+
+- **An agent can no longer kill or silently re-create the live tmux server.** chela's
+  `PreToolUse` hook (plugin 0.2.7) now denies `tmux kill-server`, and any `kill-session`
+  aimed at chela's session, unless the command pins a private socket with `-L`/`-S`. A
+  `TMUX_TMPDIR=` prefix does not count, because `$TMUX` overrides it inside a pane. The
+  self-heal in `scripts/agent-terminals.sh` and `chela.discovery.ensure_session` now starts
+  the server from a scrubbed env (no Claude session markers, proxies, `PERF_*`) and unsets
+  the same set from the new server's global env. It refuses to heal when `TMUX_TMPDIR`
+  names a missing dir, since tmux would fall back to the default socket. A supervisor
+  whose cwd was deleted exits instead of healing. (CMX-21)
+- **Agent windows no longer inherit a parent Claude session's markers.** `child_env()`
+  drops `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION` and the other
+  markers. Every launch path also scrubs them, along with proxies and `TMUX_TMPDIR`, from
+  tmux's global env, so a pm2 service that carries them no longer turns agent transcripts
+  off. An operator behind a real proxy can name it in `CHELA_CHILD_ENV_FORWARD`. (CMX-21)
+
+- **Telegram: a screenshot an agent opens with `Read` now relays as a photo.** With tool calls
+  hidden (the default) the image-bearing tool result was dropped whole, and the Read tool's
+  "[Image: original … Multiply coordinates …]" note relayed as a 👤 user message instead. The
+  photo now posts (tool text stays hidden) and the note is never relayed. (CMX-24, #608)
+
+- **A window whose agent moved to a Claude Code background session no longer reads
+  "unknown" / "Done".** The pane's own `claude` has no `claude agents --json` entry after the
+  move; chela now follows the entry that descends from it (background first, then newest) for
+  status, cwd and transcript across the Wall, sidebar, `chela peek`, collab and needs-input
+  pushes. `chela peek` and `chela status --sessions` show the background session's name — the
+  one ListAgents/SendMessage need. (CMX-28, #612)
+
+- **A window's context bar and live cost show that window's own session.** The statusLine
+  hook names the cache file after the window resolved from `$TMUX_PANE`, which every process
+  launched from a pane inherits. A Claude Code background session therefore overwrote the
+  window's cache, and the bar showed its numbers (69%, $43) instead of the interactive
+  session's (9%, $0.8). The hook now also writes `context/by-session/<session_id>.json`.
+  `/api/agents/context` and `/api/cost?window=live` read the session the window's own claude
+  process is running. The transcript fallback reads that window's own transcript, not the
+  newest one in its working directory. Stale per-session files are pruned on the
+  snapshot-history schedule. (CMX-29)
+
+- **Dispatched agents and judges show their context bar and cost again.** The statusLine
+  hook wrote `context/<window name>.json`, so a window named `<org>/cmx-N-<slug>` pointed
+  at a subdirectory that does not exist, and since 2026-10-02 every dispatched window cached
+  nothing. The file is now keyed by `chela/cachekey.py`, the one mapping both the hook and
+  `chela.context` use. A failed cache write now exits non-zero and appends to
+  `$CHELA_DIR/statusline-errors.log` instead of failing silently. (CMX-30)
+- **The Cost tab's Today / 7d / 30d views list only agents that ran in the period.** An
+  agent with no snapshot inside the window no longer gets a $0.00 row. A live session with
+  no reported cost shows `—`, and a real $0.00 is no longer turned into unknown. (CMX-30)
+
+- **iPhone Safari no longer zooms the dashboard in when you tap an input.** On a touch
+  device every text control (Settings search, the Jump palette, the new-session form,
+  settings fields) and the terminal's hidden input now use a 16px font, the size below which
+  iOS auto-zooms on focus. Desktop sizes are unchanged, and pinch-zoom still works. The same
+  fix covers the shared-terminal joiner page. Restart `chela-dashboard` to pick it up.
+  (CMX-409)
+
+- **The dispatcher watchdog now re-nudges an agent stranded behind Claude Code's ghost
+  suggestion.** Claude Code draws a faint suggestion (`❯ Try "fix lint errors"`) into an
+  empty prompt, and the watchdog read it from a plain pane capture as typed text, so an
+  agent whose brief never landed sat idle for hours and was never re-sent it. The stuck
+  check now captures the pane with its escapes and treats a faint-only input line as empty.
+  A typed draft still counts as input, and an agent that is visibly working is still never
+  nudged. Restart `chela-daemon` to pick it up. (CMX-410)
+
+- **A long judge battery is no longer killed by the judge agent's own Bash tool.** The judge
+  agent now runs `chela judge run … --detach`, which starts the battery in its own session
+  and process group, logs to `$CHELA_DIR/judge-logs/<task>.log`, and returns at once. Before
+  this, the tool backgrounded the run at 10 minutes and killed it at 30, and the agent
+  restarted it from zero until the 60-minute judge wall fired. The wall now counts from the
+  run's own start rather than from when the agent was spawned. A second run on the same task
+  while one is live is refused. `chela doctor` lists a live judge run with its elapsed time
+  and experiment progress (`k/N`). Restart `chela-daemon` to pick it up. (CMX-411)
+
+- `docs/SHARE_SANDBOX.md` now says shift+tab cycles manual → accept edits → plan → auto
+  (still no bypass). (CMX-418)
+
+- **The active-shares pill no longer covers "+ New shell" on the Wall.** The floating
+  kill-switch pill sat in the same top-right corner as the Wall toolbar's "+ New shell", so
+  with a share live the two were drawn on top of each other. On desktop the toolbar row now
+  carries the pill itself, in line just left of "+ New shell" and at the same height; the
+  floating copy steps aside only while the Wall is showing, so a live share is still visible
+  on every other tab. With no share, "+ New shell" stays where it was. Phones are unchanged.
+  (CMX-422)
+
+- **A pasted or dropped image reaches Claude as an image again.** Since CMX-412, pasting a
+  screenshot into a Wall terminal typed `@uploads/paste-….png`, a plain file reference.
+  Images (PNG, JPEG, WebP, GIF) now take the earlier image path: the image is saved under
+  `/tmp/chela-paste-images/` and its path is typed into the prompt, so Claude Code attaches
+  it and shows `[Image #N]`. Every other file still goes to the session's `uploads/` folder
+  as `@uploads/<name> `. A drop of several files sends each one to its own path, in order.
+  A share guest's image paste is now refused too, as its uploads already were. Restart
+  `chela-dashboard` to pick it up. (CMX-423)
+- **The phone keybar's Paste button works again, and says why when it can't.** It now
+  reads the clipboard the same way Ctrl/Cmd+V does inside a pane. Text is pasted into the
+  active terminal. An image, such as a screenshot, takes the image path above. It used to
+  ask only for text, so a clipboard holding an image produced nothing and the tap did
+  nothing. An empty or blocked clipboard now shows *Empty* or *Denied* on the button
+  instead of failing silently. (CMX-423)
+
+- **A live judge run no longer reads as dead when the host's clock is stepped.** A judge
+  lock recorded its owner's start as a wall-clock time (`btime` + ticks since boot). The
+  kernel recomputes `btime` every time the wall clock is stepped, and WSL2's time sync
+  steps it about every 34s. When that happened, the same untouched process failed the
+  identity check: `chela doctor` stopped listing in-flight judge runs, the per-task judge
+  lock could be taken over, and the watchdog could no longer stop a detached run. Locks
+  and run status now also record the start in ticks since boot, which no clock step
+  changes, and the identity check compares that first. Older locks still use the
+  wall-clock comparison. This also fixes the `judge.live_runs` doctor test, which passed
+  when run directly but failed in judge baselines. Restart `chela-daemon` to pick it up.
+  (CMX-424)
+
+- **An open dashboard no longer keeps running old JS and CSS after a deploy.** The page
+  now loads its scripts and stylesheets from a versioned path (`static/v/<version>/…`,
+  a content hash computed when the dashboard starts), so a reload always gets the new
+  build and never mixes old modules with new ones. Versioned files are cached for good;
+  the page itself is `no-cache`. An open page checks `/api/version` on its regular poll
+  and, when the dashboard was redeployed, shows a small "chela was updated — Reload"
+  banner. It never reloads by itself, since a share or a typed draft may be in progress.
+  Restart `chela-dashboard` to pick it up. (CMX-426)
+
+- **A re-created share shows its guests on every open dashboard page.** Stopping a share
+  and sharing the same pane again keeps its relay room but mints a new pairing code. A
+  dashboard page that didn't do the stop and re-share itself (another tab, the phone)
+  kept its presence session on the old code, so it couldn't read the new guest's
+  presence and the pane showed only the host's avatar until a refresh. Each share now
+  carries a `share_epoch` on the agents poll. When it changes, the page re-reads the
+  share and restarts presence with the new code. When a share stops, its avatars go
+  away. A share that hasn't changed keeps one presence connection. Restart
+  `chela-dashboard` to pick it up. (CMX-427)
+
+- **The phone keybar's Paste button pastes on an iPhone instead of showing *Empty*.**
+  iOS Safari allows one clipboard read per tap, and Paste read the clipboard twice
+  (`read()`, then `readText()`), so the second read came back empty. It now reads once.
+  Text that iOS provides only as a link (`text/uri-list`) or as rich text (`text/html`,
+  converted to plain text) is pasted too, not only `text/plain`. *Empty* now appears only
+  when the clipboard has nothing usable. A refused read shows *Denied*. Restart
+  `chela-dashboard` to pick it up. (CMX-428)
+
+- **A judge whose window is gone is no longer declared lost while its detached run is
+  still going.** Since `chela judge run --detach`, the judge agent stops right after
+  launching the run, so its window disappearing is normal. The watchdog read it as a dead
+  judge, marked the PR CANNOT VERIFY and spawned a second judge into the same worktree
+  while the first run was still mutating it. The watchdog, the judge spawn and
+  `--detach` now first read the run's own record (`$CHELA_DIR/judge-logs/<task>.json` and
+  the slot lock, identified by pid and `/proc` start ticks). A live run is held: no
+  CANNOT VERIFY, no reap, no second judge. Its 60-minute wall counts from the run's own
+  start. Only a run whose process is gone (or was recycled) without a verdict becomes
+  CANNOT VERIFY. Both records are on disk, so a daemon restart mid-judge finds the run
+  too. Restart `chela-daemon` when no detached judge is running. (CMX-429)
+
+- **A failed or partial tracker read no longer marks live work `done`.** Both tracker
+  adapters (`markdown`, `gh_issues`) now have `fetch_by_ids(ids)`, the ID-refresh
+  operation Symphony SPEC 11.1 requires. It returns `None` when the read failed (a missing
+  `TODO.md`, a `gh` timeout, an auth or rate-limit error, bad JSON, or a listing cut off
+  before every id was found). Reconcile re-reads by id every run it would close out
+  (claimed/running and every review state). On `None` it changes no run from the tracker,
+  logs once, and retries next tick. A task the tracker positively reports closed (a struck
+  line, a closed issue) reconciles as before. An open issue that only lost its
+  `require_label` is no longer treated as done. Restart `chela-daemon` to pick it up.
+  (CMX-430)
+
+- **A long judge run is no longer thrown away at 60 minutes while it is still working.**
+  The judge wall now grows with the battery: 10 minutes, plus 6 per experiment, plus 1.5 ×
+  the run's own baseline for each full-suite confirmation, never below the old 60 minutes
+  and never above 3 hours. Past the wall, a run is only called "stuck, not thinking" when
+  its progress has stopped. A run still moving is left alone. A run that has finished
+  every experiment gets 15 more minutes to publish its verdict. Before this, a
+  12-experiment high-risk run that had finished its battery was killed at 62 minutes and
+  its real BLOCK was never published. `chela doctor` uses the same rule. The four limits
+  are Settings → Dispatch knobs (`CHELA_JUDGE_WALL_BASE_S`,
+  `CHELA_JUDGE_WALL_PER_EXPERIMENT_S`, `CHELA_JUDGE_WALL_CEILING_S`,
+  `CHELA_JUDGE_WALL_GRACE_S`). Restart `chela-daemon` when no judge is running. (CMX-431)
+
+- **A sandboxed share session keeps working after the host refreshes its Claude login.**
+  The proxy sidecar used to mount `~/.claude/.credentials.json` as a single file. Claude
+  Code refreshes its login by writing a new file in place of the old one, which revokes
+  the old token, and a single-file mount keeps showing the old file. After a few hours
+  every request failed with `401 OAuth access token has been revoked`, and the guest was
+  offered `/login`. Now the launcher copies only the access token into a per-session
+  directory (`~/.chela/share-token/<id>/`), checks for a refresh every 2 seconds, and the
+  sidecar mounts that directory read-only. The refresh token no longer enters the
+  sidecar, and the guest still mounts no token. On a 401 the proxy reads the token again
+  and retries once if it changed. A 401 that persists is answered with a 502, *"The
+  host's Claude login expired — ask the operator…"*, instead of sending the guest into
+  `/login`. For long-running shares, `docs/SHARE_SANDBOX.md` now recommends a
+  `claude setup-token` token in `CHELA_SHARE_SANDBOX_TOKEN_FILE`. (CMX-433)
+
+- **A dashboard deploy no longer ends live shares.** A share's bridge ran inside the
+  dashboard, so every `chela-dashboard` restart cut the guest off with no notice. The
+  bridges now run in their own service, `chela collab` (PM2 `chela-collab`, added to
+  `examples/ecosystem.config.js`), and the dashboard talks to it over an owner-only
+  socket. `chela update` restarts that service only when the share code changed — including code a
+  bare `git pull` brought in, found by the HEAD the service started on (the HEAD reflog). Each
+  live share is also kept in `$CHELA_DIR/shares.json` (0600, never inside a git work
+  tree), so whichever process hosts the shares restores them after a restart with the
+  same link and pairing code. A share whose window is gone or changed isn't restored. Nor
+  is a typing share whose window no longer verifies as a sandbox, or an UNSANDBOXED
+  override that expired. Without `chela-collab` the dashboard hosts the shares as before
+  and restores them itself. A restored host never reuses an AES-GCM nonce. It also
+  refuses replayed keystrokes until the guest answers a fresh challenge. The guest page
+  shows "host restarting…" instead of "This share has ended" and reconnects by itself;
+  it needs a `wrangler deploy` of `chela/collab-relay`. `chela update` prints "N live
+  share(s) will be interrupted" before a restart that would interrupt them, and
+  `chela shares` reports the same for a hand deploy. Start the new service with
+  `pm2 start ~/.chela/ecosystem.config.js --only chela-collab && pm2 save`. (CMX-434)
+
+- **A sandboxed session's Claude banner no longer says "API Usage Billing".** The guest's
+  Claude was given a placeholder `ANTHROPIC_AUTH_TOKEN`, so it labelled itself as API
+  billing, though the share proxy always sends your Claude subscription's OAuth token.
+  It now gets a placeholder login in its own temporary HOME that names your plan (read
+  from the non-secret `subscriptionType` of your credentials file, or
+  `CHELA_SHARE_SANDBOX_SUBSCRIPTION`), so the banner reads "Claude Max" / "Claude Pro".
+  Every request still goes through the proxy, which still replaces the auth, and the real
+  token still never enters the container. When the plan can't be read, the old
+  placeholder env is kept. Applies to sandboxed sessions started after the deploy. (CMX-435)
+
+- **Sandboxed sessions show working/idle instead of "unknown".** Claude in the container
+  is invisible to chela's usual status sources, so the share proxy now records its
+  in-flight model requests in the session's proxy-only directory. `chela peek` and the
+  Wall read that for a window that verifies as sandboxed: working while a request is in
+  flight (or finished within 4 s, to cover tool calls), idle after. The tooltip says
+  "from the sandbox proxy". A permission prompt can't be seen this way, and ordinary
+  windows are unchanged. (CMX-436)
+
+- **The dispatcher-sessions toggle in "Recent sessions" reads correctly.** It said
+  "Hide 1 dispatcher session hidden". Collapsed, it now reads "Show 1 hidden dispatcher
+  session" ("sessions" for more than one); expanded, "Hide dispatcher sessions". Those
+  rows still have no Resume button. (CMX-437)
+
+- **Settings → Update flags a service as stale only when code it runs changed.** Before,
+  any new commit marked every running `chela-*` service stale: a dashboard-only change
+  flagged `chela-daemon`, `chela-telegram` and `chela-agent-terminals`, none of which run
+  that code. Now each service's code set is worked out from its import graph, launcher
+  scripts and data files, and compared with what changed since the commit the service
+  started on. A service whose start commit can't be read is shown as "unknown". The same
+  change fixes the `repo.services_current` doctor fact and the restart-only path of
+  `chela update`.
+- **"Update now" no longer does nothing when there is nothing to pull.** If services are
+  stale, the button now reads "Restart stale services (N)" and restarts exactly those. It
+  waits while a dispatched run is in flight, like the update path does. Every click now
+  shows a message: "already up to date", "restarting X, Y", or the error. The card's text
+  also wraps properly on a phone. (CMX-56)
+
+### Security
+
+- **A typing share stops streaming the moment its pane stops verifying as a sandboxed
+  session.** Before, swapping the pane's process stopped the guest's typing, but until the
+  share ended the guest's view could still show the new host shell (a prompt with an email
+  address and cloud region in it). Now a share created with *Allow typing* checks the pane
+  before every frame it sends: if the pane's process changed, the container check fails, or
+  the check can't tell, that frame is dropped and the share ends, telling the guest "the
+  session stopped being a verified sandbox". A view-only share of an ordinary window is
+  unchanged. Restart `chela-dashboard` to pick it up. (CMX-416)
+
+- **Secrets from `chela.env` and `secrets.env` no longer reach the processes chela launches.**
+  chela loads both files into its own environment, so before this change every agent and
+  judge window, workflow hook and judge test suite the daemon started carried them, including
+  the `LINEAR_API_KEY` the Linear tracker will use. Those children now get the environment
+  without `LINEAR_API_KEY` and without any name shaped like `*_API_KEY`, `*_TOKEN`,
+  `*_SECRET` or `*PASSWORD*`. Before opening a tmux window, chela also unsets those names
+  from the tmux server's global environment, which is what new windows inherit. Claude
+  Code's own credentials and `GH_TOKEN`/`GITHUB_TOKEN` are still passed on. Name any other
+  variable a hook needs in `CHELA_CHILD_ENV_FORWARD`. `PATH`, `HOME` and the `CHELA_*`
+  settings are unchanged. Restart `chela-daemon` and `chela-dashboard` to pick it up.
+  (CMX-425)
+
+- An override approval stays human-only: `chela merge-approve` refuses in a process carrying
+  `$CHELA_ACTOR` or a Claude Code session marker, and the merge-gate hook (plugin 0.2.8) also
+  denies a session's `python` call into `chela.overrides.decide`. (CMX-79)
 
 ## [0.14.0] — 2026-09-30
 
