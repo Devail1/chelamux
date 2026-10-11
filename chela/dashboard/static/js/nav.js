@@ -534,10 +534,20 @@ function _agentRowHtml(a, o = {}) {
         <span class="term-status-dot ${stCls}" title="${attrEsc(o.runId ? 'run' : type)} · ${stWord}"></span>
         <div class="ar-main">
             <span class="agent-row-name"${key ? ` data-key="${attrEsc(key)}" title="${attrEsc(`window: ${key}`)}"` : ''}>${escHtml(label)}</span>
-            <div class="ar-sub">${sub}${o.badge || ''}</div>
+            <div class="ar-sub">${sub}${_orchBadgeHtml(a)}${o.badge || ''}</div>
         </div>
         ${ago}${more}
     </div>`;
+}
+
+// CMX-76: the orchestrator's row carries a small "orchestrator" badge in the row's badge
+// slot (where a run hangs its PR badge). Since CMX-72 it is a plain row in its folder
+// group and its title is Claude's auto-title, which drifts — so this is what marks it.
+// The SAME fact _agentRole reads (orchestratorState().wid, the decisions-inbox slot).
+// A WORD, not a colour: the operator is red-weak.
+function _orchBadgeHtml(a) {
+    if (_agentRole(a) !== 'orchestrator') return '';
+    return '<span class="ar-orch" title="Orchestrator — holds the decisions inbox" aria-label="Orchestrator">orchestrator</span>';
 }
 
 // A dispatched RUN's one row (CMX-35): its agent window and its judge window are ONE
@@ -1149,6 +1159,48 @@ onOrchestratorChange(() => {
     renderSidebarAgents(_agentsCache || []);
     if (_detailAgent) renderAgentDetail();
 });
+
+// CMX-76: the sidebar header's inbox icon. The orchestrator HOLDS the inbox, so with
+// one registered a click jumps to it — its pane focused (or its detail view, with no
+// wall), its row scrolled into view (its folder group expanded if collapsed) — and the
+// decisions log still opens over it, so nothing the icon did before is lost (the log
+// is its only way in, and opening it is what clears the unread badge). With no
+// orchestrator (or its window gone) the icon only opens the log, as it always has.
+function inboxClick() {
+    jumpToOrchestrator();
+    if (window.chela && window.chela.openDecisionsMenu) window.chela.openDecisionsMenu();
+}
+
+// Focus the orchestrator's pane and row. NOT selectAgent: that one TOGGLES — on a pane
+// already open on the wall it minimizes it, the opposite of "jump to". Returns false
+// when there is no orchestrator window to jump to.
+function jumpToOrchestrator() {
+    const wid = orchestratorState().wid;
+    const a = wid ? (_agentsCache || []).find(x => x && x.window_id === wid) : null;
+    if (!a) return false;
+    if (TERMINALS_ON && typeof focusPaneByWid === 'function') {
+        if (!isWallVisible()) setTermMode('wall');
+        focusPaneByWid(wid);
+    } else {
+        showAgentDetail(a.name);
+    }
+    const rowOf = () => [...$$('#sidebar-agents .agent-row')].find(r => r.dataset.agent === a.name) || null;
+    let row = rowOf();
+    const g = row && row.closest('.side-group.collapsed');
+    if (g && g.dataset.g && g.dataset.g !== ARCHIVED_SECTION_KEY) { toggleGroup(g.dataset.g); row = rowOf(); }
+    if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' });
+    return true;
+}
+
+// The icon says what a click will do (a tooltip / screen-reader label, not just a dot).
+function _syncInboxBtn() {
+    const btn = document.getElementById('btn-decisions');
+    if (!btn) return;
+    const label = orchestratorState().wid ? 'Decisions inbox — jump to the orchestrator' : 'Decisions inbox';
+    btn.title = orchestratorState().wid ? 'Decisions — jump to the orchestrator' : 'Decisions';
+    btn.setAttribute('aria-label', label);
+}
+onOrchestratorChange(_syncInboxBtn);
 
 // The WORK badges used to be a THIRD independent poller of /api/dispatcher, right
 // here — fetching the same payload the Dispatch and Kanban views were each already
@@ -3291,8 +3343,8 @@ function closeShortcuts() {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { archiveKeys, refreshArchive, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, renameCustomGroup, toggleGroup, toggleShowArchived, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
+export { archiveKeys, inboxClick, jumpToOrchestrator, refreshArchive, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, renameCustomGroup, toggleGroup, toggleShowArchived, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyUpdate, archiveKeys, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
+Object.assign(window.chela, { applyUpdate, archiveKeys, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });

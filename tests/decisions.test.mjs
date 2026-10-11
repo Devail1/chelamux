@@ -1046,9 +1046,12 @@ test('the REAL index.html wires the modal backdrop to hideDecisionsMenu, same as
 // stayed green, because none of them ever looked at the real button. Same
 // shape as the backdrop test above, aimed at the sibling attribute it never
 // covered.
+// CMX-76: the button now calls nav.js's chela.inboxClick(), which jumps to the
+// orchestrator and still opens this modal through window.chela.openDecisionsMenu —
+// that second hop is driven for real in tests/sidebar_orchestrator_badge.test.mjs.
 test('the REAL index.html wires #btn-decisions to open the modal', () => {
-    assert.match(REAL_HTML, /id="btn-decisions"[^>]*onclick="chela\.openDecisionsMenu\(\)"/,
-        '#btn-decisions is not wired to chela.openDecisionsMenu() in index.html — nothing opens the modal');
+    assert.match(REAL_HTML, /id="btn-decisions"[^>]*onclick="chela\.inboxClick\(\)"/,
+        '#btn-decisions is not wired to chela.inboxClick() in index.html — nothing opens the modal');
 });
 
 // 🔴 GUARD (CMX-288 rework round 2): the modal's ✕ close button, same gap as
@@ -1105,9 +1108,13 @@ test('🔴 GUARD: every chela.X(...) named in an onclick/oninput on #btn-decisio
     // sanity: all three names must actually appear, or the loop below would
     // vacuously pass over a shrunken list (this is what round 3's own filter
     // silently did to openDecisionTicket/setDecisionsQuery).
-    assert.deepEqual(unique, ['hideDecisionsMenu', 'openDecisionsMenu', 'setDecisionsQuery'],
+    assert.deepEqual(unique, ['hideDecisionsMenu', 'inboxClick', 'setDecisionsQuery'],
         `expected exactly these names in an onclick/oninput within #btn-decisions/#decisions-menu, found: ${unique.join(',') || '(none)'}`);
-    for (const name of unique) {
+    // CMX-76: `inboxClick` is nav.js's (not loaded here — its resolution is guarded in
+    // tests/sidebar_orchestrator_badge.test.mjs); what it calls through window.chela is
+    // openDecisionsMenu, so THAT name must still resolve on decisions.js's surface.
+    const resolved = [...unique.filter(n => n !== 'inboxClick'), 'openDecisionsMenu'];
+    for (const name of resolved) {
         assert.equal(typeof window.chela[name], 'function',
             `an inline handler calls chela.${name}(...) but window.chela.${name} is not a function — a real interaction would throw`);
     }
