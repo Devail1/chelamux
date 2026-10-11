@@ -27,6 +27,7 @@ from chela.workflow import WorkflowDef
 
 SENTINEL = "CHELA_CMX45_SENTINEL"
 TMUX_ONLY_SENTINEL = "CMX45_TMUX_GLOBAL_ONLY"
+SESSION_ONLY_SENTINEL = "CMX45_TMUX_SESSION_ONLY"
 # `_capture_send_keys` patches the shared `subprocess` module; the replay needs the real one.
 _REAL_RUN = subprocess.run
 
@@ -45,9 +46,12 @@ def _conn(dispatcher):
     return dispatcher.ensure_schema(conn)
 
 
-def _capture_send_keys(monkeypatch, dispatcher, tmux_global: str = ""):
+def _capture_send_keys(monkeypatch, dispatcher, tmux_global: str = "",
+                       tmux_session: str = ""):
     """Fake `subprocess.run` for `_launch_agent`'s tmux calls; records every send-keys line.
-    ``tmux_global`` is what `tmux show-environment -g` reports (``KEY=value`` lines)."""
+    ``tmux_global`` is what `tmux show-environment -g` reports and ``tmux_session`` what
+    `tmux show-environment -t <TMUX_SESSION>` reports (``KEY=value`` lines) — two separate
+    tables tmux merges into a new window, so each is fed on its own."""
     sent: list[str] = []
 
     def fake_run(argv, *a, **k):
@@ -55,6 +59,8 @@ def _capture_send_keys(monkeypatch, dispatcher, tmux_global: str = ""):
             return SimpleNamespace(stdout="@100\n", returncode=0)
         if argv[:3] == ["tmux", "show-environment", "-g"]:
             return SimpleNamespace(stdout=tmux_global, returncode=0)
+        if argv[:4] == ["tmux", "show-environment", "-t", dispatcher.TMUX_SESSION]:
+            return SimpleNamespace(stdout=tmux_session, returncode=0)
         if argv[:2] == ["tmux", "send-keys"] and len(argv) > 4:
             sent.append(argv[4])
         return SimpleNamespace(stdout="", returncode=0)
@@ -63,11 +69,12 @@ def _capture_send_keys(monkeypatch, dispatcher, tmux_global: str = ""):
     return sent
 
 
-def _launch(monkeypatch, dispatcher, tmp_path, tmux_global: str = "", **kwargs):
+def _launch(monkeypatch, dispatcher, tmp_path, tmux_global: str = "",
+            tmux_session: str = "", **kwargs):
     monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda *_a, **_k: None)
     monkeypatch.setattr(dispatcher, "_wait_for_ready", lambda *a, **k: True)
     monkeypatch.setattr(dispatcher, "_send_seed", lambda *a, **k: True)
-    sent = _capture_send_keys(monkeypatch, dispatcher, tmux_global)
+    sent = _capture_send_keys(monkeypatch, dispatcher, tmux_global, tmux_session)
     wf = _wf(tmp_path)
     conn = _conn(dispatcher)
     dispatcher._launch_agent(
@@ -104,7 +111,8 @@ def test_a_daemon_var_is_absent_in_the_agent_pane_but_chela_wid_and_path_survive
     monkeypatch.setenv(SENTINEL, "1")
     monkeypatch.setenv("CHELA_NOTIFY_URL", "https://ntfy.invalid/topic")
     sent = _launch(monkeypatch, dispatcher, tmp_path,
-                   tmux_global=f"{TMUX_ONLY_SENTINEL}=1\n-CMX45_REMOVED\n")
+                   tmux_global=f"{TMUX_ONLY_SENTINEL}=1\n-CMX45_REMOVED\n",
+                   tmux_session=f"{SESSION_ONLY_SENTINEL}=1\n")
 
     pane_env = {
         "PATH": os.environ["PATH"],
@@ -112,12 +120,16 @@ def test_a_daemon_var_is_absent_in_the_agent_pane_but_chela_wid_and_path_survive
         "CHELA_TMUX_SESSION": "chela",
         SENTINEL: "1",
         TMUX_ONLY_SENTINEL: "1",
+        SESSION_ONLY_SENTINEL: "1",
         "CHELA_NOTIFY_URL": "https://ntfy.invalid/topic",
     }
     agent_env = _run_in_pane(sent, pane_env)
 
     assert SENTINEL not in agent_env, "a daemon-env var reached the agent pane"
     assert TMUX_ONLY_SENTINEL not in agent_env, "a tmux-global var reached the agent pane"
+    # The SESSION table is a second source tmux merges into a new window (`set-environment
+    # -t chela`, or update-environment on attach) — a name only it holds must go too.
+    assert SESSION_ONLY_SENTINEL not in agent_env, "a tmux-session var reached the agent pane"
     assert "CHELA_NOTIFY_URL" not in agent_env
     assert agent_env.get("CHELA_WID") == "@100"
     assert agent_env.get("PATH") == os.environ["PATH"]

@@ -143,6 +143,9 @@ AGENT_ENV_ALLOW = frozenset({
 # and tool behaviour switches (``COREPACK_ENABLE_AUTO_PIN=0`` keeps pnpm from rewriting
 # package.json; ``UV_*`` points at the cache the sandbox allows). A secret-shaped name under
 # one of these (``UV_PUBLISH_TOKEN``) is still dropped — :func:`is_secret` runs after.
+# Width is deliberate for now: of ``UV_*``, only the cache/tool locations (``UV_CACHE_DIR``,
+# ``UV_TOOL_DIR``, ``UV_PYTHON_INSTALL_DIR``) matter to a sandboxed ``uv run`` — narrow the
+# prefix to those names if a non-secret-shaped ``UV_*`` ever needs to stay daemon-side.
 AGENT_ENV_ALLOW_PREFIXES = ("LC_", "XDG_", "WSL", "COREPACK_", "UV_")
 # Dropped even when an operator forwards it (CMX-115): the daemon's real phone notifier.
 AGENT_ENV_DENY = frozenset({"CHELA_NOTIFY_URL"})
