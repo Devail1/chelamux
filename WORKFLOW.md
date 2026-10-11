@@ -12,7 +12,7 @@
 project_key: CMX
 
 # chelamux's own queue lives in Linear (team CMX), not TODO.md — the owner's call,
-# 2026-10-01 (docs/SYMPHONY_CONFORMANCE_2026-09-13.md, G2). Linear keeps briefs private,
+# 2026-10-01 (docs/archive/SYMPHONY_CONFORMANCE_2026-09-13.md, G2). Linear keeps briefs private,
 # which a public tracker would not. The API key is read ONLY from $CHELA_DIR/chela.env as
 # LINEAR_API_KEY — never put it here; this file is public. An issue in a `ready_states`
 # state is claimable; `risk:high|normal|low` labels set its risk. Setup: docs/LINEAR_TRACKER.md.

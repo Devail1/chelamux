@@ -145,7 +145,7 @@ def hook_timeout(event: str) -> int:
 
 
 # The event "timestamps on messages in the live terminal" maps to now (CMX-285,
-# correcting CMX-277's own mechanism — see docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md).
+# correcting CMX-277's own mechanism — see docs/archive/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md).
 # CMX-277 used `systemMessage` on `UserPromptSubmit`/`Stop`, which Claude Code renders as
 # its OWN separate `<Line>` above/below the message — visible, but not what Liav meant by
 # "timestamps": his verdict on the shipped version was that it "doesn't seem to be

@@ -1082,7 +1082,7 @@ STATUS_LINE = os.environ.get("CHELA_STATUS_LINE", "true").strip().lower() not in
 
 # Live-terminal message timestamps (CMX-277, correcting CMX-270's "not feasible"
 # verdict; CMX-285 corrected CMX-277's own mechanism — see
-# docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md): the MessageDisplay hook's `displayContent`
+# docs/archive/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md): the MessageDisplay hook's `displayContent`
 # response prepends a local-time marker to an assistant reply's own first line, which is
 # what the wall's ttyd tile mirrors byte-for-byte — genuinely INLINE, unlike CMX-277's
 # `systemMessage`, which Claude Code renders as its own separate line. OFF by default —

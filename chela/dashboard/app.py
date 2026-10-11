@@ -3637,7 +3637,7 @@ def api_hooks(event):
         # hooks.ingest, so this display-only decoration never touches the event log (a
         # firehose of near-duplicate "message display" records nobody would read) and
         # stays off the hot path — no wid resolution, no disk write — even when
-        # config.TERMINAL_TIMESTAMPS is False. See docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md
+        # config.TERMINAL_TIMESTAMPS is False. See docs/archive/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md
         # and hooks.message_display_response.
         if config.TERMINAL_TIMESTAMPS and isinstance(body, dict):
             return jsonify(hooks.message_display_response(body))

@@ -168,7 +168,7 @@
 // the wall visually fill its stage" — is guardable at all in this harness.
 // Verdict: no. jsdom has no layout engine (getBoundingClientRect/offsetWidth
 // are always zero, percentage/flex/grid widths never resolve against a real
-// parent — see docs/SPIKE_WALL_FILLS_STAGE.md), so this file can only ever
+// parent — see docs/archive/SPIKE_WALL_FILLS_STAGE.md), so this file can only ever
 // pin an enumerated list of known-bad property values, never observe the
 // rendered result. Confirmed live: `transform: scale(0.6)` on `.grid-stack`
 // reproduces the identical regression today and passes all four assertions
@@ -231,7 +231,7 @@
 // might narrow it — transform/zoom/inset/container-queries/aspect-ratio/a
 // new wrapper element/anything else) — jsdom has no layout engine, so no
 // text-and-DOM test in this file can observe a rendered box size, only pin
-// enumerated property VALUES (see docs/SPIKE_WALL_FILLS_STAGE.md for the
+// enumerated property VALUES (see docs/archive/SPIKE_WALL_FILLS_STAGE.md for the
 // empirical proof and a live fifth counter-example). What stays guarded,
 // deliberately not extended further, is the narrow, cheap claim below:
 // #term-stage's own padding-left/-right and .grid-stack's own max-width/
