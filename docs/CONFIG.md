@@ -218,6 +218,13 @@ Claude Code's credentials (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
 another one, for example a token an `after_done` hook needs, name it in
 **`CHELA_CHILD_ENV_FORWARD`** (comma or space separated).
 
+An agent or judge **window** gets less than that: its pane keeps only an allowlist (shell
+basics, terminal, locale, chela's own `CHELA_DIR` / `CHELA_TMUX_SESSION` / `CHELA_WID`, and the
+credentials above) and every other inherited name — including the rest of your `chela.env`
+settings — is unset before the agent starts. A name in `CHELA_CHILD_ENV_FORWARD` is kept there
+too, except `CHELA_NOTIFY_URL`. See
+[TRUST_AND_APPROVAL_POSTURE.md §2](TRUST_AND_APPROVAL_POSTURE.md#2-what-a-dispatched-agent-can-do-execution--sandbox).
+
 ### Don't clone someone else's `chela.env`
 
 `chela.env` carries no secrets, but it does carry **per-install** values — start from
