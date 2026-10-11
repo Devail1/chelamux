@@ -18,7 +18,7 @@ import sys
 
 import pytest
 
-from chela import agent_manager, dispatcher, inbox, launcher, main, orchestrator, spawn
+from chela import agent_manager, dispatcher, inbox, launcher, main, orchestrator, sidebar_archive, spawn
 
 SENTINEL_CMD = "sentinel-agent --default"
 
@@ -134,7 +134,7 @@ def close_env(monkeypatch):
     def run(cmd, **kw):
         calls.append(cmd)
         return _Proc()
-    monkeypatch.setattr(main.subprocess, "run", run)
+    monkeypatch.setattr(sidebar_archive.subprocess, "run", run)
     return calls
 
 
@@ -180,7 +180,7 @@ def test_force_kills_a_window_an_in_flight_run_claims(close_env):
 
 
 def test_close_reports_a_failed_kill(close_env, monkeypatch, capsys):
-    monkeypatch.setattr(main.subprocess, "run",
+    monkeypatch.setattr(sidebar_archive.subprocess, "run",
                         lambda cmd, **kw: _Proc(returncode=1, stderr="can't find window"))
     assert _main(["close", "@5"]) == 1
     assert "can't find window" in capsys.readouterr().err

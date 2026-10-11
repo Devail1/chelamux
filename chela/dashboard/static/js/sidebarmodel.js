@@ -162,12 +162,15 @@ export function runLabel(item) {
 // Run states that are SETTLED — nothing more will happen without a human starting it.
 const RUN_SETTLED = new Set(['done', 'closed', 'failed']);
 
-// May "Archive all" hide this row? Archiving only HIDES a row from the sidebar — it
-// never kills a window — and even hiding is refused for anything live: a window that is
+// May "Archive all" archive this row? Refused for anything live: a window that is
 // working, blocked on you (waiting / needs_human), the orchestrator, or a judge whose
 // battery is still testing. What is left is a finished plain session (`done`: idle with
 // output you have not answered), a window with no Claude in it any more, or a run that
 // has settled (done / closed / failed).
+//
+// CMX-75: what archiving then DOES is the server's (chela/sidebar_archive.py): a plain
+// session's window is CLOSED (after recording how to resume it — and refused when its
+// session id is unknown), a settled run is only HIDDEN (its windows are the dispatcher's).
 export function isArchivable(item, { wants, orchWid } = {}) {
     if (!item || !wants) return false;
     for (const a of item.windows || []) {
@@ -380,18 +383,28 @@ function _sortItems(items, sort, labelOf) {
     return items;
 }
 
+// An archived (CLOSED) session's row (CMX-75): it has no window any more — only the
+// server's resume record (chela/sidebar_archive.py) — keyed by its session id.
+export function sessionItem(rec) {
+    return { kind: 'session', key: rec.key, record: rec, agent: null, windows: [] };
+}
+
 // The whole sidebar, as data:
 //   needsYou  rows blocked on a human, lifted above the groups ("Needs you") — in the
 //             State grouping they are its "Needs you" group instead
-//   groups    [{key, label, cwd, items, archived, flat?}] in display order
-//   hidden    keys of archived rows that are still archivable (archive-set pruning and
-//             the "Show archived (N)" count)
+//   groups    [{key, label, cwd, items, flat?}] in display order — NEVER an archived row
+//   archived  every archived row, for the ONE "Archived (N)" section at the BOTTOM
+//             (CMX-75, like the desktop): hidden rows still archivable, then the closed
+//             sessions (`sessions`). Not filtered by the view — it is the archive.
+//   hidden    keys of hidden rows that are still archivable (archive-set pruning)
 // Options: `mode` (folder / date / state / custom / none), `wants` (util.js's
-// wantsHuman), `orchWid`, `order` (persisted group order), `archived` (a Set of item
-// keys), `status` (active / all / archived — `showArchived` is part 1's spelling of
-// 'all'), `env` (the session kinds to show; null = all), `activityDays` (null = all),
-// `now`, `sort` (activity / name / created), `labelOf` (an item's display label),
-// `showEmpty`, `custom` ({groups: [{id, name}], assign: {itemKey: id}}).
+// wantsHuman), `orchWid`, `order` (persisted group order), `archived` (a Set of hidden
+// item keys), `sessions` (the server's closed-session records), `status` (active / all
+// / archived — `showArchived` is part 1's spelling of 'all'; it decides whether the
+// renderer SHOWS the Archived section, and Archived shows nothing else), `env` (the
+// session kinds to show; null = all), `activityDays` (null = all), `now`, `sort`
+// (activity / name / created), `labelOf` (an item's display label), `showEmpty`,
+// `custom` ({groups: [{id, name}], assign: {itemKey: id}}).
 //
 // The orchestrator (`orchWid`, the decisions-inbox holder) is NOT lifted out of its
 // group (CMX-72) — it sits in its folder like any other session.
@@ -402,7 +415,7 @@ export function groupSidebar(agents, opts = {}) {
     const { mode = 'folder', wants, orchWid = null, order = [], archived = new Set(),
         showArchived = false, env = null, activityDays = null, now = Date.now(),
         sort = 'name', labelOf = it => it.key, showEmpty = false,
-        custom = { groups: [], assign: {} } } = opts;
+        custom = { groups: [], assign: {} }, sessions = [] } = opts;
     const status = opts.status || (showArchived ? 'all' : 'active');
     if (!GROUP_MODES.includes(mode)) throw new Error(`unknown sidebar grouping mode: ${mode}`);
     const items = buildItems(agents);
@@ -410,30 +423,36 @@ export function groupSidebar(agents, opts = {}) {
     const cutoff = activityDays ? now - activityDays * 86400000 : null;
     const needsYou = [];
     const hidden = [];
-    const kept = [];          // [item, isArchived]
+    const archivedRows = [];
+    const kept = [];
     const allFolders = new Set();
     for (const it of items) {
         const prim = primaryWindow(it);
         if (it.windows.some(a => wants(a))) { needsYou.push(it); continue; }
         if (mode === 'folder') allFolders.add(it.kind === 'run' ? DISPATCHED_KEY : folderKey(prim));
-        if (orchWid && it.windows.some(a => a.window_id === orchWid)) { kept.push([it, false]); continue; }
+        if (orchWid && it.windows.some(a => a.window_id === orchWid)) { kept.push(it); continue; }
         // Archived only while it is still archivable: a row that wakes up (busy, waiting)
-        // is shown again whatever the archive set says.
-        const isArch = archived.has(it.key) && isArchivable(it, { wants, orchWid });
-        if (isArch) hidden.push(it.key);
-        if (status === 'archived' && !isArch) continue;
+        // is shown again whatever the archive set says. An archived row goes to the ONE
+        // Archived section at the bottom — never into a group.
+        if (archived.has(it.key) && isArchivable(it, { wants, orchWid })) {
+            hidden.push(it.key);
+            archivedRows.push(it);
+            continue;
+        }
+        if (status === 'archived') continue;
         if (envSet && ![...itemKinds(it)].some(k => envSet.has(k))) continue;
         if (cutoff != null && !isLive(it, wants)) {
             const t = activityTs(it);
             if (t != null && t < cutoff) continue;
         }
-        kept.push([it, isArch]);
+        kept.push(it);
     }
+    for (const rec of sessions || []) if (rec && rec.key) archivedRows.push(sessionItem(rec));
 
     // The candidate groups, in a mode's own fixed order (rank); folders are found.
     const byKey = new Map();
     const ensure = (key, extra = {}) => {
-        if (!byKey.has(key)) byKey.set(key, { key, items: [], archived: [], ...extra });
+        if (!byKey.has(key)) byKey.set(key, { key, items: [], ...extra });
         return byKey.get(key);
     };
     const customIds = new Set((custom.groups || []).map(g => g.id));
@@ -460,13 +479,7 @@ export function groupSidebar(agents, opts = {}) {
         }
         return it.kind === 'run' ? DISPATCHED_KEY : folderKey(primaryWindow(it));
     };
-    for (const [it, isArch] of kept) {
-        const g = ensure(keyOf(it));
-        if (isArch) g.archived.push(it);
-        // Status "Active" hides an archived row, but its group still knows it has one
-        // (the group menu's "Unarchive all").
-        if (!isArch || status !== 'active') g.items.push(it);
-    }
+    for (const it of kept) ensure(keyOf(it)).items.push(it);
     // In the State grouping, "Needs you" is a group like the others.
     let lifted = needsYou;
     if (mode === 'state') {
@@ -481,10 +494,11 @@ export function groupSidebar(agents, opts = {}) {
         const label = g.label != null ? g.label : labels[g.key];
         return { ...g, label, cwd, items: _sortItems(g.items, sort, labelOf) };
     });
-    if (!showEmpty) groups = groups.filter(g => g.items.length || g.archived.length || g.flat);
+    if (!showEmpty) groups = groups.filter(g => g.items.length || g.flat);
     return {
         needsYou: _sortItems(lifted, sort, labelOf),
         groups: orderGroups(groups, order),
+        archived: archivedRows,
         hidden,
     };
 }

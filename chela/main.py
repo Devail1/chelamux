@@ -16,7 +16,6 @@ import logging
 import os
 import re
 import signal
-import subprocess
 import sys
 import threading
 import time
@@ -52,6 +51,7 @@ from chela import (
     rooms,
     scheduler,
     sessionids,
+    sidebar_archive,
     spawn,
     update,
     wait,
@@ -1636,6 +1636,9 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
                 log.exception("chela roster: recording the fleet snapshot failed")
             dispatched = set() if BIND_DISPATCHED else tg.dispatched_window_ids(
                 live_windows=live, now_epoch=now_epoch)
+            # CMX-75: a session the sidebar unarchived asks for its old topic back.
+            rebinds = sidebar_archive.pending_rebinds(now_epoch)
+            had_rebinds = bool(rebinds)
             bindings_changed = tg.reconcile_bindings(
                 registry, live, agents, topic_api,
                 cwd_for=get_window_cwd_by_id,
@@ -1643,7 +1646,10 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
                 gate_for=tg.blocked_on_human,
                 bind_dispatched=BIND_DISPATCHED,
                 now_epoch=now_epoch,
+                rebinds=rebinds,
             )
+            if had_rebinds:
+                sidebar_archive.settle_rebinds(rebinds, now_epoch)
             # A separate call, not `or`-chained onto reconcile_bindings above — a Python
             # `or` short-circuits, and reconcile_bindings returning True (a provision/reap
             # happened) would then skip the pin sync entirely for that tick.
@@ -2893,10 +2899,9 @@ def _close_window(args) -> None:
               f"`chela close {task_id} --reason …` to close the run, or --force to kill "
               "the window anyway.", file=sys.stderr)
         sys.exit(1)
-    proc = subprocess.run(["tmux", "kill-window", "-t", f"{session}:{wid}"],
-                          capture_output=True, text=True, timeout=10)
-    if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "tmux kill-window failed").strip()
+    # The ONE session-scoped window kill — the sidebar archive (CMX-75) closes through it too.
+    err = sidebar_archive.close_window(wid)
+    if err:
         print(f"close: {wid} — {err}", file=sys.stderr)
         sys.exit(1)
     print(f"✖ closed {wid} ({name})")

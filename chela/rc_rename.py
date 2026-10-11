@@ -145,6 +145,14 @@ def live_remote_control(wid: str) -> str | None:
     return name or flag or UNKNOWN_PUSHED
 
 
+def current_name(wid: str) -> str | None:
+    """The Remote Control name ``wid``'s session runs under — the name last pushed
+    (:data:`PUSHED_OPTION`), else the live claude's own (:func:`live_remote_control`).
+    None when the window runs no Remote Control session. Read by the sidebar archive
+    (CMX-75) so a resumed session comes back under the same claude.ai name."""
+    return _get_option(wid, PUSHED_OPTION) or live_remote_control(wid)
+
+
 def _status(wid: str) -> str | None:
     from chela import agent_manager
     entry = agent_manager.session_entry(agent_manager.claude_pid(wid),

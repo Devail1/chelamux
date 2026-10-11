@@ -3524,7 +3524,19 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 /* Open-on-wall cue: a click on the row RESTORES a hidden pane vs merely FOCUSES
    one already visible. A faint fill, not a ring — no borders around rows. */
 .agent-row.on-wall { background: color-mix(in srgb, var(--surface) 55%, transparent); }
-/* "Show archived (N)" — the reversible half of a group's "Archive all". */
+/* CMX-75: an archived row's Unarchive (on a closed session it RESUMES it). The row stays
+   dimmed; the button does not, so it reads as the way back. */
+.agent-row.rich .row-unarchive {
+    flex: none; align-self: center; margin-left: 6px; padding: 1px 7px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text);
+    font: inherit; font-size: 11px; cursor: pointer;
+}
+.agent-row.rich .row-unarchive:hover { border-color: var(--text-dim); }
+.agent-row.rich .row-unarchive:disabled { opacity: 0.6; cursor: progress; }
+.agent-row.rich.session-row { cursor: default; }
+/* The ONE Archived section sits at the bottom, a little apart from the folders. */
+.side-group.side-archived { margin-top: 8px; }
+/* "Show archived (N)" — the way into Status ▸ All, where the Archived section shows. */
 .side-archived-toggle {
     align-self: flex-start; margin: 10px 0 2px 10px; padding: 2px 0; border: 0; background: none;
     color: var(--text-dim); font: inherit; font-size: 11px; cursor: pointer;

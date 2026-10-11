@@ -211,6 +211,19 @@ class TopicManager:
             return False
         return True
 
+    def reopen_topic(self, thread_id: str | int) -> bool:
+        """Reopen the CLOSED forum topic ``thread_id`` (CMX-75: an archived session was
+        resumed, and its conversation comes back with it). ``True`` when the topic is
+        open now — ``TOPIC_NOT_MODIFIED`` (it already was) included. A failure is logged
+        and ``False``: the caller then provisions a fresh topic as for any new window."""
+        resp = self._transport(
+            "reopenForumTopic", {"chat_id": self._chat_id, "message_thread_id": thread_id}
+        )
+        if resp.get("ok") or _is_not_modified(resp):
+            return True
+        log.warning("reopenForumTopic(%s) failed: %s", thread_id, resp.get("description", resp))
+        return False
+
     def pin_title(
         self, thread_id: str | int, title: str, existing_message_id: str | int | None = None,
     ) -> str | None:
@@ -295,6 +308,7 @@ def reconcile_bindings(
     gate_for: Callable[[str], object | None] | None = None,
     bind_dispatched: bool = False,
     now_epoch: str | None = None,
+    rebinds: dict[str, str] | None = None,
 ) -> bool:
     """Diff the registry against the live fleet; provision + reap. Return changed.
 
@@ -331,6 +345,13 @@ def reconcile_bindings(
       binding with no stamp (a file written before CMX-77) is ADOPTED into the current epoch
       once its window is seen live: chela cannot tell such a file from one written under this
       server, and saying so is the honest limit — from the next restart on, it is verifiable.
+    * ``rebinds``     — ``{window_id: thread_id}``: a session the sidebar archive resumed
+      (CMX-75, :func:`chela.sidebar_archive.pending_rebinds`) gets its OLD topic back —
+      ``reopen_topic`` + ``bind`` — instead of a new one. Honoured between the reap and the
+      provision, so the archived window's binding is already gone (its topic closed) and
+      the resumed window is not handed a fresh topic first. Entries are POPPED as they are
+      settled (bound, or found unusable); what is left is still waiting for its window to
+      come up as an agent. A reopen that fails falls through to a fresh topic.
 
     **Provision** every agent window with no binding: create a topic named after
     the agent's project (:func:`topic_name_for`, falling back to the window name)
@@ -419,6 +440,22 @@ def reconcile_bindings(
         for wid in agent_ids
     }
     desired_names = disambiguate_topic_names(raw_names)
+
+    # Rebind (CMX-75): a resumed archive takes back its own topic, reopened. Only once the
+    # window runs Claude (an agent id), and never a thread another window holds now.
+    for wid, thread in list((rebinds or {}).items()):
+        if wid not in agent_ids:
+            continue                       # not up yet — keep the request for a later tick
+        rebinds.pop(wid, None)
+        if registry.thread_for_window(wid) is not None:
+            continue                       # already bridged; nothing to restore
+        if registry.window_for_thread(thread) is not None:
+            continue                       # that topic belongs to someone else now
+        if not topic_api.reopen_topic(thread):
+            continue                       # gone / no permission — provisioned fresh below
+        registry.bind(wid, thread, now_epoch)
+        log.info("auto-topics: reopened topic %s for resumed %s", thread, wid)
+        changed = True
 
     # Provision: an agent window with no binding gets a fresh topic. Idempotent —
     # a window that already has a binding (by id) is skipped, so no double-create.
