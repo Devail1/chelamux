@@ -60,6 +60,11 @@ named after its folder: the cwd basename, or your login for the home directory, 
 suffix if taken. Claude Code starts with `--remote-control <that name>`, so claude.ai and the
 Claude desktop show the same name. Turn that off in Settings → General → Remote Control, or
 with `CHELA_REMOTE_CONTROL=false`. Dispatched agents and judges never get Remote Control.
+A `claude` you type yourself in such a window (a "+ New shell", or after the first
+session exits) gets the same flag: chela defines a `claude` shell function there while the
+setting is on. `-p`/`--print`, `--help`/`--version`, a prompt or subcommand, or your own
+`--remote-control` pass through unchanged. Turning the setting off affects new windows
+only: an already-open shell keeps the function until it exits.
 
 chela renames a window only to resolve a duplicate (the newer one gets the `-N`). A rename
 made **in the dashboard** marks the name manual, so it is never suffixed, and chela types
