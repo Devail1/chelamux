@@ -196,6 +196,62 @@ def test_approve_with_red_ci_or_a_conflict_fails_with_the_reason(repo, told, ci,
     assert [k for k, _s, _p in told] == ["override_failed"]
 
 
+def test_approve_after_the_base_changed_since_the_request_fails(repo, told):
+    """🔴 GUARD: the request was approved for the base it NAMED. If the live base is no
+    longer that one — even an otherwise-allowed base — nothing merges. The fixture records
+    a base that differs from the live one (a record copied from the same stub it is later
+    compared against can never exercise this re-check)."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    rec = overrides.set_fields(rid, base="release")
+    assert rec["base"] == "release"
+    with _github(base="dev") as squash:
+        out = overrides.decide(rid, True, "terminal:op")
+    squash.assert_not_called()
+    assert out["ok"] is False and out["state"] == overrides.FAILED, out
+    assert "base changed" in overrides.load(rid)["detail"]
+    assert [k for k, _s, _p in told] == ["override_failed"]
+    assert dispatcher.merge_overrides(dispatcher.resolve_run("t1")) == []
+
+
+def test_approve_when_the_live_base_is_main_merges_nothing(repo, told):
+    """🔴 GUARD: the base is re-read AT APPROVAL — a PR re-targeted to `main` after the
+    request never merges, override or not."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github(base="main") as squash:
+        out = overrides.decide(rid, True, "terminal:op")
+    squash.assert_not_called()
+    assert out["ok"] is False and out["state"] == overrides.FAILED
+    assert "main" in overrides.load(rid)["detail"]
+
+
+def test_approve_with_an_unreadable_head_expires_and_merges_nothing(repo, told):
+    """🔴 GUARD: an override is for ONE commit — a head that cannot be read is not it."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github(head=None) as squash:
+        out = overrides.decide(rid, True, "terminal:op")
+    squash.assert_not_called()
+    assert out["ok"] is False and out["state"] == overrides.EXPIRED
+    assert overrides.load(rid)["state"] == overrides.EXPIRED
+
+
+def test_a_failed_squash_marks_the_request_failed_and_tells_the_operator(repo, told):
+    """🔴 GUARD: GitHub refusing the merge at the last step ⇒ FAILED with its reason, the
+    operator told — never reported as merged."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github() as squash:
+        squash.return_value = {"ok": False, "error": "head ref was modified"}
+        out = overrides.decide(rid, True, "terminal:op")
+    squash.assert_called_once()
+    assert out["ok"] is False and out["state"] == overrides.FAILED
+    rec = overrides.load(rid)
+    assert rec["state"] == overrides.FAILED and rec["merge_commit_sha"] is None
+    assert [k for k, _s, _p in told] == ["override_failed"]
+
+
 def test_deny_merges_nothing(repo):
     _seed(repo)
     rid = _request()["request_id"]
@@ -234,6 +290,17 @@ def test_an_approval_after_the_deadline_expires_without_a_sweep(repo, monkeypatc
     assert out["state"] == overrides.EXPIRED
 
 
+def test_a_zero_ttl_refuses_the_request(repo, monkeypatch):
+    """🔴 GUARD: no lifetime, no request — `CHELA_OVERRIDE_WAIT_S=0` opens nothing."""
+    monkeypatch.setenv(overrides.TTL_ENV, "0")
+    _seed(repo)
+    with _github() as squash:
+        out = contract.merge("t1", override=True, reason="flaky")
+    squash.assert_not_called()
+    assert out["ok"] is False and not out.get("pending")
+    assert overrides.all_requests() == []
+
+
 def test_the_default_ttl_is_a_day():
     assert overrides.ttl() == 24 * 3600
 
@@ -253,6 +320,17 @@ def test_a_new_push_expires_a_pending_request(repo, told):
     assert [k for k, _s, _p in told] == ["override_expired"]
 
 
+def test_the_sweep_keeps_a_request_whose_head_is_unreadable(repo, told):
+    """🔴 GUARD: only a head SEEN to differ expires a request — a head the sweep could not
+    read (no row value, a failing reader) leaves it pending."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    assert overrides.sweep(head_of=lambda _t: None) == []
+    assert overrides.sweep(head_of=lambda _t: 1 / 0) == []
+    assert overrides.load(rid)["state"] == overrides.PENDING
+    assert told == []
+
+
 # --- human-only ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("env", [{config.ACTOR_ENV: config.AUTO_ORCHESTRATOR_ACTOR},
@@ -267,6 +345,61 @@ def test_an_agent_process_cannot_approve(repo, env):
     squash.assert_not_called()
     assert out["ok"] is False and out.get("refused")
     assert overrides.load(rid)["state"] == overrides.PENDING
+
+
+_AGENT_MARKERS = {config.ACTOR_ENV: config.AUTO_ORCHESTRATOR_ACTOR, "CLAUDECODE": "1"}
+
+
+@pytest.mark.parametrize("channel", ["telegram", "dashboard"])
+def test_a_service_channel_approves_despite_inherited_agent_markers(repo, channel):
+    """🔴 GUARD (CMX-21): the Telegram bridge and the dashboard are services that may have
+    inherited `$CHELA_ACTOR` / `CLAUDECODE` from whatever shell started them. Their CALL is
+    the human's press, so the env check must NOT refuse them — else the one-tap button is
+    dead. Driven with the markers PRESENT (the default suite env strips them)."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github() as squash:
+        out = overrides.decide(rid, True, channel, channel=channel, env=dict(_AGENT_MARKERS))
+    assert out["ok"] is True and out["state"] == overrides.MERGED, out
+    squash.assert_called_once()
+
+
+def test_the_telegram_tap_merges_in_a_process_with_agent_markers(repo, monkeypatch):
+    """🔴 GUARD: the real tap path, in a bridge process whose os.environ carries both
+    markers — it still merges (the tap routes through the telegram channel)."""
+    from chela.telegram.overridewatch import handle_override_tap
+    _seed(repo)
+    rid = _request()["request_id"]
+    for k, v in _AGENT_MARKERS.items():
+        monkeypatch.setenv(k, v)
+    with _github() as squash:
+        toast = handle_override_tap(f"ov:a:{rid}")
+    squash.assert_called_once()
+    assert toast.startswith("✅ Merged")
+
+
+def test_the_dashboard_post_merges_in_a_process_with_agent_markers(repo, monkeypatch):
+    pytest.importorskip("flask")
+    from chela.dashboard.app import app
+    _seed(repo)
+    rid = _request()["request_id"]
+    for k, v in _AGENT_MARKERS.items():
+        monkeypatch.setenv(k, v)
+    with _github() as squash:
+        ok = app.test_client().post(f"/override/{rid}", data={"decision": "approve"})
+    assert ok.status_code == 200 and b"merged" in ok.data
+    squash.assert_called_once()
+
+
+@pytest.mark.parametrize("channel", ["terminal", "cli", ""])
+def test_a_non_service_channel_with_agent_markers_is_refused(repo, channel):
+    """The exemption is exactly the two service channels — any other spelling is refused."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github() as squash:
+        out = overrides.decide(rid, True, "x", channel=channel, env=dict(_AGENT_MARKERS))
+    squash.assert_not_called()
+    assert out.get("refused") and overrides.load(rid)["state"] == overrides.PENDING
 
 
 def test_merge_approve_cli_refuses_inside_an_agent_session(repo, monkeypatch, capsys):
@@ -346,10 +479,25 @@ def test_a_request_posts_one_telegram_message_with_two_buttons_and_the_pr_url(re
     assert post["thread"] == "42"
     assert PR in post["text"] and PR.startswith("https://")
     assert J_BLOCKED in post["text"] and "judge flaked" in post["text"]
+    # the seeded judge ran on "b"*40, not HEAD — the posted card must say so
+    assert "not this head" in post["text"] and "on this head" not in post["text"]
     buttons = [b for row in post["markup"]["inline_keyboard"] for b in row]
     assert [decode_override_callback(b["callback_data"]) for b in buttons] == [
         (True, rid), (False, rid)]
     assert bot.edits == []
+
+
+def test_the_card_says_the_judge_never_saw_this_head_when_it_judged_another():
+    """🔴 GUARD: judge_sha != head_sha ⇒ the card must NOT claim the verdict is on this
+    head. Both branches print the judge state, so assert the head-specific wording."""
+    from chela.telegram.overridewatch import format_override_message
+    base = {"id": "override-" + "0" * 24, "task_id": "t1", "pr_url": PR, "reason": "r",
+            "judge_state": J_BLOCKED, "head_sha": HEAD}
+    other = format_override_message({**base, "judge_sha": "b" * 40})
+    assert "on this head" not in other
+    assert "not this head" in other and "b" * 12 in other
+    same = format_override_message({**base, "judge_sha": HEAD})
+    assert f"Judge: {J_BLOCKED} on this head" in same and "not this head" not in same
 
 
 def test_an_approve_tap_merges_and_the_message_is_edited_to_the_outcome(repo):
