@@ -257,6 +257,8 @@ def cmd_run(args) -> None:
     # other "last_*" cadence var here — no reason to wait a full interval after boot.
     last_capture = 0.0
     last_prune = 0.0
+    # CMX-83: {window_id: folder} seen moved last tick — the rename waits one tick.
+    folder_moves: dict[str, str] = {}
     stop = GracefulShutdown("chela daemon").install()
 
     while not stop.stopping:
@@ -274,6 +276,13 @@ def cmd_run(args) -> None:
                     log.info("Reconciled window names: %s", ", ".join(renamed))
             except Exception:
                 log.exception("Window-name reconcile failed")
+            # CMX-83: a still-auto name follows its session's folder (debounced a tick).
+            try:
+                followed = agent_manager.follow_folder_names(folder_moves)
+                if followed:
+                    log.info("Window names followed their folder: %s", ", ".join(followed))
+            except Exception:
+                log.exception("Window-name folder follow failed")
             # CMX-39: retry every queued `/rename` (a rename that landed while its Remote
             # Control session was busy or had a draft) — sends only to idle, empty prompts.
             try:
