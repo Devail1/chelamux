@@ -274,3 +274,25 @@ test('once loaded, a slow refresh that started BEFORE a write never undoes it', 
     assert.deepEqual(groupKeys(), ['/srv/code/alpha', '/srv/code/gamma', '/srv/code/beta'],
         'a stale read put the old order back over the write');
 });
+
+// The same rule on the OTHER branch: here the server already HOLDS a layout when the
+// slow read starts, so its stale answer is a saved layout (not "nothing saved") — the
+// `if (st.layout)` path, which must check freshness too.
+test('once loaded, a slow read of a SAVED layout that started before a write never undoes it', async () => {
+    await refresh(phone);
+    phone.nav.groupMenuAction('/srv/code/gamma', 'up');
+    await settle();
+    assert.deepEqual(server.st.layout.order, ['/srv/code/alpha', '/srv/code/gamma', '/srv/code/beta']);
+    let release;
+    layoutGate = { promise: new Promise(r => { release = r; }) };
+    const slow = phone.nav.refreshLayout();   // reads the SAVED layout as it is NOW
+    layoutGate = null;
+    phone.nav.groupMenuAction('/srv/code/gamma', 'up');
+    await settle();
+    assert.deepEqual(server.st.layout.order, ['/srv/code/gamma', '/srv/code/alpha', '/srv/code/beta']);
+    release();
+    await slow;
+    phone.nav.renderSidebarAgents(ROWS);
+    assert.deepEqual(groupKeys(), ['/srv/code/gamma', '/srv/code/alpha', '/srv/code/beta'],
+        'a stale read of the saved layout put the old order back over the write');
+});
