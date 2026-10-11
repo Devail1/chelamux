@@ -89,9 +89,29 @@ function staticFile(rel) {
 /** Route every request of `context` to the fixture. Returns the list of
  * requests it had to 404 or abort, so a test can assert none were unexpected.
  * `api` maps an /api/ path to the body it answers with instead of the default
- * (e.g. a fleet with long names, or a filled /api/agents/context). */
+ * (e.g. a fleet with long names, or a filled /api/agents/context).
+ *
+ * /api/sidebar/layout (CMX-82) is answered STATEFULLY, per context, the way
+ * chela/sidebar_layout.py does: `layout` is null until something is saved, a POST
+ * replaces the fields it names, and `import: true` writes only while there is none —
+ * so a suite that seeds the pre-CMX-82 localStorage keys (`storage`) gets them
+ * imported on load, exactly as a real first device does. */
 export async function routeFixture(context, api = {}) {
     const misses = [];
+    let layout = null;
+    function sidebarLayout(req) {
+        if (req.method() !== 'POST') return { layout };
+        const body = req.postDataJSON() || {};
+        const fields = Object.fromEntries(['order', 'custom', 'view'].filter(f => f in body).map(f => [f, body[f]]));
+        const empty = { order: [], custom: { groups: [], assign: {} }, view: {} };
+        if (body.import === true) {
+            const imported = layout === null && Object.keys(fields).length > 0;
+            if (imported) layout = { ...empty, ...fields };
+            return { ok: true, imported, layout };
+        }
+        if (Object.keys(fields).length) layout = { ...(layout || empty), ...fields };
+        return { ok: true, layout };
+    }
     await context.route('**/*', async route => {
         const url = new URL(route.request().url());
         if (url.origin !== ORIGIN) {
@@ -124,6 +144,10 @@ export async function routeFixture(context, api = {}) {
         if (path === '/api/events') {
             // 204 tells EventSource to stop reconnecting; the poll paths still run.
             return route.fulfill({ status: 204, body: '' });
+        }
+        if (path === '/api/sidebar/layout' && !Object.prototype.hasOwnProperty.call(api, path)) {
+            return route.fulfill({ status: 200, contentType: 'application/json',
+                body: JSON.stringify(sidebarLayout(route.request())) });
         }
         if (path.startsWith('/api/') || path.startsWith('/hooks/')) {
             return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(apiBody(path, api)) });
