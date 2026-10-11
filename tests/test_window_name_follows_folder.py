@@ -65,7 +65,7 @@ def env(monkeypatch):
     monkeypatch.setattr(config, "current_session", lambda: "sess")
     monkeypatch.setenv("HOME", HOME)
     monkeypatch.setattr(agent_manager, "_login", lambda: "op")
-    monkeypatch.setattr(agent_manager.os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(agent_manager.os.path, "realpath", lambda p, **kw: p)
     monkeypatch.setattr(agent_manager, "session_status_map", lambda force=False: {})
     monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: wid)
     monkeypatch.setattr(
@@ -179,3 +179,122 @@ def test_the_rename_reaches_the_topic_rename_path(env):
     reconcile_bindings(reg, {"@183": fake.name("@183")}, {"@183"}, api,
                        cwd_for=lambda wid: CUTE)
     assert api.renamed == [("100", "cute-animals")]
+
+
+def test_a_second_move_follows_from_the_recorded_folder_not_the_spawn_folder(env):
+    # After the first rename the name is `cute-animals` — auto for @chela_name_cwd, NOT for
+    # the spawn folder (`~` → `op`). Deriving from the spawn folder would read the new name
+    # as a hand-picked one and freeze it there forever.
+    fake = env.setup({"wid": "@183", "name": "op-3", "start": HOME})
+    env.state["cwd"]["@183"] = CUTE
+    pending: dict[str, str] = {}
+    _tick_twice(pending)
+    assert fake.name("@183") == "cute-animals"
+
+    env.state["cwd"]["@183"] = "/home/op/projects/dogs"
+    first, second = _tick_twice(pending)
+
+    assert (first, second) == ([], ["cute-animals -> dogs"])
+    assert fake.name("@183") == "dogs"
+    assert fake.windows["@183"]["name_cwd"] == "/home/op/projects/dogs"
+    assert env.rc == [("@183", "cute-animals"), ("@183", "dogs")]
+
+
+def test_two_windows_moving_to_one_folder_in_the_same_tick_get_distinct_names(env):
+    fake = env.setup({"wid": "@7", "name": "op", "start": HOME},
+                     {"wid": "@8", "name": "op-2", "start": HOME})
+    env.state["cwd"].update({"@7": CUTE, "@8": CUTE})
+    _tick_twice({})
+    assert {fake.name("@7"), fake.name("@8")} == {"cute-animals", "cute-animals-2"}
+
+
+def test_a_move_between_two_folders_with_the_same_name_is_not_a_rename(env):
+    fake = env.setup({"wid": "@4", "name": "app", "start": "/srv/a/app"})
+    env.state["cwd"]["@4"] = "/srv/b/app"
+    pending: dict[str, str] = {}
+    assert _tick_twice(pending) == ([], [])
+    assert fake.name("@4") == "app"
+    assert pending == {}
+    assert [c for c in fake.calls if c[:2] == ["tmux", "rename-window"]] == []
+
+
+def test_a_session_that_vanishes_mid_debounce_restarts_the_debounce(env):
+    fake = env.setup({"wid": "@183", "name": "op-3", "start": HOME})
+    pending: dict[str, str] = {}
+    env.state["cwd"]["@183"] = CUTE
+    assert agent_manager.follow_folder_names(pending) == []
+    assert pending == {"@183": CUTE}
+    del env.state["cwd"]["@183"]                 # no live session: no folder
+    assert agent_manager.follow_folder_names(pending) == []
+    assert pending == {}
+    env.state["cwd"]["@183"] = CUTE              # back — a FRESH first sighting
+    assert agent_manager.follow_folder_names(pending) == []
+    assert fake.name("@183") == "op-3"
+    assert agent_manager.follow_folder_names(pending) == ["op-3 -> cute-animals"]
+
+
+def test_a_closed_window_is_dropped_from_the_debounce(env):
+    env.setup({"wid": "@1", "name": "other", "start": "/srv/other"})
+    pending = {"@99": CUTE}
+    agent_manager.follow_folder_names(pending)
+    assert pending == {}
+
+
+def test_an_unreadable_orchestrator_renames_nothing(env, monkeypatch):
+    fake = env.setup({"wid": "@0", "name": "op", "start": HOME})
+    env.state["cwd"]["@0"] = CUTE
+
+    def boom(store=None):
+        raise OSError("inbox unreadable")
+
+    monkeypatch.setattr(inbox, "orchestrator_wid", boom)
+    assert _tick_twice({}) == ([], [])
+    assert fake.name("@0") == "op"
+    assert env.rc == []
+
+
+def test_a_never_managed_window_is_not_renamed(env, monkeypatch):
+    monkeypatch.setattr(agent_manager, "NEVER_MANAGE", {"op"})
+    fake = env.setup({"wid": "@2", "name": "op", "start": HOME})
+    env.state["cwd"]["@2"] = CUTE
+    assert _tick_twice({}) == ([], [])
+    assert fake.name("@2") == "op"
+
+
+def test_a_hand_name_shaped_almost_like_a_suffix_is_never_touched(env):
+    fake = env.setup({"wid": "@3", "name": "op-x", "start": HOME},
+                     {"wid": "@4", "name": "op-3b", "start": HOME},
+                     {"wid": "@5", "name": "xop-3", "start": HOME})
+    env.state["cwd"].update({"@3": CUTE, "@4": CUTE, "@5": CUTE})
+    assert _tick_twice({}) == ([], [])
+    assert [fake.name(w) for w in ("@3", "@4", "@5")] == ["op-x", "op-3b", "xop-3"]
+
+
+def test_the_daemon_loop_follows_folders_across_two_real_ticks(env, monkeypatch):
+    """🔴 WIRING — drives TWO real passes of ``cmd_run``'s loop with the real
+    ``follow_folder_names``. Proves the loop calls it AND hands it the same debounce dict on
+    each pass: a loop that never calls it, or builds a fresh dict per tick, never renames."""
+    import chela.main as main
+    from tests.test_context import _run_one_daemon_tick
+
+    _run_one_daemon_tick(monkeypatch)
+    passes = {"n": 0}
+
+    def stop_after_two(self, _seconds):
+        passes["n"] += 1
+        if passes["n"] >= 2:
+            self._event.set()
+            return True
+        return False
+
+    monkeypatch.setattr(main.GracefulShutdown, "wait", stop_after_two)
+    monkeypatch.setattr(main, "maintenance_tick", lambda last, now: now)
+    monkeypatch.setattr(main.rc_rename, "flush_pending", lambda: {})
+    fake = env.setup({"wid": "@183", "name": "op-3", "start": HOME})
+    env.state["cwd"]["@183"] = CUTE
+
+    main.cmd_run(types.SimpleNamespace())
+
+    assert passes["n"] == 2
+    assert fake.name("@183") == "cute-animals"
+    assert env.rc == [("@183", "cute-animals")]
