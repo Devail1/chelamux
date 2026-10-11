@@ -843,3 +843,57 @@ def test_a_malformed_request_id_resolves_nothing(repo, bad):
         f"{r['id']}.lock" for r in overrides.all_requests()}
     assert not [p for p in repo.parent.rglob("*.lock") if "passwd" in p.name]
     assert len(overrides.pending()) == 1
+
+
+# --- orchestrator-added guards (judge round 4 survivors) ----------------------------------
+
+def test_the_squash_merge_binds_github_to_the_approved_head(monkeypatch):
+    """🔴 GUARD: GitHub must refuse the merge if a push landed after the re-check — the
+    squash-merge passes `--match-head-commit <approved head>`."""
+    seen: list[list[str]] = []
+
+    class _Done:
+        returncode, stdout, stderr = 1, "", "stop here"
+
+    monkeypatch.setattr(contract.subprocess, "run",
+                        lambda argv, **kw: (seen.append(list(argv)), _Done())[1])
+    contract._squash_merge({"task_id": "t1"}, "/nonexistent", PR, body="b", match_head=HEAD)
+    argv = seen[0]
+    assert argv[:3] == ["gh", "pr", "merge"]
+    i = argv.index("--match-head-commit")
+    assert argv[i + 1] == HEAD
+
+
+def test_a_request_lock_is_exclusive_across_open_files(tmp_path, monkeypatch):
+    """🔴 GUARD: "approve twice ⇒ one merge" across processes rests on the request lock
+    being EXCLUSIVE: while it is held, no other open of the lock file can take even a
+    shared lock."""
+    import fcntl
+
+    monkeypatch.setattr(overrides, "store_dir", lambda: tmp_path)
+    rid = overrides.new_request_id()
+    with overrides._locked(rid):
+        with open(tmp_path / f"{rid}.lock") as other:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_SH | fcntl.LOCK_NB)
+
+
+def test_the_bridges_override_loop_ticks_the_relay():
+    """🔴 GUARD (wiring): the Telegram bridge's own loop must actually tick the override
+    relay — that tick is what posts the Approve/Deny card and edits it to the outcome."""
+    import threading
+
+    from chela import main as chela_main
+
+    stop = threading.Event()
+    ticks: list[int] = []
+
+    class _Relay:
+        def tick(self):
+            ticks.append(1)
+            stop.set()
+
+    t = threading.Thread(target=chela_main._override_loop, args=(_Relay(), 0, stop), daemon=True)
+    t.start()
+    t.join(5)
+    assert ticks == [1], "the loop must call relay.tick()"
