@@ -127,7 +127,7 @@ The mutation-testing guard is easy and real: *corrupt the adapter to return `[]`
 > `depends:` losses listed below no longer apply. Its GitHub integration closes an issue when
 > its PR merges, and Linear is Symphony's native tracker (SPEC §11's reference adapter).
 > The adapter shipped as `tracker: kind: linear` (CMX-432, `chela/sources/linear.py`,
-> configured per [LINEAR_TRACKER.md](LINEAR_TRACKER.md)). It implements G1's `fetch_by_ids`
+> configured per [LINEAR_TRACKER.md](../LINEAR_TRACKER.md)). It implements G1's `fetch_by_ids`
 > contract: `None` on a failed read, and an archived issue is done, not absent. Its open
 > set is every non-terminal state type, so an issue the integration moved to In Progress
 > never reads as absent. It archives what it closes, because the free plan caps a
@@ -299,7 +299,7 @@ doing G2, not by patching G5.**
 
 ## G6 — SPEC 1 / 10.5: the trust posture is a documented MUST, and is undocumented
 
-**CLOSED (CMX-364):** [`docs/TRUST_AND_APPROVAL_POSTURE.md`](TRUST_AND_APPROVAL_POSTURE.md)
+**CLOSED (CMX-364):** [`docs/TRUST_AND_APPROVAL_POSTURE.md`](../TRUST_AND_APPROVAL_POSTURE.md)
 consolidates the dispatch-trust, sandbox, and merge-approval facts named below into one
 citable page, linked from both READMEs. Nothing described below changed; this heading and
 its body are kept as the record of what was found and why the fix was "write it down,"

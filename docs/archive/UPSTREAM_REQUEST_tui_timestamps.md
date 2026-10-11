@@ -1,7 +1,7 @@
 # Upstream feature request — per-message timestamps in the TUI transcript
 
 Paste into <https://github.com/anthropics/claude-code/issues>. Written 2026-08-13 after
-`docs/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md` established this cannot be built downstream.
+`docs/archive/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md` established this cannot be built downstream.
 
 ---
 

@@ -188,7 +188,7 @@ A human directive on this PR (2026-08-17, superseding round 6's per-property fra
 correctly closed `visibility`/`opacity` as ONE collapse-check group (reusing the trio
 CMX-298 settled on for `.kanban-card-parked`) instead of a sixth/seventh named property —
 but INITIALLY treated `margin` as belonging to the same bucket as `transform`/`clip-path`/
-off-screen positioning: properties CMX-273's spike (`docs/SPIKE_WALL_FILLS_STAGE.md`)
+off-screen positioning: properties CMX-273's spike (`docs/archive/SPIKE_WALL_FILLS_STAGE.md`)
 established jsdom cannot observe because they need a real layout engine, and prescribed a
 NOT GUARDED note plus a one-time browser capture instead of a guard. That classification
 was wrong, and was caught by testing it rather than reasoning from the property's name:

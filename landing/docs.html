@@ -203,21 +203,17 @@
     <a href="https://github.com/Devail1/chelamux/blob/main/docs/GETTING_STARTED.md">Getting&nbsp;Started guide</a>.</p>
 
     <h3>1. Install</h3>
-    <p>chela uses <a href="https://docs.astral.sh/uv/">uv</a>. The core has two small deps; the
-    dashboard + live terminal wall ship as a separate install (keeps the core lean). You also need <code>tmux</code>, <code>git</code>, the
-    <code>claude</code> CLI on <code>PATH</code> (and <code>gh</code> for the dispatcher's PR flow).</p>
-    <pre><span class="c"># core</span>
-git clone https://github.com/Devail1/chelamux && cd chelamux
-uv sync
+    <p>chela uses <a href="https://docs.astral.sh/uv/">uv</a>. You also need Python ≥ 3.11,
+    <code>tmux</code>, <code>git</code>, the <code>claude</code> CLI on <code>PATH</code>, and
+    <code>gh</code> (the daemon pushes branches and opens PRs with it).</p>
+    <pre>git clone https://github.com/Devail1/chelamux && cd chelamux
+uv sync --all-extras          <span class="c"># core + dashboard + Telegram bridge, in one command</span>
 uv run chela status
-
-<span class="c"># dashboard + live terminal wall (separate install — keeps the core lean)</span>
-uv sync --extra dashboard
-uv run chela dashboard
-
-<span class="c"># the Telegram bridge is its own extra. Name every extra you want in ONE</span>
-<span class="c"># command — `uv sync --extra X` replaces the env and drops the rest</span>
-uv sync --extra dashboard --extra telegram</pre>
+uv run chela dashboard        <span class="c"># http://127.0.0.1:5001</span></pre>
+    <p>Install every extra in one command: <code>uv sync --extra X</code> <em>replaces</em> the
+    environment, so naming extras one at a time leaves only the last. A headless box can use plain
+    <code>uv sync</code> (core only). Then, inside Claude Code, add the
+    <a href="#dashboard">hooks plugin</a>: <code>/plugin marketplace add Devail1/chelamux</code>.</p>
 
     <div class="note"><p><strong>Authenticate Claude once.</strong> chela never touches credentials —
     it drives the <code>claude</code> CLI inside your tmux windows. Log in once on the machine
@@ -237,10 +233,10 @@ uv run chela status
 uv run chela schedule add researcher --every 1h --prompt <span class="g">"Run your research cycle."</span>
 uv run chela run</pre>
 
-    <h3>3. Dispatch a TODO list (or a Linear team) into PRs</h3>
+    <h3>3. Dispatch a task queue into PRs</h3>
     <p>Drop a <code>WORKFLOW.md</code> + <code>TODO.md</code> into a repo (copy <code>examples/</code>),
     then point chela at it. Each open <code>- [ ]</code> becomes a worktree → an agent → a PR.
-    The queue can also be GitHub issues or a Linear team — see <a href="#linear">the Linear tracker</a>.</p>
+    The queue can also be a Linear team or GitHub issues — see <a href="#linear">the Linear tracker</a>.</p>
     <pre>uv run chela dispatch /path/to/repo/WORKFLOW.md --once   <span class="c"># one pass</span>
 uv run chela dispatch /path/to/repo/WORKFLOW.md          <span class="c"># poll forever</span></pre>
   </section>
@@ -263,8 +259,9 @@ uv run chela dispatch /path/to/repo/WORKFLOW.md          <span class="c"># poll 
       <li><strong>Schedule</strong> — for <em>long-lived</em> agents with a standing role. chela types
       a prompt into the agent's pane on an interval, a cron expression, or once at a set time. The
       agent persists between pokes; give it a <code>CLAUDE.md</code> for stable context.</li>
-      <li><strong>Dispatch</strong> — for <em>ephemeral, one-shot</em> work. Each <code>- [ ]</code> in a
-      <code>TODO.md</code> spawns a throwaway agent in its own git worktree that implements the item,
+      <li><strong>Dispatch</strong> — for <em>ephemeral, one-shot</em> work. Each ready task in the
+      queue (a Linear issue, a labelled GitHub issue, or a <code>- [ ]</code> in a <code>TODO.md</code>)
+      spawns a throwaway agent in its own git worktree that implements the item,
       opens a PR, and tears its window down. Many tasks run in parallel.</li>
     </ul>
 
@@ -345,7 +342,10 @@ chela schedule remove 3        <span class="c"># delete by id</span></pre>
     <p>A workflow can read its queue from a Linear team instead of <code>TODO.md</code>
     (<code>TODO.md</code> stays fully supported). Claimable issues are those in a
     <code>ready_states</code> state (default <code>Todo</code>) whose <em>blocked by</em> relations are
-    all done; the issue description becomes the agent's brief.</p>
+    all done; the issue description becomes the agent's brief, and a <code>risk:high</code> /
+    <code>risk:normal</code> / <code>risk:low</code> label sets its <a href="#risk">risk</a>. chela
+    moves the issue through In Progress → In Review → Done as the run goes; the Work board's columns
+    are the team's states, each card links to its issue, and <strong>New task</strong> creates one.</p>
     <pre><span class="k">tracker:</span>
   <span class="k">kind:</span> linear
   <span class="k">team:</span> ABC                <span class="c"># the team KEY — issues are ABC-12, ABC-13, …</span>
@@ -363,19 +363,39 @@ chela schedule remove 3        <span class="c"># delete by id</span></pre>
       <code>base_branch</code>;</li>
       <li>runs the optional <code>after_create</code> / <code>before_run</code> hooks, then spawns an
       agent in that worktree with your prompt body;</li>
-      <li>the agent implements the task, strikes its <code>- [ ]</code> → <code>- [x]</code>
-      <em>on its own branch</em>, pushes, and opens a PR;</li>
+      <li>the agent implements the task and runs <code>chela request-push</code>; the daemon pushes
+      its branch and opens the PR, so the agent itself never needs push credentials;</li>
       <li>the agent's last step is <code>chela task-finished &lt;task_id&gt;</code>, which marks the run
       <code>awaiting_review</code>, records the PR URL, and kills its window;</li>
-      <li>when you merge, the struck line lands on <code>base_branch</code>, the item disappears, and the
-      run flips to <code>done</code> on the next tick.</li>
+      <li>the <a href="#internals">judge</a> reviews the PR's head; a PR it sends back is reworked by
+      the same agent on the same branch, up to the risk level's cap;</li>
+      <li>after the merge the dispatcher marks the task done in its tracker — it strikes the
+      <code>TODO.md</code> line on <code>base_branch</code> (it is that file's only writer) or moves the
+      Linear issue to Done — and the run flips to <code>done</code>.</li>
     </ul>
     <p><strong>Merges go through the judge.</strong> <code>chela merge &lt;run&gt;</code> refuses unless the
     judge's verdict is clean <em>on the PR's current head</em>, CI is green and the PR is mergeable. The hooks
     plugin's PreToolUse hook denies a direct <code>gh pr merge</code> (or a push to the base branch) in a
     chela-managed repo, so an agent cannot route around it. <code>chela merge --override --reason "…"</code>
-    is the escape hatch: it waits for your approval (dashboard or <code>chela merge-approve</code>) and writes
-    an audit event.</p>
+    is the escape hatch: it files a request bound to the PR's head and returns. You approve with one tap
+    in Telegram, on the dashboard, or with <code>chela merge-approve &lt;id&gt;</code>, and <strong>the approval
+    completes the merge</strong> after re-checking head, CI and mergeability. A new push expires the request.</p>
+
+    <h3 id="risk">Risk levels, rework caps, and stuck runs</h3>
+    <p>Each task is <code>high</code>, <code>normal</code> (the default) or <code>low</code> risk — a
+    <code>risk:&lt;level&gt;</code> label on a Linear or GitHub issue, or a
+    <code>&lt;!-- risk: … --&gt;</code> marker in <code>TODO.md</code>. The level sets how many experiments
+    the judge runs (12 / 8 / 4) and how many rework rounds the run gets (5 / 4 / 3, under a
+    <code>max_reworks</code> ceiling of 5); both are Settings → Dispatch knobs. The judge always runs, and
+    a surviving guard blocks at every level. Past the cap a run stops at <code>needs_human</code>:</p>
+    <ul>
+      <li><code>chela retry &lt;run&gt; --reason "…"</code> — one more automatic rework round;</li>
+      <li><code>chela reopen &lt;run&gt;</code> — re-verify after you pushed a fix yourself;</li>
+      <li><code>chela close &lt;run&gt; --reason "…"</code> — abandon it, visibly. Closing is terminal;
+      <code>--requeue</code> re-dispatches the task on a fresh branch. <code>chela doctor</code> and a
+      Work-board <strong>Requeue</strong> button flag a closed run that stalls a ready task.</li>
+    </ul>
+    <p>The full walk-through: <a href="https://github.com/Devail1/chelamux/blob/main/docs/RUNS.md">docs/RUNS.md</a>.</p>
     <div class="note"><p>The dispatcher shape (task-list → isolated worktree → autonomous agent → PR)
     is an adaptation of OpenAI's <strong>Symphony</strong> pattern.</p></div>
   </section>
@@ -558,10 +578,10 @@ Answer by posting back to the asker — this wakes them, with no human in the mi
   <!-- ───────── Dashboard ───────── -->
   <section class="doc-section" id="dashboard">
     <h2>Dashboard &amp; the wall</h2>
-    <pre>uv sync --extra dashboard
+    <pre>uv sync --all-extras
 uv run chela dashboard           <span class="c"># http://127.0.0.1:5001</span></pre>
     <p>The web UI has two views. The <strong>Wall</strong> is every agent's live terminal, each pane
-    marked <em>working</em>, <em>needs you</em>, <em>done</em> or <em>idle</em>; <strong>Work</strong>
+    marked <em>working</em>, <em>needs you</em>, <em>PR open</em> or <em>idle</em>; <strong>Work</strong>
     holds the dispatch <strong>board</strong> (a Kanban of runs), the per-workflow <strong>runs</strong>
     and the <strong>schedules</strong>. State is derived from the native session status — no heartbeat
     daemon. On a phone the Wall collapses to one pane with a pill switcher, a keybar and a “+” New
@@ -572,10 +592,20 @@ uv run chela dashboard           <span class="c"># http://127.0.0.1:5001</span><
       <li><strong>Themes reach the terminals.</strong> Each theme (Settings → Appearance, including
       <code>warm</code>) carries its own terminal palette, applied live to every open pane.
       <code>CHELA_TERM_THEME</code> still overrides it.</li>
-      <li><strong>Remote Control.</strong> New sessions launch with <code>--remote-control</code>;
+      <li><strong>Remote Control.</strong> A window chela opens is named after its folder, and Claude Code
+      starts with <code>--remote-control &lt;that name&gt;</code>, so claude.ai shows the same name; a
+      dashboard rename types <code>/rename</code> into the session once its prompt is empty.
       Settings → General → Remote Control turns it off without a restart (<code>CHELA_REMOTE_CONTROL</code>,
       when set, wins and locks the switch). A running session keeps the flag it launched with.</li>
+      <li><strong>The sidebar</strong> groups sessions by project folder, shows each dispatched run as
+      one row with its judge's progress, marks the orchestrator with a badge (the inbox icon jumps to
+      it), and has a VIEW menu for status, environment, grouping and sort. <strong>Archive closes a
+      session and Unarchive resumes it</strong> (<code>claude --resume</code>, same folder and name);
+      the archive is kept server-side, so every device agrees.</li>
+      <li><strong>Usage</strong> (in Settings, beside spend): 5h / 7d limit bars with a burn rate, and the
+      top token consumers across every transcript.</li>
     </ul>
+    <p>Details: <a href="https://github.com/Devail1/chelamux/blob/main/docs/DASHBOARD.md">docs/DASHBOARD.md</a>.</p>
     <p>The embedded <strong>terminal wall</strong> streams the live ttyd panes in a grid. It's
     <strong>on by default but loopback-guarded</strong>: it serves writable shells, so the dashboard
     only serves it on a <code>127.0.0.1</code> bind. On a non-loopback bind it's refused unless you
@@ -628,9 +658,12 @@ chela install-statusline --write   <span class="c"># writes it (won't clobber an
     <p>In the dashboard, click <strong>Share</strong> (the link icon) on any pane's header — or
     <strong>Share current session</strong> from the <code>⋮</code> overflow menu on mobile. chela
     mints a share and shows a <strong>join link</strong> plus a short <strong>pairing code</strong>.
-    Send both to whoever's joining; they open the link, paste the code, and they're in the same
-    live terminal with <strong>full access — watch, type, and scroll</strong>. Everyone sees each
-    other as live, labeled cursors and a facepile of who's watching.</p>
+    Send both to whoever's joining; they open the link, paste the code, and they're watching the same
+    live terminal. A share is <strong>view only</strong> by default. A guest can type only into a
+    <strong>sandboxed session</strong> (a Claude Code session in a container that sees one project)
+    and only when you allow it — see
+    <a href="https://github.com/Devail1/chelamux/blob/main/docs/SHARE_SANDBOX.md">docs/SHARE_SANDBOX.md</a>.
+    Everyone sees each other as live, labeled cursors and a facepile of who's watching.</p>
     <div class="note"><p><strong>Sharing is off until you set <code>CHELA_COLLAB_RELAY</code></strong>
     (see below) — chela never phones home. Once a relay is configured, the Share control appears on
     every pane.</p></div>
@@ -673,9 +706,10 @@ cd chela/collab-relay && npx wrangler deploy
 <span class="c"># point chela at it, then start the dashboard</span>
 <span class="k">CHELA_COLLAB_RELAY</span>=wss://your-relay.workers.dev uv run chela dashboard</pre>
 
-    <div class="note"><p><strong>Full access is the model.</strong> A paired joiner holds the code,
-    so they can both watch and drive (scroll is input on a full-screen TUI). Share only with people
-    you'd hand the keyboard to.</p></div>
+    <div class="note"><p><strong>The code is the access.</strong> Anyone holding the link and the code
+    can watch. Typing is checked on your machine on every keystroke: the share must allow it, Settings →
+    Collaboration → <em>Guest typing</em> must be on, and the pane must verify live as a sandboxed
+    session.</p></div>
   </section>
 
   <!-- ───────── CLI ───────── -->
@@ -687,6 +721,8 @@ cd chela/collab-relay && npx wrangler deploy
       <h3>Core</h3>
       <div class="cmd"><code>chela status</code><p>List the agent windows discovered in your tmux session — the source of truth.</p></div>
       <div class="cmd"><code>chela run</code><p>Run the daemon: scheduler tick + dispatcher + needs-input notify. Leave it running.</p></div>
+      <div class="cmd"><code>chela spawn <span class="opt">&lt;dir&gt; [--command CMD]</span></code><p>Open an agent window in a directory (prints its <code>@N</code>).</p></div>
+      <div class="cmd"><code>chela doctor</code><p>Check that what is running matches your config, and flag stalled tasks.</p></div>
       <div class="cmd"><code>chela dashboard <span class="opt">[--host] [--port]</span></code><p>Launch the dashboard + live terminal wall (needs the <code>dashboard</code> install). Binds <code>127.0.0.1:5001</code>.</p></div>
     </div>
 
@@ -699,10 +735,13 @@ cd chela/collab-relay && npx wrangler deploy
 
     <div class="cmd-group">
       <h3>Dispatch</h3>
-      <div class="cmd"><code>chela dispatch <span class="opt">&lt;WORKFLOW.md&gt; [--once] [--interval N] [--dry-run]</span></code><p>Turn each open <code>- [ ]</code> item into a worktree, an agent, and a PR. Polls every 60s; <code>--once</code> runs one tick.</p></div>
+      <div class="cmd"><code>chela dispatch <span class="opt">&lt;WORKFLOW.md&gt; [--once] [--interval N] [--dry-run]</span></code><p>Turn each ready task into a worktree, an agent, and a PR. Polls every 60s; <code>--once</code> runs one tick. <code>--pause</code> / <code>--resume</code> hold the queue.</p></div>
       <div class="cmd"><code>chela dispatch-runs</code><p>List dispatcher runs and their status.</p></div>
       <div class="cmd"><code>chela task-finished <span class="opt">&lt;task_id&gt;</span></code><p>(agents call this) mark a run awaiting-review, record the PR, and kill its window.</p></div>
-      <div class="cmd"><code>chela merge <span class="opt">&lt;run&gt; [--override --reason …]</span></code><p>Merge a dispatched PR only if the judge passed its current head, CI is green and it is mergeable. <code>--override</code> waits for your approval and is audited.</p></div>
+      <div class="cmd"><code>chela merge <span class="opt">&lt;run&gt; [--override --reason …]</span></code><p>Merge a dispatched PR only if the judge passed its current head, CI is green and it is mergeable. <code>--override</code> files an audited request; your approval completes the merge.</p></div>
+      <div class="cmd"><code>chela merge-approve <span class="opt">[&lt;id&gt;] [--deny]</span></code><p>Approve or deny a pending override, in a plain terminal (refused inside a Claude session). No id lists the pending ones.</p></div>
+      <div class="cmd"><code>chela retry <span class="opt">&lt;run&gt; --reason …</span></code> · <code>chela reopen <span class="opt">&lt;run&gt;</span></code><p>Restart a <code>needs_human</code> run: one more rework round on the same head, or re-verify after you pushed a fix.</p></div>
+      <div class="cmd"><code>chela close <span class="opt">&lt;run&gt; --reason … [--requeue]</span></code><p>Mark a run closed with a visible reason; <code>--requeue</code> re-dispatches its task on a fresh branch. <code>chela close @N</code> kills one chela window.</p></div>
     </div>
 
     <div class="cmd-group">
@@ -796,7 +835,8 @@ cd chela/collab-relay && npx wrangler deploy
       agent. Now the verdict is written on the run and the next tick re-spawns that agent <em>in its
       original worktree, on its original branch</em>, with the verdict as its prompt — so the branch
       history and the open PR survive, and the PR simply updates when it pushes. The loop is
-      <strong>bounded</strong> (<code>CHELA_MAX_REWORKS</code>, default 2): past the cap the run
+      <strong>bounded</strong> by the task's <a href="#risk">risk level</a> (5 / 4 / 3 rounds, under
+      <code>CHELA_MAX_REWORKS</code>, default 5): past the cap the run
       stops at <code>needs_human</code>, keeping its branch, worktree and PR, and surfaces to you
       through the <a href="#orchestration">decisions inbox</a> carrying <em>every</em> verdict it was
       given.</li>

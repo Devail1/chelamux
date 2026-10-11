@@ -65,6 +65,19 @@ reconciliation does not treat absent issues as finished. A 429 or a `RATELIMITED
 backs off per team, starting at 60 seconds and doubling up to 15 minutes (or using
 `Retry-After` when given). Reads are cached for one tick only.
 
+## What chela writes back, and the dashboard
+
+chela drives the issue's state as the run moves: a claim or a rework round → *In Progress*,
+the PR out of the agent's hands → *In Review*, a merge → *Done*, and `chela close` →
+*Canceled* (or *Duplicate*, with the relation, when the reason names the issue that
+supersedes it). Each transition is written once, and a failed write never blocks the run.
+
+On the Work board the columns are the team's workflow states, in Linear's order (Canceled
+and Duplicate hidden), with chela's own run state as a badge on the card. Each card links to
+its issue (`CMX-12 ↗`). **New task** in the Work toolbar (or the ⌘K palette) creates an issue
+in the team's ready state, with optional *blocked by* relations; only the dashboard calls
+Linear, so the key never reaches the browser.
+
 ## Sharing a counter with an old `TODO.md` queue
 
 If the team key equals the workflow's old `project_key` (chelamux's own case: `CMX`),

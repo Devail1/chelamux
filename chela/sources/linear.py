@@ -5,7 +5,7 @@ same way (``__init__(wf)`` + ``list_open_tasks()`` + ``read_failed``), plus the 
 network tracker that chela itself writes to needs:
 
 * :meth:`LinearSource.fetch_by_ids` — G1's ID-refresh contract
-  (``docs/SYMPHONY_CONFORMANCE_2026-09-13.md``): the current snapshot of the named issues,
+  (``docs/archive/SYMPHONY_CONFORMANCE_2026-09-13.md``): the current snapshot of the named issues,
   ``None`` on ANY failed read, never ``[]``. An ARCHIVED issue is terminal (done), never
   absent.
 * :meth:`LinearSource.claimable` — what :func:`chela.dispatcher._claim_order` may claim:

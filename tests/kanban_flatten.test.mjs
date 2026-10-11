@@ -526,7 +526,7 @@ test('renderKanban: the parked card\'s 🔒 reason chip is actually VISIBLE unde
 // what could erase the element.
 //
 // The dividing line is CASCADE vs LAYOUT, and it is the same one CMX-273 established
-// (see tests/dashboard_scale_nav_a11y.test.mjs:162 and docs/SPIKE_WALL_FILLS_STAGE.md,
+// (see tests/dashboard_scale_nav_a11y.test.mjs:162 and docs/archive/SPIKE_WALL_FILLS_STAGE.md,
 // written after three rounds of exactly this on PR #338):
 //
 //   - CASCADE collapses — display/visibility/opacity/font-size — resolve in jsdom's
@@ -553,7 +553,7 @@ test('renderKanban: the parked card\'s 🔒 reason chip is actually VISIBLE unde
 //
 // ⛔ Do not "fix" this by adding an eighth property assertion. If someone wants the
 // outcome guarded for real, the honest project is a Playwright-sized one, exactly as
-// docs/SPIKE_WALL_FILLS_STAGE.md sizes it — not another line here.
+// docs/archive/SPIKE_WALL_FILLS_STAGE.md sizes it — not another line here.
 
 // --- 🗂️✖️ CMX-406 — a run closed by hand (`chela close --reason`) shows WHY -----------
 //
