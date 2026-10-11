@@ -281,6 +281,37 @@ def test_spawn_window_reuses_the_archived_name_and_remote_control_name(monkeypat
     assert f"claude --remote-control 'My Proj' --resume {SID}" in sent
 
 
+def _stub_spawn(monkeypatch, windows):
+    monkeypatch.setattr(spawn_mod.discovery, "ensure_session", lambda: True)
+    monkeypatch.setattr(spawn_mod.discovery, "get_all_windows", lambda: windows)
+    monkeypatch.setattr(spawn_mod.envutil, "scrub_tmux_secrets", lambda: None)
+    monkeypatch.setattr(spawn_mod.agent_manager, "lock_window_name", lambda *a, **kw: None)
+    monkeypatch.setattr(spawn_mod.config, "remote_control_enabled", lambda: False)
+    marked, argvs, sent = [], [], []
+
+    class _P:
+        returncode, stdout, stderr = 0, "@42", ""
+    monkeypatch.setattr(spawn_mod.rc_rename, "mark_launched", lambda *a: marked.append(a))
+    monkeypatch.setattr(spawn_mod.subprocess, "run", lambda argv, **kw: (argvs.append(argv), _P())[1])
+    monkeypatch.setattr(spawn_mod, "_send", lambda target, text: sent.append(text))
+    return marked, argvs, sent
+
+
+def test_a_resumed_archive_never_takes_a_name_a_live_window_already_wears(monkeypatch, tmp_path):
+    _marked, argvs, _sent = _stub_spawn(monkeypatch, {"myproj": "@2", "myproj-2": "@3"})
+    res = spawn_mod.spawn_window(tmp_path, command=f"claude --resume {SID}", name="myproj")
+    assert res.ok and res.name == "myproj-3"
+    assert argvs[0][argvs[0].index("-n") + 1] == "myproj-3"
+
+
+def test_the_resumed_window_records_its_restored_remote_control_name(monkeypatch, tmp_path):
+    marked, _argvs, _sent = _stub_spawn(monkeypatch, {})
+    spawn_mod.spawn_window(tmp_path, command=f"claude --resume {SID}", name="myproj",
+                           remote_control_name="My Proj")
+    assert marked == [("@42", "My Proj")], \
+        "rename tracking must follow the Remote Control name the session had, not the window name"
+
+
 # --- the routes ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -422,6 +453,18 @@ def test_a_rebind_never_steals_a_topic_another_window_holds():
                        rebinds={"@9": "77"})
     assert reg.thread_for_window("@3") == "77"
     assert ("reopen", "77") not in api.calls
+
+
+def test_a_rebind_never_re_points_a_window_that_is_already_bridged():
+    reg = BindingRegistry("1")
+    reg.bind("@9", "55", "e1")
+    api = _Topics()
+    rebinds = {"@9": "77"}
+    reconcile_bindings(reg, {"@9": "myproj"}, ["@9"], api, now_epoch="e1", rebinds=rebinds)
+    assert reg.thread_for_window("@9") == "55", "a bridged window keeps its topic"
+    assert reg.window_for_thread("77") is None
+    assert ("reopen", "77") not in api.calls, "the old topic is not reopened for nobody"
+    assert rebinds == {}, "the request is consumed, not retried forever"
 
 
 def test_pending_rebinds_drop_another_epoch_and_expired_requests(monkeypatch, tmp_path):
