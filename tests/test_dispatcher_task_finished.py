@@ -810,7 +810,7 @@ def test_cmd_task_finished_end_to_end_proceeds_when_every_guard_holds(tmp_path, 
     # ⛔ CMX-250 review round 5, finding 2: pin the verdict in the per-outcome line, not
     # just the file/guard text — "KILLED" appears nowhere else on this clean path.
     assert "[KILLED  ] guard.py: the glyph cue" in out
-    mark.assert_called_once_with("t1")
+    mark.assert_called_once_with("t1", handoff=None)
 
 
 def test_cmd_task_finished_end_to_end_refuses_when_self_check_cannot_run(tmp_path, capsys):
@@ -1510,7 +1510,8 @@ _TASK_FINISHED_SCENARIOS = [
         },
         expect_exit=1,
         must_contain=["task-finished:", "run is in status 'done', refusing to transition"],
-        forward=("dispatcher.request_task_finished", ("cmx-906",)),
+        # CMX-52: no --handoff given ⇒ forwarded as handoff=None (NULL, not "").
+        forward=("dispatcher.request_task_finished", ("cmx-906",), {"handoff": None}),
     ),
 ]
 
@@ -1550,7 +1551,7 @@ def test_cmd_task_finished_every_refusal_names_its_actionable_fact_and_forwards_
         assert substring not in out, f"{scenario['name']}: unexpected {substring!r} in {out!r}"
 
     if scenario.get("forward"):
-        target, expected_args = scenario["forward"]
-        mocks[target].assert_called_once_with(*expected_args)
+        target, expected_args, *expected_kwargs = scenario["forward"]
+        mocks[target].assert_called_once_with(*expected_args, **(expected_kwargs or [{}])[0])
 
 

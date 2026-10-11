@@ -1451,6 +1451,15 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # `-r2` keeps `-r2`). Without `--requeue`, `closed` stays terminal (CMX-265).
         ("requeue_pending", "ALTER TABLE runs ADD COLUMN requeue_pending INTEGER DEFAULT 0"),
         ("requeue_count", "ALTER TABLE runs ADD COLUMN requeue_count INTEGER DEFAULT 0"),
+        # 📝 CMX-52. The agent's own handoff note — what it wants the reviewer to know —
+        # passed as `chela task-finished --handoff` and written here by the daemon when it
+        # applies the completion marker (`mark_awaiting_review`). NULL ⇒ no handoff was
+        # given; "" ⇒ the agent explicitly gave an empty one — two different facts, kept
+        # apart the same way `critic_notes` keeps them. ⛔ Display-only and AGENT-AUTHORED:
+        # nothing in the dispatch/rework/judge/merge path reads it back, so it can never
+        # gate anything, and it is never folded into `critic_notes` (that column is the
+        # critic's, not the agent's). The inbox and the Dispatch board render it sanitised.
+        ("handoff", "ALTER TABLE runs ADD COLUMN handoff TEXT"),
     ):
         if _column in existing_columns:
             continue  # already migrated — no DDL attempted, nothing to fail
@@ -2869,7 +2878,22 @@ def check_no_new_guards(task_id: str) -> bool | None:
     return bool(touched)
 
 
-def mark_awaiting_review(task_id: str) -> dict:
+# 📝 CMX-52: an upper bound on a stored handoff. It is a note for a reviewer, not a log —
+# and it is agent-authored text the daemon writes into the shared runs DB on the agent's
+# behalf, so its size is bounded here rather than trusted.
+HANDOFF_MAX_CHARS = 4000
+
+
+def _clean_handoff(value) -> str | None:
+    """A handoff as it may be stored: None stays None (no handoff given), a string is kept
+    verbatim up to :data:`HANDOFF_MAX_CHARS` ("" stays "" — distinct from None), anything
+    else (a hand-edited marker carrying a number, a list) is treated as no handoff."""
+    if not isinstance(value, str):
+        return None
+    return value[:HANDOFF_MAX_CHARS]
+
+
+def mark_awaiting_review(task_id: str, *, handoff: str | None = None) -> dict:
     """Transition a run from running → awaiting_review and kill its tmux window.
 
     ⚖️🔒 issue #502 B1: this is now DAEMON-SIDE ONLY, called from `tick()` when it finds
@@ -2884,7 +2908,14 @@ def mark_awaiting_review(task_id: str) -> dict:
     Returns a dict summary of what changed (used by `tick()`'s own bookkeeping — nothing
     downstream reads this over stdout anymore, since the CLI process that used to print it
     is gone by the time this runs).
+
+    📝 CMX-52: ``handoff`` is the agent's `--handoff` note carried in the marker, written
+    to ``runs.handoff`` on EVERY completion — ``""`` as an explicit empty note, None as
+    NULL. Always written, never "left as it was": a rework round reuses this same row, so
+    a round finished without ``--handoff`` must not inherit the previous round's note. It
+    is written AFTER the transition is decided and never read by it — a note, never a gate.
     """
+    handoff = _clean_handoff(handoff)
     with _db() as conn:
         row = conn.execute(
             "SELECT * FROM runs WHERE task_id=?", (task_id,)
@@ -2918,6 +2949,7 @@ def mark_awaiting_review(task_id: str) -> dict:
             "pr_mergeable=COALESCE(?, pr_mergeable) WHERE task_id=?",
             (_now(), pr_url, pr_state, pr_mergeable, task_id),
         )
+        conn.execute("UPDATE runs SET handoff=? WHERE task_id=?", (handoff, task_id))
         conn.commit()
         if window_name:
             _kill_window(window_name)
@@ -2940,7 +2972,21 @@ def _task_finished_request_path(worktree_path: str | Path) -> Path:
     return Path(worktree_path) / ".chela-task-finished-request.json"
 
 
-def request_task_finished(task_id: str) -> dict:
+def _read_task_finished_handoff(worktree_path: str | Path) -> str | None:
+    """📝 CMX-52: the `--handoff` note a completion marker carries, or None. Best-effort by
+    design — a marker the daemon cannot parse still means "the agent says it is done", so
+    an unreadable or malformed marker yields no handoff rather than blocking the
+    transition (a handoff is never a gate)."""
+    try:
+        request = json.loads(_task_finished_request_path(worktree_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(request, dict):
+        return None
+    return _clean_handoff(request.get("handoff"))
+
+
+def request_task_finished(task_id: str, *, handoff: str | None = None) -> dict:
     """Record that a dispatched agent believes its work is done — called by `chela
     task-finished`, IN PLACE OF the direct `mark_awaiting_review` call it used to make.
 
@@ -2959,6 +3005,10 @@ def request_task_finished(task_id: str) -> dict:
     Same validation `mark_awaiting_review` used to do up front (unknown task_id, or a
     status that isn't `claimed`/`running`, refuses) — `chela task-finished` still fails
     those cases synchronously, in the agent's own process, exactly as before.
+
+    📝 CMX-52: ``handoff`` (`--handoff`) rides in the marker — the agent still writes no
+    row; the daemon stores it when it applies the marker. Omitted from the marker entirely
+    when None, so "no handoff" and "an empty handoff" stay distinct all the way through.
     """
     with _db() as conn:
         row = conn.execute(
@@ -2979,8 +3029,12 @@ def request_task_finished(task_id: str) -> dict:
             "error": "run has no worktree_path on record — cannot request completion",
             "task_id": task_id,
         }
+    request = {"task_id": task_id, "requested_at": _now()}
+    handoff = _clean_handoff(handoff)
+    if handoff is not None:
+        request["handoff"] = handoff
     _task_finished_request_path(worktree_path).write_text(
-        json.dumps({"task_id": task_id, "requested_at": _now()}), encoding="utf-8",
+        json.dumps(request), encoding="utf-8",
     )
     return {"ok": True, "task_id": task_id, "requested": True}
 
@@ -5298,7 +5352,10 @@ def tick(workflow_path: str | Path) -> dict:
                 and row["worktree_path"]
                 and _task_finished_request_path(row["worktree_path"]).exists()
             ):
-                applied = mark_awaiting_review(row["task_id"])
+                applied = mark_awaiting_review(
+                    row["task_id"],
+                    handoff=_read_task_finished_handoff(row["worktree_path"]),
+                )
                 # ⚖️🔀 issue #502 rework round 1 (hazard 3 of the brief): `ok=False` used to
                 # be ONE outcome — unlink the marker and log.warning, no matter why the
                 # transition refused. That silently strands a GENUINE failure: the row stays
