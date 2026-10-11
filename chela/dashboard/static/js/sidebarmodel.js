@@ -162,11 +162,13 @@ export function runLabel(item) {
 // Run states that are SETTLED — nothing more will happen without a human starting it.
 const RUN_SETTLED = new Set(['done', 'closed', 'failed']);
 
-// May "Archive all" archive this row? Refused for anything live: a window that is
-// working, blocked on you (waiting / needs_human), the orchestrator, or a judge whose
-// battery is still testing. What is left is a finished plain session (`done`: idle with
-// output you have not answered), a window with no Claude in it any more, or a run that
-// has settled (done / closed / failed).
+// May "Archive all" (or the row menu's Archive) archive this row? Refused for anything
+// live: a window that is working, blocked on you (waiting / needs_human), the
+// orchestrator, or a judge whose battery is still testing. What is left is a finished
+// plain session (`done`: idle with output you have not answered), an IDLE one (Claude
+// running, waiting for your next message — CMX-81), a window with no Claude in it any
+// more, or a run that has settled (done / closed / failed). An unknown or missing status
+// is NOT idle: a running session whose state cannot be read is refused.
 //
 // CMX-75: what archiving then DOES is the server's (chela/sidebar_archive.py): a plain
 // session's window is CLOSED (after recording how to resume it — and refused when its
@@ -185,7 +187,7 @@ export function isArchivable(item, { wants, orchWid } = {}) {
         return RUN_SETTLED.has(run.status) && run.judge_state !== 'running';
     }
     const a = item.agent;
-    return !!a && (!!a.done || !a.claude_running);
+    return !!a && (!!a.done || !a.claude_running || a.session_status === 'idle');
 }
 
 // Group order: the user's persisted order first (Move up / Move down), then everything

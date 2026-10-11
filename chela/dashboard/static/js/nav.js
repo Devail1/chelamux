@@ -516,12 +516,10 @@ function _agentRowHtml(a, o = {}) {
 
     const wallSuffix = onWall ? ' — open on the wall' : '';
     // A row's menu (right-click, or its ⋯ on touch): a run's opens its agent or judge
-    // pane, and under Custom groups every row can be moved to a custom group (CMX-66).
-    // Keyed on the row's item key — the window id / run id, never the label.
-    // CMX-74: a plain session's menu holds only "Move to group…", which is offered only
-    // under Group by ▸ Custom groups — elsewhere it has no menu at all (no ⋯, no
-    // right-click), rather than one that opens empty.
-    const hasMenu = !!o.itemKey && (!!o.runId || _rowMenuMoves());
+    // pane, under Custom groups every row can be moved to a custom group (CMX-66), and
+    // every row has its own Archive (CMX-81). Keyed on the row's item key — the window
+    // id / run id, never the label.
+    const hasMenu = !!o.itemKey;
     const runAttr = (o.runId ? ` data-run="${attrEsc(o.runId)}"` : '')
         + (o.itemKey ? ` data-item="${attrEsc(o.itemKey)}"` : '')
         + (hasMenu ? ' oncontextmenu="chela.openRowMenu(event, this.dataset.item)"' : '');
@@ -882,8 +880,10 @@ function groupNewSession(key) {
 function _rowMenuMoves() { return _view().groupBy === 'custom'; }
 
 // A row's menu: a run's opens its agent or judge pane; under Custom groups every row
-// can be moved to a custom group (CMX-66). `key` is the row's item key (a bare run id
-// still resolves).
+// can be moved to a custom group (CMX-66); and every row has its own Archive (CMX-81),
+// enabled by the same rule as "Archive all" (sidebarmodel.isArchivable) and sent down
+// the same archiveKeys path — a plain session is closed, a settled run only hidden.
+// `key` is the row's item key (a bare run id still resolves).
 function openRowMenu(ev, key) {
     const it = _sb.items.get(key) || _sb.items.get(`run:${key}`);
     if (!it) return;
@@ -892,15 +892,31 @@ function openRowMenu(ev, key) {
     if (it.kind === 'run') {
         if (it.agent) html += _menuItem('Open agent pane', 'agent');
         html += _menuItem('Open judge pane', 'judge', { disabled: !it.judge });
-        if (moves) html += _SEP;
+        html += _SEP;
     }
-    if (moves) html += _menuItem('Move to group…', 'move');
-    if (!html) return;
+    if (moves) html += _menuItem('Move to group…', 'move') + _SEP;
+    html += _menuItem('Archive', 'archive', { disabled: !_rowArchivable(it) });
     const m = _menuEl('row-menu');
-    _openMenu(m, ev, html, act => {
-        if (act === 'move') return _openMoveMenu(m, it.key);
-        _openPane(act === 'judge' ? it.judge : it.agent);
-    });
+    _openMenu(m, ev, html, act => rowMenuAction(it.key, act));
+}
+
+// A row already in the Archived section is not archived twice (its way back is Unarchive).
+function _rowArchivable(it) {
+    if (_arch.hidden.includes(it.key)) return false;
+    return isArchivable(it, { wants: wantsHuman, orchWid: orchestratorState().wid });
+}
+
+// The row menu's actions, callable directly (tests and keyboard paths use the same entry).
+function rowMenuAction(key, act) {
+    const it = _sb.items.get(key);
+    if (!it) return;
+    if (act === 'move') return _openMoveMenu(_menuEl('row-menu'), it.key);
+    if (act === 'archive') {
+        // re-checked at click time: the row may have woken up since the menu opened
+        if (!_rowArchivable(it)) return null;
+        return archiveKeys([it.key]);
+    }
+    _openPane(act === 'judge' ? it.judge : it.agent);
 }
 
 // "Move to group…" — a second page of the same popover (tap-reachable: no hover
@@ -3343,8 +3359,8 @@ function closeShortcuts() {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { archiveKeys, inboxClick, jumpToOrchestrator, refreshArchive, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, renameCustomGroup, toggleGroup, toggleShowArchived, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
+export { archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, refreshArchive, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, renameCustomGroup, toggleGroup, toggleShowArchived, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyUpdate, archiveKeys, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
+Object.assign(window.chela, { applyUpdate, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });

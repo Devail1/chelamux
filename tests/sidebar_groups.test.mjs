@@ -231,7 +231,7 @@ test('a THROWING localStorage still renders, and collapse / order / archive stil
     await withThrowingStorage(async () => {
         const rows = [
             win('a', { cwd: '/srv/code/alpha' }),
-            win('b', { cwd: '/srv/code/beta' }),
+            win('b', { cwd: '/srv/code/beta', session_status: 'busy' }),
             win('b-done', { cwd: '/srv/code/beta', done: true }),
         ];
         render(rows);
@@ -248,7 +248,7 @@ test('a THROWING localStorage still renders, and collapse / order / archive stil
 // --- 4. the group menu -----------------------------------------------------------
 
 test('the group menu opens on right-click AND on the ⋯ button, with the desktop\'s items', () => {
-    render([win('a', { cwd: '/srv/code/alpha' }), win('b', { cwd: '/srv/code/beta' })]);
+    render([win('a', { cwd: '/srv/code/alpha', session_status: 'busy' }), win('b', { cwd: '/srv/code/beta' })]);
     fire(group('/srv/code/alpha').querySelector('.group-head'), 'oncontextmenu');
     assert.equal(menu('group-menu').style.display, 'block', 'right-click did not open the group menu');
     assert.deepEqual(menuItems('group-menu').map(i => i.text),
@@ -302,7 +302,8 @@ test('"Archive all" on a MIXED group archives only finished rows — never a run
         win('working', { cwd: '/srv/code/mix', session_status: 'busy' }),
         win('finished', { cwd: '/srv/code/mix', done: true }),
         win('dead-shell', { cwd: '/srv/code/mix', claude_running: false, window_type: 'shell' }),
-        win('idle-unfinished', { cwd: '/srv/code/mix' }),
+        // CMX-81: an idle session IS archivable now — a status nobody can read is not idle
+        win('unknown-status', { cwd: '/srv/code/mix', session_status: null }),
         win('blocked', { cwd: '/srv/code/mix', session_status: 'waiting' }),
     ];
     render(rows);
@@ -315,7 +316,7 @@ test('"Archive all" on a MIXED group archives only finished rows — never a run
     assert.equal(posted.length, 1, 'Archive all is ONE request to the server');
     assert.deepEqual(posted[0].body.keys.sort(), [`w:${rows[1].window_id}`, `w:${rows[2].window_id}`].sort(),
         'only the finished rows are sent to be archived');
-    assert.deepEqual(rowsIn('/srv/code/mix').sort(), ['idle-unfinished', 'working'],
+    assert.deepEqual(rowsIn('/srv/code/mix').sort(), ['unknown-status', 'working'],
         'the closed windows leave their group at once');
     assert.ok(host().querySelector('.side-needs-you .agent-row[data-agent="blocked"]'),
         'the waiting row must stay in Needs you');
@@ -324,7 +325,7 @@ test('"Archive all" on a MIXED group archives only finished rows — never a run
     // Status Active: no Archived section at all
     assert.equal(archivedSection(), null);
     fire(toggle);
-    assert.deepEqual(rowsIn('/srv/code/mix').sort(), ['idle-unfinished', 'working'],
+    assert.deepEqual(rowsIn('/srv/code/mix').sort(), ['unknown-status', 'working'],
         'an archived row is never drawn inside its folder group');
     assert.deepEqual(archivedRows().sort(), ['dead-shell', 'finished']);
     // Unarchive = resume: the server is asked, and the session comes back as a live window
@@ -394,9 +395,9 @@ test('a hidden row that comes back to life is shown again, and leaves the SERVER
 // action itself — so read every request it makes, not the end state.
 test('"Archive all" never SENDS a live row to be archived — not even one the render would re-show', async () => {
     const working = win('working', { cwd: '/srv/code/mix', session_status: 'busy' });
-    const idle = win('idle-unfinished', { cwd: '/srv/code/mix' });
+    const unknown = win('unknown-status', { cwd: '/srv/code/mix', session_status: undefined });
     const finished = win('finished', { cwd: '/srv/code/mix', done: true });
-    render([working, idle, finished]);
+    render([working, unknown, finished]);
     await nav.groupMenuAction('/srv/code/mix', 'archive');
     const sent = server.calls.filter(c => c.method === 'POST' && c.path === '/api/sidebar/archive');
     assert.ok(sent.length > 0, 'Archive all sent nothing');
@@ -420,6 +421,92 @@ test('the Archive all count is the group\'s archivable rows, and is DISABLED at 
     assert.equal(item.disabled, true, 'Archive all with nothing to archive must be disabled');
     assert.ok(!menuItems('group-menu').some(i => i.text.startsWith('Unarchive all')),
         'archived rows live in the Archived section now, not in a group menu');
+    window.chela.hideSideMenus();
+});
+
+// --- 4c. CMX-81: an IDLE session is archivable; every row has its own Archive ------
+// Liav, 2026-10-11: "archive all should be enabled for idle sessions as well".
+
+const rowMenuOf = name => {
+    window.chela.hideSideMenus();
+    fire(host().querySelector(`.agent-row[data-agent="${name}"] .row-more`));
+    return menuItems('row-menu').find(i => i.text === 'Archive');
+};
+const archivePosts = () => server.calls.filter(c => c.method === 'POST' && c.path === '/api/sidebar/archive');
+
+test('CMX-81: an idle live session counts in "Archive all" and Archive all closes it', async () => {
+    const idle = win('idle', { cwd: '/srv/code/home-scout' });
+    render([idle]);
+    fire(group('/srv/code/home-scout').querySelector('.group-more'));
+    const item = menuItems('group-menu').find(i => i.text.startsWith('Archive all'));
+    assert.equal(item.text, 'Archive all (1)');
+    assert.equal(item.disabled, false, 'Archive all over an idle session must be enabled');
+    clickMenu('group-menu', 'Archive all (1)');
+    await flush();
+    assert.deepEqual(archivePosts().map(c => c.body.keys), [[`w:${idle.window_id}`]]);
+    assert.equal(group('/srv/code/home-scout'), null, 'the closed idle session leaves its group');
+});
+
+test('CMX-81: the row menu\'s Archive is enabled on an idle session and archives it ALONE — one request, its w: key', async () => {
+    const idle = win('idle', { cwd: '/srv/code/mix' });
+    const other = win('other-idle', { cwd: '/srv/code/mix' });
+    render([idle, other]);
+    const item = rowMenuOf('idle');
+    assert.ok(item, 'the row menu has no Archive');
+    assert.equal(item.disabled, false, 'Archive on an idle session must be enabled');
+    clickMenu('row-menu', 'Archive');
+    await flush();
+    assert.deepEqual(archivePosts().map(c => c.body.keys), [[`w:${idle.window_id}`]],
+        'the row\'s Archive sends exactly that row, once');
+    assert.deepEqual(rowsIn('/srv/code/mix'), ['other-idle']);
+    // and it goes through the same path the menu uses
+    assert.equal(menu('row-menu').style.display, 'none');
+});
+
+test('CMX-81: busy and unknown/missing-status rows are NOT archivable — Archive all skips them, their row Archive is disabled', async () => {
+    const rows = [
+        win('busy', { cwd: '/srv/code/mix', session_status: 'busy' }),
+        win('missing', { cwd: '/srv/code/mix', session_status: undefined }),
+        win('unknown', { cwd: '/srv/code/mix', session_status: 'unknown' }),
+        win('idle', { cwd: '/srv/code/mix' }),
+    ];
+    render(rows);
+    for (const name of ['busy', 'missing', 'unknown']) {
+        const item = rowMenuOf(name);
+        assert.ok(item, `${name}: the row menu has no Archive`);
+        assert.equal(item.disabled, true, `${name}: Archive must be disabled`);
+        assert.equal(item.act, null, `${name}: a disabled Archive carries no action`);
+    }
+    assert.equal(rowMenuOf('idle').disabled, false);
+    window.chela.hideSideMenus();
+    // even called directly, the row action refuses a live row (it re-checks at click time)
+    await nav.rowMenuAction(`w:${rows[0].window_id}`, 'archive');
+    assert.equal(archivePosts().length, 0, 'a busy row was sent to be archived');
+    fire(group('/srv/code/mix').querySelector('.group-more'));
+    assert.ok(menuItems('group-menu').some(i => i.text === 'Archive all (1)'),
+        `expected "Archive all (1)", got ${JSON.stringify(menuItems('group-menu').map(i => i.text))}`);
+    clickMenu('group-menu', 'Archive all (1)');
+    await flush();
+    assert.deepEqual(archivePosts().map(c => c.body.keys), [[`w:${rows[3].window_id}`]]);
+});
+
+test('CMX-81: a waiting / wants-human row\'s Archive is disabled (it sits in Needs you)', () => {
+    render([win('blocked', { cwd: '/srv/code/mix', session_status: 'waiting' }),
+        win('asks', { cwd: '/srv/code/mix', needs_human: true })]);
+    for (const name of ['blocked', 'asks']) {
+        assert.ok(host().querySelector(`.side-needs-you .agent-row[data-agent="${name}"]`));
+        assert.equal(rowMenuOf(name).disabled, true, `${name}: Archive must be disabled`);
+    }
+    window.chela.hideSideMenus();
+});
+
+test('CMX-81: a group of only busy rows reads "Archive all (0)", disabled', () => {
+    render([win('b1', { cwd: '/srv/code/busy', session_status: 'busy' }),
+        win('b2', { cwd: '/srv/code/busy', session_status: 'busy' })]);
+    fire(group('/srv/code/busy').querySelector('.group-more'));
+    const item = menuItems('group-menu').find(i => i.text.startsWith('Archive all'));
+    assert.equal(item.text, 'Archive all (0)');
+    assert.equal(item.disabled, true);
     window.chela.hideSideMenus();
 });
 
@@ -448,7 +535,12 @@ test('model: isArchivable is false for anything live — busy, waiting, needs_hu
     assert.equal(ok({ name: 'w', window_id: '@9', claude_running: true, done: true, session_status: 'waiting' }), false);
     assert.equal(ok({ name: 'n', window_id: '@9', claude_running: false, needs_human: true }), false);
     assert.equal(ok({ name: 'o', window_id: '@1', claude_running: false }), false);
-    assert.equal(ok({ name: 'i', window_id: '@9', claude_running: true }), false, 'an idle unfinished session is not "finished"');
+    assert.equal(ok({ name: 'u', window_id: '@9', claude_running: true }), false, 'a missing status is not idle');
+    assert.equal(ok({ name: 'u', window_id: '@9', claude_running: true, session_status: 'unknown' }), false, 'an unknown status is not idle');
+    // CMX-81: Claude running and idle (waiting for your next message) IS archivable
+    assert.equal(ok({ name: 'i', window_id: '@9', claude_running: true, session_status: 'idle' }), true);
+    assert.equal(ok({ name: 'o', window_id: '@1', claude_running: true, session_status: 'idle' }), false, 'not the orchestrator, idle or not');
+    assert.equal(ok({ name: 'n', window_id: '@9', claude_running: true, session_status: 'idle', needs_human: true }), false);
     const run = (status, extra = {}) => isArchivable(buildItems([
         { name: 'j', window_id: '@8', claude_running: false, run: { task_id: 'CMX-9', status, role: 'judge', ...extra } },
     ])[0], { wants });
@@ -529,8 +621,10 @@ test('the run row\'s menu opens on right-click and on ⋯, and "Open judge pane"
     fire(row(), 'oncontextmenu');
     assert.equal(menu('row-menu').style.display, 'block');
     // CMX-74: Group by Folder (the default) draws no custom groups, so the menu offers
-    // no "Move to group…" — a move there would be saved and invisible.
-    assert.deepEqual(menuItems('row-menu').map(i => i.text), ['Open agent pane', 'Open judge pane']);
+    // no "Move to group…" — a move there would be saved and invisible. CMX-81: every
+    // row has its own Archive, disabled for a run still working.
+    assert.deepEqual(menuItems('row-menu').map(i => i.text), ['Open agent pane', 'Open judge pane', 'Archive']);
+    assert.equal(menuItems('row-menu').find(i => i.text === 'Archive').disabled, true);
     clickMenu('row-menu', 'Open judge pane');
     assert.equal(document.querySelector('#agent-detail .detail-title').textContent, 'judge-liavacc/cmx-37-theme');
     fire(row().querySelector('.row-more'));
