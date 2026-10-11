@@ -1,4 +1,4 @@
-"""📵🔒 CMX-115 — a dispatched agent/judge window must never hold CHELA_NOTIFY_URL.
+"""📵🔒 CMX-115 / 🧾 CMX-45 — a dispatched agent/judge pane keeps an ALLOWLISTED env.
 
 The daemon carries `CHELA_NOTIFY_URL` (`~/.chela/chela.env`) so PRODUCTION can push real
 phone notifications. `_launch_agent` spawns every agent AND judge window inside the same
@@ -7,13 +7,28 @@ runs inbox/notify code (cmx-113 did), a manual repro, or `chela` command reachin
 `notify.send` pushes a REAL ntfy to the human's phone with whatever test fixture happens
 to be sitting in the worktree. `_spawn_judge` is exposed the same way because it calls
 `_launch_agent` too — there is no second launch path to fix.
+
+CMX-45 turned the one-name strip-list into an allowlist: every inherited name (the daemon's
+env + the tmux server's tables) that is not on `envutil.AGENT_ENV_ALLOW` is unset, so a
+daemon-side setting nobody thought to list never reaches an agent either. The guard below
+runs the EXACT lines `_launch_agent` types into the pane through a real `bash`.
 """
 from __future__ import annotations
 
+import os
+import shutil
 import sqlite3
+import subprocess
 from types import SimpleNamespace
 
+import pytest
+
 from chela.workflow import WorkflowDef
+
+SENTINEL = "CHELA_CMX45_SENTINEL"
+TMUX_ONLY_SENTINEL = "CMX45_TMUX_GLOBAL_ONLY"
+# `_capture_send_keys` patches the shared `subprocess` module; the replay needs the real one.
+_REAL_RUN = subprocess.run
 
 
 def _wf(tmp_path):
@@ -30,13 +45,16 @@ def _conn(dispatcher):
     return dispatcher.ensure_schema(conn)
 
 
-def _capture_send_keys(monkeypatch, dispatcher):
-    """Fake `subprocess.run` for `_launch_agent`'s tmux calls; records every send-keys line."""
+def _capture_send_keys(monkeypatch, dispatcher, tmux_global: str = ""):
+    """Fake `subprocess.run` for `_launch_agent`'s tmux calls; records every send-keys line.
+    ``tmux_global`` is what `tmux show-environment -g` reports (``KEY=value`` lines)."""
     sent: list[str] = []
 
     def fake_run(argv, *a, **k):
         if argv[:2] == ["tmux", "new-window"]:
             return SimpleNamespace(stdout="@100\n", returncode=0)
+        if argv[:3] == ["tmux", "show-environment", "-g"]:
+            return SimpleNamespace(stdout=tmux_global, returncode=0)
         if argv[:2] == ["tmux", "send-keys"] and len(argv) > 4:
             sent.append(argv[4])
         return SimpleNamespace(stdout="", returncode=0)
@@ -45,11 +63,11 @@ def _capture_send_keys(monkeypatch, dispatcher):
     return sent
 
 
-def _launch(monkeypatch, dispatcher, tmp_path, **kwargs):
+def _launch(monkeypatch, dispatcher, tmp_path, tmux_global: str = "", **kwargs):
     monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda *_a, **_k: None)
     monkeypatch.setattr(dispatcher, "_wait_for_ready", lambda *a, **k: True)
     monkeypatch.setattr(dispatcher, "_send_seed", lambda *a, **k: True)
-    sent = _capture_send_keys(monkeypatch, dispatcher)
+    sent = _capture_send_keys(monkeypatch, dispatcher, tmux_global)
     wf = _wf(tmp_path)
     conn = _conn(dispatcher)
     dispatcher._launch_agent(
@@ -59,43 +77,114 @@ def _launch(monkeypatch, dispatcher, tmp_path, **kwargs):
     return sent
 
 
+def _unset_names(sent: list[str]) -> list[str]:
+    return next(line for line in sent if line.startswith("unset")).split()[1:]
+
+
+def _run_in_pane(sent: list[str], pane_env: dict[str, str]) -> dict[str, str]:
+    """Replay the lines `_launch_agent` typed into the pane through a real non-interactive
+    bash born with ``pane_env``, the agent command swapped for `env -0` so we read what the
+    agent process would have inherited."""
+    script = "\n".join("env -0" if line.startswith("claude") else line for line in sent)
+    out = _REAL_RUN(["bash", "--norc", "--noprofile", "-c", script],
+                         env=pane_env, capture_output=True, check=True)
+    pairs = (item.partition("=") for item in out.stdout.decode().split("\0") if item)
+    return {k: v for k, _, v in pairs}
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs a real bash")
+def test_a_daemon_var_is_absent_in_the_agent_pane_but_chela_wid_and_path_survive(
+        monkeypatch, tmp_path):
+    """🔴 THE CMX-45 GUARD. A sentinel set in the DAEMON env — a name no strip-list knows —
+    must be gone in the pane the agent starts from, while `CHELA_WID` (exported after the
+    strip) and `PATH` are still there. Revert `_strip_agent_env_cmd` to the old
+    `unset CHELA_NOTIFY_URL` strip-list and the sentinel survives ⇒ RED."""
+    import chela.dispatcher as dispatcher
+
+    monkeypatch.setenv(SENTINEL, "1")
+    monkeypatch.setenv("CHELA_NOTIFY_URL", "https://ntfy.invalid/topic")
+    sent = _launch(monkeypatch, dispatcher, tmp_path,
+                   tmux_global=f"{TMUX_ONLY_SENTINEL}=1\n-CMX45_REMOVED\n")
+
+    pane_env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(tmp_path),
+        "CHELA_TMUX_SESSION": "chela",
+        SENTINEL: "1",
+        TMUX_ONLY_SENTINEL: "1",
+        "CHELA_NOTIFY_URL": "https://ntfy.invalid/topic",
+    }
+    agent_env = _run_in_pane(sent, pane_env)
+
+    assert SENTINEL not in agent_env, "a daemon-env var reached the agent pane"
+    assert TMUX_ONLY_SENTINEL not in agent_env, "a tmux-global var reached the agent pane"
+    assert "CHELA_NOTIFY_URL" not in agent_env
+    assert agent_env.get("CHELA_WID") == "@100"
+    assert agent_env.get("PATH") == os.environ["PATH"]
+    assert agent_env.get("CHELA_TMUX_SESSION") == "chela"
+
+
 def test_launch_agent_strips_notify_url_before_the_agent_command(monkeypatch, tmp_path):
     """🔴 The `unset` line must land in the window BEFORE `claude …` is typed — a strip that
     ran after the agent started would already be too late for the process it launched."""
     import chela.dispatcher as dispatcher
 
+    monkeypatch.setenv("CHELA_NOTIFY_URL", "https://ntfy.invalid/topic")
     sent = _launch(monkeypatch, dispatcher, tmp_path)
 
     unset_idx = next(i for i, line in enumerate(sent) if line.startswith("unset"))
     claude_idx = next(i for i, line in enumerate(sent) if line.startswith("claude"))
     assert unset_idx < claude_idx
-    assert "CHELA_NOTIFY_URL" in sent[unset_idx]
+    assert "CHELA_NOTIFY_URL" in sent[unset_idx].split()
 
 
-def test_the_strip_is_surgical_not_a_blanket_wipe(monkeypatch, tmp_path):
-    """🔴 Simulates applying the exact `unset ...` line `_launch_agent` sends against a
-    daemon env where CHELA_NOTIFY_URL is set for real production pushes: the resulting
-    agent env must have lost the URL but kept everything else the agent needs. A "fix"
-    that unsets everything (or nothing) must fail this."""
+def test_the_allowlist_keeps_what_the_agent_needs(monkeypatch, tmp_path):
+    """🔴 Not a blanket wipe: PATH/HOME, chela's own session + DB location, Claude Code's and
+    gh's credentials and an operator-forwarded name all survive; a pm2 bookkeeping name, an
+    unforwarded secret and a Claude session marker all go."""
     import chela.dispatcher as dispatcher
 
-    sent = _launch(monkeypatch, dispatcher, tmp_path)
-    unset_line = next(line for line in sent if line.startswith("unset"))
-    stripped_vars = unset_line.split()[1:]
-    assert stripped_vars, "the unset line names no variables"
+    keep = ("PATH", "HOME", "CHELA_TMUX_SESSION", "CHELA_DIR", "ANTHROPIC_API_KEY",
+            "GH_TOKEN", "LC_ALL", "XDG_RUNTIME_DIR", "CMX45_OPERATOR_FORWARD")
+    drop = ("CHELA_DASHBOARD_PORT", "pm_id", "LINEAR_API_KEY", "CLAUDE_CODE_SESSION_ID",
+            "UV_PUBLISH_TOKEN", "CHELA_ACTOR")
+    for name in (*keep, *drop):
+        monkeypatch.setenv(name, os.environ.get(name, "x"))
+    monkeypatch.setenv("CHELA_CHILD_ENV_FORWARD", "CMX45_OPERATOR_FORWARD")
 
-    daemon_env = {
-        "CHELA_NOTIFY_URL": "https://ntfy.sh/real-liav-topic",
-        "CHELA_TMUX_SESSION": "chela",
-        "PATH": "/usr/bin:/bin",
-    }
-    agent_env = dict(daemon_env)
-    for var in stripped_vars:
-        agent_env.pop(var, None)
+    stripped = set(_unset_names(_launch(monkeypatch, dispatcher, tmp_path)))
+    assert stripped.isdisjoint(keep), sorted(stripped & set(keep))
+    assert stripped >= set(drop), sorted(set(drop) - stripped)
 
-    assert not agent_env.get("CHELA_NOTIFY_URL")
-    assert agent_env["CHELA_TMUX_SESSION"] == "chela"
-    assert agent_env["PATH"] == "/usr/bin:/bin"
+
+def test_notify_url_is_dropped_even_when_an_operator_forwards_it(monkeypatch, tmp_path):
+    """🔴 CMX-115 outranks the forward list: the daemon's real notifier never reaches a pane."""
+    import chela.dispatcher as dispatcher
+
+    monkeypatch.setenv("CHELA_NOTIFY_URL", "https://ntfy.invalid/topic")
+    monkeypatch.setenv("CHELA_CHILD_ENV_FORWARD", "CHELA_NOTIFY_URL")
+    assert "CHELA_NOTIFY_URL" in _unset_names(_launch(monkeypatch, dispatcher, tmp_path))
+
+
+def test_the_unset_line_names_only_shell_variables(monkeypatch, tmp_path):
+    """A pm2 key like `chela-daemon` is not a shell name — `unset` would error on it. It is
+    left to the tmux-table scrub (below), and never typed into the pane."""
+    import chela.dispatcher as dispatcher
+
+    sent = _launch(monkeypatch, dispatcher, tmp_path,
+                   tmux_global="chela-daemon=x\nstatus=online\n")
+    names = _unset_names(sent)
+    assert "chela-daemon" not in names
+    assert "status" in names
+
+
+def test_non_shell_names_are_scrubbed_from_the_tmux_global_table():
+    """🔴 bash passes a `chela-daemon`-shaped env entry to every child and cannot unset it,
+    so the only place to drop it is the tmux server's global table before the window opens."""
+    from chela import envutil
+
+    out = "chela-daemon=x\nPATH=/bin\nstatus=online\n"
+    assert envutil.tmux_scrub_names(out, forward=frozenset()) == ["chela-daemon"]
 
 
 def test_notify_is_disabled_once_the_launch_env_strips_the_url(monkeypatch, tmp_path):
@@ -104,11 +193,10 @@ def test_notify_is_disabled_once_the_launch_env_strips_the_url(monkeypatch, tmp_
     import chela.dispatcher as dispatcher
     import chela.notify as notify
 
-    sent = _launch(monkeypatch, dispatcher, tmp_path)
-    unset_line = next(line for line in sent if line.startswith("unset"))
-    stripped_vars = unset_line.split()[1:]
+    monkeypatch.setenv("CHELA_NOTIFY_URL", "https://ntfy.invalid/topic")
+    stripped_vars = _unset_names(_launch(monkeypatch, dispatcher, tmp_path))
 
-    daemon_env = {"CHELA_NOTIFY_URL": "https://ntfy.sh/real-liav-topic"}
+    daemon_env = {"CHELA_NOTIFY_URL": "https://ntfy.invalid/topic"}
     agent_env = dict(daemon_env)
     for var in stripped_vars:
         agent_env.pop(var, None)
@@ -122,6 +210,8 @@ def test_spawn_judge_strips_notify_url_too(monkeypatch, tmp_path):
     the FULL pytest suite, and any test reaching `notify.send` unmocked would push real)."""
     import chela.dispatcher as dispatcher
 
+    monkeypatch.setenv("CHELA_NOTIFY_URL", "https://ntfy.invalid/topic")
+    monkeypatch.setenv(SENTINEL, "1")
     monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda *_a, **_k: None)
     monkeypatch.setattr(dispatcher, "_wait_for_ready", lambda *a, **k: True)
     monkeypatch.setattr(dispatcher, "_send_seed", lambda *a, **k: True)
@@ -144,7 +234,7 @@ def test_spawn_judge_strips_notify_url_too(monkeypatch, tmp_path):
     unset_idx = next(i for i, line in enumerate(sent) if line.startswith("unset"))
     claude_idx = next(i for i, line in enumerate(sent) if line.startswith("claude"))
     assert unset_idx < claude_idx
-    assert "CHELA_NOTIFY_URL" in sent[unset_idx]
+    assert {"CHELA_NOTIFY_URL", SENTINEL} <= set(sent[unset_idx].split())
 
 
 def test_the_suite_itself_cannot_push_a_real_notification(monkeypatch):

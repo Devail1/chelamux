@@ -66,10 +66,11 @@ session's ``CLAUDE_CODE_SESSION_ID``/``CLAUDE_CODE_CHILD_SESSION`` (transcripts 
 from __future__ import annotations
 
 import os
+import re
 import socket
 import subprocess
 import urllib.parse
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 
 # Node's own IPC / cluster markers: a Node process that sees these believes it is a forked
 # IPC child (or a cluster worker) and wires itself to a channel that is not its own.
@@ -104,6 +105,47 @@ PROXY_ENV_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY",
                   "http_proxy", "https_proxy", "all_proxy", "ftp_proxy")
 _SERVER_HAZARD_EXACT = (*PROXY_ENV_VARS, "TMUX_TMPDIR", "H")
 _SERVER_HAZARD_PREFIXES = ("PERF_",)
+
+
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+# 🧾 CMX-45 — the env a dispatched agent's PANE keeps: an ALLOWLIST, not a strip-list.
+#
+# A dispatched agent or judge window inherits the tmux server's global environment, and on a
+# pm2-run install that table is the daemon's own: ~60 names on the reference machine
+# (2026-10-11, names only) — every ``CHELA_*`` setting ``chela.env`` sources (dashboard port,
+# collab relay, notify URL, …), pm2's process description (``name``, ``status``, ``args``,
+# ``env``, ``pm_*``), the operator's prompt/theme vars, desktop plumbing. A strip-list names
+# what is known to be dangerous and passes everything else; a new daemon-side setting (a
+# webhook, a second notifier, a credential with an unrecognised shape) then reaches every
+# agent until someone notices. So the pane keeps only what the agent's work needs and drops
+# every other name chela can see — see ``docs/TRUST_AND_APPROVAL_POSTURE.md`` §2.
+AGENT_ENV_ALLOW = frozenset({
+    # the shell and the user it runs as
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "OLDPWD", "SHLVL", "_", "TMPDIR",
+    "TZ", "LANG", "LANGUAGE",
+    # bash's own read-only state: never strippable, so never named in the `unset` line
+    "SHELLOPTS", "BASHOPTS", "BASH_VERSINFO", "EUID", "PPID", "UID",
+    # the terminal the agent's TUI draws into (tmux sets TMUX/TMUX_PANE for the pane itself)
+    "TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TMUX", "TMUX_PANE",
+    # the user's session plumbing: `systemd --user` (memcap's slice), a browser for UI tests
+    "DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "WAYLAND_DISPLAY",
+    # editors, so a git command never falls back to an editor the operator did not choose
+    "EDITOR", "VISUAL", "GIT_EDITOR", "PAGER",
+    # chela itself: the run's own DB (a non-default CHELA_DIR), the session it lives in,
+    # its window id, and the operator's forward list (so nested chela calls honour it too)
+    "CHELA_DIR", "CHELA_TMUX_SESSION", "CHELA_WID", FORWARD_ENV,
+    # Claude Code's own config location / endpoint (its credentials are FORWARDED_SECRET_VARS)
+    "CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL",
+})
+# Locale, XDG dirs (``XDG_RUNTIME_DIR`` is what ``systemd-run --user`` needs), WSL interop,
+# and tool behaviour switches (``COREPACK_ENABLE_AUTO_PIN=0`` keeps pnpm from rewriting
+# package.json; ``UV_*`` points at the cache the sandbox allows). A secret-shaped name under
+# one of these (``UV_PUBLISH_TOKEN``) is still dropped — :func:`is_secret` runs after.
+AGENT_ENV_ALLOW_PREFIXES = ("LC_", "XDG_", "WSL", "COREPACK_", "UV_")
+# Dropped even when an operator forwards it (CMX-115): the daemon's real phone notifier.
+AGENT_ENV_DENY = frozenset({"CHELA_NOTIFY_URL"})
 
 
 def forwarded_names(src: Mapping[str, str] | None = None) -> frozenset[str]:
@@ -158,10 +200,21 @@ def tmux_scrub_names(show_environment_output: str,
         key, eq, _ = line.partition("=")
         if not eq or not key or key.startswith("-"):
             continue
-        if is_leaked(key) or is_secret(key, forward) or (key not in forward and (
-                is_session_marker(key) or is_server_hazard(key))):
+        if is_leaked(key) or is_secret(key, forward) or not is_shell_name(key) or (
+                key not in forward and (is_session_marker(key) or is_server_hazard(key))):
             names.append(key)
     return names
+
+
+def is_shell_name(key: str) -> bool:
+    """True for a name a POSIX shell can hold as a variable (``[A-Za-z_][A-Za-z0-9_]*``).
+
+    🧾 CMX-45: pm2 copies its process description (``name``, ``status``, ``env`` and a
+    ``chela-daemon``-shaped key named after the app) into the env of what it starts, and from
+    there into a tmux server's global table. A name with a ``-`` in it is not a shell variable:
+    bash passes it through to every child untouched and ``unset`` cannot remove it, so the
+    agent-pane allowlist (:func:`agent_env_strip_names`) can only reach it here, in the table."""
+    return _SHELL_NAME.fullmatch(key) is not None
 
 
 def scrub_tmux_secrets() -> list[str]:
@@ -188,6 +241,29 @@ def is_leaked(key: str) -> bool:
     if key in NODE_IPC_ENV_VARS or key in _PM2_EXACT:
         return True
     return key.startswith(_PM2_PREFIXES) and key not in _PM2_KEEP
+
+
+def agent_env_allowed(key: str, forward: frozenset[str] | None = None) -> bool:
+    """True for a name a dispatched agent's pane KEEPS (CMX-45): on the allowlist (or in the
+    operator's forward list), and not a secret, a Claude session marker or a pm2/Node leak."""
+    forward = forwarded_names() if forward is None else forward
+    if key in AGENT_ENV_DENY:
+        return False
+    if key in forward:
+        return True
+    if key not in AGENT_ENV_ALLOW and not key.startswith(AGENT_ENV_ALLOW_PREFIXES):
+        return False
+    return not (is_secret(key, forward) or is_session_marker(key) or is_leaked(key))
+
+
+def agent_env_strip_names(names: Iterable[str],
+                          forward: frozenset[str] | None = None) -> list[str]:
+    """The names, of ``names``, a dispatched agent's pane must drop — sorted, shell-valid
+    only (a non-identifier cannot be ``unset``; :func:`scrub_tmux_secrets` takes those out of
+    the tmux table instead). Names only: a value is never read here."""
+    forward = forwarded_names() if forward is None else forward
+    return sorted({k for k in names
+                   if is_shell_name(k) and not agent_env_allowed(k, forward)})
 
 
 def child_env(extra: Mapping[str, str] | None = None,

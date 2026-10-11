@@ -372,23 +372,42 @@ AGENT_MODEL_KEY = "agent_model"
 # ``role``). It is not read from userconfig, so no Settings write can touch it.
 DEFAULT_JUDGE_MODEL = "opus"
 
-# CMX-115: the daemon carries this so PRODUCTION can push real phone notifications
-# (~/.chela/chela.env), but a dispatched agent or judge window is spawned inside the
-# same tmux session and inherits that same environment. Neither may ever hold it — a
-# worker that runs inbox/notify code (or the judge's full pytest pass) would otherwise
-# fire a REAL ntfy at the human's phone with whatever test fixture is lying around.
-AGENT_ENV_STRIP = ("CHELA_NOTIFY_URL",)
+# 🧾 CMX-45 (was CMX-115's one-name strip-list): a dispatched agent or judge window is
+# spawned inside the daemon's tmux session and inherits that server's environment — on a
+# pm2 install, the daemon's own (every `chela.env` setting, CHELA_NOTIFY_URL among them, plus
+# pm2's bookkeeping). The pane keeps only envutil.AGENT_ENV_ALLOW (+ the operator's
+# CHELA_CHILD_ENV_FORWARD names); every other name chela can see is unset. CHELA_NOTIFY_URL
+# stays dropped even when forwarded: a worker running inbox/notify code (or the judge's full
+# pytest pass) would otherwise fire a REAL ntfy at the human's phone.
+def _inherited_env_names() -> set[str]:
+    """Every NAME a fresh window can inherit: the daemon's own env plus the tmux server's
+    global and session tables (what tmux actually hands a new window). Values are never read
+    out of the ``show-environment`` lines; a ``-NAME`` line is a removal marker, not a var."""
+    names = set(os.environ)
+    for scope in (["-g"], ["-t", TMUX_SESSION]):
+        try:
+            out = subprocess.run(["tmux", "show-environment", *scope],
+                                 capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        stdout = getattr(out, "stdout", "")
+        if not isinstance(stdout, str):
+            continue
+        for line in stdout.splitlines():
+            key, eq, _ = line.partition("=")
+            if eq and key and not key.startswith("-"):
+                names.add(key)
+    return names
 
 
 def _strip_agent_env_cmd() -> str:
     """The shell line sent into a fresh agent/judge window before its agent command.
 
-    A plain ``unset`` in THAT window's own shell — surgical (only the named vars,
-    nothing else the agent needs) and scoped to this one pane, not the tmux
-    session's stored environment, so it never touches any other window (including
-    ones a human opens by hand) or the daemon's own process.
+    A plain ``unset`` of every inherited name OFF the allowlist, in THAT window's own shell —
+    scoped to this one pane, not the tmux session's stored environment, so it never touches
+    any other window (including ones a human opens by hand) or the daemon's own process.
     """
-    return " ".join(("unset", *AGENT_ENV_STRIP))
+    return " ".join(("unset", *envutil.agent_env_strip_names(_inherited_env_names())))
 
 
 def settings_permission_mode() -> str | None:
@@ -6646,10 +6665,12 @@ def _launch_agent(
       that makes the venv real (``uv sync --all-extras``, the CMX-21 trap). ⛔ Skipping it
       on a rework hands the agent phantom test failures — and the rework prompt orders it
       to re-run the CI gates and believe them.
-    * :data:`AGENT_ENV_STRIP` (CMX-115) — sent via ``unset`` into the window's own shell
-      before anything else, so this agent (and the judge, which calls this same function)
-      never holds ``CHELA_NOTIFY_URL``. Both run notify.py-touching code (inbox repros, the
-      judge's full pytest pass) that would otherwise push a REAL ntfy to the human's phone.
+    * the env ALLOWLIST (CMX-45, :func:`_strip_agent_env_cmd`) — every inherited name off
+      ``envutil.AGENT_ENV_ALLOW`` is ``unset`` in the window's own shell before anything
+      else, so this agent (and the judge, which calls this same function) never holds
+      ``CHELA_NOTIFY_URL`` (CMX-115) or any other daemon-only setting. Both run
+      notify.py-touching code (inbox repros, the judge's full pytest pass) that would
+      otherwise push a REAL ntfy to the human's phone.
 
     TMUX (every rule below was paid for once already; a hand-rolled copy relearns them):
 
@@ -6750,7 +6771,7 @@ def _launch_agent(
     # unchanged) whenever the rail is off or unavailable — see chela/memcap.py.
     agent_cmd = memcap.wrap_launch_cmd(agent_cmd)
     log.info("Launching %s with %r (source: %s)", task_id, agent_cmd, cmd_source)
-    # CMX-115: strip daemon-only secrets from THIS window's shell before anything else
+    # CMX-115/CMX-45: narrow THIS window's shell to the allowlist before anything else
     # runs in it — must land before the CHELA_WID export and the agent command below,
     # so nothing launched in this pane (the agent itself, a repro, `chela` subcommands)
     # ever sees them.
