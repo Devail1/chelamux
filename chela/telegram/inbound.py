@@ -46,6 +46,7 @@ from chela.telegram.format import to_code_block
 from chela.telegram.interactive import (
     MIRROR_CB_PREFIX,
     MIRROR_SETTLE_S,
+    OVERRIDE_CB_PREFIX,
     SELECT_SETTLE_S,
     decode_callback,
     decode_mirror_callback,
@@ -352,6 +353,8 @@ def build_application(
     refresh_mirror=None,
     toggle_mirror=None,
     launch_session=None,
+    decide_override=None,
+    refresh_overrides=None,
 ):
     """Build a ``python-telegram-bot`` Application wired to ``router``.
 
@@ -427,6 +430,14 @@ def build_application(
     reconcile provisions and binds its topic on the next tick, exactly like any other
     agent. Browser navigation state (current path + subdir list) lives in PTB's
     per-user ``context.user_data`` so callback payloads stay tiny.
+
+    Taps on an **override request's** ✅ Approve / ❌ Deny (the ``ov:`` callbacks, CMX-79 —
+    posted by :class:`chela.telegram.overridewatch.OverrideRelay`) route to ``_on_override``.
+    Like ``/new`` it gates on the bound ``chat_id`` alone (the request is posted to the
+    orchestrator's topic, or General when it has none), then resolves the request through
+    ``decide_override`` (default :func:`chela.overrides.decide` — the same path as ``chela
+    merge-approve``, so an approval completes the merge) and calls ``refresh_overrides`` so
+    the message is edited to the outcome at once.
 
     ``on_topic_closed`` (optional) is a callable ``(thread_id) -> None`` invoked on
     a ``StatusUpdate.FORUM_TOPIC_CLOSED`` service message — Slice B's auto-topics
@@ -1075,6 +1086,32 @@ def build_application(
         except Exception:  # a menu-registration failure must not stop the bridge
             log.warning("could not set Telegram command menu", exc_info=True)
 
+    async def _on_override(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
+        """⚖️🔓 One-tap Approve / Deny on an override request (CMX-79)."""
+        from chela.telegram.overridewatch import handle_override_tap
+        query = update.callback_query
+        if query is None:
+            return
+        if not _new_chat_ok(update):
+            # Outside the bound chat: stop the spinner, decide nothing (CMX-8).
+            await query.answer()
+            return
+        user = getattr(query, "from_user", None)
+        kwargs = {"is_bot": bool(getattr(user, "is_bot", False))}
+        if decide_override is not None:
+            kwargs["decide"] = decide_override
+        try:
+            toast = await asyncio.to_thread(handle_override_tap, query.data or "", **kwargs)
+        except Exception:  # noqa: BLE001 — the tap must always be answered
+            log.exception("override tap failed")
+            toast = "❌ Failed — see the chela-telegram log"
+        await query.answer(toast)
+        if refresh_overrides is not None:
+            try:
+                await asyncio.to_thread(refresh_overrides)
+            except Exception:  # noqa: BLE001 — the next relay tick edits it anyway
+                log.exception("override refresh failed")
+
     application = Application.builder().token(token).post_init(_post_init).build()
     # Command handlers FIRST so /screenshot and /esc are intercepted here; the
     # catch-all text handler forwards every other message (and /command) onward.
@@ -1093,6 +1130,9 @@ def build_application(
     # and not to the pattern-less _on_key catch-all below.
     application.add_handler(
         CallbackQueryHandler(_on_new_cb, pattern="^" + re.escape(NEW_CB_PREFIX))
+    )
+    application.add_handler(
+        CallbackQueryHandler(_on_override, pattern="^" + re.escape(OVERRIDE_CB_PREFIX))
     )
     application.add_handler(CallbackQueryHandler(_on_key))
     # Media handlers BEFORE the text catch-all (PTB runs one handler per group):

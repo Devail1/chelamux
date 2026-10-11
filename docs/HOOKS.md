@@ -189,7 +189,7 @@ at `chela merge cmx-N`) any command that merges into a repo with a chela workflo
 | `gh pr merge …` (incl. `--auto`, a PR URL, `-R o/r`) | a merge that skips every clause of the gate |
 | `gh api -X PUT repos/O/R/pulls/N/merge`, `POST …/merges` into a protected base, `PATCH`/`DELETE …/git/refs/heads/<protected>`, a GraphQL `mergePullRequest` | the same merge, spelled against the API |
 | `git push` to the workflow's base branch or `main`/`master`/… (a `src:dst` refspec, `HEAD` while that branch is checked out, `--all`/`--mirror`) | lands commits on the base with no PR at all |
-| `chela merge-approve`, a request to the dashboard's `/override/` | a session approving its OWN override |
+| `chela merge-approve`, a request to the dashboard's `/override/`, a `python` call into `chela.overrides.decide` | a session approving its OWN override |
 
 Never denied: `gh pr view/diff/checks/list`, `gh pr create`, `git push origin cmx-12`, a heredoc
 body that merely *mentions* `gh pr merge`, any repo without a chela workflow, and `chela merge`
@@ -222,15 +222,40 @@ file, or `curl` to the GitHub API, is out of its sight; see [SANDBOX_BOUNDARY.md
 ⚠️ **This includes the orchestrator's own `git push origin dev`.** Tracker edits pushed straight
 to the base branch from a Claude session are denied too — push them from a plain terminal.
 
-**The override.** `chela merge cmx-N --override --reason "<why>"` is the one way past the judge,
-and it is the operator's call: it opens an approval request (the gate-answer rendezvous,
-`chela.gateanswer`), pushes it over the notification channel, and waits
-`CHELA_OVERRIDE_WAIT_S` (default 300 s) for the operator to press **Approve** on the dashboard
-(`/override/<id>`) or run `chela merge-approve <id>` in a plain terminal. A timeout is a DENY.
-On approval it records `orchestrator.merge_override` (who approved, the head sha, the judge
-state it overrode, the reason) to the event log and the run's review history *before* merging,
-merges with `--match-head-commit` pinned to the approved head, and puts the reason in the
-squash body. CI red or not-mergeable still refuse — the override skips the judge only.
+**The override.** `chela merge cmx-N --override --reason "<why>"` (or its request-only
+spelling, `chela override request cmx-N --reason "<why>"`) is the one way past the judge, and it
+is the operator's call. Since CMX-79 the request and the merge are **decoupled**:
+
+1. **Request — returns at once.** The command runs the gate minus the judge (base, CI green,
+   MERGEABLE), records ONE pending request bound to the PR's exact head SHA
+   (`$CHELA_DIR/overrides/<id>.json`, `chela.overrides`), logs
+   `orchestrator.merge_override_requested`, and exits 0 printing the request id. It never merges
+   and never waits. Asking again for the same head returns the same request.
+2. **Approve — one tap.** The Telegram bridge posts ONE message to the orchestrator's topic
+   (task, PR link, the judge's state on the head, the reason) with **✅ Approve / ❌ Deny**
+   buttons. The dashboard's `/override/<id>` and `chela merge-approve <id>` in a plain terminal
+   decide the same request.
+3. **The approval completes the merge by itself** — in the approving process, through the same
+   path `chela merge` uses, re-checking live at that moment: the head is still the recorded SHA,
+   CI is green, GitHub reports MERGEABLE, the base is the workflow's. It records
+   `orchestrator.merge_override` (who approved, the head sha, the judge state it overrode, the
+   reason) to the event log and the run's review history *before* merging, merges with
+   `--match-head-commit` pinned to that head, and puts the reason in the squash body. Any check
+   failing ⇒ no merge; the request is marked `failed` (or `expired`, when the head moved) with
+   the reason, and the operator is told (the Telegram message, a push notification, the inbox).
+4. **Expiry.** A request stays pending until it is decided or the PR head moves (the daemon's
+   sweep expires it — a new push invalidates the request). `CHELA_OVERRIDE_WAIT_S` is now the
+   safety TTL (default 24 h).
+
+The Telegram message is edited to the outcome: merged `<sha>` / denied / expired / failed
+(`<reason>`). `chela override list [--all]` shows the requests.
+
+**Still human-only.** The orchestrator may request; it can never approve. A session's
+`chela merge-approve`, `curl …/override/…` or `python … overrides.decide(…)` is denied by this
+hook; `chela merge-approve` also refuses in any process carrying `$CHELA_ACTOR` or a Claude
+Code session marker (`CLAUDECODE`) — so it works from a **plain terminal**, not from a `!`
+command inside a Claude session. The Telegram button follows the same trust model as every other
+Telegram button (the bound chat; a bot's tap is refused); the dashboard refuses a cross-site POST.
 
 **The backstop.** Anything the hook cannot see — a human in a plain terminal, a merge on
 github.com, a non-Claude process — is caught after the fact: the dispatcher's reconcile, on

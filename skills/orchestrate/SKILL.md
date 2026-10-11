@@ -125,10 +125,13 @@ committed `base_branch` says so).
 - ⛔ Never `gh pr merge`. chela's merge-gate hook (`chela/mergegate.py`) **denies** it in
   every Claude session, along with the merge API calls and a `git push` to the base branch
   or `main`.
-- **`chela merge cmx-N --override --reason "…"`** is the one way past the judge. It waits
-  for the **operator** to approve (dashboard `/override/<id>` or `chela merge-approve <id>`
-  in a plain terminal). The hook denies a session approving its own override: never try.
-  CI red or not-mergeable still refuse.
+- **`chela override request cmx-N --reason "…"`** (same as `chela merge cmx-N --override
+  --reason "…"`) is the one way past the judge. It only REQUESTS: it returns at once with a
+  request id, and the **operator** approves with the Telegram button (or dashboard
+  `/override/<id>`, or `chela merge-approve <id>` in a plain terminal). The approval merges
+  by itself — you do not wait, poll or re-run anything. A new push expires the request.
+  You can never approve: the hook and `chela merge-approve` both refuse a session. CI red or
+  not-mergeable still refuse.
 - **A merge can make other open PRs conflict.** Union-resolve small additive conflicts
   (changelog fragments, adjacent list entries). Send semantic conflicts back to the agent
   with the design rules.

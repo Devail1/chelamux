@@ -48,7 +48,7 @@ The dashboard has two views — **Wall** (every agent's live terminal, each mark
 working / needs you / done / idle) and **Work** (the dispatch board, runs and schedules) —
 plus Settings. Recently shipped:
 
-- **Merges go through the judge.** A PreToolUse hook denies a direct `gh pr merge`; `chela merge` lands only a PR the judge passed on its current head, and `--override` waits for your approval and is audited.
+- **Merges go through the judge.** A PreToolUse hook denies a direct `gh pr merge`; `chela merge` lands only a PR the judge passed on its current head, and `--override` asks for your approval (one tap in Telegram) and is audited — approving completes the merge.
 - **Remote Control per session.** New sessions launch with `--remote-control <window name>`, so claude.ai and the desktop show the chela window name (renames follow), and a Settings switch turns that off without a restart.
 - **Themes reach the terminals.** Every theme — including the new `warm` — recolours the live terminals too, not just the chrome.
 - **One-tap New session on a phone.** A "+" beside the menu button opens the New-session menu.

@@ -280,6 +280,13 @@ def cmd_run(args) -> None:
                 rc_rename.flush_pending()
             except Exception:
                 log.exception("Remote Control rename flush failed")
+            # CMX-79: an override request nobody decided expires here — its PR head moved
+            # (a new push invalidates it) or its TTL ran out. Reads the runs DB only.
+            try:
+                from chela import overrides
+                overrides.sweep()
+            except Exception:
+                log.exception("Override request sweep failed")
 
             now = time.time()
             if stop.stopping:
@@ -1589,6 +1596,16 @@ def _pane_loop(gate_watcher, registry, interval: int, stop) -> None:
         stop.wait(interval)
 
 
+def _override_loop(relay, interval: int, stop) -> None:
+    """Sync override requests to Telegram (CMX-79), until stopped."""
+    while not stop.is_set():
+        try:
+            relay.tick()
+        except Exception:
+            log.exception("Telegram override relay failed")
+        stop.wait(interval)
+
+
 def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
     """Auto-topics: reconcile the registry against the live fleet, until stopped.
 
@@ -1844,6 +1861,17 @@ def cmd_telegram(args) -> None:
         selected=DRAFTS.selected,
     )
 
+    # ⚖️🔓 CMX-79: override requests → ONE message on the orchestrator's topic with
+    # Approve / Deny, edited to the outcome. Its own thread (a flood-control sleep elsewhere
+    # must not hold an approval), and opted out of the 429 sleep for the same reason.
+    from chela import inbox
+    from chela.telegram.overridewatch import OverrideRelay
+    override_relay = OverrideRelay(
+        post=partial(bot.post, retry_flood=False),
+        edit=partial(bot.edit, retry_flood=False),
+        thread=lambda: registry.thread_for_window(inbox.orchestrator_wid()),
+    )
+
     # CMX-420: a SANDBOXED session's transcript is in its container, out of reach — its
     # replies are read from the outbox its credential proxy writes instead. The opt-out
     # (`chela telegram --sandbox-relay @N=off`) silences such a window in BOTH loops: its
@@ -1893,6 +1921,9 @@ def cmd_telegram(args) -> None:
             args=(gate_watcher, pane_windows, interval, stop),
             daemon=True,
         ).start()
+        threading.Thread(
+            target=_override_loop, args=(override_relay, interval, stop), daemon=True,
+        ).start()
         if topic_api is not None:
             threading.Thread(
                 target=_reconcile_loop,
@@ -1927,6 +1958,7 @@ def cmd_telegram(args) -> None:
             on_topic_closed=on_topic_closed,
             refresh_mirror=gate_watcher.refresh_mirror,
             toggle_mirror=gate_watcher.toggle_mirror,
+            refresh_overrides=override_relay.tick,
         )
     except ImportError as e:
         print(f"{e}\n(or run outbound-only:  chela telegram --no-inbound)", file=sys.stderr)
@@ -1946,6 +1978,9 @@ def cmd_telegram(args) -> None:
         target=_pane_loop,
         args=(gate_watcher, pane_windows, interval, stop),
         daemon=True,
+    ).start()
+    threading.Thread(
+        target=_override_loop, args=(override_relay, interval, stop), daemon=True,
     ).start()
     if topic_api is not None:
         threading.Thread(
@@ -2722,13 +2757,11 @@ def cmd_merge(args) -> None:
     by hand, or ``chela escalate`` to ask. Every merge is logged with its justification.
     """
     override = bool(getattr(args, "override", False))
-
-    def _asked(request_id: str, info: dict) -> None:
-        print(f"⏳ Waiting up to {info['budget']:.0f}s for the operator to approve this "
-              f"override:\n  {info['question']}\n  {info['hint']}", flush=True)
-
     result = contract.merge(args.run, reason=getattr(args, "reason", "") or "",
-                            override=override, on_request=_asked if override else None)
+                            override=override)
+    if result.get("ok") and result.get("pending"):
+        _print_override_request(result)
+        return
     if not result.get("ok"):
         tier = result.get("tier")
         prefix = "⛔ NEVER" if tier == "never" else "merge REFUSED"
@@ -2755,28 +2788,86 @@ def cmd_merge(args) -> None:
         print(f"  logged: event #{result.get('event_seq')} — CI green, judge clean, MERGEABLE")
 
 
-def cmd_merge_approve(args) -> None:
-    """⚖️ The operator's half of ``chela merge --override`` (CMX-389), for a plain terminal.
+def _print_override_request(result: dict) -> None:
+    """The request half of an override (CMX-79): it is pending, and nothing waits on it."""
+    again = " (already pending — not opened twice)" if result.get("existing") else ""
+    print(f"⏳ Override request {result['request_id']} is PENDING{again} — nothing was "
+          "merged, and nothing is waiting:")
+    print(f"  {result.get('question') or ''}")
+    print(f"  PR: {result.get('pr_url')}  head {(result.get('head_sha') or '?')[:12]}")
+    print(f"  {contract.approve_hint(result['request_id'])}")
+    print("  On approval the merge completes by itself (head unchanged, CI green, "
+          "MERGEABLE, re-checked then). A new push expires the request.")
 
-    Lists the pending override requests when called without an id. A Claude session is
-    denied this command by chela's merge-gate hook (:mod:`chela.mergegate`): an override is
-    the OPERATOR's approval, never the requesting session's own.
+
+def cmd_override(args) -> None:
+    """⚖️🔓 ``chela override request|list`` — the request-only spelling (CMX-79).
+
+    ``request`` opens an approval request for merging a run past the judge and returns at
+    once; it can never merge by itself (only the operator's approval does). ``list`` shows
+    the recent requests and their outcome.
     """
-    from chela import gateanswer
+    from chela import overrides
+    if args.override_cmd == "request":
+        result = contract.request_override(args.run, reason=args.reason or "")
+        if not result.get("ok"):
+            print(f"override REFUSED: {result.get('error', 'unknown error')}")
+            if result.get("recommendation"):
+                print(f"  Recommendation: {result['recommendation']}")
+            sys.exit(1)
+        _print_override_request(result)
+        return
+    overrides.sweep()
+    recs = overrides.all_requests()
+    if not args.all:
+        recs = [r for r in recs if r.get("state") in (overrides.PENDING, overrides.MERGING)]
+    if not recs:
+        print("No override request is pending." if not args.all else "No override requests.")
+        return
+    now = time.time()
+    for rec in recs:
+        extra = ""
+        if rec.get("state") == overrides.PENDING:
+            extra = f" ({max(0.0, (rec.get('deadline') or 0) - now):.0f}s left)"
+        elif rec.get("detail"):
+            extra = f" — {rec['detail']}"
+        print(f"{rec['id']}  {rec.get('state')}{extra}\n  {rec.get('question') or ''}")
+
+
+def cmd_merge_approve(args) -> None:
+    """⚖️ The operator's half of an override (CMX-389/CMX-79), for a plain terminal.
+
+    Approving COMPLETES the merge right here (``chela.overrides.decide`` →
+    ``contract.complete_override``), re-checking the head, CI and mergeability live; denying
+    merges nothing. Lists the pending requests when called without an id. A Claude session
+    is refused — by chela's merge-gate hook (:mod:`chela.mergegate`) for the tool call, and by
+    :func:`chela.overrides.agent_refusal` for any process carrying an agent's markers: an
+    override is the OPERATOR's approval, never the requesting session's own.
+    """
+    from chela import overrides
     if not args.request:
-        pending = gateanswer.pending_approvals()
+        overrides.sweep()
+        pending = overrides.pending()
         if not pending:
             print("No override is waiting for approval.")
             return
+        now = time.time()
         for req in pending:
-            print(f"{req['id']}  ({req['seconds_left']:.0f}s left)\n  {req['question']}")
+            print(f"{req['id']}  ({max(0.0, req['deadline'] - now):.0f}s left)\n"
+                  f"  {req.get('question') or ''}")
         return
-    ok, why = gateanswer.answer_approval(args.request, not args.deny,
-                                         by=f"terminal:{os.environ.get('USER') or 'operator'}")
-    if not ok:
-        print(f"merge-approve: {why}")
-        sys.exit(1)
-    print(f"✅ {why}: {args.request}")
+    out = overrides.decide(args.request, not args.deny,
+                           by=f"terminal:{os.environ.get('USER') or 'operator'}")
+    state = out.get("state")
+    if state == overrides.MERGED:
+        print(f"✅ approved and merged: {args.request} "
+              f"(sha {(out.get('merge_commit_sha') or '?')[:12]})")
+        return
+    if state == overrides.DENIED and out.get("ok"):
+        print(f"✅ denied: {args.request} — nothing was merged")
+        return
+    print(f"merge-approve: {out.get('detail') or state or 'refused'}")
+    sys.exit(1)
 
 
 def cmd_reopen(args) -> None:
@@ -3422,11 +3513,30 @@ def main() -> None:
     )
     p_merge.add_argument(
         "--override", action="store_true",
-        help="⚖️🔓 Merge past the judge — ONLY after the operator approves it (dashboard "
-             "/override/<id>, or `chela merge-approve <id>` in a plain terminal). Waits "
-             "CHELA_OVERRIDE_WAIT_S (default 300s); a timeout refuses. CI red or "
-             "not-mergeable still refuse. Audited.",
+        help="⚖️🔓 REQUEST a merge past the judge and return at once (same as `chela "
+             "override request`). The operator approves with the Telegram button, the "
+             "dashboard (/override/<id>) or `chela merge-approve <id>` in a plain terminal, "
+             "and the approval completes the merge by itself — re-checking head, CI and "
+             "mergeability then. A new push or the CHELA_OVERRIDE_WAIT_S TTL (default 24h) "
+             "expires it. Audited.",
     )
+
+    # override — the request-only spelling of `merge --override` (CMX-79)
+    p_override = sub.add_parser(
+        "override",
+        help="⚖️🔓 `override request <run> --reason …` opens an approval request to merge past "
+             "the judge (never merges by itself); `override list [--all]` shows requests",
+    )
+    p_override_sub = p_override.add_subparsers(dest="override_cmd", required=True)
+    p_oreq = p_override_sub.add_parser(
+        "request", help="Ask the operator to approve merging this run past the judge — "
+                        "returns at once; only the operator's approval merges")
+    p_oreq.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-84)")
+    p_oreq.add_argument("--reason", required=True,
+                        help="Why the judge's verdict is wrong or irrelevant here (audited)")
+    p_olist = p_override_sub.add_parser("list", help="Pending override requests")
+    p_olist.add_argument("--all", action="store_true",
+                         help="Include decided/expired/failed requests too")
 
     # merge-approve — the OPERATOR's half of `chela merge --override`
     p_mapprove = sub.add_parser(
@@ -3810,6 +3920,8 @@ def main() -> None:
         cmd_merge(args)
     elif args.command == "merge-approve":
         cmd_merge_approve(args)
+    elif args.command == "override":
+        cmd_override(args)
     elif args.command == "reopen":
         cmd_reopen(args)
     elif args.command == "retry":
