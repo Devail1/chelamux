@@ -81,6 +81,11 @@ uv run chela status            # lists the windows chela can drive
 > is empty; until then the rename waits, so it never interrupts a turn or touches a draft.
 > The other direction does not sync: a rename made **in the desktop app** never reaches
 > chela (Claude Code exposes no API for it), and chela's next rename overwrites it.
+> A `claude` you type yourself in such a window (a "+ New shell", or after the first
+> session exits) gets the same flag: chela defines a `claude` shell function there while
+> the setting is on. `-p`/`--print`, `--help`/`--version`, a prompt or subcommand, or your
+> own `--remote-control` pass through unchanged. Turning the setting off affects new
+> windows only — an already-open shell keeps the function until it exits.
 > Dispatched agents and judges get no Remote Control.
 
 ## 4. Start the daemon — this is the engine
