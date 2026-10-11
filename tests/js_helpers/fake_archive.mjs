@@ -10,6 +10,11 @@
 // carries `no_session: true` — the server's "session id cannot be determined" refusal.
 // A `run:` key is only hidden. Unarchive of an `s:` key RESUMES it: a new window, same
 // name + cwd, which `/api/agents` answers with from then on.
+//
+// CMX-82: it also keeps the shared sidebar LAYOUT (/api/sidebar/layout — group order,
+// View settings, custom groups) the way chela/sidebar_layout.py does: a POST merges the
+// fields it names, a migrate imports only while there is no layout yet, and a field the
+// layout does not hold (collapsed state is per device) is refused with a 400.
 
 export function fakeArchiveServer(agents) {
     const st = { hidden: [], sessions: [] };
@@ -17,9 +22,28 @@ export function fakeArchiveServer(agents) {
     const closed = new Set();
     const resumedWins = [];
     let nextWid = 9000;
+    // the shared layout: null until a device saved or migrated one
+    const lay = { layout: null };
+    const LAYOUT_FIELDS = ['order', 'view', 'custom'];
+    const layoutState = () => JSON.parse(JSON.stringify({
+        exists: lay.layout !== null,
+        layout: lay.layout || { order: [], view: {}, custom: { groups: [], assign: {} } },
+    }));
+    const badFields = body => !body || typeof body !== 'object' || !Object.keys(body).length
+        || Object.keys(body).some(k => !LAYOUT_FIELDS.includes(k));
     const state = () => JSON.parse(JSON.stringify(st));
 
     function post(path, body) {
+        if (path === '/api/sidebar/layout' || path === '/api/sidebar/layout/migrate') {
+            if (badFields(body)) return { ok: false, error: 'not part of the shared layout' };
+            if (path.endsWith('/migrate')) {
+                if (lay.layout) return { ok: true, imported: false, ...layoutState() };
+                lay.layout = { ...layoutState().layout, ...JSON.parse(JSON.stringify(body)) };
+                return { ok: true, imported: true, ...layoutState() };
+            }
+            lay.layout = { ...layoutState().layout, ...JSON.parse(JSON.stringify(body)) };
+            return { ok: true, ...layoutState() };
+        }
         const keys = (body && body.keys) || [];
         if (path === '/api/sidebar/archive') {
             const archived = [], closedNow = [], refused = [];
@@ -66,8 +90,11 @@ export function fakeArchiveServer(agents) {
     }
 
     return {
-        st, calls, resumedWins,
-        reset() { st.hidden = []; st.sessions = []; calls.length = 0; closed.clear(); resumedWins.length = 0; },
+        st, calls, resumedWins, lay,
+        reset() {
+            st.hidden = []; st.sessions = []; calls.length = 0; closed.clear(); resumedWins.length = 0;
+            lay.layout = null;
+        },
         // the live window list as the server would answer it: closed windows gone, resumed ones in
         liveAgents() { return [...(agents() || []).filter(a => a && !closed.has(a.window_id)), ...resumedWins]; },
         handle(url, opts) {
@@ -78,6 +105,7 @@ export function fakeArchiveServer(agents) {
             calls.push({ method, path, body });
             if (path === '/api/agents') return this.liveAgents();
             if (method === 'GET' && path === '/api/sidebar/archive') return state();
+            if (method === 'GET' && path === '/api/sidebar/layout') return layoutState();
             return post(path, body);
         },
     };

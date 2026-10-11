@@ -28,7 +28,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, spawn, starter, tasklists, transcripts, update, usage, userconfig
+from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -2756,6 +2756,46 @@ def api_sidebar_archive_migrate():
     if keys is None:
         return jsonify({"ok": False, "error": "keys must be a non-empty list of item keys"}), 400
     return jsonify({"ok": True, "state": sidebar_archive.hide([k for k in keys if not k.startswith("s:")])})
+
+
+# ---------------------------------------------------------------------------
+# API: the sidebar layout (CMX-82) — group order, custom groups, View settings, shared
+#
+# chela state (:mod:`chela.sidebar_layout`), so every device draws the same sidebar.
+# Collapsed groups / the folded sidebar / the Archived section's open state stay in each
+# browser — they are about that screen, and the store refuses them.
+# ---------------------------------------------------------------------------
+
+@app.route("/api/sidebar/layout", methods=["GET"])
+@require_auth
+def api_sidebar_layout_state():
+    """``{exists, layout: {order, view, custom}}`` — ``exists`` is false until a device
+    saved (or migrated) one."""
+    return jsonify(sidebar_layout.state())
+
+
+@app.route("/api/sidebar/layout", methods=["POST"])
+@require_auth
+def api_sidebar_layout():
+    """Save part of the layout. Body: any of ``{order, view, custom}``; the fields it does
+    not name are kept, so two devices editing different things never undo each other."""
+    try:
+        st = sidebar_layout.update(request.get_json(silent=True))
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, **st})
+
+
+@app.route("/api/sidebar/layout/migrate", methods=["POST"])
+@require_auth
+def api_sidebar_layout_migrate():
+    """One-time import of a browser's pre-CMX-82 localStorage layout. Imported only while
+    the server has none — the first device wins, a later one adopts the server's."""
+    try:
+        imported, st = sidebar_layout.migrate(request.get_json(silent=True))
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "imported": imported, **st})
 
 
 # ---------------------------------------------------------------------------

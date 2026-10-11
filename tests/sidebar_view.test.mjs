@@ -57,6 +57,7 @@ beforeEach(async () => {
     server.reset();
     await nav.refreshArchive();
     localStorage.clear();
+    await nav.refreshLayout();   // CMX-82: the shared layout, re-read from the (reset) server
     spawns.length = 0;
     // a choice is also kept in memory (for a throwing storage) — reset it to the defaults
     nav.viewMenuAction('group:folder');
@@ -433,7 +434,7 @@ test('Group by Custom groups: create, assign via the row menu, unassigned → Un
     nav.deleteCustomGroup(g.id);
     assert.deepEqual(groupLabels(), ['Ungrouped']);
     assert.deepEqual(rowsUnder('Ungrouped').sort(), ['a1', 'b1'], 'deleting a group moves its rows, never hides them');
-    assert.deepEqual(JSON.parse(localStorage.getItem('chela_sb_custom_groups')).assign, {},
+    assert.deepEqual(server.lay.layout.custom.assign, {},
         'a deleted group must not leave assignments behind (a group re-created later would re-capture them)');
 });
 
@@ -497,8 +498,7 @@ test('a custom-group assignment is dropped when its WINDOW is gone (a recycled @
     nav.moveToGroup(`w:${a.window_id}`, g.id);
     nav.moveToGroup('run:CMX-8', g.id);
     render([win('other')]);   // both windows closed
-    const assign = JSON.parse(localStorage.getItem('chela_sb_custom_groups')).assign;
-    assert.deepEqual(assign, { 'run:CMX-8': g.id });
+    assert.deepEqual(server.lay.layout.custom.assign, { 'run:CMX-8': g.id });
 });
 
 test('the custom-groups page in the view menu creates, renames and deletes (prompted names)', () => {
@@ -573,19 +573,21 @@ test('Show PR status: a PR badge on dispatched-run rows (with its state), hidden
 
 // --- persistence ---------------------------------------------------------------------------
 
-test('choices persist per viewer and are read back on the next render', () => {
+test('choices persist (CMX-82: on the server, shared) and are read back on the next render', async () => {
     render([win('a1'), win('b1', { cwd: '/srv/code/beta' })]);
     view('group:none');
     view('sort:name');
     view('env:judge');
-    const stored = JSON.parse(localStorage.getItem('chela_sb_view'));
+    const stored = server.lay.layout.view;
     assert.equal(stored.groupBy, 'none');
     assert.equal(stored.sort, 'name');
     assert.ok(stored.env.includes('judge'));
     render([win('a1'), win('b1', { cwd: '/srv/code/beta' })]);
     assert.equal(host().querySelectorAll('.group-head').length, 0, 'a fresh render forgot Group by ▸ None');
     // a garbage stored view falls back to the defaults, field by field
-    localStorage.setItem('chela_sb_view', '{"groupBy":"galaxy","sort":"name"}');
+    await new Promise(r => setTimeout(r, 0));   // let the view writes settle
+    server.lay.layout.view = { groupBy: 'galaxy', sort: 'name' };
+    await nav.refreshLayout();
     render([win('a1')]);
     assert.deepEqual(groupKeys(), ['/srv/code/alpha']);
 });

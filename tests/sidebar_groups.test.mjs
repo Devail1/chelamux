@@ -56,6 +56,7 @@ beforeEach(async () => {
     spawns.length = 0;
     server.reset();
     await nav.refreshArchive();   // the page's copy of the archive, re-read from the (reset) server
+    await nav.refreshLayout();    // CMX-82: and of the (reset, empty) shared layout
 });
 
 const wants = a => !!a && (a.needs_human === true || a.session_status === 'waiting');
@@ -263,7 +264,7 @@ test('the group menu opens on right-click AND on the ⋯ button, with the deskto
     assert.ok(!menuItems('group-menu').find(i => i.text === 'Move up').disabled);
 });
 
-test('Move up / Move down reorder the groups and the order persists', () => {
+test('Move up / Move down reorder the groups and the order persists (CMX-82: on the server)', () => {
     const rows = [
         win('a', { cwd: '/srv/code/alpha' }), win('b', { cwd: '/srv/code/beta' }), win('c', { cwd: '/srv/code/gamma' }),
     ];
@@ -275,7 +276,7 @@ test('Move up / Move down reorder the groups and the order persists', () => {
     fire(group('/srv/code/alpha').querySelector('.group-head'), 'oncontextmenu');
     clickMenu('group-menu', 'Move down');
     assert.deepEqual(groupKeys(), ['/srv/code/gamma', '/srv/code/alpha', '/srv/code/beta']);
-    assert.deepEqual(JSON.parse(localStorage.getItem('chela_sb_group_order')),
+    assert.deepEqual(server.lay.layout.order,
         ['/srv/code/gamma', '/srv/code/alpha', '/srv/code/beta']);
     render(rows);   // a fresh render reads the persisted order back
     assert.deepEqual(groupKeys(), ['/srv/code/gamma', '/srv/code/alpha', '/srv/code/beta']);

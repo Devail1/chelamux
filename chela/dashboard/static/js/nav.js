@@ -269,12 +269,16 @@ function _agentLabel(a) {
     return a ? a.name : '';
 }
 
-// --- Per-viewer sidebar state (CMX-35) ---------------------------------------
-// Collapsed groups, the group order (Move up / Move down) and the view are this VIEWER's,
-// so they live in localStorage — and every
+// --- Per-device sidebar state (CMX-35) --------------------------------------
+// Collapsed groups (and the Archived section's open state, kept in the same set) are
+// about THIS screen, so they live in localStorage — and every
 // read and write is wrapped: a private window, blocked site data or a throwing
 // accessor must leave a sidebar that still renders (just one that forgets).
+// CMX-82: the group order, the custom groups and the View settings are NOT — they are
+// shared chela state (_layout, below), so every device draws the same sidebar.
 const SB_COLLAPSED_KEY = 'chela_grp_collapsed';
+// Pre-CMX-82 the group order / view / custom groups lived here, per browser. They are
+// read only until the server's layout arrives, imported ONCE (_migrateLayout), then removed.
 const SB_ORDER_KEY = 'chela_sb_group_order';
 // Pre-CMX-75 the archive lived here, per browser. It is chela state now (_arch, below);
 // whatever a browser still holds is imported ONCE (_migrateArchive) and then removed.
@@ -318,7 +322,7 @@ function toggleGroup(key) {
 }
 
 let _memOrder = null;
-function _groupOrder() { return _lsList(SB_ORDER_KEY, _memOrder); }
+function _groupOrder() { return _layout ? [..._layout.order] : _lsList(SB_ORDER_KEY, _memOrder); }
 // --- The archive (CMX-75) — SERVER state, not this browser's -----------------
 // chela/sidebar_archive.py, behind /api/sidebar/archive: `hidden` (row keys hidden only —
 // a settled dispatched run) and `sessions` (CLOSED human sessions, each with what it
@@ -420,25 +424,110 @@ function _lsObj(key, mem) {
     } catch { return null; }
 }
 
+// --- The layout (CMX-82) — SERVER state, shared by every device ---------------
+// chela/sidebar_layout.py, behind /api/sidebar/layout: the group order, the View menu's
+// choices and the custom groups (+ which row is in which). `_layout` is null until the
+// server's first answer; until then the page draws from this browser's old localStorage
+// keys (or the defaults) and writes NOTHING to the server — a render off a layout this
+// page has not seen must never overwrite the one another device saved.
+let _layout = null;
+// the pre-load stand-ins for a THROWING localStorage (see _lsRead)
 let _memView = null;
-function _view() { return normalizeView(_lsObj(SB_VIEW_KEY, _memView)); }
-function _saveView(v) {
-    _memView = normalizeView(v);
-    _lsSet(SB_VIEW_KEY, _memView);
-}
-
 let _memCustom = null;
-function _custom() {
-    const c = _lsObj(SB_CUSTOM_KEY, _memCustom) || {};
+// Bumped on every local write; a GET that started before a write must not undo it.
+let _layoutGen = 0;
+let _layoutWrites = 0;
+function _cleanCustom(c) {
+    c = c && typeof c === 'object' ? c : {};
     const groups = Array.isArray(c.groups)
-        ? c.groups.filter(g => g && typeof g.id === 'string' && typeof g.name === 'string') : [];
-    const assign = c.assign && typeof c.assign === 'object' && !Array.isArray(c.assign) ? c.assign : {};
+        ? c.groups.filter(g => g && typeof g.id === 'string' && typeof g.name === 'string')
+            .map(g => ({ id: g.id, name: g.name })) : [];
+    const assign = c.assign && typeof c.assign === 'object' && !Array.isArray(c.assign) ? { ...c.assign } : {};
     return { groups, assign };
 }
-function _saveCustom(c) {
-    _memCustom = { groups: c.groups, assign: c.assign };
-    _lsSet(SB_CUSTOM_KEY, _memCustom);
+function _setLayout(l) {
+    _layout = {
+        order: Array.isArray(l && l.order) ? l.order.filter(k => typeof k === 'string') : [],
+        view: l && l.view && typeof l.view === 'object' && !Array.isArray(l.view) ? l.view : {},
+        custom: _cleanCustom(l && l.custom),
+    };
 }
+// This browser's pre-CMX-82 layout — only what it actually holds.
+function _legacyLayout() {
+    const out = {};
+    const order = _lsList(SB_ORDER_KEY, _memOrder);
+    if (order.length) out.order = order;
+    const view = _lsObj(SB_VIEW_KEY, _memView);
+    if (view) out.view = view;
+    const custom = _lsObj(SB_CUSTOM_KEY, _memCustom);
+    if (custom) out.custom = _cleanCustom(custom);
+    return out;
+}
+function _dropLegacyLayout() {
+    for (const k of [SB_ORDER_KEY, SB_VIEW_KEY, SB_CUSTOM_KEY]) {
+        try { localStorage.removeItem(k); } catch { /* storage blocked */ }
+    }
+    _memOrder = _memView = _memCustom = null;
+}
+// Save part of the layout. Before the first load it stays in this browser (the old keys —
+// the migration carries it); after, it goes to the server, where every device reads it.
+function _saveLayout(patch) {
+    if (!_layout) {
+        if (patch.order) { _memOrder = patch.order; _lsSet(SB_ORDER_KEY, patch.order); }
+        if (patch.view) { _memView = patch.view; _lsSet(SB_VIEW_KEY, patch.view); }
+        if (patch.custom) { _memCustom = patch.custom; _lsSet(SB_CUSTOM_KEY, patch.custom); }
+        return;
+    }
+    _setLayout({ ..._layout, ...patch });
+    const gen = ++_layoutGen;
+    _layoutWrites++;
+    _postJson('/api/sidebar/layout', patch)
+        .then(res => {
+            // the server's merged answer — unless a newer local write is already on its way
+            if (res && res.ok && res.layout && gen === _layoutGen) {
+                _setLayout(res.layout);
+                renderSidebarAgents(_agentsCache || []);
+            }
+        })
+        .catch(() => { /* the next refresh re-reads the server's */ })
+        .finally(() => { _layoutWrites--; });
+}
+// One-time import of this browser's old localStorage layout — the server keeps it only if
+// it has none yet (the first device wins; a later one adopts the server's).
+let _migratingLayout = false;
+async function _migrateLayout(legacy) {
+    if (_migratingLayout) return;
+    _migratingLayout = true;
+    try {
+        const res = await _postJson('/api/sidebar/layout/migrate', legacy);
+        if (res && res.ok && res.layout) {
+            _setLayout(res.layout);
+            _dropLegacyLayout();
+        }
+    } catch { /* the next refresh retries */ }
+    _migratingLayout = false;
+}
+// Load (and on every sidebar refresh, re-read) the shared layout, so another device's
+// change shows up here.
+async function refreshLayout() {
+    const gen = _layoutGen;
+    let st = null;
+    try { st = await api('/api/sidebar/layout'); } catch { return; /* keep the last answer */ }
+    if (!st || typeof st.exists !== 'boolean' || !st.layout) return;
+    if (gen !== _layoutGen || _layoutWrites) return;   // a local write raced this read
+    if (!st.exists) {
+        const legacy = _legacyLayout();
+        if (Object.keys(legacy).length) { await _migrateLayout(legacy); return; }
+    }
+    _setLayout(st.layout);
+    if (st.exists) _dropLegacyLayout();
+}
+
+function _view() { return normalizeView(_layout ? _layout.view : _lsObj(SB_VIEW_KEY, _memView)); }
+function _saveView(v) { _saveLayout({ view: normalizeView(v) }); }
+
+function _custom() { return _cleanCustom(_layout ? _layout.custom : _lsObj(SB_CUSTOM_KEY, _memCustom)); }
+function _saveCustom(c) { _saveLayout({ custom: _cleanCustom(c) }); }
 
 // The last render's model — what the group/row menus act on (they open off a click on
 // what is on screen, so they read the same grouping the screen was drawn from).
@@ -704,7 +793,7 @@ function renderSidebarAgents(agents) {
     //
     // CMX-66: the VIEW menu (the sliders button on the Sessions header) picks what shows
     // (Status / Environment / Last activity), how it groups (Date / Folder / State /
-    // Custom groups / None) and how each group sorts — per viewer, in localStorage.
+    // Custom groups / None) and how each group sorts — shared by every device (CMX-82).
     const orchWid = orchestratorState().wid;
     const archived = _archivedSet();
     const view = _view();
@@ -724,7 +813,9 @@ function renderSidebarAgents(agents) {
     // not inherit it); a run's (`run:CMX-N`) is kept — a run outlives its windows.
     const liveKeys = new Set(rows.filter(Boolean).map(a => `w:${a.window_id || a.name}`));
     const goneW = Object.keys(custom.assign).filter(k => k.startsWith('w:') && !liveKeys.has(k));
-    if (goneW.length) { goneW.forEach(k => delete custom.assign[k]); _saveCustom(custom); }
+    // Only off the SERVER's layout (CMX-82): before it has loaded there is nothing of its
+    // to prune, and a write now would overwrite what another device saved.
+    if (_layout && goneW.length) { goneW.forEach(k => delete custom.assign[k]); _saveCustom(custom); }
 
     const items = new Map();
     for (const it of [...model.needsYou, ...model.groups.flatMap(g => g.items), ...model.archived]) {
@@ -843,7 +934,7 @@ function groupMenuAction(key, act) {
     if (act === 'up' || act === 'down') {
         const keys = groups.map(x => x.key);
         const next = moveGroup(keys, _groupOrder(), key, act === 'up' ? -1 : 1);
-        if (next) { _memOrder = next; _lsSet(SB_ORDER_KEY, next); }
+        if (next) _saveLayout({ order: next });
     } else if (act === 'collapse-all') {
         _saveCollapsed(new Set([..._collapsedGroups(), ...groups.map(x => x.key)]));
     } else if (act === 'expand-all') {
@@ -1155,7 +1246,7 @@ async function refreshSidebar() {
         ]);
         setAgentsCache(agents || []);
         if (ctx) updateCtxCache(ctx);
-        await refreshArchive();
+        await Promise.all([refreshArchive(), refreshLayout()]);
         renderSidebarAgents(_agentsCache);
     } catch (e) {
         // transient — keep the last render; the next tick retries.
@@ -3359,7 +3450,7 @@ function closeShortcuts() {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, refreshArchive, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, renameCustomGroup, toggleGroup, toggleShowArchived, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
+export { archiveKeys, refreshLayout, rowMenuAction, inboxClick, jumpToOrchestrator, refreshArchive, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, renameCustomGroup, toggleGroup, toggleShowArchived, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
