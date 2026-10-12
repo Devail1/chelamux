@@ -430,3 +430,175 @@ def test_the_release_cli_exits_nonzero_on_a_refusal(world, capsys, monkeypatch):
         main.cmd_release(SimpleNamespace(version="0.2.0", theme="t", body_file=None,
                                          repo=str(world.work)))
     assert exc.value.code == 1 and "REFUSED" in capsys.readouterr().out
+
+
+# --- every pre-push re-check refuses on its own (DEFEAT_SHAPES 12b / 87) -------------------
+# Each test arms exactly ONE precondition with a real violation (every other check still
+# passes) and asserts the ABSENCE of the push — origin untouched — not just an error text.
+# The negative control is test_approve_pushes_main_tag_dev_in_order_exactly_once: same world,
+# no violation ⇒ three pushes.
+
+def _push_tag_to_origin(world, target: str = "main") -> str:
+    """A v0.2.0 tag lands on origin from another clone — on a commit outside main/dev's
+    history, so `git fetch`'s tag auto-follow never brings it home: only origin has it."""
+    other = world.tmp / "tagger"
+    _g(world.tmp, "clone", "-q", "-b", target, str(world.origin), str(other))
+    ident = ("-c", "user.email=o@example.com", "-c", "user.name=O")
+    side = _g(other, *ident, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "side")
+    _g(other, *ident, "-c", "tag.gpgsign=false",
+       "tag", "-a", "v0.2.0", "-m", "someone else's v0.2.0", side)
+    _g(other, "push", "-q", "origin", "refs/tags/v0.2.0")
+    return _remote(world, "refs/tags/v0.2.0^{commit}")
+
+
+def _assert_origin_untouched(world, main0, dev0, pushes, tag=None):
+    assert pushes == []
+    assert _remote(world, "main") == main0 and _remote(world, "dev") == dev0
+    assert _remote(world, "refs/tags/v0.2.0^{commit}") == tag
+
+
+def test_approve_with_the_tag_already_on_origin_pushes_nothing(world, pushes, told):
+    """🔴 GUARD: a v0.2.0 tag that reached origin after the request ⇒ the approval pushes
+    NOTHING (main and dev stay put), the request fails, the operator is told."""
+    out = _prepare(world)
+    main0, dev0 = _remote(world, "main"), _remote(world, "dev")
+    theirs = _push_tag_to_origin(world)
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["ok"] is False and res["state"] == overrides.FAILED, res
+    assert "already exists on origin" in res["detail"]
+    _assert_origin_untouched(world, main0, dev0, pushes, tag=theirs)
+    assert overrides.load(out["request_id"])["state"] == overrides.FAILED
+    assert [k for k, *_ in told] == ["release_failed"] and "nothing was pushed" in told[0][1]
+
+
+def test_approve_when_origin_tags_cannot_be_read_pushes_nothing(world, pushes, monkeypatch):
+    """🔴 GUARD: origin's tags unreadable at approval (ls-remote fails) ⇒ fail CLOSED."""
+    out = _prepare(world)
+    main0, dev0 = _remote(world, "main"), _remote(world, "dev")
+    monkeypatch.setattr(release, "_remote_tag", lambda cwd, tag: None)
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["state"] == overrides.FAILED and "could not be checked" in res["detail"]
+    _assert_origin_untouched(world, main0, dev0, pushes)
+
+
+def test_approve_when_the_local_tag_was_moved_pushes_nothing(world, pushes):
+    """🔴 GUARD: the local tag no longer points at the approved commit ⇒ nothing pushed —
+    and cleanup leaves that (no longer ours) tag alone."""
+    out = _prepare(world)
+    main0, dev0 = _remote(world, "main"), _remote(world, "dev")
+    _g(world.work, "-c", "tag.gpgsign=false", "tag", "-f", "-a", "v0.2.0", "-m", "moved",
+       dev0)
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["state"] == overrides.FAILED and "no longer points" in res["detail"], res
+    _assert_origin_untouched(world, main0, dev0, pushes)
+    assert _local(world, "refs/tags/v0.2.0^{commit}") == dev0     # not deleted: not ours
+
+
+def test_approve_when_the_release_is_not_one_commit_on_dev_pushes_nothing(world, pushes):
+    """🔴 GUARD: the approved commit must be ONE commit on top of the dev it was cut from.
+    A record whose release commit sits two commits above dev (tag moved with it, so the
+    tag and main-ancestor checks both still pass) ⇒ nothing pushed."""
+    out = _prepare(world)
+    main0, dev0 = _remote(world, "main"), _remote(world, "dev")
+    sha = out["release_sha"]
+    extra = _g(world.work, "-c", "user.email=o@example.com", "-c", "user.name=O",
+               "commit-tree", f"{sha}^{{tree}}", "-p", sha, "-m", "smuggled")
+    _g(world.work, "-c", "tag.gpgsign=false", "tag", "-f", "-a", "v0.2.0", "-m", "x", extra)
+    overrides.set_fields(out["request_id"], release_sha=extra)
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["state"] == overrides.FAILED and "single commit" in res["detail"], res
+    _assert_origin_untouched(world, main0, dev0, pushes)
+
+
+def test_approve_when_the_repository_is_gone_pushes_nothing(world, pushes):
+    out = _prepare(world)
+    overrides.set_fields(out["request_id"], git_dir=str(world.tmp / "nowhere"))
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["state"] == overrides.FAILED and "gone" in res["detail"]
+    assert pushes == []
+
+
+def test_approve_when_origin_cannot_be_fetched_pushes_nothing(world, pushes):
+    out = _prepare(world)
+    _g(world.work, "remote", "set-url", "origin", str(world.tmp / "missing.git"))
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["state"] == overrides.FAILED and "fetch" in res["detail"]
+    assert pushes == []
+
+
+def test_complete_refuses_an_approved_override_that_is_not_a_release(world, pushes):
+    """🔴 GUARD: `release.complete` pushes only for a stored KIND=release record."""
+    out = _prepare(world)
+    overrides.set_fields(out["request_id"], state=overrides.MERGING, kind="override")
+    res = release.complete(overrides.load(out["request_id"]), "me")
+    assert res["ok"] is False and "not approved" in res["detail"] and pushes == []
+    overrides.set_fields(out["request_id"], kind="release")     # negative control
+    assert release.complete(overrides.load(out["request_id"]), "me")["ok"] is True
+    assert len(pushes) == 3
+
+
+def test_a_rejected_dev_push_fails_and_reports_what_was_pushed(world, pushes, told):
+    """🔴 GUARD: a push failing midway stops there, the request FAILS (not released) and
+    says exactly what reached origin; the pushed tag is kept."""
+    out = _prepare(world)
+    dev0 = _remote(world, "dev")
+    hook = world.origin / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nwhile read o n r; do [ \"$r\" = refs/heads/dev ] && "
+                    "exit 1; done\nexit 0\n")
+    hook.chmod(0o755)
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["ok"] is False and res["state"] == overrides.FAILED, res
+    assert "pushing dev failed" in res["detail"] and "main, v0.2.0" in res["detail"]
+    assert len(pushes) == 3 and _remote(world, "dev") == dev0
+    assert overrides.load(out["request_id"])["pushed"] == ["main", "v0.2.0"]
+    assert "pushed only: main, v0.2.0" in told[0][1]
+    assert _local(world, "refs/tags/v0.2.0") is not None
+
+
+# --- prepare's own preconditions ----------------------------------------------------------
+
+def test_prepare_refuses_when_the_tag_already_exists_on_origin(world, pushes):
+    """🔴 GUARD: a v0.2.0 tag already on origin (not fetched locally) ⇒ refused, no request,
+    no worktree/branch/local tag."""
+    theirs = _push_tag_to_origin(world)
+    assert _local(world, "refs/tags/v0.2.0") is None             # only origin has it
+    out = _prepare(world)
+    assert out["ok"] is False and "already exists on origin" in out["error"], out
+    assert overrides.all_requests() == [] and _release_worktrees() == [] and pushes == []
+    assert _local(world, "refs/heads/chela-release/v0.2.0") is None
+    assert _remote(world, "refs/tags/v0.2.0^{commit}") == theirs
+
+
+def test_prepare_refuses_when_origin_tags_cannot_be_read(world, monkeypatch):
+    monkeypatch.setattr(release, "_remote_tag", lambda cwd, tag: None)
+    out = _prepare(world)
+    assert out["ok"] is False and "could not read origin's tags" in out["error"]
+    assert overrides.all_requests() == [] and _release_worktrees() == []
+
+
+def test_prepare_refuses_when_the_tag_exists_locally_and_keeps_it(world):
+    _g(world.work, "-c", "tag.gpgsign=false", "tag", "-a", "v0.2.0", "-m", "mine", "main")
+    mine = _local(world, "refs/tags/v0.2.0^{commit}")
+    out = _prepare(world)
+    assert out["ok"] is False and "already exists locally" in out["error"]
+    assert overrides.all_requests() == [] and _release_worktrees() == []
+    assert _local(world, "refs/tags/v0.2.0^{commit}") == mine
+
+
+def test_prepare_refuses_when_the_release_branch_exists_and_keeps_it(world):
+    """The named refusal — not `git worktree add -b`'s own failure further down — so the
+    operator is told how to clear it."""
+    _g(world.work, "branch", "chela-release/v0.2.0", "main")
+    out = _prepare(world)
+    assert out["ok"] is False and "a previous release attempt" in out["error"], out
+    assert "git branch -D chela-release/v0.2.0" in out["error"]
+    assert overrides.all_requests() == [] and _release_worktrees() == []
+    assert _local(world, "refs/heads/chela-release/v0.2.0") == _remote(world, "main")
+    assert _local(world, "refs/tags/v0.2.0") is None
+
+
+def test_prepare_refuses_when_origin_cannot_be_fetched(world):
+    _g(world.work, "remote", "set-url", "origin", str(world.tmp / "missing.git"))
+    out = _prepare(world)
+    assert out["ok"] is False and "fetch" in out["error"]
+    assert overrides.all_requests() == [] and _release_worktrees() == []
