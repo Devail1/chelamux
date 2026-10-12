@@ -672,9 +672,15 @@ def render_equivalents(equivalents: list[dict]) -> str:
              "Each mutation below SURVIVED the suite; the agent says no outcome can change "
              "under it. Not verified by chela — check the reason.", ""]
     for e in equivalents:
-        muts = "; ".join(e.get("mutations") or [])
-        lines.append(f"- `{e['key']}` — {e['why']}" + (f" (mutation: {muts})" if muts else ""))
+        muts = "; ".join(_one_line(m) for m in e.get("mutations") or [])
+        lines.append(f"- `{_one_line(e['key'])}` — {_one_line(e['why'])}"
+                     + (f" (mutation: {muts})" if muts else ""))
     return "\n".join(lines)
+
+
+def _one_line(text: object) -> str:
+    """Agent-authored text bound for ONE markdown bullet: a CR/LF would start a forged one."""
+    return re.sub(r"\s*[\r\n]+\s*", " ", str(text))
 
 
 def run_sweep(

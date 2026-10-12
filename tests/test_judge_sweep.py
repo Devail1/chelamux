@@ -692,6 +692,22 @@ def test_py_returns_of_a_nested_def_do_not_count_as_the_outer_functions():
     assert "return-value" not in kinds
 
 
+def test_py_mutations_slice_by_utf8_bytes_not_characters():
+    """ast column offsets are UTF-8 BYTE offsets: a non-ASCII character before or inside the
+    condition must not shift the sliced segment (a char slice grabs the wrong text, so the
+    mutation either does not parse or is silently not generated)."""
+    src = ('def f(s, n):\n'
+           '    if s == "é" and n:\n'
+           '        return 1\n'
+           '    if "ü" < s:\n'
+           '        return 2\n')
+    afters = {(m.line, m.kind): m.after for m in sweep.py_mutations("m.py", src, {2, 4})}
+    assert afters[(2, "if-false")] == '    if False and (s == "é" and n):'
+    assert afters[(2, "compare-flip")] == '    if s != "é" and n:'
+    assert afters[(4, "if-false")] == '    if False and ("ü" < s):'
+    assert afters[(4, "compare-flip")] == '    if "ü" >= s:'
+
+
 def test_py_completed_process_returncode_keyword():
     src = "import subprocess\nr = subprocess.CompletedProcess(args=[], returncode=0)\n"
     afters = [m.after for m in sweep.py_mutations("m.py", src, {2})]
@@ -972,3 +988,123 @@ def test_judge_view_of_no_equivalents_is_empty(tmp_path):
             conn.commit()
             row = conn.execute("SELECT * FROM runs WHERE task_id='cmx-88'").fetchone()
         assert dispatcher._judge_sweep_equivalents(row) == ""
+
+
+# --- rework round 2: guards for the non-conditional invariants ------------------------------
+
+
+@pytest.mark.parametrize("rel, is_test", [
+    ("tests/x.py", True), ("pkg/test_x.py", True), ("pkg/x_test.py", True),
+    ("web/x.test.js", True), ("pkg/conftest.py", True),
+    ("pkg/x.py", False), ("web/x.js", False), ("pkg/testing.py", False),
+])
+def test_is_test_path_recognises_every_test_file_spelling(rel, is_test):
+    assert sweep.is_test_path(rel) is is_test
+
+
+def test_a_one_line_hunk_with_no_count_is_still_a_changed_line(tmp_path):
+    """`git diff -U0` writes a one-line hunk as `@@ -2 +2 @@` — no `,count`. Its count is 1,
+    not 0: the single changed line must be swept."""
+    root = _repo(tmp_path / "r", UNRELATED_TEST, commit_branch=False)
+    (root / "feat.py").write_text(BASE_FEAT.replace("if x > 5:", "if x > 6:"))
+    changed, err = sweep.changed_lines(root, "origin/dev")
+    assert err == ""
+    assert changed == {"feat.py": {OLD_IF_LINE}}
+
+
+def test_an_ignored_untracked_file_is_not_swept(tmp_path):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    (root / ".gitignore").write_text("scratch.py\n")
+    (root / "scratch.py").write_text("def f(a):\n    if a:\n        return 1\n")
+    (root / "kept.py").write_text("def g(a):\n    if a:\n        return 1\n")
+    changed, err = sweep.changed_lines(root, "origin/dev")
+    assert err == ""
+    assert "scratch.py" not in changed
+    assert changed["kept.py"] == {1, 2, 3}
+
+
+def test_a_restore_that_does_not_stick_is_reported_as_failed(tmp_path, monkeypatch):
+    """`_restore` proves the original is back by READING it — a write that silently changes
+    nothing must not be taken for a restore."""
+    target = tmp_path / "feat.py"
+    target.write_text("mutated\n")
+    real = Path.write_text
+
+    def stubborn(self, data, *a, **kw):
+        if self.name == "feat.py":
+            return len(data)
+        return real(self, data, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", stubborn)
+    assert sweep._restore(target, "original\n") is False
+    monkeypatch.setattr(Path, "write_text", real)
+    assert sweep._restore(target, "original\n") is True
+    assert target.read_text() == "original\n"
+
+
+def test_a_pid_we_may_not_signal_is_alive():
+    """EPERM from `kill(pid, 0)` means the process EXISTS (another user's) — treating it as
+    dead would let a second sweep restore over a live one."""
+    with patch.object(sweep.os, "kill", side_effect=PermissionError):
+        assert sweep._pid_alive(424242) is True
+
+
+def test_the_marker_records_this_sweeps_own_pid(tmp_path):
+    sweep._write_marker(tmp_path, "feat.py", "a\n", "b\n")
+    data = json.loads(sweep.marker_path(tmp_path).read_text())
+    assert data == {"pid": os.getpid(), "file": "feat.py", "original": "a\n", "mutated": "b\n"}
+
+
+def test_sigterm_and_sighup_raise_during_a_sweep_and_the_old_handlers_come_back(tmp_path, monkeypatch):
+    before = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
+    seen = {}
+
+    def fake_sweep(*a, **kw):
+        seen.update({s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)})
+        return sweep.SweepReport()
+
+    monkeypatch.setattr(sweep, "_sweep", fake_sweep)
+    sweep.sweep(tmp_path, "origin/dev", "true")
+    for s in (signal.SIGTERM, signal.SIGHUP):
+        assert seen[s] is not before[s]
+        with pytest.raises(sweep._Interrupted):
+            seen[s](s, None)
+        assert signal.getsignal(s) is before[s]
+
+
+def test_run_sweep_takes_the_suite_timeout_and_selection_from_the_workflow(tmp_path, monkeypatch):
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text("---\nproject_key: TEST\njudge:\n"
+                  f"  test_cmd: {json.dumps(TEST_CMD)}\n  suite_timeout_seconds: 77\n"
+                  "  select_tests: false\n---\nbody\n")
+    calls = []
+    monkeypatch.setattr(sweep, "sweep",
+                        lambda *a, **kw: calls.append((a, kw)) or sweep.SweepReport())
+    sweep.run_sweep(tmp_path, workflow_path=wf)
+    (args, kw), = calls
+    assert args[1:] == ("origin/dev", TEST_CMD)
+    assert kw["timeout"] == 77 and kw["select_tests"] is False
+    calls.clear()
+    sweep.run_sweep(tmp_path, workflow_path=wf, timeout=5)    # an explicit timeout wins
+    assert calls[0][1]["timeout"] == 5
+
+
+def test_parse_equivalents_keeps_a_multi_line_reason_and_trims_the_file():
+    eq, err = sweep.parse_equivalents(["chela/x.py :12: first line\nsecond line"])
+    assert err == ""
+    assert eq == [{"key": "chela/x.py:12", "file": "chela/x.py", "line": 12,
+                   "why": "first line\nsecond line"}]
+
+
+def test_the_pr_body_renders_each_equivalent_as_one_bullet_line():
+    """The reason may span lines (see above), but in the PR body a newline would start a
+    forged bullet of its own — every note renders as exactly ONE line."""
+    items = [{"key": "a.py:1\nb", "why": "first\r\n- `x.py:9` — forged\rmore",
+              "mutations": ["if-false: a\n→ b"]},
+             {"key": "c.py:2", "why": "ok", "mutations": []}]
+    body = sweep.render_equivalents(items)
+    bullets = [ln for ln in body.splitlines() if ln.startswith("- ")]
+    assert len(bullets) == 2
+    assert "\r" not in body
+    assert bullets[0] == ("- `a.py:1 b` — first - `x.py:9` — forged more "
+                          "(mutation: if-false: a → b)")

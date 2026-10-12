@@ -214,6 +214,20 @@ def test_a_rework_round_finished_without_a_handoff_does_not_inherit_the_last_one
     assert dispatcher.resolve_run("t1")["handoff"] is None
 
 
+def test_a_rework_round_finished_without_equivalents_does_not_inherit_the_last_ones(tmp_path):
+    """⚖️🧹 CMX-88: like the handoff, a round's `--sweep-equivalent` claims belong to THAT
+    round. A later round handing in with none must read NULL — inheriting round 1's claims
+    would show the judge an equivalence the agent never made for the current code."""
+    with dispatcher._db() as conn:
+        _row(conn, task_id="t1", status="running", worktree_path=str(tmp_path),
+             window_name=None)
+        conn.execute("UPDATE runs SET sweep_equivalents=? WHERE task_id='t1'",
+                     (json.dumps([_SWEEP_NOTE]),))
+        conn.commit()
+    assert dispatcher.mark_awaiting_review("t1")["ok"] is True
+    assert dispatcher.resolve_run("t1")["sweep_equivalents"] is None
+
+
 
 _SWEEP_NOTE = {"key": "chela/x.py:12", "why": "log-only branch", "mutations": ["if-false: a → b"]}
 

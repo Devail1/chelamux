@@ -13,5 +13,6 @@
 - **`chela task-finished` runs the sweep and refuses while a survivor remains.** To accept a
   survivor, the agent names it with a reason:
   `--sweep-equivalent '<file:line>: <why no outcome can change>'`. The note is stored in
-  `runs.sweep_equivalents`, shown to the judge and appended to the PR body. A note that names
+  `runs.sweep_equivalents`, shown to the judge and appended to the PR body (one line per note — a newline in the reason cannot forge an
+  extra bullet). A note that names
   a line which did not survive is refused. The judge itself is unchanged. (CMX-88)
