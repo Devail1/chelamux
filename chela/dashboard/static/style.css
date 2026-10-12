@@ -297,16 +297,19 @@ body {
 .term-pane.term-focused::before, .grid-stack-item-content.term-focused::before {
     box-shadow: inset 0 0 0 2px var(--accent);
 }
-/* Waiting on user input: yellow ring on the live pane (after .term-focused so it
-   wins when a waiting pane is also focused — it's the more urgent signal). The
-   outer glow stays on the pane (outside its box, so nothing covers it); the
-   inset part rides the same overlay as the focus ring. */
+/* Waiting on user input: a soft yellow GLOW outside the pane + a yellow 1px
+   border, and the header's "waiting" state pill carries the word.
+   CMX-104: it is deliberately NOT a ring. It used to be the focus ring's twin
+   (an inset 2px ring on the same overlay, plus a crisp 1px outer ring) told
+   apart by hue alone — yellow vs the warm --accent — which a red-weak eye
+   cannot do, so "which pane is active?" had two answers. The crisp inset 2px
+   ring is reserved for keyboard focus (.term-focused above); a pane that is
+   waiting AND focused shows both: the glow outside, the focus ring inside.
+   Every whole-pane shadow here is BLURRED (no zero-blur spread ring) — the
+   guard in tests/wall_focus_ring_single_meaning.test.mjs. */
 .term-pane.term-waiting, .grid-stack-item-content.term-waiting {
     border-color: var(--yellow);
-    box-shadow: 0 0 0 1px var(--yellow), 0 0 10px -2px var(--yellow);
-}
-.term-pane.term-waiting::before, .grid-stack-item-content.term-waiting::before {
-    box-shadow: inset 0 0 0 2px var(--yellow);
+    box-shadow: 0 0 12px 0 var(--yellow);
 }
 
 /* Wall mode: draggable / resizable Gridstack tiles */
@@ -1092,7 +1095,9 @@ body.pane-is-maximized .grid-stack-item:has(.pane-maximized) {
 .pane-maximized {
     border-radius: 0 !important;
     border: 0 !important;
-    box-shadow: inset 0 0 0 2px var(--accent);   /* thin "maximized" frame */
+    /* CMX-104: no "maximized" frame. It drew a second inset accent ring a few px
+       outside the focus overlay's — two concentric rings. A maximized pane fills
+       the screen and its accent-filled restore button already says so. */
 }
 body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
     visibility: hidden;
@@ -1296,9 +1301,8 @@ body.term-dragging { overflow: hidden; }
    cursor + hover tint on their HEADER ONLY (the promote affordance —
    terminals.js's _bindFocusPromote reads clicks there, never the iframe) so
    "click here to bring this pane forward" is discoverable without a label. */
-.grid-stack-item.wall-focus-main > .grid-stack-item-content {
-    box-shadow: 0 0 0 1px var(--accent);
-}
+/* CMX-104: the large pane gets NO ring — its size is the cue. Its old 1px
+   accent outer ring read as "keyboard is here" on a pane that didn't have it. */
 .grid-stack-item.wall-focus-strip > .grid-stack-item-content .gs-head {
     cursor: pointer;
 }
@@ -1349,12 +1353,15 @@ body.term-dragging { overflow: hidden; }
 #term-stage.wire-live .grid-stack-item.wire-target > .grid-stack-item-content::after {
     background: rgba(0, 0, 0, 0.15); transform: scale(1.15);
 }
-/* In a room: a shared border in the room's colour — PAIRED WITH A NON-HUE CUE
-   (the badge below carries the room's own name + a 🔌 glyph), because hue is never
-   the only signal here. */
-.grid-stack-item-content.in-room {
-    border-color: var(--room-accent, var(--accent));
-    box-shadow: 0 0 0 1px var(--room-accent, var(--accent)), 0 1px 3px rgba(0, 0, 0, 0.4);
+/* In a room: a 3px stripe in the room's colour along the TOP of the header —
+   PAIRED WITH A NON-HUE CUE (the badge below carries the room's own name + a 🔌
+   glyph), because hue is never the only signal here.
+   CMX-104: a stripe, not a whole-pane ring. The old room-coloured border + 1px
+   outer ring was a third ring style beside focus and waiting, and was read as
+   focus (or as an ownership marker). Inset on the header itself, so it paints
+   above the header's own background and never shifts the layout. */
+.grid-stack-item-content.in-room > .gs-head {
+    box-shadow: inset 0 3px 0 0 var(--room-accent, var(--accent));
 }
 .gs-room {
     flex: 0 0 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis;

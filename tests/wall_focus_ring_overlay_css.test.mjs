@@ -59,16 +59,14 @@ for (const host of ['.term-pane', '.grid-stack-item-content']) {
             `${host}::before must be pointer-events:none — otherwise the overlay swallows every click on the terminal`);
     });
 
-    test(`CMX-90: waiting still wins over focused on ${host}'s overlay`, () => {
-        const idx = (s) => RULES.findLastIndex((r) => sel(r).includes(s) && r.style.getPropertyValue('box-shadow'));
-        const focused = idx(`${host}.term-focused::before`);
-        const waiting = idx(`${host}.term-waiting::before`);
-        assert.ok(waiting >= 0, `${host}.term-waiting::before ring rule not found`);
-        assert.ok(waiting > focused,
-            `${host}.term-waiting::before must come AFTER .term-focused::before (same specificity) so a ` +
-            'waiting+focused pane shows yellow');
-        assert.match(lastDecl(`${host}.term-waiting::before`, 'box-shadow'), /var\(--yellow\)/,
-            'the waiting overlay ring must be yellow');
+    // CMX-104 supersedes CMX-90's "waiting wins over focused": waiting no longer draws
+    // on the overlay at all (it was the focus ring's same-shape, hue-only twin), so a
+    // waiting+focused pane keeps the focus ring inside and the waiting glow outside.
+    test(`CMX-104: waiting does not repaint ${host}'s focus overlay`, () => {
+        assert.equal(lastDecl(`${host}.term-waiting::before`, 'box-shadow'), '',
+            `${host}.term-waiting::before must not paint the overlay — the inset ring there means focus only`);
+        assert.match(lastDecl(`${host}.term-waiting`, 'box-shadow'), /var\(--yellow\)/,
+            'the waiting pane keeps its yellow glow on the pane itself');
     });
 }
 
