@@ -77,6 +77,17 @@ const TYPE_CLASS = {
     // two above, without this it falls to `other` and the one push that says "this shipped
     // with NO verdict at all" reads as an anonymous `·`.
     run_unjudged_merged: 'run',
+    // CMX-86: the orchestrator inbox's new run notices — same reasoning, a run event belongs
+    // in the Runs filter, never as an anonymous `·`. A lapsed/released hold is lifecycle.
+    run_judge_not_started: 'run',
+    run_reopened: 'run',
+    run_was_closed: 'run',
+    run_ci_red: 'run',
+    run_pr_conflicting: 'run',
+    run_stuck: 'run',
+    run_marker_unread: 'run',
+    dispatch_hold_expired: 'lifecycle',
+    dispatch_hold_released: 'lifecycle',
     // The inbox cannot reach the orchestrator (CMX-77): its queue is addressed to a window
     // id a dead tmux server issued, or to a session that has exited. It is a `gate` because
     // that is exactly what it is — work is stuck until a HUMAN (or the orchestrator's next
@@ -207,14 +218,14 @@ export function buildLanes(events, agents, classes) {
         lane.total += 1;
         lane.lastTs = Math.max(lane.lastTs, e.ts || 0);
         if (e.type === 'run_review' || e.type === 'run_judge_clean'
-            || e.type === 'run_judge_cannot_verify') {
+            || e.type === 'run_judge_cannot_verify' || e.type === 'run_reopened') {
             // The TASK id, never the wid: tmux recycles `@72`, a task id is minted once.
             // A review with no task id cannot be matched against the runs, so it is not
             // claimed as open — a legacy row must not pin the graveyard open forever.
             // The judge kinds are included for the same reason `run_review` is: a daemon
             // restarted mid-judge sees the verdict BEFORE it ever sees the plain
             // `awaiting_review` edge (CMX-197), and that lane must stay out of the
-            // graveyard too.
+            // graveyard too. `run_reopened` (CMX-86) is that same edge, from a settled state.
             const tid = ((e.payload || {}).task_id || '').trim();
             if (tid && !lane.reviewTasks.includes(tid)) lane.reviewTasks.push(tid);
         }

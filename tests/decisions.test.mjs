@@ -1334,3 +1334,14 @@ test('🔴 GUARD: the decisions panel subscribes to the unjudged-merged kind', (
     assert.ok(decisions.DECISION_TYPES.includes('run_unjudged_merged'),
         `run_unjudged_merged must be subscribed, got: ${decisions.DECISION_TYPES.join(',')}`);
 });
+
+// 🔴 GUARD (CMX-86): every new orchestrator-inbox notice kind is subscribed, one by one —
+// a kind missing from DECISION_TYPES never reaches the panel (defeat shape 358).
+for (const kind of ['run_judge_not_started', 'run_reopened', 'run_was_closed', 'run_ci_red',
+                    'run_pr_conflicting', 'run_stuck', 'run_marker_unread',
+                    'dispatch_hold_expired', 'dispatch_hold_released']) {
+    test(`🔴 GUARD: the decisions panel subscribes to ${kind}`, () => {
+        assert.ok(decisions.DECISION_TYPES.includes(kind),
+            `${kind} must be subscribed, got: ${decisions.DECISION_TYPES.join(',')}`);
+    });
+}
