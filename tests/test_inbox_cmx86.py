@@ -849,3 +849,31 @@ def test_stuck_is_attributed_to_the_runs_window(monkeypatch):
     probe = {"T9": {"activity": now - 1300, "markers": {}}}
     [e] = inbox.stuck_events([run], inbox._empty(), probe, now, now_epoch="e1")
     assert e["kind"] == "run_stuck" and e["wid"] == "@41"
+
+
+def test_reopened_and_closed_notices_are_attributed_to_the_runs_window():
+    """🔴 GUARD: run_reopened and run_was_closed land in the run's agent lane too."""
+    att = {"window_id": "@41", "window_epoch": "e1"}
+    events, _ = inbox.run_events([_run("awaiting_review", **att)], {"T9": "needs_human"},
+                                 now_epoch="e1")
+    assert [(e["kind"], e["wid"]) for e in events] == [("run_reopened", "@41")]
+    expected = {"T9": {"status": "closed", "why": inbox.ORCH_ECHO,
+                       "ts": time.time() - inbox.EXPECT_EDGE_TTL_SECONDS - 1}}
+    events, _ = inbox.run_events([_run("closed", **att)], {"T9": "needs_human"},
+                                 now_epoch="e1", expected=expected)
+    closed = [e for e in events if e["kind"] == "run_was_closed"]
+    assert [e["wid"] for e in closed] == ["@41"]
+
+
+def test_a_rewritten_unread_marker_is_news_again(monkeypatch):
+    """🔴 GUARD: once per marker WRITE — a marker rewritten (new mtime) and left unread is a
+    new notice, not swallowed as the one already said."""
+    monkeypatch.setenv("CHELA_MARKER_UNREAD_ALERT_S", "300")
+    monkeypatch.setenv("CHELA_STUCK_AGENT_ALERT_S", "0")
+    store = inbox._empty()
+    now = 1_000_000.0
+    first = {"T9": {"activity": now - 5000, "markers": {"task-finished": now - 400}}}
+    assert len(inbox.stuck_events([_run("running")], store, first, now)) == 1
+    again = {"T9": {"activity": now - 5000, "markers": {"task-finished": now + 100}}}
+    fired = inbox.stuck_events([_run("running")], store, again, now + 500)
+    assert [e["kind"] for e in fired] == ["run_marker_unread"]
