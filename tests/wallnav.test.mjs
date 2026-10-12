@@ -939,7 +939,9 @@ test('CMX-377: .gs-head resolves to a fixed 40px height, not a padding-derived o
 });
 
 test('CMX-377: the focused pane gets a thin INSET ring only — no glow, no border-color change', () => {
-    const m = CSS.match(/\.term-pane\.term-focused,\s*\.grid-stack-item-content\.term-focused\s*\{([^}]*)\}/);
+    // CMX-90: the ring now lives on the pane's ::before overlay (see
+    // tests/wall_focus_ring_overlay_css.test.mjs), so that is the rule read here.
+    const m = CSS.match(/\.term-pane\.term-focused::before,\s*\.grid-stack-item-content\.term-focused::before\s*\{([^}]*)\}/);
     assert.ok(m, '.term-focused rule not found');
     const body = m[1];
     assert.doesNotMatch(body, /border-color/,
