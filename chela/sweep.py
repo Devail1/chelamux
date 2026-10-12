@@ -38,7 +38,6 @@ import re
 import signal
 import subprocess
 import tempfile
-import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -411,8 +410,7 @@ def collect_mutations(worktree: Path, base: str) -> tuple[list[Mutation], str]:
 def _anchor(text: str, mut: Mutation) -> tuple[str, str] | None:
     """Widen the mutated line to a span that occurs EXACTLY ONCE in ``text`` (the judge's
     :func:`~chela.judge.apply_mutation` refuses anything else), with the matching mutated
-    span. ``None`` when even the whole file does not make it unique (impossible in practice)
-    or the line on disk is not the one the mutation was generated from."""
+    span. ``None`` when the line on disk is not the one the mutation was generated from."""
     src = text.split("\n")
     i = mut.line - 1
     if i >= len(src) or src[i] != mut.before:
@@ -429,8 +427,7 @@ def _anchor(text: str, mut: Mutation) -> tuple[str, str] | None:
             mutated = src[lo:hi + 1]
             mutated[i - lo] = mut.after
             return span, pre + "\n".join(mutated) + post
-        if lo == 0 and hi == len(src) - 1:
-            return None
+        # Terminates: once the span is the whole file it occurs exactly once.
         lo, hi = max(0, lo - 1), min(len(src) - 1, hi + 1)
 
 
@@ -500,9 +497,7 @@ class _Interrupted(BaseException):
 
 
 def _install_signal_handlers() -> dict:
-    if threading.current_thread() is not threading.main_thread():
-        return {}
-
+    """Off the main thread ``signal.signal`` raises ValueError — no handlers, nothing to undo."""
     def _raise(signum, _frame):
         raise _Interrupted(signum)
 
@@ -536,6 +531,10 @@ def sweep(
     try:
         report = _sweep(worktree, base, test_cmd, timeout=timeout, select_tests=select_tests,
                         progress=progress)
+    except _Interrupted as e:
+        # The mutation's own `finally` has already restored the file by the time this runs.
+        report = SweepReport(cannot_verify=f"interrupted by signal {e.args[0]} — the sweep "
+                                           "stopped; the mutated file was restored")
     finally:
         _restore_signal_handlers(old)
     report.seconds = time.monotonic() - started

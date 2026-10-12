@@ -223,7 +223,9 @@ def test_sigterm_restores_the_file_before_the_sweep_exits(tmp_path):
     original = (root / "feat.py").read_bytes()
     proc, _ = _start_and_wait_for_mutation(tmp_path, root)
     proc.send_signal(signal.SIGTERM)
-    proc.wait(timeout=60)
+    out, _ = proc.communicate(timeout=60)
+    assert proc.returncode == 2, out
+    assert "interrupted by signal" in out
     try:
         os.killpg(proc.pid, signal.SIGKILL)     # reap the hung suite if it outlived us
     except ProcessLookupError:
@@ -448,3 +450,432 @@ def test_the_judge_prompt_shows_the_runs_sweep_equivalents(tmp_path):
     shown = dispatcher._judge_vars(wf, row, root, "deadbeef")["sweep_equivalents"]
     assert "`feat.py:8` — demo helper" in shown
     assert "{{sweep_equivalents}}" in dispatcher.JUDGE_PROMPT
+
+
+# --- survivors of this branch's own `chela judge sweep` (CMX-88 dogfood) -------------------
+
+
+def test_an_unresolvable_base_is_cannot_verify(tmp_path):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    report = sweep.sweep(root, "origin/no-such-branch", TEST_CMD, timeout=120)
+    assert "does not resolve" in report.cannot_verify
+    assert report.results == []
+
+
+def test_a_failing_git_diff_is_an_error_not_an_empty_diff(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    real = sweep._git
+
+    def fake(worktree, *args):
+        if args[0] == "diff":
+            return subprocess.CompletedProcess(args, 128, "", "fatal: boom")
+        return real(worktree, *args)
+
+    monkeypatch.setattr(sweep, "_git", fake)
+    lines, err = sweep.changed_lines(root, "origin/dev")
+    assert lines == {}
+    assert "git diff failed: fatal: boom" in err
+
+
+def test_no_changed_conditional_skips_the_baseline_entirely(tmp_path):
+    """Nothing to mutate ⇒ clean at once. A suite that always FAILS proves no baseline ran."""
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    _git(root, "checkout", "-q", "dev")
+    _git(root, "checkout", "-qb", "docs-only")
+    (root / "README.md").write_text("docs\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "docs")
+    report = sweep.sweep(root, "origin/dev", f'"{sys.executable}" -c "raise SystemExit(1)"',
+                         timeout=60)
+    assert report.cannot_verify == ""
+    assert report.results == []
+    assert "nothing to sweep" in report.notes[0]
+
+
+def test_a_red_baseline_is_cannot_verify(tmp_path):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    report = sweep.sweep(root, "origin/dev", f'"{sys.executable}" -c "raise SystemExit(1)"',
+                         timeout=60)
+    assert "NOT GREEN" in report.cannot_verify
+    assert report.results == []
+
+
+def test_an_unprovisionable_env_is_cannot_verify(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    monkeypatch.setattr(sweep.judge, "provision_suite_env", lambda wt: "no venv here")
+    report = _sweep(root)
+    assert "no venv here" in report.cannot_verify
+    assert report.results == []
+
+
+def test_a_file_that_cannot_be_restored_stops_the_sweep_and_keeps_the_marker(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    monkeypatch.setattr(sweep, "_restore", lambda path, original: False)
+    report = _sweep(root)
+    assert "could NOT be restored" in report.cannot_verify
+    assert len(report.results) == 1          # stopped after the first mutation
+    assert report.survivors == []            # a cannot-verify sweep names no survivor
+    assert sweep.marker_path(root).exists()  # the only known-good copy of the original
+
+
+def _one_mutation(monkeypatch, mut: sweep.Mutation) -> None:
+    monkeypatch.setattr(sweep, "collect_mutations", lambda wt, base: ([mut], ""))
+
+
+def test_a_mutation_whose_line_moved_is_not_applied(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    _one_mutation(monkeypatch, sweep.Mutation("feat.py", NEW_IF_LINE, "if-false",
+                                              "    if x == 4:", "    if False and (x == 4):"))
+    d = _sweep(root).as_dict()
+    assert [r["status"] for r in d["not_applied"]] == [sweep.NOT_APPLIED]
+    assert "anchored" in d["not_applied"][0]["reason"]
+    assert d["killed"] == 0
+
+
+def test_a_mutation_that_does_not_apply_is_reported_never_killed(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    line = BRANCH_FEAT.split("\n")[NEW_IF_LINE - 1]
+    _one_mutation(monkeypatch, sweep.Mutation("feat.py", NEW_IF_LINE, "noop", line, line))
+    d = _sweep(root).as_dict()
+    assert [r["status"] for r in d["not_applied"]] == [sweep.NOT_APPLIED]
+    assert "before == after" in d["not_applied"][0]["reason"]
+    assert d["killed"] == 0
+
+
+def test_run_sweep_takes_its_base_from_the_workflow(tmp_path):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    _git(root, "update-ref", "refs/remotes/origin/main", _git(root, "rev-parse", "origin/dev"))
+    _git(root, "update-ref", "-d", "refs/remotes/origin/dev")
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text("---\nproject_key: TEST\nworkspace:\n  base_branch: main\njudge:\n"
+                  f"  test_cmd: {json.dumps(TEST_CMD)}\n---\nbody\n")
+    d = sweep.run_sweep(root, workflow_path=wf)
+    assert d["cannot_verify"] == ""
+    assert {s["key"] for s in d["survivors"]} == {f"feat.py:{NEW_IF_LINE}"}
+
+
+def test_run_sweep_without_a_suite_is_an_error(tmp_path):
+    d = sweep.run_sweep(tmp_path)
+    assert d["ok"] is False
+    assert "no suite to run" in d["error"]
+
+
+# --- recovery / pid -------------------------------------------------------------------------
+
+
+def test_pid_alive():
+    assert sweep._pid_alive(os.getpid()) is False      # our own pid is never "another sweep"
+    assert sweep._pid_alive(0) is False
+    assert sweep._pid_alive(-5) is False
+    assert sweep._pid_alive("123") is False
+    assert sweep._pid_alive(os.getppid()) is True
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    assert sweep._pid_alive(dead.pid) is False
+
+
+def test_recovery_refuses_while_another_sweep_is_live(tmp_path):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    sweep._write_marker(root, "feat.py", BRANCH_FEAT, "mutated\n")
+    marker = json.loads(sweep.marker_path(root).read_text())
+    marker["pid"] = os.getppid()
+    sweep.marker_path(root).write_text(json.dumps(marker))
+    report = _sweep(root)
+    assert "another sweep" in report.cannot_verify
+    assert report.results == []
+    assert sweep.marker_path(root).exists()
+
+
+def test_a_marker_whose_file_is_already_original_is_just_dropped(tmp_path):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    sweep._write_marker(root, "feat.py", BRANCH_FEAT, "mutated\n")
+    with patch.object(sweep, "_pid_alive", return_value=False):
+        done, err = sweep.recover(root)
+    assert (done, err) == ("", "")
+    assert not sweep.marker_path(root).exists()
+    assert (root / "feat.py").read_text() == BRANCH_FEAT
+
+
+def test_recovery_refuses_when_the_restore_does_not_stick(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    (root / "feat.py").write_text("mutated\n")
+    sweep._write_marker(root, "feat.py", BRANCH_FEAT, "mutated\n")
+    real = Path.write_text
+
+    def stubborn(self, data, *a, **kw):
+        if self.name == "feat.py":
+            return len(data)          # the write "succeeds" and changes nothing
+        return real(self, data, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", stubborn)
+    with patch.object(sweep, "_pid_alive", return_value=False):
+        done, err = sweep.recover(root)
+    assert done == ""
+    assert "could not be restored" in err
+    assert sweep.marker_path(root).exists()
+
+
+# --- generation edge cases ------------------------------------------------------------------
+
+
+def test_py_returns_of_a_nested_def_do_not_count_as_the_outer_functions():
+    src = ("def outer(a):\n"
+           "    def inner():\n"
+           "        return a + 1\n"
+           "    if a:\n"
+           "        return None\n"
+           "    return\n")
+    kinds = {m.kind for m in sweep.py_mutations("m.py", src, {5, 6})}
+    assert "return-value" not in kinds
+
+
+def test_py_completed_process_returncode_keyword():
+    src = "import subprocess\nr = subprocess.CompletedProcess(args=[], returncode=0)\n"
+    afters = [m.after for m in sweep.py_mutations("m.py", src, {2})]
+    assert afters == ["r = subprocess.CompletedProcess(args=[], returncode=1)"]
+
+
+def test_js_strings_comments_and_escapes():
+    src = "\n".join([
+        'const a = "x // y" + (p < q);',          # `//` inside a string is not a comment
+        "const b = 'it\\'s < here' + (r > s);",    # an escaped quote keeps the string open
+        '  // if (a < b) {',                       # a comment line
+        '   * if (a < b) {',                       # a block-comment line
+        'const c = "if (z) { return 0; }";',       # an `if`/`return` inside a string
+        'if (a &&',                                # a multi-line condition
+    ])
+    muts = sweep.js_mutations("m.js", src, {1, 2, 3, 4, 5, 6, 99})
+    got = sorted((m.line, m.after) for m in muts)
+    assert got == [
+        (1, 'const a = "x // y" + (p >= q);'),
+        (2, "const b = 'it\\'s < here' + (r <= s);"),
+    ]
+
+
+def test_js_in_string_handles_escapes_and_closing_quotes():
+    line = 'f("a\\"b") < g'
+    assert sweep._in_js_string(line, line.index("<")) is False
+    assert sweep._in_js_string(line, line.index("b")) is True
+
+
+def test_js_else_detection_skips_blank_lines_and_stops_at_a_dedent():
+    src = ["  if (a) {", "    g();", "", "    h();", "  } else {", "  }"]
+    assert sweep._js_has_else(src, 0, len(src[0])) is True
+    nested = ["  if (a) {", "    if (b) g();", "  }", "    else {"]
+    assert sweep._js_has_else(nested, 1, len(nested[1])) is False
+
+
+def test_anchor_pins_whole_lines():
+    text = "a\n    if x:\n        if x:\nb"
+    mut = sweep.Mutation("m.py", 2, "if-false", "    if x:", "    if False and (x):")
+    assert sweep._anchor(text, mut) == ("\n    if x:\n", "\n    if False and (x):\n")
+    first = sweep.Mutation("m.py", 1, "k", "a", "A")
+    assert sweep._anchor(text, first) == ("a\n", "A\n")
+    last = sweep.Mutation("m.py", 4, "k", "b", "B")
+    assert sweep._anchor(text, last) == ("\nb", "\nB")
+    dup = "q\nx\ny\nx\nz"      # `\nx\n` twice ⇒ widen until unique
+    assert sweep._anchor(dup, sweep.Mutation("m.py", 4, "k", "x", "X")) == ("\ny\nx\nz", "\ny\nX\nz")
+    assert sweep._anchor(text, sweep.Mutation("m.py", 2, "k", "    if y:", "?")) is None
+    assert sweep._anchor(text, sweep.Mutation("m.py", 9, "k", "a", "A")) is None
+
+
+def test_parse_and_render_equivalents():
+    assert sweep.parse_equivalents(["nonsense"])[1].startswith("--sweep-equivalent 'nonsense'")
+    eq, err = sweep.parse_equivalents(["chela/x.py:12: a log-only branch"])
+    assert err == ""
+    assert eq == [{"key": "chela/x.py:12", "file": "chela/x.py", "line": 12,
+                   "why": "a log-only branch"}]
+    assert sweep.render_equivalents([]) == ""
+    assert "`chela/x.py:12` — a log-only branch" in sweep.render_equivalents(eq)
+
+
+# --- CLI ------------------------------------------------------------------------------------
+
+
+def test_cli_reads_the_suite_from_the_cwd_workflow_and_prints_progress(tmp_path):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    (root / "WORKFLOW.md").write_text("---\nproject_key: TEST\nworkspace:\n  base_branch: dev\n"
+                                      f"judge:\n  test_cmd: {json.dumps(TEST_CMD)}\n---\nb\n")
+    env = {**os.environ, "CHELA_DIR": str(tmp_path / "cd")}
+    out = subprocess.run(
+        [sys.executable, "-c", "from chela.main import main; main()", "judge", "sweep",
+         "--cwd", str(root)], env=env, capture_output=True, text=True, timeout=300)
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert f"[1/2] feat.py:{NEW_IF_LINE}" in out.stdout
+    assert f"[SURVIVED] feat.py:{NEW_IF_LINE}" in out.stdout
+
+
+def test_cli_exits_2_without_a_suite_and_on_cannot_verify(tmp_path, capsys):
+    from chela import main
+
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    for argv, needle in (
+        (["judge", "sweep", "--cwd", str(root)], "no suite to run"),
+        (["judge", "sweep", "--cwd", str(root), "--base", "origin/nope", "--test-cmd",
+          TEST_CMD], "does not resolve"),
+    ):
+        with patch.object(sys, "argv", ["chela", *argv]), pytest.raises(SystemExit) as e:
+            main.main()
+        assert e.value.code == 2
+        assert needle in capsys.readouterr().out
+
+
+def test_cli_reports_a_recovered_marker(tmp_path, capsys):
+    from chela import main
+
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    (root / "feat.py").write_text("mutated\n")
+    sweep._write_marker(root, "feat.py", BRANCH_FEAT, "mutated\n")
+    with patch.object(sweep, "_pid_alive", return_value=False), \
+         patch.object(sys, "argv", ["chela", "judge", "sweep", "--cwd", str(root),
+                                    "--test-cmd", TEST_CMD]):
+        main.main()
+    assert "⚠ restored feat.py from a killed sweep" in capsys.readouterr().out
+    assert (root / "feat.py").read_text() == BRANCH_FEAT
+
+
+def test_other_judge_subcommands_are_not_routed_to_the_sweep():
+    from chela import main
+
+    with patch.object(main, "cmd_judge_sweep") as sw, \
+         patch.object(main, "cmd_judge_show") as show, \
+         patch.object(sys, "argv", ["chela", "judge", "show", "cmx-1"]):
+        main.main()
+    sw.assert_not_called()
+    show.assert_called_once()
+
+
+# --- task-finished: the remaining sweep outcomes --------------------------------------------
+
+
+@pytest.mark.parametrize("result, code, needle", [
+    ({"ok": False, "error": "no run found for task_id cmx-88"}, 1,
+     "the sweep could not run — no run found for task_id cmx-88"),
+    ({"ok": True, "cannot_verify": "the suite is NOT GREEN", "survivors": []}, 1,
+     "sweep CANNOT VERIFY — the suite is NOT GREEN"),
+])
+def test_task_finished_refuses_when_the_sweep_cannot_answer(result, code, needle, capsys):
+    with patch.object(dispatcher, "verify_sweep", return_value=result) as verify, \
+         patch.object(dispatcher, "check_no_new_guards", return_value=False), \
+         patch.object(dispatcher, "request_task_finished") as req:
+        assert _task_finished() == code
+    assert needle in capsys.readouterr().out
+    verify.assert_called_once_with("cmx-88")
+    req.assert_not_called()
+
+
+def test_task_finished_prints_a_recovered_marker(capsys):
+    result = {"ok": True, "recovered": "restored feat.py from a killed sweep's recovery marker",
+              "cannot_verify": "", "survivors": [], "mutations": 0, "killed": 0}
+    with patch.object(dispatcher, "verify_sweep", return_value=result), \
+         patch.object(dispatcher, "check_no_new_guards", return_value=False), \
+         patch.object(dispatcher, "request_task_finished",
+                      return_value={"ok": True, "task_id": "cmx-88"}):
+        assert _task_finished() is None
+    assert "⚠ restored feat.py from a killed sweep" in capsys.readouterr().out
+
+
+def test_task_finished_skips_the_sweep_when_the_workflow_has_no_suite(tmp_path, capsys):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text("---\nproject_key: TEST\n---\nbody\n")
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
+            "worktree_path, branch_name, started_at, attempt, task_number) VALUES "
+            "('cmx-88', ?, 'x', 'running', 'cmx-88', ?, 'feature', '2026', 1, 88)",
+            (str(wf), str(root)))
+        conn.commit()
+    with patch.object(dispatcher, "check_no_new_guards", return_value=False), \
+         patch.object(dispatcher, "request_task_finished",
+                      return_value={"ok": True, "task_id": "cmx-88"}) as req:
+        assert _task_finished() is None
+        out = capsys.readouterr().out
+        assert "sweep skipped — the workflow sets no `judge.test_cmd`" in out
+        req.assert_called_once_with("cmx-88", handoff=None)
+        req.reset_mock()
+        assert _task_finished("--sweep-equivalent", "feat.py:8: why") == 1
+        assert "no sweep ran" in capsys.readouterr().out
+        req.assert_not_called()
+
+
+def test_verify_sweep_refuses_an_unknown_or_incomplete_run(tmp_path):
+    assert dispatcher.verify_sweep("nope") == {"ok": False,
+                                               "error": "no run found for task_id nope"}
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, window_name, branch_name, "
+            "started_at, attempt, task_number) VALUES ('bare', '/wf', 'x', 'running', 'w', 'b', "
+            "'2026', 1, 1)")
+        conn.commit()
+    assert "no worktree_path/workflow_path" in dispatcher.verify_sweep("bare")["error"]
+
+
+# --- the PR body ----------------------------------------------------------------------------
+
+
+def _gh(view_rc=0, edit_rc=0, body="the agent's body"):
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append((argv, kw.get("input")))
+        if argv[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(argv, view_rc, body, "view broke")
+        return subprocess.CompletedProcess(argv, edit_rc, "", "edit broke")
+
+    return calls, fake_run
+
+
+def test_append_pr_body_failure_modes(tmp_path):
+    section = "### notes"
+    calls, fake = _gh()
+    with patch.object(dispatcher.subprocess, "run", fake):
+        assert dispatcher._append_pr_body(None, str(tmp_path), section)[0] is False
+        assert dispatcher._append_pr_body("https://github.com/o/r/pull/7", None, section)[0] is False
+        assert dispatcher._append_pr_body("https://github.com/o/r/pull/7", str(tmp_path), "")[0] is False
+    assert calls == []
+
+    calls, fake = _gh(view_rc=1)
+    with patch.object(dispatcher.subprocess, "run", fake):
+        assert dispatcher._append_pr_body("https://github.com/o/r/pull/7", str(tmp_path),
+                                          section) == (False, "view broke")
+    assert [c[0][:3] for c in calls] == [["gh", "pr", "view"]]
+
+    calls, fake = _gh(body=f"body\n\n{section}\n")
+    with patch.object(dispatcher.subprocess, "run", fake):
+        assert dispatcher._append_pr_body("https://github.com/o/r/pull/7", str(tmp_path),
+                                          section) == (True, "already present")
+    assert [c[0][:3] for c in calls] == [["gh", "pr", "view"]]
+
+    calls, fake = _gh(edit_rc=1)
+    with patch.object(dispatcher.subprocess, "run", fake):
+        assert dispatcher._append_pr_body("https://github.com/o/r/pull/7", str(tmp_path),
+                                          section) == (False, "edit broke")
+    calls, fake = _gh()
+    with patch.object(dispatcher.subprocess, "run", fake):
+        assert dispatcher._append_pr_body("https://github.com/o/r/pull/7", str(tmp_path),
+                                          section) == (True, "")
+
+
+def test_a_failed_pr_body_append_is_logged_never_fatal(tmp_path, caplog):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    _run_row(tmp_path, root)
+    notes = [{"key": "feat.py:8", "why": "demo helper", "mutations": []}]
+    with patch.object(dispatcher, "_read_pr_url", return_value="https://github.com/o/r/pull/7"), \
+         patch.object(dispatcher, "_read_pr_status", return_value=(None, None)), \
+         patch.object(dispatcher, "_kill_window"), \
+         patch.object(dispatcher, "_append_pr_body", return_value=(False, "gh is offline")), \
+         caplog.at_level("WARNING", logger="chela.dispatcher"):
+        assert dispatcher.mark_awaiting_review("cmx-88", sweep_equivalents=notes)["ok"]
+    assert "sweep-equivalent notes not added to the PR body — gh is offline" in caplog.text
+
+
+def test_judge_view_of_no_equivalents_is_empty(tmp_path):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    _run_row(tmp_path, root)
+    for stored in (None, "[]", "not json"):
+        with dispatcher._db() as conn:
+            conn.execute("UPDATE runs SET sweep_equivalents=? WHERE task_id='cmx-88'", (stored,))
+            conn.commit()
+            row = conn.execute("SELECT * FROM runs WHERE task_id='cmx-88'").fetchone()
+        assert dispatcher._judge_sweep_equivalents(row) == ""
