@@ -16,6 +16,9 @@ behind a wrapper script, which ``Pane.claude_pid`` (a multi-generation walk) fin
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import difflib
+import itertools
 import json
 import os
 import shutil
@@ -180,6 +183,57 @@ def _no_batch():
     yield None
 
 
+def _render_per_window(client, monkeypatch) -> dict[str, bytes]:
+    with monkeypatch.context() as m:
+        m.setattr(probecache, "batch", lambda windows=None: _no_batch())
+        return _render(client)
+
+
+def _diff(want: dict[str, bytes], got: dict[str, bytes]) -> str:
+    """The differing lines, endpoint by endpoint — a byte mismatch must say WHERE."""
+    out = []
+    for ep in ENDPOINTS:
+        if want[ep] == got[ep]:
+            continue
+        a, b = (json.dumps(json.loads(x), indent=1, sort_keys=True).splitlines()
+                for x in (want[ep], got[ep]))
+        out += [f"--- {ep}", *(line for line in difflib.unified_diff(a, b, lineterm="", n=0)
+                               if line[:1] in "+-" and line[:3] not in ("+++", "---"))]
+    return "\n".join(out)
+
+
+def _pin_boot_clock(monkeypatch) -> None:
+    """Freeze ``btime`` at one read for the whole comparison (CMX-105).
+
+    ``created`` is ``btime + start ticks``, and ``btime`` is the boot moment on the WALL
+    clock — the kernel recomputes it whenever the host steps the clock, which WSL2's time
+    sync does (more often when the VM is starved, see :func:`chela.sessions.proc_start_ticks`).
+    A step between two renders moved every ``created`` and made this test flaky under load
+    — a change in the world, not between the two paths. Both paths still compute it through
+    the same :func:`chela.sessions.proc_started`, so pinning the clock hides no divergence.
+    """
+    boot = sessions._boot_time()
+    monkeypatch.setattr(sessions, "_boot_time", lambda: boot)
+
+
+def _golden_pair(client, monkeypatch, attempts: int = 5):
+    """(per-window, batched) renders of the SAME state — taken at a quiescent point.
+
+    The batched render is bracketed by two per-window ones; only when those two agree did
+    nothing move underneath it, so only then is a mismatch the batch's own. A fleet that
+    never holds still fails loudly with what kept moving, rather than passing or blaming
+    the batch.
+    """
+    for _ in range(attempts):
+        ref = _render_per_window(client, monkeypatch)
+        got = _render(client)
+        again = _render_per_window(client, monkeypatch)
+        if again == ref:
+            return ref, got
+    pytest.fail(f"the live state never held still across one batched render "
+                f"({attempts} tries) — per-window vs per-window:\n{_diff(ref, again)}")
+
+
 @requires_tmux
 @pytest.mark.parametrize("n", [5, 20])
 def test_golden_batched_output_is_byte_identical_to_the_per_window_probe(
@@ -187,14 +241,12 @@ def test_golden_batched_output_is_byte_identical_to_the_per_window_probe(
     fleet.build(n)
     fleet.settle()
     _seed(fleet, monkeypatch, tmp_path)
+    _pin_boot_clock(monkeypatch)
     client = dash.app.test_client()
 
-    with monkeypatch.context() as m:
-        m.setattr(probecache, "batch", lambda windows=None: _no_batch())
-        before = _render(client)
-    after = _render(client)
+    before, after = _golden_pair(client, monkeypatch)
 
-    assert after == before
+    assert after == before, "batched != per-window:\n" + _diff(before, after)
 
     # Not vacuous: the state really does exercise every distinction the batch must keep.
     agents = json.loads(after["/api/agents"])
@@ -212,6 +264,73 @@ def test_golden_batched_output_is_byte_identical_to_the_per_window_probe(
     assert ctx and all(r["name"].endswith("-direct") for r in ctx)
     orch = json.loads(after["/api/orchestrator/status"])
     assert orch["wid"] and orch["state"]
+
+
+def _stepping_boot_clock(monkeypatch) -> None:
+    """A host whose wall clock steps on every ``btime`` read — WSL2 under load, compressed."""
+    real, steps = sessions._boot_time, itertools.count()
+    monkeypatch.setattr(sessions, "_boot_time", lambda: real() + next(steps))
+
+
+@requires_tmux
+def test_a_clock_step_between_the_renders_is_not_reported_as_a_divergence(
+        fleet, monkeypatch, tmp_path):
+    """CMX-105: the golden test went red under load when ``btime`` stepped between the two
+    renders. With the boot clock pinned, a stepping host clock moves nothing."""
+    fleet.build(4)
+    fleet.settle()
+    _seed(fleet, monkeypatch, tmp_path)
+    _stepping_boot_clock(monkeypatch)
+    _pin_boot_clock(monkeypatch)
+    client = dash.app.test_client()
+
+    before, after = _golden_pair(client, monkeypatch)
+
+    assert after == before, "batched != per-window:\n" + _diff(before, after)
+    assert any(a["created"] for a in json.loads(after["/api/agents"]))   # not vacuous
+
+
+@requires_tmux
+def test_a_world_that_keeps_moving_is_refused_not_compared(fleet, monkeypatch, tmp_path):
+    """The quiescence bracket: two per-window renders that disagree mean the state moved
+    under the batched one, so no verdict on the batch is possible — say so, with what moved."""
+    fleet.build(4)
+    fleet.settle()
+    _seed(fleet, monkeypatch, tmp_path)
+    _stepping_boot_clock(monkeypatch)                # and deliberately NOT pinned
+    client = dash.app.test_client()
+
+    with pytest.raises(pytest.fail.Exception, match="never held still") as err:
+        _golden_pair(client, monkeypatch, attempts=2)
+    assert '"created"' in str(err.value)
+
+
+@requires_tmux
+def test_a_real_divergence_in_the_batched_path_fails_and_names_the_line(
+        fleet, monkeypatch, tmp_path):
+    """The fix must not soften the property: a batched answer that differs (here, the
+    snapshot's process start time read one second late) still fails, showing the lines."""
+    fleet.build(4)
+    fleet.settle()
+    _seed(fleet, monkeypatch, tmp_path)
+    _pin_boot_clock(monkeypatch)
+    real_peek = probecache.Batch.peek
+
+    def late_peek(self, wid):
+        pane = real_peek(self, wid)
+        return (dataclasses.replace(pane, started=pane.started + 1)
+                if pane is not None and pane.started is not None else pane)
+
+    monkeypatch.setattr(probecache.Batch, "peek", late_peek)
+    client = dash.app.test_client()
+
+    before, after = _golden_pair(client, monkeypatch)
+
+    assert after != before
+    diff = _diff(before, after)
+    assert diff.startswith("--- /api/agents")
+    changed = [line for line in diff.splitlines()[1:]]
+    assert changed and all('"created"' in line for line in changed), diff
 
 
 class _Spawns:
