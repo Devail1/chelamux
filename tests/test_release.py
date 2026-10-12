@@ -864,3 +864,227 @@ def test_poll_release_urls_skips_a_release_that_is_not_released(world, monkeypat
     t = 1_000_000.0
     overrides.set_fields(out["request_id"], finished_at=t)    # inside the poll window
     release.poll_release_urls(now=t + 1)
+
+
+# --- orchestrator-added guards (judge round 4 survivors) ----------------------------------
+
+def test_a_failed_release_card_says_what_already_reached_origin():
+    """🔴 GUARD: a release that FAILED midway must say what reached origin — never
+    "Nothing was pushed" when main and the tag are already out."""
+    from chela.telegram.overridewatch import _release_outcome_line
+    line = _release_outcome_line({"state": overrides.FAILED, "decided_by": "op",
+                                  "detail": "pushing dev failed", "tag": "v0.2.0",
+                                  "pushed": ["main", "v0.2.0"]})
+    assert "Pushed only: main, v0.2.0" in line and "Nothing was pushed" not in line
+    none = _release_outcome_line({"state": overrides.FAILED, "decided_by": "op",
+                                  "detail": "x", "tag": "v0.2.0", "pushed": []})
+    assert "Nothing was pushed" in none
+
+
+def test_the_default_sweep_expires_a_pending_release_when_dev_moves(world, pushes):
+    """🔴 GUARD (wiring): the daemon/bridge/dashboard call `overrides.sweep()` with NO
+    dev_head_of — the default must read origin's dev (release.remote_dev_head)."""
+    out = _prepare(world)
+    _move_dev(world)
+    release._dev_head_cache.clear()
+    expired = overrides.sweep()
+    assert [r["id"] for r in expired] == [out["request_id"]]
+    assert overrides.load(out["request_id"])["state"] == overrides.EXPIRED
+    assert pushes == []
+
+
+def test_a_failed_approval_still_removes_the_release_worktree_and_branch(world, pushes):
+    """🔴 GUARD: whatever the outcome — a FAILED approval included — the release's worktree
+    and local branch are removed."""
+    out = _prepare(world)
+    hook = world.origin / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["state"] == overrides.FAILED
+    assert _release_worktrees() == []
+    assert _local(world, "refs/heads/chela-release/v0.2.0") is None
+
+
+def test_the_release_uv_steps_never_inherit_the_callers_venv(monkeypatch):
+    """🔴 GUARD: the release worktree's uv steps get their OWN environment."""
+    monkeypatch.setenv("VIRTUAL_ENV", "/some/other/.venv")
+    assert "VIRTUAL_ENV" not in release._uv_env()
+
+
+# --- round 5: the sweep's survivors --------------------------------------------------------
+# Each test below was written against a mutation of the changed line that left the suite
+# green; every one was run RED against its mutation (see the commit message).
+
+def test_the_dashboard_approval_page_says_released_and_names_the_tag(world, pushes):
+    """The approve page for a release says "Approved and released" with the tag — NOT the
+    "Not released" failure page (which also contains the word "released")."""
+    pytest.importorskip("flask")
+    from chela.dashboard.app import app
+    out = _prepare(world)
+    ok = app.test_client().post(f"/override/{out['request_id']}", data={"decision": "approve"})
+    assert ok.status_code == 200
+    assert b"Approved and released" in ok.data and b"v0.2.0" in ok.data
+    assert b"Not released" not in ok.data
+
+
+def test_the_release_body_file_becomes_the_commit_body(world, tmp_path, capsys):
+    from chela import main
+    body = tmp_path / "body.md"
+    body.write_text("Notes that must reach the commit.\n")
+    main.cmd_release(SimpleNamespace(version="0.2.0", theme="t", body_file=str(body),
+                                     repo=str(world.work)))
+    sha = _local(world, "refs/tags/v0.2.0^{commit}")
+    assert "Notes that must reach the commit." in _g(world.work, "log", "-1", "--format=%B", sha)
+
+
+def test_an_unreadable_body_file_refuses_and_prepares_nothing(world, tmp_path, capsys):
+    from chela import main
+    with pytest.raises(SystemExit) as exc:
+        main.cmd_release(SimpleNamespace(version="0.2.0", theme="t",
+                                         body_file=str(tmp_path / "missing.md"),
+                                         repo=str(world.work)))
+    out = capsys.readouterr().out
+    assert exc.value.code == 1 and "REFUSED" in out and "--body-file unreadable" in out
+    assert overrides.all_requests() == [] and _local(world, "refs/tags/v0.2.0") is None
+
+
+def test_merge_approve_cli_reports_a_release_as_released(world, pushes, capsys):
+    from chela import main
+    out = _prepare(world)
+    main.cmd_merge_approve(SimpleNamespace(request=out["request_id"], deny=False))
+    printed = capsys.readouterr().out
+    assert "approved and released" in printed and out["release_sha"][:12] in printed
+    assert len(pushes) == 3
+
+
+def test_chela_release_is_wired_into_the_command_line(monkeypatch):
+    """`chela release 0.2.0 --theme t --body-file b` reaches `cmd_release` with the
+    version, theme and body file parsed."""
+    from chela import main
+    seen = []
+    monkeypatch.setattr(main, "cmd_release", lambda args: seen.append(args))
+    monkeypatch.setattr("sys.argv", ["chela", "release", "0.2.0", "--theme", "t",
+                                     "--body-file", "b.md"])
+    main.main()
+    (args,) = seen
+    assert (args.version, args.theme, args.body_file) == ("0.2.0", "t", "b.md")
+
+
+def test_not_done_for_an_override_says_nothing_was_merged():
+    assert overrides.not_done({"kind": None, "pushed": ["main"]}) == "nothing was merged"
+    assert overrides.not_done({"kind": "release"}) == "nothing was pushed"
+    assert overrides.not_done({"kind": "release", "pushed": ["main"]}) == "pushed only: main"
+
+
+def test_an_override_expiry_is_told_as_an_override_not_a_release(told):
+    overrides._tell({"id": "r1", "label": "CMX-9", "task_id": "CMX-9"}, overrides.EXPIRED, "x")
+    (kind, summary, _), = told
+    assert kind == "override_expired" and "override of CMX-9" in summary
+    assert "nothing was merged" in summary
+
+
+def test_a_pending_release_keeps_its_worktree_and_branch(world):
+    """Only a request in a FINAL state is cleaned up; a pending one still needs them."""
+    out = _prepare(world)
+    rec = overrides.load(out["request_id"])
+    assert rec["state"] == overrides.PENDING
+    overrides._cleanup_release(rec)
+    assert len(_release_worktrees()) == 1
+    assert _local(world, "refs/heads/chela-release/v0.2.0") is not None
+    # control: once final, the same call removes them
+    overrides._cleanup_release({**rec, "state": overrides.EXPIRED})
+    assert _release_worktrees() == []
+
+
+def test_a_release_expiry_event_names_the_release_label(world, pushes, told):
+    out = _prepare(world)
+    _move_dev(world)
+    overrides.decide(out["request_id"], True, "terminal:op")
+    from chela import event_log
+    ev, = event_log.read(types=["orchestrator.release_expired"])["events"]
+    assert ev["summary"].startswith(f"{overrides.load(out['request_id'])['label']} expired")
+    assert "override of" not in ev["summary"]
+
+
+def test_a_failed_command_with_no_output_reports_its_exit_code(world, monkeypatch):
+    monkeypatch.setattr(release, "_uv_lock",
+                        lambda wt: subprocess.CompletedProcess([], 7, "", ""))
+    out = _prepare(world)
+    assert out["ok"] is False and "exit 7" in out["error"]
+
+
+def test_tail_keeps_only_the_end_of_long_output():
+    p = subprocess.CompletedProcess([], 1, "", "A" * 50 + "THE-END")
+    assert release._tail(p, 10) == "AAAAATHE-END"[-10:] and release._tail(p, 10).endswith("THE-END")
+
+
+@pytest.mark.parametrize("url,slug", [
+    ("git@github.com:o/r.git", "o/r"),
+    ("https://github.com/o/r", "o/r"),
+    ("https://github.com/o/r.git/", "o/r"),
+    ("/some/local/bare.git", None),
+])
+def test_repo_slug_is_read_from_the_origin_url(tmp_path, url, slug):
+    _g(tmp_path, "init", "-q")
+    _g(tmp_path, "remote", "add", "origin", url)
+    assert release._repo_slug(tmp_path) == slug
+
+
+def test_cleanup_without_a_repository_runs_no_git(monkeypatch, tmp_path):
+    ran = []
+    monkeypatch.setattr(release, "_git", lambda *a, **k: ran.append(a) or _ok())
+    release.cleanup({})
+    release.cleanup({"git_dir": str(tmp_path / "gone"), "branch": "b", "tag": "v1"})
+    assert ran == []
+
+
+def test_cleanup_prunes_a_worktree_directory_that_is_already_gone(world):
+    out = _prepare(world)
+    rec = overrides.load(out["request_id"])
+    import shutil
+    shutil.rmtree(rec["worktree"])
+    release.cleanup({k: v for k, v in rec.items() if k != "worktree"})
+    assert "prunable" not in _g(world.work, "worktree", "list", "--porcelain")
+    assert _local(world, "refs/heads/chela-release/v0.2.0") is None
+
+
+def test_unreadable_release_notes_refuse_with_the_reason(world, monkeypatch):
+    def boom(*a, **k):
+        raise ValueError("no Unreleased heading")
+    monkeypatch.setattr(release.release_notes, "promote_unreleased", boom)
+    out = _prepare(world)
+    assert out["ok"] is False and "release notes: no Unreleased heading" in out["error"]
+    assert overrides.all_requests() == []
+
+
+def test_an_unreadable_uv_lock_refuses_with_the_reason(world, monkeypatch):
+    def break_lock(wt: Path) -> subprocess.CompletedProcess:
+        (wt / "uv.lock").unlink()
+        (wt / "uv.lock").symlink_to(wt / "nowhere")          # changed, but cannot be read
+        return _ok()
+    monkeypatch.setattr(release, "_uv_lock", break_lock)
+    out = _prepare(world)
+    assert out["ok"] is False and "uv.lock unreadable" in out["error"]
+    assert overrides.all_requests() == []
+
+
+def test_remote_dev_head_does_not_cache_a_repository_that_is_gone(tmp_path):
+    release._dev_head_cache.clear()
+    assert release.remote_dev_head({}) is None
+    assert release.remote_dev_head({"git_dir": str(tmp_path / "gone")}) is None
+    assert release._dev_head_cache == {}
+
+
+def test_the_telegram_card_tells_each_release_outcome():
+    from chela.telegram.overridewatch import _release_outcome_line as line
+    base = {"tag": "v0.2.0", "decided_by": "liav"}
+    assert line({**base, "state": overrides.MERGING}) == (
+        "⏳ Approved by liav — pushing main, v0.2.0, dev…")
+    assert line({**base, "state": overrides.DENIED}) == (
+        "❌ Denied by liav — nothing was pushed.")
+    assert line({**base, "state": overrides.DENIED, "pushed": ["main"]}) == (
+        "❌ Denied by liav — pushed only: main.")
+    assert line({**base, "state": overrides.EXPIRED, "detail": "dev moved"}) == (
+        "⌛ Expired — dev moved. Nothing was pushed.")
+    assert line({**base, "state": overrides.PENDING}) is None
