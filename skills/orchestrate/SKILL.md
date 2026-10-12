@@ -137,6 +137,12 @@ committed `base_branch` says so).
   with the design rules.
 - **Hold a clean merge that would spoil a pending fast-forward push** (for example a
   release promotion the operator is about to push) until that push lands.
+- **Release with `chela release X.Y.Z --theme "<one line>"`.** It prepares the release in
+  its own worktree off `origin/dev` (notes, version bump, `uv lock`, release tests, commit +
+  tag LOCALLY), files an approval request and returns — it pushes nothing. The **operator**
+  approves it like an override (Telegram button, dashboard, `chela merge-approve <id>`), and
+  the approval pushes main, the tag and dev. A merge into `dev` before then expires it, so
+  hold merges while a release is pending. You can never approve it.
 
 ## After a merge: deploy by import graph
 
