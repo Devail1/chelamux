@@ -39,6 +39,7 @@ def _isolated(tmp_path, monkeypatch):
     monkeypatch.delenv("CHELA_WID", raising=False)
     monkeypatch.delenv("CHELA_INBOX_NOTIFY_AWAITING_REVIEW", raising=False)
     monkeypatch.setattr(inbox, "INBOX_ENABLED", True)
+    monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")   # a DB per test
     monkeypatch.setattr(dispatcher, "list_runs", lambda: [])
     monkeypatch.setattr(inbox.agent_manager, "status_by_wid", lambda: {ORCH: inbox.BUSY})
     monkeypatch.setattr(inbox.discovery, "get_windows_by_id", lambda: {ORCH: "orchestrator"})
@@ -284,11 +285,77 @@ def test_the_dispatchers_ci_loop_raises_the_notice(tmp_path, monkeypatch):
     assert event["payload"]["sent_back"] is True
 
 
-def test_a_refused_rework_retracts_the_ci_echo(monkeypatch):
-    inbox.ci_red(_run("awaiting_review"), sha="s1", failing=("t",), run_ids=(), log_tail="",
-                 sent_back=True)
-    dispatcher._inbox_forget_ci_edge("T9")
-    assert inbox.load()["expected_edges"] == {}
+def _red_row(tmp_path):
+    from tests.test_dispatcher_ci import _row, _wf
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    return wf
+
+
+def _real_edge_after(monkeypatch) -> list[dict]:
+    """The run's NEXT real ``changes_requested`` edge (a human's verdict, say) — does it
+    still reach the orchestrator, or does a leftover CI echo swallow it?"""
+    inbox.tick({}, runs=[{**_run("awaiting_review"), "task_id": "abc123"}])
+    inbox.tick({}, runs=[{**_run("changes_requested"), "task_id": "abc123"}])
+    return _queued("run_changes_requested")
+
+
+def test_a_cas_refused_ci_rework_retracts_the_echo_at_the_call_site(tmp_path, monkeypatch):
+    """🔴 GUARD: drop the CAS-refused branch's ``_inbox_forget_ci_edge`` ⇒ the echo the CI
+    loop announced outlives the rework that never happened ⇒ the run's next REAL
+    ``changes_requested`` edge is swallowed as an echo ⇒ RED. Through ``dispatcher.tick``,
+    not the helper."""
+    from tests.test_dispatcher_ci import _check_run, _FakeGh, _tick
+    wf = _red_row(tmp_path)
+    refused = []
+    monkeypatch.setattr(dispatcher, "request_changes",
+                        lambda t, b: refused.append(t) or {"ok": False, "error": "moved"})
+    _tick(wf, _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")]))
+    assert refused == ["abc123"]                       # the refused branch really ran
+    assert len(_queued("run_ci_red")) == 1
+    assert "abc123" not in inbox.load()["expected_edges"]
+    assert len(_real_edge_after(monkeypatch)) == 1
+
+
+def test_a_db_refused_ci_rework_retracts_the_echo_at_the_call_site(tmp_path, monkeypatch):
+    """🔴 GUARD: the same, for the branch where ``request_changes`` cannot even open the DB."""
+    import sqlite3
+
+    from tests.test_dispatcher_ci import _check_run, _FakeGh, _tick
+    wf = _red_row(tmp_path)
+
+    def busy(t, b):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(dispatcher, "request_changes", busy)
+    _tick(wf, _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")]))
+    assert len(_queued("run_ci_red")) == 1
+    assert "abc123" not in inbox.load()["expected_edges"]
+    assert len(_real_edge_after(monkeypatch)) == 1
+
+
+def test_an_accepted_ci_rework_keeps_the_echo(tmp_path, monkeypatch):
+    """The other side of the two guards above: when the rework IS written, the echo stays
+    announced, so the ``changes_requested`` it causes is not a second notice."""
+    from tests.test_dispatcher_ci import _check_run, _FakeGh, _tick
+    wf = _red_row(tmp_path)
+    monkeypatch.setattr(dispatcher, "request_changes", lambda t, b: {"ok": True})
+    _tick(wf, _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")]))
+    assert inbox.load()["expected_edges"]["abc123"]["why"] == inbox.CI_RED_ECHO
+
+
+def test_an_infra_red_is_a_ci_red_notice_too_but_not_sent_back(tmp_path):
+    """🔴 GUARD: drop the infra branch's ``_inbox_ci_red`` ⇒ a red the loop deliberately does
+    NOT rework reaches nobody (no rework, no verdict row, no notice) ⇒ RED."""
+    from tests.test_dispatcher_ci import _check_run, _FakeGh, _tick
+    wf = _red_row(tmp_path)
+    summary = _tick(wf, _FakeGh(rollup=[_check_run("test (3.12)",
+                                                    conclusion="STARTUP_FAILURE")]))
+    assert summary["ci_infra_failed"] == 1
+    [event] = _queued("run_ci_red")
+    assert event["payload"]["sent_back"] is False
+    assert "NOT sent back" in event["summary"]
+    assert "abc123" not in inbox.load()["expected_edges"]     # no rework ⇒ no echo
 
 
 # --- 5. a stuck agent / an unread completion marker ---------------------------------------
@@ -383,3 +450,59 @@ def test_a_conflict_notice_rots_once_the_pr_is_rebased():
                                            pr_head_sha="bbb")])          # head moved
     assert inbox.stale_reason(event, [_run("awaiting_review", pr_mergeable="CONFLICTING",
                                            pr_head_sha="aaa")]) is None
+
+
+# --- 7. every CMX-86 notice rots on delivery once its claim stops being true -------------
+
+def _ci_red_event(sha="red1"):
+    inbox.ci_red(_run("awaiting_review", pr_head_sha=sha), sha=sha, failing=("t",),
+                 run_ids=(), log_tail="", sent_back=False)
+    [event] = _queued("run_ci_red")
+    return event
+
+
+@pytest.mark.parametrize("run,stale", [
+    (_run("awaiting_review", pr_head_sha="red1"), False),                # still red here
+    (_run("changes_requested", pr_head_sha="red1"), False),              # being reworked
+    (_run("running", pr_head_sha=None), False),                          # head unknown
+    (_run("awaiting_review", pr_head_sha="new2"), True),                 # head moved on
+    (_run("running", pr_head_sha="new2"), True),
+    (_run("done", pr_head_sha="red1"), True),
+    (_run("closed", pr_head_sha="red1"), True),
+    (_run("awaiting_review", pr_head_sha="red1", pr_state="merged"), True),
+])
+def test_a_queued_ci_red_rots_once_its_red_commit_is_not_the_head(run, stale):
+    """🔴 GUARD: disable the head-moved check ⇒ a notice about a commit the agent already
+    pushed past is delivered as current news ⇒ RED."""
+    reason = inbox.stale_reason(_ci_red_event(), [run])
+    assert bool(reason) is stale, reason
+
+
+def test_a_queued_ci_red_rots_through_the_delivery_path(monkeypatch):
+    _ci_red_event()
+    inbox.tick({}, runs=[_run("awaiting_review", pr_head_sha="new2")])
+    assert _queued("run_ci_red") == []
+
+
+@pytest.mark.parametrize("run,stale", [
+    (_run("awaiting_review", pr_head_sha="abc"), False),
+    (_run("running", pr_head_sha="abc"), True),
+    (_run("awaiting_review", pr_head_sha="abc", judge_state=judge.J_RUNNING), True),
+    (_run("awaiting_review", pr_head_sha="abc", pr_state="closed"), True),
+])
+def test_a_queued_judge_not_started_rots_once_a_judge_starts(run, stale, monkeypatch):
+    monkeypatch.setenv("CHELA_JUDGE_NOT_STARTED_ALERT_S", "0")
+    [event] = inbox.judge_wait_events([_run("awaiting_review", pr_head_sha="abc")],
+                                      inbox._empty(), 99_999.0)
+    reason = inbox.stale_reason(event, [run])
+    assert bool(reason) is stale, reason
+
+
+@pytest.mark.parametrize("status,stale", [
+    ("running", False), ("claimed", False), ("awaiting_review", True), ("failed", True)])
+def test_a_queued_stuck_notice_rots_once_the_run_stops_running(status, stale, monkeypatch):
+    monkeypatch.setenv("CHELA_STUCK_AGENT_ALERT_S", "0")
+    probe = {"T9": {"activity": 1.0, "markers": {}}}
+    [event] = inbox.stuck_events([_run("running")], inbox._empty(), probe, 99_999.0)
+    reason = inbox.stale_reason(event, [_run(status)])
+    assert bool(reason) is stale, reason
