@@ -2,6 +2,21 @@
   <img src="chela/dashboard/static/img/banner.svg" alt="chela" width="560">
 </p>
 
+<table align="center">
+  <tr>
+    <td align="center" valign="top">
+      <img src="docs/img/chela-demo-desktop.gif" alt="chela on desktop — the live terminal Wall with one agent in each state, the Work view's board, runs and schedules, then Settings opened with Ctrl+," width="600"><br>
+      <sub>Desktop — the Wall, Work (board, runs, schedules) &amp; Settings on <kbd>Ctrl</kbd>+<kbd>,</kbd></sub>
+    </td>
+    <td align="center" valign="top">
+      <img src="docs/img/chela-demo-mobile.gif" alt="chela on a phone — single-pane wall, agent pill switcher, the + New session menu and the keybar" width="150"><br>
+      <sub>Phone — pill switcher, “+” New session, keybar</sub>
+    </td>
+  </tr>
+</table>
+
+<p align="center"><sub>Recorded from a synthetic demo fleet (<a href="scripts/demo/"><code>scripts/demo/</code></a>) — re-record with <code>scripts/demo/record.sh</code>.</sub></p>
+
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue.svg" alt="License: AGPL v3"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue.svg" alt="Python 3.11+">
@@ -11,32 +26,46 @@
 
 # chelamux
 
-**A tiny control plane that puts a fleet of Claude Code agents to work — unattended.**
+**Run Claude Code agents unattended — chela only merges a PR once it has proved the tests
+catch broken code.**
 
-chela runs as a small daemon over one tmux session. It **schedules** long-lived agents
-(poke a pane every `1h`, on `0 */8 * * *`, or once), **dispatches** a task queue — Linear,
-GitHub issues or a markdown `TODO.md` — into one git worktree, one agent and one PR per task,
-with an adversarial **judge** in front of every merge, and **closes the loop** by pushing
-completions, blocks and deaths back into your orchestrator agent's own session. You watch it
-however you already watch tmux: `tmux attach`, [Mosh](https://mosh.org/), Telegram, or the
-live terminal-wall dashboard.
+- **Tracker-driven dispatch.** A ready task in Linear, GitHub issues or a `TODO.md` becomes
+  one git worktree, one agent and one PR.
+- **A mutation-testing judge.** Before a merge, the judge corrupts the code the PR guards and
+  checks the tests turn red; its verdict is bound to the PR's head commit, so a new push
+  voids it.
+- **A merge gate with one-tap approval.** `chela merge` refuses without a clean verdict on
+  the current head and green CI; `chela merge --override --reason …` asks you instead, and
+  one Telegram tap (or the dashboard) completes it — audited.
+
+And you can watch it all live: a terminal-wall dashboard, a Telegram bridge to every
+session, and schedules that poke long-lived agents (`--every 1h`, cron, or once).
+
+> **Trust note.** Dispatched agents run **unsandboxed by default** — as your user, with your
+> tools and network. A measured sandbox exists and is **opt-in per workflow**
+> (`agent.sandbox: true` in `WORKFLOW.md`); see
+> [docs/TRUST_AND_APPROVAL_POSTURE.md](docs/TRUST_AND_APPROVAL_POSTURE.md).
 
 ## Install
 
-You need Linux or macOS, Python ≥ 3.11, `tmux`, `git`, [`uv`](https://docs.astral.sh/uv/),
-the `claude` CLI on `PATH`, and `gh` (for the dispatcher's PR flow).
+Requires Linux, WSL or macOS · Python ≥ 3.11 · `tmux` · `git` · [`uv`](https://docs.astral.sh/uv/) ·
+the `claude` CLI · `gh` (for the PR flow).
 
 ```bash
 git clone https://github.com/Devail1/chelamux && cd chelamux
 uv sync --all-extras          # core + dashboard + Telegram bridge, in one command
-claude                        # then /login once — every agent reuses this login
+uv run chela status           # what chela sees
 ```
 
-chela never touches credentials: it drives the `claude` CLI in your tmux windows, so the
-whole fleet runs as **one Claude account** and shares its 5h / 7d limits. Inside Claude
-Code, add the hooks plugin too — `/plugin marketplace add Devail1/chelamux`, then
-`/plugin install chela@chela` — it powers blocked-agent handling, answering from your phone,
-and the merge gate ([docs/HOOKS.md](docs/HOOKS.md)).
+Full walkthrough, clone to a first agent-opened PR:
+[**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md).
+
+chela never touches credentials: it drives the `claude` CLI in your tmux windows (run
+`claude` and `/login` once), so the whole fleet runs as **one Claude account** and shares
+its 5h / 7d limits. Inside Claude Code, add the hooks plugin too —
+`/plugin marketplace add Devail1/chelamux`, then `/plugin install chela@chela` — it powers
+blocked-agent handling, answering from your phone, and the merge gate
+([docs/HOOKS.md](docs/HOOKS.md)).
 
 ## First run
 
@@ -56,21 +85,6 @@ uv run chela dashboard                            # http://127.0.0.1:5001
 To dispatch work, follow [**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md) (about
 10 minutes, clone to a first agent-opened PR). Prefer an agent to set it up? Copy
 [`skills/chela-setup`](skills/chela-setup/SKILL.md) into `~/.claude/skills/`.
-
-<table align="center">
-  <tr>
-    <td align="center" valign="top">
-      <img src="docs/img/chela-demo-desktop.gif" alt="chela on desktop — the live terminal Wall with one agent in each state, the Work view's board, runs and schedules, then Settings opened with Ctrl+," width="600"><br>
-      <sub>Desktop — the Wall, Work (board, runs, schedules) &amp; Settings on <kbd>Ctrl</kbd>+<kbd>,</kbd></sub>
-    </td>
-    <td align="center" valign="top">
-      <img src="docs/img/chela-demo-mobile.gif" alt="chela on a phone — single-pane wall, agent pill switcher, the + New session menu and the keybar" width="150"><br>
-      <sub>Phone — pill switcher, “+” New session, keybar</sub>
-    </td>
-  </tr>
-</table>
-
-<p align="center"><sub>Recorded from a synthetic demo fleet (<a href="scripts/demo/"><code>scripts/demo/</code></a>) — re-record with <code>scripts/demo/record.sh</code>.</sub></p>
 
 ## What's new in 0.15
 
