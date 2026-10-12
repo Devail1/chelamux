@@ -242,7 +242,13 @@ def _empty() -> dict:
             # episode, one per clean-but-unmerged run. Shared state, like everything here.
             # `last_delivery_failure` is WHY the queue is held, when a delivery was attempted
             # and failed (CMX-27 made `busy` deliverable, so the status alone no longer says).
-            "held_alert": None, "clean_unmerged": {}, "last_delivery_failure": None}
+            "held_alert": None, "clean_unmerged": {}, "last_delivery_failure": None,
+            # CMX-86: the orchestrator's own (and the CI loop's) announced state changes,
+            # whose resulting edge must NOT come back to it as news (`expect_edge`) — and
+            # the latches of the notices that used to be missing: judge not started, hold
+            # released, CI red, PR conflicting, agent stuck / marker unread.
+            "expected_edges": {}, "review_wait": {}, "hold_seen": None, "hold_ended": None,
+            "ci_red_seen": {}, "conflict_seen": {}, "stuck": {}}
 
 
 def _clear_address_alarm(store: dict) -> None:
@@ -1306,7 +1312,8 @@ def agent_events(prev: dict[str, str], cur: dict[str, str], store: dict,
 
 def run_events(runs: list[dict], seen: dict[str, str],
                windows: dict[str, str] | None = None,
-               now_epoch: str | None = None) -> tuple[list[dict], dict[str, str]]:
+               now_epoch: str | None = None,
+               expected: dict | None = None) -> tuple[list[dict], dict[str, str]]:
     """Events from the dispatcher runs DB: → ``awaiting_review``, ``needs_human``, ``failed``.
 
     Edge-triggered on the run's status, against a DURABLE mark: a run parked in
@@ -1325,9 +1332,22 @@ def run_events(runs: list[dict], seen: dict[str, str],
     what this used to do) never fired. A run with no recorded id and no unambiguous live
     window stays ``wid=None`` and belongs to chela itself: an honest ownerless event, not
     a hole.
+
+    **CMX-86: an ECHO is not news.** ``expected`` (the store's ``expected_edges``) holds the
+    status edges somebody ANNOUNCED before causing them — the orchestrator's own ``chela
+    reopen``/``retry``/``close``/``merge`` (:func:`note_own_action`), and the CI loop's
+    rework, which already went out as a richer ``run_ci_red`` (:func:`ci_red`). The edge is
+    consumed here and whatever event it produces is kept ``silent``: logged for the Feed and
+    ``chela wait``, never queued into the orchestrator's context. The same edge caused by
+    anyone else (a human on the dashboard, Telegram, a terminal) is a notice as before.
     """
     out: list[dict] = []
     fresh: dict[str, str] = {}
+    if expected:
+        cutoff = time.time() - EXPECT_EDGE_TTL_SECONDS
+        for task_id in [t for t, e in expected.items()
+                        if not isinstance(e, dict) or (e.get("ts") or 0) < cutoff]:
+            expected.pop(task_id, None)       # announced, never happened: forget it
     for run in runs:
         task_id, status = run.get("task_id"), run.get("status")
         if not task_id:
@@ -1360,10 +1380,17 @@ def run_events(runs: list[dict], seen: dict[str, str],
         # Was the run already SITTING in awaiting_review as of the last mark? (Not just
         # "is judge_state new" — a fresh task_id, or one arriving straight from a
         # different status, has never had the plain `run_review` event fire either.)
-        was_already_awaiting_review = (prev_mark or "").split(":", 1)[0] == "awaiting_review"
+        prev_status = (prev_mark or "").split(":", 1)[0]
+        was_already_awaiting_review = prev_status == "awaiting_review"
         fresh[task_id] = mark
         if prev_mark == mark:
             continue                      # already announced at this status (+judge verdict)
+        echo = None
+        if expected is not None and prev_status != status:
+            announced = expected.get(task_id)
+            if isinstance(announced, dict) and announced.get("status") == status:
+                echo = expected.pop(task_id)
+        emitted = len(out)
         wid = run_wid(run, windows, now_epoch)
         title = run.get("title") or ""
         # The branch is the handle a human recognises ("cmx-38"); the id is the handle
@@ -1491,7 +1518,21 @@ def run_events(runs: list[dict], seen: dict[str, str],
                     f"⚖️ {label} — judge CANNOT VERIFY, needs a human look"
                     f"{': ' + detail if detail else ''} — {ref}"
                     f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+        elif (status == "awaiting_review" and not was_already_awaiting_review
+              and prev_status in REOPEN_FROM):
+            # CMX-86: back under review from a SETTLED state — somebody ran `chela reopen`
+            # (or the dashboard/Telegram equivalent). The orchestrator's own reopen is an
+            # echo and goes silent below; anyone else's is news it did not cause.
+            pr = run.get("pr_url")
+            ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+            out.append(_event("run_reopened",
+                              f"🔓 {label} reopened from {prev_status} — back under review — "
+                              f"{ref}{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif status == "awaiting_review" and not was_already_awaiting_review:
+            # CMX-86: SILENT by default. The orchestrator merges only on the judge's verdict
+            # (its own notice), so "awaiting review" never asked it for anything — it is still
+            # LOGGED (the Feed, `chela wait`), just not queued. A judge that never starts is
+            # what `judge_wait_events` is for.
             pr = run.get("pr_url")
             ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
             # 📝 CMX-52: the agent's own `--handoff` note. The payload keeps it raw (None
@@ -1504,7 +1545,8 @@ def run_events(runs: list[dict], seen: dict[str, str],
                               f"📥 {label} awaiting review — {ref}"
                               f"{' · ' + snippet if snippet else ''}"
                               f"{' · handoff: “' + note + '”' if note else ''}",
-                              payload, wid=wid))
+                              payload, wid=wid,
+                              silent=not config.inbox_notify_awaiting_review()))
         # else: still awaiting_review, and the judge_state moved between two NON-terminal
         # values (e.g. "" → "running", or one retry's "running" to the next) — silently
         # absorbed. `fresh[task_id]` is already updated above, so this transition itself
@@ -1591,6 +1633,21 @@ def run_events(runs: list[dict], seen: dict[str, str],
                 f"⚖️🕳️ {label} — merged with NO judge verdict (never scheduled) — {ref}"
                 f"{': ' + detail if detail else ''}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+        elif status == "closed":
+            # CMX-86: a run closed by somebody other than the orchestrator — a human's
+            # `chela close`, or reconcile finding its PR closed on GitHub. The orchestrator's
+            # own close is an echo (silent below).
+            payload["close_reason"] = run.get("close_reason")
+            pr = run.get("pr_url")
+            ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+            why = " ".join(str(run.get("close_reason") or "").split())[:120]
+            out.append(_event("run_was_closed",
+                              f"🗂️ {label} was CLOSED{' — ' + why if why else ''} — {ref}"
+                              f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+        if echo is not None:
+            for event in out[emitted:]:
+                event["silent"] = True
+                event["payload"]["echo_of"] = echo.get("why")
     return out, fresh
 
 
@@ -1651,6 +1708,460 @@ def _reviews(run: dict) -> list[dict]:
     return [r for r in parsed if isinstance(r, dict)] if isinstance(parsed, list) else []
 
 
+# --- CMX-86: echoes out, the missing notices in -----------------------------------
+#
+# Every notice lands in the orchestrator's context and is re-billed on every later request,
+# so a notice must carry information or ask for a decision. Two rules follow:
+#
+# * an ECHO of the orchestrator's own action is not information (`note_own_action`), and
+# * the facts it kept finding by hand ARE — a judge that never started, a hold that lapsed,
+#   a red CI with the line that failed, a PR gone CONFLICTING, an agent gone quiet.
+#
+# Each new notice is edge-triggered against a latch in the store (once per run / head /
+# hold), so a later tick never repeats it, and each is re-checked at delivery
+# (`_cmx86_stale`) like every other run event.
+
+ORCH_ECHO = "orchestrator"       # `expected_edges[...]["why"]`: the orchestrator did it
+CI_RED_ECHO = "ci_red"           # ...the CI loop did it, and `run_ci_red` already said so
+
+# An announced edge that never happens (the action failed after the announcement and the
+# caller could not retract it) is forgotten after this long — it must not swallow a REAL
+# edge to the same status hours later.
+EXPECT_EDGE_TTL_SECONDS = 600
+
+# The settled states `chela reopen` brings a run back to review from.
+REOPEN_FROM = ("needs_human", "done", "closed", "failed")
+
+# A run whose PR can still go CONFLICTING and still matter.
+OPEN_RUN_STATES = ("claimed", "running", "awaiting_review", "changes_requested", "needs_human")
+
+# A run whose AGENT is supposed to be working — the only ones that can be "stuck".
+STUCK_RUN_STATES = ("claimed", "running")
+
+# The request markers a dispatched agent drops in its worktree for the daemon to apply
+# (`dispatcher._task_finished_request_path` / `_push_request_path`).
+MARKERS = {".chela-task-finished-request.json": "task-finished",
+           ".chela-push-request.json": "push-request"}
+
+_CMX86_KINDS = ("run_judge_not_started", "run_ci_red", "run_pr_conflicting", "run_stuck",
+                "run_marker_unread")
+
+
+def caller_is_orchestrator(store: dict | None = None) -> bool:
+    """Is the process running this command THE orchestrator the inbox pushes into?
+
+    The auto-launched one says so itself (``$CHELA_ACTOR``); a human-launched one is the
+    session registered by ``chela watch`` — matched by its window, or by its pid when it is a
+    windowless peer. Anything else (a human's terminal, the dashboard, Telegram, another
+    agent) is not, and its actions stay news to the orchestrator.
+    """
+    if os.environ.get(config.ACTOR_ENV, "").strip() == config.AUTO_ORCHESTRATOR_ACTOR:
+        return True
+    from chela import orchestrator      # lazy: orchestrator is CLI-side
+    store = load() if store is None else store
+    mine = orchestrator.self_wid()
+    if mine:
+        return mine == orchestrator_wid(store)
+    peer = orchestrator_peer(store)
+    if not peer:
+        return False
+    own = orchestrator.self_peer()
+    return bool(own and own.get("pid") == peer.get("pid"))
+
+
+def expect_edge(task_id: str | None, status: str, why: str) -> bool:
+    """Announce that ``task_id`` is about to move to ``status`` — so the edge, when the
+    inbox sees it, is an echo and not a notice (:func:`run_events`). Call it BEFORE the
+    action: the daemon may tick between the action and any later write."""
+    if not enabled() or not task_id:
+        return False
+    with locked_store() as store:
+        store["expected_edges"][task_id] = {"status": status, "why": why, "ts": time.time()}
+    return True
+
+
+def forget_edge(task_id: str | None, why: str | None = None) -> None:
+    """Retract :func:`expect_edge` — the action it announced did not happen."""
+    if not enabled() or not task_id:
+        return
+    with locked_store() as store:
+        announced = store["expected_edges"].get(task_id)
+        if isinstance(announced, dict) and (why is None or announced.get("why") == why):
+            store["expected_edges"].pop(task_id, None)
+
+
+def note_own_action(task_id: str | None, status: str) -> bool:
+    """The orchestrator is about to move ``task_id`` to ``status`` itself (reopen, retry,
+    close, merge): its echo must not come back to it. A no-op for anyone else — True only
+    when the edge was announced. Never raises: a CLI action must not fail on the inbox."""
+    if not enabled() or not task_id:
+        return False
+    try:
+        if not caller_is_orchestrator():
+            return False
+        return expect_edge(task_id, status, ORCH_ECHO)
+    except Exception:  # noqa: BLE001 — the inbox is advisory; the action is not
+        log.warning("inbox: could not record the orchestrator's own action on %s", task_id,
+                    exc_info=True)
+        return False
+
+
+def _label(run: dict) -> str:
+    return run.get("branch_name") or run.get("task_id") or "?"
+
+
+def _ref(run: dict) -> str:
+    pr = run.get("pr_url")
+    return f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+
+
+def _run_payload(run: dict, **extra) -> dict:
+    return {"task_id": run.get("task_id"), "run_status": run.get("status"),
+            "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
+            "pr_head_sha": run.get("pr_head_sha"), "window_id": run.get("window_id"),
+            **extra}
+
+
+def _judge_not_started(run: dict) -> bool:
+    """No judge round has started on this run's CURRENT head: none is running, none has
+    settled on it, and no outage backoff (which is its own notice) is pending."""
+    if run.get("judge_state") == judge.J_RUNNING or run.get("judge_retry_after"):
+        return False
+    judge_sha = run.get("judge_sha")
+    return not (judge_sha and judge_sha == run.get("pr_head_sha"))
+
+
+def judge_wait_events(runs: list[dict], store: dict, now: float,
+                      windows: dict[str, str] | None = None,
+                      now_epoch: str | None = None) -> list[dict]:
+    """``run_judge_not_started`` — what the old "awaiting review" notice was ever worth.
+
+    A run sitting in ``awaiting_review`` longer than ``config.judge_not_started_alert_s()``
+    with no judge round started on its head ⇒ ONE notice per (run, head). The clock is the
+    first tick that saw it waiting (``store["review_wait"]``), so it survives a restart.
+    """
+    prev: dict = store.get("review_wait") or {}
+    nxt: dict = {}
+    out: list[dict] = []
+    threshold = config.judge_not_started_alert_s()
+    for run in runs:
+        task = run.get("task_id")
+        if (not task or run.get("status") != "awaiting_review"
+                or run.get("pr_state") in ("merged", "closed")):
+            continue                              # left review: the next wait is new
+        head = run.get("pr_head_sha") or ""
+        entry = prev.get(task)
+        if not isinstance(entry, dict) or entry.get("head") != head:
+            entry = None                          # a new head is a new wait
+        if not _judge_not_started(run):
+            if entry and entry.get("alerted"):
+                nxt[task] = entry                 # said once for this head — keep it said
+            continue
+        entry = entry or {"head": head, "since": now, "alerted": False}
+        nxt[task] = entry
+        waited = now - entry["since"]
+        if entry["alerted"] or waited < threshold:
+            continue
+        entry["alerted"] = True
+        out.append(_event(
+            "run_judge_not_started",
+            f"⏳ {_label(run)} has waited {human_duration(waited)} in review and NO judge round "
+            f"has started — review it yourself or run `chela judge run {task}` — {_ref(run)}",
+            _run_payload(run, judge_state=run.get("judge_state"), waited_s=int(waited)),
+            wid=run_wid(run, windows, now_epoch)))
+    store["review_wait"] = nxt
+    return out
+
+
+def _hold_record(held) -> dict:
+    return {"created_at": held.created_at, "expires_at": held.expires_at,
+            "by": held.by, "reason": held.reason}
+
+
+def hold_events(store: dict, held, released: dict | None, now: float) -> list[dict]:
+    """``dispatch_hold_expired`` / ``dispatch_hold_released`` — dispatch resumed, and the
+    orchestrator did not resume it.
+
+    ``held`` is :func:`chela.hold.read` (expired or not), ``released`` is
+    :func:`chela.hold.last_release`. A hold this inbox has SEEN (``store["hold_seen"]``)
+    that is no longer in force ended one of three ways: the orchestrator's own ``--resume``
+    (silent — it knows), someone else's release, or its TTL lapsing (10-10: a 30m hold lapsed
+    unnoticed and the next task started). Once per hold (``hold_ended``).
+    """
+    if held is not None and not held.expired(now):
+        store["hold_seen"] = _hold_record(held)   # a re-take/extension just replaces it
+        return []
+    seen = store.get("hold_seen")
+    if not seen and held is not None and held.created_at != store.get("hold_ended"):
+        seen = _hold_record(held)                  # lapsed before any tick saw it live
+    if not seen:
+        return []
+    store["hold_seen"] = None
+    store["hold_ended"] = seen.get("created_at")
+    rel = (released if isinstance(released, dict)
+           and released.get("created_at") == seen.get("created_at") else None)
+    if rel and rel.get("orchestrator"):
+        return []                                  # its own --resume: an echo
+    age = human_duration(max(0.0, now - float(seen.get("created_at") or now)))
+    why = f" — {seen['reason']}" if seen.get("reason") else ""
+    payload = {**seen, "released_by": (rel or {}).get("by")}
+    if rel:
+        return [_event("dispatch_hold_released",
+                       f"▶️ dispatch hold RELEASED by {rel.get('by') or 'someone'} — taken {age} "
+                       f"ago by {seen.get('by') or '?'}{why} — the next tick claims the top of "
+                       f"the queue", payload)]
+    return [_event("dispatch_hold_expired",
+                   f"▶️ dispatch hold EXPIRED by its TTL — taken {age} ago by "
+                   f"{seen.get('by') or '?'}{why} — dispatch has RESUMED, the next tick claims "
+                   f"the top of the queue as it stands", payload)]
+
+
+# gh's `--log-failed` prefixes every line with `<job>\t<step>\t<timestamp> `.
+_GH_LOG_PREFIX_RE = re.compile(r"^[^\t]*\t[^\t]*\t﻿?(?:\d{4}-\d\d-\d\dT[\d:.]+Z ?)?")
+# Most to least specific: pytest's short summary, a ruff/flake8 diagnostic, pytest's `E`
+# lines, then anything that says error/fail. GitHub's own epilogue is never the answer.
+_FAILURE_LINE_RES = (
+    re.compile(r"^(?:FAILED|ERROR) \S"),
+    re.compile(r"^\S+:\d+:\d+: [A-Z]+\d+ "),
+    re.compile(r"^E\s+\S"),
+    re.compile(r"error|fail", re.IGNORECASE),
+)
+_FAILURE_NOISE_RE = re.compile(r"Process completed with exit code|^##\[(?:group|endgroup)")
+
+
+def first_failure_line(log_tail: str, limit: int = 160) -> str:
+    """The first line of a failing CI log that names WHAT failed — the test, the lint rule —
+    so a known flake is recognisable from the notice alone. "" when nothing qualifies."""
+    lines = [_GH_LOG_PREFIX_RE.sub("", raw).strip() for raw in (log_tail or "").splitlines()]
+    lines = [ln for ln in lines if ln and not _FAILURE_NOISE_RE.search(ln)]
+    for pattern in _FAILURE_LINE_RES:
+        for line in lines:
+            if pattern.search(line):
+                return line[:limit]
+    return ""
+
+
+def ci_red(run: dict, *, sha: str, failing: tuple[str, ...] | list[str],
+           run_ids: tuple[str, ...] | list[str], log_tail: str, sent_back: bool) -> bool:
+    """``run_ci_red`` — CI went red on the PR's current head. Called by the dispatcher's CI
+    loop (``dispatch_tick`` 1c), the one place that holds the failing jobs AND the log.
+
+    Once per (run, head sha) (``store["ci_red_seen"]``). When the loop is sending the run back
+    for rework (``sent_back``), the ``changes_requested`` edge that follows is announced as
+    an echo — this notice already says it, with the job and the failing line. The caller
+    retracts that with ``forget_edge(task, CI_RED_ECHO)`` if the rework is then refused.
+    """
+    if not enabled():
+        return False
+    task = run.get("task_id")
+    if not task or not sha:
+        return False
+    jobs = ", ".join(failing) or "?"
+    line = first_failure_line(log_tail)
+    rerun = f" — flake? `gh run rerun {run_ids[0]} --failed`" if run_ids else ""
+    then = ("sent back for rework" if sent_back
+            else "NOT sent back — the job never ran its steps, rerun it")
+    try:
+        wid = run_wid(run, None, epoch.current())
+    except Exception:  # noqa: BLE001 — attribution is best-effort
+        wid = None
+    event = _event(
+        "run_ci_red",
+        f"🔴 {_label(run)} CI RED on {sha[:7]} — job {jobs}"
+        f"{' — first failure: ' + line if line else ''} — {then}{rerun} — {_ref(run)}",
+        _run_payload(run, ci_sha=sha, failing=list(failing), run_ids=list(run_ids),
+                     failure_line=line, sent_back=sent_back),
+        wid=wid)
+    with locked_store() as store:
+        if store["ci_red_seen"].get(task) == sha:
+            return False                           # this red was already said
+        store["ci_red_seen"][task] = sha
+        if sent_back:
+            store["expected_edges"][task] = {"status": "changes_requested",
+                                             "why": CI_RED_ECHO, "ts": time.time()}
+        store["queue"].append(event)
+    event_log.from_inbox(event)
+    return True
+
+
+def conflict_events(runs: list[dict], store: dict,
+                    windows: dict[str, str] | None = None,
+                    now_epoch: str | None = None) -> list[dict]:
+    """``run_pr_conflicting`` — GitHub says the PR conflicts with its base (typically after
+    another merge into it). Once per (run, head) (``store["conflict_seen"]``): only a new
+    head can un-conflict it, so only a new head can make a new conflict news."""
+    prev: dict = store.get("conflict_seen") or {}
+    nxt: dict = {}
+    out: list[dict] = []
+    for run in runs:
+        task = run.get("task_id")
+        if (not task or run.get("status") not in OPEN_RUN_STATES or not run.get("pr_url")
+                or run.get("pr_state") in ("merged", "closed")):
+            continue
+        head = run.get("pr_head_sha") or ""
+        if task in prev:
+            nxt[task] = prev[task]
+        if run.get("pr_mergeable") != "CONFLICTING" or prev.get(task) == head:
+            continue
+        nxt[task] = head
+        out.append(_event(
+            "run_pr_conflicting",
+            f"⚔️ {_label(run)} PR is CONFLICTING with its base — it cannot merge until it is "
+            f"rebased — {_ref(run)}",
+            _run_payload(run, pr_mergeable="CONFLICTING"), wid=run_wid(run, windows, now_epoch)))
+    store["conflict_seen"] = nxt
+    return out
+
+
+def _git_last_commit(worktree: str) -> float | None:
+    import subprocess
+    try:
+        out = subprocess.run(["git", "-C", worktree, "log", "-1", "--format=%ct"],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    try:
+        return float(out.stdout.strip()) if out.returncode == 0 else None
+    except ValueError:
+        return None
+
+
+def _mtime(path) -> float | None:
+    try:
+        return Path(path).stat().st_mtime if path else None
+    except OSError:
+        return None
+
+
+def stuck_probes(runs: list[dict]) -> dict[str, dict]:
+    """``{task_id: {"activity": ts|None, "markers": {label: mtime}}}`` for every run whose
+    agent should be working. I/O (git, the transcript dir, the worktree) — so the tick does
+    it OUTSIDE the store lock. Activity is the later of the worktree's last commit and its
+    transcript's last write; a run with no worktree on disk has nothing to probe."""
+    out: dict[str, dict] = {}
+    for run in runs:
+        task, worktree = run.get("task_id"), run.get("worktree_path")
+        if not task or run.get("status") not in STUCK_RUN_STATES or not worktree:
+            continue
+        if not Path(worktree).is_dir():
+            continue
+        try:
+            transcript = transcripts.transcript_for_cwd(worktree)
+        except Exception:  # noqa: BLE001 — a probe never takes the tick down
+            transcript = None
+        stamps = [t for t in (_git_last_commit(worktree), _mtime(transcript)) if t]
+        markers = {label: m for name, label in MARKERS.items()
+                   if (m := _mtime(Path(worktree) / name)) is not None}
+        out[task] = {"activity": max(stamps) if stamps else None, "markers": markers}
+    return out
+
+
+def daemon_uptime(now: float) -> float | None:
+    """Seconds since the running daemon published itself, or None if none is running."""
+    from chela import capabilities
+    live = capabilities.live()
+    ts = (live or {}).get("ts")
+    return max(0.0, now - float(ts)) if isinstance(ts, (int, float)) else None
+
+
+def _parse_epoch(ts) -> float | None:
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    from chela import dispatcher
+    parsed = dispatcher._parse_ts(ts) if ts else None
+    return parsed.timestamp() if parsed else None
+
+
+def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: float,
+                 uptime: float | None = None, windows: dict[str, str] | None = None,
+                 now_epoch: str | None = None) -> list[dict]:
+    """``run_stuck`` / ``run_marker_unread`` — a running agent that has gone quiet.
+
+    * **stuck**: no new commit AND no transcript activity for ``config.stuck_agent_alert_s()``
+      (10-09: an agent sat on "Login expired" for hours). Once per quiet spell — keyed on the
+      last activity stamp, so an agent that wakes up and goes quiet again is news again.
+    * **marker unread** (folded in from CMX-43): the agent dropped its task-finished /
+      push-request marker and the daemon has not applied it for
+      ``config.marker_unread_alert_s()`` — several ticks. A stale daemon is the usual cause,
+      so the notice carries its uptime. Once per marker write. A run with a marker pending
+      is waiting on the DAEMON, not stuck, so it never also gets the stuck notice.
+    """
+    prev: dict = store.get("stuck") or {}
+    nxt: dict = {}
+    out: list[dict] = []
+    quiet_after, unread_after = config.stuck_agent_alert_s(), config.marker_unread_alert_s()
+    up = f"daemon up {human_duration(uptime)}" if uptime is not None else "no daemon running"
+    for run in runs:
+        task = run.get("task_id")
+        if not task or run.get("status") not in STUCK_RUN_STATES:
+            continue
+        entry = dict(prev.get(task) or {})
+        probe = probes.get(task)
+        if probe is None:
+            if entry:
+                nxt[task] = entry
+            continue
+        wid = run_wid(run, windows, now_epoch)
+        said = list(entry.get("markers") or [])
+        for label, mtime in sorted((probe.get("markers") or {}).items()):
+            key = f"{label}@{mtime}"
+            age = now - mtime
+            if age < unread_after or key in said:
+                continue
+            said.append(key)
+            out.append(_event(
+                "run_marker_unread",
+                f"📭 {_label(run)} — its {label} request has sat UNREAD for "
+                f"{human_duration(age)} — {up}; a stale daemon is the usual cause — "
+                f"`chela doctor`",
+                _run_payload(run, marker=label, marker_age_s=int(age), daemon_uptime_s=(
+                    int(uptime) if uptime is not None else None)), wid=wid))
+        entry["markers"] = said
+        stamps = [t for t in (probe.get("activity"), _parse_epoch(run.get("started_at"))) if t]
+        activity = max(stamps) if stamps else None
+        quiet = now - activity if activity is not None else 0.0
+        if (activity is not None and not probe.get("markers") and quiet >= quiet_after
+                and entry.get("stuck_at") != activity):
+            entry["stuck_at"] = activity
+            out.append(_event(
+                "run_stuck",
+                f"🧊 {_label(run)} looks STUCK — no commit and no transcript activity for "
+                f"{human_duration(quiet)} while {run.get('status')} — `chela peek "
+                f"{wid or run.get('window_name') or task}` — {up}",
+                _run_payload(run, quiet_s=int(quiet), daemon_uptime_s=(
+                    int(uptime) if uptime is not None else None)), wid=wid))
+        nxt[task] = entry
+    store["stuck"] = nxt
+    return out
+
+
+def _cmx86_stale(kind: str, payload: dict, run: dict) -> str | None:
+    """Delivery-time re-check of the CMX-86 notices — each is a claim that can rot."""
+    status, pr_state = run.get("status"), run.get("pr_state")
+    if pr_state in ("merged", "closed"):
+        return f"PR is {pr_state}"
+    head, said_head = run.get("pr_head_sha"), payload.get("pr_head_sha")
+    if kind == "run_judge_not_started":
+        if status != "awaiting_review":
+            return f"run is now {status!r}, not awaiting_review"
+        if not _judge_not_started(run):
+            return "a judge round has started"
+    elif kind == "run_ci_red":
+        if status in ("done", "closed", "failed"):
+            return f"run is now {status!r}"
+        sha = payload.get("ci_sha")
+        if sha and head and head != sha:
+            return f"PR head moved past the red commit ({sha[:12]} -> {head[:12]})"
+    elif kind == "run_pr_conflicting":
+        if run.get("pr_mergeable") != "CONFLICTING":
+            return "PR is no longer CONFLICTING"
+        if said_head and head and head != said_head:
+            return "PR head moved since the conflict was seen"
+    elif kind in ("run_stuck", "run_marker_unread") and status not in STUCK_RUN_STATES:
+        return f"run is now {status!r}, no longer running"
+    return None
+
+
 # --- the daemon tick ------------------------------------------------------------
 
 def status_snapshot() -> dict[str, str]:
@@ -1709,7 +2220,8 @@ def stale_reason(event: dict, runs: list[dict],
     # state for the claim to rot against. Falling through to `return None` below is the
     # correct "never stale" answer, not an oversight.
     if kind not in ("run_review", "run_failed", "run_needs_human", "run_changes_requested",
-                     "run_judge_clean", "run_judge_cannot_verify", "run_judge_blocked_race"):
+                     "run_judge_clean", "run_judge_cannot_verify", "run_judge_blocked_race",
+                     "run_reopened", *_CMX86_KINDS):
         return None
     payload = event.get("payload") or {}
     task_id = payload.get("task_id")
@@ -1719,6 +2231,8 @@ def stale_reason(event: dict, runs: list[dict],
     if run is None:
         return "run row is gone"
     status, pr_state = run.get("status"), run.get("pr_state")
+    if kind in _CMX86_KINDS:
+        return _cmx86_stale(kind, payload, run)
     if kind in ("run_judge_cannot_verify", "run_judge_blocked_race"):
         # ⚖️🔔 CMX-229 Objective 1 / ⚖️🧊 CMX-239. Unlike `run_review`/`run_judge_clean`,
         # neither "the judge could not verify this commit" nor "a guard SURVIVED
@@ -1739,7 +2253,7 @@ def stale_reason(event: dict, runs: list[dict],
                 return (f"PR head moved past the judged commit ({judged_sha[:12]} -> "
                         f"{live_sha[:12]}) — the verdict no longer applies to the current head")
         return None
-    if kind in ("run_review", "run_judge_clean"):
+    if kind in ("run_review", "run_judge_clean", "run_reopened"):
         if status != "awaiting_review":
             # Includes the rework loop's own transition: an `awaiting_review` event that
             # was still queued when the reviewer sent the PR back is a claim about a run
@@ -2230,6 +2744,13 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
     # are computed, since a verdict about to be freshly queued needs the same check as
     # one that has been sitting in the queue for ticks (see `_live_judge_heads`).
     live_heads = _live_judge_heads(runs, pre_store.get("queue", []))
+    # CMX-86: the stuck-agent probes (git, transcripts, worktree markers), the hold file and
+    # the daemon's uptime — all I/O, so all read here, outside the lock.
+    probes = stuck_probes(runs)
+    from chela import hold
+    held, released = hold.read(), hold.last_release()
+    now = time.time()
+    uptime = daemon_uptime(now) if any(p.get("markers") for p in probes.values()) else None
     alarms: list[dict] = []                # raised inside the lock, published outside it
 
     with locked_store() as store:
@@ -2243,8 +2764,14 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
         events = agent_events(prev, statuses, store, runs, windows=windows,
                               now_epoch=now_epoch)
         r_events, store["runs_seen"] = run_events(runs, store.get("runs_seen", {}),
-                                                  windows=windows, now_epoch=now_epoch)
+                                                  windows=windows, now_epoch=now_epoch,
+                                                  expected=store["expected_edges"])
         events += r_events
+        events += judge_wait_events(runs, store, now, windows=windows, now_epoch=now_epoch)
+        events += hold_events(store, held, released, now)
+        events += conflict_events(runs, store, windows=windows, now_epoch=now_epoch)
+        events += stuck_events(runs, store, probes, now, uptime, windows=windows,
+                               now_epoch=now_epoch)
 
         for event in events:
             # A `silent` event carries no message — it exists only to retire a watch

@@ -1247,7 +1247,13 @@ def cmd_dispatch_hold(args) -> bool:
     the queue you are rewriting is the one being claimed from, wherever that claim runs.
     """
     if args.resume:
-        released = hold.release()
+        # CMX-86: recorded so the inbox can tell the orchestrator's own --resume (silent)
+        # from a lapsed TTL or somebody else's release (a notice).
+        try:
+            mine = inbox.caller_is_orchestrator()
+        except Exception:  # noqa: BLE001 — a release must never fail on the inbox
+            mine = False
+        released = hold.release(by=orchestrator.self_wid() or "", orchestrator=mine)
         if released is None:
             print("Dispatch was not held. Nothing to resume.")
         else:
@@ -2763,6 +2769,27 @@ def cmd_adopt(args) -> None:
           "refuses it until the judge reports clean.")
 
 
+def _announce_own_action(ident: str, status: str) -> str | None:
+    """CMX-86: when the ORCHESTRATOR runs reopen/retry/close/merge, the status edge it is
+    about to cause must not come back to it as an inbox notice — it already knows. Announced
+    BEFORE the action (the daemon can tick in between); returns the task id to retract with
+    :func:`_retract_own_action` if the action then fails. A no-op for anyone else."""
+    try:
+        run = dispatcher.resolve_run(ident)
+    except Exception:  # noqa: BLE001 — the inbox is advisory; the action is not
+        return None
+    task_id = (run or {}).get("task_id")
+    return task_id if inbox.note_own_action(task_id, status) else None
+
+
+def _retract_own_action(task_id: str | None) -> None:
+    if task_id:
+        try:
+            inbox.forget_edge(task_id, inbox.ORCH_ECHO)
+        except Exception:  # noqa: BLE001
+            log.warning("inbox: could not retract the announced action on %s", task_id)
+
+
 def cmd_merge(args) -> None:
     """⚙️⚖️ AUTONOMOUSLY merge a dispatched PR — the escalation contract, enforced in code.
 
@@ -2773,12 +2800,15 @@ def cmd_merge(args) -> None:
     by hand, or ``chela escalate`` to ask. Every merge is logged with its justification.
     """
     override = bool(getattr(args, "override", False))
+    own = _announce_own_action(args.run, "done")
     result = contract.merge(args.run, reason=getattr(args, "reason", "") or "",
                             override=override)
     if result.get("ok") and result.get("pending"):
+        _retract_own_action(own)      # a human approves it later — that merge is news
         _print_override_request(result)
         return
     if not result.get("ok"):
+        _retract_own_action(own)
         tier = result.get("tier")
         prefix = "⛔ NEVER" if tier == "never" else "merge REFUSED"
         print(f"{prefix}: {result.get('error', 'unknown error')}")
@@ -2899,8 +2929,10 @@ def cmd_reopen(args) -> None:
     🧊🔓 CMX-387: a ``done`` run is accepted too, but only while its PR is still OPEN and
     its task is not struck ``- [x]`` — the exit from the stuck-``done`` trap.
     """
+    own = _announce_own_action(args.run, "awaiting_review")
     result = dispatcher.reopen(args.run, reason=getattr(args, "reason", "") or "")
     if not result.get("ok"):
+        _retract_own_action(own)
         print(f"reopen: {result.get('error', 'unknown error')}")
         sys.exit(1)
     print(f"🔓 Run {result['task_id']} ({result.get('branch_name') or '?'}) → awaiting_review "
@@ -2924,8 +2956,10 @@ def cmd_retry(args) -> None:
     not to merge past it. It sends the run back to ``changes_requested``; the next
     dispatcher tick re-spawns the agent exactly like a normal rework round.
     """
+    own = _announce_own_action(args.run, "changes_requested")
     result = dispatcher.retry(args.run, reason=getattr(args, "reason", "") or "")
     if not result.get("ok"):
+        _retract_own_action(own)
         print(f"retry: {result.get('error', 'unknown error')}")
         sys.exit(1)
     print(f"🔁 Run {result['task_id']} ({result.get('branch_name') or '?'}) → "
@@ -3051,6 +3085,7 @@ def cmd_close(args) -> None:
             except EOFError:
                 answer = ""
             close_pr = answer.strip().lower() in ("y", "yes")
+    own = _announce_own_action(args.run, "closed")
     result = dispatcher.close_run(
         args.run, args.reason, force=args.force, close_pr=close_pr,
         remove_worktree=args.remove_worktree,
@@ -3058,6 +3093,7 @@ def cmd_close(args) -> None:
         requeue=requeue,
     )
     if not result.get("ok"):
+        _retract_own_action(own)
         print(f"close: {result.get('error', 'unknown error')}")
         sys.exit(1)
     forced = " (forced)" if result.get("forced") else ""
