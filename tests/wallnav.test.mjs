@@ -36,9 +36,10 @@
 //      proving the CMX-108 toolbar fold was actually reverted, not just hidden.
 //   3. 🔴 A PINNED PANE'S GEOMETRY IS NEVER TOUCHED BY A GRID PRESET. applyGridLayout
 //      reflows every OTHER pane; a pinned one keeps its exact gs-x/gs-y/gs-w/gs-h.
-//   4. 🔴 ALT+N JUMPS TO THE RIGHT PANE, PLAIN "N" DOES NOT. The badge numbering and
-//      the shortcut's target must never drift apart, and the shortcut must be gated on
-//      Alt (a bare digit is normal terminal input and must reach the pane untouched).
+//   4. 🔴 ALT+N JUMPS TO THE RIGHT PANE, PLAIN "N" DOES NOT. CMX-85: N is the Nth
+//      visible SIDEBAR row (the panes carry no number any more), and the shortcut must
+//      be gated on Alt (a bare digit is normal terminal input and must reach the pane
+//      untouched).
 //   5. 🔴 ALT+N ROUTES ACTUAL KEYSTROKES, NOT JUST A HIGHLIGHT. `focusPaneByWid` must
 //      call BOTH the iframe ELEMENT'S own `.focus()` AND the xterm Terminal's OWN
 //      `.focus()` (exposed as `contentWindow.term`) — CMX-114: contentWindow.focus()
@@ -126,6 +127,7 @@ const PANEL = `
   <div id="term-switcher"></div>
   <div id="term-stage"></div>
   <div id="term-min-dock"></div>
+  <div id="sidebar-agents"></div>
   <div id="term-bar" class="kb-collapsed"><button class="kb-toggle" id="kb-toggle"></button><div class="kb-body" id="kb-body"></div></div>
 </div>
 <div class="palette-overlay" id="palette">
@@ -255,6 +257,8 @@ before(async () => {
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();
+    // CMX-85: Alt+N targets the sidebar's rows — draw them.
+    (await import('../chela/dashboard/static/js/nav.js')).renderSidebarAgents(AGENTS);
 });
 
 beforeEach(() => {
@@ -267,6 +271,12 @@ beforeEach(() => {
 });
 
 const tile = wid => document.querySelector(`#term-stage .grid-stack-item[gs-id="${wid}"]`);
+// The window id of the Nth sidebar row as drawn — what Alt+N opens (CMX-85).
+const rowWid = n => {
+    const row = document.querySelectorAll('#sidebar-agents .agent-row[data-agent]')[n - 1];
+    const a = row && AGENTS.find(x => x.name === row.dataset.agent);
+    return a ? a.window_id : null;
+};
 const geom = wid => {
     const el = tile(wid);
     return el && ['x', 'y', 'w', 'h'].map(k => el.getAttribute('gs-' + k)).join(',');
@@ -444,24 +454,23 @@ test('CMX-268: a grid-preset click never adds body.wall-density-airy — the den
         'applyGridLayout(2,1) added wall-density-airy — the reverted density toggle is back');
 });
 
-// 4 — THE KEYBOARD SWITCHER. Alt+N jumps to the pane the badge shows; bare N does not.
-test('Alt+N jumps to the Nth pane by its badge number; a bare digit is left alone', async () => {
-    const idx = wid => tile(wid).querySelector('.gs-idx');
-    assert.equal(idx('@1').textContent, '1');
-    assert.equal(idx('@2').textContent, '2');
-    assert.equal(idx('@3').textContent, '3');
-    assert.equal(idx('@1').hidden, false, 'a numbered pane\'s badge must be visible');
-
+// 4 — THE KEYBOARD SWITCHER. Alt+N opens the Nth visible SIDEBAR row's session (CMX-85
+// — the sidebar is the one numbering); a bare N does not.
+test('Alt+N focuses the pane of the Nth sidebar row; a bare digit is left alone', async () => {
     const flashed = wid => tile(wid).querySelector('.grid-stack-item-content').classList.contains('pane-flash');
+    const third = rowWid(3);
+    const first = rowWid(1);
+    assert.ok(third && first && third !== first, 'the sidebar must draw three distinct rows, or this test is vacuous');
 
     document.dispatchEvent(new window.KeyboardEvent('keydown', { key: '3', code: 'Digit3', altKey: true, bubbles: true }));
     await new Promise(r => setTimeout(r, 120));   // focusPaneByWid defers by 60ms before flashing
-    assert.ok(flashed('@3'), 'Alt+3 must flash the pane the badge labelled 3');
-    assert.ok(!flashed('@1'), 'Alt+3 must not touch an unrelated pane');
+    assert.ok(flashed(third), 'Alt+3 must flash the pane of the 3rd sidebar row');
+    assert.ok(!flashed(first), 'Alt+3 must not touch an unrelated pane');
+    assert.ok(tile(third), 'Alt+N on a pane already on the wall must focus it, never minimize it');
 
     document.dispatchEvent(new window.KeyboardEvent('keydown', { key: '1', code: 'Digit1', bubbles: true }));   // no altKey
     await new Promise(r => setTimeout(r, 120));
-    assert.ok(!flashed('@1'), 'a bare digit (no Alt) must be ignored — it is normal terminal input');
+    assert.ok(!flashed(first), 'a bare digit (no Alt) must be ignored — it is normal terminal input');
 });
 
 // 5 — REAL INPUT ROUTING (CMX-112, corrected by CMX-114). A flashed border is not
@@ -472,7 +481,7 @@ test('Alt+N jumps to the Nth pane by its badge number; a bare digit is left alon
 // another focused pane — `ifr.focus()` is required, not skipped once term.focus()
 // succeeds (the old cmx-112 fallback-only behaviour this replaces).
 test('Alt+N focuses BOTH the pane\'s own iframe element and its xterm terminal', async () => {
-    const wid = '@2';
+    const wid = rowWid(2);
     const ifr = tile(wid).querySelector('iframe.term-frame');
     assert.ok(ifr, 'the pane must have a real ttyd iframe, or this test is vacuous');
 
@@ -509,7 +518,44 @@ test('Alt+N still switches panes once focus has moved into a pane\'s own iframe 
     from.contentDocument.dispatchEvent(new window.KeyboardEvent('keydown', { key: '2', code: 'Digit2', altKey: true, bubbles: true }));
     await new Promise(r => setTimeout(r, 120));
 
-    assert.ok(flashed('@2'), 'Alt+2 fired inside the focused pane\'s own iframe must still switch panes');
+    assert.ok(flashed(rowWid(2)), 'Alt+2 fired inside the focused pane\'s own iframe must still switch panes');
+});
+
+// 6a — HOLDING ALT INSIDE A FOCUSED PANE SHOWS THE SIDEBAR NUMBERS (CMX-85). With a pane
+// focused, Alt's keydown/keyup land in that pane's own document — the parent never
+// hears them — so the iframe wiring must carry the hold and the release too.
+test('holding Alt inside a pane\'s own document shows the sidebar numbers; releasing it there hides them', () => {
+    const ifr = tile('@2').querySelector('iframe.term-frame');
+    ifr.dispatchEvent(new window.Event('load'));
+    const nums = () => document.querySelectorAll('#sidebar-agents .ar-altnum').length;
+    assert.equal(nums(), 0);
+    ifr.contentDocument.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Alt', code: 'AltLeft', altKey: true, bubbles: true }));
+    assert.equal(nums(), AGENTS.length, 'Alt held inside a pane must number the sidebar rows');
+    ifr.contentDocument.dispatchEvent(new window.KeyboardEvent('keyup', { key: 'Alt', code: 'AltLeft', bubbles: true }));
+    assert.equal(nums(), 0, 'Alt released inside a pane must hide the sidebar numbers');
+});
+
+// 6a′ — ALT+N WORKS IN EVERY MODE, NOT ONLY THE WALL (CMX-85). From the single-terminal
+// view, Alt+N must bring the wall back and focus that row's pane there — it OPENS the
+// row's session, the same as from the wall.
+test('Alt+N from the single-terminal view switches to the wall and focuses that row\'s pane', async () => {
+    const flashed = wid => tile(wid) && tile(wid).querySelector('.grid-stack-item-content').classList.contains('pane-flash');
+    try {
+        window.chela.setTermMode('single');
+        await new Promise(r => setTimeout(r, 120));   // let the in-flight renderTerminals settle
+        assert.equal(document.getElementById('term-stage').className, 'term-single',
+            'fixture: setTermMode("single") must actually leave the wall, or this test is vacuous');
+        assert.equal(terminals.isWallVisible(), false);
+
+        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: '2', code: 'Digit2', altKey: true, bubbles: true }));
+        await new Promise(r => setTimeout(r, 240));   // wall re-render + focusPaneByWid's 60ms defer
+
+        assert.equal(terminals.isWallVisible(), true, 'Alt+N from the single view must bring the wall back');
+        assert.ok(flashed(rowWid(2)), 'Alt+2 from the single view must focus the 2nd sidebar row\'s pane on the wall');
+    } finally {
+        window.chela.setTermMode('wall');
+        await new Promise(r => setTimeout(r, 120));
+    }
 });
 
 // 6b — macOS: OPTION IS A DEAD-KEY/COMPOSE MODIFIER (CMX-149). Option+1 reports
@@ -524,7 +570,7 @@ test('Alt+N still switches panes when e.key is a macOS-composed character, keyed
     document.dispatchEvent(new window.KeyboardEvent('keydown', { key: '¡', code: 'Digit1', altKey: true, bubbles: true }));
     await new Promise(r => setTimeout(r, 120));
 
-    assert.ok(flashed('@1'), 'Option+1 on macOS (e.key="¡", e.code="Digit1") must still flash pane 1');
+    assert.ok(flashed(rowWid(1)), 'Option+1 on macOS (e.key="¡", e.code="Digit1") must still flash the 1st row\'s pane');
 });
 
 // 8 — THE IFRAME LISTENER IS CAPTURE-PHASE AND PREEMPTS XTERM (CMX-114). jsdom has no
@@ -1269,76 +1315,18 @@ test('the wall footer\'s model + cost chips are revealed by a live poll carrying
     assert.equal(costChip.hidden, true, 'a poll with no context data must hide .gs-cost again');
 });
 
-// 15b — THE BOTTOM BAR'S ORDER IS CONSTANT REGARDLESS OF BRANCH PRESENCE (CMX-127,
-// supersedes CMX-124). CMX-119 put № last, after context; a branch-less pane
-// (`.gs-branch` hidden) then let `justify-content: space-between` slide `.gs-ctx` left
-// to fill the gap, so the context numbers landed in a different x-position than on a
-// branched pane. CMX-124 fixed the order to № → branch → context; CMX-127 (Liav changed
-// his mind: № reads better far-right) supersedes that with branch → context → №, branch
-// and context LEFT-grouped in normal flow and № pinned to the far-right edge via its own
-// `margin-left: auto` instead of relying on space-between at all. These are static
-// source-structure facts jsdom can prove; the actual rendered x-positions stay a manual
-// live-verify (see the honest-scoping disclaimer above test 11c).
-test('the bottom bar renders branch -> context -> №, in that DOM order — CMX-127', () => {
-    const ctxBar = tile('@1').querySelector('.term-ctx-bar');
-    const kinds = Array.from(ctxBar.children)
-        .map(el => ['gs-idx', 'gs-branch', 'gs-ctx', 'term-ctx-fill'].find(c => el.classList.contains(c)))
-        .filter(Boolean);
-    assert.deepEqual(kinds, ['gs-branch', 'gs-ctx', 'gs-idx', 'term-ctx-fill'],
-        'the bar\'s children must be branch, context, № , then the absolutely-positioned fill strip, in ' +
-        'that order — any other order breaks the CONSTANT branch -> context -> № layout');
-});
-
-test('.gs-idx is pinned to the far right via its own margin-left: auto', () => {
-    assert.match(CSS, /\.gs-idx\s*\{[^}]*margin-left:\s*auto/s,
-        '.gs-idx must declare margin-left: auto — this is what pins № to the bar\'s far-right edge ' +
-        'independent of whatever else in the bar is present or hidden; without it a branch-less pane lets ' +
-        '№ drift left');
-});
-
-// CMX-129 — № CHIP MUST SHARE THE BAR'S CENTERING, NOT OPT OUT OF IT. CMX-128 gave
-// `.gs-idx` its own `align-self: flex-end` + `margin-bottom: 8px` to balance its bottom
-// inset against its 8px right inset — but that pinned only the chip's OWN bottom edge,
-// independent of where the branch/context text's vertical center actually sits, so №
-// ended up riding ~4px above the text. The fix removes the per-element override so the
-// chip falls back to the bar's shared `align-items: center` (the exact same centering the
-// text uses — CENTER = correctness here, not a magic value), and grows
-// `--term-ctx-bar-h` so that shared centering ALSO reproduces the balanced 8px top/bottom
-// gap the corner needs. Both facts are asserted together: opting back into centering
-// alone doesn't prove the geometry lands on 8px, and the height alone doesn't prove the
-// chip isn't still pinned to the bottom by some other means.
-test('.gs-idx shares the bar\'s centering with the text and lands on a balanced 8px gap — CMX-129', () => {
-    const idxRule = CSS.match(/\.gs-idx\s*\{[^}]*\}/s);
-    assert.ok(idxRule, '.gs-idx rule must exist');
-    assert.doesNotMatch(idxRule[0], /align-self/,
-        '.gs-idx must NOT declare its own align-self — it must fall back to the bar\'s shared ' +
-        '`align-items: center`, or it decouples from the branch/context text\'s vertical center line');
-    assert.doesNotMatch(idxRule[0], /margin-bottom/,
-        '.gs-idx must NOT declare its own margin-bottom — a per-element bottom inset is exactly the ' +
-        'CMX-128 mechanism that let № drift off the text\'s center line');
-
-    const barRule = CSS.match(/\.term-ctx-bar\s*\{[^}]*\}/s);
-    assert.ok(barRule, '.term-ctx-bar rule must exist');
-    assert.match(barRule[0], /align-items:\s*center/,
-        '.term-ctx-bar must keep align-items: center — this is the ONE centering both the text and ' +
-        '№ now share, which is what keeps them on the same line');
-
-    const heightMatch = CSS.match(/\.gs-idx\s*\{[^}]*\bheight:\s*([0-9.]+)px/s);
-    assert.ok(heightMatch, '.gs-idx must declare an explicit height');
-    const chipHeight = parseFloat(heightMatch[1]);
-
-    const varMatch = CSS.match(/--term-ctx-bar-h:\s*([0-9.]+)px/);
-    assert.ok(varMatch, '--term-ctx-bar-h must be declared as a px length');
-    const barHeight = parseFloat(varMatch[1]);
-
-    // Centered via align-items: center, the chip's top/bottom gap is each (barHeight -
-    // chipHeight) / 2 — this must equal the bar's 8px horizontal padding for the corner
-    // to read as balanced, exactly the geometry CMX-128 established.
-    const verticalGap = (barHeight - chipHeight) / 2;
-    assert.strictEqual(verticalGap, 8,
-        `centered, № gets a (barHeight - chipHeight) / 2 = ${verticalGap}px top/bottom gap ` +
-        `(barHeight=${barHeight}px, chipHeight=${chipHeight}px) — this must be exactly 8px to match ` +
-        'the bar\'s 8px right padding, or the corner inset reads unbalanced again');
+// 15b — NO PANE CORNER NUMBER (CMX-85). The Alt+N numbering lives on the sidebar rows
+// (tests/sidebar_alt_switch.test.mjs) and nowhere else: one numbering, not two that can
+// drift. A wall tile's bar must carry no № chip, and the CSS no rule for one.
+test('the pane corner number is gone — no .gs-idx on any wall tile, no .gs-idx CSS rule — CMX-85', () => {
+    for (const a of AGENTS) {
+        const t = tile(a.window_id);
+        assert.ok(t && t.querySelector('.term-ctx-bar'), `${a.window_id} must render a bottom bar, or this check is vacuous`);
+        assert.equal(t.querySelector('.gs-idx'), null, `${a.window_id} still renders the pane № chip`);
+        assert.ok(!/(^|\s)\d(\s|$)/.test(t.querySelector('.term-ctx-bar').textContent.trim()),
+            `${a.window_id}'s bottom bar still shows a bare pane number`);
+    }
+    assert.doesNotMatch(CSS, /\.gs-idx\s*\{/, 'style.css still styles a pane № chip');
 });
 
 test('.gs-branch never grows past its own content — no flex-grow, no flex: 1', () => {
