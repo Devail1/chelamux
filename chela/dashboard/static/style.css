@@ -272,20 +272,41 @@ body {
 
 /* Focus ring (CMX-377: "a thin inset ring in --accent — no glow, no thick
    border"): the pane whose embedded terminal currently holds browser focus
-   gets a single thin INSET box-shadow ring, nothing else — the border itself
-   stays --border and the tile's own box size never shifts (inset never adds
-   layout width, unlike the old outer glow this replaces). Tracks the same
-   focus tmux forwards to Claude Code via focus-events. .term-focused is
-   toggled from terminals.js (_applyTermFocus). */
+   gets a single thin INSET ring, nothing else — the border itself stays
+   --border and the tile's own box size never shifts. Tracks the same focus
+   tmux forwards to Claude Code via focus-events. .term-focused is toggled
+   from terminals.js (_applyTermFocus).
+   CMX-90: the ring is drawn on a ::before OVERLAY, not on the pane itself. An
+   inset box-shadow on the pane paints BENEATH its children, and the header,
+   iframe and toolbar all have their own backgrounds, so they covered the ring
+   everywhere except the strip the recap line left exposed. The overlay sits
+   above the terminal (z-index over the ctx bar's 5, under the kill-confirm's
+   20) with pointer-events: none so every click still reaches the terminal.
+   ::before, not ::after — the wire-live drop socket already owns ::after on
+   .grid-stack-item-content. Both panes are already positioned (see the
+   `position: relative` rule by .pane-kill-confirm, and gridstack's own
+   `position: absolute` on the item content). 2px so it reads on a phone. */
+/* the pane keeps a transition for the waiting glow it still carries itself */
 .term-pane, .grid-stack-item-content { transition: box-shadow 0.15s ease; }
-.term-pane.term-focused, .grid-stack-item-content.term-focused {
-    box-shadow: inset 0 0 0 1.5px var(--accent);
+.term-pane::before, .grid-stack-item-content::before {
+    content: ''; position: absolute; inset: 0; z-index: 6;
+    border-radius: inherit; pointer-events: none;
+    box-shadow: inset 0 0 0 0 transparent;
+    transition: box-shadow 0.15s ease;
+}
+.term-pane.term-focused::before, .grid-stack-item-content.term-focused::before {
+    box-shadow: inset 0 0 0 2px var(--accent);
 }
 /* Waiting on user input: yellow ring on the live pane (after .term-focused so it
-   wins when a waiting pane is also focused — it's the more urgent signal). */
+   wins when a waiting pane is also focused — it's the more urgent signal). The
+   outer glow stays on the pane (outside its box, so nothing covers it); the
+   inset part rides the same overlay as the focus ring. */
 .term-pane.term-waiting, .grid-stack-item-content.term-waiting {
     border-color: var(--yellow);
     box-shadow: 0 0 0 1px var(--yellow), 0 0 10px -2px var(--yellow);
+}
+.term-pane.term-waiting::before, .grid-stack-item-content.term-waiting::before {
+    box-shadow: inset 0 0 0 2px var(--yellow);
 }
 
 /* Wall mode: draggable / resizable Gridstack tiles */
@@ -535,6 +556,12 @@ body {
    measures #term-stage's top live, so the Wall still fills to the bottom. */
 .term-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
 #term-new-shell { margin-left: auto; }
+/* CMX-89: a phone has no row controls (the "+" FAB starts sessions) and
+   renderTerminals() hides this button there — but only once the module graph
+   has loaded, so without this rule it painted first and then vanished. */
+@media (max-width: 768px) {
+    #term-new-shell { display: none; }
+}
 @media (min-width: 769px) {
     .term-toolbar {
         align-items: flex-end;
