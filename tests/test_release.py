@@ -1267,3 +1267,271 @@ def test_the_release_approval_page_escapes_each_agent_supplied_field(world, fiel
     assert "<script>alert(1)" not in text and 'action="//evil"' not in text
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
     assert text.count("<form") == 1                    # only the page's own approve form
+
+
+# --- round 6: normalization / derivation survivors ----------------------------------------
+# Each test below was written against a value/logic mutation that left the suite green and
+# was run RED against it (see the commit message). The shape: the old tests fed only the
+# already-clean input, so a cleaning step could be deleted unseen.
+
+def _hook_rejecting(world, ref_pattern: str) -> None:
+    hook = world.origin / "hooks" / "pre-receive"
+    hook.write_text(f"#!/bin/sh\nwhile read o n r; do case \"$r\" in {ref_pattern}) exit 1;; "
+                    "esac; done\nexit 0\n")
+    hook.chmod(0o755)
+
+
+def test_a_multi_line_theme_is_collapsed_to_one_line_everywhere(world):
+    """🔴 GUARD: the theme is ONE line — newlines, tabs and runs of spaces collapse to single
+    spaces in the commit subject, the tag message, the stored record and the card."""
+    out = release.prepare("0.2.0", "  a\n calmer \t\n\n release  ", repo=world.work)
+    assert out["ok"] is True, out
+    sha = out["release_sha"]
+    assert _g(world.work, "log", "-1", "--format=%s", sha) == "Release 0.2.0 — a calmer release"
+    assert _g(world.work, "cat-file", "-p", "v0.2.0").splitlines()[-1] == \
+        "0.2.0 — a calmer release"
+    rec = overrides.load(out["request_id"])
+    assert rec["theme"] == rec["title"] == out["theme"] == "a calmer release"
+    assert out["question"].startswith("Release v0.2.0 — a calmer release? Cut from dev ")
+    from chela.telegram.overridewatch import format_release_message
+    assert "a calmer release" in format_release_message(rec)
+
+
+def test_a_none_theme_or_version_refuses_instead_of_crashing(world):
+    assert "--theme" in release.prepare("0.2.0", None, repo=world.work)["error"]
+    assert "not a release version" in release.prepare(None, "t", repo=world.work)["error"]
+
+
+@pytest.mark.parametrize("given", ["v0.2.0", " 0.2.0 ", " v0.2.0\n", "0.2.0"])
+def test_a_version_is_cleaned_to_the_same_release(world, given):
+    """🔴 GUARD: `v0.2.0`, ` 0.2.0 ` and `0.2.0` are ONE release: version `0.2.0`, tag
+    `v0.2.0` — never `vv0.2.0`, never refused as not-a-version."""
+    out = release.prepare(given, "t", repo=world.work)
+    assert out["ok"] is True, out
+    assert out["version"] == "0.2.0" and out["tag"] == "v0.2.0"
+    assert _local(world, "refs/tags/v0.2.0") and _local(world, "refs/tags/vv0.2.0") is None
+    assert _g(world.work, "log", "-1", "--format=%s", out["release_sha"]) == "Release 0.2.0 — t"
+    assert 'version = "0.2.0"' in _g(world.work, "show", f"{out['release_sha']}:pyproject.toml")
+
+
+@pytest.mark.parametrize("given", ["vv0.2.0", "V0.2.0", "0.2", "0.2.0.1", "0.2.0-rc1",
+                                   "0.2.x", "v", ""])
+def test_only_one_leading_lowercase_v_is_stripped(world, given):
+    out = release.prepare(given, "t", repo=world.work)
+    assert out["ok"] is False and "not a release version" in out["error"]
+    assert overrides.all_requests() == [] and _release_worktrees() == []
+
+
+def test_versions_compare_numerically_not_as_text():
+    assert release._version_tuple("0.10.0") > release._version_tuple("0.9.0")
+    assert release._version_tuple("1.0.0") > release._version_tuple("0.99.99")
+    assert release._version_tuple("0.2.0") == (0, 2, 0)
+    assert release._version_tuple("0.2") is None and release._version_tuple(None) is None
+
+
+def test_task_ids_are_unique_in_first_appearance_order():
+    """🔴 GUARD: an id mentioned twice appears once, at its FIRST position."""
+    section = "- (CMX-7)\n- (CMX-5, CMX-7)\n- again CMX-5 and CMX-12, CMX-7\n"
+    assert release.task_ids(section) == ["CMX-7", "CMX-5", "CMX-12"]
+
+
+def test_task_ids_match_whole_ids_case_insensitively_and_normalise_the_case():
+    assert release.task_ids("see cmx-9, Cmx-9 and (CMX-10)") == ["CMX-9", "CMX-10"]
+    assert release.task_ids("XCMX-4 CMX-4a CMX-") == []
+    assert release.task_ids("") == [] and release.task_ids(None) == []
+
+
+def test_the_cards_task_count_and_list_do_not_repeat_an_id_mentioned_twice(world):
+    """🔴 GUARD: end to end — fragments mentioning CMX-5 three times give ONE id, the count
+    in the question says 2, and the stored record lists each once."""
+    (world.work / "changelog.d" / "CMX-5.md").write_text(
+        "### Added\n\n- **Five.** (CMX-5, #10)\n- **Five again.** (CMX-5)\n"
+        "- **Both.** (CMX-7, CMX-5)\n")
+    _g(world.work, "add", "-A")
+    _g(world.work, "commit", "-q", "-m", "more")
+    _g(world.work, "push", "-q", "origin", "dev")
+    out = _prepare(world)
+    assert out["ok"], out
+    assert out["task_ids"] == ["CMX-5", "CMX-7"]
+    assert out["question"].endswith("2 task(s): CMX-5, CMX-7")
+    assert overrides.load(out["request_id"])["task_ids"] == ["CMX-5", "CMX-7"]
+
+
+def test_a_release_with_no_task_ids_says_none(world):
+    (world.work / "changelog.d" / "CMX-5.md").write_text("### Added\n\n- **Five.**\n")
+    (world.work / "changelog.d" / "CMX-7.md").write_text("### Fixed\n\n- **Seven.**\n")
+    _g(world.work, "add", "-A")
+    _g(world.work, "commit", "-q", "-m", "anon")
+    _g(world.work, "push", "-q", "origin", "dev")
+    out = _prepare(world)
+    assert out["ok"] and out["task_ids"] == []
+    assert out["question"].endswith("0 task(s): none")
+
+
+def test_the_question_and_the_hint_are_exactly_worded(world):
+    out = _prepare(world)
+    assert out["question"] == (f"Release v0.2.0 — a calmer release? Cut from dev "
+                               f"{out['dev_sha'][:12]}; 2 task(s): CMX-5, CMX-7")
+    rid = out["request_id"]
+    assert out["hint"] == release.approve_hint(rid) == (
+        f"Approve with the Telegram button, on the dashboard (/override/{rid}), "
+        f"or in a plain terminal: chela merge-approve {rid}  (deny: add --deny)")
+
+
+def test_the_release_tests_command_leaves_no_pytest_cache(monkeypatch, tmp_path):
+    """🔴 GUARD: the REAL release-tests command, run for real (minus the `uv` wrapper), must
+    not create `.pytest_cache` in its cwd — that would dirty the release worktree and refuse
+    every real release. Its uv wrapper flags are pinned too."""
+    seen = {}
+    real_run = subprocess.run                    # `release.subprocess` IS this module
+
+    def spy(cmd, **kw):
+        seen["cmd"], seen["kw"] = cmd, kw
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(release.subprocess, "run", spy)
+    monkeypatch.setenv("VIRTUAL_ENV", "/some/other/.venv")
+    _REAL_RELEASE_TESTS(tmp_path)
+    cmd = seen["cmd"]
+    assert cmd[:7] == ["uv", "run", "--frozen", "--extra", "dev", "python", "-m"]
+    assert seen["kw"]["cwd"] == tmp_path and seen["kw"]["timeout"] == 900
+    assert "VIRTUAL_ENV" not in seen["kw"]["env"]
+    assert cmd[-len(release.RELEASE_TESTS):] == list(release.RELEASE_TESTS)
+
+    import os
+    import sys
+    clean = {"PATH": os.environ["PATH"], "HOME": str(tmp_path)}      # no ambient pytest/venv
+    for rel in release.RELEASE_TESTS:
+        f = tmp_path / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("def test_ok():\n    pass\n")
+    real = real_run([sys.executable, *cmd[cmd.index("python") + 1:]], cwd=tmp_path,
+                          capture_output=True, text=True, env=clean)
+    assert real.returncode == 0, real.stdout + real.stderr
+    assert not (tmp_path / ".pytest_cache").exists()
+    assert real_run([sys.executable, "-m", "pytest", "-q", *release.RELEASE_TESTS],
+                    cwd=tmp_path, capture_output=True, env=clean).returncode == 0
+    assert (tmp_path / ".pytest_cache").exists(), "control: without the flag a cache IS made"
+
+
+def test_the_commit_body_is_the_stripped_body_and_an_empty_body_adds_none(world):
+    out = release.prepare("0.2.0", "t", body="\n\n  Longer notes.\nSecond.\n\n", repo=world.work)
+    assert _g(world.work, "log", "-1", "--format=%B", out["release_sha"]) == \
+        "Release 0.2.0 — t\n\nLonger notes.\nSecond."
+
+
+@pytest.mark.parametrize("body", ["", "   \n ", None])
+def test_a_blank_body_leaves_a_subject_only_commit(world, body):
+    out = release.prepare("0.2.0", "t", body=body, repo=world.work)
+    assert out["ok"], out
+    assert _g(world.work, "log", "-1", "--format=%B", out["release_sha"]) == "Release 0.2.0 — t"
+
+
+def test_the_release_files_are_rewritten_exactly(world):
+    """The pyproject changes ONLY its version line; the CHANGELOG section is dated today;
+    the worktree sits under CHELA_DIR/releases as `<tag>-<6 hex>` on `chela-release/<tag>`."""
+    before = __import__("datetime").date.today().isoformat()
+    out = _prepare(world)
+    sha = out["release_sha"]
+    after = __import__("datetime").date.today().isoformat()
+    assert _g(world.work, "show", f"{sha}:pyproject.toml") + "\n" == \
+        PYPROJECT.replace('version = "0.1.0"', 'version = "0.2.0"')
+    m = re.search(r"(?m)^## \[0\.2\.0\] — (\S+)$", _g(world.work, "show", f"{sha}:CHANGELOG.md"))
+    assert m and m.group(1) in {before, after}
+    rec = overrides.load(out["request_id"])
+    wt = Path(rec["worktree"])
+    assert wt.parent == config.CHELA_DIR / "releases"
+    assert re.fullmatch(r"v0\.2\.0-[0-9a-f]{6}", wt.name)
+    assert rec["branch"] == "chela-release/v0.2.0"
+    assert _g(wt, "rev-parse", "--abbrev-ref", "HEAD") == "chela-release/v0.2.0"
+
+
+def test_a_refused_tag_push_keeps_the_local_tag_so_the_operator_can_push_it(world, pushes,
+                                                                            told):
+    """🔴 GUARD (pins the CURRENT rule): `main` landed (pushed == ['main']) but the TAG push
+    was refused ⇒ the request FAILS, the local tag is KEPT, the worktree and branch go."""
+    out = _prepare(world)
+    _hook_rejecting(world, "refs/tags/*")
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["ok"] is False and res["state"] == overrides.FAILED, res
+    assert "pushing v0.2.0 failed" in res["detail"] and "pushed so far: main" in res["detail"]
+    assert overrides.load(out["request_id"])["pushed"] == ["main"]
+    assert _remote(world, "refs/tags/v0.2.0") is None
+    assert _local(world, "refs/tags/v0.2.0^{commit}") == out["release_sha"]
+    assert _local(world, "refs/heads/chela-release/v0.2.0") is None
+    assert _release_worktrees() == []
+
+
+def test_a_refused_main_push_removes_the_unpushed_local_tag(world, pushes, told):
+    out = _prepare(world)
+    _hook_rejecting(world, "refs/heads/main")
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["state"] == overrides.FAILED
+    assert overrides.load(out["request_id"])["pushed"] == []
+    assert _local(world, "refs/tags/v0.2.0") is None
+    assert _local(world, "refs/heads/chela-release/v0.2.0") is None
+
+
+def test_cleanup_keeps_a_tag_that_is_not_ours_or_when_told_to(world):
+    out = _prepare(world)
+    rec = dict(overrides.load(out["request_id"]))
+    release.cleanup({**rec, "release_sha": world.work and _remote(world, "dev")})
+    assert _local(world, "refs/tags/v0.2.0") is not None, "a same-named tag elsewhere stays"
+    assert _local(world, "refs/heads/chela-release/v0.2.0") is None
+    # now ours, but keep_tag=True
+    release.cleanup(rec, keep_tag=True)
+    assert _local(world, "refs/tags/v0.2.0") is not None
+    release.cleanup(rec)                                         # default: not kept
+    assert _local(world, "refs/tags/v0.2.0") is None
+
+
+def test_the_request_event_names_the_tag_and_theme(world, monkeypatch):
+    seen = []
+    monkeypatch.setattr(release.event_log, "append",
+                        lambda kind, msg, payload=None: seen.append((kind, msg, payload)))
+    out = _prepare(world)
+    (kind, msg, payload), = seen
+    assert kind == "orchestrator.release_requested"
+    assert msg == "release v0.2.0 requested: a calmer release"
+    assert payload["id"] == out["request_id"] and "telegram" not in payload
+
+
+def test_the_notification_carries_the_question_hint_and_title(world, monkeypatch):
+    sent = []
+    monkeypatch.setattr(release.notify, "enabled", lambda: True)
+    monkeypatch.setattr(release.notify, "send", lambda text, title=None: sent.append((text, title)))
+    out = _prepare(world)
+    assert sent == [(f"{out['question']}\n\n{out['hint']}", "chela: approve release v0.2.0?")]
+
+
+def test_remote_dev_head_cache_is_fresh_strictly_inside_max_age(world, monkeypatch):
+    calls = []
+    real = release._git
+
+    def spy(cwd, *args, **kw):
+        calls.append(args[:1])
+        return real(cwd, *args, **kw)
+    monkeypatch.setattr(release, "_git", spy)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(release.time, "monotonic", lambda: clock["t"])
+    rec = {"git_dir": str(world.work)}
+    release.remote_dev_head(rec, max_age=60)
+    clock["t"] += 59.9
+    release.remote_dev_head(rec, max_age=60)
+    assert calls == [("ls-remote",)]
+    clock["t"] += 0.1                                            # exactly max_age: stale
+    release.remote_dev_head(rec, max_age=60)
+    assert calls == [("ls-remote",)] * 2
+
+
+def test_poll_release_urls_window_and_throttle_boundaries(world, monkeypatch):
+    rid = _released(world)
+    seen = []
+    monkeypatch.setattr(release, "_gh_release_url", lambda rec: seen.append(1) or None)
+    overrides.set_fields(rid, finished_at=1000.0, release_url_checked=0)
+    release.poll_release_urls(now=1000.0 + release.RELEASE_URL_POLL_S)      # edge: still in
+    assert len(seen) == 1
+    overrides.set_fields(rid, release_url_checked=5000.0)
+    release.poll_release_urls(now=5000.0 + release.RELEASE_URL_EVERY_S - 0.1)
+    assert len(seen) == 1
+    release.poll_release_urls(now=5000.0 + release.RELEASE_URL_EVERY_S)     # edge: due
+    assert len(seen) == 2

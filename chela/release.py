@@ -25,7 +25,9 @@ are split the same way an override is (:mod:`chela.overrides`, CMX-79):
 ``dev`` moving after the request expires it (:func:`chela.overrides.sweep` →
 :func:`remote_dev_head`), exactly as a new push expires an override. Whatever the outcome,
 the release's worktree and local branch are removed (:func:`cleanup`); the local tag is
-kept only once it was pushed.
+removed too UNLESS the release landed or at least ``main`` was pushed (so a refused TAG or
+``dev`` push leaves the tag for the operator to push by hand), and never a same-named tag
+that points somewhere else.
 
 ⛔ Approval stays human-only — the same guards as an override: :func:`chela.overrides.decide`
 refuses an agent's process, and the merge-gate hook denies a session's ``merge-approve``,
