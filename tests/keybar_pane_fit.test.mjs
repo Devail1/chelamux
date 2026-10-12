@@ -13,7 +13,12 @@
 //     return null (nothing overridden);
 //   - `_kbPin` publishes it: html.kb-fit + --kb-pane-fit-h on a phone with the keyboard
 //     up, and clears both when the keyboard closes / on desktop;
-//   - a keybar HEIGHT change alone (ResizeObserver — rotation, font size) re-fits;
+//   - ⭐ EVERY re-fit trigger is driven through its real event, with the state moved
+//     BEFORE the event and `_kbPin` never called by hand: visualViewport resize AND
+//     scroll, window resize (rotation), a scroll of the phone scroller (.canvas — moves
+//     the pane's top), a keybar HEIGHT change alone (ResizeObserver), and a freshly
+//     rebuilt pane (renderTerminals). Unwiring any one of them leaves the stale fit
+//     in place → RED (DEFEAT_SHAPES #102);
 //   - style.css consumes it: `html.kb-fit .term-single .term-pane { height: var(--kb-pane-fit-h) }`
 //     inside the phone media block, after the fullscreen rule it must win against.
 // The real-layout half (last terminal row's bottom ≤ keybar top at 390px) lives in
@@ -47,16 +52,19 @@ const AGENTS = [{ name: 'shell', window_id: '@1', online: true }];
 const SCREEN_H = 844;
 const KB_H = 336;
 const PANE_TOP = 98;
+let paneTop = PANE_TOP;
 let mobile = true;
 let barH = 47;
 let vv;            // the fake VisualViewport
 let roCallbacks = [];
 let terminals;
+let util;
 
 function fakeFetch(url) {
     const path = String(url);
     let body = {};
     if (path.endsWith('/api/agents')) body = AGENTS;
+    else if (path.endsWith('/api/agents/context')) body = [];
     else if (path.endsWith('/api/rooms')) body = { rooms: {}, pending: [] };
     else if (path.startsWith('/api/term/ready')) body = { ready: true };
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
@@ -99,10 +107,17 @@ before(async () => {
         observe(el) { roCallbacks.push({ el, cb: this.cb }); }
         disconnect() {}
     };
+    // jsdom has no layout. Patched on the PROTOTYPE, not one element: renderTerminals
+    // rebuilds the pane, and the rebuilt one must report the same geometry.
+    const realRect = dom.window.HTMLElement.prototype.getBoundingClientRect;
+    dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
+        if (!this.classList.contains('term-pane')) return realRect.call(this);
+        return { top: paneTop, bottom: paneTop + 600, left: 0, right: 390, width: 390, height: 600, x: 0, y: paneTop };
+    };
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
     await import('../chela/dashboard/static/js/main.js');
-    const util = await import('../chela/dashboard/static/js/util.js');
+    util = await import('../chela/dashboard/static/js/util.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
@@ -115,14 +130,13 @@ function stubGeometry() {
     Object.defineProperty(bar, 'offsetHeight', { configurable: true, get: () => barH });
     const pane = document.querySelector('#term-stage .term-pane');
     assert.ok(pane, 'single mode must have rendered a .term-pane');
-    pane.getBoundingClientRect = () => ({ top: PANE_TOP, bottom: PANE_TOP + 600, left: 0, right: 390, width: 390, height: 600 });
 }
 const keyboard = open => { vv.offsetTop = 0; vv.height = open ? SCREEN_H - KB_H : SCREEN_H; };
 const root = () => document.documentElement;
 const fitVar = () => root().style.getPropertyValue('--kb-pane-fit-h');
 
 beforeEach(() => {
-    mobile = true; barH = 47;
+    mobile = true; barH = 47; paneTop = PANE_TOP;
     keyboard(false);
     const sel = document.getElementById('term-agent');
     if (![...sel.options].some(o => o.value === '@1')) sel.add(new window.Option('shell', '@1'));
@@ -176,17 +190,6 @@ test('desktop: even with the visual viewport shrunk (browser zoom), no override'
     assert.equal(fitVar(), '');
 });
 
-test('a keybar HEIGHT change alone re-fits (ResizeObserver on the bar)', () => {
-    keyboard(true);
-    terminals._kbPin();
-    assert.equal(fitVar(), `${SCREEN_H - KB_H - 47 - PANE_TOP}px`);
-    const obs = roCallbacks.find(o => o.el === document.getElementById('term-keybar'));
-    assert.ok(obs, 'terminals.js must observe #term-keybar with a ResizeObserver');
-    barH = 60;   // e.g. a larger font size / rotation grew the bar; no viewport event fires
-    obs.cb([]);
-    assert.equal(fitVar(), `${SCREEN_H - KB_H - 60 - PANE_TOP}px`);
-});
-
 test('style.css applies the fit to the phone pane, after the fullscreen rule', () => {
     const css = readFileSync(new URL('../chela/dashboard/static/style.css', import.meta.url), 'utf8')
         .replace(/\/\*[\s\S]*?\*\//g, '');
@@ -199,3 +202,82 @@ test('style.css applies the fit to the phone pane, after the fullscreen rule', (
     const mq = css.lastIndexOf('@media', m.index);
     assert.match(css.slice(mq, m.index), /^@media\s*\(max-width:\s*768px\)/, 'the kb-fit rule must be phone-only');
 });
+
+test('the fit floors a fractional box (never 1px into the keybar) and never goes negative', () => {
+    // 844 − 336 − 47.4 − 98 = 362.6 → 362: rounding (to 363) would push the last row under the bar.
+    assert.equal(terminals._paneFitHeight({
+        mobile: true, occluded: KB_H, vvTop: 0, vvHeight: SCREEN_H - KB_H, barHeight: 47.4, paneTop: 98,
+    }), 362);
+    assert.equal(terminals._paneFitHeight({
+        mobile: true, occluded: KB_H, vvTop: 0, vvHeight: 100, barHeight: 47, paneTop: PANE_TOP,
+    }), 0, 'a pane whose top is already below the keybar gets 0, not a negative height');
+});
+
+// ── Every re-fit trigger, driven by its REAL event. Each test moves the state first,
+// never calls _kbPin itself, and asserts the fit the NEW state implies — so a trigger
+// that is unwired leaves the old fit (or none) in place and goes RED. ──
+
+const openFit = (bar = 47, top = PANE_TOP) => `${SCREEN_H - KB_H - bar - top}px`;
+
+test('⭐ visualViewport `resize` (the keyboard opening) re-fits', () => {
+    assert.ok(!root().classList.contains('kb-fit'));
+    keyboard(true);
+    vv.dispatchEvent(new window.Event('resize'));
+    assert.ok(root().classList.contains('kb-fit'));
+    assert.equal(fitVar(), openFit());
+});
+
+test('⭐ visualViewport `scroll` (iOS panning the visual viewport) re-fits', () => {
+    keyboard(true);
+    vv.dispatchEvent(new window.Event('scroll'));
+    assert.ok(root().classList.contains('kb-fit'), 'a vv scroll must re-run the fit');
+    assert.equal(fitVar(), openFit());
+    vv.offsetTop = 30;                    // iOS pans: the keybar's top moves down 30px
+    vv.dispatchEvent(new window.Event('scroll'));
+    assert.equal(fitVar(), `${30 + SCREEN_H - KB_H - 47 - PANE_TOP}px`);
+});
+
+test('⭐ a window `resize` alone (rotation — no visualViewport event) re-fits', () => {
+    keyboard(true);
+    window.dispatchEvent(new window.Event('resize'));
+    assert.ok(root().classList.contains('kb-fit'), 'window resize must re-run the fit');
+    assert.equal(fitVar(), openFit());
+    keyboard(false);
+    window.dispatchEvent(new window.Event('resize'));
+    assert.ok(!root().classList.contains('kb-fit'), 'and clear it once the keyboard is gone');
+});
+
+test('⭐ a scroll of the phone scroller (.canvas) re-fits from the pane\'s NEW top', () => {
+    keyboard(true);
+    vv.dispatchEvent(new window.Event('resize'));
+    assert.equal(fitVar(), openFit());
+    paneTop = 40;                         // the canvas scrolled: the pane moved up 58px
+    document.querySelector('.canvas').dispatchEvent(new window.Event('scroll'));
+    assert.equal(fitVar(), openFit(47, 40), 'the pane\'s bottom must stay on the keybar after a .canvas scroll');
+});
+
+test('⭐ a keybar HEIGHT change alone re-fits (ResizeObserver on the bar)', () => {
+    keyboard(true);
+    vv.dispatchEvent(new window.Event('resize'));
+    assert.equal(fitVar(), openFit());
+    const obs = roCallbacks.find(o => o.el === document.getElementById('term-keybar'));
+    assert.ok(obs, 'terminals.js must observe #term-keybar with a ResizeObserver');
+    barH = 60;
+    obs.cb([]);
+    assert.equal(fitVar(), openFit(60));
+});
+
+test('⭐ a freshly rebuilt pane re-fits if the keyboard is already up (renderTerminals)', async () => {
+    keyboard(true);                       // keyboard up, but NO event: only the render may notice
+    const before = document.querySelector('#term-stage .term-pane');
+    // A second agent appears → the stage signature changes → the single pane is rebuilt.
+    util.setAgentsCache([...AGENTS, { name: 'two', window_id: '@2', online: true }]);
+    await terminals.renderTerminals();
+    const after = document.querySelector('#term-stage.term-single .term-pane');
+    assert.ok(after && after !== before, 'the single pane must have been rebuilt');
+    assert.ok(root().classList.contains('kb-fit'), 'the rebuilt pane must be fitted by renderTerminals itself');
+    assert.equal(fitVar(), openFit());
+    util.setAgentsCache(AGENTS);
+    await terminals.renderTerminals();
+});
+
