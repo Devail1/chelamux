@@ -26,6 +26,7 @@ CHANGELOG = ("# Changelog\n\n## [Unreleased]\n\n## [0.1.0] — 2026-01-01\n\n###
 
 _REAL_RELEASE_TESTS = release._release_tests
 _REAL_UV_LOCK = release._uv_lock
+_REAL_GH_RELEASE_URL = release._gh_release_url
 
 
 def _g(cwd, *args: str) -> str:
@@ -656,3 +657,210 @@ def test_a_uv_lock_that_cannot_run_counts_as_failed(monkeypatch, tmp_path, exc):
         raise exc
     monkeypatch.setattr(release.subprocess, "run", boom)
     assert _REAL_UV_LOCK(tmp_path).returncode != 0
+
+
+# --- orchestrator-added guards (judge round 3 survivors) ----------------------------------
+
+def test_complete_acts_only_on_the_stored_state_never_the_callers_record(world, pushes):
+    """🔴 GUARD: `complete()` re-reads the request from disk. An in-memory record that
+    CLAIMS 'merging' while the stored request is still pending must push nothing."""
+    out = _prepare(world)
+    main0, dev0 = _remote(world, "main"), _remote(world, "dev")
+    claimed = {**overrides.load(out["request_id"]), "state": overrides.MERGING}
+    res = release.complete(claimed, "terminal:op")
+    assert res["ok"] is False and res["pushed"] == []
+    assert pushes == []
+    assert _remote(world, "main") == main0 and _remote(world, "dev") == dev0
+    assert overrides.load(out["request_id"])["state"] == overrides.PENDING
+
+
+def test_a_step_that_modifies_a_tracked_file_outside_the_release_paths_refuses(world,
+                                                                             monkeypatch):
+    """🔴 GUARD: anything changed outside the release paths makes the step DIRTY — a
+    modified TRACKED file too, not only an untracked one."""
+    (world.work / "README.md").write_text("hello\n")
+    _g(world.work, "add", "README.md")
+    _g(world.work, "commit", "-q", "-m", "readme")
+    _g(world.work, "push", "-q", "origin", "dev")
+
+    def touch(wt):
+        (wt / "README.md").write_text("changed by a release step\n")
+        return _ok()
+    monkeypatch.setattr(release, "_release_tests", touch)
+    _assert_refused_and_clean(world, _prepare(world), why="dirty")
+
+
+@pytest.mark.parametrize("exc", [FileNotFoundError("git"),
+                                 subprocess.TimeoutExpired(["git"], 120)])
+def test_a_git_command_that_cannot_complete_reads_as_failed(monkeypatch, tmp_path, exc):
+    """🔴 GUARD: `_git` never raises, and a git call that could not complete (missing git,
+    timeout) is a FAILURE — a timed-out push must never be counted as pushed."""
+    def boom(*a, **k):
+        raise exc
+    monkeypatch.setattr(release.subprocess, "run", boom)
+    assert release._git(tmp_path, "push", "origin", "x").returncode != 0
+
+
+@pytest.mark.parametrize("rc,url", [(1, "https://github.com/o/r/releases/tag/v0.2.0"),
+                                    (0, "not a url"), (0, "http://insecure.example/x"),
+                                    (0, "")])
+def test_the_release_url_is_linked_only_on_success_with_an_https_url(monkeypatch, rc, url):
+    """🔴 GUARD: the card links a Release URL only when `gh release view` succeeded AND
+    returned an https URL."""
+    monkeypatch.setattr(release.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, rc, url + "\n", ""))
+    assert _REAL_GH_RELEASE_URL({"repo_slug": "o/r", "tag": "v0.2.0"}) is None
+
+
+def test_the_release_url_is_linked_on_success(monkeypatch):
+    """Control for the test above: success + https ⇒ the URL."""
+    url = "https://github.com/o/r/releases/tag/v0.2.0"
+    monkeypatch.setattr(release.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, url + "\n", ""))
+    assert _REAL_GH_RELEASE_URL({"repo_slug": "o/r", "tag": "v0.2.0"}) == url
+
+
+# --- orchestrator-added: every remaining check in chela/release.py (self-audit) -----------
+
+def test_a_release_with_no_theme_refuses(world):
+    out = release.prepare("0.2.0", "   ", repo=world.work)
+    assert out["ok"] is False and "--theme" in out["error"]
+    assert overrides.all_requests() == []
+
+
+def test_prepare_outside_a_git_repository_refuses(tmp_path):
+    out = release.prepare("0.2.0", "a theme", repo=tmp_path)
+    assert out["ok"] is False and "not inside a git repository" in out["error"]
+
+
+def test_prepare_refuses_when_origin_has_no_dev_branch(world, monkeypatch):
+    # (a real fetch of a missing dev already fails earlier; this pins the next check)
+    monkeypatch.setattr(release, "_fetch", lambda cwd: None)
+    _g(world.work, "update-ref", "-d", "refs/remotes/origin/dev")
+    out = _prepare(world)
+    assert out["ok"] is False and "no `main` and `dev`" in out["error"]
+    assert overrides.all_requests() == []
+
+
+def test_a_pyproject_with_two_version_lines_refuses(world):
+    p = world.work / "pyproject.toml"
+    p.write_text(p.read_text() + '\n[tool.other]\nname = "x"\nversion = "9.9.9"\n')
+    _g(world.work, "commit", "-qam", "second version line")
+    _g(world.work, "push", "-q", "origin", "dev")
+    _assert_refused_and_clean(world, _prepare(world), why="exactly one")
+
+
+def _fail_git(monkeypatch, *match: str):
+    """`_git` fails (rc 1) for a call whose leading args equal ``match``; real otherwise."""
+    real = release._git
+
+    def fake(cwd, *args, **kw):
+        if args[:len(match)] == match:
+            return subprocess.CompletedProcess(["git", *args], 1, "", "boom")
+        return real(cwd, *args, **kw)
+    monkeypatch.setattr(release, "_git", fake)
+
+
+def test_a_failed_worktree_add_refuses(world, monkeypatch):
+    _fail_git(monkeypatch, "worktree", "add")
+    out = _prepare(world)
+    assert out["ok"] is False and "`git worktree add` failed" in out["error"]
+    assert overrides.all_requests() == []
+
+
+@pytest.mark.parametrize("step,why", [(("add", "-A"), "`git add` failed"),
+                                      (("commit",), "`git commit` failed"),
+                                      (("tag", "-a"), "`git tag` failed")])
+def test_a_failed_git_step_refuses_and_leaves_nothing(world, monkeypatch, step, why):
+    _fail_git(monkeypatch, *step)
+    out = _prepare(world)
+    assert out["ok"] is False and why in out["error"], out
+    assert overrides.all_requests() == [] and _release_worktrees() == []
+    assert _local(world, "refs/tags/v0.2.0") is None
+    assert _local(world, "refs/heads/chela-release/v0.2.0") is None
+
+
+def test_an_unrecordable_request_refuses_and_leaves_nothing(world, monkeypatch):
+    monkeypatch.setattr(release.overrides, "create", lambda meta, **k: None)
+    out = _prepare(world)
+    assert out["ok"] is False and "could not be recorded" in out["error"]
+    assert _release_worktrees() == []
+    assert _local(world, "refs/tags/v0.2.0") is None
+    assert _local(world, "refs/heads/chela-release/v0.2.0") is None
+
+
+def test_the_request_notifies_the_operator_when_notify_is_on(world, monkeypatch):
+    sent = []
+    monkeypatch.setattr(release.notify, "enabled", lambda: True)
+    monkeypatch.setattr(release.notify, "send", lambda text, title=None, **k: sent.append(title))
+    assert _prepare(world)["ok"] is True
+    assert sent == ["chela: approve release v0.2.0?"]
+
+
+def test_no_release_url_lookup_without_a_repo_slug(monkeypatch):
+    monkeypatch.setattr(release.subprocess, "run",
+                        lambda *a, **k: pytest.fail("gh must not run without a repo slug"))
+    assert _REAL_GH_RELEASE_URL({"tag": "v0.2.0"}) is None
+
+
+def test_remote_dev_head_is_none_without_a_repository():
+    assert release.remote_dev_head({"git_dir": "/no/such/repo"}) is None
+    assert release.remote_dev_head({}) is None
+
+
+def test_remote_dev_head_is_cached_per_repository(world, monkeypatch):
+    calls = []
+    real = release._git
+
+    def spy(cwd, *args, **kw):
+        if args[:1] == ("ls-remote",):
+            calls.append(args)
+        return real(cwd, *args, **kw)
+    monkeypatch.setattr(release, "_git", spy)
+    rec = {"git_dir": str(world.work)}
+    first = release.remote_dev_head(rec, max_age=3600)
+    assert first == _remote(world, "dev")
+    assert release.remote_dev_head(rec, max_age=3600) == first and len(calls) == 1
+    release.remote_dev_head(rec, max_age=0)
+    assert len(calls) == 2, "an expired cache entry is re-read"
+
+
+def _released(world) -> str:
+    out = _prepare(world)
+    assert overrides.decide(out["request_id"], True, "terminal:op")["state"] == overrides.RELEASED
+    return out["request_id"]
+
+
+def test_poll_release_urls_records_the_url_once_and_throttles(world, monkeypatch):
+    rid = _released(world)
+    seen = []
+    answer = {"url": None}
+    monkeypatch.setattr(release, "_gh_release_url", lambda rec: seen.append(1) or answer["url"])
+    t = overrides.load(rid).get("finished_at") or 1_000_000.0
+    release.poll_release_urls(now=t + 1)
+    assert len(seen) == 1 and "release_url" not in overrides.load(rid)
+    release.poll_release_urls(now=t + 2)                                   # throttled
+    assert len(seen) == 1
+    answer["url"] = "https://github.com/o/r/releases/tag/v0.2.0"
+    release.poll_release_urls(now=t + 2 + release.RELEASE_URL_EVERY_S)
+    assert len(seen) == 2 and overrides.load(rid)["release_url"] == answer["url"]
+    release.poll_release_urls(now=t + 10 + 2 * release.RELEASE_URL_EVERY_S)  # has a URL
+    assert len(seen) == 2
+
+
+def test_poll_release_urls_gives_up_after_the_poll_window(world, monkeypatch):
+    rid = _released(world)
+    seen = []
+    monkeypatch.setattr(release, "_gh_release_url", lambda rec: seen.append(1) or None)
+    t = overrides.load(rid).get("finished_at") or 1_000_000.0
+    release.poll_release_urls(now=t + release.RELEASE_URL_POLL_S + 1)
+    assert seen == []
+
+
+def test_poll_release_urls_skips_a_release_that_is_not_released(world, monkeypatch):
+    out = _prepare(world)                                       # still pending
+    monkeypatch.setattr(release, "_gh_release_url",
+                        lambda rec: pytest.fail("only a RELEASED request is polled"))
+    t = 1_000_000.0
+    overrides.set_fields(out["request_id"], finished_at=t)    # inside the poll window
+    release.poll_release_urls(now=t + 1)
