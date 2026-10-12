@@ -1088,3 +1088,182 @@ def test_the_telegram_card_tells_each_release_outcome():
     assert line({**base, "state": overrides.EXPIRED, "detail": "dev moved"}) == (
         "⌛ Expired — dev moved. Nothing was pushed.")
     assert line({**base, "state": overrides.PENDING}) is None
+
+
+# --- round 6: outcome consumers (dashboard + CLI) and the approval page's escaping ---------
+
+def _reject_dev_pushes(world) -> None:
+    hook = world.origin / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nwhile read o n r; do [ \"$r\" = refs/heads/dev ] && "
+                    "exit 1; done\nexit 0\n")
+    hook.chmod(0o755)
+
+
+def _post(rid: str, decision: str):
+    pytest.importorskip("flask")
+    from chela.dashboard.app import app
+    return app.test_client().post(f"/override/{rid}", data={"decision": decision})
+
+
+def test_the_dashboard_page_for_a_release_that_failed_midway_says_what_reached_origin(
+        world, pushes):
+    """🔴 GUARD: main and the tag are out, dev was rejected — the result page re-reads the
+    STORED request after decide (the request fetched before it has no `pushed`) and says so;
+    it must never claim nothing was pushed."""
+    out = _prepare(world)
+    _reject_dev_pushes(world)
+    page = _post(out["request_id"], "approve")
+    assert page.status_code == 410
+    text = page.get_data(as_text=True)
+    assert "Not released" in text and "pushing dev failed" in text
+    assert "Pushed only: main, v0.2.0" in text
+    assert "Nothing was pushed" not in text and "nothing was pushed" not in text
+    assert "Approved and released" not in text
+    assert _remote(world, "main") == out["release_sha"] and _remote(world, "dev") != out[
+        "release_sha"]
+
+
+def test_the_dashboard_page_for_a_denied_release_says_nothing_was_pushed(world, pushes):
+    out = _prepare(world)
+    page = _post(out["request_id"], "deny")
+    text = page.get_data(as_text=True)
+    assert page.status_code == 200 and "Denied" in text and "Nothing was pushed" in text
+    assert "merged" not in text and "Approved and released" not in text
+    assert overrides.load(out["request_id"])["state"] == overrides.DENIED
+    assert pushes == []
+
+
+def test_the_dashboard_page_for_an_expired_release_says_why_and_that_nothing_was_pushed(
+        world, pushes):
+    out = _prepare(world)
+    _move_dev(world)
+    page = _post(out["request_id"], "approve")
+    text = page.get_data(as_text=True)
+    assert page.status_code == 410 and "Not released" in text and "expired" in text
+    assert "nothing was pushed" in text.lower()
+    assert "Approved and released" not in text
+    assert "dev moved" in overrides.load(out["request_id"])["detail"]
+    assert pushes == []
+
+
+@pytest.mark.parametrize("how, word", [("approve", "released"), ("deny", "denied"),
+                                       ("expire", "expired")])
+def test_the_dashboard_get_for_a_decided_release_offers_no_buttons(world, pushes, how, word):
+    """A release that is already released/denied/expired shows its state and no form."""
+    pytest.importorskip("flask")
+    from chela.dashboard.app import app
+    out = _prepare(world)
+    if how == "expire":
+        _move_dev(world)
+    else:
+        overrides.decide(out["request_id"], how == "approve", "terminal:op")
+    client = app.test_client()
+    page = client.get(f"/override/{out['request_id']}")
+    text = page.get_data(as_text=True)
+    assert page.status_code == 404 and f"It is {word}" in text
+    assert "<form" not in text and "Approve release" not in text
+    assert client.get("/override/nope").status_code == 404
+
+
+def _cli_approve(rid: str, *, deny: bool = False):
+    from chela import main
+    return main.cmd_merge_approve(SimpleNamespace(request=rid, deny=deny))
+
+
+def test_merge_approve_cli_for_a_release_that_failed_midway_exits_1_and_names_the_pushes(
+        world, pushes, capsys):
+    out = _prepare(world)
+    _reject_dev_pushes(world)
+    with pytest.raises(SystemExit) as exc:
+        _cli_approve(out["request_id"])
+    printed = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "pushing dev failed" in printed and "main, v0.2.0" in printed
+    assert "approved and released" not in printed
+
+
+def test_merge_approve_cli_for_an_expired_release_exits_1_and_pushes_nothing(
+        world, pushes, capsys):
+    out = _prepare(world)
+    _move_dev(world)
+    with pytest.raises(SystemExit) as exc:
+        _cli_approve(out["request_id"])
+    printed = capsys.readouterr().out
+    assert exc.value.code == 1 and "dev moved" in printed
+    assert "approved and released" not in printed and pushes == []
+
+
+def test_merge_approve_cli_denies_a_release_and_pushes_nothing(world, pushes, capsys):
+    out = _prepare(world)
+    _cli_approve(out["request_id"], deny=True)          # exit 0: no SystemExit
+    printed = capsys.readouterr().out
+    assert "denied" in printed and out["request_id"] in printed
+    assert "approved" not in printed and pushes == []
+    assert overrides.load(out["request_id"])["state"] == overrides.DENIED
+    assert _release_worktrees() == []
+
+
+def test_the_request_records_who_asked_and_what_it_is_bound_to(world):
+    """Provenance: kind, version/tag, theme, task ids, actor, and the dev commit it is bound
+    to (head_sha) are all stored on the request."""
+    dev = _remote(world, "dev")
+    out = release.prepare("0.2.0", "a calmer release", repo=world.work,
+                          actor="orchestrator:test")
+    rec = overrides.load(out["request_id"])
+    assert rec["kind"] == "release" and rec["state"] == overrides.PENDING
+    assert (rec["version"], rec["tag"], rec["theme"]) == ("0.2.0", "v0.2.0", "a calmer release")
+    assert rec["task_ids"] == ["CMX-5", "CMX-7"]
+    assert rec["actor"] == "orchestrator:test"
+    assert rec["dev_sha"] == rec["head_sha"] == dev
+    assert rec["release_sha"] == _local(world, "refs/tags/v0.2.0^{commit}")
+    assert rec["release_sha"] != dev
+
+
+def test_the_cli_passes_the_actor_from_the_environment_to_the_request(world, monkeypatch,
+                                                                       capsys):
+    from chela import main
+    monkeypatch.setenv(config.ACTOR_ENV, "agent:cmx-9")
+    main.cmd_release(SimpleNamespace(version="0.2.0", theme="t", body_file=None,
+                                     repo=str(world.work)))
+    (rec,) = overrides.all_requests()
+    assert rec["actor"] == "agent:cmx-9"
+    printed = capsys.readouterr().out
+    assert "CMX-5, CMX-7" in printed and "tasks (2)" in printed
+    assert rec["id"] in printed
+
+
+def test_the_approval_page_and_the_card_show_every_provenance_field(world):
+    pytest.importorskip("flask")
+    from chela.dashboard.app import app
+    from chela.telegram.overridewatch import format_release_message
+    out = release.prepare("0.2.0", "a calmer release", repo=world.work, actor="orch:x")
+    rec = overrides.load(out["request_id"])
+    text = app.test_client().get(f"/override/{rec['id']}").get_data(as_text=True)
+    card = format_release_message(rec)
+    for shown in (text, card):
+        for needle in ("v0.2.0", "a calmer release", "CMX-5, CMX-7", "orch:x"):
+            assert needle in shown, (needle, shown)
+    for needle in (rec["dev_sha"], rec["release_sha"]):
+        assert needle in text and needle[:12] in card
+    assert "Tasks (2)" in text and "Tasks (2)" in card
+
+
+_PAYLOAD = '<script>alert(1)</script><form action="//evil">'
+
+
+@pytest.mark.parametrize("field", ["theme", "version", "task_ids", "tag", "actor",
+                                   "dev_sha", "release_sha"])
+def test_the_release_approval_page_escapes_each_agent_supplied_field(world, field):
+    """🔴 GUARD: every field an agent/orchestrator supplies is HTML-escaped on its own — one
+    payload per field, the others left benign, so a single un-escaped field cannot hide."""
+    pytest.importorskip("flask")
+    from chela.dashboard.app import app
+    out = _prepare(world)
+    value = [f"CMX-1{_PAYLOAD}", "CMX-2"] if field == "task_ids" else _PAYLOAD
+    overrides.set_fields(out["request_id"], **{field: value})
+    page = app.test_client().get(f"/override/{out['request_id']}")
+    text = page.get_data(as_text=True)
+    assert page.status_code == 200
+    assert "<script>alert(1)" not in text and 'action="//evil"' not in text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
+    assert text.count("<form") == 1                    # only the page's own approve form
