@@ -323,6 +323,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(dash.discovery, "get_all_windows", lambda: {"proj": "@5", "cmx-5": "@7"})
     monkeypatch.setattr(dash.inbox, "orchestrator_wid", lambda store=None: None)
     monkeypatch.setattr(sa, "drop_resumed_elsewhere", lambda is_live: [])
+    monkeypatch.setattr(sa.epoch, "current", lambda: None)   # never ask a real tmux
     return dash
 
 
@@ -767,3 +768,79 @@ def test_the_real_reopen_counts_an_already_open_topic_as_open_and_a_real_failure
         tm = TopicManager("tok", "-100", transport=transport(which))
         assert tm.reopen_topic("77") is want, which
     assert sent[0] == ("reopenForumTopic", {"chat_id": "-100", "message_thread_id": "77"})
+
+
+# --- CMX-78: one Unarchive per session; a migrated w:@N is epoch-stamped ------------------
+
+def test_two_concurrent_unarchives_of_one_session_spawn_ONE_window(resume, monkeypatch):
+    """Two devices (or a retry) press Unarchive at once: exactly one `claude --resume`
+    window opens, the other request is refused — never a second resume of the same id."""
+    import threading
+    from types import SimpleNamespace
+
+    key = f"s:{SID}"
+    with sa._LOCK:
+        sa._save({"hidden": {}, "sessions": {key: {
+            "key": key, "session_id": SID, "cwd": resume.cwd, "name": "mywin"}}})
+    entered, release = threading.Event(), threading.Event()
+    spawned = []
+
+    def slow_spawn(cwd, **kw):
+        spawned.append(kw["command"])
+        entered.set()
+        assert release.wait(10), "the second unarchive never returned"
+        return SimpleNamespace(ok=True, error=None, wid="@9", name="mywin", cwd=str(cwd))
+    monkeypatch.setattr(spawn_mod, "spawn_window", slow_spawn)
+
+    first = {}
+    t = threading.Thread(target=lambda: first.setdefault("out", sa.unarchive_session(key)))
+    t.start()
+    assert entered.wait(10), "the first unarchive never reached its spawn"
+    second = sa.unarchive_session(key)      # while the first is still spawning
+    release.set()
+    t.join(10)
+
+    assert spawned == [f"claude --resume {SID}"], "one session, one resumed window"
+    assert first["out"].ok
+    assert not second.ok and second.status == 409, second
+    assert key not in sa._load()["sessions"]
+
+
+def test_a_failed_unarchive_spawn_releases_its_claim_so_a_retry_resumes(resume, monkeypatch):
+    from types import SimpleNamespace
+
+    key = f"s:{SID}"
+    with sa._LOCK:
+        sa._save({"hidden": {}, "sessions": {key: {
+            "key": key, "session_id": SID, "cwd": resume.cwd, "name": "mywin"}}})
+    answers = iter([False, True])
+    monkeypatch.setattr(spawn_mod, "spawn_window", lambda cwd, **kw: SimpleNamespace(
+        ok=next(answers), error="tmux said no", wid="@9", name="mywin", cwd=str(cwd)))
+
+    assert not sa.unarchive_session(key).ok
+    retry = sa.unarchive_session(key)
+    assert retry.ok, f"a failed resume must not leave the session claimed forever: {retry.error}"
+    assert key not in sa._load()["sessions"]
+
+
+def test_the_localStorage_import_stamps_the_epoch_and_a_restart_unhides_a_recycled_window(
+        client, monkeypatch):
+    now = {"epoch": "e1"}
+    monkeypatch.setattr(sa.epoch, "current", lambda: now["epoch"])
+    tc = client.app.test_client()
+    tc.post("/api/sidebar/archive/migrate", json={"keys": ["w:@5", "run:CMX-5"]})
+    assert sa._load()["hidden"]["w:@5"]["epoch"] == "e1", "imported under the current epoch"
+    assert tc.get("/api/sidebar/archive").get_json()["hidden"] == ["run:CMX-5", "w:@5"]
+
+    now["epoch"] = "e2"     # tmux restarted: @5 is now some other window
+    assert tc.get("/api/sidebar/archive").get_json()["hidden"] == ["run:CMX-5"], \
+        "a w:@N hidden under a dead tmux server must not hide the window that recycled @5"
+    assert "w:@5" not in sa._load()["hidden"], "and it leaves the store"
+
+
+def test_an_unknown_epoch_never_unhides_a_migrated_window(client, monkeypatch):
+    now = {"epoch": "e1"}
+    monkeypatch.setattr(sa.epoch, "current", lambda: now["epoch"])
+    client.app.test_client().post("/api/sidebar/archive/migrate", json={"keys": ["w:@5"]})
+    now["epoch"] = None     # tmux cannot be asked — unknown is not "restarted"
+    assert sa.state()["hidden"] == ["w:@5"]
