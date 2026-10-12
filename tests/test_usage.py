@@ -157,6 +157,21 @@ def test_today_is_the_utc_day_and_30m_is_a_subset(tmp_path):
     assert recent["requests"] == 1
 
 
+def test_30m_window_reaches_past_utc_midnight(tmp_path, monkeypatch):
+    # Ten minutes after UTC midnight the 30m window still holds the 20 minutes before it
+    # (red on CI at 00:04 UTC, 2026-10-12: the scan started at day0 and the window was empty).
+    root = tmp_path / "projects"
+    day0 = usage.utc_day_start(NOW)
+    now = day0 + 600
+    p = _write(root, "p/s.jsonl", [_line(day0 - 1200, "y", "y"), _line(day0 - 3600, "old", "old"),
+                                   _line(day0 + 60, "t", "t")])
+    os.utime(p, (now, now))
+    monkeypatch.setattr(usage, "default_root", lambda: root)
+    monkeypatch.setattr(usage, "CONTEXT_CACHE_DIR", tmp_path / "ctx")
+    w = usage.report({}, now=now, roots=[], use_cache=False)["windows"]
+    assert w["30m"]["rows"][0]["requests"] == 2       # day0-1200 and day0+60, not day0-3600
+    assert w["today"]["rows"][0]["requests"] == 1     # today stays the UTC day
+
 def test_mtime_filter_skips_old_transcripts(tmp_path):
     p = _write(tmp_path, "p/old.jsonl", [_line(NOW - 60, "m", "r")])
     os.utime(p, (NOW - 2 * 86400, NOW - 2 * 86400))
