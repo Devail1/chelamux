@@ -17,6 +17,10 @@
 //      So are the Archived section's, even when it is drawn open.
 //   3. 🔴 Alt+2 opens the 2nd visible row's session.
 //   4. 🔴 Typing in a field, the palette open, or Ctrl/⌘ held with Alt ⇒ Alt+N does nothing.
+//   5. 🔴 Only the first NINE visible rows are numbered — an 11-row sidebar shows 1..9
+//      and rows 10/11 carry nothing (there is no Alt+10).
+//   6. 🔴 A bare Alt keydown is NOT consumed (it must still reach a pane); Alt+N is.
+//      Ctrl/⌘/Shift held with Alt is another chord: no numbers.
 //
 // Run: node --test tests/sidebar_alt_switch.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { before, beforeEach, test } from 'node:test';
@@ -28,7 +32,7 @@ const BODY = `
 <aside class="sidebar">
   <div class="side-list" id="sidebar-agents"></div>
 </aside>
-<input id="some-field">
+<input id="some-field"><textarea id="some-area"></textarea><select id="some-select"><option>x</option></select>
 <div class="palette-overlay" id="palette"><div class="palette"><input id="palette-input"><div id="palette-list"></div></div></div>
 <div id="agent-detail"></div>
 <span id="hdr-agents"></span><span id="hdr-next"></span><span id="hdr-updated"></span>`;
@@ -178,8 +182,15 @@ test('Alt+N does nothing while typing in a field, with the palette open, or with
     assert.equal(activeRow(), null, 'Alt+1 with the palette open must not open a row');
     document.getElementById('palette').classList.remove('open');
 
+    altDigit(1, {}, document.getElementById('some-area'));
+    assert.equal(activeRow(), null, 'Alt+1 typed into a textarea must not open a row');
+    altDigit(1, {}, document.getElementById('some-select'));
+    assert.equal(activeRow(), null, 'Alt+1 on a focused select must not open a row');
+
     altDigit(1, { ctrlKey: true });
     assert.equal(activeRow(), null, 'Ctrl+Alt+1 must not open a row');
+    altDigit(1, { metaKey: true });
+    assert.equal(activeRow(), null, '⌘+Alt+1 must not open a row');
 
     altDigit(1);   // the control: the same key with nothing in the way DOES open
     assert.equal(activeRow(), drawn()[0].dataset.agent, 'Alt+1 must open the 1st row');
@@ -188,4 +199,47 @@ test('Alt+N does nothing while typing in a field, with the palette open, or with
 test('Alt+N past the last visible row does nothing', () => {
     altDigit(9);
     assert.equal(activeRow(), null);
+});
+
+test('only the first NINE visible rows are numbered — rows 10 and 11 carry nothing', () => {
+    const many = Array.from({ length: 11 }, (_, i) => win(`m-${String(i + 1).padStart(2, '0')}`, '/srv/code/many'));
+    util.setAgentsCache(many);
+    nav.renderSidebarAgents(many);
+    try {
+        assert.equal(drawn().length, 11, 'fixture must draw eleven visible rows, or the cap is untested');
+        altDown();
+        const want = drawn().slice(0, 9).map((r, i) => [r.dataset.agent, String(i + 1)]);
+        assert.deepEqual(badges(), want,
+            'holding Alt must number exactly the first nine rows 1..9 — a 10th/11th row has no Alt+N to show');
+        assert.equal(host().querySelectorAll('.ar-altnum').length, 9, 'exactly nine numbers may be on screen');
+        drawn().slice(9).forEach(r => assert.equal(r.querySelector('.ar-altnum'), null,
+            `row ${r.dataset.agent} past the ninth must carry no number`));
+        assert.equal(drawn()[0].querySelector('.ar-altnum').getAttribute('aria-hidden'), 'true',
+            'the number is a visual hint only — screen readers must not read it as part of the row name');
+
+        altDigit(9);
+        assert.equal(activeRow(), drawn()[8].dataset.agent, 'Alt+9 must open the 9th row');
+    } finally {
+        altUp();
+        util.setAgentsCache(ROWS);
+        nav.renderSidebarAgents(ROWS);
+    }
+});
+
+test('a bare Alt keydown is not consumed; Alt+N is; Alt with another modifier shows no numbers', () => {
+    const altEv = new window.KeyboardEvent('keydown', { key: 'Alt', code: 'AltLeft', altKey: true, bubbles: true, cancelable: true });
+    document.dispatchEvent(altEv);
+    assert.equal(altEv.defaultPrevented, false, 'Alt itself must not be preventDefault-ed — it still belongs to whatever has focus');
+    assert.equal(badges().length, 5, 'the bare Alt press must show the numbers');
+
+    const digitEv = new window.KeyboardEvent('keydown', { key: '1', code: 'Digit1', altKey: true, bubbles: true, cancelable: true });
+    document.dispatchEvent(digitEv);
+    assert.equal(digitEv.defaultPrevented, true, 'Alt+1 opened a row, so the browser must not also act on it');
+    altUp();
+
+    for (const mod of ['ctrlKey', 'metaKey', 'shiftKey']) {
+        key('keydown', { key: 'Alt', code: 'AltLeft', altKey: true, [mod]: true });
+        assert.deepEqual(badges(), [], `Alt pressed with ${mod} held is another chord — no numbers`);
+        altUp();
+    }
 });

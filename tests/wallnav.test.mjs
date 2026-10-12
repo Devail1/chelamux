@@ -535,6 +535,29 @@ test('holding Alt inside a pane\'s own document shows the sidebar numbers; relea
     assert.equal(nums(), 0, 'Alt released inside a pane must hide the sidebar numbers');
 });
 
+// 6a′ — ALT+N WORKS IN EVERY MODE, NOT ONLY THE WALL (CMX-85). From the single-terminal
+// view, Alt+N must bring the wall back and focus that row's pane there — it OPENS the
+// row's session, the same as from the wall.
+test('Alt+N from the single-terminal view switches to the wall and focuses that row\'s pane', async () => {
+    const flashed = wid => tile(wid) && tile(wid).querySelector('.grid-stack-item-content').classList.contains('pane-flash');
+    try {
+        window.chela.setTermMode('single');
+        await new Promise(r => setTimeout(r, 120));   // let the in-flight renderTerminals settle
+        assert.equal(document.getElementById('term-stage').className, 'term-single',
+            'fixture: setTermMode("single") must actually leave the wall, or this test is vacuous');
+        assert.equal(terminals.isWallVisible(), false);
+
+        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: '2', code: 'Digit2', altKey: true, bubbles: true }));
+        await new Promise(r => setTimeout(r, 240));   // wall re-render + focusPaneByWid's 60ms defer
+
+        assert.equal(terminals.isWallVisible(), true, 'Alt+N from the single view must bring the wall back');
+        assert.ok(flashed(rowWid(2)), 'Alt+2 from the single view must focus the 2nd sidebar row\'s pane on the wall');
+    } finally {
+        window.chela.setTermMode('wall');
+        await new Promise(r => setTimeout(r, 120));
+    }
+});
+
 // 6b — macOS: OPTION IS A DEAD-KEY/COMPOSE MODIFIER (CMX-149). Option+1 reports
 // e.key as a composed character ("¡"), never a bare digit — the switcher must key
 // off e.code (the physical key, layout- and modifier-independent), not e.key, or
