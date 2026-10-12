@@ -9,6 +9,11 @@
     <link rel="stylesheet" href="{{ asset_path('style.css') }}">
 </head>
 <body>
+<!-- CMX-89: restore the collapsed desktop sidebar BEFORE first paint. nav.js
+     does the same, but as a module it runs only after its whole import graph has
+     loaded, so the expanded sidebar painted first and then folded. Key must match
+     nav.js's SIDEBAR_COLLAPSED_KEY; mobile CSS ignores the class. -->
+<script>try { if (localStorage.getItem('chela_sidebar_collapsed') === '1') document.body.classList.add('sidebar-collapsed'); } catch (e) {}</script>
 
 <div class="app">
 
@@ -191,8 +196,12 @@
          Dispatch and Kanban were never two datasets: both rendered /api/dispatcher.
          They are two SEGMENTS of the same view now, drawn from one fetch (work.js),
          and Schedules — the other half of "work in flight" — rides along. Every id
-         inside is unchanged, so the renderers are untouched. -->
-    <div class="panel active" id="panel-work">
+         inside is unchanged, so the renderers are untouched.
+         CMX-89: it is the server-rendered FIRST panel only when terminals are
+         off; with terminals on, #panel-terminals below carries `active` instead,
+         so first paint is the Wall rather than Work-then-Wall once main.js's
+         module graph has loaded (worst on a phone). -->
+    <div class="panel{% if not terminals_enabled %} active{% endif %}" id="panel-work">
       <div class="work-toolbar">
         <div class="work-seg" id="work-seg" role="group" aria-label="Work view">
           <button type="button" class="work-seg-btn" data-seg="board" aria-pressed="true"
@@ -319,8 +328,10 @@
     </div><!-- /panel-work -->
 
     {% if terminals_enabled %}
-    <!-- Terminals wall (flagship view mode; streams live ttyd panes) -->
-    <div class="panel" id="panel-terminals">
+    <!-- Terminals wall (flagship view mode; streams live ttyd panes). Active in
+         the markup (CMX-89): it is the default canvas whenever it exists, and
+         main.js's selectView('terminals') re-selects it idempotently. -->
+    <div class="panel active" id="panel-terminals">
         <div class="term-toolbar">
             <!-- mode toggle + single-agent picker kept (terminals.js refs them) but hidden: wall-only -->
             <button id="term-mode-single" onclick="chela.setTermMode('single')" style="display:none;">Single</button>

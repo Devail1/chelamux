@@ -35,8 +35,11 @@ import { bootDashboardDom, flush, sliceTemplate } from './js_helpers/dashboard_d
 // hand-typed — so a mutation to panel-work's pre-set `active` class (exactly
 // the mutation this round's verdict named) shows up here, not just in a
 // fixture that happens to agree with the file today.
+// CMX-89: `active` is a Jinja conditional now (terminals_enabled picks the
+// first panel), so the slice is rendered for the terminals-off config.
 const CANVAS_HTML = sliceTemplate(
-    '<div class="panel" id="panel-agent-detail">', '<!-- /panel-work -->');
+    '<div class="panel" id="panel-agent-detail">', '<!-- /panel-work -->',
+    { terminals_enabled: false, wall_tile_dispatched: false });
 
 const BODY = `
 <div class="app">
