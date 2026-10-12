@@ -24,6 +24,10 @@ CHANGELOG = ("# Changelog\n\n## [Unreleased]\n\n## [0.1.0] — 2026-01-01\n\n###
              "- **First.** (CMX-1)\n")
 
 
+_REAL_RELEASE_TESTS = release._release_tests
+_REAL_UV_LOCK = release._uv_lock
+
+
 def _g(cwd, *args: str) -> str:
     return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True,
                           text=True).stdout.strip()
@@ -602,3 +606,53 @@ def test_prepare_refuses_when_origin_cannot_be_fetched(world):
     out = _prepare(world)
     assert out["ok"] is False and "fetch" in out["error"]
     assert overrides.all_requests() == [] and _release_worktrees() == []
+
+
+# --- orchestrator-added guards (judge round 2 survivors) ----------------------------------
+
+def test_a_rejected_main_push_stops_before_the_tag_and_dev(world, pushes, told):
+    """🔴 GUARD: a push that fails stops the sequence — a refused MAIN push must never be
+    followed by the tag or dev push."""
+    out = _prepare(world)
+    main0, dev0 = _remote(world, "main"), _remote(world, "dev")
+    hook = world.origin / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nwhile read o n r; do [ \"$r\" = refs/heads/main ] && "
+                    "exit 1; done\nexit 0\n")
+    hook.chmod(0o755)
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["ok"] is False and res["state"] == overrides.FAILED, res
+    assert "pushing main failed" in res["detail"]
+    assert len(pushes) == 1, f"no push may follow a refused main push: {pushes}"
+    assert _remote(world, "main") == main0 and _remote(world, "dev") == dev0
+    assert _remote(world, "refs/tags/v0.2.0") is None
+    assert overrides.load(out["request_id"])["pushed"] == []
+
+
+def test_unreadable_origin_tags_read_as_unknown_not_absent(world):
+    """🔴 GUARD: the real `_remote_tag` returns None (UNKNOWN) when `ls-remote` fails — never
+    False ("tag absent"), which would let a release push over a tag it could not see."""
+    assert release._remote_tag(world.work, "v0.2.0") is False, "control: readable and absent"
+    _g(world.work, "remote", "set-url", "origin", str(world.tmp / "no-such-origin.git"))
+    assert release._remote_tag(world.work, "v0.2.0") is None
+
+
+@pytest.mark.parametrize("exc", [FileNotFoundError("uv"),
+                                 subprocess.TimeoutExpired(["uv"], 900)])
+def test_release_tests_that_cannot_run_count_as_failed(monkeypatch, tmp_path, exc):
+    """🔴 GUARD: a release-tests run that cannot complete (uv missing / timeout) is a FAILED
+    step, never a pass."""
+    def boom(*a, **k):
+        raise exc
+    monkeypatch.setattr(release.subprocess, "run", boom)
+    p = _REAL_RELEASE_TESTS(tmp_path)
+    assert p.returncode != 0
+
+
+@pytest.mark.parametrize("exc", [FileNotFoundError("uv"),
+                                 subprocess.TimeoutExpired(["uv"], 300)])
+def test_a_uv_lock_that_cannot_run_counts_as_failed(monkeypatch, tmp_path, exc):
+    """🔴 GUARD: same rule for `uv lock`: an exception is a FAILED step, never a pass."""
+    def boom(*a, **k):
+        raise exc
+    monkeypatch.setattr(release.subprocess, "run", boom)
+    assert _REAL_UV_LOCK(tmp_path).returncode != 0
