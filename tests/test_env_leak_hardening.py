@@ -114,10 +114,10 @@ def _wait(pred, timeout=15.0) -> bool:
     return False
 
 
-def _reap(proc):
+def _reap(proc, timeout=10.0):
     proc.terminate()
     try:
-        proc.wait(timeout=10)
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait(timeout=5)
@@ -333,8 +333,14 @@ def test_negative_control_supervisor_cleanup_reaps_its_own_webterms(env, sock):
     try:
         assert _wait(lambda: _has_session(env, sock))
     finally:
-        _reap(proc)
-    assert _tmux(env, sock, "has-session", "-t", victim, check=False).returncode != 0
+        # Generous: a SIGKILL fallback skips the EXIT trap, so no reap would ever come.
+        _reap(proc, timeout=30)
+    # CMX-59: poll, don't check once — on a loaded runner the reap can land after this
+    # line. Bounded, so a supervisor that never reaps still goes RED (after the timeout).
+    reaped = _wait(lambda: _tmux(env, sock, "has-session", "-t", victim,
+                                 check=False).returncode != 0, 30)
+    assert reaped, (f"supervisor exited rc={proc.returncode} without reaping {victim}:\n"
+                    f"{proc.stdout.read()}")
 
 
 def _orphan(env, out: Path) -> int:

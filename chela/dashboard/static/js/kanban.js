@@ -7,7 +7,7 @@ import { displayTitle, riskChip } from './taskmodalmodel.js';
 import { knInline } from './knowledge.js';
 import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from './kanbanlanemodel.js';
 import { runStateBadges, trackerBoard, trackerColumns } from './kanbanlinearmodel.js';
-import { runCardNote, runCloseAction, runStallNote } from './runstate.js';
+import { runCardNote, runCloseAction, runHandoffNote, runStallNote } from './runstate.js';
 
 // ---------------------------------------------------------------------------
 // Render: the Board segment of WORK (the global cross-workflow kanban)
@@ -222,6 +222,12 @@ function _kCard(card) {
     const err = note
         ? `<div class="${note.closed ? 'kanban-card-closed-note' : 'kanban-card-error'}" title="${attrEsc(note.text)}">${escHtml(note.text.slice(0, 120))}</div>`
         : '';
+    // 📝 CMX-52: the agent's own handoff note (`chela task-finished --handoff`) — escaped,
+    // one line, truncated on the card; the full note is the tooltip.
+    const handoffNote = runHandoffNote(card);
+    const handoff = handoffNote
+        ? `<div class="kanban-card-handoff" title="${attrEsc(handoffNote)}">📝 ${escHtml(handoffNote.slice(0, 160))}${handoffNote.length > 160 ? '…' : ''}</div>`
+        : '';
     // 🗂️🔁 CMX-68: a closed run holding a READY task — on the closed card AND the open one.
     const stallNote = runStallNote(card);
     const stall = stallNote
@@ -317,6 +323,7 @@ function _kCard(card) {
             ${merge}
             ${closeBtn}
         </div>
+        ${handoff}
         ${err}
         ${stall}
     </div>`;

@@ -59,6 +59,17 @@ export function runCardNote(run) {
     return err ? { text: err, closed: false } : null;
 }
 
+// 📝 CMX-52. The agent's own `chela task-finished --handoff` note, as one display line for
+// the Dispatch board card — or null when there is nothing to show (no handoff recorded, i.e.
+// NULL, or an explicit empty/blank one). Agent-authored, so it is flattened here: control
+// characters dropped and every run of whitespace (newlines included) collapsed to one space.
+// The renderer still HTML-escapes it; this only makes it one tidy line.
+export function runHandoffNote(run) {
+    const raw = run && typeof run.handoff === 'string' ? run.handoff : '';
+    const text = raw.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim();
+    return text || null;
+}
+
 // 🗂️🔁 CMX-68. A `closed` run is never claimed again — so a closed run whose task the tracker
 // still calls READY (Todo) is a SILENT stall: CMX-33 sat in Todo ~11 hours that way, its
 // dependants with it. The server sets `closed_run_stall` (dispatcher.CLOSED_RUN_STALL) on

@@ -896,6 +896,22 @@ def render(event: dict) -> str:
     return sanitize_prompt(event.get("summary") or event.get("text") or "")
 
 
+# 📝 CMX-52: how much of an agent's `--handoff` note rides in a `run_review` summary. The
+# full note lives in the payload and on the Dispatch board; the notification only points
+# at it.
+SUMMARY_HANDOFF_CHARS = 120
+
+
+def handoff_snippet(handoff: str | None, limit: int = SUMMARY_HANDOFF_CHARS) -> str:
+    """A run's handoff, cut to one prompt-safe line for a notification — "" when there is
+    none (NULL) or it is empty/blank. Neutralised with :func:`sanitize_prompt` HERE, not
+    only by :func:`_event`: the note is agent-authored and must not lose its closing quote
+    to a cut made after sanitising, nor smuggle a newline into the one-line summary."""
+    if not isinstance(handoff, str):
+        return ""
+    return sanitize_prompt(handoff, max_chars=limit)
+
+
 def _short_title(title: str, limit: int = SUMMARY_TITLE_CHARS) -> str:
     """A tracker line, cut down to something you can read in a notification.
 
@@ -1519,9 +1535,17 @@ def run_events(runs: list[dict], seen: dict[str, str],
             # what `judge_wait_events` is for.
             pr = run.get("pr_url")
             ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
+            # 📝 CMX-52: the agent's own `--handoff` note. The payload keeps it raw (None
+            # vs "" intact — a record is read, not typed); the summary carries a short,
+            # prompt-safe snippet of it, since it is agent-authored text being typed at
+            # the orchestrator's prompt.
+            payload["handoff"] = run.get("handoff")
+            note = handoff_snippet(run.get("handoff"))
             out.append(_event("run_review",
                               f"📥 {label} awaiting review — {ref}"
-                              f"{' · ' + snippet if snippet else ''}", payload, wid=wid,
+                              f"{' · ' + snippet if snippet else ''}"
+                              f"{' · handoff: “' + note + '”' if note else ''}",
+                              payload, wid=wid,
                               silent=not config.inbox_notify_awaiting_review()))
         # else: still awaiting_review, and the judge_state moved between two NON-terminal
         # values (e.g. "" → "running", or one retry's "running" to the next) — silently

@@ -43,6 +43,45 @@ and what does its output need before it changes anything real.**
   pinned to a capable model and never follows the coding-agent Settings model, so a
   cheaper fleet default cannot quietly weaken the adversarial pass
   (`dispatcher.py:330-402`).
+- **An agent's pane inherits an allowlisted environment, not the daemon's** (CMX-45).
+  A dispatched window (coding agent, rework, judge) is opened inside the daemon's tmux
+  session, and a tmux window inherits the server's *global* environment — on a pm2 install,
+  the daemon's own. Audited by name on the reference install (2026-10-11): about 60 names
+  in the daemon env and the tmux global table — every `CHELA_*` setting `chela.env` sources
+  (dashboard port, collab relay, notify URL, dispatch workflows, …), pm2's process
+  description (`name`, `status`, `args`, `env`, `pm_*`, and a key named after the app such
+  as `chela-daemon`), Node's IPC markers, the operator's prompt/theme variables and the
+  desktop plumbing (`DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`, WSL interop). Before the agent
+  command is typed, `_launch_agent` sends one `unset` line into that pane naming **every**
+  inherited name — the daemon's env plus the tmux global and session tables — that is not
+  on `envutil.AGENT_ENV_ALLOW`:
+  - kept: the shell basics (`PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `LC_*`, `TZ`, `TMPDIR`),
+    the terminal (`TERM`, `COLORTERM`, `TMUX`, `TMUX_PANE`), session plumbing
+    (`XDG_*`, `DBUS_SESSION_BUS_ADDRESS` — `systemd-run --user` needs them for the memory
+    slice — `DISPLAY`, `WAYLAND_DISPLAY`, `WSL*`), editors, tool switches (`COREPACK_*`,
+    `UV_*`), and chela's own identity: `CHELA_DIR`, `CHELA_TMUX_SESSION`, `CHELA_WID`
+    (exported after the strip). Claude Code's and `gh`'s credentials pass as the
+    forwarded secrets (`envutil.FORWARDED_SECRET_VARS`), plus `CLAUDE_CONFIG_DIR` and
+    `ANTHROPIC_BASE_URL`.
+  - dropped: everything else, including every other `CHELA_*` setting. A name on the
+    allowlist is still dropped when it is secret-shaped (`*_TOKEN`, …), a Claude session
+    marker, or a pm2/Node leak. `CHELA_NOTIFY_URL` is dropped even when forwarded (CMX-115).
+  - extending it: an operator names extra variables in `CHELA_CHILD_ENV_FORWARD`, the same
+    knob that forwards a secret to a hook ([CONFIG.md](CONFIG.md)).
+
+  Where this sits next to the other strips: `envutil.child_env` (CMX-390/425/21) is what a
+  hook or a suite chela runs *itself* receives — the daemon env minus leaks, secrets and
+  session markers, everything else passed. `envutil.scrub_tmux_secrets` unsets secrets,
+  markers, server hazards (proxies, `TMUX_TMPDIR`) and, since CMX-45, every name that is
+  not a valid shell variable (pm2's `chela-daemon`-shaped keys, which bash passes to children
+  and cannot `unset`) from the tmux global table before any window opens. The allowlist is
+  the narrowest of the three and applies to the agent pane only. Not covered: what the
+  operator's own shell rc sets when the pane's shell starts, and `chela` subcommands run
+  inside the pane, which re-read `$CHELA_DIR/chela.env` at import (so a `chela` process there
+  still sees the operator's settings, including the notify URL — its notify calls are what
+  CMX-115's test fence covers). Pinned by `tests/test_agent_env_strip.py`, which replays the
+  exact typed lines through a real `bash`: a sentinel set in the daemon env is absent in the
+  pane while `CHELA_WID` and `PATH` survive.
 - **A worktree cannot escape into a workspace it doesn't own.** `workspace_escape` refuses
   to dispatch — loudly, not by silently relocating — when a non-default `CHELA_DIR`
   process's configured `workspace.root` resolves outside that `CHELA_DIR`
@@ -131,7 +170,7 @@ migrates its tracker from `markdown` to `gh_issues`.
 | Posture question | Enforced in | Documented in |
 |---|---|---|
 | Who may trigger a dispatch | `chela/sources/gh_issues.py`, `chela/sources/markdown.py` | this doc §1 |
-| What a running agent may do | `chela/dispatcher.py::resolve_agent_cmd`, `chela/workflow.py::workspace_escape`, `chela/memcap.py`, `chela/sandbox.py` (opt-in, off for chelamux) | this doc §2, `RESOURCE_ISOLATION.md`, `SANDBOX_BOUNDARY.md` |
+| What a running agent may do | `chela/dispatcher.py::resolve_agent_cmd`, `chela/dispatcher.py::_strip_agent_env_cmd` + `chela/envutil.py::AGENT_ENV_ALLOW` (env allowlist), `chela/workflow.py::workspace_escape`, `chela/memcap.py`, `chela/sandbox.py` (opt-in, off for chelamux) | this doc §2, `RESOURCE_ISOLATION.md`, `SANDBOX_BOUNDARY.md` |
 | What approves a merge | `chela/judge.py`, `chela/contract.py::merge` | this doc §3, `ESCALATION_CONTRACT.md` |
 | What a human must decide instead of the orchestrator | `chela/contract.py::escalate` | `ESCALATION_CONTRACT.md`'s decision taxonomy |
 

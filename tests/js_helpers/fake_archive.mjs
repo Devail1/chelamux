@@ -10,9 +10,16 @@
 // carries `no_session: true` — the server's "session id cannot be determined" refusal.
 // A `run:` key is only hidden. Unarchive of an `s:` key RESUMES it: a new window, same
 // name + cwd, which `/api/agents` answers with from then on.
+//
+// CMX-82: it also keeps the sidebar LAYOUT (chela/sidebar_layout.py, /api/sidebar/layout)
+// the way the server does: `st.layout` is null until a device saves one; a POST replaces
+// the fields it names; `import: true` writes only while there is none (first device wins).
 
 export function fakeArchiveServer(agents) {
-    const st = { hidden: [], sessions: [] };
+    const st = { hidden: [], sessions: [], layout: null };
+    const LAYOUT_FIELDS = ['order', 'custom', 'view'];
+    const pick = body => Object.fromEntries(LAYOUT_FIELDS.filter(f => f in (body || {})).map(f => [f, body[f]]));
+    const emptyLayout = () => ({ order: [], custom: { groups: [], assign: {} }, view: {} });
     const calls = [];
     const closed = new Set();
     const resumedWins = [];
@@ -20,6 +27,16 @@ export function fakeArchiveServer(agents) {
     const state = () => JSON.parse(JSON.stringify(st));
 
     function post(path, body) {
+        if (path === '/api/sidebar/layout') {
+            const fields = JSON.parse(JSON.stringify(pick(body)));
+            if (body && body.import === true) {
+                const imported = st.layout === null && Object.keys(fields).length > 0;
+                if (imported) st.layout = { ...emptyLayout(), ...fields };
+                return { ok: true, imported, layout: JSON.parse(JSON.stringify(st.layout)) };
+            }
+            if (Object.keys(fields).length) st.layout = { ...(st.layout || emptyLayout()), ...fields };
+            return { ok: true, layout: JSON.parse(JSON.stringify(st.layout)) };
+        }
         const keys = (body && body.keys) || [];
         if (path === '/api/sidebar/archive') {
             const archived = [], closedNow = [], refused = [];
@@ -67,7 +84,7 @@ export function fakeArchiveServer(agents) {
 
     return {
         st, calls, resumedWins,
-        reset() { st.hidden = []; st.sessions = []; calls.length = 0; closed.clear(); resumedWins.length = 0; },
+        reset() { st.hidden = []; st.sessions = []; st.layout = null; calls.length = 0; closed.clear(); resumedWins.length = 0; },
         // the live window list as the server would answer it: closed windows gone, resumed ones in
         liveAgents() { return [...(agents() || []).filter(a => a && !closed.has(a.window_id)), ...resumedWins]; },
         handle(url, opts) {
@@ -78,6 +95,9 @@ export function fakeArchiveServer(agents) {
             calls.push({ method, path, body });
             if (path === '/api/agents') return this.liveAgents();
             if (method === 'GET' && path === '/api/sidebar/archive') return state();
+            if (method === 'GET' && path === '/api/sidebar/layout') {
+                return { layout: st.layout && JSON.parse(JSON.stringify(st.layout)) };
+            }
             return post(path, body);
         },
     };

@@ -238,6 +238,9 @@ message.
      still reads the diff and a guard that exists without a matching self-check is exactly
      the gap this closes. It is checked (never blocked, but recorded) against your own
      diff — passing it on a run that touches `tests/` prints a loud warning.
+   - **Optional: `--handoff "<note>"`** — a short note for your reviewer (what changed, what
+     to look at first, what you assumed). It is shown in the orchestrator's inbox notice and
+     on the Dispatch board. Informational only — it never gates anything.
 
 **Do NOT touch the tracker file.** You do not tick your own checkbox — the dispatcher
 strikes it on `{{base_branch}}` once your PR actually **merges**. It is the file's only
