@@ -214,6 +214,16 @@ message.
    corruption instead of hand-editing and eyeballing it. **This is the exact check the judge will
    run — catch your own decoration first, or the PR comes straight back.** ⛔ **Keep the
    experiments JSON file** (do not delete it after step 3) — step 6 needs its path.
+
+   **⚖️🧹 Then run the MECHANICAL sweep: `chela judge sweep`** (from your worktree; it diffs
+   against `origin/{{base_branch}}` and reads `judge.test_cmd` from WORKFLOW.md). Your
+   experiments test the guards YOU thought of; the sweep corrupts every conditional,
+   comparison and return code your branch CHANGED (`if X:` → `if False and (X):`, `==` →
+   `!=`, `0` ↔ `1`, an emptied return…), runs the related tests, and restores
+   the file. It exits 1 and lists each SURVIVED `file:line` with its mutation. **For every
+   survivor, add a test that goes RED under that exact mutation — not a weaker assertion,
+   and not a test that merely touches the line.** Re-run until it exits 0. `task-finished`
+   runs the same sweep in step 6 and refuses while a survivor remains.
 4. **Commit in the worktree.** Stage only files you intentionally changed
    (`git add <paths>` — never `git add -A`). Verify with `git status` +
    `git diff --cached --stat` before committing.
@@ -238,6 +248,13 @@ message.
      still reads the diff and a guard that exists without a matching self-check is exactly
      the gap this closes. It is checked (never blocked, but recorded) against your own
      diff — passing it on a run that touches `tests/` prints a loud warning.
+   - **⚖️🧹 CMX-88: `task-finished` also runs `chela judge sweep`** (~5–10 min) and REFUSES
+     while a survivor remains. Only when NO outcome can change under a surviving mutation
+     (a log-only branch, a value both paths compute identically), name it with a written
+     reason: `--sweep-equivalent '<file:line>: <why no outcome can change>'` (repeatable).
+     It is recorded on the run, shown to the judge and appended to your PR body — the judge
+     treats it as a claim to test, so a wrong one comes straight back. A note for a line
+     that did not survive is refused.
    - **Optional: `--handoff "<note>"`** — a short note for your reviewer (what changed, what
      to look at first, what you assumed). It is shown in the orchestrator's inbox notice and
      on the Dispatch board. Informational only — it never gates anything.
