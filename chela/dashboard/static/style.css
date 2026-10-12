@@ -58,7 +58,7 @@
        nothing until Hebrew text actually needs it. */
     --ui-font: 'Geist', 'Heebo', system-ui, -apple-system, 'Segoe UI', sans-serif;
     --font: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
-    --term-ctx-bar-h: 30px;   /* .term-ctx-bar height; iframe rules reserve this much bottom space. CMX-129: the 14px № chip sits centered (same align-items: center as the branch/context text), so its bottom AND top gaps are each (bar-h - chip-h) / 2 — 8px only when bar-h = chip-h + 16 = 30px. Supersedes CMX-128's flex-end + margin-bottom scheme, which gave № its own 8px bottom inset independent of the text's center line and left it riding ~4px above it — see .gs-idx below */
+    --term-ctx-bar-h: 30px;   /* .term-ctx-bar height; iframe rules reserve this much bottom space. 30px was sized for the pane № chip (CMX-129), kept as-is when CMX-85 dropped that chip for the sidebar's Alt numbers */
     --term-bg: #0d1117;   /* the ttyd terminal's OWN xterm.js background (scripts/agent-terminals.sh TERM_THEME, tests/test_term_bg_sync.py guards the two stay identical) — NOT an arbitrary black; shared with .term-ctx-bar so the bar reads as a seamless footer, not a separate strip */
 
     /* CMX-230: the wall/pane/card type scale, as NAMED LEVERS instead of the
@@ -350,7 +350,7 @@ body {
 
 /* --- CMX-119: pane header v2 — split the CMX-117 combined badge back apart
    now that every pane has a bottom bar to hold its numbers (see .term-ctx-bar
-   / .gs-idx below). `.gs-dot` also wears `.term-status-dot` (below), so it
+   below). `.gs-dot` also wears `.term-status-dot` (below), so it
    is painted by the SAME shape rules as the sidebar row's status mark —
    CMX-377's whole point: one shape vocabulary, not a pane-header dialect and
    a sidebar dialect. `.gs-dot` itself now only sets the pane header's
@@ -424,15 +424,10 @@ body {
    file's `--bg`), so nothing "shows through" at all; `--term-bg` must equal that
    real color exactly or the bar/frame are a visibly blacker seam sitting on top
    of it. tests/test_term_bg_sync.py drift-guards the two literals. */
-/* CMX-124 pinned № far-left with context pinned far-right via `.gs-ctx`'s own
-   `margin-left: auto`. CMX-127 (Liav changed his mind: № reads better
-   far-right) supersedes that — branch + context are LEFT-grouped in normal
-   flow, and `.gs-idx` (below) now carries the `margin-left: auto` instead, so
-   № is pinned to the bar's far-right edge no matter what else is present. No
-   `justify-content: space-between`: on a branch-less pane (`.gs-branch`
-   hidden) space-between used to let whatever came next slide left to fill the
-   gap — the auto-margin on the pinned element keeps it at the right edge
-   regardless. */
+/* Every chip is LEFT-grouped in normal flow. No `justify-content:
+   space-between`: on a branch-less pane (`.gs-branch` hidden) it let whatever
+   came next slide around to fill the gap. (The pane № that used to sit
+   far-right is gone — CMX-85 moved the Alt+N numbers to the sidebar rows.) */
 .term-ctx-bar {
     position: absolute; left: 0; right: 0; bottom: 0; z-index: 4;
     display: flex; align-items: center; gap: 8px;
@@ -450,9 +445,7 @@ body {
 
 /* Branch + exact context "74% · 147.5K/1M" — dim, subtle, tabular-nums; the
    fill strip (above) still carries the at-a-glance colour. Both sit in normal
-   flow, LEFT-grouped, immediately after each other; `.gs-idx` (below) carries
-   the auto left-margin now, so it's what stays pinned to the bar's far-right
-   edge regardless of what else in the bar is present/hidden. `.gs-branch`
+   flow, LEFT-grouped, immediately after each other. `.gs-branch`
    may shrink/ellipsis but must NOT grow past its own content — growth is
    what let it (and by extension the space-between layout) push things
    around. */
@@ -468,8 +461,7 @@ body {
    into this SAME bottom bar rather than a separate strip (enrich, don't
    duplicate — .gs-branch/.gs-ctx above already live here). Wall-only
    (_ctxBarHTML's draggable gate), left-grouped in normal flow same as
-   .gs-branch/.gs-ctx; `.gs-idx` (below) keeps its own auto-left-margin so it
-   stays pinned far-right no matter how many of these chips are hidden. */
+   .gs-branch/.gs-ctx. */
 .gs-model, .gs-cost {
     flex: 0 0 auto; font-weight: 500; line-height: 1;
     white-space: nowrap; font-variant-numeric: tabular-nums;
@@ -504,33 +496,6 @@ body {
     background: var(--surface); color: var(--text);
     border: 1px solid var(--accent); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
     font-size: 11px; white-space: nowrap; pointer-events: none;
-}
-
-/* Pane № (Alt+N jump target) — CMX-119 originally tucked it at the far right
-   of the bottom bar, after the context numbers; CMX-124 moved it to the FAR
-   LEFT instead; CMX-127 (Liav changed his mind: № reads better far-right)
-   supersedes that and restores the far-right position — branch and context
-   are LEFT-grouped, and this chip is pinned to the bar's far-right edge via
-   its own auto left-margin, so it never drifts regardless of what else in
-   the bar is present. CMX-128 opted this chip OUT of the bar's shared
-   `align-items: center` with `align-self: flex-end` + `margin-bottom: 8px`,
-   to give it a balanced 8px bottom inset matching the 8px right inset — but
-   that pinned only the CHIP's own bottom edge, independent of where the
-   branch/context text's vertical center actually sits, so № ended up riding
-   ~4px above the text's center line. CMX-129 supersedes that: the chip goes
-   back to the bar's shared `align-items: center` (no per-element override),
-   which puts № on the exact same center line as the text — and
-   `--term-ctx-bar-h` above is sized to 30px (chip's 14px + 2×8px) so that
-   centering ALSO reproduces the balanced 8px top/bottom gap, keeping the
-   corner symmetry CMX-128 established without decoupling the chip from the
-   text's baseline. */
-.gs-idx {
-    flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
-    min-width: 15px; height: 14px; padding: 0 4px; box-sizing: border-box;
-    border-radius: 4px; background: var(--bg); border: 1px solid var(--border);
-    color: var(--text); font-weight: 700; font-size: 9.5px; line-height: 1;
-    font-variant-numeric: tabular-nums;
-    margin-left: auto;
 }
 
 /* Inline split-glyph layout picker. Icon-only buttons; active preset is
@@ -3527,6 +3492,17 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 /* An idle row is the common case — its word stays out of the way. */
 .agent-row.rich .ar-state.idle { opacity: 0.7; }
 .agent-row.rich.archived { opacity: 0.55; }
+/* CMX-85: the Alt fast-switch number, shown only while Alt is held (nav.js
+   _paintAltNums inserts it, Alt up removes it) — like the Claude desktop app's
+   Ctrl-held numbers. Over the row's right edge, so the row never reflows. */
+.agent-row .ar-altnum {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box;
+    border-radius: 4px; background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); font-size: 10px; font-weight: 700; line-height: 1;
+    font-variant-numeric: tabular-nums; pointer-events: none;
+}
 .agent-row.rich .row-more { width: 20px; height: 20px; margin: -2px -4px -2px 0; opacity: 0.55; }
 .agent-row.rich:hover .row-more { opacity: 1; }
 /* Open-on-wall cue: a click on the row RESTORES a hidden pane vs merely FOCUSES
@@ -4425,8 +4401,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
        re-hide them here: they fall through to the desktop `.gs-branch/.gs-ctx`
        rules + the `hidden` attribute that _applyTermContext toggles by data
        presence (so an empty/context-less pane still shows nothing). The №
-       pane-number chip needs no rule — it's never rendered on the single pane
-       (_ctxBarHTML(wid, draggable=false) omits .gs-idx entirely). */
+       pane-number chip is gone everywhere since CMX-85. */
 
     /* CMX-130: the keybar below is `position: fixed` — it floats over whatever
        flow content sits at the bottom of the viewport rather than pushing it

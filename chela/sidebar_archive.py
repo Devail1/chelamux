@@ -34,8 +34,13 @@ saves it from there, so a second writer would be overwritten on its next tick (s
 
 Store shape (``CHELA_DIR/sidebar-archive.json``)::
 
-    {"hidden":   {"<item key>": <archived_at>, ...},          # hide-only rows (runs)
+    {"hidden":   {"<item key>": {"at": <archived_at>, "epoch": <tmux epoch>}, ...},
+                                                              # hide-only rows (runs)
      "sessions": {"s:<session id>": {<resume record>}, ...}}  # closed human sessions
+
+A hidden ``w:@N`` (only ever a migrated localStorage key) is stamped with the tmux epoch it
+was hidden under: after a tmux restart that ``@N`` is a stranger's window, so the key is
+dropped (:func:`state`) instead of hiding whatever window recycles the id.
 """
 from __future__ import annotations
 
@@ -56,6 +61,10 @@ log = logging.getLogger(__name__)
 _STORE = CHELA_DIR / "sidebar-archive.json"
 _REBINDS = CHELA_DIR / "topic-rebinds.json"
 _LOCK = threading.Lock()
+# Archived sessions an Unarchive is resuming RIGHT NOW (guarded by _LOCK). Claimed under the
+# lock before the spawn, so a second Unarchive of the same key (another device, a retry) is
+# refused instead of opening a second `claude --resume` of the same session.
+_RESUMING: set[str] = set()
 
 # A rebind request older than this is dropped: its window never came up as an agent (the
 # spawn half-launched, or it was closed again), and a stale request must never reopen an
@@ -104,10 +113,33 @@ def _save(data: dict) -> None:
     _write(_STORE, {"hidden": data["hidden"], "sessions": data["sessions"]})
 
 
+def _hidden_epoch(value: object) -> str | None:
+    return value.get("epoch") if isinstance(value, dict) else None
+
+
+def _drop_dangling_windows() -> dict:
+    """:func:`_load`, minus the hidden ``w:@N`` keys stamped under another tmux server (a
+    recycled ``@N`` must never inherit an old row's hide) — dropped from the store too."""
+    data = _load()
+    stamped = [k for k, v in data["hidden"].items() if k.startswith("w:") and _hidden_epoch(v)]
+    if not stamped:
+        return data
+    now_epoch = epoch.current()
+    with _LOCK:
+        data = _load()
+        gone = [k for k in stamped
+                if k in data["hidden"] and epoch.is_dangling(_hidden_epoch(data["hidden"][k]), now_epoch)]
+        if gone:
+            for k in gone:
+                data["hidden"].pop(k, None)
+            _save(data)
+    return data
+
+
 def state() -> dict:
     """What the sidebar renders: ``{"hidden": [keys], "sessions": [records]}``, sessions
     newest-archived first."""
-    data = _load()
+    data = _drop_dangling_windows()
     sessions = sorted(data["sessions"].values(), key=lambda r: -(r.get("archived_at") or 0))
     return {"hidden": sorted(data["hidden"]), "sessions": sessions}
 
@@ -124,13 +156,15 @@ def valid_key(key: object) -> bool:
 
 def hide(keys: list[str]) -> dict:
     """Hide rows without closing anything (a settled dispatched run; a migrated
-    localStorage key). Idempotent. Returns :func:`state`."""
+    localStorage key). Idempotent. Returns :func:`state`. Each key is stamped with the
+    current tmux epoch, so a ``w:@N`` stops hiding anything once that server is gone."""
+    now_epoch = epoch.current()
     with _LOCK:
         data = _load()
         now = time.time()
         for k in keys:
             if valid_key(k) and not k.startswith("s:") and k not in data["hidden"]:
-                data["hidden"][k] = now
+                data["hidden"][k] = {"at": now, "epoch": now_epoch}
         _save(data)
     return state()
 
@@ -310,13 +344,28 @@ def unarchive_session(key: str) -> Outcome:
     ``claude --resume <id>``; its manual-name flag and Remote Control name restored; a
     request queued for the Telegram daemon to REOPEN its old topic and bind it here.
 
-    The record is dropped only once the window is open — a failed spawn keeps it."""
-    from chela import agent_manager, sessionids, spawn
-
+    The record is CLAIMED under the lock before anything is spawned, so a second Unarchive
+    of the same key while this one runs is refused (409) — one session, one window. The
+    record is dropped only once the window is open; a failed spawn keeps it and releases
+    the claim, so it can be retried."""
     with _LOCK:
         record = _load()["sessions"].get(key)
-    if record is None:
-        return Outcome(False, "not archived (refresh and retry)", 404)
+        if record is None:
+            return Outcome(False, "not archived (refresh and retry)", 404)
+        if key in _RESUMING:
+            return Outcome(False, "this session is already being resumed", 409)
+        _RESUMING.add(key)
+    try:
+        return _resume(key, record)
+    finally:
+        with _LOCK:
+            _RESUMING.discard(key)
+
+
+def _resume(key: str, record: dict) -> Outcome:
+    """:func:`unarchive_session`'s body, run while ``key`` is claimed."""
+    from chela import agent_manager, sessionids, spawn
+
     sid = record.get("session_id") or ""
     if not _SESSION_ID_RE.match(sid):
         return Outcome(False, "the archived record carries no usable session id", 409)

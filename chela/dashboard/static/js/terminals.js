@@ -1,6 +1,6 @@
 // --- Stage 0: ES-module imports ---
 import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, staticUrl, updateTabSignal, wantsHuman } from './util.js';
-import { openPalette, renderSidebarAgents, selectView, updateCtxCache } from './nav.js';
+import { altSwitchKeydown, openPalette, renderSidebarAgents, selectView, setAltHeld, updateCtxCache } from './nav.js';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
 import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, stateTitle, tileState } from './wallmodel.js';
@@ -1349,8 +1349,8 @@ function paneHead(wid, draggable) {
     // btn.nextElementSibling` contract, so the menu's rows and all their live
     // state wiring (_updateShareBtns/_updateOrchBtns/the pin toggle) are
     // untouched, just anchored at a plain button instead of the pill. The
-    // pane № (Alt+N jump target) moved OUT of the header entirely, down to
-    // the bottom bar — see _ctxBarHTML.
+    // pane № moved OUT of the header (CMX-119), and is gone since CMX-85 —
+    // the sidebar rows carry the Alt+N numbers.
     const dot = `<span class="gs-dot-ring" data-wid="${attrEsc(wid)}"><span class="gs-dot term-status-dot" data-status-for="${attrEsc(wid)}" data-wid="${attrEsc(wid)}" title="…"></span></span>`;
     // Wall redesign slice 1 (docs/wall-redesign.md): the header's state pill.
     // CMX-393: the WORD only — the SHAPE is `.gs-dot` at the head's far left,
@@ -2401,46 +2401,11 @@ function _refreshPaneLabels() {
     renderMobileSwitcher();   // reflect renames / added / dropped agents in the pills
 }
 
-// ---- Keyboard-fast pane switcher (Alt+1..9) + palette-first (Ctrl/⌘+K) -----
-// The first 9 panes in stable wall order get a jump key. Shared by the badge
-// painter and the shortcut handler so "what a tile shows" and "what Alt+N
-// jumps to" can never drift apart. CMX-116: the palette is the primary,
-// discoverable pane switcher — Alt+N stays as the power-user fallback.
-function _switcherOrder() {
-    return _orderedWids(_renderedWids).slice(0, 9);
-}
-
-// Paint (or hide) each tile's index badge. Cheap — only touches tiles whose
-// number actually changed — call freely after anything that can reorder the
-// wall (a build, a surgical append, a pane drop).
-function _refreshPaneIdx() {
-    if (!TERMINALS_ON || _termMode !== 'wall') return;
-    const order = _switcherOrder();
-    $('#term-stage').querySelectorAll('.grid-stack-item .gs-idx').forEach(el => {
-        if (!el.hidden) { el.hidden = true; el.textContent = ''; }
-    });
-    order.forEach((wid, i) => {
-        const el = _gridItemEl(wid);
-        const idx = el && el.querySelector('.gs-idx');
-        if (!idx) return;
-        idx.textContent = String(i + 1);
-        idx.hidden = false;
-    });
-}
-
-// Alt+1..9: jump straight to that pane, tmux-prefix style — no menu, no
-// typing. Ignored while the user is typing anywhere (an input) or while the
-// palette is open, so it never steals a keystroke. Shared with the
-// iframe-side wiring below so "what counts as a switch key" can't drift.
-// Keyed on e.code (physical key, e.g. "Digit1"), not e.key: on macOS, Option
-// is a dead-key/compose modifier, so Option+1 reports e.key as "¡" (never a
-// bare digit) even though the physical key pressed is the same "1".
-function _altSwitchWid(e) {
-    if (!TERMINALS_ON || _termMode !== 'wall' || !e.altKey || e.ctrlKey || e.metaKey) return null;
-    const m = /^Digit([1-9])$/.exec(e.code);
-    if (!m) return null;
-    return _switcherOrder()[Number(m[1]) - 1] || null;
-}
+// ---- Fast switch (Alt+1..9) + palette-first (Ctrl/⌘+K) ---------------------
+// CMX-85: Alt+N opens the Nth visible SIDEBAR row, and holding Alt shows those
+// numbers on the rows (nav.js `altSwitchKeydown`) — the sidebar is the one
+// numbering; the panes carry none. CMX-116: the palette is the primary,
+// discoverable switcher — Alt+N is the power-user fallback.
 
 // Ctrl/⌘+K — the same combo the parent chrome's palette shortcut uses
 // (nav.js). Matched the same way here so a pane's own keydown can trigger it.
@@ -2448,21 +2413,9 @@ function _isPaletteKey(e) {
     return (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'k' || e.key === 'K');
 }
 
-// Capture phase for consistency with the iframe-side listener below (which is
-// the load-bearing one — see its comment): harmless here since the parent
-// document IS the dispatch target for these keydowns either way.
-document.addEventListener('keydown', e => {
-    const target = e.target;
-    if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
-    const wid = _altSwitchWid(e);
-    if (!wid) return;
-    e.preventDefault();
-    focusPaneByWid(wid);
-}, true);
-
 // Once Alt+N focuses a pane, keystrokes land in that ttyd iframe's OWN
 // document — a same-origin iframe's keydown never bubbles to the parent, so
-// the listener above goes deaf to the next Alt+N (or Ctrl/⌘+K) until focus
+// nav.js's document listener goes deaf to the next Alt+N (or Ctrl/⌘+K) until focus
 // manually returns to the parent. Wire the same shortcuts inside each pane's
 // document too, as soon as it (re)loads. Unlike the parent, no INPUT/TEXTAREA
 // guard is needed: ttyd's DOM holds nothing but the terminal, and its own
@@ -2489,11 +2442,9 @@ function _wireIframeShortcuts(ifr) {
     try { doc = ifr.contentDocument; } catch (e) { return; }   // cross-doc guard
     if (!doc) return;
     doc.addEventListener('keydown', e => {
-        const wid = _altSwitchWid(e);
-        if (wid) {
+        if (altSwitchKeydown(e)) {
             e.preventDefault();
             e.stopImmediatePropagation();
-            focusPaneByWid(wid);
             return;
         }
         if (_isPaletteKey(e)) {
@@ -2502,6 +2453,8 @@ function _wireIframeShortcuts(ifr) {
             if (typeof openPalette === 'function') openPalette();
         }
     }, true);
+    // Releasing Alt inside a pane hides the sidebar numbers (CMX-85).
+    doc.addEventListener('keyup', e => { if (e.key === 'Alt') setAltHeld(false); }, true);
 }
 
 // 'load' doesn't bubble, but it still traverses ancestors during the CAPTURE
@@ -2569,7 +2522,6 @@ function dropTerminalPane(wid) {
     _forgetAutoDock(wid);   // the window is gone: its lazy-dock decision dies with it
     renderMinDock();        // taskbar lists every pane → refresh whenever one drops
     _refitWallForDock();    // taskbar may have shrunk a row → re-fit the wall above it
-    _refreshPaneIdx();      // Alt+N badges (keyboard-fast pane switcher)
     _syncTermSig();
 }
 
@@ -2712,24 +2664,16 @@ function _applyWallTileFrame(agents) {
 // Per-tile context-window bar pinned to the tile bottom edge (CMX-117: now the
 // subtle home for branch + context, folded together with the ambient fill strip
 // — previously two top-header chips PLUS this bar). Filled/coloured by
-// _applyTermContext from /api/agents/context, keyed by window_id. CMX-119
-// moved the pane № (Alt+N jump target) chip here, far-right after context;
-// CMX-124 pinned it to the FAR-LEFT instead (№ → branch → context). CMX-127
-// (Liav changed his mind: № reads better far-right) supersedes that — back to
-// branch → context → №, with branch+context LEFT-grouped and № pinned to the
-// bar's far-right edge via its own auto left-margin (see the CSS comment
-// above .gs-idx) — filled in and shown/hidden by _refreshPaneIdx, same as
-// before, just a different resting place; `draggable` gates it exactly like
-// paneHead's own wall-only controls (single mode has no Alt+N switcher to
-// target).
+// _applyTermContext from /api/agents/context, keyed by window_id. CMX-85
+// dropped the pane № chip that rode here: the sidebar rows carry the only
+// Alt+N numbering now.
 function _ctxBarHTML(wid, draggable) {
-    const idxNum = draggable ? `<span class="gs-idx" title="Alt+N to jump here" hidden></span>` : '';
     // The model chip rides in the bar on EVERY surface — wall tiles AND the
     // mobile single pane (Liav, 2026-07-25). It's context-poll-driven
     // (_applyTermContext fills it from c.model, guarded by `if (modelChip)`),
     // so it just needed to exist in the single-pane bar to light up.
     const modelChip = `<span class="gs-model" hidden></span>`;
-    // PR + cost stay wall-only (same gate as idxNum above): PR is agents-driven
+    // PR + cost stay wall-only: PR is agents-driven
     // (_applyWallTileFrame) and both add width the compact mobile bar doesn't
     // need. _applyTermContext writes cost, _applyWallTileFrame writes PR — never
     // both to the same field, so there is exactly one writer per chip.
@@ -2763,7 +2707,6 @@ function _ctxBarHTML(wid, draggable) {
       <span class="gs-branch" hidden></span>
       <span class="gs-ctx" hidden></span>
       ${filesChip}
-      ${idxNum}
       <i class="term-ctx-fill"></i>
     </div>`;
 }
@@ -2889,7 +2832,6 @@ function buildWall(wids) {
     _applyWallInteractivity();   // restore the locked (swap-on-drag) / auto-arrange / focus feel across reloads
     renderMinDock();
     _replayRoomAccents();   // rebuilt tiles: repaint room accents from the last poll
-    _refreshPaneIdx();      // Alt+N badges (keyboard-fast pane switcher)
 }
 
 // Surgically append new tiles to an existing wall WITHOUT touching the live
@@ -2933,7 +2875,6 @@ async function addWallTiles(wids) {
     renderMinDock();            // taskbar lists every pane → add the new chip(s)
     _refitWallForDock();        // taskbar may have grown a row → re-fit the wall above it
     _replayRoomAccents();       // a fresh tile already in a room wears its accent at once
-    _refreshPaneIdx();          // Alt+N badges (keyboard-fast pane switcher)
     _syncTermSig();
     return true;
 }

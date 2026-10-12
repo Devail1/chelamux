@@ -540,9 +540,11 @@ def utc_day_start(now: float) -> int:
 
 def _windows(dirs: list[str], now: float) -> dict:
     day0 = utc_day_start(now)
-    sessions = collect(dirs, day0)
     n = int(now)
     since_30m = n - WINDOW_30M_S
+    # Read back to whichever window starts first: in the half hour after UTC midnight the
+    # 30m window reaches into yesterday, and a scan from day0 alone would empty it.
+    sessions = collect(dirs, min(day0, since_30m))
     return {
         "30m": {"since": since_30m, "until": n,
                 "rows": aggregate(sessions, since_30m, n, 15)[:TOP_N]},

@@ -10,6 +10,15 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Added
+
+- **Hold Alt to number the sidebar sessions; Alt+1..9 opens that row** — like the Claude
+  desktop app's Ctrl-held numbers (Ctrl+1..9 is the browser's tab switch). The numbers go on
+  the first nine visible session rows, top to bottom; collapsed groups and the Archived
+  section are skipped. Alt+N now works in every mode, not only the wall, and from inside a
+  focused terminal pane. The wall panes' corner numbers are gone — the sidebar's is the one
+  numbering. (CMX-85, #657)
+
 ## [0.15.0] — 2026-10-11
 
 ### Added

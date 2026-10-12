@@ -2751,7 +2751,9 @@ def api_sidebar_unarchive():
 @require_auth
 def api_sidebar_archive_migrate():
     """One-time import of a browser's old localStorage archive (pre-CMX-75). Those keys
-    only ever meant HIDE, so they are imported as hidden — nothing is closed on a page load."""
+    only ever meant HIDE, so they are imported as hidden — nothing is closed on a page load.
+    Each is stamped with the current tmux epoch (:func:`chela.sidebar_archive.hide`), so a
+    ``w:@N`` from before a tmux restart never hides the window that recycles that id."""
     keys = _keys_from_body()
     if keys is None:
         return jsonify({"ok": False, "error": "keys must be a non-empty list of item keys"}), 400
