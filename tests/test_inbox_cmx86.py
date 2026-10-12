@@ -427,6 +427,74 @@ def test_the_orchestrators_own_resume_is_recorded_as_its_own(monkeypatch):
     assert hold.last_release()["orchestrator"] is True
 
 
+def test_the_tick_reads_the_release_record_someone_elses_release_is_released_not_expired():
+    """🔴 GUARD (round 5): the tick must feed ``hold.last_release()`` to the hold events — a
+    release by the dashboard is a 'released' notice, never mislabelled 'expired'; the
+    orchestrator's own --resume stays silent."""
+    hold.take(ttl_seconds=600, by=ORCH)
+    inbox.tick({}, runs=[])                                  # the hold is seen live
+    hold.release(by="dashboard", orchestrator=False)
+    inbox.tick({}, runs=[])
+    assert [e["kind"] for e in _queued() if e["kind"].startswith("dispatch_hold")] == [
+        "dispatch_hold_released"]
+    assert _queued("dispatch_hold_released")[0]["payload"]["released_by"] == "dashboard"
+    # ...and the orchestrator's own release of the NEXT hold is an echo: nothing new queued.
+    hold.take(ttl_seconds=600, by=ORCH)
+    inbox.tick({}, runs=[])
+    hold.release(by=ORCH, orchestrator=True)
+    inbox.tick({}, runs=[])
+    assert len([e for e in _queued() if e["kind"].startswith("dispatch_hold")]) == 1
+
+
+def test_a_humans_resume_from_a_terminal_reaches_the_orchestrator(monkeypatch):
+    """🔴 GUARD (round 5): ``chela dispatch --resume`` from a window that is NOT the registered
+    orchestrator is recorded as not-the-orchestrator, and so is a notice."""
+    _as(monkeypatch, HUMAN)
+    hold.take(ttl_seconds=600, by=ORCH)
+    inbox.tick({}, runs=[])
+    main.cmd_dispatch_hold(Namespace(resume=True, pause=False, hold_status=False))
+    assert hold.last_release()["orchestrator"] is False
+    assert hold.last_release()["by"] == HUMAN
+    inbox.tick({}, runs=[])
+    assert len(_queued("dispatch_hold_released")) == 1
+    assert _queued("dispatch_hold_expired") == []
+
+
+def test_a_resume_still_releases_when_the_inbox_cannot_say_who_is_calling(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("inbox store unreadable")
+    monkeypatch.setattr(inbox, "caller_is_orchestrator", boom)
+    _as(monkeypatch, ORCH)
+    hold.take(ttl_seconds=600, by=ORCH)
+    main.cmd_dispatch_hold(Namespace(resume=True, pause=False, hold_status=False))
+    assert hold.read() is None
+    assert hold.last_release()["orchestrator"] is False      # unknown never reads as "mine"
+
+
+def test_a_release_that_cannot_be_recorded_still_releases(monkeypatch, tmp_path):
+    held = hold.take(ttl_seconds=600, by=ORCH)
+    monkeypatch.setattr(hold, "release_path", lambda: tmp_path / "no-such-dir" / "r.json")
+    assert hold.release(by="x").created_at == held.created_at
+    assert hold.read() is None
+
+
+def test_an_announced_edge_that_never_happens_cannot_swallow_a_real_one_later():
+    """🔴 GUARD (round 5): the TTL is BOUNDED. An edge announced 30 minutes ago and never
+    seen is forgotten, so a REAL edge to that status now is a notice."""
+    expected = {"T9": {"status": "closed", "why": inbox.ORCH_ECHO, "ts": time.time() - 1800}}
+    events, _ = inbox.run_events([_run("closed")], {"T9": "needs_human"}, expected=expected)
+    assert [e["kind"] for e in events if not e.get("silent")] == ["run_was_closed"]
+    assert "T9" not in expected
+
+
+def test_a_fresh_announcement_still_silences_its_echo():
+    """The other side of the TTL: a 60s-old announcement is live, the edge is an echo."""
+    expected = {"T9": {"status": "closed", "why": inbox.ORCH_ECHO, "ts": time.time() - 60}}
+    events, _ = inbox.run_events([_run("closed")], {"T9": "needs_human"}, expected=expected)
+    assert [e["kind"] for e in events if not e.get("silent")] == []
+    assert "T9" not in expected
+
+
 def test_hold_expiry_through_the_tick_is_one_notice(monkeypatch):
     held = hold.take(ttl_seconds=1, by=ORCH)
     inbox.tick({}, runs=[])                          # seen live
