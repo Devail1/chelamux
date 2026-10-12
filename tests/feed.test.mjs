@@ -51,6 +51,17 @@ test('a gate is a gate, a tool call is the firehose, an unknown type is shown', 
     // surfaces. Unmapped falls to `other` and the push that says "this shipped unjudged"
     // reads as an anonymous `·`, indistinguishable from noise.
     assert.equal(classOf('run_unjudged_merged'), 'run');
+    // CMX-86: the orchestrator inbox's new notices — run events stay in the Runs filter;
+    // a lapsed/released dispatch hold is lifecycle. Unmapped, each would render as a `·`.
+    assert.equal(classOf('run_judge_not_started'), 'run');
+    assert.equal(classOf('run_reopened'), 'run');
+    assert.equal(classOf('run_was_closed'), 'run');
+    assert.equal(classOf('run_ci_red'), 'run');
+    assert.equal(classOf('run_pr_conflicting'), 'run');
+    assert.equal(classOf('run_stuck'), 'run');
+    assert.equal(classOf('run_marker_unread'), 'run');
+    assert.equal(classOf('dispatch_hold_expired'), 'lifecycle');
+    assert.equal(classOf('dispatch_hold_released'), 'lifecycle');
     assert.equal(classOf('daemon_start'), 'lifecycle');
     // An inbox that cannot deliver is a GATE: work is stuck until a human acts, and it
     // stayed invisible for a whole outage (CMX-77). `other` would render it as a `·`.

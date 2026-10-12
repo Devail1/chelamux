@@ -2220,6 +2220,28 @@ def pr_live_head_sha(pr_url: str | None, repo_dir: str | None) -> str | None:
     return (data.get("headRefOid") or "").strip() or None
 
 
+def _inbox_ci_red(row, sha: str, ci: CIStatus | None, log_tail: str, *,
+                  sent_back: bool) -> None:
+    """CMX-86: the orchestrator's ``run_ci_red`` notice (:func:`chela.inbox.ci_red`) — the
+    failing job and first failing line, once per red head. Best-effort: the inbox is
+    advisory, and a failure here must never cost the verdict or the tick."""
+    from chela import inbox
+    try:
+        inbox.ci_red(dict(row), sha=sha, failing=ci.failing if ci else (),
+                     run_ids=ci.run_ids if ci else (), log_tail=log_tail, sent_back=sent_back)
+    except Exception:  # noqa: BLE001
+        log.warning("CI: could not queue the inbox notice for %s", row["task_id"], exc_info=True)
+
+
+def _inbox_forget_ci_edge(task_id: str) -> None:
+    """The rework :func:`_inbox_ci_red` announced did not happen — its edge is news again."""
+    from chela import inbox
+    try:
+        inbox.forget_edge(task_id, inbox.CI_RED_ECHO)
+    except Exception:  # noqa: BLE001
+        log.warning("CI: could not retract the inbox edge for %s", task_id, exc_info=True)
+
+
 def _failing_log_tail(repo_dir: str | None, run_ids: tuple[str, ...]) -> str:
     """The tail of the failing CI log — fetched ONCE, on the transition into red.
 
@@ -5674,6 +5696,7 @@ def tick(workflow_path: str | Path) -> dict:
                     (sha, streak, task_id),
                 )
                 conn.commit()
+                _inbox_ci_red(row, sha, ci, log_tail, sent_back=False)
                 infra_body = _ci_infra_verdict_body(ci, log_tail, row["pr_url"], streak, cap)
                 posted, detail = _post_pr_comment(row["pr_url"], wf_dir, infra_body)
                 if not posted:
@@ -5714,9 +5737,13 @@ def tick(workflow_path: str | Path) -> dict:
             # whole rework budget on a single commit — the very bug this guard exists for.
             conn.execute("UPDATE runs SET ci_failed_sha=? WHERE task_id=?", (sha, task_id))
             conn.commit()
+            # CMX-86: tell the orchestrator NOW, with the failing job and line — and mark the
+            # rework edge below as already said, so it does not hear the same red twice.
+            _inbox_ci_red(row, sha, ci, log_tail, sent_back=True)
             try:
                 result = request_changes(task_id, body)
             except sqlite3.Error as e:
+                _inbox_forget_ci_edge(task_id)
                 # request_changes opens its OWN connection, and a busy DB can refuse it. Two
                 # things must not happen: the tick must not die (it still has merges to
                 # reconcile and a queue to dispatch), and the red must not be lost. A refused
@@ -5735,6 +5762,7 @@ def tick(workflow_path: str | Path) -> dict:
             if not result.get("ok"):
                 # The CAS refused it — the row moved (a human merged it, or a reviewer got
                 # there first). Nothing was written, and nothing should be.
+                _inbox_forget_ci_edge(task_id)
                 log.info("CI: %s is red, but the verdict was not written: %s",
                          task_id, result.get("error"))
                 continue

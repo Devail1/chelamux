@@ -66,6 +66,9 @@ from chela import config
 log = logging.getLogger(__name__)
 
 HOLD_FILE_NAME = "dispatch-hold.json"
+# CMX-86: who released the last hold, so the decisions inbox can tell an orchestrator's own
+# `--resume` (silent) from a TTL lapse or someone else's release (a notice).
+RELEASE_FILE_NAME = "dispatch-hold-released.json"
 
 # Long enough for a human (or an orchestrator agent) to review a merge and rewrite the
 # queue, short enough that forgetting to release it costs one tick's worth of patience
@@ -182,11 +185,16 @@ def _default_by() -> str:
     return os.environ.get("CHELA_WID") or f"pid {os.getpid()}"
 
 
-def release() -> Hold | None:
+def release(by: str = "", *, orchestrator: bool = False) -> Hold | None:
     """Resume claiming. Returns the hold that was released, or None if none was in force.
 
     Idempotent — releasing an already-released hold is a no-op, so the orchestrator can
     (and should) release unconditionally in its own error path.
+
+    CMX-86: a release is RECORDED (:func:`last_release`) — who, and whether it was the
+    orchestrator — keyed on the released hold's ``created_at``. A hold that vanishes with no
+    matching record lapsed by its TTL; the inbox tells those apart. Best-effort: a record we
+    cannot write costs a spurious "expired" notice, never the release itself.
     """
     held = read()
     try:
@@ -196,7 +204,29 @@ def release() -> Hold | None:
     except OSError as e:
         log.warning("could not remove the dispatch hold at %s: %s", path(), e)
         return None
+    if held is not None:
+        try:
+            release_path().write_text(json.dumps({
+                "created_at": held.created_at, "by": by.strip() or _default_by(),
+                "orchestrator": bool(orchestrator), "ts": time.time(),
+            }) + "\n", encoding="utf-8")
+        except OSError as e:
+            log.warning("could not record the dispatch-hold release at %s: %s",
+                        release_path(), e)
     return held
+
+
+def release_path() -> Path:
+    return config.CHELA_DIR / RELEASE_FILE_NAME
+
+
+def last_release() -> dict | None:
+    """The last recorded release (``created_at``/``by``/``orchestrator``/``ts``), or None."""
+    try:
+        data = json.loads(release_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def read() -> Hold | None:

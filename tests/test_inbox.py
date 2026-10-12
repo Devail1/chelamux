@@ -52,6 +52,17 @@ def no_live_runs(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def awaiting_review_notices_on(monkeypatch):
+    """CMX-86 made the plain ``run_review`` notice SILENT by default (logged, not queued) —
+    the orchestrator merges on the judge's verdict, so "awaiting review" never asked it for
+    anything. These tests use ``run_review`` as the vehicle for delivery, staleness and
+    attribution mechanics that every queued run event shares, so they opt back in
+    (``CHELA_INBOX_NOTIFY_AWAITING_REVIEW``). The default itself is pinned in
+    ``test_inbox_cmx86.py``."""
+    monkeypatch.setenv("CHELA_INBOX_NOTIFY_AWAITING_REVIEW", "true")
+
+
+@pytest.fixture(autouse=True)
 def event_log_file(tmp_path, monkeypatch):
     """Never the real ``~/.chela/events.jsonl``.
 
