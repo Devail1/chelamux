@@ -14,6 +14,7 @@
 //
 //   1. 🔴 Alt down ⇒ 1..N on the visible rows in draw order; Alt up / blur ⇒ gone.
 //   2. 🔴 A collapsed group's rows are skipped — by the numbers AND by Alt+N.
+//      So are the Archived section's, even when it is drawn open.
 //   3. 🔴 Alt+2 opens the 2nd visible row's session.
 //   4. 🔴 Typing in a field, the palette open, or Ctrl/⌘ held with Alt ⇒ Alt+N does nothing.
 //
@@ -136,6 +137,35 @@ test('a collapsed group\'s rows are skipped by the numbers and by Alt+N', () => 
     altDigit(3);
     assert.equal(activeRow(), visible[2].dataset.agent,
         'Alt+3 must open the 3rd VISIBLE row, skipping the collapsed group\'s rows');
+});
+
+test('an OPEN Archived section\'s rows are skipped by the numbers and by Alt+N', async () => {
+    // A hidden LIVE row: still a real window, so its archived row is drawn with
+    // data-agent like any other, in a section that is NOT collapsed — only the
+    // `.side-archived` exclusion keeps it out (without it, it would take number 5).
+    const hiddenRow = ROWS[0];
+    server.st.hidden.push(`w:${hiddenRow.window_id}`);
+    await nav.refreshArchive();
+    window.chela.toggleShowArchived();       // View ▸ Status ▸ All — the section is drawn
+    window.chela.toggleArchivedSection();    // …and OPEN, so .side-group.collapsed cannot hide it
+    const sec = host().querySelector('.side-archived');
+    assert.ok(sec && !sec.classList.contains('collapsed'), 'fixture: the Archived section must be drawn open');
+    const archivedRows = [...sec.querySelectorAll('.agent-row[data-agent]')];
+    assert.deepEqual(archivedRows.map(r => r.dataset.agent), [hiddenRow.name],
+        'fixture: the hidden window must be drawn as an Archived row with data-agent, or the skip is untested');
+    const visible = drawn().filter(r => !r.closest('.side-archived'));
+    assert.equal(visible.length, 4, 'fixture: four rows outside Archived');
+
+    altDown();
+    assert.deepEqual(badges(), visible.map((r, i) => [r.dataset.agent, String(i + 1)]),
+        'an Archived row must get no number, and must not use one up');
+
+    // The re-renders above re-mark whatever row an earlier test opened, so compare
+    // against what is active now rather than against null.
+    const before = activeRow();
+    assert.notEqual(before, hiddenRow.name);
+    altDigit(5);
+    assert.equal(activeRow(), before, 'Alt+5 must not reach the Archived row (only four visible rows)');
 });
 
 test('Alt+N does nothing while typing in a field, with the palette open, or with Ctrl held', () => {
