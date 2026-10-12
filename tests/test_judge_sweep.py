@@ -643,8 +643,9 @@ def test_js_strings_comments_and_escapes():
         '   * if (a < b) {',                       # a block-comment line
         'const c = "if (z) { return 0; }";',       # an `if`/`return` inside a string
         'if (a &&',                                # a multi-line condition
+        'const d = "a\\"b"; // c < d',            # an escaped quote, then a real comment
     ])
-    muts = sweep.js_mutations("m.js", src, {1, 2, 3, 4, 5, 6, 99})
+    muts = sweep.js_mutations("m.js", src, {1, 2, 3, 4, 5, 6, 7, 99})
     got = sorted((m.line, m.after) for m in muts)
     assert got == [
         (1, 'const a = "x // y" + (p >= q);'),
