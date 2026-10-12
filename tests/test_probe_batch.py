@@ -31,7 +31,8 @@ from pathlib import Path
 
 import pytest
 
-from chela import agent_manager, config, discovery, epoch, inbox, probecache, sessions, transcripts
+from chela import (agent_manager, config, discovery, epoch, inbox, probecache, sandbox_status,
+                   sessions, transcripts)
 from chela.dashboard import app as dash
 
 TMUX_BIN = shutil.which("tmux")
@@ -352,6 +353,12 @@ def test_spawns_per_poll_do_not_grow_with_the_fleet(fleet, monkeypatch, tmp_path
     fleet.settle()
     _seed(fleet, monkeypatch, tmp_path)
     client = dash.app.test_client()
+    # The sandboxed-window verdict (CMX-436) is its OWN per-window probe, amortized by a
+    # 15 s cache, not part of this batch. Warm it explicitly: this test used to pass only
+    # while earlier tests' entries for the same wids were still fresh (CMX-105).
+    monkeypatch.setattr(sandbox_status, "_cache", {})
+    monkeypatch.setattr(sandbox_status, "CHECK_TTL_S", 3600.0)
+    assert client.get("/api/agents").status_code == 200
     spawns = _Spawns()
     monkeypatch.setattr(subprocess.Popen, "__init__", spawns(subprocess.Popen.__init__))
     for ep in ENDPOINTS:
