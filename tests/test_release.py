@@ -9,6 +9,7 @@ real override store under the sandboxed `CHELA_DIR` (conftest). No live tmux or 
 from __future__ import annotations
 
 import re
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -1462,9 +1463,10 @@ def test_the_release_tests_command_leaves_no_pytest_cache(monkeypatch, tmp_path)
     assert cmd[:7] == ["uv", "run", "--frozen", "--extra", "dev", "python", "-m"]
     assert seen["kw"]["cwd"] == tmp_path and seen["kw"]["timeout"] == 900
     assert "VIRTUAL_ENV" not in seen["kw"]["env"]
+    assert seen["kw"]["env"] is not None and seen["kw"]["env"]["PATH"] == os.environ["PATH"]
+    assert seen["kw"]["capture_output"] is True and seen["kw"]["text"] is True
     assert cmd[-len(release.RELEASE_TESTS):] == list(release.RELEASE_TESTS)
 
-    import os
     import sys
     clean = {"PATH": os.environ["PATH"], "HOME": str(tmp_path)}      # no ambient pytest/venv
     for rel in release.RELEASE_TESTS:
@@ -2046,3 +2048,124 @@ def test_each_request_notification_names_its_own_kind_in_text_and_title(world, s
     rel = _prepare(world)
     assert sent == [(f"{rel['question']}\n\n{rel['hint']}", "chela: approve release v0.2.0?")]
     assert rel["question"].startswith("Release v0.2.0 — ") and "override" not in rel["question"]
+
+
+# --- CMX-87 round 10: every subprocess seam, pinned on its SUCCESS path -------------------
+
+def _spy_run(monkeypatch):
+    seen = []
+
+    def spy(cmd, **kw):
+        seen.append((cmd, kw))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(release.subprocess, "run", spy)
+    return seen
+
+
+def test_uv_lock_runs_in_the_release_worktree_with_its_own_environment(monkeypatch, tmp_path):
+    """🔴 GUARD: `uv lock` on a real run: exact argv, cwd = the release worktree, a 600s
+    timeout, captured text output, and an env WITHOUT the caller's VIRTUAL_ENV (mutation
+    `env=None` would inherit it)."""
+    seen = _spy_run(monkeypatch)
+    monkeypatch.setenv("VIRTUAL_ENV", "/caller/.venv")
+    monkeypatch.setenv("CMX87_MARKER", "kept")
+    assert _REAL_UV_LOCK(tmp_path).returncode == 0
+    (cmd, kw), = seen
+    assert cmd == ["uv", "lock"]
+    assert kw["cwd"] == tmp_path and kw["timeout"] == 600
+    assert kw["capture_output"] is True and kw["text"] is True
+    assert kw["env"] is not None and "VIRTUAL_ENV" not in kw["env"]
+    assert kw["env"]["CMX87_MARKER"] == "kept"          # the rest of the environment is kept
+
+
+def test_the_caller_environment_is_never_mutated_by_the_uv_env(monkeypatch):
+    monkeypatch.setenv("VIRTUAL_ENV", "/caller/.venv")
+    assert "VIRTUAL_ENV" not in release._uv_env()
+    assert os.environ["VIRTUAL_ENV"] == "/caller/.venv"
+
+
+def test_the_gh_release_lookup_argv_and_timeout(monkeypatch):
+    """🔴 GUARD: `gh release view` — exact argv (tag, --repo slug, url query), 30s timeout."""
+    seen = []
+
+    def spy(cmd, **kw):
+        seen.append((cmd, kw))
+        return subprocess.CompletedProcess(cmd, 0, "https://github.com/o/r/x\n", "")
+    monkeypatch.setattr(release.subprocess, "run", spy)
+    assert _REAL_GH_RELEASE_URL({"repo_slug": "o/r", "tag": "v0.2.0"}) == "https://github.com/o/r/x"
+    (cmd, kw), = seen
+    assert cmd == ["gh", "release", "view", "v0.2.0", "--repo", "o/r", "--json", "url",
+                   "-q", ".url"]
+    assert kw["timeout"] == 30 and kw["capture_output"] is True and kw["text"] is True
+
+
+def test_git_runs_with_c_cwd_captured_text_and_the_default_timeout(monkeypatch, tmp_path):
+    seen = _spy_run(monkeypatch)
+    release._git(tmp_path, "status", "-s")
+    release._git(tmp_path, "fetch", timeout=77)
+    assert seen[0] == (["git", "-C", str(tmp_path), "status", "-s"],
+                       {"capture_output": True, "text": True, "timeout": 120})
+    assert seen[1][0] == ["git", "-C", str(tmp_path), "fetch"] and seen[1][1]["timeout"] == 77
+
+
+@pytest.mark.parametrize("call,argv_tail,timeout", [
+    (lambda d: release._fetch(d),
+     ["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main",
+      "+refs/heads/dev:refs/remotes/origin/dev"], 300),
+    (lambda d: release._remote_tag(d, "v0.2.0"),
+     ["ls-remote", "--tags", "origin", "refs/tags/v0.2.0"], 60),
+    (lambda d: release.remote_dev_head({"git_dir": str(d)}, max_age=0),
+     ["ls-remote", "origin", "refs/heads/dev"], 60),
+    (lambda d: release._rev(d, "HEAD"), ["rev-parse", "-q", "--verify", "HEAD^{commit}"], 120),
+    (lambda d: release._is_ancestor(d, "a", "b"), ["merge-base", "--is-ancestor", "a", "b"], 120),
+    (lambda d: release._repo_slug(d), ["remote", "get-url", "origin"], 120),
+])
+def test_each_git_seam_passes_its_exact_argv_and_timeout(monkeypatch, tmp_path, call,
+                                                         argv_tail, timeout):
+    """🔴 GUARD: every git call outside the `world` flow, on the SUCCESS path."""
+    release._dev_head_cache.clear()
+    seen = _spy_run(monkeypatch)
+    call(tmp_path)
+    (cmd, kw), = seen
+    assert cmd == ["git", "-C", str(tmp_path), *argv_tail]
+    assert kw["timeout"] == timeout and kw["capture_output"] is True and kw["text"] is True
+
+
+def test_complete_pushes_main_tag_dev_in_order_plain_with_300s(world, monkeypatch):
+    """🔴 GUARD: the three pushes' exact argv and timeout on the success path (no `+`,
+    no --force)."""
+    calls = []
+    real = release._git
+
+    def spy(cwd, *args, **kw):
+        if args and args[0] == "push":
+            calls.append((str(cwd), args, kw))
+        return real(cwd, *args, **kw)
+    monkeypatch.setattr(release, "_git", spy)
+    out = _prepare(world)
+    overrides.set_fields(out["request_id"], state=overrides.MERGING)
+    res = release.complete(overrides.load(out["request_id"]), "terminal:op")
+    assert res["ok"] is True
+    sha, tag = res["merge_commit_sha"], release.tag_name("0.2.0")
+    assert [c[1] for c in calls] == [
+        ("push", "--quiet", "origin", f"{sha}:refs/heads/main"),
+        ("push", "--quiet", "origin", f"refs/tags/{tag}:refs/tags/{tag}"),
+        ("push", "--quiet", "origin", f"{sha}:refs/heads/dev")]
+    assert all(c[2] == {"timeout": 300} for c in calls)
+    assert len({c[0] for c in calls}) == 1
+
+
+def test_a_uv_lock_recording_only_another_package_at_the_new_version_refuses(world,
+                                                                             monkeypatch):
+    """🔴 GUARD (deterministic): the lock changes, and ANOTHER package (click) sits at the
+    new version, but THIS project (demo) does not ⇒ refuse. Own fixture, no shared state."""
+    def lock_other(wt):
+        (wt / "uv.lock").write_text(
+            'version = 1\n\n[[package]]\nname = "click"\nversion = "0.2.0"\n\n'
+            '[[package]]\nname = "demo"\nversion = "0.1.5"\nsource = { editable = "." }\n')
+        return _ok()
+    monkeypatch.setattr(release, "_uv_lock", lock_other)
+    out = _prepare(world)
+    assert out["ok"] is False and "version mismatch" in out["error"]
+    assert "demo 0.2.0" in out["error"]
+    _assert_refused_and_clean(world, out, why="version mismatch")
