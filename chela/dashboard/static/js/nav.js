@@ -94,8 +94,10 @@ function toggleSidebar(force) {
 // whenever you use it is not a sidebar.
 function closeSidebar() { if (_isPhoneWidth()) toggleSidebar(false); }
 
-// Restore the persisted desktop state before first paint (mobile CSS ignores the
-// class, so a phone that inherits it from a desktop session is unaffected).
+// Restore the persisted desktop state (mobile CSS ignores the class, so a phone
+// that inherits it from a desktop session is unaffected). The class itself is
+// already set before first paint by index.html's inline <body> script (CMX-89 —
+// a module runs too late for that); this keeps the toggle's aria in step.
 if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1') {
     document.body.classList.add('sidebar-collapsed');
     const _menuBtn = document.getElementById('btn-menu');

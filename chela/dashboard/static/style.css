@@ -535,6 +535,12 @@ body {
    measures #term-stage's top live, so the Wall still fills to the bottom. */
 .term-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
 #term-new-shell { margin-left: auto; }
+/* CMX-89: a phone has no row controls (the "+" FAB starts sessions) and
+   renderTerminals() hides this button there — but only once the module graph
+   has loaded, so without this rule it painted first and then vanished. */
+@media (max-width: 768px) {
+    #term-new-shell { display: none; }
+}
 @media (min-width: 769px) {
     .term-toolbar {
         align-items: flex-end;
