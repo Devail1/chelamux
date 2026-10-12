@@ -769,6 +769,7 @@ def test_a_failed_worktree_add_refuses(world, monkeypatch):
 
 
 @pytest.mark.parametrize("step,why", [(("add", "-A"), "`git add` failed"),
+                                      (("status", "--porcelain"), "worktree is dirty"),
                                       (("commit",), "`git commit` failed"),
                                       (("tag", "-a"), "`git tag` failed")])
 def test_a_failed_git_step_refuses_and_leaves_nothing(world, monkeypatch, step, why):
@@ -778,6 +779,72 @@ def test_a_failed_git_step_refuses_and_leaves_nothing(world, monkeypatch, step, 
     assert overrides.all_requests() == [] and _release_worktrees() == []
     assert _local(world, "refs/tags/v0.2.0") is None
     assert _local(world, "refs/heads/chela-release/v0.2.0") is None
+
+
+def _track_other_py(world):
+    (world.work / "other.py").write_text("x = 1\n" * 20)
+    _g(world.work, "add", "other.py")
+    _g(world.work, "commit", "-q", "-m", "other")
+    _g(world.work, "push", "-q", "origin", "dev")
+
+
+def _rename_step(monkeypatch, src: str, dst: str):
+    def mv(wt):
+        _g(wt, "mv", src, dst)
+        return _ok()
+    monkeypatch.setattr(release, "_release_tests", mv)
+
+
+def test_a_rename_from_outside_into_the_release_paths_refuses_naming_it(world, monkeypatch):
+    """🔴 GUARD: `R  other.py -> changelog.d/x.md` has ONE end outside RELEASE_PATHS — it
+    would ship other.py's deletion. Every end must be a release path (all, not any)."""
+    _track_other_py(world)
+    _rename_step(monkeypatch, "other.py", "changelog.d/x.md")
+    out = _prepare(world)
+    _assert_refused_and_clean(world, out, why="dirty")
+    assert "other.py" in out["error"]
+
+
+def test_a_rename_from_the_release_paths_to_outside_refuses_naming_it(world, monkeypatch):
+    _rename_step(monkeypatch, "changelog.d/README.md", "other.py")
+    out = _prepare(world)
+    _assert_refused_and_clean(world, out, why="dirty")
+    assert "other.py" in out["error"]
+
+
+def test_a_rename_inside_the_release_paths_is_allowed(world, monkeypatch):
+    _rename_step(monkeypatch, "changelog.d/README.md", "changelog.d/NOTES.md")
+    out = _prepare(world)
+    assert out["ok"] is True, out
+
+
+def test_a_quoted_outside_path_refuses(world, monkeypatch):
+    """git prints a name with spaces QUOTED; a quoted path must still read as outside."""
+    def stray(wt):
+        (wt / "stray file.txt").write_text("x")
+        return _ok()
+    monkeypatch.setattr(release, "_release_tests", stray)
+    _assert_refused_and_clean(world, _prepare(world), why="dirty")
+
+
+def test_a_quoted_rename_into_the_release_paths_refuses(world, monkeypatch):
+    (world.work / "my other.py").write_text("x = 1\n" * 20)
+    _g(world.work, "add", "my other.py")
+    _g(world.work, "commit", "-q", "-m", "spaced")
+    _g(world.work, "push", "-q", "origin", "dev")
+    _rename_step(monkeypatch, "my other.py", "changelog.d/x.md")
+    _assert_refused_and_clean(world, _prepare(world), why="dirty")
+
+
+@pytest.mark.xfail(strict=True, reason="PRODUCTION FINDING: porcelain QUOTES a name with "
+                   "spaces, so `_in_release_paths('\"changelog.d/a b.md\"')` is False — a "
+                   "legitimate in-release file is refused (fail-closed, never a slip-through)")
+def test_a_quoted_path_inside_the_release_paths_is_allowed(world, monkeypatch):
+    def spaced(wt):
+        (wt / "changelog.d" / "a b.md").write_text("x")
+        return _ok()
+    monkeypatch.setattr(release, "_release_tests", spaced)
+    assert _prepare(world)["ok"] is True
 
 
 def test_an_unrecordable_request_refuses_and_leaves_nothing(world, monkeypatch):
