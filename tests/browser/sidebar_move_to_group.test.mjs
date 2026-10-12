@@ -61,6 +61,12 @@ describe(`CMX-74 phone ${W}×${H}, Group by Custom groups: Move to group… work
     const ready = setup(async () => {
         ({ page, context } = await openDashboard(browser, { width: W, height: H, storage: CUSTOM, touch: true }));
         await page.waitForSelector(ROW, { state: 'attached', timeout: 15000 });
+        // The row can be drawn once by Folder before the server layout (the imported
+        // Custom groups view) has answered — wait for the Custom groups draw, so the
+        // test reads the layout it set up, not that first frame (red on CI, 2026-10-12).
+        // Only Custom groups draws an "Ungrouped" group; Folder would draw "x" (cwd /p/x).
+        await page.waitForFunction(() => [...document.querySelectorAll('.side-group .group-name')]
+            .some(n => n.textContent === 'Ungrouped'), null, { timeout: 15000 });
         await openDrawer(page);
     });
     after(() => context && context.close());

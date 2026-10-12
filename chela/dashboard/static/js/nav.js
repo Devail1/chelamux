@@ -181,6 +181,101 @@ function selectAgent(name) {
     showAgentDetail(name);
 }
 
+// --- Alt fast switch (CMX-85) ------------------------------------------------
+// Like the Claude desktop app's Ctrl-held numbers, with Alt (Ctrl+1..9 is the
+// browser's own tab switch, which a page cannot take): HOLDING Alt shows 1..9 on
+// the first nine visible session rows, top to bottom as drawn, and Alt+N opens
+// the Nth. The sidebar is the ONE numbering — the wall panes carry none — so
+// "what a row shows" and "what Alt+N opens" are both read off _altRows().
+//
+// Visible = a row in #sidebar-agents (Needs you + the folder groups), minus a
+// collapsed group's rows and the Archived section. Recent sessions live in
+// another list and are not sessions you can switch to.
+function _altRows() {
+    const host = document.getElementById('sidebar-agents');
+    if (!host) return [];
+    return [...host.querySelectorAll('.agent-row[data-agent]')]
+        .filter(r => !r.closest('.side-group.collapsed, .side-archived'))
+        .slice(0, 9);
+}
+
+let _altHeld = false;
+function _paintAltNums() {
+    const host = document.getElementById('sidebar-agents');
+    if (host) host.querySelectorAll('.ar-altnum').forEach(el => el.remove());
+    if (!_altHeld) return;
+    _altRows().forEach((row, i) => {
+        const b = document.createElement('span');
+        b.className = 'ar-altnum';
+        b.setAttribute('aria-hidden', 'true');
+        b.textContent = String(i + 1);
+        row.appendChild(b);
+    });
+}
+function setAltHeld(on) {
+    on = !!on;
+    if (on === _altHeld) return;
+    _altHeld = on;
+    _paintAltNums();
+}
+
+// Alt+1..9's row number (1..9), or 0. Keyed on e.code (the physical key,
+// "Digit1"), not e.key: macOS Option is a compose modifier, so Option+1 reports
+// e.key "¡". Ctrl/⌘ held too is someone else's shortcut.
+function altRowNumber(e) {
+    if (!e.altKey || e.ctrlKey || e.metaKey) return 0;
+    const m = /^Digit([1-9])$/.exec(e.code || '');
+    return m ? Number(m[1]) : 0;
+}
+
+// A bare Alt press — the "hold to see the numbers" gesture. Any other modifier
+// held with it is a different chord.
+function isAltOnly(e) {
+    return e.key === 'Alt' && !e.ctrlKey && !e.metaKey && !e.shiftKey;
+}
+
+// Open the session on the Nth visible row — what a click on it does, except a
+// pane already open on the wall is focused, never minimized: Alt+N OPENS.
+// Returns whether a row was there to open.
+function openSidebarRow(n) {
+    const row = _altRows()[n - 1];
+    if (!row) return false;
+    const name = row.dataset.agent;
+    if (TERMINALS_ON && typeof focusPaneByWid === 'function') {
+        const a = (_agentsCache || []).find(x => x.name === name);
+        if (a && a.window_id) {
+            if (!isWallVisible()) setTermMode('wall');
+            focusPaneByWid(a.window_id);
+            return true;
+        }
+    }
+    showAgentDetail(name);
+    return true;
+}
+
+// The ONE keydown handler for both documents: the dashboard's own (below) and
+// each terminal pane's (terminals.js `_wireIframeShortcuts`, whose keydowns
+// never reach this document). Returns true when it consumed the key.
+function altSwitchKeydown(e) {
+    if (isAltOnly(e)) { setAltHeld(true); return false; }   // Alt itself must still reach a pane
+    const n = altRowNumber(e);
+    if (!n) return false;
+    return openSidebarRow(n);
+}
+
+// Capture phase, so a handler further down cannot swallow Alt+N first. Typing
+// in a field (the palette's input included) keeps every keystroke.
+document.addEventListener('keydown', e => {
+    const t = e.target;
+    if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+    const pal = document.getElementById('palette');
+    if (pal && pal.classList.contains('open')) return;
+    if (altSwitchKeydown(e)) e.preventDefault();
+}, true);
+document.addEventListener('keyup', e => { if (e.key === 'Alt') setAltHeld(false); }, true);
+window.addEventListener('blur', () => setAltHeld(false));
+document.addEventListener('visibilitychange', () => setAltHeld(false));
+
 // Focus a single agent in the canvas (metadata detail / transcript).
 function showAgentDetail(name) {
     setCurrentTab('agent-detail');
@@ -397,10 +492,12 @@ function _groupOrder() { return _layout.order; }
 // --- The archive (CMX-75) — SERVER state, not this browser's -----------------
 // chela/sidebar_archive.py, behind /api/sidebar/archive: `hidden` (row keys hidden only —
 // a settled dispatched run) and `sessions` (CLOSED human sessions, each with what it
-// takes to resume it). Every device reads the same set. `loaded` stays false until the
-// first answer, so nothing is pruned off an archive this page has not seen yet.
-let _arch = { hidden: [], sessions: [], loaded: false };
-function _archivedSet() { return new Set(_arch.hidden); }
+// takes to resume it). Every device reads the same set. Until the first answer the archive
+// is UNKNOWN — `hidden`/`sessions` are null, not empty — so nothing can act on an archive
+// this page has not seen: rendering reads it as "nothing archived yet", and _pruneHidden
+// refuses outright (an empty list would let it prune nothing by luck, not by its guard).
+let _arch = { hidden: null, sessions: null, loaded: false };
+function _archivedSet() { return new Set(_arch.hidden || []); }
 function _setArchive(st) {
     if (!st || typeof st !== 'object') return;
     _arch = {
@@ -473,7 +570,9 @@ async function unarchiveKeys(keys) {
 }
 // Hidden rows that woke up (busy, waiting) or whose window is gone leave the archive, so
 // a woken row is not re-hidden the moment it settles and a recycled @N never inherits an
-// old row's flag. One request in flight at a time.
+// old row's flag. Never before the server's first answer (an unknown archive is not an
+// empty one), and one request in flight at a time: a refresh that lands while it is in
+// flight re-reads the not-yet-pruned keys, and must not send them a second time.
 let _pruning = false;
 function _pruneHidden(stillHidden) {
     if (!_arch.loaded || _pruning) return;
@@ -780,7 +879,7 @@ function renderSidebarAgents(agents) {
         mode: view.groupBy, wants: wantsHuman, orchWid, order: _groupOrder(),
         archived, status: view.status, env: view.env, activityDays: VIEW_ACTIVITY[view.activity],
         now: Date.now(), sort: view.sort, labelOf: _itemLabel, showEmpty: view.showEmpty, custom,
-        sessions: _arch.sessions,
+        sessions: _arch.sessions || [],
     });
     const showArchived = view.status !== 'active';
 
@@ -820,6 +919,7 @@ function renderSidebarAgents(agents) {
             showArchived ? 'Hide archived' : `Show archived (${n})`}</button>`;
     }
     host.innerHTML = html;
+    _paintAltNums();   // CMX-85: a re-render while Alt is held keeps its numbers
 }
 
 // --- The group menu (CMX-35) -------------------------------------------------
@@ -970,7 +1070,7 @@ function openRowMenu(ev, key) {
 
 // A row already in the Archived section is not archived twice (its way back is Unarchive).
 function _rowArchivable(it) {
-    if (_arch.hidden.includes(it.key)) return false;
+    if (_archivedSet().has(it.key)) return false;
     return isArchivable(it, { wants: wantsHuman, orchWid: orchestratorState().wid });
 }
 
@@ -1223,6 +1323,8 @@ async function refreshSidebar() {
         ]);
         setAgentsCache(agents || []);
         if (ctx) updateCtxCache(ctx);
+        // Awaited BEFORE the render: what another device archived or resumed since the
+        // last tick is drawn on this one, not a tick later.
         await Promise.all([refreshArchive(), refreshLayout()]);
         renderSidebarAgents(_agentsCache);
     } catch (e) {
@@ -3427,7 +3529,7 @@ function closeShortcuts() {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, refreshArchive, refreshLayout, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, renameCustomGroup, toggleGroup, toggleShowArchived, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
+export { altSwitchKeydown, setAltHeld, openSidebarRow, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, refreshArchive, refreshLayout, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, renameCustomGroup, toggleGroup, toggleShowArchived, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
