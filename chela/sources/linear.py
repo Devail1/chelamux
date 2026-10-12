@@ -18,7 +18,7 @@ network tracker that chela itself writes to needs:
   ``chela close`` → Canceled, or Duplicate + a ``duplicate`` relation when the close reason
   names the superseding issue). Never raises; never moves a finished issue.
 * :meth:`LinearSource.workflow_states` — the team's states in Linear's board order, for the
-  dashboard's Work board (Canceled-type columns flagged ``hidden``, as Linear hides them).
+  dashboard's Work board (Canceled/Duplicate columns flagged ``hidden``, as Linear hides them).
 * :meth:`LinearSource.archive_sweep` — the one place chela archives (CMX-8): it keeps the
   ``keep_done`` most recently finished issues visible and archives only the finished issues
   older than those, whoever closed them, then publishes the team's non-archived issue count
@@ -48,7 +48,7 @@ REFUSED, not used. The value is never logged, never put in an exception message,
 reaches a child process (:func:`chela.envutil.child_env` strips ``LINEAR_API_KEY``, CMX-425).
 
 The OPEN set (:meth:`list_open_tasks`) is every issue whose state TYPE is not
-``completed``/``canceled`` — backlog, unstarted AND started. Linear's GitHub integration moves
+``completed``/``canceled``/``duplicate`` — backlog, unstarted AND started. Linear's GitHub integration moves
 an issue to In Progress / In Review by itself when the PR opens; an open set of just ``Todo``
 would make every such issue read as ABSENT, and the dispatcher reads absence as "done".
 """
@@ -73,12 +73,18 @@ LINEAR_API_URL = "https://api.linear.app/graphql"
 API_KEY_ENV = "LINEAR_API_KEY"
 DEFAULT_READY_STATES = ("Todo",)
 # Linear's state TYPES. Terminal ones leave the open set; everything else is open.
-TERMINAL_STATE_TYPES = ("completed", "canceled")
+# 🗂️ CMX-107: Linear reports its Duplicate state with a type of its OWN — `duplicate`, not
+# `canceled` (`state { name: "Duplicate", type: "duplicate" }`, seen on CMX-33 / CMX-80).
+# Leaving it out of this set kept every closed duplicate in the open read, so the
+# reconcile read it as "still open" and the board showed it. Both are "closed, not shipped".
+CANCELED_STATE_TYPES = ("canceled",)
+TERMINAL_STATE_TYPES = ("completed", *CANCELED_STATE_TYPES)
 # 🗂️📐 CMX-23 — the order Linear's board shows its columns in: by state TYPE, then the
-# state's own `position` inside its type. Canceled-type states (Canceled, Duplicate) are
-# collapsed off the board by default in Linear, so the Work board hides them too.
-STATE_TYPE_ORDER = ("triage", "backlog", "unstarted", "started", "completed", "canceled")
-HIDDEN_STATE_TYPES = ("canceled",)
+# state's own `position` inside its type. Canceled and Duplicate states are collapsed off
+# the board by default in Linear, so the Work board hides them too.
+STATE_TYPE_ORDER = ("triage", "backlog", "unstarted", "started", "completed",
+                    *CANCELED_STATE_TYPES)
+HIDDEN_STATE_TYPES = CANCELED_STATE_TYPES
 # The edges chela writes (CMX-23), and the default state NAME each one moves an issue to.
 # `done` is not here: merge → Done is `close_tasks` (and the `done_state` key), unchanged.
 DEFAULT_TRANSITION_STATES = {
@@ -234,12 +240,12 @@ OPEN_ISSUES_QUERY = """
 query OpenIssues($team: String!, $after: String) {
   issues(first: %d, after: $after, includeArchived: false,
          filter: { team: { key: { eq: $team } },
-                   state: { type: { nin: ["completed", "canceled"] } } }) {
+                   state: { type: { nin: %s } } }) {
     nodes { %s }
     pageInfo { hasNextPage endCursor }
   }
 }
-""" % (PAGE_SIZE, _ISSUE_FIELDS)
+""" % (PAGE_SIZE, json.dumps(list(TERMINAL_STATE_TYPES)), _ISSUE_FIELDS)
 
 ISSUES_BY_NUMBER_QUERY = """
 query IssuesByNumber($team: String!, $numbers: [Float!], $after: String) {
@@ -361,8 +367,9 @@ def _finished_at(node: dict) -> datetime:
     One without a readable time sorts as the OLDEST — it is archived first rather than
     pinning a slot of the newest ``keep_done`` forever."""
     state = node.get("state") if isinstance(node.get("state"), dict) else {}
-    first, second = ("canceledAt", "completedAt") if state.get("type") == "canceled" else (
-        "completedAt", "canceledAt")
+    first, second = (("canceledAt", "completedAt")
+                     if state.get("type") in CANCELED_STATE_TYPES
+                     else ("completedAt", "canceledAt"))
     for key in (first, second):
         raw = node.get(key)
         if isinstance(raw, str) and raw:
@@ -604,7 +611,7 @@ class LinearSource:
     def workflow_states(self) -> list[dict] | None:
         """🗂️📐 CMX-23 — the team's workflow states as the Work board's columns, in Linear's
         board order (:data:`STATE_TYPE_ORDER`, then ``position``): ``[{"name", "type",
-        "hidden"}]``. ``hidden`` marks the Canceled-type states Linear collapses. None when
+        "hidden"}]``. ``hidden`` marks the Canceled / Duplicate states Linear collapses. None when
         the team cannot be read. Cached per team for :data:`TEAM_STATES_TTL_SECONDS` — the
         dashboard asks on every poll, and a team's states almost never change."""
         cached = _team_states.get(self.team)
@@ -742,7 +749,7 @@ class LinearSource:
     def requeue_task(self, task_id: str) -> str:
         """🗂️🔁 CMX-65 — ``chela close <run> --requeue`` → the first configured READY state
         (Todo), so the next claim takes it. Unlike :meth:`transition` this DOES move an issue
-        out of a ``canceled``-type state: requeueing a task an earlier ``chela close``
+        out of a ``canceled``- or ``duplicate``-type state: requeueing a task an earlier ``chela close``
         canceled is exactly the explicit human ask that resurrection needs. Never out of
         ``completed`` (Done shipped). Same outcomes as :meth:`transition`; never raises."""
         if self.config_error:
@@ -824,8 +831,9 @@ class LinearSource:
     def _transition_state(self, edge: str) -> dict | None:
         """The team state ``edge`` moves an issue to: the configured (or default) NAME, else
         the state TYPE's natural pick — In Progress = the first ``started`` state, In Review
-        = the last one (only when there are two), Canceled/Duplicate = the first
-        ``canceled`` one. None (logged) when the team has nothing that fits."""
+        = the last one (only when there are two), Canceled = the first ``canceled`` one,
+        Duplicate = the first ``duplicate`` one, else the first ``canceled`` one. None
+        (logged) when the team has nothing that fits."""
         team = self._team()
         if team is None:
             return None
@@ -837,12 +845,15 @@ class LinearSource:
         by_pos = sorted(states, key=lambda s: s.get("position") or 0)
         started = [s for s in by_pos if s.get("type") == "started"]
         canceled = [s for s in by_pos if s.get("type") == "canceled"]
+        duplicate = [s for s in by_pos if s.get("type") == "duplicate"]
         pick = None
         if edge == "in_progress" and started:
             pick = started[0]
         elif edge == "in_review" and len(started) > 1:
             pick = started[-1]
-        elif edge in ("canceled", "duplicate") and canceled:
+        elif edge == "duplicate" and (duplicate or canceled):
+            pick = (duplicate or canceled)[0]
+        elif edge == "canceled" and canceled:
             pick = canceled[0]
         if pick is None:
             _report_once((self.team, f"state:{edge}"),
@@ -864,9 +875,9 @@ class LinearSource:
         return ok
 
     def archive_sweep(self, *, force: bool = False) -> int | None:
-        """Apply the ``keep_done`` rule (CMX-8): of the team's finished (completed/canceled)
-        but unarchived issues — whoever closed them — keep the ``keep_done`` most recently
-        finished and archive the older ones, oldest first. Open issues are never archived
+        """Apply the ``keep_done`` rule (CMX-8): of the team's finished
+        (completed/canceled/duplicate) but unarchived issues — whoever closed them — keep
+        the ``keep_done`` most recently finished and archive the older ones, oldest first. Open issues are never archived
         and never count toward ``keep_done``. Then publish the team's non-archived count
         for ``chela doctor``. Throttled to once per :data:`ARCHIVE_SWEEP_INTERVAL_SECONDS`
         per team unless ``force``. Returns how many it archived, or None when it did not
@@ -1041,7 +1052,7 @@ class LinearSource:
         risk = highest_risk(lbl[len("risk:"):] for lbl in labels
                             if lbl.lower().startswith("risk:"))
         terminal = None
-        if state.get("type") == "canceled":
+        if state.get("type") in CANCELED_STATE_TYPES:
             terminal = "canceled"
         elif state.get("type") == "completed" or node.get("archivedAt"):
             terminal = "done"
