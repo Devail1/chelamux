@@ -897,3 +897,23 @@ def test_the_bridges_override_loop_ticks_the_relay():
     t.start()
     t.join(5)
     assert ticks == [1], "the loop must call relay.tick()"
+
+
+def test_an_override_request_notification_names_the_override_never_a_release(repo, monkeypatch):
+    """🔴 GUARD: the operator's push for an override REQUEST — question, hint and title —
+    says override, and the hint is the same approve line a release card uses."""
+    sent = []
+    monkeypatch.setattr(contract.notify, "enabled", lambda: True)
+    monkeypatch.setattr(contract.notify, "send", lambda text, title=None, **k: sent.append(
+        (text, title)))
+    _seed(repo)
+    result = _request(reason="flaky")
+    rid = result["request_id"]
+    assert result["question"] == (f"Override-merge cmx-1 into dev past the judge ('blocked' on "
+                                  f"{HEAD[:12]})? Reason: flaky")
+    assert result["hint"] == contract.approve_hint(rid) == (
+        f"Approve with the Telegram button, on the dashboard (/override/{rid}), "
+        f"or in a plain terminal: chela merge-approve {rid}  (deny: add --deny)")
+    assert sent == [(f"{result['question']}\n\n{result['hint']}",
+                     "chela: approve override of cmx-1?")]
+    assert "release" not in sent[0][0].lower() and "release" not in sent[0][1]

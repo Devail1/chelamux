@@ -1848,3 +1848,201 @@ def test_poll_release_urls_never_looks_up_a_merge_override(monkeypatch):
     monkeypatch.setattr(release, "_gh_release_url",
                         lambda rec: pytest.fail("only a RELEASE is polled for a URL"))
     release.poll_release_urls(now=1001.0)
+
+
+# --- round 9: how a push is spelled, unreadable remote reads, and WHICH record complete() reads
+# Each test below is the negative control's mirror: the same world with no violation pushes
+# main -> tag -> dev (test_approve_pushes_main_tag_dev_in_order_exactly_once).
+
+@pytest.fixture
+def argvs(monkeypatch):
+    """The FULL argv of every `git push` chela.release ran (the real push still happens)."""
+    seen: list[tuple] = []
+    real = release._git
+
+    def spy(cwd, *args, **kw):
+        if args and args[0] == "push":
+            seen.append(tuple(args))
+        return real(cwd, *args, **kw)
+    monkeypatch.setattr(release, "_git", spy)
+    return seen
+
+
+def test_every_push_is_spelled_plain_with_no_force_flag_and_no_plus_refspec(world, argvs):
+    """🔴 GUARD: the WHOLE argv of each push is pinned — `--force`, `-f`, `--force-with-lease`,
+    `--mirror`, `--delete`, a `+` refspec or any other added flag changes it ⇒ RED."""
+    out = _prepare(world)
+    sha = out["release_sha"]
+    assert overrides.decide(out["request_id"], True, "terminal:op")["state"] == overrides.RELEASED
+    assert argvs == [("push", "--quiet", "origin", f"{sha}:refs/heads/main"),
+                     ("push", "--quiet", "origin", "refs/tags/v0.2.0:refs/tags/v0.2.0"),
+                     ("push", "--quiet", "origin", f"{sha}:refs/heads/dev")]
+    for argv in argvs:
+        assert not any(a in ("-f", "--force", "--force-with-lease", "--mirror", "--delete")
+                       or a.startswith(("--force", "+")) for a in argv)
+
+
+def _diverge(world, ref: str) -> str:
+    """Point `ref` in the bare origin at a parentless commit (a non-ancestor of anything)."""
+    ident = ("-c", "user.email=o@example.com", "-c", "user.name=O")
+    empty = subprocess.run(["git", "-C", str(world.origin), "mktree"], input="",
+                           check=True, capture_output=True, text=True).stdout.strip()
+    sha = _g(world.origin, *ident, "commit-tree", empty, "-m", f"rewritten {ref}")
+    _g(world.origin, "update-ref", ref, sha)
+    return sha
+
+
+@pytest.mark.parametrize("nth, ref, what", [(0, "refs/heads/main", "main"),
+                                            (1, "refs/tags/v0.2.0", "v0.2.0"),
+                                            (2, "refs/heads/dev", "dev")])
+def test_a_ref_that_moved_to_a_non_ancestor_during_the_pushes_is_refused_by_git(
+        world, monkeypatch, told, nth, ref, what):
+    """🔴 GUARD (real bare origin): the ref the push is about to update is rewritten on origin
+    to a commit that is NOT an ancestor of the release, right before that push. A plain push is
+    refused by git (non-fast-forward / tag exists); a forced one would overwrite it. The
+    release reports the refusal and origin keeps the other party's commit."""
+    out = _prepare(world)
+    sha = out["release_sha"]
+    real = release._git
+    count = {"n": 0}
+    theirs: dict[str, str] = {}
+
+    def racing(cwd, *args, **kw):
+        if args and args[0] == "push":
+            if count["n"] == nth:
+                theirs["sha"] = _diverge(world, ref)
+            count["n"] += 1
+        return real(cwd, *args, **kw)
+    monkeypatch.setattr(release, "_git", racing)
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["ok"] is False and res["state"] == overrides.FAILED, res
+    assert f"pushing {what} failed" in res["detail"], res
+    assert _remote(world, f"{ref}^{{commit}}") == theirs["sha"] != sha      # NOT overwritten
+    assert overrides.load(out["request_id"])["pushed"] == ["main", "v0.2.0", "dev"][:nth]
+    assert [k for k, *_ in told] == ["release_failed"]
+
+
+def test_origin_main_unreadable_at_approval_fails_closed(world, pushes, told, monkeypatch):
+    """🔴 GUARD: `origin/main` reading as None at approval is NOT 'nothing to fast-forward
+    from': nothing is pushed, the reason names the unreadable main, and the cleanup rules run
+    (the unpushed local tag and branch go)."""
+    out = _prepare(world)
+    main0, dev0 = _remote(world, "main"), _remote(world, "dev")
+    real = release._rev
+    monkeypatch.setattr(release, "_rev", lambda cwd, ref: None
+                        if ref == "refs/remotes/origin/main" else real(cwd, ref))
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["ok"] is False and res["state"] == overrides.FAILED, res
+    assert "origin/main (?)" in res["detail"] and "nothing pushed" in res["detail"]
+    _assert_origin_untouched(world, main0, dev0, pushes)
+    assert [k for k, *_ in told] == ["release_failed"] and "nothing was pushed" in told[0][1]
+    assert _local(world, "refs/tags/v0.2.0") is None
+    assert _local(world, "refs/heads/chela-release/v0.2.0") is None and _release_worktrees() == []
+
+
+def test_origin_dev_unreadable_at_approval_expires_and_pushes_nothing(world, pushes, told,
+                                                                      monkeypatch):
+    out = _prepare(world)
+    main0, dev0 = _remote(world, "main"), _remote(world, "dev")
+    real = release._rev
+    monkeypatch.setattr(release, "_rev", lambda cwd, ref: None
+                        if ref == "refs/remotes/origin/dev" else real(cwd, ref))
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["ok"] is False and res["state"] == overrides.EXPIRED, res
+    assert "dev moved" in res["detail"] and "→ ?" in res["detail"]
+    _assert_origin_untouched(world, main0, dev0, pushes)
+
+
+def test_a_missing_local_tag_at_approval_pushes_nothing(world, pushes):
+    out = _prepare(world)
+    main0, dev0 = _remote(world, "main"), _remote(world, "dev")
+    _g(world.work, "tag", "-d", "v0.2.0")
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["state"] == overrides.FAILED and "no longer points" in res["detail"], res
+    _assert_origin_untouched(world, main0, dev0, pushes)
+
+
+def test_an_unreadable_release_parent_at_approval_pushes_nothing(world, pushes, monkeypatch):
+    out = _prepare(world)
+    main0, dev0 = _remote(world, "main"), _remote(world, "dev")
+    sha, real = out["release_sha"], release._rev
+    monkeypatch.setattr(release, "_rev", lambda cwd, ref: None
+                        if ref == f"{sha}^" else real(cwd, ref))
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["state"] == overrides.FAILED and "single commit" in res["detail"], res
+    _assert_origin_untouched(world, main0, dev0, pushes)
+
+
+# --- complete() reads every value from the STORED request ---------------------------------
+
+def _approved_with_a_caller_copy(world, **lies):
+    """A request moved to `merging` on disk, plus a caller's in-memory copy that disagrees on
+    the fields in ``lies``."""
+    out = _prepare(world)
+    overrides.set_fields(out["request_id"], state=overrides.MERGING)
+    stored = overrides.load(out["request_id"])
+    return out, stored, {**stored, **lies}
+
+
+def test_complete_takes_dev_and_release_shas_from_disk_never_the_callers_copy(world, pushes):
+    """🔴 GUARD: a stale/tampered caller record names bogus dev/release commits. complete()
+    pushes the STORED release commit and never the caller's."""
+    out, stored, lie = _approved_with_a_caller_copy(
+        world, dev_sha="f" * 40, release_sha="e" * 40)
+    res = release.complete(lie, "terminal:op")
+    assert res["ok"] is True and res["merge_commit_sha"] == stored["release_sha"], res
+    assert pushes == [f"{stored['release_sha']}:refs/heads/main",
+                      "refs/tags/v0.2.0:refs/tags/v0.2.0",
+                      f"{stored['release_sha']}:refs/heads/dev"]
+    assert "e" * 40 not in " ".join(pushes)
+    assert _remote(world, "main") == _remote(world, "dev") == stored["release_sha"]
+
+
+def test_a_caller_copy_naming_a_real_but_different_release_commit_cannot_redirect_the_push(
+        world, pushes):
+    """The caller's copy points release_sha at a REAL other commit (dev's head, which the
+    tag and parent checks would refuse if read). Stored values win: the approved commit
+    ships, the other commit is never pushed as main."""
+    out, stored, lie = _approved_with_a_caller_copy(
+        world, release_sha=_remote(world, "dev"))
+    res = release.complete(lie, "terminal:op")
+    assert res["ok"] is True and res["merge_commit_sha"] == stored["release_sha"], res
+    assert _remote(world, "main") == stored["release_sha"] != lie["release_sha"]
+
+
+def test_complete_reads_every_field_from_the_stored_request(world, pushes):
+    """🔴 GUARD: id/git_dir/tag/version/task_ids/dev_sha/release_sha all come from disk. The
+    caller's copy lies about each; the push, the audit event and the result follow the stored
+    request."""
+    out, stored, lie = _approved_with_a_caller_copy(
+        world, git_dir=str(world.tmp / "nowhere"), tag="v9.9.9", version="9.9.9",
+        task_ids=["ZZZ-1"], dev_sha="f" * 40, release_sha="e" * 40)
+    res = release.complete(lie, "terminal:op")
+    assert res["ok"] is True and res["pushed"] == ["main", "v0.2.0", "dev"], res
+    assert _remote(world, "refs/tags/v0.2.0^{commit}") == stored["release_sha"]
+    assert _remote(world, "refs/tags/v9.9.9") is None
+    ev, = _events("orchestrator.release_pushed")
+    assert ev["payload"] == {"request_id": stored["id"], "tag": "v0.2.0", "version": "0.2.0",
+                             "release_sha": stored["release_sha"], "dev_sha": stored["dev_sha"],
+                             "approved_by": "terminal:op", "task_ids": ["CMX-5", "CMX-7"]}
+    assert ev["summary"] == (f"release v0.2.0 APPROVED by terminal:op and pushed "
+                             f"({stored['release_sha'][:12]})")
+
+
+# --- the operator's words, at every notify call site, for both kinds ----------------------
+
+@pytest.mark.parametrize("approve", [True, False])
+def test_an_approved_or_denied_release_sends_no_failure_notification(world, pushes, sent,
+                                                                     approve):
+    out = _prepare(world)
+    sent.clear()                                        # the approval request's own push
+    assert overrides.decide(out["request_id"], approve, "terminal:op")["ok"] is True
+    assert sent == []
+
+
+def test_each_request_notification_names_its_own_kind_in_text_and_title(world, sent):
+    """The release REQUEST push says release in question and title (the override request's
+    mirror lives in test_merge_override.py)."""
+    rel = _prepare(world)
+    assert sent == [(f"{rel['question']}\n\n{rel['hint']}", "chela: approve release v0.2.0?")]
+    assert rel["question"].startswith("Release v0.2.0 — ") and "override" not in rel["question"]
