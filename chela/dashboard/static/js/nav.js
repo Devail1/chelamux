@@ -397,10 +397,12 @@ function _groupOrder() { return _layout.order; }
 // --- The archive (CMX-75) — SERVER state, not this browser's -----------------
 // chela/sidebar_archive.py, behind /api/sidebar/archive: `hidden` (row keys hidden only —
 // a settled dispatched run) and `sessions` (CLOSED human sessions, each with what it
-// takes to resume it). Every device reads the same set. `loaded` stays false until the
-// first answer, so nothing is pruned off an archive this page has not seen yet.
-let _arch = { hidden: [], sessions: [], loaded: false };
-function _archivedSet() { return new Set(_arch.hidden); }
+// takes to resume it). Every device reads the same set. Until the first answer the archive
+// is UNKNOWN — `hidden`/`sessions` are null, not empty — so nothing can act on an archive
+// this page has not seen: rendering reads it as "nothing archived yet", and _pruneHidden
+// refuses outright (an empty list would let it prune nothing by luck, not by its guard).
+let _arch = { hidden: null, sessions: null, loaded: false };
+function _archivedSet() { return new Set(_arch.hidden || []); }
 function _setArchive(st) {
     if (!st || typeof st !== 'object') return;
     _arch = {
@@ -473,7 +475,9 @@ async function unarchiveKeys(keys) {
 }
 // Hidden rows that woke up (busy, waiting) or whose window is gone leave the archive, so
 // a woken row is not re-hidden the moment it settles and a recycled @N never inherits an
-// old row's flag. One request in flight at a time.
+// old row's flag. Never before the server's first answer (an unknown archive is not an
+// empty one), and one request in flight at a time: a refresh that lands while it is in
+// flight re-reads the not-yet-pruned keys, and must not send them a second time.
 let _pruning = false;
 function _pruneHidden(stillHidden) {
     if (!_arch.loaded || _pruning) return;
@@ -780,7 +784,7 @@ function renderSidebarAgents(agents) {
         mode: view.groupBy, wants: wantsHuman, orchWid, order: _groupOrder(),
         archived, status: view.status, env: view.env, activityDays: VIEW_ACTIVITY[view.activity],
         now: Date.now(), sort: view.sort, labelOf: _itemLabel, showEmpty: view.showEmpty, custom,
-        sessions: _arch.sessions,
+        sessions: _arch.sessions || [],
     });
     const showArchived = view.status !== 'active';
 
@@ -970,7 +974,7 @@ function openRowMenu(ev, key) {
 
 // A row already in the Archived section is not archived twice (its way back is Unarchive).
 function _rowArchivable(it) {
-    if (_arch.hidden.includes(it.key)) return false;
+    if (_archivedSet().has(it.key)) return false;
     return isArchivable(it, { wants: wantsHuman, orchWid: orchestratorState().wid });
 }
 
@@ -1223,6 +1227,8 @@ async function refreshSidebar() {
         ]);
         setAgentsCache(agents || []);
         if (ctx) updateCtxCache(ctx);
+        // Awaited BEFORE the render: what another device archived or resumed since the
+        // last tick is drawn on this one, not a tick later.
         await Promise.all([refreshArchive(), refreshLayout()]);
         renderSidebarAgents(_agentsCache);
     } catch (e) {
