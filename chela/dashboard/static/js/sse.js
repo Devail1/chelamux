@@ -4,6 +4,7 @@ import { pollWork } from './work.js';
 import { onDecisionsLogDelta } from './decisions.js';
 import { refreshOrchestratorStatus } from './orchestrator.js';
 import { RUN_TOAST_KINDS, runToastKind } from './runtoast.js';
+import { tickApprovals } from './approvals.js';
 import { _absorbFreshTerminals, _cssEsc, _refreshPaneLabels, _renderedWids, _stopReadyPoll, _swapToFrame, _termReady, dropTerminalPane } from './terminals.js';
 
 // ---------------------------------------------------------------------------
@@ -182,6 +183,8 @@ function initSSE() {
         _sseTermReady(d);
     });
     _sse.addEventListener('orchestrator', () => _sseOrchestrator());
+    // CMX-103: the pending approval requests changed — refetch the list (and badge).
+    _sse.addEventListener('overrides', () => { tickApprovals(); });
     // onerror: the browser reconnects on its own; the poll timers cover the gap
     // meanwhile, so there is nothing to do but note it.
     _sse.onerror = () => { /* auto-reconnect; polling is the fallback */ };

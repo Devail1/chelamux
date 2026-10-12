@@ -156,6 +156,81 @@ def pending() -> list[dict]:
             if r.get("state") == PENDING and (r.get("deadline") or 0) > now]
 
 
+# The record kinds the dashboard's "Pending approvals" list renders (CMX-103). Every request
+# in this store is an override today; ``chela release`` (CMX-87) files its one-tap request as
+# a record here with ``kind: "release"`` and ``version`` — the list, the badge, the SSE frame
+# and the Approve/Deny buttons then carry it with no second surface.
+KIND_OVERRIDE = "override"
+KIND_RELEASE = "release"
+
+
+def stale_reason(rec: dict, run: dict | None) -> str | None:
+    """Why approving ``rec`` right now would certainly fail — or None.
+
+    Read from the run row's caches (the dispatcher refreshes them from GitHub every tick),
+    never the network, so the dashboard can show WHY instead of offering a button that
+    fails. Only a definite miss blocks: a cache that was never read (None / unknown) does
+    not, because Approve re-checks everything live anyway
+    (:func:`chela.contract.complete_override`) — this is the early, readable half of the
+    same rules (head unchanged, CI green, MERGEABLE, not expired).
+    """
+    if (rec.get("deadline") or 0) <= time.time():
+        return "the request expired — nothing will merge from it"
+    if (rec.get("kind") or KIND_OVERRIDE) != KIND_OVERRIDE:
+        return None
+    if run is None:
+        return "the run no longer exists"
+    head = run.get("pr_head_sha")
+    if head and rec.get("head_sha") and head != rec.get("head_sha"):
+        return (f"the PR head moved ({str(rec.get('head_sha'))[:12]} → {head[:12]}) — "
+                "request a new override for the new head")
+    pr_state = (run.get("pr_state") or "").lower()
+    if pr_state and pr_state != "open":
+        return f"the PR is {pr_state}"
+    if (run.get("pr_mergeable") or "").upper() == "CONFLICTING":
+        return "GitHub reports the PR CONFLICTING with its base — not mergeable"
+    from chela import dispatcher
+    ci = run.get("pr_checks")
+    if ci == dispatcher.CI_FAILING:
+        return "CI is failing on this head"
+    if ci == dispatcher.CI_PENDING:
+        return "CI is still running on this head — approve once it is green"
+    return None
+
+
+def listing(run_of=None) -> list[dict]:
+    """The dashboard's "Pending approvals" rows (CMX-103): every request still PENDING and
+    inside its TTL, oldest first — decided and expired ones are never listed. Each row says
+    what it is, who asked, why, its age and time to expiry, and ``blocked`` — why it cannot
+    be approved now (:func:`stale_reason`), or None. Read-only: deciding is :func:`decide`.
+    ``run_of(task_id) -> run row | None`` defaults to the dispatcher's run lookup."""
+    if run_of is None:
+        def run_of(task_id):
+            from chela import dispatcher
+            return dispatcher.resolve_run(task_id) if task_id else None
+    now = time.time()
+    rows = []
+    for rec in pending():
+        kind = rec.get("kind") or KIND_OVERRIDE
+        try:
+            run = run_of(rec.get("task_id")) if kind == KIND_OVERRIDE else None
+        except Exception:                                    # noqa: BLE001 — best effort
+            run = None
+        rows.append({
+            "id": rec["id"], "kind": kind, "task_id": rec.get("task_id"),
+            "label": rec.get("label") or rec.get("task_id"), "title": rec.get("title"),
+            "version": rec.get("version"), "pr_url": rec.get("pr_url"),
+            "base": rec.get("base"), "head_sha": rec.get("head_sha"),
+            "judge_state": rec.get("judge_state"), "reason": rec.get("reason"),
+            "actor": rec.get("actor"), "question": rec.get("question"),
+            "created": rec.get("created"), "deadline": rec.get("deadline"),
+            "age_s": max(0.0, now - (rec.get("created") or now)),
+            "expires_in_s": max(0.0, (rec.get("deadline") or now) - now),
+            "blocked": stale_reason(rec, run),
+        })
+    return rows
+
+
 def create(meta: dict, *, ttl_s: float | None = None) -> dict | None:
     """Record a new PENDING request. ``meta`` must carry ``head_sha`` — the one commit this
     request is for. None if it could not be written (the caller then refuses)."""

@@ -528,6 +528,13 @@
           title="Access requests from sandboxed guests — tap to approve or deny" aria-label="Access requests">
     <span class="ar-pill-text">🙋 0 access requests</span>
   </button>
+  <!-- ⚖️ Pending approvals (CMX-103): override / release requests waiting on the operator —
+       so a dashboard-only operator (no Telegram) learns one is waiting. Text + count. -->
+  <button class="shares-indicator approvals-indicator" id="btn-approvals" hidden
+          onclick="chela.openApprovals()"
+          title="Requests waiting for your approval — tap to review" aria-label="Pending approvals">
+    <span class="pa-pill-text">⚖️ 0 pending approvals</span>
+  </button>
 </div>
 
 <!-- Command palette (⌘K / Ctrl-K): fuzzy jump to any agent, view, or project -->
