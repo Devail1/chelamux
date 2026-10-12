@@ -296,3 +296,29 @@ test('once loaded, a slow read of a SAVED layout that started before a write nev
     assert.deepEqual(groupKeys(), ['/srv/code/gamma', '/srv/code/alpha', '/srv/code/beta'],
         'a stale read of the saved layout put the old order back over the write');
 });
+
+// CMX-89 (red on CI): ONE page, TWO refreshes in flight at once — selectView() calls
+// refresh() and main.js calls it again on load. Both read "no layout yet"; the first
+// imports this browser's old keys and spends them; the second then found no old keys
+// and drew the DEFAULTS over the layout just imported, until the next 30s tick.
+test('CONCURRENT refreshes on one page: the second never resets the layout the first imported', async () => {
+    use(phone);
+    localStorage.setItem('chela_sb_view', JSON.stringify({ groupBy: 'custom' }));
+    localStorage.setItem('chela_sb_custom_groups', JSON.stringify({ groups: [{ id: 'g1', name: 'Infra' }], assign: {} }));
+    const first = phone.nav.refreshLayout();          // answers "layout: null" at once
+    let release;
+    layoutGate = { promise: new Promise(r => { release = r; }) };
+    const second = phone.nav.refreshLayout();         // also "layout: null", but late
+    layoutGate = null;
+    await first;
+    await settle();
+    assert.equal(server.st.layout.view.groupBy, 'custom', 'the first refresh did not import the old keys');
+    release();
+    await second;
+    await settle();
+    phone.nav.renderSidebarAgents(ROWS);
+    // only Custom groups draws an "Ungrouped" group (an empty "Infra" is not drawn);
+    // the defaults would draw the folders alpha/beta/gamma
+    assert.deepEqual(groupLabels(), ['Ungrouped'],
+        `the second refresh reset the imported Custom groups layout — groups drawn: ${groupLabels()}`);
+});

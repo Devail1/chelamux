@@ -475,7 +475,16 @@ async function _migrateLayout(fresh) {
     _dropLegacyLayout();
     return true;
 }
-async function refreshLayout() {
+// One read at a time (CMX-89): page load runs refresh() twice back to back (selectView's
+// and main.js's own), and two overlapping reads that both saw "nothing saved" raced the
+// import — the first spent this browser's old keys, the second then found none and drew
+// the defaults over what the first had just imported. A caller during a read shares it.
+let _layoutRead = null;
+function refreshLayout() {
+    if (!_layoutRead) _layoutRead = _readLayout().finally(() => { _layoutRead = null; });
+    return _layoutRead;
+}
+async function _readLayout() {
     const wasLoaded = _layout.loaded, gen = _layout.gen;
     const fresh = () => !wasLoaded || gen === _layout.gen;
     let st;
