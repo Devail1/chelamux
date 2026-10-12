@@ -3531,6 +3531,17 @@ def _session_start_recap(body: dict, explicit_wid: str | None = None):
 # behalf. A Claude session curling this route is denied by the merge-gate hook
 # (chela.mergegate) — the approval is the operator's to press.
 
+DASHBOARD_DECIDER = "dashboard"   # `decided_by` on a dashboard decision (audit, CMX-103)
+
+
+def _dashboard_decide(request_id: str, approve: bool) -> dict:
+    """The dashboard's ONE decide call — the `/override/<id>` page and the Pending approvals
+    list (CMX-103) both come through here, into the request kind's own decide path
+    (:func:`chela.approvals.decide` → :func:`chela.overrides.decide` for an override)."""
+    from chela import approvals
+    return approvals.decide(request_id, approve, by=DASHBOARD_DECIDER, channel="dashboard")
+
+
 _OVERRIDE_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Approve override</title><style>
@@ -3574,8 +3585,7 @@ def override_confirm(request_id):
         if decision not in ("approve", "deny"):
             abort(400)
         # Approve COMPLETES the merge here (CMX-79), re-checking head/CI/mergeable live.
-        out = overrides.decide(request_id, decision == "approve", by="dashboard",
-                               channel="dashboard")
+        out = _dashboard_decide(request_id, decision == "approve")
         state = out.get("state")
         if state == overrides.MERGED:
             body = (f"<h1>✅ Approved and merged</h1><p>Merge commit "
@@ -3613,6 +3623,63 @@ def override_confirm(request_id):
             'Approve override</button><button class="no" name="decision" value="deny">'
             "Deny</button></form>")
     return Response(_OVERRIDE_PAGE.format(body=body), mimetype="text/html")
+
+
+# ---------------------------------------------------------------------------
+# ⚖️ CMX-103 — Pending approvals on every dashboard page
+# ---------------------------------------------------------------------------
+#
+# The /override/<id> page above is only reachable from a link the CLI or the Telegram card
+# hands out, so a dashboard-only operator never learned a request was waiting. These routes
+# back the "Pending approvals" pill + sheet (static/js/approvals.js): the list, and Approve /
+# Deny through `_dashboard_decide` — the SAME call the confirm page makes.
+#
+# ⛔ A share guest (the relay-served joiner) gets no list and no decision, whatever it sends.
+# ⛔ Approve needs `confirm: true` in the body — the sheet's second, deliberate tap — so a
+#    single mis-tap (or a bare POST) never merges. A request chela already knows cannot merge
+#    (head moved, CI not green, conflicting, expired) is refused here with the reason and the
+#    request stays as it is. chela.mergegate denies a Claude session's request to these.
+
+
+@app.route("/api/approvals")
+@require_auth
+def api_approvals():
+    from chela import approvals, overrides
+    if _share_guest_request():
+        return jsonify({"approvals": [], "can_decide": False})
+    overrides.sweep()
+    return jsonify({"approvals": approvals.pending(), "can_decide": True})
+
+
+@app.route("/api/approvals/<request_id>/<action>", methods=["POST"])
+@require_auth
+def api_approval_decide(request_id, action):
+    from chela import approvals, overrides
+    if action not in ("approve", "deny"):
+        abort(404)
+    if _share_guest_request() or not _override_same_origin():
+        return jsonify({"ok": False, "error": "only the operator's own dashboard can decide "
+                                              "an approval"}), 403
+    data = request.get_json(silent=True) or {}
+    overrides.sweep()
+    row = approvals.find(request_id)
+    if row is None:
+        return jsonify({"ok": False, "error": "no request is waiting under that id — it was "
+                                              "already decided, or it expired"}), 404
+    if action == "approve":
+        if data.get("confirm") is not True:
+            return jsonify({"ok": False, "error": "approving needs the confirm step"}), 400
+        if row.get("blocked"):
+            return jsonify({"ok": False, "error": f"can't be approved: {row['blocked']}",
+                            "blocked": row["blocked"]}), 409
+    out = _dashboard_decide(request_id, action == "approve")
+    state = out.get("state")
+    ok = bool(out.get("ok")) and state in (overrides.MERGED, overrides.DENIED)
+    body = {"ok": ok, "state": state, "detail": out.get("detail"),
+            "merge_commit_sha": out.get("merge_commit_sha")}
+    if not ok:
+        body["error"] = out.get("detail") or f"not decided ({state})"
+    return jsonify(body), (200 if ok else 409)
 
 
 @app.route("/hooks/<event>", methods=["POST"])
@@ -5598,6 +5665,18 @@ def _sse_log_snapshot() -> dict:
         return {}
 
 
+def _sse_approvals_snapshot() -> list:
+    """``[[id, blocked], …]`` of the pending approvals (CMX-103) — diffed to push an
+    ``approvals`` frame so the pill appears the moment a request is filed, and a row turns
+    approvable/stale as CI and the head move. A notification: the client refetches."""
+    try:
+        from chela import approvals
+        return approvals.snapshot()
+    except Exception:
+        log.exception("SSE: approvals snapshot failed")
+        return []
+
+
 def _sse_stream():
     """Generator yielding SSE frames on relevant state change. Never raises out;
     a disconnected client surfaces as GeneratorExit on the next yield, which
@@ -5610,6 +5689,7 @@ def _sse_stream():
     prev_terms = _sse_terms_snapshot()
     prev_log = _sse_log_snapshot()
     prev_orch = _sse_orchestrator_snapshot()
+    prev_approvals = _sse_approvals_snapshot()
 
     # An initial 'hello' lets the client confirm the stream is live (it may
     # optionally lengthen its poll timers; default behavior leaves them as-is).
@@ -5673,6 +5753,13 @@ def _sse_stream():
             yield f"event: orchestrator\ndata: {json.dumps(cur_orch)}\n\n"
             last_sent = time.monotonic()
         prev_orch = cur_orch
+
+        cur_approvals = _sse_approvals_snapshot()
+        if cur_approvals != prev_approvals:
+            payload = json.dumps({"pending": len(cur_approvals)})
+            yield f"event: approvals\ndata: {payload}\n\n"
+            last_sent = time.monotonic()
+        prev_approvals = cur_approvals
 
         cur_terms = _sse_terms_snapshot()
         newly_ready = sorted(cur_terms - prev_terms)

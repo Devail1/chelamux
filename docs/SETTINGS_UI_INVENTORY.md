@@ -20,7 +20,7 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**61** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+**62** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
 wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
 added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
@@ -35,7 +35,8 @@ then 44, until CMX-389 added `CHELA_OVERRIDE_WAIT_S`, group 4 — then 51, until
 added the seven sandboxed-share knobs, group 9 — then 57, until CMX-418 added the six
 web-mode knobs, group 9 — then 58, until CMX-420 added the proxy's `CHELA_PROXY_SESSION_DIR`,
 group 9 — then 59, until CMX-435 added `CHELA_SHARE_SANDBOX_SUBSCRIPTION`, group 9 — then 61,
-until CMX-26 added `CHELA_INBOX_HELD_ALERT_S` and `CHELA_CLEAN_UNMERGED_ALERT_S`, group 5) — every literal `CHELA_*` name a Python module in
+until CMX-26 added `CHELA_INBOX_HELD_ALERT_S` and `CHELA_CLEAN_UNMERGED_ALERT_S`, group 5 — then 62,
+until CMX-103 added `CHELA_DASHBOARD_URL`, group 7) — every literal `CHELA_*` name a Python module in
 `chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
@@ -251,12 +252,13 @@ Status section already does for other facts), not a write control.
 | `CHELA_TELEGRAM_BIND_DISPATCHED` | `false` | Give dispatcher-spawned agents a topic eagerly vs lazily |
 | `CHELA_TELEGRAM_BINDINGS` | `$CHELA_DIR/telegram-bindings.json` | `internal-path` — override where bindings persist |
 
-### 7. Dashboard bind (2) — `trust-boundary`, keep env-file-only
+### 7. Dashboard bind (3) — `trust-boundary`, keep env-file-only
 
 | Variable | Default | Notes |
 |---|---|---|
 | `CHELA_DASH_HOST` | `127.0.0.1` | Baked into the rendered hooks-plugin manifest as a literal URL — see `docs/CONFIG.md`'s port section for why this one is unusually load-bearing |
 | `CHELA_DASHBOARD_PORT` | `5001` | Same |
+| `CHELA_DASHBOARD_URL` | `http://$CHELA_DASH_HOST:<port>` | The address the operator opens; only used for links printed outside the browser (`chela merge --override` names `<this>/override/<id>`, CMX-103) |
 
 `userconfig.py` names this pair explicitly as the reason it refuses to hold "the bind
 host." A dashboard writing its own bind host is a process editing the boundary that makes

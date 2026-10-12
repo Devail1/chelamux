@@ -876,6 +876,26 @@ body {
 .access-req-sheet .ar-meta { font-size: 12px; margin-bottom: 4px; }
 .access-req-sheet .ar-done { opacity: 0.65; }
 
+/* ⚖️ Pending approvals (CMX-103): same pill shape + sheet as the access requests. */
+.approvals-sheet .ap-row { padding: 10px 0; border-top: 1px solid var(--border); }
+.approvals-sheet .ap-what { font-weight: 600; font-size: 12.5px; overflow-wrap: anywhere; }
+.approvals-sheet .ap-meta { font-size: 11.5px; color: var(--muted, #7d8590); margin: 3px 0; }
+.approvals-sheet .ap-meta a { color: var(--accent); }
+.approvals-sheet .ap-why { font-size: 12px; margin-bottom: 6px; overflow-wrap: anywhere; }
+.approvals-sheet .ap-ctl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.approvals-sheet .ap-ctl button {
+    font: inherit; font-size: 12px; padding: 6px 12px; border-radius: 8px; cursor: pointer;
+    background: transparent; color: var(--text); border: 1px solid var(--border);
+}
+.approvals-sheet .ap-ctl button:disabled { opacity: 0.5; cursor: default; }
+.approvals-sheet .ap-confirm { border-color: var(--accent) !important; color: var(--accent) !important; font-weight: 700; }
+.approvals-sheet .ap-blocked, .approvals-sheet .ap-warn, .approvals-sheet .ap-err {
+    color: var(--warn, #d29922); font-size: 12px; margin: 4px 0;
+}
+@media (max-width: 768px) {
+    .approvals-sheet .ap-ctl button { min-height: 44px; padding: 0 16px; }
+}
+
 /* The same override, on the pane header itself. */
 .gs-unsafe-banner {
     flex: 0 0 auto; padding: 2px 8px; border-radius: 4px; white-space: nowrap;

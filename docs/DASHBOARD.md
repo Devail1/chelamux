@@ -15,6 +15,18 @@ There are two views and a Settings panel:
   search box over every setting. Tabs: General, Timing, Dispatch, Notifications, Cost,
   Appearance, Collaboration.
 
+## Pending approvals
+
+An override request (`chela merge <run> --override`) waits for the operator. While one does,
+a **⚖️ N pending approvals** pill shows on every page; it opens a list with what is asked
+(`override-merge CMX-N past <verdict> on <sha>`), who asked, the reason, its age and time to
+expiry. **Approve…** takes a second tap (*Confirm — merge now*) and goes through the same
+path as `/override/<id>`, `chela merge-approve` and the Telegram button, re-checking that the
+head is unchanged, CI is green and the PR is MERGEABLE. A request chela already knows cannot
+merge says why instead of offering Approve. None of it needs Telegram. Settings →
+Notifications has an opt-in browser notification for new requests, off by default.
+`CHELA_DASHBOARD_URL` sets the absolute link the CLI prints for a request.
+
 ## The sidebar
 
 Sessions are grouped by **project folder**, like the Claude desktop app. Each folder header

@@ -716,8 +716,13 @@ def request_override(ident: str, *, reason: str, actor: str | None = None) -> di
 
 
 def approve_hint(request_id: str) -> str:
-    return (f"Approve with the Telegram button, on the dashboard (/override/{request_id}), "
-            f"or in a plain terminal: chela merge-approve {request_id}  (deny: add --deny)")
+    """Where the operator approves — none of it needs Telegram (CMX-103). The dashboard URL
+    is absolute (``config.dashboard_url``) so it can be opened straight from a terminal; the
+    request also shows on every dashboard page under "Pending approvals"."""
+    return (f"Approve on the dashboard: {config.dashboard_url()}/override/{request_id} "
+            "(or its ⚖️ Pending approvals pill), in a plain terminal: chela merge-approve "
+            f"{request_id}  (deny: add --deny), or with the Telegram button if the bridge "
+            "is set up")
 
 
 def complete_override(rec: dict, approved_by: str) -> dict:

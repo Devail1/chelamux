@@ -626,6 +626,25 @@ def dashboard_port() -> int:
         return DEFAULT_DASHBOARD_PORT
 
 
+def dashboard_url() -> str:
+    """The dashboard's absolute base URL, for links printed OUTSIDE the browser (the CLI).
+
+    ``CHELA_DASHBOARD_URL`` when set — the address the operator actually opens (a tailnet
+    name behind Caddy / ``tailscale serve``, say), since nothing here can know it. Otherwise
+    the address this host binds: ``CHELA_DASH_HOST`` (a wildcard bind read as loopback) and
+    the port the running dashboard published. No trailing slash.
+    """
+    explicit = os.environ.get("CHELA_DASHBOARD_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    host = dashboard_host().strip() or "127.0.0.1"
+    if host in ("0.0.0.0", "::", "[::]"):
+        host = "127.0.0.1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{live_dashboard_port()}"
+
+
 def dashboard_port_file() -> Path:
     """Where the dashboard writes down the port it actually bound."""
     return CHELA_DIR / "dashboard.port"

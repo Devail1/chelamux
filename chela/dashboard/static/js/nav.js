@@ -12,6 +12,7 @@ import { refresh } from './main.js';
 import { refreshCostTab } from './usage.js';
 import { resolveWindowId } from './windowid.js';
 import { DISPATCHED_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, groupSidebar, isArchivable, moveGroup, normalizeView, primaryWindow, runLabel, runState } from './sidebarmodel.js';
+import { notifyEnabled as approvalNotifyEnabled } from './approvals.js';
 
 // The ONE Archived section at the bottom of the sidebar (CMX-75) — its collapse state
 // rides the collapsed-groups set under this key.
@@ -1978,6 +1979,8 @@ function renderSettings(focus) {
     const collabName = localStorage.getItem('chela_collab_name') || '';
     const collabAuto = localStorage.getItem('chela_collab_autoname') || 'auto-assigned';
     const runToastsMuted = localStorage.getItem('chela_mute_run_toasts') === '1';
+    const approvalNotify = approvalNotifyEnabled();
+    const notifySupported = typeof window.Notification === 'function';
     body.innerHTML = `
         <div class="settings-tabpanel" data-tab="general">
         <section class="settings-section" id="settings-status" data-keywords="health connected daemon telegram services">
@@ -2142,6 +2145,14 @@ function renderSettings(focus) {
             <p class="s-desc">Pop a dashboard toast when a dispatcher run turns
             <code>awaiting_review</code> (or done / failed) — so you learn a run
             needs review without watching the board.</p>
+            <div class="s-row" data-keywords="approval override release browser notification desktop push">
+                <label class="s-rowlabel" for="approval-notify-toggle">Browser notification for a new approval request</label>
+                <input id="approval-notify-toggle" type="checkbox" role="switch"${approvalNotify ? ' checked' : ''}${notifySupported ? '' : ' disabled'}
+                       onchange="chela.setApprovalNotify(this.checked).then(on => { this.checked = on; })">
+            </div>
+            <p class="s-desc">Off by default. When on, this browser shows a system notification
+            when an override (or release) request starts waiting for you — the
+            <strong>⚖️ Pending approvals</strong> pill shows on every page either way.${notifySupported ? '' : ' Not supported in this browser.'}</p>
             <p class="s-desc">Set on the daemon (env), then restart <code>chela run</code>:</p>
             <div class="s-kv"><code>CHELA_NOTIFY_URL</code><span>ntfy / Telegram / webhook (auto-detected)</span></div>
             <div class="s-examples">

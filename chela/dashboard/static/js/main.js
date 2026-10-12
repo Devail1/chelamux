@@ -15,6 +15,7 @@ import { enterResources, tickResources } from './resources.js';
 import { enterStatusHealth, tickStatusHealth } from './statushealth.js';
 import { checkForUpdate } from './version.js';
 import { tickAccessRequests } from './accessreq.js';
+import { tickApprovals } from './approvals.js';
 
 // ---------------------------------------------------------------------------
 // Refresh loop
@@ -45,6 +46,9 @@ async function refresh() {
         await tickStatusHealth();
         // 🙋 Sandboxed guests' access requests (CMX-7) — the pill shows on every tab.
         await tickAccessRequests();
+        // ⚖️ Pending approvals (CMX-103) — the pill shows on every tab; SSE `approvals`
+        // frames refresh it sooner, this poll is the fallback.
+        await tickApprovals();
         if (typeof refreshLauncher === 'function') refreshLauncher();
         const view = findView(VIEWS, currentTab);
         if (view && view.tick) await view.tick();
@@ -83,6 +87,9 @@ enterResources();
 // Seeds the native status feed health marker on load — otherwise a fleet that is
 // ALREADY down on page load stays unmarked until the first refresh() tick.
 enterStatusHealth();
+// Seeds the Pending approvals pill on load (CMX-103) — a request filed before this page
+// opened must show without waiting for the first refresh() tick.
+tickApprovals();
 
 // --- Stage 0: ES-module exports ---
 export { refresh };
