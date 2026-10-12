@@ -68,6 +68,10 @@ RELEASE_URL_POLL_S = 3 * 3600.0
 RELEASE_URL_EVERY_S = 60.0
 
 
+def _in_release_paths(path: str) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in RELEASE_PATHS)
+
+
 def is_release(rec: dict | None) -> bool:
     return bool(rec) and rec.get("kind") == KIND
 
@@ -264,7 +268,8 @@ def _steps(wt: Path, version: str, theme: str, body: str) -> str | dict:
     if add.returncode != 0:
         return f"`git add` failed: {_tail(add)}"
     status = _git(wt, "status", "--porcelain", "--untracked-files=all")
-    dirty = [ln for ln in status.stdout.splitlines() if ln[:1] in (" ", "?") or ln[1:2] != " "]
+    dirty = [ln for ln in status.stdout.splitlines()
+             if not all(_in_release_paths(path) for path in ln[3:].split(" -> "))]
     if status.returncode != 0 or dirty:
         return "the release worktree is dirty after the steps: " + "; ".join(dirty[:10])
     msg = f"Release {version} — {theme}" + (f"\n\n{body.strip()}\n" if body.strip() else "")

@@ -13,5 +13,6 @@
   released commit and, once the Release workflow built it, the GitHub Release's URL. A push to
   dev expires the request; deny, expiry or a failed check push nothing and remove the local
   tag. The approval stays human-only: the merge-gate hook (plugin 0.2.9) also denies a
-  session's `python` call into `chela.release.complete`. See "Releasing" in CONTRIBUTING.md.
-  (CMX-87)
+  session's `python` call into `chela.release.complete`. A staged file outside the release
+  paths (CHANGELOG.md, pyproject.toml, uv.lock, changelog.d) refuses the release too. See
+  "Releasing" in CONTRIBUTING.md. (CMX-87)

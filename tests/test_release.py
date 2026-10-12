@@ -1535,3 +1535,249 @@ def test_poll_release_urls_window_and_throttle_boundaries(world, monkeypatch):
     assert len(seen) == 1
     release.poll_release_urls(now=5000.0 + release.RELEASE_URL_EVERY_S)     # edge: due
     assert len(seen) == 2
+
+
+# --- round 7: the staged-file hole in the dirty check --------------------------------------
+
+def test_a_step_that_stages_a_stray_file_outside_the_release_paths_refuses(world, monkeypatch):
+    """🔴 GUARD: a file a step STAGED (`git add`) outside the release paths reads as clean in
+    the worktree — `git commit` would ship it. It must refuse, naming the file."""
+    (world.work / "other.py").write_text("x = 1\n")
+    _g(world.work, "add", "other.py")
+    _g(world.work, "commit", "-q", "-m", "other")
+    _g(world.work, "push", "-q", "origin", "dev")
+
+    def stage(wt):
+        (wt / "stray.txt").write_text("x")
+        _g(wt, "add", "stray.txt")                              # staged, clean in the worktree
+        (wt / "other.py").write_text("x = 2\n")
+        _g(wt, "add", "other.py")                               # a staged MODIFICATION
+        return _ok()
+    monkeypatch.setattr(release, "_release_tests", stage)
+    out = _prepare(world)
+    _assert_refused_and_clean(world, out, why="dirty")
+    assert "stray.txt" in out["error"] and "other.py" in out["error"]
+
+
+def test_staged_changes_inside_the_release_paths_are_allowed(world, monkeypatch):
+    """The release's own files are staged by `git add` before the check — that must pass,
+    and the commit holds exactly them."""
+    def stage_own(wt):
+        (wt / "changelog.d" / "CMX-9.md").write_text("### Added\n\n- **Nine.** (CMX-9)\n")
+        _g(wt, "add", "changelog.d/CMX-9.md")
+        return _ok()
+    monkeypatch.setattr(release, "_release_tests", stage_own)
+    out = _prepare(world)
+    assert out["ok"] is True, out
+    files = set(_g(world.work, "show", "--name-only", "--format=", out["release_sha"]).split())
+    assert files <= {"CHANGELOG.md", "pyproject.toml", "uv.lock"} | {
+        f for f in files if f.startswith("changelog.d/")}
+    assert "CHANGELOG.md" in files and "pyproject.toml" in files
+
+
+# --- round 7: release-vs-override kind discrimination in chela.overrides -------------------
+# Every `_is_release(rec)` branch gets BOTH kinds through it, asserting the kind-specific
+# observable (event name, text, state, cleanup, which seam the sweep reads).
+
+from chela import event_log  # noqa: E402
+
+
+def _override(**kw) -> dict:
+    """A pending merge-OVERRIDE request (no kind), as contract.merge(override=True) records."""
+    rec = overrides.create({"task_id": "CMX-9", "label": "CMX-9", "head_sha": "a" * 40,
+                            "pr_url": "https://github.com/o/r/pull/9", "base": "dev",
+                            "question": "Override-merge CMX-9?", **kw})
+    assert rec is not None
+    return rec
+
+
+def _events(*types: str) -> list[dict]:
+    return event_log.read(types=list(types))["events"]
+
+
+@pytest.fixture
+def sent(monkeypatch):
+    seen: list[tuple] = []
+    monkeypatch.setattr(overrides.notify, "enabled", lambda: True)
+    monkeypatch.setattr(overrides.notify, "send",
+                        lambda text, title=None, **k: seen.append((text, title)))
+    return seen
+
+
+def _complete_override(monkeypatch, outcome: dict):
+    from chela import contract
+    monkeypatch.setattr(contract, "complete_override", lambda rec, by: outcome)
+
+
+def test_an_approved_release_writes_the_release_pushed_audit_event(world, pushes):
+    out = _prepare(world)
+    assert overrides.decide(out["request_id"], True, "terminal:op")["state"] == overrides.RELEASED
+    ev, = _events("orchestrator.release_pushed")
+    assert ev["payload"]["approved_by"] == "terminal:op"
+    assert ev["payload"]["tag"] == "v0.2.0" and ev["payload"]["release_sha"] == out["release_sha"]
+    assert ev["payload"]["request_id"] == out["request_id"]
+    assert "APPROVED by terminal:op and pushed" in ev["summary"]
+    assert _events("orchestrator.merge_override_pushed") == []
+
+
+def test_a_denied_release_and_a_denied_override_each_log_their_own_event(world, pushes):
+    rel = _prepare(world)
+    ovr = _override()
+    overrides.decide(rel["request_id"], False, "terminal:op")
+    overrides.decide(ovr["id"], False, "terminal:op")
+    r, = _events("orchestrator.release_denied")
+    o, = _events("orchestrator.merge_override_denied")
+    assert r["payload"]["id"] == rel["request_id"] and r["payload"]["approved_by"] == "terminal:op"
+    assert o["payload"]["id"] == ovr["id"] and o["payload"]["approved_by"] == "terminal:op"
+    assert r["summary"] == f"{overrides.load(rel['request_id'])['label']} DENIED by terminal:op"
+    assert o["summary"] == "override of CMX-9 DENIED by terminal:op"
+
+
+def test_a_failed_release_and_a_failed_override_each_log_and_tell_their_own(
+        world, pushes, told, sent, monkeypatch):
+    rel = _prepare(world)
+    sent.clear()                                        # the approval request's own push
+    _reject_dev_pushes(world)
+    overrides.decide(rel["request_id"], True, "terminal:op")
+    ovr = _override()
+    _complete_override(monkeypatch, {"ok": False, "state": overrides.FAILED, "detail": "boom"})
+    overrides.decide(ovr["id"], True, "terminal:op")
+
+    r, = _events("orchestrator.release_failed")
+    assert r["summary"].startswith("release v0.2.0 approved by terminal:op but NOT released: ")
+    o, = _events("orchestrator.merge_override_failed")
+    assert o["summary"] == "override of CMX-9 approved by terminal:op but NOT merged: boom"
+
+    detail = overrides.load(rel["request_id"])["detail"]
+    assert sent == [
+        (f"release v0.2.0 failed: {detail}\n\nPushed only: main, v0.2.0.", "chela: release failed"),
+        ("override of CMX-9 failed: boom\n\nNothing was merged.", "chela: override failed"),
+    ]
+    assert [k for k, _s, _p in told] == ["release_failed", "override_failed"]
+    assert told[0][1].startswith("🏷️ ") and told[1][1].startswith("⚖️ ")
+    assert told[0][1].endswith("— pushed only: main, v0.2.0")
+    assert told[1][1].endswith("— nothing was merged")
+
+
+def test_a_release_that_pushed_nothing_says_so_never_nothing_was_merged(world, pushes, sent):
+    out = _prepare(world)
+    sent.clear()
+    hook = world.origin / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    overrides.decide(out["request_id"], True, "terminal:op")
+    (text, title), = sent
+    assert text.endswith("\n\nNothing was pushed.") and "merged" not in text
+    assert title == "chela: release failed"
+
+
+def test_an_expired_release_and_an_expired_override_each_log_and_tell_their_own(
+        world, pushes, sent, told):
+    rel = _prepare(world)
+    sent.clear()
+    ovr = _override()
+    overrides._expire(overrides.load(rel["request_id"]), "dev moved")
+    overrides._expire(overrides.load(ovr["id"]), "head moved")
+    r, = _events("orchestrator.release_expired")
+    o, = _events("orchestrator.merge_override_expired")
+    assert r["summary"] == "release v0.2.0 expired: dev moved"
+    assert o["summary"] == "override of CMX-9 expired: head moved"
+    assert sent == [("release v0.2.0 expired: dev moved\n\nNothing was pushed.", "chela: release expired"),
+                    ("override of CMX-9 expired: head moved\n\nNothing was merged.",
+                     "chela: override expired")]
+    assert [k for k, _s, _p in told] == ["release_expired", "override_expired"]
+    assert _release_worktrees() == []                       # the release's worktree went too
+
+
+def test_an_approved_override_is_merged_and_never_records_pushed_refs(monkeypatch):
+    ovr = _override()
+    _complete_override(monkeypatch, {"ok": True, "merge_commit_sha": "m" * 40,
+                                     "pushed": ["main"]})
+    res = overrides.decide(ovr["id"], True, "terminal:op")
+    assert res["ok"] is True and res["state"] == overrides.MERGED
+    rec = overrides.load(ovr["id"])
+    assert rec["state"] == overrides.MERGED and "pushed" not in rec
+    assert _events("orchestrator.release_pushed") == []
+
+
+def test_an_approved_release_ends_released_and_records_what_was_pushed(world, pushes):
+    out = _prepare(world)
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["state"] == overrides.RELEASED
+    assert overrides.load(out["request_id"])["pushed"] == ["main", "v0.2.0", "dev"]
+
+
+def test_only_a_release_in_a_final_state_is_cleaned_up(monkeypatch):
+    calls = []
+    monkeypatch.setattr(release, "cleanup", lambda rec, keep_tag=False: calls.append(
+        (rec["id"], keep_tag)))
+    for state in overrides.FINAL_STATES:
+        overrides._cleanup_release({"id": f"ovr-{state}", "state": state})        # override
+    assert calls == []
+    overrides._cleanup_release({"id": "rel-released", "kind": "release",
+                                "state": overrides.RELEASED})
+    overrides._cleanup_release({"id": "rel-main", "kind": "release",
+                                "state": overrides.FAILED, "pushed": ["main"]})
+    overrides._cleanup_release({"id": "rel-none", "kind": "release",
+                                "state": overrides.DENIED})
+    assert calls == [("rel-released", True), ("rel-main", True), ("rel-none", False)]
+
+
+def test_a_denied_override_runs_no_release_cleanup(world, pushes, monkeypatch):
+    calls = []
+    monkeypatch.setattr(release, "cleanup", lambda rec, keep_tag=False: calls.append(rec["id"]))
+    overrides.decide(_override()["id"], False, "terminal:op")
+    assert calls == []
+
+
+def test_the_sweep_reads_dev_for_a_release_and_the_pr_head_for_an_override(world, pushes):
+    rel = _prepare(world)
+    ovr = _override()
+    seen = {"dev": [], "pr": []}
+
+    def dev_head_of(rec):
+        seen["dev"].append(rec["id"])
+        return "d" * 40
+
+    def head_of(task_id):
+        seen["pr"].append(task_id)
+        return "e" * 40
+    expired = overrides.sweep(head_of=head_of, dev_head_of=dev_head_of)
+    assert seen == {"dev": [rel["request_id"]], "pr": ["CMX-9"]}
+    by_id = {r["id"]: r for r in expired}
+    assert by_id[rel["request_id"]]["detail"].startswith("dev moved (")
+    assert "cut it again from the new dev" in by_id[rel["request_id"]]["detail"]
+    assert by_id[ovr["id"]]["detail"].startswith("the PR head moved (")
+    assert "request a new override" in by_id[ovr["id"]]["detail"]
+
+
+def test_prepare_is_blocked_only_by_a_pending_release_never_by_a_merge_override(world):
+    ovr = _override()
+    out = _prepare(world)
+    assert out["ok"] is True, out                       # a pending OVERRIDE does not block
+    assert {r["id"] for r in overrides.pending()} == {ovr["id"], out["request_id"]}
+    again = _prepare(world, version="0.3.0")            # a pending RELEASE does
+    assert again["ok"] is False and "already waiting" in again["error"]
+    assert out["request_id"] in again["error"] and "v0.2.0" in again["error"]
+
+
+def test_a_stray_file_that_merely_starts_like_a_release_path_still_refuses(world, monkeypatch):
+    """A prefix is not containment: `changelog.dx/` and `CHANGELOG.md.bak` are NOT inside
+    `changelog.d` / `CHANGELOG.md`."""
+    def stray(wt):
+        (wt / "CHANGELOG.md.bak").write_text("x")
+        (wt / "changelog.dx").mkdir()
+        (wt / "changelog.dx" / "a.md").write_text("x")
+        return _ok()
+    monkeypatch.setattr(release, "_release_tests", stray)
+    out = _prepare(world)
+    _assert_refused_and_clean(world, out, why="dirty")
+    assert "CHANGELOG.md.bak" in out["error"] and "changelog.dx/a.md" in out["error"]
+
+
+def test_poll_release_urls_never_looks_up_a_merge_override(monkeypatch):
+    ovr = _override()
+    overrides.set_fields(ovr["id"], state=overrides.RELEASED, finished_at=1000.0)
+    monkeypatch.setattr(release, "_gh_release_url",
+                        lambda rec: pytest.fail("only a RELEASE is polled for a URL"))
+    release.poll_release_urls(now=1001.0)
