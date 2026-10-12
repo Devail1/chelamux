@@ -77,7 +77,7 @@ DEFAULT_READY_STATES = ("Todo",)
 # `canceled` (`state { name: "Duplicate", type: "duplicate" }`, seen on CMX-33 / CMX-80).
 # Leaving it out of this set kept every closed duplicate in the open read, so the
 # reconcile read it as "still open" and the board showed it. Both are "closed, not shipped".
-CANCELED_STATE_TYPES = ("canceled",)
+CANCELED_STATE_TYPES = ("canceled", "duplicate")
 TERMINAL_STATE_TYPES = ("completed", *CANCELED_STATE_TYPES)
 # 🗂️📐 CMX-23 — the order Linear's board shows its columns in: by state TYPE, then the
 # state's own `position` inside its type. Canceled and Duplicate states are collapsed off
