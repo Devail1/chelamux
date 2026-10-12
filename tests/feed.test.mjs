@@ -230,7 +230,7 @@ test('a gone lane holding an UNANSWERED review is NOT buried (CMX-62)', () => {
 // restarted mid-judge may see EITHER verdict before the plain `awaiting_review` edge. Both
 // are asserted, in one table, so the pair cannot drift apart: covering only the kind a
 // reviewer happened to name is how the sibling half stays unguarded (CMX-197 round 3).
-for (const kind of ['run_judge_clean', 'run_judge_cannot_verify']) {
+for (const kind of ['run_judge_clean', 'run_judge_cannot_verify', 'run_reopened']) {
     test(`a ${kind} verdict alone (no run_review) still keeps a gone lane open (CMX-197)`, () => {
         const events = [ev(kind, '@7', { payload: { task_id: 't-open' } })];
         const { lanes } = buildLanes(events, [], DEFAULT_CLASSES);

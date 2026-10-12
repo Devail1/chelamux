@@ -468,6 +468,17 @@ def test_ci_red_is_one_notice_with_the_job_and_the_failing_test():
     assert "gh run rerun 42 --failed" in event["summary"]
 
 
+def test_a_ci_red_notice_is_attributed_to_the_runs_agent_window(monkeypatch):
+    """🔴 GUARD: the CI-red notice lands in the run's agent lane (its recorded window, in
+    the current tmux epoch), never as an ownerless "chela itself" row."""
+    monkeypatch.setattr(inbox.epoch, "current", lambda: "e1")
+    run = _run("awaiting_review", pr_head_sha="cafe001", window_id="@41", window_epoch="e1")
+    assert inbox.ci_red(run, sha="cafe001", failing=("test",), run_ids=(), log_tail="",
+                        sent_back=False) is True
+    [event] = _queued("run_ci_red")
+    assert event["wid"] == "@41"
+
+
 def test_a_red_on_a_NEW_head_is_a_new_notice():
     """🔴 GUARD: the latch is per (run, head sha) — the agent's next push going red is news."""
     run = _run("awaiting_review")
@@ -810,3 +821,31 @@ def test_a_queued_stuck_notice_rots_once_the_run_stops_running(status, stale, mo
     [event] = inbox.stuck_events([_run("running")], inbox._empty(), probe, 99_999.0)
     reason = inbox.stale_reason(event, [_run(status)])
     assert bool(reason) is stale, reason
+
+
+# --- orchestrator-added: every new CMX-86 notice lands in the run's agent lane -----------
+
+def _attributed(over=None):
+    return _run("awaiting_review", window_id="@41", window_epoch="e1", **(over or {}))
+
+
+def test_judge_not_started_is_attributed_to_the_runs_window(monkeypatch):
+    monkeypatch.setenv("CHELA_JUDGE_NOT_STARTED_ALERT_S", "0")
+    run = _attributed({"pr_head_sha": "abc", "judge_state": ""})
+    [e] = inbox.judge_wait_events([run], inbox._empty(), 1_000_000.0, now_epoch="e1")
+    assert e["kind"] == "run_judge_not_started" and e["wid"] == "@41"
+
+
+def test_pr_conflicting_is_attributed_to_the_runs_window():
+    run = _attributed({"pr_mergeable": "CONFLICTING", "pr_head_sha": "aaa"})
+    [e] = inbox.conflict_events([run], inbox._empty(), now_epoch="e1")
+    assert e["kind"] == "run_pr_conflicting" and e["wid"] == "@41"
+
+
+def test_stuck_is_attributed_to_the_runs_window(monkeypatch):
+    monkeypatch.setenv("CHELA_STUCK_AGENT_ALERT_S", "1200")
+    run = {**_attributed(), "status": "running", "worktree_path": "/wt"}
+    now = 1_000_000.0
+    probe = {"T9": {"activity": now - 1300, "markers": {}}}
+    [e] = inbox.stuck_events([run], inbox._empty(), probe, now, now_epoch="e1")
+    assert e["kind"] == "run_stuck" and e["wid"] == "@41"
