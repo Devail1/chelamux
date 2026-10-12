@@ -1281,6 +1281,32 @@ def inbox_held_alert_s() -> int:
 def clean_unmerged_alert_s() -> int:
     return int(os.environ.get("CHELA_CLEAN_UNMERGED_ALERT_S", "1800"))
 
+
+# CMX-86: the orchestrator inbox's own notices. Every notice is re-billed on every later
+# request the orchestrator makes, so each must carry information or ask for a decision.
+def inbox_notify_awaiting_review() -> bool:
+    """The plain "awaiting review" notice. OFF by default: the orchestrator merges only after
+    the judge's verdict (which IS a notice), so this one was never actionable — the dashboard
+    and `chela dispatch-runs` still show the state. `run_judge_not_started` replaces it."""
+    return os.environ.get("CHELA_INBOX_NOTIFY_AWAITING_REVIEW", "false").strip().lower() in (
+        "true", "1", "yes", "on")
+
+
+def judge_not_started_alert_s() -> int:
+    """A run in `awaiting_review` this long with no judge round started ⇒ one notice."""
+    return int(os.environ.get("CHELA_JUDGE_NOT_STARTED_ALERT_S", "1200"))
+
+
+def stuck_agent_alert_s() -> int:
+    """A running agent with no new commit AND no transcript activity this long ⇒ one notice."""
+    return int(os.environ.get("CHELA_STUCK_AGENT_ALERT_S", "1200"))
+
+
+def marker_unread_alert_s() -> int:
+    """A completion/push-request marker sitting unread in a running run's worktree this long
+    (several dispatcher ticks) ⇒ one notice. The daemon applies one on its next pass."""
+    return int(os.environ.get("CHELA_MARKER_UNREAD_ALERT_S", "300"))
+
 # Explicit opt-in to serve the writable terminal wall on a NON-loopback bind
 # (e.g. --host 0.0.0.0 or a LAN/tailnet IP). Off by default: a public bind would
 # otherwise hand out unauthenticated remote shells (RCE). Loopback binds, fronted

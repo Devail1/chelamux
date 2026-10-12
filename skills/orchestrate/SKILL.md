@@ -168,6 +168,11 @@ release can pass tests and still break a deploy job.
 - **`@N` does not survive a tmux restart.** The fleet comes back renumbered. If
   `chela status` shows nothing you recognise, re-derive every wid; `chela watching` says
   whether the inbox's address is still real, and `chela watch` re-registers you.
+- **The inbox does not echo you.** Your own `reopen`/`retry`/`close`/`merge`/`dispatch
+  --resume` produce no notice; the same act by a human does. "Awaiting review" is silent
+  (the judge verdict is the notice); you hear instead when no judge has started after 20m,
+  CI goes red (job + first failing line), a PR goes CONFLICTING, a running agent goes quiet
+  or its completion marker sits unread, or a dispatch hold lapses or is released by someone else.
 - **Trust authoritative signals over scrapes.** `chela peek`, the event log and the run
   row beat reading a terminal screen.
 - **Surface forks with a recommendation; decide the rest.** Irreversible or outward-facing

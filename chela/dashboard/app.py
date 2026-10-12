@@ -4702,7 +4702,7 @@ def api_dispatcher_pause():
 def api_dispatcher_resume():
     """Release the dispatch hold. Idempotent — releasing when nothing is held is not an
     error, so a stale/duplicate click never surfaces as a failure."""
-    released = hold.release()
+    released = hold.release(by="dashboard")
     return jsonify({
         "ok": True,
         "released": released.as_dict() if released else None,

@@ -51,6 +51,17 @@ test('a gate is a gate, a tool call is the firehose, an unknown type is shown', 
     // surfaces. Unmapped falls to `other` and the push that says "this shipped unjudged"
     // reads as an anonymous `·`, indistinguishable from noise.
     assert.equal(classOf('run_unjudged_merged'), 'run');
+    // CMX-86: the orchestrator inbox's new notices — run events stay in the Runs filter;
+    // a lapsed/released dispatch hold is lifecycle. Unmapped, each would render as a `·`.
+    assert.equal(classOf('run_judge_not_started'), 'run');
+    assert.equal(classOf('run_reopened'), 'run');
+    assert.equal(classOf('run_was_closed'), 'run');
+    assert.equal(classOf('run_ci_red'), 'run');
+    assert.equal(classOf('run_pr_conflicting'), 'run');
+    assert.equal(classOf('run_stuck'), 'run');
+    assert.equal(classOf('run_marker_unread'), 'run');
+    assert.equal(classOf('dispatch_hold_expired'), 'lifecycle');
+    assert.equal(classOf('dispatch_hold_released'), 'lifecycle');
     assert.equal(classOf('daemon_start'), 'lifecycle');
     // An inbox that cannot deliver is a GATE: work is stuck until a human acts, and it
     // stayed invisible for a whole outage (CMX-77). `other` would render it as a `·`.
@@ -219,7 +230,7 @@ test('a gone lane holding an UNANSWERED review is NOT buried (CMX-62)', () => {
 // restarted mid-judge may see EITHER verdict before the plain `awaiting_review` edge. Both
 // are asserted, in one table, so the pair cannot drift apart: covering only the kind a
 // reviewer happened to name is how the sibling half stays unguarded (CMX-197 round 3).
-for (const kind of ['run_judge_clean', 'run_judge_cannot_verify']) {
+for (const kind of ['run_judge_clean', 'run_judge_cannot_verify', 'run_reopened']) {
     test(`a ${kind} verdict alone (no run_review) still keeps a gone lane open (CMX-197)`, () => {
         const events = [ev(kind, '@7', { payload: { task_id: 't-open' } })];
         const { lanes } = buildLanes(events, [], DEFAULT_CLASSES);

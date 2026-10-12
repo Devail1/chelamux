@@ -270,7 +270,7 @@ def _assert_nothing_was_pasted_into(pane: str) -> None:
 
 
 def test_a_tmux_restart_renumbers_the_fleet_and_the_queue_is_NOT_pasted_into_the_stranger(
-        tmux, live_inbox, caplog):
+        tmux, live_inbox, caplog, monkeypatch):
     """2026-07-14, driven for real: the server dies, the fleet comes back renumbered.
 
     Server A issues `@0` to the orchestrator and the inbox is addressed to it. Server A is
@@ -280,6 +280,8 @@ def test_a_tmux_restart_renumbers_the_fleet_and_the_queue_is_NOT_pasted_into_the
     the whole cost of the outage was that it was silent), and the queue must survive to be
     delivered to whoever registers next.
     """
+    # CMX-86: `run_review` is silent by default now; this drives it as the vehicle event.
+    monkeypatch.setenv("CHELA_INBOX_NOTIFY_AWAITING_REVIEW", "true")
     # --- server A: the fleet as it was ---------------------------------------------------
     tmux.start("orchestrator")
     orch = tmux.wid("orchestrator")
