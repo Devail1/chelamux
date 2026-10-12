@@ -945,3 +945,193 @@ def test_a_rewritten_unread_marker_is_news_again(monkeypatch):
     again = {"T9": {"activity": now - 5000, "markers": {"task-finished": now + 100}}}
     fired = inbox.stuck_events([_run("running")], store, again, now + 500)
     assert [e["kind"] for e in fired] == ["run_marker_unread"]
+
+
+# --- round 6: survivors of the judge's mutation battery ------------------------------------
+
+@pytest.mark.parametrize("status,stale", [
+    ("running", False), ("claimed", False), ("awaiting_review", True), ("failed", True)])
+def test_a_queued_marker_unread_notice_rots_once_the_run_stops_running(status, stale,
+                                                                       monkeypatch):
+    """🔴 GUARD: the daemon applied the marker (run -> awaiting_review) while the notice sat
+    queued: "your marker was not read" is now false and must not be delivered."""
+    monkeypatch.setenv("CHELA_MARKER_UNREAD_ALERT_S", "60")
+    now = 1_000_000.0
+    probe = {"T9": {"activity": now, "markers": {"task-finished": now - 3600}}}
+    [event] = inbox.stuck_events([_run("running")], inbox._empty(), probe, now)
+    assert event["kind"] == "run_marker_unread"
+    reason = inbox.stale_reason(event, [_run(status)])
+    assert bool(reason) is stale, reason
+
+
+# A run NAMED by something other than its task id: the inbox keys on `T9`, the operator types
+# the branch (`cmx-9`) or the window name.
+@pytest.mark.parametrize("typed", ["cmx-9", "the-window-name"])
+@pytest.mark.parametrize("name", sorted(_ACTIONS))
+def test_own_action_is_announced_under_the_resolved_task_id(name, typed, monkeypatch):
+    """🔴 GUARD: ``chela <action> cmx-9`` must key the echo on the RESOLVED task id (T9), or the
+    tick sees an unannounced edge and the orchestrator hears about its own action."""
+    cmd, args, fn, before, after, kind = _ACTIONS[name]
+    _as(monkeypatch, ORCH)
+    run = lambda status, **o: _run(status, window_name="the-window-name", **o)  # noqa: E731
+    monkeypatch.setattr(dispatcher, "resolve_run", lambda ident: run(before))
+    monkeypatch.setattr(dispatcher, fn, lambda *a, **k: {
+        "ok": True, "task_id": "T9", "branch_name": "cmx-9", "reason": "superseded",
+        "from_status": before, "comment_posted": True})
+    inbox.tick({}, runs=[run(before)])
+    cmd(Namespace(**{**vars(args), "run": typed}))
+    assert list(inbox.load()["expected_edges"]) == ["T9"]
+    inbox.tick({}, runs=[run(after, close_reason="superseded")])
+    assert _queued(kind) == []
+    assert inbox.load()["expected_edges"] == {}
+
+
+@pytest.mark.parametrize("result", [
+    {"ok": False, "error": "judge not clean", "tier": "escalate"},
+    {"ok": True, "pending": True, "request_id": "r1"},
+])
+def test_merge_by_branch_name_announces_and_retracts_under_the_task_id(result, monkeypatch):
+    """🔴 GUARD: ``chela merge cmx-9`` announces under T9, and a refused/pending merge retracts
+    exactly that key (a retraction under the typed name would leave T9's echo behind)."""
+    _as(monkeypatch, ORCH)
+    monkeypatch.setattr(dispatcher, "resolve_run", lambda ident: _run("awaiting_review"))
+    seen = {}
+    def merge(run, **k):
+        seen["announced"] = list(inbox.load()["expected_edges"])
+        return result
+    monkeypatch.setattr(main.contract, "merge", merge)
+    monkeypatch.setattr(main, "_print_override_request", lambda r: None)
+    args = Namespace(run="cmx-9", reason="", override=False)
+    if result["ok"]:
+        main.cmd_merge(args)
+    else:
+        with pytest.raises(SystemExit):
+            main.cmd_merge(args)
+    assert seen["announced"] == ["T9"]
+    assert inbox.load()["expected_edges"] == {}
+
+
+# --- round 6: a changed-line mutation sweep (sweep.py vs origin/dev) -----------------------
+
+def test_a_caller_with_no_window_and_no_registered_peer_is_not_the_orchestrator(monkeypatch):
+    """🔴 GUARD: windowless caller, nothing registered via ``chela watch`` — False, without
+    ever asking who the caller is (an own-peer with a pid must not be compared to nothing)."""
+    _as(monkeypatch, None)
+    store = inbox.load()
+    store["orchestrator_peer"] = None
+    monkeypatch.setattr(orchestrator, "self_peer", lambda: {"pid": 5})
+    assert inbox.caller_is_orchestrator(store) is False
+
+
+def test_a_windowless_peer_matching_the_registered_pid_is_the_orchestrator(monkeypatch):
+    _as(monkeypatch, None)
+    store = inbox.load()
+    store["orchestrator_peer"] = {"pid": 5}
+    monkeypatch.setattr(orchestrator, "self_peer", lambda: {"pid": 5})
+    assert inbox.caller_is_orchestrator(store) is True
+    monkeypatch.setattr(orchestrator, "self_peer", lambda: {"pid": 6})
+    assert inbox.caller_is_orchestrator(store) is False
+
+
+@pytest.mark.parametrize("task_id", [None, ""])
+def test_no_edge_is_announced_without_a_task_id(task_id):
+    assert inbox.expect_edge(task_id, "closed", inbox.ORCH_ECHO) is False
+    assert inbox.load()["expected_edges"] == {}
+
+
+def test_a_disabled_inbox_announces_and_retracts_nothing(monkeypatch):
+    """🔴 GUARD: with the inbox off the CLI's own-action hooks are inert — nothing written,
+    nothing retracted."""
+    monkeypatch.setattr(inbox, "INBOX_ENABLED", False)
+    assert inbox.expect_edge("T9", "closed", inbox.ORCH_ECHO) is False
+    assert inbox.load()["expected_edges"] == {}
+    monkeypatch.setattr(inbox, "INBOX_ENABLED", True)
+    inbox.expect_edge("T9", "closed", inbox.ORCH_ECHO)
+    monkeypatch.setattr(inbox, "INBOX_ENABLED", False)
+    inbox.forget_edge("T9")
+    monkeypatch.setattr(inbox, "INBOX_ENABLED", True)
+    assert "T9" in inbox.load()["expected_edges"]
+
+
+def test_note_own_action_is_inert_when_disabled_or_without_a_task_id(monkeypatch):
+    monkeypatch.setattr(inbox, "caller_is_orchestrator", lambda store=None: True)
+    assert inbox.note_own_action(None, "closed") is False
+    assert inbox.note_own_action("", "closed") is False
+    monkeypatch.setattr(inbox, "INBOX_ENABLED", False)
+    assert inbox.note_own_action("T9", "closed") is False
+    monkeypatch.setattr(inbox, "INBOX_ENABLED", True)
+    assert inbox.load()["expected_edges"] == {}
+    assert inbox.note_own_action("T9", "closed") is True
+
+
+def test_note_own_action_is_false_for_a_non_orchestrator_and_never_raises(monkeypatch):
+    monkeypatch.setattr(inbox, "caller_is_orchestrator", lambda store=None: False)
+    assert inbox.note_own_action("T9", "closed") is False
+    assert inbox.load()["expected_edges"] == {}
+
+    def boom(store=None):
+        raise RuntimeError("registry unreadable")
+    monkeypatch.setattr(inbox, "caller_is_orchestrator", boom)
+    assert inbox.note_own_action("T9", "closed") is False
+    assert inbox.load()["expected_edges"] == {}
+
+
+def test_label_and_ref_helpers():
+    assert inbox._label({"branch_name": "cmx-9", "task_id": "T9"}) == "cmx-9"
+    assert inbox._label({"task_id": "T9"}) == "T9"
+    assert inbox._label({}) == "?"
+    assert inbox._ref({}) == "no PR link"
+    ref = inbox._ref({"pr_url": "https://github.com/o/r/pull/9"})
+    assert ref.endswith("— https://github.com/o/r/pull/9") and ref != "no PR link"
+
+
+def test_judge_not_started_is_false_while_a_round_runs_or_backs_off():
+    base = {"pr_head_sha": "abc"}
+    assert inbox._judge_not_started(base) is True
+    assert inbox._judge_not_started({**base, "judge_state": judge.J_RUNNING}) is False
+    assert inbox._judge_not_started({**base, "judge_retry_after": "2026-10-12T10:00:00Z"}) is False
+    assert inbox._judge_not_started({**base, "judge_sha": "abc"}) is False
+    assert inbox._judge_not_started({**base, "judge_sha": "old"}) is True
+
+
+def test_ci_red_declines_when_disabled_or_without_a_task_or_a_sha(monkeypatch):
+    kw = dict(failing=("test",), run_ids=(), log_tail="", sent_back=True)
+    run = _run("awaiting_review", pr_head_sha="abc")
+    assert inbox.ci_red({**run, "task_id": ""}, sha="abc", **kw) is False
+    assert inbox.ci_red(run, sha="", **kw) is False
+    monkeypatch.setattr(inbox, "INBOX_ENABLED", False)
+    assert inbox.ci_red(run, sha="abc", **kw) is False
+    monkeypatch.setattr(inbox, "INBOX_ENABLED", True)
+    assert _queued("run_ci_red") == [] and inbox.load()["expected_edges"] == {}
+    assert inbox.ci_red(run, sha="abc", **kw) is True
+
+
+def test_ci_red_is_written_to_the_event_log():
+    """🔴 GUARD: the notice is also a durable log record (the dashboard feed reads the log)."""
+    from chela import event_log
+    inbox.ci_red(_run("awaiting_review", pr_head_sha="abc"), sha="abc", failing=("test",),
+                 run_ids=(), log_tail="", sent_back=False)
+    assert "run_ci_red" in [e["type"] for e in event_log.read()["events"]]
+
+
+def test_stuck_probes_skips_a_run_whose_worktree_is_gone(tmp_path):
+    gone = _run("running", worktree_path=str(tmp_path / "missing"))
+    here = tmp_path / "wt"
+    here.mkdir()
+    probes = inbox.stuck_probes([gone, _run("running", task_id="T8", worktree_path=str(here))])
+    assert list(probes) == ["T8"]
+
+
+def test_parse_epoch_takes_a_number_as_is():
+    assert inbox._parse_epoch(12) == 12.0
+    assert inbox._parse_epoch(12.5) == 12.5
+    assert inbox._parse_epoch(None) is None
+
+
+def test_marker_unread_is_attributed_to_the_runs_window(monkeypatch):
+    monkeypatch.setenv("CHELA_MARKER_UNREAD_ALERT_S", "60")
+    run = {**_attributed(), "status": "running", "worktree_path": "/wt"}
+    now = 1_000_000.0
+    probe = {"T9": {"activity": now, "markers": {"task-finished": now - 3600}}}
+    [e] = inbox.stuck_events([run], inbox._empty(), probe, now, now_epoch="e1")
+    assert e["kind"] == "run_marker_unread" and e["wid"] == "@41"
