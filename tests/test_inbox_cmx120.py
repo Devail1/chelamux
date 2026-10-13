@@ -116,3 +116,21 @@ def test_the_probe_names_the_earliest_instance_pid():
              ("pytest", root, 50.0, 11)]
     assert inbox._selfcheck_for(str(root), procs) == {
         "what": "judge self-check", "since": 100.0, "pid": 55}
+
+
+def test_a_quick_re_run_is_a_new_process_even_with_a_start_inside_the_slack():
+    """🔴 GUARD: with both pids known the pid decides — a re-run that started seconds after
+    the first (inside the pid-less slack) is still a new self-check and is news."""
+    store = inbox._empty()
+    assert _tick(store, START + CEILING, _probe(pid=1)) == ["run_selfcheck_long"]
+    assert _tick(store, START + CEILING + 60, _probe(pid=2, since=START + 30)) == [
+        "run_selfcheck_long"]
+
+
+def test_a_probe_with_no_readable_start_names_the_command_without_a_pid():
+    """🔴 GUARD: a process whose start could not be read still names the self-check (it is
+    activity), with no start and no pid to latch on — never None, never a crash."""
+    root = Path("/tmp").resolve()
+    procs = [("task-finished self-check", root, None, 9)]
+    assert inbox._selfcheck_for(str(root), procs) == {
+        "what": "task-finished self-check", "since": None, "pid": None}
