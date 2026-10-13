@@ -11,8 +11,9 @@
 //
 // chela's run state (running, judging, rework N, failed, needs a human, …) is a BADGE on
 // the card (kanban.js's STATUS_CHIPS + runStateBadges below), never a column: a failed run
-// shows a red "failed" pill INSIDE In Progress / In Review. Canceled-type columns
-// (Canceled, Duplicate) are `hidden`, as Linear collapses them.
+// shows a red "failed" pill INSIDE In Progress / In Review. The Canceled and
+// Duplicate columns (state types `canceled` / `duplicate`) are `hidden`, as Linear
+// collapses them — the API flags them; this module only reads `hidden`.
 // ---------------------------------------------------------------------------
 
 // Where a card goes when the tracker did not report its state (a finished / archived
