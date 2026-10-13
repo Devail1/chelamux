@@ -3559,6 +3559,25 @@ def _override_same_origin() -> bool:
     return True
 
 
+def _release_confirm_body(req: dict, left: float) -> str:
+    """The confirm page for a ``chela release`` request (CMX-87) — same route, same POST."""
+    from html import escape
+    ids = req.get("task_ids") or []
+    rows = "".join(
+        f"<dt>{escape(k)}</dt><dd>{escape(str(v))}</dd>" for k, v in (
+            ("Version", req.get("version")), ("Theme", req.get("theme")),
+            ("Cut from dev", req.get("dev_sha")), ("Release commit", req.get("release_sha")),
+            (f"Tasks ({len(ids)})", ", ".join(ids) or "none"),
+            ("Asked by", req.get("actor")), ("Expires in", f"{left:.0f}s")))
+    return (f"<h1>🏷️ Release {escape(str(req.get('tag')))}?</h1><dl>{rows}</dl>"
+            "<p>Approving pushes main, the tag, then dev — fast-forward only, after "
+            "re-checking that dev is still the commit above and main an ancestor of the "
+            "release. Any miss pushes nothing.</p>"
+            '<form method="post"><button class="ok" name="decision" value="approve">'
+            'Approve release</button><button class="no" name="decision" value="deny">'
+            "Deny</button></form>")
+
+
 @app.route("/override/<request_id>", methods=["GET", "POST"])
 @require_auth
 def override_confirm(request_id):
@@ -3577,15 +3596,23 @@ def override_confirm(request_id):
         out = overrides.decide(request_id, decision == "approve", by="dashboard",
                                channel="dashboard")
         state = out.get("state")
+        is_release = (req or {}).get("kind") == "release"
         if state == overrides.MERGED:
             body = (f"<h1>✅ Approved and merged</h1><p>Merge commit "
                     f"<code>{escape((out.get('merge_commit_sha') or '?')[:12])}</code>.</p>")
+        elif state == overrides.RELEASED:
+            body = (f"<h1>✅ Approved and released</h1><p>Pushed main, "
+                    f"{escape(str(req.get('tag')))} and dev at "
+                    f"<code>{escape((out.get('merge_commit_sha') or '?')[:12])}</code>.</p>")
         elif state == overrides.DENIED and out.get("ok"):
-            body = "<h1>✅ Denied</h1><p>Nothing was merged.</p>"
+            body = ("<h1>✅ Denied</h1><p>Nothing was "
+                    f"{'pushed' if is_release else 'merged'}.</p>")
         else:
-            body = (f"<h1>⌛ Not merged</h1><p>{escape(str(out.get('detail') or state))}</p>"
-                    "<p>Nothing was merged.</p>")
-        ok = state in (overrides.MERGED, overrides.DENIED) and out.get("ok")
+            done = overrides.load(request_id) or req or {}
+            body = (f"<h1>⌛ Not {'released' if is_release else 'merged'}</h1>"
+                    f"<p>{escape(str(out.get('detail') or state))}</p>"
+                    f"<p>{escape(overrides.not_done(done).capitalize())}.</p>")
+        ok = state in (*overrides.SUCCESS_STATES, overrides.DENIED) and out.get("ok")
         return Response(_OVERRIDE_PAGE.format(body=body), status=200 if ok else 410,
                         mimetype="text/html")
     if req is None or req.get("state") != overrides.PENDING:
@@ -3597,6 +3624,9 @@ def override_confirm(request_id):
                 + " Nothing will merge from this page.</p>")
         return Response(_OVERRIDE_PAGE.format(body=body), status=404, mimetype="text/html")
     left = max(0.0, (req.get("deadline") or 0) - time.time())
+    if req.get("kind") == "release":
+        return Response(_OVERRIDE_PAGE.format(body=_release_confirm_body(req, left)),
+                        mimetype="text/html")
     rows = "".join(
         f"<dt>{escape(k)}</dt><dd>{escape(str(v))}</dd>" for k, v in (
             ("Run", req.get("label")), ("PR", req.get("pr_url")),

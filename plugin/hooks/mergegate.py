@@ -18,8 +18,9 @@ into a chela workflow's repo:
 * ``git push`` whose destination is the workflow's base branch or a production branch
   (``main``/``master``/…), including ``--all``/``--mirror`` and a bare ``git push`` while
   that branch is checked out;
-* a Claude session approving its OWN override (``chela merge-approve``, a request to the
-  dashboard's ``/override/`` route, or a ``python`` call into ``chela.overrides.decide``) —
+* a Claude session approving its OWN override or release (``chela merge-approve``, a
+  request to the dashboard's ``/override/`` route, or a ``python`` call into
+  ``chela.overrides.decide`` or ``chela.release.complete``) —
   the operator's approval must come from a human;
 * a Claude session approving a sandboxed guest's access request (``chela share-requests
   approve``, or a request to the dashboard's ``/api/share-requests/…/approve`` route,
@@ -575,6 +576,13 @@ def _self_approval(argv: list[str]) -> Decision:
         return Decision(True, "⚖️ chela merge gate: an override is approved by the "
                               "OPERATOR (the Telegram button, the dashboard, or a plain "
                               "terminal) — never by a Claude session. Ask the human.")
+    if (name.startswith("python") or name in ("uv", "uvx")) and any(
+            "release" in a and "complete(" in a.replace(" ", "") for a in rest):
+        # CMX-87: the in-process spelling of a release's approved half
+        # (`chela.release.complete`, which pushes main + tag + dev).
+        return Decision(True, "⚖️ chela merge gate: a release is approved by the OPERATOR "
+                              "(the Telegram button, the dashboard, or a plain terminal) — "
+                              "never by a Claude session. Ask the human.")
     if name in ("curl", "wget", "http", "xh") and any("/override/" in a for a in rest):
         return Decision(True, "⚖️ chela merge gate: the dashboard's /override/ approval is "
                               "the OPERATOR's to press, not a Claude session's. Ask the "
