@@ -19,7 +19,7 @@ const LINEAR = [
     { name: 'In Review', type: 'started', hidden: false },
     { name: 'Done', type: 'completed', hidden: false },
     { name: 'Canceled', type: 'canceled', hidden: true },
-    { name: 'Duplicate', type: 'canceled', hidden: true },
+    { name: 'Duplicate', type: 'duplicate', hidden: true },
 ];
 
 const labels = board => board.columns.map(c => c.label);

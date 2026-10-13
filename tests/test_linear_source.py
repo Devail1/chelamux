@@ -51,8 +51,11 @@ def _wf(tmp_path, **tracker):
                            project_key="CMX")
 
 
+# 🗂️ CMX-107: Duplicate has a state TYPE of its own. The real payload (CMX-33 / CMX-80):
+#   "state": {"name": "Duplicate", "type": "duplicate"}   — NOT "canceled".
 _TYPES = {"Backlog": "backlog", "Todo": "unstarted", "In Progress": "started",
-          "In Review": "started", "Done": "completed", "Canceled": "canceled"}
+          "In Review": "started", "Done": "completed", "Canceled": "canceled",
+          "Duplicate": "duplicate"}
 
 
 def issue(n, title=None, *, state="Todo", priority=0, sort=0.0, desc=None, blockers=(),
@@ -67,7 +70,7 @@ def issue(n, title=None, *, state="Todo", priority=0, sort=0.0, desc=None, block
         "archivedAt": "2026-10-01T00:00:00Z" if archived else None,
         "state": {"name": state, "type": kind},
         "completedAt": finished_at if kind == "completed" else None,
-        "canceledAt": finished_at if kind == "canceled" else None,
+        "canceledAt": finished_at if kind in ("canceled", "duplicate") else None,
         "labels": {"nodes": []},
         "inverseRelations": {"nodes": list(blockers)},
     }
@@ -999,7 +1002,7 @@ def test_state_is_closed_exactly_when_terminal_state_is_set(tmp_path, node_state
     for archived in (False, True):
         fake = FakeLinear([issue(1, state=node_state, archived=archived)])
         (t,) = _src(tmp_path, fake).fetch_by_ids(["CMX-1"])
-        terminal = archived or _TYPES[node_state] in ("completed", "canceled")
+        terminal = archived or _TYPES[node_state] in ("completed", "canceled", "duplicate")
         assert (t.terminal_state is not None) is terminal
         assert t.state == ("closed" if terminal else "open"), (node_state, archived)
 
@@ -1606,3 +1609,96 @@ def test_the_doctor_warn_says_lower_keep_done(tmp_path):
         {"CMX": "WORKFLOW.md"}, runtime_truth._linear_issue_cap_read())
     assert found.level == runtime_truth.WARN
     assert "lower `keep_done`" in found.detail
+
+
+# --- 🗂️ CMX-107: Duplicate is its own state TYPE, and it is terminal ------------------
+# Linear reports `state { name: "Duplicate", type: "duplicate" }` (seen on CMX-33 / CMX-80);
+# before this, chela's terminal set was completed/canceled only, so every closed duplicate
+# stayed in the open read — 19 "open" tasks on a team with 8 in Todo.
+
+def _every_type_team():
+    """One issue per state type: backlog / unstarted / started / completed / canceled /
+    duplicate."""
+    return [issue(1, state="Backlog"), issue(2, state="Todo"), issue(3, state="In Progress"),
+            issue(4, state="Done"), issue(5, state="Canceled"), issue(6, state="Duplicate")]
+
+
+def test_duplicate_is_a_terminal_state_type():
+    assert "duplicate" in linear.TERMINAL_STATE_TYPES
+    assert '"duplicate"' in linear.OPEN_ISSUES_QUERY
+
+
+def test_the_open_set_excludes_duplicates(tmp_path):
+    """`list_open_tasks` is backlog / unstarted / started — never Done, Canceled or
+    Duplicate. The fake applies the QUERY's own `nin` filter, so this reads the query."""
+    src = _src(tmp_path, FakeLinear(_every_type_team()))
+    assert {t.id for t in src.list_open_tasks()} == {"CMX-1", "CMX-2", "CMX-3"}
+    assert src.read_failed is False
+
+
+def test_a_duplicate_issue_reads_closed_and_canceled_not_done(tmp_path):
+    """A duplicate did not ship: terminal `canceled` (like Canceled), state `closed`."""
+    fake = FakeLinear(_every_type_team())
+    got = {t.id: (t.terminal_state, t.state)
+           for t in _src(tmp_path, fake).fetch_by_ids([f"CMX-{n}" for n in range(1, 7)])}
+    assert got == {"CMX-1": (None, "open"), "CMX-2": (None, "open"), "CMX-3": (None, "open"),
+                   "CMX-4": ("done", "closed"), "CMX-5": ("canceled", "closed"),
+                   "CMX-6": ("canceled", "closed")}
+
+
+def test_a_duplicate_issue_is_never_claimable(tmp_path):
+    """Claiming is unaffected (ready_states = Todo): a Duplicate issue is not a candidate,
+    not even as the retry of a died run — even if it somehow sat in the snapshot."""
+    fake = FakeLinear(_every_type_team())
+    src = _src(tmp_path, fake)
+    src.list_open_tasks()
+    dup = src._task(fake.issues["CMX-6"])
+    src._snapshot = (src._snapshot or []) + [copy.deepcopy(fake.issues["CMX-6"])]
+    candidates, _ = src.claimable([*src.list_open_tasks(), dup], retry_ids={"CMX-6"})
+    assert "CMX-6" not in {t.id for t in candidates}
+    assert {t.id for t in candidates} == {"CMX-2"}
+
+
+def test_a_duplicate_issue_is_not_marked_done_on_merge(tmp_path):
+    """`close_tasks` never moves a finished issue — a Duplicate is `already` closed."""
+    fake = FakeLinear([issue(6, state="Duplicate")])
+    assert _src(tmp_path, fake).close_tasks(["CMX-6"]) == {"CMX-6": "already"}
+    assert not [c for c in fake.calls if c[0] == "update"]
+
+
+def test_duplicates_are_archived_like_canceled(tmp_path):
+    """keep_done counts a Duplicate as finished (by its `canceledAt`), so the sweep
+    archives it like a Canceled one; open issues stay."""
+    fake = FakeLinear([issue(1, state="Todo"),
+                       issue(5, state="Canceled", finished_at="2026-09-01T00:00:00Z"),
+                       issue(6, state="Duplicate", finished_at="2026-09-02T00:00:00Z")])
+    assert _src(tmp_path, fake, keep_done=0).archive_sweep(force=True) == 2
+    assert sorted(_archived_ids(fake)) == ["uuid-5", "uuid-6"]
+
+
+def test_a_duplicate_keeps_its_finish_time_for_keep_done(tmp_path):
+    """The newest finished issue is a Duplicate: it is the one keep_done=1 KEEPS."""
+    fake = FakeLinear([issue(4, state="Done", finished_at="2026-09-01T00:00:00Z"),
+                       issue(6, state="Duplicate", finished_at="2026-09-05T00:00:00Z")])
+    fake.issues["CMX-6"]["completedAt"] = "2026-08-01T00:00:00Z"
+    _src(tmp_path, fake, keep_done=1).archive_sweep(force=True)
+    assert _archived_ids(fake) == ["uuid-4"]
+
+
+def test_a_run_whose_issue_became_duplicate_reconciles_closed(repo, team, launched):
+    """The reconcile: a review run whose issue was closed as Duplicate leaves the review
+    queue exactly as a Canceled one does — it is not left reading "still open"."""
+    wf = str((repo / "WORKFLOW.md").resolve())
+    with dispatcher._db() as conn:
+        for tid in ("CMX-5", "CMX-6"):
+            conn.execute(
+                "INSERT INTO runs (task_id, workflow_path, title, status, attempt, started_at, "
+                "worktree_path) VALUES (?, ?, 't', 'awaiting_review', 1, ?, NULL)",
+                (tid, wf, dispatcher._now()))
+        conn.commit()
+    team.issues = {"CMX-5": issue(5, state="Canceled"), "CMX-6": issue(6, state="Duplicate")}
+    with patch.object(dispatcher, "_read_pr_url", return_value=None):
+        summary = dispatcher.tick(repo / "WORKFLOW.md")
+    assert summary["dispatched"] == 0 and launched == []
+    assert _row("CMX-6")["status"] != "awaiting_review"
+    assert _row("CMX-6")["status"] == _row("CMX-5")["status"]

@@ -386,6 +386,46 @@ def clear() -> None:
         pass
 
 
+def daemon_state() -> tuple[str, dict | None]:
+    """``("up", data)``, ``("down", None)`` or ``("unknown", None)`` — MEASURED, never inferred.
+
+    CMX-110: the inbox told the orchestrator "no daemon running" while ``chela-daemon`` had
+    been online for 92 minutes, because it read "I did not look" as "nothing is there".
+    So the three answers are kept apart here:
+
+    * **down** only on evidence — the state file names a pid that no longer exists (the
+      daemon crashed or was killed).
+    * **unknown** when there is no evidence to read — no state file (``publish`` is
+      best-effort, and another process may resolve a different ``CHELA_DIR``), an
+      unreadable / garbled one, one with no pid to check (``data`` is still returned), or
+      a liveness check that errored. Callers must say "unknown", never "down".
+    * **up** — the file parses and its pid is alive (``data`` is the file as published).
+    """
+    try:
+        raw = state_file().read_text(encoding="utf-8")
+    except OSError:
+        return "unknown", None
+    try:
+        data = json.loads(raw)
+        pid = int(data.get("pid") or 0)
+        caps = data["capabilities"]
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return "unknown", None
+    if not isinstance(caps, list):
+        return "unknown", None
+    if pid <= 0:
+        return "unknown", data   # nothing to check — live() has always passed this through
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "down", None
+    except PermissionError:
+        pass                     # alive, owned by someone else
+    except OSError:
+        return "unknown", None
+    return "up", data
+
+
 def live() -> dict | None:
     """What the RUNNING daemon published, or None if no daemon is running.
 
@@ -402,23 +442,10 @@ def live() -> dict | None:
     import, so its boot snapshot genuinely IS the running daemon's truth until a restart —
     those are returned exactly as published, unchanged.
     """
-    try:
-        data = json.loads(state_file().read_text(encoding="utf-8"))
-        pid = int(data.get("pid") or 0)
-        caps = data["capabilities"]
-    except (OSError, ValueError, TypeError, KeyError):
+    _state, data = daemon_state()
+    if data is None:
         return None
-    if not isinstance(caps, list):
-        return None
-    if pid > 0:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return None
-        except PermissionError:
-            pass                 # alive, owned by someone else
-        except OSError:
-            return None
+    caps = data["capabilities"]
     fresh_by_key = None
     reconciled = []
     for cap in caps:

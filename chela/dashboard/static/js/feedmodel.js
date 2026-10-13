@@ -86,6 +86,7 @@ const TYPE_CLASS = {
     run_pr_conflicting: 'run',
     run_stuck: 'run',
     run_marker_unread: 'run',
+    run_selfcheck_long: 'run',
     dispatch_hold_expired: 'lifecycle',
     dispatch_hold_released: 'lifecycle',
     // The inbox cannot reach the orchestrator (CMX-77): its queue is addressed to a window

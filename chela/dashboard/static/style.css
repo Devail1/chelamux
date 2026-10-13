@@ -4442,6 +4442,16 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
        now-hidden context bar (see the base .term-frame rule) — zero it here
        so that space isn't left as a dead strip under the terminal. */
     body.term-mobile-full .term-single .term-pane .term-frame { margin-bottom: 0; }
+    /* CMX-102: keyboard OPEN → the pane's height is MEASURED by _kbPin/_kbFitPane
+       (terminals.js) so its box ends exactly at the keybar's top edge. The calc()
+       rules above can't do that: they subtract a fixed list of chrome constants
+       and miss whatever isn't on it (.canvas's 60px fab clearance, iOS's form
+       accessory row, dvh ≠ innerHeight with the keyboard up), and the overshoot
+       hid the terminal's bottom rows — the line you are typing into — behind the
+       keybar. html.kb-fit is set only while the keyboard is up on a phone, so the
+       closed layout and desktop keep the calc() untouched. Placed AFTER the
+       fullscreen rule so it wins that tie on source order too. */
+    html.kb-fit .term-single .term-pane { height: var(--kb-pane-fit-h); }
     /* CMX-117 hid the bottom-bar branch + context text on phones (declutter);
        Liav's 2026-07-25 call brings them back — the mobile single pane has room
        for the bottom bar now, and branch/context% are worth having. We DON'T

@@ -1324,6 +1324,13 @@ def stuck_agent_alert_s() -> int:
     return int(os.environ.get("CHELA_STUCK_AGENT_ALERT_S", "1200"))
 
 
+def selfcheck_alert_s() -> int:
+    """A live ``chela task-finished`` / ``chela judge sweep`` / pytest in a running run's
+    worktree is ACTIVITY, not a stuck agent (CMX-110) — until it has run this long; then
+    one notice that says exactly that ("task-finished self-check running for 62m")."""
+    return int(os.environ.get("CHELA_SELFCHECK_ALERT_S", "3600"))
+
+
 def marker_unread_alert_s() -> int:
     """A completion/push-request marker sitting unread in a running run's worktree this long
     (several dispatcher ticks) ⇒ one notice. The daemon applies one on its next pass."""
