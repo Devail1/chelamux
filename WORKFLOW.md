@@ -199,8 +199,41 @@ message.
    instead of the mechanical check. Run `chela doctor` first; if it is silent on that fact,
    reproduce the failure in a `git worktree add` you just created (or `git stash` +
    re-clone) before calling anything pre-existing.
-3. **⚖️ SELF-VERIFY YOUR GUARDS — this is a CHECK, not a habit, so run it as one.** For every
-   test or guard you added or changed, write a `{guard, file, before, after}` experiment (the
+3. **⚖️ SELF-VERIFY YOUR GUARDS — this is a CHECK, not a habit, so run it as one.**
+   Do these three in order: (a) write the category tests, (b) run the mechanical sweep and
+   fix its survivors, (c) self-check your experiments.
+
+   **(a) 🧭 GUARD-CATEGORY CHECKLIST — walk your OWN diff before hand-in.** Cover each whole
+   CATEGORY up front, not one survivor per judge round (CMX-87 took 13 rounds that way;
+   examples: `docs/DEFEAT_SHAPES.md` entries 87/87b/87c). One test per item that applies;
+   list in the PR body the items that don't, and why:
+   1. **Every `except` clause** — raise what it must catch but a NARROWER clause would miss
+      (`RuntimeError` for `except Exception`, an `OSError` subclass for `except OSError`);
+      assert the documented behaviour (continue / fail closed + cleanup / exact error).
+   2. **Every subprocess / external call** — pin the FULL argv, cwd, env and timeout on the
+      SUCCESS path too. Never a spy that records a single element.
+   3. **Literal documented values** — never the module's own constant as the expected value.
+      Every regex gets positive AND negative fixtures (anchors, prefixes, `\b`, trailing `\n`).
+   4. **Every branch on a kind/type/flag** — drive BOTH kinds through it, asserting the
+      kind-specific observable (event name, text, state, cleanup).
+   5. **Every read that can fail** (remote ref, file, API) — an empty/unreadable result
+      fails CLOSED, tested. Unknown never reads as OK.
+   6. **Every flag/config input** — explicit flag > workflow/config > default, each wired to
+      where it's used: one parametrized precedence table.
+   7. **Values from the authoritative record** (stored request, DB row), never a
+      caller-supplied copy, wherever the code claims that.
+
+   **(b) ⚖️🧹 Then run the MECHANICAL sweep: `chela judge sweep`** (from your worktree; it diffs
+   against `origin/{{base_branch}}` and reads `judge.test_cmd` from WORKFLOW.md). Your
+   experiments test the guards YOU thought of; the sweep corrupts every conditional,
+   comparison and return code your branch CHANGED (`if X:` → `if False and (X):`, `==` →
+   `!=`, `0` ↔ `1`, an emptied return…), runs the related tests, and restores
+   the file. It exits 1 and lists each SURVIVED `file:line` with its mutation. **For every
+   survivor, add a test that goes RED under that exact mutation — not a weaker assertion,
+   and not a test that merely touches the line.** Re-run until it exits 0, THEN do (c).
+   `task-finished` runs the same sweep in step 6 and refuses while a survivor remains.
+
+   **(c) ⚖️ Self-check your experiments.** For every test or guard you added or changed, write a `{guard, file, before, after}` experiment (the
    `before` anchor must occur EXACTLY ONCE in `file`; `after` is the invariant broken — flip a
    condition, empty a returned value, delete the production call-site it wires) into a JSON file:
    `{"experiments": [{"guard": "...", "file": "...", "before": "...", "after": "..."}]}`. Then run:
@@ -214,16 +247,6 @@ message.
    corruption instead of hand-editing and eyeballing it. **This is the exact check the judge will
    run — catch your own decoration first, or the PR comes straight back.** ⛔ **Keep the
    experiments JSON file** (do not delete it after step 3) — step 6 needs its path.
-
-   **⚖️🧹 Then run the MECHANICAL sweep: `chela judge sweep`** (from your worktree; it diffs
-   against `origin/{{base_branch}}` and reads `judge.test_cmd` from WORKFLOW.md). Your
-   experiments test the guards YOU thought of; the sweep corrupts every conditional,
-   comparison and return code your branch CHANGED (`if X:` → `if False and (X):`, `==` →
-   `!=`, `0` ↔ `1`, an emptied return…), runs the related tests, and restores
-   the file. It exits 1 and lists each SURVIVED `file:line` with its mutation. **For every
-   survivor, add a test that goes RED under that exact mutation — not a weaker assertion,
-   and not a test that merely touches the line.** Re-run until it exits 0. `task-finished`
-   runs the same sweep in step 6 and refuses while a survivor remains.
 4. **Commit in the worktree.** Stage only files you intentionally changed
    (`git add <paths>` — never `git add -A`). Verify with `git status` +
    `git diff --cached --stat` before committing.

@@ -25,6 +25,11 @@ gate is in [TRUST_AND_APPROVAL_POSTURE.md](TRUST_AND_APPROVAL_POSTURE.md).
    `runs.sweep_equivalents`, shown to the judge and appended to the PR body). `--handoff "<note>"`
    records the agent's note for its reviewer on the run (`runs.handoff`); the inbox notice
    and the Dispatch board show it sanitised. It is informational and never gates anything.
+   Before hand-in the brief has the agent walk its own diff against a seven-item
+   guard-category checklist (`WORKFLOW.md` step 3: `except` clauses, subprocess calls,
+   literal values and regexes, kind branches, fail-closed reads, flag precedence, the
+   authoritative record), writing one test per item that applies and naming the rest in the
+   PR body, so each judge round is not left to find the next gap in a category one at a time.
 5. **The judge.** One judge per head commit corrupts each guard the PR claims and re-runs
    the suite (`chela/judge.py`). A guard that survives sends the PR back; see
    [Risk and the judge](#risk-and-the-judge).
