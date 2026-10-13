@@ -154,31 +154,38 @@ def changed_lines(worktree: Path, base: str) -> tuple[dict[str, set[int]], str]:
     if mb.returncode != 0 or not mb.stdout.strip():
         return {}, (f"`{base}` does not resolve to a merge base with HEAD in {worktree} — "
                     f"{(mb.stderr or '').strip()[:200] or 'no output'}")
-    diff = _git(worktree, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames",
-                mb.stdout.strip(), "--")
-    if diff.returncode != 0:
-        return {}, f"git diff failed: {(diff.stderr or '').strip()[:200]}"
+    base_sha = mb.stdout.strip()
+    # Names come NUL-separated and unquoted (`-z`): a `+++ b/<name>` header is quoted for
+    # non-ASCII/odd names and tab-suffixed for names with spaces, so it is never parsed.
+    names = _git(worktree, "diff", "--name-only", "-z", "--no-renames", base_sha, "--")
+    if names.returncode != 0:
+        return {}, f"git diff failed: {(names.stderr or '').strip()[:200]}"
     out: dict[str, set[int]] = {}
-    current: str | None = None
-    for raw in diff.stdout.splitlines():
-        if raw.startswith("+++ "):
-            target = raw[4:]
-            current = target[2:] if target.startswith("b/") else None
-            continue
-        m = _RE_HUNK.match(raw)
-        if m and current:
-            start, count = int(m.group(1)), int(m.group(2) or "1")
-            if count:
-                out.setdefault(current, set()).update(range(start, start + count))
-    untracked = _git(worktree, "ls-files", "--others", "--exclude-standard")
-    for rel in (untracked.stdout.splitlines() if untracked.returncode == 0 else []):
+    for rel in (n for n in names.stdout.split("\0") if n and _sweepable(n)):
+        diff = _git(worktree, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames",
+                    base_sha, "--", rel)
+        if diff.returncode != 0:
+            return {}, f"git diff failed: {(diff.stderr or '').strip()[:200]}"
+        for raw in diff.stdout.splitlines():
+            m = _RE_HUNK.match(raw)
+            if m:
+                start, count = int(m.group(1)), int(m.group(2) or "1")
+                if count:
+                    out.setdefault(rel, set()).update(range(start, start + count))
+    untracked = _git(worktree, "ls-files", "--others", "--exclude-standard", "-z")
+    if untracked.returncode != 0:
+        return {}, f"git ls-files failed: {(untracked.stderr or '').strip()[:200]}"
+    for rel in (n for n in untracked.stdout.split("\0") if n and _sweepable(n)):
         try:
             n = len((worktree / rel).read_text().splitlines())
-        except (OSError, UnicodeDecodeError):
-            continue
+        except (OSError, UnicodeDecodeError) as e:
+            return {}, f"{rel} is a changed source file that could not be read: {e}"
         out[rel] = set(range(1, n + 1))
-    return {f: ls for f, ls in out.items()
-            if f.endswith(PY_SUFFIXES + JS_SUFFIXES) and not is_test_path(f)}, ""
+    return out, ""
+
+
+def _sweepable(rel: str) -> bool:
+    return rel.endswith(PY_SUFFIXES + JS_SUFFIXES) and not is_test_path(rel)
 
 
 # --- what to mutate -------------------------------------------------------------------------
@@ -400,8 +407,14 @@ def collect_mutations(worktree: Path, base: str) -> tuple[list[Mutation], str]:
     for rel in sorted(changed):
         try:
             text = (worktree / rel).read_text()
-        except (OSError, UnicodeDecodeError):
-            continue
+        except (OSError, UnicodeDecodeError) as e:
+            # ⛔ fail CLOSED: a changed source file we cannot read is not "nothing to sweep".
+            return [], f"{rel} is a changed source file that could not be read: {e}"
+        if rel.endswith(PY_SUFFIXES):
+            try:
+                ast.parse(text)
+            except (SyntaxError, ValueError) as e:
+                return [], f"{rel} is a changed source file that could not be parsed: {e}"
         gen = py_mutations if rel.endswith(PY_SUFFIXES) else js_mutations
         muts.extend(gen(rel, text, changed[rel]))
     return muts, ""

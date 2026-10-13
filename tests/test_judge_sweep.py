@@ -1731,3 +1731,541 @@ def test_a_renamed_file_is_swept_as_entirely_changed(tmp_path):
     assert err == ""
     assert set(changed) == {"new_name.py"}                  # the deleted old path is not swept
     assert changed["new_name.py"] == set(range(1, 11))      # all 10 lines, not just line 6
+
+
+# --- CMX-88 category pass: fail-closed reads, path/suffix literals, except breadth, seams ------
+
+
+def _plain_repo(root: Path, base_files: dict, branch_files: dict) -> Path:
+    """``origin/dev`` holds ``base_files``; the branch (committed) writes ``branch_files``."""
+    root.mkdir(parents=True)
+    (root / "README.md").write_text("base\n")
+    for rel, body in base_files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(body)
+    _git(root, "init", "-q", "-b", "dev")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "base")
+    _git(root, "update-ref", "refs/remotes/origin/dev", _git(root, "rev-parse", "HEAD"))
+    _git(root, "checkout", "-qb", "feature")
+    for rel, body in branch_files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(body, bytes):
+            (root / rel).write_bytes(body)
+        else:
+            (root / rel).write_text(body)
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "feature", "--allow-empty")
+    return root
+
+
+ODD_NAMES = ["my file.py", "é.py", "tab\tname.py", 'quo"te.py', "dir with space/ü x.js"]
+
+
+def test_paths_git_would_quote_or_tab_suffix_are_still_swept(tmp_path):
+    """`git diff` writes `+++ b/my file.py<TAB>` and quotes non-ASCII/tab/quote names, so a
+    parser keyed on the `+++` header silently DROPPED these files — "nothing to sweep"."""
+    body = "if a == 1:\n    pass\nx = 2\n"
+    root = _plain_repo(tmp_path / "r", {n: body for n in ODD_NAMES},
+                       {n: body.replace("x = 2", "x = 3") for n in ODD_NAMES})
+    changed, err = sweep.changed_lines(root, "origin/dev")
+    assert err == ""
+    assert changed == {n: {3} for n in ODD_NAMES}
+
+
+def test_untracked_paths_git_would_quote_are_still_swept(tmp_path):
+    root = _plain_repo(tmp_path / "r", {}, {})
+    for n in ODD_NAMES:
+        (root / n).parent.mkdir(parents=True, exist_ok=True)
+        (root / n).write_text("if a == 1:\n    pass\n")
+    changed, err = sweep.changed_lines(root, "origin/dev")
+    assert err == ""
+    assert changed == {n: {1, 2} for n in ODD_NAMES}
+
+
+def test_a_failing_ls_files_is_an_error_not_no_untracked_files(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    real = sweep._git
+
+    def fake(worktree, *args):
+        if args[0] == "ls-files":
+            return subprocess.CompletedProcess(args, 128, "", "fatal: index broken")
+        return real(worktree, *args)
+
+    monkeypatch.setattr(sweep, "_git", fake)
+    lines, err = sweep.changed_lines(root, "origin/dev")
+    assert lines == {}
+    assert "git ls-files failed: fatal: index broken" in err
+
+
+def test_a_failing_per_file_diff_is_an_error(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    real = sweep._git
+
+    def fake(worktree, *args):
+        if args[0] == "diff" and "-U0" in args:
+            return subprocess.CompletedProcess(args, 128, "", "fatal: bad object")
+        return real(worktree, *args)
+
+    monkeypatch.setattr(sweep, "_git", fake)
+    lines, err = sweep.changed_lines(root, "origin/dev")
+    assert lines == {} and "git diff failed: fatal: bad object" in err
+
+
+def test_changed_lines_runs_exactly_these_git_commands(tmp_path, monkeypatch):
+    calls = []
+    answers = {"merge-base": "abc123\n", "ls-files": "new one.py\0"}
+
+    def fake(worktree, *args):
+        calls.append(args)
+        if args[0] == "diff" and "--name-only" in args:
+            return subprocess.CompletedProcess(args, 0, "a.py\0gone.py\0tests/t.py\0n.txt\0", "")
+        if args[0] == "diff":
+            text = {"a.py": "@@ -5,2 +5,0 @@\n@@ -9,0 +10,3 @@\n@@ -20 +22 @@\n",
+                    "gone.py": "@@ -1,3 +0,0 @@\n"}[args[-1]]
+            return subprocess.CompletedProcess(args, 0, text, "")
+        return subprocess.CompletedProcess(args, 0, answers[args[0]], "")
+
+    (tmp_path / "new one.py").write_text("x\ny\n")
+    monkeypatch.setattr(sweep, "_git", fake)
+    out, err = sweep.changed_lines(tmp_path, "origin/dev")
+    assert err == ""
+    assert out == {"a.py": {10, 11, 12, 22}, "new one.py": {1, 2}}
+    assert calls == [
+        ("merge-base", "origin/dev", "HEAD"),
+        ("diff", "--name-only", "-z", "--no-renames", "abc123", "--"),
+        ("diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames", "abc123", "--", "a.py"),
+        ("diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames", "abc123", "--", "gone.py"),
+        ("ls-files", "--others", "--exclude-standard", "-z"),
+    ]
+
+
+def test_git_helper_argv_and_kwargs():
+    seen = {}
+
+    def fake(argv, **kw):
+        seen["argv"], seen["kw"] = argv, kw
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    with patch.object(sweep.subprocess, "run", fake):
+        sweep._git(Path("/w/tree"), "status", "-s")
+    assert seen["argv"] == ["git", "-C", "/w/tree", "status", "-s"]
+    assert seen["kw"] == {"capture_output": True, "text": True, "errors": "replace",
+                          "timeout": 60}
+
+
+def test_an_unreadable_changed_source_file_is_cannot_verify_not_skipped(tmp_path):
+    root = _plain_repo(tmp_path / "r", {}, {"bad.py": b"if a == 1:\n    x = '\xff'\n"})
+    muts, err = sweep.collect_mutations(root, "origin/dev")
+    assert muts == [] and "bad.py is a changed source file that could not be read" in err
+    marker = tmp_path / "ran"
+    report = sweep.sweep(root, "origin/dev",
+                         f'"{sys.executable}" -c "open(r\'{marker}\', \'w\')"', timeout=60)
+    assert "could not be read" in report.cannot_verify and not marker.exists()
+
+
+def test_a_dangling_symlink_source_file_is_cannot_verify(tmp_path):
+    root = _plain_repo(tmp_path / "r", {}, {})
+    (root / "link.py").symlink_to(root / "nowhere.py")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "link")
+    muts, err = sweep.collect_mutations(root, "origin/dev")
+    assert muts == [] and "link.py is a changed source file that could not be read" in err
+
+
+def test_an_unreadable_untracked_source_file_is_an_error_but_a_binary_blob_is_ignored(tmp_path):
+    root = _plain_repo(tmp_path / "r", {}, {})
+    (root / "blob.bin").write_bytes(b"\xff\xfe\x00")
+    changed, err = sweep.changed_lines(root, "origin/dev")
+    assert (changed, err) == ({}, "")
+    (root / "bad.py").write_bytes(b"\xff\xfe")
+    changed, err = sweep.changed_lines(root, "origin/dev")
+    assert changed == {} and "bad.py is a changed source file that could not be read" in err
+
+
+@pytest.mark.parametrize("src", ["def f(:\n    pass\n", "if a == 1\n    pass\n"])
+def test_a_changed_python_file_that_does_not_parse_is_an_error_not_skipped(tmp_path, src):
+    root = _plain_repo(tmp_path / "r", {}, {"broken.py": src})
+    muts, err = sweep.collect_mutations(root, "origin/dev")
+    assert muts == [] and "broken.py is a changed source file that could not be parsed" in err
+
+
+def test_a_deleted_source_file_is_not_a_changed_line_and_not_an_error(tmp_path):
+    root = _plain_repo(tmp_path / "r", {"gone.py": "if a == 1:\n    pass\n"}, {})
+    _git(root, "rm", "-q", "gone.py")
+    _git(root, "commit", "-qm", "rm")
+    assert sweep.changed_lines(root, "origin/dev") == ({}, "")
+    assert sweep.collect_mutations(root, "origin/dev") == ([], "")
+
+
+def test_the_sweepable_suffixes_are_exactly_py_js_mjs_and_never_tests(tmp_path):
+    assert sweep.PY_SUFFIXES == (".py",) and sweep.JS_SUFFIXES == (".js", ".mjs")
+    body = "if a == 1:\n    pass\n"
+    keep = ["a.py", "b.js", "c.mjs", "pkg/d.py", "web/e.mjs", "src/tests/f.py"]
+    skip = ["g.cjs", "h.pyi", "i.ts", "j.jsx", "k.mts", "l.md", "m.py.txt", "n.json", "Makefile",
+            "x.test.js", "y.test.mjs", "tests/z.py", "tests/z.js", "pkg/test_q.py",
+            "pkg/test_q.js", "pkg/r_test.py", "pkg/conftest.py"]
+    root = _plain_repo(tmp_path / "r", {}, {n: body for n in keep + skip})
+    changed, err = sweep.changed_lines(root, "origin/dev")
+    assert err == "" and set(changed) == set(keep)
+    # the same filter on UNTRACKED files
+    for n in ("u.js", "u.cjs", "u.pyi", "u.test.js"):
+        (root / n).write_text(body)
+    changed, _ = sweep.changed_lines(root, "origin/dev")
+    assert set(changed) == set(keep) | {"u.js"}
+
+
+@pytest.mark.parametrize("rel, expected", [
+    ("src/tests/x.py", False), ("web/x.test.mjs", True), ("test_x.js", True),
+    ("x_test.js", False), ("contest.py", False), ("conftest.js", False),
+    ("tests/sub/deep.py", True), ("latest.py", False),
+])
+def test_is_test_path_literal_edges(rel, expected):
+    assert sweep.is_test_path(rel) is expected
+
+
+def test_collect_mutations_routes_py_to_the_python_generator_and_js_mjs_to_the_js_one(tmp_path):
+    py = "def f(x):\n    if x == 1:\n        return 0\n    return 2\n"
+    js = "function f(x) {\n  if (x === 1) {\n    return 0;\n  }\n}\n"
+    root = _plain_repo(tmp_path / "r", {}, {"a.py": py, "b.js": js, "c.mjs": js})
+    muts, err = sweep.collect_mutations(root, "origin/dev")
+    assert err == ""
+    got = {(m.file, m.kind, m.after.strip()) for m in muts}
+    assert got >= {("a.py", "if-false", "if False and (x == 1):"),
+                   ("b.js", "if-false", "if (false && (x === 1)) {"),
+                   ("c.mjs", "if-false", "if (false && (x === 1)) {"),
+                   ("c.mjs", "compare-flip", "if (x !== 1) {"),
+                   ("a.py", "compare-flip", "if x != 1:")}
+
+
+JS_CHECK = '''\
+import sys
+src = open("web.mjs").read()
+sys.exit(1 if ("false &&" in src or "!==" in src) else 0)
+'''
+
+
+def _node_or_skip():
+    import shutil
+
+    if shutil.which("node") is None and not os.environ.get("CHELA_REQUIRE_JS_TESTS"):
+        pytest.skip("node not installed")
+
+
+def test_a_javascript_file_is_swept_end_to_end_and_restored(tmp_path):
+    _node_or_skip()
+    web = "export function f(x) {\n  if (x === 1) {\n    return 5;\n  }\n  return 6;\n}\n"
+    root = _plain_repo(tmp_path / "r", {"check.py": JS_CHECK}, {"web.mjs": web})
+    killed = sweep.sweep(root, "origin/dev", f'"{sys.executable}" check.py', timeout=60,
+                         select_tests=False)
+    assert killed.cannot_verify == ""
+    assert {(r.mutation.file, r.mutation.kind, r.status) for r in killed.results} == {
+        ("web.mjs", "if-false", "KILLED"), ("web.mjs", "compare-flip", "KILLED")}
+    lenient = sweep.sweep(root, "origin/dev", f'"{sys.executable}" -c pass', timeout=60,
+                          select_tests=False)
+    assert {s.mutation.key for s in lenient.survivors} == {"web.mjs:2"}
+    assert (root / "web.mjs").read_text() == web
+    assert not sweep.marker_path(root).exists()
+
+
+# -- recover(): every unreadable-marker shape, and the target-read branch ---------------------
+
+
+@pytest.mark.parametrize("content", [
+    b"not json", b"[]", b"null", b'{"file": "a"}', b'{"file":"a","original":"o"}',
+    b"\xff\xfe\xfa",
+])
+def test_an_unreadable_recovery_marker_stops_the_sweep(tmp_path, content):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    sweep.marker_path(root).write_bytes(content)
+    done, err = sweep.recover(root)
+    assert done == ""
+    assert err.startswith(f"{sweep.marker_path(root)} is unreadable (")
+    assert err.endswith(") — inspect it, restore by hand, then delete it")
+    ran = tmp_path / "ran"
+    report = sweep.sweep(root, "origin/dev", f'"{sys.executable}" -c "open(r\'{ran}\', \'w\')"',
+                         timeout=60)
+    assert report.cannot_verify == err and report.results == [] and not ran.exists()
+    assert sweep.marker_path(root).read_bytes() == content        # never deleted
+
+
+def test_a_marker_that_is_a_directory_stops_the_sweep(tmp_path):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    sweep.marker_path(root).mkdir()
+    done, err = sweep.recover(root)
+    assert done == "" and "is unreadable" in err and "inspect it, restore by hand" in err
+
+
+def test_the_marker_lives_at_the_worktree_root_under_a_fixed_name(tmp_path):
+    assert sweep.RECOVERY_MARKER == ".chela-sweep-recovery.json"
+    assert sweep.marker_path(tmp_path) == tmp_path / ".chela-sweep-recovery.json"
+    sweep._write_marker(tmp_path, "f.py", "a", "b")
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".chela-sweep-recovery.json"]
+
+
+@pytest.mark.parametrize("make", ["missing", "binary"])
+def test_recovery_refuses_when_the_marked_file_cannot_be_read(tmp_path, make):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    sweep._write_marker(root, "feat.py", BRANCH_FEAT, "mutated\n")
+    if make == "missing":
+        (root / "feat.py").unlink()
+    else:
+        (root / "feat.py").write_bytes(b"\xff\xfe")
+    with patch.object(sweep, "_pid_alive", return_value=False):
+        done, err = sweep.recover(root)
+    assert done == "" and err.startswith("feat.py could not be read to recover it: ")
+    assert sweep.marker_path(root).exists()
+
+
+def test_recovery_restores_a_mutated_file_and_drops_the_marker(tmp_path):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    (root / "feat.py").write_text("mutated\n")
+    sweep._write_marker(root, "feat.py", BRANCH_FEAT, "mutated\n")
+    with patch.object(sweep, "_pid_alive", return_value=False):
+        done, err = sweep.recover(root)
+    assert (done, err) == ("restored feat.py from a killed sweep's recovery marker", "")
+    assert (root / "feat.py").read_text() == BRANCH_FEAT and not sweep.marker_path(root).exists()
+
+
+# -- the finally-restore, _restore, signal handlers, _Interrupted -----------------------------
+
+
+def test_a_runtime_error_mid_measurement_still_restores_the_file_and_the_marker(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    muts, _ = sweep.collect_mutations(root, "origin/dev")
+
+    def boom(worktree, test_cmd, mut, before, after, baseline, timeout, selector):
+        (worktree / mut.file).write_text("CORRUPT\n")
+        raise RuntimeError("suite runner exploded")
+
+    monkeypatch.setattr(sweep, "_apply_and_measure", boom)
+    with pytest.raises(RuntimeError, match="exploded"):
+        sweep._run_one(root, TEST_CMD, muts[0], None, 1, None)
+    assert (root / "feat.py").read_text() == BRANCH_FEAT
+    assert not sweep.marker_path(root).exists()
+
+
+def test_the_marker_holds_the_original_and_mutated_bytes_while_a_mutation_is_live(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    muts, _ = sweep.collect_mutations(root, "origin/dev")
+    mut = next(m for m in muts if m.kind == "if-false")
+    seen = {}
+
+    def peek(worktree, test_cmd, mut, before, after, baseline, timeout, selector):
+        seen["marker"] = json.loads(sweep.marker_path(worktree).read_text())
+        seen["tmp"] = (worktree / ".chela-sweep-recovery.tmp").exists()
+        return sweep.SweepResult(mut, "KILLED")
+
+    monkeypatch.setattr(sweep, "_apply_and_measure", peek)
+    sweep._run_one(root, TEST_CMD, mut, None, 1, None)
+    m = seen["marker"]
+    assert m["pid"] == os.getpid() and m["file"] == "feat.py" and m["original"] == BRANCH_FEAT
+    assert "if False and (x == 3):" in m["mutated"] and seen["tmp"] is False
+    assert not sweep.marker_path(root).exists()
+
+
+def test_apply_and_measure_hands_the_judge_the_exact_experiment(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    muts, _ = sweep.collect_mutations(root, "origin/dev")
+    mut = next(m for m in muts if m.kind == "if-false")
+    seen = {}
+
+    def fake_measure(*args):
+        seen["args"] = args
+        import types
+
+        return types.SimpleNamespace(verdict="SURVIVED", reason="why", measured_by="312 tests")
+
+    monkeypatch.setattr(sweep.judge, "_measure", fake_measure)
+    res = sweep._apply_and_measure(root, TEST_CMD, mut, mut.before, mut.after, "BASE", 7, "SEL")
+    wt, cmd, exp, reason, parses, detail, base, timeout, selector = seen["args"]
+    assert (wt, cmd, base, timeout, selector) == (root, TEST_CMD, "BASE", 7, "SEL")
+    assert parses is True and "parses" in detail
+    assert (exp.guard, exp.file, exp.before, exp.after) == (
+        mut.describe(), "feat.py", mut.before, mut.after)
+    assert (res.status, res.reason, res.measured_by) == ("SURVIVED", "why", "312 tests")
+    (root / "feat.py").write_text(BRANCH_FEAT)
+
+
+def test_a_mutated_file_that_cannot_be_read_is_not_applied(tmp_path):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    mut = sweep.Mutation("nope.py", 1, "if-false", "a", "b")
+    res, stop = sweep._run_one(root, TEST_CMD, mut, None, 1, None)
+    assert res.status == sweep.NOT_APPLIED and res.reason.startswith("could not read nope.py: ")
+    assert stop == ""
+    (root / "bin.py").write_bytes(b"\xff")
+    res, _ = sweep._run_one(root, TEST_CMD, sweep.Mutation("bin.py", 1, "k", "a", "b"),
+                            None, 1, None)
+    assert res.status == sweep.NOT_APPLIED
+
+
+def test_restore_reports_false_for_every_unreadable_shape(tmp_path):
+    assert sweep._restore(tmp_path, "x") is False                      # a directory (OSError)
+    bad = tmp_path / "bad.py"
+    bad.write_bytes(b"\xff\xfe")
+    with patch.object(Path, "write_text", lambda self, data, *a, **k: 0):
+        assert sweep._restore(bad, "x") is False                       # UnicodeDecodeError
+    gone = tmp_path / "gone.py"
+    assert sweep._restore(gone, "orig\n") is True and gone.read_text() == "orig\n"
+
+
+def test_signal_handlers_are_skipped_off_the_main_thread_and_on_os_errors():
+    import threading
+
+    box = {}
+    t = threading.Thread(target=lambda: box.update(old=sweep._install_signal_handlers()))
+    t.start()
+    t.join()
+    assert box["old"] == {}
+    for exc in (OSError, ValueError):
+        with patch.object(sweep.signal, "signal", side_effect=exc):
+            assert sweep._install_signal_handlers() == {}
+            sweep._restore_signal_handlers({signal.SIGTERM: signal.SIG_DFL})   # must not raise
+
+
+def test_an_interrupted_sweep_is_cannot_verify_naming_the_signal(tmp_path, monkeypatch):
+    def interrupted(*a, **kw):
+        raise sweep._Interrupted(15)
+
+    monkeypatch.setattr(sweep, "_sweep", interrupted)
+    report = sweep.sweep(tmp_path, "origin/dev", "true")
+    assert report.cannot_verify == ("interrupted by signal 15 — the sweep stopped; the mutated "
+                                    "file was restored")
+    assert signal.getsignal(signal.SIGTERM) is not None
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("boom"), OSError("denied"), ValueError("bad yaml")])
+def test_run_sweep_with_a_workflow_that_raises_anything_is_an_error_dict(tmp_path, monkeypatch, exc):
+    from chela import workflow
+
+    def raiser(path):
+        raise exc
+
+    monkeypatch.setattr(workflow, "load_workflow", raiser)
+    d = sweep.run_sweep(tmp_path, workflow_path="/wf/WORKFLOW.md")
+    assert d == {"ok": False, "error": f"/wf/WORKFLOW.md could not be read: {exc}"}
+
+
+# -- dispatcher: verify_sweep, PR body, marker reader, judge view -----------------------------
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("boom"), OSError("denied"), ValueError("bad yaml"),
+                                 KeyError("k")])
+def test_verify_sweep_with_a_workflow_that_raises_anything_is_an_error_dict(tmp_path, monkeypatch, exc):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    _run_row(tmp_path, root)
+
+    def raiser(path):
+        raise exc
+
+    monkeypatch.setattr(dispatcher, "load_workflow", raiser)
+    d = dispatcher.verify_sweep("cmx-88")
+    assert d == {"ok": False, "error": f"{tmp_path / 'WORKFLOW.md'} could not be read: {exc}"}
+
+
+def test_verify_sweep_with_a_workflow_file_that_vanished_is_an_error_dict(tmp_path):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    _run_row(tmp_path, root)
+    (tmp_path / "WORKFLOW.md").unlink()
+    d = dispatcher.verify_sweep("cmx-88")
+    assert d["ok"] is False and "could not be read" in d["error"]
+
+
+PR = "https://github.com/o/r/pull/7"
+
+
+@pytest.mark.parametrize("fail_on", ["view", "edit"])
+@pytest.mark.parametrize("exc", [subprocess.TimeoutExpired("gh", 30), FileNotFoundError("gh")])
+def test_append_pr_body_reports_a_gh_timeout_or_missing_gh(tmp_path, fail_on, exc):
+    def fake(argv, **kw):
+        if argv[2] == fail_on:
+            raise exc
+        return subprocess.CompletedProcess(argv, 0, "body", "")
+
+    with patch.object(dispatcher.subprocess, "run", fake):
+        assert dispatcher._append_pr_body(PR, str(tmp_path), "### s") == (
+            False, f"gh pr edit failed: {exc}")
+
+
+def test_a_gh_timeout_is_never_fatal_to_mark_awaiting_review(tmp_path, caplog):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    _run_row(tmp_path, root)
+    real = subprocess.run
+
+    def fake(argv, **kw):
+        if argv[0] == "gh":
+            raise subprocess.TimeoutExpired(argv, 30)
+        return real(argv, **kw)
+
+    notes = [{"key": "feat.py:8", "why": "demo", "mutations": []}]
+    with patch.object(dispatcher, "_read_pr_url", return_value=PR), \
+         patch.object(dispatcher, "_read_pr_status", return_value=(None, None)), \
+         patch.object(dispatcher, "_kill_window"), \
+         patch.object(dispatcher.subprocess, "run", fake), \
+         caplog.at_level("WARNING", logger="chela.dispatcher"):
+        assert dispatcher.mark_awaiting_review("cmx-88", sweep_equivalents=notes)["ok"] is True
+    assert dispatcher.resolve_run("cmx-88")["status"] == "awaiting_review"
+    assert "sweep-equivalent notes not added to the PR body — gh pr edit failed" in caplog.text
+
+
+def test_append_pr_body_success_path_argv_cwd_stdin_and_timeouts(tmp_path):
+    calls = []
+
+    def fake(argv, **kw):
+        calls.append((argv, kw))
+        return subprocess.CompletedProcess(argv, 0, "the body\n\n" if argv[2] == "view" else "", "")
+
+    with patch.object(dispatcher.subprocess, "run", fake):
+        assert dispatcher._append_pr_body(PR, str(tmp_path), "### s") == (True, "")
+    (view_argv, view_kw), (edit_argv, edit_kw) = calls
+    assert view_argv == ["gh", "pr", "view", "7", "--json", "body", "-q", ".body"]
+    assert view_kw == {"cwd": str(tmp_path), "capture_output": True, "text": True, "timeout": 30}
+    assert edit_argv == ["gh", "pr", "edit", "7", "--body-file", "-"]
+    assert edit_kw == {"cwd": str(tmp_path), "input": "the body\n\n### s\n",
+                       "capture_output": True, "text": True, "timeout": 30}
+
+
+def test_mark_awaiting_review_appends_with_the_rows_own_pr_url_and_workflow_dir(tmp_path):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    _run_row(tmp_path, root)
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET pr_url=? WHERE task_id='cmx-88'", (PR,))
+        conn.commit()
+    notes = [{"key": "feat.py:8", "why": "demo", "mutations": []}]
+    with patch.object(dispatcher, "_read_pr_url", return_value="https://github.com/x/y/pull/99"), \
+         patch.object(dispatcher, "_read_pr_status", return_value=(None, None)), \
+         patch.object(dispatcher, "_kill_window"), \
+         patch.object(dispatcher, "_append_pr_body", return_value=(True, "")) as app:
+        dispatcher.mark_awaiting_review("cmx-88", sweep_equivalents=notes)
+        app.assert_called_once_with(PR, str(tmp_path), sweep.render_equivalents(notes))
+
+
+def test_no_equivalents_means_no_pr_body_call(tmp_path):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    _run_row(tmp_path, root)
+    with patch.object(dispatcher, "_read_pr_url", return_value=PR), \
+         patch.object(dispatcher, "_read_pr_status", return_value=(None, None)), \
+         patch.object(dispatcher, "_kill_window"), \
+         patch.object(dispatcher, "_append_pr_body") as app:
+        dispatcher.mark_awaiting_review("cmx-88")
+    app.assert_not_called()
+
+
+def test_the_marker_reader_survives_a_missing_or_binary_marker(tmp_path):
+    assert dispatcher._read_task_finished_sweep_equivalents(tmp_path / "absent") is None
+    dispatcher._task_finished_request_path(tmp_path).write_bytes(b"\xff\xfe\xfa")
+    assert dispatcher._read_task_finished_sweep_equivalents(tmp_path) is None
+
+
+def test_the_judge_view_survives_every_bad_row_shape(tmp_path):
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    no_column = conn.execute("SELECT 1 AS other").fetchone()          # IndexError
+    for row in (no_column, {}, {"sweep_equivalents": "{bad"}, {"sweep_equivalents": 5},
+                {"sweep_equivalents": '{"a": 1}'}, {"sweep_equivalents": "[]"}):
+        assert dispatcher._judge_sweep_equivalents(row) == ""
+    ok = dispatcher._judge_sweep_equivalents(
+        {"sweep_equivalents": json.dumps([{"key": "a.py:1", "why": "w", "mutations": ["m"]}])})
+    assert "`a.py:1` — w (m)" in ok
