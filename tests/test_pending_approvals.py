@@ -395,3 +395,11 @@ def test_a_filed_request_pushes_an_sse_overrides_frame(monkeypatch):
     frame = next(stream)
     assert frame.startswith("event: overrides\n"), f"no overrides frame after filing (got {frame!r})"
     assert rec["id"] in frame and '"pending": 1' in frame
+    # 🔴 GUARD: edge-triggered — with the set unchanged the next ticks push NO overrides
+    # frame (a baseline that never advances would re-send it on every tick forever).
+    for _ in range(3):
+        idle = next(stream)
+        assert idle == ": keepalive\n\n", f"an unchanged pending set re-pushed {idle!r}"
+    overrides.decide(rec["id"], False, "dashboard", channel="dashboard")
+    gone = next(stream)
+    assert gone.startswith("event: overrides\n") and '"pending": 0' in gone, gone

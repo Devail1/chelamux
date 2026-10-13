@@ -3585,6 +3585,8 @@ def _override_decide(request_id: str, approve: bool) -> dict:
 @require_auth
 def api_overrides():
     from chela import overrides
+    # Hygiene only: listing() already drops expired requests (pending() filters by deadline)
+    # and marks a moved head `blocked` itself — the sweep just settles their records.
     overrides.sweep()
     return jsonify({"requests": overrides.listing()})
 

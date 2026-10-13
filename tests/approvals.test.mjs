@@ -77,6 +77,11 @@ test('the pill shows only while a request is pending, with the count', async () 
     const pill = document.getElementById('btn-approvals');
     assert.equal(pill.hidden, false);
     assert.match(pill.textContent, /2 pending approvals/);
+    // The accessible name carries the count too — a screen reader must not hear only a label.
+    assert.equal(pill.getAttribute('aria-label'), '2 approval requests waiting — tap to review');
+    LISTING = { requests: [req()] };
+    await pa.tickApprovals();
+    assert.equal(pill.getAttribute('aria-label'), '1 approval request waiting — tap to review');
 });
 
 test('a row says what, who, why, age and expiry', async () => {
@@ -213,6 +218,21 @@ test('a refused decision shows the server\'s reason, even after the sheet re-ren
     const err = document.querySelector('#approvals-backdrop .pa-err');
     assert.equal(err.hidden, false);
     assert.match(err.textContent, /the PR head moved/);
+});
+
+test('a later decision clears the previous refused reason', async () => {
+    LISTING = { requests: [req(), req({ id: 'override-' + '5'.repeat(24) })] };
+    await pa.openApprovals();
+    POST_REPLY = { ok: false, state: 'expired', detail: 'the PR head moved' };
+    document.querySelector('.pa-deny').click();
+    await tick(); await tick();
+    assert.match(document.querySelector('#approvals-backdrop .pa-err').textContent, /the PR head moved/);
+    POST_REPLY = null;                       // the next decision succeeds
+    document.querySelector('#approvals-backdrop .pa-deny').click();
+    await tick(); await tick();
+    const err = document.querySelector('#approvals-backdrop .pa-err');
+    assert.equal(err.hidden, true, 'a stale refusal survived a later, successful decision');
+    assert.equal(err.textContent, '');
 });
 
 test('an open sheet re-renders on every tick', async () => {
