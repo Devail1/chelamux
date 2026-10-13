@@ -59,7 +59,7 @@ def test_inventory_matches_env_reads():
     )
 
 
-def test_inventory_count_is_65():
+def test_inventory_count_is_66():
     # The number CMX-207's ticket and the doc's own prose both cite (58, until CMX-217
     # wired the 9-strong Daemon-intervals group through config.dashboard_setting() and
     # they stopped being literal os.environ.get("CHELA_...") call sites — see the doc's
@@ -74,8 +74,8 @@ def test_inventory_count_is_65():
     # 58, until CMX-420 added CHELA_PROXY_SESSION_DIR, then 59, until CMX-435 added
     # CHELA_SHARE_SANDBOX_SUBSCRIPTION, then 61, until CMX-26 added CHELA_INBOX_HELD_ALERT_S
     # and CHELA_CLEAN_UNMERGED_ALERT_S, then 65, until CMX-86 added the four inbox notice
-    # knobs). A change
+    # knobs, then 66, until CMX-110 added CHELA_SELFCHECK_ALERT_S). A change
     # here without a change to the doc's stated count is exactly the kind of drift this
     # file exists to catch — pinned as its own assertion so a future diff has to touch the
     # prose too.
-    assert len(_scan_env_reads()) == 65
+    assert len(_scan_env_reads()) == 66

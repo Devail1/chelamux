@@ -11,6 +11,7 @@ The GraphQL transport is an in-memory fake (`Team`) — no test talks to Linear.
 from __future__ import annotations
 
 import copy
+import re
 import subprocess
 from types import SimpleNamespace
 
@@ -26,7 +27,8 @@ SECRET = "lin_api_CMX23fakeKEYvalue0123456789"
 STATES = [
     ("st-done", "Done", "completed", 0),
     ("st-review", "In Review", "started", 2),
-    ("st-dup", "Duplicate", "canceled", 1),
+    # CMX-107: the real payload — Duplicate is its own TYPE, `duplicate`, not `canceled`.
+    ("st-dup", "Duplicate", "duplicate", 0),
     ("st-todo", "Todo", "unstarted", 0),
     ("st-cancel", "Canceled", "canceled", 0),
     ("st-backlog", "Backlog", "backlog", 0),
@@ -68,8 +70,10 @@ class Team:
         self.calls.append((name, copy.deepcopy(variables)))
         page = {"pageInfo": {"hasNextPage": False, "endCursor": None}}
         if name in ("open", "sweep"):
-            nodes = [i for i in self.issues.values()
-                     if name == "sweep" or i["state"]["type"] not in ("completed", "canceled")]
+            # The open read's filter is read from the QUERY's own `nin`, as Linear would.
+            nin = re.search(r"nin:\s*\[([^\]]*)\]", query)
+            closed = re.findall(r'"(\w+)"', nin.group(1)) if name == "open" and nin else []
+            nodes = [i for i in self.issues.values() if i["state"]["type"] not in closed]
             return {"issues": {"nodes": copy.deepcopy(nodes), **page}}
         if name == "by_number":
             nodes = [i for i in self.issues.values() if i["number"] in variables["numbers"]]
@@ -130,6 +134,26 @@ def test_workflow_states_are_linears_board_order_with_canceled_types_hidden(tmp_
     assert [c["name"] for c in cols if c["hidden"]] == ["Canceled", "Duplicate"]
     # Negative control: no visible column is a chela run status.
     assert not {c["name"] for c in cols if not c["hidden"]} & {"failed", "Review", "running"}
+
+
+def test_the_board_hides_canceled_and_duplicate_by_type_not_name(tmp_path):
+    """CMX-107: `hidden` keys off the state TYPE — a renamed Duplicate state ("Dupe") of
+    type `duplicate` is hidden too, and so is a renamed canceled one."""
+    states = [("s-todo", "Todo", "unstarted", 0), ("s-done", "Done", "completed", 0),
+              ("s-kill", "Killed", "canceled", 0), ("s-dupe", "Dupe", "duplicate", 0)]
+    cols = _src(tmp_path, Team(states=states)).workflow_states()
+    assert [(c["name"], c["hidden"]) for c in cols] == [
+        ("Todo", False), ("Done", False), ("Killed", True), ("Dupe", True)]
+
+
+def test_a_superseded_close_lands_in_the_duplicate_type_state_by_type(tmp_path):
+    """A team whose Duplicate state is renamed: the `duplicate` edge falls back to the first
+    state of TYPE `duplicate` — not the canceled one."""
+    states = [("s-todo", "Todo", "unstarted", 0), ("s-doing", "Doing", "started", 0),
+              ("s-kill", "Killed", "canceled", 0), ("s-dupe", "Dupe", "duplicate", 0)]
+    team = Team(_in(1, "Doing", "started"), _in(9, "Todo", "unstarted"), states=states)
+    assert _src(tmp_path, team).cancel_task("CMX-1", "superseded by CMX-9") == "set"
+    assert team.updates() == [("uuid-1", "s-dupe")]
 
 
 def test_an_open_task_carries_its_linear_state_name(tmp_path):

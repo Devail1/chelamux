@@ -1744,7 +1744,7 @@ MARKERS = {".chela-task-finished-request.json": "task-finished",
            ".chela-push-request.json": "push-request"}
 
 _CMX86_KINDS = ("run_judge_not_started", "run_ci_red", "run_pr_conflicting", "run_stuck",
-                "run_marker_unread")
+                "run_marker_unread", "run_selfcheck_long")
 
 
 def caller_is_orchestrator(store: dict | None = None) -> bool:
@@ -2033,12 +2033,85 @@ def _mtime(path) -> float | None:
         return None
 
 
+# CMX-110: the commands whose long SILENCE is by design — a self-check re-runs the whole
+# suite once per mutation, writing no transcript line and no commit for tens of minutes.
+# Most specific first: the label names the thing the agent is actually waiting on.
+_SELFCHECK_RANK = ("task-finished self-check", "judge sweep", "judge self-check", "pytest")
+
+
+def _selfcheck_label(argv: list[str]) -> str | None:
+    """Which silent-by-design command ``argv`` is, or None."""
+    names = [os.path.basename(a) for a in argv]
+    is_chela = "chela" in names or "chela.main" in argv
+    if is_chela and "task-finished" in argv:
+        return "task-finished self-check"
+    if is_chela and "judge" in argv:
+        for sub in ("sweep", "self-check"):
+            if sub in argv:
+                return f"judge {sub}"
+    if "pytest" in names or "py.test" in names:
+        return "pytest"
+    return None
+
+
+_PROC = Path("/proc")
+
+
+def _selfcheck_scan() -> list[tuple[str, Path, float | None]]:
+    """``[(label, cwd, started_epoch|None)]`` for every live silent-by-design process.
+
+    ONE pass over ``/proc`` per tick, shared by every run. Linux-only by nature; anywhere
+    else (or a process that vanished / is not ours to read) it simply finds nothing, which
+    leaves the transcript/commit probes exactly as they were."""
+    try:
+        boot = next((float(line.split()[1]) for line in
+                     (_PROC / "stat").read_text().splitlines() if line.startswith("btime ")),
+                    None)
+        hz = os.sysconf("SC_CLK_TCK")
+        pids = [d for d in _PROC.iterdir() if d.name.isdigit()]
+    except (OSError, ValueError, IndexError):
+        return []
+    found: list[tuple[str, Path, float | None]] = []
+    for d in pids:
+        try:
+            argv = [a.decode(errors="replace")
+                    for a in (d / "cmdline").read_bytes().split(b"\0") if a]
+            label = _selfcheck_label(argv)
+            if label is None:
+                continue
+            cwd = Path(os.readlink(d / "cwd"))
+            ticks = float((d / "stat").read_text().rsplit(")", 1)[1].split()[19])
+        except (OSError, ValueError, IndexError):
+            continue
+        found.append((label, cwd, boot + ticks / hz if boot is not None else None))
+    return found
+
+
+def _selfcheck_for(worktree: str, procs: list[tuple[str, Path, float | None]]) -> dict | None:
+    """``{"what": label, "since": epoch|None}`` for the most specific silent-by-design
+    process running in ``worktree`` (its earliest instance), or None."""
+    try:
+        root = Path(worktree).resolve()
+    except OSError:
+        return None
+    mine = [(label, since) for label, cwd, since in procs
+            if cwd == root or root in cwd.parents]
+    if not mine:
+        return None
+    what = min((label for label, _ in mine), key=_SELFCHECK_RANK.index)
+    starts = [since for label, since in mine if label == what and since is not None]
+    return {"what": what, "since": min(starts) if starts else None}
+
+
 def stuck_probes(runs: list[dict]) -> dict[str, dict]:
-    """``{task_id: {"activity": ts|None, "markers": {label: mtime}}}`` for every run whose
-    agent should be working. I/O (git, the transcript dir, the worktree) — so the tick does
-    it OUTSIDE the store lock. Activity is the later of the worktree's last commit and its
-    transcript's last write; a run with no worktree on disk has nothing to probe."""
+    """``{task_id: {"activity": ts|None, "markers": {label: mtime}, "selfcheck": …}}`` for
+    every run whose agent should be working. I/O (git, the transcript dir, the worktree,
+    ``/proc``) — so the tick does it OUTSIDE the store lock. Activity is the later of the
+    worktree's last commit and its transcript's last write; a run with no worktree on disk
+    has nothing to probe. ``selfcheck`` is a live ``chela task-finished`` / ``chela judge
+    sweep`` / pytest running in the worktree (CMX-110) — or None."""
     out: dict[str, dict] = {}
+    procs: list | None = None
     for run in runs:
         task, worktree = run.get("task_id"), run.get("worktree_path")
         if not task or run.get("status") not in STUCK_RUN_STATES or not worktree:
@@ -2052,16 +2125,34 @@ def stuck_probes(runs: list[dict]) -> dict[str, dict]:
         stamps = [t for t in (_git_last_commit(worktree), _mtime(transcript)) if t]
         markers = {label: m for name, label in MARKERS.items()
                    if (m := _mtime(Path(worktree) / name)) is not None}
-        out[task] = {"activity": max(stamps) if stamps else None, "markers": markers}
+        if procs is None:
+            procs = _selfcheck_scan()
+        out[task] = {"activity": max(stamps) if stamps else None, "markers": markers,
+                     "selfcheck": _selfcheck_for(worktree, procs)}
     return out
 
 
-def daemon_uptime(now: float) -> float | None:
-    """Seconds since the running daemon published itself, or None if none is running."""
+def daemon_state(now: float) -> tuple[str, float | None]:
+    """``("up", uptime|None)`` / ``("down", None)`` / ``("unknown", None)`` — measured from
+    the daemon's published state file and a liveness check on its pid
+    (``capabilities.daemon_state``). CMX-110: never inferred from anything else, and an
+    answer we could not get is ``unknown``, never ``down``."""
     from chela import capabilities
-    live = capabilities.live()
-    ts = (live or {}).get("ts")
-    return max(0.0, now - float(ts)) if isinstance(ts, (int, float)) else None
+    state, data = capabilities.daemon_state()
+    if state != "up":
+        return state, None
+    ts = (data or {}).get("ts")
+    return "up", (max(0.0, now - float(ts)) if isinstance(ts, (int, float)) else None)
+
+
+def _daemon_phrase(state: str | None, uptime: float | None) -> str:
+    if uptime is not None:
+        return f"daemon up {human_duration(uptime)}"
+    if state == "up":
+        return "daemon up"
+    if state == "down":
+        return "no daemon running"
+    return "daemon state unknown"
 
 
 def _parse_epoch(ts) -> float | None:
@@ -2074,7 +2165,7 @@ def _parse_epoch(ts) -> float | None:
 
 def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: float,
                  uptime: float | None = None, windows: dict[str, str] | None = None,
-                 now_epoch: str | None = None) -> list[dict]:
+                 now_epoch: str | None = None, daemon: str | None = None) -> list[dict]:
     """``run_stuck`` / ``run_marker_unread`` — a running agent that has gone quiet.
 
     * **stuck**: no new commit AND no transcript activity for ``config.stuck_agent_alert_s()``
@@ -2085,12 +2176,20 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
       ``config.marker_unread_alert_s()`` — several ticks. A stale daemon is the usual cause,
       so the notice carries its uptime. Once per marker write. A run with a marker pending
       is waiting on the DAEMON, not stuck, so it never also gets the stuck notice.
+    * **self-check** (CMX-110): a live ``chela task-finished`` / ``chela judge sweep`` /
+      pytest in the worktree is activity — silence is its design — so it is never "stuck".
+      Past ``config.selfcheck_alert_s()`` it gets ONE ``run_selfcheck_long`` notice that
+      says exactly that, once per self-check (keyed on its start).
+
+    ``daemon`` is ``daemon_state``'s measured answer; with ``uptime`` it is rendered as
+    "daemon up …", "no daemon running" (only when measured down) or "daemon state unknown"
+    — never "down" for something nobody looked at.
     """
     prev: dict = store.get("stuck") or {}
     nxt: dict = {}
     out: list[dict] = []
     quiet_after, unread_after = config.stuck_agent_alert_s(), config.marker_unread_alert_s()
-    up = f"daemon up {human_duration(uptime)}" if uptime is not None else "no daemon running"
+    up = _daemon_phrase(daemon, uptime)
     for run in runs:
         task = run.get("task_id")
         if not task or run.get("status") not in STUCK_RUN_STATES:
@@ -2114,10 +2213,32 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
                 f"📭 {_label(run)} — its {label} request has sat UNREAD for "
                 f"{human_duration(age)} — {up}; a stale daemon is the usual cause — "
                 f"`chela doctor`",
-                _run_payload(run, marker=label, marker_age_s=int(age), daemon_uptime_s=(
-                    int(uptime) if uptime is not None else None)), wid=wid))
+                _run_payload(run, marker=label, marker_age_s=int(age), daemon_state=daemon,
+                             daemon_uptime_s=(int(uptime) if uptime is not None else None)),
+                wid=wid))
         entry["markers"] = said
-        stamps = [t for t in (probe.get("activity"), _parse_epoch(run.get("started_at"))) if t]
+        selfcheck = probe.get("selfcheck")
+        if selfcheck:
+            entry["active_at"] = now
+            since, ceiling = selfcheck.get("since"), config.selfcheck_alert_s()
+            running = now - since if since is not None else None
+            if (running is not None and running >= ceiling
+                    and entry.get("selfcheck_at") != since):
+                entry["selfcheck_at"] = since
+                out.append(_event(
+                    "run_selfcheck_long",
+                    f"⏳ {_label(run)} — {selfcheck.get('what')} running for "
+                    f"{human_duration(running)} (ceiling {human_duration(ceiling)}) — not "
+                    f"stuck, still working — `chela peek "
+                    f"{wid or run.get('window_name') or task}` — {up}",
+                    _run_payload(run, selfcheck=selfcheck.get("what"),
+                                 selfcheck_running_s=int(running), daemon_state=daemon,
+                                 daemon_uptime_s=(int(uptime) if uptime is not None
+                                                  else None)), wid=wid))
+            nxt[task] = entry
+            continue
+        stamps = [t for t in (probe.get("activity"), _parse_epoch(run.get("started_at")),
+                              entry.get("active_at")) if t]
         activity = max(stamps) if stamps else None
         quiet = now - activity if activity is not None else 0.0
         if (activity is not None and not probe.get("markers") and quiet >= quiet_after
@@ -2128,7 +2249,7 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
                 f"🧊 {_label(run)} looks STUCK — no commit and no transcript activity for "
                 f"{human_duration(quiet)} while {run.get('status')} — `chela peek "
                 f"{wid or run.get('window_name') or task}` — {up}",
-                _run_payload(run, quiet_s=int(quiet), daemon_uptime_s=(
+                _run_payload(run, quiet_s=int(quiet), daemon_state=daemon, daemon_uptime_s=(
                     int(uptime) if uptime is not None else None)), wid=wid))
         nxt[task] = entry
     store["stuck"] = nxt
@@ -2157,7 +2278,8 @@ def _cmx86_stale(kind: str, payload: dict, run: dict) -> str | None:
             return "PR is no longer CONFLICTING"
         if said_head and head and head != said_head:
             return "PR head moved since the conflict was seen"
-    elif kind in ("run_stuck", "run_marker_unread") and status not in STUCK_RUN_STATES:
+    elif (kind in ("run_stuck", "run_marker_unread", "run_selfcheck_long")
+          and status not in STUCK_RUN_STATES):
         return f"run is now {status!r}, no longer running"
     return None
 
@@ -2750,7 +2872,10 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
     from chela import hold
     held, released = hold.read(), hold.last_release()
     now = time.time()
-    uptime = daemon_uptime(now) if any(p.get("markers") for p in probes.values()) else None
+    # CMX-110: measured whenever a probed run could produce a notice — it used to be read
+    # only for a pending marker, so every STUCK notice said "no daemon running" while the
+    # daemon (the very process running this tick) was up.
+    daemon, uptime = daemon_state(now) if probes else ("unknown", None)
     alarms: list[dict] = []                # raised inside the lock, published outside it
 
     with locked_store() as store:
@@ -2771,7 +2896,7 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
         events += hold_events(store, held, released, now)
         events += conflict_events(runs, store, windows=windows, now_epoch=now_epoch)
         events += stuck_events(runs, store, probes, now, uptime, windows=windows,
-                               now_epoch=now_epoch)
+                               now_epoch=now_epoch, daemon=daemon)
 
         for event in events:
             # A `silent` event carries no message — it exists only to retire a watch
