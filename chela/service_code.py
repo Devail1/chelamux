@@ -191,3 +191,15 @@ def touches(paths: frozenset[str], changed: list[str]) -> list[str]:
     """The ``changed`` repo paths that fall inside ``paths`` (exact, or under a prefix)."""
     prefixes = tuple(p for p in paths if p.endswith("/"))
     return [c for c in changed if c in paths or (prefixes and c.startswith(prefixes))]
+
+
+def services_touched(changed: list[str], root: Path | None = None) -> list[str]:
+    """Every known ``chela-*`` service whose code set a change to ``changed`` reaches — the
+    "restart by import graph" list for a merge (CMX-123). A service whose code set can't be
+    told is INCLUDED: an extra restart is cheap, a stale service is not."""
+    out = []
+    for service in (*CLI_SERVICES, *SCRIPT_SERVICES):
+        paths = service_paths(service, root)
+        if paths is None or touches(paths, changed):
+            out.append(service)
+    return out
