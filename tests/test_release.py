@@ -208,7 +208,15 @@ def test_approve_pushes_main_tag_dev_in_order_exactly_once(world, pushes, told):
     assert _remote(world, "main") == _remote(world, "dev") == sha
     assert _remote(world, "refs/tags/v0.2.0^{commit}") == sha
     assert overrides.load(rid)["state"] == overrides.RELEASED
-    assert told == []
+    # CMX-123: the orchestrator hears the release — once, with what was pushed and next.
+    (kind, summary, payload), = told
+    assert kind == "release_released"
+    assert payload["version"] == "0.2.0" and payload["tag"] == "v0.2.0"
+    assert payload["pushed"] == ["main", "v0.2.0", "dev"] and payload["release_sha"] == sha
+    assert payload["by"] == "terminal:op" and payload["channel"] == "terminal"
+    assert "pushed main, v0.2.0, dev" in summary
+    assert "pyproject.toml" in payload["changed"] and payload["services"] is None
+    assert payload["deploy"].startswith("changed: ") and payload["deploy"] in summary
     # its worktree and local branch are gone; the pushed tag stays
     assert _release_worktrees() == []
     assert _local(world, "refs/heads/chela-release/v0.2.0") is None
@@ -371,6 +379,18 @@ def test_a_release_with_no_entries_refuses(world):
 
 
 # --- deny / human-only ---------------------------------------------------------------------
+
+def test_deny_tells_the_orchestrator_release_denied_once(world, pushes, told):
+    """🔴 GUARD: deny a release ⇒ exactly one `release_denied`, by whom and through what."""
+    out = _prepare(world)
+    overrides.decide(out["request_id"], False, "telegram:@op", channel="telegram")
+    overrides.decide(out["request_id"], False, "telegram:@op", channel="telegram")
+    overrides.sweep()
+    (kind, summary, payload), = told
+    assert kind == "release_denied" and payload["by"] == "telegram:@op"
+    assert payload["channel"] == "telegram" and "nothing was pushed" in summary
+    assert pushes == []
+
 
 def test_deny_pushes_nothing_and_cleans_up_the_local_tag_and_branch(world, pushes):
     """🔴 GUARD: deny ⇒ nothing pushed; the local tag, branch and worktree are removed."""

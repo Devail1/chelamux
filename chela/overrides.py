@@ -55,6 +55,7 @@ import logging
 import os
 import re
 import secrets
+import subprocess
 import time
 from pathlib import Path
 
@@ -252,7 +253,8 @@ def _cleanup_release(rec: dict | None) -> None:
 
 def _tell(rec: dict, outcome: str, detail: str | None) -> None:
     """Tell the operator (push notification) and the orchestrator (inbox) how a request
-    ended, when it did NOT merge. The Telegram message is edited by the bridge's relay."""
+    ended, when nobody's decision ended it — expired or failed. The Telegram message is
+    edited by the bridge's relay. An operator's merged/released/denied is :func:`_announce`."""
     label = rec.get("label") or rec.get("task_id")
     what = label if _is_release(rec) else f"override of {label}"
     text = f"{what} {outcome}" + (f": {detail}" if detail else "")
@@ -272,6 +274,120 @@ def _tell(rec: dict, outcome: str, detail: str | None) -> None:
                        "pr_url": rec.get("pr_url"), "state": outcome, "detail": detail})
     except Exception:                                        # noqa: BLE001 — best effort
         log.debug("override inbox enqueue failed", exc_info=True)
+
+
+# How many changed paths a merged notice names when it cannot name the services instead.
+CHANGED_PATHS_SHOWN = 5
+
+
+def _git_lines(cwd, *args: str) -> list[str] | None:
+    try:
+        p = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True,
+                           errors="replace", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    return [line.strip() for line in p.stdout.splitlines() if line.strip()]
+
+
+def _is_chela_source(cwd) -> bool:
+    """Is ``cwd`` a checkout of the repo chela's own services run from? Only then does a
+    merge there mean restarting a ``chela-*`` service."""
+    from chela import service_code
+    mine = _git_lines(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    ours = _git_lines(service_code.SOURCE_ROOT, "rev-parse", "--path-format=absolute",
+                      "--git-common-dir")
+    return bool(mine and ours and mine == ours)
+
+
+def deploy_step(cwd, base: str | None, head: str | None) -> dict:
+    """The next step after ``base..head`` landed (CMX-123): ``{"step", "changed",
+    "services"}``. In chela's own repo the step names the services to restart by import
+    graph (:func:`chela.service_code.services_touched`); elsewhere it names the changed
+    paths. ``step`` is "" when git cannot say what changed."""
+    changed = (_git_lines(cwd, "diff", "--name-only", "--no-renames", f"{base}...{head}")
+               if cwd and base and head else None)
+    if changed is None:
+        return {"step": "", "changed": None, "services": None}
+    if _is_chela_source(cwd):
+        from chela import service_code
+        services = service_code.services_touched(changed)
+        step = (f"deploy: restart {', '.join(services)}" if services
+                else "deploy: no chela service runs the changed files — nothing to restart")
+        return {"step": step, "changed": changed, "services": services}
+    shown = ", ".join(changed[:CHANGED_PATHS_SHOWN])
+    more = len(changed) - CHANGED_PATHS_SHOWN
+    step = f"changed: {shown}" + (f" (+{more} more)" if more > 0 else "")
+    return {"step": step, "changed": changed, "services": None}
+
+
+def _latch_notice(request_id: str) -> bool:
+    """True exactly ONCE per request: the orchestrator hears each outcome once, never again
+    per tick or per repeated decision (cf. CMX-120)."""
+    with _locked(request_id):
+        rec = load(request_id)
+        if rec is None or rec.get("inbox_notified"):
+            return False
+        rec["inbox_notified"] = time.time()
+        _write(rec)
+        return True
+
+
+def _deploy_for(rec: dict) -> dict:
+    """What the merged/released notice tells the orchestrator to do next."""
+    try:
+        if _is_release(rec):
+            return deploy_step(rec.get("git_dir"), rec.get("dev_sha"), rec.get("release_sha"))
+        from chela import dispatcher
+        run = dispatcher.resolve_run(rec.get("task_id") or "") or {}
+        base = rec.get("base")
+        return deploy_step(run.get("worktree_path"), base and f"origin/{base}",
+                           rec.get("head_sha"))
+    except Exception:                                        # noqa: BLE001 — best effort
+        log.debug("override deploy step failed", exc_info=True)
+        return {"step": "", "changed": None, "services": None}
+
+
+def _announce(rec: dict, outcome: str, by: str, channel: str,
+              reason: str | None = None) -> bool:
+    """Tell the orchestrator (inbox ONLY) that an operator decided a request and how it
+    ended — ``merged`` / ``released`` / ``denied`` (CMX-123). The operator already knows: the
+    Telegram card is edited to the outcome by the relay, so there is no push here. Latched
+    once per request id (:func:`_latch_notice`)."""
+    if not _latch_notice(rec["id"]):
+        return False
+    release = _is_release(rec)
+    kind = f"{'release' if release else 'override'}_{outcome}"
+    via = f"{by} via {channel}"
+    payload = {"request_id": rec.get("id"), "task_id": rec.get("task_id"),
+               "pr_url": rec.get("pr_url"), "state": outcome, "by": by, "channel": channel}
+    if outcome == DENIED:
+        payload["reason"] = reason
+        summary = (f"{'🏷️' if release else '⚖️'} {_what(rec)} DENIED by {via}"
+                   + (f": {reason}" if reason else "") + f" — {not_done(rec)}")
+    elif release:
+        deploy = _deploy_for(rec)
+        pushed = rec.get("pushed") or []
+        payload.update(version=rec.get("version"), tag=rec.get("tag"), pushed=pushed,
+                       release_sha=rec.get("release_sha"), deploy=deploy["step"],
+                       changed=deploy["changed"], services=deploy["services"])
+        summary = (f"🏷️ {rec.get('label')} RELEASED, approved by {via} — pushed "
+                   f"{', '.join(pushed) or 'nothing'}"
+                   + (f" — next, {deploy['step']}" if deploy["step"] else ""))
+    else:
+        deploy = _deploy_for(rec)
+        sha = rec.get("merge_commit_sha")
+        payload.update(merge_commit_sha=sha, deploy=deploy["step"],
+                       changed=deploy["changed"], services=deploy["services"])
+        summary = (f"⚖️ {_what(rec)} MERGED ({str(sha or '?')[:12]}), approved by {via}"
+                   + (f" — next, {deploy['step']}" if deploy["step"] else ""))
+    try:
+        from chela import inbox
+        return bool(inbox.enqueue(kind, summary, payload))
+    except Exception:                                        # noqa: BLE001 — best effort
+        log.debug("override inbox enqueue failed", exc_info=True)
+        return False
 
 
 def _expire(rec: dict, detail: str) -> dict | None:
@@ -298,7 +414,7 @@ SERVICE_CHANNELS = ("telegram", "dashboard")
 
 
 def decide(request_id: str, approve: bool, by: str, *, channel: str = "terminal",
-           env=None) -> dict:
+           env=None, reason: str | None = None) -> dict:
     """The operator's decision. ``{ok, state, detail, merge_commit_sha?}``.
 
     Approve ⇒ the merge happens HERE, now, via :func:`chela.contract.complete_override`
@@ -324,9 +440,10 @@ def decide(request_id: str, approve: bool, by: str, *, channel: str = "terminal"
         expired = (rec.get("deadline") or 0) <= time.time()
         if not expired:
             rec.update(state=MERGING if approve else DENIED, decided_by=by,
-                       decided_at=time.time())
+                       decided_at=time.time(), decided_via=channel)
             if not approve:
-                rec.update(detail=f"denied by {by}", finished_at=time.time())
+                rec.update(detail=f"denied by {by}" + (f": {reason}" if reason else ""),
+                           deny_reason=reason or None, finished_at=time.time())
             _write(rec)
     if expired:
         done = _expire(rec, f"not decided within {rec.get('ttl') or 0:.0f}s")
@@ -338,7 +455,8 @@ def decide(request_id: str, approve: bool, by: str, *, channel: str = "terminal"
                          f"{_what(rec)} DENIED by {by}",
                          payload={**_public(rec), "approved_by": by})
         _cleanup_release(rec)
-        return {"ok": True, "state": DENIED, "detail": f"denied by {by}"}
+        _announce(rec, DENIED, by, channel, reason)
+        return {"ok": True, "state": DENIED, "detail": rec.get("detail")}
 
     try:
         if _is_release(rec):
@@ -367,6 +485,8 @@ def decide(request_id: str, approve: bool, by: str, *, channel: str = "terminal"
                          f"{'released' if _is_release(rec) else 'merged'}: {detail}",
                          payload={**_public(done or rec), "approved_by": by})
         _tell(done or {**rec, **extra}, FAILED, detail)
+    elif done is not None:
+        _announce(done, state, by, channel)
     return {"ok": state in SUCCESS_STATES, "state": state, "detail": detail,
             "merge_commit_sha": outcome.get("merge_commit_sha")}
 

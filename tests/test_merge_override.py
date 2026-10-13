@@ -174,7 +174,13 @@ def test_approve_merges_exactly_once_through_the_merge_path_with_the_audit(repo,
     assert len(history) == 1 and history[0]["head_sha"] == HEAD
     merged, = event_log.read(types=["orchestrator.merge"])["events"]
     assert merged["payload"]["override"]["approved_by"] == "terminal:op"
-    assert told == []
+    # CMX-123: the orchestrator hears the merge — once, with the sha, who and through what.
+    (kind, summary, payload), = told
+    assert kind == "override_merged"
+    assert payload["merge_commit_sha"] == "m" * 40 and "m" * 12 in summary
+    assert payload["by"] == "terminal:op" and payload["channel"] == "terminal"
+    assert payload["request_id"] == rid and payload["task_id"] == "t1"
+    assert payload["pr_url"] == PR
 
 
 def test_the_override_audit_is_on_the_run_row_before_the_squash_merge(repo, told):
@@ -974,3 +980,213 @@ def test_service_channels_are_telegram_and_dashboard():
 ])
 def test_request_id_regex_edges(rid, ok):
     assert overrides.valid_id(rid) is ok
+
+
+# --- CMX-123: the orchestrator hears EVERY operator outcome, once -----------------------
+
+def test_an_approval_tells_the_orchestrator_merged_with_the_channel(repo, told):
+    """🔴 GUARD: a Telegram approval ⇒ exactly one `override_merged`, naming the channel."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github():
+        overrides.decide(rid, True, "telegram:@op", channel="telegram")
+    assert [(k, p["by"], p["channel"], p["state"]) for k, _s, p in told] == [
+        ("override_merged", "telegram:@op", "telegram", overrides.MERGED)]
+    assert "telegram:@op via telegram" in told[0][1]
+    assert overrides.load(rid)["decided_via"] == "telegram"
+
+
+def test_a_denial_tells_the_orchestrator_denied_with_the_reason(repo, told):
+    """🔴 GUARD: deny ⇒ exactly one `override_denied`, by whom and why — nothing merged."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github() as squash:
+        out = overrides.decide(rid, False, "dashboard", channel="dashboard",
+                               reason="wrong fix")
+    squash.assert_not_called()
+    assert out["state"] == overrides.DENIED and "wrong fix" in out["detail"]
+    (kind, summary, payload), = told
+    assert kind == "override_denied"
+    assert payload["by"] == "dashboard" and payload["channel"] == "dashboard"
+    assert payload["reason"] == "wrong fix" and payload["state"] == overrides.DENIED
+    assert "DENIED by dashboard" in summary and "wrong fix" in summary
+    assert "nothing was merged" in summary
+    assert overrides.load(rid)["deny_reason"] == "wrong fix"
+
+
+def test_a_denial_without_a_reason_names_none(repo, told):
+    _seed(repo)
+    rid = _request()["request_id"]
+    out = overrides.decide(rid, False, "terminal:op")
+    assert out["detail"] == "denied by terminal:op"
+    (_k, summary, payload), = told
+    assert payload["reason"] is None
+    assert "DENIED by terminal:op via terminal — nothing was merged" in summary
+
+
+def test_an_outcome_is_told_once_across_repeated_decisions_and_ticks(repo, told):
+    """🔴 GUARD: once per request id — a second approval, a deny after it and every later
+    sweep tell the orchestrator NOTHING more (cf. CMX-120)."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github():
+        overrides.decide(rid, True, "terminal:op")
+        overrides.decide(rid, True, "dashboard", channel="dashboard")
+        overrides.decide(rid, False, "terminal:op")
+    for _ in range(3):
+        overrides.sweep(head_of=lambda _t: MOVED)
+    assert [k for k, _s, _p in told] == ["override_merged"]
+
+
+def test_the_notice_latch_fires_once_per_request(repo, told):
+    """🔴 GUARD: the latch itself — announcing the same finished request twice (a re-entry, a
+    second process) enqueues ONE notice, and the record carries the latch."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github():
+        overrides.decide(rid, True, "terminal:op")
+    rec = overrides.load(rid)
+    assert rec["inbox_notified"]
+    assert overrides._announce(rec, overrides.MERGED, "terminal:op", "terminal") is False
+    assert len(told) == 1
+
+
+def test_the_merged_notice_carries_the_deploy_step_for_the_runs_worktree(repo, told,
+                                                                          monkeypatch):
+    """🔴 GUARD: the merged notice says what to do next, computed from the run's worktree
+    between the PR's base and the approved head."""
+    _seed(repo)
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET worktree_path=? WHERE task_id='t1'", (str(repo),))
+        conn.commit()
+    asked: list = []
+
+    def step(cwd, base, head):
+        asked.append((cwd, base, head))
+        return {"step": "deploy: restart chela-daemon", "changed": ["chela/x.py"],
+                "services": ["chela-daemon"]}
+    monkeypatch.setattr(overrides, "deploy_step", step)
+    rid = _request()["request_id"]
+    with _github():
+        overrides.decide(rid, True, "terminal:op")
+    assert asked == [(str(repo), "origin/dev", HEAD)]
+    (_k, summary, payload), = told
+    assert payload["deploy"] == "deploy: restart chela-daemon"
+    assert payload["services"] == ["chela-daemon"] and payload["changed"] == ["chela/x.py"]
+    assert summary.endswith("next, deploy: restart chela-daemon")
+
+
+def test_a_crashing_deploy_step_still_tells_the_merge(repo, told, monkeypatch):
+    def boom(*_a):
+        raise RuntimeError("git exploded")
+    monkeypatch.setattr(overrides, "deploy_step", boom)
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github():
+        overrides.decide(rid, True, "terminal:op")
+    (kind, summary, payload), = told
+    assert kind == "override_merged" and payload["deploy"] == "" and "next" not in summary
+
+
+def _git_repo(path: Path, files: dict[str, str]) -> tuple[str, str]:
+    """A repo with a base commit and a head commit adding ``files``. -> (base, head)."""
+    import subprocess
+
+    def g(*args):
+        return subprocess.run(["git", "-C", str(path), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+    path.mkdir(parents=True, exist_ok=True)
+    g("init", "-q", "-b", "dev")
+    for k, v in (("user.email", "t@example.com"), ("user.name", "T"),
+                 ("commit.gpgsign", "false")):
+        g("config", k, v)
+    (path / "README").write_text("x\n")
+    g("add", "-A")
+    g("commit", "-q", "-m", "base")
+    base = g("rev-parse", "HEAD")
+    for name, body in files.items():
+        (path / name).parent.mkdir(parents=True, exist_ok=True)
+        (path / name).write_text(body)
+    g("add", "-A")
+    g("commit", "-q", "-m", "head")
+    return base, g("rev-parse", "HEAD")
+
+
+def test_deploy_step_outside_chela_names_the_changed_paths(tmp_path):
+    """🔴 GUARD: a merge in another repo restarts no chela service — the step names the
+    changed paths, capped with a "+N more"."""
+    names = [f"f{i}.txt" for i in range(overrides.CHANGED_PATHS_SHOWN + 2)]
+    base, head = _git_repo(tmp_path / "r", {n: "1" for n in names})
+    out = overrides.deploy_step(tmp_path / "r", base, head)
+    assert out["services"] is None and out["changed"] == names
+    assert out["step"] == ("changed: " + ", ".join(names[:overrides.CHANGED_PATHS_SHOWN])
+                           + " (+2 more)")
+
+
+def test_deploy_step_with_few_paths_has_no_more_suffix(tmp_path):
+    base, head = _git_repo(tmp_path / "r", {"a.txt": "1"})
+    assert overrides.deploy_step(tmp_path / "r", base, head)["step"] == "changed: a.txt"
+
+
+def test_deploy_step_with_exactly_the_cap_has_no_more_suffix(tmp_path):
+    names = [f"f{i}.txt" for i in range(overrides.CHANGED_PATHS_SHOWN)]
+    base, head = _git_repo(tmp_path / "r", {n: "1" for n in names})
+    assert "more" not in overrides.deploy_step(tmp_path / "r", base, head)["step"]
+
+
+def test_deploy_step_in_chelas_own_repo_names_the_services(tmp_path, monkeypatch):
+    """🔴 GUARD: in chela's own repo the step is the restart-by-import-graph list."""
+    from chela import service_code
+    base, head = _git_repo(tmp_path / "r", {"chela/x.py": "1"})
+    monkeypatch.setattr(overrides, "_is_chela_source", lambda cwd: True)
+    seen: list = []
+    monkeypatch.setattr(service_code, "services_touched",
+                        lambda changed: seen.append(changed) or ["chela-daemon",
+                                                                 "chela-telegram"])
+    out = overrides.deploy_step(tmp_path / "r", base, head)
+    assert seen == [["chela/x.py"]]
+    assert out["step"] == "deploy: restart chela-daemon, chela-telegram"
+    assert out["services"] == ["chela-daemon", "chela-telegram"]
+    monkeypatch.setattr(service_code, "services_touched", lambda changed: [])
+    assert "nothing to restart" in overrides.deploy_step(tmp_path / "r", base, head)["step"]
+
+
+def test_deploy_step_is_empty_when_git_cannot_say(tmp_path):
+    assert overrides.deploy_step(tmp_path, "a", "b") == {
+        "step": "", "changed": None, "services": None}
+    assert overrides.deploy_step(None, "a", "b")["step"] == ""
+    assert overrides.deploy_step(tmp_path, None, "b")["changed"] is None
+
+
+def test_is_chela_source_tells_chelas_repo_from_another(tmp_path):
+    from chela import service_code
+    _git_repo(tmp_path / "r", {"a": "1"})
+    assert overrides._is_chela_source(service_code.SOURCE_ROOT) is True
+    assert overrides._is_chela_source(tmp_path / "r") is False
+    assert overrides._is_chela_source(tmp_path / "nope") is False
+
+
+def test_services_touched_follows_each_services_code_set(monkeypatch):
+    """🔴 GUARD: restart by import graph — a launcher-only change reaches the CLI services,
+    not the bash loop; the loop's own script reaches only it; an unknown code set is kept."""
+    from chela import service_code
+    cli = sorted(service_code.CLI_SERVICES)
+    assert sorted(service_code.services_touched(["uv.lock"])) == cli
+    assert service_code.services_touched(["scripts/agent-terminals.sh"]) == [
+        "chela-agent-terminals"]
+    assert service_code.services_touched(["docs/nothing.md"]) == []
+    real = service_code.service_paths
+    monkeypatch.setattr(service_code, "service_paths",
+                        lambda s, root=None: None if s == "chela-collab" else real(s, root))
+    assert service_code.services_touched(["docs/nothing.md"]) == ["chela-collab"]
+
+
+def test_git_lines_is_none_when_git_cannot_run(tmp_path, monkeypatch):
+    """A missing/hung git is "cannot say" (None) — never a crash in the approving process."""
+    import subprocess
+
+    def boom(*_a, **_k):
+        raise subprocess.TimeoutExpired("git", 30)
+    monkeypatch.setattr(overrides.subprocess, "run", boom)
+    assert overrides._git_lines(tmp_path, "status") is None
+    assert overrides.deploy_step(tmp_path, "a", "b")["step"] == ""
