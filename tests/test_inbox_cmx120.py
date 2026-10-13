@@ -134,3 +134,75 @@ def test_a_probe_with_no_readable_start_names_the_command_without_a_pid():
     procs = [("task-finished self-check", root, None, 9)]
     assert inbox._selfcheck_for(str(root), procs) == {
         "what": "task-finished self-check", "since": None, "pid": None}
+
+
+# --- the PRODUCER of the identity: ``_selfcheck_scan`` reads the pid off ``/proc`` ---------
+# Every test above hands ``stuck_events`` / ``_selfcheck_for`` a probe that already carries a
+# pid. The pid has to come from somewhere real — the ``/proc/<pid>`` directory name — and a
+# scan that stopped reporting it would fall back to the start-with-slack match and look fine
+# on every jittering-start fixture. These run the real scan over a fake ``/proc``.
+
+_HZ = 100
+
+
+def _fake_proc(root: Path, btime: float, procs: list[tuple[int, list[str], Path, int]]):
+    """A ``/proc`` with ``stat``'s ``btime`` and, per ``(pid, argv, cwd, start_ticks)``, the
+    three files the scan reads: ``cmdline``, a ``cwd`` link and ``stat`` (field 22)."""
+    if root.exists():
+        for child in sorted(root.rglob("*"), reverse=True):
+            child.unlink() if child.is_file() or child.is_symlink() else child.rmdir()
+    root.mkdir(exist_ok=True)
+    (root / "stat").write_text(f"cpu  1 2 3\nbtime {int(btime)}\nprocesses 9\n")
+    for pid, argv, cwd, ticks in procs:
+        d = root / str(pid)
+        d.mkdir()
+        (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+        (d / "cwd").symlink_to(cwd)
+        rest = ["S"] + ["0"] * 18 + [str(ticks)] + ["0"] * 5   # index 19 = starttime
+        (d / "stat").write_text(f"{pid} (python) " + " ".join(rest) + "\n")
+
+
+_JUDGE = ["python", "-m", "chela.main", "judge", "self-check"]
+
+
+@pytest.fixture
+def fake_proc(tmp_path, monkeypatch):
+    monkeypatch.setattr(inbox, "_PROC", tmp_path / "proc")
+    monkeypatch.setattr(inbox.os, "sysconf", lambda name: _HZ)
+    monkeypatch.setattr(inbox.transcripts, "transcript_for_cwd", lambda cwd: None)
+    monkeypatch.setattr(inbox, "_git_last_commit", lambda w: None)
+    wt = (tmp_path / "wt")
+    wt.mkdir()
+    return tmp_path / "proc", wt.resolve()
+
+
+def test_the_scan_reports_each_process_by_its_proc_pid(fake_proc):
+    """🔴 GUARD: the pid the latch keys on is the ``/proc/<pid>`` the process was read from —
+    distinct per process, never None for a readable one."""
+    proc, wt = fake_proc
+    _fake_proc(proc, 1000, [(4242, _JUDGE, wt, 500), (17, ["pytest", "-q"], wt, 900),
+                            (5, ["bash"], wt, 100)])
+    assert sorted(inbox._selfcheck_scan()) == sorted([
+        ("judge self-check", wt, 1005.0, 4242), ("pytest", wt, 1009.0, 17)])
+
+
+def test_a_quick_re_run_through_the_real_scan_is_news_again(fake_proc):
+    """🔴 GUARD (end-to-end): scan → probe → latch. A self-check re-run 30s after the first
+    one (inside the pid-less slack) is a NEW process — read off ``/proc`` — so it is news;
+    the same process on the next tick, its start jittering with ``btime``, is not."""
+    proc, wt = fake_proc
+    run = dict(_run(), worktree_path=str(wt))
+    store, fired = inbox._empty(), []
+
+    def tick(now, btime, pid, ticks):
+        _fake_proc(proc, btime, [(pid, _JUDGE, wt, ticks)])
+        probes = inbox.stuck_probes([run])
+        fired.extend(e["kind"] for e in inbox.stuck_events([run], store, probes, now))
+        return probes["T9"]["selfcheck"]
+
+    sc = tick(START + CEILING, START, 1001, 0)
+    assert sc == {"what": "judge self-check", "since": START, "pid": 1001}
+    tick(START + CEILING + 60, START + 1, 1001, 0)           # btime resynced: same process
+    assert fired == ["run_selfcheck_long"]
+    tick(START + CEILING + 120, START, 1002, 30 * _HZ)       # the re-run (+30s): new pid
+    assert fired == ["run_selfcheck_long"] * 2
