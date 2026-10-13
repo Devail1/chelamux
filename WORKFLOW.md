@@ -214,6 +214,26 @@ message.
    corruption instead of hand-editing and eyeballing it. **This is the exact check the judge will
    run — catch your own decoration first, or the PR comes straight back.** ⛔ **Keep the
    experiments JSON file** (do not delete it after step 3) — step 6 needs its path.
+
+   **🧭 GUARD-CATEGORY CHECKLIST — walk your OWN diff before hand-in.** Cover each whole
+   CATEGORY up front, not one survivor per judge round (CMX-87 took 13 rounds that way;
+   examples: `docs/DEFEAT_SHAPES.md` entries 87/87b/87c). One test per item that applies;
+   list in the PR body the items that don't, and why:
+   1. **Every `except` clause** — raise what it must catch but a NARROWER clause would miss
+      (`RuntimeError` for `except Exception`, an `OSError` subclass for `except OSError`);
+      assert the documented behaviour (continue / fail closed + cleanup / exact error).
+   2. **Every subprocess / external call** — pin the FULL argv, cwd, env and timeout on the
+      SUCCESS path too. Never a spy that records a single element.
+   3. **Literal documented values** — never the module's own constant as the expected value.
+      Every regex gets positive AND negative fixtures (anchors, prefixes, `\b`, trailing `\n`).
+   4. **Every branch on a kind/type/flag** — drive BOTH kinds through it, asserting the
+      kind-specific observable (event name, text, state, cleanup).
+   5. **Every read that can fail** (remote ref, file, API) — an empty/unreadable result
+      fails CLOSED, tested. Unknown never reads as OK.
+   6. **Every flag/config input** — explicit flag > workflow/config > default, each wired to
+      where it's used: one parametrized precedence table.
+   7. **Values from the authoritative record** (stored request, DB row), never a
+      caller-supplied copy, wherever the code claims that.
 4. **Commit in the worktree.** Stage only files you intentionally changed
    (`git add <paths>` — never `git add -A`). Verify with `git status` +
    `git diff --cached --stat` before committing.
