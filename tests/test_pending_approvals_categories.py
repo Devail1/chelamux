@@ -267,10 +267,10 @@ def _corrupt(name="b"):
 
 def test_a_corrupt_request_file_does_not_take_the_list_down(client):
     good = _override(label="good")
-    _corrupt()
+    bad = _corrupt()
     resp = client.get("/api/overrides")
     assert resp.status_code == 200
-    assert [r["id"] for r in resp.get_json()["requests"]] == [good["id"]]
+    assert [r["id"] for r in resp.get_json()["requests"]] == [good["id"], bad.stem]
 
 
 def test_a_missing_run_marks_the_row_instead_of_dropping_it(client):
@@ -290,28 +290,99 @@ def test_a_run_lookup_that_raises_marks_the_row_not_a_500(client, monkeypatch):
     assert [r["id"] for r in resp.get_json()["requests"]] == [rec["id"]]
 
 
-@pytest.mark.xfail(strict=True, reason="PRODUCTION GAP (CMX-103 r4 report): a record with a "
-                   "wrong-typed deadline/created ('soon') raises in pending()/sort and the whole "
-                   "list 500s — one bad file hides every other pending approval")
-def test_one_wrong_typed_record_does_not_take_the_list_down(client):
+def _bad_file(name, text):
+    path = overrides.store_dir() / f"override-{name * 24}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path.stem
+
+
+@pytest.mark.parametrize("fields", [
+    {"deadline": "soon", "created": "x"}, {"deadline": "soon"}, {"created": [1]},
+    {"deadline": True}, {"ttl": "long"}, {"deadline": float("nan")},
+])
+def test_a_wrong_typed_record_is_marked_and_does_not_take_the_list_down(client, fields):
     good = _override(label="good")
-    bad = overrides.store_dir() / f"override-{'c' * 24}.json"
-    bad.write_text(json.dumps({"id": bad.stem, "state": "pending", "deadline": "soon",
-                               "created": "x"}))
+    bid = f"override-{'c' * 24}"
+    (overrides.store_dir() / f"{bid}.json").write_text(json.dumps(
+        {"id": bid, "state": "pending", "deadline": time.time() + 99, **fields}))
     resp = client.get("/api/overrides")
     assert resp.status_code == 200
-    assert good["id"] in [r["id"] for r in resp.get_json()["requests"]]
+    rows = {r["id"]: r for r in resp.get_json()["requests"]}
+    assert set(rows) == {good["id"], bid}
+    assert rows[bid]["kind"] == "unreadable" and "is not a number" in rows[bid]["reason"]
+    assert rows[bid]["blocked"].startswith(f"unreadable request {bid} — ")
 
 
-@pytest.mark.xfail(strict=True, reason="PRODUCTION GAP (CMX-103 r4 report): an unparseable "
-                   "request file is dropped silently — the list neither shows nor marks it, and "
-                   "an unreadable store answers {'requests': []} ('nothing waiting'): unknown "
-                   "reads as empty")
-def test_an_unreadable_request_is_marked_not_silently_dropped(client):
-    _override(label="good")
-    _corrupt()
-    body = client.get("/api/overrides").get_json()
-    assert len(body["requests"]) == 2 or body.get("unreadable")
+@pytest.mark.parametrize("text,why", [
+    ("{this is not json", "not valid JSON"), ("[1, 2]", "not a JSON object"),
+    ('{"id": "override-zzz", "state": "pending"}', "does not match"), ("", "not valid JSON"),
+])
+def test_an_unusable_request_file_is_marked_not_silently_dropped(client, text, why):
+    good = _override(label="good")
+    bid = _bad_file("b", text)
+    row_ids = [r["id"] for r in client.get("/api/overrides").get_json()["requests"]]
+    assert row_ids == [good["id"], bid]            # the bad one last, marked
+    bad = client.get("/api/overrides").get_json()["requests"][1]
+    assert bad["kind"] == "unreadable" and why in bad["reason"]
+    assert bad["blocked"] == f"unreadable request {bid} — {bad['reason']}"
+
+
+def test_an_unreadable_file_cannot_be_decided(client):
+    bid = _bad_file("b", "{nope")
+    for action, body in (("approve", {"confirm": True}), ("deny", {})):
+        resp = client.post(f"/api/override/{bid}/{action}", json=body)
+        assert resp.status_code == 409 and resp.get_json()["ok"] is False
+
+
+def test_an_unreadable_file_makes_the_sweeps_and_pending_survive(client):
+    good = _override(label="good")
+    _bad_file("b", json.dumps({"id": f"override-{'b' * 24}", "state": "pending", "deadline": "x"}))
+    overrides.sweep()                                # used to raise TypeError
+    assert [r["id"] for r in overrides.pending()] == [good["id"]]
+
+
+def test_a_final_record_with_a_bad_field_stays_usable_history(client):
+    rec = _override()
+    overrides.set_fields(rec["id"], state=overrides.DENIED, created="x")
+    assert client.get("/api/overrides").get_json() == {"requests": []}
+
+
+def test_a_missing_store_means_nothing_was_ever_filed(client):
+    assert client.get("/api/overrides").get_json() == {"requests": []}
+
+
+def test_an_unreadable_store_is_an_explicit_error_not_nothing_waiting(client):
+    """🔴 GUARD: unknown is not empty. A store that cannot be listed answers 503 with an
+    ``error`` — never ``{"requests": []}``, which the page shows as "nothing is waiting"."""
+    import os
+    d = overrides.store_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    _override()
+    d.chmod(0)
+    try:
+        if os.access(d, os.R_OK):
+            pytest.skip("running as a user that ignores directory permissions")
+        resp = client.get("/api/overrides")
+    finally:
+        d.chmod(0o755)
+    assert resp.status_code == 503
+    body = resp.get_json()
+    assert body["requests"] == [] and "cannot be read" in body["error"]
+
+
+def test_a_store_path_that_is_a_file_is_an_error(client):
+    d = overrides.store_dir()
+    d.parent.mkdir(parents=True, exist_ok=True)
+    d.write_text("not a directory")
+    resp = client.get("/api/overrides")
+    assert resp.status_code == 503 and "error" in resp.get_json()
+
+
+def test_a_failure_inside_listing_is_an_error_reply_not_a_500_page(client, monkeypatch):
+    monkeypatch.setattr(overrides, "listing_state", lambda *a, **k: (_ for _ in ()).throw(ValueError("x")))
+    resp = client.get("/api/overrides")
+    assert resp.status_code == 503 and resp.get_json()["requests"] == [] and resp.get_json()["error"]
 
 
 # === F. auth ==================================================================================

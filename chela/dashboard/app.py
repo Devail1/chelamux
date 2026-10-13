@@ -3587,8 +3587,16 @@ def api_overrides():
     from chela import overrides
     # Hygiene only: listing() already drops expired requests (pending() filters by deadline)
     # and marks a moved head `blocked` itself — the sweep just settles their records.
-    overrides.sweep()
-    return jsonify({"requests": overrides.listing()})
+    # Unknown is not empty: a store that cannot be read is an explicit error state (503 +
+    # ``error``), never ``{"requests": []}`` — which the page would show as "nothing waiting".
+    try:
+        overrides.sweep()
+        rows, error = overrides.listing_state()
+    except Exception as exc:  # noqa: BLE001 — report it, do not 500 into silence
+        rows, error = [], f"the approvals list failed ({exc.__class__.__name__}: {exc})"
+    if error:
+        return jsonify({"requests": [], "error": error}), 503
+    return jsonify({"requests": rows})
 
 
 @app.route("/api/override/<request_id>/<action>", methods=["POST"])

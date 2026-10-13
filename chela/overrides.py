@@ -144,18 +144,68 @@ def load(request_id: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def all_requests() -> list[dict]:
-    """Every request on disk, oldest first."""
-    out = []
+_NUMERIC_FIELDS = ("created", "deadline", "ttl")
+
+
+def _is_num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v
+
+
+def _read_request(path: Path) -> tuple[dict | None, str | None]:
+    """``(record, None)`` or ``(None, why it is unusable)`` — never raises. A record is
+    unusable when it cannot be read or parsed, is not an object, names a different id than
+    its file, or carries a non-numeric ``created`` / ``deadline`` / ``ttl`` (which would
+    otherwise raise in every sort and expiry check downstream)."""
     try:
-        paths = list(store_dir().glob("override-*.json"))
-    except OSError:
-        return out
-    for path in paths:
-        rec = load(path.stem)
-        if rec is not None:
-            out.append(rec)
-    return sorted(out, key=lambda r: r.get("created") or 0)
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return None, f"unreadable ({exc.__class__.__name__})"
+    except ValueError:
+        return None, "not valid JSON"
+    if not isinstance(data, dict):
+        return None, "not a JSON object"
+    if data.get("id") != path.stem:
+        return None, "its id does not match its file name"
+    for key in _NUMERIC_FIELDS:
+        if data.get(key) is not None and not _is_num(data[key]):
+            if data.get("state") in FINAL_STATES:
+                data.pop(key)       # history nobody acts on — usable, minus the bad field
+                continue
+            return None, f"{key} is not a number"
+    return data, None
+
+
+def scan() -> tuple[list[dict], list[dict], str | None]:
+    """``(requests oldest first, unreadable [{id, reason}], store_error)``.
+
+    The one reader of the store. A bad FILE is reported in ``unreadable`` instead of being
+    dropped; a store that cannot be listed at all (permissions, not a directory) sets
+    ``store_error`` — which is NOT the same as an empty store (a directory that does not
+    exist yet just means nothing was ever filed)."""
+    good: list[dict] = []
+    bad: list[dict] = []
+    try:
+        with os.scandir(store_dir()) as it:
+            names = sorted(e.name for e in it if e.name.startswith("override-")
+                           and e.name.endswith(".json") and e.is_file())
+    except FileNotFoundError:
+        return good, bad, None
+    except OSError as exc:
+        return good, bad, f"the approvals store cannot be read ({exc.__class__.__name__}: {exc})"
+    for name in names:
+        path = store_dir() / name
+        rec, why = _read_request(path)
+        if rec is None:
+            bad.append({"id": path.stem, "reason": why})
+        else:
+            good.append(rec)
+    good.sort(key=lambda r: r.get("created") or 0)
+    return good, bad, None
+
+
+def all_requests() -> list[dict]:
+    """Every USABLE request on disk, oldest first (see :func:`scan` for the rest)."""
+    return scan()[0]
 
 
 def pending() -> list[dict]:
@@ -171,6 +221,7 @@ def pending() -> list[dict]:
 # and the Approve/Deny buttons then carry it with no second surface.
 KIND_OVERRIDE = "override"
 KIND_RELEASE = "release"
+KIND_UNREADABLE = "unreadable"   # a request FILE that could not be used (listing only)
 
 
 def stale_reason(rec: dict, run: dict | None) -> str | None:
@@ -208,6 +259,11 @@ def stale_reason(rec: dict, run: dict | None) -> str | None:
 
 
 def listing(run_of=None) -> list[dict]:
+    """The rows of :func:`listing_state`, for callers that only want the list."""
+    return listing_state(run_of)[0]
+
+
+def listing_state(run_of=None) -> tuple[list[dict], str | None]:
     """The dashboard's "Pending approvals" rows (CMX-103): every request still PENDING and
     inside its TTL, oldest first — decided and expired ones are never listed. Each row says
     what it is, who asked, why, its age and time to expiry, and ``blocked`` — why it cannot
@@ -219,7 +275,10 @@ def listing(run_of=None) -> list[dict]:
             return dispatcher.resolve_run(task_id) if task_id else None
     now = time.time()
     rows = []
-    for rec in pending():
+    good, bad, store_error = scan()
+    if store_error:
+        return [], store_error
+    for rec in (r for r in good if r.get("state") == PENDING and (r.get("deadline") or 0) > now):
         kind = rec.get("kind") or KIND_OVERRIDE
         try:
             run = run_of(rec.get("task_id")) if kind == KIND_OVERRIDE else None
@@ -237,7 +296,12 @@ def listing(run_of=None) -> list[dict]:
             "expires_in_s": max(0.0, (rec.get("deadline") or now) - now),
             "blocked": stale_reason(rec, run),
         })
-    return rows
+    # A request file that cannot be used is MARKED, never dropped: the operator learns a
+    # request exists that this page cannot act on (no Approve / Deny — nothing to decide).
+    for b in bad:
+        rows.append({"id": b["id"], "kind": KIND_UNREADABLE, "reason": b["reason"],
+                     "blocked": f"unreadable request {b['id']} — {b['reason']}"})
+    return rows, None
 
 
 def create(meta: dict, *, ttl_s: float | None = None) -> dict | None:

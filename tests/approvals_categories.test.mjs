@@ -135,19 +135,35 @@ test('a quote in the PR url stays inside the href attribute', async () => {
         'https://x.test/"><img src=x onerror=alert(1)>');
 });
 
-// A `javascript:` PR url is not a link a click may follow. attrEsc escapes quotes, not the
-// scheme, so today it becomes a live href: PRODUCTION GAP reported with CMX-103 r4 (no change
-// under chela/ in this pass). `todo` — it runs and reports, but fails nothing until fixed;
-// then drop `todo`.
-for (const url of ['javascript:alert(1)', ' JaVaScRiPt:alert(1)', 'data:text/html,<script>alert(1)</script>']) {
-    test(`a ${url.trim().split(':')[0].toLowerCase()}: PR url never becomes a live link`, { todo: 'CMX-103 r4: href scheme is not allow-listed' }, async () => {
+// A PR url is agent-supplied: only http(s) becomes a link; anything else is plain escaped text.
+for (const url of ['javascript:alert(1)', ' JaVaScRiPt:alert(1)', 'java\tscript:alert(1)', '\u0001javascript:alert(1)',
+    'java\nscript:alert(1)', 'data:text/html,<script>alert(1)</script>', 'ftp://x.test/a', '//evil.test/x', 'vbscript:x']) {
+    test(`PR url ${JSON.stringify(url)} never becomes a live link`, async () => {
         LISTING = { requests: [req({ pr_url: url })] };
         await pa.openApprovals();
-        const a = document.querySelector('.pa-meta a');
-        const href = a ? a.getAttribute('href') || '' : '';
-        assert.ok(!a || /^https?:\/\//i.test(href), `href=${JSON.stringify(href)} is not http(s)`);
+        assert.equal(document.querySelector('.pa-meta a'), null, 'a non-http(s) url became a link');
+        assert.equal(document.querySelector('[href]'), null);
+        assert.ok(document.querySelector('.pa-meta .pa-prtext').textContent.includes('PR: '), 'the url is not shown as text');
+        assertInert(document.getElementById('approvals-backdrop'));
     });
 }
+
+test('a http(s) url is still a link, however it is cased or padded', async () => {
+    for (const [url, href] of [['HTTPS://github.com/o/r/pull/1', 'HTTPS://github.com/o/r/pull/1'],
+        ['  http://h.test/x\n', 'http://h.test/x'], ['https://git\thub.com/x', 'https://github.com/x']]) {
+        LISTING = { requests: [req({ pr_url: url })] };
+        await pa.openApprovals();
+        assert.equal(document.querySelector('.pa-meta a').getAttribute('href'), href);
+    }
+});
+
+test('safeHref: pinned', () => {
+    assert.equal(pa.safeHref('https://a.test'), 'https://a.test');
+    assert.equal(pa.safeHref(' \u0001 javascript:1'), null);
+    assert.equal(pa.safeHref(null), null);
+    assert.equal(pa.safeHref(undefined), null);
+    assert.equal(pa.safeHref(''), null);
+});
 
 // --- B. computed values ------------------------------------------------------------------
 
@@ -205,25 +221,79 @@ test('an override with no judge verdict says so', () => {
 
 // --- E. fail closed ----------------------------------------------------------------------
 
-test('a failed fetch keeps what was known — it does not read as "nothing waiting"', async () => {
+test('a failed fetch keeps what was known and says it could not refresh', async () => {
     LISTING = { requests: [req()] };
     await pa.openApprovals();
     FAIL = true;
     await pa.tickApprovals();                       // must not throw
     assert.equal(document.querySelectorAll('.pa-row').length, 1);
     assert.equal(document.getElementById('btn-approvals').hidden, false);
+    assert.equal(document.querySelector('.pa-stale').hidden, false);
+    assert.match(document.querySelector('.pa-stale').textContent, /couldn’t refresh approvals/i);
+    FAIL = false; LISTING = { requests: [req()] };
+    await pa.tickApprovals();
+    assert.equal(document.querySelector('.pa-stale').hidden, true, 'the notice outlived the failure');
 });
 
-test('a non-JSON / failed reply never opens a sheet saying nothing is waiting', async () => {
+test('a failure with nothing known is "could not refresh", never "Nothing is waiting"', async () => {
+    await pa.tickApprovals();                       // a good, empty listing: nothing known
     FAIL = true;
     await pa.tickApprovals();
-    assert.equal(document.getElementById('approvals-backdrop'), null);
+    const pill = document.getElementById('btn-approvals');
+    assert.equal(pill.hidden, false);
+    assert.match(pill.textContent, /couldn’t refresh approvals/);
+    await pa.openApprovals();
+    assert.ok(!document.getElementById('approvals-backdrop').textContent.includes('Nothing is waiting'));
+    assert.equal(document.querySelector('.pa-stale').hidden, false);
 });
 
-test('an error body is not "no pending approvals"', { todo: 'CMX-103 r4: {error} reads as an empty list' }, async () => {
-    LISTING = { requests: [req()] };
+for (const bad of [{ error: 'store unreadable', requests: [] }, { error: 'x' }, { requests: 'nope' }, null]) {
+    test(`an error reply ${JSON.stringify(bad)} keeps the list`, async () => {
+        LISTING = { requests: [req()] };
+        await pa.openApprovals();
+        LISTING = bad;
+        await pa.tickApprovals();
+        assert.equal(document.querySelectorAll('.pa-row').length, 1, 'an error reply emptied the list');
+        assert.equal(document.querySelector('.pa-stale').hidden, false);
+        assert.equal(document.getElementById('btn-approvals').hidden, false);
+    });
+}
+
+test('an unreadable request file is shown, marked, with no Approve or Deny', async () => {
+    const id = 'override-' + 'f'.repeat(24);
+    LISTING = { requests: [req(), { id, kind: 'unreadable', reason: 'not valid JSON',
+        blocked: 'unreadable request ' + id + ' — not valid JSON' }] };
     await pa.openApprovals();
-    LISTING = { error: 'store unreadable' };
-    await pa.tickApprovals();
-    assert.equal(document.querySelectorAll('.pa-row').length, 1, 'an error reply emptied the list');
+    const rows = [...document.querySelectorAll('.pa-row')];
+    assert.equal(rows.length, 2);
+    const bad = rows[1];
+    assert.equal(bad.querySelector('.pa-approve'), null);
+    assert.equal(bad.querySelector('.pa-deny'), null);
+    assert.equal(bad.querySelector('button'), null);
+    assert.ok(bad.textContent.includes('unreadable request ' + id + ' — not valid JSON'));
+    assert.match(document.getElementById('btn-approvals').textContent, /2 pending approvals/);
+});
+
+test('an unreadable row escapes its text', async () => {
+    LISTING = { requests: [{ id: 'x', kind: 'unreadable', blocked: IMG + SHORT }] };
+    await pa.openApprovals();
+    assertInert(document.getElementById('approvals-backdrop'));
+});
+
+test('a page whose approvals endpoint has NEVER answered stays quiet on a dead fetch, but an explicit server error is shown', async () => {
+    const dom = new JSDOM('<!doctype html><body><button id="btn-approvals" hidden><span class="pa-pill-text"></span></button></body>', { url: 'http://localhost:5005/' });
+    const saved = { document: globalThis.document, window: globalThis.window, localStorage: globalThis.localStorage };
+    for (const k of Object.keys(saved)) Object.defineProperty(globalThis, k, { value: dom.window[k], writable: true, configurable: true });
+    try {
+        const fresh = await import('../chela/dashboard/static/js/approvals.js?never-answered');
+        FAIL = true;
+        await fresh.tickApprovals();
+        assert.equal(document.getElementById('btn-approvals').hidden, true, 'a page with no approvals backend grew a pill');
+        FAIL = false; LISTING = { requests: [], error: 'the approvals store cannot be read' };
+        await fresh.tickApprovals();
+        assert.equal(document.getElementById('btn-approvals').hidden, false, 'a server-reported error was hidden');
+        assert.match(document.getElementById('btn-approvals').textContent, /couldn’t refresh approvals/);
+    } finally {
+        for (const [k, v] of Object.entries(saved)) Object.defineProperty(globalThis, k, { value: v, writable: true, configurable: true });
+    }
 });

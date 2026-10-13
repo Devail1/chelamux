@@ -23,6 +23,9 @@ const ARM_MS = 6000;
 
 let _rows = [];
 let _seen = null;          // ids already known — null until the first listing primes it
+let _loaded = false;       // a listing has succeeded at least once on this page
+let _staleLoud = false;    // the server itself reported an error (not just a dead fetch)
+let _stale = false;        // the last refresh failed — rows are the last KNOWN list, not "nothing"
 let _flash = '';           // the last refused decision's reason — survives the re-render
 
 export function durStr(s) {
@@ -32,6 +35,15 @@ export function durStr(s) {
     if (m < 60) return m + 'm';
     const h = Math.floor(m / 60);
     return h < 48 ? h + 'h ' + (m % 60) + 'm' : Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
+}
+
+// A request's PR url is agent-supplied: it becomes a link only when it is plainly http(s).
+// Whitespace and control characters are stripped first (browsers ignore a tab or newline
+// inside a scheme, so `java\tscript:` must not slip past a prefix test). Anything else
+// renders as plain text, never as an href.
+export function safeHref(url) {
+    const clean = String(url == null ? '' : url).trim().replace(/[\u0000-\u001f\u007f-\u009f]/g, '');
+    return /^https?:\/\//i.test(clean) ? clean : null;
 }
 
 // What the request asks, in one line — per record kind.
@@ -46,7 +58,15 @@ export function whatText(r) {
 
 export function rowHTML(r) {
     const id = attrEsc(r.id);
-    const pr = r.pr_url ? ` · <a href="${attrEsc(r.pr_url)}" target="_blank" rel="noopener">PR</a>` : '';
+    if (r.kind === 'unreadable') {
+        // A request FILE the server could not use: shown, never actionable.
+        return `<div class="pa-row pa-bad" data-id="${id}">
+      <div class="pa-blocked">⛔ ${escHtml(r.blocked || 'unreadable request ' + r.id)}</div></div>`;
+    }
+    const href = r.pr_url ? safeHref(r.pr_url) : null;
+    const pr = !r.pr_url ? ''
+        : href ? ` · <a href="${attrEsc(href)}" target="_blank" rel="noopener">PR</a>`
+            : ` · <span class="pa-prtext">PR: ${escHtml(r.pr_url)}</span>`;
     const head = `<div class="pa-what">${escHtml(whatText(r))}</div>
       <div class="pa-meta">asked by ${escHtml(r.actor || 'unknown')} · ${escHtml(durStr(r.age_s))} ago · expires in ${escHtml(durStr(r.expires_in_s))}${pr}</div>
       ${r.reason ? `<div class="pa-why">“${escHtml(r.reason)}”</div>` : ''}`;
@@ -62,10 +82,18 @@ function _renderPill() {
     const btn = document.getElementById('btn-approvals');
     if (!btn) return;
     const n = _rows.length;
-    btn.hidden = n === 0;
+    // A failed refresh with nothing known must not hide the pill: unknown is not "none".
+    // (Quiet only when the endpoint has NEVER answered here — e.g. a page with no approvals
+    // backend; once it has answered, or says `error` itself, a failure is shown.)
+    const showStale = _stale && (_loaded || _staleLoud);
+    btn.hidden = n === 0 && !showStale;
     const txt = btn.querySelector('.pa-pill-text');
-    if (txt) txt.textContent = '⚖️ ' + n + ' pending approval' + (n === 1 ? '' : 's');
-    btn.setAttribute('aria-label', n + ' approval request' + (n === 1 ? '' : 's') + ' waiting — tap to review');
+    if (txt) {
+        txt.textContent = n === 0 && showStale ? '⚠️ couldn’t refresh approvals'
+            : '⚖️ ' + n + ' pending approval' + (n === 1 ? '' : 's');
+    }
+    btn.setAttribute('aria-label', n === 0 && showStale ? 'couldn’t refresh approvals — tap to review'
+        : n + ' approval request' + (n === 1 ? '' : 's') + ' waiting — tap to review');
 }
 
 export function notifyEnabled() {
@@ -91,8 +119,20 @@ function _notifyNew(rows) {
 
 export async function tickApprovals() {
     let data;
-    try { data = await api('/api/overrides'); } catch (_) { return; }
-    _rows = (data && Array.isArray(data.requests)) ? data.requests : [];
+    try { data = await api('/api/overrides'); } catch (_) { data = null; }
+    if (!data || data.error || !Array.isArray(data.requests)) {
+        // A failed or error reply keeps the last KNOWN rows and says so — it is never
+        // "Nothing is waiting for approval".
+        _stale = true;
+        _staleLoud = !!(data && data.error);
+        _renderPill();
+        if (document.getElementById('approvals-backdrop')) _buildSheet();
+        return;
+    }
+    _stale = false;
+    _staleLoud = false;
+    _loaded = true;
+    _rows = data.requests;
     _notifyNew(_rows);
     _renderPill();
     if (document.getElementById('approvals-backdrop')) _buildSheet();
@@ -123,7 +163,8 @@ function _buildSheet() {
         <button class="ss-close" type="button" aria-label="Close">&times;</button></div>
       <div class="ss-sub">Approving merges NOW — after re-checking that the head is unchanged, CI is green and GitHub reports the PR mergeable. It skips only the judge, and is recorded. Deny merges nothing.</div>
       <div class="pa-err ss-err"${_flash ? '' : ' hidden'}>${escHtml(_flash)}</div>
-      <div class="ss-list">${_rows.map(rowHTML).join('') || '<div class="ss-empty">Nothing is waiting for approval.</div>'}</div>`;
+      <div class="pa-stale ss-err"${_stale ? '' : ' hidden'}>Couldn’t refresh approvals — showing the last known list.</div>
+      <div class="ss-list">${_rows.map(rowHTML).join('') || `<div class="ss-empty">${_stale ? 'The approvals list is unavailable.' : 'Nothing is waiting for approval.'}</div>`}</div>`;
     backdrop.appendChild(sheet);
     document.body.appendChild(backdrop);
     sheet.querySelector('.ss-close').onclick = closeApprovals;
