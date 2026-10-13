@@ -2169,3 +2169,460 @@ def test_a_uv_lock_recording_only_another_package_at_the_new_version_refuses(wor
     assert out["ok"] is False and "version mismatch" in out["error"]
     assert "demo 0.2.0" in out["error"]
     _assert_refused_and_clean(world, out, why="version mismatch")
+
+
+# --- CMX-87 round 11: every `except` clause tested with an exception its narrowing misses ---
+#
+# A `except Exception` narrowed to one type, or an `except OSError` narrowed to one of its
+# subclasses, must turn a test RED: each test below raises a type the clause is MEANT to catch
+# but which the narrower clause would not (RuntimeError for `except Exception`; PermissionError /
+# IsADirectoryError — OSError subclasses — for `except OSError`).
+
+import logging  # noqa: E402
+
+
+class _Boom(RuntimeError):
+    pass
+
+
+# prepare(): a step that crashes with ANY exception refuses and leaves NOTHING behind -------
+
+@pytest.mark.parametrize("exc", [RuntimeError("boom"), OSError("disk"), KeyError("k"),
+                                 _Boom("custom")])
+@pytest.mark.parametrize("seam", ["_uv_lock", "_release_tests"])
+def test_a_release_step_that_crashes_with_any_exception_refuses_and_leaves_nothing(
+        world, pushes, monkeypatch, caplog, seam, exc):
+    def crash(*a, **k):
+        raise exc
+    monkeypatch.setattr(release, seam, crash)
+    with caplog.at_level(logging.ERROR, logger=release.log.name):
+        out = _prepare(world)
+    _assert_refused_and_clean(world, out, why="internal error")
+    assert pushes == []
+    assert any("release steps crashed" in r.getMessage() for r in caplog.records)
+
+
+def test_steps_itself_raising_a_runtime_error_refuses_and_leaves_nothing(world, monkeypatch):
+    monkeypatch.setattr(release, "_steps", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("steps exploded")))
+    _assert_refused_and_clean(world, _prepare(world), why="internal error: steps exploded")
+
+
+# prepare(): a push notification that fails is best effort ---------------------------------
+
+@pytest.mark.parametrize("exc", [RuntimeError("telegram down"), KeyError("x"), OSError("net")])
+def test_a_failing_request_notification_never_fails_the_request(world, monkeypatch, exc):
+    def boom(*a, **k):
+        raise exc
+    monkeypatch.setattr(release.notify, "enabled", lambda: True)
+    monkeypatch.setattr(release.notify, "send", boom)
+    out = _prepare(world)
+    assert out["ok"] is True and out["pending"] is True
+    rec = overrides.load(out["request_id"])
+    assert rec is not None and rec["state"] == overrides.PENDING
+    assert _local(world, "refs/tags/v0.2.0") is not None, "the release is kept"
+
+
+def test_a_failing_notify_enabled_check_never_fails_the_request(world, monkeypatch):
+    def boom():
+        raise RuntimeError("config unreadable")
+    monkeypatch.setattr(release.notify, "enabled", boom)
+    assert _prepare(world)["ok"] is True
+
+
+# overrides: a release cleanup that raises is best effort ----------------------------------
+
+@pytest.mark.parametrize("exc", [RuntimeError("cleanup boom"), KeyError("git_dir"),
+                                 OSError("busy")])
+def test_a_release_cleanup_that_raises_never_changes_the_recorded_outcome(
+        world, pushes, monkeypatch, caplog, exc):
+    out = _prepare(world)
+
+    def boom(*a, **k):
+        raise exc
+    monkeypatch.setattr(release, "cleanup", boom)
+    with caplog.at_level(logging.WARNING, logger=overrides.log.name):
+        res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["ok"] is True and res["state"] == overrides.RELEASED, res
+    rec = overrides.load(out["request_id"])
+    assert rec["state"] == overrides.RELEASED
+    assert rec["pushed"] == ["main", "v0.2.0", "dev"]
+    release_sha = rec["release_sha"]
+    assert _remote(world, "refs/heads/main") == release_sha
+    assert _remote(world, "refs/heads/dev") == release_sha
+    assert _remote(world, "refs/tags/v0.2.0^{commit}") == release_sha
+    assert any(r.levelno == logging.WARNING and "release cleanup failed" in r.getMessage()
+               and out["request_id"] in r.getMessage() for r in caplog.records)
+
+
+def test_a_release_cleanup_that_raises_after_a_deny_still_returns_denied(
+        world, pushes, monkeypatch, caplog):
+    out = _prepare(world)
+    monkeypatch.setattr(release, "cleanup", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("cleanup boom")))
+    with caplog.at_level(logging.WARNING, logger=overrides.log.name):
+        res = overrides.decide(out["request_id"], False, "terminal:op")
+    assert res["ok"] is True and res["state"] == overrides.DENIED
+    assert overrides.load(out["request_id"])["state"] == overrides.DENIED
+    assert any("release cleanup failed" in r.getMessage() for r in caplog.records)
+    assert pushes == []
+
+
+# overrides.decide: a completion that crashes with ANY exception fails closed, never wedges ---
+
+@pytest.mark.parametrize("exc", [RuntimeError("complete boom"), KeyError("tag"),
+                                 OSError("io")])
+def test_a_release_completion_that_crashes_fails_the_request_and_cleans_up(
+        world, pushes, told, monkeypatch, caplog, exc):
+    out = _prepare(world)
+
+    def boom(*a, **k):
+        raise exc
+    monkeypatch.setattr(release, "complete", boom)
+    with caplog.at_level(logging.ERROR, logger=overrides.log.name):
+        res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["ok"] is False and res["state"] == overrides.FAILED
+    assert res["detail"].startswith("internal error: ")
+    rec = overrides.load(out["request_id"])
+    assert rec["state"] == overrides.FAILED and rec["detail"] == res["detail"]
+    assert pushes == [] and _remote(world, "refs/heads/dev") != rec["release_sha"]
+    assert _release_worktrees() == []
+    assert _local(world, "refs/tags/v0.2.0") is None
+    assert [k for k, *_ in told] == ["release_failed"]
+    assert any("override completion crashed" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("merge boom"), KeyError("x")])
+def test_an_override_completion_that_crashes_fails_the_request_never_raises(
+        monkeypatch, told, exc):
+    from chela import contract
+
+    def boom(rec, by):
+        raise exc
+    monkeypatch.setattr(contract, "complete_override", boom)
+    rec = _override()
+    res = overrides.decide(rec["id"], True, "terminal:op")
+    assert res["ok"] is False and res["state"] == overrides.FAILED
+    assert res["detail"].startswith("internal error: ")
+    assert overrides.load(rec["id"])["state"] == overrides.FAILED
+    assert [k for k, *_ in told] == ["override_failed"]
+
+
+# overrides._tell: each of the two channels is best effort AND independent -----------------
+
+@pytest.mark.parametrize("kind", [None, "release"])
+def test_a_failing_push_notification_does_not_stop_the_inbox_notice(monkeypatch, kind):
+    seen = []
+    monkeypatch.setattr(overrides.notify, "enabled", lambda: True)
+    monkeypatch.setattr(overrides.notify, "send", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("push down")))
+    monkeypatch.setattr(inbox, "enqueue", lambda k, s, p: seen.append(k) or True)
+    rec = {"id": "override-" + "a" * 24, "label": "L", "kind": kind, "task_id": "CMX-9"}
+    overrides._tell(rec, overrides.FAILED, "why")
+    assert seen == [f"{'release' if kind else 'override'}_failed"]
+
+
+@pytest.mark.parametrize("kind", [None, "release"])
+def test_a_failing_inbox_enqueue_does_not_fail_the_telling(monkeypatch, kind):
+    sent = []
+    monkeypatch.setattr(overrides.notify, "enabled", lambda: True)
+    monkeypatch.setattr(overrides.notify, "send", lambda text, title=None, **k: sent.append(
+        title))
+    monkeypatch.setattr(inbox, "enqueue", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("inbox down")))
+    rec = {"id": "override-" + "a" * 24, "label": "L", "kind": kind, "task_id": "CMX-9"}
+    overrides._tell(rec, overrides.FAILED, "why")           # must not raise
+    assert len(sent) == 1
+
+
+def test_a_failing_telling_never_changes_a_failed_approvals_outcome(
+        world, pushes, monkeypatch):
+    _reject_dev_pushes(world)
+    out = _prepare(world)
+    monkeypatch.setattr(overrides.notify, "enabled", lambda: True)
+    monkeypatch.setattr(overrides.notify, "send", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("push down")))
+    monkeypatch.setattr(inbox, "enqueue", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("inbox down")))
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["ok"] is False and res["state"] == overrides.FAILED
+    assert overrides.load(out["request_id"])["state"] == overrides.FAILED
+
+
+# overrides.sweep: a head lookup that raises is "unknown", never an expiry or a crash -------
+
+@pytest.mark.parametrize("exc", [RuntimeError("ls-remote boom"), KeyError("x"), OSError("io")])
+def test_a_sweep_whose_dev_lookup_raises_keeps_the_release_pending(world, pushes, exc):
+    out = _prepare(world)
+
+    def boom(rec):
+        raise exc
+    assert overrides.sweep(dev_head_of=boom) == []
+    assert overrides.load(out["request_id"])["state"] == overrides.PENDING
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("db boom"), KeyError("x")])
+def test_a_sweep_whose_pr_head_lookup_raises_keeps_the_override_pending(exc):
+    rec = _override()
+
+    def boom(task_id):
+        raise exc
+    assert overrides.sweep(head_of=boom) == []
+    assert overrides.load(rec["id"])["state"] == overrides.PENDING
+
+
+# overrides store: the OSError / ValueError clauses ----------------------------------------
+
+def test_an_unwritable_store_is_false_not_an_exception(monkeypatch, caplog):
+    rec = {"id": overrides.new_request_id(), "state": overrides.PENDING}
+    real = Path.write_text
+
+    def deny(self, *a, **k):
+        if self.suffix == ".tmp":
+            raise PermissionError("read-only")             # an OSError SUBCLASS
+        return real(self, *a, **k)
+    monkeypatch.setattr(Path, "write_text", deny)
+    with caplog.at_level(logging.WARNING, logger=overrides.log.name):
+        assert overrides._write(rec) is False
+        assert overrides.create({"head_sha": "a" * 40}) is None
+    assert any("could not write" in r.getMessage() for r in caplog.records)
+    assert overrides.all_requests() == []
+
+
+def test_a_failed_mkdir_in_the_store_is_false_not_an_exception(monkeypatch):
+    def deny(self, *a, **k):
+        raise PermissionError("no")
+    monkeypatch.setattr(Path, "mkdir", deny)
+    assert overrides._write({"id": overrides.new_request_id()}) is False
+
+
+@pytest.mark.parametrize("payload", [b"{not json", b"\xff\xfe\x00bad utf8", b""])
+def test_an_unreadable_request_file_loads_as_none(payload):
+    rid = overrides.new_request_id()
+    overrides.store_dir().mkdir(parents=True, exist_ok=True)
+    (overrides.store_dir() / f"{rid}.json").write_bytes(payload)   # JSON error / UnicodeDecodeError
+    assert overrides.load(rid) is None
+    assert overrides.all_requests() == []
+
+
+def test_a_request_path_that_is_a_directory_loads_as_none():
+    rid = overrides.new_request_id()
+    (overrides.store_dir() / f"{rid}.json").mkdir(parents=True)    # IsADirectoryError
+    assert overrides.load(rid) is None
+    assert overrides.all_requests() == []
+
+
+def test_an_unlistable_store_is_an_empty_list(monkeypatch):
+    def deny(self, *a, **k):
+        raise PermissionError("no")
+    monkeypatch.setattr(Path, "glob", deny)
+    assert overrides.all_requests() == []
+
+
+# release.py: the OSError / TimeoutExpired seams, with an OSError SUBCLASS -----------------
+
+@pytest.mark.parametrize("exc", [PermissionError("denied"), IsADirectoryError("dir")])
+def test_every_release_subprocess_seam_treats_any_oserror_as_a_failed_step(
+        monkeypatch, tmp_path, exc):
+    def boom(*a, **k):
+        raise exc
+    monkeypatch.setattr(release.subprocess, "run", boom)
+    for p in (release._git(tmp_path, "push"), _REAL_UV_LOCK(tmp_path),
+              _REAL_RELEASE_TESTS(tmp_path)):
+        assert p.returncode != 0 and str(exc) in p.stderr
+    assert _REAL_GH_RELEASE_URL({"repo_slug": "o/r", "tag": "v1.0.0"}) is None
+
+
+def test_an_oserror_subclass_from_release_notes_refuses_with_the_reason(world, monkeypatch):
+    def boom(*a, **k):
+        raise PermissionError("CHANGELOG.md locked")
+    monkeypatch.setattr(release.release_notes, "promote_unreleased", boom)
+    out = _prepare(world)
+    assert out["ok"] is False and "release notes: CHANGELOG.md locked" in out["error"]
+    assert _release_worktrees() == [] and overrides.all_requests() == []
+
+
+def test_an_oserror_subclass_reading_uv_lock_refuses_with_the_reason(world, monkeypatch):
+    def lock_becomes_dir(wt: Path) -> subprocess.CompletedProcess:
+        (wt / "uv.lock").unlink()
+        (wt / "uv.lock").mkdir()                            # read_text -> IsADirectoryError
+        return _ok()
+    monkeypatch.setattr(release, "_uv_lock", lock_becomes_dir)
+    out = _prepare(world)
+    assert out["ok"] is False and "uv.lock unreadable" in out["error"]
+    assert _release_worktrees() == [] and overrides.all_requests() == []
+
+
+# overridewatch.OverrideRelay.tick: each stage is best effort and independent ---------------
+
+class _Bot:
+    def __init__(self):
+        self.posts = []
+
+    def post(self, text, message_thread_id=None, reply_markup=None):
+        self.posts.append(message_thread_id)
+        return 100 + len(self.posts)
+
+    def edit(self, *a, **k):
+        return True
+
+
+def _relay_for(bot, thread=lambda: "42"):
+    from chela.telegram.overridewatch import OverrideRelay
+    return OverrideRelay(post=bot.post, edit=bot.edit, thread=thread)
+
+
+def test_a_sweep_that_raises_does_not_stop_the_relay(monkeypatch, caplog):
+    _override()
+    monkeypatch.setattr(overrides, "sweep", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("sweep boom")))
+    bot = _Bot()
+    with caplog.at_level(logging.ERROR):
+        _relay_for(bot).tick()
+    assert bot.posts == ["42"]
+    assert any("override sweep failed" in r.getMessage() for r in caplog.records)
+
+
+def test_a_release_url_poll_that_raises_does_not_stop_the_relay(monkeypatch, caplog):
+    _override()
+    monkeypatch.setattr(release, "poll_release_urls", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("gh boom")))
+    bot = _Bot()
+    with caplog.at_level(logging.ERROR):
+        _relay_for(bot).tick()
+    assert bot.posts == ["42"]
+    assert any("release URL poll failed" in r.getMessage() for r in caplog.records)
+
+
+def test_a_request_whose_sync_raises_does_not_stop_the_next_one(caplog):
+    first, second = _override(), _override()
+    calls = []
+
+    class _Flaky(_Bot):
+        def post(self, text, message_thread_id=None, reply_markup=None):
+            calls.append(text)
+            if len(calls) == 1:
+                raise RuntimeError("telegram 500")
+            return super().post(text, message_thread_id, reply_markup)
+    bot = _Flaky()
+    with caplog.at_level(logging.ERROR):
+        _relay_for(bot).tick()
+    assert len(calls) == 2 and len(bot.posts) == 1, "the second request still got its card"
+    assert any("override relay failed" in r.getMessage() for r in caplog.records)
+    assert first["id"] != second["id"]
+
+
+def test_a_topic_lookup_that_raises_posts_to_the_general_topic():
+    _override()
+
+    def boom():
+        raise RuntimeError("bindings unreadable")
+    bot = _Bot()
+    _relay_for(bot, thread=boom).tick()
+    assert bot.posts == [None]
+
+
+# main.py ----------------------------------------------------------------------------------
+
+def test_the_bridges_override_loop_survives_a_relay_tick_that_raises():
+    import threading
+
+    from chela import main as chela_main
+    stop = threading.Event()
+    ticks = []
+
+    class _Relay:
+        def tick(self):
+            ticks.append(1)
+            if len(ticks) == 1:
+                raise RuntimeError("tick boom")
+            stop.set()
+    t = threading.Thread(target=chela_main._override_loop, args=(_Relay(), 0, stop),
+                         daemon=True)
+    t.start()
+    t.join(5)
+    assert ticks == [1, 1], "a raising tick must not end the loop"
+
+
+def test_a_body_file_that_is_a_directory_refuses_cleanly(world, tmp_path, capsys):
+    from chela import main
+    with pytest.raises(SystemExit) as exc:
+        main.cmd_release(SimpleNamespace(version="0.2.0", theme="t", body_file=str(tmp_path),
+                                         repo=str(world.work)))      # IsADirectoryError
+    out = capsys.readouterr().out
+    assert exc.value.code == 1 and "--body-file unreadable" in out
+    assert overrides.all_requests() == [] and _local(world, "refs/tags/v0.2.0") is None
+
+
+# contract.py: the override's merge mechanics (OSError subclasses) -------------------------
+
+def _contract_run(monkeypatch, *, merge=None, view=None):
+    from chela import contract
+    calls = []
+
+    def fake(argv, **k):
+        calls.append(argv)
+        step = merge if argv[:3] == ["gh", "pr", "merge"] else view
+        if isinstance(step, BaseException):
+            raise step
+        return step
+    monkeypatch.setattr(contract.subprocess, "run", fake)
+    return contract, calls
+
+
+_PR = "https://github.com/o/r/pull/9"
+_RUN = {"task_id": "CMX-9"}
+
+
+def test_a_squash_merge_whose_gh_cannot_run_reports_it_for_any_oserror(monkeypatch):
+    contract, _ = _contract_run(monkeypatch, merge=PermissionError("gh: denied"))
+    out = contract._squash_merge(_RUN, "/tmp", _PR, match_head="a" * 40)
+    assert out["ok"] is False and "gh CLI could not be run: gh: denied" in out["error"]
+
+
+def test_a_squash_merge_that_times_out_says_so(monkeypatch):
+    contract, _ = _contract_run(monkeypatch, merge=subprocess.TimeoutExpired(["gh"], 1))
+    out = contract._squash_merge(_RUN, "/tmp", _PR)
+    assert out == {"ok": False, "error": "gh pr merge timed out"}
+
+
+@pytest.mark.parametrize("exc", [PermissionError("no"), subprocess.TimeoutExpired(["gh"], 15)])
+def test_a_merge_that_landed_stays_ok_when_its_sha_cannot_be_read(monkeypatch, exc):
+    contract, _ = _contract_run(
+        monkeypatch, merge=subprocess.CompletedProcess([], 0, "", ""), view=exc)
+    out = contract._squash_merge(_RUN, "/tmp", _PR)
+    assert out == {"ok": True, "merge_commit_sha": None}
+
+
+@pytest.mark.parametrize("exc", [PermissionError("no"), subprocess.TimeoutExpired(["git"], 30)])
+def test_a_post_merge_cleanup_step_that_cannot_run_is_logged_never_raised(
+        monkeypatch, caplog, exc):
+    contract, _ = _contract_run(monkeypatch)
+    monkeypatch.setattr(contract.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(exc))
+    with caplog.at_level(logging.WARNING, logger=contract.log.name):
+        contract._best_effort("CMX-9", "branch-delete", ["git", "branch", "-D", "b"], "/tmp", 5)
+    assert any("merge cleanup branch-delete failed" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("exc", [PermissionError("no"), subprocess.TimeoutExpired(["gh"], 15)])
+def test_an_unreadable_pr_base_is_none_for_any_oserror(monkeypatch, exc):
+    contract, _ = _contract_run(monkeypatch, view=exc)
+    monkeypatch.setattr(contract.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(exc))
+    assert contract._read_pr_base(_PR, "/tmp") is None
+
+
+@pytest.mark.parametrize("stdout", ["not json", "[1]", '{"baseRefName": ""}', ""])
+def test_a_garbled_pr_base_reply_is_none(monkeypatch, stdout):
+    from chela import contract
+    monkeypatch.setattr(contract.subprocess, "run", lambda *a, **k:
+                        subprocess.CompletedProcess(a, 0, stdout, ""))
+    assert contract._read_pr_base(_PR, "/tmp") is None
+
+
+def test_an_unresolvable_repo_dir_is_not_the_control_repo(monkeypatch):
+    from chela import contract
+
+    def boom(self, *a, **k):
+        raise PermissionError("no")
+    monkeypatch.setattr(Path, "resolve", boom)
+    assert contract._is_control_repo("/tmp") is False
