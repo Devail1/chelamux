@@ -767,15 +767,20 @@ def test_a_probe_that_misses_one_tick_does_not_repeat_the_stuck_notice(monkeypat
     assert inbox.stuck_events([_run("running")], store, probe, now + 60) == []
 
 
-def test_an_unread_marker_through_the_tick_carries_the_daemon_uptime(monkeypatch):
+def test_an_unread_marker_through_the_tick_carries_the_daemon_uptime(monkeypatch, tmp_path):
     """🔴 GUARD: the tick must look the daemon up when a marker is pending — "a stale daemon
     is the usual cause" is only useful with its actual uptime."""
     monkeypatch.setenv("CHELA_MARKER_UNREAD_ALERT_S", "60")
     now = time.time()
     monkeypatch.setattr(inbox, "stuck_probes", lambda runs: {
         "T9": {"activity": now, "markers": {"task-finished": now - 3600}}})
+    import json
+    import os
     from chela import capabilities
-    monkeypatch.setattr(capabilities, "live", lambda: {"ts": now - 2 * 86400})
+    state = tmp_path / "daemon.json"
+    state.write_text(json.dumps({"pid": os.getpid(), "ts": now - 2 * 86400,
+                                 "capabilities": []}))
+    monkeypatch.setattr(capabilities, "state_file", lambda: state)
     inbox.tick({}, runs=[_run("running")])
     [event] = _queued("run_marker_unread")
     assert "daemon up 48h" in event["summary"]
