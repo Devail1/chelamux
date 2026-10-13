@@ -19,15 +19,26 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
 
 # ``conftest``, not ``tests.conftest``: tests/ has no __init__.py, so pytest imports the
 # conftest as a TOP-LEVEL module (see tests/test_isolation.py for the same note).
-from conftest import SANDBOX_PM2_HOME
+from conftest import (
+    PM2_SANDBOX_OWNER_FILE,
+    PM2_SANDBOX_PREFIX,
+    SANDBOX_PM2_HOME,
+    _pm2_daemons,
+    _pm2_kill,
+    _reap_pm2_sandbox,
+    _reap_stale_pm2_sandboxes,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -117,3 +128,253 @@ def test_the_sandbox_pm2_home_is_removed_when_the_process_that_created_it_exits(
         "_kill_sandbox_pm2_daemon did not run at atexit, so a throwaway pm2 home (and "
         "any daemon it spawned) survives every process that ever imports conftest.py."
     )
+
+
+# ── CMX-115: a KILLED run must not leak its sandbox (or its God Daemon) ─────────────────
+
+
+def _dead_pid() -> int:
+    """A PID that just existed and is gone (its parent — this process — reaped it)."""
+    cp = subprocess.run(
+        [sys.executable, "-c", "import os; print(os.getpid())"],
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+    return int(cp.stdout.strip())
+
+
+def _sandbox(root: Path, name: str, owner: int | None) -> Path:
+    home = root / f"{PM2_SANDBOX_PREFIX}{name}"
+    home.mkdir()
+    if owner is not None:
+        (home / PM2_SANDBOX_OWNER_FILE).write_text(str(owner))
+    (home / "pm2.pid").write_text("0")   # "a daemon may be running here"
+    return home
+
+
+def test_this_sessions_sandbox_is_marked_with_its_own_pid():
+    """The marker is what the NEXT session's reaper keys on: without it, a run killed
+    with SIGKILL leaves a sandbox nothing will ever provably own, and so never reap."""
+    marker = SANDBOX_PM2_HOME / PM2_SANDBOX_OWNER_FILE
+    assert marker.read_text().strip() == str(os.getpid())
+
+
+def test_a_sandbox_whose_owner_is_dead_is_reaped(tmp_path):
+    stale = _sandbox(tmp_path, "stale", _dead_pid())
+    killed = []
+    reaped = _reap_stale_pm2_sandboxes(tmp_path, kill=killed.append)
+    assert reaped == [stale]
+    assert killed == [stale], "the stale home's daemon was never `pm2 kill`ed"
+    assert not stale.exists()
+
+
+def test_a_sandbox_whose_owner_is_alive_is_left_alone(tmp_path):
+    """A concurrent pytest session (another judge, an xdist worker) owns this one."""
+    live = _sandbox(tmp_path, "live", os.getpid())
+    killed = []
+    assert _reap_stale_pm2_sandboxes(tmp_path, kill=killed.append) == []
+    assert killed == []
+    assert (live / PM2_SANDBOX_OWNER_FILE).is_file()
+
+
+def test_an_unmarked_sandbox_is_never_scanned_as_reapable(tmp_path):
+    legacy = _sandbox(tmp_path, "legacy", owner=None)
+    killed = []
+    assert _reap_stale_pm2_sandboxes(tmp_path, kill=killed.append) == []
+    assert killed == [] and legacy.exists()
+
+
+def test_the_reaper_refuses_any_path_without_the_marker(tmp_path):
+    """The live ``~/.pm2`` has neither the prefix nor the marker; a prefixed dir with no
+    marker is not provably a test sandbox either. Both refused BEFORE anything is killed."""
+    killed = []
+    with pytest.raises(ValueError):
+        _reap_pm2_sandbox(REAL_PM2_HOME, kill=killed.append)
+    unmarked = _sandbox(tmp_path, "unmarked", owner=None)
+    with pytest.raises(ValueError):
+        _reap_pm2_sandbox(unmarked, kill=killed.append)
+    lookalike = tmp_path / ".pm2"
+    lookalike.mkdir()
+    (lookalike / PM2_SANDBOX_OWNER_FILE).write_text(str(_dead_pid()))
+    with pytest.raises(ValueError):
+        _reap_pm2_sandbox(lookalike, kill=killed.append)
+    assert killed == []
+    assert unmarked.exists() and lookalike.exists()
+
+
+def _pm2_daemon_pid(home: Path) -> int:
+    subprocess.run(
+        ["pm2", "ping"], env={**os.environ, "PM2_HOME": str(home)},
+        capture_output=True, timeout=30, check=True,
+    )
+    return int((home / "pm2.pid").read_text().strip())
+
+
+def _gone_within(pid: int, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+# Every root these tests point a child's TMPDIR at. SHORT on purpose, never ``tmp_path``:
+# pm2 keeps its unix sockets in its home, and an xdist worker's ``tmp_path`` pushes
+# ``…/rpc.sock`` past the 108-byte ``sun_path`` limit — where a spawned God Daemon can't
+# bind, can't be reached by ``pm2 kill``, and runs away to 4-5 GB (CMX-115, measured).
+_ROOT_PREFIX = "cmx115-"
+
+
+@pytest.fixture
+def short_root():
+    root = Path(tempfile.mkdtemp(prefix=_ROOT_PREFIX))
+    yield root
+    for home in root.glob(f"{PM2_SANDBOX_PREFIX}*"):
+        for pid in _pm2_daemons(home):           # never leak one, even on a red run
+            os.kill(pid, signal.SIGKILL)
+    shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.fixture
+def fake_pm2(short_root):
+    """A ``pm2`` on PATH that only records its argv — a child that runs teardown can then
+    never start a real God Daemon, whatever the code under test (or its mutation) does."""
+    bin_dir = short_root / "bin"
+    bin_dir.mkdir()
+    log = short_root / "pm2-calls.log"
+    pm2 = bin_dir / "pm2"
+    pm2.write_text(f'#!/bin/sh\necho "$PM2_HOME $*" >> "{log}"\n')
+    pm2.chmod(0o755)
+    env = {**os.environ, "TMPDIR": str(short_root),
+           "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    return env, log
+
+
+def test_session_start_reaps_a_dead_owners_sandbox_and_kills_its_daemon(short_root):
+    """The real event, end to end: a fresh interpreter imports ``conftest.py`` (session
+    start) with ``TMPDIR`` pointed here. A sandbox left by a dead owner — with a REAL pm2
+    God Daemon still running in it, the leak itself — is gone afterwards, daemon and dir;
+    a live owner's sandbox and an unmarked one are untouched."""
+    if shutil.which("pm2") is None:
+        pytest.skip("pm2 not installed on this host")
+    stale = short_root / f"{PM2_SANDBOX_PREFIX}stale"
+    stale.mkdir()
+    (stale / PM2_SANDBOX_OWNER_FILE).write_text(str(_dead_pid()))
+    live = _sandbox(short_root, "live", os.getpid())
+    legacy = _sandbox(short_root, "legacy", owner=None)
+    daemon = _pm2_daemon_pid(stale)
+    try:
+        cp = subprocess.run(
+            [sys.executable, "-c", "import sys; sys.path.insert(0, 'tests'); import conftest"],
+            cwd=REPO_ROOT, env={**os.environ, "TMPDIR": str(short_root)},
+            capture_output=True, text=True, timeout=60,
+        )
+        assert cp.returncode == 0, f"subprocess failed: {cp.stderr}"
+        assert not stale.exists(), "a dead owner's sandbox survived the next session start"
+        assert _gone_within(daemon, 10), f"the stale sandbox's pm2 daemon {daemon} still runs"
+        assert live.exists() and legacy.exists()
+    finally:
+        try:
+            os.kill(daemon, signal.SIGKILL)       # the dir may be gone; the daemon must be
+        except ProcessLookupError:
+            pass
+
+
+def test_a_god_daemon_that_ignores_sigterm_is_sigkilled(fake_pm2, monkeypatch):
+    """The runaway daemon this task found ignores SIGTERM. A stand-in with the same
+    process title and ``PM2_HOME``, and SIGTERM set to SIG_IGN, must still be gone after
+    teardown — and gone by SIGKILL, since nothing else can stop it."""
+    env, _log = fake_pm2
+    monkeypatch.setenv("PATH", env["PATH"])               # `pm2 kill` is a no-op
+    home = Path(env["TMPDIR"]) / f"{PM2_SANDBOX_PREFIX}stubborn"
+    home.mkdir()
+    daemon = subprocess.Popen(
+        ["bash", "-c", "trap '' TERM; exec -a 'PM2 vTEST: God Daemon' sleep 60"],
+        env={**os.environ, "PM2_HOME": str(home)},
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while daemon.pid not in _pm2_daemons(home) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert _pm2_daemons(home) == [daemon.pid], "the stand-in daemon never came up"
+        _pm2_kill(home)
+        assert daemon.wait(timeout=10) == -signal.SIGKILL
+    finally:
+        daemon.kill()
+        daemon.wait()
+
+
+_SLEEPER = (
+    "import sys, time; sys.path.insert(0, 'tests'); import conftest; "
+    "print(conftest.SANDBOX_PM2_HOME, flush=True); time.sleep(60)"
+)
+
+
+def test_a_sigtermed_run_still_tears_its_sandbox_down(fake_pm2):
+    """`atexit` does not run on SIGTERM's default action — a `timeout`/judge kill skipped
+    the teardown entirely. The handler must run it, and the process must still die OF
+    SIGTERM (the caller's exit-status semantics are unchanged). And the teardown must NOT
+    run ``pm2 kill`` on a home no daemon ever started in: that call is what SPAWNS one."""
+    env, log = fake_pm2
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _SLEEPER], cwd=REPO_ROOT, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        sandbox = Path(proc.stdout.readline().strip())
+        assert sandbox.name.startswith(PM2_SANDBOX_PREFIX), proc.stderr.read()
+        assert sandbox.exists()
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=30) == -signal.SIGTERM
+        assert not sandbox.exists(), "a SIGTERMed run left its pm2 sandbox behind"
+        assert not log.exists(), (
+            f"teardown ran pm2 against a home with no daemon: {log.read_text()!r}"
+        )
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_a_forked_child_dying_does_not_tear_down_its_parents_sandbox(fake_pm2):
+    """The SIGTERM handler and the atexit entry are inherited across ``fork`` —
+    ``multiprocessing`` terminates pool workers with exactly SIGTERM. Only the process
+    that created the sandbox may remove it."""
+    env, _log = fake_pm2
+    script = (
+        "import os, signal, sys; sys.path.insert(0, 'tests'); import conftest; "
+        "pid = os.fork()\n"
+        "if pid == 0:\n    os.kill(os.getpid(), signal.SIGTERM); os._exit(0)\n"
+        "os.waitpid(pid, 0); print(conftest.SANDBOX_PM2_HOME.exists())"
+    )
+    cp = subprocess.run(
+        [sys.executable, "-c", script], cwd=REPO_ROOT, env=env,
+        capture_output=True, text=True, timeout=60,
+    )
+    assert cp.returncode == 0, cp.stderr
+    assert cp.stdout.strip().splitlines()[-1] == "True", (
+        "a forked child's SIGTERM removed its parent's live pm2 sandbox"
+    )
+
+
+def test_zz_no_pm2_daemon_survives_this_files_tests(tmp_path_factory):
+    """Last in the file (pytest runs a file in definition order; ``--dist loadfile`` keeps
+    it on one worker): no God Daemon may still be running with its ``PM2_HOME`` under any
+    root the tests above created — this worker's ``tmp_path`` base or a ``cmx115-`` root.
+    The leak this task exists to stop must not be one its own tests commit."""
+    roots = [str(tmp_path_factory.getbasetemp()),
+             *(str(p) for p in Path(tempfile.gettempdir()).glob(f"{_ROOT_PREFIX}*"))]
+    leaked = []
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            if b"God Daemon" not in (proc / "cmdline").read_bytes():
+                continue
+            env = (proc / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        homes = [e[len(b"PM2_HOME="):].decode(errors="replace")
+                 for e in env if e.startswith(b"PM2_HOME=")]
+        if any(h.startswith(r) for h in homes for r in roots):
+            leaked.append((proc.name, homes))
+    assert not leaked, f"pm2 God Daemons leaked by this file's tests: {leaked}"
