@@ -917,3 +917,60 @@ def test_an_override_request_notification_names_the_override_never_a_release(rep
     assert sent == [(f"{result['question']}\n\n{result['hint']}",
                      "chela: approve override of cmx-1?")]
     assert "release" not in sent[0][0].lower() and "release" not in sent[0][1]
+
+
+# --- the DOCUMENTED literals, never the module's own constants (CMX-87 judge round 12) ------
+# constant -> literal pinned -> test:
+#   PENDING..RELEASED      test_the_state_names_are_the_documented_strings
+#   FINAL/SUCCESS_STATES   test_final_and_success_states_are_the_documented_sets
+#   TTL_ENV/DEFAULT_TTL_S  test_the_ttl_env_name_and_default_are_the_documented_literals
+#   SERVICE_CHANNELS       test_service_channels_are_telegram_and_dashboard
+#   _ID_RE                 test_request_id_regex_edges
+
+
+def test_the_state_names_are_the_documented_strings():
+    assert (overrides.PENDING, overrides.MERGING, overrides.MERGED, overrides.DENIED,
+            overrides.EXPIRED, overrides.FAILED, overrides.RELEASED) == (
+        "pending", "merging", "merged", "denied", "expired", "failed", "released")
+
+
+def test_final_and_success_states_are_the_documented_sets():
+    assert overrides.FINAL_STATES == ("merged", "denied", "expired", "failed", "released")
+    assert overrides.SUCCESS_STATES == ("merged", "released")
+
+
+def test_a_stored_request_carries_the_documented_state_strings(repo):
+    _seed(repo)
+    rid = _request()["request_id"]
+    assert overrides.load(rid)["state"] == "pending"
+    with _github():
+        out = overrides.decide(rid, True, "terminal:op")
+    assert out["state"] == "merged" and overrides.load(rid)["state"] == "merged"
+
+
+def test_the_ttl_env_name_and_default_are_the_documented_literals(monkeypatch):
+    assert overrides.TTL_ENV == "CHELA_OVERRIDE_WAIT_S"
+    assert overrides.DEFAULT_TTL_S == 86400.0
+    monkeypatch.delenv("CHELA_OVERRIDE_WAIT_S", raising=False)
+    assert overrides.ttl() == 86400.0
+    monkeypatch.setenv("CHELA_OVERRIDE_WAIT_S", "garbage")
+    assert overrides.ttl() == 86400.0
+    monkeypatch.setenv("CHELA_OVERRIDE_WAIT_S", "90")
+    assert overrides.ttl() == 90.0
+
+
+def test_service_channels_are_telegram_and_dashboard():
+    assert overrides.SERVICE_CHANNELS == ("telegram", "dashboard")
+
+
+@pytest.mark.parametrize("rid,ok", [
+    ("override-" + "0123456789abcdef01234567", True),
+    ("override-" + "a" * 24, True),
+    ("override-" + "a" * 23, False), ("override-" + "a" * 25, False),
+    ("override-" + "A" * 24, False), ("override-" + "g" * 24, False),
+    ("x" + "override-" + "a" * 24, False),
+    ("Override-" + "a" * 24, False), ("override_" + "a" * 24, False),
+    ("override-" + "a" * 12 + "/" + "a" * 11, False), ("", False), (None, False),
+])
+def test_request_id_regex_edges(rid, ok):
+    assert overrides.valid_id(rid) is ok
