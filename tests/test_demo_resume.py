@@ -59,3 +59,38 @@ def test_resume_of_an_unknown_or_malformed_id_runs_nothing(status_dir, monkeypat
     assert fake.main(["--resume", "../planted"]) == 2
     assert fake.main(["--resume"]) == 2
     assert calls == []
+
+
+def test_a_started_session_records_itself_so_resume_reruns_it(status_dir, monkeypatch):
+    """The producer half, driven through ``main()`` — not a hand-seeded record. A session
+    that never records itself (or records argv without its ``--session-id``) would make
+    Unarchive start nothing, or a session with a NEW id the sidebar no longer knows."""
+    agent, fake = _load("claude_demo_agent"), _load("fake_claude")
+    ran = []
+    monkeypatch.setattr(agent, "run", lambda *a: ran.append(a))
+    monkeypatch.setattr(sys, "argv", ["claude_demo_agent.py", "--scene", "waiting",
+                                      "--status-dir", str(status_dir), "--cwd", "/tmp/demo/docs",
+                                      "--session-id", SID])
+    assert agent.main() == 0
+    assert ran == [("waiting", str(status_dir), "/tmp/demo/docs", "/tmp/demo/docs", SID)]
+    recorded = json.loads((status_dir.parent / "sessions" / f"{SID}.json").read_text())["argv"]
+    assert recorded == ["--scene", "waiting", "--status-dir", str(status_dir), "--cwd",
+                        "/tmp/demo/docs", "--cwd-label", "/tmp/demo/docs", "--session-id", SID]
+
+    # ...and that record is exactly what the fake `claude --resume <id>` re-runs.
+    calls = []
+    monkeypatch.setattr(fake.os, "execv", lambda path, args: calls.append((path, args)))
+    fake.main(["--resume", SID])
+    assert calls == [(sys.executable, [sys.executable, str(DEMO / "claude_demo_agent.py"), *recorded])]
+
+
+def test_a_session_started_without_an_id_records_under_the_id_it_runs_as(status_dir, monkeypatch):
+    agent = _load("claude_demo_agent")
+    ran = []
+    monkeypatch.setattr(agent, "run", lambda *a: ran.append(a))
+    monkeypatch.setattr(sys, "argv", ["claude_demo_agent.py", "--scene", "idle",
+                                      "--status-dir", str(status_dir), "--cwd", "/tmp/demo/x"])
+    agent.main()
+    sid = ran[0][-1]
+    recorded = json.loads((status_dir.parent / "sessions" / f"{sid}.json").read_text())["argv"]
+    assert recorded[-2:] == ["--session-id", sid]
