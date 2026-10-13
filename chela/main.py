@@ -2960,6 +2960,38 @@ def _print_override_request(result: dict) -> None:
           "MERGEABLE, re-checked then). A new push expires the request.")
 
 
+def cmd_release(args) -> None:
+    """🏷️ ``chela release X.Y.Z --theme "…"`` (CMX-87): prepare the release LOCALLY — notes,
+    version bump, ``uv lock``, the release tests, commit + annotated tag in its own worktree
+    off ``origin/dev`` — and request the operator's approval. Pushes nothing; the approval
+    (Telegram button, dashboard, ``chela merge-approve <id>``) pushes main + tag + dev.
+    """
+    from chela import release
+    body = ""
+    if args.body_file:
+        try:
+            body = Path(args.body_file).read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"release REFUSED: --body-file unreadable: {e}")
+            sys.exit(1)
+    result = release.prepare(args.version, args.theme, body=body, repo=args.repo,
+                             actor=os.environ.get(config.ACTOR_ENV) or None)
+    if not result.get("ok"):
+        print(f"release REFUSED: {result.get('error', 'unknown error')}")
+        print("  Nothing was committed, tagged or pushed.")
+        sys.exit(1)
+    ids = result.get("task_ids") or []
+    print(f"⏳ Release {result['tag']} is PENDING approval ({result['request_id']}) — "
+          "committed and tagged locally, NOTHING pushed:")
+    print(f"  {result['tag']} — {result['theme']}")
+    print(f"  cut from dev {result['dev_sha'][:12]}  ·  release commit "
+          f"{result['release_sha'][:12]}")
+    print(f"  tasks ({len(ids)}): {', '.join(ids) or 'none'}")
+    print(f"  {release.approve_hint(result['request_id'])}")
+    print("  On approval chela pushes main, the tag, then dev (fast-forward only, re-checked "
+          "then). A push to dev expires the request.")
+
+
 def cmd_override(args) -> None:
     """⚖️🔓 ``chela override request|list`` — the request-only spelling (CMX-79).
 
@@ -3021,6 +3053,10 @@ def cmd_merge_approve(args) -> None:
     state = out.get("state")
     if state == overrides.MERGED:
         print(f"✅ approved and merged: {args.request} "
+              f"(sha {(out.get('merge_commit_sha') or '?')[:12]})")
+        return
+    if state == overrides.RELEASED:
+        print(f"✅ approved and released: {args.request} — pushed main, tag, dev "
               f"(sha {(out.get('merge_commit_sha') or '?')[:12]})")
         return
     if state == overrides.DENIED and out.get("ok"):
@@ -3727,11 +3763,28 @@ def main() -> None:
     p_olist.add_argument("--all", action="store_true",
                          help="Include decided/expired/failed requests too")
 
+    # release — prepare a release locally and request the operator's approval (CMX-87)
+    p_release = sub.add_parser(
+        "release",
+        help="🏷️ Prepare release X.Y.Z in its own worktree off origin/dev (notes, version "
+             "bump, uv lock, release tests, commit + tag LOCALLY) and request the operator's "
+             "approval — pushes nothing; the approval pushes main + tag + dev",
+    )
+    p_release.add_argument("version", help="The release version, X.Y.Z")
+    p_release.add_argument("--theme", required=True,
+                           help="One line — titles the commit (Release X.Y.Z — <theme>) "
+                                "and the tag")
+    p_release.add_argument("--body-file", default=None,
+                           help="Optional file whose text becomes the release commit's body")
+    p_release.add_argument("--repo", default=None,
+                           help="The repository to release (default: the current one)")
+
     # merge-approve — the OPERATOR's half of `chela merge --override`
     p_mapprove = sub.add_parser(
         "merge-approve",
-        help="⚖️ Approve (or --deny) a pending `chela merge --override` — for a HUMAN in a "
-             "plain terminal; a Claude session is denied this by chela's merge-gate hook",
+        help="⚖️ Approve (or --deny) a pending `chela merge --override` or `chela release` — "
+             "for a HUMAN in a plain terminal; a Claude session is denied this by chela's "
+             "merge-gate hook",
     )
     p_mapprove.add_argument("request", nargs="?", default=None,
                             help="The override request id (omit to list pending requests)")
@@ -4124,6 +4177,8 @@ def main() -> None:
         cmd_merge(args)
     elif args.command == "merge-approve":
         cmd_merge_approve(args)
+    elif args.command == "release":
+        cmd_release(args)
     elif args.command == "override":
         cmd_override(args)
     elif args.command == "reopen":

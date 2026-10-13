@@ -189,7 +189,7 @@ at `chela merge cmx-N`) any command that merges into a repo with a chela workflo
 | `gh pr merge …` (incl. `--auto`, a PR URL, `-R o/r`) | a merge that skips every clause of the gate |
 | `gh api -X PUT repos/O/R/pulls/N/merge`, `POST …/merges` into a protected base, `PATCH`/`DELETE …/git/refs/heads/<protected>`, a GraphQL `mergePullRequest` | the same merge, spelled against the API |
 | `git push` to the workflow's base branch or `main`/`master`/… (a `src:dst` refspec, `HEAD` while that branch is checked out, `--all`/`--mirror`) | lands commits on the base with no PR at all |
-| `chela merge-approve`, a request to the dashboard's `/override/`, a `python` call into `chela.overrides.decide` | a session approving its OWN override |
+| `chela merge-approve`, a request to the dashboard's `/override/`, a `python` call into `chela.overrides.decide` or `chela.release.complete` | a session approving its OWN override or release (CMX-87) |
 
 Never denied: `gh pr view/diff/checks/list`, `gh pr create`, `git push origin cmx-12`, a heredoc
 body that merely *mentions* `gh pr merge`, any repo without a chela workflow, and `chela merge`
