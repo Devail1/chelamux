@@ -182,6 +182,17 @@ def test_a_python_call_into_the_override_approval_is_denied(world):
     assert not _denied(_run_hook(world, "uv run python -c 'from chela import overrides'"))
 
 
+def test_a_python_call_into_the_release_push_is_denied(world):
+    """🔴 GUARD (CMX-87): `chela.release.complete` pushes main + tag + dev — its in-process
+    spelling is the operator's approval, not a Claude session's. REQUESTING a release
+    (`chela release X.Y.Z`) stays allowed: the orchestrator may ask, never approve."""
+    assert _denied(_run_hook(
+        world, "uv run python -c 'from chela import release; "
+               "release.complete({\"id\": \"override-abc\"}, \"me\")'"))
+    assert not _denied(_run_hook(world, "uv run chela release 0.16.0 --theme 'a theme'"))
+    assert not _denied(_run_hook(world, "uv run python -c 'from chela import release'"))
+
+
 # --- the dashboard is DOWN, and the gate still holds ------------------------------------
 
 def test_the_hook_runs_with_the_dashboard_down_and_still_denies(world):

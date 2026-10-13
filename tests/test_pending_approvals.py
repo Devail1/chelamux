@@ -336,6 +336,29 @@ def test_a_release_request_is_listed_and_never_blocked_for_lacking_a_run(repo):
     assert looked_up == ["nope"], "a release request was looked up as a dispatcher run"
 
 
+def test_a_pending_release_is_listed_and_approves_through_the_shared_decide_path(
+        repo, client, monkeypatch):
+    """CMX-87 x CMX-103: a `chela release` request shows in Pending approvals with its
+    version, and the list's Approve runs `overrides.decide` -> `release.complete` (the one
+    path the `/override/<id>` page and Telegram use), ending `released` with decided_by."""
+    from chela import release
+    rec = overrides.create({"kind": overrides.KIND_RELEASE, "version": "0.9.0", "tag": "v0.9.0",
+                            "head_sha": HEAD, "reason": "cut 0.9.0", "actor": "orchestrator"})
+    rows = client.get("/api/overrides").get_json()["requests"]
+    assert [(r["id"], r["kind"], r["version"], r["blocked"]) for r in rows] == [
+        (rec["id"], "release", "0.9.0", None)]
+    completed = []
+    monkeypatch.setattr(release, "complete", lambda r, by: completed.append((r["id"], by))
+                        or {"ok": True, "state": overrides.RELEASED, "pushed": ["main"]})
+    resp = client.post(f"/api/override/{rec['id']}/approve", json={"confirm": True},
+                       headers={"Tailscale-User-Login": "op@example.com"})
+    assert resp.status_code == 200 and resp.get_json()["state"] == overrides.RELEASED
+    assert completed == [(rec["id"], "dashboard:op@example.com")]
+    done = overrides.load(rec["id"])
+    assert done["state"] == overrides.RELEASED and done["decided_by"] == "dashboard:op@example.com"
+    assert client.get("/api/overrides").get_json()["requests"] == []
+
+
 def test_stale_reason_refuses_an_expired_request_of_any_kind():
     """🔴 GUARD: past its deadline nothing is approvable — override or release, run or not."""
     past = time.time() - 1
