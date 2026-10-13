@@ -23,6 +23,7 @@ const ARM_MS = 6000;
 
 let _rows = [];
 let _seen = null;          // ids already known — null until the first listing primes it
+let _flash = '';           // the last refused decision's reason — survives the re-render
 
 export function durStr(s) {
     if (s == null) return '';
@@ -54,7 +55,7 @@ export function rowHTML(r) {
         : `<button class="pa-approve" type="button" data-id="${id}">Approve</button>`;
     return `<div class="pa-row" data-id="${id}">${head}
       <div class="pa-ctl">${approve}<button class="pa-deny" type="button" data-id="${id}">Deny</button></div>
-      <div class="pa-err" hidden></div></div>`;
+      </div>`;
 }
 
 function _renderPill() {
@@ -121,17 +122,20 @@ function _buildSheet() {
     sheet.innerHTML = `<div class="ss-hd">⚖️ Pending approvals
         <button class="ss-close" type="button" aria-label="Close">&times;</button></div>
       <div class="ss-sub">Approving merges NOW — after re-checking that the head is unchanged, CI is green and GitHub reports the PR mergeable. It skips only the judge, and is recorded. Deny merges nothing.</div>
+      <div class="pa-err ss-err"${_flash ? '' : ' hidden'}>${escHtml(_flash)}</div>
       <div class="ss-list">${_rows.map(rowHTML).join('') || '<div class="ss-empty">Nothing is waiting for approval.</div>'}</div>`;
     backdrop.appendChild(sheet);
     document.body.appendChild(backdrop);
     sheet.querySelector('.ss-close').onclick = closeApprovals;
     sheet.querySelectorAll('.pa-row').forEach(row => {
         const id = row.dataset.id;
-        const err = row.querySelector('.pa-err');
         const run = async (action, btn) => {
             btn.disabled = true;
+            _flash = '';
             const r = await _decide(id, action);
-            if (!r.ok && err) { err.textContent = r.error; err.hidden = false; }
+            // The re-render below rebuilds the sheet (and a refused request has usually
+            // left the list) — so the reason rides on the sheet, not on the old row.
+            if (!r.ok) _flash = r.error;
             await tickApprovals();
         };
         const ap = row.querySelector('.pa-approve');
@@ -163,6 +167,7 @@ export async function openApprovals() {
 export function closeApprovals() {
     const bd = document.getElementById('approvals-backdrop');
     if (bd) bd.remove();
+    _flash = '';
     document.removeEventListener('keydown', _key, true);
 }
 

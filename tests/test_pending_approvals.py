@@ -317,3 +317,81 @@ def test_the_hint_names_telegram_only_when_a_bridge_is_configured(monkeypatch):
     assert "Telegram" not in contract.approve_hint("override-" + "0" * 24)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "x")
     assert "Telegram" in contract.approve_hint("override-" + "0" * 24)
+
+
+# --- CMX-87's release requests ride the same record ---------------------------------------
+
+def test_a_release_request_is_listed_and_never_blocked_for_lacking_a_run(repo):
+    """🔴 GUARD: a release request (kind "release", no dispatcher run behind it) is listed as
+    approvable — it is never looked up as a run, nor refused as "the run no longer exists",
+    which only an OVERRIDE whose run vanished deserves."""
+    looked_up = []
+    rel = overrides.create({"kind": overrides.KIND_RELEASE, "version": "0.9.0", "head_sha": HEAD,
+                            "reason": "cut 0.9.0", "actor": "orchestrator"})
+    orphan = _bare()                                  # an override whose run is gone
+    rows = {r["id"]: r for r in overrides.listing(run_of=lambda t: looked_up.append(t))}
+    assert rows[rel["id"]]["kind"] == "release" and rows[rel["id"]]["version"] == "0.9.0"
+    assert rows[rel["id"]]["blocked"] is None
+    assert rows[orphan["id"]]["blocked"] == "the run no longer exists"
+    assert looked_up == ["nope"], "a release request was looked up as a dispatcher run"
+
+
+def test_stale_reason_refuses_an_expired_request_of_any_kind():
+    """🔴 GUARD: past its deadline nothing is approvable — override or release, run or not."""
+    past = time.time() - 1
+    run = {"pr_head_sha": HEAD, "pr_state": "open", "pr_checks": CI_PASSING}
+    for kind in (overrides.KIND_OVERRIDE, overrides.KIND_RELEASE):
+        rec = {"kind": kind, "head_sha": HEAD, "deadline": past}
+        assert "expired" in overrides.stale_reason(rec, run)
+        assert overrides.stale_reason({**rec, "deadline": time.time() + 60}, run) is None
+
+
+def test_a_closed_pr_is_not_blocked_when_the_state_is_unread_or_open(repo):
+    _seed(repo, pr_state=None)
+    _request()
+    assert overrides.listing()[0]["blocked"] is None
+    _set_run(pr_state="OPEN")
+    assert overrides.listing()[0]["blocked"] is None
+
+
+def test_the_decide_api_rejects_an_unknown_action(repo, client):
+    _seed(repo)
+    rid = _request()
+    with _github() as squash:
+        assert client.post(f"/api/override/{rid}/merge", json={"confirm": True}).status_code == 404
+    squash.assert_not_called()
+    assert overrides.load(rid)["state"] == overrides.PENDING
+
+
+def test_an_ipv6_bind_is_bracketed_in_the_printed_url(monkeypatch):
+    monkeypatch.setattr(config, "live_dashboard_port", lambda: 5099)
+    monkeypatch.setenv("CHELA_DASH_HOST", "fd7a:115c::1")
+    assert config.dashboard_url("/x") == "http://[fd7a:115c::1]:5099/x"
+    monkeypatch.setenv("CHELA_DASH_HOST", "::")
+    assert config.dashboard_url("/x") == "http://127.0.0.1:5099/x"
+    monkeypatch.setenv("CHELA_DASH_HOST", "100.64.0.7")
+    assert config.dashboard_url("/x") == "http://100.64.0.7:5099/x"
+
+
+def test_a_filed_request_pushes_an_sse_overrides_frame(monkeypatch):
+    """🔴 GUARD: the SERVER half of "live via SSE" — filing a request makes the real
+    `_sse_stream` loop yield an `overrides` frame (approvals_wiring.test.mjs proves a frame
+    re-fetches the list). Monotonic jumps past the keepalive so a dead diff fails fast."""
+    import itertools
+
+    from chela.dashboard import app as dash
+    monkeypatch.setattr(dash, "_sse_windows_snapshot", lambda: {})
+    monkeypatch.setattr(dash, "_sse_runs_snapshot", lambda: {})
+    monkeypatch.setattr(dash, "_sse_terms_snapshot", lambda: set())
+    monkeypatch.setattr(dash, "_sse_log_snapshot", lambda: {})
+    monkeypatch.setattr(dash, "_sse_orchestrator_snapshot", lambda: {})
+    monkeypatch.setattr(dash.time, "sleep", lambda _s: None)
+    ticks = itertools.count(0.0, dash.SSE_KEEPALIVE_INTERVAL + 1.0)
+    monkeypatch.setattr(dash.time, "monotonic", lambda: next(ticks))
+
+    stream = dash._sse_stream()
+    assert next(stream).startswith("event: hello")
+    rec = _bare()
+    frame = next(stream)
+    assert frame.startswith("event: overrides\n"), f"no overrides frame after filing (got {frame!r})"
+    assert rec["id"] in frame and '"pending": 1' in frame

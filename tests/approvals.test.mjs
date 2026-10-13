@@ -9,14 +9,20 @@
 //      NEW request — never for what was already waiting on load — and a missing
 //      Notification API is silent.
 //   6. A release request (CMX-87's record kind) renders as "Release X.Y.Z".
+//   7. The FIRST listing a page ever sees only primes the seen-set — even opted in, a
+//      reload never re-announces what was already waiting (a FRESH module instance, so
+//      the seen-set really starts empty). A notification needs permission "granted".
+//   8. An armed Approve disarms on its own; a refused decision shows the server's reason
+//      on the sheet; an open sheet re-renders on every tick.
 //
 // Run: node --test tests/approvals.test.mjs (pytest runs it via tests/test_js_suites.py).
-import { before, beforeEach, test } from 'node:test';
+import { before, beforeEach, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
 let LISTING = { requests: [] };
 let POSTS = [];
+let POST_REPLY = null;     // null → { ok: true }
 
 function fakeFetch(url, opts) {
     const path = String(url);
@@ -24,7 +30,7 @@ function fakeFetch(url, opts) {
     let body = {};
     if (method === 'POST') {
         POSTS.push({ path, body: JSON.parse(opts.body || '{}') });
-        body = { ok: true, state: 'denied' };
+        body = POST_REPLY || { ok: true, state: 'denied' };
     } else if (path.endsWith('/api/overrides')) body = LISTING;
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
 }
@@ -41,7 +47,7 @@ class FakeNotification {
 
 before(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PILL}</body></html>`, { url: 'http://localhost:5005/' });
-    for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement', 'Element', 'Node', 'Event']) {
+    for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement', 'Element', 'Node', 'Event', 'KeyboardEvent']) {
         Object.defineProperty(globalThis, k, { value: dom.window[k], writable: true, configurable: true });
     }
     globalThis.fetch = fakeFetch;
@@ -49,7 +55,8 @@ before(async () => {
 });
 
 beforeEach(() => {
-    POSTS = []; NOTES = [];
+    POSTS = []; NOTES = []; POST_REPLY = null;
+    FakeNotification.permission = 'granted';
     pa.closeApprovals();
     try { localStorage.removeItem(pa.NOTIFY_KEY); } catch (_) { /* ignore */ }
     window.Notification = FakeNotification;
@@ -145,4 +152,84 @@ test('with no Notification API, opting in stays off and nothing throws', async (
 
 test('a release request renders as a release', () => {
     assert.equal(pa.whatText(req({ kind: 'release', version: '0.9.0' })), 'Release 0.9.0');
+});
+
+test('the first listing a fresh page sees never notifies, even opted in; the next new one does', async () => {
+    // A FRESH module instance: its seen-set is still unprimed, as on a real page load.
+    const fresh = await import('../chela/dashboard/static/js/approvals.js?first-listing');
+    assert.equal(await fresh.setApprovalNotify('on'), true);
+    LISTING = { requests: [req(), req({ id: 'override-' + '1'.repeat(24) })] };
+    await fresh.tickApprovals();
+    assert.equal(NOTES.length, 0, 'a reload re-announced requests that were already waiting');
+    const next = req({ id: 'override-' + '2'.repeat(24) });
+    LISTING = { requests: [...LISTING.requests, next] };
+    await fresh.tickApprovals();
+    assert.deepEqual(NOTES.map(n => n.opts.tag), ['chela-approval-' + next.id]);
+    assert.match(NOTES[0].opts.body, /Override-merge cmx-1/);
+});
+
+test('opted in, a new request does not notify while permission is not granted', async () => {
+    LISTING = { requests: [] };
+    await pa.tickApprovals();
+    assert.equal(await pa.setApprovalNotify('on'), true);
+    FakeNotification.permission = 'denied';
+    LISTING = { requests: [req({ id: 'override-' + '3'.repeat(24) })] };
+    await pa.tickApprovals();
+    assert.equal(NOTES.length, 0);
+});
+
+test('opting in with permission refused stays off', async () => {
+    FakeNotification.permission = 'default';
+    const orig = FakeNotification.requestPermission;
+    FakeNotification.requestPermission = () => Promise.resolve('denied');
+    try {
+        assert.equal(await pa.setApprovalNotify('on'), false);
+        assert.equal(pa.notifyEnabled(), false);
+    } finally { FakeNotification.requestPermission = orig; }
+});
+
+test('an armed Approve disarms on its own — a later single tap only re-arms', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+        LISTING = { requests: [req()] };
+        await pa.openApprovals();
+        const ap = document.querySelector('.pa-approve');
+        ap.click();
+        assert.match(ap.textContent, /Confirm merge/);
+        mock.timers.tick(6001);
+        assert.equal(ap.textContent, 'Approve');
+        assert.equal(ap.classList.contains('pa-armed'), false);
+        ap.click();
+        assert.equal(POSTS.length, 0, 'a tap after the arm window lapsed approved');
+    } finally { mock.timers.reset(); }
+});
+
+test('a refused decision shows the server\'s reason, even after the sheet re-renders', async () => {
+    LISTING = { requests: [req()] };
+    await pa.openApprovals();
+    POST_REPLY = { ok: false, state: 'expired', detail: 'the PR head moved' };
+    document.querySelector('.pa-deny').click();
+    await tick(); await tick();
+    const err = document.querySelector('#approvals-backdrop .pa-err');
+    assert.equal(err.hidden, false);
+    assert.match(err.textContent, /the PR head moved/);
+});
+
+test('an open sheet re-renders on every tick', async () => {
+    LISTING = { requests: [req()] };
+    await pa.openApprovals();
+    LISTING = { requests: [req(), req({ id: 'override-' + '4'.repeat(24) })] };
+    await pa.tickApprovals();
+    assert.equal(document.querySelectorAll('#approvals-backdrop .pa-row').length, 2);
+    LISTING = { requests: [] };
+    await pa.tickApprovals();
+    assert.equal(document.querySelectorAll('#approvals-backdrop .pa-row').length, 0);
+    assert.equal(document.getElementById('btn-approvals').hidden, true);
+});
+
+test('Escape closes the sheet', async () => {
+    LISTING = { requests: [req()] };
+    await pa.openApprovals();
+    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+    assert.equal(document.getElementById('approvals-backdrop'), null);
 });
