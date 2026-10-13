@@ -140,9 +140,21 @@ def is_test_path(rel: str) -> bool:
             or ".test." in name or name == "conftest.py")
 
 
+GIT_TIMEOUT_SECONDS = 60
+
+
+class GitHung(Exception):
+    """A git command that did not finish within :data:`GIT_TIMEOUT_SECONDS` — CMX-116: a
+    CANNOT VERIFY naming the command, never a traceback out of ``chela judge sweep``."""
+
+
 def _git(worktree: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(worktree), *args], capture_output=True, text=True,
-                          errors="replace", timeout=60)
+    try:
+        return subprocess.run(["git", "-C", str(worktree), *args], capture_output=True,
+                              text=True, errors="replace", timeout=GIT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as e:
+        raise GitHung(f"`git {' '.join(args)}` did not finish within {e.timeout:g}s in "
+                      f"{worktree} — a hung git cannot say which lines changed") from e
 
 
 def changed_lines(worktree: Path, base: str) -> tuple[dict[str, set[int]], str]:
@@ -150,6 +162,13 @@ def changed_lines(worktree: Path, base: str) -> tuple[dict[str, set[int]], str]:
     uncommitted edits (the working tree is diffed against the merge base), plus every line of
     an untracked, unignored file. Only sweepable source: ``.py``/``.js``/``.mjs``, never a test
     file. Returns ``(lines, error)``."""
+    try:
+        return _changed_lines(worktree, base)
+    except GitHung as e:
+        return {}, str(e)
+
+
+def _changed_lines(worktree: Path, base: str) -> tuple[dict[str, set[int]], str]:
     mb = _git(worktree, "merge-base", base, "HEAD")
     if mb.returncode != 0 or not mb.stdout.strip():
         return {}, (f"`{base}` does not resolve to a merge base with HEAD in {worktree} — "
@@ -167,6 +186,13 @@ def changed_lines(worktree: Path, base: str) -> tuple[dict[str, set[int]], str]:
         if diff.returncode != 0:
             return {}, f"git diff failed: {(diff.stderr or '').strip()[:200]}"
         for raw in diff.stdout.splitlines():
+            if raw.startswith("Binary files "):
+                # ⛔ CMX-116: git emits no hunks for a file it calls binary (a NUL byte is
+                # enough), so its changed lines would silently never be swept. Unknown is
+                # not "nothing changed".
+                return {}, (f"{rel} is a changed source file git diffs as BINARY (a NUL "
+                            "byte?) — it has no readable hunks, so its changed lines "
+                            "cannot be swept")
             m = _RE_HUNK.match(raw)
             if m:
                 start, count = int(m.group(1)), int(m.group(2) or "1")
