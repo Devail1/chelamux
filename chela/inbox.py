@@ -2057,8 +2057,8 @@ def _selfcheck_label(argv: list[str]) -> str | None:
 _PROC = Path("/proc")
 
 
-def _selfcheck_scan() -> list[tuple[str, Path, float | None]]:
-    """``[(label, cwd, started_epoch|None)]`` for every live silent-by-design process.
+def _selfcheck_scan() -> list[tuple[str, Path, float | None, int]]:
+    """``[(label, cwd, started_epoch|None, pid)]`` for every live silent-by-design process.
 
     ONE pass over ``/proc`` per tick, shared by every run. Linux-only by nature; anywhere
     else (or a process that vanished / is not ours to read) it simply finds nothing, which
@@ -2071,7 +2071,7 @@ def _selfcheck_scan() -> list[tuple[str, Path, float | None]]:
         pids = [d for d in _PROC.iterdir() if d.name.isdigit()]
     except (OSError, ValueError, IndexError):
         return []
-    found: list[tuple[str, Path, float | None]] = []
+    found: list[tuple[str, Path, float | None, int]] = []
     for d in pids:
         try:
             argv = [a.decode(errors="replace")
@@ -2083,24 +2083,30 @@ def _selfcheck_scan() -> list[tuple[str, Path, float | None]]:
             ticks = float((d / "stat").read_text().rsplit(")", 1)[1].split()[19])
         except (OSError, ValueError, IndexError):
             continue
-        found.append((label, cwd, boot + ticks / hz if boot is not None else None))
+        found.append((label, cwd, boot + ticks / hz if boot is not None else None,
+                      int(d.name)))
     return found
 
 
-def _selfcheck_for(worktree: str, procs: list[tuple[str, Path, float | None]]) -> dict | None:
-    """``{"what": label, "since": epoch|None}`` for the most specific silent-by-design
-    process running in ``worktree`` (its earliest instance), or None."""
+def _selfcheck_for(worktree: str,
+                   procs: list[tuple[str, Path, float | None, int]]) -> dict | None:
+    """``{"what": label, "since": epoch|None, "pid": pid|None}`` for the most specific
+    silent-by-design process running in ``worktree`` (its earliest instance), or None.
+    ``pid`` is that instance's — the self-check's identity across ticks (CMX-120)."""
     try:
         root = Path(worktree).resolve()
     except OSError:
         return None
-    mine = [(label, since) for label, cwd, since in procs
+    mine = [(label, since, pid) for label, cwd, since, pid in procs
             if cwd == root or root in cwd.parents]
     if not mine:
         return None
-    what = min((label for label, _ in mine), key=_SELFCHECK_RANK.index)
-    starts = [since for label, since in mine if label == what and since is not None]
-    return {"what": what, "since": min(starts) if starts else None}
+    what = min((label for label, _, _ in mine), key=_SELFCHECK_RANK.index)
+    starts = sorted((since, pid) for label, since, pid in mine
+                    if label == what and since is not None)
+    if not starts:
+        return {"what": what, "since": None, "pid": None}
+    return {"what": what, "since": starts[0][0], "pid": starts[0][1]}
 
 
 def stuck_probes(runs: list[dict]) -> dict[str, dict]:
@@ -2163,6 +2169,34 @@ def _parse_epoch(ts) -> float | None:
     return parsed.timestamp() if parsed else None
 
 
+# CMX-120: a self-check's start is ``btime + starttime/HZ`` re-read every tick, and ``btime``
+# is not a constant everywhere (WSL2 re-derives it from a resynced clock) — so ``since`` can
+# move by a second between ticks. Without a pid, two readings this close are one self-check.
+_SELFCHECK_SAME_SLACK_S = 120.0
+# ...and one still running past the ceiling is re-announced at most once per this long.
+SELFCHECK_RENOTIFY_S = 3600
+
+
+def _same_selfcheck(latch: dict | None, selfcheck: dict) -> bool:
+    """Is ``selfcheck`` (this tick's probe) the self-check ``latch`` already announced?
+    Identity is the process (``pid``) — never the float start, which jitters (CMX-120)."""
+    if not latch or latch.get("what") != selfcheck.get("what"):
+        return False
+    pid, said_pid = selfcheck.get("pid"), latch.get("pid")
+    if pid is not None and said_pid is not None:
+        return pid == said_pid
+    since, said = selfcheck.get("since"), latch.get("since")
+    return since is not None and said is not None and abs(since - said) <= _SELFCHECK_SAME_SLACK_S
+
+
+def _selfcheck_round(running: float | None, ceiling: int) -> int | None:
+    """Which notice a self-check ``running`` seconds is due: None under the ceiling, 1 at
+    it, then one more per ``SELFCHECK_RENOTIFY_S`` past it."""
+    if running is None or running < ceiling:
+        return None
+    return 1 + int((running - ceiling) // SELFCHECK_RENOTIFY_S)
+
+
 def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: float,
                  uptime: float | None = None, windows: dict[str, str] | None = None,
                  now_epoch: str | None = None, daemon: str | None = None) -> list[dict]:
@@ -2179,7 +2213,9 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
     * **self-check** (CMX-110): a live ``chela task-finished`` / ``chela judge sweep`` /
       pytest in the worktree is activity — silence is its design — so it is never "stuck".
       Past ``config.selfcheck_alert_s()`` it gets ONE ``run_selfcheck_long`` notice that
-      says exactly that, once per self-check (keyed on its start).
+      says exactly that, once per self-check — latched on its PROCESS (CMX-120: keyed on
+      the float start it re-fired every tick), at most once more per
+      ``SELFCHECK_RENOTIFY_S``. The latch clears when the self-check ends.
 
     ``daemon`` is ``daemon_state``'s measured answer; with ``uptime`` it is rendered as
     "daemon up …", "no daemon running" (only when measured down) or "daemon state unknown"
@@ -2218,13 +2254,22 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
                 wid=wid))
         entry["markers"] = said
         selfcheck = probe.get("selfcheck")
+        entry.pop("selfcheck_at", None)     # the pre-CMX-120 latch, keyed on a jittery float
+        if not selfcheck:
+            entry.pop("selfcheck", None)    # the self-check ended: the next one is news
         if selfcheck:
             entry["active_at"] = now
             since, ceiling = selfcheck.get("since"), config.selfcheck_alert_s()
             running = now - since if since is not None else None
-            if (running is not None and running >= ceiling
-                    and entry.get("selfcheck_at") != since):
-                entry["selfcheck_at"] = since
+            latch = entry.get("selfcheck")
+            if not _same_selfcheck(latch, selfcheck):
+                latch = None
+                entry.pop("selfcheck", None)
+            due = _selfcheck_round(running, ceiling)
+            if due is not None and (latch is None or due > latch.get("round", 0)):
+                entry["selfcheck"] = {"what": selfcheck.get("what"),
+                                      "pid": selfcheck.get("pid"), "since": since,
+                                      "round": due}
                 out.append(_event(
                     "run_selfcheck_long",
                     f"⏳ {_label(run)} — {selfcheck.get('what')} running for "
