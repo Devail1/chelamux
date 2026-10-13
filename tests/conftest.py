@@ -57,6 +57,7 @@ import signal
 import sqlite3
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -134,8 +135,50 @@ PM2_SANDBOX_PREFIX = "chela-tests-pm2-"
 PM2_SANDBOX_OWNER_FILE = "chela-tests-owner.pid"
 
 
+def _pm2_daemons(home: Path) -> list[int]:
+    """PIDs of live pm2 God Daemons whose ``PM2_HOME`` is exactly ``home`` (Linux /proc;
+    elsewhere ``[]`` and ``pm2 kill`` alone has to do). A zombie's cmdline is empty, so
+    a dead-but-unreaped daemon does not count."""
+    want = f"PM2_HOME={home}".encode()
+    pids = []
+    try:
+        procs = list(Path("/proc").glob("[0-9]*"))
+    except OSError:                       # pragma: no cover - no procfs
+        return pids
+    for proc in procs:
+        try:
+            if b"God Daemon" not in (proc / "cmdline").read_bytes():
+                continue
+            if want in (proc / "environ").read_bytes().split(b"\0"):
+                pids.append(int(proc.name))
+        except (OSError, ValueError):
+            continue
+    return pids
+
+
+def _signal_until_gone(home: Path, sig: int, seconds: float) -> list[int]:
+    for pid in _pm2_daemons(home):
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.monotonic() + seconds
+    while (alive := _pm2_daemons(home)) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return alive
+
+
 def _pm2_kill(home: Path) -> None:
-    """`PM2_HOME=<home> pm2 kill` — that home's daemon only, never the operator's."""
+    """Stop ``home``'s God Daemon — that home's only, never the operator's.
+
+    ⛔ Only if one was ever started there (``pm2.pid``, or a live daemon): ``pm2 kill``
+    against a fresh home SPAWNS a daemon to stop it. Measured 2026-10-13: when that home's
+    socket path is over the 108-byte ``sun_path`` limit (an xdist ``tmp_path`` is), the
+    CLI crashes on ``rpc.sock`` and the daemon it spawned is left running, unreachable,
+    growing ~40 MB/s to 4-5 GB, and IGNORING SIGTERM. So anything ``pm2 kill`` leaves
+    behind gets SIGTERM, then SIGKILL after a bounded wait."""
+    if not ((home / "pm2.pid").exists() or _pm2_daemons(home)):
+        return
     if shutil.which("pm2"):
         try:
             subprocess.run(
@@ -144,8 +187,9 @@ def _pm2_kill(home: Path) -> None:
                 capture_output=True, timeout=15,
             )
         except (subprocess.TimeoutExpired, OSError):
-            pass  # nothing to kill, or pm2 hung on its own way out — the rmtree after
-                  # this still removes the pid/socket files so nothing points here again
+            pass  # nothing to kill, or pm2 hung on its own way out — escalation below
+    if _signal_until_gone(home, signal.SIGTERM, 3):
+        _signal_until_gone(home, signal.SIGKILL, 3)
 
 
 def _refuse_unmarked_pm2_home(home: Path) -> None:
@@ -168,9 +212,7 @@ def _owner_alive(pid: int) -> bool:
 
 def _reap_pm2_sandbox(home: Path, kill=_pm2_kill) -> None:
     _refuse_unmarked_pm2_home(home)
-    # No pm2.pid ⇒ no daemon ever started there; `pm2 kill` would SPAWN one to stop it.
-    if (home / "pm2.pid").exists():
-        kill(home)
+    kill(home)
     shutil.rmtree(home, ignore_errors=True)
 
 
