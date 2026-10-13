@@ -3,86 +3,145 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>chela — put a fleet of Claude Code agents to work</title>
-<meta name="description" content="A tiny control plane that schedules Claude Code agents, dispatches a TODO list into pull requests, pushes each completion back to the orchestrator, and streams the whole fleet on one live terminal wall — shareable end-to-end encrypted, over a single tmux session.">
+<title>chela — a merge gate for unattended Claude Code agents</title>
+<meta name="description" content="Run Claude Code agents unattended — chela only merges a PR once it has proved the tests catch broken code. Tracker-driven dispatch, a mutation-testing judge bound to the PR head, and a merge gate with one-tap audited override. Local-first, AGPL-3.0.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
-<meta property="og:title" content="chela — put a fleet of Claude Code agents to work">
-<meta property="og:description" content="Schedule agents, dispatch TODOs into PRs, and get told the moment one finishes or blocks — with the whole fleet on a live terminal wall you can share, end-to-end encrypted.">
+<meta name="theme-color" content="#0d1117">
+<meta property="og:title" content="chela — a merge gate for unattended Claude Code agents">
+<meta property="og:description" content="Run Claude Code agents unattended — chela only merges a PR once it has proved the tests catch broken code.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://chela.pages.dev/">
 <meta property="og:site_name" content="chela">
 <meta property="og:image" content="https://chela.pages.dev/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="chela — schedule Claude Code agents, dispatch TODOs to PRs, and watch the fleet on a live terminal wall.">
+<meta property="og:image:alt" content="chela — run Claude Code agents unattended; chela only merges a PR once it has proved the tests catch broken code. Tracker → agent → judge → merge gate.">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="chela — put a fleet of Claude Code agents to work">
-<meta name="twitter:description" content="Schedule agents, dispatch TODOs into PRs, and get told the moment one finishes or blocks — with the whole fleet on a live terminal wall you can share, end-to-end encrypted.">
+<meta name="twitter:title" content="chela — a merge gate for unattended Claude Code agents">
+<meta name="twitter:description" content="Run Claude Code agents unattended — chela only merges a PR once it has proved the tests catch broken code.">
 <meta name="twitter:image" content="https://chela.pages.dev/img/og.png">
 <style>
   :root{
-    --bg:#0d1117; --surface:#161b22; --surface2:#1c2230; --border:#21262d;
-    --text:#e6edf3; --text-dim:#8b949e; --accent:#58a6ff; --green:#3fb950;
+    --bg:#0d1117; --surface:#161b22; --surface2:#1c2230; --border:#21262d; --border-strong:#30363d;
+    --text:#e6edf3; --text-dim:#9ba5b0; --accent:#58a6ff; --green:#3fb950;
     --yellow:#d29922; --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
   }
   *{box-sizing:border-box}
   html{scroll-behavior:smooth}
+  @media (prefers-reduced-motion:reduce){ html{scroll-behavior:auto} .card{transition:none} }
   body{
     margin:0; color:var(--text);
     background:radial-gradient(820px 380px at 50% -40px, rgba(88,166,255,0.10), transparent 70%), var(--bg);
     background-repeat:no-repeat;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-    line-height:1.6; -webkit-font-smoothing:antialiased;
+    line-height:1.6; -webkit-font-smoothing:antialiased; overflow-wrap:break-word;
   }
   a{color:var(--accent); text-decoration:none}
   a:hover{text-decoration:underline}
+  /* a link inside prose is underlined, not marked by colour alone (red-weak readers) */
+  main p a,main li a,.cmp caption a{text-decoration:underline; text-underline-offset:2px}
+  a:focus-visible,button:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:4px}
   /* horizontal only — vertical rhythm comes from section{} so a section.wrap
      keeps its top/bottom padding (a `padding:0 24px` shorthand would zero it) */
-  .wrap{max-width:1000px; margin:0 auto; padding-left:24px; padding-right:24px}
+  .wrap{max-width:1080px; margin:0 auto; padding-left:24px; padding-right:24px}
   code,.mono{font-family:var(--mono)}
+  code{font-size:.92em}
+  .sr-only{position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0}
 
   /* nav */
-  nav{display:flex; align-items:center; gap:10px; padding:20px 24px; max-width:1000px; margin:0 auto}
-  nav .mark{height:24px}
+  nav{display:flex; align-items:center; gap:10px; padding:18px 24px; max-width:1080px; margin:0 auto}
+  nav .mark{height:24px; width:24px}
   nav .name{font-weight:700; font-size:17px; color:var(--accent)}
   nav .spacer{flex:1}
   nav .links a{color:var(--text-dim); font-size:14px; margin-left:18px}
   nav .links a:hover{color:var(--text); text-decoration:none}
 
-  /* hero */
-  .hero{text-align:center; padding-block:56px 40px}
-  .hero img.banner{width:min(560px,86vw); margin-bottom:8px}
-  .hero h1{font-size:clamp(28px,5vw,44px); line-height:1.15; margin:18px 0 10px; letter-spacing:-0.02em}
+  /* hero — two columns on desktop (pitch | demo), stacked on a phone */
+  .hero{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.15fr); gap:40px; align-items:center; padding-block:28px 56px}
+  .hero img.banner{width:220px; height:auto; display:block; margin:0 0 6px -6px}
+  .hero h1{font-size:clamp(26px,3.4vw,38px); line-height:1.18; margin:8px 0 14px; letter-spacing:-0.02em}
   .hero h1 .accent{color:var(--accent)}
-  .hero p.sub{font-size:clamp(16px,2.4vw,19px); color:var(--text-dim); max-width:620px; margin:0 auto 28px}
-  .cta{display:flex; gap:12px; justify-content:center; flex-wrap:wrap}
-  .btn{display:inline-block; padding:11px 20px; border-radius:8px; font-weight:600; font-size:15px}
+  .hero p.sub{font-size:17px; color:var(--text-dim); margin:0 0 22px}
+  .hero p.sub strong{color:var(--text)}
+  .cta{display:flex; gap:12px; flex-wrap:wrap}
+  .btn{display:inline-flex; align-items:center; gap:8px; padding:11px 20px; border-radius:8px; font-weight:600; font-size:15px; min-height:44px}
   .btn-primary{background:#1f6feb; color:#fff; border:1px solid #1f6feb}
   .btn-primary:hover{background:#388bfd; text-decoration:none}
-  .btn-ghost{background:transparent; color:var(--text); border:1px solid var(--border)}
+  .btn-ghost{background:transparent; color:var(--text); border:1px solid var(--border-strong)}
   .btn-ghost:hover{border-color:var(--accent); text-decoration:none}
-
-  /* install strip */
-  .install{max-width:640px; margin:32px auto 0; text-align:left}
-  .install pre{
-    background:#010409; border:1px solid var(--border); border-radius:10px;
-    padding:16px 18px; overflow-x:auto; font-size:13.5px; color:var(--text); margin:0;
-  }
-  .install pre .c{color:var(--text-dim)}
-  .install pre .g{color:var(--green)}
+  .hero .reqs{margin:18px 0 0; font-size:13.5px; color:var(--text-dim)}
+  .demo{margin:0}
+  .demo video{width:100%; height:auto; display:block; border:1px solid var(--border-strong); border-radius:12px; background:#1e1e1e}
+  .demo .demo-mobile{display:none}
+  .demo figcaption{margin-top:10px; color:var(--text-dim); font-size:13px; text-align:center}
 
   /* sections — generous vertical rhythm; a hairline rule reinforces the break */
   section{padding:64px 0}
   section + section{border-top:1px solid var(--border)}
-  .section-head{text-align:center; max-width:640px; margin:0 auto 36px}
-  .section-head h2{font-size:25px; margin:0 0 10px; letter-spacing:-0.01em}
-  .section-head p{color:var(--text-dim); font-size:15px; margin:0}
-  .pitch{text-align:center; max-width:680px; margin:0 auto}
-  .pitch h2{font-size:25px; margin:0 0 12px; letter-spacing:-0.01em}
-  .pitch p{color:var(--text-dim); font-size:17px}
-  .pitch strong{color:var(--text)}
+  .section-head{text-align:center; max-width:680px; margin:0 auto 36px}
+  .section-head h2{font-size:26px; margin:0 0 10px; letter-spacing:-0.01em}
+  .section-head p{color:var(--text-dim); font-size:15.5px; margin:0}
 
-  .features{display:grid; grid-template-columns:repeat(3,1fr); gap:20px}
+  /* install + copy button (the button only appears once JS has wired it; with JS off
+     the command is plain selectable text) */
+  .install{max-width:720px; margin:0 auto}
+  .codebox{position:relative}
+  .codebox pre{
+    background:#010409; border:1px solid var(--border-strong); border-radius:10px;
+    padding:16px 18px; overflow-x:auto; font-size:13.5px; line-height:1.7; color:var(--text); margin:0;
+  }
+  .codebox pre .c{color:var(--text-dim)}
+  .codebox pre .p{color:var(--text-dim); user-select:none}
+  .copy{
+    position:absolute; top:8px; right:8px; display:inline-flex; align-items:center; gap:6px;
+    font:600 12.5px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    color:var(--text); background:var(--surface2); border:1px solid var(--border-strong);
+    border-radius:6px; padding:8px 10px; cursor:pointer; min-height:32px;
+  }
+  .copy[hidden]{display:none}
+  .copy:hover{border-color:var(--accent)}
+  .copy[data-state="done"]{border-color:var(--green)}
+  .install .reqs{margin:0 0 14px; color:var(--text-dim); font-size:14.5px; text-align:center}
+  .install .reqs strong{color:var(--text)}
+  .install .next{margin:18px 0 0; color:var(--text-dim); font-size:14.5px}
+  .install .next li{margin-bottom:6px}
+
+  /* how it works — a 4-step pipeline; numbers + shapes carry the order, not colour */
+  .how{background:var(--surface)}
+  .pipe{list-style:none; margin:0; padding:0; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:28px; counter-reset:step}
+  .pipe li{position:relative; background:var(--bg); border:1px solid var(--border-strong); border-radius:12px; padding:20px 18px 18px}
+  .pipe li::after{
+    content:""; position:absolute; top:50%; right:-22px; width:16px; height:16px; margin-top:-8px;
+    background:no-repeat center/16px url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239ba5b0' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14M13 6l6 6-6 6'/%3E%3C/svg%3E");
+  }
+  .pipe li:last-child::after{display:none}
+  .pipe .num{display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:50%; border:1.5px solid var(--accent); color:var(--accent); font:700 13px/1 var(--mono)}
+  .pipe svg.ic{float:right; color:var(--text-dim)}
+  .pipe h3{font-size:16px; margin:12px 0 6px}
+  .pipe p{margin:0; color:var(--text-dim); font-size:14px}
+  .pipe li.gate{border-color:var(--accent); border-width:2px}
+  .pipe .tag{display:inline-block; margin-top:10px; font:700 10.5px/1 var(--mono); letter-spacing:.06em; border:1px solid currentColor; border-radius:999px; padding:4px 8px; color:var(--text-dim)}
+  .pipe li.gate .tag{color:var(--accent)}
+  .how .more-line{text-align:center; margin:28px 0 0; color:var(--text-dim); font-size:14px}
+
+  /* comparison table — every cell is a word + a symbol, never colour alone */
+  .table-scroll{overflow-x:auto; border:1px solid var(--border-strong); border-radius:12px}
+  table.cmp{width:100%; border-collapse:collapse; font-size:14px; min-width:680px}
+  .cmp caption{caption-side:bottom; text-align:left; padding:12px 16px; color:var(--text-dim); font-size:12.5px}
+  .cmp th,.cmp td{padding:12px 14px; text-align:left; vertical-align:top; border-bottom:1px solid var(--border)}
+  .cmp thead th{font-size:13px; color:var(--text-dim); font-weight:600; background:var(--surface)}
+  .cmp thead th.us{color:var(--accent)}
+  .cmp tbody th{font-weight:600; width:24%}
+  .cmp td.us{background:rgba(88,166,255,0.06)}
+  .cmp tbody tr:last-child th,.cmp tbody tr:last-child td{border-bottom:0}
+  .v{display:inline-flex; align-items:center; gap:6px; font-weight:700; white-space:nowrap}
+  .v::before{font-family:var(--mono); font-weight:700}
+  .v.yes{color:var(--green)} .v.yes::before{content:"✓"}
+  .v.no{color:var(--text-dim)} .v.no::before{content:"✗"}
+  .v.part{color:var(--yellow)} .v.part::before{content:"◐"}
+  .cmp small{display:block; color:var(--text-dim); font-size:12.5px; margin-top:3px; line-height:1.45}
+
+  .features{display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:20px}
   .card{
     background:var(--surface); border:1px solid var(--border); border-radius:12px;
     padding:24px; transition:border-color .15s ease, transform .15s ease;
@@ -92,13 +151,7 @@
   .card h3{margin:0 0 8px; font-size:17px}
   .card p{margin:0; color:var(--text-dim); font-size:14.5px}
   .card code{background:var(--surface2); padding:1px 5px; border-radius:4px; font-size:12.5px}
-
-  .how{background:var(--surface)}  /* section+section rules supply the dividers */
-  .how h2{text-align:center; font-size:24px; margin:0 0 28px}
-  .how-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:22px}
-  .how-item h4{margin:0 0 6px; font-size:15px}
-  .how-item h4 .step{color:var(--accent); font-family:var(--mono); margin-right:8px}
-  .how-item p{margin:0; color:var(--text-dim); font-size:14.5px}
+  .more{display:inline-block; margin-top:10px; font-size:14px; font-weight:600}
 
   /* wide "differentiator" card — spans the feature grid, accent-tinted */
   .card-wide{
@@ -113,7 +166,6 @@
     border:1px solid var(--accent); border-radius:999px; padding:3px 7px; margin-left:9px; vertical-align:middle;
   }
   .card h3 svg{vertical-align:-2px}
-  .more{display:inline-block; margin-top:10px; font-size:14px; font-weight:600}
 
   /* E2E channel diagram — You →🔒→ Relay(blind) →🔒→ Joiner */
   .e2e{display:flex; align-items:stretch; justify-content:center; flex-wrap:wrap; gap:0; margin:0 auto 34px; max-width:720px}
@@ -129,131 +181,256 @@
   .e2e-wire::before{content:""; position:absolute; left:6px; right:6px; top:50%; height:1px; background:linear-gradient(90deg,transparent,var(--accent) 25%,var(--accent) 75%,transparent)}
   .e2e-wire .lock{position:relative; background:var(--bg); padding:2px 6px; color:var(--accent); display:flex}
   .e2e-wire em{position:relative; background:var(--bg); padding:2px 6px; margin-top:4px; font:11px/1 var(--mono); color:var(--accent); font-style:normal; letter-spacing:0.02em}
+  .how-grid{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:22px}
+  .how-item h3{margin:0 0 6px; font-size:15px}
+  .how-item p{margin:0; color:var(--text-dim); font-size:14.5px}
 
-  footer{text-align:center; padding:40px 24px; color:var(--text-dim); font-size:13.5px}
-  footer a{color:var(--text-dim); text-decoration:underline}
+  /* latest release — one line, links the Releases page so it never goes stale */
+  .release{padding:28px 0}
+  .release p{margin:0; text-align:center; color:var(--text-dim); font-size:15px}
+  .release strong{color:var(--text)}
+
+  /* FAQ — native <details>, works with JS off */
+  .faq{max-width:760px; margin:0 auto}
+  .faq details{border:1px solid var(--border-strong); border-radius:10px; background:var(--surface); margin-bottom:12px}
+  .faq summary{cursor:pointer; padding:16px 18px; font-weight:600; font-size:15.5px; list-style:none; display:flex; justify-content:space-between; gap:12px}
+  .faq summary::-webkit-details-marker{display:none}
+  .faq summary::after{content:"+"; font-family:var(--mono); color:var(--text-dim); flex:0 0 auto}
+  .faq details[open] summary::after{content:"−"}
+  .faq .a{padding:0 18px 16px; color:var(--text-dim); font-size:14.5px}
+  .faq .a p{margin:0 0 8px}
+  .faq .a strong{color:var(--text)}
 
   /* honest status note */
   .status-note{
-    max-width:660px; margin:26px auto 0; padding:14px 18px; text-align:left;
+    max-width:720px; margin:26px auto 0; padding:14px 18px; text-align:left;
     background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--accent);
     border-radius:8px; color:var(--text-dim); font-size:13.5px;
   }
   .status-note strong{color:var(--text)}
 
-  /* screenshots */
-  .shots{display:grid; gap:26px}
-  .shots figure{margin:0}
-  .shots img,.shots video{width:100%; border:1px solid var(--border); border-radius:12px; display:block}
-  .shots figcaption{margin-top:10px; text-align:center; color:var(--text-dim); font-size:13.5px}
-  /* Responsive demo: desktop clip for wide viewports, portrait phone clip for narrow.
-     Scoped under .shots so these beat the `.shots video` display:block above. */
-  .shots .demo-mobile{display:none; max-width:420px; margin-inline:auto}
-  @media(max-width:768px){ .shots .demo-desktop{display:none} .shots .demo-mobile{display:block} }
+  footer{border-top:1px solid var(--border); padding:36px 24px 44px; color:var(--text-dim); font-size:13.5px; text-align:center}
+  footer .flinks{display:flex; flex-wrap:wrap; justify-content:center; gap:8px 22px; margin-bottom:12px}
+  footer .flinks a{color:var(--text); font-size:14px}
+  footer p{margin:0}
 
+  @media (max-width:960px){
+    .hero{grid-template-columns:minmax(0,1fr); gap:28px; padding-block:12px 44px}
+    .pipe{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .pipe li:nth-child(2)::after{display:none}
+  }
   @media (max-width:760px){
-    .features{grid-template-columns:1fr}
-    .how-grid{grid-template-columns:1fr}
+    .features{grid-template-columns:minmax(0,1fr)}
+    .how-grid{grid-template-columns:minmax(0,1fr)}
     .card-wide{flex-direction:column; gap:14px}
+    .pipe{grid-template-columns:minmax(0,1fr); gap:26px}
+    .pipe li::after,.pipe li:nth-child(2)::after{display:block; top:auto; bottom:-22px; right:auto; left:50%; margin:0 0 0 -8px; transform:rotate(90deg)}
+    .pipe li:last-child::after{display:none}
     /* stack the E2E diagram vertically; the wire connector turns vertical */
-    .e2e{flex-direction:column}
+    .e2e{flex-direction:column; align-items:center}
     .e2e-node{width:100%; max-width:280px}
     .e2e-wire{flex-direction:row; gap:8px; min-width:0; padding:8px 0}
     .e2e-wire::before{left:50%; right:auto; top:6px; bottom:6px; width:1px; height:auto; background:linear-gradient(180deg,transparent,var(--accent) 25%,var(--accent) 75%,transparent)}
-    /* Stacked, centered header: logo on top, links wrap evenly below. */
-    nav{flex-wrap:wrap; justify-content:center; gap:4px; padding:16px}
-    nav .spacer{display:none}
-    nav .links{flex-basis:100%; display:flex; flex-wrap:wrap; justify-content:center; gap:8px 18px; margin-top:8px}
-    nav .links a{margin-left:0}
+    /* a phone keeps the bar to brand + the two links that matter */
+    nav{padding:14px 16px}
+    nav .links a.wide{display:none}
+    .wrap{padding-left:16px; padding-right:16px}
+    section{padding:48px 0}
+    .hero img.banner{width:150px}
+    .hero p.sub{font-size:16px; margin-bottom:18px}
+    /* the portrait phone clip, capped so the pitch + CTAs + the clip's top share the fold */
+    .demo .demo-desktop{display:none}
+    .demo .demo-mobile{display:block; max-width:300px; margin-inline:auto}
   }
 </style>
 </head>
 <body>
 
-<nav>
-  <img class="mark" src="favicon.svg" alt="">
+<nav aria-label="Primary">
+  <img class="mark" src="favicon.svg" alt="" width="24" height="24">
   <span class="name">chela</span>
   <span class="spacer"></span>
   <span class="links">
-    <a href="#features">Features</a>
-    <a href="#collab">Collaborate</a>
-    <a href="#screenshots">Screenshots</a>
-    <a href="#how">How it works</a>
-    <a href="#install">Install</a>
+    <a class="wide" href="#how">How it works</a>
+    <a class="wide" href="#why">Why chela</a>
+    <a class="wide" href="#faq">FAQ</a>
     <a href="docs.html">Docs</a>
     <a href="https://github.com/Devail1/chelamux">GitHub</a>
   </span>
 </nav>
 
+<main>
 <header class="hero wrap">
-  <img class="banner" src="banner.svg" alt="chela">
-  <h1>Run Claude Code agents unattended —<br><span class="accent">chela only merges a PR once it has proved the tests catch broken code.</span></h1>
-  <p class="sub">
-    chela <strong>dispatches</strong> a task queue (Linear, GitHub issues or a <code>TODO.md</code>)
-    into one worktree, one agent and one PR per task. A <strong>mutation-testing judge</strong>
-    corrupts the code to prove the tests notice, its verdict is bound to the PR head, and
-    <code>chela merge</code> <strong>refuses without it</strong> — an override is one audited
-    Telegram tap. And you can watch it all live: a <strong>terminal wall</strong>, a
-    Telegram bridge, and schedules for long-lived agents.
-  </p>
-  <div class="cta">
-    <a class="btn btn-primary" href="#install">Get started</a>
-    <a class="btn btn-ghost" href="#features">See what it does</a>
+  <div class="pitch">
+    <img class="banner" src="banner.svg" alt="chela" width="1991" height="995">
+    <h1>Run Claude Code agents unattended —<br><span class="accent">chela only merges a PR once it has proved the tests catch broken code.</span></h1>
+    <p class="sub">A tracker task becomes a worktree, an agent and a PR; a <strong>mutation-testing
+      judge</strong> must pass on its head commit before <code>chela merge</code> will land it.</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="#install">Get started</a>
+      <a class="btn btn-ghost" href="https://github.com/Devail1/chelamux">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        Star on GitHub</a>
+    </div>
+    <p class="reqs">Free &amp; open source (AGPL-3.0) · runs on your machine, on your Claude subscription</p>
   </div>
-
-  <div class="install">
-    <pre><span class="c"># one tmux session whose windows are your agents</span>
-tmux new-session -d -s chela -n researcher
-
-<span class="c"># schedule one, then run the daemon</span>
-uv run chela schedule add researcher --every 1h --prompt <span class="g">"Run your cycle."</span>
-uv run chela run</pre>
-  </div>
-
-  <p class="status-note">
-    <strong>Status: early.</strong> The core — scheduler, dispatcher, messaging — is solid and
-    tested; the dashboard + live wall is a first-class, separately-installed feature. chela is
-    <strong>self-hosted and single-user</strong>: you run it on your own machine, driving one
-    Claude account (the whole fleet shares its 5h / weekly rate limits).
-  </p>
+  <figure class="demo">
+    <video class="demo-desktop" src="chela-demo-desktop.mp4" poster="img/poster-desktop.jpg" width="1440" height="900" autoplay loop muted playsinline preload="metadata" aria-label="Demo: the live terminal Wall with one agent in each state, the Work view's board, runs and schedules, then Settings"></video>
+    <video class="demo-mobile" src="chela-demo-mobile.mp4" poster="img/poster-mobile.jpg" width="390" height="844" autoplay loop muted playsinline preload="metadata" aria-label="Demo on a phone: a single pane, the agent pill switcher, the New session menu and the keybar"></video>
+    <figcaption>Recorded from a synthetic demo fleet.</figcaption>
+  </figure>
 </header>
 
-<section class="pitch wrap">
-  <h2>Most tools help you <em>talk to</em> agents.</h2>
-  <p>chela is for <strong>putting them to work and walking away</strong> — and watching them
-  however you already watch tmux: <code>tmux&nbsp;attach</code>, Mosh, or the live terminal-wall dashboard.</p>
+<section id="install" class="wrap">
+  <div class="section-head">
+    <h2>Install</h2>
+  </div>
+  <div class="install">
+    <p class="reqs"><strong>Requires</strong> Linux, WSL or macOS · Python ≥ 3.11 · <code>tmux</code> · <code>git</code> · <code>uv</code> · the <code>claude</code> CLI · <code>gh</code> (for the PR flow)</p>
+    <div class="codebox">
+      <pre id="install-cmd"><code>git clone https://github.com/Devail1/chelamux && cd chelamux
+uv sync --all-extras
+uv run chela status</code></pre>
+      <button class="copy" type="button" data-copy="install-cmd" hidden aria-label="Copy install commands">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+        <span>Copy</span>
+      </button>
+    </div>
+    <ol class="next">
+      <li>Log the <code>claude</code> CLI in once (<code>claude</code>, then <code>/login</code>) — chela drives it and never handles credentials.</li>
+      <li>Inside Claude Code, add the hooks plugin that enforces the merge gate:
+        <code>/plugin marketplace add Devail1/chelamux</code>, then <code>/plugin install chela@chela</code>.</li>
+      <li>Follow <a href="https://github.com/Devail1/chelamux/blob/main/docs/GETTING_STARTED.md">Getting started</a> — about 10 minutes from clone to a first agent-opened PR.</li>
+    </ol>
+    <p class="status-note">
+      <strong>Status: early.</strong> The core — scheduler, dispatcher, messaging — is solid and
+      tested; the dashboard and live wall ship in the same install. chela is
+      <strong>self-hosted and single-user</strong>: you run it on your own machine, driving one
+      Claude account (the whole fleet shares its 5h / weekly rate limits).
+    </p>
+  </div>
+</section>
+
+<section id="how" class="how">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>How it works</h2>
+      <p>From a tracker task to a merged PR — and the one place a human is asked.</p>
+    </div>
+    <ol class="pipe">
+      <li>
+        <span class="num" aria-hidden="true">1</span>
+        <svg class="ic" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V11a3 3 0 0 0-3-3H9"/></svg>
+        <h3><span class="sr-only">Step 1: </span>Tracker → worktree agent</h3>
+        <p>A ready task in Linear, GitHub issues or a <code>TODO.md</code> becomes one git worktree, one agent and one PR.</p>
+      </li>
+      <li>
+        <span class="num" aria-hidden="true">2</span>
+        <svg class="ic" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6M10 3v6L4.5 19a1.5 1.5 0 0 0 1.3 2h12.4a1.5 1.5 0 0 0 1.3-2L14 9V3"/><path d="M7 15h10"/></svg>
+        <h3><span class="sr-only">Step 2: </span>The judge corrupts the code</h3>
+        <p>For each guard the PR claims, it breaks the code under test and re-runs the suite. A guard that stays green sends the PR back for rework.</p>
+      </li>
+      <li class="gate">
+        <span class="num" aria-hidden="true">3</span>
+        <svg class="ic" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <h3><span class="sr-only">Step 3: </span><code>chela merge</code> refuses</h3>
+        <p>…unless the judge said <em>clean</em> on the PR's <strong>current head</strong>, CI is green and the PR is mergeable. A new push voids the verdict.</p>
+        <span class="tag">THE GATE</span>
+      </li>
+      <li>
+        <span class="num" aria-hidden="true">4</span>
+        <svg class="ic" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V10m0-1.5a1.5 1.5 0 0 1 3 0V11m0-1a1.5 1.5 0 0 1 3 0v4.5a6.5 6.5 0 0 1-6.5 6.5h-.6a6 6 0 0 1-4.6-2.2L4 15.5a1.5 1.5 0 0 1 2.3-1.9L9 16"/></svg>
+        <h3><span class="sr-only">Step 4: </span>One-tap override, audited</h3>
+        <p><code>chela merge --override --reason …</code> asks you. One Telegram tap (or the dashboard) approves it, re-checks head and CI, and records who approved.</p>
+      </li>
+    </ol>
+    <p class="more-line">The full lifecycle, every command and the rework rules: <a href="https://github.com/Devail1/chelamux/blob/main/docs/RUNS.md">docs/RUNS.md</a>.</p>
+  </div>
+</section>
+
+<section id="why" class="wrap">
+  <div class="section-head">
+    <h2>Why chela</h2>
+    <p>Other tools run agents well. chela is about what happens <em>after</em> the agent says “done”.</p>
+  </div>
+  <div class="table-scroll" role="region" aria-labelledby="cmp-cap" tabindex="0">
+    <table class="cmp">
+      <caption id="cmp-cap">Compared October 2026. The two generic columns describe the category; check the specific tool you use. Anthropic's features: <a href="https://claude.com/blog/agent-view-in-claude-code">Agent view</a>, <a href="https://code.claude.com/docs/en/sandboxing">Claude Code sandboxing</a>.</caption>
+      <thead>
+        <tr>
+          <th scope="col"><span class="sr-only">Capability</span></th>
+          <th scope="col" class="us">chela</th>
+          <th scope="col">Claude desktop app / Agent view</th>
+          <th scope="col">A tmux session manager</th>
+          <th scope="col">A hosted issue-to-PR platform</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">A merge gate that blocks</th>
+          <td class="us"><span class="v yes">Yes</span><small><code>chela merge</code> refuses; a direct <code>gh pr merge</code> is denied by the hooks plugin</small></td>
+          <td><span class="v no">No</span><small>you review and merge</small></td>
+          <td><span class="v no">No</span><small>not in scope</small></td>
+          <td><span class="v no">No</span><small>opens the PR; merging is your repo's review</small></td>
+        </tr>
+        <tr>
+          <th scope="row">Verdict bound to the commit</th>
+          <td class="us"><span class="v yes">Yes</span><small>judge verdict + override both bound to the PR head; a push voids them</small></td>
+          <td><span class="v no">No</span></td>
+          <td><span class="v no">No</span></td>
+          <td><span class="v no">No</span><small>typically CI status only</small></td>
+        </tr>
+        <tr>
+          <th scope="row">Local-first, on your subscription</th>
+          <td class="us"><span class="v yes">Yes</span><small>drives your logged-in <code>claude</code> CLI; no API key</small></td>
+          <td><span class="v yes">Yes</span></td>
+          <td><span class="v yes">Yes</span></td>
+          <td><span class="v no">No</span><small>runs in the vendor's cloud</small></td>
+        </tr>
+        <tr>
+          <th scope="row">Any CLI agent in a live terminal</th>
+          <td class="us"><span class="v part">Partly</span><small>any tmux window streams on the Wall; dispatch's <code>agent.cmd</code> is free-form, but the hooks and judge are built for Claude Code</small></td>
+          <td><span class="v no">No</span><small>Claude Code sessions</small></td>
+          <td><span class="v yes">Yes</span></td>
+          <td><span class="v no">No</span><small>the vendor's agent</small></td>
+        </tr>
+        <tr>
+          <th scope="row">Sandbox</th>
+          <td class="us"><span class="v part">Opt-in</span><small>off by default — <code>agent.sandbox: true</code> per workflow</small></td>
+          <td><span class="v part">Opt-in</span><small>Claude Code's Bash sandbox</small></td>
+          <td><span class="v no">No</span></td>
+          <td><span class="v yes">Yes</span><small>typically a cloud VM per task</small></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
 </section>
 
 <section id="features" class="wrap">
+  <div class="section-head">
+    <h2>And you can watch it all live</h2>
+    <p>A terminal-wall dashboard, a Telegram bridge to every session, and schedules for long-lived agents.</p>
+  </div>
   <div class="features">
     <div class="card">
-      <span class="ic">◷</span>
+      <span class="ic" aria-hidden="true">◷</span>
       <h3>Schedule agents</h3>
       <p>Poke an agent on an interval or cron — <code>every 1h</code>, <code>0 */8 * * *</code>,
       or once at a set time. chela types the prompt into its pane when it fires.</p>
     </div>
     <div class="card">
-      <span class="ic">⇶</span>
-      <h3>Dispatch tasks → PRs</h3>
-        <p>Point chela at a <code>WORKFLOW.md</code>. Each ready task — a Linear issue, a GitHub issue or a <code>- [ ]</code> line — becomes a git
-        worktree, an agent that implements it, and a pull request — which an <strong>adversarial
-      judge</strong> re-reviews before it reaches you.</p>
-    </div>
-    <div class="card">
-      <span class="ic">📥</span>
+      <span class="ic" aria-hidden="true">📥</span>
       <h3>Closes the loop</h3>
-      <p>An orchestrator is just another agent — it can only act when something messages it, so an
-      agent <em>finishing</em> is invisible to it. chela pushes completions, blocks and deaths back
-      into the orchestrator's own session, gated strictly on <code>idle</code> so a live agent is
-      never interrupted mid-thought. <a class="more" href="docs.html#orchestration">How it works →</a></p>
+      <p>An orchestrator is just another agent — it can only act when something messages it. chela
+      pushes completions, blocks and deaths back into the orchestrator's own session, gated on
+      <code>idle</code> so a live agent is never interrupted. <a class="more" href="docs.html#orchestration">How it works →</a></p>
     </div>
     <div class="card">
-      <span class="ic">▦</span>
+      <span class="ic" aria-hidden="true">▦</span>
       <h3>The wall</h3>
-      <p>A live grid of every agent's terminal — drag, lock, maximize — each pane marked
-      <em>working</em>, <em>needs you</em>, <em>PR open</em> or <em>idle</em>, with a context-window bar
-      and 5h / weekly rate-limit readouts. Its sibling view, <strong>Work</strong>, holds the dispatch
-      board, runs and schedules.</p>
+      <p>A live grid of every agent's terminal, each pane marked <em>working</em>, <em>needs you</em>,
+      <em>PR open</em> or <em>idle</em>, with a context-window bar and 5h / weekly rate-limit
+      readouts. Its sibling view, <strong>Work</strong>, holds the dispatch board, runs and schedules.</p>
     </div>
     <div class="card card-wide">
       <span class="ic" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg></span>
@@ -273,7 +450,7 @@ uv run chela run</pre>
   <div class="section-head">
     <h2>Share a live terminal — end-to-end encrypted</h2>
     <p>Hand someone a link and a pairing code. They watch the same session in their browser (and type, in a sandboxed session you allow) — everyone sees everyone as live cursors — and the relay in the middle
-    only ever sees ciphertext. chela is web-first collaboration, over the public internet.</p>
+    only ever sees ciphertext.</p>
   </div>
 
   <div class="e2e">
@@ -292,129 +469,119 @@ uv run chela run</pre>
 
   <div class="how-grid">
     <div class="how-item">
-      <h4>Link + pairing code</h4>
+      <h3>Link + pairing code</h3>
       <p>Click Share on any pane. The <strong>code is the key</strong> — 16 random bytes both
       browsers turn into AES-256-GCM keys with HKDF, in-browser. A wrong code simply can't decrypt.</p>
     </div>
     <div class="how-item">
-      <h4>Zero-knowledge relay</h4>
+      <h3>Zero-knowledge relay</h3>
       <p>A dumb WebSocket fan-out that broadcasts opaque frames — it never holds a key, and sees
       metadata only. Run your own (a small Cloudflare Worker) so even that stays yours.</p>
     </div>
     <div class="how-item">
-      <h4>Everyone's present</h4>
+      <h3>Everyone's present</h3>
       <p>Live labeled cursors mapped to the grid, plus a facepile of who's watching (the host gets
       a ★). Presence rides the same encryption — colorblind-safe, names not just colors.</p>
     </div>
     <div class="how-item">
-      <h4>Mobile &amp; revocable</h4>
+      <h3>Mobile &amp; revocable</h3>
       <p>Phone joiners get an on-screen keys-line, swipe-to-scroll, and touch cursors. Stop a share
       and the room dies + the code rotates; a topbar kill-switch stops everything at once.</p>
     </div>
   </div>
 </section>
 
-<section id="screenshots" class="wrap">
+<section id="release" class="release wrap">
+  <p><strong>Latest release:</strong> what shipped, version by version —
+    <a href="https://github.com/Devail1/chelamux/releases/latest">see it on GitHub Releases →</a></p>
+</section>
+
+<section id="faq" class="wrap">
   <div class="section-head">
-    <h2>See the fleet</h2>
-    <p>Two views: the <strong>Wall</strong> streams every agent's pane into one grid, and
-    <strong>Work</strong> shows the dispatch board, runs and schedules. Settings is one
-    <kbd>Ctrl</kbd>+<kbd>,</kbd> away.</p>
+    <h2>FAQ</h2>
   </div>
-  <div class="shots">
-    <figure>
-      <video class="demo-desktop" src="chela-demo-desktop.mp4" poster="img/wall.png" autoplay loop muted playsinline preload="metadata"></video>
-      <video class="demo-mobile" src="chela-demo-mobile.mp4" autoplay loop muted playsinline preload="metadata"></video>
-      <figcaption>The Wall (one agent in each state), Work's board, runs and schedules, then Settings on Ctrl+,. On a phone it collapses to a single pane with an agent pill switcher, a “+” New session button and a keybar — this clip follows your screen. Recorded from a synthetic demo fleet.</figcaption>
-    </figure>
-  </div>
-</section>
-
-<section id="new" class="wrap">
-    <div class="section-head">
-      <h2>New in 0.15</h2>
-    </div>
-    <div class="how-grid">
-      <div class="how-item">
-        <h4>Linear is a first-class queue</h4>
-        <p><code>tracker: kind: linear</code> reads a team's issues, <code>risk:high|normal|low</code> labels size the judge, the Work board mirrors the team's states, and <strong>New task</strong> creates the issue.</p>
+  <div class="faq">
+    <details>
+      <summary>Is it safe to run unattended?</summary>
+      <div class="a">
+        <p>Be clear about what is and isn't guarded. <strong>Dispatched agents run unsandboxed by
+        default</strong> — as your user, with your tools and network — under Claude Code's
+        <code>--permission-mode auto</code> classifier, with no inherited MCP servers and an
+        allowlisted environment. A measured sandbox exists and is <strong>opt-in per workflow</strong>
+        (<code>agent.sandbox: true</code> in <code>WORKFLOW.md</code>).</p>
+        <p>What chela does guarantee is the other end: nothing an agent writes reaches your base
+        branch through <code>chela merge</code> without a clean judge verdict on its head commit or
+        your audited approval. The full posture:
+        <a href="https://github.com/Devail1/chelamux/blob/main/docs/TRUST_AND_APPROVAL_POSTURE.md">TRUST_AND_APPROVAL_POSTURE.md</a>.</p>
       </div>
-      <div class="how-item">
-        <h4>Override in one tap</h4>
-        <p><code>chela merge --override</code> files a request and returns. Approve it with a Telegram button, the dashboard or <code>chela merge-approve</code>, and the approval completes the merge.</p>
-      </div>
-      <div class="how-item">
-        <h4>Closed tasks can come back</h4>
-        <p><code>chela close --requeue</code> re-dispatches a task on a fresh branch; <code>chela doctor</code> and a Work-board <strong>Requeue</strong> button flag a closed run that stalls a ready task.</p>
-      </div>
-      <div class="how-item">
-        <h4>A desktop-app sidebar</h4>
-        <p>Folder groups, one row per dispatched run with live judge progress, a VIEW menu, an orchestrator badge — and Archive closes a session, Unarchive resumes it.</p>
-      </div>
-      <div class="how-item">
-        <h4>Usage view</h4>
-        <p>5h / 7d limit bars, burn rate, and the top token consumers across every transcript — in Settings, beside spend.</p>
-      </div>
-      <div class="how-item">
-        <h4>Names that match Remote Control</h4>
-        <p>A window is named after its folder and launches with <code>--remote-control &lt;name&gt;</code>; a dashboard rename reaches claude.ai too.</p>
-      </div>
-    </div>
-  </section>
-
-<section id="how" class="how">
-  <div class="wrap">
-    <h2>How it works</h2>
-    <div class="how-grid">
-      <div class="how-item">
-        <h4><span class="step">01</span>tmux is the source of truth</h4>
-        <p>Discovery is <code>tmux list-windows</code> + <code>pane_current_path</code> — no
-        external state file, no daemon to coordinate with. tmux never lies about what's live.</p>
-      </div>
-      <div class="how-item">
-        <h4><span class="step">02</span>One window per agent</h4>
-        <p>Each window of your session is an agent; the window name is its display name.
-        Schedules and messages target it by name.</p>
-      </div>
-      <div class="how-item">
-        <h4><span class="step">03</span>Dispatch is isolated</h4>
-        <p>Every task runs in its own worktree on branch <code>&lt;project&gt;-&lt;n&gt;</code>,
-        opens a PR, and auto-closes when you merge — many tasks in flight at once.</p>
-      </div>
-      <div class="how-item">
-        <h4><span class="step">04</span>Watch from anywhere</h4>
-        <p>The dashboard binds loopback; put it behind a tailnet or SSH tunnel. The live wall is on
-        by default but only served on a loopback bind (it's a writable shell). Or skip the UI
-        entirely and <code>tmux attach</code> from a phone over Mosh.</p>
-      </div>
-    </div>
+    </details>
+    <details>
+      <summary>Does it need an API key?</summary>
+      <div class="a"><p>No. chela never handles credentials: it drives the <code>claude</code> CLI inside
+        your tmux windows, so every agent reuses the one login you made with <code>/login</code>
+        (or <code>claude setup-token</code> on a headless box). The tracker integrations need their own
+        tokens — <code>gh</code> logged in for GitHub, a personal API key for Linear.</p></div>
+    </details>
+    <details>
+      <summary>Linux, macOS or Windows?</summary>
+      <div class="a"><p>Linux and macOS natively. On Windows, run it inside WSL — chela is built on
+        <code>tmux</code>, which has no native Windows build.</p></div>
+    </details>
+    <details>
+      <summary>How is it different from Claude's built-in agents?</summary>
+      <div class="a"><p>Claude Code's Agent view and the desktop app are great at running and watching
+        many sessions, and chela runs those same Claude Code sessions. What chela adds is the part
+        after “done”: tracker-driven dispatch into worktrees, a mutation-testing judge whose verdict
+        is bound to the PR head, and a merge command that refuses without it. See
+        <a href="#why">Why chela</a>.</p></div>
+    </details>
+    <details>
+      <summary>What's the license?</summary>
+      <div class="a"><p><strong>AGPL-3.0-or-later.</strong> Use it freely, privately or commercially, and
+        modify it as you like; if you distribute a modified version or run one as a network service,
+        publish your source under the same licence. Versions up to and including 0.3.0 were MIT.
+        <a href="https://github.com/Devail1/chelamux/blob/main/LICENSE">LICENSE</a>.</p></div>
+    </details>
+    <details>
+      <summary>What does it cost?</summary>
+      <div class="a"><p>chela itself is free. The agents run on your own Claude plan, so the cost is
+        your subscription's usage: the whole fleet — coding agents and judges — shares one account's
+        5h / weekly limits. The dashboard shows the limit bars and burn rate so you can see it.</p></div>
+    </details>
   </div>
 </section>
-
-<section id="install" class="wrap" style="max-width:680px">
-  <div class="pitch" style="margin-bottom:24px">
-    <h2>Install</h2>
-    <p>Linux or macOS, Python ≥ 3.11, <code>tmux</code>, <code>git</code>, <code>uv</code>, <code>gh</code> and the <code>claude</code> CLI.
-      One command installs everything; a headless box can use plain <code>uv sync</code> (core only).</p>
-  </div>
-  <div class="install" style="margin-top:0">
-    <pre>git clone https://github.com/Devail1/chelamux && cd chelamux
-uv sync --all-extras        <span class="c"># core + dashboard + Telegram bridge, in one command</span>
-uv run chela status
-uv run chela dashboard      <span class="c"># http://127.0.0.1:5001</span>
-
-<span class="c"># does what's running still match your config?</span>
-uv run chela doctor</pre>
-  </div>
-  <p style="text-align:center; margin:22px 0 0; color:var(--text-dim); font-size:14px;">
-    Full setup, the <code>WORKFLOW.md</code> format, the CLI, and config live in the
-    <a href="docs.html">documentation</a>.
-  </p>
-</section>
+</main>
 
 <footer>
-  chela · AGPL v3 licensed · a control plane for Claude Code agents on tmux
+  <nav class="flinks" aria-label="Footer">
+    <a href="docs.html">Docs</a>
+    <a href="https://github.com/Devail1/chelamux">GitHub</a>
+    <a href="https://github.com/Devail1/chelamux/blob/main/LICENSE">License (AGPL-3.0)</a>
+    <a href="https://github.com/Devail1/chelamux/blob/main/CHANGELOG.md">Changelog</a>
+  </nav>
+  <p>chela — a merge gate and control plane for Claude Code agents on tmux</p>
 </footer>
+
+<script>
+  // Copy buttons stay hidden until this runs, so with JS off the command is just text.
+  for (const btn of document.querySelectorAll("button.copy[data-copy]")) {
+    const src = document.getElementById(btn.dataset.copy);
+    if (!src || !navigator.clipboard) continue;
+    const label = btn.querySelector("span");
+    btn.hidden = false;
+    btn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(src.innerText.trim() + "\n");
+        btn.dataset.state = "done"; label.textContent = "Copied ✓";
+      } catch {
+        const r = document.createRange(); r.selectNodeContents(src);
+        const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+        label.textContent = "Press Ctrl+C";
+      }
+      setTimeout(() => { delete btn.dataset.state; label.textContent = "Copy"; }, 2000);
+    });
+  }
+</script>
 
 </body>
 </html>
