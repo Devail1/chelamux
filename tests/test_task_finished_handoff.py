@@ -20,6 +20,16 @@ from chela import dispatcher, inbox
 from tests.test_dispatcher_rework import _FakeTmux, _row, _Source, _status, _wf
 
 
+# ⚖️🧹 CMX-88: `task-finished` now also runs `chela judge sweep`. These tests drive the OTHER
+# gates and have no real run to sweep, so the sweep is stubbed clean here; it has its own
+# tests in tests/test_judge_sweep.py.
+@pytest.fixture(autouse=True)
+def _clean_sweep(monkeypatch):
+    monkeypatch.setattr(dispatcher, "verify_sweep",
+                        lambda task_id: {"ok": True, "survivors": [], "mutations": 0,
+                                         "killed": 0, "cannot_verify": "", "recovered": ""})
+
+
 @pytest.fixture(autouse=True)
 def _own_runs_db(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
@@ -202,3 +212,33 @@ def test_a_rework_round_finished_without_a_handoff_does_not_inherit_the_last_one
         conn.commit()
     assert dispatcher.mark_awaiting_review("t1")["ok"] is True
     assert dispatcher.resolve_run("t1")["handoff"] is None
+
+
+def test_a_rework_round_finished_without_equivalents_does_not_inherit_the_last_ones(tmp_path):
+    """⚖️🧹 CMX-88: like the handoff, a round's `--sweep-equivalent` claims belong to THAT
+    round. A later round handing in with none must read NULL — inheriting round 1's claims
+    would show the judge an equivalence the agent never made for the current code."""
+    with dispatcher._db() as conn:
+        _row(conn, task_id="t1", status="running", worktree_path=str(tmp_path),
+             window_name=None)
+        conn.execute("UPDATE runs SET sweep_equivalents=? WHERE task_id='t1'",
+                     (json.dumps([_SWEEP_NOTE]),))
+        conn.commit()
+    assert dispatcher.mark_awaiting_review("t1")["ok"] is True
+    assert dispatcher.resolve_run("t1")["sweep_equivalents"] is None
+
+
+
+_SWEEP_NOTE = {"key": "chela/x.py:12", "why": "log-only branch", "mutations": ["if-false: a → b"]}
+
+
+@pytest.mark.parametrize("marker, expected", [
+    ({"task_id": "abc123", "sweep_equivalents": [_SWEEP_NOTE]}, [_SWEEP_NOTE]),
+    ({"task_id": "abc123"}, None),
+])
+def test_tick_persists_the_markers_sweep_equivalents_on_the_run(tmp_path, marker, expected):
+    """⚖️🧹 CMX-88: the daemon records the agent's `--sweep-equivalent` notes from the
+    marker; a marker without them leaves the column NULL."""
+    _, run = _tick_with_marker(tmp_path, marker)
+    stored = run["sweep_equivalents"]
+    assert (json.loads(stored) if stored is not None else None) == expected
