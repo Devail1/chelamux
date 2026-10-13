@@ -23,7 +23,8 @@ real fleet may reach one, so the demo shares NOTHING with it:
   ``pgrep`` cannot see the host's own chela services.
 
 The panes are ``claude_demo_agent.py`` scenes, one per status the Wall draws:
-working, needs you (waiting), done and idle.
+working, needs you (waiting), done and idle. The first one holds the decisions inbox
+(:data:`ORCHESTRATOR`), so its sidebar row wears the orchestrator badge.
 
 It also looks like a HEALTHY install, since Settings is on camera: chela runs from a
 git checkout (a copy of the package committed into a fresh repo with a local bare
@@ -65,6 +66,8 @@ AGENTS = [
     ("worker", "done"),
     ("infra", "idle"),
 ]
+# The window registered as THE orchestrator (chela.inbox) — the sidebar badges its row.
+ORCHESTRATOR = "api-server"
 
 
 def free_port(start: int | None = None) -> int:
@@ -300,6 +303,15 @@ def seed_launcher(env: dict[str, str]) -> None:
     (Path(env["CHELA_DIR"]) / "launcher.json").write_text(json.dumps(store, indent=2))
 
 
+def register_orchestrator(env: dict[str, str]) -> None:
+    """Make :data:`ORCHESTRATOR`'s window the decisions-inbox holder — what ``chela watch``
+    from that window would do. Run INSIDE the demo env, like :func:`seed`."""
+    wid = tmux(env, "display-message", "-p", "-t", f"{SESSION}:{ORCHESTRATOR}", "#{window_id}")
+    code = ("import sys\nfrom chela import inbox\n"
+            f"r = inbox.register({wid!r})\nsys.exit(0 if r.get('ok') else r.get('error'))\n")
+    subprocess.run([env["PYTHON"], "-c", code], env=env, cwd=env["HOME"], check=True)
+
+
 def tmux(env: dict[str, str], *args: str) -> str:
     r = subprocess.run(["tmux", *args], env=env, capture_output=True, text=True, check=True)
     return r.stdout.strip()
@@ -342,6 +354,7 @@ def up() -> dict:
     make_app(env)
     seed(env)
     seed_launcher(env)
+    register_orchestrator(env)
     logs = home / ".cache" / "chela-demo" / "logs"
     logs.mkdir(parents=True)
     procs = {}
