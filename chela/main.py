@@ -2352,6 +2352,10 @@ def _task_finished_sweep(task_id: str, notes: list[str]) -> list[dict]:
         print(f"⚖️ sweep CANNOT VERIFY — {result['cannot_verify']}")
         print("   task-finished refuses until this resolves.")
         sys.exit(1)
+    skipped = _print_sweep_skipped(result)
+    if skipped:
+        print(f"⚠ {skipped} mutation(s) SKIPPED — those lines were never measured; a skip is "
+              "unmeasured, not killed.")
     survivors = result.get("survivors") or []
     uncovered, stray = sweep.check_equivalents(survivors, equivalents)
     if stray:
@@ -2375,7 +2379,8 @@ def _task_finished_sweep(task_id: str, notes: list[str]) -> list[dict]:
         e["mutations"] = by_key.get(e["key"], [])
         print(f"  [EQUIVALENT] {e['key']} — {e['why'][:100]}")
     print(f"✓ sweep: {result.get('mutations', 0)} mutation(s), {result.get('killed', 0)} "
-          f"killed, {len(survivors)} survivor(s) declared equivalent — proceeding.")
+          f"killed, {skipped} skipped (unmeasured), {len(survivors)} survivor(s) declared "
+          "equivalent — proceeding.")
     return equivalents
 
 
@@ -2669,17 +2674,12 @@ def cmd_judge_sweep(args) -> None:
         print(f"⚠ {result['recovered']}")
     for note in result["notes"]:
         print(f"  {note}")
-    for r in result["unparseable"]:
-        print(f"  [SKIPPED ] {r['key']} {r['mutation']} — does not parse, not counted as killed")
-    for r in result["not_applied"] + result["invalid"]:
-        print(f"  [SKIPPED ] {r['key']} {r['mutation']} — {r['reason'][:120]}")
+    skipped = _print_sweep_skipped(result)
     for r in result["survivors"]:
         print(f"  [SURVIVED] {r['key']} {r['mutation']}")
     if result["cannot_verify"]:
         print(f"⚠ CANNOT VERIFY — {result['cannot_verify']}")
         sys.exit(2)
-    skipped = (len(result["unparseable"]) + len(result["not_applied"])
-               + len(result["invalid"]))
     print(f"sweep: {result['mutations']} mutation(s) — {result['killed']} killed, "
           f"{len(result['survivors'])} survived, {skipped} skipped "
           f"({result['seconds']}s)")
@@ -2689,6 +2689,19 @@ def cmd_judge_sweep(args) -> None:
               "assertion. If no outcome can change under it, `chela task-finished` accepts "
               "--sweep-equivalent '<file:line>: <why>'.")
         sys.exit(1)
+
+
+def _print_sweep_skipped(result: dict) -> int:
+    """Print every mutation the sweep generated but never MEASURED — unparseable, not
+    applied, invalid — as ``[SKIPPED ]``, and return how many. Shared by ``chela judge
+    sweep`` and ``task-finished`` (CMX-116): a skipped line was never tested, so it must be
+    named, never folded silently into "✓ N killed"."""
+    for r in result.get("unparseable") or []:
+        print(f"  [SKIPPED ] {r['key']} {r['mutation']} — does not parse, not counted as killed")
+    for r in (result.get("not_applied") or []) + (result.get("invalid") or []):
+        print(f"  [SKIPPED ] {r['key']} {r['mutation']} — {r['reason'][:120]}")
+    return (len(result.get("unparseable") or []) + len(result.get("not_applied") or [])
+            + len(result.get("invalid") or []))
 
 
 def cmd_judge_show(args) -> None:

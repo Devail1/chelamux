@@ -2358,3 +2358,177 @@ def test_the_judge_view_survives_every_bad_row_shape(tmp_path):
     ok = dispatcher._judge_sweep_equivalents(
         {"sweep_equivalents": json.dumps([{"key": "a.py:1", "why": "w", "mutations": ["m"]}])})
     assert "`a.py:1` — w (m)" in ok
+
+
+# --- CMX-116: skips are named, a hung git and a binary .py are CANNOT VERIFY -----------------
+
+
+def _skip(status: str, line: int, reason: str = "") -> dict:
+    m = sweep.Mutation("feat.py", line, "if-false", "    if x:", "    if False and (x):")
+    return sweep.SweepResult(m, status, reason).as_dict()
+
+
+SKIPPY_RESULT = {
+    "ok": True, "mutations": 5, "killed": 2, "survivors": [], "cannot_verify": "",
+    "recovered": "", "notes": [], "selection": "", "seconds": 1.0,
+    "unparseable": [_skip(sweep.UNPARSEABLE, 11)],
+    "not_applied": [_skip(sweep.NOT_APPLIED, 12, "anchor occurs twice")],
+    "invalid": [_skip("INVALID", 13, "the mutation made the suite ERROR")],
+}
+
+
+def test_task_finished_names_every_skipped_mutation_and_counts_them_unmeasured(capsys):
+    with patch.object(dispatcher, "verify_sweep", return_value=SKIPPY_RESULT), \
+         patch.object(dispatcher, "check_no_new_guards", return_value=False), \
+         patch.object(dispatcher, "request_task_finished",
+                      return_value={"ok": True, "task_id": "cmx-88"}):
+        assert _task_finished() is None
+    out = capsys.readouterr().out
+    assert ("  [SKIPPED ] feat.py:11 if-false: `if x:` → `if False and (x):` — does not "
+            "parse, not counted as killed") in out
+    assert "  [SKIPPED ] feat.py:12 if-false: `if x:` → `if False and (x):` — anchor occurs twice" in out
+    assert ("  [SKIPPED ] feat.py:13 if-false: `if x:` → `if False and (x):` — the mutation "
+            "made the suite ERROR") in out
+    assert "⚠ 3 mutation(s) SKIPPED — those lines were never measured" in out
+    assert ("✓ sweep: 5 mutation(s), 2 killed, 3 skipped (unmeasured), 0 survivor(s) "
+            "declared equivalent — proceeding.") in out
+
+
+def test_task_finished_with_no_skip_says_zero_skipped_and_no_warning(capsys):
+    clean = {**SKIPPY_RESULT, "mutations": 2, "unparseable": [], "not_applied": [],
+             "invalid": []}
+    with patch.object(dispatcher, "verify_sweep", return_value=clean), \
+         patch.object(dispatcher, "check_no_new_guards", return_value=False), \
+         patch.object(dispatcher, "request_task_finished",
+                      return_value={"ok": True, "task_id": "cmx-88"}):
+        assert _task_finished() is None
+    out = capsys.readouterr().out
+    assert "SKIPPED" not in out
+    assert "✓ sweep: 2 mutation(s), 2 killed, 0 skipped (unmeasured), 0 survivor(s)" in out
+
+
+def test_task_finished_names_skips_even_when_it_refuses_on_a_survivor(capsys):
+    result = {**SKIPPY_RESULT, "survivors": [_skip(sweep.judge.SURVIVED, 14)]}
+    with patch.object(dispatcher, "verify_sweep", return_value=result), \
+         patch.object(dispatcher, "check_no_new_guards", return_value=False), \
+         patch.object(dispatcher, "request_task_finished") as req:
+        assert _task_finished() == 1
+    out = capsys.readouterr().out
+    assert "[SKIPPED ] feat.py:11" in out and "[SURVIVED] feat.py:14" in out
+    req.assert_not_called()
+
+
+def test_cli_prints_every_skipped_mutation(tmp_path, capsys):
+    from chela import main
+
+    with patch.object(sweep, "run_sweep", return_value=SKIPPY_RESULT), \
+         patch.object(sys, "argv", ["chela", "judge", "sweep", "--cwd", str(tmp_path),
+                                    "--test-cmd", TEST_CMD]):
+        main.main()
+    out = capsys.readouterr().out
+    assert "  [SKIPPED ] feat.py:11 if-false" in out and "does not parse" in out
+    assert "  [SKIPPED ] feat.py:12 if-false" in out and "anchor occurs twice" in out
+    assert "  [SKIPPED ] feat.py:13 if-false" in out and "made the suite ERROR" in out
+    assert "sweep: 5 mutation(s) — 2 killed, 0 survived, 3 skipped (1.0s)" in out
+
+
+def test_cli_prints_a_real_unparseable_mutation_as_skipped(tmp_path, monkeypatch, capsys):
+    from chela import main
+
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    line = BRANCH_FEAT.split("\n")[NEW_IF_LINE - 1]
+    broken = sweep.Mutation("feat.py", NEW_IF_LINE, "if-false", line, "    if False and (x == 3:")
+    monkeypatch.setattr(sweep, "collect_mutations", lambda wt, base: ([broken], ""))
+    with patch.object(sys, "argv", ["chela", "judge", "sweep", "--cwd", str(root),
+                                    "--base", "origin/dev", "--test-cmd", TEST_CMD]):
+        main.main()
+    out = capsys.readouterr().out
+    assert f"[SKIPPED ] feat.py:{NEW_IF_LINE} if-false" in out
+    assert "1 skipped" in out
+
+
+@pytest.mark.parametrize("line", ["/* if (a === 1) { return 0; } */",
+                                  "  /* a > b */",
+                                  "    /** if (x == 2) */"])
+def test_js_a_line_opening_a_block_comment_produces_no_mutation(line):
+    assert sweep.js_mutations("m.js", line + "\n", {1}) == []
+
+
+def test_js_code_after_a_closed_block_comment_on_its_own_line_is_still_code():
+    """The negative fixture: only a line that STARTS with a comment opener is skipped."""
+    muts = sweep.js_mutations("m.js", "if (a === 1) { /* x */ }\n", {1})
+    assert {m.kind for m in muts} == {"if-false", "compare-flip"}
+
+
+def test_a_hung_git_is_cannot_verify_naming_the_command(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    real = subprocess.run
+
+    def fake(argv, **kw):
+        if argv[:4] == ["git", "-C", str(root), "merge-base"]:
+            raise subprocess.TimeoutExpired(argv, kw["timeout"])
+        return real(argv, **kw)
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake)
+    report = _sweep(root)
+    assert report.cannot_verify == (
+        f"`git merge-base origin/dev HEAD` did not finish within 60s in {root} — a hung git "
+        "cannot say which lines changed")
+    assert report.results == []
+
+
+def test_a_hung_per_file_git_diff_is_cannot_verify_too(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    real = subprocess.run
+
+    def fake(argv, **kw):
+        if "-U0" in argv:
+            raise subprocess.TimeoutExpired(argv, kw["timeout"])
+        return real(argv, **kw)
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake)
+    lines, err = sweep.changed_lines(root, "origin/dev")
+    assert lines == {}
+    assert err.startswith("`git diff -U0 --no-color --no-ext-diff --no-renames ")
+    assert err.endswith("-- feat.py` did not finish within 60s in "
+                        f"{root} — a hung git cannot say which lines changed")
+
+
+def test_a_hung_git_reaches_task_finished_as_cannot_verify_not_a_traceback(tmp_path, monkeypatch,
+                                                                            capsys):
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    _run_row(tmp_path, root)
+
+    def fake(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, kw["timeout"])
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake)
+    with patch.object(dispatcher, "check_no_new_guards", return_value=False), \
+         patch.object(dispatcher, "request_task_finished") as req:
+        assert _task_finished() == 1
+    out = capsys.readouterr().out
+    assert "sweep CANNOT VERIFY — `git merge-base origin/dev HEAD` did not finish" in out
+    req.assert_not_called()
+
+
+def test_git_timeout_is_sixty_seconds():
+    assert sweep.GIT_TIMEOUT_SECONDS == 60
+
+
+def test_a_changed_py_with_a_nul_byte_is_cannot_verify_naming_the_file(tmp_path):
+    root = _plain_repo(tmp_path / "r", {"bin.py": "x = 1\n"},
+                       {"bin.py": b"x = 1\nif x == 1:\n    y = '\x00'\n"})
+    lines, err = sweep.changed_lines(root, "origin/dev")
+    assert lines == {}
+    assert err == ("bin.py is a changed source file git diffs as BINARY (a NUL byte?) — it has "
+                   "no readable hunks, so its changed lines cannot be swept")
+    report = _sweep(root)
+    assert report.cannot_verify == err and report.results == []
+
+
+def test_a_text_line_that_reads_like_the_binary_notice_is_still_swept(tmp_path):
+    body = 's = """\nBinary files a and b differ\n"""\nif s == "":\n    pass\n'
+    root = _plain_repo(tmp_path / "r", {}, {"txt.py": body})
+    lines, err = sweep.changed_lines(root, "origin/dev")
+    assert err == ""
+    assert lines == {"txt.py": {1, 2, 3, 4, 5}}
