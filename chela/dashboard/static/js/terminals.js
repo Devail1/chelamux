@@ -2082,6 +2082,7 @@ async function renderTerminals() {
     _refitWallForDock();
 
     renderMobileSwitcher();   // phone single-mode agent pills (no-op on desktop)
+    _kbPin();                 // CMX-102: a freshly built pane re-fits to the keybar if the keyboard is up
     _bindHeaderSwipe();       // header swipe → prev/next agent (idempotent)
     _bindFocusPromote();      // click a strip pane's header to promote it while Focus is on (idempotent)
     _refreshRooms();          // paint room accents on the first render, not 4s later
@@ -3958,14 +3959,60 @@ function _kbPin() {
     const top = Math.max(0, Math.round(vv.offsetTop + vv.height - bar.offsetHeight));
     bar.style.bottom = 'auto';
     bar.style.top = top + 'px';
+    _kbFitPane(vv, bar, occluded);
 }
+
+// CMX-102: the phone pane's height, MEASURED rather than summed from constants.
+// The CSS calc (style.css, mobile block) subtracts --kb-occluded and a fixed set
+// of chrome constants, but it is blind to everything that is not one of them —
+// .canvas's 60px fab clearance, iOS's form-accessory row, a dvh that disagrees
+// with innerHeight once the keyboard is up — so with the keyboard open the pane
+// ran past the keybar and its bottom rows (Claude's status line, then each new
+// line of a multi-line prompt) sat behind it until you scrolled the page.
+// While the keyboard is open we therefore size the pane from live geometry: its
+// box ends exactly at the keybar's TOP edge, both read in layout-viewport coords
+// (the same coords `top` was just pinned in). ttyd's xterm re-fits to its iframe
+// on resize, so its rows follow. Keyboard closed / desktop → null (the CSS calc
+// stays in charge, unchanged).
+function _paneFitHeight({ mobile, occluded, vvTop, vvHeight, barHeight, paneTop }) {
+    if (!mobile || !(occluded > 0)) return null;
+    return Math.max(0, Math.floor(vvTop + vvHeight - barHeight - paneTop));
+}
+
+function _kbFitPane(vv, bar, occluded) {
+    const root = document.documentElement;
+    const pane = document.querySelector('#term-stage.term-single .term-pane');
+    const fit = pane ? _paneFitHeight({
+        mobile: _isMobileTerm(), occluded,
+        vvTop: vv.offsetTop, vvHeight: vv.height,
+        barHeight: bar.offsetHeight, paneTop: pane.getBoundingClientRect().top,
+    }) : null;
+    if (fit === null) {
+        root.classList.remove('kb-fit');
+        root.style.removeProperty('--kb-pane-fit-h');
+        return;
+    }
+    root.style.setProperty('--kb-pane-fit-h', fit + 'px');
+    root.classList.add('kb-fit');
+}
+
 if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', _kbPin);
     window.visualViewport.addEventListener('scroll', _kbPin);
 }
+// Re-fit when the keybar's OWN height changes (rotation, font size, the safe-area
+// inset its padding carries) or the window rotates — not only on viewport events.
+window.addEventListener('resize', _kbPin);
+// The pane's top is read live, so a scroll of the phone's scroller (.canvas)
+// moves it — re-fit then too, or the bottom edge drifts off the keybar.
+document.querySelector('.canvas')?.addEventListener('scroll', _kbPin, { passive: true });
+if (typeof ResizeObserver === 'function') {
+    const _kbBar = document.getElementById('term-keybar');
+    if (_kbBar) new ResizeObserver(() => _kbPin()).observe(_kbBar);
+}
 
 // --- Stage 0: ES-module exports ---
-export { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
