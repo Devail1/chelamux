@@ -34,6 +34,16 @@ from chela import dispatcher, event_log
 
 TEST_CMD = f'"{sys.executable}" -m pytest -q'
 
+
+# ⚖️🧹 CMX-88: `task-finished` now also runs `chela judge sweep`. These tests drive the OTHER
+# gates and have no real run to sweep, so the sweep is stubbed clean here; it has its own
+# tests in tests/test_judge_sweep.py.
+@pytest.fixture(autouse=True)
+def _clean_sweep(monkeypatch):
+    monkeypatch.setattr(dispatcher, "verify_sweep",
+                        lambda task_id: {"ok": True, "survivors": [], "mutations": 0,
+                                         "killed": 0, "cannot_verify": "", "recovered": ""})
+
 GUARD_PY = '''\
 def chip(state):
     glyph = "*" if state == "on" else "-"

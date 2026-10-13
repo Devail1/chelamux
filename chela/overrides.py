@@ -38,6 +38,13 @@ On top of that the merge-gate hook (:mod:`chela.mergegate`) denies a session's
 ``chela.overrides.decide``. The env check is deliberately NOT applied to the two service
 channels: a pm2 service can inherit a Claude marker from the shell that started it (CMX-21),
 and that must not silently disable the one-tap button the operator relies on.
+
+🏷️ **Releases ride the same store (CMX-87).** ``chela release X.Y.Z`` (:mod:`chela.release`)
+records a request with ``kind: "release"``, bound (``head_sha``) to the ``dev`` commit the
+release was cut from. Everything above holds for it unchanged — one card, the same three
+approval surfaces, human-only, one decision under the lock — except what an approval DOES:
+:func:`chela.release.complete` pushes ``main`` + tag + ``dev`` instead of merging a PR, a
+success ends ``released``, and the sweep expires it when origin's ``dev`` moves.
 """
 from __future__ import annotations
 
@@ -61,7 +68,9 @@ MERGED = "merged"
 DENIED = "denied"
 EXPIRED = "expired"
 FAILED = "failed"
-FINAL_STATES = (MERGED, DENIED, EXPIRED, FAILED)
+RELEASED = "released"    # a `kind: release` request whose pushes all landed (CMX-87)
+FINAL_STATES = (MERGED, DENIED, EXPIRED, FAILED, RELEASED)
+SUCCESS_STATES = (MERGED, RELEASED)
 
 # The request stays answerable until it is decided or its head moves — this is only the
 # backstop for a request everybody forgot. `CHELA_OVERRIDE_WAIT_S` keeps its name (it was the
@@ -217,20 +226,48 @@ def agent_refusal(env=None) -> str | None:
     return None
 
 
+def _is_release(rec: dict | None) -> bool:
+    return bool(rec) and rec.get("kind") == "release"
+
+
+def not_done(rec: dict) -> str:
+    """What did NOT happen, for a request that ended without succeeding."""
+    if not _is_release(rec):
+        return "nothing was merged"
+    pushed = rec.get("pushed") or []
+    return f"pushed only: {', '.join(pushed)}" if pushed else "nothing was pushed"
+
+
+def _cleanup_release(rec: dict | None) -> None:
+    """A release request that reached a final state no longer needs its worktree/branch."""
+    if not _is_release(rec) or rec.get("state") not in FINAL_STATES:
+        return
+    try:
+        from chela import release
+        release.cleanup(rec, keep_tag=rec.get("state") == RELEASED
+                        or "main" in (rec.get("pushed") or []))
+    except Exception:                                        # noqa: BLE001 — best effort
+        log.warning("release cleanup failed for %s", rec.get("id"), exc_info=True)
+
+
 def _tell(rec: dict, outcome: str, detail: str | None) -> None:
     """Tell the operator (push notification) and the orchestrator (inbox) how a request
     ended, when it did NOT merge. The Telegram message is edited by the bridge's relay."""
     label = rec.get("label") or rec.get("task_id")
-    text = f"override of {label} {outcome}" + (f": {detail}" if detail else "")
+    what = label if _is_release(rec) else f"override of {label}"
+    text = f"{what} {outcome}" + (f": {detail}" if detail else "")
+    missed = not_done(rec)
     try:
         if notify.enabled():
-            notify.send(f"{text}\n\nNothing was merged.", title=f"chela: override {outcome}")
+            notify.send(f"{text}\n\n{missed[:1].upper()}{missed[1:]}.",
+                        title=f"chela: {'release' if _is_release(rec) else 'override'} "
+                              f"{outcome}")
     except Exception:                                        # noqa: BLE001 — best effort
         log.debug("override notify failed", exc_info=True)
     try:
         from chela import inbox
-        inbox.enqueue(f"override_{outcome}",
-                      f"⚖️ {text} — nothing was merged",
+        inbox.enqueue(f"{'release' if _is_release(rec) else 'override'}_{outcome}",
+                      f"{'🏷️' if _is_release(rec) else '⚖️'} {text} — {missed}",
                       {"request_id": rec.get("id"), "task_id": rec.get("task_id"),
                        "pr_url": rec.get("pr_url"), "state": outcome, "detail": detail})
     except Exception:                                        # noqa: BLE001 — best effort
@@ -240,11 +277,16 @@ def _tell(rec: dict, outcome: str, detail: str | None) -> None:
 def _expire(rec: dict, detail: str) -> dict | None:
     done = _finish(rec["id"], EXPIRED, detail, from_states=(PENDING, MERGING))
     if done is not None:
-        event_log.append("orchestrator.merge_override_expired",
-                         f"override of {rec.get('label')} expired: {detail}",
-                         payload={**_public(done)})
+        event_log.append("orchestrator.release_expired" if _is_release(done)
+                         else "orchestrator.merge_override_expired",
+                         f"{_what(done)} expired: {detail}", payload={**_public(done)})
+        _cleanup_release(done)
         _tell(done, EXPIRED, detail)
     return done
+
+
+def _what(rec: dict) -> str:
+    return rec.get("label") if _is_release(rec) else f"override of {rec.get('label')}"
 
 
 def _public(rec: dict) -> dict:
@@ -291,37 +333,50 @@ def decide(request_id: str, approve: bool, by: str, *, channel: str = "terminal"
         return {"ok": False, "state": EXPIRED, "detail": (done or rec).get("detail")}
 
     if not approve:
-        event_log.append("orchestrator.merge_override_denied",
-                         f"override of {rec.get('label')} DENIED by {by}",
+        event_log.append("orchestrator.release_denied" if _is_release(rec)
+                         else "orchestrator.merge_override_denied",
+                         f"{_what(rec)} DENIED by {by}",
                          payload={**_public(rec), "approved_by": by})
+        _cleanup_release(rec)
         return {"ok": True, "state": DENIED, "detail": f"denied by {by}"}
 
-    from chela import contract
     try:
-        outcome = contract.complete_override(rec, by)
+        if _is_release(rec):
+            from chela import release
+            outcome = release.complete(rec, by)
+        else:
+            from chela import contract
+            outcome = contract.complete_override(rec, by)
     except Exception as e:                                   # noqa: BLE001 — never wedge
         log.exception("override completion crashed for %s", request_id)
         outcome = {"ok": False, "state": FAILED, "detail": f"internal error: {e}"}
-    state = outcome.get("state") or (MERGED if outcome.get("ok") else FAILED)
+    success = RELEASED if _is_release(rec) else MERGED
+    state = outcome.get("state") or (success if outcome.get("ok") else FAILED)
     detail = outcome.get("detail")
+    extra = {"pushed": outcome.get("pushed") or []} if _is_release(rec) else {}
     if state == EXPIRED:
         done = _expire(rec, detail or "the PR head moved")
         return {"ok": False, "state": EXPIRED, "detail": (done or rec).get("detail")}
     done = _finish(request_id, state, detail, from_states=(MERGING,),
-                   merge_commit_sha=outcome.get("merge_commit_sha"))
-    if state != MERGED:
-        event_log.append("orchestrator.merge_override_failed",
-                         f"override of {rec.get('label')} approved by {by} but NOT merged: "
-                         f"{detail}", payload={**_public(done or rec), "approved_by": by})
-        _tell(done or rec, FAILED, detail)
-    return {"ok": state == MERGED, "state": state, "detail": detail,
+                   merge_commit_sha=outcome.get("merge_commit_sha"), **extra)
+    _cleanup_release(done)
+    if state not in SUCCESS_STATES:
+        event_log.append("orchestrator.release_failed" if _is_release(rec)
+                         else "orchestrator.merge_override_failed",
+                         f"{_what(rec)} approved by {by} but NOT "
+                         f"{'released' if _is_release(rec) else 'merged'}: {detail}",
+                         payload={**_public(done or rec), "approved_by": by})
+        _tell(done or {**rec, **extra}, FAILED, detail)
+    return {"ok": state in SUCCESS_STATES, "state": state, "detail": detail,
             "merge_commit_sha": outcome.get("merge_commit_sha")}
 
 
-def sweep(now: float | None = None, head_of=None) -> list[dict]:
+def sweep(now: float | None = None, head_of=None, dev_head_of=None) -> list[dict]:
     """Expire every pending request whose TTL ran out or whose PR head moved past the
     recorded SHA. ``head_of(task_id) -> sha | None`` defaults to the run row's
     ``pr_head_sha`` (the dispatcher refreshes it from GitHub every tick — no network here).
+    A release request's "head" is origin's ``dev``: ``dev_head_of(rec) -> sha | None``
+    defaults to :func:`chela.release.remote_dev_head` (a cached ``git ls-remote``).
     Returns the requests it expired."""
     now = time.time() if now is None else now
     if head_of is None:
@@ -329,6 +384,10 @@ def sweep(now: float | None = None, head_of=None) -> list[dict]:
             from chela import dispatcher
             run = dispatcher.resolve_run(task_id) if task_id else None
             return (run or {}).get("pr_head_sha")
+    if dev_head_of is None:
+        def dev_head_of(rec):
+            from chela import release
+            return release.remote_dev_head(rec)
     expired = []
     for rec in all_requests():
         if rec.get("state") != PENDING:
@@ -337,14 +396,19 @@ def sweep(now: float | None = None, head_of=None) -> list[dict]:
             why = f"not decided within {rec.get('ttl') or 0:.0f}s"
         else:
             try:
-                head = head_of(rec.get("task_id"))
+                head = (dev_head_of(rec) if _is_release(rec)
+                        else head_of(rec.get("task_id")))
             except Exception:                                # noqa: BLE001 — best effort
                 head = None
             if not head or head == rec.get("head_sha"):
                 continue
-            why = (f"the PR head moved ({str(rec.get('head_sha'))[:12]} → {head[:12]}) — "
-                   "a new push invalidates the request; request a new override for the new "
-                   "head")
+            if _is_release(rec):
+                why = (f"dev moved ({str(rec.get('head_sha'))[:12]} → {head[:12]}) after the "
+                       "release was cut — cut it again from the new dev")
+            else:
+                why = (f"the PR head moved ({str(rec.get('head_sha'))[:12]} → {head[:12]}) "
+                       "— a new push invalidates the request; request a new override for the "
+                       "new head")
         done = _expire(rec, why)
         if done is not None:
             expired.append(done)

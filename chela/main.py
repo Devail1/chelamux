@@ -2253,6 +2253,10 @@ def cmd_task_finished(args) -> None:
     purpose: an old, in-flight agent must not be broken by a check it was never told to
     run.
 
+    ⚖️🧹 CMX-88: it then RUNS ``chela judge sweep`` against the run's worktree (see
+    :func:`_task_finished_sweep`) and refuses while a survivor remains that is not named,
+    with a reason, in ``--sweep-equivalent '<file:line>: <why>'``.
+
     📝 CMX-52: ``--handoff TEXT`` is the agent's note for its reviewer — persisted on the run
     (``runs.handoff``) by the daemon along with the transition, and shown sanitised in the
     inbox notice and on the Dispatch board. Omitting it stores nothing (NULL); ``--handoff
@@ -2305,14 +2309,74 @@ def cmd_task_finished(args) -> None:
               "--self-check-experiments <path> (or --no-new-guards if this PR truly adds "
               "no guards) next time.")
 
-    result = dispatcher.request_task_finished(
-        args.task_id, handoff=getattr(args, "handoff", None),
-    )
+    accepted = _task_finished_sweep(args.task_id, getattr(args, "sweep_equivalent", None) or [])
+    kwargs = {"handoff": getattr(args, "handoff", None)}
+    if accepted:
+        kwargs["sweep_equivalents"] = accepted
+    result = dispatcher.request_task_finished(args.task_id, **kwargs)
     if not result.get("ok"):
         print(f"task-finished: {result.get('error', 'unknown error')}")
         sys.exit(1)
     print(f"Task {result['task_id']}: completion requested — chela will transition it to "
           "awaiting review and close this window on its next pass.")
+
+
+def _task_finished_sweep(task_id: str, notes: list[str]) -> list[dict]:
+    """⚖️🧹 CMX-88: ``task-finished``'s sweep gate. Runs the mechanical sweep against the
+    run's own worktree and exits 1 unless every survivor is named — with a reason — in a
+    ``--sweep-equivalent`` note, and every note names a real survivor (a note for a line
+    that did not survive is a claim about nothing, and would launder a future one). Returns
+    the accepted notes, each with the mutations it covers, for the run record."""
+    from chela import sweep
+
+    equivalents, err = sweep.parse_equivalents(notes)
+    if err:
+        print(f"task-finished: {err}")
+        sys.exit(2)
+    print("⚖️🧹 task-finished: running `chela judge sweep` on this run's changed lines…",
+          flush=True)
+    result = dispatcher.verify_sweep(task_id)
+    if not result.get("ok"):
+        print(f"task-finished: the sweep could not run — {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    if result.get("skipped"):
+        print(f"⚠ task-finished: sweep skipped — {result['skipped']}")
+        if equivalents:
+            print("task-finished: --sweep-equivalent names a survivor, but no sweep ran — "
+                  "drop it: " + ", ".join(e["key"] for e in equivalents))
+            sys.exit(1)
+        return []
+    if result.get("recovered"):
+        print(f"⚠ {result['recovered']}")
+    if result.get("cannot_verify"):
+        print(f"⚖️ sweep CANNOT VERIFY — {result['cannot_verify']}")
+        print("   task-finished refuses until this resolves.")
+        sys.exit(1)
+    survivors = result.get("survivors") or []
+    uncovered, stray = sweep.check_equivalents(survivors, equivalents)
+    if stray:
+        for e in stray:
+            print(f"  [NOT A SURVIVOR] {e['key']}")
+        print(f"task-finished: {len(stray)} --sweep-equivalent note(s) name a line the sweep "
+              "did not report as a survivor — only a SURVIVED line can be declared equivalent.")
+        sys.exit(1)
+    if uncovered:
+        for r in uncovered:
+            print(f"  [SURVIVED] {r['key']} {r['mutation']}")
+        print(f"⚖️🧹 {len(uncovered)} sweep survivor(s) — a changed check no test can tell "
+              "apart from its corruption. Add a test that goes RED under each mutation, then "
+              "call task-finished again. Only if no outcome can change under one, pass "
+              "--sweep-equivalent '<file:line>: <why>' for it.")
+        sys.exit(1)
+    by_key: dict[str, list[str]] = {}
+    for r in survivors:
+        by_key.setdefault(r["key"], []).append(r["mutation"])
+    for e in equivalents:
+        e["mutations"] = by_key.get(e["key"], [])
+        print(f"  [EQUIVALENT] {e['key']} — {e['why'][:100]}")
+    print(f"✓ sweep: {result.get('mutations', 0)} mutation(s), {result.get('killed', 0)} "
+          f"killed, {len(survivors)} survivor(s) declared equivalent — proceeding.")
+    return equivalents
 
 
 def cmd_request_push(args) -> None:
@@ -2575,6 +2639,56 @@ def cmd_judge_self_check(args) -> None:
         sys.exit(2)
     print(f"✓ every guard held ({len(result['outcomes'])} experiment(s), all KILLED) — "
           "safe to commit.")
+
+
+def cmd_judge_sweep(args) -> None:
+    """⚖️🧹 CMX-88: the MECHANICAL pre-hand-in pass — every conditional, comparison and return
+    code the branch changed vs ``--base`` is corrupted in turn (``if False and (X)``, ``==`` →
+    ``!=``, ``0`` ↔ ``1``…), measured with the judge's own per-mutation test selection, and
+    restored. See :mod:`chela.sweep`.
+
+    Exit codes: ``0`` no survivor, ``1`` a mutation SURVIVED (add a test that goes red under
+    it), ``2`` CANNOT VERIFY (a red baseline, an unresolvable base, a leftover recovery marker
+    that cannot be applied safely).
+    """
+    from chela import sweep
+
+    workflow = args.workflow
+    if workflow is None and (Path(args.cwd) / "WORKFLOW.md").is_file():
+        workflow = str(Path(args.cwd) / "WORKFLOW.md")
+
+    def _progress(n, total, mut):
+        print(f"  [{n + 1}/{total}] {mut.key} {mut.kind}", flush=True)
+
+    result = sweep.run_sweep(args.cwd, base=args.base, workflow_path=workflow,
+                             test_cmd=args.test_cmd, progress=_progress)
+    if not result.get("ok"):
+        print(f"sweep: {result.get('error', 'unknown error')}")
+        sys.exit(2)
+    if result["recovered"]:
+        print(f"⚠ {result['recovered']}")
+    for note in result["notes"]:
+        print(f"  {note}")
+    for r in result["unparseable"]:
+        print(f"  [SKIPPED ] {r['key']} {r['mutation']} — does not parse, not counted as killed")
+    for r in result["not_applied"] + result["invalid"]:
+        print(f"  [SKIPPED ] {r['key']} {r['mutation']} — {r['reason'][:120]}")
+    for r in result["survivors"]:
+        print(f"  [SURVIVED] {r['key']} {r['mutation']}")
+    if result["cannot_verify"]:
+        print(f"⚠ CANNOT VERIFY — {result['cannot_verify']}")
+        sys.exit(2)
+    skipped = (len(result["unparseable"]) + len(result["not_applied"])
+               + len(result["invalid"]))
+    print(f"sweep: {result['mutations']} mutation(s) — {result['killed']} killed, "
+          f"{len(result['survivors'])} survived, {skipped} skipped "
+          f"({result['seconds']}s)")
+    if result["survivors"]:
+        print("⚖️ Each SURVIVED line is a changed check no test can tell apart from its "
+              "corruption. Add a test that goes RED under that mutation — not a weaker "
+              "assertion. If no outcome can change under it, `chela task-finished` accepts "
+              "--sweep-equivalent '<file:line>: <why>'.")
+        sys.exit(1)
 
 
 def cmd_judge_show(args) -> None:
@@ -2846,6 +2960,38 @@ def _print_override_request(result: dict) -> None:
           "MERGEABLE, re-checked then). A new push expires the request.")
 
 
+def cmd_release(args) -> None:
+    """🏷️ ``chela release X.Y.Z --theme "…"`` (CMX-87): prepare the release LOCALLY — notes,
+    version bump, ``uv lock``, the release tests, commit + annotated tag in its own worktree
+    off ``origin/dev`` — and request the operator's approval. Pushes nothing; the approval
+    (Telegram button, dashboard, ``chela merge-approve <id>``) pushes main + tag + dev.
+    """
+    from chela import release
+    body = ""
+    if args.body_file:
+        try:
+            body = Path(args.body_file).read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"release REFUSED: --body-file unreadable: {e}")
+            sys.exit(1)
+    result = release.prepare(args.version, args.theme, body=body, repo=args.repo,
+                             actor=os.environ.get(config.ACTOR_ENV) or None)
+    if not result.get("ok"):
+        print(f"release REFUSED: {result.get('error', 'unknown error')}")
+        print("  Nothing was committed, tagged or pushed.")
+        sys.exit(1)
+    ids = result.get("task_ids") or []
+    print(f"⏳ Release {result['tag']} is PENDING approval ({result['request_id']}) — "
+          "committed and tagged locally, NOTHING pushed:")
+    print(f"  {result['tag']} — {result['theme']}")
+    print(f"  cut from dev {result['dev_sha'][:12]}  ·  release commit "
+          f"{result['release_sha'][:12]}")
+    print(f"  tasks ({len(ids)}): {', '.join(ids) or 'none'}")
+    print(f"  {release.approve_hint(result['request_id'])}")
+    print("  On approval chela pushes main, the tag, then dev (fast-forward only, re-checked "
+          "then). A push to dev expires the request.")
+
+
 def cmd_override(args) -> None:
     """⚖️🔓 ``chela override request|list`` — the request-only spelling (CMX-79).
 
@@ -2907,6 +3053,10 @@ def cmd_merge_approve(args) -> None:
     state = out.get("state")
     if state == overrides.MERGED:
         print(f"✅ approved and merged: {args.request} "
+              f"(sha {(out.get('merge_commit_sha') or '?')[:12]})")
+        return
+    if state == overrides.RELEASED:
+        print(f"✅ approved and released: {args.request} — pushed main, tag, dev "
               f"(sha {(out.get('merge_commit_sha') or '?')[:12]})")
         return
     if state == overrides.DENIED and out.get("ok"):
@@ -3504,6 +3654,29 @@ def main() -> None:
         "--cwd", metavar="DIR", default=".",
         help="Worktree to mutate in place (default: the current directory)",
     )
+    p_jsweep = judge_sub.add_parser(
+        "sweep",
+        help="⚖️🧹 Mechanically mutate every conditional/comparison/return code this branch "
+             "CHANGED (if X → if False and (X), == → !=, 0 ↔ 1…), run the related tests, "
+             "restore. Exit 1 on any survivor",
+    )
+    p_jsweep.add_argument(
+        "--base", default=None, metavar="REF",
+        help="Diff against this ref (default: origin/<workspace.base_branch> from the "
+             "workflow, else origin/dev)",
+    )
+    p_jsweep.add_argument(
+        "--cwd", metavar="DIR", default=".",
+        help="Worktree to sweep in place (default: the current directory)",
+    )
+    p_jsweep.add_argument(
+        "--workflow", metavar="PATH", default=None,
+        help="WORKFLOW.md to read `judge.test_cmd` from (default: <cwd>/WORKFLOW.md)",
+    )
+    p_jsweep.add_argument(
+        "--test-cmd", metavar="CMD",
+        help="Run this suite command instead of reading one from the workflow",
+    )
     from chela.judge_eval import cli as judge_eval_cli
     judge_eval_cli.add_parser(judge_sub)
     p_jshow = judge_sub.add_parser(
@@ -3590,11 +3763,28 @@ def main() -> None:
     p_olist.add_argument("--all", action="store_true",
                          help="Include decided/expired/failed requests too")
 
+    # release — prepare a release locally and request the operator's approval (CMX-87)
+    p_release = sub.add_parser(
+        "release",
+        help="🏷️ Prepare release X.Y.Z in its own worktree off origin/dev (notes, version "
+             "bump, uv lock, release tests, commit + tag LOCALLY) and request the operator's "
+             "approval — pushes nothing; the approval pushes main + tag + dev",
+    )
+    p_release.add_argument("version", help="The release version, X.Y.Z")
+    p_release.add_argument("--theme", required=True,
+                           help="One line — titles the commit (Release X.Y.Z — <theme>) "
+                                "and the tag")
+    p_release.add_argument("--body-file", default=None,
+                           help="Optional file whose text becomes the release commit's body")
+    p_release.add_argument("--repo", default=None,
+                           help="The repository to release (default: the current one)")
+
     # merge-approve — the OPERATOR's half of `chela merge --override`
     p_mapprove = sub.add_parser(
         "merge-approve",
-        help="⚖️ Approve (or --deny) a pending `chela merge --override` — for a HUMAN in a "
-             "plain terminal; a Claude session is denied this by chela's merge-gate hook",
+        help="⚖️ Approve (or --deny) a pending `chela merge --override` or `chela release` — "
+             "for a HUMAN in a plain terminal; a Claude session is denied this by chela's "
+             "merge-gate hook",
     )
     p_mapprove.add_argument("request", nargs="?", default=None,
                             help="The override request id (omit to list pending requests)")
@@ -3825,6 +4015,13 @@ def main() -> None:
              "against this run's own diff for tests/ changes.",
     )
     p_tf.add_argument(
+        "--sweep-equivalent", action="append", default=[], metavar="'FILE:LINE: WHY'",
+        help="⚖️🧹 CMX-88: a `chela judge sweep` survivor no outcome can change under, with "
+             "the reason. Repeatable. task-finished runs the sweep and refuses while a "
+             "survivor is not named here, or a note names a line that did not survive. "
+             "Recorded on the run, shown to the judge and in the PR body.",
+    )
+    p_tf.add_argument(
         "--handoff", metavar="TEXT", default=None,
         help="📝 CMX-52: a note for whoever reviews this run (what changed, what to look "
              "at, what was assumed). Persisted on the run and shown in the inbox notice "
@@ -3963,6 +4160,8 @@ def main() -> None:
             cmd_judge(args)
         elif args.judge_cmd == "self-check":
             cmd_judge_self_check(args)
+        elif args.judge_cmd == "sweep":
+            cmd_judge_sweep(args)
         elif args.judge_cmd == "ack-blocked-race":
             cmd_judge_ack_blocked_race(args)
         elif args.judge_cmd == "eval":
@@ -3978,6 +4177,8 @@ def main() -> None:
         cmd_merge(args)
     elif args.command == "merge-approve":
         cmd_merge_approve(args)
+    elif args.command == "release":
+        cmd_release(args)
     elif args.command == "override":
         cmd_override(args)
     elif args.command == "reopen":

@@ -18,7 +18,11 @@ gate is in [TRUST_AND_APPROVAL_POSTURE.md](TRUST_AND_APPROVAL_POSTURE.md).
 4. **`chela task-finished <task>`** asks the daemon to mark the run `awaiting_review` and
    close the agent's window. With `--self-check-experiments <file>` it first re-runs the
    agent's own guard corruptions and refuses if one survives; `--no-new-guards` is the
-   opt-out for a run that added no guard. With neither, it warns. `--handoff "<note>"`
+   opt-out for a run that added no guard. With neither, it warns. It then runs
+   `chela judge sweep` — a mechanical mutation of every conditional, comparison and return
+   code the branch changed vs its base — and refuses while a mutation survives, unless the
+   agent names it in `--sweep-equivalent '<file:line>: <why>'` (recorded in
+   `runs.sweep_equivalents`, shown to the judge and appended to the PR body). `--handoff "<note>"`
    records the agent's note for its reviewer on the run (`runs.handoff`); the inbox notice
    and the Dispatch board show it sanitised. It is informational and never gates anything.
    Before hand-in the brief has the agent walk its own diff against a seven-item

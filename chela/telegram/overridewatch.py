@@ -9,6 +9,12 @@ failed (``<reason>``), dropping the buttons. A tap resolves the request through
 :func:`chela.overrides.decide` — the same path as ``chela merge-approve`` and the dashboard —
 so an approval completes the merge right there.
 
+A release request (``kind: "release"``, ``chela release X.Y.Z`` — CMX-87) gets its own card
+from :func:`format_release_message` — version, theme, the ``dev`` commit it was cut from, the
+task ids in the new CHANGELOG section — on the same buttons and the same decide path; its
+outcome reads released ``<sha>`` (plus the GitHub Release's URL once the Release workflow
+created it) / denied / expired / failed.
+
 Trust model: the same as every other Telegram button — the tap must come from the bound
 chat (CMX-8; a ``from.id`` check was declined 2026-10-09). A callback can only be produced by
 a person pressing a button in that chat — no agent tool call can mint one — and a bot
@@ -46,6 +52,64 @@ def _outcome_line(rec: dict) -> str | None:
     if state == overrides.FAILED:
         return f"⚠️ Approved by {by} but NOT merged — failed ({detail or 'unknown'})"
     return None
+
+
+def _release_outcome_line(rec: dict) -> str | None:
+    state = rec.get("state")
+    by = rec.get("decided_by") or "?"
+    detail = rec.get("detail") or ""
+    pushed = rec.get("pushed") or []
+    not_done = f"Pushed only: {', '.join(pushed)}." if pushed else "Nothing was pushed."
+    if state == overrides.MERGING:
+        return f"⏳ Approved by {by} — pushing main, {rec.get('tag')}, dev…"
+    if state == overrides.RELEASED:
+        line = (f"✅ Approved by {by} — released {(rec.get('merge_commit_sha') or '?')[:12]}"
+                f" (main, {rec.get('tag')}, dev pushed)")
+        url = rec.get("release_url")
+        return line + (f"\nRelease: {url}" if url else
+                       "\nThe Release workflow is building the GitHub Release…")
+    if state == overrides.DENIED:
+        return f"❌ Denied by {by} — {not_done[:1].lower()}{not_done[1:]}"
+    if state == overrides.EXPIRED:
+        return f"⌛ Expired — {detail or 'no decision'}. {not_done}"
+    if state == overrides.FAILED:
+        return f"⚠️ Approved by {by} but NOT released — failed ({detail or 'unknown'}). {not_done}"
+    return None
+
+
+def format_release_message(rec: dict) -> str:
+    """The release request card — plain text, like :func:`format_override_message`."""
+    ids = rec.get("task_ids") or []
+    lines = [
+        f"🏷️ Release {rec.get('tag')} — approve?",
+        f"Version: {rec.get('version')}",
+        f"Theme: {rec.get('theme')}",
+        f"Cut from dev: {str(rec.get('dev_sha') or '?')[:12]}  ·  release commit "
+        f"{str(rec.get('release_sha') or '?')[:12]}",
+        f"Tasks ({len(ids)}): {', '.join(ids) or 'none'}",
+        f"Asked by: {rec.get('actor') or 'human'}",
+    ]
+    outcome = _release_outcome_line(rec)
+    if outcome:
+        lines += ["", outcome]
+    else:
+        lines += ["", "Approve pushes main, the tag, then dev (fast-forward only) — after "
+                      "re-checking that dev is still the commit above and main an ancestor. "
+                      "A push to dev expires this request. "
+                      f"(Dashboard: /override/{rec.get('id')})"]
+    return "\n".join(lines)
+
+
+def _rendered_key(rec: dict) -> str:
+    """What the card currently shows — a release's URL arriving later is a new render."""
+    state = rec.get("state") or ""
+    return f"{state}+url" if rec.get("release_url") else state
+
+
+def _format(rec: dict) -> str:
+    if rec.get("kind") == "release":
+        return format_release_message(rec)
+    return format_override_message(rec)
 
 
 def _judge_line(rec: dict) -> str:
@@ -105,6 +169,11 @@ class OverrideRelay:
                 overrides.sweep()
             except Exception:                                # noqa: BLE001 — best effort
                 log.exception("override sweep failed")
+            try:
+                from chela import release
+                release.poll_release_urls()
+            except Exception:                                # noqa: BLE001 — best effort
+                log.exception("release URL poll failed")
             for rec in overrides.all_requests():
                 try:
                     self._sync(rec)
@@ -124,17 +193,17 @@ class OverrideRelay:
                 thread = self._thread()
             except Exception:                                # noqa: BLE001
                 thread = None
-            mid = self._post(format_override_message(rec), message_thread_id=thread,
+            mid = self._post(_format(rec), message_thread_id=thread,
                              reply_markup=override_reply_markup(rec["id"]))
             if mid is not None:
                 overrides.set_fields(rec["id"], telegram={"message_id": mid,
-                                                          "rendered": state})
+                                                          "rendered": _rendered_key(rec)})
             return
-        if tg.get("rendered") == state:
+        if tg.get("rendered") == _rendered_key(rec):
             return
         markup = override_reply_markup(rec["id"]) if state == overrides.PENDING else None
-        if self._edit(mid, format_override_message(rec), reply_markup=markup):
-            overrides.set_fields(rec["id"], telegram={**tg, "rendered": state})
+        if self._edit(mid, _format(rec), reply_markup=markup):
+            overrides.set_fields(rec["id"], telegram={**tg, "rendered": _rendered_key(rec)})
 
 
 def handle_override_tap(data: str, *, is_bot: bool = False,
@@ -152,6 +221,8 @@ def handle_override_tap(data: str, *, is_bot: bool = False,
     state = out.get("state")
     if state == overrides.MERGED:
         return f"✅ Merged {(out.get('merge_commit_sha') or '')[:12]}".strip()
+    if state == overrides.RELEASED:
+        return f"✅ Released {(out.get('merge_commit_sha') or '')[:12]}".strip()
     if state == overrides.DENIED and out.get("ok"):
         return "❌ Denied — nothing merged"
     return f"Not merged: {out.get('detail') or state}"[:190]

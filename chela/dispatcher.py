@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import critic, envutil, epoch, event_log, hold, judge, memcap, mergegate
+from chela import critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, sweep
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -1479,6 +1479,12 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # gate anything, and it is never folded into `critic_notes` (that column is the
         # critic's, not the agent's). The inbox and the Dispatch board render it sanitised.
         ("handoff", "ALTER TABLE runs ADD COLUMN handoff TEXT"),
+        # ⚖️🧹 CMX-88. `chela task-finished --sweep-equivalent '<file:line>: <why>'` — the
+        # `chela judge sweep` survivors the agent declared equivalent (no outcome can
+        # change), as a JSON list of {key, file, line, why, mutations}. Written by the
+        # daemon from the completion marker; shown to the judge and appended to the PR
+        # body. NULL ⇒ none declared. AGENT-AUTHORED: shown, never trusted as a verdict.
+        ("sweep_equivalents", "ALTER TABLE runs ADD COLUMN sweep_equivalents TEXT"),
     ):
         if _column in existing_columns:
             continue  # already migrated — no DDL attempted, nothing to fail
@@ -2813,6 +2819,30 @@ def verify_self_check(task_id: str, experiments_path: str) -> dict:
     }
 
 
+def verify_sweep(task_id: str) -> dict:
+    """⚖️🧹 CMX-88. The `chela judge sweep` that `chela task-finished` runs — against the
+    run's OWN worktree (looked up by ``task_id``, never a caller-chosen ``--cwd``), diffed
+    against ``origin/<workspace.base_branch>``, measured with the workflow's
+    ``judge.test_cmd`` and per-mutation selection. Returns :meth:`SweepReport.as_dict`'s
+    shape, or ``{"ok": True, "skipped": why}`` when the workflow has no ``judge.test_cmd``
+    (there is no suite to sweep against — the judge cannot run there either)."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None:
+        return {"ok": False, "error": f"no run found for task_id {task_id}"}
+    if not row["worktree_path"] or not row["workflow_path"]:
+        return {"ok": False, "error": "run has no worktree_path/workflow_path on record — "
+                                      "cannot sweep"}
+    try:
+        wf = load_workflow(row["workflow_path"])
+    except Exception as e:
+        return {"ok": False, "error": f"{row['workflow_path']} could not be read: {e}"}
+    if not judge.judge_test_cmd(wf):
+        return {"ok": True, "skipped": "the workflow sets no `judge.test_cmd` — no suite to "
+                                       "sweep against"}
+    return sweep.run_sweep(row["worktree_path"], workflow_path=row["workflow_path"])
+
+
 def _is_guard_path(path: str) -> bool:
     """⚖️🔎 CMX-258 rework round 6: the DEFINITION ``check_no_new_guards`` cross-checks — "is
     this diff-touched path a guard?" — written down once, in one place, instead of being
@@ -2934,7 +2964,9 @@ def _clean_handoff(value) -> str | None:
     return value[:HANDOFF_MAX_CHARS]
 
 
-def mark_awaiting_review(task_id: str, *, handoff: str | None = None) -> dict:
+def mark_awaiting_review(
+    task_id: str, *, handoff: str | None = None, sweep_equivalents: list[dict] | None = None,
+) -> dict:
     """Transition a run from running → awaiting_review and kill its tmux window.
 
     ⚖️🔒 issue #502 B1: this is now DAEMON-SIDE ONLY, called from `tick()` when it finds
@@ -2991,7 +3023,17 @@ def mark_awaiting_review(task_id: str, *, handoff: str | None = None) -> dict:
             (_now(), pr_url, pr_state, pr_mergeable, task_id),
         )
         conn.execute("UPDATE runs SET handoff=? WHERE task_id=?", (handoff, task_id))
+        # ⚖️🧹 CMX-88: always written, like the handoff — a rework round must not inherit
+        # the previous round's equivalence claims.
+        conn.execute("UPDATE runs SET sweep_equivalents=? WHERE task_id=?",
+                     (json.dumps(sweep_equivalents) if sweep_equivalents else None, task_id))
         conn.commit()
+        if sweep_equivalents and effective_pr_url:
+            ok, detail = _append_pr_body(effective_pr_url, repo_dir,
+                                         sweep.render_equivalents(sweep_equivalents))
+            if not ok:
+                log.warning("Task %s: sweep-equivalent notes not added to the PR body — %s",
+                            task_id, detail)
         if window_name:
             _kill_window(window_name)
         return {
@@ -3027,7 +3069,27 @@ def _read_task_finished_handoff(worktree_path: str | Path) -> str | None:
     return _clean_handoff(request.get("handoff"))
 
 
-def request_task_finished(task_id: str, *, handoff: str | None = None) -> dict:
+def _read_task_finished_sweep_equivalents(worktree_path: str | Path) -> list[dict] | None:
+    """⚖️🧹 CMX-88: the `--sweep-equivalent` notes a completion marker carries, or None.
+    Best-effort like the handoff — a malformed entry is dropped, never a gate."""
+    try:
+        request = json.loads(_task_finished_request_path(worktree_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    items = request.get("sweep_equivalents") if isinstance(request, dict) else None
+    if not isinstance(items, list):
+        return None
+    clean = [
+        {"key": str(e["key"]), "why": str(e["why"])[:HANDOFF_MAX_CHARS],
+         "mutations": [str(m) for m in e.get("mutations") or [] if isinstance(m, str)]}
+        for e in items if isinstance(e, dict) and e.get("key") and e.get("why")
+    ]
+    return clean or None
+
+
+def request_task_finished(
+    task_id: str, *, handoff: str | None = None, sweep_equivalents: list[dict] | None = None,
+) -> dict:
     """Record that a dispatched agent believes its work is done — called by `chela
     task-finished`, IN PLACE OF the direct `mark_awaiting_review` call it used to make.
 
@@ -3074,6 +3136,9 @@ def request_task_finished(task_id: str, *, handoff: str | None = None) -> dict:
     handoff = _clean_handoff(handoff)
     if handoff is not None:
         request["handoff"] = handoff
+    if sweep_equivalents:
+        # ⚖️🧹 CMX-88: rides in the marker like the handoff — the daemon records it.
+        request["sweep_equivalents"] = sweep_equivalents
     _task_finished_request_path(worktree_path).write_text(
         json.dumps(request), encoding="utf-8",
     )
@@ -3651,6 +3716,31 @@ def _post_pr_comment(pr_url: str | None, repo_dir: str | None, body: str) -> tup
     if out.returncode != 0:
         return False, (out.stderr or out.stdout or "gh pr comment failed").strip()
     return True, (out.stdout or "").strip()
+
+
+def _append_pr_body(pr_url: str | None, repo_dir: str | None, section: str) -> tuple[bool, str]:
+    """Append ``section`` to the PR's body (``gh pr view`` → ``gh pr edit``). A PROJECTION,
+    like :func:`_post_pr_comment`: the run row is the record, so a failure is reported,
+    never fatal. Idempotent — a body that already carries ``section`` is left alone."""
+    number = _pr_number(pr_url)
+    if not number or not repo_dir or not section:
+        return False, "no PR number on the run row"
+    try:
+        view = subprocess.run(["gh", "pr", "view", number, "--json", "body", "-q", ".body"],
+                              cwd=repo_dir, capture_output=True, text=True, timeout=30)
+        if view.returncode != 0:
+            return False, (view.stderr or "gh pr view failed").strip()
+        body = (view.stdout or "").rstrip("\n")
+        if section in body:
+            return True, "already present"
+        out = subprocess.run(["gh", "pr", "edit", number, "--body-file", "-"], cwd=repo_dir,
+                             input=f"{body}\n\n{section}\n", capture_output=True, text=True,
+                             timeout=30)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return False, f"gh pr edit failed: {e}"
+    if out.returncode != 0:
+        return False, (out.stderr or out.stdout or "gh pr edit failed").strip()
+    return True, ""
 
 
 def resolve_run(ident: str) -> dict | None:
@@ -5396,6 +5486,8 @@ def tick(workflow_path: str | Path) -> dict:
                 applied = mark_awaiting_review(
                     row["task_id"],
                     handoff=_read_task_finished_handoff(row["worktree_path"]),
+                    sweep_equivalents=_read_task_finished_sweep_equivalents(
+                        row["worktree_path"]),
                 )
                 # ⚖️🔀 issue #502 rework round 1 (hazard 3 of the brief): `ok=False` used to
                 # be ONE outcome — unlink the marker and log.warning, no matter why the
@@ -7328,6 +7420,7 @@ that SURVIVES **blocks this PR at every risk level** — it is never downgraded 
    statements, fixtures parked on a default, source-constant checks instead of the rendered
    value…). Reaching for one of those shapes first is faster than rediscovering it from
    scratch.
+{{sweep_equivalents}}
 2. For **each guard/invariant it adds** (each new or changed test, each "must never…"
    comment, each accessibility cue), design ONE **minimal, live, syntactically valid**
    mutation to the **production** code that a real guard MUST catch:
@@ -7387,6 +7480,7 @@ def judge_prompt_vars(
     branch_name: str, base_branch: str, workspace_path: str, repo_path: str,
     project_key: str, task_number, pr_url: str, head_sha: str, experiments_path: str,
     judge_cmd: str, judge_log: str, test_cmd: str, diff_cmd: str, pr_view_cmd: str,
+    sweep_equivalents: str = "",
 ) -> dict:
     """📏 CMX-408. EVERY variable :data:`JUDGE_PROMPT` renders with — the one map both the
     live judge (:func:`_judge_vars`) and the offline eval (``chela.judge_eval.design``)
@@ -7423,6 +7517,10 @@ def judge_prompt_vars(
         "held_out_min": judge.HELD_OUT_MIN_EXPERIMENTS,
         "diff_cmd": diff_cmd,
         "pr_view_cmd": pr_view_cmd,
+        # ⚖️🧹 CMX-88: the agent's `--sweep-equivalent` claims — survivors of its own
+        # mechanical sweep it says no outcome can change under. Agent-authored, so shown
+        # as claims to TEST, never as findings. "" ⇒ none (the line renders empty).
+        "sweep_equivalents": sweep_equivalents,
     }
 
 
@@ -7454,7 +7552,27 @@ def _judge_vars(
         diff_cmd=f"git diff origin/{base}...HEAD",
         pr_view_cmd=(f"gh pr view {number} --comments" if number
                      else "gh pr view --comments   # no PR url on the run row"),
+        sweep_equivalents=_judge_sweep_equivalents(row),
     )
+
+
+def _judge_sweep_equivalents(row) -> str:
+    """⚖️🧹 CMX-88: the judge prompt's view of ``runs.sweep_equivalents`` — "" when none."""
+    try:
+        items = json.loads(row["sweep_equivalents"] or "null")
+    except (IndexError, KeyError, ValueError, TypeError):
+        return ""
+    if not isinstance(items, list) or not items:
+        return ""
+    lines = ["   ⚖️🧹 **The agent declared these `chela judge sweep` survivors EQUIVALENT** "
+             "(no outcome can change under the mutation). These are CLAIMS, not facts — "
+             "an equivalence that is wrong is a missing guard; design an experiment for it:"]
+    for e in items:
+        if isinstance(e, dict):
+            muts = "; ".join(str(m) for m in e.get("mutations") or [])
+            text = f"`{e.get('key')}` — {e.get('why')}" + (f" ({muts})" if muts else "")
+            lines.append(f"   - {tui_sanitize(text).replace(chr(10), ' ')}")
+    return "\n".join(lines)
 
 
 def _is_adopted(row) -> bool:
