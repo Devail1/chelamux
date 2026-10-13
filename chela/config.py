@@ -626,6 +626,28 @@ def dashboard_port() -> int:
         return DEFAULT_DASHBOARD_PORT
 
 
+DASHBOARD_URL_ENV = "CHELA_DASHBOARD_URL"
+
+
+def dashboard_url(path: str = "") -> str:
+    """The dashboard's ABSOLUTE base URL for a human to open, plus ``path`` (CMX-103).
+
+    ``CHELA_DASHBOARD_URL`` when the operator configured one (the tailnet / reverse-proxy
+    address they actually browse to), else the address the dashboard binds — a wildcard
+    bind is reached on loopback. Printed by the CLI so an operator with no Telegram bridge
+    still learns where a pending approval waits.
+    """
+    base = (os.environ.get("CHELA_DASHBOARD_URL") or "").strip().rstrip("/")
+    if not base:
+        host = dashboard_host()
+        if host in ("", "0.0.0.0", "::", "[::]"):
+            host = "127.0.0.1"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        base = f"http://{host}:{live_dashboard_port()}"
+    return base + path
+
+
 def dashboard_port_file() -> Path:
     """Where the dashboard writes down the port it actually bound."""
     return CHELA_DIR / "dashboard.port"

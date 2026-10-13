@@ -15,6 +15,7 @@ import { enterResources, tickResources } from './resources.js';
 import { enterStatusHealth, tickStatusHealth } from './statushealth.js';
 import { checkForUpdate } from './version.js';
 import { tickAccessRequests } from './accessreq.js';
+import { tickApprovals } from './approvals.js';
 
 // ---------------------------------------------------------------------------
 // Refresh loop
@@ -45,6 +46,9 @@ async function refresh() {
         await tickStatusHealth();
         // 🙋 Sandboxed guests' access requests (CMX-7) — the pill shows on every tab.
         await tickAccessRequests();
+        // ⚖️ Pending approvals (CMX-103) — the pill shows on every tab; SSE `overrides`
+        // frames refresh it between ticks.
+        await tickApprovals();
         if (typeof refreshLauncher === 'function') refreshLauncher();
         const view = findView(VIEWS, currentTab);
         if (view && view.tick) await view.tick();

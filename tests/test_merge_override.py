@@ -911,9 +911,11 @@ def test_an_override_request_notification_names_the_override_never_a_release(rep
     rid = result["request_id"]
     assert result["question"] == (f"Override-merge cmx-1 into dev past the judge ('blocked' on "
                                   f"{HEAD[:12]})? Reason: flaky")
-    assert result["hint"] == contract.approve_hint(rid) == (
-        f"Approve with the Telegram button, on the dashboard (/override/{rid}), "
-        f"or in a plain terminal: chela merge-approve {rid}  (deny: add --deny)")
+    # CMX-103 made the override hint name only the surfaces that work (absolute dashboard
+    # URL + pill, `chela merge-approve`; Telegram only with a bridge); the release card
+    # (release.approve_hint, CMX-87) still carries the older fixed line.
+    assert result["hint"] == contract.approve_hint(rid)
+    assert f"/override/{rid}" in result["hint"] and f"chela merge-approve {rid}" in result["hint"]
     assert sent == [(f"{result['question']}\n\n{result['hint']}",
                      "chela: approve override of cmx-1?")]
     assert "release" not in sent[0][0].lower() and "release" not in sent[0][1]

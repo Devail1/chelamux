@@ -164,6 +164,15 @@ def test_self_approval_of_an_override_is_denied(world):
         world, "curl -s -X POST -d decision=approve http://127.0.0.1:5001/override/override-abc"))
 
 
+def test_a_curl_to_the_pending_approvals_decide_api_is_denied(world):
+    """CMX-103: the dashboard's Pending-approvals Approve posts to `/api/override/<id>/…` —
+    the operator's button, never a Claude session's curl. Reading the list stays allowed."""
+    assert _denied(_run_hook(
+        world, "curl -s -X POST -d '{\"confirm\":true}' "
+               "http://127.0.0.1:5001/api/override/override-abc/approve"))
+    assert not _denied(_run_hook(world, "curl -s http://127.0.0.1:5001/api/overrides"))
+
+
 def test_a_python_call_into_the_override_approval_is_denied(world):
     """CMX-79: an approval completes the merge by itself, so its in-process spelling
     (`chela.overrides.decide`) is the operator's too — not a Claude session's."""

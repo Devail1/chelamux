@@ -3559,6 +3559,65 @@ def _override_same_origin() -> bool:
     return True
 
 
+def _override_decider() -> str:
+    """Who decided, for the request's ``decided_by`` (CMX-103): the tailnet front's named
+    user when there is one, else ``"dashboard"`` — the same audit the Telegram tap records
+    as ``"telegram"``."""
+    who = (request.headers.get("Tailscale-User-Login") or "").strip()
+    return f"dashboard:{who}" if who else "dashboard"
+
+
+def _override_decide(request_id: str, approve: bool) -> dict:
+    """The ONE dashboard decide path — the confirm page and the Pending approvals list both
+    land here, and it is :func:`chela.overrides.decide` (the Telegram tap's and
+    ``chela merge-approve``'s path too): approve re-checks head / CI / MERGEABLE / expiry
+    live and merges; deny merges nothing."""
+    from chela import overrides
+    return overrides.decide(request_id, approve, by=_override_decider(), channel="dashboard")
+
+
+# 🔔 CMX-103 — "Pending approvals": the override (and, with CMX-87, release) requests waiting
+# on the operator, listed on every view so a dashboard-only operator (no Telegram bridge)
+# learns one is waiting. Reading is harmless; deciding is a same-origin POST that needs an
+# explicit confirm for Approve, and the merge-gate hook denies a Claude session's curl to
+# `/override/` (which this decide URL contains).
+@app.route("/api/overrides")
+@require_auth
+def api_overrides():
+    from chela import overrides
+    # Hygiene only: listing() already drops expired requests (pending() filters by deadline)
+    # and marks a moved head `blocked` itself — the sweep just settles their records.
+    # Unknown is not empty: a store that cannot be read is an explicit error state (503 +
+    # ``error``), never ``{"requests": []}`` — which the page would show as "nothing waiting".
+    try:
+        overrides.sweep()
+        rows, error = overrides.listing_state()
+    except Exception as exc:  # noqa: BLE001 — report it, do not 500 into silence
+        rows, error = [], f"the approvals list failed ({exc.__class__.__name__}: {exc})"
+    if error:
+        return jsonify({"requests": [], "error": error}), 503
+    return jsonify({"requests": rows})
+
+
+@app.route("/api/override/<request_id>/<action>", methods=["POST"])
+@require_auth
+def api_override_decide(request_id, action):
+    from chela import overrides
+    if not _override_same_origin():
+        abort(403)
+    if action not in ("approve", "deny"):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if action == "approve" and data.get("confirm") is not True:
+        # Approving merges NOW — the button asks twice, and so does the API.
+        return jsonify({"ok": False, "error": "approving needs an explicit confirm"}), 400
+    out = _override_decide(request_id, action == "approve")
+    state = out.get("state")
+    ok = bool(out.get("ok")) and state in (*overrides.SUCCESS_STATES, overrides.DENIED)
+    return jsonify({"ok": ok, "state": state, "detail": out.get("detail"),
+                    "merge_commit_sha": out.get("merge_commit_sha")}), (200 if ok else 409)
+
+
 def _release_confirm_body(req: dict, left: float) -> str:
     """The confirm page for a ``chela release`` request (CMX-87) — same route, same POST."""
     from html import escape
@@ -3593,8 +3652,7 @@ def override_confirm(request_id):
         if decision not in ("approve", "deny"):
             abort(400)
         # Approve COMPLETES the merge here (CMX-79), re-checking head/CI/mergeable live.
-        out = overrides.decide(request_id, decision == "approve", by="dashboard",
-                               channel="dashboard")
+        out = _override_decide(request_id, decision == "approve")
         state = out.get("state")
         is_release = (req or {}).get("kind") == "release"
         if state == overrides.MERGED:
@@ -5594,6 +5652,16 @@ def _sse_terms_snapshot() -> set:
         return set()
 
 
+def _sse_overrides_snapshot() -> tuple:
+    """The ids of the approval requests pending now (CMX-103) — a glob of a small
+    directory, cheap enough every SSE tick. Diffed to push an ``overrides`` frame."""
+    try:
+        from chela import overrides
+        return tuple(r["id"] for r in overrides.pending())
+    except Exception:  # noqa: BLE001 — a snapshot must never kill the stream
+        return ()
+
+
 def _sse_orchestrator_snapshot() -> dict:
     """``{wid, state}`` — cheap enough to diff every SSE tick (one JSON read, no
     tmux). Diffed to push an ``orchestrator`` delta so the pane toggle and the
@@ -5640,6 +5708,7 @@ def _sse_stream():
     prev_terms = _sse_terms_snapshot()
     prev_log = _sse_log_snapshot()
     prev_orch = _sse_orchestrator_snapshot()
+    prev_ovr = _sse_overrides_snapshot()
 
     # An initial 'hello' lets the client confirm the stream is live (it may
     # optionally lengthen its poll timers; default behavior leaves them as-is).
@@ -5703,6 +5772,15 @@ def _sse_stream():
             yield f"event: orchestrator\ndata: {json.dumps(cur_orch)}\n\n"
             last_sent = time.monotonic()
         prev_orch = cur_orch
+
+        cur_ovr = _sse_overrides_snapshot()
+        if cur_ovr != prev_ovr:
+            # CMX-103: the set of pending approval requests changed (filed, decided,
+            # expired). A notification — the client re-fetches /api/overrides.
+            payload = json.dumps({"pending": len(cur_ovr), "ids": list(cur_ovr)})
+            yield f"event: overrides\ndata: {payload}\n\n"
+            last_sent = time.monotonic()
+        prev_ovr = cur_ovr
 
         cur_terms = _sse_terms_snapshot()
         newly_ready = sorted(cur_terms - prev_terms)

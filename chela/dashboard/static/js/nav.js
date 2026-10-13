@@ -1978,6 +1978,7 @@ function renderSettings(focus) {
     const collabName = localStorage.getItem('chela_collab_name') || '';
     const collabAuto = localStorage.getItem('chela_collab_autoname') || 'auto-assigned';
     const runToastsMuted = localStorage.getItem('chela_mute_run_toasts') === '1';
+    const approvalNotify = localStorage.getItem('chela_approval_notify') === '1';
     body.innerHTML = `
         <div class="settings-tabpanel" data-tab="general">
         <section class="settings-section" id="settings-status" data-keywords="health connected daemon telegram services">
@@ -2142,6 +2143,16 @@ function renderSettings(focus) {
             <p class="s-desc">Pop a dashboard toast when a dispatcher run turns
             <code>awaiting_review</code> (or done / failed) — so you learn a run
             needs review without watching the board.</p>
+            <div class="s-row" data-keywords="notifications browser approval override release pending">
+                <span class="s-rowlabel">Approval requests</span>
+                <select id="approval-notify-select" class="s-select" onchange="chela.setApprovalNotify(this.value).then(on => { this.value = on ? 'on' : 'off'; })">
+                    <option value="off"${approvalNotify ? '' : ' selected'}>Off</option>
+                    <option value="on"${approvalNotify ? ' selected' : ''}>Browser notification</option>
+                </select>
+            </div>
+            <p class="s-desc">A browser notification when a new override or release request
+            waits for your approval (the ⚖️ pill shows it either way). Off by default; your
+            browser asks for permission once.</p>
             <p class="s-desc">Set on the daemon (env), then restart <code>chela run</code>:</p>
             <div class="s-kv"><code>CHELA_NOTIFY_URL</code><span>ntfy / Telegram / webhook (auto-detected)</span></div>
             <div class="s-examples">
