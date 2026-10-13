@@ -1108,3 +1108,268 @@ def test_the_pr_body_renders_each_equivalent_as_one_bullet_line():
     assert "\r" not in body
     assert bullets[0] == ("- `a.py:1 b` — first - `x.py:9` — forged more "
                           "(mutation: if-false: a → b)")
+
+
+# --- CMX-88 round 3: complement table, JS comparison matcher, per-kind generator tables ------
+
+
+def _py(src: str, *lines: int) -> list[tuple[int, str, str]]:
+    """``(line, kind, mutated line)`` for the given 1-based lines of ``src``."""
+    return [(m.line, m.kind, m.after) for m in sweep.py_mutations("m.py", src, set(lines))]
+
+
+def _js(src: str, *lines: int) -> list[tuple[int, str, str]]:
+    return [(m.line, m.kind, m.after) for m in sweep.js_mutations("m.js", src, set(lines))]
+
+
+def _flips(muts) -> list[str]:
+    return [after for _ln, kind, after in muts if kind == "compare-flip"]
+
+
+# The LOGICAL COMPLEMENT of each operator (the module docstring's contract): for every a, b
+# exactly one of `a OP b` / `a COMPLEMENT b` holds. `<=` ↔ `>` and `>=` ↔ `<` — NOT `<=` ↔ `>=`.
+PY_COMPLEMENT = {"==": "!=", "!=": "==", "<": ">=", ">=": "<", ">": "<=", "<=": ">"}
+
+
+def test_py_flip_table_is_exactly_the_six_operators_under_test():
+    """A new operator added to the table must come with a row in PY_COMPLEMENT."""
+    assert {v[0]: v[1] for v in sweep._PY_FLIP.values()} == PY_COMPLEMENT
+
+
+@pytest.mark.parametrize("op,comp", sorted(PY_COMPLEMENT.items()))
+def test_py_compare_flip_produces_the_logical_complement(op, comp):
+    src = f"r = a {op} b\n"
+    assert _py(src, 1) == [(1, "compare-flip", f"r = a {comp} b")]
+
+
+@pytest.mark.parametrize("op,comp", sorted(PY_COMPLEMENT.items()))
+def test_py_compare_flip_complement_is_semantically_the_negation(op, comp):
+    import operator
+    fn = {"==": operator.eq, "!=": operator.ne, "<": operator.lt, ">=": operator.ge,
+          ">": operator.gt, "<=": operator.le}
+    for a, b in [(1, 2), (2, 2), (3, 2)]:
+        assert fn[op](a, b) is not fn[comp](a, b)
+
+
+@pytest.mark.parametrize("op", ["is", "is not", "in", "not in"])
+def test_py_compare_flip_never_touches_identity_or_membership(op):
+    assert _py(f"r = a {op} b\n", 1) == []
+
+
+def test_py_compare_flip_chained_and_parenthesised_and_multi_line():
+    # each link of a chain flips on its own
+    assert sorted(_flips(_py("r = a < b <= c\n", 1))) == ["r = a < b > c", "r = a >= b <= c"]
+    # parentheses around an operand are tolerated
+    assert _flips(_py("r = (a) < (b)\n", 1)) == ["r = (a) >= (b)"]
+    # a comparison split across lines is not a one-line mutation
+    assert _py("r = (a <\n     b)\n", 1, 2) == []
+    # a comparison on an UNCHANGED line is left alone
+    assert _py("r = a < b\nq = c < d\n", 2) == [(2, "compare-flip", "q = c >= d")]
+
+
+def test_py_if_false_and_if_true_exact_text_and_negatives():
+    src = ("def f(a, b):\n"
+           "    if a:\n"          # 2: no else -> if-false only
+           "        pass\n"
+           "    elif b:\n"        # 4: elif, no else -> if-false only
+           "        pass\n"
+           "    x = 1 if a else 2\n"      # 6: IfExp is not an `if` statement
+           "    if (a and\n"      # 7: multi-line test
+           "            b):\n"
+           "        pass\n"
+           "    else:\n"
+           "        pass\n")
+    got = _py(src, 2, 4, 6, 7)
+    assert (2, "if-false", "    if False and (a):") in got
+    # line 2's `if` HAS an elif to fall into, so it gets the True twin; the elif (line 4) has none
+    assert (2, "if-true", "    if True or (a):") in got
+    assert (4, "if-false", "    elif False and (b):") in got
+    assert (4, "if-true", "    elif True or (b):") not in got
+    assert [g for g in got if g[0] == 6] == []
+    assert [g for g in got if g[0] == 7] == []
+    # unchanged lines are never mutated
+    assert _py(src, 3) == []
+
+
+def test_py_return_code_table_and_bool_exclusion():
+    """`_is_code` uses `type(...) is int`: a bool must NOT count as a 0/1 code (True == 1)."""
+    table = {"return 0": "return 1", "return 1": "return 0"}
+    for before, after in table.items():
+        assert _py(f"def f():\n    {before}\n", 2) == [(2, "return-code", f"    {after}")]
+    for lit in ("True", "False", "2", "-1", "0.0", "1.0", '"0"', "None", "x"):
+        got = [g for g in _py(f"def f(x):\n    return {lit}\n", 2) if g[1] == "return-code"]
+        assert got == [], lit
+    # same exclusion for the CompletedProcess code
+    for lit in ("True", "False", "2"):
+        assert _py(f"import subprocess\nr = subprocess.CompletedProcess([], {lit})\n", 2) == [], lit
+
+
+def test_py_is_code_directly():
+    import ast as _ast
+    expr = lambda s: _ast.parse(s, mode="eval").body        # noqa: E731
+    assert sweep._is_code(expr("0")) and sweep._is_code(expr("1"))
+    for s in ("True", "False", "2", "0.0", "None", "'0'", "x"):
+        assert not sweep._is_code(expr(s)), s
+    assert not sweep._is_code(None)
+
+
+def test_py_returncode_table_and_negatives():
+    base = "import subprocess\n"
+    assert _py(base + "r = subprocess.CompletedProcess([], 0)\n", 2) == [
+        (2, "returncode", "r = subprocess.CompletedProcess([], 1)")]
+    assert _py(base + "r = subprocess.CompletedProcess([], 1)\n", 2) == [
+        (2, "returncode", "r = subprocess.CompletedProcess([], 0)")]
+    assert _py(base + "r = CompletedProcess(args=[], returncode=1)\n", 2) == [
+        (2, "returncode", "r = CompletedProcess(args=[], returncode=0)")]
+    for stmt in ("r = subprocess.CompletedProcess([], 2)",     # not a 0/1 code
+                 "r = subprocess.CompletedProcess([])",         # no code at all
+                 "r = subprocess.CompletedProcess([], code)",   # not a literal
+                 "r = subprocess.Popen([], 0)",                 # not a CompletedProcess
+                 "r = foo([], 0)"):
+        assert [g for g in _py(base + stmt + "\n", 2) if g[1] == "returncode"] == [], stmt
+
+
+def test_py_return_none_and_return_value_tables_and_negatives():
+    src = ("def f(a):\n"
+           "    if a:\n"
+           "        return None\n"      # 3
+           "    return a + 1\n")        # 4
+    got = {(ln, k): after for ln, k, after in _py(src, 3, 4)}
+    assert got[(3, "return-value")] == "        return a + 1"
+    assert got[(4, "return-none")] == "    return None"
+    # a bare `return` counts as a None return
+    bare = "def f(a):\n    if a:\n        return\n    return a\n"
+    assert {(ln, k): after for ln, k, after in _py(bare, 3)}[(3, "return-value")] == "        return a"
+    # only-values and only-None functions have nothing to swap
+    only_vals = "def f(a):\n    if a:\n        return 5\n    return a\n"
+    assert [g for g in _py(only_vals, 3, 4) if g[1].startswith("return-") and g[1] != "return-code"] == []
+    only_none = "def f(a):\n    if a:\n        return None\n    return None\n"
+    assert [g for g in _py(only_none, 3, 4) if g[1] in ("return-none", "return-value")] == []
+    # an unchanged return is left alone
+    assert [g for g in _py(src, 3) if g[0] == 4] == []
+
+
+# --- JS comparison matcher -----------------------------------------------------------------
+
+JS_COMPLEMENT = {"===": "!==", "!==": "===", "==": "!=", "!=": "==",
+                 "<": ">=", ">=": "<", ">": "<=", "<=": ">"}
+
+
+def test_js_flip_table_is_exactly_the_eight_operators_under_test():
+    assert sweep._JS_FLIP == JS_COMPLEMENT
+
+
+@pytest.mark.parametrize("op,comp", sorted(JS_COMPLEMENT.items()))
+def test_js_compare_flip_produces_the_logical_complement(op, comp):
+    assert _js(f"const r = a {op} b;\n", 1) == [(1, "compare-flip", f"const r = a {comp} b;")]
+
+
+@pytest.mark.parametrize("op", sorted(JS_COMPLEMENT))
+def test_js_comparison_matcher_matches_a_spaced_operator(op):
+    m = sweep._RE_JS_CMP.search(f"a {op} b")
+    assert m and m.group(1) == op
+
+
+@pytest.mark.parametrize("line", [
+    "const f = x => y;",              # arrow function
+    "const f = (x) => (y > 0);".replace(" > ", ">"),   # arrow + glued `>`
+    "const f = async x => x;",
+    "const r = a >> 2;",              # shifts
+    "const r = a >>> 1;",
+    "const r = a << 2;",
+    "a >>= 1;",
+    "a >>>= 1;",
+    "a <<= 1;",
+    "const r = a<=b;",                # glued: no whitespace either side
+    "const r = a>=b;",
+    "const r = a<b;",
+    "const r = a>b;",
+    "const r = a===b;",
+    "const r = a !== b ? 1 : 2".replace("!== b", "!==b"),
+    "let m: Array<string>;",          # generics
+    "x += 1; y -= 1; z = 1;",         # assignments
+    'const s = "a=>b";',              # inside a string
+    'const s = "a >= b";',
+    "const s = 'a === b';",
+    "const s = `a < b`;",
+    "const r = a >=b;",               # whitespace on one side only
+    "const r = a== b;",
+])
+def test_js_comparison_matcher_negatives(line):
+    assert _js(line + "\n", 1) == [], line
+
+
+def test_js_arrow_next_to_a_real_comparison_only_flips_the_comparison():
+    assert _flips(_js("const f = x => x > 0;\n", 1)) == ["const f = x => x <= 0;"]
+    assert _flips(_js("const r = (a >> 2) === b;\n", 1)) == ["const r = (a >> 2) !== b;"]
+
+
+def test_js_regex_without_the_lookbehind_is_rejected():
+    """Positive control for the matcher: the pattern requires whitespace BEFORE the operator."""
+    assert sweep._RE_JS_CMP.search("x=> y") is None
+    assert sweep._RE_JS_CMP.search("x =>y") is None
+    assert sweep._RE_JS_CMP.search("a ==b") is None
+    assert sweep._RE_JS_CMP.search("a== b") is None
+
+
+# --- JS per-kind generator tables ----------------------------------------------------------
+
+
+def test_js_if_false_and_if_true_exact_text_and_negatives():
+    src = ("function f(a) {\n"
+           "  if (a) {\n"                       # 2: has else
+           "    g();\n"
+           "  } else {\n"
+           "    h();\n"
+           "  }\n"
+           "  if (g(a) && (b)) { x(); }\n"      # 7: nested parens, no else
+           "  while (a) { x(); }\n"             # 8: not an if
+           "  const s = 'if (a) {';\n"          # 9: in a string
+           "  // if (a) {\n"                    # 10: comment
+           "  notif (a) { x(); }\n"             # 11: \bif must not match inside a word
+           "  if (a &&\n"                       # 12: multi-line condition
+           "      b) { x(); }\n"
+           "}\n")
+    got = _js(src, 2, 7, 8, 9, 10, 11, 12)
+    assert (2, "if-false", "  if (false && (a)) {") in got
+    assert (2, "if-true", "  if (true || (a)) {") in got
+    assert (7, "if-false", "  if (false && (g(a) && (b))) { x(); }") in got
+    assert not [g for g in got if g[0] == 7 and g[1] == "if-true"]
+    for ln in (8, 9, 10, 11, 12):
+        assert [g for g in got if g[0] == ln] == [], ln
+    assert _js(src, 3) == []                     # an unchanged line is left alone
+
+
+def test_js_else_if_chain_gets_the_true_twin_only_where_an_else_follows():
+    src = ("function f(a, b) {\n"
+           "  if (a) {\n"
+           "    x();\n"
+           "  } else if (b) {\n"          # 4: has a trailing else
+           "    y();\n"
+           "  } else {\n"
+           "    z();\n"
+           "  }\n"
+           "}\n")
+    got = _js(src, 4)
+    assert (4, "if-false", "  } else if (false && (b)) {") in got
+    assert (4, "if-true", "  } else if (true || (b)) {") in got
+
+
+def test_js_return_code_table_and_negatives():
+    for before, after in {"return 0;": "return 1;", "return 1;": "return 0;",
+                          "return 0": "return 1", "process.exit(2); return 1;": "process.exit(2); return 0;"}.items():
+        assert _js(f"  {before}\n", 1) == [(1, "return-code", f"  {after}")], before
+    for stmt in ("return 2;", "return 10;", "return 01x;", "return x;", "return true;",
+                 "return false;", "return -1;", "return;", "preturn 0;",
+                 'const s = "return 0";', "// return 0", "x(); // return 0"):
+        assert [g for g in _js(f"  {stmt}\n", 1) if g[1] == "return-code"] == [], stmt
+
+
+def test_js_multiple_mutations_on_one_line_are_each_separate():
+    got = _js("if (a < b) return 0;\n", 1)
+    kinds = sorted((k, after) for _ln, k, after in got)
+    assert kinds == [
+        ("compare-flip", "if (a >= b) return 0;"),
+        ("if-false", "if (false && (a < b)) return 0;"),
+        ("return-code", "if (a < b) return 1;"),
+    ]
