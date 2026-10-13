@@ -1373,3 +1373,361 @@ def test_js_multiple_mutations_on_one_line_are_each_separate():
         ("if-false", "if (false && (a < b)) return 0;"),
         ("return-code", "if (a < b) return 1;"),
     ]
+
+
+# --- CMX-88 round 4: flag / config PRECEDENCE and WIRING for every sweep input ---------------
+#
+# Every input the sweep reads, and the one rule each follows (explicit flag > WORKFLOW.md key >
+# built-in default):
+#
+#   input                      flag                  workflow key                    default
+#   suite command              --test-cmd            judge.test_cmd                  none -> error
+#   suite timeout              (run_sweep timeout=)  judge.suite_timeout_seconds     judge.SUITE_TIMEOUT_SECONDS
+#   per-mutation selection     (none)                judge.select_tests              True
+#   diff base                  --base                workspace.base_branch           origin/dev
+#   workflow file              --workflow            <cwd>/WORKFLOW.md               none
+#   worktree                   --cwd                 -                               "."
+#
+# task-finished runs the same sweep through dispatcher.verify_sweep: worktree + workflow from the
+# run's row, everything else from that workflow (no flag reaches it), and --sweep-equivalent
+# rides into request_task_finished.
+
+
+def _wf_text(*, cmd=None, timeout=None, select=None, base=None) -> str:
+    head = ["---", "project_key: TEST"]
+    if base is not None:
+        head += ["workspace:", f"  base_branch: {base}"]
+    judge_lines = []
+    if cmd is not None:
+        judge_lines.append(f"  test_cmd: {json.dumps(cmd)}")
+    if timeout is not None:
+        judge_lines.append(f"  suite_timeout_seconds: {timeout}")
+    if select is not None:
+        judge_lines.append(f"  select_tests: {'true' if select else 'false'}")
+    if judge_lines:
+        head += ["judge:", *judge_lines]
+    return "\n".join([*head, "---", "body", ""])
+
+
+def _spy_sweep(monkeypatch) -> list:
+    calls: list = []
+    monkeypatch.setattr(sweep, "sweep",
+                        lambda *a, **kw: calls.append((a, kw)) or sweep.SweepReport())
+    return calls
+
+
+_DEFAULT_TO = sweep.judge.SUITE_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("wf_kw, call_kw, want", [
+    # suite command: explicit > workflow
+    (dict(cmd="wf-cmd"), dict(test_cmd="flag-cmd"), dict(cmd="flag-cmd")),
+    (dict(cmd="wf-cmd"), dict(), dict(cmd="wf-cmd")),
+    (dict(cmd="wf-cmd"), dict(test_cmd="   "), dict(cmd="wf-cmd")),     # blank flag = absent
+    (dict(cmd="wf-cmd"), dict(test_cmd=None), dict(cmd="wf-cmd")),
+    # suite timeout: explicit > workflow > default
+    (dict(cmd="c", timeout=77), dict(timeout=5), dict(to=5)),
+    (dict(cmd="c", timeout=77), dict(), dict(to=77)),
+    (dict(cmd="c"), dict(), dict(to=_DEFAULT_TO)),
+    (dict(cmd="c", timeout=77), dict(timeout=0), dict(to=0)),           # 0 is explicit, not absent
+    # selection: the workflow's value, both settings; default on
+    (dict(cmd="c", select=False), dict(), dict(sel=False)),
+    (dict(cmd="c", select=True), dict(), dict(sel=True)),
+    (dict(cmd="c"), dict(), dict(sel=True)),
+    # base: explicit > workspace.base_branch > origin/dev
+    (dict(cmd="c", base="main"), dict(base="origin/other"), dict(base="origin/other")),
+    (dict(cmd="c", base="main"), dict(), dict(base="origin/main")),
+    (dict(cmd="c"), dict(), dict(base="origin/dev")),
+])
+def test_run_sweep_precedence_table_with_a_workflow(tmp_path, monkeypatch, wf_kw, call_kw, want):
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text(_wf_text(**wf_kw))
+    calls = _spy_sweep(monkeypatch)
+    sweep.run_sweep(tmp_path, workflow_path=wf, **call_kw)
+    (args, kw), = calls
+    assert args[0] == tmp_path
+    if "cmd" in want:
+        assert args[2] == want["cmd"]
+    if "base" in want:
+        assert args[1] == want["base"]
+    if "to" in want:
+        assert kw["timeout"] == want["to"]
+    if "sel" in want:
+        assert kw["select_tests"] is want["sel"]
+
+
+def test_run_sweep_defaults_with_no_workflow_at_all(tmp_path, monkeypatch):
+    calls = _spy_sweep(monkeypatch)
+    sweep.run_sweep(tmp_path, test_cmd="flag-cmd")
+    (args, kw), = calls
+    assert args[1:] == ("origin/dev", "flag-cmd")
+    assert kw["timeout"] == _DEFAULT_TO and kw["select_tests"] is True
+    calls.clear()
+    sweep.run_sweep(tmp_path, test_cmd="flag-cmd", base="origin/x", timeout=9)
+    (args, kw), = calls
+    assert args[1] == "origin/x" and kw["timeout"] == 9
+
+
+def test_run_sweep_with_an_unreadable_workflow_is_an_error_not_a_default(tmp_path, monkeypatch):
+    calls = _spy_sweep(monkeypatch)
+    d = sweep.run_sweep(tmp_path, workflow_path=tmp_path / "missing.md", test_cmd="c")
+    assert d["ok"] is False and "could not be read" in d["error"]
+    assert calls == []
+
+
+def _stub_baseline(monkeypatch) -> list:
+    """Spy on judge.run_baseline (the call the sweep MEASURES with) and return a red baseline,
+    so the sweep stops right after it."""
+    from types import SimpleNamespace
+
+    seen: list = []
+
+    def fake(worktree, test_cmd, timeout, scratch, *, select_tests=True):
+        seen.append({"cmd": test_cmd, "timeout": timeout, "select_tests": select_tests})
+        return (SimpleNamespace(green=False, detail="stub", tail="", exit_code=1), None, "")
+
+    monkeypatch.setattr(sweep.judge, "run_baseline", fake)
+    return seen
+
+
+@pytest.mark.parametrize("select", [False, True])
+def test_the_workflows_select_tests_reaches_the_baseline_the_sweep_runs(tmp_path, monkeypatch,
+                                                                         select):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text(_wf_text(cmd=TEST_CMD, timeout=33, select=select, base="dev"))
+    seen = _stub_baseline(monkeypatch)
+    d = sweep.run_sweep(root, workflow_path=wf)
+    (call,) = seen
+    assert call["select_tests"] is select
+    assert call["timeout"] == 33 and call["cmd"] == TEST_CMD
+    assert "NOT GREEN" in d["cannot_verify"]
+
+
+def test_sweep_itself_forwards_select_tests_and_timeout_to_the_baseline(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    seen = _stub_baseline(monkeypatch)
+    for sel in (False, True):
+        sweep.sweep(root, "origin/dev", "the-cmd", timeout=11, select_tests=sel)
+    assert [(c["select_tests"], c["timeout"], c["cmd"]) for c in seen] == [
+        (False, 11, "the-cmd"), (True, 11, "the-cmd")]
+
+
+def _cli_main(*argv: str):
+    from chela import main
+
+    with patch.object(sys, "argv", ["chela", "judge", "sweep", *argv]):
+        try:
+            main.main()
+        except SystemExit as e:
+            return e.code
+    return None
+
+
+def _spy_run_sweep(monkeypatch) -> list:
+    calls: list = []
+    monkeypatch.setattr(sweep, "run_sweep", lambda cwd, **kw: calls.append((cwd, kw)) or
+                        {"ok": False, "error": "stub"})
+    return calls
+
+
+def test_cli_flags_reach_run_sweep(tmp_path, monkeypatch):
+    calls = _spy_run_sweep(monkeypatch)
+    wf = tmp_path / "other.md"
+    wf.write_text("x")
+    assert _cli_main("--cwd", str(tmp_path), "--base", "origin/b", "--workflow", str(wf),
+                     "--test-cmd", "T") == 2
+    (cwd, kw), = calls
+    assert cwd == str(tmp_path)
+    assert kw["base"] == "origin/b" and kw["workflow_path"] == str(wf) and kw["test_cmd"] == "T"
+
+
+def test_cli_defaults_when_every_flag_is_absent(tmp_path, monkeypatch):
+    calls = _spy_run_sweep(monkeypatch)
+    monkeypatch.chdir(tmp_path)                        # no WORKFLOW.md here
+    _cli_main()
+    (cwd, kw), = calls
+    assert cwd == "."
+    assert kw["base"] is None and kw["workflow_path"] is None and kw["test_cmd"] is None
+
+
+def test_cli_workflow_precedence_explicit_then_cwd_then_none(tmp_path, monkeypatch):
+    calls = _spy_run_sweep(monkeypatch)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    explicit = tmp_path / "explicit.md"
+    explicit.write_text("x")
+    # nothing anywhere
+    _cli_main("--cwd", str(cwd))
+    assert calls[-1][1]["workflow_path"] is None
+    # <cwd>/WORKFLOW.md is the default
+    (cwd / "WORKFLOW.md").write_text("x")
+    _cli_main("--cwd", str(cwd))
+    assert calls[-1][1]["workflow_path"] == str(cwd / "WORKFLOW.md")
+    # an explicit --workflow is NEVER replaced by it
+    _cli_main("--cwd", str(cwd), "--workflow", str(explicit))
+    assert calls[-1][1]["workflow_path"] == str(explicit)
+
+
+def test_cli_explicit_test_cmd_beats_the_workflows_end_to_end(tmp_path, monkeypatch):
+    calls = _spy_sweep(monkeypatch)
+    (tmp_path / "WORKFLOW.md").write_text(_wf_text(cmd="wf-cmd", select=False))
+    _cli_main("--cwd", str(tmp_path), "--test-cmd", "flag-cmd")
+    _cli_main("--cwd", str(tmp_path))
+    assert [a[2] for a, _ in calls] == ["flag-cmd", "wf-cmd"]
+    assert [kw["select_tests"] for _, kw in calls] == [False, False]
+
+
+def test_cli_explicit_workflow_is_the_one_read_end_to_end(tmp_path, monkeypatch):
+    calls = _spy_sweep(monkeypatch)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    (cwd / "WORKFLOW.md").write_text(_wf_text(cmd="cwd-cmd", base="main"))
+    other = tmp_path / "other.md"
+    other.write_text(_wf_text(cmd="other-cmd", base="trunk"))
+    _cli_main("--cwd", str(cwd), "--workflow", str(other))
+    _cli_main("--cwd", str(cwd))
+    assert [(a[1], a[2]) for a, _ in calls] == [("origin/trunk", "other-cmd"),
+                                                ("origin/main", "cwd-cmd")]
+
+
+def test_verify_sweep_uses_the_runs_worktree_and_workflow_only(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text(_wf_text(cmd="wf-cmd", timeout=44, select=False, base="trunk"))
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
+            "worktree_path, branch_name, started_at, attempt, task_number) VALUES "
+            "('cmx-88', ?, 'x', 'running', 'cmx-88', ?, 'feature', '2026', 1, 88)",
+            (str(wf), str(root)))
+        conn.commit()
+    calls = _spy_sweep(monkeypatch)
+    assert dispatcher.verify_sweep("cmx-88")["ok"] is True
+    (args, kw), = calls
+    assert Path(args[0]).resolve() == root.resolve()
+    assert args[1:] == ("origin/trunk", "wf-cmd")
+    assert kw["timeout"] == 44 and kw["select_tests"] is False
+
+
+def test_task_finished_forwards_accepted_equivalents_to_the_request(tmp_path, capsys):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    _run_row(tmp_path, root)
+    note = f"feat.py:{NEW_IF_LINE}: no outcome can change"
+    with patch.object(dispatcher, "check_no_new_guards", return_value=False), \
+         patch.object(dispatcher, "request_task_finished",
+                      return_value={"ok": True, "task_id": "cmx-88"}) as req:
+        assert _task_finished("--sweep-equivalent", note) is None
+    (call,) = req.call_args_list
+    assert call.kwargs["sweep_equivalents"][0]["why"] == "no outcome can change"
+    assert call.kwargs["sweep_equivalents"][0]["key"] == f"feat.py:{NEW_IF_LINE}"
+
+
+# --- AST node-type switches: async / nested / lambda / class variants ------------------------
+
+
+def _kinds(src: str, *lines: int) -> list[tuple[int, str]]:
+    return [(ln, k) for ln, k, _a in _py(src, *lines)]
+
+
+def test_return_none_and_value_mutations_are_generated_inside_async_def():
+    src = ("async def f(a):\n"
+           "    if a:\n"
+           "        return None\n"      # 3
+           "    return a + 1\n")        # 4
+    got = {(ln, k): after for ln, k, after in _py(src, 3, 4)}
+    assert got[(3, "return-value")] == "        return a + 1"
+    assert got[(4, "return-none")] == "    return None"
+    # a bare `return` and a method of a class, async too
+    meth = "class C:\n    async def m(self, a):\n        if a:\n            return\n        return a\n"
+    assert {(ln, k) for ln, k, _ in _py(meth, 4, 5)} >= {(4, "return-value"), (5, "return-none")}
+
+
+def test_sync_and_async_defs_get_identical_return_mutations():
+    body = "(a):\n    if a:\n        return None\n    return a + 1\n"
+    assert _py("def f" + body, 3, 4) == _py("async def f" + body, 3, 4)
+
+
+def test_if_compare_and_code_mutations_are_generated_inside_async_nested_and_class_bodies():
+    src = ("async def outer(a):\n"
+           "    def inner(b):\n"
+           "        if b == 1:\n"                # 3
+           "            return 0\n"              # 4
+           "        return b\n"
+           "    class K:\n"
+           "        async def m(self, c):\n"
+           "            if c > 2:\n"             # 8
+           "                return 1\n"          # 9
+           "    return inner\n")
+    got = {(ln, k) for ln, k, _ in _py(src, 3, 4, 8, 9)}
+    assert {(3, "if-false"), (3, "compare-flip"), (4, "return-code"),
+            (8, "if-false"), (8, "compare-flip"), (9, "return-code")} <= got
+
+
+def test_each_function_in_a_nesting_is_judged_on_its_own_returns():
+    src = ("def outer(a):\n"
+           "    def inner(b):\n"
+           "        if b:\n"
+           "            return None\n"      # 4
+           "        return b * 2\n"         # 5
+           "    return inner\n")            # 6 -- outer has only value returns
+    got = {(ln, k) for ln, k, _ in _py(src, 4, 5, 6)}
+    assert {(4, "return-value"), (5, "return-none")} <= got      # inner has both
+    assert not any(ln == 6 for ln, _ in got)                      # outer has nothing to swap
+
+
+@pytest.mark.parametrize("inner", [
+    "    async def g():\n        return 5\n",
+    "    def g():\n        return 5\n",
+    "    class G:\n        def m(self):\n            return 5\n",
+    "    class G:\n        async def m(self):\n            return 5\n",
+])
+def test_a_nested_defs_or_classes_returns_never_count_as_the_outer_functions(inner):
+    # outer has ONLY `return None`: were g's `return 5` counted, outer would look like it has
+    # both and `return None` would be mutated to `return 5`.
+    src = "def outer(a):\n" + inner + "    if a:\n        return None\n    return\n"
+    n = src.count("\n")
+    assert [k for _ln, k, _a in _py(src, *range(1, n + 1)) if k.startswith("return-")
+            and k != "return-code"] == []
+
+
+def test_a_lambda_is_not_a_function_and_its_body_is_never_mutated_as_a_return():
+    src = ("def f(a):\n"
+           "    g = lambda x: x if x else None\n"
+           "    if a:\n"
+           "        return None\n"
+           "    return g\n")
+    got = _kinds(src, 2, 3, 4, 5)
+    # the conditional EXPRESSION in the lambda is not an `if` statement: no mutation there
+    assert not any(ln == 2 for ln, _ in got)
+    # f's own returns are still paired
+    assert (4, "return-value") in got and (5, "return-none") in got
+
+
+# --- renames -----------------------------------------------------------------------------------
+
+
+def test_a_renamed_file_is_swept_as_entirely_changed(tmp_path):
+    """`changed_lines` passes --no-renames, so git reports a rename as delete + add and EVERY
+    line of the new path counts as changed, not just the one edited line. (Pinned as the
+    current behaviour; sweep.py has no comment saying whether that is intended — it errs
+    toward sweeping MORE, never fewer, lines.)"""
+    root = tmp_path / "r"
+    root.mkdir()
+    base = "".join(f"def f{i}(x):\n    return x + {i}\n" for i in range(1, 6))
+    (root / "old_name.py").write_text(base)
+    _git(root, "init", "-q", "-b", "dev")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "base")
+    _git(root, "update-ref", "refs/remotes/origin/dev", _git(root, "rev-parse", "HEAD"))
+    _git(root, "checkout", "-qb", "feature")
+    _git(root, "mv", "old_name.py", "new_name.py")
+    (root / "new_name.py").write_text(base.replace("x + 3", "x + 33"))      # one-line edit
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "rename + edit")
+    # the premise: with rename detection git WOULD call this a 1-line change
+    assert "rename from old_name.py" in _git(root, "diff", "-M", "--stat", "-p", "origin/dev", "HEAD")
+    changed, err = sweep.changed_lines(root, "origin/dev")
+    assert err == ""
+    assert set(changed) == {"new_name.py"}                  # the deleted old path is not swept
+    assert changed["new_name.py"] == set(range(1, 11))      # all 10 lines, not just line 6
