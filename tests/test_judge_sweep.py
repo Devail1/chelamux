@@ -745,6 +745,95 @@ def test_js_else_detection_skips_blank_lines_and_stops_at_a_dedent():
     assert sweep._js_has_else(nested, 1, len(nested[1])) is False
 
 
+def _js_twins(src: str) -> set[tuple[int, str]]:
+    n = len(src.split("\n"))
+    return {(m.line, m.kind) for m in sweep.js_mutations("m.js", src, set(range(1, n + 1)))
+            if m.kind.startswith("if-")}
+
+
+def test_js_a_bare_else_on_the_next_line_counts_as_an_else():
+    # Mutation guarded: `(\}\s*)?else` -> `\}\s*else` (a bare `else` stops counting).
+    assert (1, "if-true") in _js_twins("if (a) { x(); }\nelse { y(); }\n")
+    assert (1, "if-true") in _js_twins("if (a) { x(); }\n} else { y(); }\n")
+    assert (1, "if-true") in _js_twins("if (a) { x(); } else { y(); }\n")
+    assert (1, "if-true") not in _js_twins("if (a) { x(); }\nz();\n")
+    assert sweep._js_has_else(["if (a) { x(); }", "else { y(); }"], 0, 6) is True
+    assert sweep._js_has_else(["if (a) { x(); }", "} else { y(); }"], 0, 6) is True
+
+
+def test_js_a_same_line_else_is_searched_only_after_the_ifs_closing_paren():
+    # Mutation guarded: `line[after:]` -> `line` (the `} else` BEFORE the `if (b)` counts).
+    src = "if (a) {\n  x();\n} else if (b) {\n  y();\n}\n"
+    twins = _js_twins(src)
+    assert (1, "if-true") in twins            # `if (a)` really has an else
+    assert (3, "if-true") not in twins        # `if (b)` is the last link: no else
+    assert (3, "if-false") in twins
+    assert (1, "if-true") in _js_twins("if (a) { x } else { y }\n")
+    assert (1, "if-true") not in _js_twins("if (a) { x }\n")
+
+
+def test_the_judge_prompt_frames_agent_equivalence_notes_as_claims_before_the_notes(tmp_path):
+    # The framing is pinned as a LITERAL, not via any module constant: dropping it from
+    # `_judge_sweep_equivalents` must go red.
+    framing = ("These are CLAIMS, not facts — an equivalence that is wrong is a missing "
+               "guard; design an experiment for it:")
+    prompt = _hostile_judge_prompt(tmp_path, [{"key": "feat.py:8", "why": "demo helper"}])
+    assert framing in prompt
+    assert prompt.index(framing) < prompt.index("`feat.py:8` — demo helper")
+
+
+_JS_SHAPES = [
+    # (name, source, exact {(line, kind): mutated line} for the if-mutations)
+    ("K&R if/else", "if (a) {\n  x();\n} else {\n  y();\n}\n",
+     {(1, "if-false"): "if (false && (a)) {", (1, "if-true"): "if (true || (a)) {"}),
+    ("no else", "if (a) {\n  x();\n}\n", {(1, "if-false"): "if (false && (a)) {"}),
+    ("else-if chain",
+     "if (a) {\n  x();\n} else if (b) {\n  y();\n} else {\n  z();\n}\n",
+     {(1, "if-false"): "if (false && (a)) {", (1, "if-true"): "if (true || (a)) {",
+      (3, "if-false"): "} else if (false && (b)) {", (3, "if-true"): "} else if (true || (b)) {"}),
+    ("chain ending in else-if",
+     "if (a) {\n  x();\n} else if (b) {\n  y();\n}\n",
+     {(1, "if-false"): "if (false && (a)) {", (1, "if-true"): "if (true || (a)) {",
+      (3, "if-false"): "} else if (false && (b)) {"}),
+    ("nested",
+     "if (a) {\n  if (b) {\n    x();\n  } else {\n    y();\n  }\n}\n",
+     {(1, "if-false"): "if (false && (a)) {", (2, "if-false"): "  if (false && (b)) {",
+      (2, "if-true"): "  if (true || (b)) {"}),
+    ("one-liner braces", "if (a) { x } else { y }\n",
+     {(1, "if-false"): "if (false && (a)) { x } else { y }",
+      (1, "if-true"): "if (true || (a)) { x } else { y }"}),
+    ("brace-less, no else", "if (a) g();\n", {(1, "if-false"): "if (false && (a)) g();"}),
+    # --- documented-partial: detection is line-based, so these UNDER-report (no true-twin) ---
+    ("PARTIAL Allman", "if (a)\n{\n  x();\n}\nelse\n{\n  y();\n}\n",
+     {(1, "if-false"): "if (false && (a))"}),
+    ("PARTIAL `}` on its own line before else", "if (a) {\n  x();\n}\nelse {\n  y();\n}\n",
+     {(1, "if-false"): "if (false && (a)) {"}),
+    ("PARTIAL brace-less one-line else", "if (a) g(); else h();\n",
+     {(1, "if-false"): "if (false && (a)) g(); else h();"}),
+]
+
+
+@pytest.mark.parametrize("name,src,expected", _JS_SHAPES, ids=[c[0] for c in _JS_SHAPES])
+def test_js_if_else_shapes_produce_exactly_these_mutations(name, src, expected):
+    n = len(src.split("\n"))
+    got = {(m.line, m.kind): m.after for m in sweep.js_mutations("m.js", src, set(range(1, n + 1)))
+           if m.kind.startswith("if-")}
+    assert got == expected
+
+
+def test_anchor_replace_hits_the_target_line_for_a_substring_of_a_deeper_line():
+    # `    if x:` is a substring of `        if x:` on a different line. The anchored span is
+    # unique (count == 1) and replacing it once yields exactly the one-line mutation.
+    text = "a\n    if x:\n        if x:\nb"
+    for line_no, before, after in ((2, "    if x:", "    if False and (x):"),
+                                   (3, "        if x:", "        if False and (x):")):
+        span, mutated = sweep._anchor(text, sweep.Mutation("m.py", line_no, "k", before, after))
+        assert text.count(span) == 1
+        lines = text.split("\n")
+        lines[line_no - 1] = after
+        assert text.replace(span, mutated, 1) == "\n".join(lines)
+
+
 def test_anchor_pins_whole_lines():
     text = "a\n    if x:\n        if x:\nb"
     mut = sweep.Mutation("m.py", 2, "if-false", "    if x:", "    if False and (x):")

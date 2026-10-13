@@ -331,7 +331,10 @@ def _in_js_string(line: str, pos: int) -> bool:
 
 def _js_has_else(src: list[str], idx: int, after: int) -> bool:
     """Does the ``if`` on ``src[idx]`` have an ``else``? Line-based: ``} else`` later on the
-    same line, or the next non-blank line at the SAME indent is an ``else``/``} else``."""
+    same line, or the next non-blank line at the SAME indent is an ``else``/``} else``.
+    Detection is line-based and PARTIAL: an Allman ``}`` on its own line before the ``else``
+    and a brace-less one-line ``if (a) g(); else h();`` are missed (no true-twin: the sweep
+    under-reports, it never invents a survivor)."""
     line = src[idx]
     if re.search(r"\}\s*else\b", line[after:]):
         return True
@@ -431,8 +434,11 @@ def _anchor(text: str, mut: Mutation) -> tuple[str, str] | None:
     lo = hi = i
     while True:
         before = "\n".join(src[lo:hi + 1])
-        # A leading/trailing newline pins the span to WHOLE lines — `    if x:` is otherwise
-        # a substring of `        if x:`.
+        # Uniqueness is guaranteed by `text.count(span) == 1` alone: the target line is always
+        # inside `span`, so a count of one means `replace(span, mutated, 1)` can only hit the
+        # target (`    if x:` also occurs inside `        if x:` — count 2 — so it widens to
+        # a neighbour line until unique). The newline pins are NOT load-bearing for that; they
+        # only keep the span aligned to whole lines, which is the span's tidy SHAPE.
         pre = "\n" if lo > 0 else ""
         post = "\n" if hi < len(src) - 1 else ""
         span = pre + before + post
