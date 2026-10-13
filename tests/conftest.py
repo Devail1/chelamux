@@ -53,6 +53,7 @@ import io
 import os
 import pwd
 import shutil
+import signal
 import sqlite3
 import subprocess
 import tempfile
@@ -119,25 +120,118 @@ atexit.register(shutil.rmtree, SANDBOX_CHELA_DIR, ignore_errors=True)
 # the operator's actual fleet contents (which no test can know ahead of time). Making pm2
 # UNREACHABLE instead (e.g. blocking its socket) would fail those reads outright, trading
 # this bug for exactly the one CMX-346's own fence comment warns against.
-SANDBOX_PM2_HOME = Path(tempfile.mkdtemp(prefix="chela-tests-pm2-"))
-os.environ["PM2_HOME"] = str(SANDBOX_PM2_HOME)
+#
+# **And a run that is KILLED never reaches `atexit`** (CMX-115). Judge mutation timeouts,
+# self-check timeouts, `timeout`, an agent's Bash limit: SIGTERM/SIGKILL skip the teardown,
+# so the God Daemon and the dir both leak — 83 of them were found on 2026-10-13, daemons
+# ~18h old. Two layers close it: a SIGTERM handler runs the same teardown before the
+# process dies, and — for the SIGKILL nothing can handle — every session START reaps the
+# sandboxes whose owning pytest PID is gone. The owner is recorded in a marker file inside
+# the dir, and the reaper refuses anything without the prefix AND that marker: it can
+# never be pointed at the operator's live `~/.pm2` (no marker), nor at a sandbox from
+# before this change (none either — those are the operator's to clear by hand once).
+PM2_SANDBOX_PREFIX = "chela-tests-pm2-"
+PM2_SANDBOX_OWNER_FILE = "chela-tests-owner.pid"
 
 
-def _kill_sandbox_pm2_daemon() -> None:
+def _pm2_kill(home: Path) -> None:
+    """`PM2_HOME=<home> pm2 kill` — that home's daemon only, never the operator's."""
     if shutil.which("pm2"):
         try:
             subprocess.run(
                 ["pm2", "kill"],
-                env={**os.environ, "PM2_HOME": str(SANDBOX_PM2_HOME)},
+                env={**os.environ, "PM2_HOME": str(home)},
                 capture_output=True, timeout=15,
             )
         except (subprocess.TimeoutExpired, OSError):
-            pass  # nothing to kill, or pm2 hung on its own way out — the rmtree below
-                  # still removes the pid/socket files so nothing points at this home again
+            pass  # nothing to kill, or pm2 hung on its own way out — the rmtree after
+                  # this still removes the pid/socket files so nothing points here again
+
+
+def _refuse_unmarked_pm2_home(home: Path) -> None:
+    """Raise unless ``home`` is a test sandbox: the prefix AND the owner marker."""
+    if not home.name.startswith(PM2_SANDBOX_PREFIX):
+        raise ValueError(f"refusing to reap {home}: not a {PM2_SANDBOX_PREFIX}* sandbox")
+    if not (home / PM2_SANDBOX_OWNER_FILE).is_file():
+        raise ValueError(f"refusing to reap {home}: no {PM2_SANDBOX_OWNER_FILE} marker")
+
+
+def _owner_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True                       # exists, just not ours to signal
+    return True
+
+
+def _reap_pm2_sandbox(home: Path, kill=_pm2_kill) -> None:
+    _refuse_unmarked_pm2_home(home)
+    # No pm2.pid ⇒ no daemon ever started there; `pm2 kill` would SPAWN one to stop it.
+    if (home / "pm2.pid").exists():
+        kill(home)
+    shutil.rmtree(home, ignore_errors=True)
+
+
+def _reap_stale_pm2_sandboxes(root: Path | None = None, kill=_pm2_kill) -> list[Path]:
+    """Reap every marked sandbox under ``root`` whose owning pytest process is gone."""
+    root = Path(tempfile.gettempdir()) if root is None else root
+    reaped = []
+    for home in sorted(root.glob(PM2_SANDBOX_PREFIX + "*")):
+        if home.is_symlink() or not home.is_dir():
+            continue
+        try:
+            pid = int((home / PM2_SANDBOX_OWNER_FILE).read_text().strip())
+        except (OSError, ValueError):
+            continue                      # unmarked or unreadable: not provably ours
+        if pid <= 0 or _owner_alive(pid):
+            continue
+        _reap_pm2_sandbox(home, kill)
+        reaped.append(home)
+    return reaped
+
+
+try:
+    _reap_stale_pm2_sandboxes()
+except Exception:                         # pragma: no cover - housekeeping never fails a run
+    pass
+
+SANDBOX_PM2_HOME = Path(tempfile.mkdtemp(prefix=PM2_SANDBOX_PREFIX))
+_SANDBOX_OWNER_PID = os.getpid()
+(SANDBOX_PM2_HOME / PM2_SANDBOX_OWNER_FILE).write_text(str(_SANDBOX_OWNER_PID))
+os.environ["PM2_HOME"] = str(SANDBOX_PM2_HOME)
+
+
+def _kill_sandbox_pm2_daemon() -> None:
+    # A forked child inherits this handler and the atexit list; its exit (or the SIGTERM
+    # `multiprocessing` sends a pool worker) must not tear down its PARENT's sandbox.
+    if os.getpid() != _SANDBOX_OWNER_PID:
+        return
+    _pm2_kill(SANDBOX_PM2_HOME)
     shutil.rmtree(SANDBOX_PM2_HOME, ignore_errors=True)
 
 
 atexit.register(_kill_sandbox_pm2_daemon)
+
+
+def _on_sigterm(signum, frame) -> None:
+    _kill_sandbox_pm2_daemon()
+    if os.getpid() == _SANDBOX_OWNER_PID:
+        shutil.rmtree(SANDBOX_CHELA_DIR, ignore_errors=True)
+    if callable(_PREV_SIGTERM):
+        _PREV_SIGTERM(signum, frame)
+        return
+    signal.signal(signum, signal.SIG_DFL)  # then die of SIGTERM exactly as before
+    os.kill(os.getpid(), signum)
+
+
+_PREV_SIGTERM = signal.getsignal(signal.SIGTERM)
+if _PREV_SIGTERM is not signal.SIG_IGN:   # a parent that chose to ignore it keeps that
+    try:
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except ValueError:                    # pragma: no cover - not the main thread
+        pass
 
 # A developer who exported these to debug against live files would otherwise aim the whole
 # suite straight back at production, under the sandbox's nose.
