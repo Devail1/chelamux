@@ -137,7 +137,9 @@ test('a quote in the PR url stays inside the href attribute', async () => {
 
 // A PR url is agent-supplied: only http(s) becomes a link; anything else is plain escaped text.
 for (const url of ['javascript:alert(1)', ' JaVaScRiPt:alert(1)', 'java\tscript:alert(1)', '\u0001javascript:alert(1)',
-    'java\nscript:alert(1)', 'data:text/html,<script>alert(1)</script>', 'ftp://x.test/a', '//evil.test/x', 'vbscript:x']) {
+    'java\nscript:alert(1)', 'data:text/html,<script>alert(1)</script>', 'ftp://x.test/a', '//evil.test/x', 'vbscript:x',
+    // http(s):// must be the PREFIX, not merely present somewhere in the url (CMX-103 round 6).
+    'javascript:alert(1)//https://x.test', 'data:text/html,x#http://x.test', ' x https://x.test']) {
     test(`PR url ${JSON.stringify(url)} never becomes a live link`, async () => {
         LISTING = { requests: [req({ pr_url: url })] };
         await pa.openApprovals();
@@ -160,6 +162,8 @@ test('a http(s) url is still a link, however it is cased or padded', async () =>
 test('safeHref: pinned', () => {
     assert.equal(pa.safeHref('https://a.test'), 'https://a.test');
     assert.equal(pa.safeHref(' \u0001 javascript:1'), null);
+    assert.equal(pa.safeHref('javascript:alert(1)//https://x.test'), null);
+    assert.equal(pa.safeHref('mailto:a@b.test?https://x.test'), null);
     assert.equal(pa.safeHref(null), null);
     assert.equal(pa.safeHref(undefined), null);
     assert.equal(pa.safeHref(''), null);
