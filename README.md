@@ -5,7 +5,7 @@
 <table align="center">
   <tr>
     <td align="center" valign="top">
-      <img src="docs/img/chela-demo-desktop.gif" alt="chela on desktop — the live terminal Wall with one agent in each state, the Work view's board, runs and schedules, then Settings opened with Ctrl+," width="600"><br>
+      <img src="docs/img/chela-demo-desktop.gif" alt="chela on desktop — the live terminal Wall with one agent in each state beside the sidebar (folder groups, Needs you, the orchestrator badge); hold Alt to number the rows, archive a finished session and unarchive it, then the Work view's board, runs and schedules, and Settings opened with Ctrl+," width="600"><br>
       <sub>Desktop — the Wall, Work (board, runs, schedules) &amp; Settings on <kbd>Ctrl</kbd>+<kbd>,</kbd></sub>
     </td>
     <td align="center" valign="top">

@@ -12,6 +12,10 @@ The file name is load-bearing: chela maps a window to its session with
 "claude" for the dashboard to see a session in the pane at all.
 
     claude_demo_agent.py --scene working|waiting|done|idle --status-dir DIR --cwd DIR
+
+It also records how to start it again (:func:`record_session`), keyed by its session id:
+the sidebar's Unarchive resumes a closed session with ``claude --resume <id>``, and
+``fake_claude.py`` answers that by re-running this scene.
 """
 from __future__ import annotations
 
@@ -99,6 +103,22 @@ def publish_status(status_dir: str, cwd: str, status: str, session_id: str) -> N
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump({"pid": os.getpid(), "cwd": cwd, "status": status, "sessionId": session_id}, fh)
+    os.replace(tmp, path)
+
+
+def sessions_dir(status_dir: str) -> str:
+    """Where session records live: beside the status dir. fake_claude.py reads the same."""
+    return os.path.join(os.path.dirname(os.path.abspath(status_dir)), "sessions")
+
+
+def record_session(status_dir: str, session_id: str, argv: list[str]) -> None:
+    """This session's own arguments, for ``fake_claude.py --resume <session_id>``."""
+    d = sessions_dir(status_dir)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, f"{session_id}.json")
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"argv": argv}, fh)
     os.replace(tmp, path)
 
 
@@ -209,8 +229,12 @@ def main() -> int:
     ap.add_argument("--cwd-label", default=None, help="what the banner shows for cwd")
     ap.add_argument("--session-id", default=None)
     a = ap.parse_args()
+    sid = a.session_id or str(uuid.uuid4())
+    record_session(a.status_dir, sid, ["--scene", a.scene, "--status-dir", a.status_dir,
+                                       "--cwd", a.cwd, "--cwd-label", a.cwd_label or a.cwd,
+                                       "--session-id", sid])
     try:
-        run(a.scene, a.status_dir, a.cwd, a.cwd_label or a.cwd, a.session_id or str(uuid.uuid4()))
+        run(a.scene, a.status_dir, a.cwd, a.cwd_label or a.cwd, sid)
     except KeyboardInterrupt:
         pass
     return 0
