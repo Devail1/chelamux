@@ -2110,16 +2110,51 @@ async function renderTerminals() {
 // activeElement read and only touches the DOM when the focused pane changes.
 // Pure parent-frame — the iframe needs no cooperation — and it tracks the SAME
 // focus that drives tmux's focus-events to Claude Code.
+//
+// CMX-104: the parent's activeElement is NOT the authority. Live, after
+// CMX-90, Liav typed into one pane (its xterm drew the solid, focused cursor)
+// while the ring sat on the OTHER pane (hollow, blurred cursor) — the parent's
+// activeElement still named the frame he had left. The authority is each
+// frame's OWN document.hasFocus(): it is the focus xterm's cursor and tmux's
+// focus-events follow, so the ring now asks every term frame that question
+// first and only falls back to activeElement when no frame can answer (an
+// opaque frame) or the whole browser window is unfocused (keep marking the
+// pane focus will return to — a screenshot tool steals OS focus). And every
+// tick re-asserts the invariant on the DOM itself — exactly one .term-focused,
+// on that pane — instead of trusting the remembered _focusedPane: a ring left
+// on any pane the tracker no longer remembers is cleared, not kept forever.
 let _focusPoll = null;
 let _focusedPane = null;
 
-function _applyTermFocus() {
+function _frameDocHasFocus(frame) {
+    let doc = null;
+    try { doc = frame.contentDocument; } catch (e) { /* cross-doc guard */ }
+    if (!doc || typeof doc.hasFocus !== 'function') return null;   // can't tell
+    try { return doc.hasFocus(); } catch (e) { return null; }
+}
+
+function _focusedTermFrame() {
+    const frames = Array.from(document.querySelectorAll('iframe.term-frame'));
+    const owner = frames.find(f => _frameDocHasFocus(f) === true);
+    if (owner) return owner;
     const ae = document.activeElement;
-    const frame = (ae && ae.classList && ae.classList.contains('term-frame')) ? ae : null;
+    const aeFrame = (ae && ae.classList && ae.classList.contains('term-frame')) ? ae : null;
+    if (!aeFrame) return null;
+    let pageFocused = true;
+    try { pageFocused = document.hasFocus(); } catch (e) { /* assume focused */ }
+    // The page has focus but this frame's own document says it doesn't: the
+    // keyboard is NOT there, whatever activeElement claims (the CMX-104 bug).
+    if (pageFocused && _frameDocHasFocus(aeFrame) === false) return null;
+    return aeFrame;
+}
+
+function _applyTermFocus() {
+    const frame = _focusedTermFrame();
     const pane = frame ? frame.closest('.grid-stack-item-content, .term-pane') : null;
-    if (pane === _focusedPane) return;            // unchanged — leave the DOM alone
-    if (_focusedPane) _focusedPane.classList.remove('term-focused');
-    if (pane) pane.classList.add('term-focused');
+    document.querySelectorAll('.term-focused').forEach(el => {
+        if (el !== pane) el.classList.remove('term-focused');
+    });
+    if (pane && !pane.classList.contains('term-focused')) pane.classList.add('term-focused');
     _focusedPane = pane;
 }
 
@@ -3930,7 +3965,7 @@ if (window.visualViewport) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

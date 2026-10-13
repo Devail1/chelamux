@@ -28,6 +28,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
+import { renderTemplateIfs } from './template_ifs.mjs';
 
 const HELPERS_DIR = dirname(fileURLToPath(import.meta.url));
 const DASHBOARD_ROOT = join(HELPERS_DIR, '..', '..', 'chela', 'dashboard');
@@ -37,16 +38,17 @@ const TEMPLATE_HTML = readFileSync(join(DASHBOARD_ROOT, 'templates', 'index.html
  * (inclusive of both). Throws — loudly, at fixture-build time, not as a
  * quiet empty string — if either marker has moved, exactly like
  * tests/dashboard_default_view.test.mjs's original inline version did. */
-export function sliceTemplate(startMarker, endMarker) {
-    const start = TEMPLATE_HTML.indexOf(startMarker);
+export function sliceTemplate(startMarker, endMarker, ctx) {
+    const html = ctx ? renderTemplateIfs(TEMPLATE_HTML, ctx) : TEMPLATE_HTML;
+    const start = html.indexOf(startMarker);
     if (start < 0) {
         throw new Error(`sliceTemplate: start marker not found in templates/index.html: ${JSON.stringify(startMarker)}`);
     }
-    const endAt = TEMPLATE_HTML.indexOf(endMarker, start);
+    const endAt = html.indexOf(endMarker, start);
     if (endAt < 0) {
         throw new Error(`sliceTemplate: end marker not found (after the start marker) in templates/index.html: ${JSON.stringify(endMarker)}`);
     }
-    return TEMPLATE_HTML.slice(start, endAt + endMarker.length);
+    return html.slice(start, endAt + endMarker.length);
 }
 
 const GLOBAL_WINDOW_PROPS = ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',

@@ -108,6 +108,11 @@ const DECISION_TYPES = [
     // dispatcher.py's reconcile-to-done branch, not the judge itself; see chela/judge.py's
     // J_UNJUDGED_MERGED comment.
     'run_unjudged_merged',
+    // CMX-86: the notices the orchestrator used to find only by hand — a judge that never
+    // started, a run someone else reopened/closed, a red CI with its failing line, a PR gone
+    // CONFLICTING, an agent gone quiet (or its completion marker unread), a hold that lapsed.
+    'run_judge_not_started', 'run_reopened', 'run_was_closed', 'run_ci_red', 'run_pr_conflicting',
+    'run_stuck', 'run_marker_unread', 'dispatch_hold_expired', 'dispatch_hold_released',
     'finished', 'blocked', 'died', 'gone_unknown', 'completed_gone',
     'watch_epoch_lost', 'inbox_undeliverable', 'inbox_self_healed',
 ];

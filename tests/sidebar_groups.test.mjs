@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { bootDashboardDom, flush } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 import {
-    DISPATCHED_KEY, OTHER_KEY, buildItems, folderKey, folderLabels, groupSidebar, isArchivable, moveGroup, runState,
+    DISPATCHED_KEY, OTHER_KEY, buildItems, folderKey, folderLabels, groupSidebar, isArchivable, moveGroup, orderGroups, runState,
 } from '../chela/dashboard/static/js/sidebarmodel.js';
 
 const BODY = `
@@ -708,6 +708,33 @@ test('model: Move up / down stops at the ends and keeps off-screen groups in the
     assert.equal(moveGroup(['a', 'b'], [], 'zz', +1), null, 'an unknown group does not move');
     assert.deepEqual(moveGroup(['a', 'b', 'c'], ['gone', 'b', 'a'], 'c', -1), ['a', 'c', 'b', 'gone'],
         'a folder with no session today keeps its place for when it comes back');
+});
+
+// CMX-106: once any order is saved (moveGroup persists the whole visible order, so
+// Dispatched is in it), a folder created later must still land among the folders.
+const G = key => ({ key, label: key === DISPATCHED_KEY ? 'Dispatched' : key === OTHER_KEY ? 'Other' : key });
+const ordered = (keys, stored) => orderGroups(keys.map(G), stored).map(g => g.key);
+
+test('CMX-106: a new folder lands after the stored folders and BEFORE a stored Dispatched', () => {
+    assert.deepEqual(ordered(['liavedunix', DISPATCHED_KEY, 'tradeplan'], ['liavedunix', DISPATCHED_KEY]),
+        ['liavedunix', 'tradeplan', DISPATCHED_KEY]);
+});
+
+test('CMX-106: Dispatched moved ABOVE the folders stays there; the new folder follows the last stored folder', () => {
+    assert.deepEqual(ordered(['liavedunix', DISPATCHED_KEY, 'tradeplan'], [DISPATCHED_KEY, 'liavedunix']),
+        [DISPATCHED_KEY, 'liavedunix', 'tradeplan']);
+});
+
+test('CMX-106: an unstored Other stays last, an unstored Dispatched after the folders', () => {
+    assert.deepEqual(ordered([OTHER_KEY, DISPATCHED_KEY, 'beta', 'alpha'], ['beta']),
+        ['beta', 'alpha', DISPATCHED_KEY, OTHER_KEY]);
+    assert.deepEqual(ordered([OTHER_KEY, 'zeta', DISPATCHED_KEY, 'alpha'], ['alpha', DISPATCHED_KEY]),
+        ['alpha', 'zeta', DISPATCHED_KEY, OTHER_KEY]);
+});
+
+test('CMX-106: a new folder with only Dispatched stored goes above it; nothing stored = default order', () => {
+    assert.deepEqual(ordered([DISPATCHED_KEY, 'tradeplan'], [DISPATCHED_KEY]), ['tradeplan', DISPATCHED_KEY]);
+    assert.deepEqual(ordered([OTHER_KEY, DISPATCHED_KEY, 'b', 'a'], []), ['a', 'b', DISPATCHED_KEY, OTHER_KEY]);
 });
 
 test('model: sort by name is NUMERIC — CMX-100 sorts after CMX-37, not between CMX-10 and CMX-11', () => {

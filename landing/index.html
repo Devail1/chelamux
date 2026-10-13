@@ -187,13 +187,14 @@
 
 <header class="hero wrap">
   <img class="banner" src="banner.svg" alt="chela">
-  <h1>Put a fleet of Claude Code agents<br>to work — <span class="accent">unattended.</span></h1>
+  <h1>Run Claude Code agents unattended —<br><span class="accent">chela only merges a PR once it has proved the tests catch broken code.</span></h1>
   <p class="sub">
-    chela is a tiny control plane over a single tmux session. It <strong>schedules</strong>
-    agents, <strong>dispatches</strong> a task queue (Linear, GitHub issues or a <code>TODO.md</code>) into pull requests, <strong>tells you the
-    moment one finishes or blocks</strong>, and streams the whole fleet on one <strong>live
-    terminal wall</strong> — which you can <strong>share, end-to-end encrypted</strong>. You walk
-    away; the agents keep working.
+    chela <strong>dispatches</strong> a task queue (Linear, GitHub issues or a <code>TODO.md</code>)
+    into one worktree, one agent and one PR per task. A <strong>mutation-testing judge</strong>
+    corrupts the code to prove the tests notice, its verdict is bound to the PR head, and
+    <code>chela merge</code> <strong>refuses without it</strong> — an override is one audited
+    Telegram tap. And you can watch it all live: a <strong>terminal wall</strong>, a
+    Telegram bridge, and schedules for long-lived agents.
   </p>
   <div class="cta">
     <a class="btn btn-primary" href="#install">Get started</a>

@@ -11,6 +11,7 @@
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, extname, normalize, sep } from 'node:path';
+import { renderTemplateIfs } from '../js_helpers/template_ifs.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const STATIC = join(ROOT, 'chela', 'dashboard', 'static');
@@ -46,22 +47,17 @@ const TYPES = {
 export const ASSET_VERSION = 'f1x7ure0000a';
 
 // What Flask's render_template would produce with terminals enabled and the
-// dispatched-tile flag off. The template's Jinja is `{% if flag %}…{% endif %}`
-// pairs plus the CMX-426 asset expressions; anything else is a loud error rather than a
+// dispatched-tile flag off. The template's Jinja is `{% if [not] flag %}…{% endif %}`
+// blocks (js_helpers/template_ifs.mjs) plus the CMX-426 asset expressions; anything else is a loud error rather than a
 // silently mis-rendered shell.
 export function renderShell() {
     const flags = { terminals_enabled: true, wall_tile_dispatched: false };
     const html = readFileSync(TEMPLATE, 'utf8')
         .replace(/\{\{\s*asset_path\('([^']+)'\)\s*\}\}/g, (_, rel) => `static/v/${ASSET_VERSION}/${rel}`)
-        .replace(/\{\{\s*asset_version\|tojson\s*\}\}/g, JSON.stringify(ASSET_VERSION))
-        .replace(
-        /\{%\s*if\s+(\w+)\s*%\}([\s\S]*?)\{%\s*endif\s*%\}/g,
-        (_, flag, inner) => {
-            if (!(flag in flags)) throw new Error(`renderShell: unknown template flag ${flag}`);
-            return flags[flag] ? inner : '';
-        });
-    if (/\{%|\{\{/.test(html)) throw new Error('renderShell: unrendered Jinja left in templates/index.html');
-    return html;
+        .replace(/\{\{\s*asset_version\|tojson\s*\}\}/g, JSON.stringify(ASSET_VERSION));
+    const rendered = renderTemplateIfs(html, flags);
+    if (/\{%|\{\{/.test(rendered)) throw new Error('renderShell: unrendered Jinja left in templates/index.html');
+    return rendered;
 }
 
 function apiBody(path, api = {}) {

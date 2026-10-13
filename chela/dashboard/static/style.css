@@ -272,20 +272,44 @@ body {
 
 /* Focus ring (CMX-377: "a thin inset ring in --accent — no glow, no thick
    border"): the pane whose embedded terminal currently holds browser focus
-   gets a single thin INSET box-shadow ring, nothing else — the border itself
-   stays --border and the tile's own box size never shifts (inset never adds
-   layout width, unlike the old outer glow this replaces). Tracks the same
-   focus tmux forwards to Claude Code via focus-events. .term-focused is
-   toggled from terminals.js (_applyTermFocus). */
+   gets a single thin INSET ring, nothing else — the border itself stays
+   --border and the tile's own box size never shifts. Tracks the same focus
+   tmux forwards to Claude Code via focus-events. .term-focused is toggled
+   from terminals.js (_applyTermFocus).
+   CMX-90: the ring is drawn on a ::before OVERLAY, not on the pane itself. An
+   inset box-shadow on the pane paints BENEATH its children, and the header,
+   iframe and toolbar all have their own backgrounds, so they covered the ring
+   everywhere except the strip the recap line left exposed. The overlay sits
+   above the terminal (z-index over the ctx bar's 5, under the kill-confirm's
+   20) with pointer-events: none so every click still reaches the terminal.
+   ::before, not ::after — the wire-live drop socket already owns ::after on
+   .grid-stack-item-content. Both panes are already positioned (see the
+   `position: relative` rule by .pane-kill-confirm, and gridstack's own
+   `position: absolute` on the item content). 2px so it reads on a phone. */
+/* the pane keeps a transition for the waiting glow it still carries itself */
 .term-pane, .grid-stack-item-content { transition: box-shadow 0.15s ease; }
-.term-pane.term-focused, .grid-stack-item-content.term-focused {
-    box-shadow: inset 0 0 0 1.5px var(--accent);
+.term-pane::before, .grid-stack-item-content::before {
+    content: ''; position: absolute; inset: 0; z-index: 6;
+    border-radius: inherit; pointer-events: none;
+    box-shadow: inset 0 0 0 0 transparent;
+    transition: box-shadow 0.15s ease;
 }
-/* Waiting on user input: yellow ring on the live pane (after .term-focused so it
-   wins when a waiting pane is also focused — it's the more urgent signal). */
+.term-pane.term-focused::before, .grid-stack-item-content.term-focused::before {
+    box-shadow: inset 0 0 0 2px var(--accent);
+}
+/* Waiting on user input: a soft yellow GLOW outside the pane + a yellow 1px
+   border, and the header's "waiting" state pill carries the word.
+   CMX-104: it is deliberately NOT a ring. It used to be the focus ring's twin
+   (an inset 2px ring on the same overlay, plus a crisp 1px outer ring) told
+   apart by hue alone — yellow vs the warm --accent — which a red-weak eye
+   cannot do, so "which pane is active?" had two answers. The crisp inset 2px
+   ring is reserved for keyboard focus (.term-focused above); a pane that is
+   waiting AND focused shows both: the glow outside, the focus ring inside.
+   Every whole-pane shadow here is BLURRED (no zero-blur spread ring) — the
+   guard in tests/wall_focus_ring_single_meaning.test.mjs. */
 .term-pane.term-waiting, .grid-stack-item-content.term-waiting {
     border-color: var(--yellow);
-    box-shadow: 0 0 0 1px var(--yellow), 0 0 10px -2px var(--yellow);
+    box-shadow: 0 0 12px 0 var(--yellow);
 }
 
 /* Wall mode: draggable / resizable Gridstack tiles */
@@ -535,6 +559,12 @@ body {
    measures #term-stage's top live, so the Wall still fills to the bottom. */
 .term-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
 #term-new-shell { margin-left: auto; }
+/* CMX-89: a phone has no row controls (the "+" FAB starts sessions) and
+   renderTerminals() hides this button there — but only once the module graph
+   has loaded, so without this rule it painted first and then vanished. */
+@media (max-width: 768px) {
+    #term-new-shell { display: none; }
+}
 @media (min-width: 769px) {
     .term-toolbar {
         align-items: flex-end;
@@ -1065,7 +1095,9 @@ body.pane-is-maximized .grid-stack-item:has(.pane-maximized) {
 .pane-maximized {
     border-radius: 0 !important;
     border: 0 !important;
-    box-shadow: inset 0 0 0 2px var(--accent);   /* thin "maximized" frame */
+    /* CMX-104: no "maximized" frame. It drew a second inset accent ring a few px
+       outside the focus overlay's — two concentric rings. A maximized pane fills
+       the screen and its accent-filled restore button already says so. */
 }
 body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
     visibility: hidden;
@@ -1269,9 +1301,8 @@ body.term-dragging { overflow: hidden; }
    cursor + hover tint on their HEADER ONLY (the promote affordance —
    terminals.js's _bindFocusPromote reads clicks there, never the iframe) so
    "click here to bring this pane forward" is discoverable without a label. */
-.grid-stack-item.wall-focus-main > .grid-stack-item-content {
-    box-shadow: 0 0 0 1px var(--accent);
-}
+/* CMX-104: the large pane gets NO ring — its size is the cue. Its old 1px
+   accent outer ring read as "keyboard is here" on a pane that didn't have it. */
 .grid-stack-item.wall-focus-strip > .grid-stack-item-content .gs-head {
     cursor: pointer;
 }
@@ -1322,12 +1353,15 @@ body.term-dragging { overflow: hidden; }
 #term-stage.wire-live .grid-stack-item.wire-target > .grid-stack-item-content::after {
     background: rgba(0, 0, 0, 0.15); transform: scale(1.15);
 }
-/* In a room: a shared border in the room's colour — PAIRED WITH A NON-HUE CUE
-   (the badge below carries the room's own name + a 🔌 glyph), because hue is never
-   the only signal here. */
-.grid-stack-item-content.in-room {
-    border-color: var(--room-accent, var(--accent));
-    box-shadow: 0 0 0 1px var(--room-accent, var(--accent)), 0 1px 3px rgba(0, 0, 0, 0.4);
+/* In a room: a 3px stripe in the room's colour along the TOP of the header —
+   PAIRED WITH A NON-HUE CUE (the badge below carries the room's own name + a 🔌
+   glyph), because hue is never the only signal here.
+   CMX-104: a stripe, not a whole-pane ring. The old room-coloured border + 1px
+   outer ring was a third ring style beside focus and waiting, and was read as
+   focus (or as an ownership marker). Inset on the header itself, so it paints
+   above the header's own background and never shifts the layout. */
+.grid-stack-item-content.in-room > .gs-head {
+    box-shadow: inset 0 3px 0 0 var(--room-accent, var(--accent));
 }
 .gs-room {
     flex: 0 0 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis;

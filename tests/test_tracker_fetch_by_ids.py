@@ -1348,6 +1348,9 @@ def _trace_tick_calls(calls):
 def _one_arm(root, monkeypatch, name, status, source, *, check=True):
     root.mkdir()
     monkeypatch.setattr(dispatcher, "DB_PATH", root / "scheduler.db")
+    # CMX-86: the CI loop now queues an inbox notice, deduped per head in the inbox store —
+    # one store per arm, or arm B's identical red reads as "already said" by arm A's.
+    monkeypatch.setenv("CHELA_INBOX_FILE", str(root / "inbox.json"))
     dispatcher._refresh_failed.clear()
     case = NON_TRACKER_EVIDENCE[name][1]() if name else {}
     wf = _wf(root.parent)       # ONE workflow (its workspace must sit in this test's CHELA_DIR)

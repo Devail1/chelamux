@@ -190,19 +190,31 @@ export function isArchivable(item, { wants, orchWid } = {}) {
     return !!a && (!!a.done || !a.claude_running || a.session_status === 'idle');
 }
 
-// Group order: the user's persisted order first (Move up / Move down), then everything
-// it does not mention in the default order — folders by label, then Dispatched, then
-// Other at the bottom (where the desktop puts it).
+// Group order: the user's persisted order (Move up / Move down), with every group it
+// does not mention merged in by its default rank — folders by label, then Dispatched,
+// then Other at the bottom (where the desktop puts it). An unstored group goes right
+// after the LAST stored group whose default rank is not above its own (before every
+// stored group when none is), so a folder created after the user moved anything lands
+// among the folders — not below a stored Dispatched — while an arrangement the user
+// chose (Dispatched moved above the folders) is kept. The stored order is not rewritten.
 export function orderGroups(groups, stored) {
     const pos = new Map((stored || []).map((k, i) => [k, i]));
     const rank = g => (g.rank != null ? g.rank : g.key === OTHER_KEY ? 2 : g.key === DISPATCHED_KEY ? 1 : 0);
     const dflt = [...groups].sort((a, b) => rank(a) - rank(b) || a.label.localeCompare(b.label));
     const di = new Map(dflt.map((g, i) => [g.key, i]));
+    const kept = groups.filter(g => pos.has(g.key));
+    // [slot, tie]: a stored group sits at its stored position; an unstored one just after
+    // its anchor (-1 = before them all), in default order among those sharing it.
+    const slot = new Map(groups.map(g => {
+        if (pos.has(g.key)) return [g.key, [pos.get(g.key), 0]];
+        let anchor = -1;
+        for (const s of kept) if (rank(s) <= rank(g)) anchor = Math.max(anchor, pos.get(s.key));
+        return [g.key, [anchor, 1 + di.get(g.key)]];
+    }));
     return [...groups].sort((a, b) => {
-        const pa = pos.has(a.key) ? pos.get(a.key) : Infinity;
-        const pb = pos.has(b.key) ? pos.get(b.key) : Infinity;
-        if (pa !== pb) return pa - pb;
-        return di.get(a.key) - di.get(b.key);
+        const [sa, ta] = slot.get(a.key);
+        const [sb, tb] = slot.get(b.key);
+        return sa - sb || ta - tb;
     });
 }
 
