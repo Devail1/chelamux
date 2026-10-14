@@ -99,7 +99,7 @@ def test_the_gate_refuses_over_the_limit_unless_overridden(root, monkeypatch, li
 
 
 def test_an_unknown_size_refuses(root, monkeypatch):
-    assert dispatcher.check_hand_in_size("cmx-1")["ok"] is False           # no such run
+    assert dispatcher.check_hand_in_size("cmx-1")["error"] == "no run with a worktree on record for cmx-1"
     monkeypatch.setattr(sizegate, "MAX_PR_LINES", "nope")
     out = dispatcher.check_hand_in_size("cmx-88", "a reason")
     assert out["ok"] is False and "could not measure" in out["error"]
