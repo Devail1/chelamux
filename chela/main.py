@@ -2685,7 +2685,8 @@ def cmd_judge_sweep(args) -> None:
     skipped = _print_sweep_skipped(result)
     for r in result["survivors"]:
         print(f"  [SURVIVED] {r['key']} {r['mutation']}")
-    for f in result["unsupported"]:
+    unsupported = result.get("unsupported", [])
+    for f in unsupported:
         print(f"  [UNKNOWN ] {f} — not supported: {sweep.SUPPORTED_NOTE}")
     if result["cannot_verify"]:
         print(f"⚠ CANNOT VERIFY — {result['cannot_verify']}")
@@ -2699,8 +2700,8 @@ def cmd_judge_sweep(args) -> None:
               "assertion. If no outcome can change under it, `chela task-finished` accepts "
               "--sweep-equivalent '<file:line>: <why>'.")
         sys.exit(1)
-    if result["unsupported"]:
-        print(f"⚠ UNKNOWN — {len(result['unsupported'])} changed source file(s) were NOT "
+    if unsupported:
+        print(f"⚠ UNKNOWN — {len(unsupported)} changed source file(s) were NOT "
               f"swept ({sweep.SUPPORTED_NOTE}). This is not a pass.")
         sys.exit(3)
 

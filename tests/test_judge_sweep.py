@@ -2375,6 +2375,7 @@ SKIPPY_RESULT = {
     "unparseable": [_skip(sweep.UNPARSEABLE, 11)],
     "not_applied": [_skip(sweep.NOT_APPLIED, 12, "anchor occurs twice")],
     "invalid": [_skip("INVALID", 13, "the mutation made the suite ERROR")],
+    "unsupported": [],
 }
 
 
