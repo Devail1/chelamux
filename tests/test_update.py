@@ -162,6 +162,7 @@ def test_stuck_after_ceiling_is_derived_from_the_timeout_constants():
         update._APPLY_GIT_LOCAL_CALLS * update.GIT_TIMEOUT_SECONDS
         + update._APPLY_GIT_NET_CALLS * update.GIT_NET_TIMEOUT_SECONDS
         + update._APPLY_SHELL_CALLS * update._SHELL_TIMEOUT_SECONDS
+        + 60   # CMX-95: the daemon-tick wait inside the one `pm2 restart`
         + update._SHELL_TIMEOUT_SECONDS // 2
     )
     assert update.apply_stuck_after_seconds() == expected

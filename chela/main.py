@@ -53,6 +53,7 @@ from chela import (
     sessionids,
     sidebar_archive,
     spawn,
+    ticklock,
     update,
     wait,
     workflow,
@@ -262,6 +263,10 @@ def cmd_run(args) -> None:
     stop = GracefulShutdown("chela daemon").install()
 
     while not stop.stopping:
+        # CMX-95: a restart of this daemon waits for the tick in progress, never more.
+        tick_fd = ticklock.begin_tick(stop.wait)
+        if tick_fd is None:
+            break              # a restart held the lock and signalled us: leave unstarted
         try:
             executed = scheduler.tick()
             if executed:
@@ -455,6 +460,8 @@ def cmd_run(args) -> None:
                 log.exception("Room pending-delivery flush failed")
         except Exception:
             log.exception("Error in daemon loop")
+        finally:
+            ticklock.end_tick(tick_fd)
         stop.wait(config.scheduler_poll_interval())
 
     capabilities.clear()   # nothing is providing these any more; don't let doctor say so
