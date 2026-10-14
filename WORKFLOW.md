@@ -89,6 +89,13 @@ agent:
 # never trusted on its own: every subset survivor is re-run on the FULL suite before it can
 # block. An unknown file type, a conftest.py, or a test_cmd that is not one pytest invocation
 # runs the full suite. `select_tests: false` puts every mutation back on the full suite.
+# 📏 CMX-126: `chela task-finished` refuses a diff over `max_pr_lines` changed lines (code +
+# tests vs base_branch) unless the agent passes `--oversize-reason`. `size_exclude` = fnmatch
+# globs that do not count (default: docs/*, *.md, changelog.d/*, images, video).
+# hand_in:
+#   max_pr_lines: 300
+#   size_exclude: ["docs/*", "*.md", "changelog.d/*", "*.png", "*.jpg", "*.gif", "*.svg", "*.mp4", "*.webm"]
+
 judge:
   test_cmd: CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q
   suite_timeout_seconds: 900
@@ -278,6 +285,11 @@ message.
      It is recorded on the run, shown to the judge and appended to your PR body — the judge
      treats it as a claim to test, so a wrong one comes straight back. A note for a line
      that did not survive is refused.
+   - **📏 CMX-126: `task-finished` measures your diff first** (code + tests vs `dev`; docs,
+     media and changelog excluded) and REFUSES it over `hand_in.max_pr_lines` (300) before
+     any sweep runs. Split it into ≤300-line PRs. Only a diff that truly cannot be split
+     may pass `--oversize-reason '<why>'` — recorded on the run, shown to the judge and in
+     your PR body.
    - **Optional: `--handoff "<note>"`** — a short note for your reviewer (what changed, what
      to look at first, what you assumed). It is shown in the orchestrator's inbox notice and
      on the Dispatch board. Informational only — it never gates anything.

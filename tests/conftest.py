@@ -528,6 +528,15 @@ def _no_live_state(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hand_in_size_passes(request, monkeypatch):
+    """📏 CMX-126: the size gate passes unless a module sets ``REAL_SIZE_GATE = True``."""
+    if not getattr(request.module, "REAL_SIZE_GATE", False):
+        from chela import dispatcher
+        monkeypatch.setattr(dispatcher, "check_hand_in_size",
+                            lambda *a, **k: {"ok": True, "record": None})
+
+
+@pytest.fixture(autouse=True)
 def _no_live_notifications(monkeypatch):
     """The fence for OUTBOUND side effects: no test may push a real notification.
 
