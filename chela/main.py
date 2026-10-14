@@ -2647,15 +2647,10 @@ def cmd_judge_sweep(args) -> None:
     ``!=``, ``0`` ↔ ``1``…), measured with the judge's own per-mutation test selection, and
     restored. See :mod:`chela.sweep`.
 
-    ⚖️ CMX-97: it needs no chela setup — any git repo, the suite detected when neither
-    ``--test-cmd`` nor a WORKFLOW.md names one. ``--json`` prints the result as JSON on stdout
-    (progress goes to stderr); ``--github`` also writes the Actions step summary/outputs and
-    upserts the PR comment (:mod:`chela.sweep_github`).
-
-    Exit codes: ``0`` clean, ``1`` a mutation SURVIVED (add a test that goes red under it),
-    ``2`` CANNOT VERIFY (a red baseline, an unresolvable base, no suite, a leftover recovery
-    marker that cannot be applied safely), ``3`` UNKNOWN — nothing survived, but a changed
-    source file is in a language the sweep cannot mutate, so this is not a pass.
+    Exit codes: ``0`` no survivor, ``1`` a mutation SURVIVED (add a test that goes red under
+    it), ``2`` CANNOT VERIFY (a red baseline, an unresolvable base, no suite, a leftover
+    recovery marker that cannot be applied safely), ``3`` UNKNOWN (CMX-97: a changed file in a
+    language the sweep cannot mutate — not a pass). Runs in any git repo; ``--json`` for JSON.
     """
     from chela import sweep
 
@@ -2670,11 +2665,6 @@ def cmd_judge_sweep(args) -> None:
     result = sweep.run_sweep(args.cwd, base=args.base, workflow_path=workflow,
                              test_cmd=args.test_cmd, progress=_progress)
     verdict = sweep.verdict(result)
-    if args.github:
-        from chela import sweep_github
-
-        for warning in sweep_github.publish(result, comment=not args.no_comment):
-            print(f"::warning::chela judge sweep: {warning}", file=out)
     if args.json:
         print(json.dumps(result, indent=2))
         sys.exit(sweep.EXIT_CODES[verdict])
@@ -2706,10 +2696,8 @@ def cmd_judge_sweep(args) -> None:
     if result["survivors"]:
         print("⚖️ Each SURVIVED line is a changed check no test can tell apart from its "
               "corruption. Add a test that goes RED under that mutation — not a weaker "
-              "assertion.")
-        if workflow:        # a chela-managed run — standalone there is no task-finished
-            print("  If no outcome can change under it, `chela task-finished` accepts "
-                  "--sweep-equivalent '<file:line>: <why>'.")
+              "assertion. If no outcome can change under it, `chela task-finished` accepts "
+              "--sweep-equivalent '<file:line>: <why>'.")
         sys.exit(1)
     if result["unsupported"]:
         print(f"⚠ UNKNOWN — {len(result['unsupported'])} changed source file(s) were NOT "
@@ -3707,15 +3695,6 @@ def main() -> None:
     p_jsweep.add_argument(
         "--json", action="store_true",
         help="Print the result as JSON on stdout (progress goes to stderr)",
-    )
-    p_jsweep.add_argument(
-        "--github", action="store_true",
-        help="In GitHub Actions: write the step summary + outputs and post/update the PR "
-             "comment (needs `gh` and GH_TOKEN). Never changes the exit code",
-    )
-    p_jsweep.add_argument(
-        "--no-comment", action="store_true",
-        help="With --github: skip the PR comment",
     )
     from chela.judge_eval import cli as judge_eval_cli
     judge_eval_cli.add_parser(judge_sub)
