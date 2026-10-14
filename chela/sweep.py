@@ -26,8 +26,18 @@ survivor here is a survivor in exactly the judge's sense.
 it is written a RECOVERY MARKER (:data:`RECOVERY_MARKER`, inside the worktree) records the
 file's original bytes. A sweep killed mid-mutation — SIGKILL, a closed pane — leaves the
 marker behind, and the next sweep restores the file from it BEFORE doing anything else.
-SIGTERM/SIGHUP are turned into an exception while a sweep runs, so they take the ``finally``
-path instead of skipping it.
+SIGTERM/SIGHUP/SIGINT are turned into an exception while a sweep runs, so they take the
+``finally`` path instead of skipping it. ⛔ CMX-97: SIGKILL cannot be caught, so while
+mutations run a GUARDIAN process (its own session, so a process-group kill misses it) waits
+for the sweep to die and restores from the marker the moment it does — a killed run does not
+leave a mutation in the tree until "the next sweep".
+
+⚖️ CMX-97 — STANDALONE. ``chela judge sweep`` runs in ANY git repo: no WORKFLOW.md, no run
+record, no daemon, no tmux, no tracker. The suite is ``--test-cmd``, else the workflow's
+``judge.test_cmd``, else DETECTED (:func:`detect_test_cmd`: pytest / npm test / go test /
+cargo test). Only Python (first-class) and ``.js``/``.mjs`` (line-based) are mutated; a
+changed source file in any other language is UNKNOWN (:func:`unsupported_files`) and the
+verdict is ``unknown``, never ``clean`` — a sweep that could not look is not a pass.
 """
 from __future__ import annotations
 
@@ -35,8 +45,10 @@ import ast
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -63,6 +75,22 @@ _RE_JS_CMP = re.compile(r"(?<=\s)(===|!==|==|!=|<=|>=|<|>)(?=\s)")
 _RE_JS_IF = re.compile(r"\bif\s*\(")
 _RE_JS_RET = re.compile(r"\breturn\s+([01])\b")
 _RE_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+# ⚖️ CMX-97: source languages the mutators CANNOT handle. A changed file with one of these
+# suffixes is UNKNOWN — reported by name, and the verdict can never be `clean` while one is.
+# (`.cjs` too: the sweep's line-based JS mutator only claims `.js`/`.mjs`.)
+UNSUPPORTED_SUFFIXES = frozenset({
+    ".ts", ".tsx", ".mts", ".cts", ".jsx", ".cjs", ".go", ".rs", ".java", ".kt", ".kts",
+    ".scala", ".rb", ".php", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".cs", ".swift",
+    ".m", ".mm", ".lua", ".ex", ".exs", ".erl", ".hs", ".ml", ".clj", ".dart", ".sh",
+    ".bash",
+})
+SUPPORTED_NOTE = "only Python (and .js/.mjs, line-based) is mutated"
+
+# Verdicts, in the order they win. The exit code of `chela judge sweep` is EXIT_CODES[verdict].
+V_CLEAN, V_SURVIVORS, V_UNKNOWN = "clean", "survivors", "unknown"
+V_CANNOT_VERIFY, V_ERROR = "cannot_verify", "error"
+EXIT_CODES = {V_CLEAN: 0, V_SURVIVORS: 1, V_CANNOT_VERIFY: 2, V_ERROR: 2, V_UNKNOWN: 3}
 
 
 @dataclass
@@ -105,6 +133,9 @@ class SweepReport:
     notes: list[str] = field(default_factory=list)
     selection: str = ""
     seconds: float = 0.0
+    unsupported: list[str] = field(default_factory=list)
+    base: str = ""
+    test_cmd: str = ""
 
     def _with(self, status: str) -> list[SweepResult]:
         return [r for r in self.results if r.status == status]
@@ -115,7 +146,7 @@ class SweepReport:
         return [] if self.cannot_verify else self._with(judge.SURVIVED)
 
     def as_dict(self) -> dict:
-        return {
+        d = {
             "ok": True,
             "mutations": len(self.results),
             "survivors": [r.as_dict() for r in self.survivors],
@@ -126,7 +157,25 @@ class SweepReport:
             "cannot_verify": self.cannot_verify, "recovered": self.recovered,
             "notes": list(self.notes), "selection": self.selection,
             "seconds": round(self.seconds, 1),
+            "unsupported": list(self.unsupported), "base": self.base, "test_cmd": self.test_cmd,
         }
+        d["verdict"] = verdict(d)
+        return d
+
+
+def verdict(result: dict) -> str:
+    """The one-word answer for a :meth:`SweepReport.as_dict` (or a ``run_sweep`` error dict).
+    ⛔ ``clean`` only when the sweep ran, named no survivor AND every changed source file was
+    one it can mutate — an unsupported file makes it ``unknown``, never a vacuous pass."""
+    if not result.get("ok"):
+        return V_ERROR
+    if result.get("cannot_verify"):
+        return V_CANNOT_VERIFY
+    if result.get("survivors"):
+        return V_SURVIVORS
+    if result.get("unsupported"):
+        return V_UNKNOWN
+    return V_CLEAN
 
 
 # --- which lines changed --------------------------------------------------------------------
@@ -186,6 +235,99 @@ def changed_lines(worktree: Path, base: str) -> tuple[dict[str, set[int]], str]:
 
 def _sweepable(rel: str) -> bool:
     return rel.endswith(PY_SUFFIXES + JS_SUFFIXES) and not is_test_path(rel)
+
+
+_RE_FOREIGN_TEST_STEM = re.compile(r"(_test|_spec|Tests?)$")
+
+
+def _is_foreign_test(rel: str) -> bool:
+    """A test file in a language the sweep does not mutate (``x_test.go``, ``FooTest.java``,
+    ``a.spec.ts``, ``__tests__/…``) — what a suite is measured BY, so never UNKNOWN."""
+    p = PurePosixPath(rel)
+    return (is_test_path(rel) or bool(_RE_FOREIGN_TEST_STEM.search(p.name.split(".")[0]))
+            or ".spec." in p.name or any(d in ("__tests__", "test", "spec") for d in p.parts[:-1]))
+
+
+def _unsupported(rel: str) -> bool:
+    return PurePosixPath(rel).suffix.lower() in UNSUPPORTED_SUFFIXES and not _is_foreign_test(rel)
+
+
+def unsupported_files(worktree: Path, base: str) -> tuple[list[str], str]:
+    """⚖️ CMX-97: the changed (or untracked) source files vs ``base`` in a language the
+    mutators cannot handle — each one UNKNOWN, never clean. A deleted file is not listed (there
+    is nothing left to mutate). Returns ``(files, error)``; any git failure is an error, never
+    "no such files"."""
+    mb = _git(worktree, "merge-base", base, "HEAD")
+    if mb.returncode != 0 or not mb.stdout.strip():
+        return [], (f"`{base}` does not resolve to a merge base with HEAD in {worktree} — "
+                    f"{(mb.stderr or '').strip()[:200] or 'no output'}")
+    names = _git(worktree, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=d",
+                 mb.stdout.strip(), "--")
+    if names.returncode != 0:
+        return [], f"git diff failed: {(names.stderr or '').strip()[:200]}"
+    untracked = _git(worktree, "ls-files", "--others", "--exclude-standard", "-z")
+    if untracked.returncode != 0:
+        return [], f"git ls-files failed: {(untracked.stderr or '').strip()[:200]}"
+    found = {n for n in (names.stdout + "\0" + untracked.stdout).split("\0")
+             if n and _unsupported(n)}
+    return sorted(found), ""
+
+
+# --- which suite to run ---------------------------------------------------------------------
+
+_PY_MARKERS = ("pytest.ini", "pyproject.toml", "setup.py", "setup.cfg", "tox.ini", "conftest.py")
+_NPM_PLACEHOLDER = "no test specified"      # `npm init`'s default `scripts.test` — not a suite
+
+
+def _python_marker(worktree: Path) -> str:
+    for name in _PY_MARKERS:
+        if (worktree / name).is_file():
+            return name
+    for d in ("tests", "test"):
+        if (worktree / d).is_dir() and (any((worktree / d).rglob("test_*.py"))
+                                        or any((worktree / d).rglob("*_test.py"))):
+            return f"{d}/"
+    return ""
+
+
+def detect_test_cmd(worktree: Path) -> tuple[str, str]:
+    """⚖️ CMX-97: the suite a repo with no chela config most likely runs, and why —
+    ``("", "")`` when nothing is recognised (the caller refuses: no suite, no sweep).
+    Python first (the first-class language): ``uv run pytest -q`` under a ``uv.lock`` with
+    ``uv`` installed, else ``python -m pytest -q``; then ``package.json``'s ``test`` script
+    (pnpm/yarn/npm by lockfile; never npm's "no test specified" placeholder); ``go.mod`` →
+    ``go test ./...``; ``Cargo.toml`` → ``cargo test``."""
+    worktree = Path(worktree)
+    marker = _python_marker(worktree)
+    if marker:
+        if (worktree / "uv.lock").is_file() and shutil.which("uv"):
+            return "uv run pytest -q", f"{marker} + uv.lock"
+        py = "python" if shutil.which("python") else "python3"
+        return f"{py} -m pytest -q", marker
+    pkg = worktree / "package.json"
+    if pkg.is_file():
+        try:
+            scripts = json.loads(pkg.read_text()).get("scripts")
+        except (OSError, UnicodeDecodeError, ValueError, AttributeError):
+            scripts = None
+        test = scripts.get("test") if isinstance(scripts, dict) else None
+        if isinstance(test, str) and test.strip() and _NPM_PLACEHOLDER not in test:
+            runner = ("pnpm" if (worktree / "pnpm-lock.yaml").is_file()
+                      else "yarn" if (worktree / "yarn.lock").is_file() else "npm")
+            return f"{runner} test", "package.json scripts.test"
+    if (worktree / "go.mod").is_file():
+        return "go test ./...", "go.mod"
+    if (worktree / "Cargo.toml").is_file():
+        return "cargo test", "Cargo.toml"
+    return "", ""
+
+
+def default_base(worktree: Path) -> str:
+    """The base when neither ``--base`` nor a workflow names one: the remote's default branch
+    (``origin/HEAD``), else ``origin/dev`` (chela's own convention)."""
+    out = _git(Path(worktree), "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    ref = out.stdout.strip() if out.returncode == 0 else ""
+    return ref or "origin/dev"
 
 
 # --- what to mutate -------------------------------------------------------------------------
@@ -473,8 +615,18 @@ def _pid_alive(pid: object) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
-    return True
+        return not _is_zombie(pid)
+    # A killed process its parent has not reaped yet still answers signal 0 — it is dead.
+    return not _is_zombie(pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+    fields = stat.rsplit(")", 1)[-1].split()
+    return bool(fields) and fields[0] == "Z"
 
 
 def recover(worktree: Path) -> tuple[str, str]:
@@ -512,7 +664,8 @@ def recover(worktree: Path) -> tuple[str, str]:
 
 
 class _Interrupted(BaseException):
-    """SIGTERM/SIGHUP during a sweep — raised so the ``finally`` that restores the file runs."""
+    """SIGTERM/SIGHUP/SIGINT during a sweep — raised so the ``finally`` that restores the file
+    runs."""
 
 
 def _install_signal_handlers() -> dict:
@@ -521,7 +674,7 @@ def _install_signal_handlers() -> dict:
         raise _Interrupted(signum)
 
     old = {}
-    for sig in (signal.SIGTERM, signal.SIGHUP):
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         try:
             old[sig] = signal.signal(sig, _raise)
         except (OSError, ValueError):
@@ -537,19 +690,65 @@ def _restore_signal_handlers(old: dict) -> None:
             pass
 
 
+# --- the guardian: SIGKILL ------------------------------------------------------------------
+
+GUARD_POLL_SECONDS = 0.2
+
+
+def _guardian_argv(worktree: Path) -> list[str]:
+    return [sys.executable, "-m", "chela.sweep", "guard", str(os.getpid()), str(worktree)]
+
+
+def _start_guardian(worktree: Path) -> subprocess.Popen | None:
+    """⛔ CMX-97: a process that outlives a SIGKILLed sweep and restores its mutation. Its own
+    session (``start_new_session``), so ``kill -9 -<pgid>`` or a closed terminal misses it.
+    ``None`` when it cannot start — the marker still lets the next sweep recover."""
+    try:
+        return subprocess.Popen(_guardian_argv(worktree), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+    except OSError:
+        return None
+
+
+def _stop_guardian(proc: subprocess.Popen | None) -> None:
+    if proc is None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def guard(pid: int, worktree: Path, poll: float = GUARD_POLL_SECONDS) -> int:
+    """The guardian's body: wait for the sweep ``pid`` to die, then :func:`recover`. A sweep
+    that finished normally removed its marker (and stops the guardian first), so this is a
+    no-op unless the sweep died mid-mutation. Exit 0 when nothing is left mutated."""
+    while _pid_alive(pid):
+        time.sleep(poll)
+    _, err = recover(Path(worktree))
+    return 1 if err else 0
+
+
 # --- the sweep ------------------------------------------------------------------------------
 
 
 def sweep(
     worktree: str | Path, base: str, test_cmd: str, *,
     timeout: float = judge.SUITE_TIMEOUT_SECONDS, select_tests: bool = True, progress=None,
+    provision: bool = True,
 ) -> SweepReport:
+    """``provision``: let the judge build the suite's env (``uv sync`` / ``pnpm install``) in
+    the tree first. True for a chela-managed worktree; ⛔ False standalone, where the repo's
+    env is its owner's (a pip-managed repo must not grow a ``.venv``, nor need ``uv``)."""
     worktree = Path(worktree).resolve()
     started = time.monotonic()
     old = _install_signal_handlers()
     try:
         report = _sweep(worktree, base, test_cmd, timeout=timeout, select_tests=select_tests,
-                        progress=progress)
+                        progress=progress, provision=provision)
     except _Interrupted as e:
         # The mutation's own `finally` has already restored the file by the time this runs.
         report = SweepReport(cannot_verify=f"interrupted by signal {e.args[0]} — the sweep "
@@ -557,11 +756,12 @@ def sweep(
     finally:
         _restore_signal_handlers(old)
     report.seconds = time.monotonic() - started
+    report.base, report.test_cmd = base, test_cmd
     return report
 
 
 def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_tests: bool,
-           progress) -> SweepReport:
+           progress, provision: bool = True) -> SweepReport:
     report = SweepReport()
     report.recovered, err = recover(worktree)
     if err:
@@ -571,12 +771,19 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
     if err:
         report.cannot_verify = err
         return report
+    report.unsupported, err = unsupported_files(worktree, base)
+    if err:
+        report.cannot_verify = err
+        return report
+    if report.unsupported:
+        report.notes.append(f"{len(report.unsupported)} changed file(s) NOT swept — "
+                            f"{SUPPORTED_NOTE}; each is UNKNOWN, not clean")
     if not muts:
         report.notes.append(f"no changed conditional, comparison or return code vs `{base}` — "
                             "nothing to sweep")
         return report
 
-    env_problem = judge.provision_suite_env(worktree)
+    env_problem = judge.provision_suite_env(worktree) if provision else ""
     if env_problem:
         report.cannot_verify = f"the worktree could not be PROVISIONED to run the suite: {env_problem}"
         return report
@@ -591,14 +798,22 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
             "nothing. Fix the suite first.")
         return report
 
-    for n, mut in enumerate(muts):
-        if progress is not None:
-            progress(n, len(muts), mut)
-        result, contamination = _run_one(worktree, test_cmd, mut, baseline, timeout, selector)
-        report.results.append(result)
-        if contamination:
-            report.cannot_verify = contamination
-            return report
+    guardian = _start_guardian(worktree)
+    if guardian is None:
+        report.notes.append("the kill guardian could not start — a SIGKILL mid-mutation is "
+                            "only recovered by the next sweep")
+    try:
+        for n, mut in enumerate(muts):
+            if progress is not None:
+                progress(n, len(muts), mut)
+            result, contamination = _run_one(worktree, test_cmd, mut, baseline, timeout,
+                                             selector)
+            report.results.append(result)
+            if contamination:
+                report.cannot_verify = contamination
+                return report
+    finally:
+        _stop_guardian(guardian)
     return report
 
 
@@ -706,11 +921,13 @@ def run_sweep(
     worktree: str | Path, *, base: str | None = None, workflow_path: str | Path | None = None,
     test_cmd: str | None = None, timeout: float | None = None, progress=None,
 ) -> dict:
-    """``chela judge sweep``'s entry point: resolve the suite (``--test-cmd`` or the
-    workflow's ``judge.test_cmd``, the suite the judge measures against) and the base
-    (``--base``, else ``origin/<workspace.base_branch>``, else ``origin/dev``), sweep, and
-    return a JSON-friendly dict."""
+    """``chela judge sweep``'s entry point: resolve the suite (``--test-cmd``, else the
+    workflow's ``judge.test_cmd`` — the suite the judge measures against — else
+    :func:`detect_test_cmd`) and the base (``--base``, else
+    ``origin/<workspace.base_branch>``, else :func:`default_base`), sweep, and return a
+    JSON-friendly dict (``test_cmd_source`` says where the suite came from)."""
     cmd = test_cmd.strip() if isinstance(test_cmd, str) and test_cmd.strip() else None
+    source = "--test-cmd" if cmd else ""
     to, select = timeout, True
     if workflow_path:
         from chela import workflow as workflow_mod
@@ -720,15 +937,33 @@ def run_sweep(
         except Exception as e:      # a WORKFLOW.md that does not parse
             return {"ok": False, "error": f"{workflow_path} could not be read: {e}"}
         cfg = judge.judge_suite_config(wf)
-        cmd = cmd or cfg.test_cmd
+        if not cmd and cfg.test_cmd:
+            cmd, source = cfg.test_cmd, f"{workflow_path} judge.test_cmd"
         to = to if to is not None else cfg.suite_timeout_seconds
         select = cfg.select_tests
         if base is None:
             base = f"origin/{wf.get('workspace', 'base_branch', default='dev')}"
     if not cmd:
-        return {"ok": False, "error": "no suite to run — pass --test-cmd, or --workflow "
-                                      "pointing at a WORKFLOW.md with `judge.test_cmd` set"}
-    report = sweep(worktree, base or "origin/dev", cmd,
+        cmd, why = detect_test_cmd(Path(worktree))
+        source = f"detected ({why})" if cmd else ""
+    if not cmd:
+        return {"ok": False, "error": "no suite to run — none detected (no pytest / package.json "
+                                      "test script / go.mod / Cargo.toml); pass --test-cmd, or "
+                                      "--workflow pointing at a WORKFLOW.md with "
+                                      "`judge.test_cmd` set"}
+    report = sweep(worktree, base or default_base(Path(worktree)), cmd,
                    timeout=to if to is not None else judge.SUITE_TIMEOUT_SECONDS,
-                   select_tests=select, progress=progress)
-    return report.as_dict()
+                   select_tests=select, progress=progress, provision=workflow_path is not None)
+    return {**report.as_dict(), "test_cmd_source": source}
+
+
+def main(argv: list[str]) -> int:
+    """``python -m chela.sweep guard <pid> <worktree>`` — the kill guardian's entry point."""
+    if len(argv) == 3 and argv[0] == "guard" and argv[1].isdigit():
+        return guard(int(argv[1]), Path(argv[2]))
+    print("usage: python -m chela.sweep guard <pid> <worktree>", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

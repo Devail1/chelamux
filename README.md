@@ -46,6 +46,44 @@ session, and schedules that poke long-lived agents (`--every 1h`, cron, or once)
 > (`agent.sandbox: true` in `WORKFLOW.md`); see
 > [docs/TRUST_AND_APPROVAL_POSTURE.md](docs/TRUST_AND_APPROVAL_POSTURE.md).
 
+## Try the judge on your own repo — no setup
+
+The judge's mechanical half runs on its own: no tmux, no dispatcher, no tracker, no API key.
+`chela judge sweep` corrupts every conditional, comparison and return code your branch
+changed (`if x > 100:` → `if False and (x > 100):`, `==` → `!=`, `0` ↔ `1`…), runs your
+tests against each, restores the file, and fails on every mutation the tests did not catch.
+
+```bash
+uvx --from git+https://github.com/Devail1/chelamux chela judge sweep --base origin/main
+```
+
+```text
+  [1/2] calc.py:10 compare-flip
+  [2/2] calc.py:10 if-false
+  suite: `python -m pytest -q` — detected (tests/)
+  [SURVIVED] calc.py:10 compare-flip: `if x > 100:` → `if x <= 100:`
+  [SURVIVED] calc.py:10 if-false: `if x > 100:` → `if False and (x > 100):`
+  [UNKNOWN ] tool.ts — not supported: only Python (and .js/.mjs, line-based) is mutated
+sweep: 2 mutation(s) — 0 killed, 2 survived, 0 skipped (1.0s)
+```
+
+On a pull request, as a GitHub Action (only `GITHUB_TOKEN`; it comments the survivors and
+fails the job):
+
+```yaml
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: Devail1/chelamux@main     # after your own "install the test deps" step
+```
+
+The job needs `permissions: pull-requests: write` to comment. The suite is detected
+(pytest / `npm test` / `go test` / `cargo test`) or given as `test-cmd:` / `--test-cmd`.
+Exit codes: `0` clean · `1` survivors · `2` cannot verify (red baseline, base not found) ·
+`3` **unknown**. Python is first-class, `.js`/`.mjs` are swept line by line, and a changed
+file in any other language is reported as UNKNOWN, never as a pass. `--json` prints the
+result as JSON. Mutations happen in place but never outlive the run: each one is restored
+in a `finally`, and a guardian process restores it if the run is `kill -9`ed.
+
 ## Install
 
 Requires Linux, WSL or macOS · Python ≥ 3.11 · `tmux` · `git` · [`uv`](https://docs.astral.sh/uv/) ·

@@ -202,20 +202,21 @@ def _start_and_wait_for_mutation(tmp_path: Path, root: Path) -> tuple[subprocess
     return proc, flag
 
 
-def test_a_killed_sweep_is_recovered_on_the_next_start(tmp_path):
+def test_a_sigkilled_sweep_is_restored_by_its_guardian_without_a_next_sweep(tmp_path):
+    """⛔ CMX-97: SIGKILL to the sweep's whole process group, mid-mutation. Nothing in the
+    sweep can run — the guardian (its own session) restores the file and drops the marker,
+    and the user's `git diff` is empty again WITHOUT anyone starting another sweep."""
     root = _repo(tmp_path / "r", COVERING_TEST)
     original = (root / "feat.py").read_bytes()
     proc, _ = _start_and_wait_for_mutation(tmp_path, root)
+    assert sweep.marker_path(root).exists()          # the kill lands while a mutation is live
     os.killpg(proc.pid, signal.SIGKILL)
     proc.wait(timeout=30)
-    # The kill really did land mid-mutation: the file is corrupted and the marker says so.
-    assert (root / "feat.py").read_bytes() != original
-    assert sweep.marker_path(root).exists()
-
-    report = _sweep(root)
-    assert "restored feat.py" in report.recovered
-    assert (root / "feat.py").read_bytes() == original
-    assert not sweep.marker_path(root).exists()
+    deadline = time.monotonic() + 30
+    while (root / "feat.py").read_bytes() != original or sweep.marker_path(root).exists():
+        assert time.monotonic() < deadline, "the guardian never restored the killed mutation"
+        time.sleep(0.1)
+    assert _git(root, "diff") == "" and _git(root, "status", "--porcelain") == ""
 
 
 def test_sigterm_restores_the_file_before_the_sweep_exits(tmp_path):
@@ -907,8 +908,11 @@ def test_cli_exits_2_without_a_suite_and_on_cannot_verify(tmp_path, capsys):
     from chela import main
 
     root = _repo(tmp_path / "r", COVERING_TEST)
+    # CMX-97: a suite is now DETECTED when none is named, so "no suite" needs a repo with
+    # nothing to detect it from.
+    bare = _plain_repo(tmp_path / "bare", {}, {"feat.py": BRANCH_FEAT})
     for argv, needle in (
-        (["judge", "sweep", "--cwd", str(root)], "no suite to run"),
+        (["judge", "sweep", "--cwd", str(bare)], "no suite to run"),
         (["judge", "sweep", "--cwd", str(root), "--base", "origin/nope", "--test-cmd",
           TEST_CMD], "does not resolve"),
     ):
