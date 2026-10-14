@@ -2694,16 +2694,17 @@ def cmd_judge_sweep(args) -> None:
     print(f"sweep: {result['mutations']} mutation(s) — {result['killed']} killed, "
           f"{len(result['survivors'])} survived, {skipped} skipped "
           f"({result['seconds']}s)")
-    if result["survivors"]:
+    if verdict == sweep.V_SURVIVORS:
         print("⚖️ Each SURVIVED line is a changed check no test can tell apart from its "
               "corruption. Add a test that goes RED under that mutation — not a weaker "
               "assertion. If no outcome can change under it, `chela task-finished` accepts "
               "--sweep-equivalent '<file:line>: <why>'.")
-        sys.exit(1)
-    if unsupported:
+    elif verdict == sweep.V_UNKNOWN:
         print(f"⚠ UNKNOWN — {len(unsupported)} changed source file(s) were NOT "
               f"swept ({sweep.SUPPORTED_NOTE}). This is not a pass.")
-        sys.exit(3)
+    # The same verdict → exit code as --json, so the two output modes cannot drift.
+    if sweep.EXIT_CODES[verdict]:
+        sys.exit(sweep.EXIT_CODES[verdict])
 
 
 def _print_sweep_skipped(result: dict) -> int:

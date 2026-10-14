@@ -72,17 +72,27 @@ def test_a_bare_repo_with_no_chela_config(tmp_path, branch, test_body, code, ver
     got, d = _chela(root, tmp_path)
     assert (got, d["verdict"], d["unsupported"]) == (code, verdict, unsupported)
     assert d["test_cmd_source"] == "detected (tests/)"
+    assert d["base"] == "main" and d["test_cmd"].endswith(" -m pytest -q")
     assert any("NOT swept" in n for n in d["notes"]) is bool(unsupported)
     assert _git(root, "status", "--porcelain") == "" and not (root / ".venv").exists()
 
 
-def test_text_mode_names_the_detected_suite_and_the_unknown_files(tmp_path):
-    root = _bare(tmp_path / "r", {"big.go": "package main\n"})
+@pytest.mark.parametrize("branch, test_body, code, banner", [
+    ({"big.go": "package main\n"}, TEST, 3, "⚠ UNKNOWN"),
+    ({"calc.py": BIG, "big.go": "package main\n"}, TEST, 1, "⚖️ Each SURVIVED"),
+    ({"calc.py": BIG}, COVERING, 0, None),
+])
+def test_text_mode_exit_and_banner_match_the_json_verdict(tmp_path, branch, test_body, code,
+                                                         banner):
+    """Text mode exits on the same verdict as --json: survivors outrank UNKNOWN."""
+    root = _bare(tmp_path / "r", branch, test_body)
     out = subprocess.run([*CHELA, "judge", "sweep", "--base", "main"], cwd=str(root),
                          env=_env(tmp_path), capture_output=True, text=True, timeout=300)
-    assert out.returncode == 3, out.stdout + out.stderr
+    assert out.returncode == code, out.stdout + out.stderr
     assert "suite: `python -m pytest -q` — detected (tests/)" in out.stdout
-    assert "[UNKNOWN ] big.go — not supported" in out.stdout and "not a pass" in out.stdout
+    assert ("[UNKNOWN ] big.go — not supported" in out.stdout) is ("big.go" in branch)
+    for b in ("⚠ UNKNOWN", "⚖️ Each SURVIVED"):
+        assert (b in out.stdout) is (b == banner), out.stdout
 
 
 @pytest.mark.parametrize("rel, unsupported", [
@@ -93,6 +103,32 @@ def test_text_mode_names_the_detected_suite_and_the_unknown_files(tmp_path):
 ])
 def test_unsupported_classification(rel, unsupported):
     assert sweep._unsupported(rel) is unsupported
+
+
+def test_unsupported_files_is_exactly_the_live_foreign_source_vs_the_merge_base(tmp_path):
+    """Committed, uncommitted and UNTRACKED foreign files are UNKNOWN; a deleted one (committed
+    or only in the working tree), the old side of a rename, an ignored file and a foreign test
+    file are not. The exact set is asserted, so dropping any source or filter goes red."""
+    root = _bare(tmp_path / "r", {"calc.py": BIG})
+    _git(root, "checkout", "-q", "main")
+    for rel in ("gone.go", "wt_gone.rs", "old.java", "edited.go", "same.go"):
+        (root / rel).write_text("x\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "foreign base")
+    _git(root, "checkout", "-q", "feature")
+    _git(root, "merge", "-q", "--no-edit", "main")
+    _git(root, "rm", "-q", "gone.go")
+    _git(root, "mv", "old.java", "New.java")
+    (root / "committed.ts").write_text("x\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "branch")
+    (root / "wt_gone.rs").unlink()
+    (root / "edited.go").write_text("y\n")
+    (root / ".gitignore").write_text("ignored.go\n")
+    for rel in ("untracked.kt", "ignored.go", "untracked_test.go"):
+        (root / rel).write_text("x\n")
+    files, err = sweep.unsupported_files(root, "main")
+    assert (files, err) == (["New.java", "committed.ts", "edited.go", "untracked.kt"], "")
 
 
 @pytest.mark.parametrize("failing", ["merge-base", "diff", "ls-files"])
