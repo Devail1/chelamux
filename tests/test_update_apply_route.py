@@ -186,8 +186,11 @@ def test_apply_starts_a_background_run_when_behind(client, monkeypatch):
 
     assert resp.status_code == 200
     data = resp.get_json()
+    run, boot = data.pop("run"), data.pop("boot")
     assert data == {"ok": True, "started": True, "behind": 3,
                     "detail": "pulling 3 commit(s), then restarting services"}
+    # CMX-95: the handle a page polls /api/update/status with.
+    assert isinstance(run, int) and run >= 1 and boot == dash._BOOT_ID
     # The response returned WITHOUT waiting for apply() to finish — proof this runs off
     # the request thread, which is the entire point (apply() can restart this process).
     assert started.wait(timeout=2), "update.apply() was never invoked"
@@ -222,49 +225,38 @@ def test_nothing_to_pull_but_stale_services_restarts_exactly_those(client, monke
     resp = client.post("/api/update/apply")
 
     assert resp.status_code == 200
-    assert resp.get_json() == {"ok": True, "started": True, "behind": 0,
-                               "restarting": ["chela-dashboard"],
-                               "detail": "restarting chela-dashboard"}
+    data = resp.get_json()
+    run, boot = data.pop("run"), data.pop("boot")
+    assert data == {"ok": True, "started": True, "behind": 0,
+                    "restarting": ["chela-dashboard"],
+                    "detail": "restarting chela-dashboard"}
+    assert isinstance(run, int) and run >= 1 and boot == dash._BOOT_ID
     assert restarted.wait(timeout=2), "update.restart_stale() was never invoked"
     assert applied == []
 
 
-def test_a_stale_restart_waits_for_an_in_flight_dispatched_run(client, monkeypatch):
-    """The same CMX-199 guard as the pull path: restarting chela-daemon mid-run orphans
-    the dispatched agent, whether or not anything was pulled."""
-    _stale(monkeypatch, ["chela-daemon"])
-    monkeypatch.setattr(dispatcher, "list_runs",
-                        lambda: [{"task_id": "cmx-56-abc12", "status": "running"}])
-    calls = []
-    monkeypatch.setattr(update, "restart_stale", lambda *a, **k: calls.append("restart"))
-
-    resp = client.post("/api/update/apply")
-
-    assert resp.status_code == 409
-    assert "cmx-56-abc12" in resp.get_json()["error"]
-    time.sleep(0.05)
-    assert calls == []
-
-
-def test_apply_refuses_while_a_dispatched_run_is_in_flight(client, monkeypatch):
-    """The brief's guard: a dispatched agent run (claimed/running), not a second click of
-    this same route — those are separate hazards with separate tests."""
+@pytest.mark.parametrize("behind,stale", [(0, ["chela-daemon"]), (3, [])])
+def test_a_dispatched_run_in_flight_no_longer_blocks_the_restart(client, monkeypatch, behind, stale):
+    """CMX-95 removes CMX-199's 409: a daemon restart orphans neither a tmux agent nor a
+    detached judge, and the one real hazard — a tick caught half-way — is waited for inside
+    `update._restart` (chela.ticklock). Both arms of the route: restart-only and pull."""
     monkeypatch.setattr(update, "commits_behind",
-                        lambda fetch=True: update.UpdateStatus(ok=True, behind=3, ahead=0, branch="dev"))
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=behind, ahead=0, branch="dev"))
+    if stale:
+        _stale(monkeypatch, stale)
     monkeypatch.setattr(dispatcher, "list_runs",
-                        lambda: [{"task_id": "cmx-199-abc12", "status": "running"}])
-    calls = []
-    monkeypatch.setattr(update, "apply", lambda *a, **k: calls.append("apply"))
+                        lambda: [{"task_id": "cmx-56-abc12", "status": "running"},
+                                 {"task_id": "cmx-57-abc12", "status": "claimed"}])
+    started = threading.Event()
+    result = lambda *a, **k: (started.set(), update.ApplyResult(ok=True, step="done"))[1]  # noqa: E731
+    monkeypatch.setattr(update, "restart_stale", result)
+    monkeypatch.setattr(update, "apply", result)
 
     resp = client.post("/api/update/apply")
 
-    assert resp.status_code == 409
-    data = resp.get_json()
-    assert data["ok"] is False
-    assert "cmx-199-abc12" in data["error"]
-    # Never queued, never applied — apply() must not run now or later.
-    time.sleep(0.05)
-    assert calls == []
+    assert resp.status_code == 200
+    assert resp.get_json()["started"] is True
+    assert started.wait(timeout=2), "the update never ran while a dispatched run was in flight"
 
 
 def test_apply_proceeds_when_no_dispatched_run_is_active(client, monkeypatch):
@@ -564,3 +556,89 @@ def test_a_readable_checkout_still_succeeds(client, monkeypatch, surface):
         resp = client.post("/api/update/apply")
         assert resp.status_code == 200
         assert resp.get_json()["ok"] is True
+
+
+# --- CMX-95: the outcome a page can poll for, and unread is never "up to date" ----------
+
+def test_unread_service_freshness_refuses_instead_of_saying_up_to_date(client, monkeypatch):
+    """Nothing to pull + a freshness check that could not answer used to read as "already up
+    to date". Unknown is not OK: refuse, name it, and restart nothing."""
+    monkeypatch.setattr(update, "services_running_stale_code",
+                        lambda *a, **k: update.ServiceFreshness(ok=False, error="pm2 jlist failed"))
+    calls = []
+    monkeypatch.setattr(update, "restart_stale", lambda *a, **k: calls.append("restart"))
+    resp = client.post("/api/update/apply")
+    assert resp.status_code == 503
+    assert resp.get_json() == {"ok": False, "error": "could not read which services run old "
+                               "code — check `chela doctor` / `pm2 ls`"}
+    assert calls == []
+
+
+def _wait_status(client, pred, timeout=3):
+    deadline = time.monotonic() + timeout
+    while True:
+        data = client.get("/api/update/status").get_json()
+        if pred(data) or time.monotonic() > deadline:
+            return data
+        time.sleep(0.01)
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_status_reports_this_runs_outcome_under_its_run_number(client, monkeypatch, ok):
+    """The post-click poll (nav.js / version.js) reads `last_result` for ITS run — both a
+    success (names what restarted) and a refusal (step + error)."""
+    _stale(monkeypatch, ["chela-collab", "chela-daemon"])
+    release = threading.Event()
+
+    def fake_restart():
+        release.wait(timeout=2)
+        if ok:
+            return update.ApplyResult(ok=True, step="done", restarted=["chela-collab", "chela-daemon"])
+        return update.ApplyResult(ok=False, step="pm2-restart", error="pm2 said no")
+
+    monkeypatch.setattr(update, "restart_stale", fake_restart)
+    run = client.post("/api/update/apply").get_json()["run"]
+
+    mid = client.get("/api/update/status").get_json()
+    assert mid["applying"] is True
+    assert mid["boot"] == dash._BOOT_ID
+    assert mid["stale_ok"] is True
+    release.set()
+
+    data = _wait_status(client, lambda d: (d["last_result"] or {}).get("run") == run and not d["applying"])
+    assert data["applying"] is False
+    if ok:
+        assert data["last_result"] == {"run": run, "ok": True, "step": "done", "error": "",
+                                       "restarted": ["chela-collab", "chela-daemon"],
+                                       "behind_before": 0}
+    else:
+        assert data["last_result"] == {"run": run, "ok": False, "step": "pm2-restart",
+                                       "error": "pm2 said no", "restarted": [], "behind_before": 0}
+
+
+def test_a_crashed_update_thread_is_recorded_as_a_failure_not_left_blank(client, monkeypatch):
+    """`finally` records an outcome even when restart_stale raises — the page must see a
+    failure, never wait out its timeout on a result that will never come."""
+    _stale(monkeypatch, ["chela-collab"])
+    monkeypatch.setattr(update, "restart_stale",
+                        lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(threading, "excepthook", lambda args: None)
+    run = client.post("/api/update/apply").get_json()["run"]
+    data = _wait_status(client, lambda d: (d["last_result"] or {}).get("run") == run)
+    assert data["last_result"] == {"run": run, "ok": False, "step": "crashed",
+                                   "error": "the update thread died before reporting",
+                                   "restarted": [], "behind_before": 0}
+
+
+def test_each_apply_gets_a_new_run_number(client, monkeypatch):
+    _stale(monkeypatch, ["chela-collab"])
+    done = threading.Event()
+    monkeypatch.setattr(update, "restart_stale",
+                        lambda: (done.set(), update.ApplyResult(ok=True, step="done"))[1])
+    first = client.post("/api/update/apply").get_json()["run"]
+    assert done.wait(timeout=2)
+    deadline = time.monotonic() + 2
+    while dash._update_apply_lock.locked() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    second = client.post("/api/update/apply").get_json()["run"]
+    assert second == first + 1

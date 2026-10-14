@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -145,6 +147,53 @@ def test_the_daemon_restarting_itself_from_its_own_tick_does_not_wait_on_itself(
         assert time.monotonic() - t0 < 1
     finally:
         ticklock.end_tick(fd)
+
+
+# --- agents and judges are NOT the daemon's to interrupt (why CMX-199's refusal went) ---
+
+def test_a_detached_judge_survives_the_daemon_being_killed(tmp_path):
+    pidfile = tmp_path / "judge.pid"
+    spawner = _py("""
+        import sys, time
+        from pathlib import Path
+        from chela import judge
+        Path(sys.argv[1]).write_text(str(judge.spawn_detached(["sleep", "30"], Path(sys.argv[2]))))
+        time.sleep(60)
+    """, pidfile, tmp_path / "judge.log", start_new_session=True)
+    try:
+        _wait_for(pidfile)
+        os.killpg(spawner.pid, signal.SIGKILL)   # pm2's worst case, whole group
+        spawner.wait(timeout=5)
+        time.sleep(0.2)
+        # a killed judge is reaped (stat gone) or a zombie (state Z) — either fails here
+        assert (Path("/proc") / pidfile.read_text() / "stat").read_text().rsplit(") ", 1)[1][0] != "Z"
+    finally:
+        spawner.kill()
+        with contextlib.suppress(OSError, ValueError):
+            os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+def test_a_tmux_agent_survives_the_daemon_being_killed(tmp_path):
+    sock = f"cmx95-{os.getpid()}"
+    spawner = _py("""
+        import subprocess, sys, time
+        from pathlib import Path
+        subprocess.run(["tmux", "-L", sys.argv[1], "new-session", "-d", "-s", "a", "sleep 30"],
+                       check=True)
+        Path(sys.argv[2]).touch()
+        time.sleep(60)
+    """, sock, tmp_path / "up", start_new_session=True)
+    try:
+        _wait_for(tmp_path / "up")
+        os.killpg(spawner.pid, signal.SIGKILL)
+        spawner.wait(timeout=5)
+        time.sleep(0.2)
+        cp = subprocess.run(["tmux", "-L", sock, "has-session", "-t", "a"],
+                            capture_output=True, timeout=10)
+        assert cp.returncode == 0, "the agent's tmux session died with the daemon"
+    finally:
+        subprocess.run(["tmux", "-L", sock, "kill-server"], capture_output=True, timeout=10)
 
 
 def _lock_is_free() -> bool:
