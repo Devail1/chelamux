@@ -1727,10 +1727,13 @@ def _apply_experiments(
     return outcomes, ""
 
 
+_SELECT = object()   # _measure's "no pinned selection — compute one" sentinel
+
+
 def _measure(
     worktree: Path, test_cmd: str, exp: Experiment, reason: str, parses: bool,
     parse_detail: str, baseline: SuiteResult, timeout: float,
-    selector: "judge_select.Selector | None", pinned: object = None, *, heartbeat=None,
+    selector: "judge_select.Selector | None", pinned: object = _SELECT, *, heartbeat=None,
 ) -> Outcome:
     """⚡ CMX-407: run one APPLIED mutation against the tests that can observe its file, and
     adjudicate it WITHOUT changing what any verdict means.
@@ -1747,6 +1750,8 @@ def _measure(
 
     ``pinned`` is the selection to replay (a :class:`~chela.judge_select.Selection`, or
     ``None`` for the full suite); the default ``_SELECT`` computes it from ``selector``.
+    ⛔ CMX-145: the default MUST compute — with ``None`` as the default, the sweep (which
+    passes no ``pinned``) ran every mutation on the full suite and its budget reached ~1 of 10.
     Held-out experiments take exactly this path — confirmation is not a visibility feature.
     """
     if pinned is _SELECT:
@@ -1774,9 +1779,6 @@ def _measure(
     confirmed.confirmed_full = True
     confirmed.subset_verdict = outcome.verdict
     return confirmed
-
-
-_SELECT = object()   # _measure's "no pinned selection — compute one" sentinel
 
 
 def _check_consistency(
