@@ -76,7 +76,23 @@ beforeEach(() => {
     applyPayload = {};
     fetchCalls = [];
     settingsShouldFail = false;
+    useStatuses([]);
 });
+
+// CMX-95: a FAKE /api/update/status, one scripted entry per poll (an Error = unreachable),
+// on a fake clock that advances per sleep, so the 180 s timeout costs no real time.
+let statusPolls = 0, clock = 0, reloads = 0;
+function useStatuses(list) {
+    statusPolls = clock = reloads = 0;
+    Object.assign(window.chela._updateFlowDeps, {
+        sleep: async ms => { clock += ms; }, now: () => clock, reload: () => { reloads++; },
+        fetchStatus: async () => {
+            const v = list.length ? list[Math.min(statusPolls++, list.length - 1)] : null;
+            if (v instanceof Error) throw v;
+            return v;
+        },
+    });
+}
 
 async function openWith(update) {
     updatePayload = update;
@@ -98,13 +114,32 @@ test('a checkout that is behind enables the Update button and shows the count', 
 
 // --- 2. 🔴 counterweight — up to date leaves the button disabled ------------------
 
-test('a checkout that is up to date leaves the Update button disabled', async () => {
-    await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev' });
+test('a checkout that is up to date offers no Update button at all', async () => {
+    await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev', stale_services: [], stale_ok: true });
 
     const btn = document.getElementById('update-apply-btn');
     const row = document.getElementById('update-status-row');
     assert.equal(btn.disabled, true, 'the Update button is enabled with nothing to pull');
+    // CMX-95 (Liav's live test 10-12): "Update now" was offered on UP TO DATE.
+    assert.equal(btn.hidden, true, '"Update now" is offered with nothing to pull and nothing stale');
     assert.match(row.textContent, /Up to date/, 'the status row does not say "Up to date"');
+});
+
+test('the button comes back once there is something to do (after an up-to-date render)', async () => {
+    await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev', stale_services: [], stale_ok: true });
+    document.getElementById('settings-drawer').classList.remove('open');
+    await openWith({ ok: true, behind: 2, ahead: 0, branch: 'dev', stale_services: [], stale_ok: true });
+    assert.equal(document.getElementById('update-apply-btn').hidden, false);
+});
+
+test('an unreadable service-freshness check is Unknown, never "Up to date", and offers nothing', async () => {
+    await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev', stale_services: [], stale_ok: false });
+
+    const btn = document.getElementById('update-apply-btn');
+    const row = document.getElementById('update-status-row');
+    assert.doesNotMatch(row.textContent, /Up to date/, 'an unread fleet rendered as "Up to date"');
+    assert.match(row.textContent, /Unknown.*could not read which services run old code/s);
+    assert.equal(btn.hidden, true);
 });
 
 test('an unreadable checkout (git=false) reports Unknown and keeps the button disabled', async () => {
@@ -113,6 +148,7 @@ test('an unreadable checkout (git=false) reports Unknown and keeps the button di
     const btn = document.getElementById('update-apply-btn');
     const row = document.getElementById('update-status-row');
     assert.equal(btn.disabled, true);
+    assert.equal(btn.hidden, true);
     assert.match(row.textContent, /Unknown/);
 });
 
@@ -148,20 +184,87 @@ test('a service whose freshness is unknown is named as unknown, not stale and no
     assert.equal(document.getElementById('update-apply-btn').disabled, true);
 });
 
-test('clicking Restart stale services says which services it is restarting', async () => {
+const BOOT = 'boot-1';
+const status = extra => ({ ok: true, behind: 0, ahead: 0, branch: 'dev', stale_ok: true,
+    stale_services: [], boot: BOOT, applying: false, last_result: null, ...extra });
+
+test('clicking Restart stale services says which services it is restarting, then the outcome', async () => {
     await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev',
-        stale_services: ['chela-dashboard'] });
+        stale_services: ['chela-collab', 'chela-daemon', 'chela-telegram'] });
     globalThis.confirm = () => true;
-    applyPayload = { ok: true, started: true, behind: 0, restarting: ['chela-dashboard'],
-        detail: 'restarting chela-dashboard' };
+    applyPayload = { ok: true, started: true, behind: 0, run: 4, boot: BOOT,
+        restarting: ['chela-collab', 'chela-daemon', 'chela-telegram'],
+        detail: 'restarting chela-collab, chela-daemon, chela-telegram' };
+    const seen = [];
+    const msg = document.getElementById('update-apply-msg');
+    useStatuses([status({ applying: true }), status({ applying: true }),
+        status({ last_result: { run: 4, ok: true, step: 'done', error: '', behind_before: 0,
+            restarted: ['chela-telegram', 'chela-collab', 'chela-daemon'] } })]);
+    const fetchStatus = window.chela._updateFlowDeps.fetchStatus;
+    window.chela._updateFlowDeps.fetchStatus = async () => { seen.push(msg.className + '|' + msg.textContent); return fetchStatus(); };
+
+    await window.chela.applyUpdate();
+    await flush();
+
+    assert.match(seen[0], /Restarting chela-collab, chela-daemon, chela-telegram/,
+        'a restart click gave no feedback naming what it restarted');
+    // While polling it is in progress — neither the success nor the error style.
+    assert.equal(seen[1], 's-savemsg |Restarting chela-collab, chela-daemon, chela-telegram…');
+    // 🔴 The hang (Liav 10-12): it used to sit at "refresh in a few seconds" forever.
+    assert.equal(msg.textContent, 'Restarted chela-collab, chela-daemon, chela-telegram');
+    assert.match(msg.className, /\bok\b/);
+    assert.equal(statusPolls, 3, 'it stopped polling before the outcome, or kept polling after it');
+});
+
+test('a failed restart ends in the error, styled as one, with the button back', async () => {
+    await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev', stale_services: ['chela-daemon'] });
+    globalThis.confirm = () => true;
+    applyPayload = { ok: true, started: true, behind: 0, run: 5, boot: BOOT, detail: 'restarting chela-daemon' };
+    useStatuses([status({ applying: true }), status({ last_result: { run: 5, ok: false,
+        step: 'pm2-restart', restarted: [], error: 'chela-daemon is still mid-tick' } })]);
 
     await window.chela.applyUpdate();
     await flush();
 
     const msg = document.getElementById('update-apply-msg');
-    assert.match(msg.textContent, /Restarting chela-dashboard/,
-        'a restart click gave no feedback naming what it restarted');
-    assert.match(msg.className, /\bok\b/);
+    assert.equal(msg.textContent, 'Update failed at pm2-restart: chela-daemon is still mid-tick');
+    assert.match(msg.className, /\berr\b/);
+    const btn = document.getElementById('update-apply-btn');
+    assert.equal(btn.disabled, false, 'a failed restart must leave the button to retry');
+    assert.equal(btn.textContent, 'Restart stale services (1)');
+});
+
+test('no answer within the bound ends in "couldn\'t confirm", never success and never forever', async () => {
+    await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev', stale_services: ['chela-collab'] });
+    globalThis.confirm = () => true;
+    applyPayload = { ok: true, started: true, behind: 0, run: 8, boot: BOOT, detail: 'restarting chela-collab' };
+    // Unreachable, then forever "applying": nothing ever confirms.
+    useStatuses([new Error('down'), status({ applying: true })]);
+
+    await window.chela.applyUpdate();
+    await flush();
+
+    const msg = document.getElementById('update-apply-msg');
+    assert.equal(msg.textContent, "Couldn't confirm the restart — check `pm2 ls`.");
+    assert.match(msg.className, /\berr\b/);
+    assert.doesNotMatch(msg.className, /\bok\b/);
+    // 180s bound at 2s per poll — bounded, and not given up early.
+    assert.equal(statusPolls, 90);
+});
+
+test('a restart of THIS dashboard (new boot) reloads the page onto the new code', async () => {
+    await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev', stale_services: ['chela-dashboard'] });
+    globalThis.confirm = () => true;
+    applyPayload = { ok: true, started: true, behind: 0, run: 9, boot: BOOT, detail: 'restarting chela-dashboard' };
+    useStatuses([new Error('down'), status({ boot: 'boot-2' })]);
+
+    await window.chela.applyUpdate();
+    await flush();
+
+    assert.equal(reloads, 1, 'the dashboard restarted but the page never reloaded');
+    const msg = document.getElementById('update-apply-msg');
+    assert.equal(msg.className + '|' + msg.textContent, 's-savemsg |The dashboard restarted — reloading…');
+    assert.equal(statusPolls, 2);
 });
 
 // --- Counterweight — no stale services still renders "Up to date" -------------------
@@ -204,7 +307,7 @@ test('the Update button is wired to applyUpdate() — not just rendered', async 
 test('a refused update surfaces the reason, naming the in-flight task', async () => {
     await openWith({ ok: true, behind: 3, ahead: 0, branch: 'dev' });
     globalThis.confirm = () => true;
-    applyPayload = { ok: false, error: 'a dispatched run is in flight: cmx-199-abc12' };
+    applyPayload = { ok: false, error: 'an update is already running (cmx-199-abc12)' };
 
     await window.chela.applyUpdate();
     await flush();
@@ -226,13 +329,16 @@ test('a refused update surfaces the reason, naming the in-flight task', async ()
 test('a started update reports success, not a refusal', async () => {
     await openWith({ ok: true, behind: 3, ahead: 0, branch: 'dev' });
     globalThis.confirm = () => true;
-    applyPayload = { ok: true, started: true };
+    applyPayload = { ok: true, started: true, run: 3, boot: BOOT };
+    useStatuses([status({ last_result: { run: 3, ok: true, step: 'done', behind_before: 3,
+        restarted: ['chela-daemon'] } })]);
 
     await window.chela.applyUpdate();
     await flush();
 
     const msg = document.getElementById('update-apply-msg');
-    assert.match(msg.textContent, /Started/, 'a started update did not report as started');
+    assert.equal(msg.textContent, 'Pulled 3 commit(s). Restarted chela-daemon',
+        'a started update did not report its outcome');
     assert.doesNotMatch(msg.textContent, /refused/i);
     // ⛔ The TEXT alone is not the property: setMsg carries the outcome in the class, so
     // `setMsg('ok', …)` -> `setMsg('err', …)` leaves this message word-for-word identical
@@ -240,6 +346,18 @@ test('a started update reports success, not a refusal', async () => {
     // survives (it did, the first time I wrote this test).
     assert.match(msg.className, /\bok\b/, 'a started update is styled as an error');
     assert.doesNotMatch(msg.className, /\berr\b/);
+});
+
+test('done re-reads the status; an unreadable one hides the shown button again', async () => {
+    await openWith({ ok: true, behind: 3, ahead: 0, branch: 'dev' });
+    globalThis.confirm = () => true;
+    applyPayload = { ok: true, started: true, run: 3, boot: BOOT };
+    useStatuses([status({ last_result: { run: 3, ok: true, step: 'done', restarted: [] } })]);
+    settingsShouldFail = true;   // the POST is not /api/settings; only the re-read fails
+    await window.chela.applyUpdate();
+    await flush();
+    assert.match(document.getElementById('update-status-row').textContent, /Unknown/);
+    assert.equal(document.getElementById('update-apply-btn').hidden, true);
 });
 
 // --- 6. 🔴 A NOT-STARTED response must never be announced as a fleet-wide restart ---
@@ -302,4 +420,69 @@ test('a failed /api/settings poll re-renders the Update row as Unknown', async (
     assert.match(row.textContent, /Unknown/,
         'a failed /api/settings poll left the row on its stale/initial state');
     assert.equal(btn.disabled, true);
+});
+
+// --- CMX-95: the state machine on its exact boundaries ------------------------------
+
+const flow = await import('../chela/dashboard/static/js/updateflow.js');
+const CTX = { run: 4, boot: BOOT, label: 'Restarting chela-daemon', startedAt: 1000 };
+const done = { run: 4, ok: true, step: 'done', error: '', restarted: ['chela-daemon'], behind_before: 0 };
+
+test('timeout: 179.9 s still polls, 180 s gives up — and never as success', () => {
+    const st = status({ applying: true });
+    assert.deepEqual(flow.updateOutcome(st, CTX, 1000 + 179900),
+        { state: 'polling', text: 'Restarting chela-daemon…' });
+    assert.deepEqual(flow.updateOutcome(st, CTX, 1000 + 180000),
+        { state: 'timeout', text: "Couldn't confirm the restart — check `pm2 ls`." });
+    assert.equal(flow.updateOutcome(null, CTX, 1000 + 180000).state, 'timeout');
+});
+
+test('done needs applying === false AND this run\'s result', () => {
+    assert.deepEqual(flow.updateOutcome(status({ last_result: done }), CTX, 1000),
+        { state: 'done', text: 'Restarted chela-daemon' });
+    // Still applying, or `applying` unread: not done yet (only an explicit false finishes).
+    for (const applying of [true, undefined]) assert.equal(flow.updateOutcome(status({ applying, last_result: done }), CTX, 1000).state, 'polling');
+    assert.equal(flow.updateOutcome(status({ last_result: { ...done, run: 3 } }), CTX, 1000).state, 'polling');
+    // A result decided at the bound still wins over the timeout.
+    assert.equal(flow.updateOutcome(status({ last_result: done }), CTX, 1000 + 180000).state, 'done');
+    assert.equal(flow.updateOutcome(status({ last_result: { ...done, restarted: [] } }), CTX, 1000).text,
+        'Done — no running service needed a restart');
+});
+
+test('an unknown result (ok missing / not true) is failed, never success', () => {
+    for (const ok of [undefined, null, 'true', 1]) {
+        const step = flow.updateOutcome(status({ last_result: { run: 4, ok, step: 'pm2-restart' } }), CTX, 1000);
+        assert.deepEqual(step, { state: 'failed', text: 'Update failed at pm2-restart: no detail' }, String(ok));
+    }
+    assert.equal(flow.updateOutcome(status({ last_result: { run: 4, ok: false, step: 'git-pull', error: 'diverged' } }),
+        CTX, 1000).text, 'Update failed at git-pull: diverged');
+});
+
+test('reload only on a CHANGED boot — a missing boot on either side is not a restart', () => {
+    assert.deepEqual(flow.updateOutcome(status({ boot: 'boot-2', applying: true }), CTX, 1000),
+        { state: 'reload', text: 'The dashboard restarted — reloading…' });
+    assert.equal(flow.updateOutcome(status({ boot: BOOT, applying: true }), CTX, 1000).state, 'polling');
+    assert.equal(flow.updateOutcome(status({ boot: undefined, applying: true }), CTX, 1000).state, 'polling');
+    assert.equal(flow.updateOutcome(status({ boot: 'boot-2', applying: true }), { ...CTX, boot: undefined }, 1000).state, 'polling');
+});
+
+test('followUpdate polls every 2 s from the click, and fetches /api/update/status by default', async () => {
+    let t = 0;
+    const sleeps = [];
+    const steps = [];
+    const seq = [status({ applying: true }), status({ last_result: done })];
+    const step = await flow.followUpdate({ run: 4, boot: BOOT, detail: 'restarting chela-daemon' },
+        s => steps.push(s.state), {
+            fetchStatus: async () => seq.shift(), now: () => t,
+            sleep: async ms => { sleeps.push(ms); t += ms; }, reload: () => assert.fail('reloaded'),
+        });
+    assert.deepEqual(sleeps, [2000, 2000]);
+    assert.deepEqual(steps, ['polling', 'done']);
+    assert.equal(step.state, 'done');
+
+    const before = fetchCalls.length;
+    applyPayload = status({ last_result: done });
+    const def = await flow.followUpdate({ run: 4, boot: BOOT }, () => {}, { sleep: async () => {} });
+    assert.equal(def.state, 'done');
+    assert.ok(fetchCalls.slice(before).some(c => c.url.endsWith('/api/update/status')));
 });
