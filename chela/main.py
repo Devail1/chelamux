@@ -2765,6 +2765,14 @@ def cmd_judge_sweep(args) -> None:
                              budget_seconds=args.budget_seconds,
                              max_mutations=args.max_mutations)
     verdict = sweep.verdict(result)
+    if args.github:     # CMX-97: publishing never changes the exit code — failures warn
+        from chela import sweep_github
+        try:
+            warnings = sweep_github.publish(result, comment=not args.no_comment)
+        except Exception as e:  # noqa: BLE001
+            warnings = [f"publishing failed: {type(e).__name__}: {e}"]
+        for warning in warnings:
+            print(f"::warning::chela judge sweep: {warning}", file=out)
     if args.json:
         print(json.dumps(result, indent=2))
         sys.exit(sweep.EXIT_CODES[verdict])
@@ -3842,6 +3850,13 @@ def main() -> None:
         "--json", action="store_true",
         help="Print the result as JSON on stdout (progress goes to stderr)",
     )
+    p_jsweep.add_argument(
+        "--github", action="store_true",
+        help="In GitHub Actions: write the step summary + outputs and upsert the PR comment "
+             "(needs `gh` and GITHUB_TOKEN). Never changes the exit code",
+    )
+    p_jsweep.add_argument("--no-comment", action="store_true",
+                          help="With --github: skip the PR comment")
     p_jsweep.add_argument(
         "--budget-seconds", type=float, default=None, metavar="S",
         help="Wall-clock budget; mutations it does not reach are UNRUN (CANNOT VERIFY). "
