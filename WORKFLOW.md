@@ -89,9 +89,23 @@ agent:
 # never trusted on its own: every subset survivor is re-run on the FULL suite before it can
 # block. An unknown file type, a conftest.py, or a test_cmd that is not one pytest invocation
 # runs the full suite. `select_tests: false` puts every mutation back on the full suite.
+# 📏 CMX-126: `chela task-finished` refuses a diff over `max_pr_lines` changed lines (code +
+# tests vs base_branch) unless the agent passes `--oversize-reason`. `size_exclude` = fnmatch
+# globs that do not count (default: docs/*, *.md, changelog.d/*, images, video).
+# hand_in:
+#   max_pr_lines: 300
+#   size_exclude: ["docs/*", "*.md", "changelog.d/*", "*.png", "*.jpg", "*.gif", "*.svg", "*.mp4", "*.webm"]
+
 judge:
   test_cmd: CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q
   suite_timeout_seconds: 900
+  # ⏳ CMX-111: `chela judge sweep` (and the sweep inside `task-finished`) is BUDGETED. It
+  # measures conditionals first, then return codes/values, then comparison flips, round-robin
+  # across files, and stops at whichever budget runs out first. Every mutation it did not
+  # reach is listed as UNRUN — CANNOT VERIFY, never counted as killed, never a pass.
+  # 0 or unset = the default. `chela judge sweep --budget-seconds/--max-mutations` override.
+  # sweep_budget_seconds: 900   # wall-clock, baseline included (default 900)
+  # sweep_max_mutations: 60     # most mutations measured (default 60)
 
 hooks:
   # ⛔ THIS HOOK IS THE JUDGE'S ENVIRONMENT TOO, not just the agent's — `_launch_agent` runs
@@ -271,13 +285,20 @@ message.
      still reads the diff and a guard that exists without a matching self-check is exactly
      the gap this closes. It is checked (never blocked, but recorded) against your own
      diff — passing it on a run that touches `tests/` prints a loud warning.
-   - **⚖️🧹 CMX-88: `task-finished` also runs `chela judge sweep`** (~5–10 min) and REFUSES
-     while a survivor remains. Only when NO outcome can change under a surviving mutation
+   - **⚖️🧹 CMX-88: `task-finished` also runs `chela judge sweep`** (budgeted: at most
+     `judge.sweep_budget_seconds`, default 15 min) and REFUSES while a survivor remains. A
+     mutation the budget never reached is printed `[UNRUN]` — CANNOT VERIFY, not a pass; it does
+     not block the hand-in, but the judge still measures your diff. Only when NO outcome can change under a surviving mutation
      (a log-only branch, a value both paths compute identically), name it with a written
      reason: `--sweep-equivalent '<file:line>: <why no outcome can change>'` (repeatable).
      It is recorded on the run, shown to the judge and appended to your PR body — the judge
      treats it as a claim to test, so a wrong one comes straight back. A note for a line
      that did not survive is refused.
+   - **📏 CMX-126: `task-finished` measures your diff first** (code + tests vs `dev`; docs,
+     media and changelog excluded) and REFUSES it over `hand_in.max_pr_lines` (300) before
+     any sweep runs. Split it into ≤300-line PRs. Only a diff that truly cannot be split
+     may pass `--oversize-reason '<why>'` — recorded on the run, shown to the judge and in
+     your PR body.
    - **Optional: `--handoff "<note>"`** — a short note for your reviewer (what changed, what
      to look at first, what you assumed). It is shown in the orchestrator's inbox notice and
      on the Dispatch board. Informational only — it never gates anything.

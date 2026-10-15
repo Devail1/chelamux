@@ -32,6 +32,14 @@ path instead of skipping it.
 ⚖️ CMX-97 — STANDALONE: any git repo, no WORKFLOW.md/daemon/tmux/tracker; the suite is
 detected when none is named (:func:`detect_test_cmd`). A changed file in a language the
 mutators cannot handle is UNKNOWN (:func:`unsupported_files`) — the verdict is never ``clean``.
+
+⏳ CMX-111: A SWEEP HAS A BUDGET. Its cost is mutations × suite time, so an unbounded sweep on
+a large diff blocked ``task-finished`` for 24+ minutes. :class:`SweepBudget` caps it by
+wall-clock (``judge.sweep_budget_seconds``) and by count (``judge.sweep_max_mutations``).
+Mutations run in :func:`prioritise` order — conditionals, then return codes/values, then
+comparison flips, round-robin across files — so the budget is spent where a missed guard
+costs most. Whatever the budget did not reach is :data:`UNRUN`: listed, never counted as
+killed, never a pass.
 """
 from __future__ import annotations
 
@@ -57,6 +65,18 @@ JS_SUFFIXES = (".js", ".mjs")
 # below are mutations that never reached a suite, and are NEVER counted as killed.
 UNPARSEABLE = "UNPARSEABLE"   # the mutated file did not parse — skipped, said out loud
 NOT_APPLIED = "NOT_APPLIED"   # the anchor could not be applied/proven — skipped, said out loud
+UNRUN = "UNRUN"               # CMX-111: the budget ran out before it — CANNOT VERIFY, not killed
+
+# ⏳ CMX-111: the defaults a 0/unset/unreadable budget falls back to. The wall-clock budget is
+# checked BEFORE each mutation, so a sweep can overrun it by at most the one mutation already
+# measuring (its subset run, plus a full-suite confirmation if it survived the subset).
+DEFAULT_BUDGET_SECONDS = 900.0
+DEFAULT_MAX_MUTATIONS = 60
+
+# Which mutations the budget reaches first: a dropped branch (the shape the judge finds most)
+# before a flipped return code/value, before a flipped comparison.
+_KIND_RANK = {"if-false": 0, "if-true": 1, "return-code": 2, "returncode": 2,
+              "return-none": 3, "return-value": 3, "compare-flip": 4}
 
 _PY_FLIP = {ast.Eq: ("==", "!="), ast.NotEq: ("!=", "=="), ast.Lt: ("<", ">="),
             ast.GtE: (">=", "<"), ast.Gt: (">", "<="), ast.LtE: ("<=", ">")}
@@ -116,6 +136,41 @@ class SweepResult:
                 "measured_by": self.measured_by}
 
 
+@dataclass(frozen=True)
+class SweepBudget:
+    """⏳ CMX-111: how much a sweep may spend — wall-clock seconds (counted from the sweep's
+    start, baseline included) and the most mutations it measures."""
+    seconds: float = DEFAULT_BUDGET_SECONDS
+    max_mutations: int = DEFAULT_MAX_MUTATIONS
+
+    def as_dict(self) -> dict:
+        return {"seconds": self.seconds, "max_mutations": self.max_mutations}
+
+
+def _positive(value: object, cast):
+    """``value`` as a positive ``cast`` number, else ``None`` — 0, negative, blank, a bool or
+    garbage all mean "not set", so the next source in the precedence chain decides."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        n = cast(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return n if n > 0 else None
+
+
+def resolve_budget(wf=None, *, seconds: object = None, max_mutations: object = None) -> SweepBudget:
+    """Explicit argument > the workflow's ``judge.sweep_budget_seconds`` /
+    ``judge.sweep_max_mutations`` > :data:`DEFAULT_BUDGET_SECONDS` /
+    :data:`DEFAULT_MAX_MUTATIONS`, each field on its own. A budget of 0 (or unset, or not a
+    positive number) is NOT "unbounded" — it falls through to the default."""
+    wf_seconds = wf.get("judge", "sweep_budget_seconds", default=None) if wf is not None else None
+    wf_max = wf.get("judge", "sweep_max_mutations", default=None) if wf is not None else None
+    s = _positive(seconds, float) or _positive(wf_seconds, float) or DEFAULT_BUDGET_SECONDS
+    m = _positive(max_mutations, int) or _positive(wf_max, int) or DEFAULT_MAX_MUTATIONS
+    return SweepBudget(seconds=float(s), max_mutations=int(m))
+
+
 @dataclass
 class SweepReport:
     results: list[SweepResult] = field(default_factory=list)
@@ -127,6 +182,9 @@ class SweepReport:
     unsupported: list[str] = field(default_factory=list)
     base: str = ""
     test_cmd: str = ""
+    budget: SweepBudget = field(default_factory=SweepBudget)
+    # Why the budget stopped the sweep ("" when every mutation was reached).
+    exhausted: str = ""
 
     def _with(self, status: str) -> list[SweepResult]:
         return [r for r in self.results if r.status == status]
@@ -145,6 +203,10 @@ class SweepReport:
             "unparseable": [r.as_dict() for r in self._with(UNPARSEABLE)],
             "not_applied": [r.as_dict() for r in self._with(NOT_APPLIED)],
             "invalid": [r.as_dict() for r in self._with(judge.INVALID)],
+            # ⏳ CMX-111: never measured — CANNOT VERIFY for these lines, never killed.
+            "unrun": [r.as_dict() for r in self._with(UNRUN)],
+            "measured": len([r for r in self.results if r.status != UNRUN]),
+            "budget": self.budget.as_dict(), "exhausted": self.exhausted,
             "cannot_verify": self.cannot_verify, "recovered": self.recovered,
             "notes": list(self.notes), "selection": self.selection,
             "seconds": round(self.seconds, 1),
@@ -155,14 +217,17 @@ class SweepReport:
 
 
 def verdict(result: dict) -> str:
-    """⛔ ``clean`` only when the sweep ran, found no survivor AND could mutate every changed
-    source file — an unsupported one makes it ``unknown``, never a vacuous pass."""
+    """⛔ ``clean`` only when the sweep ran, found no survivor, reached every mutation within
+    its budget AND could mutate every changed source file — an unsupported one makes it ``unknown``, never a vacuous pass."""
     if not result.get("ok"):
         return V_ERROR
     if result.get("cannot_verify"):
         return V_CANNOT_VERIFY
     if result.get("survivors"):
         return V_SURVIVORS
+    if result.get("unrun"):
+        # ⏳ CMX-111: mutations the budget never reached are unmeasured — never a pass.
+        return V_CANNOT_VERIFY
     if result.get("unsupported"):
         return V_UNKNOWN
     return V_CLEAN
@@ -553,6 +618,21 @@ def collect_mutations(worktree: Path, base: str) -> tuple[list[Mutation], str]:
     return muts, ""
 
 
+def prioritise(muts: list[Mutation]) -> list[Mutation]:
+    """The order a budgeted sweep measures in: by kind (:data:`_KIND_RANK` — conditionals,
+    return codes, return values, comparisons), and within a kind ROUND-ROBIN across files, so
+    a budget that runs out still reached every file's first changed check instead of spending
+    itself on the first file alphabetically."""
+    nth: dict[tuple[int, str], int] = {}
+    keyed = []
+    for m in sorted(muts, key=lambda m: (m.file, m.line, m.kind, m.after)):
+        rank = _KIND_RANK.get(m.kind, len(_KIND_RANK))
+        i = nth.get((rank, m.file), 0)
+        nth[(rank, m.file)] = i + 1
+        keyed.append(((rank, i, m.file, m.line, m.kind, m.after), m))
+    return [m for _k, m in sorted(keyed, key=lambda km: km[0])]
+
+
 def _anchor(text: str, mut: Mutation) -> tuple[str, str] | None:
     """Widen the mutated line to a span that occurs EXACTLY ONCE in ``text`` (the judge's
     :func:`~chela.judge.apply_mutation` refuses anything else), with the matching mutated
@@ -670,32 +750,40 @@ def _restore_signal_handlers(old: dict) -> None:
 # --- the sweep ------------------------------------------------------------------------------
 
 
+def _now() -> float:
+    return time.monotonic()
+
+
 def sweep(
     worktree: str | Path, base: str, test_cmd: str, *,
     timeout: float = judge.SUITE_TIMEOUT_SECONDS, select_tests: bool = True, progress=None,
-    provision: bool = True,
+    provision: bool = True, budget: SweepBudget | None = None,
 ) -> SweepReport:
     """``provision=False`` standalone: the repo's env is its owner's (no ``uv sync``)."""
     worktree = Path(worktree).resolve()
-    started = time.monotonic()
+    budget = budget if budget is not None else SweepBudget()
+    started = _now()
     old = _install_signal_handlers()
     try:
         report = _sweep(worktree, base, test_cmd, timeout=timeout, select_tests=select_tests,
-                        progress=progress, provision=provision)
+                        progress=progress, provision=provision, budget=budget,
+                        started=started)
     except _Interrupted as e:
         # The mutation's own `finally` has already restored the file by the time this runs.
         report = SweepReport(cannot_verify=f"interrupted by signal {e.args[0]} — the sweep "
                                            "stopped; the mutated file was restored")
     finally:
         _restore_signal_handlers(old)
-    report.seconds = time.monotonic() - started
+    report.budget = budget
+    report.seconds = _now() - started
     report.base, report.test_cmd = base, test_cmd
     return report
 
 
 def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_tests: bool,
-           progress, provision: bool = True) -> SweepReport:
-    report = SweepReport()
+           progress, budget: SweepBudget, started: float,
+           provision: bool = True) -> SweepReport:
+    report = SweepReport(budget=budget)
     report.recovered, err = recover(worktree)
     if err:
         report.cannot_verify = err
@@ -731,15 +819,33 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
             "nothing. Fix the suite first.")
         return report
 
-    for n, mut in enumerate(muts):
+    muts = prioritise(muts)
+    chosen = muts[:budget.max_mutations]
+    for n, mut in enumerate(chosen):
+        elapsed = _now() - started
+        if elapsed >= budget.seconds:
+            report.exhausted = (f"the {budget.seconds:g}s wall-clock budget ran out after "
+                                f"{n} of {len(muts)} mutation(s) ({elapsed:.0f}s spent)")
+            _mark_unrun(report, chosen[n:], report.exhausted)
+            break
         if progress is not None:
-            progress(n, len(muts), mut)
+            progress(n, len(chosen), mut)
         result, contamination = _run_one(worktree, test_cmd, mut, baseline, timeout, selector)
         report.results.append(result)
         if contamination:
             report.cannot_verify = contamination
             return report
+    if len(muts) > len(chosen):
+        why = (f"over the {budget.max_mutations}-mutation budget ({len(muts)} generated)")
+        report.exhausted = report.exhausted or why
+        _mark_unrun(report, muts[len(chosen):], why)
     return report
+
+
+def _mark_unrun(report: SweepReport, muts: list[Mutation], why: str) -> None:
+    """⛔ CMX-111: a mutation the budget never reached is UNRUN — CANNOT VERIFY for its line,
+    never KILLED, never silently dropped."""
+    report.results.extend(SweepResult(m, UNRUN, f"not run — {why}") for m in muts)
 
 
 def _run_one(worktree: Path, test_cmd: str, mut: Mutation, baseline, timeout: float,
@@ -845,14 +951,15 @@ def _one_line(text: object) -> str:
 def run_sweep(
     worktree: str | Path, *, base: str | None = None, workflow_path: str | Path | None = None,
     test_cmd: str | None = None, timeout: float | None = None, progress=None,
+    budget_seconds: float | None = None, max_mutations: int | None = None,
 ) -> dict:
     """``chela judge sweep``'s entry point: resolve the suite (``--test-cmd``, else the
-    workflow's ``judge.test_cmd`` — the suite the judge measures against — else detected) and
-    the base (``--base``, else ``origin/<workspace.base_branch>``, else ``origin/dev``), sweep,
-    and return a JSON-friendly dict."""
+    workflow's ``judge.test_cmd`` — the suite the judge measures against — else detected), the
+    base (``--base``, else ``origin/<workspace.base_branch>``, else ``origin/dev``) and the
+    budget (:func:`resolve_budget` — standalone too), sweep, and return a JSON-friendly dict."""
     cmd = test_cmd.strip() if isinstance(test_cmd, str) and test_cmd.strip() else None
     source = "--test-cmd" if cmd else ""
-    to, select = timeout, True
+    to, select, wf = timeout, True, None
     if workflow_path:
         from chela import workflow as workflow_mod
 
@@ -876,5 +983,6 @@ def run_sweep(
                                       "`judge.test_cmd` set"}
     report = sweep(worktree, base or "origin/dev", cmd,
                    timeout=to if to is not None else judge.SUITE_TIMEOUT_SECONDS,
-                   select_tests=select, progress=progress, provision=workflow_path is not None)
+                   select_tests=select, progress=progress, provision=workflow_path is not None,
+                   budget=resolve_budget(wf, seconds=budget_seconds, max_mutations=max_mutations))
     return {**report.as_dict(), "test_cmd_source": source}

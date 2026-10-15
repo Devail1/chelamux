@@ -53,6 +53,7 @@ from chela import (
     sessionids,
     sidebar_archive,
     spawn,
+    ticklock,
     update,
     wait,
     workflow,
@@ -262,6 +263,10 @@ def cmd_run(args) -> None:
     stop = GracefulShutdown("chela daemon").install()
 
     while not stop.stopping:
+        # CMX-95: a restart of this daemon waits for the tick in progress, never more.
+        tick_fd = ticklock.begin_tick(stop.wait)
+        if tick_fd is None:
+            break              # a restart held the lock and signalled us: leave unstarted
         try:
             executed = scheduler.tick()
             if executed:
@@ -455,6 +460,8 @@ def cmd_run(args) -> None:
                 log.exception("Room pending-delivery flush failed")
         except Exception:
             log.exception("Error in daemon loop")
+        finally:
+            ticklock.end_tick(tick_fd)
         stop.wait(config.scheduler_poll_interval())
 
     capabilities.clear()   # nothing is providing these any more; don't let doctor say so
@@ -2267,6 +2274,11 @@ def cmd_task_finished(args) -> None:
     if experiments and no_new_guards:
         print("task-finished: pass at most one of --self-check-experiments / --no-new-guards")
         sys.exit(2)
+    # 📏 CMX-126: the size gate runs FIRST — an oversized diff is refused before its sweep.
+    size = dispatcher.check_hand_in_size(args.task_id, getattr(args, "oversize_reason", None))
+    if not size.get("ok"):
+        print(f"task-finished: 📏 {size['error']}")
+        sys.exit(1)
 
     if experiments:
         check = dispatcher.verify_self_check(args.task_id, experiments)
@@ -2313,6 +2325,8 @@ def cmd_task_finished(args) -> None:
     kwargs = {"handoff": getattr(args, "handoff", None)}
     if accepted:
         kwargs["sweep_equivalents"] = accepted
+    if size.get("record"):
+        kwargs["size_gate"] = size["record"]
     result = dispatcher.request_task_finished(args.task_id, **kwargs)
     if not result.get("ok"):
         print(f"task-finished: {result.get('error', 'unknown error')}")
@@ -2356,6 +2370,7 @@ def _task_finished_sweep(task_id: str, notes: list[str]) -> list[dict]:
     if skipped:
         print(f"⚠ {skipped} mutation(s) SKIPPED — those lines were never measured; a skip is "
               "unmeasured, not killed.")
+    unrun = _print_sweep_unrun(result)
     survivors = result.get("survivors") or []
     uncovered, stray = sweep.check_equivalents(survivors, equivalents)
     if stray:
@@ -2378,6 +2393,14 @@ def _task_finished_sweep(task_id: str, notes: list[str]) -> list[dict]:
     for e in equivalents:
         e["mutations"] = by_key.get(e["key"], [])
         print(f"  [EQUIVALENT] {e['key']} — {e['why'][:100]}")
+    if unrun:
+        # ⏳ CMX-111: the budget bounds the hand-in, so a partial sweep does not refuse — but
+        # it is never reported as a pass: the unrun lines are named, and the judge still runs.
+        print(f"⚠ sweep PARTIAL: {result.get('measured', 0)} of {result.get('mutations', 0)} "
+              f"mutation(s) measured — {result.get('killed', 0)} killed, {skipped} skipped "
+              f"(unmeasured), {len(survivors)} survivor(s) declared equivalent; {unrun} UNRUN "
+              "= CANNOT VERIFY, not passed — proceeding within the sweep budget.")
+        return equivalents
     print(f"✓ sweep: {result.get('mutations', 0)} mutation(s), {result.get('killed', 0)} "
           f"killed, {skipped} skipped (unmeasured), {len(survivors)} survivor(s) declared "
           "equivalent — proceeding.")
@@ -2654,7 +2677,8 @@ def cmd_judge_sweep(args) -> None:
 
     Exit codes: ``0`` no survivor, ``1`` a mutation SURVIVED (add a test that goes red under
     it), ``2`` CANNOT VERIFY (a red baseline, an unresolvable base, no suite, a leftover
-    recovery marker that cannot be applied safely), ``3`` UNKNOWN (CMX-97: a changed file in a
+    recovery marker that cannot be applied safely, CMX-111: mutations the budget never
+    reached), ``3`` UNKNOWN (CMX-97: a changed file in a
     language the sweep cannot mutate — not a pass). Runs in any git repo; ``--json`` for JSON.
     """
     from chela import sweep
@@ -2668,7 +2692,9 @@ def cmd_judge_sweep(args) -> None:
         print(f"  [{n + 1}/{total}] {mut.key} {mut.kind}", file=out, flush=True)
 
     result = sweep.run_sweep(args.cwd, base=args.base, workflow_path=workflow,
-                             test_cmd=args.test_cmd, progress=_progress)
+                             test_cmd=args.test_cmd, progress=_progress,
+                             budget_seconds=args.budget_seconds,
+                             max_mutations=args.max_mutations)
     verdict = sweep.verdict(result)
     if args.json:
         print(json.dumps(result, indent=2))
@@ -2683,6 +2709,7 @@ def cmd_judge_sweep(args) -> None:
     for note in result["notes"]:
         print(f"  {note}")
     skipped = _print_sweep_skipped(result)
+    unrun = _print_sweep_unrun(result)
     for r in result["survivors"]:
         print(f"  [SURVIVED] {r['key']} {r['mutation']}")
     unsupported = result.get("unsupported", [])
@@ -2692,19 +2719,33 @@ def cmd_judge_sweep(args) -> None:
         print(f"⚠ CANNOT VERIFY — {result['cannot_verify']}")
         sys.exit(2)
     print(f"sweep: {result['mutations']} mutation(s) — {result['killed']} killed, "
-          f"{len(result['survivors'])} survived, {skipped} skipped "
-          f"({result['seconds']}s)")
+          f"{len(result['survivors'])} survived, {skipped} skipped"
+          f"{f', {unrun} UNRUN' if unrun else ''} ({result['seconds']}s)")
     if verdict == sweep.V_SURVIVORS:
         print("⚖️ Each SURVIVED line is a changed check no test can tell apart from its "
               "corruption. Add a test that goes RED under that mutation — not a weaker "
               "assertion. If no outcome can change under it, `chela task-finished` accepts "
               "--sweep-equivalent '<file:line>: <why>'.")
+    elif unrun:
+        # ⏳ CMX-111: no survivor among what ran is NOT "all killed" — the rest is unknown.
+        print(f"⚠ CANNOT VERIFY — the sweep budget stopped it: {result.get('exhausted', '')}. "
+              f"{unrun} mutation(s) never ran. Raise --budget-seconds/--max-mutations (or "
+              "judge.sweep_budget_seconds / judge.sweep_max_mutations) to cover them.")
     elif verdict == sweep.V_UNKNOWN:
         print(f"⚠ UNKNOWN — {len(unsupported)} changed source file(s) were NOT "
               f"swept ({sweep.SUPPORTED_NOTE}). This is not a pass.")
     # The same verdict → exit code as --json, so the two output modes cannot drift.
     if sweep.EXIT_CODES[verdict]:
         sys.exit(sweep.EXIT_CODES[verdict])
+
+
+def _print_sweep_unrun(result: dict) -> int:
+    """⏳ CMX-111: print every mutation the sweep BUDGET never reached as ``[UNRUN   ]`` and
+    return how many — CANNOT VERIFY for those lines, never killed and never a pass."""
+    unrun = result.get("unrun") or []
+    for r in unrun:
+        print(f"  [UNRUN   ] {r['key']} {r['mutation']} — CANNOT VERIFY: {r['reason'][:120]}")
+    return len(unrun)
 
 
 def _print_sweep_skipped(result: dict) -> int:
@@ -3711,6 +3752,16 @@ def main() -> None:
         "--json", action="store_true",
         help="Print the result as JSON on stdout (progress goes to stderr)",
     )
+    p_jsweep.add_argument(
+        "--budget-seconds", type=float, default=None, metavar="S",
+        help="Wall-clock budget; mutations it does not reach are UNRUN (CANNOT VERIFY). "
+             "Default: judge.sweep_budget_seconds, else 900. 0 = the default",
+    )
+    p_jsweep.add_argument(
+        "--max-mutations", type=int, default=None, metavar="N",
+        help="Measure at most N mutations (highest priority first); the rest are UNRUN. "
+             "Default: judge.sweep_max_mutations, else 60. 0 = the default",
+    )
     from chela.judge_eval import cli as judge_eval_cli
     judge_eval_cli.add_parser(judge_sub)
     p_jshow = judge_sub.add_parser(
@@ -4054,6 +4105,10 @@ def main() -> None:
              "the reason. Repeatable. task-finished runs the sweep and refuses while a "
              "survivor is not named here, or a note names a line that did not survive. "
              "Recorded on the run, shown to the judge and in the PR body.",
+    )
+    p_tf.add_argument(
+        "--oversize-reason", metavar="WHY", default=None,
+        help="📏 CMX-126: hand in an oversized diff that cannot be split (recorded).",
     )
     p_tf.add_argument(
         "--handoff", metavar="TEXT", default=None,

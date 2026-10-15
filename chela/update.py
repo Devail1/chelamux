@@ -63,7 +63,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chela import config, hooks, notify, service_code
+from chela import config, hooks, notify, service_code, ticklock
 from chela.dispatcher import (
     GIT_NET_TIMEOUT_SECONDS,
     GIT_TIMEOUT_SECONDS,
@@ -78,6 +78,9 @@ log = logging.getLogger(__name__)
 # Non-git subprocesses (uv, pm2) get more slack than a git round-trip: a dependency
 # re-sync or a service restart can legitimately take longer than GIT_TIMEOUT_SECONDS.
 _SHELL_TIMEOUT_SECONDS = 300
+
+# CMX-95: the one service whose restart waits for its current tick (see `chela.ticklock`).
+DAEMON_SERVICE = "chela-daemon"
 
 # CMX-226/CMX-262: how many of `apply()`'s OWN subprocess calls sit on each side of that
 # split, on its single slowest real path (behind > 0, not diverged, at least one chela-*
@@ -127,6 +130,7 @@ def apply_stuck_after_seconds() -> int:
         _APPLY_GIT_LOCAL_CALLS * GIT_TIMEOUT_SECONDS
         + _APPLY_GIT_NET_CALLS * GIT_NET_TIMEOUT_SECONDS
         + _APPLY_SHELL_CALLS * _SHELL_TIMEOUT_SECONDS
+        + ticklock.DAEMON_TICK_WAIT_SECONDS  # CMX-95: the one `pm2 restart` may wait a tick
         + _SHELL_TIMEOUT_SECONDS // 2
     )
 
@@ -231,7 +235,16 @@ def _restart(repo: Path, services: list[str], on_notice) -> tuple[object, str]:
         log.warning("update: %s", notice)
         if on_notice:
             on_notice(notice)
-    return _sh(["pm2", "restart", *services], cwd=repo), notice
+    argv = ["pm2", "restart", *services]
+    if DAEMON_SERVICE not in services:
+        return _sh(argv, cwd=repo), notice
+    # CMX-95: the daemon's tick in progress finishes first (a few seconds), and no new one
+    # starts until pm2 has it — agents (tmux) and judges (detached) are never waited for.
+    with ticklock.between_ticks() as refused:
+        if refused:
+            log.warning("update: %s", refused)
+            return subprocess.CompletedProcess(argv, 1, "", refused), notice
+        return _sh(argv, cwd=repo), notice
 
 
 def repo_root() -> Path:

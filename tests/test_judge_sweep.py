@@ -2534,3 +2534,330 @@ def test_a_text_line_that_reads_like_the_binary_notice_is_still_swept(tmp_path):
     lines, err = sweep.changed_lines(root, "origin/dev")
     assert err == ""
     assert lines == {"txt.py": {1, 2, 3, 4, 5}}
+
+
+# --- ⏳ CMX-111: the sweep budget -------------------------------------------------------------
+
+
+def _m(file: str, line: int, kind: str) -> sweep.Mutation:
+    return sweep.Mutation(file, line, kind, f"line {line}", f"{kind} {line}")
+
+
+def _budgeted(tmp_path, monkeypatch, muts, *, budget, tick: float = 0.0,
+              verdict: str = sweep.judge.KILLED):
+    """Run ``sweep.sweep`` over ``muts`` with every expensive step stubbed: a green baseline,
+    and each measured mutation advancing a fake clock by ``tick`` seconds. Returns
+    ``(report, measured mutations in order)``."""
+    from types import SimpleNamespace
+
+    clock = [1000.0]
+    measured: list = []
+    monkeypatch.setattr(sweep, "_now", lambda: clock[0])
+    monkeypatch.setattr(sweep, "collect_mutations", lambda wt, base: (list(muts), ""))
+    monkeypatch.setattr(sweep, "unsupported_files", lambda wt, base: ([], ""))  # CMX-97
+    monkeypatch.setattr(sweep.judge, "provision_suite_env", lambda wt: "")
+    monkeypatch.setattr(sweep.judge, "run_baseline", lambda *a, **kw: (
+        SimpleNamespace(green=True, detail="", tail="", exit_code=0), None, ""))
+
+    def run_one(worktree, test_cmd, mut, baseline, timeout, selector):
+        measured.append(mut)
+        clock[0] += tick
+        return sweep.SweepResult(mut, verdict, "stub"), ""
+
+    monkeypatch.setattr(sweep, "_run_one", run_one)
+    report = sweep.sweep(tmp_path, "origin/dev", "cmd", timeout=5, budget=budget)
+    return report, measured
+
+
+def test_a_max_mutations_budget_runs_a_partial_sweep_and_lists_the_rest_unrun(tmp_path,
+                                                                             monkeypatch):
+    muts = [_m("a.py", n, "if-false") for n in range(1, 6)]
+    report, measured = _budgeted(tmp_path, monkeypatch, muts,
+                                 budget=sweep.SweepBudget(seconds=10_000, max_mutations=2))
+    d = report.as_dict()
+    assert [m.line for m in measured] == [1, 2]
+    assert d["mutations"] == 5 and d["measured"] == 2
+    assert d["killed"] == 2                              # never the unrun three
+    assert [(r["key"], r["status"]) for r in d["unrun"]] == [
+        ("a.py:3", "UNRUN"), ("a.py:4", "UNRUN"), ("a.py:5", "UNRUN")]
+    assert all(r["reason"] == "not run — over the 2-mutation budget (5 generated)"
+               for r in d["unrun"])
+    assert d["exhausted"] == "over the 2-mutation budget (5 generated)"
+    assert d["budget"] == {"seconds": 10_000, "max_mutations": 2}
+    assert d["cannot_verify"] == ""
+
+
+def test_a_budget_covering_every_mutation_leaves_nothing_unrun(tmp_path, monkeypatch):
+    muts = [_m("a.py", n, "if-false") for n in range(1, 4)]
+    report, measured = _budgeted(tmp_path, monkeypatch, muts,
+                                 budget=sweep.SweepBudget(seconds=10_000, max_mutations=3))
+    d = report.as_dict()
+    assert len(measured) == 3 and d["unrun"] == [] and d["exhausted"] == ""
+    assert d["measured"] == d["killed"] == 3
+
+
+@pytest.mark.parametrize("seconds, ran", [(25, 3), (20, 2), (20.5, 3), (0.5, 1)])
+def test_the_wall_clock_budget_stops_before_the_next_mutation(tmp_path, monkeypatch, seconds,
+                                                              ran):
+    """Each mutation costs 10 fake seconds. The check is BEFORE a mutation: elapsed 0, 10, 20…
+    runs while elapsed < budget, so an exactly-spent budget (20 at t=20) stops."""
+    muts = [_m("a.py", n, "if-false") for n in range(1, 6)]
+    report, measured = _budgeted(tmp_path, monkeypatch, muts, tick=10,
+                                 budget=sweep.SweepBudget(seconds=seconds, max_mutations=50))
+    d = report.as_dict()
+    assert len(measured) == ran and d["measured"] == ran and d["killed"] == ran
+    assert [r["line"] for r in d["unrun"]] == list(range(ran + 1, 6))
+    assert d["exhausted"] == (f"the {seconds:g}s wall-clock budget ran out after {ran} of 5 "
+                              f"mutation(s) ({ran * 10}s spent)")
+    assert all(r["reason"] == f"not run — {d['exhausted']}" for r in d["unrun"])
+    assert report.seconds == ran * 10
+
+
+def test_both_budgets_exhausted_lists_every_unreached_mutation_once(tmp_path, monkeypatch):
+    muts = [_m("a.py", n, "if-false") for n in range(1, 7)]
+    report, measured = _budgeted(tmp_path, monkeypatch, muts, tick=10,
+                                 budget=sweep.SweepBudget(seconds=15, max_mutations=4))
+    d = report.as_dict()
+    assert len(measured) == 2
+    assert [r["line"] for r in d["unrun"]] == [3, 4, 5, 6]
+    assert "wall-clock" in d["exhausted"]               # the first reason is kept
+    assert [r["reason"] for r in d["unrun"]][-1] == (
+        "not run — over the 4-mutation budget (6 generated)")
+
+
+def test_unrun_mutations_are_never_survivors_or_killed_even_when_measured_ones_survive(
+        tmp_path, monkeypatch):
+    muts = [_m("a.py", n, "if-false") for n in range(1, 4)]
+    report, _ = _budgeted(tmp_path, monkeypatch, muts, verdict=sweep.judge.SURVIVED,
+                          budget=sweep.SweepBudget(seconds=10_000, max_mutations=1))
+    d = report.as_dict()
+    assert [r["key"] for r in d["survivors"]] == ["a.py:1"]
+    assert d["killed"] == 0 and len(d["unrun"]) == 2
+
+
+def test_sweep_without_a_budget_uses_the_documented_defaults(tmp_path, monkeypatch):
+    muts = [_m("a.py", n, "if-false") for n in range(1, 63)]
+    report, measured = _budgeted(tmp_path, monkeypatch, muts, budget=None)
+    assert report.budget == sweep.SweepBudget(seconds=900.0, max_mutations=60)
+    assert len(measured) == 60 and len(report.as_dict()["unrun"]) == 2
+
+
+def test_the_default_budget_literals():
+    assert sweep.DEFAULT_BUDGET_SECONDS == 900.0
+    assert sweep.DEFAULT_MAX_MUTATIONS == 60
+    assert sweep.SweepBudget() == sweep.SweepBudget(900.0, 60)
+
+
+def test_a_real_partial_sweep_end_to_end(tmp_path):
+    """No stubs: a covering test KILLS every mutation that runs, so a 1-mutation budget
+    yields one kill and the rest UNRUN — and the file is untouched afterwards."""
+    root = _repo(tmp_path / "r", COVERING_TEST)
+    report = sweep.sweep(root, "origin/dev", TEST_CMD, timeout=120,
+                         budget=sweep.SweepBudget(seconds=10_000, max_mutations=1))
+    d = report.as_dict()
+    assert d["measured"] == 1 and d["killed"] == 1 and d["survivors"] == []
+    assert d["mutations"] >= 2 and len(d["unrun"]) == d["mutations"] - 1
+    assert report.results[0].mutation.kind == "if-false"       # conditionals first
+    assert (root / "feat.py").read_text() == BRANCH_FEAT
+
+
+def test_prioritise_orders_by_kind_then_round_robin_across_files():
+    muts = [
+        _m("b.py", 9, "compare-flip"), _m("a.py", 1, "compare-flip"),
+        _m("a.py", 5, "return-value"), _m("b.py", 2, "return-none"),
+        _m("a.py", 3, "return-code"), _m("b.py", 4, "returncode"),
+        _m("a.py", 7, "if-true"), _m("b.py", 1, "if-false"),
+        _m("a.py", 2, "if-false"), _m("a.py", 8, "if-false"), _m("b.py", 6, "if-false"),
+        _m("c.py", 1, "mystery"),
+    ]
+    got = [(m.file, m.line, m.kind) for m in sweep.prioritise(muts)]
+    assert got == [
+        ("a.py", 2, "if-false"), ("b.py", 1, "if-false"),      # round 1 of if-false
+        ("a.py", 8, "if-false"), ("b.py", 6, "if-false"),      # round 2
+        ("a.py", 7, "if-true"),
+        ("a.py", 3, "return-code"), ("b.py", 4, "returncode"),
+        ("a.py", 5, "return-value"), ("b.py", 2, "return-none"),
+        ("a.py", 1, "compare-flip"), ("b.py", 9, "compare-flip"),
+        ("c.py", 1, "mystery"),                                # an unknown kind goes last
+    ]
+    assert sweep.prioritise([]) == []
+
+
+def test_the_sweep_measures_in_priority_order(tmp_path, monkeypatch):
+    muts = [_m("a.py", 1, "compare-flip"), _m("a.py", 2, "if-false"),
+            _m("a.py", 3, "return-code")]
+    report, measured = _budgeted(tmp_path, monkeypatch, muts,
+                                 budget=sweep.SweepBudget(seconds=10_000, max_mutations=2))
+    assert [m.kind for m in measured] == ["if-false", "return-code"]
+    assert [r["kind"] for r in report.as_dict()["unrun"]] == ["compare-flip"]
+
+
+def _wf(tmp_path, *, seconds=None, maxm=None):
+    from chela import workflow as workflow_mod
+
+    lines = ["---", "project_key: TEST", "judge:", "  test_cmd: c"]
+    if seconds is not None:
+        lines.append(f"  sweep_budget_seconds: {seconds}")
+    if maxm is not None:
+        lines.append(f"  sweep_max_mutations: {maxm}")
+    path = tmp_path / "WORKFLOW.md"
+    path.write_text("\n".join([*lines, "---", "body", ""]))
+    return workflow_mod.load_workflow(path), path
+
+
+@pytest.mark.parametrize("wf_kw, call_kw, want", [
+    # wall-clock: explicit > workflow > default; 0 / negative / garbage fall through
+    (dict(seconds=120), dict(seconds=30), (30.0, 60)),
+    (dict(seconds=120), dict(), (120.0, 60)),
+    (dict(), dict(), (900.0, 60)),
+    (dict(seconds=120), dict(seconds=0), (120.0, 60)),
+    (dict(seconds=0), dict(seconds=0), (900.0, 60)),
+    (dict(seconds=-5), dict(), (900.0, 60)),
+    (dict(seconds='"soon"'), dict(), (900.0, 60)),
+    (dict(seconds="true"), dict(), (900.0, 60)),
+    (dict(), dict(seconds=float("nan")), (900.0, 60)),
+    # count: explicit > workflow > default; 0 / negative / garbage fall through
+    (dict(maxm=7), dict(max_mutations=3), (900.0, 3)),
+    (dict(maxm=7), dict(), (900.0, 7)),
+    (dict(maxm=7), dict(max_mutations=0), (900.0, 7)),
+    (dict(maxm=0), dict(), (900.0, 60)),
+    (dict(maxm=-1), dict(max_mutations=-2), (900.0, 60)),
+    (dict(maxm='"lots"'), dict(), (900.0, 60)),
+    (dict(), dict(max_mutations=float("inf")), (900.0, 60)),
+    (dict(), dict(max_mutations=True), (900.0, 60)),
+    # each field resolves on its own
+    (dict(seconds=50), dict(max_mutations=4), (50.0, 4)),
+])
+def test_resolve_budget_precedence_table(tmp_path, wf_kw, call_kw, want):
+    wf, _ = _wf(tmp_path, **wf_kw)
+    b = sweep.resolve_budget(wf, **call_kw)
+    assert (b.seconds, b.max_mutations) == want
+    assert type(b.seconds) is float and type(b.max_mutations) is int
+
+
+def test_resolve_budget_with_no_workflow():
+    assert sweep.resolve_budget() == sweep.SweepBudget(900.0, 60)
+    assert sweep.resolve_budget(None, seconds=5, max_mutations=2) == sweep.SweepBudget(5.0, 2)
+
+
+def test_run_sweep_forwards_the_resolved_budget(tmp_path, monkeypatch):
+    _, path = _wf(tmp_path, seconds=120, maxm=7)
+    calls = _spy_sweep(monkeypatch)
+    sweep.run_sweep(tmp_path, workflow_path=path)
+    sweep.run_sweep(tmp_path, workflow_path=path, budget_seconds=30, max_mutations=3)
+    sweep.run_sweep(tmp_path, test_cmd="c")
+    assert [kw["budget"] for _, kw in calls] == [
+        sweep.SweepBudget(120.0, 7), sweep.SweepBudget(30.0, 3), sweep.SweepBudget(900.0, 60)]
+
+
+def test_verify_sweep_reads_the_budget_from_the_runs_workflow(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r", UNRELATED_TEST)
+    _, wf = _wf(tmp_path, seconds=45, maxm=9)
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
+            "worktree_path, branch_name, started_at, attempt, task_number) VALUES "
+            "('cmx-88', ?, 'x', 'running', 'cmx-88', ?, 'feature', '2026', 1, 88)",
+            (str(wf), str(root)))
+        conn.commit()
+    calls = _spy_sweep(monkeypatch)
+    dispatcher.verify_sweep("cmx-88")
+    (_, kw), = calls
+    assert kw["budget"] == sweep.SweepBudget(45.0, 9)
+
+
+def test_cli_budget_flags_reach_run_sweep(tmp_path, monkeypatch):
+    calls = _spy_run_sweep(monkeypatch)
+    _cli_main("--cwd", str(tmp_path), "--budget-seconds", "12.5", "--max-mutations", "4")
+    _cli_main("--cwd", str(tmp_path))
+    assert [(kw["budget_seconds"], kw["max_mutations"]) for _, kw in calls] == [
+        (12.5, 4), (None, None)]
+
+
+_PARTIAL = {
+    "ok": True, "cannot_verify": "", "recovered": "", "notes": [], "mutations": 3,
+    "measured": 1, "killed": 1, "survivors": [], "unparseable": [], "not_applied": [],
+    "invalid": [], "seconds": 4.0, "exhausted": "over the 1-mutation budget (3 generated)",
+    "unrun": [
+        {"key": "feat.py:8", "mutation": "compare-flip: `a` → `b`",
+         "reason": "not run — over the 1-mutation budget (3 generated)"},
+        {"key": "feat.py:9", "mutation": "return-code: `0` → `1`",
+         "reason": "not run — over the 1-mutation budget (3 generated)"},
+    ],
+}
+
+
+def test_task_finished_names_the_unrun_mutations_and_never_claims_a_pass(capsys):
+    with patch.object(dispatcher, "verify_sweep", return_value=dict(_PARTIAL)), \
+         patch.object(dispatcher, "check_no_new_guards", return_value=False), \
+         patch.object(dispatcher, "request_task_finished",
+                      return_value={"ok": True, "task_id": "cmx-88"}) as req:
+        assert _task_finished() is None
+    out = capsys.readouterr().out
+    assert ("  [UNRUN   ] feat.py:8 compare-flip: `a` → `b` — CANNOT VERIFY: not run — over "
+            "the 1-mutation budget (3 generated)") in out
+    assert "  [UNRUN   ] feat.py:9 return-code" in out
+    assert ("⚠ sweep PARTIAL: 1 of 3 mutation(s) measured — 1 killed, 0 skipped (unmeasured), "
+            "0 survivor(s) declared equivalent; 2 UNRUN = CANNOT VERIFY, not passed") in out
+    assert "✓ sweep" not in out
+    req.assert_called_once_with("cmx-88", handoff=None)
+
+
+def test_task_finished_with_unrun_still_refuses_a_measured_survivor(capsys):
+    result = dict(_PARTIAL, survivors=[{"key": "feat.py:7", "mutation": "if-false: x"}])
+    with patch.object(dispatcher, "verify_sweep", return_value=result), \
+         patch.object(dispatcher, "check_no_new_guards", return_value=False), \
+         patch.object(dispatcher, "request_task_finished") as req:
+        assert _task_finished() == 1
+    out = capsys.readouterr().out
+    assert "[SURVIVED] feat.py:7" in out and "[UNRUN   ] feat.py:8" in out
+    req.assert_not_called()
+
+
+def test_task_finished_refuses_an_equivalent_note_for_an_unrun_line(capsys):
+    with patch.object(dispatcher, "verify_sweep", return_value=dict(_PARTIAL)), \
+         patch.object(dispatcher, "check_no_new_guards", return_value=False), \
+         patch.object(dispatcher, "request_task_finished") as req:
+        assert _task_finished("--sweep-equivalent", "feat.py:8: never ran") == 1
+    assert "[NOT A SURVIVOR] feat.py:8" in capsys.readouterr().out
+    req.assert_not_called()
+
+
+def test_task_finished_with_nothing_unrun_still_says_pass(capsys):
+    result = dict(_PARTIAL, unrun=[], measured=3, killed=3, exhausted="")
+    with patch.object(dispatcher, "verify_sweep", return_value=result), \
+         patch.object(dispatcher, "check_no_new_guards", return_value=False), \
+         patch.object(dispatcher, "request_task_finished",
+                      return_value={"ok": True, "task_id": "cmx-88"}):
+        assert _task_finished() is None
+    out = capsys.readouterr().out
+    assert "✓ sweep: 3 mutation(s), 3 killed" in out
+    assert "PARTIAL" not in out and "UNRUN" not in out
+
+
+def _cli_with(monkeypatch, result) -> int | None:
+    monkeypatch.setattr(sweep, "run_sweep", lambda cwd, **kw: result)
+    return _cli_main("--cwd", ".")
+
+
+def test_cli_a_partial_sweep_with_no_survivor_is_cannot_verify_not_a_pass(monkeypatch, capsys):
+    assert _cli_with(monkeypatch, dict(_PARTIAL)) == 2
+    out = capsys.readouterr().out
+    assert "  [UNRUN   ] feat.py:8 compare-flip" in out
+    assert "sweep: 3 mutation(s) — 1 killed, 0 survived, 0 skipped, 2 UNRUN (4.0s)" in out
+    assert ("⚠ CANNOT VERIFY — the sweep budget stopped it: over the 1-mutation budget "
+            "(3 generated). 2 mutation(s) never ran.") in out
+
+
+def test_cli_a_partial_sweep_with_a_survivor_exits_1(monkeypatch, capsys):
+    result = dict(_PARTIAL, survivors=[{"key": "feat.py:7", "mutation": "if-false: x"}])
+    assert _cli_with(monkeypatch, result) == 1
+    assert "[SURVIVED] feat.py:7" in capsys.readouterr().out
+
+
+def test_cli_a_complete_sweep_still_exits_0(monkeypatch, capsys):
+    result = dict(_PARTIAL, unrun=[], measured=3, killed=3, exhausted="")
+    assert _cli_with(monkeypatch, result) is None
+    out = capsys.readouterr().out
+    assert "sweep: 3 mutation(s) — 3 killed, 0 survived, 0 skipped (4.0s)" in out
+    assert "CANNOT VERIFY" not in out

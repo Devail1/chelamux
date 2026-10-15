@@ -95,6 +95,25 @@ def test_text_mode_exit_and_banner_match_the_json_verdict(tmp_path, branch, test
         assert (b in out.stdout) is (b == banner), out.stdout
 
 
+@pytest.mark.parametrize("args, code, verdict, budget", [
+    (("--max-mutations", "1"), 2, "cannot_verify", {"seconds": 900.0, "max_mutations": 1}),
+    (("--budget-seconds", "77"), 0, "clean", {"seconds": 77.0, "max_mutations": 60}),
+    ((), 0, "clean", {"seconds": 900.0, "max_mutations": 60}),
+])
+def test_the_cmx111_budget_applies_in_standalone_mode(tmp_path, args, code, verdict, budget):
+    """🔴 GUARD: with no WORKFLOW.md the budget flags still reach the sweep, and a sweep the
+    budget cut short is CANNOT VERIFY (exit 2) in BOTH output modes — never a clean pass."""
+    root = _bare(tmp_path / "r", {"calc.py": BIG}, COVERING)
+    got, d = _chela(root, tmp_path, *args)
+    assert (got, d["verdict"], d["budget"]) == (code, verdict, budget)
+    assert bool(d["unrun"]) is (verdict == "cannot_verify") and d["measured"] >= 1
+    out = subprocess.run([*CHELA, "judge", "sweep", "--base", "main", *args], cwd=str(root),
+                         env=_env(tmp_path), capture_output=True, text=True, timeout=300)
+    assert out.returncode == code, out.stdout + out.stderr
+    assert ("mutation(s) never ran" in out.stdout) is (verdict == "cannot_verify")
+    assert _git(root, "status", "--porcelain") == ""
+
+
 @pytest.mark.parametrize("rel, unsupported", [
     ("a.go", True), ("src/A.java", True), ("x.TS", True), ("a.cjs", True), ("a.py", False),
     ("a.js", False), ("README.md", False), ("a_test.go", False), ("FooTest.java", False),
@@ -153,7 +172,10 @@ def test_a_failing_git_read_is_cannot_verify_never_no_unsupported_files(tmp_path
     ({"ok": True, "cannot_verify": "x", "survivors": [1], "unsupported": ["a.go"]},
      "cannot_verify"),
     ({"ok": True, "survivors": [1], "unsupported": ["a.go"]}, "survivors"),
-    ({"ok": True, "survivors": [], "unsupported": ["a.go"]}, "unknown"),
+    ({"ok": True, "survivors": [1], "unrun": [1], "unsupported": ["a.go"]}, "survivors"),
+    ({"ok": True, "survivors": [], "unrun": [1], "unsupported": ["a.go"]}, "cannot_verify"),
+    ({"ok": True, "survivors": [], "unrun": [1], "unsupported": []}, "cannot_verify"),
+    ({"ok": True, "survivors": [], "unrun": [], "unsupported": ["a.go"]}, "unknown"),
     ({"ok": True, "survivors": [], "unsupported": []}, "clean"),
 ])
 def test_verdict_precedence_and_exit_codes(result, want):

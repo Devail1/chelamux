@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, sweep
+from chela import critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, sizegate, sweep
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -1485,6 +1485,8 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # daemon from the completion marker; shown to the judge and appended to the PR
         # body. NULL ⇒ none declared. AGENT-AUTHORED: shown, never trusted as a verdict.
         ("sweep_equivalents", "ALTER TABLE runs ADD COLUMN sweep_equivalents TEXT"),
+        # 📏 CMX-126. JSON {lines, limit, oversize_reason}: an oversized hand-in's override.
+        ("size_gate", "ALTER TABLE runs ADD COLUMN size_gate TEXT"),
     ):
         if _column in existing_columns:
             continue  # already migrated — no DDL attempted, nothing to fail
@@ -2843,6 +2845,30 @@ def verify_sweep(task_id: str) -> dict:
     return sweep.run_sweep(row["worktree_path"], workflow_path=row["workflow_path"])
 
 
+def check_hand_in_size(task_id: str, oversize_reason: str | None = None) -> dict:
+    """📏 CMX-126: the hand-in size gate — run BEFORE the sweep, so an oversized diff is
+    refused in seconds, not hours. ``{"ok", "record"}``; record is None under the limit."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"] or not row["workflow_path"]:
+        return {"ok": False, "error": f"no run with a worktree on record for {task_id}"}
+    try:
+        wf = load_workflow(row["workflow_path"])
+        limit, exclude = sizegate.settings(wf)
+        lines = sizegate.measure(row["worktree_path"],
+                                 wf.get("workspace", "base_branch", default="master"), exclude)
+    except Exception as e:
+        return {"ok": False, "error": f"could not measure this branch's size — {e}"}
+    if lines <= limit:
+        return {"ok": True, "record": None}
+    if (oversize_reason or "").strip():
+        return {"ok": True, "record": {"lines": lines, "limit": limit,
+                                       "oversize_reason": oversize_reason.strip()[:HANDOFF_MAX_CHARS]}}
+    return {"ok": False, "error": (
+        f"this branch changes {lines} lines (limit {limit}; docs/media excluded). Split it "
+        "into ≤-limit PRs; only if it truly cannot be split, pass --oversize-reason '<why>'.")}
+
+
 def _is_guard_path(path: str) -> bool:
     """⚖️🔎 CMX-258 rework round 6: the DEFINITION ``check_no_new_guards`` cross-checks — "is
     this diff-touched path a guard?" — written down once, in one place, instead of being
@@ -2966,6 +2992,7 @@ def _clean_handoff(value) -> str | None:
 
 def mark_awaiting_review(
     task_id: str, *, handoff: str | None = None, sweep_equivalents: list[dict] | None = None,
+    size_gate: dict | None = None,
 ) -> dict:
     """Transition a run from running → awaiting_review and kill its tmux window.
 
@@ -3027,7 +3054,15 @@ def mark_awaiting_review(
         # the previous round's equivalence claims.
         conn.execute("UPDATE runs SET sweep_equivalents=? WHERE task_id=?",
                      (json.dumps(sweep_equivalents) if sweep_equivalents else None, task_id))
+        conn.execute("UPDATE runs SET size_gate=? WHERE task_id=?",
+                     (json.dumps(size_gate) if size_gate else None, task_id))
         conn.commit()
+        note = sizegate.render(size_gate or {})
+        if note and effective_pr_url:
+            ok, detail = _append_pr_body(effective_pr_url, repo_dir, note)
+            if not ok:
+                log.warning("Task %s: size-gate note not added to the PR body — %s",
+                            task_id, detail)
         if sweep_equivalents and effective_pr_url:
             ok, detail = _append_pr_body(effective_pr_url, repo_dir,
                                          sweep.render_equivalents(sweep_equivalents))
@@ -3087,8 +3122,19 @@ def _read_task_finished_sweep_equivalents(worktree_path: str | Path) -> list[dic
     return clean or None
 
 
+def _read_task_finished_size_gate(worktree_path: str | Path) -> dict | None:
+    """📏 CMX-126: the size-gate record a completion marker carries, or None (best-effort)."""
+    try:
+        request = json.loads(_task_finished_request_path(worktree_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    record = request.get("size_gate") if isinstance(request, dict) else None
+    return record if isinstance(record, dict) else None
+
+
 def request_task_finished(
     task_id: str, *, handoff: str | None = None, sweep_equivalents: list[dict] | None = None,
+    size_gate: dict | None = None,
 ) -> dict:
     """Record that a dispatched agent believes its work is done — called by `chela
     task-finished`, IN PLACE OF the direct `mark_awaiting_review` call it used to make.
@@ -3139,6 +3185,8 @@ def request_task_finished(
     if sweep_equivalents:
         # ⚖️🧹 CMX-88: rides in the marker like the handoff — the daemon records it.
         request["sweep_equivalents"] = sweep_equivalents
+    if size_gate:
+        request["size_gate"] = size_gate
     _task_finished_request_path(worktree_path).write_text(
         json.dumps(request), encoding="utf-8",
     )
@@ -5488,6 +5536,7 @@ def tick(workflow_path: str | Path) -> dict:
                     handoff=_read_task_finished_handoff(row["worktree_path"]),
                     sweep_equivalents=_read_task_finished_sweep_equivalents(
                         row["worktree_path"]),
+                    size_gate=_read_task_finished_size_gate(row["worktree_path"]),
                 )
                 # ⚖️🔀 issue #502 rework round 1 (hazard 3 of the brief): `ok=False` used to
                 # be ONE outcome — unlink the marker and log.warning, no matter why the
@@ -7552,8 +7601,17 @@ def _judge_vars(
         diff_cmd=f"git diff origin/{base}...HEAD",
         pr_view_cmd=(f"gh pr view {number} --comments" if number
                      else "gh pr view --comments   # no PR url on the run row"),
-        sweep_equivalents=_judge_sweep_equivalents(row),
+        sweep_equivalents=_judge_sweep_equivalents(row) + _judge_size_gate(row),
     )
+
+
+def _judge_size_gate(row) -> str:
+    """📏 CMX-126: the size-gate record (an oversize override) for the judge."""
+    try:
+        note = sizegate.render(json.loads(row["size_gate"] or "{}"))
+    except (IndexError, KeyError, ValueError, TypeError):
+        return ""
+    return f"\n   {tui_sanitize(note).replace(chr(10), ' ')}" if note else ""
 
 
 def _judge_sweep_equivalents(row) -> str:
