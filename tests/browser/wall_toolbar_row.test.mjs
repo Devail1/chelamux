@@ -40,8 +40,8 @@ async function stable(page) {
     }, null, { timeout: 15000, polling: 100 });
 }
 
-async function openWall(viewport, storage = {}) {
-    const { context, page, errors } = await openDashboard(browser, { ...viewport, storage });
+async function openWall(viewport, storage = {}, api = {}) {
+    const { context, page, errors } = await openDashboard(browser, { ...viewport, storage, api });
     if (viewport.width > 768) {
         await page.waitForFunction(() => document.querySelectorAll('#term-stage .grid-stack-item').length >= 4,
             null, { timeout: 15000 });
@@ -214,20 +214,28 @@ describe('CMX-414 390×844: the phone layout is unchanged', { skip: why }, () =>
 // CMX-135: with the row's "+ New shell" gone, the New menu is the one entry point.
 for (const [width, height, opener] of [[1440, 900, '.sidebar-new-btn'], [725, 900, '#btn-new-mobile'], [390, 844, '#btn-new-mobile']]) {
     describe(`CMX-135 ${width}×${height}: New menu → Shell window spawns a shell`, { skip: why }, () => {
-        let context, post;
+        let context, post, dialogs = [];
         const ready = setup(async () => {
             let page;
-            ({ context, page } = await openWall({ width, height }));
+            // A real spawn answers {ok: true}; the fixture's default {} would make
+            // newShellWindow alert(), and that dialog outliving the context is an
+            // unhandled rejection that fails the whole file.
+            ({ context, page } = await openWall({ width, height }, {}, { '/api/agents/spawn': { ok: true } }));
+            page.on('dialog', d => { dialogs.push(d.message()); d.dismiss().catch(() => {}); });
             const req = page.waitForRequest(r => r.method() === 'POST' && new URL(r.url()).pathname === '/api/agents/spawn', { timeout: 15000 });
+            const res = page.waitForResponse(r => new URL(r.url()).pathname === '/api/agents/spawn', { timeout: 15000 });
             await page.click(opener);
             await page.click('#new-shell-item');
             post = await req;
+            await res;
+            await stable(page);
         });
         after(() => context && context.close());
 
         test(`clicking ${opener} then "Shell window" POSTs /api/agents/spawn`, () => {
             ready();
             assert.ok(post, 'no spawn request was sent');
+            assert.deepEqual(dialogs, [], `the spawn raised a dialog: ${dialogs.join(' | ')}`);
         });
     });
 }
