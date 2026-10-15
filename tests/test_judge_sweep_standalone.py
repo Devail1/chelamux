@@ -181,6 +181,59 @@ def test_detect_test_cmd(tmp_path, monkeypatch, files, have, want):
     assert sweep.detect_test_cmd(tmp_path) == want
 
 
+_ALL_TOOLS = {"uv", "python", "python3", "npm", "go", "cargo"}
+_PJ = '{"scripts": {"test": "jest"}}'
+
+
+@pytest.mark.parametrize("files, have, want", [
+    # uv: BOTH uv.lock AND uv on PATH — either alone is plain pytest
+    ({"pyproject.toml": "", "uv.lock": ""}, {"uv"}, ("uv run pytest -q", "pyproject.toml + uv.lock")),
+    ({"pyproject.toml": "", "uv.lock": ""}, {"python"}, ("python -m pytest -q", "pyproject.toml")),
+    ({"pyproject.toml": "", "uv.lock": ""}, set(), ("python3 -m pytest -q", "pyproject.toml")),
+    ({"pyproject.toml": ""}, {"uv", "python"}, ("python -m pytest -q", "pyproject.toml")),
+    ({"pyproject.toml": "", "uv.lock/x": ""}, {"uv", "python"}, ("python -m pytest -q", "pyproject.toml")),
+    # every python marker counts on its own, and only as a FILE
+    *[({m: ""}, {"python"}, ("python -m pytest -q", m)) for m in
+      ("pytest.ini", "pyproject.toml", "setup.py", "setup.cfg", "tox.ini", "conftest.py")],
+    ({"pyproject.toml/x": ""}, {"python"}, ("", "")),
+    # marker order: the first of _PY_MARKERS present is the one named
+    ({"conftest.py": "", "setup.cfg": "", "pytest.ini": ""}, {"python"},
+     ("python -m pytest -q", "pytest.ini")),
+    ({"tox.ini": "", "setup.py": ""}, {"python"}, ("python -m pytest -q", "setup.py")),
+    # a tests/ or test/ dir counts only when it holds a test_*.py (nested too); tests/ first
+    ({"test/test_a.py": ""}, {"python"}, ("python -m pytest -q", "test/")),
+    ({"tests/sub/test_a.py": ""}, {"python"}, ("python -m pytest -q", "tests/")),
+    ({"tests/test_a.py": "", "test/test_b.py": ""}, {"python"}, ("python -m pytest -q", "tests/")),
+    ({"src/test_a.py": ""}, _ALL_TOOLS, ("", "")),
+    ({"setup.cfg": "", "tests/test_a.py": ""}, {"python"}, ("python -m pytest -q", "setup.cfg")),
+    # precedence python > npm > go > cargo, whatever binaries exist
+    ({"pyproject.toml": "", "package.json": _PJ, "go.mod": "", "Cargo.toml": ""}, _ALL_TOOLS - {"uv"},
+     ("python -m pytest -q", "pyproject.toml")),
+    ({"package.json": _PJ, "go.mod": "", "Cargo.toml": ""}, _ALL_TOOLS,
+     ("npm test", "package.json scripts.test")),
+    ({"go.mod": "", "Cargo.toml": ""}, _ALL_TOOLS, ("go test ./...", "go.mod")),
+    ({"Cargo.toml": ""}, _ALL_TOOLS, ("cargo test", "Cargo.toml")),
+    ({"go.mod": ""}, set(), ("go test ./...", "go.mod")),
+    ({"package.json": _PJ}, _ALL_TOOLS, ("npm test", "package.json scripts.test")),
+    # npm only for a real scripts.test string; anything else falls through to the next marker
+    *[({"package.json": body, "Cargo.toml": ""}, _ALL_TOOLS, ("cargo test", "Cargo.toml")) for body in (
+        '{"scripts": {"test": ""}}', '{"scripts": {"test": "   "}}', '{"scripts": {"test": 1}}',
+        '{"scripts": {"build": "x"}}', '{"scripts": ["test"]}', '{"name": "x"}', '["scripts"]',
+        '{"scripts": {"test": "echo \\"Error: no test specified\\" && exit 1"}}', "{bad")],
+    ({"package.json": '{"scripts": {"test": ""}}'}, _ALL_TOOLS, ("", "")),
+    ({"package.json/x": "", "go.mod/x": "", "Cargo.toml/x": ""}, _ALL_TOOLS, ("", "")),
+])
+def test_detect_test_cmd_pins_every_branch(tmp_path, monkeypatch, files, have, want):
+    """🔴 GUARD: every suite-detection condition — uv.lock AND uv, each marker, file-not-dir,
+    marker order, the tests/ dir glob, python vs python3, npm's scripts.test rules, and the
+    python > npm > go > cargo precedence — is pinned, so flipping any one goes red."""
+    for rel, body in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(body)
+    monkeypatch.setattr(sweep.shutil, "which", lambda n: f"/bin/{n}" if n in have else None)
+    assert sweep.detect_test_cmd(tmp_path) == want
+
+
 @pytest.mark.parametrize("flag, wf_cmd, want_cmd", [
     ("flag-cmd", "wf-cmd", "flag-cmd"), (None, "wf-cmd", "wf-cmd"),
     (None, None, "python -m pytest -q"),
