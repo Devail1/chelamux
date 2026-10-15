@@ -29,6 +29,10 @@ marker behind, and the next sweep restores the file from it BEFORE doing anythin
 SIGTERM/SIGHUP are turned into an exception while a sweep runs, so they take the ``finally``
 path instead of skipping it.
 
+⚖️ CMX-97 — STANDALONE: any git repo, no WORKFLOW.md/daemon/tmux/tracker; the suite is
+detected when none is named (:func:`detect_test_cmd`). A changed file in a language the
+mutators cannot handle is UNKNOWN (:func:`unsupported_files`) — the verdict is never ``clean``.
+
 ⏳ CMX-111: A SWEEP HAS A BUDGET. Its cost is mutations × suite time, so an unbounded sweep on
 a large diff blocked ``task-finished`` for 24+ minutes. :class:`SweepBudget` caps it by
 wall-clock (``judge.sweep_budget_seconds``) and by count (``judge.sweep_max_mutations``).
@@ -43,6 +47,7 @@ import ast
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -83,6 +88,20 @@ _RE_JS_CMP = re.compile(r"(?<=\s)(===|!==|==|!=|<=|>=|<|>)(?=\s)")
 _RE_JS_IF = re.compile(r"\bif\s*\(")
 _RE_JS_RET = re.compile(r"\breturn\s+([01])\b")
 _RE_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+# Source languages the mutators cannot handle (`.cjs` too: the JS mutator claims .js/.mjs).
+UNSUPPORTED_SUFFIXES = frozenset({
+    ".ts", ".tsx", ".mts", ".cts", ".jsx", ".cjs", ".go", ".rs", ".java", ".kt", ".kts",
+    ".scala", ".rb", ".php", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".cs", ".swift",
+    ".m", ".mm", ".lua", ".ex", ".exs", ".erl", ".hs", ".ml", ".clj", ".dart", ".sh",
+    ".bash",
+})
+SUPPORTED_NOTE = "only Python (and .js/.mjs, line-based) is mutated"
+
+# Verdicts, in the order they win. The exit code of `chela judge sweep` is EXIT_CODES[verdict].
+V_CLEAN, V_SURVIVORS, V_UNKNOWN = "clean", "survivors", "unknown"
+V_CANNOT_VERIFY, V_ERROR = "cannot_verify", "error"
+EXIT_CODES = {V_CLEAN: 0, V_SURVIVORS: 1, V_CANNOT_VERIFY: 2, V_ERROR: 2, V_UNKNOWN: 3}
 
 
 @dataclass
@@ -160,6 +179,9 @@ class SweepReport:
     notes: list[str] = field(default_factory=list)
     selection: str = ""
     seconds: float = 0.0
+    unsupported: list[str] = field(default_factory=list)
+    base: str = ""
+    test_cmd: str = ""
     budget: SweepBudget = field(default_factory=SweepBudget)
     # Why the budget stopped the sweep ("" when every mutation was reached).
     exhausted: str = ""
@@ -173,7 +195,7 @@ class SweepReport:
         return [] if self.cannot_verify else self._with(judge.SURVIVED)
 
     def as_dict(self) -> dict:
-        return {
+        d = {
             "ok": True,
             "mutations": len(self.results),
             "survivors": [r.as_dict() for r in self.survivors],
@@ -188,7 +210,27 @@ class SweepReport:
             "cannot_verify": self.cannot_verify, "recovered": self.recovered,
             "notes": list(self.notes), "selection": self.selection,
             "seconds": round(self.seconds, 1),
+            "unsupported": list(self.unsupported), "base": self.base, "test_cmd": self.test_cmd,
         }
+        d["verdict"] = verdict(d)
+        return d
+
+
+def verdict(result: dict) -> str:
+    """⛔ ``clean`` only when the sweep ran, found no survivor, reached every mutation within
+    its budget AND could mutate every changed source file — an unsupported one makes it ``unknown``, never a vacuous pass."""
+    if not result.get("ok"):
+        return V_ERROR
+    if result.get("cannot_verify"):
+        return V_CANNOT_VERIFY
+    if result.get("survivors"):
+        return V_SURVIVORS
+    if result.get("unrun"):
+        # ⏳ CMX-111: mutations the budget never reached are unmeasured — never a pass.
+        return V_CANNOT_VERIFY
+    if result.get("unsupported"):
+        return V_UNKNOWN
+    return V_CLEAN
 
 
 # --- which lines changed --------------------------------------------------------------------
@@ -274,6 +316,71 @@ def _changed_lines(worktree: Path, base: str) -> tuple[dict[str, set[int]], str]
 
 def _sweepable(rel: str) -> bool:
     return rel.endswith(PY_SUFFIXES + JS_SUFFIXES) and not is_test_path(rel)
+
+
+_RE_FOREIGN_TEST = re.compile(r"(_test|_spec|Tests?)\.|\.spec\.|(^|/)(__tests__|tests?|spec)/")
+
+
+def _unsupported(rel: str) -> bool:
+    return PurePosixPath(rel).suffix.lower() in UNSUPPORTED_SUFFIXES and not (
+        is_test_path(rel) or _RE_FOREIGN_TEST.search(rel))
+
+
+def unsupported_files(worktree: Path, base: str) -> tuple[list[str], str]:
+    """Changed (or untracked, not deleted) files vs ``base`` the mutators cannot handle, as
+    ``(files, error)`` — a git failure is an error, never "no such files"."""
+    mb = _git(worktree, "merge-base", base, "HEAD")
+    if mb.returncode != 0 or not mb.stdout.strip():
+        return [], (f"`{base}` does not resolve to a merge base with HEAD in {worktree} — "
+                    f"{(mb.stderr or '').strip()[:200] or 'no output'}")
+    names = _git(worktree, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=d",
+                 mb.stdout.strip(), "--")
+    if names.returncode != 0:
+        return [], f"git diff failed: {(names.stderr or '').strip()[:200]}"
+    untracked = _git(worktree, "ls-files", "--others", "--exclude-standard", "-z")
+    if untracked.returncode != 0:
+        return [], f"git ls-files failed: {(untracked.stderr or '').strip()[:200]}"
+    found = {n for n in (names.stdout + "\0" + untracked.stdout).split("\0")
+             if n and _unsupported(n)}
+    return sorted(found), ""
+
+
+# --- which suite to run ---------------------------------------------------------------------
+
+_PY_MARKERS = ("pytest.ini", "pyproject.toml", "setup.py", "setup.cfg", "tox.ini", "conftest.py")
+_NPM_PLACEHOLDER = "no test specified"      # `npm init`'s default `scripts.test` — not a suite
+
+
+def _python_marker(worktree: Path) -> str:
+    found = [n for n in _PY_MARKERS if (worktree / n).is_file()]
+    return found[0] if found else next((f"{d}/" for d in ("tests", "test")
+                                        if any((worktree / d).glob("**/test_*.py"))), "")
+
+
+def detect_test_cmd(worktree: Path) -> tuple[str, str]:
+    """``(cmd, why)`` for a repo with no chela config — pytest (``uv run`` under a uv.lock),
+    ``npm test`` (never npm init's placeholder), go, cargo; ``("", "")`` when none."""
+    worktree = Path(worktree)
+    marker = _python_marker(worktree)
+    if marker:
+        if (worktree / "uv.lock").is_file() and shutil.which("uv"):
+            return "uv run pytest -q", f"{marker} + uv.lock"
+        py = "python" if shutil.which("python") else "python3"
+        return f"{py} -m pytest -q", marker
+    pkg = worktree / "package.json"
+    if pkg.is_file():
+        try:
+            scripts = json.loads(pkg.read_text()).get("scripts")
+        except (OSError, UnicodeDecodeError, ValueError, AttributeError):
+            scripts = None
+        test = scripts.get("test") if isinstance(scripts, dict) else None
+        if isinstance(test, str) and test.strip() and _NPM_PLACEHOLDER not in test:
+            return "npm test", "package.json scripts.test"
+    if (worktree / "go.mod").is_file():
+        return "go test ./...", "go.mod"
+    if (worktree / "Cargo.toml").is_file():
+        return "cargo test", "Cargo.toml"
+    return "", ""
 
 
 # --- what to mutate -------------------------------------------------------------------------
@@ -650,15 +757,17 @@ def _now() -> float:
 def sweep(
     worktree: str | Path, base: str, test_cmd: str, *,
     timeout: float = judge.SUITE_TIMEOUT_SECONDS, select_tests: bool = True, progress=None,
-    budget: SweepBudget | None = None,
+    provision: bool = True, budget: SweepBudget | None = None,
 ) -> SweepReport:
+    """``provision=False`` standalone: the repo's env is its owner's (no ``uv sync``)."""
     worktree = Path(worktree).resolve()
     budget = budget if budget is not None else SweepBudget()
     started = _now()
     old = _install_signal_handlers()
     try:
         report = _sweep(worktree, base, test_cmd, timeout=timeout, select_tests=select_tests,
-                        progress=progress, budget=budget, started=started)
+                        progress=progress, provision=provision, budget=budget,
+                        started=started)
     except _Interrupted as e:
         # The mutation's own `finally` has already restored the file by the time this runs.
         report = SweepReport(cannot_verify=f"interrupted by signal {e.args[0]} — the sweep "
@@ -667,11 +776,13 @@ def sweep(
         _restore_signal_handlers(old)
     report.budget = budget
     report.seconds = _now() - started
+    report.base, report.test_cmd = base, test_cmd
     return report
 
 
 def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_tests: bool,
-           progress, budget: SweepBudget, started: float) -> SweepReport:
+           progress, budget: SweepBudget, started: float,
+           provision: bool = True) -> SweepReport:
     report = SweepReport(budget=budget)
     report.recovered, err = recover(worktree)
     if err:
@@ -681,12 +792,19 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
     if err:
         report.cannot_verify = err
         return report
+    report.unsupported, err = unsupported_files(worktree, base)
+    if err:
+        report.cannot_verify = err
+        return report
+    if report.unsupported:
+        report.notes.append(f"{len(report.unsupported)} changed file(s) NOT swept — "
+                            f"{SUPPORTED_NOTE}; each is UNKNOWN, not clean")
     if not muts:
         report.notes.append(f"no changed conditional, comparison or return code vs `{base}` — "
                             "nothing to sweep")
         return report
 
-    env_problem = judge.provision_suite_env(worktree)
+    env_problem = judge.provision_suite_env(worktree) if provision else ""
     if env_problem:
         report.cannot_verify = f"the worktree could not be PROVISIONED to run the suite: {env_problem}"
         return report
@@ -835,11 +953,12 @@ def run_sweep(
     test_cmd: str | None = None, timeout: float | None = None, progress=None,
     budget_seconds: float | None = None, max_mutations: int | None = None,
 ) -> dict:
-    """``chela judge sweep``'s entry point: resolve the suite (``--test-cmd`` or the
-    workflow's ``judge.test_cmd``, the suite the judge measures against) and the base
-    (``--base``, else ``origin/<workspace.base_branch>``, else ``origin/dev``) and the budget
-    (:func:`resolve_budget`), sweep, and return a JSON-friendly dict."""
+    """``chela judge sweep``'s entry point: resolve the suite (``--test-cmd``, else the
+    workflow's ``judge.test_cmd`` — the suite the judge measures against — else detected), the
+    base (``--base``, else ``origin/<workspace.base_branch>``, else ``origin/dev``) and the
+    budget (:func:`resolve_budget` — standalone too), sweep, and return a JSON-friendly dict."""
     cmd = test_cmd.strip() if isinstance(test_cmd, str) and test_cmd.strip() else None
+    source = "--test-cmd" if cmd else ""
     to, select, wf = timeout, True, None
     if workflow_path:
         from chela import workflow as workflow_mod
@@ -849,16 +968,21 @@ def run_sweep(
         except Exception as e:      # a WORKFLOW.md that does not parse
             return {"ok": False, "error": f"{workflow_path} could not be read: {e}"}
         cfg = judge.judge_suite_config(wf)
-        cmd = cmd or cfg.test_cmd
+        if not cmd and cfg.test_cmd:
+            cmd, source = cfg.test_cmd, f"{workflow_path} judge.test_cmd"
         to = to if to is not None else cfg.suite_timeout_seconds
         select = cfg.select_tests
         if base is None:
             base = f"origin/{wf.get('workspace', 'base_branch', default='dev')}"
     if not cmd:
-        return {"ok": False, "error": "no suite to run — pass --test-cmd, or --workflow "
-                                      "pointing at a WORKFLOW.md with `judge.test_cmd` set"}
+        cmd, why = detect_test_cmd(Path(worktree))
+        source = f"detected ({why})" if cmd else ""
+    if not cmd:
+        return {"ok": False, "error": "no suite to run — none detected; pass --test-cmd, or "
+                                      "--workflow pointing at a WORKFLOW.md with "
+                                      "`judge.test_cmd` set"}
     report = sweep(worktree, base or "origin/dev", cmd,
                    timeout=to if to is not None else judge.SUITE_TIMEOUT_SECONDS,
-                   select_tests=select, progress=progress,
+                   select_tests=select, progress=progress, provision=workflow_path is not None,
                    budget=resolve_budget(wf, seconds=budget_seconds, max_mutations=max_mutations))
-    return report.as_dict()
+    return {**report.as_dict(), "test_cmd_source": source}

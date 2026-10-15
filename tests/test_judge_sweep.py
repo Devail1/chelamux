@@ -907,8 +907,9 @@ def test_cli_exits_2_without_a_suite_and_on_cannot_verify(tmp_path, capsys):
     from chela import main
 
     root = _repo(tmp_path / "r", COVERING_TEST)
+    bare = _plain_repo(tmp_path / "bare", {}, {"feat.py": BRANCH_FEAT})   # nothing to detect
     for argv, needle in (
-        (["judge", "sweep", "--cwd", str(root)], "no suite to run"),
+        (["judge", "sweep", "--cwd", str(bare)], "no suite to run"),
         (["judge", "sweep", "--cwd", str(root), "--base", "origin/nope", "--test-cmd",
           TEST_CMD], "does not resolve"),
     ):
@@ -2374,6 +2375,7 @@ SKIPPY_RESULT = {
     "unparseable": [_skip(sweep.UNPARSEABLE, 11)],
     "not_applied": [_skip(sweep.NOT_APPLIED, 12, "anchor occurs twice")],
     "invalid": [_skip("INVALID", 13, "the mutation made the suite ERROR")],
+    "unsupported": [],
 }
 
 
@@ -2552,6 +2554,7 @@ def _budgeted(tmp_path, monkeypatch, muts, *, budget, tick: float = 0.0,
     measured: list = []
     monkeypatch.setattr(sweep, "_now", lambda: clock[0])
     monkeypatch.setattr(sweep, "collect_mutations", lambda wt, base: (list(muts), ""))
+    monkeypatch.setattr(sweep, "unsupported_files", lambda wt, base: ([], ""))  # CMX-97
     monkeypatch.setattr(sweep.judge, "provision_suite_env", lambda wt: "")
     monkeypatch.setattr(sweep.judge, "run_baseline", lambda *a, **kw: (
         SimpleNamespace(green=True, detail="", tail="", exit_code=0), None, ""))

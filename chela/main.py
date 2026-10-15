@@ -2684,25 +2684,34 @@ def cmd_judge_sweep(args) -> None:
     restored. See :mod:`chela.sweep`.
 
     Exit codes: ``0`` no survivor, ``1`` a mutation SURVIVED (add a test that goes red under
-    it), ``2`` CANNOT VERIFY (a red baseline, an unresolvable base, a leftover recovery marker
-    that cannot be applied safely).
+    it), ``2`` CANNOT VERIFY (a red baseline, an unresolvable base, no suite, a leftover
+    recovery marker that cannot be applied safely, CMX-111: mutations the budget never
+    reached), ``3`` UNKNOWN (CMX-97: a changed file in a
+    language the sweep cannot mutate — not a pass). Runs in any git repo; ``--json`` for JSON.
     """
     from chela import sweep
 
     workflow = args.workflow
     if workflow is None and (Path(args.cwd) / "WORKFLOW.md").is_file():
         workflow = str(Path(args.cwd) / "WORKFLOW.md")
+    out = sys.stderr if args.json else sys.stdout
 
     def _progress(n, total, mut):
-        print(f"  [{n + 1}/{total}] {mut.key} {mut.kind}", flush=True)
+        print(f"  [{n + 1}/{total}] {mut.key} {mut.kind}", file=out, flush=True)
 
     result = sweep.run_sweep(args.cwd, base=args.base, workflow_path=workflow,
                              test_cmd=args.test_cmd, progress=_progress,
                              budget_seconds=args.budget_seconds,
                              max_mutations=args.max_mutations)
+    verdict = sweep.verdict(result)
+    if args.json:
+        print(json.dumps(result, indent=2))
+        sys.exit(sweep.EXIT_CODES[verdict])
     if not result.get("ok"):
         print(f"sweep: {result.get('error', 'unknown error')}")
         sys.exit(2)
+    if result.get("test_cmd_source", "").startswith("detected"):
+        print(f"  suite: `{result['test_cmd']}` — {result['test_cmd_source']}")
     if result["recovered"]:
         print(f"⚠ {result['recovered']}")
     for note in result["notes"]:
@@ -2711,24 +2720,31 @@ def cmd_judge_sweep(args) -> None:
     unrun = _print_sweep_unrun(result)
     for r in result["survivors"]:
         print(f"  [SURVIVED] {r['key']} {r['mutation']}")
+    unsupported = result.get("unsupported", [])
+    for f in unsupported:
+        print(f"  [UNKNOWN ] {f} — not supported: {sweep.SUPPORTED_NOTE}")
     if result["cannot_verify"]:
         print(f"⚠ CANNOT VERIFY — {result['cannot_verify']}")
         sys.exit(2)
     print(f"sweep: {result['mutations']} mutation(s) — {result['killed']} killed, "
           f"{len(result['survivors'])} survived, {skipped} skipped"
           f"{f', {unrun} UNRUN' if unrun else ''} ({result['seconds']}s)")
-    if result["survivors"]:
+    if verdict == sweep.V_SURVIVORS:
         print("⚖️ Each SURVIVED line is a changed check no test can tell apart from its "
               "corruption. Add a test that goes RED under that mutation — not a weaker "
               "assertion. If no outcome can change under it, `chela task-finished` accepts "
               "--sweep-equivalent '<file:line>: <why>'.")
-        sys.exit(1)
-    if unrun:
+    elif unrun:
         # ⏳ CMX-111: no survivor among what ran is NOT "all killed" — the rest is unknown.
         print(f"⚠ CANNOT VERIFY — the sweep budget stopped it: {result.get('exhausted', '')}. "
               f"{unrun} mutation(s) never ran. Raise --budget-seconds/--max-mutations (or "
               "judge.sweep_budget_seconds / judge.sweep_max_mutations) to cover them.")
-        sys.exit(2)
+    elif verdict == sweep.V_UNKNOWN:
+        print(f"⚠ UNKNOWN — {len(unsupported)} changed source file(s) were NOT "
+              f"swept ({sweep.SUPPORTED_NOTE}). This is not a pass.")
+    # The same verdict → exit code as --json, so the two output modes cannot drift.
+    if sweep.EXIT_CODES[verdict]:
+        sys.exit(sweep.EXIT_CODES[verdict])
 
 
 def _print_sweep_unrun(result: dict) -> int:
@@ -3737,7 +3753,12 @@ def main() -> None:
     )
     p_jsweep.add_argument(
         "--test-cmd", metavar="CMD",
-        help="Run this suite command instead of reading one from the workflow",
+        help="Run this suite command (default: the workflow's judge.test_cmd, else detected: "
+             "pytest / npm test / go test / cargo test)",
+    )
+    p_jsweep.add_argument(
+        "--json", action="store_true",
+        help="Print the result as JSON on stdout (progress goes to stderr)",
     )
     p_jsweep.add_argument(
         "--budget-seconds", type=float, default=None, metavar="S",
