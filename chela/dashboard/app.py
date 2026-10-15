@@ -3376,6 +3376,7 @@ def api_update_apply():
     # CMX-56: nothing to pull used to mean "do nothing" — while the card above the button
     # listed services still running old code. Then the click restarts exactly those.
     stale: list[str] = []
+    # Only the nothing-to-pull arm needs freshness: a pull restarts by import graph anyway.
     if status.behind == 0:
         stale, _unknown, stale_ok = _service_freshness()
         if not stale_ok:

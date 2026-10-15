@@ -329,6 +329,21 @@ def test_update_payload_degrades_stale_services_to_empty_on_an_unreadable_freshn
     assert data["update"]["stale_ok"] is False
 
 
+def test_the_no_upstream_note_arm_also_flags_an_unread_fleet(client, monkeypatch):
+    """`_update_status_payload` builds its note arm (no upstream) as a separate dict — the
+    unread flag must be carried there too, not only on the plain arm the test above drives
+    (defeat shape 22). Read through /api/update/status, the route the banner polls."""
+    monkeypatch.setattr(dash.update, "commits_behind",
+                        lambda fetch=True: dash.update.UpdateStatus(
+                            ok=True, behind=0, ahead=0, branch="dev",
+                            error="no upstream configured for this branch"))
+    monkeypatch.setattr(dash.update, "services_running_stale_code",
+                        lambda *a, **k: dash.update.ServiceFreshness(ok=False, error="git log failed"))
+    data = client.get("/api/update/status").get_json()
+    assert data["note"] == "no upstream configured for this branch"
+    assert data["stale_ok"] is False
+
+
 def test_update_payload_never_calls_pm2_or_git_for_stale_check_more_than_once(client, monkeypatch):
     """`services_running_stale_code` must actually be consulted by the payload — not just
     importable. Corrupting the call-site out (returning `[]` unconditionally) is exactly

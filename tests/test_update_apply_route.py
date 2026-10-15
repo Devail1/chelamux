@@ -616,6 +616,20 @@ def test_status_reports_this_runs_outcome_under_its_run_number(client, monkeypat
                                        "error": "pm2 said no", "restarted": [], "behind_before": 0}
 
 
+def test_status_reports_the_pulls_real_behind_before(client, monkeypatch):
+    """The restart-stale arm above always has behind_before=0, which is also the crashed
+    default — so only the PULL arm can prove `last_result` carries the real count (defeat
+    shape 02: a value parked on its default)."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda fetch=True: update.UpdateStatus(ok=True, behind=3, ahead=0, branch="dev"))
+    monkeypatch.setattr(update, "apply", lambda: update.ApplyResult(
+        ok=True, step="done", behind_before=3, restarted=["chela-daemon"]))
+    run = client.post("/api/update/apply").get_json()["run"]
+    data = _wait_status(client, lambda d: (d["last_result"] or {}).get("run") == run and not d["applying"])
+    assert data["last_result"] == {"run": run, "ok": True, "step": "done", "error": "",
+                                   "restarted": ["chela-daemon"], "behind_before": 3}
+
+
 def test_a_crashed_update_thread_is_recorded_as_a_failure_not_left_blank(client, monkeypatch):
     """`finally` records an outcome even when restart_stale raises — the page must see a
     failure, never wait out its timeout on a result that will never come."""
