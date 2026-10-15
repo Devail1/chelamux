@@ -3246,21 +3246,20 @@ def _settings_status() -> dict:
     }
 
 
-def _service_freshness() -> tuple[list[str], list[str]]:
-    """``(stale, unknown)`` running `chela-*` PM2 services — see
+def _service_freshness() -> tuple[list[str], list[str], bool]:
+    """``(stale, unknown, ok)`` running `chela-*` PM2 services — see
     `update.services_running_stale_code` (import-aware since CMX-56: a service is stale
     only when a file IT runs changed since it started). `commits_behind` answers "is the
     CHECKOUT in sync"; this answers "is the RUNNING CODE the checkout" — a bare `git pull`
     (bypassing `chela update`) leaves the former true while the latter is false, and
     `chela doctor` already reports exactly that gap (`repo.services_current`) while this
-    card said "UP TO DATE" about it (2026-08-02). Best-effort: an unreadable result
-    degrades to "no known-stale services" rather than failing the whole payload over a
-    fact this route doesn't otherwise depend on.
+    card said "UP TO DATE" about it (2026-08-02). An unreadable result is ``ok=False``
+    (CMX-95), never "nothing stale": no surface may call an unread fleet up to date.
     """
     freshness = update.services_running_stale_code()
     if not freshness.ok:
-        return [], []
-    return freshness.stale, freshness.unknown
+        return [], [], False
+    return freshness.stale, freshness.unknown, True
 
 
 def _update_status_payload() -> dict:
@@ -3273,14 +3272,32 @@ def _update_status_payload() -> dict:
         return {"ok": False, "git": False, "error": str(e)}
     if not status.ok:
         return {"ok": False, "error": status.error}
-    stale, unknown = _service_freshness()
+    stale, unknown, stale_ok = _service_freshness()
     if status.error:
         # ok=True but carrying a note (no upstream configured) — not a fault, just
         # nothing this control can act on.
         return {"ok": True, "behind": 0, "ahead": 0, "branch": status.branch,
-                "note": status.error, "stale_services": stale, "unknown_services": unknown}
+                "note": status.error, "stale_services": stale, "unknown_services": unknown,
+                "stale_ok": stale_ok}
     return {"ok": True, "behind": status.behind, "ahead": status.ahead, "branch": status.branch,
-            "stale_services": stale, "unknown_services": unknown}
+            "stale_services": stale, "unknown_services": unknown, "stale_ok": stale_ok}
+
+
+# CMX-95: THIS dashboard process. A click that restarts the dashboard can't read its own
+# outcome back; the page polling /api/update/status sees `boot` change and reloads instead.
+_BOOT_ID = f"{os.getpid()}-{time.time_ns()}"
+
+
+@app.route("/api/update/status")
+@require_auth
+def api_update_status():
+    """The Update payload plus what the apply route is doing (CMX-95). Read-only."""
+    payload = _update_status_payload()
+    payload.update(boot=_BOOT_ID, applying=_update_apply_started_at is not None,
+                   last_result=_update_last_result)
+    resp = jsonify(payload)
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 @app.route("/api/settings")
@@ -3316,6 +3333,10 @@ _update_apply_lock = threading.Lock()
 # operator (or the drawer) can tell "wait" from "go restart the dashboard" without reading
 # this source file first.
 _update_apply_started_at: float | None = None
+# CMX-95: the last apply's outcome, keyed by the `run` the POST answered with. In memory on
+# purpose: a restart of this process is reported by `boot` instead.
+_update_apply_runs = 0
+_update_last_result: dict | None = None
 # CMX-226: `update.apply_stuck_after_seconds()` derives the ceiling from
 # GIT_TIMEOUT_SECONDS / _SHELL_TIMEOUT_SECONDS instead of a literal, so it moves with
 # them — see that function's docstring for the full derivation. Also read (via
@@ -3332,12 +3353,12 @@ def api_update_apply():
     dashboard process; running it inline would race the process's own restart against
     flushing the HTTP response. Returns immediately once it has confirmed there is
     something to do; the actual outcome lands in the daemon/dashboard log, not this
-    response.
+    response — and in /api/update/status's ``last_result``, under this response's ``run``.
 
-    Refuses outright — no queueing — while any dispatched run is `claimed`/`running`:
-    the restart this triggers would orphan it mid-flight.
+    Dispatched runs don't block it (CMX-95): tmux agents and detached judges survive a
+    daemon restart, and `update._restart` waits for the daemon's tick (`chela.ticklock`).
     """
-    global _update_apply_started_at
+    global _update_apply_started_at, _update_apply_runs
     try:
         status = update.commits_behind(fetch=False)
     except update.NotAGitCheckout as e:
@@ -3347,22 +3368,15 @@ def api_update_apply():
     # CMX-56: nothing to pull used to mean "do nothing" — while the card above the button
     # listed services still running old code. Then the click restarts exactly those.
     stale: list[str] = []
+    # Only the nothing-to-pull arm needs freshness: a pull restarts by import graph anyway.
     if status.behind == 0:
-        stale, _unknown = _service_freshness()
+        stale, _unknown, stale_ok = _service_freshness()
+        if not stale_ok:
+            # CMX-95: unread is not "already up to date".
+            return jsonify({"ok": False, "error": "could not read which services run old "
+                            "code — check `chela doctor` / `pm2 ls`"}), 503
         if not stale:
             return jsonify({"ok": True, "started": False, "detail": "already up to date"})
-
-    # CMX-199 rework: `chela update` restarts chela-daemon, and a mid-run restart
-    # orphans any dispatched agent it interrupts — a hazard entirely separate from the
-    # apply-vs-apply race the lock below guards. Refuse outright rather than queue: a
-    # deferred update that fires when the run ends is a restart nobody is watching for.
-    in_flight = [r["task_id"] for r in dispatcher.list_runs()
-                 if r.get("status") in dispatcher.ACTIVE_STATUSES]
-    if in_flight:
-        return jsonify({
-            "ok": False,
-            "error": f"a dispatched run is in flight: {', '.join(in_flight)}",
-        }), 409
 
     if not _update_apply_lock.acquire(blocking=False):
         started_at = _update_apply_started_at
@@ -3384,11 +3398,18 @@ def api_update_apply():
 
     _update_apply_started_at = time.monotonic()
     config.publish_update_apply_lock(time.time())
+    _update_apply_runs += 1
+    run = _update_apply_runs
 
     def _run():
-        global _update_apply_started_at
+        global _update_apply_started_at, _update_last_result
+        outcome = {"run": run, "ok": False, "step": "crashed", "restarted": [], "behind_before": 0,
+                   "error": "the update thread died before reporting"}
         try:
             result = update.restart_stale() if stale else update.apply()
+            outcome = {"run": run, "ok": bool(result.ok), "step": result.step,
+                       "error": result.error or "", "restarted": list(result.restarted),
+                       "behind_before": result.behind_before}
             if not result.ok:
                 log.error("dashboard-triggered update refused at %r — %s",
                           result.step, result.error)
@@ -3398,6 +3419,8 @@ def api_update_apply():
                     "dashboard-triggered update applied %d commit(s), restarted: %s",
                     result.behind_before, restarted)
         finally:
+            # Order matters: a poller seeing `applying` false must already see this result.
+            _update_last_result = outcome
             _update_apply_started_at = None
             config.clear_update_apply_lock()
             _update_apply_lock.release()
@@ -3405,9 +3428,11 @@ def api_update_apply():
     threading.Thread(target=_run, daemon=True, name="dashboard-update-apply").start()
     if stale:
         return jsonify({"ok": True, "started": True, "behind": 0, "restarting": stale,
-                        "detail": f"restarting {', '.join(stale)}"})
+                        "detail": f"restarting {', '.join(stale)}", "run": run,
+                        "boot": _BOOT_ID})
     return jsonify({"ok": True, "started": True, "behind": status.behind,
-                    "detail": f"pulling {status.behind} commit(s), then restarting services"})
+                    "detail": f"pulling {status.behind} commit(s), then restarting services",
+                    "run": run, "boot": _BOOT_ID})
 
 
 @app.route("/api/launcher/pin", methods=["POST"])
