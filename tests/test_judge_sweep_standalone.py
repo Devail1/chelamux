@@ -281,7 +281,7 @@ def test_suite_precedence_and_provisioning(tmp_path, monkeypatch, flag, wf_cmd, 
     assert calls[0][0] == (tmp_path, "main", want_cmd) and calls[0][1]["provision"] is with_wf
 
 
-@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP])
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
 def test_an_interrupted_run_leaves_git_diff_empty(tmp_path, sig):
     root = _bare(tmp_path / "r", {"calc.py": BIG})
     flag, script = tmp_path / "flag", tmp_path / "slow_suite.py"
@@ -300,6 +300,162 @@ def test_an_interrupted_run_leaves_git_diff_empty(tmp_path, sig):
     out, _ = proc.communicate(timeout=60)
     assert proc.returncode == 2 and f"interrupted by signal {int(sig)}" in out
     assert _git(root, "diff") == "" and _git(root, "status", "--porcelain") == ""
+
+
+# --- CMX-97 slice B: the kill guardian ---------------------------------------------------------
+
+
+def test_the_guardian_argv_and_popen_kwargs(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(sweep.subprocess, "Popen",
+                        lambda argv, **kw: seen.append((argv, kw)) or "proc")
+    assert sweep._start_guardian(tmp_path) == "proc"
+    assert seen == [([sys.executable, "-m", "chela.sweep", "guard", str(os.getpid()),
+                      str(tmp_path)],
+                     {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                      "stderr": subprocess.DEVNULL, "start_new_session": True})]
+
+
+def test_a_guardian_that_cannot_start_is_a_note_and_the_sweep_goes_on(tmp_path, monkeypatch):
+    root = _bare(tmp_path / "r", {"calc.py": BIG})
+    # A guardian binary that does not exist: Popen raises FileNotFoundError (an OSError).
+    monkeypatch.setattr(sweep, "_guardian_argv", lambda wt: [str(tmp_path / "no-such-python")])
+    report = sweep.sweep(root, "main", f'"{sys.executable}" -m pytest -q', timeout=120,
+                         provision=False)
+    assert "the kill guardian could not start — a SIGKILL mid-mutation is only recovered by " \
+           "the next sweep" in report.notes
+    assert report.results and not report.cannot_verify
+
+
+def test_the_guardian_is_started_once_and_stopped_even_when_the_sweep_raises(tmp_path,
+                                                                             monkeypatch):
+    root = _bare(tmp_path / "r", {"calc.py": BIG})
+    events = []
+    monkeypatch.setattr(sweep, "_start_guardian", lambda wt: events.append(("start", wt)) or "g")
+    monkeypatch.setattr(sweep, "_stop_guardian", lambda g: events.append(("stop", g)))
+
+    def boom(*a, **kw):
+        raise sweep._Interrupted(15)
+
+    monkeypatch.setattr(sweep, "_run_one", boom)
+    report = sweep.sweep(root, "main", f'"{sys.executable}" -m pytest -q', timeout=120,
+                         provision=False)
+    assert "interrupted by signal 15" in report.cannot_verify
+    assert events == [("start", root.resolve()), ("stop", "g")]
+    assert not any("kill guardian" in n for n in report.notes)
+
+
+def test_stop_guardian_terminates_then_kills_a_stuck_one():
+    assert sweep._stop_guardian(None) is None
+    calls = []
+
+    class P:
+        def __init__(self, stuck):
+            self.stuck = stuck
+
+        def terminate(self):
+            calls.append("terminate")
+
+        def kill(self):
+            calls.append("kill")
+
+        def wait(self, timeout):
+            calls.append(("wait", timeout))
+            if self.stuck and "kill" not in calls:
+                raise subprocess.TimeoutExpired("g", timeout)
+
+    sweep._stop_guardian(P(stuck=False))
+    assert calls == ["terminate", ("wait", 5)]
+    calls.clear()
+    sweep._stop_guardian(P(stuck=True))
+    assert calls == ["terminate", ("wait", 5), "kill", ("wait", 5)]
+
+
+def test_guard_waits_for_the_pid_then_recovers(tmp_path, monkeypatch):
+    alive = iter([True, True, False])
+    sleeps = []
+    monkeypatch.setattr(sweep, "_pid_alive", lambda pid: next(alive))
+    monkeypatch.setattr(sweep.time, "sleep", sleeps.append)
+    seen = []
+    monkeypatch.setattr(sweep, "recover", lambda wt: seen.append(wt) or ("", ""))
+    assert sweep.guard(42, tmp_path, poll=0.5) == 0
+    assert sleeps == [0.5, 0.5] and seen == [tmp_path]
+    monkeypatch.setattr(sweep, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(sweep, "recover", lambda wt: ("", "edited since"))
+    assert sweep.guard(42, tmp_path) == 1
+
+
+def test_the_guard_poll_interval_is_a_fifth_of_a_second():
+    assert sweep.GUARD_POLL_SECONDS == 0.2
+
+
+def test_guard_main_parses_its_argv(tmp_path, monkeypatch, capsys):
+    seen = []
+    monkeypatch.setattr(sweep, "guard", lambda pid, wt: seen.append((pid, wt)) or 7)
+    assert sweep.main(["guard", "123", str(tmp_path)]) == 7
+    assert seen == [(123, tmp_path)]
+    for bad in (["guard", "x", "/w"], ["guard", "1"], ["other", "1", "/w"], [],
+                ["guard", "1", "/w", "extra"]):
+        assert sweep.main(bad) == 2
+    assert seen == [(123, tmp_path)]
+    assert "usage: python -m chela.sweep guard <pid> <worktree>" in capsys.readouterr().err
+
+
+def test_the_guardian_module_entry_point_restores_a_dead_sweeps_mutation(tmp_path):
+    root = _bare(tmp_path / "r", {"calc.py": BIG})
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    (root / "calc.py").write_text("mutated\n")
+    marker = sweep.marker_path(root)
+    marker.write_text(json.dumps({"pid": dead.pid, "file": "calc.py", "original": BIG,
+                                  "mutated": "mutated\n"}))
+    out = subprocess.run([sys.executable, "-m", "chela.sweep", "guard", str(dead.pid),
+                          str(root)], capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert (root / "calc.py").read_text() == BIG and not marker.exists()
+
+
+def test_a_zombie_is_dead():
+    child = subprocess.Popen(["true"])
+    deadline = time.monotonic() + 10
+    while not sweep._is_zombie(child.pid):
+        assert time.monotonic() < deadline, "the child never became a zombie"
+        time.sleep(0.02)
+    assert sweep._pid_alive(child.pid) is False
+    child.wait()
+    assert sweep._is_zombie(child.pid) is False
+    assert sweep._is_zombie(os.getpid()) is False
+    assert sweep._pid_alive(os.getppid()) is True
+
+
+def test_a_zombie_we_may_not_signal_is_dead(monkeypatch):
+    def denied(pid, sig):
+        raise PermissionError
+
+    monkeypatch.setattr(sweep.os, "kill", denied)
+    monkeypatch.setattr(sweep, "_is_zombie", lambda pid: True)
+    assert sweep._pid_alive(4242) is False
+    monkeypatch.setattr(sweep, "_is_zombie", lambda pid: False)
+    assert sweep._pid_alive(4242) is True
+
+
+@pytest.mark.parametrize("stat, zombie", [
+    ("123 (a) Z 1 2", True), ("123 (a b) c) Z 1", True), ("123 (a) S 1 2", False),
+    ("123 (Z) S 1", False), ("123 (a)", False),
+])
+def test_is_zombie_reads_the_state_after_the_last_paren(monkeypatch, stat, zombie):
+    monkeypatch.setattr(sweep.Path, "read_text", lambda self: stat)
+    assert sweep._is_zombie(123) is zombie
+
+
+@pytest.mark.parametrize("exc", [FileNotFoundError, PermissionError,
+                                 UnicodeDecodeError("utf-8", b"", 0, 1, "x")])
+def test_an_unreadable_stat_is_not_a_zombie(monkeypatch, exc):
+    def boom(self):
+        raise exc
+
+    monkeypatch.setattr(sweep.Path, "read_text", boom)
+    assert sweep._is_zombie(123) is False
 
 
 # --- CMX-97 category pass: every gate / filter / wiring point is pinned ----------------------
