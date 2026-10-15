@@ -2299,6 +2299,7 @@ def cmd_task_finished(args) -> None:
         print(f"task-finished: 📏 {size['error']}")
         sys.exit(1)
 
+    partial = None
     if experiments:
         check = dispatcher.verify_self_check(args.task_id, experiments)
         if not check.get("ok"):
@@ -2325,6 +2326,7 @@ def cmd_task_finished(args) -> None:
             print("   Nothing was blocked and nothing was cleared. task-finished refuses "
                   "until this resolves.")
             sys.exit(1)
+        partial = _self_check_partial(check)
         if not _print_self_check_unrun(check):
             print(f"✓ self-check: every guard held ({len(check['outcomes'])} experiment(s)) — "
                   "proceeding.")
@@ -2354,12 +2356,26 @@ def cmd_task_finished(args) -> None:
         print(f"📏 split filed: {', '.join(filed['record']['sub_issues'])}")
     if size.get("record"):
         kwargs["size_gate"] = size["record"]
+    if partial:
+        kwargs["self_check_partial"] = partial
     result = dispatcher.request_task_finished(args.task_id, **kwargs)
     if not result.get("ok"):
         print(f"task-finished: {result.get('error', 'unknown error')}")
         sys.exit(1)
     print(f"Task {result['task_id']}: completion requested — chela will transition it to "
           "awaiting review and close this window on its next pass.")
+
+
+def _self_check_partial(check: dict) -> dict | None:
+    """⏳ CMX-141 slice 2: the record ``runs.self_check_partial`` keeps (None when all ran) —
+    shown to the judge and appended to the PR body."""
+    unrun = check.get("unrun") or []
+    if not unrun:
+        return None
+    measured = len(check.get("outcomes") or [])
+    return {"measured": measured, "total": measured + len(unrun),
+            "exhausted": check.get("exhausted") or "",
+            "unrun": [{"file": u["file"], "guard": u["guard"][:200]} for u in unrun]}
 
 
 def _print_self_check_unrun(check: dict) -> int:

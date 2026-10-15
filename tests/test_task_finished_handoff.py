@@ -253,3 +253,15 @@ def test_tick_persists_the_markers_size_gate_on_the_run(tmp_path, marker, expect
     _, run = _tick_with_marker(tmp_path, marker)
     stored = run["size_gate"]
     assert (json.loads(stored) if stored is not None else None) == expected
+
+
+@pytest.mark.parametrize("marker, expected", [
+    ({"task_id": "abc123", "self_check_partial": {"measured": 1, "unrun": [{"file": "a"}]}},
+     {"measured": 1, "unrun": [{"file": "a"}]}),
+    ({"task_id": "abc123", "self_check_partial": ["not a record"]}, None),
+])
+def test_tick_persists_the_markers_self_check_partial_on_the_run(tmp_path, marker, expected):
+    """⏳ CMX-141: the daemon records a budget-cut self-check from the marker."""
+    _, run = _tick_with_marker(tmp_path, marker)
+    stored = run["self_check_partial"]
+    assert (json.loads(stored) if stored is not None else None) == expected

@@ -2280,6 +2280,18 @@ def _self_check(
     return report
 
 
+def render_self_check_partial(record: dict) -> str:
+    """⏳ CMX-141: the PR-body / judge-prompt note for a hand-in whose self-check the budget cut
+    short ("" when every experiment ran)."""
+    unrun = record.get("unrun") if isinstance(record, dict) else None
+    if not isinstance(unrun, list) or not unrun:
+        return ""
+    names = "; ".join(f"{u.get('file')}: {str(u.get('guard'))[:80]}"
+                      for u in unrun if isinstance(u, dict))
+    return (f"⏳ **Self-check PARTIAL — {len(unrun)} experiment(s) UNRUN** (CANNOT VERIFY, not "
+            f"passed; {record.get('exhausted') or 'budget exhausted'}): {names}")
+
+
 def run_self_check(
     worktree: str | Path, experiments_path: str | Path, *,
     workflow_path: str | Path | None = None, test_cmd: str | None = None,
