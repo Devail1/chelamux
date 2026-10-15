@@ -139,6 +139,12 @@ J_UNJUDGED_MERGED = "unjudged_merged"
 # truncation reads as "everything was checked" when it was not.
 MAX_EXPERIMENTS = 12
 
+# ⏳ CMX-141: self-check's budget (`judge.self_check_budget_seconds` / `_max_experiments`; 0/unset
+# = these). An experiment it never reached is UNRUN: CANNOT VERIFY, never killed, never a pass.
+SELF_CHECK_BUDGET_SECONDS = 900.0
+SELF_CHECK_MAX_EXPERIMENTS = MAX_EXPERIMENTS
+UNRUN = "UNRUN"
+
 # ⚖️🙈 CMX-395 — HELD-OUT experiments: the train/test split, ported from "Automating eval
 # design and hillclimbing". PR #529 (CMX-377) went 7 judge rounds because every verdict
 # listed the exact surviving mutations and every rework patched THOSE mutations — the rework
@@ -377,6 +383,9 @@ class Report:
     # verdict header; ⛔ read by NOTHING on the blocking path (`blocking`/`state` below).
     risk: str = ""
     cap: int = MAX_EXPERIMENTS
+    # ⏳ CMX-141 (self-check): UNRUN experiments — kept OUT of ``outcomes`` — and why.
+    unrun: list[Outcome] = field(default_factory=list)
+    exhausted: str = ""
 
     @property
     def blocking(self) -> list[Outcome]:
@@ -2154,7 +2163,7 @@ def load_experiments(path: str | Path) -> tuple[dict, str]:
 
 def self_check(
     worktree: Path, test_cmd: str, raw: dict, *, timeout: float = SUITE_TIMEOUT_SECONDS,
-    select_tests: bool = True,
+    select_tests: bool = True, budget=None,
 ) -> Report:
     """Run the judge's own mutation mechanics against YOUR OWN worktree, before you commit.
 
@@ -2182,15 +2191,34 @@ def self_check(
     ⚡ CMX-407: per-mutation test selection too (``select_tests``) — the same
     :func:`run_baseline` / :func:`_measure` pair, so a self-check that comes back clean was
     decided exactly the way the judge will decide it.
+    ⏳ CMX-141: bounded by ``budget`` (a ``sweep.SweepBudget``; None = the defaults).
     """
-    started = time.monotonic()
-    report = _self_check(worktree, test_cmd, raw, timeout=timeout, select_tests=select_tests)
-    report.battery_seconds = time.monotonic() - started
+    from chela import sweep
+
+    budget = budget if budget is not None else sweep.SweepBudget(
+        SELF_CHECK_BUDGET_SECONDS, SELF_CHECK_MAX_EXPERIMENTS)
+    started = _now()
+    report = _self_check(worktree, test_cmd, raw, timeout=timeout, select_tests=select_tests,
+                         budget=budget, started=started)
+    report.battery_seconds = _now() - started
     return report
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def _mark_unrun(report: Report, items: list, why: str) -> None:
+    """⛔ CMX-141: listed as UNRUN — CANNOT VERIFY, never KILLED, never silently dropped."""
+    for raw_exp in items:
+        exp, _ = Experiment.parse(raw_exp)
+        exp = exp or Experiment(guard=str(raw_exp)[:120], file="?", before="", after="")
+        report.unrun.append(Outcome(exp, UNRUN, f"not run — {why}"))
 
 
 def _self_check(
     worktree: Path, test_cmd: str, raw: dict, *, timeout: float, select_tests: bool,
+    budget, started: float,
 ) -> Report:
     report = Report()
     items = raw.get("experiments") if isinstance(raw, dict) else None
@@ -2205,10 +2233,6 @@ def _self_check(
             "to protect."
         )
         return report
-
-    if len(items) > MAX_EXPERIMENTS:
-        report.dropped = len(items) - MAX_EXPERIMENTS
-        items = items[:MAX_EXPERIMENTS]
 
     env_problem = provision_suite_env(worktree)
     if env_problem:
@@ -2233,18 +2257,32 @@ def _self_check(
         )
         return report
 
-    outcomes, contamination = _apply_experiments(
-        worktree, test_cmd, items, baseline, timeout, selector)
-    report.outcomes.extend(outcomes)
-    if contamination:
-        report.cannot_verify = contamination
+    # ⏳ CMX-141: one experiment at a time, so the wall-clock budget is checked before each.
+    chosen = items[:budget.max_mutations]
+    for n, raw_exp in enumerate(chosen):
+        if _now() - started >= budget.seconds:
+            report.exhausted = (f"the {budget.seconds:g}s wall-clock budget ran out after "
+                                f"{n} of {len(items)} experiment(s)")
+            _mark_unrun(report, chosen[n:], report.exhausted)
+            break
+        outcomes, contamination = _apply_experiments(
+            worktree, test_cmd, [raw_exp], baseline, timeout, selector)
+        report.outcomes.extend(outcomes)
+        if contamination:
+            report.cannot_verify = contamination
+            return report
+    if len(items) > len(chosen):
+        why = f"over the {budget.max_mutations}-experiment budget ({len(items)} given)"
+        report.exhausted = report.exhausted or why
+        _mark_unrun(report, items[len(chosen):], why)
     return report
 
 
 def run_self_check(
     worktree: str | Path, experiments_path: str | Path, *,
     workflow_path: str | Path | None = None, test_cmd: str | None = None,
-    timeout: float | None = None,
+    timeout: float | None = None, budget_seconds: float | None = None,
+    max_experiments: int | None = None,
 ) -> dict:
     """``chela judge self-check``'s entry point: load the experiments file an agent wrote,
     resolve the suite to measure against, run :func:`self_check`, and return a JSON-friendly
@@ -2254,7 +2292,11 @@ def run_self_check(
     (the SAME ``WORKFLOW.md`` key :func:`judge_test_cmd` reads for the real judge) — so a
     self-check that comes back clean was measured against the exact suite the judge will
     later measure against, not a narrower one an agent could pick to always pass.
+    ⏳ CMX-141: budget = the arguments > the workflow > the defaults; a partial run is never
+    ``clean``.
     """
+    from chela import sweep
+
     worktree = Path(worktree).resolve()
     raw, err = load_experiments(experiments_path)
     if err:
@@ -2263,7 +2305,8 @@ def run_self_check(
     cmd = test_cmd.strip() if isinstance(test_cmd, str) and test_cmd.strip() else None
     to = timeout
     select = True
-    if workflow_path and (cmd is None or to is None):
+    wf = None
+    if workflow_path:
         from chela import workflow as workflow_mod
 
         try:
@@ -2280,12 +2323,21 @@ def run_self_check(
                                        "pointing at a WORKFLOW.md with `judge.test_cmd` set"}
     if to is None:
         to = SUITE_TIMEOUT_SECONDS
+    budget = sweep.resolve_budget(
+        wf, seconds=budget_seconds, max_mutations=max_experiments,
+        keys=("self_check_budget_seconds", "self_check_max_experiments"),
+        defaults=(SELF_CHECK_BUDGET_SECONDS, SELF_CHECK_MAX_EXPERIMENTS))
 
-    report = self_check(worktree, cmd, raw, timeout=to, select_tests=select)
+    report = self_check(worktree, cmd, raw, timeout=to, select_tests=select, budget=budget)
     blocking = report.blocking
+    state = report.state
+    if state == J_CLEAN and report.unrun:
+        state = "partial"   # ⛔ no survivor among what RAN is not "every guard held"
     return {
-        "ok": True, "state": report.state, "blocking": len(blocking),
+        "ok": True, "state": state, "blocking": len(blocking),
         "outcomes": [o.as_dict() for o in report.outcomes],
+        "unrun": [o.as_dict() for o in report.unrun], "exhausted": report.exhausted,
+        "budget": budget.as_dict(),
         "cannot_verify": report.cannot_verify, "notes": len(report.notes),
         "dropped": report.dropped, "seconds": round(report.battery_seconds, 1),
         "selection": report.selection,

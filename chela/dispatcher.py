@@ -2818,6 +2818,8 @@ def verify_self_check(task_id: str, experiments_path: str) -> dict:
         "cannot_verify": result["cannot_verify"],
         "outcomes": result.get("outcomes") or [],
         "missing_required": missing,
+        # ⏳ CMX-141: what the self-check budget never reached — CANNOT VERIFY, not killed.
+        "unrun": result.get("unrun") or [], "exhausted": result.get("exhausted") or "",
     }
 
 

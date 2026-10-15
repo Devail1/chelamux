@@ -2307,8 +2307,9 @@ def cmd_task_finished(args) -> None:
             print("   Nothing was blocked and nothing was cleared. task-finished refuses "
                   "until this resolves.")
             sys.exit(1)
-        print(f"✓ self-check: every guard held ({len(check['outcomes'])} experiment(s)) — "
-              "proceeding.")
+        if not _print_self_check_unrun(check):
+            print(f"✓ self-check: every guard held ({len(check['outcomes'])} experiment(s)) — "
+                  "proceeding.")
     elif no_new_guards:
         touched_tests = dispatcher.check_no_new_guards(args.task_id)
         if touched_tests:
@@ -2341,6 +2342,22 @@ def cmd_task_finished(args) -> None:
         sys.exit(1)
     print(f"Task {result['task_id']}: completion requested — chela will transition it to "
           "awaiting review and close this window on its next pass.")
+
+
+def _print_self_check_unrun(check: dict) -> int:
+    """⏳ CMX-141: name each experiment the budget never reached; return how many. DECISION: it
+    does NOT refuse the hand-in (the judge re-runs experiments anyway), but is never a pass."""
+    unrun = check.get("unrun") or []
+    if not unrun:
+        return 0
+    for u in unrun:
+        print(f"  [UNRUN   ] {u['file']}: {u['guard'][:70]} — CANNOT VERIFY")
+    measured = len(check.get("outcomes") or [])
+    print(f"⚠ self-check PARTIAL: {measured} of {measured + len(unrun)} experiment(s) "
+          f"measured, none survived; {len(unrun)} UNRUN = CANNOT VERIFY, not passed "
+          f"({check.get('exhausted') or 'budget exhausted'}). Proceeding within the "
+          "self-check budget.")
+    return len(unrun)
 
 
 def _task_finished_sweep(task_id: str, notes: list[str]) -> list[dict]:
@@ -2651,10 +2668,11 @@ def cmd_judge_self_check(args) -> None:
 
     Exit codes: ``0`` every guard KILLED (safe to commit), ``1`` a guard SURVIVED corruption
     (this is decoration — fix it before committing), ``2`` CANNOT VERIFY (no experiments, a
-    red baseline, or an unprovisionable env — not a verdict either way).
+    red baseline, an unprovisionable env, CMX-141 unrun experiments — not a verdict either way).
     """
     result = judge.run_self_check(
         args.cwd, args.experiments, workflow_path=args.workflow, test_cmd=args.test_cmd,
+        budget_seconds=args.budget_seconds, max_experiments=args.max_experiments,
     )
     if not result.get("ok"):
         print(f"self-check: {result.get('error', 'unknown error')}")
@@ -2672,6 +2690,14 @@ def cmd_judge_self_check(args) -> None:
     if result["cannot_verify"]:
         print(f"⚠ CANNOT VERIFY — {result['cannot_verify']}")
         print("   Nothing was blocked and nothing was cleared.")
+        sys.exit(2)
+    if result.get("unrun"):     # ⏳ CMX-141: none survived among what RAN; the rest is unknown
+        for u in result["unrun"]:
+            print(f"  [UNRUN   ] {u['file']}: {u['guard'][:70]}")
+        print(f"⚠ CANNOT VERIFY — the self-check budget stopped it: {result['exhausted']}. "
+              f"{len(result['unrun'])} experiment(s) never ran. Raise --budget-seconds/"
+              "--max-experiments (or judge.self_check_budget_seconds / "
+              "judge.self_check_max_experiments) to cover them.")
         sys.exit(2)
     print(f"✓ every guard held ({len(result['outcomes'])} experiment(s), all KILLED) — "
           "safe to commit.")
@@ -3731,6 +3757,16 @@ def main() -> None:
     p_jcheck.add_argument(
         "--cwd", metavar="DIR", default=".",
         help="Worktree to mutate in place (default: the current directory)",
+    )
+    p_jcheck.add_argument(
+        "--budget-seconds", type=float, default=None, metavar="S",
+        help="Wall-clock budget; experiments it does not reach are UNRUN (CANNOT VERIFY). "
+             "Default: judge.self_check_budget_seconds, else 900. 0 = the default",
+    )
+    p_jcheck.add_argument(
+        "--max-experiments", type=int, default=None, metavar="N",
+        help="Run at most N experiments (in file order); the rest are UNRUN. "
+             "Default: judge.self_check_max_experiments, else 12. 0 = the default",
     )
     p_jsweep = judge_sub.add_parser(
         "sweep",
