@@ -2274,6 +2274,11 @@ def cmd_task_finished(args) -> None:
     if experiments and no_new_guards:
         print("task-finished: pass at most one of --self-check-experiments / --no-new-guards")
         sys.exit(2)
+    # 📏 CMX-126: the size gate runs FIRST — an oversized diff is refused before its sweep.
+    size = dispatcher.check_hand_in_size(args.task_id, getattr(args, "oversize_reason", None))
+    if not size.get("ok"):
+        print(f"task-finished: 📏 {size['error']}")
+        sys.exit(1)
 
     if experiments:
         check = dispatcher.verify_self_check(args.task_id, experiments)
@@ -2320,6 +2325,8 @@ def cmd_task_finished(args) -> None:
     kwargs = {"handoff": getattr(args, "handoff", None)}
     if accepted:
         kwargs["sweep_equivalents"] = accepted
+    if size.get("record"):
+        kwargs["size_gate"] = size["record"]
     result = dispatcher.request_task_finished(args.task_id, **kwargs)
     if not result.get("ok"):
         print(f"task-finished: {result.get('error', 'unknown error')}")
@@ -4040,6 +4047,10 @@ def main() -> None:
              "the reason. Repeatable. task-finished runs the sweep and refuses while a "
              "survivor is not named here, or a note names a line that did not survive. "
              "Recorded on the run, shown to the judge and in the PR body.",
+    )
+    p_tf.add_argument(
+        "--oversize-reason", metavar="WHY", default=None,
+        help="📏 CMX-126: hand in an oversized diff that cannot be split (recorded).",
     )
     p_tf.add_argument(
         "--handoff", metavar="TEXT", default=None,

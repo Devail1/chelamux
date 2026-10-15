@@ -242,3 +242,14 @@ def test_tick_persists_the_markers_sweep_equivalents_on_the_run(tmp_path, marker
     _, run = _tick_with_marker(tmp_path, marker)
     stored = run["sweep_equivalents"]
     assert (json.loads(stored) if stored is not None else None) == expected
+
+
+@pytest.mark.parametrize("marker, expected", [
+    ({"task_id": "abc123", "size_gate": {"lines": 9, "limit": 3, "oversize_reason": "why"}},
+     {"lines": 9, "limit": 3, "oversize_reason": "why"}),
+    ({"task_id": "abc123", "size_gate": "not a record"}, None),
+])
+def test_tick_persists_the_markers_size_gate_on_the_run(tmp_path, marker, expected):
+    _, run = _tick_with_marker(tmp_path, marker)
+    stored = run["size_gate"]
+    assert (json.loads(stored) if stored is not None else None) == expected
