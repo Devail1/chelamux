@@ -552,8 +552,8 @@ body {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
-/* CMX-414: the Wall's top toolbar row (layout toggle left, "+ New shell"
-   right). It used to be the canvas's 18px top padding + the controls + a 12px
+/* CMX-414: the Wall's top toolbar row (layout toggle left, the pills right;
+   CMX-135 dropped "+ New shell"). It used to be the canvas's 18px top padding + the controls + a 12px
    margin + GridStack's 6px item margin — ~68px of chrome above the first pane,
    which started below the sidebar head's rule. Now the row owns the canvas's
    top padding (negative margin) and is EXACTLY the sidebar head's height; its
@@ -562,13 +562,6 @@ body {
    so the first pane's top edge lands on the head's bottom rule. _wallFill
    measures #term-stage's top live, so the Wall still fills to the bottom. */
 .term-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
-#term-new-shell { margin-left: auto; }
-/* CMX-89: a phone has no row controls (the "+" FAB starts sessions) and
-   renderTerminals() hides this button there — but only once the module graph
-   has loaded, so without this rule it painted first and then vanished. */
-@media (max-width: 768px) {
-    #term-new-shell { display: none; }
-}
 @media (min-width: 769px) {
     .term-toolbar {
         align-items: flex-end;
@@ -576,25 +569,25 @@ body {
         margin: calc(-1 * var(--canvas-pad-y)) 0 calc(var(--wall-gap) / -2);
         padding-bottom: var(--wall-gap);
     }
-    #term-new-shell { height: var(--ctl-h-sm); display: inline-flex; align-items: center; }
 }
 
 /* CMX-422: the active-shares pill in the Wall's toolbar row. .safety-float is
    position:fixed in the top-right corner — exactly where this row's "+ New
-   shell" sits — so with a share live the floating pill was drawn ON TOP of the
+   shell" sat — so with a share live the floating pill was drawn ON TOP of the
    button. On desktop the row carries its own copy (#term-shares) in normal
-   flow, left of "+ New shell" with the row's gap, at the row's control height,
-   and the floating copy steps aside while the Wall is the active panel. It is
-   hidden with no share, so "+ New shell" keeps its spot. A phone has no row
-   controls (the "+" FAB starts sessions) — there the floating pill stays. */
-#term-shares { display: none; }
+   flow, at the row's control height, and the floating copy steps aside while
+   the Wall is the active panel. CMX-135: the pending-approvals pill does the
+   same (#term-approvals). Each is hidden while it has nothing to say. A phone
+   has no row controls (the "+" FAB starts sessions) — there the floating pills stay. */
+#term-shares, #term-approvals { display: none; }
 @media (min-width: 769px) {
-    #term-shares:not([hidden]) {
+    #term-shares:not([hidden]), #term-approvals:not([hidden]) {
         display: inline-flex; height: var(--ctl-h-sm); margin-left: auto;
         padding: 0 11px; font-size: 12px;
     }
-    #term-shares:not([hidden]) + #term-new-shell { margin-left: 0; }
-    body:has(#panel-terminals.active) .safety-float #btn-shares { display: none; }
+    #term-shares:not([hidden]) ~ #term-approvals { margin-left: 0; }
+    body:has(#panel-terminals.active) .safety-float #btn-shares,
+    body:has(#panel-terminals.active) .safety-float #btn-approvals { display: none; }
 }
 
 /* CMX-397: the collapsible layout toolbar. Collapsed, only #term-grid-toggle
@@ -1040,6 +1033,9 @@ body {
     .shares-sheet .tsp-copy { min-height: 44px; padding: 0 16px; }
     /* Keep the amber pill readable but compact in .safety-float on a phone. */
     .shares-indicator { height: 38px; padding: 0 11px; }
+    /* CMX-135: "⚖️ 2 pending", not "…approvals" — the full pill pushed .safety-float
+       over the "+" beside the ☰. The aria-label still says it in full. */
+    .approvals-indicator .pa-pill-word { display: none; }
 }
 
 /* Kill-confirm popup, centered over the pane (reuses .kanban-confirm styling).

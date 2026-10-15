@@ -1,10 +1,11 @@
-// CMX-414 — the Wall's top toolbar row (the layout toggle + "+ New shell"),
+// CMX-414 — the Wall's top toolbar row (the layout toggle; no "+ New shell" since CMX-135),
 // MEASURED in a real Chromium (see dashboard.test.mjs for why a browser).
 //
 //  1. At 1440×900 the collapsed row is EXACTLY the sidebar head's height, so
 //     the first pane's top edge lands on the head's bottom rule.
-//  2. The layout toggle and "+ New shell" render at one height, the
-//     --ctl-h-sm token's.
+//  2. The layout toggle renders at the --ctl-h-sm token's height.
+//  2b. CMX-135: the New menu (sidebar "+ New session" / the phone's "+") →
+//      Shell window spawns the shell the row's button used to.
 //  3. The row's controls sit one pane-gap above the first pane — the same gap
 //     the Wall leaves between two panes.
 //  4. ⭐ Expanded, the row still shows every one of its controls, unclipped,
@@ -39,8 +40,8 @@ async function stable(page) {
     }, null, { timeout: 15000, polling: 100 });
 }
 
-async function openWall(viewport, storage = {}) {
-    const { context, page, errors } = await openDashboard(browser, { ...viewport, storage });
+async function openWall(viewport, storage = {}, api = {}) {
+    const { context, page, errors } = await openDashboard(browser, { ...viewport, storage, api });
     if (viewport.width > 768) {
         await page.waitForFunction(() => document.querySelectorAll('#term-stage .grid-stack-item').length >= 4,
             null, { timeout: 15000 });
@@ -78,7 +79,6 @@ const geometry = page => page.evaluate(() => {
         head: rect(document.querySelector('.sidebar-head')),
         row: rect(row), rowShown: shown(row), controls,
         toggle: rect(document.getElementById('term-grid-toggle')),
-        newShell: rect(document.getElementById('term-new-shell')),
         ctlToken: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ctl-h-sm')),
         expanded: document.getElementById('term-grid-toggle').getAttribute('aria-expanded'),
         firstPaneTop: panes.length ? Math.min(...panes.map(p => p.top)) : null,
@@ -114,19 +114,16 @@ describe('CMX-414 1440×900: the collapsed toolbar row matches the sidebar head'
         assert.ok(Math.abs(g.row.top - g.head.top) <= 1, `row starts at ${g.row.top}, head at ${g.head.top}`);
     });
 
-    test('the toggle and "+ New shell" render at one height: --ctl-h-sm', () => {
+    test('the toggle renders at --ctl-h-sm', () => {
         ready();
         assert.ok(g.ctlToken > 0, '--ctl-h-sm is not defined');
-        assert.ok(Math.abs(g.toggle.height - g.newShell.height) <= 0.5,
-            `toggle ${g.toggle.height}px vs "+ New shell" ${g.newShell.height}px`);
         assert.ok(Math.abs(g.toggle.height - g.ctlToken) <= 0.5, `toggle ${g.toggle.height}px ≠ --ctl-h-sm ${g.ctlToken}px`);
-        assert.ok(Math.abs(g.newShell.height - g.ctlToken) <= 0.5, `"+ New shell" ${g.newShell.height}px ≠ --ctl-h-sm ${g.ctlToken}px`);
     });
 
     test('controls → first pane is the Wall\'s own pane gap, and the first pane starts on the head\'s rule', () => {
         ready();
         assert.ok(g.paneGap !== null, 'the fixture wall has no vertically stacked panes to measure a gap from');
-        const gap = g.firstPaneTop - Math.max(g.toggle.bottom, g.newShell.bottom);
+        const gap = g.firstPaneTop - g.toggle.bottom;
         assert.ok(Math.abs(gap - g.paneGap) <= 1, `${gap}px from the controls to the first pane vs ${g.paneGap}px between panes`);
         assert.ok(Math.abs(g.firstPaneTop - g.head.bottom) <= 1,
             `the first pane starts at ${g.firstPaneTop}, the sidebar head ends at ${g.head.bottom}`);
@@ -163,14 +160,14 @@ describe('CMX-414 1440×900: ⭐ the EXPANDED toolbar still shows every control,
     });
     after(() => context && context.close());
 
-    test('expanded: toggle, 6 presets, lock, auto, focus and "+ New shell" all on screen', () => {
+    test('expanded: toggle, 6 presets, lock, auto, and focus all on screen', () => {
         ready();
         assert.equal(open.expanded, 'true');
         const ids = open.controls.map(c => c.id);
-        for (const id of ['term-grid-toggle', 'term-lock-btn', 'term-auto-btn', 'term-focus-btn', 'term-new-shell']) {
+        for (const id of ['term-grid-toggle', 'term-lock-btn', 'term-auto-btn', 'term-focus-btn']) {
             assert.ok(ids.includes(id), `${id} is not shown expanded (shown: ${ids.join(', ')})`);
         }
-        assert.ok(open.controls.length >= 11, `only ${open.controls.length} controls are shown expanded`);
+        assert.ok(open.controls.length >= 10, `only ${open.controls.length} controls are shown expanded`);
     });
 
     test('no expanded control is clipped: inside the row, inside the viewport, and hit-testable', () => {
@@ -213,3 +210,32 @@ describe('CMX-414 390×844: the phone layout is unchanged', { skip: why }, () =>
             `pills at ${g.switcherTop}px, expected ${g.canvasPadTop + 12}px`);
     });
 });
+
+// CMX-135: with the row's "+ New shell" gone, the New menu is the one entry point.
+for (const [width, height, opener] of [[1440, 900, '.sidebar-new-btn'], [725, 900, '#btn-new-mobile'], [390, 844, '#btn-new-mobile']]) {
+    describe(`CMX-135 ${width}×${height}: New menu → Shell window spawns a shell`, { skip: why }, () => {
+        let context, post, dialogs = [];
+        const ready = setup(async () => {
+            let page;
+            // A real spawn answers {ok: true}; the fixture's default {} would make
+            // newShellWindow alert(), and that dialog outliving the context is an
+            // unhandled rejection that fails the whole file.
+            ({ context, page } = await openWall({ width, height }, {}, { '/api/agents/spawn': { ok: true } }));
+            page.on('dialog', d => { dialogs.push(d.message()); d.dismiss().catch(() => {}); });
+            const req = page.waitForRequest(r => r.method() === 'POST' && new URL(r.url()).pathname === '/api/agents/spawn', { timeout: 15000 });
+            const res = page.waitForResponse(r => new URL(r.url()).pathname === '/api/agents/spawn', { timeout: 15000 });
+            await page.click(opener);
+            await page.click('#new-shell-item');
+            post = await req;
+            await res;
+            await stable(page);
+        });
+        after(() => context && context.close());
+
+        test(`clicking ${opener} then "Shell window" POSTs /api/agents/spawn`, () => {
+            ready();
+            assert.ok(post, 'no spawn request was sent');
+            assert.deepEqual(dialogs, [], `the spawn raised a dialog: ${dialogs.join(' | ')}`);
+        });
+    });
+}
