@@ -2409,6 +2409,7 @@ def _task_finished_sweep(task_id: str, notes: list[str]) -> list[dict]:
         print(f"⚖️ sweep CANNOT VERIFY — {result['cannot_verify']}")
         print("   task-finished refuses until this resolves.")
         sys.exit(1)
+    _print_sweep_full_suite(result)
     skipped = _print_sweep_skipped(result)
     if skipped:
         print(f"⚠ {skipped} mutation(s) SKIPPED — those lines were never measured; a skip is "
@@ -2760,6 +2761,7 @@ def cmd_judge_sweep(args) -> None:
         print(f"⚠ {result['recovered']}")
     for note in result["notes"]:
         print(f"  {note}")
+    _print_sweep_full_suite(result)
     skipped = _print_sweep_skipped(result)
     unrun = _print_sweep_unrun(result)
     for r in result["survivors"]:
@@ -2789,6 +2791,16 @@ def cmd_judge_sweep(args) -> None:
     # The same verdict → exit code as --json, so the two output modes cannot drift.
     if sweep.EXIT_CODES[verdict]:
         sys.exit(sweep.EXIT_CODES[verdict])
+
+
+def _print_sweep_full_suite(result: dict) -> None:
+    """⚡ CMX-145: name every mutation that ran the FULL suite instead of its selected tests,
+    and why — a selection fallback costs budget, so it is said out loud, never silent."""
+    rows = result.get("full_suite") or []
+    for r in rows:
+        print(f"  [FULL    ] {r['key']} — ran the full suite: {r['full_suite']}")
+    if rows and result.get("selection"):
+        print(f"  selection: {result['selection']}")
 
 
 def _print_sweep_unrun(result: dict) -> int:

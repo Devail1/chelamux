@@ -2165,7 +2165,8 @@ def test_apply_and_measure_hands_the_judge_the_exact_experiment(tmp_path, monkey
         seen["args"] = args
         import types
 
-        return types.SimpleNamespace(verdict="SURVIVED", reason="why", measured_by="312 tests")
+        return types.SimpleNamespace(verdict="SURVIVED", reason="why", measured_by="312 tests",
+                                     selected=312, selection="sel")
 
     monkeypatch.setattr(sweep.judge, "_measure", fake_measure)
     res = sweep._apply_and_measure(root, TEST_CMD, mut, mut.before, mut.after, "BASE", 7, "SEL")
@@ -2175,6 +2176,7 @@ def test_apply_and_measure_hands_the_judge_the_exact_experiment(tmp_path, monkey
     assert (exp.guard, exp.file, exp.before, exp.after) == (
         mut.describe(), "feat.py", mut.before, mut.after)
     assert (res.status, res.reason, res.measured_by) == ("SURVIVED", "why", "312 tests")
+    assert res.full_suite == ""     # a selected run is no fallback
     (root / "feat.py").write_text(BRANCH_FEAT)
 
 

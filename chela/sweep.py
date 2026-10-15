@@ -132,12 +132,15 @@ class SweepResult:
     status: str
     reason: str = ""
     measured_by: str = ""
+    # ⚡ CMX-145: why this mutation ran the FULL suite instead of its selected tests ("" when
+    # it ran a selection) — a fallback is said out loud, never silent.
+    full_suite: str = ""
 
     def as_dict(self) -> dict:
         m = self.mutation
         return {"file": m.file, "line": m.line, "key": m.key, "kind": m.kind,
                 "mutation": m.describe(), "status": self.status, "reason": self.reason,
-                "measured_by": self.measured_by}
+                "measured_by": self.measured_by, "full_suite": self.full_suite}
 
 
 @dataclass(frozen=True)
@@ -215,6 +218,7 @@ class SweepReport:
             "budget": self.budget.as_dict(), "exhausted": self.exhausted,
             "cannot_verify": self.cannot_verify, "recovered": self.recovered,
             "notes": list(self.notes), "selection": self.selection,
+            "full_suite": [r.as_dict() for r in self.results if r.full_suite],
             "seconds": round(self.seconds, 1),
             "unsupported": list(self.unsupported), "base": self.base, "test_cmd": self.test_cmd,
         }
@@ -964,7 +968,10 @@ def _apply_and_measure(worktree: Path, test_cmd: str, mut: Mutation, before: str
     exp = judge.Experiment(guard=mut.describe(), file=mut.file, before=before, after=after)
     outcome = judge._measure(worktree, test_cmd, exp, reason, parses, detail, baseline,
                              timeout, selector)
-    return SweepResult(mut, outcome.verdict, outcome.reason, outcome.measured_by)
+    fallback = ""
+    if outcome.selected is None:
+        fallback = outcome.selection or "no per-mutation selection for this sweep"
+    return SweepResult(mut, outcome.verdict, outcome.reason, outcome.measured_by, fallback)
 
 
 # --- `--sweep-equivalent` ---------------------------------------------------------------------
