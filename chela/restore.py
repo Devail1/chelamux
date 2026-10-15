@@ -103,11 +103,15 @@ shape gets a retire path here but must not be read as license to bulk-delete a r
 """
 from __future__ import annotations
 
+import json
+import logging
+import os
 import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
-from chela import dispatcher, epoch, inbox, resume_state, roster, sessionids, sessions, spawn as spawn_mod
+from chela import config, dispatcher, epoch, inbox, resume_state, roster, sessionids, sessions, spawn as spawn_mod
 
 
 @dataclass(frozen=True)
@@ -453,6 +457,24 @@ def _task_in_flight(wid: str, runs: list[dict]) -> str | None:
     return None
 
 
+def live_worktree_owner(cwd: str | None, runs: list[dict] | None) -> str | None:
+    """The ``task_id`` of a run that is not over whose ``worktree_path`` is (or contains)
+    ``cwd``. CMX-125: a re-spawned run's OLD session no longer joins its row by (wid, epoch),
+    but the worktree does not move — while the run is not over, only the run gets a window in it.
+    """
+    if not cwd:
+        return None
+    target = os.path.normpath(cwd)
+    for row in runs or []:
+        wt = row.get("worktree_path")
+        if not wt or dispatcher.run_is_terminal(row):
+            continue
+        wt = os.path.normpath(wt)
+        if target == wt or target.startswith(wt + os.sep):
+            return row.get("task_id") or "?"
+    return None
+
+
 def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
            spawn_window=None,
            register_orchestrator=None,
@@ -591,6 +613,12 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
                 v, SKIPPED, f"task {task_id} is still ACTIVE in the dispatcher — refusing "
                             "to relaunch out from under it")
             continue
+        owner = live_worktree_owner(v.cwd, runs)
+        if owner:
+            resumed_by_id[id(v)] = ApplyResult(
+                v, SKIPPED, f"its worktree belongs to run {owner}, still in flight — the "
+                            "dispatcher gives that run its one window")
+            continue
 
         blocked = resume_blocked(v.session_id)
         if blocked:
@@ -665,3 +693,57 @@ def retire_empty(verdicts: list[Verdict], **apply_kwargs) -> list[ApplyResult]:
     target_ids = {id(v) for v in targets}
     results = iter(apply(targets, **apply_kwargs))
     return [next(results) if id(v) in target_ids else ApplyResult(v, KEPT) for v in verdicts]
+
+
+# --- the boot pass: run the restore once per NEW tmux epoch (CMX-125) --------------------
+
+log = logging.getLogger(__name__)
+
+
+def boot_marker_path() -> Path:
+    return config.CHELA_DIR / "restore-boot.json"
+
+
+def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Path,
+              resume_fn=None, notify=None) -> dict | None:
+    """CMX-125: run the restore pass at most ONCE per tmux epoch (called every daemon tick).
+
+    ``marker`` holds the last epoch seen. Unknown epoch → nothing (a boot can reach the daemon
+    before tmux). No marker → baseline only, never a relaunch. A NEW epoch → marker written
+    FIRST (once, even if a launch crashes), then the MANUAL rows the ENDED epoch stamped
+    (``gather()`` → ``(verdicts, runs)``) go through :func:`resume` if ``resume_enabled``, else
+    are only reported; one inbox notice says what came back and what did not.
+    """
+    if not now_epoch:
+        return None
+    try:
+        previous = json.loads(marker.read_text()).get("epoch")
+    except (OSError, ValueError, AttributeError):
+        previous = None
+    if previous == now_epoch:
+        return None
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"epoch": now_epoch}))
+    if previous is None:
+        log.info("restore boot pass: baseline tmux epoch %s recorded", now_epoch)
+        return None
+    verdicts, runs = gather()
+    rows = [v for v in verdicts if v.stamped_epoch == previous and v.verdict == "MANUAL"]
+    if resume_enabled:
+        results = (resume_fn or resume)(rows, runs)
+    else:
+        results = [ApplyResult(v, SKIPPED, "CHELA_RESTORE_RESUME is off — report only")
+                   for v in rows]
+    back = [f"{r.verdict.label or r.verdict.wid} ({r.detail})" for r in results
+            if r.action == RESUMED]
+    left = [f"{r.verdict.label or r.verdict.wid}: {r.detail or r.action}" for r in results
+            if r.action != RESUMED]
+    log.info("restore boot pass: tmux epoch %s -> %s, %d resumed, %d not",
+             previous, now_epoch, len(back), len(left))
+    if back or left:
+        (notify or inbox.enqueue)(
+            "restore_boot",
+            f"tmux restarted — came back: {', '.join(back) or 'none'}; "
+            f"not resumed: {'; '.join(left) or 'none'}",
+            {"previous": previous, "epoch": now_epoch, "resumed": back, "not_resumed": left})
+    return {"previous": previous, "epoch": now_epoch, "resumed": back, "not_resumed": left}
