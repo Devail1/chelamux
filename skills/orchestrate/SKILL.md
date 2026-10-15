@@ -23,7 +23,7 @@ ids don't. Address siblings by `@N`, and re-derive them from `chela status` afte
 | `chela read <wid> --tail N` / `--query Q` / `--all` | **Distilled** transcript. Escalate to this only when `peek` isn't enough. |
 | `chela spawn <cwd> [--command CMD]` / `chela close @N` | Open an agent window (default `$CHELA_AGENT_CMD`, i.e. `claude`; prints `@N`) / kill one. `close` refuses the orchestrator's window and a dispatched run's window — never raw `tmux kill-window`. |
 | `chela msg <wid> "…"` / `chela drive <wid> "…"` | Message a sibling. `drive --wait done` blocks until it finishes. |
-| `chela watch <wid> --note "…"` / `chela watching` | Wake me when that window finishes/blocks; show the inbox and its address. |
+| `chela watch <wid> --note "…"` / `chela watching` | Wake the orchestrator when that window finishes/blocks (run it right after you dispatch); show the inbox and its address. Claims the orchestrator role only if no live session holds it — from a side session the watch is routed to the live holder; `--take-over` takes the role explicitly. |
 | `chela dispatch-runs --awaiting` | Every run parked in the review loop. |
 | `chela wait <task-id> --until done` | Block until a dispatched task reaches a state you must act on. |
 | `chela judge show <run>` | Rounds-to-clean and survival rates for a run's judge rounds. |
@@ -167,7 +167,8 @@ release can pass tests and still break a deploy job.
 
 - **`@N` does not survive a tmux restart.** The fleet comes back renumbered. If
   `chela status` shows nothing you recognise, re-derive every wid; `chela watching` says
-  whether the inbox's address is still real, and `chela watch` re-registers you.
+  whether the inbox's address is still real, and `chela watch` re-registers you (it claims a
+  dead or stale-epoch pin; a LIVE holder is only displaced with `--take-over`).
 - **The inbox does not echo you.** Your own `reopen`/`retry`/`close`/`merge`/`dispatch
   --resume` produce no notice; the same act by a human does. "Awaiting review" is silent
   (the judge verdict is the notice); you hear instead when no judge has started after 20m,

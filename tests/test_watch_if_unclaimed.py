@@ -40,13 +40,14 @@ main.main()
 
 
 def _run(tmp_path: Path, argv: list[str], *, store: dict | None, statuses: dict,
-         caller: str = "@B") -> tuple[subprocess.CompletedProcess, dict]:
+         caller: str = "@B", windows: dict | None = None,
+         ) -> tuple[subprocess.CompletedProcess, dict]:
     chela_dir = tmp_path / "chela"
     chela_dir.mkdir(exist_ok=True)
     inbox_file = chela_dir / "inbox.json"
     if store is not None:
         inbox_file.write_text(json.dumps(store))
-    world = {"windows": {"@A": "orchestrator", "@B": "peer"}, "epoch": NOW,
+    world = {"windows": windows or {"@A": "orchestrator", "@B": "peer"}, "epoch": NOW,
              "statuses": statuses}
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -132,12 +133,16 @@ def test_empty_status_map_is_not_evidence_of_death(tmp_path):
     assert after["orchestrator"] == "@A"
 
 
-def test_plain_watch_still_takes_the_pin(tmp_path):
-    """Unchanged semantics: a bare `chela watch` from @B moves a live @A's pin."""
+def test_plain_watch_no_longer_takes_a_live_pin(tmp_path):
+    """CMX-138: a bare `chela watch` from @B refuses a live @A exactly as --if-unclaimed does,
+    plus the hint naming the explicit way to take it."""
     proc, after = _run(tmp_path, ["watch"], store=_pinned("@A"), statuses=BOTH_LIVE)
     assert proc.returncode == 0, proc.stderr
-    assert "registered @B as the orchestrator" in proc.stdout
-    assert after["orchestrator"] == "@B"
+    assert proc.stdout.splitlines() == [
+        "orchestrator is @A (live) — not claiming",
+        "  to take the orchestrator role from it, run `chela watch --take-over`",
+    ]
+    assert after["orchestrator"] == "@A"
 
 
 def test_if_unclaimed_refuses_a_window_argument(tmp_path):

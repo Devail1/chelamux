@@ -585,6 +585,14 @@ non-tmux session from failing the hook. Two sessions starting in the same instan
 reboot can both see a dead pin; the later registration wins, and neither ever displaces an
 orchestrator that was live when it checked.
 
+**The explicit form follows the same rule (CMX-138).** A bare `chela watch` run by hand from a
+session that is not the live orchestrator prints the same `not claiming` line plus a hint, and
+`chela watch @N` from such a side session only adds the watch — `@N`'s events go to the current
+orchestrator (`watching @N — events go to the orchestrator @M (live)`), and the pin does not
+move. Taking the role from a live holder is explicit: `chela watch [@N] --take-over` names the
+session it displaced, and the `orchestrator.moved` notice (reason `taken_over`) still fires.
+The recovery path — empty pin, dead window, new tmux epoch — claims exactly as before.
+
 ## Event types in the log
 
 A hook event is namespaced — `hook.pre_tool_use`, `hook.permission_request` — so *an agent
