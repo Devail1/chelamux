@@ -10,6 +10,7 @@ check is back to proving nothing about which build production serves.
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -195,3 +196,78 @@ def test_verify_step_gates_on_the_script():
 def test_script_changes_trigger_a_redeploy():
     wf = yaml.safe_load(WORKFLOW.read_text())
     assert "scripts/landing_verify.py" in wf[True]["push"]["paths"]
+
+
+# --- the verify step itself, executed: a match ends the loop GREEN, at once ----------------
+#
+# Source-matching the run block can't see control flow: `exit 0` → `true` after a match
+# leaves every asserted substring in place, the loop keeps going, and the step ends red on
+# a deploy that worked (CMX-149 judge round 1). So run the real block under bash, with
+# curl and sleep stubbed on PATH, and assert on its exit code and how many fetches it made.
+
+def _run_verify_step(tmp_path, served_by_attempt):
+    """Run the workflow's own verify block; attempt i is served ``served_by_attempt[i-1]``
+    (the last entry repeats). Returns (CompletedProcess, curl_calls, sleep_calls)."""
+    run = _verify_step()["run"]
+    assert run.count("/tmp/live.html") == 2  # the curl -o target and the script's argument
+    live = tmp_path / "live.html"
+    run = run.replace("/tmp/live.html", str(live))
+
+    work = tmp_path / "repo"
+    (work / "landing").mkdir(parents=True)
+    (work / "scripts").mkdir()
+    (work / "landing" / "index.html").write_text(SOURCE)
+    (work / "scripts" / "landing_verify.py").write_text(SCRIPT.read_text())
+
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    for n, body in enumerate(served_by_attempt, 1):
+        (pages / str(n)).write_text(body)
+
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "curl").write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo x >> "{tmp_path}/curl.calls"\n'
+        f'n=$(wc -l < "{tmp_path}/curl.calls")\n'
+        f'[ -f "{pages}/$n" ] || n={len(served_by_attempt)}\n'
+        'out=""; while [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done\n'
+        f'cp "{pages}/$n" "$out"\n'
+    )
+    (bin_ / "sleep").write_text(f'#!/usr/bin/env bash\necho x >> "{tmp_path}/sleep.calls"\n')
+    for f in bin_.iterdir():
+        f.chmod(0o755)
+
+    script = tmp_path / "step.sh"
+    script.write_text(run)
+    env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", "GITHUB_SHA": "deadbeef"}
+    r = subprocess.run(["bash", str(script)], cwd=work, env=env,
+                       capture_output=True, text=True, timeout=60)
+
+    def calls(name):
+        p = tmp_path / f"{name}.calls"
+        return len(p.read_text().splitlines()) if p.exists() else 0
+
+    return r, calls("curl"), calls("sleep")
+
+
+def test_verify_step_exits_green_on_the_first_match(tmp_path):
+    r, curls, sleeps = _run_verify_step(tmp_path, [_served(SOURCE)])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "✅" in r.stdout
+    assert (curls, sleeps) == (1, 0)  # a match ENDS the loop — no further fetch, no wait
+
+
+def test_verify_step_exits_green_once_production_catches_up(tmp_path):
+    stale = SOURCE.replace("Mission control", "Old mission control")
+    r, curls, sleeps = _run_verify_step(tmp_path, [_served(stale), _served(stale), _served(SOURCE)])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (curls, sleeps) == (3, 2)
+
+
+def test_verify_step_exits_red_when_production_never_matches(tmp_path):
+    changed = SOURCE.replace("Mission control", "Mission controls")
+    r, curls, sleeps = _run_verify_step(tmp_path, [_served(changed)])
+    assert r.returncode == 1
+    assert "::error::" in r.stdout and "✅" not in r.stdout
+    assert (curls, sleeps) == (10, 10)
