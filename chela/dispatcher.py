@@ -2845,9 +2845,11 @@ def verify_sweep(task_id: str) -> dict:
     return sweep.run_sweep(row["worktree_path"], workflow_path=row["workflow_path"])
 
 
-def check_hand_in_size(task_id: str, oversize_reason: str | None = None) -> dict:
+def check_hand_in_size(task_id: str, oversize_reason: str | None = None,
+                       plan_path: str | None = None) -> dict:
     """📏 CMX-126: the hand-in size gate — run BEFORE the sweep, so an oversized diff is
-    refused in seconds, not hours. ``{"ok", "record"}``; record is None under the limit."""
+    refused in seconds, not hours. ``{"ok", "record"}``; record is None under the limit. With a
+    split plan the branch must ALREADY be under it, the rest parked on ``<task>-rest``."""
     with _db() as conn:
         row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
     if row is None or not row["worktree_path"] or not row["workflow_path"]:
@@ -2859,6 +2861,20 @@ def check_hand_in_size(task_id: str, oversize_reason: str | None = None) -> dict
                                  wf.get("workspace", "base_branch", default="master"), exclude)
     except Exception as e:
         return {"ok": False, "error": f"could not measure this branch's size — {e}"}
+    if plan_path:
+        branch = sizegate.rest_branch(task_id)
+        slices, err = sizegate.load_plan(plan_path)
+        if err:
+            return {"ok": False, "error": err}
+        if lines > limit:
+            return {"ok": False, "error": f"after the split this branch still changes {lines} "
+                                          f"lines (limit {limit}) — move more to `{branch}`"}
+        if not _git_ok(_git(Path(row["worktree_path"]), "rev-parse", "--verify", "--quiet",
+                            f"refs/heads/{branch}")):
+            return {"ok": False, "error": f"the rest of the split must be parked on branch "
+                                          f"`{branch}`, and there is no such branch"}
+        return {"ok": True, "slices": slices,
+                "record": {"lines": lines, "limit": limit, "rest_branch": branch}}
     if lines <= limit:
         return {"ok": True, "record": None}
     if (oversize_reason or "").strip():
@@ -2866,7 +2882,27 @@ def check_hand_in_size(task_id: str, oversize_reason: str | None = None) -> dict
                                        "oversize_reason": oversize_reason.strip()[:HANDOFF_MAX_CHARS]}}
     return {"ok": False, "error": (
         f"this branch changes {lines} lines (limit {limit}; docs/media excluded). Split it "
-        "into ≤-limit PRs; only if it truly cannot be split, pass --oversize-reason '<why>'.")}
+        "into ≤-limit PRs (--split-plan); only if it truly cannot be split, pass --oversize-reason '<why>'.")}
+
+
+def file_split(task_id: str, record: dict, slices: list[dict]) -> dict:
+    """📏 CMX-126: file a split's remaining slices as sub-issues of ``task_id`` — chela holds
+    the tracker credentials, the agent never does. A failed write REFUSES the hand-in; a rework
+    round reuses the sub-issues already on the run instead of filing them twice."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    try:
+        prior = json.loads(row["size_gate"] or "{}")
+    except (TypeError, ValueError):
+        prior = {}
+    if isinstance(prior, dict) and prior.get("sub_issues"):
+        return {"ok": True, "record": {**record, "sub_issues": prior["sub_issues"]}}
+    try:
+        source = get_source(load_workflow(row["workflow_path"]))
+        ids = sizegate.file_sub_issues(source, task_id, slices, record["rest_branch"])
+    except Exception as e:
+        return {"ok": False, "error": f"the tracker write failed — {e}"}
+    return {"ok": True, "record": {**record, "sub_issues": ids}}
 
 
 def _is_guard_path(path: str) -> bool:
@@ -3063,6 +3099,10 @@ def mark_awaiting_review(
             if not ok:
                 log.warning("Task %s: size-gate note not added to the PR body — %s",
                             task_id, detail)
+        if (size_gate or {}).get("sub_issues"):
+            from chela import inbox
+            inbox.enqueue("split_filed", f"{task_id} was split: {note}",
+                          {"task_id": task_id, **size_gate})
         if sweep_equivalents and effective_pr_url:
             ok, detail = _append_pr_body(effective_pr_url, repo_dir,
                                          sweep.render_equivalents(sweep_equivalents))
