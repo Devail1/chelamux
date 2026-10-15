@@ -5701,12 +5701,20 @@ def tick(workflow_path: str | Path) -> dict:
                     _rework_failed(conn, row, "rework agent's tmux window disappeared")
                     continue
                 attempt = row["attempt"]
+                # CMX-125: a window stamped by a tmux server that is no longer running died
+                # with that server (a reboot, an OOM) — not the agent's failure, so the
+                # retry reuses this attempt number instead of spending one.
+                rebooted = epoch.is_dangling(row["window_epoch"], epoch.current())
                 conn.execute(
-                    "UPDATE runs SET status='failed', ended_at=?, last_error=? WHERE task_id=?",
-                    (_now(), "tmux window disappeared", row["task_id"]),
+                    "UPDATE runs SET status='failed', ended_at=?, last_error=?, attempt=? "
+                    "WHERE task_id=?",
+                    (_now(), "tmux server restarted (attempt not counted)" if rebooted
+                     else "tmux window disappeared",
+                     attempt - 1 if rebooted else attempt, row["task_id"]),
                 )
                 summary["reconciled_failed"] += 1
-                log.warning("Task %s failed (window gone, attempt %d)", row["task_id"], attempt)
+                log.warning("Task %s failed (window gone, attempt %d%s)", row["task_id"], attempt,
+                            ", tmux restarted — not counted" if rebooted else "")
                 continue
 
             # Watchdog: a running row whose window is alive but stuck — either the

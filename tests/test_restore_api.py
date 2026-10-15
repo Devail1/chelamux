@@ -803,3 +803,29 @@ def test_dismissing_a_dispatcher_row_never_touches_session_ids_or_bindings(clien
 
     assert _dismiss(client, f"row:session-ids|@329|{OLD}").status_code == 200
     assert touched == []
+
+
+
+# CMX-125: a session in a live run's worktree is never offered — the run keeps its ONE window.
+WT = "/home/liav/.chela/worktrees/chelamux/CMX-95"
+_LIVE = {"task_id": "CMX-95", "status": "running", "worktree_path": WT, "attempt": 3,
+         "window_id": "@1", "window_epoch": "9001-1784099999"}
+
+
+@pytest.mark.parametrize("run,buckets", [
+    (_LIVE, (0, 1)), ({**_LIVE, "status": "done", "pr_state": "merged"}, (1, 0))])
+def test_a_session_in_a_live_runs_worktree_is_not_offered(client, monkeypatch, run, buckets):
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual(wid="@7", cwd=WT)])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [run])
+    data = client.get("/api/restore").get_json()
+    assert (len(data["rows"]), len(data["dispatcher_rows"])) == buckets
+
+
+def test_resume_refuses_a_session_in_a_live_runs_worktree(client, monkeypatch):
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual(wid="@7", cwd=WT)])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [_LIVE])
+    spawned = []
+    monkeypatch.setattr(dash.spawn, "spawn_window", lambda *a, **k: spawned.append(1))
+    resp = _resume(client, store="session-ids", wid="@7", session_id=SID_DEAD, stamped_epoch=OLD)
+    assert resp.status_code == 409 and spawned == []
+    assert "run CMX-95 is still in flight" in resp.get_json()["error"]

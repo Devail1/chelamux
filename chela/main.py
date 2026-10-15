@@ -192,6 +192,16 @@ def maintenance_tick(last_capture: float, now: float,
     return now
 
 
+def _restore_gather() -> tuple[list, list[dict]]:
+    """``(verdicts, runs)`` for :func:`chela.restore.boot_pass`, read as ``cmd_restore`` does."""
+    from chela.telegram.bindings import BindingRegistry
+
+    reg = BindingRegistry.load()
+    bindings = {wid: reg.epoch_for(wid) for wid in reg.windows()}
+    verdicts = restore.plan(inbox.load(), bindings, sessionids.entries(), epoch.current())
+    return verdicts, dispatcher.list_runs()
+
+
 def cmd_run(args) -> None:
     """Run the daemon loop: scheduler tick every pass, dispatcher on its own cadence."""
     log.info("chela daemon starting (session=%s, poll=%ds)",
@@ -301,6 +311,14 @@ def cmd_run(args) -> None:
                 overrides.sweep()
             except Exception:
                 log.exception("Override request sweep failed")
+
+            # CMX-125: a NEW tmux epoch (reboot, OOM) brings the human sessions back —
+            # once per epoch; every other tick this is one marker read and a no-op.
+            try:
+                restore.boot_pass(epoch.current(), resume_enabled=config.RESTORE_RESUME_ENABLED,
+                                  gather=_restore_gather, marker=restore.boot_marker_path())
+            except Exception:
+                log.exception("Restore boot pass failed")
 
             now = time.time()
             if stop.stopping:

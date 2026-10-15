@@ -2498,6 +2498,7 @@ def api_restore():
     """
     _require_terminals()
     owned = _dispatcher_owned_wid_epochs()
+    runs = dispatcher.list_runs()
     terminal_wid_epochs, terminal_cwds = _terminal_run_claims()
     # CMX-75: a session the sidebar archived (closed) is offered by its Archived section's
     # Unarchive, never a second time here.
@@ -2511,7 +2512,9 @@ def api_restore():
         if not cwd_live and ((v.wid, v.stamped_epoch) in terminal_wid_epochs
                              or os.path.normpath(v.cwd) in terminal_cwds):
             continue
-        resumable = (v.wid, v.stamped_epoch) not in owned and cwd_live
+        # CMX-125: a worktree its run still owns gets that run's ONE window, never a 2nd.
+        resumable = ((v.wid, v.stamped_epoch) not in owned and cwd_live
+                     and restore.live_worktree_owner(v.cwd, runs) is None)
         if _dismiss_key(v, resumable=resumable) in dismissed:
             continue
         (rows if resumable else dispatcher_rows).append(_shape_restore_row(v, resumable=resumable))
@@ -2603,6 +2606,13 @@ def api_restore_resume():
         return jsonify({"ok": False,
                         "error": "this session's working directory no longer exists — "
                                  "nowhere to resume it into"}), 409
+
+    owner = restore.live_worktree_owner(verdict.cwd, dispatcher.list_runs())
+    if owner:
+        return jsonify({"ok": False,
+                        "error": f"run {owner} is still in flight in this worktree and has "
+                                 "its own window — a second session here would be two "
+                                 "writers in one tree"}), 409
 
     result = spawn.spawn_window(verdict.cwd, command=f"claude --resume {verdict.session_id}")
     if not result.ok:
