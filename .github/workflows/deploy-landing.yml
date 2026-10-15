@@ -17,6 +17,7 @@ on:
     paths:
       - 'landing/**'
       - '.github/workflows/deploy-landing.yml'
+      - 'scripts/landing_verify.py'
   workflow_dispatch:        # manual re-deploy, e.g. to re-publish an unchanged tree
 
 # Least privilege: the job reads the repo and talks to Cloudflare. Nothing else.
@@ -71,17 +72,19 @@ jobs:
             # makes this guard fail on every successful deploy: a permanent false
             # alarm reporting a broken deploy that worked fine.
             curl -fsSL "https://chela.pages.dev/?cb=${GITHUB_SHA}${i}" -o /tmp/live.html
-            # Compare normalised tokens, never bytes: Pages rewrites whitespace, so
-            # the served HTML is never byte-identical to the file in the repo.
-            if diff -q \
-                 <(tr -s ' \n' '\n\n' < landing/index.html) \
-                 <(tr -s ' \n' '\n\n' < /tmp/live.html) >/dev/null; then
+            # Compare normalised tokens, never bytes: Pages rewrites whitespace, and
+            # Cloudflare Web Analytics injects its beacon <script> into the served
+            # HTML (since 2026-10-15), so the page is never byte-identical to the
+            # file in the repo. The script strips ONLY that beacon element; any other
+            # difference, down to one character of body text, is still a mismatch.
+            if python3 scripts/landing_verify.py landing/index.html /tmp/live.html; then
               echo "✅ chela.pages.dev matches landing/index.html at ${GITHUB_SHA}"
               exit 0
             fi
             echo "attempt $i: production does not match yet, retrying…"
             sleep 15
           done
-          echo "::error::Deploy reported success but chela.pages.dev never matched landing/index.html."
-          echo "Most likely a PREVIEW deployment (wrong --branch) rather than production."
+          echo "::error::Deploy reported success but chela.pages.dev never matched landing/index.html (first difference printed above)."
+          echo "If the difference is the old page, most likely a PREVIEW deployment (wrong --branch) rather than production."
+          echo "If it is something the edge injected, scripts/landing_verify.py needs to learn to strip it."
           exit 1
