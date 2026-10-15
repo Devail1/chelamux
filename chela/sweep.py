@@ -159,15 +159,17 @@ def _positive(value: object, cast):
     return n if n > 0 else None
 
 
-def resolve_budget(wf=None, *, seconds: object = None, max_mutations: object = None) -> SweepBudget:
+def resolve_budget(wf=None, *, seconds: object = None, max_mutations: object = None,
+                   keys=("sweep_budget_seconds", "sweep_max_mutations"),  # CMX-141: or self-check's
+                   defaults=(DEFAULT_BUDGET_SECONDS, DEFAULT_MAX_MUTATIONS)) -> SweepBudget:
     """Explicit argument > the workflow's ``judge.sweep_budget_seconds`` /
     ``judge.sweep_max_mutations`` > :data:`DEFAULT_BUDGET_SECONDS` /
     :data:`DEFAULT_MAX_MUTATIONS`, each field on its own. A budget of 0 (or unset, or not a
     positive number) is NOT "unbounded" — it falls through to the default."""
-    wf_seconds = wf.get("judge", "sweep_budget_seconds", default=None) if wf is not None else None
-    wf_max = wf.get("judge", "sweep_max_mutations", default=None) if wf is not None else None
-    s = _positive(seconds, float) or _positive(wf_seconds, float) or DEFAULT_BUDGET_SECONDS
-    m = _positive(max_mutations, int) or _positive(wf_max, int) or DEFAULT_MAX_MUTATIONS
+    wf_seconds = wf.get("judge", keys[0], default=None) if wf is not None else None
+    wf_max = wf.get("judge", keys[1], default=None) if wf is not None else None
+    s = _positive(seconds, float) or _positive(wf_seconds, float) or defaults[0]
+    m = _positive(max_mutations, int) or _positive(wf_max, int) or defaults[1]
     return SweepBudget(seconds=float(s), max_mutations=int(m))
 
 

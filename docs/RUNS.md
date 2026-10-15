@@ -18,7 +18,11 @@ gate is in [TRUST_AND_APPROVAL_POSTURE.md](TRUST_AND_APPROVAL_POSTURE.md).
 4. **`chela task-finished <task>`** asks the daemon to mark the run `awaiting_review` and
    close the agent's window. With `--self-check-experiments <file>` it first re-runs the
    agent's own guard corruptions and refuses if one survives; `--no-new-guards` is the
-   opt-out for a run that added no guard. With neither, it warns. It then runs
+   opt-out for a run that added no guard. With neither, it warns. That re-run is budgeted
+   (`judge.self_check_budget_seconds`, default 900; `judge.self_check_max_experiments`,
+   default 12): experiments it did not reach are listed `[UNRUN]` — CANNOT VERIFY, never
+   killed — and do not refuse the hand-in (the judge re-runs experiments anyway), but
+   `task-finished` names them and never reports the self-check as passed. It then runs
    `chela judge sweep` — a mechanical mutation of every conditional, comparison and return
    code the branch changed vs its base — and refuses while a mutation survives, unless the
    agent names it in `--sweep-equivalent '<file:line>: <why>'` (recorded in
