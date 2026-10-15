@@ -57,6 +57,12 @@ _PYPROJECT_NAME = re.compile(r'(?m)^name = "([^"]+)"$')
 _TASK_ID = re.compile(r"\bCMX-(\d+)\b", re.IGNORECASE)
 # The release's own steps, verified in its worktree before anything is committed.
 RELEASE_TESTS = ("tests/test_version.py", "tests/test_release_notes.py")
+# ⛔ CMX-144: the release worktree lives under the repository's git dir, NEVER under
+# CHELA_DIR — the suite's live-state fence (tests/conftest.py, CMX-59) fails every test
+# that reads a path under the real chela dir, so a worktree there refused every release.
+WORKTREE_DIR = "chela-releases"
+# The full output of the last failed release-tests run (chela state, not under test).
+FAILURE_LOG = "last-failure.log"
 # What the release commit may touch — anything else in the worktree is a dirty step.
 RELEASE_PATHS = ("CHANGELOG.md", "pyproject.toml", "uv.lock", "changelog.d")
 # `remote_dev_head` is called from every sweep (the daemon tick, the bridge's relay, the
@@ -106,13 +112,15 @@ def _uv_lock(cwd: Path) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(["uv", "lock"], 1, "", str(e))
 
 
-def _release_tests(cwd: Path) -> subprocess.CompletedProcess:
+def _release_tests(cwd: Path, *, python: tuple[str, ...] = (
+        "uv", "run", "--frozen", "--extra", "dev", "python")) -> subprocess.CompletedProcess:
     # `--extra dev`: pytest lives there — without it the release venv has no pytest and PATH
     # falls through to the CALLER's, which imports the caller's chela, not the release's.
     # `python -m pytest` pins the interpreter to the release worktree's own venv.
     # `-p no:cacheprovider`: a `.pytest_cache/` would make the worktree dirty.
-    cmd = ["uv", "run", "--frozen", "--extra", "dev", "python", "-m", "pytest", "-q",
-           "-p", "no:cacheprovider", *RELEASE_TESTS]
+    # `-rf --tb=short`: a refusal names each failed test and why (CMX-144).
+    cmd = [*python, "-m", "pytest", "-q", "-rf", "--tb=short", "-p", "no:cacheprovider",
+           *RELEASE_TESTS]
     try:
         return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=900,
                               env=_uv_env())
@@ -196,6 +204,30 @@ def _git_common_dir(repo: Path) -> Path | None:
     return Path(p.stdout.strip()) if p.returncode == 0 and p.stdout.strip() else None
 
 
+def worktree_path(git_dir: Path, tag: str) -> Path:
+    """Where :func:`prepare` builds a release: ``<git-common-dir>/chela-releases/<tag>-<hex>``
+    — outside ``CHELA_DIR``, whose live state the release tests may never read."""
+    return Path(git_dir) / WORKTREE_DIR / f"{tag}-{secrets.token_hex(3)}"
+
+
+def _tests_failed(p: subprocess.CompletedProcess) -> str:
+    """The refusal for a red release-tests run: the full output goes to
+    ``CHELA_DIR/releases/last-failure.log`` and the message names it, with pytest's
+    ``FAILED``/``ERROR`` summary lines — never a clipped tail."""
+    log_path = config.CHELA_DIR / "releases" / FAILURE_LOG
+    out = f"$ {' '.join(map(str, p.args or []))}\nexit {p.returncode}\n\n--- stdout ---\n" \
+          f"{p.stdout or ''}\n--- stderr ---\n{p.stderr or ''}"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(out, encoding="utf-8")
+        where = f"full output: {log_path}"
+    except OSError as e:
+        where = f"the full output could not be written to {log_path} ({e}): {_tail(p)}"
+    failed = [ln for ln in (p.stdout or "").splitlines() if ln.startswith(("FAILED ", "ERROR "))]
+    return (f"release tests failed (exit {p.returncode}) — {where}"
+            + "".join(f"\n  {ln}" for ln in failed))
+
+
 def cleanup(rec: dict, *, keep_tag: bool = False) -> None:
     """Remove the release's worktree and local branch — and its local tag unless it was
     pushed. Best effort, idempotent."""
@@ -262,7 +294,7 @@ def _steps(wt: Path, version: str, theme: str, body: str) -> str | dict:
 
     tests = _release_tests(wt)
     if tests.returncode != 0:
-        return f"release tests failed: {_tail(tests)}"
+        return _tests_failed(tests)
 
     add = _git(wt, "add", "-A", "--", *RELEASE_PATHS)
     if add.returncode != 0:
@@ -329,7 +361,7 @@ def prepare(version: str, theme: str, *, body: str = "", repo: str | Path | None
         return _refuse(f"local branch {branch} already exists (a previous release attempt?) "
                        f"— delete it first: git branch -D {branch}")
 
-    wt = config.CHELA_DIR / "releases" / f"{tag}-{secrets.token_hex(3)}"
+    wt = worktree_path(git_dir, tag)
     wt.parent.mkdir(parents=True, exist_ok=True)
     add = _git(git_dir, "worktree", "add", "--quiet", "-b", branch, str(wt), dev_sha)
     if add.returncode != 0:

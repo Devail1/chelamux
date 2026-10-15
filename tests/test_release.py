@@ -130,9 +130,14 @@ def _prepare(world, version="0.2.0", theme="a calmer release") -> dict:
     return release.prepare(version, theme, body="Longer notes.", repo=world.work)
 
 
-def _release_worktrees() -> list[Path]:
-    d = config.CHELA_DIR / "releases"
-    return list(d.iterdir()) if d.is_dir() else []
+def _release_worktrees(world) -> list[Path]:
+    """The release worktrees left behind — they live under the repo's git dir (CMX-144); a
+    directory under CHELA_DIR/releases is one in the WRONG place and is returned too."""
+    found = []
+    for d in (world.work / ".git" / "chela-releases", config.CHELA_DIR / "releases"):
+        found += [p for p in d.iterdir()
+                  if p.is_dir() and p.name != "last-failure.log"] if d.is_dir() else []
+    return found
 
 
 # --- the request ---------------------------------------------------------------------------
@@ -218,7 +223,7 @@ def test_approve_pushes_main_tag_dev_in_order_exactly_once(world, pushes, told):
     assert "pyproject.toml" in payload["changed"] and payload["services"] is None
     assert payload["deploy"].startswith("changed: ") and payload["deploy"] in summary
     # its worktree and local branch are gone; the pushed tag stays
-    assert _release_worktrees() == []
+    assert _release_worktrees(world) == []
     assert _local(world, "refs/heads/chela-release/v0.2.0") is None
     assert _local(world, "refs/tags/v0.2.0") is not None
 
@@ -280,7 +285,7 @@ def test_approve_after_dev_moved_pushes_nothing_expires_and_tells(world, pushes,
     assert _remote(world, "refs/tags/v0.2.0") is None
     assert overrides.load(out["request_id"])["state"] == overrides.EXPIRED
     assert [k for k, *_ in told] == ["release_expired"] and "nothing was pushed" in told[0][1]
-    assert _local(world, "refs/tags/v0.2.0") is None and _release_worktrees() == []
+    assert _local(world, "refs/tags/v0.2.0") is None and _release_worktrees(world) == []
 
 
 def test_the_sweep_expires_a_release_when_dev_moves(world, pushes, told):
@@ -315,7 +320,7 @@ def _assert_refused_and_clean(world, out, *, why: str):
     assert overrides.all_requests() == []
     assert _local(world, "refs/tags/v0.2.0") is None
     assert _local(world, "refs/heads/chela-release/v0.2.0") is None
-    assert _release_worktrees() == []
+    assert _release_worktrees(world) == []
 
 
 def test_red_release_tests_refuse_with_no_request(world, pushes, monkeypatch):
@@ -357,7 +362,7 @@ def test_a_step_that_leaves_a_stray_file_refuses_as_dirty(world, monkeypatch):
 def test_a_version_that_is_not_newer_refuses(world, version, why):
     out = release.prepare(version, "t", repo=world.work)
     assert out["ok"] is False and why in out["error"]
-    assert overrides.all_requests() == [] and _release_worktrees() == []
+    assert overrides.all_requests() == [] and _release_worktrees(world) == []
 
 
 def test_main_not_an_ancestor_of_dev_refuses(world):
@@ -368,7 +373,7 @@ def test_main_not_an_ancestor_of_dev_refuses(world):
     _g(other, "push", "-q", "origin", "main")
     out = _prepare(world)
     assert out["ok"] is False and "not an ancestor" in out["error"]
-    assert overrides.all_requests() == [] and _release_worktrees() == []
+    assert overrides.all_requests() == [] and _release_worktrees(world) == []
 
 
 def test_a_release_with_no_entries_refuses(world):
@@ -395,14 +400,14 @@ def test_deny_tells_the_orchestrator_release_denied_once(world, pushes, told):
 def test_deny_pushes_nothing_and_cleans_up_the_local_tag_and_branch(world, pushes):
     """🔴 GUARD: deny ⇒ nothing pushed; the local tag, branch and worktree are removed."""
     out = _prepare(world)
-    assert _local(world, "refs/tags/v0.2.0") and _release_worktrees()
+    assert _local(world, "refs/tags/v0.2.0") and _release_worktrees(world)
     res = overrides.decide(out["request_id"], False, "terminal:op")
     assert res["ok"] is True and res["state"] == overrides.DENIED
     assert pushes == []
     assert _remote(world, "refs/tags/v0.2.0") is None
     assert _local(world, "refs/tags/v0.2.0") is None
     assert _local(world, "refs/heads/chela-release/v0.2.0") is None
-    assert _release_worktrees() == []
+    assert _release_worktrees(world) == []
 
 
 @pytest.mark.parametrize("env", [{config.ACTOR_ENV: config.AUTO_ORCHESTRATOR_ACTOR},
@@ -590,7 +595,7 @@ def test_prepare_refuses_when_the_tag_already_exists_on_origin(world, pushes):
     assert _local(world, "refs/tags/v0.2.0") is None             # only origin has it
     out = _prepare(world)
     assert out["ok"] is False and "already exists on origin" in out["error"], out
-    assert overrides.all_requests() == [] and _release_worktrees() == [] and pushes == []
+    assert overrides.all_requests() == [] and _release_worktrees(world) == [] and pushes == []
     assert _local(world, "refs/heads/chela-release/v0.2.0") is None
     assert _remote(world, "refs/tags/v0.2.0^{commit}") == theirs
 
@@ -599,7 +604,7 @@ def test_prepare_refuses_when_origin_tags_cannot_be_read(world, monkeypatch):
     monkeypatch.setattr(release, "_remote_tag", lambda cwd, tag: None)
     out = _prepare(world)
     assert out["ok"] is False and "could not read origin's tags" in out["error"]
-    assert overrides.all_requests() == [] and _release_worktrees() == []
+    assert overrides.all_requests() == [] and _release_worktrees(world) == []
 
 
 def test_prepare_refuses_when_the_tag_exists_locally_and_keeps_it(world):
@@ -607,7 +612,7 @@ def test_prepare_refuses_when_the_tag_exists_locally_and_keeps_it(world):
     mine = _local(world, "refs/tags/v0.2.0^{commit}")
     out = _prepare(world)
     assert out["ok"] is False and "already exists locally" in out["error"]
-    assert overrides.all_requests() == [] and _release_worktrees() == []
+    assert overrides.all_requests() == [] and _release_worktrees(world) == []
     assert _local(world, "refs/tags/v0.2.0^{commit}") == mine
 
 
@@ -618,7 +623,7 @@ def test_prepare_refuses_when_the_release_branch_exists_and_keeps_it(world):
     out = _prepare(world)
     assert out["ok"] is False and "a previous release attempt" in out["error"], out
     assert "git branch -D chela-release/v0.2.0" in out["error"]
-    assert overrides.all_requests() == [] and _release_worktrees() == []
+    assert overrides.all_requests() == [] and _release_worktrees(world) == []
     assert _local(world, "refs/heads/chela-release/v0.2.0") == _remote(world, "main")
     assert _local(world, "refs/tags/v0.2.0") is None
 
@@ -627,7 +632,7 @@ def test_prepare_refuses_when_origin_cannot_be_fetched(world):
     _g(world.work, "remote", "set-url", "origin", str(world.tmp / "missing.git"))
     out = _prepare(world)
     assert out["ok"] is False and "fetch" in out["error"]
-    assert overrides.all_requests() == [] and _release_worktrees() == []
+    assert overrides.all_requests() == [] and _release_worktrees(world) == []
 
 
 # --- orchestrator-added guards (judge round 2 survivors) ----------------------------------
@@ -797,7 +802,7 @@ def test_a_failed_git_step_refuses_and_leaves_nothing(world, monkeypatch, step, 
     _fail_git(monkeypatch, *step)
     out = _prepare(world)
     assert out["ok"] is False and why in out["error"], out
-    assert overrides.all_requests() == [] and _release_worktrees() == []
+    assert overrides.all_requests() == [] and _release_worktrees(world) == []
     assert _local(world, "refs/tags/v0.2.0") is None
     assert _local(world, "refs/heads/chela-release/v0.2.0") is None
 
@@ -872,7 +877,7 @@ def test_an_unrecordable_request_refuses_and_leaves_nothing(world, monkeypatch):
     monkeypatch.setattr(release.overrides, "create", lambda meta, **k: None)
     out = _prepare(world)
     assert out["ok"] is False and "could not be recorded" in out["error"]
-    assert _release_worktrees() == []
+    assert _release_worktrees(world) == []
     assert _local(world, "refs/tags/v0.2.0") is None
     assert _local(world, "refs/heads/chela-release/v0.2.0") is None
 
@@ -990,7 +995,7 @@ def test_a_failed_approval_still_removes_the_release_worktree_and_branch(world, 
     hook.chmod(0o755)
     res = overrides.decide(out["request_id"], True, "terminal:op")
     assert res["state"] == overrides.FAILED
-    assert _release_worktrees() == []
+    assert _release_worktrees(world) == []
     assert _local(world, "refs/heads/chela-release/v0.2.0") is None
 
 
@@ -1078,11 +1083,11 @@ def test_a_pending_release_keeps_its_worktree_and_branch(world):
     rec = overrides.load(out["request_id"])
     assert rec["state"] == overrides.PENDING
     overrides._cleanup_release(rec)
-    assert len(_release_worktrees()) == 1
+    assert len(_release_worktrees(world)) == 1
     assert _local(world, "refs/heads/chela-release/v0.2.0") is not None
     # control: once final, the same call removes them
     overrides._cleanup_release({**rec, "state": overrides.EXPIRED})
-    assert _release_worktrees() == []
+    assert _release_worktrees(world) == []
 
 
 def test_a_release_expiry_event_names_the_release_label(world, pushes, told):
@@ -1288,7 +1293,7 @@ def test_merge_approve_cli_denies_a_release_and_pushes_nothing(world, pushes, ca
     assert "denied" in printed and out["request_id"] in printed
     assert "approved" not in printed and pushes == []
     assert overrides.load(out["request_id"])["state"] == overrides.DENIED
-    assert _release_worktrees() == []
+    assert _release_worktrees(world) == []
 
 
 def test_the_request_records_who_asked_and_what_it_is_bound_to(world):
@@ -1407,7 +1412,7 @@ def test_a_version_is_cleaned_to_the_same_release(world, given):
 def test_only_one_leading_lowercase_v_is_stripped(world, given):
     out = release.prepare(given, "t", repo=world.work)
     assert out["ok"] is False and "not a release version" in out["error"]
-    assert overrides.all_requests() == [] and _release_worktrees() == []
+    assert overrides.all_requests() == [] and _release_worktrees(world) == []
 
 
 def test_versions_compare_numerically_not_as_text():
@@ -1486,8 +1491,8 @@ def test_the_release_tests_command_leaves_no_pytest_cache(monkeypatch, tmp_path)
     assert seen["kw"]["env"] is not None and seen["kw"]["env"]["PATH"] == os.environ["PATH"]
     assert seen["kw"]["capture_output"] is True and seen["kw"]["text"] is True
     assert cmd[-2:] == ["tests/test_version.py", "tests/test_release_notes.py"]    # the literal set
-    assert cmd[7:] == ["pytest", "-q", "-p", "no:cacheprovider", "tests/test_version.py",
-                       "tests/test_release_notes.py"]
+    assert cmd[7:] == ["pytest", "-q", "-rf", "--tb=short", "-p", "no:cacheprovider",
+                       "tests/test_version.py", "tests/test_release_notes.py"]
 
     import sys
     clean = {"PATH": os.environ["PATH"], "HOME": str(tmp_path)}      # no ambient pytest/venv
@@ -1520,7 +1525,7 @@ def test_a_blank_body_leaves_a_subject_only_commit(world, body):
 
 def test_the_release_files_are_rewritten_exactly(world):
     """The pyproject changes ONLY its version line; the CHANGELOG section is dated today;
-    the worktree sits under CHELA_DIR/releases as `<tag>-<6 hex>` on `chela-release/<tag>`."""
+    the worktree sits under <git-common-dir>/chela-releases as `<tag>-<6 hex>` on `chela-release/<tag>`."""
     before = __import__("datetime").date.today().isoformat()
     out = _prepare(world)
     sha = out["release_sha"]
@@ -1531,7 +1536,7 @@ def test_the_release_files_are_rewritten_exactly(world):
     assert m and m.group(1) in {before, after}
     rec = overrides.load(out["request_id"])
     wt = Path(rec["worktree"])
-    assert wt.parent == config.CHELA_DIR / "releases"
+    assert wt.parent == world.work / ".git" / "chela-releases"
     assert re.fullmatch(r"v0\.2\.0-[0-9a-f]{6}", wt.name)
     assert rec["branch"] == "chela-release/v0.2.0"
     assert _g(wt, "rev-parse", "--abbrev-ref", "HEAD") == "chela-release/v0.2.0"
@@ -1550,7 +1555,7 @@ def test_a_refused_tag_push_keeps_the_local_tag_so_the_operator_can_push_it(worl
     assert _remote(world, "refs/tags/v0.2.0") is None
     assert _local(world, "refs/tags/v0.2.0^{commit}") == out["release_sha"]
     assert _local(world, "refs/heads/chela-release/v0.2.0") is None
-    assert _release_worktrees() == []
+    assert _release_worktrees(world) == []
 
 
 def test_a_refused_main_push_removes_the_unpushed_local_tag(world, pushes, told):
@@ -1778,7 +1783,7 @@ def test_an_expired_release_and_an_expired_override_each_log_and_tell_their_own(
                     ("override of CMX-9 expired: head moved\n\nNothing was merged.",
                      "chela: override expired")]
     assert [k for k, _s, _p in told] == ["release_expired", "override_expired"]
-    assert _release_worktrees() == []                       # the release's worktree went too
+    assert _release_worktrees(world) == []                       # the release's worktree went too
 
 
 def test_an_approved_override_is_merged_and_never_records_pushed_refs(monkeypatch):
@@ -1962,7 +1967,7 @@ def test_origin_main_unreadable_at_approval_fails_closed(world, pushes, told, mo
     _assert_origin_untouched(world, main0, dev0, pushes)
     assert [k for k, *_ in told] == ["release_failed"] and "nothing was pushed" in told[0][1]
     assert _local(world, "refs/tags/v0.2.0") is None
-    assert _local(world, "refs/heads/chela-release/v0.2.0") is None and _release_worktrees() == []
+    assert _local(world, "refs/heads/chela-release/v0.2.0") is None and _release_worktrees(world) == []
 
 
 def test_origin_dev_unreadable_at_approval_expires_and_pushes_nothing(world, pushes, told,
@@ -2309,7 +2314,7 @@ def test_a_release_completion_that_crashes_fails_the_request_and_cleans_up(
     rec = overrides.load(out["request_id"])
     assert rec["state"] == overrides.FAILED and rec["detail"] == res["detail"]
     assert pushes == [] and _remote(world, "refs/heads/dev") != rec["release_sha"]
-    assert _release_worktrees() == []
+    assert _release_worktrees(world) == []
     assert _local(world, "refs/tags/v0.2.0") is None
     assert [k for k, *_ in told] == ["release_failed"]
     assert any("override completion crashed" in r.getMessage() for r in caplog.records)
@@ -2462,7 +2467,7 @@ def test_an_oserror_subclass_from_release_notes_refuses_with_the_reason(world, m
     monkeypatch.setattr(release.release_notes, "promote_unreleased", boom)
     out = _prepare(world)
     assert out["ok"] is False and "release notes: CHANGELOG.md locked" in out["error"]
-    assert _release_worktrees() == [] and overrides.all_requests() == []
+    assert _release_worktrees(world) == [] and overrides.all_requests() == []
 
 
 def test_an_oserror_subclass_reading_uv_lock_refuses_with_the_reason(world, monkeypatch):
@@ -2473,7 +2478,7 @@ def test_an_oserror_subclass_reading_uv_lock_refuses_with_the_reason(world, monk
     monkeypatch.setattr(release, "_uv_lock", lock_becomes_dir)
     out = _prepare(world)
     assert out["ok"] is False and "uv.lock unreadable" in out["error"]
-    assert _release_worktrees() == [] and overrides.all_requests() == []
+    assert _release_worktrees(world) == [] and overrides.all_requests() == []
 
 
 # overridewatch.OverrideRelay.tick: each stage is best effort and independent ---------------
@@ -2823,3 +2828,75 @@ def test_task_id_regex_edges(text, found):
 ])
 def test_version_regex_edges(v, tup):
     assert release._version_tuple(v) == tup
+
+
+# --- CMX-144: the worktree lives OUTSIDE CHELA_DIR; a red test run is diagnosable -----------
+
+def test_the_release_worktree_is_never_under_chela_dir(world):
+    """🔴 GUARD: the worktree sits under the repo's git dir, not under CHELA_DIR (whose live
+    state the release tests' own fence refuses to read)."""
+    out = _prepare(world)
+    wt = Path(overrides.load(out["request_id"])["worktree"])
+    assert wt.is_dir() and wt.parent == world.work / ".git" / "chela-releases"
+    assert config.CHELA_DIR not in wt.parents
+    assert not (config.CHELA_DIR / "releases").exists() or \
+        not any(p.is_dir() for p in (config.CHELA_DIR / "releases").iterdir())
+
+
+def test_red_release_tests_write_the_full_output_to_a_named_log(world, monkeypatch):
+    """🔴 GUARD: a red run's FULL stdout+stderr lands in CHELA_DIR/releases/last-failure.log,
+    the refusal names that path and each FAILED line — nothing clipped — and nothing is left
+    behind."""
+    head = "HEAD-OF-THE-OUTPUT " + "x" * 2000
+    stdout = f"{head}\nFAILED tests/test_version.py::test_a - assert 1 == 2\n1 failed\n"
+    monkeypatch.setattr(release, "_release_tests", lambda wt: subprocess.CompletedProcess(
+        ["pytest", "-q"], 1, stdout, "STDERR-TEXT"))
+    out = _prepare(world)
+    log = config.CHELA_DIR / "releases" / "last-failure.log"
+    _assert_refused_and_clean(world, out, why="release tests failed (exit 1)")
+    assert f"full output: {log}" in out["error"]
+    assert "\n  FAILED tests/test_version.py::test_a - assert 1 == 2" in out["error"]
+    text = log.read_text()
+    assert text.startswith("$ pytest -q\nexit 1\n") and head in text
+    assert "STDERR-TEXT" in text and "1 failed" in text
+    assert "HEAD-OF-THE-OUTPUT" not in out["error"]
+
+
+def test_an_unwritable_failure_log_still_refuses_with_the_tail(world, monkeypatch):
+    """🔴 GUARD: the log cannot be written (an OSError SUBCLASS) ⇒ still a clean refusal that
+    says so and carries the output's tail."""
+    (config.CHELA_DIR / "releases" / "last-failure.log").mkdir(parents=True)
+    monkeypatch.setattr(release, "_release_tests", lambda wt: subprocess.CompletedProcess(
+        [], 1, "1 failed: THE-TAIL", ""))
+    out = _prepare(world)
+    _assert_refused_and_clean(world, out, why="the full output could not be written")
+    assert out["error"].endswith("1 failed: THE-TAIL")
+
+
+def test_the_release_tests_pass_under_the_live_state_fence_on_a_real_layout(
+        tmp_path, monkeypatch):
+    """🔴 REGRESSION (CMX-144): run the REAL release-tests step of THIS repository, in a
+    worktree at :func:`release.worktree_path`, with CHELA_DIR a scratch dir that CONTAINS the
+    old default location — so the nested suite's LiveStateEscape fence guards it as live.
+    Under the old `CHELA_DIR/releases/…` path every release refused this way."""
+    import sys
+    repo_root = Path(release.__file__).resolve().parents[1]
+    src = tmp_path / "src"
+    _g(tmp_path, "clone", "-q", "--shared", "--no-checkout", str(repo_root), str(src))
+    chela_dir = tmp_path / "chela"
+    (chela_dir / "releases").mkdir(parents=True)
+    monkeypatch.setenv("CHELA_DIR", str(chela_dir))
+    monkeypatch.setattr(config, "CHELA_DIR", chela_dir)
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-n 0")         # no nested xdist workers
+
+    def run(wt: Path) -> subprocess.CompletedProcess:
+        _g(src, "worktree", "add", "-q", "--detach", str(wt), "HEAD")
+        return _REAL_RELEASE_TESTS(wt, python=(sys.executable,))
+
+    wt = release.worktree_path(release._git_common_dir(src), "v9.9.9")
+    assert chela_dir not in wt.parents
+    p = run(wt)
+    assert p.returncode == 0, p.stdout[-3000:] + p.stderr[-2000:]
+    # Control: the same run at the OLD location trips the fence — so the pass above is real.
+    old = run(chela_dir / "releases" / "v9.9.9-000000")
+    assert old.returncode != 0 and "LiveStateEscape" in old.stdout + old.stderr
