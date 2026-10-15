@@ -202,20 +202,21 @@ def _start_and_wait_for_mutation(tmp_path: Path, root: Path) -> tuple[subprocess
     return proc, flag
 
 
-def test_a_killed_sweep_is_recovered_on_the_next_start(tmp_path):
+def test_a_sigkilled_sweep_is_restored_by_its_guardian_without_a_next_sweep(tmp_path):
+    """⛔ CMX-97: SIGKILL to the sweep's whole process group, mid-mutation. Nothing in the
+    sweep can run — the guardian (its own session) restores the file and drops the marker,
+    and the user's `git diff` is empty again WITHOUT anyone starting another sweep."""
     root = _repo(tmp_path / "r", COVERING_TEST)
     original = (root / "feat.py").read_bytes()
     proc, _ = _start_and_wait_for_mutation(tmp_path, root)
+    assert sweep.marker_path(root).exists()          # the kill lands while a mutation is live
     os.killpg(proc.pid, signal.SIGKILL)
     proc.wait(timeout=30)
-    # The kill really did land mid-mutation: the file is corrupted and the marker says so.
-    assert (root / "feat.py").read_bytes() != original
-    assert sweep.marker_path(root).exists()
-
-    report = _sweep(root)
-    assert "restored feat.py" in report.recovered
-    assert (root / "feat.py").read_bytes() == original
-    assert not sweep.marker_path(root).exists()
+    deadline = time.monotonic() + 30
+    while (root / "feat.py").read_bytes() != original or sweep.marker_path(root).exists():
+        assert time.monotonic() < deadline, "the guardian never restored the killed mutation"
+        time.sleep(0.1)
+    assert _git(root, "diff") == "" and _git(root, "status", "--porcelain") == ""
 
 
 def test_sigterm_restores_the_file_before_the_sweep_exits(tmp_path):
@@ -1145,17 +1146,17 @@ def test_the_marker_records_this_sweeps_own_pid(tmp_path):
     assert data == {"pid": os.getpid(), "file": "feat.py", "original": "a\n", "mutated": "b\n"}
 
 
-def test_sigterm_and_sighup_raise_during_a_sweep_and_the_old_handlers_come_back(tmp_path, monkeypatch):
-    before = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
+def test_sigterm_sighup_and_sigint_raise_during_a_sweep_and_the_old_handlers_come_back(tmp_path, monkeypatch):
+    before = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
     seen = {}
 
     def fake_sweep(*a, **kw):
-        seen.update({s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)})
+        seen.update({s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)})
         return sweep.SweepReport()
 
     monkeypatch.setattr(sweep, "_sweep", fake_sweep)
     sweep.sweep(tmp_path, "origin/dev", "true")
-    for s in (signal.SIGTERM, signal.SIGHUP):
+    for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         assert seen[s] is not before[s]
         with pytest.raises(sweep._Interrupted):
             seen[s](s, None)

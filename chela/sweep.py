@@ -26,8 +26,11 @@ survivor here is a survivor in exactly the judge's sense.
 it is written a RECOVERY MARKER (:data:`RECOVERY_MARKER`, inside the worktree) records the
 file's original bytes. A sweep killed mid-mutation — SIGKILL, a closed pane — leaves the
 marker behind, and the next sweep restores the file from it BEFORE doing anything else.
-SIGTERM/SIGHUP are turned into an exception while a sweep runs, so they take the ``finally``
-path instead of skipping it.
+SIGTERM/SIGHUP/SIGINT are turned into an exception while a sweep runs, so they take the
+``finally`` path instead of skipping it. ⛔ CMX-97: SIGKILL cannot be caught, so while
+mutations run a GUARDIAN process (its own session, so a process-group kill misses it) waits
+for the sweep to die and restores from the marker the moment it does — a killed run does not
+leave a mutation in the tree until "the next sweep".
 
 ⚖️ CMX-97 — STANDALONE: any git repo, no WORKFLOW.md/daemon/tmux/tracker; the suite is
 detected when none is named (:func:`detect_test_cmd`). A changed file in a language the
@@ -50,6 +53,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -683,8 +687,18 @@ def _pid_alive(pid: object) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
-    return True
+        return not _is_zombie(pid)
+    # A killed process its parent has not reaped yet still answers signal 0 — it is dead.
+    return not _is_zombie(pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+    fields = stat.rsplit(")", 1)[-1].split()
+    return bool(fields) and fields[0] == "Z"
 
 
 def recover(worktree: Path) -> tuple[str, str]:
@@ -722,7 +736,8 @@ def recover(worktree: Path) -> tuple[str, str]:
 
 
 class _Interrupted(BaseException):
-    """SIGTERM/SIGHUP during a sweep — raised so the ``finally`` that restores the file runs."""
+    """SIGTERM/SIGHUP/SIGINT during a sweep — raised so the ``finally`` that restores the file
+    runs."""
 
 
 def _install_signal_handlers() -> dict:
@@ -731,7 +746,7 @@ def _install_signal_handlers() -> dict:
         raise _Interrupted(signum)
 
     old = {}
-    for sig in (signal.SIGTERM, signal.SIGHUP):
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         try:
             old[sig] = signal.signal(sig, _raise)
         except (OSError, ValueError):
@@ -745,6 +760,48 @@ def _restore_signal_handlers(old: dict) -> None:
             signal.signal(sig, handler)
         except (OSError, ValueError):
             pass
+
+
+# --- the guardian: SIGKILL ------------------------------------------------------------------
+
+GUARD_POLL_SECONDS = 0.2
+
+
+def _guardian_argv(worktree: Path) -> list[str]:
+    return [sys.executable, "-m", "chela.sweep", "guard", str(os.getpid()), str(worktree)]
+
+
+def _start_guardian(worktree: Path) -> subprocess.Popen | None:
+    """⛔ CMX-97: a process that outlives a SIGKILLed sweep and restores its mutation. Its own
+    session (``start_new_session``), so ``kill -9 -<pgid>`` or a closed terminal misses it.
+    ``None`` when it cannot start — the marker still lets the next sweep recover."""
+    try:
+        return subprocess.Popen(_guardian_argv(worktree), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+    except OSError:
+        return None
+
+
+def _stop_guardian(proc: subprocess.Popen | None) -> None:
+    if proc is None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def guard(pid: int, worktree: Path, poll: float = GUARD_POLL_SECONDS) -> int:
+    """The guardian's body: wait for the sweep ``pid`` to die, then :func:`recover`. A sweep
+    that finished normally removed its marker (and stops the guardian first), so this is a
+    no-op unless the sweep died mid-mutation. Exit 0 when nothing is left mutated."""
+    while _pid_alive(pid):
+        time.sleep(poll)
+    _, err = recover(Path(worktree))
+    return 1 if err else 0
 
 
 # --- the sweep ------------------------------------------------------------------------------
@@ -821,20 +878,28 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
 
     muts = prioritise(muts)
     chosen = muts[:budget.max_mutations]
-    for n, mut in enumerate(chosen):
-        elapsed = _now() - started
-        if elapsed >= budget.seconds:
-            report.exhausted = (f"the {budget.seconds:g}s wall-clock budget ran out after "
-                                f"{n} of {len(muts)} mutation(s) ({elapsed:.0f}s spent)")
-            _mark_unrun(report, chosen[n:], report.exhausted)
-            break
-        if progress is not None:
-            progress(n, len(chosen), mut)
-        result, contamination = _run_one(worktree, test_cmd, mut, baseline, timeout, selector)
-        report.results.append(result)
-        if contamination:
-            report.cannot_verify = contamination
-            return report
+    guardian = _start_guardian(worktree)
+    if guardian is None:
+        report.notes.append("the kill guardian could not start — a SIGKILL mid-mutation is "
+                            "only recovered by the next sweep")
+    try:
+        for n, mut in enumerate(chosen):
+            elapsed = _now() - started
+            if elapsed >= budget.seconds:
+                report.exhausted = (f"the {budget.seconds:g}s wall-clock budget ran out after "
+                                    f"{n} of {len(muts)} mutation(s) ({elapsed:.0f}s spent)")
+                _mark_unrun(report, chosen[n:], report.exhausted)
+                break
+            if progress is not None:
+                progress(n, len(chosen), mut)
+            result, contamination = _run_one(worktree, test_cmd, mut, baseline, timeout,
+                                             selector)
+            report.results.append(result)
+            if contamination:
+                report.cannot_verify = contamination
+                return report
+    finally:
+        _stop_guardian(guardian)
     if len(muts) > len(chosen):
         why = (f"over the {budget.max_mutations}-mutation budget ({len(muts)} generated)")
         report.exhausted = report.exhausted or why
@@ -986,3 +1051,15 @@ def run_sweep(
                    select_tests=select, progress=progress, provision=workflow_path is not None,
                    budget=resolve_budget(wf, seconds=budget_seconds, max_mutations=max_mutations))
     return {**report.as_dict(), "test_cmd_source": source}
+
+
+def main(argv: list[str]) -> int:
+    """``python -m chela.sweep guard <pid> <worktree>`` — the kill guardian's entry point."""
+    if len(argv) == 3 and argv[0] == "guard" and argv[1].isdigit():
+        return guard(int(argv[1]), Path(argv[2]))
+    print("usage: python -m chela.sweep guard <pid> <worktree>", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
