@@ -81,3 +81,16 @@ def test_the_marker_carries_the_partial_record(tmp_path):
     assert dispatcher.request_task_finished("cmx-88", self_check_partial=PARTIAL)["ok"]
     assert dispatcher._read_task_finished_size_gate(root, "self_check_partial") == PARTIAL
     assert dispatcher._read_task_finished_size_gate(root) is None
+
+
+def test_a_failed_pr_body_append_is_logged_by_name(tmp_path, caplog):
+    root = tmp_path / "wt"
+    root.mkdir()
+    _run_row(tmp_path, root)
+    with patch.object(dispatcher, "_read_pr_url", return_value="https://github.com/o/r/pull/7"), \
+            patch.object(dispatcher, "_read_pr_status", return_value=(None, None)), \
+            patch.object(dispatcher, "_kill_window"), \
+            patch.object(dispatcher, "_append_pr_body", return_value=(False, "gh said no")), \
+            caplog.at_level("WARNING", logger="chela.dispatcher"):
+        assert dispatcher.mark_awaiting_review("cmx-88", self_check_partial=PARTIAL)["ok"]
+    assert "cmx-88: self-check note not added to the PR body — gh said no" in caplog.text
