@@ -253,3 +253,27 @@ test('Escape closes the sheet', async () => {
     document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
     assert.equal(document.getElementById('approvals-backdrop'), null);
 });
+
+// CMX-135: the trailing word is its own span (a phone hides it), and a failed refresh
+// keeps it on the last known count but never tacks it onto the stale warning.
+test('the pill text: count + .pa-pill-word, through a failed refresh', async () => {
+    const text = () => document.querySelector('#btn-approvals .pa-pill-text').textContent;
+    const word = () => document.querySelector('#btn-approvals .pa-pill-word');
+    LISTING = { requests: [req()] };
+    await pa.tickApprovals();
+    assert.equal(text(), '⚖️ 1 pending approval');
+    assert.equal(word().textContent, ' approval');
+    LISTING = { requests: [req(), req({ id: 'override-' + '6'.repeat(24) })] };
+    await pa.tickApprovals();
+    LISTING = { error: 'boom' };
+    await pa.tickApprovals();
+    assert.equal(text(), '⚖️ 2 pending approvals', 'a failed refresh dropped the known count’s word');
+    LISTING = { requests: [] };
+    await pa.tickApprovals();
+    LISTING = { error: 'boom' };
+    await pa.tickApprovals();
+    assert.equal(text(), '⚠️ couldn’t refresh approvals');
+    assert.equal(word(), null);
+    LISTING = { requests: [] };
+    await pa.tickApprovals();
+});
