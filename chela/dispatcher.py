@@ -1487,6 +1487,9 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("sweep_equivalents", "ALTER TABLE runs ADD COLUMN sweep_equivalents TEXT"),
         # 📏 CMX-126. JSON {lines, limit, oversize_reason}: an oversized hand-in's override.
         ("size_gate", "ALTER TABLE runs ADD COLUMN size_gate TEXT"),
+        # ⏳ CMX-141. JSON {measured, total, exhausted, unrun: [{file, guard}]}: a hand-in
+        # whose --self-check-experiments the budget cut short. NULL ⇒ it all ran.
+        ("self_check_partial", "ALTER TABLE runs ADD COLUMN self_check_partial TEXT"),
     ):
         if _column in existing_columns:
             continue  # already migrated — no DDL attempted, nothing to fail
@@ -2819,7 +2822,8 @@ def verify_self_check(task_id: str, experiments_path: str) -> dict:
         "outcomes": result.get("outcomes") or [],
         "missing_required": missing,
         # ⏳ CMX-141: what the self-check budget never reached — CANNOT VERIFY, not killed.
-        "unrun": result.get("unrun") or [], "exhausted": result.get("exhausted") or "",
+        "unrun": result.get("unrun") or [],
+        "exhausted": result.get("exhausted") or "",
     }
 
 
@@ -3030,7 +3034,7 @@ def _clean_handoff(value) -> str | None:
 
 def mark_awaiting_review(
     task_id: str, *, handoff: str | None = None, sweep_equivalents: list[dict] | None = None,
-    size_gate: dict | None = None,
+    size_gate: dict | None = None, self_check_partial: dict | None = None,
 ) -> dict:
     """Transition a run from running → awaiting_review and kill its tmux window.
 
@@ -3094,13 +3098,17 @@ def mark_awaiting_review(
                      (json.dumps(sweep_equivalents) if sweep_equivalents else None, task_id))
         conn.execute("UPDATE runs SET size_gate=? WHERE task_id=?",
                      (json.dumps(size_gate) if size_gate else None, task_id))
+        conn.execute("UPDATE runs SET self_check_partial=? WHERE task_id=?",
+                     (json.dumps(self_check_partial) if self_check_partial else None, task_id))
         conn.commit()
         note = sizegate.render(size_gate or {})
-        if note and effective_pr_url:
-            ok, detail = _append_pr_body(effective_pr_url, repo_dir, note)
-            if not ok:
-                log.warning("Task %s: size-gate note not added to the PR body — %s",
-                            task_id, detail)
+        for what, text in (("size-gate", note), ("self-check", judge.render_self_check_partial(
+                self_check_partial or {}))):
+            if text and effective_pr_url:
+                ok, detail = _append_pr_body(effective_pr_url, repo_dir, text)
+                if not ok:
+                    log.warning("Task %s: %s note not added to the PR body — %s",
+                                task_id, what, detail)
         if (size_gate or {}).get("sub_issues"):
             from chela import inbox
             inbox.enqueue("split_filed", f"{task_id} was split: {note}",
@@ -3164,19 +3172,21 @@ def _read_task_finished_sweep_equivalents(worktree_path: str | Path) -> list[dic
     return clean or None
 
 
-def _read_task_finished_size_gate(worktree_path: str | Path) -> dict | None:
-    """📏 CMX-126: the size-gate record a completion marker carries, or None (best-effort)."""
+def _read_task_finished_size_gate(worktree_path: str | Path,
+                                  key: str = "size_gate") -> dict | None:
+    """📏 CMX-126: the size-gate record a completion marker carries, or None (best-effort).
+    ⏳ CMX-141: ``key="self_check_partial"`` reads the partial-self-check record the same way."""
     try:
         request = json.loads(_task_finished_request_path(worktree_path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    record = request.get("size_gate") if isinstance(request, dict) else None
+    record = request.get(key) if isinstance(request, dict) else None
     return record if isinstance(record, dict) else None
 
 
 def request_task_finished(
     task_id: str, *, handoff: str | None = None, sweep_equivalents: list[dict] | None = None,
-    size_gate: dict | None = None,
+    size_gate: dict | None = None, self_check_partial: dict | None = None,
 ) -> dict:
     """Record that a dispatched agent believes its work is done — called by `chela
     task-finished`, IN PLACE OF the direct `mark_awaiting_review` call it used to make.
@@ -3229,6 +3239,8 @@ def request_task_finished(
         request["sweep_equivalents"] = sweep_equivalents
     if size_gate:
         request["size_gate"] = size_gate
+    if self_check_partial:
+        request["self_check_partial"] = self_check_partial
     _task_finished_request_path(worktree_path).write_text(
         json.dumps(request), encoding="utf-8",
     )
@@ -5579,6 +5591,8 @@ def tick(workflow_path: str | Path) -> dict:
                     sweep_equivalents=_read_task_finished_sweep_equivalents(
                         row["worktree_path"]),
                     size_gate=_read_task_finished_size_gate(row["worktree_path"]),
+                    self_check_partial=_read_task_finished_size_gate(
+                        row["worktree_path"], "self_check_partial"),
                 )
                 # ⚖️🔀 issue #502 rework round 1 (hazard 3 of the brief): `ok=False` used to
                 # be ONE outcome — unlink the marker and log.warning, no matter why the
@@ -7656,12 +7670,18 @@ def _judge_vars(
 
 
 def _judge_size_gate(row) -> str:
-    """📏 CMX-126: the size-gate record (an oversize override) for the judge."""
-    try:
-        note = sizegate.render(json.loads(row["size_gate"] or "{}"))
-    except (IndexError, KeyError, ValueError, TypeError):
-        return ""
-    return f"\n   {tui_sanitize(note).replace(chr(10), ' ')}" if note else ""
+    """📏 CMX-126: the size-gate record (an oversize override) for the judge — and ⏳ CMX-141:
+    the self-check experiments the agent's budget never ran (the judge's to cover)."""
+    notes = []
+    for col, render in (("size_gate", sizegate.render),
+                        ("self_check_partial", judge.render_self_check_partial)):
+        try:
+            note = render(json.loads(row[col] or "{}"))
+        except (IndexError, KeyError, ValueError, TypeError):
+            note = ""
+        if note:
+            notes.append(f"\n   {tui_sanitize(note).replace(chr(10), ' ')}")
+    return "".join(notes)
 
 
 def _judge_sweep_equivalents(row) -> str:

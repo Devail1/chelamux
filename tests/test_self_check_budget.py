@@ -141,7 +141,9 @@ def test_task_finished_names_the_unrun_but_does_not_block(tmp_path, capsys, unru
         main.main()
     out = capsys.readouterr().out
     assert all(s in out for s in shown) and hidden not in out
-    req.assert_called_once_with("cmx-88", handoff=None)
+    partial = {"self_check_partial": {"measured": 1, "total": 2, "exhausted": "over budget",
+               "unrun": [{"file": "guard.py", "guard": "g1"}]}} if unrun else {}
+    req.assert_called_once_with("cmx-88", handoff=None, **partial)   # proceeds — never blocked
 
 
 def test_verify_self_check_passes_the_unrun_through(tmp_path, monkeypatch):
