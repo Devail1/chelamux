@@ -3757,7 +3757,8 @@ def test_run_self_check_forwards_the_ENTIRE_judge_config_in_one_call(tmp_path, m
 
     captured = {}
 
-    def fake_self_check(worktree, test_cmd, raw, *, timeout, select_tests):
+    def fake_self_check(worktree, test_cmd, raw, *, timeout, select_tests, budget):
+        captured["budget"] = budget
         captured["test_cmd"] = test_cmd
         captured["timeout"] = timeout
         captured["select_tests"] = select_tests
@@ -3774,6 +3775,7 @@ def test_run_self_check_forwards_the_ENTIRE_judge_config_in_one_call(tmp_path, m
     assert captured["test_cmd"] == "some-distinctive-cmd"
     assert captured["timeout"] == 120
     assert captured["select_tests"] is False
+    assert (captured["budget"].seconds, captured["budget"].max_mutations) == (900.0, 12)
 
 
 def test_run_self_check_explicit_test_cmd_wins_over_the_workflow(tmp_path):
