@@ -423,9 +423,8 @@ _MOVED_WHY = {
     "restore": "`chela restore --apply` re-addressed it",
     "dashboard": "it was registered from the dashboard, not by a `chela watch` from that window",
     "autolaunch": "chela auto-launched an orchestrator persona there",
-    "taken_over": "that window ran `chela watch` while the previous orchestrator's window was "
-                  "STILL LIVE — the pin was taken over, not recovered. A SessionStart hook that "
-                  "runs `chela watch` does this for every session that starts in its directory",
+    "taken_over": "that window ran `chela watch --take-over` while the previous orchestrator's "
+                  "window was STILL LIVE — the pin was taken over, not recovered",
 }
 
 
@@ -443,8 +442,8 @@ def _moved_event(old: str | None, new: str, reason: str, *, old_session: str | N
         return None
     why = _MOVED_WHY.get(reason, reason)
     summary = (f"🧭 the orchestrator pin moved {old} to {new} · {why} · the decisions inbox "
-               f"now delivers to {new}. If that is wrong, run `chela watch` from the session "
-               "that should orchestrate.")
+               f"now delivers to {new}. If that is wrong, run `chela watch --take-over` from "
+               "the session that should orchestrate.")
     payload = {"old": old, "new": new, "reason": reason,
                "old_session": old_session, "new_session": new_session}
     return _event(MOVED_KIND, summary, payload, wid=new)

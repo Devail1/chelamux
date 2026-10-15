@@ -578,11 +578,17 @@ def _resolve_wid(token: str | None) -> str | None:
 def cmd_watch(args) -> None:
     """Register interest in a window you just delegated work to (the decisions inbox).
 
-    The session that runs this becomes THE orchestrator — the one and only window the
-    inbox may push into ($CHELA_WID, or $CHELA_ORCHESTRATOR_WID to pin it). Call it
-    right after you dispatch: when that agent finishes, blocks, or dies, the event is
-    pushed back into your session the moment you are idle, instead of the completion
-    being invisible to you (and a human having to relay it).
+    Call it right after you dispatch: when that agent finishes, blocks, or dies, the event
+    is pushed back into THE orchestrator's session the moment it is idle, instead of the
+    completion being invisible (and a human having to relay it). The orchestrator is the one
+    and only window the inbox may push into ($CHELA_WID, or $CHELA_ORCHESTRATOR_WID to pin it).
+
+    CMX-138: running it CLAIMS that role only when nobody live holds it — the pin is empty,
+    undeliverable (a dead window, a stale tmux epoch) or already yours. While ANOTHER live
+    session holds it, ``chela watch @N`` only adds the watch, routed to that holder, and a
+    bare ``chela watch`` changes nothing: a side session watching a window it started must not
+    silently re-route the orchestrator's decisions inbox to itself. Taking the role from a
+    live holder is explicit: ``--take-over``.
 
     With **no window**, it only (re-)registers you — stamped with the tmux epoch you are
     really in (CMX-77). That is the recovery path after a tmux restart: the addresses in
@@ -599,18 +605,31 @@ def cmd_watch(args) -> None:
     is no pane to paste into).
     """
     self_wid = orchestrator.self_wid()
-    if getattr(args, "if_unclaimed", False):
+    if_unclaimed = getattr(args, "if_unclaimed", False)
+    take_over = getattr(args, "take_over", False)
+    if if_unclaimed and take_over:
+        print("--if-unclaimed and --take-over contradict each other", file=sys.stderr)
+        sys.exit(2)
+    if if_unclaimed and args.wid:
         # CMX-399: the SessionStart-hook form. It may only ever FILL an empty or dead slot —
         # a bare `chela watch` in that hook moved the pin to a restarted peer (CMX-394).
-        if args.wid:
-            print("--if-unclaimed only registers this session; it takes no window",
-                  file=sys.stderr)
-            sys.exit(2)
-        holder = inbox.live_holder(inbox.load(), inbox.status_snapshot(), epoch.current(),
-                                   self_wid)
-        if holder:
-            print(f"orchestrator is {holder} (live) — not claiming")
-            return
+        print("--if-unclaimed only registers this session; it takes no window",
+              file=sys.stderr)
+        sys.exit(2)
+    # CMX-138: the explicit form claims under the same rule as --if-unclaimed — only an
+    # empty, dead or own slot — unless --take-over says otherwise. A side session that ran
+    # `chela watch @14` moved a live @4's pin and its whole decisions inbox (2026-10-14).
+    holder = (inbox.live_holder(inbox.load(), inbox.status_snapshot(), epoch.current(),
+                                self_wid) if self_wid else None)
+    claim = not holder or take_over
+    if not claim and not args.wid:
+        print(f"orchestrator is {holder} (live) — not claiming")
+        if not if_unclaimed:
+            print("  to take the orchestrator role from it, run `chela watch --take-over`")
+        return
+    if holder and take_over:
+        print(f"taking over the orchestrator role from {holder} (live) — it will no longer "
+              "receive the decisions inbox")
     if not args.wid:
         if not self_wid:
             peer = orchestrator.self_peer()
@@ -647,12 +666,16 @@ def cmd_watch(args) -> None:
                  if queued else "; nothing queued"))
         return
     wid = _resolve_wid(args.wid)
-    result = inbox.watch(wid, args.note or "", by=self_wid)
+    by = self_wid if claim else None
+    result = inbox.watch(wid, args.note or "", by=by)
     if not result["ok"]:
         print(f"watch failed: {result['error']}", file=sys.stderr)
         sys.exit(1)
     orch = result["orchestrator"] or "(unregistered)"
     note = f' — note: "{result["note"]}"' if result["note"] else ""
+    if not claim:
+        print(f"watching {wid}{note} — events go to the orchestrator {orch} (live)")
+        return
     print(f"watching {wid}{note}; events -> {orch} when idle")
     # CMX-195: a registration with no resolved identity looks identical to a healthy one
     # once it's on disk (orchestrator_session: null) — CMX-82's self-heal is disarmed for
@@ -3524,18 +3547,24 @@ def main() -> None:
     p_peek.add_argument("--json", action="store_true", help="Emit the raw peek dict as JSON")
 
     p_watch = sub.add_parser(
-        "watch", help="Report back when a window you delegated to finishes/blocks/dies "
-                      "(no window: (re-)register THIS session as the orchestrator)")
+        "watch", help="Report back to the orchestrator when a window you delegated to "
+                      "finishes/blocks/dies (claims the role only if no live session holds it)")
     p_watch.add_argument("wid", nargs="?",
-                         help="Window you dispatched work to (@N or N). Omit to register "
-                              "this session as the orchestrator and nothing else — the "
-                              "recovery path after tmux restarts and renumbers the fleet.")
+                         help="Window you dispatched work to (@N or N). While another live "
+                              "session is the orchestrator, events go to IT and the pin does "
+                              "not move. Omit to register this session as the orchestrator "
+                              "and nothing else — the recovery path after tmux restarts and "
+                              "renumbers the fleet (refused while a live one holds the pin).")
     p_watch.add_argument("--note", help="What you asked it to do (echoed back to you)")
     p_watch.add_argument("--if-unclaimed", action="store_true",
                          help="Register this session ONLY if no live orchestrator holds the "
                               "pin (empty, dead window, stale tmux epoch, or already you); "
                               "otherwise change nothing and exit 0. Safe for a SessionStart "
                               "hook.")
+    p_watch.add_argument("--take-over", action="store_true",
+                         help="Become the orchestrator even though another LIVE session holds "
+                              "the pin (it stops receiving the decisions inbox; an "
+                              "orchestrator.moved notice says so)")
 
     p_unwatch = sub.add_parser("unwatch", help="Stop watching a window")
     p_unwatch.add_argument("wid", help="Window to stop watching (@N or N)")

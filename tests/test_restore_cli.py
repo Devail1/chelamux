@@ -203,6 +203,8 @@ def _watch_env(monkeypatch, session, self_wid="@0"):
     from chela import inbox, orchestrator
     monkeypatch.setattr(orchestrator, "self_wid", lambda: self_wid)
     monkeypatch.setattr(main, "_resolve_wid", lambda w: "@7")
+    monkeypatch.setattr(inbox, "load", lambda: {"orchestrator": None})
+    monkeypatch.setattr(inbox, "status_snapshot", dict)
     monkeypatch.setattr(inbox, "watch",
                         lambda *a, **k: {"ok": True, "wid": "@7", "note": "",
                                          "orchestrator": "@0", "epoch": NOW,
