@@ -78,19 +78,33 @@ export function rowHTML(r) {
       </div>`;
 }
 
+// Two copies of one pill (CMX-135, like the shares pill's CMX-422): #btn-approvals floats in
+// .safety-float on every tab; #term-approvals sits IN the Wall's toolbar row, and the
+// stylesheet hides the floating copy while the Wall shows the in-row one.
 function _renderPill() {
-    const btn = document.getElementById('btn-approvals');
-    if (!btn) return;
     const n = _rows.length;
     // A failed refresh with nothing known must not hide the pill: unknown is not "none".
     // (Quiet only when the endpoint has NEVER answered here — e.g. a page with no approvals
     // backend; once it has answered, or says `error` itself, a failure is shown.)
     const showStale = _stale && (_loaded || _staleLoud);
+    for (const id of ['btn-approvals', 'term-approvals']) {
+        const btn = document.getElementById(id);
+        if (btn) _paintPill(btn, n, showStale);
+    }
+}
+
+function _paintPill(btn, n, showStale) {
     btn.hidden = n === 0 && !showStale;
     const txt = btn.querySelector('.pa-pill-text');
     if (txt) {
-        txt.textContent = n === 0 && showStale ? '⚠️ couldn’t refresh approvals'
-            : '⚖️ ' + n + ' pending approval' + (n === 1 ? '' : 's');
+        txt.textContent = n === 0 && showStale ? '⚠️ couldn’t refresh approvals' : '⚖️ ' + n + ' pending';
+        // A phone drops the trailing word (CMX-135) so the floating pills clear the "+".
+        if (n > 0 || !showStale) {
+            const word = document.createElement('span');
+            word.className = 'pa-pill-word';
+            word.textContent = ' approval' + (n === 1 ? '' : 's');
+            txt.append(word);
+        }
     }
     btn.setAttribute('aria-label', n === 0 && showStale ? 'couldn’t refresh approvals — tap to review'
         : n + ' approval request' + (n === 1 ? '' : 's') + ' waiting — tap to review');

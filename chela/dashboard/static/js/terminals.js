@@ -227,34 +227,6 @@ function isWallVisible() {
     return currentTab === 'terminals' && _termMode === 'wall';
 }
 
-// Spawn a fresh plain-shell tmux window, then re-render the wall so its pane
-// appears. The /term/<wid>/ iframe 404s until the ttyd supervisor's next poll
-// (~12s); renderTerminals renders a pending placeholder + readiness poll for
-// the new pane and swaps in the iframe once the port lands (no manual refresh).
-async function spawnShell(btn) {
-    const orig = btn ? btn.textContent : '';
-    if (btn) { btn.disabled = true; btn.textContent = 'Spawning…'; }
-    try {
-        const res = await api('/api/agents/spawn', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: '{}',
-        });
-        if (!res || !res.ok) {
-            alert('Spawn failed: ' + ((res && res.error) || 'unknown error'));
-            return;
-        }
-        setAgentsCache([]);   // force /api/agents refetch so the new window shows
-        _termSig = '';       // invalidate render cache so the stage rebuilds
-        await renderTerminals();
-    } catch (e) {
-        console.error('spawnShell', e);
-        alert('Spawn failed: ' + e);
-    } finally {
-        if (btn) { btn.disabled = false; btn.textContent = orig; }
-    }
-}
-
 async function termKeyFor(wid, key) {
     if (!wid) return;
     try {
@@ -654,9 +626,9 @@ function _syncOwnerPresenceFromAgents(agents) {
 // moment it matters.
 function _renderSharesIndicator() {
     // Two copies of one pill (CMX-422): #btn-shares floats in .safety-float on
-    // every tab; #term-shares sits IN the Wall's toolbar row, in normal flow left
-    // of "+ New shell", and the stylesheet hides the floating copy only while the
-    // Wall shows the in-row one — the float used to be drawn on top of the button.
+    // every tab; #term-shares sits IN the Wall's toolbar row, in normal flow at
+    // its right end, and the stylesheet hides the floating copy only while the
+    // Wall shows the in-row one — the float used to be drawn on top of the row.
     const btns = ['btn-shares', 'term-shares'].map(id => document.getElementById(id)).filter(Boolean);
     if (!btns.length) return;
     const n = _sharedWids.size;
@@ -2014,7 +1986,6 @@ async function renderTerminals() {
     sel.style.display = _termMode === 'single' ? '' : 'none';
     $('#term-bar').style.display = _termMode === 'single' ? 'flex' : 'none';
     $('#term-wall-grid').style.display = _termMode === 'wall' ? 'inline-flex' : 'none';
-    $('#term-new-shell').style.display = _termMode === 'wall' ? 'inline-block' : 'none';
     _buildGridPicker();
     kbApplyState();
     if (sel.options.length !== wids.length) {
@@ -4016,4 +3987,4 @@ export { SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, SHARE_TYPING_OFF_RE
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, copyWindowId, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, spawnShell, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, termScrollToggle, toggleDockChip, toggleGridRow, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, copyWindowId, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, termScrollToggle, toggleDockChip, toggleGridRow, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });

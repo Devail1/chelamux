@@ -6,15 +6,12 @@
 // was drawn ON TOP of the button. On desktop the row now carries its own copy
 // of the pill (#term-shares) in normal flow, left of "+ New shell".
 //
-//  1. Shared, 1440×900: the pill's box and "+ New shell"'s box don't
-//     intersect, the pill is left of the button, at the row's control height.
-//  2. ⭐ Both are clickable: the topmost element at each one's centre is itself.
-//  3. No share: "+ New shell" sits where it does with a share (flush right in
-//     the row) and no pill takes space.
-//  4. Off the Wall the floating kill-switch is still on screen (it is a safety
-//     control: a live share must never go unseen on another tab).
-//  5. Shared, 390×844: the pill and the phone's "+" don't intersect, both
-//     clickable.
+//  CMX-135: "+ New shell" is gone and the pending-approvals pill got the same
+//  in-row copy (#term-approvals). At 1440 / 725 / 390, with and without a
+//  share + approvals: each pill shows exactly when it has something to say;
+//  none intersects a row control, the phone's ☰ / "+" or another pill; each
+//  is clickable; on desktop each sits in the row (never empty; a phone's is
+//  0px). Off the Wall the floating kill-switch is still on screen.
 //
 // Harness: tests/browser/fixture.mjs — never a live dashboard or daemon.
 import { after, before, describe, test } from 'node:test';
@@ -33,7 +30,7 @@ function setup(fn) {
 // openDashboard, plus a `shared` switch: the fixture always shares @2, so the
 // no-share case overrides the two endpoints that say so (a route registered
 // later runs first).
-async function open({ width, height, shared }) {
+async function open({ width, height, shared, approvals = shared }) {
     const context = await browser.newContext({ viewport: { width, height } });
     await context.addInitScript(() => {
         try {
@@ -41,7 +38,8 @@ async function open({ width, height, shared }) {
             localStorage.setItem('pc_wall_preset', JSON.stringify({ cols: 2, rows: 2 }));
         } catch (e) { /* defaults still boot the wall */ }
     });
-    await routeFixture(context);
+    const requests = approvals ? [{ id: 'r1', kind: 'override', label: 'CMX-1' }, { id: 'r2', kind: 'release', version: '1.0.0' }] : [];
+    await routeFixture(context, { '/api/overrides': { requests } });
     if (!shared) {
         const json = body => ({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
         await context.route(ORIGIN + '/api/term/shared', r => r.fulfill(json({})));
@@ -52,6 +50,7 @@ async function open({ width, height, shared }) {
     await page.evaluate(() => document.fonts.ready);
     await page.waitForSelector('.agent-row', { state: 'attached', timeout: 15000 });
     if (shared) await page.waitForSelector('#btn-shares:not([hidden])', { state: 'attached', timeout: 15000 });
+    if (approvals) await page.waitForSelector('#btn-approvals:not([hidden])', { state: 'attached', timeout: 15000 });
     await stable(page);
     return { context, page };
 }
@@ -61,7 +60,7 @@ async function open({ width, height, shared }) {
 async function stable(page) {
     await page.evaluate(() => { window.__cmx422Sig = null; });
     await page.waitForFunction(() => {
-        const sig = [...document.querySelectorAll('.term-toolbar, .term-toolbar button, .safety-float, .safety-float button, .mobile-new-fab')]
+        const sig = [...document.querySelectorAll('.term-toolbar, .term-toolbar button, .safety-float, .safety-float button, .mobile-new-fab, .mobile-menu-fab')]
             .map(e => { const r = e.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(Math.round).join(','); })
             .join('|');
         const now = performance.now();
@@ -70,134 +69,84 @@ async function stable(page) {
     }, null, { timeout: 15000, polling: 100 });
 }
 
-// The pill the viewer actually sees (whichever copy is rendered), "+ New
-// shell" (or the phone's "+"), and what the browser hit-tests at each centre.
-const measure = page => page.evaluate(() => {
+// Every pill copy the viewer actually sees, every other control the row shows
+// (plus the phone's ☰ and "+"), and what the browser hit-tests at each centre.
+const PILLS = ['term-shares', 'btn-shares', 'term-approvals', 'btn-approvals'];
+const measure = page => page.evaluate(PILLS => {
     const shown = e => !!e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
     const info = e => {
-        if (!shown(e)) return null;
         const r = e.getBoundingClientRect();
         const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-        return { id: e.id, left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height,
+        return { id: e.id || e.className, left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height,
             hitsSelf: !!top && (top === e || e.contains(top)) };
     };
-    const pills = ['term-shares', 'btn-shares'].map(id => info(document.getElementById(id))).filter(Boolean);
-    const newShell = info(document.getElementById('term-new-shell')) || info(document.querySelector('.mobile-new-fab'));
+    const pills = PILLS.map(id => document.getElementById(id)).filter(shown).map(info);
+    const controls = [...document.querySelectorAll('.term-toolbar button, .mobile-new-fab, .mobile-menu-fab')]
+        .filter(e => shown(e) && !PILLS.includes(e.id)).map(info);
     const row = document.querySelector('.term-toolbar');
     const rr = row.getBoundingClientRect();
     return {
-        pills, newShell,
-        row: { top: rr.top, bottom: rr.bottom, right: rr.right - parseFloat(getComputedStyle(row).paddingRight) },
+        pills, controls, rowControls: [...row.querySelectorAll('button')].filter(e => shown(e) && !PILLS.includes(e.id)).length,
+        row: { top: rr.top, bottom: rr.bottom, height: rr.height },
         ctl: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ctl-h-sm')),
-        gap: parseFloat(getComputedStyle(row).columnGap),
     };
-});
+}, PILLS);
 
 const intersects = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
 
-function assertApart(m) {
-    assert.ok(m.newShell, '"+ New shell" is not rendered');
-    assert.ok(m.pills.length >= 1, 'no active-shares pill is rendered while a session is shared');
-    for (const p of m.pills) {
-        assert.ok(!intersects(p, m.newShell),
-            `#${p.id} ${JSON.stringify(p)} overlaps "+ New shell" ${JSON.stringify(m.newShell)}`);
+for (const [width, height] of [[1440, 900], [725, 900], [390, 844]]) {
+    for (const live of [true, false]) {
+        describe(`CMX-135 ${width}×${height}, ${live ? 'a share + 2 approvals live' : 'nothing live'}`, { skip: why }, () => {
+            let context, m, offWall;
+            const ready = setup(async () => {
+                let page;
+                ({ context, page } = await open({ width, height, shared: live }));
+                m = await measure(page);
+                await page.evaluate(() => window.chela.selectView('work'));
+                await stable(page);
+                offWall = await measure(page);
+            });
+            after(() => context && context.close());
+
+            test('each pill shows exactly when it has something to say, one copy of it', () => {
+                ready();
+                const ids = m.pills.map(p => p.id);
+                assert.equal(ids.filter(id => /shares/.test(id)).length, live ? 1 : 0, `shares pills: ${ids}`);
+                assert.equal(ids.filter(id => /approvals/.test(id)).length, live ? 1 : 0, `approvals pills: ${ids}`);
+            });
+
+            test('⭐ no pill intersects a toolbar control or another pill, and each is clickable', () => {
+                ready();
+                assert.ok(m.controls.length >= 1, 'no toolbar control or "+" is shown to measure against');
+                for (const p of m.pills) {
+                    for (const c of [...m.controls, ...m.pills.filter(q => q !== p)]) {
+                        assert.ok(!intersects(p, c), `#${p.id} ${JSON.stringify(p)} overlaps ${c.id} ${JSON.stringify(c)}`);
+                    }
+                    assert.ok(p.hitsSelf, `#${p.id} is not the topmost element at its own centre`);
+                }
+                for (const c of m.controls) assert.ok(c.hitsSelf, `${c.id} is covered at its own centre`);
+            });
+
+            test('desktop: the pills sit in the row at its control height; the row is never empty', () => {
+                ready();
+                if (width <= 768) {
+                    assert.equal(m.row.height, 0, `the phone's empty toolbar row is ${m.row.height}px tall`);
+                    return;
+                }
+                assert.ok(m.rowControls >= 1, 'the Wall toolbar row shows no control of its own');
+                for (const p of m.pills) {
+                    assert.match(p.id, /^term-/, `#${p.id} floats over the Wall instead of sitting in its row`);
+                    assert.ok(p.top >= m.row.top - 0.5 && p.bottom <= m.row.bottom + 0.5, `#${p.id} is outside the toolbar row`);
+                    assert.ok(Math.abs(p.height - m.ctl) <= 0.5, `#${p.id} ${p.height}px ≠ --ctl-h-sm ${m.ctl}px`);
+                }
+            });
+
+            test('off the Wall, the floating copies are back on screen and clickable', () => {
+                ready();
+                assert.deepEqual(offWall.pills.map(p => p.id), live ? ['btn-shares', 'btn-approvals'] : []);
+                for (const p of offWall.pills) assert.ok(p.hitsSelf, `the floating #${p.id} is covered on another tab`);
+            });
+        });
     }
 }
 
-function assertClickable(m) {
-    for (const p of m.pills) assert.ok(p.hitsSelf, `#${p.id} is not the topmost element at its own centre`);
-    assert.ok(m.newShell.hitsSelf, `"+ New shell" (#${m.newShell.id}) is covered at its own centre`);
-}
-
-describe('CMX-422 1440×900, a share live: the pill sits beside "+ New shell"', { skip: why }, () => {
-    let context, page, m, offWall;
-    const ready = setup(async () => {
-        ({ context, page } = await open({ width: 1440, height: 900, shared: true }));
-        m = await measure(page);
-        await page.evaluate(() => window.chela.selectView('work'));
-        await stable(page);
-        offWall = await page.evaluate(() => {
-            const b = document.getElementById('btn-shares');
-            const r = b.getBoundingClientRect();
-            const top = r.width ? document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) : null;
-            return { width: r.width, height: r.height, hitsSelf: !!top && b.contains(top) };
-        });
-    });
-    after(() => context && context.close());
-
-    test('exactly one pill shows, and its box does not intersect "+ New shell"', () => {
-        ready();
-        assert.equal(m.pills.length, 1, `pills shown: ${m.pills.map(p => p.id).join(', ')}`);
-        assertApart(m);
-    });
-
-    test('the pill is in the row, left of "+ New shell" by the row\'s gap, at the row\'s control height', () => {
-        ready();
-        const [p] = m.pills;
-        assert.equal(p.id, 'term-shares', 'the in-row pill is not the one shown');
-        assert.ok(p.top >= m.row.top - 0.5 && p.bottom <= m.row.bottom + 0.5, 'the pill is outside the toolbar row');
-        assert.ok(Math.abs(m.newShell.left - p.right - m.gap) <= 0.5,
-            `${m.newShell.left - p.right}px between the pill and "+ New shell", the row's gap is ${m.gap}px`);
-        assert.ok(Math.abs(p.height - m.ctl) <= 0.5, `pill ${p.height}px ≠ --ctl-h-sm ${m.ctl}px`);
-        assert.ok(Math.abs(m.newShell.height - m.ctl) <= 0.5, `"+ New shell" ${m.newShell.height}px ≠ --ctl-h-sm ${m.ctl}px`);
-    });
-
-    test('⭐ both are clickable: the topmost element at each centre is itself', () => {
-        ready();
-        assertClickable(m);
-    });
-
-    test('off the Wall, the floating kill-switch is back on screen and clickable', () => {
-        ready();
-        assert.ok(offWall.width > 0 && offWall.height > 0, 'the floating #btn-shares has no box on another tab');
-        assert.ok(offWall.hitsSelf, 'the floating #btn-shares is covered on another tab');
-    });
-});
-
-describe('CMX-422 1440×900, no share: "+ New shell" keeps its spot', { skip: why }, () => {
-    let ctxA, ctxB, none, live;
-    const ready = setup(async () => {
-        let page;
-        ({ context: ctxA, page } = await open({ width: 1440, height: 900, shared: false }));
-        none = await measure(page);
-        ({ context: ctxB, page } = await open({ width: 1440, height: 900, shared: true }));
-        live = await measure(page);
-    });
-    after(async () => { if (ctxA) await ctxA.close(); if (ctxB) await ctxB.close(); });
-
-    test('no pill takes space and "+ New shell" is flush right in the row', () => {
-        ready();
-        assert.equal(none.pills.length, 0, `a pill shows with no share: ${none.pills.map(p => p.id)}`);
-        assert.ok(Math.abs(none.newShell.right - none.row.right) <= 0.5,
-            `"+ New shell" ends at ${none.newShell.right}, the row's content at ${none.row.right}`);
-        assert.ok(none.newShell.hitsSelf, '"+ New shell" is covered with no share');
-    });
-
-    test('a live share does not move "+ New shell"', () => {
-        ready();
-        for (const k of ['left', 'top', 'width', 'height']) {
-            assert.ok(Math.abs(none.newShell[k] - live.newShell[k]) <= 0.5,
-                `"+ New shell" ${k} ${none.newShell[k]} without a share vs ${live.newShell[k]} with one`);
-        }
-    });
-});
-
-describe('CMX-422 390×844, a share live: the pill and the phone "+" stay apart', { skip: why }, () => {
-    let context, m;
-    const ready = setup(async () => {
-        let page;
-        ({ context, page } = await open({ width: 390, height: 844, shared: true }));
-        m = await measure(page);
-    });
-    after(() => context && context.close());
-
-    test('the pill does not intersect the phone\'s "+"', () => {
-        ready();
-        assertApart(m);
-    });
-
-    test('⭐ both are clickable', () => {
-        ready();
-        assertClickable(m);
-    });
-});

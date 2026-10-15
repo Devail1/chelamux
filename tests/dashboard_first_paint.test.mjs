@@ -2,10 +2,10 @@
 // decide, or the page flashes one state and switches to another (worst on a
 // phone, where the module graph takes longest to load).
 //
-//   1. #term-new-shell — renderTerminals() hides it on a phone (forced single
-//      mode; the "+" FAB starts sessions there), but only once terminals.js has
-//      run. style.css must hide it at phone width on its own; on desktop it is
-//      the Wall's own control and must still paint.
+//   1. the Wall toolbar row (CMX-135): no "+ New shell" in it any more — the
+//      New menu is the one place a shell starts — and its in-row pill copies
+//      (#term-shares, #term-approvals) ship [hidden], so neither paints before
+//      the modules have counted anything, at either width.
 //   2. the collapsed desktop sidebar — nav.js restores it, but as a module it
 //      runs late; index.html's inline <body> script must restore it first.
 //
@@ -29,25 +29,32 @@ const DASH = path.join(here, '..', 'chela', 'dashboard');
 const CSS = fs.readFileSync(path.join(DASH, 'static', 'style.css'), 'utf8');
 const NAV_JS = fs.readFileSync(path.join(DASH, 'static', 'js', 'nav.js'), 'utf8');
 
-const TOOLBAR = sliceTemplate('<div class="term-toolbar">', '+ New shell</button>',
+const TOOLBAR = sliceTemplate('<div class="term-toolbar">', '<div id="term-switcher"',
     { terminals_enabled: true, wall_tile_dispatched: false });
 
-function newShellDisplay(vp) {
-    const dom = new JSDOM(`<!DOCTYPE html><html><head><style>${cssForViewport(CSS, vp)}</style></head>
+function toolbarDom(vp) {
+    return new JSDOM(`<!DOCTYPE html><html><head><style>${cssForViewport(CSS, vp)}</style></head>
         <body><main class="canvas"><div class="panel active" id="panel-terminals">${TOOLBAR}</div></div></main></body></html>`);
-    const btn = dom.window.document.getElementById('term-new-shell');
-    assert.ok(btn, '#term-new-shell is missing from index.html');
-    return dom.window.getComputedStyle(btn).display;
 }
 
-test('@390 before any JS: "+ New shell" does not paint', () => {
-    assert.equal(newShellDisplay(PHONE), 'none',
-        '#term-new-shell paints on a phone until terminals.js hides it — the first-load flash');
+test('the Wall toolbar renders no "+ New shell" button (CMX-135)', () => {
+    const doc = toolbarDom(DESKTOP).window.document;
+    assert.ok(doc.querySelector('.term-toolbar #term-grid-toggle'), 'the toolbar slice is not the real row');
+    assert.equal(doc.getElementById('term-new-shell'), null, '#term-new-shell is back in index.html');
+    assert.ok(![...doc.querySelectorAll('.term-toolbar button')].some(b => /new shell/i.test(b.textContent)),
+        'a "New shell" button is in the Wall toolbar again');
 });
 
-test('@1440 before any JS: "+ New shell" paints (the Wall is the default)', () => {
-    assert.notEqual(newShellDisplay(DESKTOP), 'none');
-});
+for (const [name, vp] of [['@390', PHONE], ['@1440', DESKTOP]]) {
+    test(`${name} before any JS: neither in-row pill paints`, () => {
+        const dom = toolbarDom(vp);
+        for (const id of ['term-shares', 'term-approvals']) {
+            const el = dom.window.document.getElementById(id);
+            assert.ok(el, `#${id} is missing from index.html`);
+            assert.equal(dom.window.getComputedStyle(el).display, 'none', `#${id} paints before JS at ${name}`);
+        }
+    });
+}
 
 // The inline restore, run for real: the template from <body> up to the app
 // shell, executed as a browser would (inline scripts only — no modules).
