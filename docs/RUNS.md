@@ -22,7 +22,10 @@ gate is in [TRUST_AND_APPROVAL_POSTURE.md](TRUST_AND_APPROVAL_POSTURE.md).
    `chela judge sweep` — a mechanical mutation of every conditional, comparison and return
    code the branch changed vs its base — and refuses while a mutation survives, unless the
    agent names it in `--sweep-equivalent '<file:line>: <why>'` (recorded in
-   `runs.sweep_equivalents`, shown to the judge and appended to the PR body). `--handoff "<note>"`
+   `runs.sweep_equivalents`, shown to the judge and appended to the PR body). The sweep is
+   budgeted (`judge.sweep_budget_seconds`, default 900; `judge.sweep_max_mutations`, default
+   60): it measures conditionals first, and every mutation the budget did not reach is listed
+   `[UNRUN]` — CANNOT VERIFY, never counted as killed — and the hand-in proceeds. `--handoff "<note>"`
    records the agent's note for its reviewer on the run (`runs.handoff`); the inbox notice
    and the Dispatch board show it sanitised. It is informational and never gates anything.
    Before hand-in the brief has the agent walk its own diff against a seven-item
