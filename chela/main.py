@@ -2370,6 +2370,7 @@ def _task_finished_sweep(task_id: str, notes: list[str]) -> list[dict]:
     if skipped:
         print(f"⚠ {skipped} mutation(s) SKIPPED — those lines were never measured; a skip is "
               "unmeasured, not killed.")
+    unrun = _print_sweep_unrun(result)
     survivors = result.get("survivors") or []
     uncovered, stray = sweep.check_equivalents(survivors, equivalents)
     if stray:
@@ -2392,6 +2393,14 @@ def _task_finished_sweep(task_id: str, notes: list[str]) -> list[dict]:
     for e in equivalents:
         e["mutations"] = by_key.get(e["key"], [])
         print(f"  [EQUIVALENT] {e['key']} — {e['why'][:100]}")
+    if unrun:
+        # ⏳ CMX-111: the budget bounds the hand-in, so a partial sweep does not refuse — but
+        # it is never reported as a pass: the unrun lines are named, and the judge still runs.
+        print(f"⚠ sweep PARTIAL: {result.get('measured', 0)} of {result.get('mutations', 0)} "
+              f"mutation(s) measured — {result.get('killed', 0)} killed, {skipped} skipped "
+              f"(unmeasured), {len(survivors)} survivor(s) declared equivalent; {unrun} UNRUN "
+              "= CANNOT VERIFY, not passed — proceeding within the sweep budget.")
+        return equivalents
     print(f"✓ sweep: {result.get('mutations', 0)} mutation(s), {result.get('killed', 0)} "
           f"killed, {skipped} skipped (unmeasured), {len(survivors)} survivor(s) declared "
           "equivalent — proceeding.")
@@ -2680,7 +2689,9 @@ def cmd_judge_sweep(args) -> None:
         print(f"  [{n + 1}/{total}] {mut.key} {mut.kind}", flush=True)
 
     result = sweep.run_sweep(args.cwd, base=args.base, workflow_path=workflow,
-                             test_cmd=args.test_cmd, progress=_progress)
+                             test_cmd=args.test_cmd, progress=_progress,
+                             budget_seconds=args.budget_seconds,
+                             max_mutations=args.max_mutations)
     if not result.get("ok"):
         print(f"sweep: {result.get('error', 'unknown error')}")
         sys.exit(2)
@@ -2689,20 +2700,36 @@ def cmd_judge_sweep(args) -> None:
     for note in result["notes"]:
         print(f"  {note}")
     skipped = _print_sweep_skipped(result)
+    unrun = _print_sweep_unrun(result)
     for r in result["survivors"]:
         print(f"  [SURVIVED] {r['key']} {r['mutation']}")
     if result["cannot_verify"]:
         print(f"⚠ CANNOT VERIFY — {result['cannot_verify']}")
         sys.exit(2)
     print(f"sweep: {result['mutations']} mutation(s) — {result['killed']} killed, "
-          f"{len(result['survivors'])} survived, {skipped} skipped "
-          f"({result['seconds']}s)")
+          f"{len(result['survivors'])} survived, {skipped} skipped"
+          f"{f', {unrun} UNRUN' if unrun else ''} ({result['seconds']}s)")
     if result["survivors"]:
         print("⚖️ Each SURVIVED line is a changed check no test can tell apart from its "
               "corruption. Add a test that goes RED under that mutation — not a weaker "
               "assertion. If no outcome can change under it, `chela task-finished` accepts "
               "--sweep-equivalent '<file:line>: <why>'.")
         sys.exit(1)
+    if unrun:
+        # ⏳ CMX-111: no survivor among what ran is NOT "all killed" — the rest is unknown.
+        print(f"⚠ CANNOT VERIFY — the sweep budget stopped it: {result.get('exhausted', '')}. "
+              f"{unrun} mutation(s) never ran. Raise --budget-seconds/--max-mutations (or "
+              "judge.sweep_budget_seconds / judge.sweep_max_mutations) to cover them.")
+        sys.exit(2)
+
+
+def _print_sweep_unrun(result: dict) -> int:
+    """⏳ CMX-111: print every mutation the sweep BUDGET never reached as ``[UNRUN   ]`` and
+    return how many — CANNOT VERIFY for those lines, never killed and never a pass."""
+    unrun = result.get("unrun") or []
+    for r in unrun:
+        print(f"  [UNRUN   ] {r['key']} {r['mutation']} — CANNOT VERIFY: {r['reason'][:120]}")
+    return len(unrun)
 
 
 def _print_sweep_skipped(result: dict) -> int:
@@ -3703,6 +3730,16 @@ def main() -> None:
     p_jsweep.add_argument(
         "--test-cmd", metavar="CMD",
         help="Run this suite command instead of reading one from the workflow",
+    )
+    p_jsweep.add_argument(
+        "--budget-seconds", type=float, default=None, metavar="S",
+        help="Wall-clock budget; mutations it does not reach are UNRUN (CANNOT VERIFY). "
+             "Default: judge.sweep_budget_seconds, else 900. 0 = the default",
+    )
+    p_jsweep.add_argument(
+        "--max-mutations", type=int, default=None, metavar="N",
+        help="Measure at most N mutations (highest priority first); the rest are UNRUN. "
+             "Default: judge.sweep_max_mutations, else 60. 0 = the default",
     )
     from chela.judge_eval import cli as judge_eval_cli
     judge_eval_cli.add_parser(judge_sub)
