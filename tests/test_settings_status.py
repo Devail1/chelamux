@@ -330,9 +330,7 @@ def test_update_payload_degrades_stale_services_to_empty_on_an_unreadable_freshn
 
 
 def test_the_no_upstream_note_arm_also_flags_an_unread_fleet(client, monkeypatch):
-    """`_update_status_payload` builds its note arm (no upstream) as a separate dict — the
-    unread flag must be carried there too, not only on the plain arm the test above drives
-    (defeat shape 22). Read through /api/update/status, the route the banner polls."""
+    """The note arm is a separate dict — it must carry the flag too (defeat shape 22)."""
     monkeypatch.setattr(dash.update, "commits_behind",
                         lambda fetch=True: dash.update.UpdateStatus(
                             ok=True, behind=0, ahead=0, branch="dev",

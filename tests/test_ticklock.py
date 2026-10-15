@@ -150,7 +150,6 @@ def test_the_daemon_restarting_itself_from_its_own_tick_does_not_wait_on_itself(
 
 
 # --- agents and judges are NOT the daemon's to interrupt (why CMX-199's refusal went) ---
-
 def test_a_detached_judge_survives_the_daemon_being_killed(tmp_path):
     pidfile = tmp_path / "judge.pid"
     spawner = _py("""
@@ -179,8 +178,7 @@ def test_a_tmux_agent_survives_the_daemon_being_killed(tmp_path):
     spawner = _py("""
         import subprocess, sys, time
         from pathlib import Path
-        subprocess.run(["tmux", "-L", sys.argv[1], "new-session", "-d", "-s", "a", "sleep 30"],
-                       check=True)
+        subprocess.run(["tmux", "-L", sys.argv[1], "new-session", "-d", "-s", "a", "sleep 30"], check=True)
         Path(sys.argv[2]).touch()
         time.sleep(60)
     """, sock, tmp_path / "up", start_new_session=True)

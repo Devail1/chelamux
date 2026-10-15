@@ -22,6 +22,6 @@ test must read the partial states too, not wait for the final one.
 
 **Found:** CMX-127 rework round 2, PR #680 (held-out survivor; this was the likeliest
 candidate). `chela/dashboard/app.py` `api_update_apply()`'s `_run` `finally`; fixed in
-`tests/test_update_apply_route.py` (`test_last_result_lands_before_applying_clears`). The same
+`tests/test_update_apply_route.py` (`test_a_pull_records_its_outcome_before_applying_clears`). The same
 round also pinned `/api/update/status`'s `Cache-Control: no-cache` and `_BOOT_ID`'s pid
 identity, which no test read.

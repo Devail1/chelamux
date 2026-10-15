@@ -3253,9 +3253,8 @@ def _service_freshness() -> tuple[list[str], list[str], bool]:
     CHECKOUT in sync"; this answers "is the RUNNING CODE the checkout" — a bare `git pull`
     (bypassing `chela update`) leaves the former true while the latter is false, and
     `chela doctor` already reports exactly that gap (`repo.services_current`) while this
-    card said "UP TO DATE" about it (2026-08-02). An unreadable result does not fail the
-    whole payload, but it is reported as ``ok=False`` (CMX-95) — never as "nothing stale":
-    the global banner and the Update section must not call an unread fleet up to date.
+    card said "UP TO DATE" about it (2026-08-02). An unreadable result is ``ok=False``
+    (CMX-95), never "nothing stale": no surface may call an unread fleet up to date.
     """
     freshness = update.services_running_stale_code()
     if not freshness.ok:
@@ -3284,23 +3283,18 @@ def _update_status_payload() -> dict:
             "stale_services": stale, "unknown_services": unknown, "stale_ok": stale_ok}
 
 
-# CMX-95: identifies THIS dashboard process. A click that restarts chela-dashboard itself
-# can never read its own outcome back (the process recording it is the one pm2 killed); a
-# page polling /api/update/status sees `boot` change instead and reloads onto the new code.
+# CMX-95: THIS dashboard process. A click that restarts the dashboard can't read its own
+# outcome back; the page polling /api/update/status sees `boot` change and reloads instead.
 _BOOT_ID = f"{os.getpid()}-{time.time_ns()}"
 
 
 @app.route("/api/update/status")
 @require_auth
 def api_update_status():
-    """The Update section's payload plus what the apply route is doing — polled by the
-    global banner and by the post-click state machine (CMX-95). Read-only, never fetches."""
+    """The Update payload plus what the apply route is doing (CMX-95). Read-only."""
     payload = _update_status_payload()
-    payload.update({
-        "boot": _BOOT_ID,
-        "applying": _update_apply_started_at is not None,
-        "last_result": _update_last_result,
-    })
+    payload.update(boot=_BOOT_ID, applying=_update_apply_started_at is not None,
+                   last_result=_update_last_result)
     resp = jsonify(payload)
     resp.headers["Cache-Control"] = "no-cache"
     return resp
@@ -3339,9 +3333,8 @@ _update_apply_lock = threading.Lock()
 # operator (or the drawer) can tell "wait" from "go restart the dashboard" without reading
 # this source file first.
 _update_apply_started_at: float | None = None
-# CMX-95: the outcome of the last apply this process ran, keyed by the `run` number the POST
-# answered with, so a page polling /api/update/status can tell ITS click's result from an
-# older one. In memory on purpose: a restart of this process is reported by `boot` instead.
+# CMX-95: the last apply's outcome, keyed by the `run` the POST answered with. In memory on
+# purpose: a restart of this process is reported by `boot` instead.
 _update_apply_runs = 0
 _update_last_result: dict | None = None
 # CMX-226: `update.apply_stuck_after_seconds()` derives the ceiling from
@@ -3359,12 +3352,11 @@ def api_update_apply():
     thread, because the pull it may do restarts `chela-*` PM2 services INCLUDING this
     dashboard process; running it inline would race the process's own restart against
     flushing the HTTP response. Returns immediately once it has confirmed there is
-    something to do; the outcome lands in the log and in /api/update/status's
-    ``last_result`` under the ``run`` number this response carries.
+    something to do; the actual outcome lands in the daemon/dashboard log, not this
+    response — and in /api/update/status's ``last_result``, under this response's ``run``.
 
-    Dispatched runs no longer block it (CMX-95, removing CMX-199's refusal): agents live in
-    tmux and judges run detached, so a daemon restart interrupts neither — and the daemon's
-    own tick in progress is waited for inside `update._restart` (`chela.ticklock`).
+    Dispatched runs don't block it (CMX-95): tmux agents and detached judges survive a
+    daemon restart, and `update._restart` waits for the daemon's tick (`chela.ticklock`).
     """
     global _update_apply_started_at, _update_apply_runs
     try:
@@ -3411,9 +3403,8 @@ def api_update_apply():
 
     def _run():
         global _update_apply_started_at, _update_last_result
-        outcome = {"run": run, "ok": False, "step": "crashed",
-                   "error": "the update thread died before reporting", "restarted": [],
-                   "behind_before": 0}
+        outcome = {"run": run, "ok": False, "step": "crashed", "restarted": [], "behind_before": 0,
+                   "error": "the update thread died before reporting"}
         try:
             result = update.restart_stale() if stale else update.apply()
             outcome = {"run": run, "ok": bool(result.ok), "step": result.step,
@@ -3428,8 +3419,7 @@ def api_update_apply():
                     "dashboard-triggered update applied %d commit(s), restarted: %s",
                     result.behind_before, restarted)
         finally:
-            # Order matters: a poller that sees `applying` false must already see this run's
-            # result (pinned by test_last_result_lands_before_applying_clears).
+            # Order matters: a poller seeing `applying` false must already see this result.
             _update_last_result = outcome
             _update_apply_started_at = None
             config.clear_update_apply_lock()
