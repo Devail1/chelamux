@@ -10,6 +10,8 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-10-15
+
 ### Added
 
 - **Hold Alt to number the sidebar sessions; Alt+1..9 opens that row** — like the Claude
@@ -18,6 +20,303 @@ history lives in `git log`.
   section are skipped. Alt+N now works in every mode, not only the wall, and from inside a
   focused terminal pane. The wall panes' corner numbers are gone — the sidebar's is the one
   numbering. (CMX-85, #657)
+
+- **Pending approvals on the dashboard — no Telegram needed.** A ⚖️ pill on every view counts
+  the override (and, once CMX-87 lands, release) requests waiting on you; its sheet shows
+  what, who asked, why, age and time to expiry. Approve (a second tap confirms) and Deny go
+  through the same decide path as `/override/<id>` and re-check head / CI / mergeable /
+  expiry; a request that can't be approved says why instead of offering the button. Live over
+  SSE, with an opt-in browser notification (Settings → Notifications, off by default).
+  `chela merge --override` now prints the dashboard's absolute URL (`CHELA_DASHBOARD_URL`,
+  else the bind address) and `chela merge-approve`, and names Telegram only when a bridge is
+  configured. A dashboard decision is recorded as `decided_by: dashboard` (or
+  `dashboard:<tailnet login>`). (CMX-103, #667)
+
+- **The orchestrator hears every override and release decision.** Approving or denying an
+  override or a release now sends one inbox notice: merged (the commit, who approved and
+  where, and the deploy step: which chela services to restart, or the changed paths in
+  another repo), released (version, tag, what was pushed), or denied (by whom, where, the
+  reason). (CMX-123, #676)
+
+- **`chela task-finished` refuses an oversized diff.** It measures the branch's changed lines
+  against its base (code + tests; docs, media and changelog excluded via
+  `hand_in.size_exclude`) and refuses over `hand_in.max_pr_lines` (default 300) BEFORE the
+  sweep runs, printing the measured count. A diff that truly cannot be split may pass
+  `--oversize-reason '<why>'`, which is recorded on the run, shown to the judge and appended
+  to the PR body. An unmeasurable branch refuses rather than passing. (CMX-126)
+
+- **`chela task-finished --split-plan <file>` hands in slice 1 of an oversized task.** With a
+  plan (`{"slices": [{title, files, behaviour, tests}, …]}`, slice 1 = this PR, the rest
+  parked on the branch `<task>-rest`), the hand-in passes the size gate only once this branch
+  is back under `hand_in.max_pr_lines`. chela then files one Linear sub-issue per remaining
+  slice under the run's issue, chained so they run in order, and posts a `split_filed` inbox
+  notice. A failed tracker write refuses the hand-in and names what was already filed.
+  (CMX-140, #683)
+
+- **`chela task-finished --handoff "<note>"` leaves a note for the reviewer.** The agent's
+  note (what changed, what to look at first, what it assumed) is stored on the run
+  (`runs.handoff`) and shown, sanitised, in the orchestrator's inbox notice and on the
+  Dispatch board card. It is informational only and never gates anything. (CMX-52, #653)
+
+- **A `claude` you type by hand into a chela window gets Remote Control too.** While the
+  Remote Control setting is on, every window chela opens for a human ("+ New shell", the
+  dashboard launcher, Telegram `/new`, a resume) defines a `claude` shell function, so a
+  hand-typed `claude …` starts with `--remote-control <window name>` and shows up in the
+  Claude desktop app under the window's current name. `-p`/`--print`, help/version, a
+  prompt or subcommand, or an explicit `--remote-control` are passed through unchanged.
+  Dispatched agents and judges never get it. Turning the setting off affects windows opened
+  afterwards; an already-open shell keeps its function until it exits. (CMX-84, #646)
+
+- **The orchestrator now hears what it used to find by hand.** One inbox notice each, never
+  repeated on a later tick: a run waiting in review with no judge round started past
+  `CHELA_JUDGE_NOT_STARTED_ALERT_S` (default 20m); a dispatch hold that lapses by its TTL or
+  is released by someone else; CI red on the PR's head, naming the failing job, the first
+  failing line and the `gh run rerun … --failed` command (the rework the CI loop sends is no
+  longer a second notice); a PR that turns CONFLICTING with its base (once per head); a
+  running agent with no commit and no transcript activity past `CHELA_STUCK_AGENT_ALERT_S`
+  (default 20m); and a task-finished / push-request marker left unapplied past
+  `CHELA_MARKER_UNREAD_ALERT_S` (default 5m), with the daemon's uptime. (CMX-86)
+
+- **`chela release X.Y.Z --theme "…"` — the orchestrator prepares a release, the operator
+  approves it with one tap, chela pushes.** In its own worktree off `origin/dev` (refused
+  unless `origin/main` is an ancestor) it runs the release steps — the notes, the
+  `pyproject.toml` bump, `uv lock` (which must re-record the new version), the release tests —
+  then commits and tags LOCALLY and files an approval request. It pushes nothing; a failed or
+  dirty step refuses with the reason and leaves nothing behind. The request is a Telegram card
+  (version, theme, the dev commit, the task ids in the new CHANGELOG section, Approve / Deny),
+  the dashboard's `/override/<id>`, or `chela merge-approve <id>`. Approving re-checks that
+  `origin/dev` is still the commit the release was cut from and `origin/main` an ancestor,
+  then pushes main, the tag and dev — fast-forward only, once — and the card ends on the
+  released commit and, once the Release workflow built it, the GitHub Release's URL. A push to
+  dev expires the request; deny, expiry or a failed check push nothing and remove the local
+  tag. The approval stays human-only: the merge-gate hook (plugin 0.2.9) also denies a
+  session's `python` call into `chela.release.complete`. A staged file outside the release
+  paths (CHANGELOG.md, pyproject.toml, uv.lock, changelog.d) refuses the release too. See
+  "Releasing" in CONTRIBUTING.md. (CMX-87)
+
+- **`chela judge sweep`: a mechanical mutation pass over every conditional the branch
+  changed.** For each changed line in `.py`/`.js`/`.mjs` (not tests) vs `--base` (default
+  `origin/<workspace.base_branch>`), it rewrites `if X` to `if False and (X)` (plus the
+  `True or (X)` twin when there is an `else`), swaps a return/`CompletedProcess` code
+  `0`↔`1`, swaps `return None`↔`return <expr>` in a function that has both, and flips
+  `==`↔`!=`, `<`↔`>=`, `>`↔`<=`. Each mutation goes through the judge's own
+  apply/read-back/parse/per-mutation-selection mechanics and is restored in a `finally`. A
+  recovery marker (`.chela-sweep-recovery.json`) means a killed sweep is undone on the next
+  start. It exits 1 on any survivor. A mutation that does not parse is reported as skipped,
+  never as killed.
+- **`chela task-finished` runs the sweep and refuses while a survivor remains.** To accept a
+  survivor, the agent names it with a reason:
+  `--sweep-equivalent '<file:line>: <why no outcome can change>'`. The note is stored in
+  `runs.sweep_equivalents`, shown to the judge and appended to the PR body (one line per note — a newline in the reason cannot forge an
+  extra bullet). A note that names
+  a line which did not survive is refused. The judge itself is unchanged. (CMX-88)
+
+- **`chela judge sweep` runs on any git repo, with no chela setup.** No `WORKFLOW.md`, run
+  record, daemon, tmux or tracker: the suite is `--test-cmd`, else the workflow's
+  `judge.test_cmd`, else detected (pytest / `npm test` / `go test` / `cargo test`); `--json`
+  prints the result as JSON. A changed file in a language the sweep cannot mutate (anything
+  but Python and `.js`/`.mjs`) is reported as UNKNOWN (exit `3`), never as a pass. Run
+  standalone, the sweep does not provision the repo's environment. (CMX-97)
+
+### Changed
+
+- **Docs: the README / landing demos are re-recorded for the new sidebar.** The desktop clip
+  now shows the sidebar as it is today — folder groups with "Needs you" on top, the
+  orchestrator badge, hold-Alt row numbers, and a finished session archived (its window
+  closes) and unarchived (resumed in a new window) — before the Work view and Settings; the
+  phone clip is re-shot on the current pill switcher. Same file names. The demo recorder
+  gained what that needed: the synthetic fleet registers an orchestrator, its fake `claude`
+  answers `claude --resume <id>` by re-running that scripted session, and `record.mjs` can cut
+  over a transient instead of freezing on it. (CMX-100)
+
+- **`chela judge sweep` has a budget, so `task-finished` can no longer block for as long as
+  the diff is big.** The sweep's cost was mutations × suite time; one hand-in ran 24+
+  minutes. It now stops at a wall-clock budget (`judge.sweep_budget_seconds`, default 900)
+  or a mutation cap (`judge.sweep_max_mutations`, default 60), whichever comes first; `0` or
+  unset means the default, and `chela judge sweep --budget-seconds/--max-mutations` override
+  both. Mutations run conditionals first, then return codes and values, then comparison
+  flips, round-robin across files. Each mutation the budget did not reach is listed as
+  `[UNRUN]`: CANNOT VERIFY, never counted as killed. `chela judge sweep` exits 2 on a partial
+  sweep with no survivor. `task-finished` still refuses a measured survivor, but proceeds past
+  the unrun remainder and reports it as "PARTIAL", never as a pass. (CMX-111)
+
+- **The agent brief now has a guard-category checklist to walk before hand-in.** Step 3 of
+  `WORKFLOW.md`'s agent prompt lists seven categories the agent checks its own diff against
+  (`except` clauses, subprocess calls, literal values and regexes, kind branches, fail-closed
+  reads, flag precedence, the authoritative record), writing one test per item that applies
+  and naming the rest in the PR body. CMX-87 took 13 judge rounds because each round found
+  the next gap in a category the tests covered one case at a time; `docs/RUNS.md` notes the
+  step too. (CMX-114)
+
+- **The sweep names what it could not measure.** `chela task-finished` and `chela judge
+  sweep` list every mutation that was skipped (did not parse, did not apply) and summarise
+  "N killed, M skipped (unmeasured)". A git command that hangs, or a changed `.py` file that
+  git diffs as binary, is CANNOT VERIFY instead of being silently left unswept. (CMX-116, #677)
+
+- **Update now no longer refuses while a dispatched run is in flight.** Agents live in tmux
+  and judges run detached, so both outlive a restart of the daemon that spawned them (now
+  proven by tests that SIGKILL the spawner's whole process group), and the daemon's own tick
+  is waited for by the tick lock (CMX-95). A fleet whose freshness can't be read now answers
+  **503** instead of "already up to date", and the new read-only `GET /api/update/status`
+  reports the Update payload plus `boot`, `applying` and `last_result`, keyed by the `run`
+  number the apply POST returns. (CMX-127)
+
+- **`task-finished --self-check-experiments` has a budget too.** Re-running the agent's own
+  mutation experiments was unbounded (one hand-in spent 4-5 hours on it). `chela judge
+  self-check` now stops at a wall-clock budget (`judge.self_check_budget_seconds`, default
+  900) or an experiment cap (`judge.self_check_max_experiments`, default 12), whichever comes
+  first; `0` or unset means the default, and `chela judge self-check
+  --budget-seconds/--max-experiments` override both. Each experiment still uses per-mutation
+  test selection, with subset survivors confirmed on the full suite. Experiments the budget did
+  not reach are listed as `[UNRUN]`: CANNOT VERIFY, never counted as killed, and the result is
+  `partial`, never `clean` (`chela judge self-check` exits 2). `task-finished` still refuses a
+  surviving guard, but proceeds past the unrun remainder and names it — "PARTIAL", never
+  "every guard held". Experiments past the cap used to be dropped silently; they are now listed. (CMX-141)
+
+- **The sidebar layout now follows you across devices.** The group order, custom groups and
+  their members, and the View settings (group by, sort, status) are stored by chela
+  (`/api/sidebar/layout`) instead of each browser's localStorage, so the phone and the laptop
+  show the same sidebar. Collapsed groups, the collapsed sidebar and the Archived section's
+  open/closed state stay per device. The first browser to load the new version imports its
+  old local layout once; later devices adopt that one. (CMX-82, #649)
+
+- **A window's name now follows its session's folder while chela still owns the name.** A
+  window opened in `~` was named after your login and kept that name after its Claude
+  moved to `~/projects/cute-animals`, even though the sidebar grouped it under that folder.
+  The daemon now renames such a window to the new folder, adding `-2` and so on if the
+  name is taken. It waits until the new folder has held for a full tick, and it reads the
+  folder from the same place the sidebar does. The Telegram topic and the Remote Control
+  name follow the new name. A name you chose, the orchestrator's window, and dispatched
+  agent and judge windows are never renamed. (CMX-83)
+
+- **The orchestrator's inbox stops echoing it and stops announcing "awaiting review".** A
+  `chela reopen`/`retry`/`close`/`merge` or `chela dispatch --resume` run by the orchestrator
+  itself no longer comes back to it as a notice; the same action by a human (terminal,
+  dashboard, Telegram) still does — a human's reopen is now `run_reopened`, and a close by
+  anyone else (or a PR closed on GitHub) is `run_was_closed`. The plain "awaiting review"
+  notice is silent by default (still logged for the Feed and `chela wait`); set
+  `CHELA_INBOX_NOTIFY_AWAITING_REVIEW=true` to bring it back. (CMX-86)
+
+- **Docs: README leads with the gate.** The README top now pitches the merge gate (tracker
+  dispatch → mutation-testing judge bound to the PR head → `chela merge` refusing without a
+  clean verdict, one-tap Telegram override), puts the demo right under the banner, has one
+  install block with a one-line requirements list, and states plainly that agents run
+  unsandboxed by default (the sandbox is opt-in per workflow). The landing hero carries the
+  same pitch. (CMX-91)
+
+- **Restarting the daemon waits only for its current tick.** The daemon holds a lock
+  (`$CHELA_DIR/daemon-tick.lock`) for each tick, and `chela update` / the dashboard's Update
+  takes it before restarting `chela-daemon`, so a restart never lands mid-claim, mid-spawn or
+  mid-DB-write. The wait is bounded at 60 s; past that, or when the lock cannot be read, the
+  restart refuses with the reason. Other services never wait. (CMX-95, #679)
+
+- **Landing page follows dev-tool landing conventions, in chela's own look.** The hero puts
+  the README's gate-first pitch, one sub-line, *Get started* / *Star on GitHub* and the demo
+  clip (muted autoplay loop with a poster, desktop and phone cuts) above the fold. Install is
+  the three-line path from `docs/GETTING_STARTED.md` with its requirements line and a copy
+  button that stays out of the way with JS off. *How it works* is a four-step pipeline
+  (tracker → worktree agent → the judge corrupts the code → `chela merge` refuses → one-tap
+  audited override), followed by a *Why chela* comparison table that is honest about the
+  opt-in sandbox, an FAQ, a release-agnostic *Latest release* link to GitHub Releases in place
+  of *New in 0.15*, a Docs / GitHub / License / Changelog footer, and a regenerated social
+  card. (CMX-99)
+
+### Fixed
+
+- **Danger buttons (Schedules' "Del", an agent's "Stop") are readable in every theme.** A
+  leftover rule painted them red text on a red fill. They are now outlined at rest, with a
+  label that meets WCAG AA in every theme; the red is carried by the outline and the hover
+  fill, not by hue alone. (CMX-101, #670)
+
+- **Phone, keyboard open: the terminal's bottom rows are no longer hidden behind the keybar.**
+  Typing a multi-line prompt into an agent showed only its first lines, and Claude's status
+  line was cut in half, until you scrolled the page. With the keyboard up, the single pane is
+  now sized from live geometry so it ends exactly at the keybar's top edge, and it re-fits on
+  keyboard, rotation, keybar-height and scroll changes. Keyboard closed and desktop are
+  unchanged. (CMX-102)
+
+- **The Wall's ring marks the pane your keyboard is in, and only that.** The focus ring is
+  drawn on an overlay above the pane's header, terminal and toolbar instead of only around
+  the recap line (CMX-90, #660), and it follows the terminal that actually has keyboard focus,
+  never a stale one. A crisp ring now means focus only: a pane waiting on you glows yellow, a
+  room is a stripe on the header, and a maximized pane has no second frame. (CMX-104, #663)
+
+- **A new folder group lands among the folders.** Once you had moved any sidebar group, a
+  newly seen folder sorted below *Dispatched*. Groups missing from the saved order now merge
+  in at their default rank; an arrangement you chose is kept and *Other* stays last.
+  (CMX-106, #664)
+
+- **A Linear issue closed as Duplicate counts as closed.** Linear reports Duplicate with its
+  own state type, `duplicate`, so such issues stayed in chela's open read and on the Work
+  board. They are now terminal and hidden, like Canceled. (CMX-107, #668)
+
+- **The stuck-agent notice no longer cries wolf during a self-check, nor claims the daemon is
+  down.** A live `chela task-finished` / `chela judge sweep` / pytest running in a run's
+  worktree now counts as activity, so a long, silent-by-design self-check is never "STUCK";
+  past `CHELA_SELFCHECK_ALERT_S` (default 60m) it gets one `run_selfcheck_long` notice that
+  says exactly that ("task-finished self-check running for 1h02m"). The daemon's state on
+  these notices is now measured (its state file + pid liveness) on every notice, not only
+  when a marker was pending: "daemon up …", "no daemon running" only when the recorded pid
+  is gone, and "daemon state unknown" when it cannot tell. (CMX-110)
+
+- **The "self-check running past the ceiling" notice fires once, not every tick.** After
+  CMX-110 a self-check still running past `CHELA_SELFCHECK_ALERT_S` re-announced itself on
+  every daemon tick: the latch was keyed on the self-check's measured start, a float that
+  jitters between ticks. It is now latched on the self-check's process — one notice per
+  self-check, at most one more per further hour it runs — and the latch clears when the
+  self-check ends or the run leaves `running`, so a re-run is news again. (CMX-120)
+
+- **After a reboot, human sessions come back on their own.** The daemon now runs the restore
+  pass once per new tmux epoch: with `CHELA_RESTORE_RESUME=true` it relaunches the MANUAL
+  rows the ended epoch left behind (the `chela restore --resume` path, which re-registers the
+  orchestrator), and with it off it only reports. Either way one inbox notice lists what came
+  back and what didn't. The first epoch it ever sees is recorded as a baseline, never acted on.
+- **Restore no longer offers a second session in a dispatched run's worktree.** A session
+  whose cwd is the worktree of a run that is not over is hidden from Recent sessions, refused
+  by `/api/restore/resume` (409, saying which run), and skipped by `chela restore --resume`:
+  the run gets exactly one window, the dispatcher's.
+- **A tmux restart no longer spends a run's attempt.** A run whose window was stamped by a
+  tmux server that is no longer running is retried under the same attempt number. (CMX-125)
+
+- **A size-gate split's sub-issues now run in order and keep the parent's priority, and the
+  write is verified.** Slice 2 is blocked by the parent (whose PR carries slice 1) and each
+  later slice by the one before; every slice is filed with the parent's priority. Each
+  created issue is read back fresh from Linear, and `task-finished` refuses the hand-in,
+  naming the mismatch and what was already filed, when the read-back lacks the `blockedBy`,
+  carries a different priority, or cannot be read. (CMX-143)
+
+- **`chela release` can succeed on a real install.** Its worktree was built under
+  `CHELA_DIR/releases/`, i.e. inside the live `~/.chela`, so the release tests' own
+  live-state fence failed every read of the worktree's `CHANGELOG.md`/`pyproject.toml` and
+  every release refused. The worktree now lives under the repository's git dir
+  (`<git-common-dir>/chela-releases/<tag>-<hex>`); the approval records stay in `CHELA_DIR`.
+  A red release-tests run now writes its full output to `CHELA_DIR/releases/last-failure.log`
+  and the refusal names that file and each failed test, instead of a 600-character tail.
+  (CMX-144)
+
+- **Unarchive opens one window, even when two taps race.** A second Unarchive of the same
+  session while the first is still spawning is refused (409) instead of opening a second
+  window; a failed spawn releases the claim. Archive keys imported from a browser's old local
+  state are stamped with the tmux server's epoch, so a hidden `@N` from a dead tmux server no
+  longer hides an unrelated new window. (CMX-78, #654)
+- **The Usage view's 30-minute window no longer empties after UTC midnight.** It scanned
+  transcripts only from the start of the UTC day, so for the first half hour of each day the
+  30-minute consumers lost everything from before midnight. (CMX-78, #654)
+
+- **The dashboard's first paint is the view it lands on.** With terminals on, the Wall is
+  the server-rendered active view, so a load no longer flashes the Work view first; a phone
+  no longer flashes the desktop "+ New shell" button; and a collapsed desktop sidebar stays
+  collapsed from the first frame. (CMX-89, #658)
+
+### Security
+
+- **A dispatched agent or judge pane now inherits an allowlisted environment, not the
+  daemon's.** It used to unset only `CHELA_NOTIFY_URL` and inherit everything else the tmux
+  server held — every `chela.env` setting, pm2's bookkeeping, the operator's shell vars. Every
+  inherited name (the daemon's env plus the tmux global and session tables) that is not on
+  `envutil.AGENT_ENV_ALLOW` is now unset in the pane before the agent starts. Extend the list
+  with `CHELA_CHILD_ENV_FORWARD`; `CHELA_NOTIFY_URL` stays dropped even when forwarded. See
+  TRUST §2 and `docs/CONFIG.md`. (CMX-45, #652)
 
 ## [0.15.0] — 2026-10-11
 
