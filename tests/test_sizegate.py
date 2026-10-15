@@ -12,6 +12,7 @@ import pytest
 from chela import dispatcher, sizegate
 from chela.workflow import parse_workflow
 from tests.test_judge_sweep import _git, _run_row, _task_finished
+from chela.sources import linear
 from chela.sources.linear import LinearError
 from tests.test_linear_new_task import FakeTeam, _node, _source
 
@@ -198,18 +199,105 @@ def test_a_plan_needs_the_branch_under_the_limit_and_the_rest_parked(
 
 
 def test_a_valid_plan_files_ordered_sub_issues_under_the_parent():
-    parent = _node(1, "parent")
+    parent = _node(1, "parent", priority=2)
     parent["labels"] = {"nodes": [{"id": "lbl-risk", "name": "risk:high"}, {"name": "x"}]}
     ids = sizegate.file_sub_issues(_source(fake := FakeTeam(parent)), "CMX-1", PLAN["slices"], "cmx-1-rest")
     assert ids == ["CMX-100", "CMX-101"]
     creates = fake.inputs("create")
-    assert [(c["title"], c["parentId"], c["labelIds"], c["stateId"]) for c in creates] == [
-        ("two", "uuid-1", ["lbl-risk"], "st-Todo"), ("three", "uuid-1", ["lbl-risk"], "st-Todo")]
+    assert [(c["title"], c["parentId"], c["labelIds"], c["stateId"], c["priority"]) for c in creates] == [
+        ("two", "uuid-1", ["lbl-risk"], "st-Todo", 2), ("three", "uuid-1", ["lbl-risk"], "st-Todo", 2)]
     assert creates[0]["description"] == ("b\n\n**Files:** a.py\n**Tests:** test_a\n\nSlice 2 of 3, split from "
                                          "CMX-1 by the hand-in size gate. Builds on branch `cmx-1-rest` — start from it.")
     assert fake.inputs("relation") == [
         {"issueId": "uuid-1", "relatedIssueId": "uuid-100", "type": "blocks"},
         {"issueId": "uuid-100", "relatedIssueId": "uuid-101", "type": "blocks"}]
+
+
+@pytest.mark.parametrize("n_slices, chain", [
+    (2, [("CMX-100", "CMX-1")]),
+    (4, [("CMX-100", "CMX-1"), ("CMX-101", "CMX-100"), ("CMX-102", "CMX-101")]),
+])
+def test_the_sub_issues_chain_parent_then_each_slice_and_inherit_priority(n_slices, chain):
+    """CMX-143: 1 remaining slice → blockedBy the parent; 3 → parent←s2←s3←s4, as READ BACK
+    from the tracker (not as requested), each with the parent's High priority."""
+    slices = [{**SLICE, "title": f"s{i}"} for i in range(1, n_slices + 1)]
+    fake = FakeTeam(_node(1, "parent", priority=2))
+    ids = sizegate.file_sub_issues(_source(fake), "CMX-1", slices, "b")
+    assert ids == [c for c, _ in chain]
+    for child, blocker in chain:
+        node = fake.issues[child]
+        assert [r["issue"]["identifier"] for r in node["inverseRelations"]["nodes"]] == [blocker]
+        assert node["priority"] == 2
+
+
+class _SilentRelation(FakeTeam):
+    """Linear says `success` for the relation but stores nothing."""
+    def __call__(self, query, variables):
+        if query == linear.CREATE_RELATION_MUTATION:
+            self.calls.append(("relation", variables))
+            return {"issueRelationCreate": {"success": True}}
+        return super().__call__(query, variables)
+
+
+class _DroppedPriority(FakeTeam):
+    """Linear creates the issue but ignores its priority."""
+    def __call__(self, query, variables):
+        if query == linear.CREATE_ISSUE_MUTATION:
+            variables = {"input": {**variables["input"], "priority": 0}}
+        return super().__call__(query, variables)
+
+
+class _UnreadableAfterCreate(FakeTeam):
+    def __call__(self, query, variables):
+        if query == linear.ISSUES_BY_NUMBER_QUERY and self.next_number > 100:
+            raise LinearError("network", "connection reset")
+        return super().__call__(query, variables)
+
+
+@pytest.mark.parametrize("team, error", [
+    (_SilentRelation, "slice 2 filed as CMX-100 but the read-back has no blockedBy CMX-1 (it has none)"
+                      " — already filed: CMX-100"),
+    (_DroppedPriority, "slice 2 filed as CMX-100 but the read-back has priority 0, not CMX-1's 2"
+                       " — already filed: CMX-100"),
+    (_UnreadableAfterCreate, "slice 2 filed as CMX-100 but it could not be read back"
+                             " — already filed: CMX-100"),
+])
+def test_a_write_the_read_back_disagrees_with_refuses(team, error):
+    fake = team(_node(1, "parent", priority=2))
+    with pytest.raises(RuntimeError) as ei:
+        sizegate.file_sub_issues(_source(fake), "CMX-1", PLAN["slices"], "b")
+    assert str(ei.value) == error
+    assert fake.names().count("create") == 1
+
+
+def test_an_unreadable_parent_files_nothing():
+    fake = FakeTeam(_node(1, "parent", priority=2))
+    fake.fail_read = True
+    with pytest.raises(RuntimeError, match="^could not read CMX-1's priority — filed nothing$"):
+        sizegate.file_sub_issues(_source(fake), "CMX-1", PLAN["slices"], "b")
+    assert "create" not in fake.names()
+
+
+@pytest.mark.parametrize("info", [None, {}, {"priority": None}, {"priority": True}, {"priority": "2"}])
+def test_a_parent_priority_chela_cannot_read_files_nothing(info):
+    t = _Tracker(links={"CMX-1": info})
+    with pytest.raises(RuntimeError, match="^could not read CMX-1's priority — filed nothing$"):
+        sizegate.file_sub_issues(t, "CMX-1", PLAN["slices"], "b")
+    assert t.calls == []
+
+
+def test_issue_links_reads_fresh_and_refuses_what_it_cannot_read():
+    fake = FakeTeam(_node(1, "p", priority=3, blockers=[
+        {"type": "blocks", "issue": {"identifier": "cmx-7", "state": {"type": "started"}}},
+        {"type": "related", "issue": {"identifier": "CMX-8", "state": {"type": "started"}}}]))
+    src = _source(fake)
+    assert src.issue_links("CMX-1") == {"priority": 3, "blocked_by": ["CMX-7"]}
+    fake.issues["CMX-1"]["priority"] = 1
+    assert src.issue_links("cmx-1")["priority"] == 1          # uncached: sees the change
+    assert src.issue_links("CMX-9") is None
+    assert src.issue_links("OTHER-1") is None
+    fake.fail_read = True
+    assert src.issue_links("CMX-1") is None
 
 
 def test_a_parent_alone_is_resolved_and_an_unknown_one_files_nothing():
@@ -221,11 +309,21 @@ def test_a_parent_alone_is_resolved_and_an_unknown_one_files_nothing():
 
 
 class _Tracker:
-    def __init__(self, fail_at=None, warn_at=None):
+    """Records each call and reads back exactly what was written."""
+    def __init__(self, fail_at=None, warn_at=None, links=None):
         self.calls, self.fail_at, self.warn_at = [], fail_at, warn_at
+        self.links = links
 
-    def create_issue(self, title, body, *, blocked_by, parent):
-        self.calls.append((title, blocked_by, parent))
+    def issue_links(self, ident):
+        if self.links is not None:
+            return self.links.get(ident)
+        written = {f"CMX-{n + 100}": c for n, c in enumerate(self.calls)}
+        if ident not in written:
+            return {"priority": 2, "blocked_by": []}          # the parent
+        return {"priority": written[ident][1], "blocked_by": [b.upper() for b in written[ident][2]]}
+
+    def create_issue(self, title, body, *, priority, blocked_by, parent):
+        self.calls.append((title, priority, blocked_by, parent))
         n = len(self.calls)
         if n == self.fail_at:
             raise RuntimeError("boom")

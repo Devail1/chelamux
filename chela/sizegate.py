@@ -81,25 +81,45 @@ def slice_brief(s: dict, n: int, total: int, parent: str, branch: str) -> str:
 
 def file_sub_issues(source, parent: str, slices: list[dict], branch: str) -> list[str]:
     """Create one sub-issue of ``parent`` per slice after the first, each blocked by the one
-    before it (the first by ``parent``), so they run in order. Returns their identifiers.
-    Raises RuntimeError naming what failed AND what was already filed — a half-filed split
-    is not a filed one, and must never read as one."""
+    before it (the first by ``parent``, whose PR carries slice 1), so they run in order, and
+    each with ``parent``'s priority. 📏 CMX-143: every created issue is READ BACK, and a
+    missing ``blockedBy`` or a different priority refuses — an unverified write must not read
+    as a filed one. Returns their identifiers. Raises RuntimeError naming what failed AND what
+    was already filed — a half-filed split is not a filed one, and must never read as one."""
+    info = source.issue_links(parent)
+    if not info or isinstance(info.get("priority"), bool) or not isinstance(
+            info.get("priority"), int):
+        raise RuntimeError(f"could not read {parent}'s priority — filed nothing")
+    priority = info["priority"]
     created: list[str] = []
     prev = parent
     for n, s in enumerate(slices[1:], 2):
         try:
             issue = source.create_issue(str(s["title"]),
                                         slice_brief(s, n, len(slices), parent, branch),
-                                        blocked_by=[prev], parent=parent)
+                                        priority=priority, blocked_by=[prev], parent=parent)
         except Exception as e:
             raise RuntimeError(f"filing slice {n} ({s['title']!r}) failed: {e}"
                                f" — already filed: {', '.join(created) or 'none'}") from e
-        created.append(issue["identifier"])
+        ident = issue["identifier"]
+        created.append(ident)
         if issue.get("warnings"):
-            raise RuntimeError(f"slice {n} filed as {issue['identifier']} but "
+            raise RuntimeError(f"slice {n} filed as {ident} but "
                                f"{'; '.join(issue['warnings'])} — already filed: "
                                f"{', '.join(created)}")
-        prev = issue["identifier"]
+        got = source.issue_links(ident)
+        if not got:
+            problem = "it could not be read back"
+        elif prev.upper() not in got.get("blocked_by", ()):
+            problem = f"the read-back has no blockedBy {prev} (it has {got.get('blocked_by') or 'none'})"
+        elif got.get("priority") != priority:
+            problem = f"the read-back has priority {got.get('priority')!r}, not {parent}'s {priority!r}"
+        else:
+            problem = None
+        if problem:
+            raise RuntimeError(f"slice {n} filed as {ident} but {problem} — already filed: "
+                               f"{', '.join(created)}")
+        prev = ident
     return created
 
 
