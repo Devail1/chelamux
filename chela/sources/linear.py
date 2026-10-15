@@ -998,6 +998,19 @@ class LinearSource:
         return {"identifier": issue["identifier"], "url": str(issue.get("url") or ""),
                 "title": str(issue.get("title") or title), "warnings": warnings}
 
+    def issue_links(self, identifier: str) -> dict | None:
+        """📏 CMX-143 — ``{"priority", "blocked_by"}`` for one issue of this team, read FRESH
+        (never this tick's cache), so a caller can verify what a write actually left behind.
+        ``blocked_by`` holds the upper-cased identifiers of its ``blocks`` relations. None
+        when the issue cannot be read or does not exist — unknown never reads as OK."""
+        nodes = self._nodes_by_id([identifier], cache=False)     # None/[]: unread, foreign
+        node = next((n for n in nodes or () if isinstance(n, dict) and str(
+            n.get("identifier") or "").upper() == str(identifier).strip().upper()), None)
+        if node is None:
+            return None
+        return {"priority": node.get("priority"),
+                "blocked_by": [b["identifier"].upper() for b in _blockers(node)]}
+
     # --- helpers -------------------------------------------------------------------------
 
     def _team(self) -> tuple[str, list[dict]] | None:
