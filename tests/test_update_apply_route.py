@@ -599,9 +599,12 @@ def test_status_reports_this_runs_outcome_under_its_run_number(client, monkeypat
     monkeypatch.setattr(update, "restart_stale", fake_restart)
     run = client.post("/api/update/apply").get_json()["run"]
 
-    mid = client.get("/api/update/status").get_json()
+    resp = client.get("/api/update/status")
+    assert resp.headers["Cache-Control"] == "no-cache"   # a cached poll never sees the restart
+    mid = resp.get_json()
     assert mid["applying"] is True
-    assert mid["boot"] == dash._BOOT_ID
+    # `boot` names THIS process: a constant would never change across the restart it reports.
+    assert mid["boot"] == dash._BOOT_ID and dash._BOOT_ID.startswith(f"{os.getpid()}-")
     assert mid["stale_ok"] is True
     release.set()
 
@@ -656,3 +659,28 @@ def test_each_apply_gets_a_new_run_number(client, monkeypatch):
         time.sleep(0.01)
     second = client.post("/api/update/apply").get_json()["run"]
     assert second == first + 1
+
+
+def test_last_result_lands_before_applying_clears(client, monkeypatch):
+    """A poller stops at the first read with `applying` false and takes `last_result` from
+    that SAME read — so the result must be written first. Polling for both halves (as the
+    tests above do) passes in either order; this traces every line of the update thread and
+    checks the invariant at each one (defeat shape 127)."""
+    _stale(monkeypatch, ["chela-collab"])
+    monkeypatch.setattr(update, "restart_stale", lambda: update.ApplyResult(ok=True, step="done"))
+    seen = []
+
+    def local(frame, event, arg):
+        if event == "line" and dash._update_apply_started_at is None:
+            seen.append(dash._update_last_result)
+        return local
+
+    previous = threading.gettrace()
+    threading.settrace(lambda frame, event, arg: local if frame.f_code.co_name == "_run" else None)
+    try:
+        run = client.post("/api/update/apply").get_json()["run"]
+    finally:
+        threading.settrace(previous)
+    _wait_status(client, lambda d: (d["last_result"] or {}).get("run") == run and not d["applying"])
+    assert seen, "the update thread never reached a line with applying cleared"
+    assert all((r or {}).get("run") == run for r in seen), "applying cleared before last_result"

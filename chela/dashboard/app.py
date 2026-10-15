@@ -3428,6 +3428,8 @@ def api_update_apply():
                     "dashboard-triggered update applied %d commit(s), restarted: %s",
                     result.behind_before, restarted)
         finally:
+            # Order matters: a poller that sees `applying` false must already see this run's
+            # result (pinned by test_last_result_lands_before_applying_clears).
             _update_last_result = outcome
             _update_apply_started_at = None
             config.clear_update_apply_lock()
