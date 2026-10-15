@@ -230,7 +230,7 @@ def make_transport(api_key: str) -> Transport:
 _ISSUE_FIELDS = """
   id identifier number title description priority sortOrder branchName url archivedAt
   state { name type }
-  labels(first: 50) { nodes { name } }
+  labels(first: 50) { nodes { id name } }
   inverseRelations(first: 50, includeArchived: true) {
     nodes { type issue { identifier archivedAt state { type } } }
   }
@@ -287,8 +287,8 @@ mutation Archive($id: String!) {
 }
 """
 
-# CMX-6: the dashboard's "New task". ⛔ The input never carries `parentId` — chela never
-# creates a sub-issue (the free plan's cap counts them, and a sub-issue is not a task).
+# CMX-6: the dashboard's "New task". `parentId` is sent only for a size-gate split
+# (CMX-126) — a slice of an oversized hand-in, which IS a task of its own.
 CREATE_ISSUE_MUTATION = """
 mutation CreateIssue($input: IssueCreateInput!) {
   issueCreate(input: $input) { success issue { id identifier title url } }
@@ -925,7 +925,7 @@ class LinearSource:
         return archived
 
     def create_issue(self, title: str, description: str = "", priority: int = 0,
-                     blocked_by=()) -> dict:
+                     blocked_by=(), parent: str | None = None) -> dict:
         """📐 CMX-6 — create one issue in this team, in its first configured READY state,
         and a ``blocks`` relation from each of ``blocked_by`` (identifiers of this team).
 
@@ -933,29 +933,32 @@ class LinearSource:
         when nothing was created (a bad input, an unknown blocker, Linear refused) — the
         caller keeps the typed brief. A relation that fails AFTER the issue exists is a
         warning, not an error: the issue is real, and creating it twice would be worse.
-        Never a sub-issue: no ``parentId`` is ever sent."""
+        📏 CMX-126: ``parent`` (an identifier of this team) makes it a sub-issue of that
+        issue, inheriting its labels (so its risk) — a size-gate split's slice."""
         title = (title or "").strip()
         if not title:
             raise LinearError("input", "a title is required")
         if isinstance(priority, bool) or priority not in PRIORITIES:
             raise LinearError("input", "priority must be 0 (none) to 4 (low)")
         blockers = [str(b).strip() for b in (blocked_by or ()) if str(b).strip()]
+        lookup = blockers + ([parent] if parent else [])
         if self.config_error:
             raise LinearError("config", self.config_error)
-        foreign = [b for b in blockers if self._number_of(b) is None]
+        foreign = [b for b in lookup if self._number_of(b) is None]
         if foreign:
             raise LinearError("input", f"not an issue of team {self.team}: {foreign[0]}")
         blocker_ids: dict[str, str] = {}
-        if blockers:
-            nodes = self._nodes_by_id(blockers)
+        found: dict[str, dict] = {}
+        if lookup:
+            nodes = self._nodes_by_id(lookup)
             if nodes is None:
                 raise LinearError("network", "could not read the blocking issues")
-            found = {str(n.get("identifier") or "").upper(): n.get("id")
+            found = {str(n.get("identifier") or "").upper(): n
                      for n in nodes if isinstance(n, dict) and n.get("id")}
-            for b in blockers:
+            for b in lookup:
                 if b.upper() not in found:
                     raise LinearError("input", f"no such issue: {b}")
-                blocker_ids[b.upper()] = found[b.upper()]
+            blocker_ids = {b.upper(): found[b.upper()]["id"] for b in blockers}
         team = self._team()
         if team is None:
             raise LinearError("network", f"could not read team {self.team}")
@@ -966,10 +969,14 @@ class LinearSource:
         if state_id is None:
             raise LinearError("config", f"team {self.team} has no state named "
                                         f"{' / '.join(self.ready_states)}")
-        data = self._call(CREATE_ISSUE_MUTATION, {"input": {
-            "teamId": team_id, "title": title, "description": description or "",
-            "priority": priority, "stateId": state_id,
-        }}, cache=False)
+        fields = {"teamId": team_id, "title": title, "description": description or "",
+                  "priority": priority, "stateId": state_id}
+        if parent:
+            node = found[parent.upper()]
+            fields["parentId"] = node["id"]
+            fields["labelIds"] = [lbl["id"] for lbl in (node.get("labels") or {}).get("nodes")
+                                  or [] if isinstance(lbl, dict) and lbl.get("id")]
+        data = self._call(CREATE_ISSUE_MUTATION, {"input": fields}, cache=False)
         created = data.get("issueCreate") or {}
         issue = created.get("issue") if isinstance(created, dict) else None
         if not (isinstance(created, dict) and created.get("success") and isinstance(issue, dict)

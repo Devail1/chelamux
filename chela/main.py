@@ -2275,7 +2275,8 @@ def cmd_task_finished(args) -> None:
         print("task-finished: pass at most one of --self-check-experiments / --no-new-guards")
         sys.exit(2)
     # 📏 CMX-126: the size gate runs FIRST — an oversized diff is refused before its sweep.
-    size = dispatcher.check_hand_in_size(args.task_id, getattr(args, "oversize_reason", None))
+    size = dispatcher.check_hand_in_size(args.task_id, getattr(args, "oversize_reason", None),
+                                         getattr(args, "split_plan", None))
     if not size.get("ok"):
         print(f"task-finished: 📏 {size['error']}")
         sys.exit(1)
@@ -2325,6 +2326,13 @@ def cmd_task_finished(args) -> None:
     kwargs = {"handoff": getattr(args, "handoff", None)}
     if accepted:
         kwargs["sweep_equivalents"] = accepted
+    if size.get("slices"):
+        filed = dispatcher.file_split(args.task_id, size["record"], size["slices"])
+        if not filed.get("ok"):
+            print(f"task-finished: 📏 {filed['error']}")
+            sys.exit(1)
+        size["record"] = filed["record"]
+        print(f"📏 split filed: {', '.join(filed['record']['sub_issues'])}")
     if size.get("record"):
         kwargs["size_gate"] = size["record"]
     result = dispatcher.request_task_finished(args.task_id, **kwargs)
@@ -4088,6 +4096,12 @@ def main() -> None:
     p_tf.add_argument(
         "--oversize-reason", metavar="WHY", default=None,
         help="📏 CMX-126: hand in an oversized diff that cannot be split (recorded).",
+    )
+    p_tf.add_argument(
+        "--split-plan", metavar="PATH", default=None,
+        help="📏 CMX-126: JSON {\"slices\": [{title, files, behaviour, tests}, …]}, slice 1 "
+             "= this PR, the rest parked on branch <task>-rest; chela files them as ordered "
+             "sub-issues.",
     )
     p_tf.add_argument(
         "--handoff", metavar="TEXT", default=None,
