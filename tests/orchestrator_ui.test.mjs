@@ -156,3 +156,51 @@ test('an SSE "orchestrator" frame repaints the pane buttons live, with no poll',
     assert.equal(orchBtn('@1').classList.contains('on'), false,
         'pane @1 must not also show as owner');
 });
+
+// --- 3. CMX-139: a RECONNECT re-fetches the status and moves the ring -----------
+//
+// The server primes its orchestrator baseline from the CURRENT pin on every new
+// connection, without emitting — so a pin that moved while the stream was down (a
+// dashboard restart, `chela watch` from the CLI in between) never arrives as an
+// `orchestrator` delta. The `hello` that opens every connection is the only signal.
+// 🔴 GUARD: drop `refreshOrchestratorStatus()` from sse.js's `hello` handler and the
+// ring stays on @2 — the stale-ring-until-reload bug.
+
+const ring = wid => document.querySelector(
+    `#term-stage .grid-stack-item[gs-id="${wid}"] .gs-dot-ring`);
+
+test('an SSE reconnect ("hello") re-fetches the status and the ring moves to the new pane', async () => {
+    const source = FakeEventSource.last;
+    const hello = source.listeners['hello'];
+    assert.ok(hello && hello.length > 0, 'nothing is listening for the "hello" SSE event');
+    assert.equal(ring('@2').classList.contains('gs-dot-orch'), true, 'sanity: the ring starts on @2');
+
+    // The pin moved to @1 while disconnected; the reconnect's hello carries only the runs baseline.
+    ORCH_STATUS = { wid: '@1', name: 'agent-a', state: 'ok', why: '', queued: 0 };
+    hello.forEach(cb => cb({ data: JSON.stringify({ runs: [] }) }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    assert.equal(orchestrator.orchestratorState().wid, '@1',
+        'the stream reconnected but the orchestrator status was never re-fetched');
+    assert.equal(ring('@1').classList.contains('gs-dot-orch'), true, 'the ring never moved to @1');
+    assert.equal(ring('@2').classList.contains('gs-dot-orch'), false, 'the ring stayed on @2');
+});
+
+// --- 4. CMX-139: a pane built AFTER the status landed is born with the ring -----
+//
+// 🔴 GUARD: render `.gs-dot-ring` without its owner check (paneHead) and a pane that
+// appears after the last status change shows no ring until the NEXT change.
+
+test('a pane added after the owner is known renders with the ring already on', async () => {
+    ORCH_STATUS = { wid: '@3', name: 'agent-c', state: 'ok', why: '', queued: 0 };
+    await orchestrator.refreshOrchestratorStatus();   // owner is @3 BEFORE its pane exists
+    const util = await import('../chela/dashboard/static/js/util.js');
+    util.setAgentsCache([...AGENTS, { name: 'shell', window_id: '@3', online: true }]);
+    terminals._absorbFreshTerminals(['@1', '@2', '@3']);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    assert.ok(ring('@3'), 'sanity: pane @3 was absorbed into the wall');
+    assert.equal(ring('@3').classList.contains('gs-dot-orch'), true,
+        'pane @3 owns the slot but was rendered without the orchestrator ring');
+    assert.equal(ring('@1').classList.contains('gs-dot-orch'), false);
+});

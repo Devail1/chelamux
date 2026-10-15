@@ -161,6 +161,12 @@ function initSSE() {
         let d = null;
         try { d = JSON.parse(e.data); } catch (_) { /* baseline optional */ }
         _primeRunStatus(d);
+        // CMX-139: `hello` opens EVERY connection, reconnects included (a dashboard
+        // restart drops the stream and the browser re-opens it). The server primes
+        // its orchestrator baseline from the CURRENT pin without emitting, so a pin
+        // that moved while we were disconnected never arrives as a delta — re-fetch
+        // the status here, or the ring stays on the old pane until a reload.
+        refreshOrchestratorStatus();
     });
     _sse.addEventListener('windows', e => {
         let d = null;

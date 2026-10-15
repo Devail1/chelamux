@@ -5698,9 +5698,17 @@ def _sse_overrides_snapshot() -> tuple:
 
 
 def _sse_orchestrator_snapshot() -> dict:
-    """``{wid, state}`` — cheap enough to diff every SSE tick (one JSON read, no
-    tmux). Diffed to push an ``orchestrator`` delta so the pane toggle and the
-    decisions panel's owner chip update live, without waiting on their own poll.
+    """``{wid, epoch, name}`` — the pin AS RECORDED, cheap enough to diff every SSE
+    tick (one JSON read, no tmux). Diffed to push an ``orchestrator`` delta so the
+    pane toggle and the decisions panel's owner chip update live, without waiting
+    on their own poll.
+
+    CMX-139: the diff is on the WHOLE pin, not just the wid, and it reads the store
+    every writer goes through (``chela watch``, the SessionStart hook's
+    ``--if-unclaimed``, ``chela restore --resume``, a take-over, this dashboard) —
+    so a CLI writer needs no channel of its own. The wid alone missed the case that
+    bit after a WSL restart: tmux renumbers, the orchestrator re-registers as the
+    SAME ``@2`` under a NEW epoch, and a wid-only diff saw no change at all.
     """
     try:
         store = inbox.load()
@@ -5710,7 +5718,8 @@ def _sse_orchestrator_snapshot() -> dict:
         # loop already polls every second. The full state (with `why`) is one
         # cheap follow-up fetch to /api/orchestrator/status, same as every other
         # frame on this stream being a notification, not a payload.
-        return {"wid": wid}
+        return {"wid": wid, "epoch": inbox.orchestrator_epoch(store),
+                "name": store.get("orchestrator_name")}
     except Exception:
         log.exception("SSE: orchestrator snapshot failed")
         return {}
