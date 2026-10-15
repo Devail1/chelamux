@@ -18,14 +18,20 @@ gate is in [TRUST_AND_APPROVAL_POSTURE.md](TRUST_AND_APPROVAL_POSTURE.md).
 4. **`chela task-finished <task>`** asks the daemon to mark the run `awaiting_review` and
    close the agent's window. With `--self-check-experiments <file>` it first re-runs the
    agent's own guard corruptions and refuses if one survives; `--no-new-guards` is the
-   opt-out for a run that added no guard. With neither, it warns. It then runs
+   opt-out for a run that added no guard. With neither, it warns. Before any sweep it
+   measures the diff (code + tests vs the base; docs, media and changelog excluded via
+   `hand_in.size_exclude`) and refuses it over `hand_in.max_pr_lines` (default 300), printing
+   the count. `--oversize-reason '<why>'` passes a diff that truly cannot be split (recorded on
+   the run, shown to the judge and in the PR body); `--split-plan <file>` hands in slice 1 of
+   a plan and has chela file the remaining slices as ordered Linear sub-issues. It then runs
    `chela judge sweep` — a mechanical mutation of every conditional, comparison and return
    code the branch changed vs its base — and refuses while a mutation survives, unless the
    agent names it in `--sweep-equivalent '<file:line>: <why>'` (recorded in
    `runs.sweep_equivalents`, shown to the judge and appended to the PR body). The sweep is
    budgeted (`judge.sweep_budget_seconds`, default 900; `judge.sweep_max_mutations`, default
    60): it measures conditionals first, and every mutation the budget did not reach is listed
-   `[UNRUN]` — CANNOT VERIFY, never counted as killed — and the hand-in proceeds. `--handoff "<note>"`
+   `[UNRUN]` — CANNOT VERIFY, never counted as killed — and the hand-in proceeds; a mutation
+   that did not parse or apply is listed as skipped, never as killed. `--handoff "<note>"`
    records the agent's note for its reviewer on the run (`runs.handoff`); the inbox notice
    and the Dispatch board show it sanitised. It is informational and never gates anything.
    Before hand-in the brief has the agent walk its own diff against a seven-item
@@ -46,6 +52,22 @@ gate is in [TRUST_AND_APPROVAL_POSTURE.md](TRUST_AND_APPROVAL_POSTURE.md).
 8. **Done.** After the merge, the dispatcher marks the task done in its tracker: it strikes the
    `TODO.md` line on the base branch (it is that file's only writer), or moves the Linear
    issue to its `done_state`.
+
+### The sweep on its own
+
+`chela judge sweep` also runs in any git repo, with no `WORKFLOW.md`, daemon, tmux or
+tracker:
+
+```bash
+chela judge sweep --base origin/main --test-cmd "pytest -q"   # add --json for a machine-readable result
+```
+
+The suite is `--test-cmd`, else the workflow's `judge.test_cmd`, else detected (pytest,
+`npm test`, `go test`, `cargo test`). It mutates changed Python and `.js`/`.mjs` lines only; a
+changed file in another language is UNKNOWN, never a pass. Exit codes: `0` every mutation
+killed, `1` a survivor, `2` cannot verify (including a partial, budget-cut sweep), `3`
+unknown. Run standalone, it does not provision the repo's environment, so install the
+project's dependencies first.
 
 A PR that changes only documentation (`docs/`, `changelog.d/`, top-level `*.md`) is not
 judged — there is nothing to mutate — and is parked once at `needs_human` for a human OK or
@@ -86,7 +108,8 @@ commit**, prints its id and returns. Nothing merges yet.
 The operator approves or denies it in one of three places:
 
 - the **Approve / Deny** buttons on the message posted to the orchestrator's Telegram topic;
-- the dashboard's confirm page, `/override/<id>`;
+- the dashboard: the ⚖️ **Pending approvals** pill on every view (a second tap confirms
+  Approve), or the confirm page `/override/<id>`;
 - `chela merge-approve <id>` (or `--deny`) in a plain terminal. With no id it lists pending
   requests.
 
@@ -96,7 +119,18 @@ merges, and the request is marked failed with the reason. A new push to the PR e
 pending request, as does `CHELA_OVERRIDE_WAIT_S` (default 24 h). `chela override list [--all]`
 shows requests. Approval is human-only: `merge-approve` refuses inside a Claude Code session or
 the orchestrator's process, and the merge-gate hook denies a session's attempts to reach it
-(`chela/overrides.py`).
+(`chela/overrides.py`). Every decision (merged, denied) also reaches the orchestrator as one
+inbox notice; a merge in chela's own repo names the services to restart.
+
+## Releasing
+
+`chela release X.Y.Z --theme "…"` prepares a release in its own worktree off `origin/dev`
+(the notes from `changelog.d/`, the version bump, `uv lock`, the release tests), commits and
+tags it **locally**, and files an approval request the same way an override does. Approving
+it (Telegram, the dashboard, or `chela merge-approve <id>`) re-checks that `origin/dev` has
+not moved, then pushes `main`, the tag and `dev`, fast-forward only. Deny, expiry or a failed
+check pushes nothing. The full steps are under "Releasing" in
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Closing and requeueing
 

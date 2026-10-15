@@ -123,7 +123,9 @@ branch. What to do when a run stops for a human — retry, reopen, override, clo
 > **Guard discipline is the contract.** Every guard must go **RED** when the thing
 > it protects is broken — the judge corrupts each guard in a throwaway worktree and
 > blocks any PR whose guard survives its own corruption. See
-> [CONTRIBUTING.md](../CONTRIBUTING.md).
+> [CONTRIBUTING.md](../CONTRIBUTING.md). To see where your own tests stand first, run
+> `uv run chela judge sweep --cwd /path/to/your/repo --base origin/main` on a branch: it lists
+> every changed check no test catches ([RUNS.md](RUNS.md#the-sweep-on-its-own)).
 
 > **Prefer an agent set it up?** Copy [`skills/chela-setup`](../skills/chela-setup/SKILL.md)
 > into `~/.claude/skills/` and a Claude Code agent will install chela and seed a

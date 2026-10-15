@@ -148,6 +148,16 @@ to the event log.
 Merging to `main`, making the repo public, and executing agent-authored text as a command
 are all in the NEVER tier — no standing grant reaches them.
 
+**Two requests reach past the gate, and only a human's tap completes either.**
+`chela merge --override --reason …` (skip the judge clause; every other clause is
+re-checked) and `chela release X.Y.Z` (push the release commit to `main`, its tag and `dev`)
+each file a request bound to what they were cut from: the PR's head, or the `origin/dev`
+commit. Nothing moves until an operator approves it on Telegram, on the dashboard or with
+`chela merge-approve`; a new push expires it. Approval is human-only: `merge-approve` refuses
+inside a Claude Code session or the orchestrator's process, and the merge-gate hook denies a
+session's `python` call into the approval path (`chela/overrides.py`, `chela/release.py`).
+See `docs/RUNS.md` ("Overriding the judge", "Releasing").
+
 **Two unattended paths exist, and both are strictly opt-in, off by default, and loud when
 on** (`capabilities.py`'s `warn_when_on` logs a WARNING, not an INFO, on every boot they
 are enabled): `CHELA_AUTO_MERGE` runs the *same* `contract.merge` gate above on a timer
