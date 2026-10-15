@@ -86,24 +86,24 @@ To dispatch work, follow [**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md) 
 10 minutes, clone to a first agent-opened PR). Prefer an agent to set it up? Copy
 [`skills/chela-setup`](skills/chela-setup/SKILL.md) into `~/.claude/skills/`.
 
-## What's new in 0.15
+## What's new in 0.16
 
-- **Linear is a first-class queue.** `tracker: kind: linear` reads a team's issues (ready
-  state `Todo`, `risk:high|normal|low` labels), the Work board mirrors the team's workflow
-  states, and "New task" creates the issue — [docs/LINEAR_TRACKER.md](docs/LINEAR_TRACKER.md).
-- **Override is one tap.** `chela merge --override --reason …` files a request and returns;
-  approving it (a Telegram button, the dashboard, or `chela merge-approve`) completes the
-  merge after re-checking head, CI and mergeability — [docs/RUNS.md](docs/RUNS.md).
-- **A closed task can come back.** `chela close <run> --requeue` re-dispatches it on a fresh
-  branch, and `chela doctor` plus a Work-board **Requeue** button flag a closed run that
-  stalls a ready task.
-- **A sidebar like the Claude desktop app's** — folder groups, one row per dispatched run
-  with live judge progress, a VIEW menu, an orchestrator badge, and Archive that closes a
-  session (Unarchive resumes it) — [docs/DASHBOARD.md](docs/DASHBOARD.md).
-- **Usage view** (in Settings, beside spend): 5h / 7d limit bars, burn rate, and the top
-  token consumers across every transcript.
-- **Window names match Remote Control.** A new window is named after its folder and launches
-  with `--remote-control <that name>`; a dashboard rename types `/rename` into the session.
+- **`chela judge sweep`** mutates every conditional, comparison and return code a branch
+  changed and lists each one no test catches. A dispatched agent's `chela task-finished` runs
+  it (budgeted) and refuses while a mutation survives; it also refuses a diff over 300 changed
+  lines. The sweep runs in any git repo too: `chela judge sweep --base origin/main --test-cmd
+  "pytest -q"` — [docs/RUNS.md](docs/RUNS.md#the-sweep-on-its-own).
+- **`chela release X.Y.Z --theme "…"`** prepares the release locally; one tap pushes `main`,
+  the tag and `dev`.
+- **Pending approvals on the dashboard.** A ⚖️ pill approves or denies override and release
+  requests without Telegram.
+- **The orchestrator's inbox hears what it used to find by hand**: CI red on a PR's head, a
+  PR turning conflicting, a stuck agent, a judge that never started, every approval outcome,
+  and the agent's own `--handoff` note.
+- **Dispatched agents inherit an allowlisted environment**, not the daemon's —
+  [TRUST §2](docs/TRUST_AND_APPROVAL_POSTURE.md#2-what-a-dispatched-agent-can-do-execution--sandbox).
+- **The sidebar follows you across devices**, hold <kbd>Alt</kbd> to number its rows, and a
+  window's name follows its session's folder — [docs/DASHBOARD.md](docs/DASHBOARD.md).
 
 Full list: [CHANGELOG.md](CHANGELOG.md).
 
