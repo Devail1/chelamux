@@ -300,3 +300,247 @@ def test_an_interrupted_run_leaves_git_diff_empty(tmp_path, sig):
     out, _ = proc.communicate(timeout=60)
     assert proc.returncode == 2 and f"interrupted by signal {int(sig)}" in out
     assert _git(root, "diff") == "" and _git(root, "status", "--porcelain") == ""
+
+
+# --- CMX-97 category pass: every gate / filter / wiring point is pinned ----------------------
+
+
+@pytest.mark.parametrize("provision", [True, False])
+def test_provisioning_runs_iff_provision_is_true(tmp_path, monkeypatch, provision):
+    """🔴 GUARD (wiring): a standalone sweep (provision=False) NEVER provisions the repo's env;
+    a chela-managed one does, and a provisioning failure is CANNOT VERIFY."""
+    root = _bare(tmp_path / "r", {"calc.py": BIG})
+    calls = []
+    monkeypatch.setattr(sweep.judge, "provision_suite_env",
+                        lambda wt: calls.append(Path(wt)) or "boom")
+    report = sweep.sweep(root, "main", "true", timeout=60, provision=provision)
+    assert bool(calls) is provision
+    if provision:
+        assert "PROVISIONED" in report.cannot_verify and "boom" in report.cannot_verify
+    else:
+        assert report.cannot_verify == "" and report.results
+
+
+def test_provision_defaults_to_true(tmp_path, monkeypatch):
+    root = _bare(tmp_path / "r", {"calc.py": BIG})
+    calls = []
+    monkeypatch.setattr(sweep.judge, "provision_suite_env",
+                        lambda wt: calls.append(wt) or "boom")
+    sweep.sweep(root, "main", "true", timeout=60)
+    assert len(calls) == 1
+
+
+def test_provisioning_is_skipped_when_there_is_nothing_to_sweep(tmp_path, monkeypatch):
+    root = _bare(tmp_path / "r", {"README.md": "hi\n"})
+    monkeypatch.setattr(sweep.judge, "provision_suite_env",
+                        lambda wt: pytest.fail("provisioned with no mutation"))
+    report = sweep.sweep(root, "main", "true", timeout=60, provision=True)
+    assert report.results == [] and any("nothing to sweep" in n for n in report.notes)
+
+
+@pytest.mark.parametrize("rel, unsupported", [
+    # each test-file alternative on its own (is_test_path does NOT match these)
+    ("x/a_spec.rb", False), ("x/a_spec.go", False), ("x/a_test.go", False),
+    ("x/FooTest.java", False), ("x/FooTests.cs", False), ("x/a.spec.ts", False),
+    ("x/__tests__/a.ts", False), ("x/tests/a.go", False), ("x/test/a.java", False),
+    ("x/spec/a.rb", False), ("tests/a.go", False), ("test/a.go", False), ("spec/a.rb", False),
+    ("__tests__/a.ts", False),
+    # is_test_path's own patterns (the foreign regex does NOT match these)
+    ("x/test_a.go", False), ("x/a.test.go", False),
+    # near misses stay UNKNOWN: the dir must be a whole path segment, the suffix a whole token
+    ("xtests/a.go", True), ("x/mytest/a.go", True), ("x/specs/a.rb", True),
+    ("x/contest.go", True), ("x/a_testing.go", True), ("x/spec.go", True),
+    ("x/aspec.rb", True), ("x/Testing.java", True),
+])
+def test_foreign_test_file_patterns_are_never_unknown_source(rel, unsupported):
+    """Deterministic (pure-function) pin of each foreign test pattern — no git, no order."""
+    assert sweep._unsupported(rel) is unsupported
+
+
+@pytest.mark.parametrize("suffix", [
+    ".ts", ".tsx", ".mts", ".cts", ".jsx", ".cjs", ".go", ".rs", ".java", ".kt", ".kts",
+    ".scala", ".rb", ".php", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".cs", ".swift",
+    ".m", ".mm", ".lua", ".ex", ".exs", ".erl", ".hs", ".ml", ".clj", ".dart", ".sh",
+    ".bash"])
+def test_every_unsupported_suffix_is_unknown(suffix):
+    """A LITERAL list (not derived from the set under test) — dropping a suffix goes red."""
+    assert suffix in sweep.UNSUPPORTED_SUFFIXES and sweep._unsupported(f"src/thing{suffix}")
+    assert sweep._unsupported(f"src/thing{suffix}") is True
+
+
+def test_a_foreign_spec_file_in_a_real_repo_is_not_unknown(tmp_path):
+    root = _bare(tmp_path / "r", {"calc.py": BIG, "x/a_spec.rb": "x\n", "y/b.spec.ts": "x\n",
+                                  "z/c_test.go": "x\n", "real.go": "x\n"})
+    assert sweep.unsupported_files(root, "main") == (["real.go"], "")
+
+
+def _fake_result(**over) -> dict:
+    d = {"ok": True, "mutations": 1, "killed": 1, "survivors": [], "unrun": [], "notes": [],
+         "unparseable": [], "not_applied": [], "invalid": [], "unsupported": [],
+         "cannot_verify": "", "recovered": "", "seconds": 0.1, "test_cmd": "t",
+         "test_cmd_source": "--test-cmd"}
+    d.update(over)
+    return d
+
+
+def _run_cli(monkeypatch, capsys, result, *argv, cwd=None, progress=False):
+    from chela import main
+    seen = {}
+
+    def fake(cwd_, **kw):
+        seen.update(cwd=cwd_, **kw)
+        if progress:
+            kw["progress"](0, 2, sweep.Mutation("a.py", 3, "flip", "a", "b"))
+        return result
+
+    monkeypatch.setattr(sweep, "run_sweep", fake)
+    monkeypatch.setattr(sys, "argv", ["chela", "judge", "sweep", "--cwd", str(cwd or "."), *argv])
+    code = 0
+    try:
+        main.main()
+    except SystemExit as e:
+        code = e.code or 0
+    out = capsys.readouterr()
+    return code, out.out, out.err, seen
+
+
+@pytest.mark.parametrize("result, code", [
+    (_fake_result(), 0),
+    (_fake_result(survivors=[{"key": "a.py:3", "mutation": "m"}]), 1),
+    (_fake_result(cannot_verify="red baseline"), 2),
+    (_fake_result(unrun=[{"key": "a.py:3", "mutation": "m", "reason": "r"}]), 2),
+    (_fake_result(unsupported=["a.go"]), 3),
+    (_fake_result(survivors=[{"key": "a.py:3", "mutation": "m"}], unsupported=["a.go"]), 1),
+    ({"ok": False, "error": "nope"}, 2),
+])
+@pytest.mark.parametrize("as_json", [True, False])
+def test_cli_exit_code_is_the_verdict_in_both_output_modes(monkeypatch, capsys, result, code,
+                                                          as_json):
+    for r in (result.get("survivors") or []) + (result.get("unrun") or []):
+        r.setdefault("status", "x")
+    got, out, err, _ = _run_cli(monkeypatch, capsys, result, *(["--json"] if as_json else []))
+    assert got == code
+    if as_json:
+        assert json.loads(out) == result
+    else:
+        assert not out.lstrip().startswith("{")
+
+
+def test_cli_json_keeps_stdout_pure_and_progress_on_stderr(monkeypatch, capsys):
+    code, out, err, _ = _run_cli(monkeypatch, capsys, _fake_result(), "--json", progress=True)
+    assert json.loads(out) and "[1/2] a.py:3 flip" in err and "[1/2]" not in out
+
+
+def test_cli_text_progress_goes_to_stdout(monkeypatch, capsys):
+    code, out, err, _ = _run_cli(monkeypatch, capsys, _fake_result(), progress=True)
+    assert "[1/2] a.py:3 flip" in out and "[1/2]" not in err
+
+
+@pytest.mark.parametrize("source, shown", [("detected (tests/)", True), ("--test-cmd", False),
+                                           ("WORKFLOW.md judge.test_cmd", False)])
+def test_cli_names_the_suite_only_when_it_was_detected(monkeypatch, capsys, source, shown):
+    _, out, _, _ = _run_cli(monkeypatch, capsys, _fake_result(test_cmd_source=source))
+    assert ("suite: `t` — detected (tests/)" in out) is shown
+
+
+def test_cli_text_banners_are_exclusive(monkeypatch, capsys):
+    unk = _fake_result(unsupported=["a.go"])
+    _, out, _, _ = _run_cli(monkeypatch, capsys, unk)
+    assert "[UNKNOWN ] a.go — not supported: " + sweep.SUPPORTED_NOTE in out
+    assert "⚠ UNKNOWN — 1 changed source file(s)" in out and "SURVIVED" not in out
+    assert "never ran" not in out
+    unrun = _fake_result(unrun=[{"key": "a.py:3", "mutation": "m", "reason": "r"}],
+                         exhausted="budget")
+    _, out, _, _ = _run_cli(monkeypatch, capsys, unrun)
+    assert "mutation(s) never ran" in out and "⚠ UNKNOWN —" not in out
+    _, out, _, _ = _run_cli(monkeypatch, capsys, _fake_result(cannot_verify="red"))
+    assert "⚠ CANNOT VERIFY — red" in out and "sweep: 1 mutation(s)" not in out
+    _, out, _, _ = _run_cli(monkeypatch, capsys, _fake_result())
+    assert "sweep: 1 mutation(s) — 1 killed" in out and "⚠" not in out
+
+
+def test_cli_passes_its_arguments_through(monkeypatch, capsys, tmp_path):
+    _, _, _, seen = _run_cli(monkeypatch, capsys, _fake_result(), "--base", "b", "--test-cmd",
+                             "tc", "--budget-seconds", "7", "--max-mutations", "3",
+                             cwd=tmp_path)
+    assert (seen["cwd"], seen["base"], seen["workflow_path"], seen["test_cmd"],
+            seen["budget_seconds"], seen["max_mutations"]) == (str(tmp_path), "b", None, "tc",
+                                                               7.0, 3)
+
+
+def test_cli_workflow_is_auto_detected_in_cwd_and_explicit_wins(monkeypatch, capsys, tmp_path):
+    (tmp_path / "WORKFLOW.md").write_text("x")
+    _, _, _, seen = _run_cli(monkeypatch, capsys, _fake_result(), cwd=tmp_path)
+    assert seen["workflow_path"] == str(tmp_path / "WORKFLOW.md")
+    _, _, _, seen = _run_cli(monkeypatch, capsys, _fake_result(), "--workflow", "/e/W.md",
+                             cwd=tmp_path)
+    assert seen["workflow_path"] == "/e/W.md"
+
+
+def test_cli_recovered_marker_is_printed(monkeypatch, capsys):
+    _, out, _, _ = _run_cli(monkeypatch, capsys, _fake_result(recovered="restored x"))
+    assert "⚠ restored x" in out
+
+
+@pytest.mark.parametrize("with_wf, source_has", [(True, "judge.test_cmd"), (False, "detected")])
+def test_run_sweep_reports_where_the_suite_came_from(tmp_path, monkeypatch, with_wf, source_has):
+    (tmp_path / "pytest.ini").write_text("")
+    monkeypatch.setattr(sweep.shutil, "which", lambda n: "/bin/python")
+    wf = None
+    if with_wf:
+        wf = tmp_path / "WORKFLOW.md"
+        wf.write_text("---\nproject_key: TEST\njudge:\n  test_cmd: wfcmd\n---\n")
+    monkeypatch.setattr(sweep, "sweep", lambda *a, **kw: sweep.SweepReport())
+    assert source_has in sweep.run_sweep(tmp_path, workflow_path=wf)["test_cmd_source"]
+    d = sweep.run_sweep(tmp_path, workflow_path=wf, test_cmd=" flag ")
+    assert d["test_cmd_source"] == "--test-cmd"
+
+
+def test_run_sweep_base_defaults(tmp_path, monkeypatch):
+    """No workflow, no --base -> origin/dev; a workflow's base_branch -> origin/<it>; --base wins."""
+    calls = []
+    monkeypatch.setattr(sweep, "sweep", lambda wt, base, cmd, **kw: calls.append(base) or
+                        sweep.SweepReport())
+    sweep.run_sweep(tmp_path, test_cmd="t")
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text("---\nproject_key: TEST\nworkspace:\n  base_branch: trunk\n---\nbody\n")
+    sweep.run_sweep(tmp_path, workflow_path=wf, test_cmd="t")
+    sweep.run_sweep(tmp_path, workflow_path=wf, test_cmd="t", base="mine")
+    assert calls == ["origin/dev", "origin/trunk", "mine"]
+
+
+def test_run_sweep_unreadable_workflow_and_no_suite_are_errors(tmp_path):
+    bad = tmp_path / "WORKFLOW.md"
+    bad.write_text("no front matter, not a workflow")
+    d = sweep.run_sweep(tmp_path, workflow_path=bad)
+    assert d["ok"] is False and "no suite" in d["error"] or "could not be read" in d["error"]
+    assert sweep.run_sweep(tmp_path / "empty_dir_missing", test_cmd=None)["ok"] is False
+
+
+def test_run_sweep_budget_flags_override_the_workflow(tmp_path, monkeypatch):
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text("---\nproject_key: TEST\njudge:\n  test_cmd: c\n  sweep_budget_seconds: 11\n"
+                  "  sweep_max_mutations: 5\n---\nbody\n")
+    seen = []
+    monkeypatch.setattr(sweep, "sweep", lambda *a, **kw: seen.append(kw["budget"]) or
+                        sweep.SweepReport())
+    sweep.run_sweep(tmp_path, workflow_path=wf)
+    sweep.run_sweep(tmp_path, workflow_path=wf, budget_seconds=2, max_mutations=1)
+    assert [(b.seconds, b.max_mutations) for b in seen] == [(11.0, 5), (2.0, 1)]
+
+
+def test_report_records_base_and_test_cmd(tmp_path):
+    root = _bare(tmp_path / "r", {"README.md": "x\n"})
+    d = sweep.sweep(root, "main", "true", provision=False).as_dict()
+    assert (d["base"], d["test_cmd"], d["verdict"]) == ("main", "true", "clean")
+    assert d["unsupported"] == []
+
+
+def test_unsupported_note_and_untracked_unknown_end_to_end(tmp_path):
+    root = _bare(tmp_path / "r", {"calc.py": BIG}, COVERING)
+    (root / "later.go").write_text("x\n")                    # untracked, never committed
+    got, d = _chela(root, tmp_path)
+    assert (got, d["verdict"], d["unsupported"]) == (3, "unknown", ["later.go"])
+    (root / "later.go").unlink()
+    got, d = _chela(root, tmp_path)
+    assert (got, d["verdict"]) == (0, "clean")
