@@ -63,6 +63,7 @@ from chela.telegram.newsession import (
     start_dir,
 )
 from chela.telegram.panescan import detect_askuserquestion
+from chela.telegram.senders import SenderGate, allowed_users_from_env
 
 log = logging.getLogger(__name__)
 
@@ -355,6 +356,7 @@ def build_application(
     launch_session=None,
     decide_override=None,
     refresh_overrides=None,
+    allowed_users=None,
 ):
     """Build a ``python-telegram-bot`` Application wired to ``router``.
 
@@ -444,6 +446,11 @@ def build_application(
     wires :meth:`chela.telegram.reconcile.TopicClosedHandler.handle` here to
     unbind (never kill) a window when its topic is closed from Telegram. Left
     ``None`` (single-topic / manual bindings), no such handler is registered.
+
+    ``allowed_users`` (CMX-185) — the Telegram user ids allowed to drive the agents;
+    ``None`` reads ``CHELA_TELEGRAM_ALLOWED_USERS``. EVERY handler below is wrapped in
+    that :class:`~chela.telegram.senders.SenderGate`, so an update from anyone else is
+    dropped unanswered before it can type, tap or download anything.
     """
     try:
         from telegram import (
@@ -475,6 +482,17 @@ def build_application(
     # daemon is holding open. This process is the only one that sees a tap, so this is the
     # only place the half-answered map for a multi-question gate can live.
     drafts = drafts or gateanswers.DRAFTS
+    gate = SenderGate(allowed_users_from_env() if allowed_users is None
+                      else frozenset(str(u) for u in allowed_users))
+    gate.warn_if_open()
+
+    def _gated(callback):
+        """``callback`` behind the sender gate: a stranger's update reaches nothing."""
+        async def _wrapper(update, context) -> None:
+            if gate.allows(update):
+                await callback(update, context)
+        _wrapper.__wrapped__ = callback
+        return _wrapper
 
     def _screenshot_keyboard() -> "InlineKeyboardMarkup":
         """The control-key keyboard attached to every ``/screenshot`` reply."""
@@ -1115,32 +1133,32 @@ def build_application(
     application = Application.builder().token(token).post_init(_post_init).build()
     # Command handlers FIRST so /screenshot and /esc are intercepted here; the
     # catch-all text handler forwards every other message (and /command) onward.
-    application.add_handler(CommandHandler("new", _on_new))
-    application.add_handler(CommandHandler("screenshot", _on_screenshot))
-    application.add_handler(CommandHandler("esc", _on_esc))
+    application.add_handler(CommandHandler("new", _gated(_on_new)))
+    application.add_handler(CommandHandler("screenshot", _gated(_on_screenshot)))
+    application.add_handler(CommandHandler("esc", _gated(_on_esc)))
     # AskUserQuestion taps (``qa:``) and mirror D-pad taps (``m:``) are matched FIRST
     # via patterns so they route to their own handlers; PTB runs one handler per group,
     # and the pattern-less _on_key below picks up the /screenshot ``k:`` taps (and
     # ignores anything else).
-    application.add_handler(CallbackQueryHandler(_on_qa, pattern=r"^qa:"))
+    application.add_handler(CallbackQueryHandler(_gated(_on_qa), pattern=r"^qa:"))
     application.add_handler(
-        CallbackQueryHandler(_on_mirror, pattern="^" + re.escape(MIRROR_CB_PREFIX))
+        CallbackQueryHandler(_gated(_on_mirror), pattern="^" + re.escape(MIRROR_CB_PREFIX))
     )
     # ``/new`` folder-browser taps (``n:``), matched by pattern so they route here
     # and not to the pattern-less _on_key catch-all below.
     application.add_handler(
-        CallbackQueryHandler(_on_new_cb, pattern="^" + re.escape(NEW_CB_PREFIX))
+        CallbackQueryHandler(_gated(_on_new_cb), pattern="^" + re.escape(NEW_CB_PREFIX))
     )
     application.add_handler(
-        CallbackQueryHandler(_on_override, pattern="^" + re.escape(OVERRIDE_CB_PREFIX))
+        CallbackQueryHandler(_gated(_on_override), pattern="^" + re.escape(OVERRIDE_CB_PREFIX))
     )
-    application.add_handler(CallbackQueryHandler(_on_key))
+    application.add_handler(CallbackQueryHandler(_gated(_on_key)))
     # Media handlers BEFORE the text catch-all (PTB runs one handler per group):
     # a photo/document pasted into a bound topic is downloaded and its path
     # forwarded to the window, instead of being silently dropped.
-    application.add_handler(MessageHandler(filters.PHOTO, _on_photo))
-    application.add_handler(MessageHandler(filters.Document.ALL, _on_document))
-    application.add_handler(MessageHandler(filters.TEXT, _on_message))
+    application.add_handler(MessageHandler(filters.PHOTO, _gated(_on_photo)))
+    application.add_handler(MessageHandler(filters.Document.ALL, _gated(_on_document)))
+    application.add_handler(MessageHandler(filters.TEXT, _gated(_on_message)))
 
     if on_topic_closed is not None:
         async def _on_topic_closed(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
@@ -1155,7 +1173,7 @@ def build_application(
                 log.exception("topic-closed handling failed")
 
         application.add_handler(
-            MessageHandler(filters.StatusUpdate.FORUM_TOPIC_CLOSED, _on_topic_closed)
+            MessageHandler(filters.StatusUpdate.FORUM_TOPIC_CLOSED, _gated(_on_topic_closed))
         )
 
     return application

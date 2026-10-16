@@ -204,6 +204,29 @@ umask 077 && printf 'TELEGRAM_BOT_TOKEN=…\nTELEGRAM_CHAT_ID=…\n' > ~/.chela/
 
 Neither file is ever committed. Both live under `$CHELA_DIR`, which is not the repo.
 
+### Telegram: who may drive your agents
+
+`TELEGRAM_CHAT_ID` only fixes *which chat* the bridge listens to. Every member of that
+group could otherwise type into every bound agent, send it keys, answer its permission
+prompts and request `/screenshot`. Name the people allowed to do that:
+
+```bash
+# chela.env or secrets.env — numeric Telegram user ids, comma separated
+CHELA_TELEGRAM_ALLOWED_USERS=123456789
+```
+
+To find your id, message `@userinfobot`. Then `pm2 restart chela-telegram`. Every inbound
+update (text, `/commands`, button taps, photos and documents) whose sender is not on the
+list is dropped before any handler runs. It is never forwarded or downloaded and never
+answered, so the sender gets no sign the bot is listening. The drop is logged with the
+sender's id and a short hash of the text (never the text itself), at most once a minute
+per sender.
+
+**Unset, the bridge keeps the old chat-only behaviour**, so upgrading doesn't lock you
+out. It logs a loud warning at start-up, and `chela doctor` reports
+`telegram.sender_allowlist` as a warning until the list is set. A non-numeric entry (an
+`@username`) is ignored and named by doctor.
+
 ### Secrets stay out of the children chela launches
 
 chela itself reads both files, but nothing it launches gets their secrets: the env handed to

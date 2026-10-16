@@ -423,9 +423,8 @@ def _text_handler_and_bot(stub):
     on_message = text_handlers[-1].callback           # the TEXT catch-all, added last
     # The username cell lives in build_application's closure (filled by post_init from
     # get_me()); reach it the same way post_init does, without a network call.
-    cell = on_message.__closure__[
-        on_message.__code__.co_freevars.index("bot")
-    ].cell_contents
+    inner = on_message.__wrapped__                    # behind the CMX-185 sender gate
+    cell = inner.__closure__[inner.__code__.co_freevars.index("bot")].cell_contents
     return on_message, cell
 
 
