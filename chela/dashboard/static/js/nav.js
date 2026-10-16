@@ -4,7 +4,7 @@ import { onOrchestratorChange, orchestratorState } from './orchestrator.js';
 import { refreshSummary } from './header.js';
 import { checkContext } from './agents.js';
 import { showAddSchedule } from './schedules.js';
-import { _displayLabel, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals.js';
+import { _displayLabel, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, isWallVisible, minimizePane, renderMobileSwitcher, setTermMode, shareBtnClick } from './terminals.js';
 import { _launcherData, launchProject, refreshLauncher } from './launcher.js';
 import { VIEWS } from './views.js';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg.js';
@@ -13,7 +13,7 @@ import { refreshCostTab } from './usage.js';
 import { resolveWindowId } from './windowid.js';
 import { followUpdate } from './updateflow.js';
 import { memNote, stepPayload, workflowNote } from './concurrencymodel.js';
-import { DISPATCHED_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, groupSidebar, isArchivable, moveGroup, normalizeView, primaryWindow, runDot, runLabel, runState } from './sidebarmodel.js';
+import { DISPATCHED_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, groupSidebar, isArchivable, moveGroup, normalizeView, primaryWindow, runDot, runLabel, runState, sidebarWids } from './sidebarmodel.js';
 
 // The ONE Archived section at the bottom of the sidebar (CMX-75) — its collapse state
 // rides the collapsed-groups set under this key.
@@ -623,6 +623,16 @@ function _saveCustom(c) { _writeLayout({ custom: { groups: c.groups, assign: c.a
 // what is on screen, so they read the same grouping the screen was drawn from).
 let _sb = { groups: [], needsYou: [], items: new Map() };
 
+// CMX-165: the window ids in the order the sidebar last drew them (sidebarmodel.sidebarWids
+// over the same groupSidebar call). The phone's pill strip sorts by this, so there is one
+// order. The View filters (Status / Environment / Last activity) are lifted for it: a row
+// the sidebar filters out still has a pane, so its pill keeps its group's position.
+let _sbIn = null;   // the agents + groupSidebar options renderSidebarAgents last drew from
+function sidebarOrder() {
+    if (!_sbIn) return [];
+    return sidebarWids(groupSidebar(_sbIn.rows, { ..._sbIn.opts, status: 'all', env: null, activityDays: null }));
+}
+
 // An item's display label: a run reads `CMX-37 · <title>`; a window reads its CMX-62
 // label (manual name > Claude's title > window name).
 function _itemLabel(it) {
@@ -893,12 +903,14 @@ function renderSidebarAgents(agents) {
     const archived = _archivedSet();
     const view = _view();
     const custom = _custom();
-    const model = groupSidebar(rows, {
+    const sbOpts = {
         mode: view.groupBy, wants: wantsHuman, orchWid, order: _groupOrder(),
         archived, status: view.status, env: view.env, activityDays: VIEW_ACTIVITY[view.activity],
         now: Date.now(), sort: view.sort, labelOf: _itemLabel, showEmpty: view.showEmpty, custom,
         sessions: _arch.sessions || [],
-    });
+    };
+    const model = groupSidebar(rows, sbOpts);
+    _sbIn = { rows, opts: sbOpts };
     const showArchived = view.status !== 'active';
 
     // A hidden row that came back to life (busy, waiting) or whose window is gone leaves
@@ -938,6 +950,7 @@ function renderSidebarAgents(agents) {
     }
     host.innerHTML = html;
     _paintAltNums();   // CMX-85: a re-render while Alt is held keeps its numbers
+    renderMobileSwitcher();   // CMX-165: the phone's pills follow this order (no-op on desktop)
 }
 
 // --- The group menu (CMX-35) -------------------------------------------------
@@ -3630,8 +3643,8 @@ function closeShortcuts() {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { altSwitchKeydown, setAltHeld, openSidebarRow, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, refreshArchive, refreshLayout, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, renameCustomGroup, toggleGroup, toggleShowArchived, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
+export { sidebarOrder, altSwitchKeydown, setAltHeld, openSidebarRow, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, refreshArchive, refreshLayout, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, renameCustomGroup, toggleGroup, toggleShowArchived, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _updateFlowDeps, applyUpdate, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
+Object.assign(window.chela, { sidebarOrder, _updateFlowDeps, applyUpdate, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
