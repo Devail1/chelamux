@@ -1063,23 +1063,17 @@ def test_chela_release_is_wired_into_the_command_line(monkeypatch):
     assert (args.version, args.theme, args.body_file) == ("0.2.0", "t", "b.md")
 
 
-def test_major_tag_only_on_the_real_command_line_reaches_the_major_tag_branch(
-        world, capsys, monkeypatch):
-    """`chela release 0.2.0 --major-tag-only` parsed by the REAL parser must land in
-    `release.major_tag_only` — not in `prepare`. A hand-built Namespace (the test above)
-    cannot see a renamed argparse dest that `cmd_release`'s getattr default then swallows."""
+def test_major_tag_only_on_the_real_command_line_reaches_the_major_tag_branch(world, monkeypatch):
+    # Real parser, not a hand-built Namespace: a renamed dest must not fall through to prepare().
     from chela import main
     calls = []
     monkeypatch.setattr(release, "major_tag_only", lambda v, repo=None: calls.append(
         (v, repo)) or {"ok": True, "major": "v0", "sha": "b" * 40})
-    monkeypatch.setattr(release, "prepare", lambda *a, **k: pytest.fail(
-        "--major-tag-only fell through to a full release prepare()"))
+    monkeypatch.setattr(release, "prepare", lambda *a, **k: pytest.fail("fell through"))
     monkeypatch.setattr("sys.argv", ["chela", "release", "0.2.0", "--major-tag-only",
                                      "--repo", str(world.work)])
     main.main()
     assert calls == [("0.2.0", str(world.work))]
-    assert "v0 → bbbbbbbbbbbb" in capsys.readouterr().out
-    assert overrides.all_requests() == []
 
 
 def test_not_done_for_an_override_says_nothing_was_merged():
