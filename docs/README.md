@@ -15,6 +15,7 @@ behind decisions that are otherwise invisible in the code.
 | [RISK_LEVELS.md](RISK_LEVELS.md) | `high` / `normal` / `low` tasks: what the level changes (judge search, rework cap) and what it never does |
 | [CONFIG.md](CONFIG.md) | Where configuration lives (`chela.env`), precedence, and PM2 |
 | [HOOKS.md](HOOKS.md) | The Claude Code hooks plugin — what it enables and what it costs |
+| [MODS_SPIKE.md](MODS_SPIKE.md) | Spike: the hook layer as a Claude Code Mod, measured side by side, and the go/no-go |
 | [EVENTS.md](EVENTS.md) | The event log: kinds, shape, rotation |
 | [TRUST_AND_APPROVAL_POSTURE.md](TRUST_AND_APPROVAL_POSTURE.md) | Who may dispatch, what a running agent may do, what approves a merge — in one place |
 | [ESCALATION_CONTRACT.md](ESCALATION_CONTRACT.md) | When an agent must stop and surface to a human |
