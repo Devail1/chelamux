@@ -3,6 +3,7 @@ import errno
 import logging
 import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 
@@ -279,6 +280,59 @@ def refuse_if_not_a_worktree(repo_path: Path, wt_path: Path, root: Path) -> None
         )
 
 
+def _ancestors() -> set[int]:
+    """This process and every ancestor of it — never a reaping target, even with its cwd
+    inside the worktree (a ``chela`` invoked from the worktree it is cleaning up)."""
+    pids, pid = set(), os.getpid()
+    while pid > 1 and pid not in pids:
+        pids.add(pid)
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                pid = int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+    return pids
+
+
+def reap_processes_in(wt_path: Path) -> list[int]:
+    """SIGKILL every process whose cwd is inside the linked worktree ``wt_path`` (CMX-151).
+
+    The backstop for a run's processes outliving the run: eight orphaned ``node --test``
+    children of a merged run sat in its removed worktree for 3.5 hours holding ~4 GB.
+    Logs each kill (pid + cmdline) and returns the pids killed.
+
+    ⛔ Only a LINKED worktree — its ``.git`` must be a FILE. The main checkout (``.git`` a
+    directory), any ancestor of it, an unregistered leftover: none of them qualify, so a
+    wrongly recorded worktree path (issue #398) can never reach the operator's own
+    processes. Containment is per path COMPONENT (``CMX-1`` never matches ``CMX-10``), and
+    this process and its ancestors are always spared.
+    """
+    if not (wt_path / ".git").is_file():
+        return []
+    target = wt_path.resolve()
+    spared = _ancestors()
+    killed: list[int] = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) in spared:
+            continue
+        try:
+            cwd = os.readlink(f"/proc/{entry}/cwd")
+        except OSError:
+            continue                            # gone, or not ours to read
+        cwd = cwd.removesuffix(" (deleted)")    # a subdirectory already removed under it
+        if not Path(cwd).is_relative_to(target):
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                cmdline = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+            os.kill(int(entry), signal.SIGKILL)
+        except OSError:
+            continue
+        log.warning("reaped pid %s (cwd %s) left in worktree %s: %s", entry, cwd, target, cmdline)
+        killed.append(int(entry))
+    return killed
+
+
 def remove_worktree(repo_path: Path, wt_path: Path, root: Path) -> bool:
     """Drop a worktree and its directory — survives every way it can go stale.
 
@@ -306,6 +360,7 @@ def remove_worktree(repo_path: Path, wt_path: Path, root: Path) -> bool:
     # that fallback exists precisely for paths git has no record of, which is exactly what
     # a wrongly-recorded main checkout (or any other out-of-root path) looks like from here.
     refuse_if_not_a_worktree(repo_path, wt_path, root)
+    reap_processes_in(wt_path)
     out = subprocess.run(
         ["git", "-C", str(repo_path), "worktree", "remove", "--force", str(wt_path)],
         capture_output=True, text=True,

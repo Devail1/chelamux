@@ -13,7 +13,10 @@ A LIVE worktree must still win the idempotent-reuse path untouched.
 from __future__ import annotations
 
 import logging
+import signal
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -417,3 +420,134 @@ def test_is_inside_root_treats_an_UNRESOLVABLE_path_as_OUTSIDE(tmp_path, monkeyp
         "an UNRESOLVABLE path read as INSIDE the worktrees root — the OSError arm must "
         "fail closed, because False is what refuses the deletion"
     )
+
+
+# --- reap_processes_in: a run's processes die with its worktree (CMX-151) ---------------
+# Every target is a dummy this test spawned, with its cwd in a tmp worktree — never the
+# operator's processes.
+
+_SLEEP = [sys.executable, "-c", "import time; time.sleep(60)"]
+
+
+@pytest.fixture
+def dummies():
+    procs: list[subprocess.Popen] = []
+
+    def spawn(cwd: Path) -> subprocess.Popen:
+        procs.append(subprocess.Popen(_SLEEP, cwd=str(cwd)))
+        return procs[-1]
+
+    yield spawn
+    for p in procs:
+        p.kill()
+        p.wait()
+
+
+def _killed(p: subprocess.Popen) -> bool:
+    try:
+        return p.wait(timeout=5) == -signal.SIGKILL
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def test_removing_a_worktree_reaps_only_processes_inside_it(repo, tmp_path, dummies, caplog):
+    """W's process dies; a SIBLING worktree whose name W prefixes (`task-1` vs `task-10`)
+    and the main repo are negative controls and must survive."""
+    root = tmp_path / "worktrees"
+    wt, _ = worktree.ensure_worktree(repo, "task-1", "main", "PROJ", 1, root)
+    sib, _ = worktree.ensure_worktree(repo, "task-10", "main", "PROJ", 10, root)
+    (wt / "sub").mkdir()
+    inside, sibling, main = dummies(wt / "sub"), dummies(sib), dummies(repo)
+
+    with caplog.at_level(logging.WARNING):
+        assert worktree.remove_worktree(repo, wt, root) is True
+
+    assert _killed(inside)
+    assert sibling.poll() is None and main.poll() is None
+    assert f"reaped pid {inside.pid}" in caplog.text and "time.sleep(60)" in caplog.text
+
+
+def test_reap_matches_a_cwd_already_deleted_under_the_worktree(repo, tmp_path, dummies):
+    root = tmp_path / "worktrees"
+    wt, _ = worktree.ensure_worktree(repo, "task-1", "main", "PROJ", 1, root)
+    (wt / "gone").mkdir()
+    p = dummies(wt / "gone")
+    time.sleep(0.2)                      # let it chdir before the dir disappears
+    (wt / "gone").rmdir()                # its cwd now reads "<wt>/gone (deleted)"
+    assert worktree.reap_processes_in(wt) == [p.pid]
+    assert _killed(p)
+
+
+def test_reap_refuses_anything_but_a_linked_worktree(repo, tmp_path, dummies):
+    """The main checkout (`.git` a directory) and a plain directory (no `.git`) are never
+    reaping targets — a wrongly recorded worktree path cannot reach the operator."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    in_repo, in_plain = dummies(repo), dummies(plain)
+    assert worktree.reap_processes_in(repo) == []
+    assert worktree.reap_processes_in(plain) == []
+    assert in_repo.poll() is None and in_plain.poll() is None
+
+
+def test_reap_spares_the_caller_and_its_ancestors(repo, tmp_path):
+    """A `chela` run from inside the worktree it cleans up must not kill itself or the
+    shell that started it: an ancestor and the caller, both with cwd in W, survive."""
+    root = tmp_path / "worktrees"
+    wt, _ = worktree.ensure_worktree(repo, "task-1", "main", "PROJ", 1, root)
+    inner = ("from pathlib import Path; from chela import worktree; "
+             f"print(worktree.reap_processes_in(Path({str(wt)!r})))")
+    outer = ("import subprocess, sys; "
+             f"r = subprocess.run([sys.executable, '-c', {inner!r}], capture_output=True, text=True); "
+             "print(r.returncode, r.stdout.strip())")
+    out = subprocess.run([sys.executable, "-c", outer], cwd=str(wt), capture_output=True,
+                         text=True, timeout=30)
+    assert out.returncode == 0 and out.stdout.split() == ["0", "[]"], out.stderr
+
+
+def test_the_squash_merge_reaps_the_worktree_before_removing_it(monkeypatch, tmp_path):
+    from chela import contract
+    order: list = []
+
+    class _Ok:
+        returncode, stdout, stderr = 0, "", ""
+
+    monkeypatch.setattr(contract, "reap_processes_in", lambda p: order.append(("reap", p)))
+    monkeypatch.setattr(contract.subprocess, "run",
+                        lambda argv, **kw: (order.append(tuple(argv[:3])), _Ok())[1])
+    contract._squash_merge({"task_id": "t1", "worktree_path": str(tmp_path)}, str(tmp_path),
+                           "https://github.com/o/r/pull/7")
+    i = order.index(("reap", tmp_path))
+    assert order[i + 1] == ("git", "worktree", "remove")
+
+
+def test_deleting_an_in_flight_run_reaps_its_worktree_before_removing_it(monkeypatch, tmp_path):
+    from chela import dispatcher
+    order: list = []
+
+    class _Ok:
+        returncode, stdout, stderr = 0, "", ""
+
+    (tmp_path / "WORKFLOW.md").write_text("# wf\n")
+    with dispatcher._db() as conn:
+        conn.execute("INSERT INTO runs (task_id, workflow_path, title, status, started_at, "
+                     "attempt, worktree_path) VALUES (?,?,?,?,?,?,?)",
+                     ("cmx151-del", str(tmp_path / "WORKFLOW.md"), "t", "running",
+                      dispatcher._now(), 1, str(tmp_path / "wt")))
+        conn.commit()
+    monkeypatch.setattr(dispatcher, "reap_processes_in", lambda p: order.append(("reap", p)))
+    monkeypatch.setattr(dispatcher.subprocess, "run",
+                        lambda argv, **kw: (order.append(tuple(argv[:3])), _Ok())[1])
+    assert dispatcher.delete_run("cmx151-del")["ok"] is True
+    assert order[:2] == [("reap", tmp_path / "wt"), ("git", "worktree", "remove")]
+
+
+def test_the_dashboard_merge_reaps_the_worktree_before_removing_it(monkeypatch, tmp_path):
+    from chela.dashboard import app as dash
+    from tests.test_dispatcher_ci import _FakeGh, _check_run, _merge_row
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="SUCCESS")])
+    monkeypatch.setattr(dash.subprocess, "run", fake.run)
+    monkeypatch.setattr(dash, "reap_processes_in",
+                        lambda p: fake.calls.append(["reap", str(p)]))
+    assert dash._merge_one(_merge_row(tmp_path))["ok"] is True
+    i = fake.calls.index(["reap", str(tmp_path)])
+    assert fake.calls[i + 1][:3] == ["git", "worktree", "remove"]
