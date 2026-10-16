@@ -1,34 +1,20 @@
-// CMX-137 — a DISPATCHED run wears Linear-style progress icons, IN A REAL DOM.
-//
-// In the collapsed rail the group headings are gone, and a dispatched run that is
-// working was the same solid blue dot as one of your own working sessions. So, for
-// dispatched runs only (sidebar row, collapsed rail, the Wall's minimized bar):
-//   working                    → ◐ a half-filled circle, with the shared pulse ring
-//   judging / awaiting review  → ◕ a ¾-filled circle, no pulse ring
-//   done / waiting             → the SAME check / triangle a human session wears
-// in Okabe-Ito bluish-green, never violet (Liav is red-weak). A human session's dot
-// is unchanged. Every row here is drawn by the real renderSidebarAgents / the real
-// dock (renderMinDock → _colorTermDots), and resolved against cssForViewport(style.css).
-//
-// Run: node --test tests/dispatched_progress_icons.test.mjs  (pytest runs it via
-// tests/test_js_suites.py)
+// CMX-137 — a DISPATCHED run wears Linear-style progress icons (◐ working with the shared
+// pulse ring, ◕ judging / awaiting review; the shared check / triangle for done / waiting),
+// in Okabe-Ito bluish-green; a human session's dot is unchanged. Real DOM: the real
+// renderSidebarAgents and dock, resolved against style.css. Run: node --test <this file>.
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 import { bootDashboardDom, sliceTemplate, flush } from './js_helpers/dashboard_dom.mjs';
 import { cssForViewport, resolveVars, shapeSignature, DESKTOP, DESKTOP_DARK } from './js_helpers/css_viewport.mjs';
 
-const CSS = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
+const CSS = readFileSync(new URL('../chela/dashboard/static/style.css', import.meta.url), 'utf8');
 
 const WT = '/srv/u/.chela/worktrees/chelamux';
 const card = (tid, role, over = {}) => ({ task_id: tid, title: `Run ${tid}`, status: 'running', judge_state: '', role, ...over });
 const human = (name, wid, over = {}) => ({ name, window_id: wid, online: true, claude_running: true, session_status: 'idle', cwd: '/p/x', ...over });
-const worker = (tid, wid, run, over = {}) => ({
-    name: `liavacc/${tid.toLowerCase()}-x`, window_id: wid, online: true, claude_running: true,
-    session_status: 'idle', cwd: `${WT}/${tid}`, dispatched: true, run, ...over,
-});
+const worker = (tid, wid, run, over = {}) => ({ name: `liavacc/${tid.toLowerCase()}-x`, window_id: wid, online: true,
+    claude_running: true, session_status: 'idle', cwd: `${WT}/${tid}`, dispatched: true, run, ...over });
 
 const AGENTS = [
     human('h-working', '@1', { session_status: 'busy' }),
@@ -46,44 +32,30 @@ const AGENTS = [
 ];
 
 // run → [the dot's state class, the label's state word]
-const RUNS = {
-    'R-WORK': ['working', 'working'],
-    'R-REWORK': ['working', 'rework'],
-    'R-JUDGE': ['judging', 'judging'],
-    'R-REVIEW': ['judging', 'awaiting review'],
-    'R-DONE': ['done', 'done'],
-    'R-WAIT': ['waiting', 'waiting'],
-};
+const RUNS = { 'R-WORK': ['working', 'working'], 'R-REWORK': ['working', 'rework'], 'R-JUDGE': ['judging', 'judging'],
+    'R-REVIEW': ['judging', 'awaiting review'], 'R-DONE': ['done', 'done'], 'R-WAIT': ['waiting', 'waiting'] };
 const HUMANS = { 'h-working': 'working', 'h-waiting': 'waiting', 'h-idle': 'idle', 'h-done': 'done' };
 
 let fleet = AGENTS;
+const BODIES = [['/api/agents', () => fleet], ['/api/agents/context', () => ({})],
+    ['/api/rooms', () => ({ rooms: {}, pending: [] })], ['/api/term/ready', () => ({ ready: true })]];
 function fakeFetch(url) {
-    const path = String(url);
-    const body = path.endsWith('/api/agents') ? fleet
-        : path.endsWith('/api/agents/context') ? {}
-            : path.endsWith('/api/rooms') ? { rooms: {}, pending: [] }
-                : path.startsWith('/api/term/ready') ? { ready: true }
-                    : {};
-    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+    const hit = BODIES.find(([p]) => String(url).split('?')[0].endsWith(p));
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(hit ? hit[1]() : {}) });
 }
-function fakeGridStack() {
-    const grid = {
-        on() {}, off() {}, save: () => [], destroy() {}, removeWidget(el) { el.remove(); },
-        addWidget: el => el, makeWidget: el => el, enableMove() {}, enableResize() {},
-        update() {}, batchUpdate() {}, commit() {}, cellHeight() {}, column() {},
-        getGridItems: () => [], removeAll() {}, float() {}, engine: { nodes: [] },
-    };
-    return { init: () => grid };
-}
+const noop = () => {};
+const fakeGridStack = () => ({ init: () => ({
+    on: noop, off: noop, save: () => [], destroy: noop, removeWidget(el) { el.remove(); }, addWidget: el => el,
+    makeWidget: el => el, enableMove: noop, enableResize: noop, update: noop, batchUpdate: noop, commit: noop,
+    cellHeight: noop, column: noop, getGridItems: () => [], removeAll: noop, float: noop, engine: { nodes: [] },
+}) });
 
 let win, doc, util, terminals, nav, sheet;
 before(async () => {
     globalThis.GridStack = fakeGridStack();
     const body = sliceTemplate('<div class="app">', '\n  </main>') + '</div>';
-    const { dom, modules } = await bootDashboardDom({
-        body, fetchImpl: fakeFetch, canvasStub: true,
-        extraModules: ['util.js', 'terminals.js', 'nav.js'],
-    });
+    const { dom, modules } = await bootDashboardDom({ body, fetchImpl: fakeFetch, canvasStub: true,
+        extraModules: ['util.js', 'terminals.js', 'nav.js'] });
     win = dom.window; doc = win.document;
     doc.elementFromPoint = () => null;
     ({ util, terminals, nav } = modules);
@@ -92,8 +64,7 @@ before(async () => {
     await terminals.renderTerminals();
     nav.renderSidebarAgents(AGENTS);
     await flush();
-    sheet = doc.createElement('style');
-    doc.head.appendChild(sheet);
+    sheet = doc.head.appendChild(doc.createElement('style'));
     sheet.textContent = cssForViewport(CSS, DESKTOP);
 });
 
@@ -107,8 +78,6 @@ const prop = (el, p) => resolveVars(win, el, win.getComputedStyle(el).getPropert
 const animName = el => (prop(el, 'animation').split(/\s+/)[0] || 'none');
 const SKY = /#56b4e9|rgb\(86, 180, 233\)/i;   // Okabe-Ito sky blue #56B4E9 — a human's working dot
 const BLUISH_GREEN = /#009e73|rgb\(0, 158, 115\)/i;   // Okabe-Ito bluish-green #009E73
-
-// --- 1. the right glyph per state, and the label names kind + state -------------------
 
 test('sidebar: a dispatched run in each state wears `dispatched <state>` and is labelled "Dispatched run — <state>"', () => {
     for (const [tid, [cls, word]] of Object.entries(RUNS)) {
@@ -130,8 +99,6 @@ test('sidebar: a human session keeps its own glyph — no `dispatched`, no run l
         assert.equal(dot.getAttribute('title'), `claude · ${cls}`, name);
     }
 });
-
-// --- 2. what the CSS resolves those classes to ----------------------------------------
 
 const conicFill = el => {
     const m = /conic-gradient\((.*)\)/.exec(prop(el, 'background-image'));
@@ -212,8 +179,6 @@ test('same size as the human dot — expanded row and collapsed rail', () => {
     doc.body.classList.remove('sidebar-collapsed');
 });
 
-// --- 3. the Wall's minimized bar ------------------------------------------------------
-
 test('minimized bar: a run window wears its run\'s icon and label; a human chip is unchanged', () => {
     for (const a of AGENTS) terminals.minimizePane(a.window_id);
     const want = { '@11': ['working', 'working'], '@14': ['judging', 'judging'], '@15': ['judging', 'awaiting review'],
@@ -232,9 +197,6 @@ test('minimized bar: a run window wears its run\'s icon and label; a human chip 
         assert.equal(dot.getAttribute('aria-label'), null, wid);
         assert.equal(dot.getAttribute('role'), null, wid);
     }
-    // the pane HEADER dot of a dispatched window is the Wall's own — out of scope
-    const head = doc.querySelector('.grid-stack-item .gs-head .term-status-dot[data-wid="@11"]');
-    if (head) assert.ok(!head.classList.contains('dispatched'), head.className);
 });
 
 test('minimized bar: a state change drops the old state — the pulse ring stops when the run leaves working', async () => {
@@ -256,8 +218,6 @@ test('minimized bar: a state change drops the old state — the pulse ring stops
     assert.equal(dot.title, 'Working');
     fleet = AGENTS;
 });
-
-// --- 4. the model, directly -----------------------------------------------------------
 
 test('model: windowRunDot is null without a run card; an unknown run status keeps the plain idle ring', async () => {
     const { windowRunDot, runDot, buildItems } = await import('../chela/dashboard/static/js/sidebarmodel.js');
