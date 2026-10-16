@@ -159,6 +159,7 @@ test('ttyd reconnecting by itself is left alone (no second connect)', async () =
     const own = new p.w.WebSocket('ws://localhost:5005/term/%401/ws', ['tty']);   // ttyd's own retry
     await p.advance(10000);
     assert.equal(p.reloads.length, 0);
+    assert.equal(p.probes.length, 0, 'not even a probe while ttyd\'s own socket is connecting');
     own.open();
     assert.ok(!p.w.document.documentElement.classList.contains('chela-reconnecting'));
 });
