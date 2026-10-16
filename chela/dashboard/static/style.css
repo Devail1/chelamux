@@ -3625,6 +3625,32 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     border-radius: 1px; clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
     background: var(--ok-sky); box-shadow: none;
 }
+/* CMX-137: a DISPATCHED run's progress icons (sidebar row, collapsed rail, the Wall's
+   minimized bar — nav.js/terminals.js put `.dispatched` on the dot), after Linear's
+   status icons: working = a HALF-filled circle (◐, "In Progress"), judging / awaiting
+   review = a ¾-filled one (◕, "In Review"). The SHAPE says it on its own — a ring with
+   an empty sector is never your own session's solid working dot; the Okabe-Ito
+   bluish-green (vs a human's sky blue) is only a second cue. NOT violet: Liav is
+   red-weak, and violet collapses into blue for him. Same box as every other state, so
+   rows never shift. Done (check) and waiting (triangle) are not overridden here:
+   attention looks the same for both kinds. Working keeps the shared pulse ring (the
+   halo + `term-status-pulse` off `.working`), tinted to the run's hue. */
+.term-status-dot.dispatched.working,
+.term-status-dot.dispatched.judging {
+    border-radius: 50%; clip-path: none; background-color: transparent;
+    border: 1.5px solid var(--ok-green);
+}
+.term-status-dot.dispatched.working {
+    background-image: conic-gradient(var(--ok-green) 0 50%, transparent 0);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok-green) 22%, transparent);
+}
+.term-status-dot.dispatched.judging {
+    background-image: conic-gradient(var(--ok-green) 0 50%, transparent 0);
+    box-shadow: none; animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+    .term-status-dot.dispatched.working { animation: none; }
+}
 
 /* Window-type cue (recent/dispatcher rows only — CMX-377 round 2 dropped it
    from the live agent row face; see nav.js's _agentRowHtml comment). A GLYPH,

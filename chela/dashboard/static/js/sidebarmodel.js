@@ -152,6 +152,26 @@ export function runState(item, wants) {
     return { word: st ? String(st).replace(/_/g, ' ') : 'unknown', shape: 'idle' };
 }
 
+// CMX-137: a dispatched run's status MARK — the `.term-status-dot` classes and the
+// label it carries. Runs wear their own Linear-style progress icons (style.css's
+// `.term-status-dot.dispatched.*`): working is a half-filled circle, judging AND
+// awaiting review a ¾-filled one, so in the collapsed rail — where the group headings
+// are gone — a dispatched run never reads as one of your own working sessions. Done
+// and waiting keep the shared check / triangle: attention looks the same everywhere.
+export function runDot(item, wants) {
+    const st = runState(item, wants);
+    const review = st.shape === 'idle' && ((item && item.run) || {}).status === 'awaiting_review';
+    return { cls: `dispatched ${review ? 'judging' : st.shape}`, label: `Dispatched run — ${st.word}` };
+}
+
+// The same mark for ONE window of a run (the Wall's minimized bar, which is per
+// window): its run card makes it a one-window run item. Null for any window with no
+// run card — a human session keeps its own dot.
+export function windowRunDot(a, wants) {
+    if (!a || !a.run || !a.run.task_id) return null;
+    return runDot(buildItems([a])[0], () => !!wants);
+}
+
 // The run row's label: `CMX-37 · <Linear title>` (truncation is the CSS's job).
 export function runLabel(item) {
     const run = (item && item.run) || {};

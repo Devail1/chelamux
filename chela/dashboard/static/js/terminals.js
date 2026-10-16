@@ -8,6 +8,7 @@ import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChi
 // "Files" chip below (_ctxBarHTML) and the #modal-diff close button in index.html.
 import './diffpanel.js';
 import { windowIdQuery } from './windowid.js';
+import { windowRunDot } from './sidebarmodel.js';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -1762,10 +1763,14 @@ function _colorTermDots(agents) {
         const a = by[dot.dataset.statusFor];
         const wants = wantsHuman(a);
         const s = tileState(a, wants);
-        const cls = _TILE_CLS_TO_DOT[s.cls] || 'idle';
-        dot.classList.remove('working', 'waiting', 'idle', 'done');
-        dot.classList.add(cls);
-        dot.title = stateTitle(a, s);
+        // CMX-137: in the minimized bar a dispatched run's window wears the run's own
+        // progress icon (the sidebar row's runDot), never a human session's dot.
+        const run = dot.closest('.min-chip') ? windowRunDot(a, wants) : null;
+        dot.classList.remove('working', 'waiting', 'idle', 'done', 'judging', 'dispatched');
+        dot.classList.add(...(run ? run.cls.split(' ') : [_TILE_CLS_TO_DOT[s.cls] || 'idle']));
+        dot.title = run ? run.label : stateTitle(a, s);
+        if (run) { dot.setAttribute('role', 'img'); dot.setAttribute('aria-label', run.label); }
+        else { dot.removeAttribute('role'); dot.removeAttribute('aria-label'); }
         // Flag the host surface (live pane OR taskbar chip) so a "waiting for
         // input" pane gets a yellow border even when minimized to the dock.
         const host = dot.closest('.grid-stack-item-content, .term-pane, .min-chip');
