@@ -3646,7 +3646,6 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 }
 .term-status-dot.dispatched.judging {
     background-image: conic-gradient(var(--ok-green) 0 75%, transparent 0);
-    box-shadow: none; animation: none;
 }
 @media (prefers-reduced-motion: reduce) {
     .term-status-dot.dispatched.working { animation: none; }
