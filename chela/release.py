@@ -54,7 +54,7 @@ log = logging.getLogger("chela.release")
 
 KIND = "release"
 BRANCH_PREFIX = "chela-release/"
-_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+_VERSION_RE = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)")
 _PYPROJECT_VERSION = re.compile(r'(?m)^version = "([^"]+)"$')
 _PYPROJECT_NAME = re.compile(r'(?m)^name = "([^"]+)"$')
 _TASK_ID = re.compile(r"\bCMX-(\d+)\b", re.IGNORECASE)
@@ -189,7 +189,7 @@ def _repo_slug(cwd) -> str | None:
 
 
 def _version_tuple(v: str) -> tuple[int, ...] | None:
-    m = _VERSION_RE.match(v or "")
+    m = _VERSION_RE.fullmatch(v or "")
     return tuple(int(x) for x in m.groups()) if m else None
 
 

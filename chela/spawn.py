@@ -45,7 +45,7 @@ _WID_RE = re.compile(r"@\d+")
 # A generated window name must satisfy the same charset the dashboard rename API enforces
 # (letters, digits, '-' or '_'). ``window_name_for_cwd`` sanitizes to it; this asserts the invariant so a
 # future change to the name scheme can't silently produce a name tmux/the API would reject.
-_WINDOW_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_WINDOW_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
 
 # A launch command that already pins/resumes/forks a session itself — appending our own
 # generated `--session-id` on top would be silently ignored by the CLI at best, and at

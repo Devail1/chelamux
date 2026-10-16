@@ -242,7 +242,10 @@
              tap to snap-scroll. Populated + shown only in the swipe layout. -->
         <div class="kanban-nav-strip" id="kanban-nav-strip" aria-label="Jump to column"></div>
       </div>
-      <div class="kanban-board" id="kanban-board"></div>
+      <div class="kanban-board-wrap">
+        <div class="kanban-board" id="kanban-board"></div>
+        <!-- CMX-136: kanban.js fills #kanban-hidden (the Hidden columns panel) -->
+      </div>
       <div id="kanban-empty" class="work-empty" style="display:none;">
         <div class="work-empty-icon">▤</div>
         <div class="work-empty-title">A board for work in flight</div>

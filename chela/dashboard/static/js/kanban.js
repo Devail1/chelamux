@@ -7,6 +7,7 @@ import { displayTitle, riskChip } from './taskmodalmodel.js';
 import { knInline } from './knowledge.js';
 import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from './kanbanlanemodel.js';
 import { runStateBadges, trackerBoard, trackerColumns } from './kanbanlinearmodel.js';
+import { hiddenSummary, loadColPrefs, saveColPrefs, splitColumns } from './kanbanhiddenmodel.js';
 import { runCardNote, runCloseAction, runHandoffNote, runStallNote } from './runstate.js';
 
 // ---------------------------------------------------------------------------
@@ -106,6 +107,16 @@ function _loadKanbanCollapsed() {
     } catch (e) { return new Set(KANBAN_DEFAULT_COLLAPSED); }
 }
 let _kanbanCollapsed = _loadKanbanCollapsed();
+
+// 🙈 CMX-136: per-viewer "always show" pins for the Hidden columns panel. The lambdas keep
+// even a missing/throwing `localStorage` inside kanbanhiddenmodel.js's try/catch.
+const _KANBAN_LS = { getItem: k => localStorage.getItem(k), setItem: (k, v) => localStorage.setItem(k, v) };
+let _kanbanColPrefs = loadColPrefs(_KANBAN_LS);
+let _kanbanHiddenOpen = true;   // the panel's caret; survives the repaint, not a reload
+// A drag in flight freezes the layout: a poll that lands mid-drag is parked in
+// _kanbanPending and painted on dragend, so a drop row never moves under the cursor.
+let _kanbanDragIdx = null;
+let _kanbanPending = null;
 
 function _wfName(path) {
     if (!path) return '?';
@@ -589,6 +600,9 @@ function _kCol(key, label, cards) {
             <span class="kanban-col-caret" aria-hidden="true"></span>
             <span class="kanban-col-label">${label}</span>
             <span class="col-count">${cards.length}</span>
+            ${_kanbanColPrefs[key] === 'show' && !cards.length
+                ? `<button class="kanban-col-hide" type="button" title="Hide this column when it is empty"
+                           onclick="event.stopPropagation();chela.kanbanHideCol('${key}')">Hide</button>` : ''}
         </div>
         <div class="kanban-cards">${body}</div>
     </div>`;
@@ -829,9 +843,11 @@ function renderKanban(data) {
     const empty = $('#kanban-empty');
     const filters = $('#kanban-filters');
     if (!board || !empty || !filters) return;
+    if (_kanbanDragIdx !== null) { _kanbanPending = data; return; }
     if (!data || !data.configured || !data.workflows || !data.workflows.length) {
         board.innerHTML = '';
         filters.innerHTML = '';
+        _renderHiddenPanel(board, []);
         empty.style.display = 'block';
         return;
     }
@@ -878,11 +894,97 @@ function renderKanban(data) {
         .filter(c => c.status === 'awaiting_review' && c.pr_mergeable === 'MERGEABLE'
                      && (c.pr_checks === 'passing' || c.pr_checks === 'none')).length;
     _renderKanbanFilters(workflows, mergeableCount);
-    _renderKanbanNav(cols);
+    const { visible, hidden } = splitColumns(cols, _kanbanColPrefs);
+    _renderKanbanNav(visible);
     _applyKanbanLayout();
 
-    board.style.setProperty('--kanban-cols', String(cols.length || 1));
-    board.innerHTML = cols.map(c => _kCol(c.key, c.label, c.cards)).join('');
+    board.style.setProperty('--kanban-cols', String(visible.length));
+    board.innerHTML = visible.map(c => _kCol(c.key, c.label, c.cards)).join('');
+    board.querySelectorAll('.kanban-card[data-kidx]').forEach(el => { el.draggable = true; });
+    board.ondragstart = e => {
+        const el = e.target.closest && e.target.closest('.kanban-card[data-kidx]');
+        if (!el) return;
+        _kanbanDragIdx = Number(el.dataset.kidx);
+        if (e.dataTransfer) e.dataTransfer.setData('text/plain', el.dataset.kidx);
+    };
+    board.ondragend = _kanbanDragEnd;
+    _renderHiddenPanel(board, hidden);
+}
+
+// The panel lives NEXT TO the board (#kanban-hidden, created on first use), never inside
+// it, so the swipe carousel's columns stay the board's only children.
+function _renderHiddenPanel(board, hidden) {
+    let panel = document.getElementById('kanban-hidden');
+    if (!panel) {
+        panel = document.createElement('aside');
+        panel.id = 'kanban-hidden';
+        panel.className = 'kanban-hidden-panel';
+        panel.setAttribute('aria-label', 'Hidden columns');
+        board.after(panel);
+    }
+    panel.style.display = hidden.length ? '' : 'none';
+    const rows = hidden.map(c => `
+        <li class="kanban-hidden-row kanban-col-${c.key}" data-col="${c.key}" role="button" tabindex="0"
+            title="Show ${attrEsc(c.label)} as a column"
+            onclick="chela.kanbanShowCol('${c.key}')"
+            onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();chela.kanbanShowCol('${c.key}');}"
+            ondragover="chela.kanbanRowDragOver(event,this)"
+            ondragleave="this.classList.remove('kanban-hidden-row-over')"
+            ondrop="chela.kanbanRowDrop(event,this)">
+            <span class="kanban-hidden-dot" aria-hidden="true">●</span>
+            <span class="kanban-hidden-label">${escHtml(c.label)}</span>
+            <span class="col-count">${c.cards.length}</span>
+        </li>`).join('');
+    panel.innerHTML = `
+        <details class="kanban-hidden-details"${_kanbanHiddenOpen ? ' open' : ''}
+                 ontoggle="chela.kanbanHiddenToggled(this)">
+            <summary class="kanban-hidden-head">Hidden columns</summary>
+            <ul class="kanban-hidden-rows">${rows}</ul>
+        </details>
+        <div class="kanban-hidden-inline">${escHtml(hiddenSummary(hidden))}</div>`;
+    panel._kanbanHidden = hidden;
+}
+
+function _setColPref(key, show) {
+    if (show) _kanbanColPrefs[key] = 'show';
+    else delete _kanbanColPrefs[key];
+    saveColPrefs(_KANBAN_LS, _kanbanColPrefs);
+    pollWork();
+}
+function kanbanShowCol(key) { _setColPref(key, true); }
+function kanbanHideCol(key) { _setColPref(key, false); }
+function kanbanHiddenToggled(el) { _kanbanHiddenOpen = !!el.open; }
+
+function kanbanRowDragOver(e, row) {
+    if (_kanbanDragIdx === null) return;
+    e.preventDefault();             // marks the row a valid drop target
+    row.classList.add('kanban-hidden-row-over');
+}
+
+function kanbanRowDrop(e, row) {
+    e.preventDefault();
+    row.classList.remove('kanban-hidden-row-over');
+    const card = _kanbanDragIdx === null ? null : _kanbanCardIndex[_kanbanDragIdx];
+    const panel = document.getElementById('kanban-hidden');
+    const col = ((panel && panel._kanbanHidden) || []).find(c => c.key === row.dataset.col);
+    if (card && col) window.chela.kanbanMoveCard(card, col);
+}
+
+function _kanbanDragEnd() {
+    _kanbanDragIdx = null;
+    const data = _kanbanPending;
+    _kanbanPending = null;
+    if (data) renderKanban(data);
+}
+
+// The ONE place a drop lands. chela has no "move a card to column X" API yet (the board
+// had no drag at all before CMX-136), so a drop announces itself as a
+// `chela:kanban-move` event and says plainly that nothing moved; the follow-up that adds
+// the tracker write replaces only this function.
+function kanbanMoveCard(card, col) {
+    document.dispatchEvent(new CustomEvent('chela:kanban-move', { detail: { card, to: col.key, label: col.label } }));
+    _kanbanToast(`Moving cards between columns is not wired to the tracker yet: `
+                 + `${card.task_id || card.title || 'this card'} was not moved to ${col.label}.`);
 }
 
 
@@ -891,4 +993,4 @@ export { renderKanban };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { kanbanCloseRun, kanbanDeleteClick, kanbanDeleteConfirm, kanbanMergeAll, kanbanMergePR, kanbanNavTo, kanbanPromoteBacklog, openTaskModalFromCard, setKanbanFilter, setKanbanLayout, toggleKanbanCol });
+Object.assign(window.chela, { kanbanCloseRun, kanbanDeleteClick, kanbanDeleteConfirm, kanbanHiddenToggled, kanbanHideCol, kanbanMergeAll, kanbanMergePR, kanbanMoveCard, kanbanNavTo, kanbanRowDragOver, kanbanRowDrop, kanbanShowCol, kanbanPromoteBacklog, openTaskModalFromCard, setKanbanFilter, setKanbanLayout, toggleKanbanCol });

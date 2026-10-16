@@ -44,7 +44,7 @@ export const VIEWS = [
         // never reloads a pane (terminals.js), so this hook only owns the timer.
         enter: () => startTermTimer(),
         exit: () => stopTermTimer(),
-        tick: () => renderTerminals(),
+        tick: ctxRead => renderTerminals(ctxRead),
     },
     {
         id: 'work',

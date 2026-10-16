@@ -531,3 +531,31 @@ export function groupSidebar(agents, opts = {}) {
         hidden,
     };
 }
+
+// CMX-165: the window ids in the order the sidebar DRAWS them, read off groupSidebar's
+// model: Needs you, then each group in its order (Move up / Move down, custom groups) and
+// each group's rows in their sort, then the Archived section. A collapsed group still
+// counts (its rows are in the model, just not shown), so the phone's pill strip keeps a
+// pill for every session. A run's primary window leads its other windows (the judge).
+export function sidebarWids(model) {
+    const out = [];
+    const seen = new Set();
+    const rows = [...(model.needsYou || []), ...(model.groups || []).flatMap(g => g.items), ...(model.archived || [])];
+    for (const it of rows) {
+        const prim = primaryWindow(it);
+        for (const a of [prim, ...(it.windows || [])]) {
+            const wid = a && a.window_id;
+            if (wid && !seen.has(wid)) { seen.add(wid); out.push(wid); }
+        }
+    }
+    return out;
+}
+
+// `wids` sorted by their place in `order`; a wid `order` does not hold (a window spawned
+// since the sidebar last drew) goes to the END, keeping its place among the others like
+// it. Never drops one.
+export function orderByList(wids, order) {
+    const at = new Map((order || []).map((w, i) => [w, i]));
+    const known = wids.filter(w => at.has(w)).sort((a, b) => at.get(a) - at.get(b));
+    return [...known, ...wids.filter(w => !at.has(w))];
+}

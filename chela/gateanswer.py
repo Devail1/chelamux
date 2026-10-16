@@ -74,7 +74,7 @@ ANSWERABLE_TOOL = "AskUserQuestion"
 
 # A tool_use_id becomes a filename, so it is validated as the token Claude Code emits
 # rather than trusted. `../../` in a payload must not be able to walk the filesystem.
-_TUID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_TUID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}\Z")
 
 # How often the blocked hook thread looks for its answer. It is asleep in between; the
 # cost of a tighter poll is nothing, and the human's tap should feel instant.

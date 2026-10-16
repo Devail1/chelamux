@@ -132,7 +132,7 @@ RECAP_MAX_CHARS = 1500     # the whole recap, whatever the rooms did
 PENDING_TTL_SECONDS = 3600.0
 MAX_PENDING_PER_WID = 20
 
-_ROOM_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$", re.IGNORECASE)
+_ROOM_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}\Z", re.IGNORECASE)
 
 
 # --- the membership table (rooms.json — NO events live here) ---------------------

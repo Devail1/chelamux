@@ -1,6 +1,7 @@
 // --- Stage 0: ES-module imports ---
 import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, staticUrl, updateTabSignal, wantsHuman } from './util.js';
-import { altSwitchKeydown, openPalette, renderSidebarAgents, selectView, setAltHeld, updateCtxCache } from './nav.js';
+import { altSwitchKeydown, openPalette, renderSidebarAgents, selectView, setAltHeld, sidebarOrder, updateCtxCache } from './nav.js';
+import { orderByList } from './sidebarmodel.js';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
 import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, stateTitle, tileState } from './wallmodel.js';
@@ -1810,7 +1811,7 @@ function _applyTermStatus(agents) {
 // statusline source = exact; transcript source = estimate (dimmed fill, "~"/est).
 let _ctxCache = [];
 function _applyTermContext(ctx) {
-    if (!ctx) return;
+    if (!Array.isArray(ctx)) return;
     _ctxCache = ctx;
     const by = {};
     ctx.forEach(c => { if (c.window_id) by[c.window_id] = c; });
@@ -1970,10 +1971,14 @@ function kbToggle() {
     $('#kb-toggle').setAttribute('aria-expanded', String(!collapsed));
 }
 
-async function renderTerminals() {
+async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read (CMX-166)
     if (!TERMINALS_ON) return;   // terminals disabled — DOM (#term-stage etc.) absent
     let agents = _agentsCache;
-    if (!agents || !agents.length) { agents = await api('/api/agents'); setAgentsCache(agents); }
+    if (!agents || !agents.length) {
+        const fresh = await api('/api/agents');
+        agents = Array.isArray(fresh) ? fresh : [];   // an error body is not a pane list
+        setAgentsCache(agents);
+    }
     const wids = (agents || []).filter(a => a.online !== false && a.window_id).map(a => a.window_id);
 
     // Wall mode tiles 5+ terminals across a 12-col grid — useless at 375px.
@@ -2054,7 +2059,7 @@ async function renderTerminals() {
     renderMinDock();   // single / no-agents → hides the dock; wall already rebuilt it
     _applyTermStatus(_agentsCache);   // colour pane dots (single + wall) from cached state
     _applyTermContext(_ctxCache);     // repaint ctx bars from cache instantly…
-    api('/api/agents/context').then(_applyTermContext).catch(() => {});  // …then refresh
+    (ctxRead || api('/api/agents/context')).then(_applyTermContext).catch(() => {});  // …then refresh
 
     // Fit the wall AFTER the taskbar is at its final rendered height, so the grid
     // leaves exactly the right room above it (dock height feeds _wallFill).
@@ -3764,12 +3769,20 @@ function _isMobileTerm() {
     return window.matchMedia('(max-width: 768px)').matches;
 }
 
+// CMX-165: the pills (and the header swipe) go in the SIDEBAR's order (nav.js
+// sidebarOrder: group order, custom moves, each group's sort), not #term-agent's option
+// order. A session the sidebar has not drawn yet goes at the end; none is dropped.
+function _mobileWids() {
+    const sel = $('#term-agent');
+    return orderByList(sel ? Array.from(sel.options).map(o => o.value) : [], sidebarOrder());
+}
+
 // Build/refresh the pill strip. Hidden unless mobile + single mode with panes.
 function renderMobileSwitcher() {
     const host = document.getElementById('term-switcher');
     if (!host) return;
     const sel = $('#term-agent');
-    const wids = sel ? Array.from(sel.options).map(o => o.value) : [];
+    const wids = _mobileWids();
     const show = TERMINALS_ON && _isMobileTerm() && _termMode === 'single' && wids.length > 0;
     if (!show) { host.style.display = 'none'; host.innerHTML = ''; return; }
     host.style.display = 'flex';
@@ -3814,7 +3827,7 @@ function switchAgentMobile(wid) {
 function stepAgentMobile(dir) {
     const sel = $('#term-agent');
     if (!sel) return;
-    const wids = Array.from(sel.options).map(o => o.value);
+    const wids = _mobileWids();
     if (wids.length < 2) return;
     const i = Math.max(0, wids.indexOf(sel.value));
     switchAgentMobile(wids[(i + dir + wids.length) % wids.length]);
@@ -4011,7 +4024,7 @@ if (typeof ResizeObserver === 'function') {
 }
 
 // --- Stage 0: ES-module exports ---
-export { SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, _refitPaneTerm, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { renderMobileSwitcher, stepAgentMobile, SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, _refitPaneTerm, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

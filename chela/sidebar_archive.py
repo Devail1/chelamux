@@ -71,8 +71,8 @@ _RESUMING: set[str] = set()
 # old topic into a window that happens to wear the same id much later.
 REBIND_TTL_SECONDS = 15 * 60
 
-_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_KEY_RE = re.compile(r"^(?:w:|run:|s:)[^\s]{1,200}$")
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_KEY_RE = re.compile(r"^(?:w:|run:|s:)[^\s]{1,200}\Z")
 
 
 def session_key(session_id: str) -> str:

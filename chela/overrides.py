@@ -79,7 +79,7 @@ SUCCESS_STATES = (MERGED, RELEASED)
 DEFAULT_TTL_S = 24 * 3600.0
 TTL_ENV = "CHELA_OVERRIDE_WAIT_S"
 
-_ID_RE = re.compile(r"^override-[0-9a-f]{24}$")
+_ID_RE = re.compile(r"override-[0-9a-f]{24}")
 
 
 def ttl() -> float:
@@ -97,7 +97,7 @@ def new_request_id() -> str:
 
 
 def valid_id(request_id: str | None) -> bool:
-    return bool(_ID_RE.match(request_id or ""))
+    return bool(_ID_RE.fullmatch(request_id or ""))
 
 
 def store_dir() -> Path:
