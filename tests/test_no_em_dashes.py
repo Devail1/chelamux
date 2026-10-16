@@ -23,6 +23,7 @@ LAUNCH_SET = [
     "landing/docs.html",
     "README.md",
     "action.yml",
+    "NOTICE",               # linked from both landing footers (CMX-159)
     "skills/README.md",
     "skills/blindspot-pass/SKILL.md",
     "skills/chela-setup/SKILL.md",
