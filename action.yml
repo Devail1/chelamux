@@ -8,15 +8,15 @@ branding:
   color: purple
 inputs:
   base:
-    description: Git ref or sha to diff against. Default — the pull request's base commit.
+    description: Git ref or sha to diff against. Defaults to the pull request's base commit.
     required: false
     default: ""
   test-cmd:
-    description: Suite command. Default — detected (pytest, npm test, go test, cargo test).
+    description: Suite command. Defaults to auto-detection (pytest, npm test, go test, cargo test).
     required: false
     default: ""
   comment:
-    description: Post (or update) one PR comment with the result — "true" or "false".
+    description: Post (or update) one PR comment with the result ("true" or "false").
     required: false
     default: "true"
   github-token:

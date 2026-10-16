@@ -190,7 +190,7 @@ function _showReadyRetry(wid) {
     const stage = $('#term-stage');
     const ph = stage.querySelector('.term-pending[data-pending="' + _cssEsc(wid) + '"]');
     if (!ph) return;
-    ph.innerHTML = `<div class="term-pending-inner">still starting —
+    ph.innerHTML = `<div class="term-pending-inner">still starting.
       <a href="#" class="term-retry" onclick="chela.retryReady('${_jsStr(wid)}');return false;">click to retry</a></div>`;
 }
 
@@ -551,7 +551,7 @@ function _shareTimeLeft(wid, nowMs) {
     if (h) return h + 'h ' + m + 'm left';
     return m + 'm left';
 }
-const SHARE_UNSAFE_TEXT = '⚠ UNSANDBOXED — guest can type';
+const SHARE_UNSAFE_TEXT = '⚠ UNSANDBOXED: guest can type';
 function _unsafeBannerText(wid) {
     const left = _shareTimeLeft(wid);
     return SHARE_UNSAFE_TEXT + (left ? ' · ' + left : '');
@@ -648,9 +648,9 @@ function _renderSharesIndicator() {
             const unsafeWid = [..._sharedWids].find(w => _shareModes.get(w) === 'unsandboxed');
             if (txt) txt.textContent = unsafe ? _unsafeBannerText(unsafeWid)
                 : icon + ' ' + n + ' sharing';
-            btn.setAttribute('aria-label', (unsafe ? 'UNSANDBOXED — a guest can type into a real shell. ' : '')
+            btn.setAttribute('aria-label', (unsafe ? 'UNSANDBOXED: a guest can type into a real shell. ' : '')
                 + n + ' active share' + (n === 1 ? '' : 's') + (typing || unsafe ? ' (typing allowed)' : ' (view only)')
-                + ' — tap to manage or stop');
+                + ', tap to manage or stop');
         }
     }
     // Keep an open sheet in sync with the live set (e.g. the reaper stopped one).
@@ -701,7 +701,7 @@ let _sharesSheetGen = 0;
 const SHARE_MODE_UI = {
     view: { label: '👁 View only', desc: 'Anyone with the link + code can watch. Nothing they type reaches this machine.' },
     typing: { label: '⌨ Allow typing', desc: 'Anyone with the link + code can watch and type into this sandboxed session.' },
-    unsandboxed: { label: '⚠ Full access — UNSANDBOXED', desc: 'UNSANDBOXED: the first guest to type gets a real shell on this machine.' },
+    unsandboxed: { label: '⚠ Full access: UNSANDBOXED', desc: 'UNSANDBOXED: the first guest to type gets a real shell on this machine.' },
 };
 
 // The per-row mode control: three buttons, the live mode pressed. Down (to View only)
@@ -765,7 +765,7 @@ function _shareModeControlHTML(wid, opts) {
         <div class="tsp-row"><input class="tsp-in ss-confirm-in" autocomplete="off" spellcheck="false" placeholder="${attrEsc(name)}">
           <button class="ss-confirm-go sd-danger" type="button" disabled>Grant full access</button></div>
         <div class="ss-confirm-long" hidden>
-          <label class="tsp-lbl">Longer than 4 h — type <code>${escHtml(name)}</code> again</label>
+          <label class="tsp-lbl">Longer than 4 h: type <code>${escHtml(name)}</code> again</label>
           <input class="tsp-in ss-confirm-long-in" autocomplete="off" spellcheck="false" placeholder="${attrEsc(name)}">
         </div>
       </div>` : ''}
@@ -870,18 +870,18 @@ async function _buildSharesSheet() {
     const focus = _sharesSheetFocus && wids.includes(_sharesSheetFocus) ? _sharesSheetFocus : null;
     const rows = wids.map((wid, i) => `
         <div class="ss-row${wid === focus ? ' ss-row-focus' : ''}" data-wid="${attrEsc(wid)}">
-          ${wid === focus ? '<div class="ss-already">This session is already shared — change who can type below. The link and code stay the same.</div>' : ''}
+          ${wid === focus ? '<div class="ss-already">This session is already shared. Change who can type below. The link and code stay the same.</div>' : ''}
           <div class="ss-row-hd">
             <span class="ss-label">${_shareModeBadge(wid)} ${escHtml(_paneTitle(wid))} <span class="ss-wid">${escHtml(wid)}</span></span>
             <button class="ss-stop" type="button" data-wid="${attrEsc(wid)}">Stop</button>
           </div>
           ${_shareModeControlHTML(wid, opts[i])}
-          <div class="ss-row-body">${_shareInfoRowsHTML(infos[i], 'Link unavailable — reopen this sheet to retry.')}</div>
+          <div class="ss-row-body">${_shareInfoRowsHTML(infos[i], 'Link unavailable. Reopen this sheet to retry.')}</div>
         </div>`).join('');
     sheet.innerHTML =
         `<div class="ss-hd"><span class="ss-hd-ic">${lucideIcon('share-2', 15)}</span> Active shares
            <button class="ss-close" type="button" aria-label="Close">&times;</button></div>
-         <div class="ss-sub">Each share says who can type. Changing it keeps the same link and code. Stop a share to revoke it — the link dies and the code rotates.</div>
+         <div class="ss-sub">Each share says who can type. Changing it keeps the same link and code. Stop a share to revoke it: the link dies and the code rotates.</div>
          <div class="ss-list">${rows || '<div class="ss-empty">No active shares.</div>'}</div>
          ${wids.length ? `<button class="ss-stopall" type="button">Stop all sharing (${wids.length})</button>` : ''}`;
     backdrop.appendChild(sheet);
@@ -963,7 +963,7 @@ async function shareBtnClick(btn, wid) {
 // needs the window name TYPED to arm. The server re-checks every one of these, and the
 // host bridge re-checks per keystroke; this dialog only keeps the choice honest.
 const SHARE_TYPING_OFF_REASON = 'Typing is disabled in Settings';
-const SHARE_NOT_SANDBOXED_REASON = 'Not a sandboxed session — start one from New session → Sandboxed';
+const SHARE_NOT_SANDBOXED_REASON = 'Not a sandboxed session. Start one from New session → Sandboxed';
 
 function closeShareDialog() {
     const bd = document.getElementById('share-dialog-backdrop');
@@ -994,11 +994,11 @@ async function openShareDialog(btn, wid) {
         <label class="sd-opt"><input type="radio" name="sd-mode" value="view" checked>
           <span><strong>👁 View only</strong><span class="sd-desc">The guest watches. Nothing they type reaches this machine.</span></span></label>
         <label class="sd-opt${typingOk ? '' : ' sd-disabled'}"><input type="radio" name="sd-mode" value="typing"${typingOk ? '' : ' disabled'}>
-          <span><strong>⌨ Allow typing</strong><span class="sd-desc">Into this sandboxed session only — a container that sees just the project, re-verified on every keystroke.</span>
+          <span><strong>⌨ Allow typing</strong><span class="sd-desc">Into this sandboxed session only: a container that sees just the project, re-verified on every keystroke.</span>
           ${reason ? `<span class="sd-reason">${escHtml(reason)}</span>` : ''}</span></label>
         ${offerUnsafe ? `
         <label class="sd-opt sd-unsafe"><input type="radio" name="sd-mode" value="unsandboxed">
-          <span><strong>⚠ Full access — UNSANDBOXED: the guest can type into a real shell on this machine</strong>
+          <span><strong>⚠ Full access, UNSANDBOXED: the guest can type into a real shell on this machine</strong>
           <span class="sd-desc">For a very trusted peer only. Bound to the first guest who joins, ends when the time you pick runs out, audited. Stop the share to revoke it at once.</span></span></label>
         <div class="sd-confirm" hidden>
           <label class="tsp-lbl" for="sd-dur">Lasts</label>
@@ -1006,7 +1006,7 @@ async function openShareDialog(btn, wid) {
           <label class="tsp-lbl" for="sd-confirm-in">Type <code>${escHtml(name)}</code> to confirm</label>
           <input id="sd-confirm-in" class="tsp-in" autocomplete="off" spellcheck="false" placeholder="${attrEsc(name)}">
           <div class="sd-confirm-long" hidden>
-            <label class="tsp-lbl" for="sd-confirm-long-in">Longer than 4 h — type <code>${escHtml(name)}</code> again</label>
+            <label class="tsp-lbl" for="sd-confirm-long-in">Longer than 4 h: type <code>${escHtml(name)}</code> again</label>
             <input id="sd-confirm-long-in" class="tsp-in" autocomplete="off" spellcheck="false" placeholder="${attrEsc(name)}">
           </div>
         </div>` : ''}
@@ -1103,7 +1103,7 @@ function _shareInfoRowsHTML(info, emptyMsg) {
       <div class="tsp-row"><input class="tsp-in" readonly value="${attrEsc(val)}">
         <button class="tsp-copy" data-copy="${attrEsc(val)}">Copy</button></div>`;
     return (url ? row('Join link', url) : '') +
-        (code ? row('Pairing code', code, ' <span class="tsp-hint">— needed to decrypt</span>') : '') +
+        (code ? row('Pairing code', code, ' <span class="tsp-hint">(needed to decrypt)</span>') : '') +
         (!url && !code ? `<div class="tsp-warn">${emptyMsg}</div>` : '');
 }
 function _wireShareCopyButtons(root) {
@@ -1159,7 +1159,7 @@ function _shareModeBadge(wid) {
     const m = _shareModes.get(wid) || 'view';
     if (m === 'unsandboxed') {
         const left = _shareTimeLeft(wid);
-        return '<span class="ss-mode ss-mode-unsafe" title="UNSANDBOXED — guest can type">⚠ UNSANDBOXED'
+        return '<span class="ss-mode ss-mode-unsafe" title="UNSANDBOXED: guest can type">⚠ UNSANDBOXED'
             + (left ? ' · <span class="ss-left">' + escHtml(left) + '</span>' : '') + '</span>';
     }
     if (m === 'typing') return '<span class="ss-mode" title="Guest may type (sandboxed session)">⌨</span>';
@@ -1213,7 +1213,7 @@ function _shareBtnHTML(wid) {
 function _orchBtnHTML(wid) {
     const on = orchestratorState().wid === wid;
     const title = on
-        ? 'This pane receives the decisions inbox — click to release'
+        ? 'This pane receives the decisions inbox, click to release'
         : 'Click to receive the decisions inbox in this pane';
     return `<button class="gs-orch-btn popover-item ov-item${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
       onclick="chela.orchestratorBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
@@ -1228,7 +1228,7 @@ function _updateOrchBtns() {
         btn.classList.toggle('on', on);
         btn.setAttribute('aria-pressed', on ? 'true' : 'false');
         btn.title = on
-            ? 'This pane receives the decisions inbox — click to release'
+            ? 'This pane receives the decisions inbox, click to release'
             : 'Click to receive the decisions inbox in this pane';
     });
     // CMX-119: the pane's status dot (paneHead) carries a non-hue ring while
@@ -1302,7 +1302,7 @@ function paneHead(wid, draggable) {
     // so it simply gets neither — degrade, don't crash.
     const port = draggable
         ? `<button class="gs-port popover-item ov-item" onmousedown="chela.wireDragStart(event, this, '${j}')"
-             title="Wire this agent to another — drag onto a peer"
+             title="Wire this agent to another: drag onto a peer"
              aria-label="Wire this agent to another"><span class="ov-ic">${lucideIcon('link-2', 14)}</span><span>Wire to…</span></button>` : '';
     const roomBadge = draggable
         ? `<button class="gs-room" onclick="chela.wireRoomClick(this, '${j}')" hidden></button>` : '';
@@ -1359,7 +1359,7 @@ function paneHead(wid, draggable) {
       ${label}
       ${roomBadge}
       <span class="gs-presence" data-presence-for="${attrEsc(wid)}"></span>
-      <span class="gs-net-badge" data-net-for="${attrEsc(wid)}" title="Sandboxed session with web access — public hosts only, rate-limited, every request logged"${_netModes.get(wid) === 'web' ? '' : ' hidden'}>🌐 web</span>
+      <span class="gs-net-badge" data-net-for="${attrEsc(wid)}" title="Sandboxed session with web access: public hosts only, rate-limited, every request logged"${_netModes.get(wid) === 'web' ? '' : ' hidden'}>🌐 web</span>
       <span class="gs-unsafe-banner" data-banner-for="${attrEsc(wid)}" role="status"${_sharedWids.has(wid) && _shareModes.get(wid) === 'unsandboxed' ? '' : ' hidden'}>${escHtml(_unsafeBannerText(wid))}</span>
       ${state}
       ${menu}
@@ -1539,8 +1539,8 @@ function _savePinned() {
 function _pinBtnHTML(wid) {
     const on = _pinned.has(wid);
     const title = on
-        ? "Pinned — this pane keeps its spot when a grid layout is applied. Click to unpin"
-        : "Pin — keep this pane's position when a grid layout is applied";
+        ? "Pinned: this pane keeps its spot when a grid layout is applied. Click to unpin"
+        : "Pin: keep this pane's position when a grid layout is applied";
     return `<button class="gs-pin-btn popover-item ov-item${on ? ' on' : ''}" onclick="chela.termPinToggle(this,'${_jsStr(wid)}')"
       aria-pressed="${on ? 'true' : 'false'}" title="${attrEsc(title)}"><span class="ov-ic">${lucideIcon('pin', 14)}</span><span>Pin</span></button>`;
 }
@@ -1554,8 +1554,8 @@ function termPinToggle(btn, wid) {
     btn.classList.toggle('on', on);
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
     btn.title = on
-        ? "Pinned — this pane keeps its spot when a grid layout is applied. Click to unpin"
-        : "Pin — keep this pane's position when a grid layout is applied";
+        ? "Pinned: this pane keeps its spot when a grid layout is applied. Click to unpin"
+        : "Pin: keep this pane's position when a grid layout is applied";
     const item = btn.closest('.grid-stack-item');
     if (item) item.classList.toggle('pane-pinned', on);
 }
@@ -1851,7 +1851,7 @@ function _applyTermContext(ctx) {
         const bits = [`Context: ${c.used}/${c.total} (${pct}%${c.estimated ? '~' : ''})`];
         if (c.model) bits.push(c.model);
         if (c.cost_usd != null) bits.push(`$${c.cost_usd}`);
-        if (c.estimated) bits.push('estimate — run `chela install-statusline` for exact');
+        if (c.estimated) bits.push('estimate; run `chela install-statusline` for exact');
         const tip = bits.join(' · ');
         bar.title = tip;
         // The bar is pointer-events:none (so it can't block resize), so mirror
@@ -2483,6 +2483,7 @@ document.addEventListener('load', e => {
     if (!ifr || ifr.tagName !== 'IFRAME' || !ifr.classList.contains('term-frame')) return;
     _wireIframeShortcuts(ifr);
     _reportWatch(ifr);   // register this fresh connection's watched state (CMX-175)
+    _kbPin();            // CMX-154: a pane's terminal (first view, tile switch) fits the box it landed in
 }, true);
 
 // Rebuild the single-mode agent dropdown's <option> list in place, preserving
@@ -2527,7 +2528,7 @@ function dropTerminalPane(wid) {
             if (!pane.querySelector('.pane-ended')) {
                 const ov = document.createElement('div');
                 ov.className = 'pane-ended';
-                ov.textContent = `${_paneTitle(wid)} — session ended`;
+                ov.textContent = `${_paneTitle(wid)}: session ended`;
                 pane.appendChild(ov);
             }
         }
@@ -2655,7 +2656,7 @@ function _applyWallTileFrame(agents) {
         // draft read dim with their state word, unknown is a bare `#N` link.
         el.textContent = (chip.flag ? '⚑ ' : '') + chip.label;
         el.classList.toggle('gs-pr-dim', chip.dim);
-        el.title = 'Open PR ' + chip.label + (chip.repository ? ' — ' + chip.repository : '')
+        el.title = 'Open PR ' + chip.label + (chip.repository ? ' (' + chip.repository + ')' : '')
             + (chip.state === 'unknown' ? ' (state unknown)' : '');
     });
 
@@ -2713,7 +2714,7 @@ function _ctxBarHTML(wid, draggable) {
     // it. A <button> so it punches through the bar's `pointer-events: none`
     // (see .gs-wid) and takes a click: copy to the clipboard + a "copied" toast.
     const widChip = windowIdQuery(wid)
-        ? `<button type="button" class="gs-wid" data-wid="${attrEsc(wid)}" title="tmux window ${attrEsc(wid)} — click to copy"
+        ? `<button type="button" class="gs-wid" data-wid="${attrEsc(wid)}" title="tmux window ${attrEsc(wid)}, click to copy"
       onclick="event.stopPropagation(); chela.copyWindowId(this)">${escHtml(wid)}</button>` : '';
     return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —">
       ${widChip}
@@ -2732,7 +2733,7 @@ function _ctxBarHTML(wid, draggable) {
 function copyWindowId(btn) {
     const wid = btn && btn.dataset.wid;
     if (!wid) return;
-    const done = ok => _widToast(btn, ok ? `Copied ${wid}` : `Copy failed — ${wid}`);
+    const done = ok => _widToast(btn, ok ? `Copied ${wid}` : `Copy failed: ${wid}`);
     const legacy = () => {
         const ta = document.createElement('textarea');
         ta.value = wid;
@@ -3074,7 +3075,7 @@ function _reflectGridRow() {
     tog.setAttribute('aria-expanded', String(open));
     const { glyph, label } = _currentLayoutGlyph();
     tog.innerHTML = `${glyph}<span class="grid-chevron" aria-hidden="true">${lucideIcon('chevron-down', 12)}</span>`;
-    tog.title = open ? `Layout: ${label} — hide the layout toolbar` : `Layout: ${label} — show the layout toolbar`;
+    tog.title = open ? `Layout: ${label}, hide the layout toolbar` : `Layout: ${label}, show the layout toolbar`;
     tog.setAttribute('aria-label', tog.title);
 }
 
@@ -3123,8 +3124,8 @@ function _reflectLockBtn() {
     b.classList.toggle('active', _wallLocked);
     b.innerHTML = _lockGlyph(_wallLocked);   // lucide lock / lock-open
     b.title = _wallLocked
-        ? 'Layout locked — drag a pane onto another to swap them. Click to unlock (free move + resize).'
-        : 'Lock layout — drag swaps panes, resize off';
+        ? 'Layout locked: drag a pane onto another to swap them. Click to unlock (free move + resize).'
+        : 'Lock layout: drag swaps panes, resize off';
 }
 
 // Wall redesign slice 2: reflect the auto-arrange toggle's on/off state on its
@@ -3137,8 +3138,8 @@ function _reflectAutoBtn() {
     b.classList.toggle('active', _wallAuto);
     b.innerHTML = _autoGlyph();
     b.title = _wallAuto
-        ? 'Auto-arrange ON — panes rank by attention (needs you → working → idle → done). Click to restore your manual layout.'
-        : 'Auto-arrange — rank panes by attention (needs you → working → idle → done)';
+        ? 'Auto-arrange ON: panes rank by attention (needs you → working → idle → done). Click to restore your manual layout.'
+        : 'Auto-arrange: rank panes by attention (needs you → working → idle → done)';
 }
 
 // Focus layout: reflect the toggle's on/off state on its toolbar button —
@@ -3149,8 +3150,8 @@ function _reflectFocusBtn() {
     b.classList.toggle('active', _wallFocus);
     b.innerHTML = _focusGlyph();
     b.title = _wallFocus
-        ? 'Focus ON — one pane large, the rest a strip. Click a strip pane’s header to promote it. Click to restore your manual layout.'
-        : 'Focus — one pane large, the rest a strip';
+        ? 'Focus ON: one pane large, the rest a strip. Click a strip pane’s header to promote it. Click to restore your manual layout.'
+        : 'Focus: one pane large, the rest a strip';
 }
 
 // Push the current lock + auto-arrange + focus state onto the live grid. Safe
@@ -3444,7 +3445,7 @@ async function _wireDrop(e) {
         if (!res || res.error) { _termShareToast(head, res && res.error ? res.error : 'wire failed'); return; }
         _termShareToast(head, `🔌 ${_displayLabel(_nameOfWid(drop.wids[1]))} joined ${res.room}`);
     } catch (err) {
-        _termShareToast(head, 'wire failed — could not reach the dashboard');
+        _termShareToast(head, 'wire failed, could not reach the dashboard');
         return;
     }
     await _refreshRooms();
@@ -3969,10 +3970,29 @@ function _kbFitPane(vv, bar, occluded) {
     if (fit === null) {
         root.classList.remove('kb-fit');
         root.style.removeProperty('--kb-pane-fit-h');
-        return;
+    } else {
+        root.style.setProperty('--kb-pane-fit-h', fit + 'px');
+        root.classList.add('kb-fit');
     }
-    root.style.setProperty('--kb-pane-fit-h', fit + 'px');
-    root.classList.add('kb-fit');
+    _refitPaneTerm();
+}
+
+// CMX-154: make the phone pane's terminal re-fit to the box it now has. Resizing
+// the pane resizes its ttyd iframe, and on a desktop browser that iframe's own
+// `resize` re-fits xterm — but on iPhone Safari the box shrank (keyboard up, pane
+// ended at the keybar) while xterm KEPT its taller row count, so its bottom rows
+// (the rest of a multi-line prompt, Claude's status line) sat clipped below the
+// tile footer until a scroll happened to re-fit it. So we don't rely on the
+// iframe's event: after every fit we call ttyd's own `window.term.fit()` (the
+// handle the font shim in app.py uses too). fit() reads the iframe's computed
+// size synchronously, so it sees the height just applied; it is a no-op when the
+// rows/cols already match. Phone only — desktop keeps ttyd's own resize handling.
+function _refitPaneTerm() {
+    if (!_isMobileTerm()) return;
+    const ifr = document.querySelector('#term-stage.term-single .term-pane iframe.term-frame');
+    let term = null;
+    try { term = ifr && ifr.contentWindow && ifr.contentWindow.term; } catch (e) { return; }
+    if (term && typeof term.fit === 'function') term.fit();
 }
 
 if (window.visualViewport) {
@@ -3991,7 +4011,7 @@ if (typeof ResizeObserver === 'function') {
 }
 
 // --- Stage 0: ES-module exports ---
-export { SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, _refitPaneTerm, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

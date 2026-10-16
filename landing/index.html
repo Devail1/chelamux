@@ -3,22 +3,22 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>chela — a merge gate for unattended Claude Code agents</title>
-<meta name="description" content="Run Claude Code agents unattended — chela only merges a PR once it has proved the tests catch broken code. Tracker-driven dispatch, a mutation-testing judge bound to the PR head, and a merge gate with one-tap audited override. Local-first, AGPL-3.0.">
+<title>chela: a merge gate for unattended Claude Code agents</title>
+<meta name="description" content="Run Claude Code agents unattended. chela only merges a PR once it has proved the tests catch broken code. Tracker-driven dispatch, a mutation-testing judge bound to the PR head, and a merge gate with one-tap audited override. Local-first, AGPL-3.0.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <meta name="theme-color" content="#0d1117">
-<meta property="og:title" content="chela — a merge gate for unattended Claude Code agents">
-<meta property="og:description" content="Run Claude Code agents unattended — chela only merges a PR once it has proved the tests catch broken code.">
+<meta property="og:title" content="chela: a merge gate for unattended Claude Code agents">
+<meta property="og:description" content="Run Claude Code agents unattended. chela only merges a PR once it has proved the tests catch broken code.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://chela.pages.dev/">
 <meta property="og:site_name" content="chela">
 <meta property="og:image" content="https://chela.pages.dev/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="chela — run Claude Code agents unattended; chela only merges a PR once it has proved the tests catch broken code. Tracker → agent → judge → merge gate.">
+<meta property="og:image:alt" content="chela: run Claude Code agents unattended. It only merges a PR once it has proved the tests catch broken code. Tracker → agent → judge → merge gate.">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="chela — a merge gate for unattended Claude Code agents">
-<meta name="twitter:description" content="Run Claude Code agents unattended — chela only merges a PR once it has proved the tests catch broken code.">
+<meta name="twitter:title" content="chela: a merge gate for unattended Claude Code agents">
+<meta name="twitter:description" content="Run Claude Code agents unattended. chela only merges a PR once it has proved the tests catch broken code.">
 <meta name="twitter:image" content="https://chela.pages.dev/img/og.png">
 <style>
   :root{
@@ -41,7 +41,7 @@
   /* a link inside prose is underlined, not marked by colour alone (red-weak readers) */
   main p a,main li a,.cmp caption a{text-decoration:underline; text-underline-offset:2px}
   a:focus-visible,button:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:4px}
-  /* horizontal only — vertical rhythm comes from section{} so a section.wrap
+  /* horizontal only. Vertical rhythm comes from section{} so a section.wrap
      keeps its top/bottom padding (a `padding:0 24px` shorthand would zero it) */
   .wrap{max-width:1080px; margin:0 auto; padding-left:24px; padding-right:24px}
   code,.mono{font-family:var(--mono)}
@@ -56,10 +56,14 @@
   nav .links a{color:var(--text-dim); font-size:14px; margin-left:18px}
   nav .links a:hover{color:var(--text); text-decoration:none}
 
-  /* hero — two columns on desktop (pitch | demo), stacked on a phone */
-  .hero{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.15fr); gap:40px; align-items:center; padding-block:28px 56px}
+  /* hero: two columns on desktop (pitch | demo), stacked on a phone */
+  /* the hero band runs wider than the 1080px sections (and the nav with it, so the brand
+     lines up with the pitch): the demo is a fixed 16:10 clip, so only width can grow it to
+     span the pitch column top to bottom (CMX-159) */
+  nav,.hero{max-width:1280px}
+  .hero{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.3fr); gap:44px; align-items:center; padding-block:28px 56px}
   .hero img.banner{width:220px; height:auto; display:block; margin:0 0 6px -6px}
-  .hero h1{font-size:clamp(26px,3.4vw,38px); line-height:1.18; margin:8px 0 14px; letter-spacing:-0.02em}
+  .hero h1{font-size:clamp(26px,3.2vw,38px); line-height:1.18; margin:8px 0 14px; letter-spacing:-0.02em}
   .hero h1 .accent{color:var(--accent)}
   .hero p.sub{font-size:17px; color:var(--text-dim); margin:0 0 22px}
   .hero p.sub strong{color:var(--text)}
@@ -75,7 +79,7 @@
   .demo .demo-mobile{display:none}
   .demo figcaption{margin-top:10px; color:var(--text-dim); font-size:13px; text-align:center}
 
-  /* sections — generous vertical rhythm; a hairline rule reinforces the break */
+  /* sections: generous vertical rhythm; a hairline rule reinforces the break */
   section{padding:64px 0}
   section + section{border-top:1px solid var(--border)}
   .section-head{text-align:center; max-width:680px; margin:0 auto 36px}
@@ -106,7 +110,7 @@
   .install .next{margin:18px 0 0; color:var(--text-dim); font-size:14.5px}
   .install .next li{margin-bottom:6px}
 
-  /* how it works — a 4-step pipeline; numbers + shapes carry the order, not colour */
+  /* how it works: a 4-step pipeline; numbers + shapes carry the order, not colour */
   .how{background:var(--surface)}
   .pipe{list-style:none; margin:0; padding:0; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:28px; counter-reset:step}
   .pipe li{position:relative; background:var(--bg); border:1px solid var(--border-strong); border-radius:12px; padding:20px 18px 18px}
@@ -124,7 +128,7 @@
   .pipe li.gate .tag{color:var(--accent)}
   .how .more-line{text-align:center; margin:28px 0 0; color:var(--text-dim); font-size:14px}
 
-  /* comparison table — every cell is a word + a symbol, never colour alone */
+  /* comparison table: every cell is a word + a symbol, never colour alone */
   .table-scroll{overflow-x:auto; border:1px solid var(--border-strong); border-radius:12px}
   table.cmp{width:100%; border-collapse:collapse; font-size:14px; min-width:680px}
   .cmp caption{caption-side:bottom; text-align:left; padding:12px 16px; color:var(--text-dim); font-size:12.5px}
@@ -153,7 +157,7 @@
   .card code{background:var(--surface2); padding:1px 5px; border-radius:4px; font-size:12.5px}
   .more{display:inline-block; margin-top:10px; font-size:14px; font-weight:600}
 
-  /* wide "differentiator" card — spans the feature grid, accent-tinted */
+  /* wide "differentiator" card, spans the feature grid, accent-tinted */
   .card-wide{
     grid-column:1 / -1; display:flex; gap:22px; align-items:flex-start;
     border-color:rgba(88,166,255,0.40);
@@ -167,7 +171,7 @@
   }
   .card h3 svg{vertical-align:-2px}
 
-  /* E2E channel diagram — You →🔒→ Relay(blind) →🔒→ Joiner */
+  /* E2E channel diagram: You →🔒→ Relay(blind) →🔒→ Joiner */
   .e2e{display:flex; align-items:stretch; justify-content:center; flex-wrap:wrap; gap:0; margin:0 auto 34px; max-width:720px}
   .e2e-node{
     background:var(--surface); border:1px solid var(--border); border-radius:12px;
@@ -185,12 +189,12 @@
   .how-item h3{margin:0 0 6px; font-size:15px}
   .how-item p{margin:0; color:var(--text-dim); font-size:14.5px}
 
-  /* latest release — one line, links the Releases page so it never goes stale */
+  /* latest release: one line, links the Releases page so it never goes stale */
   .release{padding:28px 0}
   .release p{margin:0; text-align:center; color:var(--text-dim); font-size:15px}
   .release strong{color:var(--text)}
 
-  /* FAQ — native <details>, works with JS off */
+  /* FAQ: native <details>, works with JS off */
   .faq{max-width:760px; margin:0 auto}
   .faq details{border:1px solid var(--border-strong); border-radius:10px; background:var(--surface); margin-bottom:12px}
   .faq summary{cursor:pointer; padding:16px 18px; font-weight:600; font-size:15.5px; list-style:none; display:flex; justify-content:space-between; gap:12px}
@@ -263,7 +267,7 @@
 <header class="hero wrap">
   <div class="pitch">
     <img class="banner" src="banner.svg" alt="chela" width="1991" height="995">
-    <h1>Run Claude Code agents unattended —<br><span class="accent">chela only merges a PR once it has proved the tests catch broken code.</span></h1>
+    <h1>Run Claude Code agents unattended.<br><span class="accent">chela only merges a PR once it has proved the tests catch broken code.</span></h1>
     <p class="sub">A tracker task becomes a worktree, an agent and a PR; a <strong>mutation-testing
       judge</strong> must pass on its head commit before <code>chela merge</code> will land it.</p>
     <div class="cta">
@@ -297,13 +301,13 @@ uv run chela status</code></pre>
       </button>
     </div>
     <ol class="next">
-      <li>Log the <code>claude</code> CLI in once (<code>claude</code>, then <code>/login</code>) — chela drives it and never handles credentials.</li>
+      <li>Log the <code>claude</code> CLI in once (<code>claude</code>, then <code>/login</code>). chela drives it and never handles credentials.</li>
       <li>Inside Claude Code, add the hooks plugin that enforces the merge gate:
         <code>/plugin marketplace add Devail1/chelamux</code>, then <code>/plugin install chela@chela</code>.</li>
-      <li>Follow <a href="https://github.com/Devail1/chelamux/blob/main/docs/GETTING_STARTED.md">Getting started</a> — about 10 minutes from clone to a first agent-opened PR.</li>
+      <li>Follow <a href="https://github.com/Devail1/chelamux/blob/main/docs/GETTING_STARTED.md">Getting started</a>: about 10 minutes from clone to a first agent-opened PR.</li>
     </ol>
     <p class="status-note">
-      <strong>Status: early.</strong> The core — scheduler, dispatcher, messaging — is solid and
+      <strong>Status: early.</strong> The core (scheduler, dispatcher, messaging) is solid and
       tested; the dashboard and live wall ship in the same install. chela is
       <strong>self-hosted and single-user</strong>: you run it on your own machine, driving one
       Claude account (the whole fleet shares its 5h / weekly rate limits).
@@ -315,7 +319,7 @@ uv run chela status</code></pre>
   <div class="wrap">
     <div class="section-head">
       <h2>How it works</h2>
-      <p>From a tracker task to a merged PR — and the one place a human is asked.</p>
+      <p>From a tracker task to a merged PR, and the one place a human is asked.</p>
     </div>
     <ol class="pipe">
       <li>
@@ -396,7 +400,7 @@ uv run chela status</code></pre>
         </tr>
         <tr>
           <th scope="row">Sandbox</th>
-          <td class="us"><span class="v part">Opt-in</span><small>off by default — <code>agent.sandbox: true</code> per workflow</small></td>
+          <td class="us"><span class="v part">Opt-in</span><small>off by default; <code>agent.sandbox: true</code> per workflow</small></td>
           <td><span class="v part">Opt-in</span><small>Claude Code's Bash sandbox</small></td>
           <td><span class="v no">No</span></td>
           <td><span class="v yes">Yes</span><small>typically a cloud VM per task</small></td>
@@ -413,20 +417,20 @@ uv run chela status</code></pre>
   </div>
   <div class="features">
     <div class="card">
-      <span class="ic" aria-hidden="true">◷</span>
+      <span class="ic" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
       <h3>Schedule agents</h3>
-      <p>Poke an agent on an interval or cron — <code>every 1h</code>, <code>0 */8 * * *</code>,
+      <p>Poke an agent on an interval or cron (<code>every 1h</code>, <code>0 */8 * * *</code>)
       or once at a set time. chela types the prompt into its pane when it fires.</p>
     </div>
     <div class="card">
-      <span class="ic" aria-hidden="true">📥</span>
+      <span class="ic" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></span>
       <h3>Closes the loop</h3>
-      <p>An orchestrator is just another agent — it can only act when something messages it. chela
+      <p>An orchestrator is just another agent: it can only act when something messages it. chela
       pushes completions, blocks and deaths back into the orchestrator's own session, gated on
       <code>idle</code> so a live agent is never interrupted. <a class="more" href="docs.html#orchestration">How it works →</a></p>
     </div>
     <div class="card">
-      <span class="ic" aria-hidden="true">▦</span>
+      <span class="ic" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg></span>
       <h3>The wall</h3>
       <p>A live grid of every agent's terminal, each pane marked <em>working</em>, <em>needs you</em>,
       <em>PR open</em> or <em>idle</em>, with a context-window bar and 5h / weekly rate-limit
@@ -436,8 +440,8 @@ uv run chela status</code></pre>
       <span class="ic" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg></span>
       <div class="card-body">
         <h3>Collaborative terminals <span class="badge">END-TO-END ENCRYPTED</span></h3>
-        <p>Share any agent's live terminal over the internet with a link + a pairing code —
-          view-only by default, typing only into a sandboxed session you allow — multi-user with live Figma-style
+        <p>Share any agent's live terminal over the internet with a link + a pairing code.
+          It's view-only by default, with typing only into a sandboxed session you allow, and multi-user with live Figma-style
         cursors and a presence facepile, and mobile-friendly. The relay in the middle only ever
         sees ciphertext; the keys never leave the browsers.</p>
         <a class="more" href="#collab">See how it works →</a>
@@ -448,8 +452,8 @@ uv run chela status</code></pre>
 
 <section id="collab" class="wrap">
   <div class="section-head">
-    <h2>Share a live terminal — end-to-end encrypted</h2>
-    <p>Hand someone a link and a pairing code. They watch the same session in their browser (and type, in a sandboxed session you allow) — everyone sees everyone as live cursors — and the relay in the middle
+    <h2>Share a live terminal, end-to-end encrypted</h2>
+    <p>Hand someone a link and a pairing code. They watch the same session in their browser (and type, in a sandboxed session you allow). Everyone sees everyone as live cursors, and the relay in the middle
     only ever sees ciphertext.</p>
   </div>
 
@@ -470,18 +474,18 @@ uv run chela status</code></pre>
   <div class="how-grid">
     <div class="how-item">
       <h3>Link + pairing code</h3>
-      <p>Click Share on any pane. The <strong>code is the key</strong> — 16 random bytes both
+      <p>Click Share on any pane. The <strong>code is the key</strong>: 16 random bytes both
       browsers turn into AES-256-GCM keys with HKDF, in-browser. A wrong code simply can't decrypt.</p>
     </div>
     <div class="how-item">
       <h3>Zero-knowledge relay</h3>
-      <p>A dumb WebSocket fan-out that broadcasts opaque frames — it never holds a key, and sees
+      <p>A dumb WebSocket fan-out that broadcasts opaque frames. It never holds a key, and sees
       metadata only. Run your own (a small Cloudflare Worker) so even that stays yours.</p>
     </div>
     <div class="how-item">
       <h3>Everyone's present</h3>
       <p>Live labeled cursors mapped to the grid, plus a facepile of who's watching (the host gets
-      a ★). Presence rides the same encryption — colorblind-safe, names not just colors.</p>
+      a ★). Presence rides the same encryption. It's colorblind-safe, with names not just colors.</p>
     </div>
     <div class="how-item">
       <h3>Mobile &amp; revocable</h3>
@@ -492,7 +496,7 @@ uv run chela status</code></pre>
 </section>
 
 <section id="release" class="release wrap">
-  <p><strong>Latest release:</strong> what shipped, version by version —
+  <p><strong>Latest release:</strong> what shipped, version by version.
     <a href="https://github.com/Devail1/chelamux/releases/latest">see it on GitHub Releases →</a></p>
 </section>
 
@@ -505,7 +509,7 @@ uv run chela status</code></pre>
       <summary>Is it safe to run unattended?</summary>
       <div class="a">
         <p>Be clear about what is and isn't guarded. <strong>Dispatched agents run unsandboxed by
-        default</strong> — as your user, with your tools and network — under Claude Code's
+        default</strong> (as your user, with your tools and network) under Claude Code's
         <code>--permission-mode auto</code> classifier, with no inherited MCP servers and an
         allowlisted environment. A measured sandbox exists and is <strong>opt-in per workflow</strong>
         (<code>agent.sandbox: true</code> in <code>WORKFLOW.md</code>).</p>
@@ -520,11 +524,11 @@ uv run chela status</code></pre>
       <div class="a"><p>No. chela never handles credentials: it drives the <code>claude</code> CLI inside
         your tmux windows, so every agent reuses the one login you made with <code>/login</code>
         (or <code>claude setup-token</code> on a headless box). The tracker integrations need their own
-        tokens — <code>gh</code> logged in for GitHub, a personal API key for Linear.</p></div>
+        tokens: <code>gh</code> logged in for GitHub, a personal API key for Linear.</p></div>
     </details>
     <details>
       <summary>Linux, macOS or Windows?</summary>
-      <div class="a"><p>Linux and macOS natively. On Windows, run it inside WSL — chela is built on
+      <div class="a"><p>Linux and macOS natively. On Windows, run it inside WSL, because chela is built on
         <code>tmux</code>, which has no native Windows build.</p></div>
     </details>
     <details>
@@ -545,7 +549,7 @@ uv run chela status</code></pre>
     <details>
       <summary>What does it cost?</summary>
       <div class="a"><p>chela itself is free. The agents run on your own Claude plan, so the cost is
-        your subscription's usage: the whole fleet — coding agents and judges — shares one account's
+        your subscription's usage: the whole fleet (coding agents and judges) shares one account's
         5h / weekly limits. The dashboard shows the limit bars and burn rate so you can see it.</p></div>
     </details>
   </div>
@@ -558,8 +562,9 @@ uv run chela status</code></pre>
     <a href="https://github.com/Devail1/chelamux">GitHub</a>
     <a href="https://github.com/Devail1/chelamux/blob/main/LICENSE">License (AGPL-3.0)</a>
     <a href="https://github.com/Devail1/chelamux/blob/main/CHANGELOG.md">Changelog</a>
+    <a href="https://github.com/Devail1/chelamux/blob/main/NOTICE">Icons: Lucide (ISC)</a>
   </nav>
-  <p>chela — a merge gate and control plane for Claude Code agents on tmux</p>
+  <p>chela: a merge gate and control plane for Claude Code agents on tmux</p>
 </footer>
 
 <script>

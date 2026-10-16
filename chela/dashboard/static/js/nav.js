@@ -564,7 +564,7 @@ async function archiveKeys(keys) {
     const closed = new Set(res && Array.isArray(res.closed) ? res.closed : []);
     if (closed.size) setAgentsCache((_agentsCache || []).filter(a => !(a && closed.has(a.window_id))));
     renderSidebarAgents(_agentsCache || []);
-    if (!res) { if (typeof alert === 'function') alert('Archive failed — the dashboard did not answer.'); }
+    if (!res) { if (typeof alert === 'function') alert('Archive failed. The dashboard did not answer.'); }
     else _sayRefused(res);
     return res;
 }
@@ -576,7 +576,7 @@ async function unarchiveKeys(keys) {
     try { res = await _postJson('/api/sidebar/unarchive', { keys }); } catch { /* below */ }
     if (res && res.state) _setArchive(res.state);
     renderSidebarAgents(_agentsCache || []);
-    if (!res) { if (typeof alert === 'function') alert('Unarchive failed — the dashboard did not answer.'); }
+    if (!res) { if (typeof alert === 'function') alert('Unarchive failed. The dashboard did not answer.'); }
     else _sayRefused(res);
     return res;
 }
@@ -684,7 +684,7 @@ function _agentRowHtml(a, o = {}) {
 
     const type = _agentType(a);
     // CMX-146's ai_title / the away_summary recap ride the row's tooltip.
-    const extra = [a.ai_title, a.recap].filter(Boolean).join(' — ');
+    const extra = [a.ai_title, a.recap].filter(Boolean).join(', ');
     // CMX-62: when Claude's title leads the row, the short window NAME (the key
     // `chela peek/msg` and the bindings use) is the secondary label — on hover.
     const key = !o.label && label !== a.name ? a.name : '';
@@ -692,7 +692,7 @@ function _agentRowHtml(a, o = {}) {
     const tail = [o.titleExtra || extra, age ? `${age} ago` : ''].filter(Boolean).join('\n');
     const rowTitle = tail ? `${head}\n${tail}` : head;
 
-    const wallSuffix = onWall ? ' — open on the wall' : '';
+    const wallSuffix = onWall ? ' (open on the wall)' : '';
     // A row's menu (right-click, or its ⋯ on touch): a run's opens its agent or judge
     // pane, under Custom groups every row can be moved to a custom group (CMX-66), and
     // every row has its own Archive (CMX-81). Keyed on the row's item key — the window
@@ -725,7 +725,7 @@ function _agentRowHtml(a, o = {}) {
 // A WORD, not a colour: the operator is red-weak.
 function _orchBadgeHtml(a) {
     if (_agentRole(a) !== 'orchestrator') return '';
-    return '<span class="ar-orch" title="Orchestrator — holds the decisions inbox" aria-label="Orchestrator">orchestrator</span>';
+    return '<span class="ar-orch" title="Orchestrator: holds the decisions inbox" aria-label="Orchestrator">orchestrator</span>';
 }
 
 // A dispatched RUN's one row (CMX-35): its agent window and its judge window are ONE
@@ -737,13 +737,13 @@ function _runRowHtml(it, extraCls, showPR) {
     const st = runState(it, wantsHuman);
     const label = runLabel(it);
     // CMX-137: the run's own progress icon (◐ working, ◕ judging/awaiting review),
-    // not a human session's dot — and its label names both kind and state.
+    // not a human session's dot, and its label names both kind and state.
     const dot = runDot(it, wantsHuman);
     const wins = [it.agent && `agent ${it.agent.name} · ${it.agent.window_id}`,
         it.judge && `judge ${it.judge.name} · ${it.judge.window_id}`].filter(Boolean).join('\n');
     return _agentRowHtml(a, {
         label, stWord: st.word, stCls: st.shape, dot, runId: it.run.task_id, itemKey: it.key,
-        titleHead: `${label} — ${st.word}`, titleExtra: wins,
+        titleHead: `${label}: ${st.word}`, titleExtra: wins,
         cls: ['run-row', extraCls].filter(Boolean).join(' '),
         badge: showPR ? _prBadgeHtml(it) : '',
     });
@@ -774,7 +774,7 @@ function _itemRowHtml(it, archived, showPR = true) {
 // The Unarchive button an archived row carries (CMX-75). On a closed session it RESUMES
 // it; on a hidden row it shows it again.
 function _unarchiveBtn(key, resume) {
-    const what = resume ? 'Unarchive — resume this session in a new window' : 'Unarchive';
+    const what = resume ? 'Unarchive: resume this session in a new window' : 'Unarchive';
     return `<button class="row-unarchive" data-item="${attrEsc(key)}" title="${attrEsc(what)}" aria-label="${attrEsc(what)}"
         onclick="event.stopPropagation(); chela.unarchiveRow(this, this.dataset.item)">Unarchive</button>`;
 }
@@ -786,7 +786,7 @@ function _sessionRowHtml(it) {
     const label = r.name || r.session_id || it.key;
     const folder = String(r.cwd || '').replace(/\/+$/, '').split('/').pop() || r.cwd || '';
     const when = r.archived_at ? ageStr(Date.now() / 1000 - r.archived_at) : '';
-    const title = [`${label} — archived (closed)`, r.cwd, when && `archived ${when}`].filter(Boolean).join('\n');
+    const title = [`${label}: archived (closed)`, r.cwd, when && `archived ${when}`].filter(Boolean).join('\n');
     return `<div class="agent-row rich archived session-row" data-item="${attrEsc(it.key)}" title="${attrEsc(title)}">
         <span class="term-status-dot idle" title="archived"></span>
         <div class="ar-main">
@@ -1399,8 +1399,8 @@ function jumpToOrchestrator() {
 function _syncInboxBtn() {
     const btn = document.getElementById('btn-decisions');
     if (!btn) return;
-    const label = orchestratorState().wid ? 'Decisions inbox — jump to the orchestrator' : 'Decisions inbox';
-    btn.title = orchestratorState().wid ? 'Decisions — jump to the orchestrator' : 'Decisions';
+    const label = orchestratorState().wid ? 'Decisions inbox: jump to the orchestrator' : 'Decisions inbox';
+    btn.title = orchestratorState().wid ? 'Decisions: jump to the orchestrator' : 'Decisions';
     btn.setAttribute('aria-label', label);
 }
 onOrchestratorChange(_syncInboxBtn);
@@ -1425,7 +1425,7 @@ function _dismissKey(r) {
 }
 
 function _dismissButtonHtml(r, label) {
-    return `<button class="recent-dismiss" title="Dismiss — hide this session from Recent (the transcript is kept)"
+    return `<button class="recent-dismiss" title="Dismiss: hide this session from Recent (the transcript is kept)"
                 aria-label="Dismiss ${attrEsc(label)}" data-session="${attrEsc(r.session_id || '')}"
                 data-dismiss="${attrEsc(_dismissKey(r))}"
                 onclick="event.stopPropagation(); chela.dismissRecentSession(this)">${lucideIcon('x')}</button>`;
@@ -1435,7 +1435,7 @@ function _recentRowHtml(r) {
     const label = r.label || r.cwd || r.wid;
     const key = `${r.store} ${r.wid}`;
     return `<div class="agent-row recent-row" data-key="${attrEsc(key)}">
-        <span class="ar-type recent" title="dead session — needs a human to resume">&#8635;</span>
+        <span class="ar-type recent" title="dead session, needs a human to resume">&#8635;</span>
         <div class="ar-main">
             <div class="ar-top"><span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span></div>
             <div class="ar-sub"><span class="ar-recap" title="${attrEsc(r.cwd || '')}">${escHtml(r.cwd || '')}</span></div>
@@ -1457,7 +1457,7 @@ function _recentRowHtml(r) {
 function _dispatcherRowHtml(r) {
     const label = r.label || r.cwd || r.wid;
     return `<div class="agent-row recent-row recent-row-dispatcher"
-                title="dispatcher-owned — resuming it would race the dispatcher's own worktree lifecycle">
+                title="dispatcher-owned: resuming it would race the dispatcher's own worktree lifecycle">
         <span class="ar-type recent" title="dispatcher-owned session">&#8635;</span>
         <div class="ar-main">
             <div class="ar-top"><span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span></div>
@@ -1611,7 +1611,7 @@ async function _dismiss(sids, text) {
     if (!(await _postDismiss('/api/restore/dismiss', sids))) {
         _recentPayload = before;
         _paintRecentSessions();
-        alert('Could not dismiss — nothing was changed.');
+        alert('Could not dismiss. Nothing was changed.');
         return;
     }
     _showRecentUndoToast(sids, text);
@@ -1677,7 +1677,7 @@ async function resumeSession(btn) {
     if (!res || res.error || res.ok === false) {
         btn.disabled = false;
         btn.textContent = prevText;
-        alert((res && res.error) || 'Could not resume this session — it may have changed since the list was loaded.');
+        alert((res && res.error) || 'Could not resume this session. It may have changed since the list was loaded.');
         refreshRecentSessions();
         return;
     }
@@ -1999,7 +1999,7 @@ function renderSettings(focus) {
                 <span class="s-status-detail" id="update-status-detail"></span>
             </div>
             <p class="s-desc">Pulls this checkout, re-syncs deps, and restarts every running
-            <code>chela-*</code> PM2 service (including this dashboard) — the same as running
+            <code>chela-*</code> PM2 service (including this dashboard), the same as running
             <code>chela update</code> from the CLI. A dirty working tree or a branch diverged
             from its upstream refuses rather than clobbering anything.</p>
             <div class="s-row">
@@ -2012,7 +2012,7 @@ function renderSettings(focus) {
             <h4>Projects folder</h4>
             <p class="s-desc">Scanned for git repos to suggest in the <strong>+</strong> launch
             menu. Defaults to <code>~/projects</code> (or the <code>CHELA_PROJECTS_DIR</code>
-            env var). Takes effect immediately — no restart.</p>
+            env var). Takes effect immediately, no restart.</p>
             <div class="s-row">
                 <input id="cfg-projects-dir" class="s-input" type="text"
                        placeholder="~/projects" autocomplete="off"
@@ -2025,7 +2025,7 @@ function renderSettings(focus) {
         <section class="settings-section" id="settings-agentmode">
             <h4>Dispatcher agent mode</h4>
             <p class="s-desc">Permission mode for agents the <strong>dispatcher</strong> spawns.
-            Applies to the <strong>next</strong> dispatch — an agent already running keeps the
+            Applies to the <strong>next</strong> dispatch. An agent already running keeps the
             mode it started with. Only the mode is settable; the rest of the launch command is
             fixed in code.</p>
             <div class="s-row" data-keywords="bypass approve prompts auto">
@@ -2046,7 +2046,7 @@ function renderSettings(focus) {
             </div>
             <div id="agent-model-msg" class="s-savemsg"></div>
             <p class="s-desc" id="agent-model-source"></p>
-            <p class="s-desc">The <strong>coding</strong> model — cmx tasks rarely need Opus,
+            <p class="s-desc">The <strong>coding</strong> model: cmx tasks rarely need Opus,
             so Sonnet is the default (cheaper/faster). The <strong>judge</strong> (the
             adversarial reviewer) always runs on a capable model and is not affected by this
             setting.</p>
@@ -2055,12 +2055,12 @@ function renderSettings(focus) {
         <section class="settings-section" id="settings-remote-control">
             <h4>Remote Control</h4>
             <p class="s-desc">Launch sessions with Claude Code's <code>--remote-control</code> so
-            they can be driven from claude.ai — windows opened from the dashboard, Telegram
+            they can be driven from claude.ai: windows opened from the dashboard, Telegram
             <code>/new</code>, and the orchestrator. Applies to <strong>new</strong> sessions
             only: a window already running keeps the flag it was launched with. Never applied
             to dispatcher agents or judges.</p>
             <div class="s-row" data-keywords="claude.ai remote phone mobile anywhere">
-                <label class="s-rowlabel" for="remote-control-toggle">Remote Control — make new sessions reachable from claude.ai</label>
+                <label class="s-rowlabel" for="remote-control-toggle">Remote Control: make new sessions reachable from claude.ai</label>
                 <input id="remote-control-toggle" type="checkbox" role="switch" disabled
                        onchange="chela.setRemoteControl(this.checked)">
             </div>
@@ -2070,13 +2070,13 @@ function renderSettings(focus) {
 
         <section class="settings-section" id="settings-file-drop">
             <h4>File drop into terminals</h4>
-            <p class="s-desc">Drop a file on a Wall terminal — or paste one, e.g. a screenshot —
+            <p class="s-desc">Drop a file on a Wall terminal (or paste one, e.g. a screenshot)
             and it is saved to that session's <code>uploads/</code> folder and its
             <code>@uploads/&lt;name&gt;</code> is typed into the prompt (not sent). Works from
             your phone too. Never overwrites; <span id="file-drop-cap">25</span> MB per file.
             Share guests can never upload. A pane picks up a change when it reloads.</p>
             <div class="s-row" data-keywords="upload drag drop paste file image screenshot attach uploads phone">
-                <label class="s-rowlabel" for="file-drop-toggle">File drop into terminals — save dropped or pasted files into the session</label>
+                <label class="s-rowlabel" for="file-drop-toggle">File drop into terminals: save dropped or pasted files into the session</label>
                 <input id="file-drop-toggle" type="checkbox" role="switch" disabled
                        onchange="chela.setFileDrop(this.checked)">
             </div>
@@ -2086,7 +2086,7 @@ function renderSettings(focus) {
 
         <section class="settings-section" data-keywords="tailscale ssh tunnel vpn auth security">
             <h4>Remote access</h4>
-            <p class="s-desc">Zero built-in auth — the dashboard binds <code>127.0.0.1</code>.
+            <p class="s-desc">Zero built-in auth: the dashboard binds <code>127.0.0.1</code>.
             Put it behind a tailnet or SSH tunnel; that is the trust boundary.</p>
             <div class="s-examples">
                 <div class="s-ex"><span class="s-tag">tailnet</span><code>tailscale serve 5001</code></div>
@@ -2102,10 +2102,10 @@ function renderSettings(focus) {
             <h4>Timing</h4>
             <p class="s-desc">Daemon and dispatcher cadences. Blank a field to fall back to
             its <code>CHELA_*</code> env var (or the built-in default, shown as its
-            placeholder) — takes effect on the <strong>next tick</strong>, no restart, except
+            placeholder). Takes effect on the <strong>next tick</strong>, no restart, except
             the status-feed timeout/TTL pair (marked below), which the dashboard/daemon
             process reads once at startup. A knob whose env var is currently set is disabled
-            here — <strong>env always wins</strong>, so an edit would be silently discarded.</p>
+            here. <strong>env always wins</strong>, so an edit would be silently discarded.</p>
             <div id="timing-rows" class="s-timing-rows"><div class="s-desc">Loading…</div></div>
             <div class="s-row">
                 <button class="btn-accent" onclick="chela.saveTiming()">Save</button>
@@ -2119,12 +2119,12 @@ function renderSettings(focus) {
             <h4>Dispatch</h4>
             <p class="s-desc">Dispatcher, judge, and critic policy. Blank a field to fall back
             to its <code>CHELA_*</code> env var (or the built-in default, shown as its
-            placeholder). Four of these — <strong>Dispatch workflows</strong>,
-            <strong>Judge</strong>, <strong>Critic</strong>, and <strong>Merge base</strong>
-            (marked <span class="s-badge off" style="display:inline-block">restart</span>
-            below) — are read once when the daemon/dashboard starts, so a save there takes
+            placeholder). Four of these (<strong>Dispatch workflows</strong>,
+            <strong>Judge</strong>, <strong>Critic</strong>, and <strong>Merge base</strong>,
+            marked <span class="s-badge off" style="display:inline-block">restart</span>
+            below) are read once when the daemon/dashboard starts, so a save there takes
             effect on the <strong>next restart</strong>, not immediately. The rest apply on the
-            next tick. A knob whose env var is currently set is disabled here —
+            next tick. A knob whose env var is currently set is disabled here.
             <strong>env always wins</strong>, so an edit would be silently discarded.</p>
             <div id="dispatch-rows" class="s-dispatch-rows"><div class="s-desc">Loading…</div></div>
             <div class="s-row">
@@ -2147,7 +2147,7 @@ function renderSettings(focus) {
                 </select>
             </div>
             <p class="s-desc">Pop a dashboard toast when a dispatcher run turns
-            <code>awaiting_review</code> (or done / failed) — so you learn a run
+            <code>awaiting_review</code> (or done / failed), so you learn a run
             needs review without watching the board.</p>
             <div class="s-row" data-keywords="notifications browser approval override release pending">
                 <span class="s-rowlabel">Approval requests</span>
@@ -2164,7 +2164,7 @@ function renderSettings(focus) {
             <div class="s-examples">
                 <div class="s-ex"><span class="s-tag">ntfy</span><code>https://ntfy.sh/your-topic</code></div>
                 <div class="s-ex"><span class="s-tag">Telegram</span><code>https://api.telegram.org/bot&lt;token&gt;/sendMessage?chat_id=&lt;id&gt;</code></div>
-                <div class="s-ex"><span class="s-tag">webhook</span><span class="s-exnote">any URL — receives JSON <code>{title,message,event}</code></span></div>
+                <div class="s-ex"><span class="s-tag">webhook</span><span class="s-exnote">any URL, receives JSON <code>{title,message,event}</code></span></div>
             </div>
         </section>
         </div>
@@ -2182,7 +2182,7 @@ function renderSettings(focus) {
             </div>
             <div id="cost-pane">
             <p class="s-desc">Fleet spend from the cost each agent's statusLine hook already
-            reports (<code>cost.total_cost_usd</code>) — no separate accounting, just a read
+            reports (<code>cost.total_cost_usd</code>), with no separate accounting, just a read
             over data chela ingests anyway. Grouped by project, same convention the sidebar
             uses for "what project is this agent".</p>
             <div class="work-toolbar">
@@ -2200,9 +2200,9 @@ function renderSettings(focus) {
             <div id="cost-table"><div class="s-desc">Loading…</div></div>
             </div>
             <div id="usage-pane" hidden>
-            <p class="s-desc">Tokens, not dollars, read from EVERY Claude Code transcript —
+            <p class="s-desc">Tokens, not dollars, read from EVERY Claude Code transcript:
             judges, subagents, dispatched agents, background sessions, and any extra root
-            listed below — so a session with no statusLine still shows up. Limits come from the
+            listed below, so a session with no statusLine still shows up. Limits come from the
             freshest statusLine <code>rate_limits</code>.</p>
             <div class="usage-limits" id="usage-limits"></div>
             <div class="work-toolbar">
@@ -2239,7 +2239,7 @@ function renderSettings(focus) {
             <h4>Terminal font</h4>
             <p class="s-desc">Applies live to every open terminal, saved per browser.
             Pick the <strong>English</strong> (monospace) and <strong>Hebrew</strong> faces
-            independently. Only <strong>Miriam Mono</strong> keeps Hebrew on the grid — the
+            independently. Only <strong>Miriam Mono</strong> keeps Hebrew on the grid; the
             other Hebrew faces are proportional: nicer letters, slight drift in the fixed cells.</p>
             <div class="s-row" data-keywords="terminal typeface monospace latin">
                 <span class="s-rowlabel">English font</span>
@@ -2260,7 +2260,7 @@ function renderSettings(focus) {
             <div class="s-row" data-keywords="terminal font size zoom px">
                 <span class="s-rowlabel">Size</span>
                 <select id="term-size-select" class="s-select" onchange="chela.setTermSize(this.value)">
-                    ${['8', '10', '12', '13', '14', '15', '16', '18']
+                    ${['8', '10', '11', '12', '13', '14', '15', '16', '18']
                         .map(s => `<option value="${s}"${termSize === s ? ' selected' : ''}>${s}px</option>`)
                         .join('')}
                 </select>
@@ -2284,20 +2284,20 @@ function renderSettings(focus) {
                 <span class="s-rowlabel">Relay</span>
                 <code id="collab-relay" style="overflow-wrap:anywhere;font-size:11px">…</code>
             </div>
-            <p class="s-desc">End-to-end encrypted — the relay (<code>CHELA_COLLAB_RELAY</code>)
+            <p class="s-desc">End-to-end encrypted. The relay (<code>CHELA_COLLAB_RELAY</code>)
             is a zero-knowledge fan-out that only ever sees ciphertext (keys are derived in your
-            browser from the pairing code). It does see room names + traffic timing (metadata) —
+            browser from the pairing code). It does see room names + traffic timing (metadata), so
             run your own relay for full metadata privacy.</p>
         </section>
         <section class="settings-section" id="settings-share-typing">
             <h4>Guest typing</h4>
             <p class="s-desc">Shares are <strong>view only</strong> unless this is on. With it on,
-            a share may let the guest type — but only into a <strong>sandboxed session</strong>
+            a share may let the guest type, but only into a <strong>sandboxed session</strong>
             (New session → Sandboxed: a container that sees only the project), checked live on
             every keystroke. Turning it off stops typing on live shares at once. See
             <code>docs/SHARE_SANDBOX.md</code> and run its checklist first.</p>
             <div class="s-row" data-keywords="share typing keyboard input write guest sandbox sandboxed container view only unsandboxed full access">
-                <label class="s-rowlabel" for="share-typing-toggle">Guest typing — let share guests type into sandboxed sessions</label>
+                <label class="s-rowlabel" for="share-typing-toggle">Guest typing: let share guests type into sandboxed sessions</label>
                 <input id="share-typing-toggle" type="checkbox" role="switch" disabled
                        onchange="chela.setShareTyping(this.checked)">
             </div>
@@ -2343,11 +2343,11 @@ function _renderAgentModeSource(cfg) {
     const eff = (cfg && cfg.agent_permission_mode_effective) || '';
     const stored = (cfg && cfg.agent_permission_mode) || '';
     const src = stored ? 'this setting' : 'the built-in default';
-    let html = `In effect: <code>claude --permission-mode ${escHtml(eff)}</code> — from ${src}.`;
+    let html = `In effect: <code>claude --permission-mode ${escHtml(eff)}</code> (from ${src}).`;
     if (overrides.length) {
         html += ' <strong>Overridden</strong> for ' + overrides.map(o =>
             `<code>${escHtml(o.workflow)}</code> (<code>${escHtml(o.cmd)}</code>)`).join(', ') +
-            ' — a workflow that pins <code>agent.cmd</code> wins over this setting.';
+            ' (a workflow that pins <code>agent.cmd</code> wins over this setting.)';
     }
     el.innerHTML = html;
 }
@@ -2381,11 +2381,11 @@ async function setAgentPermissionMode(v) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ agent_permission_mode: v }),
         });
-    } catch (e) { setMsg('err', 'Save failed — mode unchanged.'); return; }
+    } catch (e) { setMsg('err', 'Save failed. Mode unchanged.'); return; }
     // api() resolves on a 4xx too, so the server's rejection arrives as a body,
     // not a throw. Fail closed: report it and re-read the mode that IS stored.
     if (!cfg || cfg.error) {
-        setMsg('err', 'Rejected — mode unchanged.');
+        setMsg('err', 'Rejected. Mode unchanged.');
         _loadAgentModeSetting();
         return;
     }
@@ -2410,7 +2410,7 @@ function _renderAgentModelSource(cfg) {
     const eff = (cfg && cfg.agent_model_effective) || '';
     const stored = (cfg && cfg.agent_model) || '';
     const src = stored ? 'this setting' : 'the built-in default';
-    el.innerHTML = `Coding agents launch with <code>--model ${escHtml(eff)}</code> — from ${src}.`;
+    el.innerHTML = `Coding agents launch with <code>--model ${escHtml(eff)}</code> (from ${src}).`;
 }
 
 async function _loadAgentModelSetting() {
@@ -2442,11 +2442,11 @@ async function setAgentModel(v) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ agent_model: v }),
         });
-    } catch (e) { setMsg('err', 'Save failed — model unchanged.'); return; }
+    } catch (e) { setMsg('err', 'Save failed. Model unchanged.'); return; }
     // api() resolves on a 4xx too, so a server rejection arrives as a body, not
     // a throw. Fail closed: report it and re-read the model that IS stored.
     if (!cfg || cfg.error) {
-        setMsg('err', 'Rejected — model unchanged.');
+        setMsg('err', 'Rejected. Model unchanged.');
         _loadAgentModelSetting();
         return;
     }
@@ -2468,10 +2468,10 @@ function _renderRemoteControl(cfg) {
     box.disabled = locked;
     if (src) {
         const env = escHtml((cfg && cfg.remote_control_env) || 'CHELA_REMOTE_CONTROL');
-        const from = locked ? `set by <code>${env}</code> — env wins; unset it to edit here`
+        const from = locked ? `set by <code>${env}</code>; env wins, unset it to edit here`
             : (cfg && cfg.remote_control_source === 'dashboard') ? 'this setting'
             : 'the built-in default';
-        src.innerHTML = `In effect: <strong>${on ? 'On' : 'Off'}</strong> — ${from}.`;
+        src.innerHTML = `In effect: <strong>${on ? 'On' : 'Off'}</strong> (${from}).`;
     }
 }
 
@@ -2496,10 +2496,10 @@ async function setRemoteControl(on) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ remote_control: !!on }),
         });
-    } catch (e) { setMsg('err', 'Save failed — unchanged.'); _loadRemoteControlSetting(); return; }
+    } catch (e) { setMsg('err', 'Save failed. Unchanged.'); _loadRemoteControlSetting(); return; }
     // api() resolves on a 4xx too — fail closed: report it and re-read what IS stored.
     if (!cfg || cfg.error) {
-        setMsg('err', 'Rejected — unchanged.');
+        setMsg('err', 'Rejected. Unchanged.');
         _loadRemoteControlSetting();
         return;
     }
@@ -2519,10 +2519,10 @@ function _renderShareTyping(cfg) {
     box.disabled = locked;
     if (src) {
         const env = escHtml((cfg && cfg.share_typing_env) || 'CHELA_SHARE_TYPING');
-        const from = locked ? `set by <code>${env}</code> — env wins; unset it to edit here`
+        const from = locked ? `set by <code>${env}</code>; env wins, unset it to edit here`
             : (cfg && cfg.share_typing_source === 'dashboard') ? 'this setting'
             : 'the built-in default';
-        src.innerHTML = `In effect: <strong>${on ? 'On' : 'Off'}</strong> — ${from}.`;
+        src.innerHTML = `In effect: <strong>${on ? 'On' : 'Off'}</strong> (${from}).`;
     }
 }
 
@@ -2547,13 +2547,13 @@ async function setShareTyping(on) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ share_typing: !!on }),
         });
-    } catch (e) { setMsg('err', 'Save failed — unchanged.'); _loadShareTypingSetting(); return; }
+    } catch (e) { setMsg('err', 'Save failed. Unchanged.'); _loadShareTypingSetting(); return; }
     if (!cfg || cfg.error) {
-        setMsg('err', 'Rejected — unchanged.');
+        setMsg('err', 'Rejected. Unchanged.');
         _loadShareTypingSetting();
         return;
     }
-    setMsg('ok', 'Saved · guest typing ' + (cfg.share_typing ? 'allowed into sandboxed sessions' : 'off — every share is view only'));
+    setMsg('ok', 'Saved · guest typing ' + (cfg.share_typing ? 'allowed into sandboxed sessions' : 'off, every share is view only'));
     _renderShareTyping(cfg);
 }
 
@@ -2571,10 +2571,10 @@ function _renderFileDrop(cfg) {
     if (cap && cfg && cfg.upload_max_mb) cap.textContent = String(cfg.upload_max_mb);
     if (src) {
         const env = escHtml((cfg && cfg.file_drop_env) || 'CHELA_FILE_DROP');
-        const from = locked ? `set by <code>${env}</code> — env wins; unset it to edit here`
+        const from = locked ? `set by <code>${env}</code>; env wins, unset it to edit here`
             : (cfg && cfg.file_drop_source === 'dashboard') ? 'this setting'
             : 'the built-in default';
-        src.innerHTML = `In effect: <strong>${on ? 'On' : 'Off'}</strong> — ${from}.`;
+        src.innerHTML = `In effect: <strong>${on ? 'On' : 'Off'}</strong> (${from}).`;
     }
 }
 
@@ -2599,9 +2599,9 @@ async function setFileDrop(on) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ file_drop: !!on }),
         });
-    } catch (e) { setMsg('err', 'Save failed — unchanged.'); _loadFileDropSetting(); return; }
+    } catch (e) { setMsg('err', 'Save failed. Unchanged.'); _loadFileDropSetting(); return; }
     if (!cfg || cfg.error) {
-        setMsg('err', 'Rejected — unchanged.');
+        setMsg('err', 'Rejected. Unchanged.');
         _loadFileDropSetting();
         return;
     }
@@ -2661,7 +2661,7 @@ function _renderUpdateStatus(upd) {
     if (btn) { btn.dataset.mode = ''; btn.hidden = false; }
     if (behind > 0) {
         row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>${behind} behind</span>
-            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — ${behind} commit(s) unpulled; running services are still serving what they last loaded</span>`;
+            <span class="s-status-detail">branch ${escHtml(upd.branch || '')}: ${behind} commit(s) unpulled; running services are still serving what they last loaded</span>`;
         if (btn) { btn.disabled = false; btn.textContent = 'Update now'; btn.dataset.mode = 'update'; }
     } else if (stale.length) {
         // The checkout itself is fully synced (nothing to pull) — but a bare `git pull`
@@ -2669,7 +2669,7 @@ function _renderUpdateStatus(upd) {
         // code. Stale is import-aware (CMX-56): only a service whose OWN code changed
         // since it started is listed. The button then restarts exactly these.
         row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>${stale.length} stale</span>
-            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull, but code that ${escHtml(stale.join(', '))} ${stale.length === 1 ? 'runs' : 'run'} changed after ${stale.length === 1 ? 'it' : 'they'} started (or <code class="s-cmd">pm2 restart ${stale.map(n => `<span class="s-cmd-arg">${escHtml(n)}</span>`).join(' ')}</code>)${unknownNote}</span>`;
+            <span class="s-status-detail">branch ${escHtml(upd.branch || '')}: nothing to pull, but code that ${escHtml(stale.join(', '))} ${stale.length === 1 ? 'runs' : 'run'} changed after ${stale.length === 1 ? 'it' : 'they'} started (or <code class="s-cmd">pm2 restart ${stale.map(n => `<span class="s-cmd-arg">${escHtml(n)}</span>`).join(' ')}</code>)${unknownNote}</span>`;
         if (btn) {
             btn.disabled = false;
             btn.textContent = `Restart stale services (${stale.length})`;
@@ -2678,11 +2678,11 @@ function _renderUpdateStatus(upd) {
     } else if (upd.stale_ok === false) {
         // CMX-95: which services run old code could not be read — Unknown, never "Up to date".
         row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>Unknown</span>
-            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull, but could not read which services run old code (check <code class="s-cmd">pm2 ls</code>)</span>`;
+            <span class="s-status-detail">branch ${escHtml(upd.branch || '')}: nothing to pull, but could not read which services run old code (check <code class="s-cmd">pm2 ls</code>)</span>`;
         if (btn) { btn.disabled = true; btn.hidden = true; }
     } else {
         row.innerHTML = `<span class="s-status-badge on"><span class="s-status-dot" aria-hidden="true">●</span>Up to date</span>
-            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull${unknownNote}</span>`;
+            <span class="s-status-detail">branch ${escHtml(upd.branch || '')}: nothing to pull${unknownNote}</span>`;
         // CMX-95: nothing to pull and nothing stale — offer no button at all.
         if (btn) { btn.disabled = true; btn.hidden = true; }
     }
@@ -2703,7 +2703,7 @@ async function applyUpdate() {
     try {
         resp = await api('/api/update/apply', { method: 'POST' });
     } catch (e) {
-        setMsg('err', 'Request failed — the dashboard may have already restarted; refresh to check.');
+        setMsg('err', 'Request failed. The dashboard may have already restarted; refresh to check.');
         return;
     }
     if (!resp || resp.error || resp.ok === false) {
@@ -2821,12 +2821,12 @@ function _renderTimingRows(knobs) {
     box.innerHTML = (knobs || []).map(k => {
         const isEnv = k.source === 'env';
         const badges =
-            (isEnv ? ` <span class="s-badge on" title="Set by ${attrEsc(k.env)} — env wins over the dashboard.">env</span>` : '') +
+            (isEnv ? ` <span class="s-badge on" title="Set by ${attrEsc(k.env)}; env wins over the dashboard.">env</span>` : '') +
             (k.restart_required ? ' <span class="s-badge off" title="Takes effect after a daemon/dashboard restart, not the next tick.">restart</span>' : '');
         const input = isEnv
             ? `<input class="s-input s-timing-input" type="number" step="any"
                    data-timing-key="${attrEsc(k.key)}" value="${attrEsc(String(k.effective))}" disabled
-                   title="Overridden by ${attrEsc(k.env)} — dashboard edits are ignored while it's set.">`
+                   title="Overridden by ${attrEsc(k.env)}; dashboard edits are ignored while it's set.">`
             : `<input class="s-input s-timing-input" type="number" step="any"
                    data-timing-key="${attrEsc(k.key)}"
                    placeholder="${attrEsc(String(k.default))}"
@@ -2868,7 +2868,7 @@ async function saveTiming() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
-    } catch (e) { setMsg('err', 'Save failed — nothing changed.'); return; }
+    } catch (e) { setMsg('err', 'Save failed. Nothing changed.'); return; }
     // api() resolves on a 4xx too (the rejection arrives as a body, not a throw) —
     // the whole batch is atomic server-side, so an error here means NONE of the
     // fields changed, not just the bad one.
@@ -2876,7 +2876,7 @@ async function saveTiming() {
         const detail = body && body.errors
             ? Object.entries(body.errors).map(([k, v]) => k + ': ' + v).join('; ')
             : 'rejected';
-        setMsg('err', 'Nothing saved — ' + detail);
+        setMsg('err', 'Nothing saved: ' + detail);
         _loadTimingSettings();     // re-show what's actually stored
         return;
     }
@@ -2896,9 +2896,9 @@ function _renderDispatchRows(knobs) {
     box.innerHTML = (knobs || []).map(k => {
         const isEnv = k.source === 'env';
         const badges =
-            (isEnv ? ` <span class="s-badge on" title="Set by ${attrEsc(k.env)} — env wins over the dashboard.">env</span>` : '') +
+            (isEnv ? ` <span class="s-badge on" title="Set by ${attrEsc(k.env)}; env wins over the dashboard.">env</span>` : '') +
             (k.restart_required ? ' <span class="s-badge off" title="Takes effect after a daemon/dashboard restart, not the next tick.">restart</span>' : '');
-        const envTitle = isEnv ? `title="Overridden by ${attrEsc(k.env)} — dashboard edits are ignored while it's set."` : '';
+        const envTitle = isEnv ? `title="Overridden by ${attrEsc(k.env)}; dashboard edits are ignored while it's set."` : '';
         let input;
         if (k.kind === 'bool') {
             const stored = k.stored !== '' && k.stored !== undefined ? !!k.stored : null;
@@ -2956,12 +2956,12 @@ async function saveDispatch() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
-    } catch (e) { setMsg('err', 'Save failed — nothing changed.'); return; }
+    } catch (e) { setMsg('err', 'Save failed. Nothing changed.'); return; }
     if (!body || body.error) {
         const detail = body && body.errors
             ? Object.entries(body.errors).map(([k, v]) => k + ': ' + v).join('; ')
             : 'rejected';
-        setMsg('err', 'Nothing saved — ' + detail);
+        setMsg('err', 'Nothing saved: ' + detail);
         _loadDispatchSettings();     // re-show what's actually stored
         return;
     }
@@ -3206,7 +3206,7 @@ async function newSandboxedSession(web) {
     const recent = (_launcherData.favorites || []).concat(_launcherData.recent || []);
     const guess = recent.length ? recent[0].path : '';
     const label = web ? 'Sandboxed session with WEB ACCESS' : 'Sandboxed session';
-    const cwd = (window.prompt(label + ' — project directory (the guest sees ONLY this):', guess) || '').trim();
+    const cwd = (window.prompt(label + ': project directory (the guest sees ONLY this):', guess) || '').trim();
     if (!cwd) return;
     if (web && !window.confirm('Allow web access for this session?\n\n'
             + 'It can fetch any PUBLIC web page (never your host or LAN), rate-limited, and every '

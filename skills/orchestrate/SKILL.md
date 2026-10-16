@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: Coordinate a fleet of sibling Claude Code agents and chela's work-item dispatcher — discover who's live, observe status and work, queue tasks in the tracker, review PRs against the judge's verdict, merge through `chela merge`, deploy, and surface decisions to the human. Use when acting as an orchestrator or lead over other chela agents — driving multi-step work across sessions, reviewing another agent's output, merging a dispatched PR, or watching for an agent to finish.
+description: Coordinate a fleet of sibling Claude Code agents and chela's work-item dispatcher. Discover who's live, observe status and work, queue tasks in the tracker, review PRs against the judge's verdict, merge through `chela merge`, deploy, and surface decisions to the human. Use when acting as an orchestrator or lead over other chela agents, such as driving multi-step work across sessions, reviewing another agent's output, merging a dispatched PR, or watching for an agent to finish.
 ---
 
 # Orchestrate a fleet of agents
@@ -18,18 +18,18 @@ ids don't. Address siblings by `@N`, and re-derive them from `chela status` afte
 
 | Command | What it gives you |
 |---------|-------------------|
-| `chela status` | The live fleet — every window, its type and liveness. |
+| `chela status` | The live fleet: every window, its type and liveness. |
 | `chela peek <wid>` | **Filtered** status: native `session_status` (busy/idle/waiting) + recap + cwd + health + context. The cheap default. `--json` for scripts. |
 | `chela read <wid> --tail N` / `--query Q` / `--all` | **Distilled** transcript. Escalate to this only when `peek` isn't enough. |
-| `chela spawn <cwd> [--command CMD]` / `chela close @N` | Open an agent window (default `$CHELA_AGENT_CMD`, i.e. `claude`; prints `@N`) / kill one. `close` refuses the orchestrator's window and a dispatched run's window — never raw `tmux kill-window`. |
+| `chela spawn <cwd> [--command CMD]` / `chela close @N` | Open an agent window (default `$CHELA_AGENT_CMD`, i.e. `claude`; prints `@N`) / kill one. `close` refuses the orchestrator's window and a dispatched run's window (never raw `tmux kill-window`). |
 | `chela msg <wid> "…"` / `chela drive <wid> "…"` | Message a sibling. `drive --wait done` blocks until it finishes. |
-| `chela watch <wid> --note "…"` / `chela watching` | Wake the orchestrator when that window finishes/blocks (run it right after you dispatch); show the inbox and its address. Claims the orchestrator role only if no live session holds it — from a side session the watch is routed to the live holder; `--take-over` takes the role explicitly. |
+| `chela watch <wid> --note "…"` / `chela watching` | Wake the orchestrator when that window finishes/blocks (run it right after you dispatch); show the inbox and its address. Claims the orchestrator role only if no live session holds it; from a side session the watch is routed to the live holder; `--take-over` takes the role explicitly. |
 | `chela dispatch-runs --awaiting` | Every run parked in the review loop. |
 | `chela wait <task-id> --until done` | Block until a dispatched task reaches a state you must act on. |
 | `chela judge show <run>` | Rounds-to-clean and survival rates for a run's judge rounds. |
-| `chela events --type T --tail N` | The durable event log — the record of what actually happened. |
+| `chela events --type T --tail N` | The durable event log, i.e. the record of what actually happened. |
 | `chela escalate "…" --recommend "…"` | Hand a decision to the human, with your recommendation. |
-| `chela dispatch --pause` / `--resume` | **HOLD the queue** while you reorder the tracker — no new claims, judges or rework re-spawns until you release; running agents and judges finish. See the gotcha below. |
+| `chela dispatch --pause` / `--resume` | **HOLD the queue** while you reorder the tracker: no new claims, judges or rework re-spawns until you release; running agents and judges finish. See the gotcha below. |
 
 ## Messaging
 
@@ -44,7 +44,7 @@ ids don't. Address siblings by `@N`, and re-derive them from `chela status` afte
   empty prompt with a ghost suggestion has **not** received its brief. Check with
   `tmux capture-pane -pe` (the ghost is SGR 2 right after `❯`) or trust `chela peek`.
 
-## The tracker (TODO.md) — rules the dispatcher depends on
+## The tracker (TODO.md): rules the dispatcher depends on
 
 - **The first line of a bullet is the task's title, and its id.** The id hashes the bare
   title (markers stripped). ⛔ Never edit a claimed task's first line: the run loses its
@@ -111,7 +111,7 @@ ids don't. Address siblings by `@N`, and re-derive them from `chela status` afte
    judge window's transcript. A judge agent's own Bash tool can kill `chela judge run` at its
    background-command limit, and that looks like a timeout.
 
-## Merging — `chela merge` only
+## Merging: `chela merge` only
 
 ```bash
 chela merge cmx-N --reason "judge clean on <sha>, CI green"
@@ -129,7 +129,7 @@ committed `base_branch` says so).
   --reason "…"`) is the one way past the judge. It only REQUESTS: it returns at once with a
   request id, and the **operator** approves with the Telegram button (or dashboard
   `/override/<id>`, or `chela merge-approve <id>` in a plain terminal). The approval merges
-  by itself — you do not wait, poll or re-run anything. A new push expires the request.
+  by itself, so you do not wait, poll or re-run anything. A new push expires the request.
   You can never approve: the hook and `chela merge-approve` both refuse a session. CI red or
   not-mergeable still refuse.
 - **A merge can make other open PRs conflict.** Union-resolve small additive conflicts
@@ -139,7 +139,7 @@ committed `base_branch` says so).
   release promotion the operator is about to push) until that push lands.
 - **Release with `chela release X.Y.Z --theme "<one line>"`.** It prepares the release in
   its own worktree off `origin/dev` (notes, version bump, `uv lock`, release tests, commit +
-  tag LOCALLY), files an approval request and returns — it pushes nothing. The **operator**
+  tag LOCALLY), files an approval request and returns; it pushes nothing. The **operator**
   approves it like an override (Telegram button, dashboard, `chela merge-approve <id>`), and
   the approval pushes main, the tag and dev. A merge into `dev` before then expires it, so
   hold merges while a release is pending. You can never approve it.

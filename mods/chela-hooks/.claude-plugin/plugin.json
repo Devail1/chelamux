@@ -1,0 +1,5 @@
+{
+  "name": "chela-hooks-mod",
+  "version": "0.1.0",
+  "description": "SPIKE (CMX-157): chela's merge gate + event posting as a Claude Code Mod. One test session only — see docs/MODS_SPIKE.md."
+}

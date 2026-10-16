@@ -158,7 +158,7 @@ export function runState(item, wants) {
 export function runDot(item, wants) {
     const st = runState(item, wants);
     const review = st.shape === 'idle' && ((item && item.run) || {}).status === 'awaiting_review';
-    return { cls: `dispatched ${review ? 'judging' : st.shape}`, label: `Dispatched run — ${st.word}` };
+    return { cls: `dispatched ${review ? 'judging' : st.shape}`, label: `Dispatched run: ${st.word}` };
 }
 
 // The same mark for ONE window (the Wall's minimized bar); null without a run card.

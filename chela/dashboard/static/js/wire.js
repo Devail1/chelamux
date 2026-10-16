@@ -90,7 +90,7 @@ export function applyRoomAccents(root, status) {
             const extra = mine.length > 1 ? ` +${mine.length - 1}` : '';
             badge.textContent = `🔌 ${mine[0]}${extra}`;   // the non-hue cue: glyph + the room's NAME
             badge.setAttribute('data-room', mine[0]);
-            badge.setAttribute('title', `In room ${mine.join(', ')} — click to leave ${mine[0]}`);
+            badge.setAttribute('title', `In room ${mine.join(', ')}, click to leave ${mine[0]}`);
             badge.hidden = false;
         } else {
             badge.textContent = '';

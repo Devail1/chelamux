@@ -10,6 +10,55 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-10-16
+
+### Added
+
+- **`chela judge sweep --github`** publishes a sweep to GitHub Actions with only
+  `GITHUB_TOKEN`: it writes the job step summary and the `verdict` / `survivors` step
+  outputs, and keeps ONE sticky PR comment — found by an HTML marker and edited in place, a
+  new one posted only when the result is not clean. `--no-comment` skips the comment. A
+  comment list that cannot be read is an error, never a duplicate post, and publishing never
+  changes the sweep's exit code: every failure is a `::warning::` line. (CMX-97, CMX-132)
+
+### Changed
+
+- **The README shows how to try the judge on your own repo with no setup**: the
+  `uvx … chela judge sweep --base origin/main` one-liner, a real sample run, the GitHub Action
+  snippet and the exit codes. Without `--base` or a workflow, `chela judge sweep` now diffs
+  against the remote's default branch (`origin/HEAD`), else `origin/dev`. A standalone run no
+  longer suggests `chela task-finished --sweep-equivalent`, which only exists in a chela-managed
+  run (one with a `WORKFLOW.md`). (CMX-134)
+
+### Fixed
+
+- **`chela watch @N` from a side session no longer steals a live orchestrator's pin.** It now
+  claims the role only when the pin is empty, undeliverable (dead window, new tmux epoch) or
+  already the caller's; otherwise it adds the watch routed to the current orchestrator and
+  prints `watching @N — events go to the orchestrator @M (live)`. A bare `chela watch` from a
+  non-orchestrator gets the `--if-unclaimed` refusal plus a hint. Taking the role from a live
+  holder is explicit: `chela watch [@N] --take-over`. (CMX-138)
+
+- **The landing deploy's "production serves this commit" check no longer fails on every
+  deploy since Cloudflare Web Analytics was switched on.** Cloudflare injects its beacon
+  `<script>` into every page `chela.pages.dev` serves, so the served HTML never matched
+  `landing/index.html` again and each deploy went red with a misleading "most likely a
+  PREVIEW deployment" error. The comparison now lives in `scripts/landing_verify.py`, which
+  strips only that beacon element before the whitespace-normalised token diff. Any other
+  difference still fails, down to one character of body text. The workflow's verify step is
+  tested by running its own `run:` block with `curl`/`sleep` stubbed. (CMX-149, #692)
+
+- **A PR queued behind another judge no longer gets the "NO judge round has started" stall
+  notice.** With `judge_max_concurrent` saturated by its workflow's running judges, a run in
+  `awaiting_review` is a queue, not a stall: it stays silent for three
+  stall bounds (`CHELA_JUDGE_NOT_STARTED_ALERT_S` × 3, 1h by default), then says once that it is queued behind which
+  run, judging since when, and how many slots there are. The stall clock restarts from the
+  last tick that saw it queued, so a freed slot gets the full 20m before the stall notice
+  fires. The stall notice no longer tells the operator to run `chela judge run CMX-N`, which
+  needs the judge agent's `--experiments` and is not how a round starts. It now says the
+  daemon starts the round on its next dispatch tick and points at `chela dispatch
+  --hold-status`. A test runs that argv through the real CLI parser. (CMX-150)
+
 ## [0.16.0] — 2026-10-15
 
 ### Added

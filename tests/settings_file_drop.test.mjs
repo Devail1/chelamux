@@ -90,7 +90,7 @@ test('the File drop switch sits in the General tab and is ON by default', async 
     assert.equal(box.closest('.settings-tabpanel').dataset.tab, 'general');
     assert.equal(box.checked, true, 'file_drop must default ON');
     assert.equal(box.disabled, false);
-    assert.match(document.getElementById('file-drop-source').textContent, /On — the built-in default/);
+    assert.match(document.getElementById('file-drop-source').textContent, /On \(the built-in default\)/);
 });
 
 test('the switch reflects file_drop=false from GET and shows the size cap', async () => {

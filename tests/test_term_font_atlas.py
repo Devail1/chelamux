@@ -85,6 +85,15 @@ def test_atlas_rebuilds_when_switching_to_a_custom_font_size(tmp_path):
     assert result["fontSize"] == 16, result
 
 
+def test_shim_applies_an_11px_settings_size(tmp_path):
+    """CMX-153: Settings > Terminal > Size offers 11px — a stored '11' must reach
+    xterm as fontSize 11 (no whitelist/clamp snaps it to a neighbour)."""
+    shim_path = _shim_js(tmp_path)
+    result = _run(shim_path, "no-clear", {"chela_term_fontsize": "11"})
+    assert result["tofu"] is False, result
+    assert result["fontSize"] == 11, result
+
+
 def test_no_regression_guard_against_the_diagnosed_bug(tmp_path):
     """Directly reproduces CMX-155: feed the harness the shim source with the
     fix's atlas-eviction walk deleted (simulating a revert) and confirm the

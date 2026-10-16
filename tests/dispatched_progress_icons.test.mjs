@@ -1,4 +1,4 @@
-// CMX-137 — a DISPATCHED run wears Linear-style progress icons (◐ working with the shared
+// CMX-137: a DISPATCHED run wears Linear-style progress icons (◐ working with the shared
 // pulse ring, ◕ judging / awaiting review; the shared check / triangle for done / waiting),
 // in Okabe-Ito bluish-green; a human session's dot is unchanged. Real DOM: the real
 // renderSidebarAgents and dock, resolved against style.css. Run: node --test <this file>.
@@ -76,21 +76,21 @@ const prop = (el, p) => resolveVars(win, el, win.getComputedStyle(el).getPropert
 // jsdom keeps `animation` / `border-radius` as the shorthand it was given (style.css
 // writes them that way), so the animation's NAME is the shorthand's first token.
 const animName = el => (prop(el, 'animation').split(/\s+/)[0] || 'none');
-const SKY = /#56b4e9|rgb\(86, 180, 233\)/i;   // Okabe-Ito sky blue #56B4E9 — a human's working dot
+const SKY = /#56b4e9|rgb\(86, 180, 233\)/i;   // Okabe-Ito sky blue #56B4E9: a human's working dot
 const BLUISH_GREEN = /#009e73|rgb\(0, 158, 115\)/i;   // Okabe-Ito bluish-green #009E73
 
-test('sidebar: a dispatched run in each state wears `dispatched <state>` and is labelled "Dispatched run — <state>"', () => {
+test('sidebar: a dispatched run in each state wears `dispatched <state>` and is labelled "Dispatched run: <state>"', () => {
     for (const [tid, [cls, word]] of Object.entries(RUNS)) {
         const dot = runDot(tid);
         assert.ok(dot, `no run row dot for ${tid}`);
         assert.deepEqual(classes(dot), ['dispatched', cls, 'term-status-dot'].sort(), `${tid}: ${dot.className}`);
-        assert.equal(dot.getAttribute('aria-label'), `Dispatched run — ${word}`, tid);
-        assert.equal(dot.getAttribute('title'), `Dispatched run — ${word}`, tid);
+        assert.equal(dot.getAttribute('aria-label'), `Dispatched run: ${word}`, tid);
+        assert.equal(dot.getAttribute('title'), `Dispatched run: ${word}`, tid);
         assert.equal(dot.getAttribute('role'), 'img', tid);
     }
 });
 
-test('sidebar: a human session keeps its own glyph — no `dispatched`, no run label', () => {
+test('sidebar: a human session keeps its own glyph: no `dispatched`, no run label', () => {
     for (const [name, cls] of Object.entries(HUMANS)) {
         const dot = humanDot(name);
         assert.ok(dot, `no row dot for ${name}`);
@@ -106,7 +106,7 @@ const conicFill = el => {
 };
 
 for (const [scheme, vp] of [['light', DESKTOP], ['dark', DESKTOP_DARK]]) {
-    test(`[${scheme}] ◐ working is HALF filled, ◕ judging / awaiting review is ¾ filled — bluish-green, a ring, never the human's solid sky dot`, () => {
+    test(`[${scheme}] ◐ working is HALF filled, ◕ judging / awaiting review is ¾ filled: bluish-green, a ring, never the human's solid sky dot`, () => {
         sheet.textContent = cssForViewport(CSS, vp);
         for (const [tid, cls] of [['R-WORK', 'working'], ['R-REWORK', 'working'], ['R-JUDGE', 'judging'], ['R-REVIEW', 'judging']]) {
             const dot = runDot(tid);
@@ -165,7 +165,7 @@ test('reduced motion: the dispatched working pulse stops; the ring geometry stay
     assert.equal(animName(runDot('R-WORK')), 'term-status-pulse');
 });
 
-test('same size as the human dot — expanded row and collapsed rail', () => {
+test('same size as the human dot: expanded row and collapsed rail', () => {
     for (const collapsed of [false, true]) {
         doc.body.classList.toggle('sidebar-collapsed', collapsed);
         sheet.textContent = cssForViewport(CSS, DESKTOP);
@@ -187,8 +187,8 @@ test('minimized bar: a run window wears its run\'s icon and label; a human chip 
         const dot = chipDot(wid);
         assert.ok(dot, `no dock chip for ${wid}`);
         assert.deepEqual(classes(dot), ['dispatched', cls, 'term-status-dot'].sort(), `${wid}: ${dot.className}`);
-        assert.equal(dot.getAttribute('aria-label'), `Dispatched run — ${word}`, wid);
-        assert.equal(dot.title, `Dispatched run — ${word}`, wid);
+        assert.equal(dot.getAttribute('aria-label'), `Dispatched run: ${word}`, wid);
+        assert.equal(dot.title, `Dispatched run: ${word}`, wid);
         assert.equal(dot.getAttribute('role'), 'img', wid);
     }
     for (const [wid, cls] of [['@1', 'working'], ['@2', 'waiting'], ['@3', 'idle']]) {
@@ -199,7 +199,7 @@ test('minimized bar: a run window wears its run\'s icon and label; a human chip 
     }
 });
 
-test('minimized bar: a state change drops the old state — the pulse ring stops when the run leaves working', async () => {
+test('minimized bar: a state change drops the old state: the pulse ring stops when the run leaves working', async () => {
     const swap = (wid, over) => AGENTS.map(a => (a.window_id === wid ? { ...a, ...over } : a));
     fleet = swap('@11', { session_status: 'idle', run: card('R-WORK', 'agent', { status: 'awaiting_review', judge_state: 'running' }) });
     util.setAgentsCache(fleet);
@@ -225,9 +225,9 @@ test('model: windowRunDot is null without a run card; an unknown run status keep
     assert.equal(windowRunDot({ name: 'h', window_id: '@1', dispatched: true }, false), null);
     assert.equal(windowRunDot({ name: 'h', window_id: '@1', run: { status: 'running' } }, false), null);
     assert.deepEqual(windowRunDot({ name: 'w', window_id: '@2', run: card('T', 'agent') }, true),
-        { cls: 'dispatched waiting', label: 'Dispatched run — waiting' });
+        { cls: 'dispatched waiting', label: 'Dispatched run: waiting' });
     assert.deepEqual(windowRunDot({ name: 'w', window_id: '@2', run: card('T', 'agent') }, false),
-        { cls: 'dispatched working', label: 'Dispatched run — working' });
+        { cls: 'dispatched working', label: 'Dispatched run: working' });
     const item = buildItems([{ name: 'w', window_id: '@2', run: card('T', 'agent', { status: 'queued' }) }])[0];
-    assert.deepEqual(runDot(item, () => false), { cls: 'dispatched idle', label: 'Dispatched run — queued' });
+    assert.deepEqual(runDot(item, () => false), { cls: 'dispatched idle', label: 'Dispatched run: queued' });
 });

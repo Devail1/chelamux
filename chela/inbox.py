@@ -248,7 +248,10 @@ def _empty() -> dict:
             # the latches of the notices that used to be missing: judge not started, hold
             # released, CI red, PR conflicting, agent stuck / marker unread.
             "expected_edges": {}, "review_wait": {}, "hold_seen": None, "hold_ended": None,
-            "ci_red_seen": {}, "conflict_seen": {}, "stuck": {}}
+            "ci_red_seen": {}, "conflict_seen": {}, "stuck": {},
+            # CMX-155: the event-log cursor of the classifier-denial scan, and the per-run
+            # cooldown latch of its notice (`denied_events`).
+            "denied_cursor": None, "denied_seen": {}}
 
 
 def _clear_address_alarm(store: dict) -> None:
@@ -2439,7 +2442,7 @@ def stale_reason(event: dict, runs: list[dict],
     # correct "never stale" answer, not an oversight.
     if kind not in ("run_review", "run_failed", "run_needs_human", "run_changes_requested",
                      "run_judge_clean", "run_judge_cannot_verify", "run_judge_blocked_race",
-                     "run_reopened", *_CMX86_KINDS):
+                     "run_reopened", DENIED_KIND, *_CMX86_KINDS):
         return None
     payload = event.get("payload") or {}
     task_id = payload.get("task_id")
@@ -2489,6 +2492,8 @@ def stale_reason(event: dict, runs: list[dict],
             if judged_sha and live_sha and live_sha != judged_sha:
                 return (f"PR head moved past the judged commit ({judged_sha[:12]} -> "
                         f"{live_sha[:12]}) — the verdict no longer applies to the current head")
+    elif kind == DENIED_KIND and status not in STUCK_RUN_STATES:
+        return f"run is now {status!r} — the agent is no longer stopped on the denial"
     elif kind == "run_failed" and status != "failed":
         return f"run is now {status!r}, not failed"
     elif kind == "run_needs_human":
@@ -2927,6 +2932,74 @@ def _live_judge_heads(runs: list[dict], queue: list[dict]) -> dict[str, str]:
     return heads
 
 
+# --- classifier denials of dispatched agents (CMX-155) --------------------------------
+
+DENIED_KIND = "run_permission_denied"
+DENIED_COOLDOWN_S = 10 * 60   # at most one notice per run per this many seconds
+
+
+def read_denials(store: dict, now: float) -> tuple[list[dict], dict]:
+    """New ``hook.permission_denied`` records since the store's cursor, and the next cursor.
+
+    I/O (the event log), so the caller runs it OUTSIDE the store lock. Like
+    :class:`chela.notify.DeniedWatch`: the first read only anchors at the log's tip — an
+    upgrade never replays old denials — and when the cursor cannot be honoured (``gap``: the
+    log's boot id moved) only records stamped since the previous read are returned.
+    """
+    cursor = store.get("denied_cursor")
+    if not isinstance(cursor, dict):
+        tip = event_log.tip()
+        return [], {"seq": tip["seq"], "boot": tip["boot_id"], "at": now}
+    batch = event_log.read(cursor.get("seq"), after_boot=cursor.get("boot"),
+                           types=[notify.DENIED_TYPE])
+    events = batch["events"]
+    if batch["gap"] is not None:
+        events = [e for e in events if (e.get("ts") or 0) >= (cursor.get("at") or 0)]
+    return events, {"seq": batch["next_seq"], "boot": batch["boot_id"], "at": now}
+
+
+def denied_events(denials: list[dict], runs: list[dict], store: dict, now: float,
+                  windows: dict[str, str] | None = None,
+                  now_epoch: str | None = None) -> list[dict]:
+    """``run_permission_denied`` — a dispatched agent was refused by its permission classifier.
+
+    The agent is stopped on the refusal and asks in prose; nothing else tells the orchestrator
+    until the 🧊 STUCK alarm, while the phone push (CMX-25) goes to the human. Only a denial
+    from the window of a ``claimed``/``running`` run counts: the orchestrator's own window
+    already sees its denials as tool results, and a human session keeps the phone push only.
+    One notice per run per :data:`DENIED_COOLDOWN_S` (``store["denied_seen"]``), so a looping
+    agent cannot flood the inbox.
+    """
+    orch = orchestrator_wid(store)
+    active: dict[str, dict] = {}
+    for run in runs:
+        if run.get("status") in STUCK_RUN_STATES and run.get("task_id"):
+            wid = run_wid(run, windows, now_epoch)
+            if wid:
+                active[wid] = run
+    seen: dict = {t: ts for t, ts in (store.get("denied_seen") or {}).items()
+                  if now - ts < DENIED_COOLDOWN_S}
+    out: list[dict] = []
+    for denial in denials:
+        wid = denial.get("wid")
+        run = active.get(wid) if wid and wid != orch else None
+        if run is None or epoch.is_dangling(denial.get("epoch"), now_epoch):
+            continue
+        task = run["task_id"]
+        if task in seen:
+            continue
+        seen[task] = now
+        tool, detail = notify.denied_detail(denial)
+        out.append(_event(
+            DENIED_KIND,
+            f"🔒 {task} · {wid} was blocked by its permission classifier: {tool} "
+            f"{detail} — the agent is stopped on it: hand the human a bang-prefixed command "
+            f"to run, or redirect the agent.",
+            _run_payload(run, tool=tool, detail=detail, denied_at=denial.get("ts")), wid=wid))
+    store["denied_seen"] = seen
+    return out
+
+
 def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]:
     """One daemon pass: scan for events, queue them, deliver what the gate allows.
 
@@ -2972,6 +3045,7 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
     # only for a pending marker, so every STUCK notice said "no daemon running" while the
     # daemon (the very process running this tick) was up.
     daemon, uptime = daemon_state(now) if probes else ("unknown", None)
+    denials, denied_cursor = read_denials(pre_store, now)   # CMX-155: the event log, outside
     alarms: list[dict] = []                # raised inside the lock, published outside it
 
     with locked_store() as store:
@@ -2993,6 +3067,8 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
         events += conflict_events(runs, store, windows=windows, now_epoch=now_epoch)
         events += stuck_events(runs, store, probes, now, uptime, windows=windows,
                                now_epoch=now_epoch, daemon=daemon)
+        events += denied_events(denials, runs, store, now, windows=windows, now_epoch=now_epoch)
+        store["denied_cursor"] = denied_cursor
 
         for event in events:
             # A `silent` event carries no message — it exists only to retire a watch

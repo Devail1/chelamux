@@ -35,9 +35,12 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+from chela.procguard import run_contained
 
 ROOT = Path(__file__).resolve().parent.parent
 _SKIP_DIRS = {"node_modules", "vendor", ".git"}
@@ -53,6 +56,12 @@ def js_suites() -> list[Path]:
 
 _SUITES = js_suites()
 _IDS = [str(p.relative_to(ROOT)) for p in _SUITES]
+
+
+def _xdist_master() -> int | None:
+    """CMX-151: under pytest-xdist the run is the MASTER (this worker's parent): a worker
+    notices a SIGKILLed master only once its current test ends, so node watches it too."""
+    return os.getppid() if os.environ.get("PYTEST_XDIST_WORKER") else None
 
 
 def _clean_env() -> dict[str, str]:
@@ -117,9 +126,11 @@ _BROWSER_DID_NOT_RUN = "browser suite DID NOT RUN"
 def test_js_suite(suite: Path):
     node = _node_or_skip([suite])
     _jsdom_or_skip(suite)
-    proc = subprocess.run(
-        [node, "--test", str(suite)], capture_output=True, timeout=120, cwd=str(ROOT),
-        env=_clean_env(),
+    # CMX-151: contained — node's per-file children die with this run, even if pytest is
+    # SIGKILLed; a plain subprocess.run left 8 of them holding ~4 GB for 3.5 hours.
+    proc = run_contained(
+        [node, "--test", str(suite)], timeout=120, cwd=str(ROOT), env=_clean_env(),
+        watch=_xdist_master(),
     )
     if proc.returncode != 0:
         pytest.fail(
@@ -139,7 +150,8 @@ def test_a_browser_suite_that_could_not_launch_is_a_loud_skip_not_a_pass(monkeyp
     suite = ROOT / "tests" / "browser" / "dashboard.test.mjs"
     out = f"{_BROWSER_DID_NOT_RUN}: Chromium could not launch\n# SKIP\n".encode()
     monkeypatch.setattr(
-        subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, out, b""),
+        sys.modules[__name__], "run_contained",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, out, b""),
     )
     with pytest.raises(pytest.skip.Exception, match="DID NOT RUN: Chromium could not launch"):
         test_js_suite(suite)
@@ -175,3 +187,38 @@ def test_a_missing_browser_fails_under_require_and_skips_loudly_otherwise(tmp_pa
         assert proc.returncode == 0, proc.stderr
         assert "RESULT " in proc.stdout and _BROWSER_DID_NOT_RUN in proc.stdout
         assert '"browser"' not in proc.stdout
+
+
+@pytest.mark.parametrize("worker,expected", [("gw0", "parent"), ("", None), (None, None)])
+def test_an_xdist_worker_watches_its_master_and_a_plain_run_watches_nothing(
+    monkeypatch, worker, expected,
+):
+    """CMX-151: the master is the run — a worker outlives its SIGKILL until the test ends."""
+    if worker is None:
+        monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
+    else:
+        monkeypatch.setenv("PYTEST_XDIST_WORKER", worker)
+    monkeypatch.setattr(os, "getppid", lambda: 4242)
+    assert _xdist_master() == (4242 if expected else None)
+
+
+def test_a_js_suite_runs_contained_with_its_full_call_pinned(monkeypatch):
+    """CMX-151: node runs under ``run_contained`` — argv, cwd, scrubbed env, timeout and the
+    xdist master to watch — never a bare ``subprocess.run`` whose children can outlive it."""
+    suite = ROOT / "tests" / "approvals.test.mjs"
+    calls = []
+    monkeypatch.setattr(shutil, "which", lambda name: "/opt/node")
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw3")
+    monkeypatch.setenv("NODE_CHANNEL_FD", "9")
+    monkeypatch.setattr(os, "getppid", lambda: 4242)
+    monkeypatch.setattr(
+        sys.modules[__name__], "run_contained",
+        lambda argv, **kw: (calls.append((argv, kw)),
+                            subprocess.CompletedProcess(argv, 0, b"ok", b""))[1],
+    )
+    test_js_suite(suite)
+    [(argv, kw)] = calls
+    assert argv == ["/opt/node", "--test", str(suite)]
+    assert set(kw) == {"timeout", "cwd", "env", "watch"}
+    assert (kw["timeout"], kw["cwd"], kw["watch"]) == (120, str(ROOT), 4242)
+    assert "NODE_CHANNEL_FD" not in kw["env"] and kw["env"]["PYTEST_XDIST_WORKER"] == "gw3"

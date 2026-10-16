@@ -281,3 +281,59 @@ test('⭐ a freshly rebuilt pane re-fits if the keyboard is already up (renderTe
     await terminals.renderTerminals();
 });
 
+
+// ---- CMX-154: the pane's TERMINAL re-fits, not just the pane box ----------------
+// iPhone Safari resized the pane (and so its ttyd iframe) but xterm kept its old row
+// count, so its bottom rows sat clipped below the tile footer. _kbFitPane therefore
+// calls ttyd's own `window.term.fit()` after every fit. Real-layout half:
+// tests/browser/first_view_fit.test.mjs.
+function paneTerm() {
+    const ifr = document.querySelector('#term-stage.term-single .term-pane iframe.term-frame');
+    assert.ok(ifr && ifr.contentWindow, 'the single pane must hold a live ttyd iframe');
+    const calls = [];
+    ifr.contentWindow.term = { fit: () => calls.push(fitVar()) };
+    return { ifr, calls };
+}
+
+test('⭐ phone: every fit re-fits the pane\'s terminal — keyboard opening AND closing', () => {
+    const { calls } = paneTerm();
+    keyboard(true);
+    vv.dispatchEvent(new window.Event('resize'));
+    assert.deepEqual(calls, [openFit()], 'term.fit() runs once, AFTER the open fit is applied');
+    keyboard(false);
+    vv.dispatchEvent(new window.Event('resize'));
+    assert.deepEqual(calls, [openFit(), ''], 'closing the keyboard re-fits too, after the override is cleared');
+});
+
+test('desktop: the terminal is left to ttyd\'s own resize handling (no term.fit())', () => {
+    const { calls } = paneTerm();
+    mobile = false;
+    keyboard(true);
+    vv.dispatchEvent(new window.Event('resize'));
+    window.dispatchEvent(new window.Event('resize'));
+    assert.deepEqual(calls, []);
+});
+
+test('⭐ a pane\'s iframe finishing its load (first view, tile switch) fits it — no viewport event', () => {
+    const { ifr, calls } = paneTerm();
+    keyboard(true);                       // keyboard already up, no resize/scroll event
+    root().classList.remove('kb-fit');
+    root().style.removeProperty('--kb-pane-fit-h');
+    ifr.dispatchEvent(new window.Event('load'));
+    assert.ok(root().classList.contains('kb-fit'), 'the load must apply the fit');
+    assert.deepEqual(calls, [openFit()], 'and re-fit the terminal that just loaded');
+});
+
+test('a terminal that is not booted yet (no term / no fit) or an unreadable iframe never breaks the fit', () => {
+    const { ifr } = paneTerm();
+    ifr.contentWindow.term = {};
+    keyboard(true);
+    assert.doesNotThrow(() => terminals._kbPin());   // direct: dispatchEvent would swallow a throw
+    delete ifr.contentWindow.term;
+    assert.doesNotThrow(() => terminals._kbPin());
+    Object.defineProperty(ifr, 'contentWindow', { configurable: true, get() { throw new Error('SecurityError: cross-origin frame'); } });
+    keyboard(false);
+    assert.doesNotThrow(() => terminals._kbPin());
+    assert.ok(!root().classList.contains('kb-fit'), 'the box fit is still applied before the terminal is touched');
+    delete ifr.contentWindow;
+});

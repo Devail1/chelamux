@@ -197,7 +197,7 @@ test('the dispatcher runs table shows "Closed — <reason>" for a hand-closed ru
 
     const cell = document.querySelector('.dispatcher-table tbody tr td[data-label="Error"]');
     assert.ok(cell, 'the Error column cell is missing');
-    assert.equal(cell.textContent.trim(), 'Closed — superseded by cmx-403');
+    assert.equal(cell.textContent.trim(), 'Closed: superseded by cmx-403');
     assert.doesNotMatch(cell.textContent, /tmux window disappeared/,
         'a closed run must not show its stale last_error in the runs table');
 });

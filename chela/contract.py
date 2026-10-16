@@ -56,6 +56,7 @@ from chela.dispatcher import CI_PASSING
 from chela.judge import J_CLEAN
 from chela.personas import lease
 from chela.workflow import load_workflow_cached
+from chela.worktree import reap_run_worktree
 
 log = logging.getLogger("chela.contract")
 
@@ -261,6 +262,7 @@ def _squash_merge(run: dict, repo_dir: str, pr_url: str, *, body: str | None = N
 
     worktree_path = run.get("worktree_path")
     if worktree_path and Path(worktree_path).exists():
+        reap_run_worktree(worktree_path, run.get("workflow_path"))   # CMX-151: a run's processes die with it
         _best_effort(task_id, "worktree-remove",
                      ["git", "worktree", "remove", "--force", worktree_path], repo_dir, 30)
     branch_name = run.get("branch_name")

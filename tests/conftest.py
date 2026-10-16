@@ -369,6 +369,23 @@ def _is_live_state(path) -> bool:
 
 
 @pytest.fixture(autouse=True)
+def reaper_kills(monkeypatch):
+    """CMX-151: the worktree reaper NEVER signals a real process under test.
+
+    ``reap_processes_in`` scans ``/proc`` and SIGKILLs what it finds; a judge mutation of
+    one of its checks once SIGKILLed every process of the user (2026-10-16). Its only kill
+    path, ``worktree._signal_pid``, records here instead — for every test, including the
+    many that remove a worktree incidentally. A test asserts on the list and kills the
+    dummies it spawned itself.
+    """
+    from chela import worktree
+
+    kills: list[tuple[int, int]] = []
+    monkeypatch.setattr(worktree, "_signal_pid", lambda pid, sig: kills.append((pid, sig)))
+    return kills
+
+
+@pytest.fixture(autouse=True)
 def _isolate_claude_config(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
 
