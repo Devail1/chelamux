@@ -17,8 +17,7 @@ const BODY = sliceTemplate('<div class="app">', END, { terminals_enabled: true, 
     .slice(0, -END.length);
 const WIDS = ['@1', '@2', '@3'];
 const AGENTS = WIDS.map((w, i) => ({ name: `agent-${i}`, window_id: w, online: true, session_status: 'idle' }));
-const tmp = mkdtempSync(join(tmpdir(), 'chela-cmx166-'));
-after(() => rmSync(tmp, { recursive: true, force: true }));
+const tmp = mkdtempSync(join(tmpdir(), 'chela-cmx166-')); after(() => rmSync(tmp, { recursive: true, force: true }));
 
 const GRID = new Proxy({ engine: { nodes: [] }, save: () => [], getGridItems: () => [] },
     { get: (t, k) => (k in t ? t[k] : el => el) });   // GridStack: the tile DOM is real
@@ -83,7 +82,11 @@ test('the wall requests its iframes while /api/restore (and every read it does n
 });
 
 test('a boot read that FAILS does not stop the others: the wall and the sidebar still paint', async () => {
-    const { log } = await boot({ fail: p => p === '/api/summary' });   // the old chain stopped here
+    const errs = [], orig = console.error; let log;
+    console.error = (...a) => errs.push(a);
+    try { ({ log } = await boot({ fail: p => p === '/api/summary' })); } finally { console.error = orig; }   // the old chain stopped here
+    const logged = errs.filter(([m]) => m === 'Refresh error:').map(([, e]) => String(e && e.message));
+    assert.deepEqual(logged.filter(m => m === 'Failed to fetch'), ['Failed to fetch'], `the failed lane was not logged: ${logged}`);
     assert.equal(frames().length, WIDS.length, 'a failed /api/summary kept the wall from rendering');
     assert.equal(rows(), AGENTS.length, 'a failed /api/summary kept the sidebar from rendering');
     assert.ok(log.includes('/api/overrides'), 'a failed /api/summary skipped the lanes after it');
