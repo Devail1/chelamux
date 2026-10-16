@@ -2916,6 +2916,8 @@ def cmd_judge_show(args) -> None:
               f"{vis.get('total', 0)} survived · held-out {held.get('survived', 0)}/"
               f"{held.get('total', 0)} (quota {held.get('quota', 0)}) · flips "
               f"{cons.get('flipped', 0)}/{cons.get('sampled', 0)}")
+        for path in rec.get("suite_logs") or []:
+            print(f"           📄 suite output: {path}")
         for flip in cons.get("flips") or []:
             print(f"           🎲 {flip.get('guard', '?')[:70]}: {flip.get('first')} → "
                   f"{flip.get('rerun')}{' (held-out)' if flip.get('held_out') else ''}")

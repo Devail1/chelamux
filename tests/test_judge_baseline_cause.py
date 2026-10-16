@@ -102,10 +102,13 @@ def test_red_on_base_too_is_named_when_base_shares_the_same_failure(tmp_path, re
     wt = _detached_worktree(repo, "pr-1", tmp_path / "wt")
     _git("fetch", "origin", "dev", cwd=wt)
 
-    cause = judge._diagnose_red_baseline(wt, TEST_CMD, "dev", 60)
+    fails: list = []
+    cause = judge._diagnose_red_baseline(wt, TEST_CMD, "dev", 60, fails)
 
     assert "RED ON BASE TOO" in cause
     assert "predates the PR" in cause
+    # 📄 CMX-163: the red base-branch run is kept for its failure log.
+    assert len(fails) == 1 and "test_known_broken" in fails[0].run["output"]
     # ⛔ the worktree must come back to the PR's own tip — the next thing a caller does is
     # treat this worktree as the artifact under test, and a diagnostic that leaves it on a
     # different commit would corrupt everything after it.
@@ -120,10 +123,12 @@ def test_red_only_on_this_branch_is_named_when_base_is_green(tmp_path, repo, ori
     wt = _detached_worktree(repo, "pr-1", tmp_path / "wt")
     _git("fetch", "origin", "dev", cwd=wt)
 
-    cause = judge._diagnose_red_baseline(wt, TEST_CMD, "dev", 60)
+    fails: list = []
+    cause = judge._diagnose_red_baseline(wt, TEST_CMD, "dev", 60, fails)
 
     assert "RED ONLY ON THIS BRANCH" in cause
     assert "own commits" in cause
+    assert fails == []                       # 📄 CMX-163: a GREEN base run is not a failure
     head = _git("rev-parse", "HEAD", cwd=wt).stdout.strip()
     assert head == _git("rev-parse", "pr-1", cwd=repo).stdout.strip()
 
@@ -288,6 +293,9 @@ def test_run_experiments_names_the_failing_test_and_the_cause(tmp_path, repo, or
     assert "test_known_broken" in report.cannot_verify        # WHICH test, not just a count
     assert "RED ON BASE TOO" in report.cannot_verify           # WHY, not just "exited 1"
     assert report.outcomes == []                               # still never ran a mutation
+    # 📄 CMX-163: the red baseline AND the red base-branch diagnostic, in that order.
+    assert [s.run["cwd"] for s in report.suite_failures] == [str(wt), str(wt)]
+    assert all(not s.green for s in report.suite_failures)
 
 
 def test_run_experiments_without_a_base_branch_still_reports_cleanly(tmp_path, repo):

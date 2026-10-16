@@ -578,9 +578,12 @@ def test_a_baseline_red_only_under_coverage_is_re_run_plain_never_CANNOT_VERIFY(
     a repo whose suite dislikes coverage. The plain re-run wrote no coverage data, so the map
     must not be read off it either."""
     root = _repo(tmp_path / "repo", {**FILES, **COV_SENSITIVE})
-    baseline, selector, why = judge.run_baseline(root, TEST_CMD, 120, tmp_path)
+    fails: list = []
+    baseline, selector, why = judge.run_baseline(root, TEST_CMD, 120, tmp_path, failures=fails)
 
     assert baseline.green, baseline.tail
+    # 📄 CMX-163: the red coverage run is kept for a failure log, though the verdict is green.
+    assert len(fails) == 1 and not fails[0].green
     assert selector is not None, why
     assert [env for _, env in fake_cov["runs"]] == [COV_ENV, {}]
     assert fake_cov["parsed"] == []                  # nothing read off the plain re-run
@@ -604,7 +607,9 @@ def test_a_red_baseline_WITHOUT_coverage_is_not_re_run(tmp_path, fake_cov, monke
     re-running it costs a full suite and can only flake it green."""
     monkeypatch.setattr(judge, "_has_pytest_cov", lambda wt: False)
     root = _repo(tmp_path / "repo", {**FILES, "test_red.py": "def test_red():\n    assert 0\n"})
-    baseline, selector, _ = judge.run_baseline(root, TEST_CMD, 120, tmp_path)
+    fails: list = []
+    baseline, selector, _ = judge.run_baseline(root, TEST_CMD, 120, tmp_path, failures=fails)
+    assert fails == []          # 📄 CMX-163: no coverage run happened — nothing extra to keep
 
     assert not baseline.green and selector is None
     assert [env for _, env in fake_cov["runs"]] == [{}]
