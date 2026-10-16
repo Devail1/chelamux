@@ -2825,8 +2825,10 @@ def cmd_judge_sweep(args) -> None:
     if verdict == sweep.V_SURVIVORS:
         print("⚖️ Each SURVIVED line is a changed check no test can tell apart from its "
               "corruption. Add a test that goes RED under that mutation — not a weaker "
-              "assertion. If no outcome can change under it, `chela task-finished` accepts "
-              "--sweep-equivalent '<file:line>: <why>'.")
+              "assertion.")
+        if workflow:        # a chela-managed run — standalone there is no task-finished
+            print("  If no outcome can change under it, `chela task-finished` accepts "
+                  "--sweep-equivalent '<file:line>: <why>'.")
     elif unrun:
         # ⏳ CMX-111: no survivor among what ran is NOT "all killed" — the rest is unknown.
         print(f"⚠ CANNOT VERIFY — the sweep budget stopped it: {result.get('exhausted', '')}. "

@@ -271,6 +271,18 @@ def _git(worktree: Path, *args: str) -> subprocess.CompletedProcess:
                       f"{worktree} — a hung git cannot say which lines changed") from e
 
 
+def default_base(worktree: Path) -> str:
+    """The base when neither ``--base`` nor a workflow names one: the remote's default branch
+    (``origin/HEAD``), else ``origin/dev`` (chela's own convention)."""
+    try:
+        out = _git(Path(worktree), "symbolic-ref", "--quiet", "--short",
+                   "refs/remotes/origin/HEAD")
+    except GitHung:
+        return "origin/dev"
+    ref = out.stdout.strip() if out.returncode == 0 else ""
+    return ref or "origin/dev"
+
+
 def changed_lines(worktree: Path, base: str) -> tuple[dict[str, set[int]], str]:
     """``{file: {1-based line numbers}}`` the branch changed vs ``base`` — committed AND
     uncommitted edits (the working tree is diffed against the merge base), plus every line of
@@ -1029,7 +1041,7 @@ def run_sweep(
 ) -> dict:
     """``chela judge sweep``'s entry point: resolve the suite (``--test-cmd``, else the
     workflow's ``judge.test_cmd`` — the suite the judge measures against — else detected), the
-    base (``--base``, else ``origin/<workspace.base_branch>``, else ``origin/dev``) and the
+    base (``--base``, else ``origin/<workspace.base_branch>``, else :func:`default_base`) and the
     budget (:func:`resolve_budget` — standalone too), sweep, and return a JSON-friendly dict."""
     cmd = test_cmd.strip() if isinstance(test_cmd, str) and test_cmd.strip() else None
     source = "--test-cmd" if cmd else ""
@@ -1055,7 +1067,7 @@ def run_sweep(
         return {"ok": False, "error": "no suite to run — none detected; pass --test-cmd, or "
                                       "--workflow pointing at a WORKFLOW.md with "
                                       "`judge.test_cmd` set"}
-    report = sweep(worktree, base or "origin/dev", cmd,
+    report = sweep(worktree, base or default_base(Path(worktree)), cmd,
                    timeout=to if to is not None else judge.SUITE_TIMEOUT_SECONDS,
                    select_tests=select, progress=progress, provision=workflow_path is not None,
                    budget=resolve_budget(wf, seconds=budget_seconds, max_mutations=max_mutations))

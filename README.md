@@ -46,6 +46,52 @@ session, and schedules that poke long-lived agents (`--every 1h`, cron, or once)
 > (`agent.sandbox: true` in `WORKFLOW.md`); see
 > [docs/TRUST_AND_APPROVAL_POSTURE.md](docs/TRUST_AND_APPROVAL_POSTURE.md).
 
+## Try the judge on your own repo — no setup
+
+The judge's mechanical half runs on its own: no tmux, no dispatcher, no tracker, no API key.
+`chela judge sweep` corrupts every conditional, comparison and return code your branch
+changed (`if x > 100:` → `if False and (x > 100):`, `==` → `!=`, `0` ↔ `1`…), runs your
+tests against each, restores the file, and fails on every mutation the tests did not catch.
+From your branch's checkout:
+
+```bash
+uvx --with pytest --from git+https://github.com/Devail1/chelamux chela judge sweep --base origin/main
+```
+
+```text
+  [1/2] calc.py:8 if-false
+  [2/2] calc.py:8 compare-flip
+  suite: `python -m pytest -q` — detected (tests/)
+  1 changed file(s) NOT swept — only Python (and .js/.mjs, line-based) is mutated; each is UNKNOWN, not clean
+  [SURVIVED] calc.py:8 if-false: `if x > 100:` → `if False and (x > 100):`
+  [SURVIVED] calc.py:8 compare-flip: `if x > 100:` → `if x <= 100:`
+  [UNKNOWN ] tool.ts — not supported: only Python (and .js/.mjs, line-based) is mutated
+sweep: 2 mutation(s) — 0 killed, 2 survived, 0 skipped (1.0s)
+⚖️ Each SURVIVED line is a changed check no test can tell apart from its corruption. Add a test that goes RED under that mutation — not a weaker assertion.
+```
+
+The suite runs inside the `uvx` environment, so give it your test deps the same way
+(`--with-requirements requirements.txt`), or name the suite yourself with `--test-cmd`.
+Without `--base` it diffs against `origin/HEAD` (the remote's default branch), else
+`origin/dev`.
+
+On a pull request, as a GitHub Action (only `GITHUB_TOKEN`; it comments the survivors and
+fails the job):
+
+```yaml
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: Devail1/chelamux@main     # after your own "install the test deps" step
+```
+
+The job needs `permissions: pull-requests: write` to comment. The suite is detected
+(pytest / `npm test` / `go test` / `cargo test`) or given as `test-cmd:` / `--test-cmd`.
+Exit codes: `0` clean · `1` survivors · `2` cannot verify (red baseline, base not found) ·
+`3` **unknown** (nothing survived, but a changed file could not be swept). Survivors win:
+the run above exits `1`. `--json` prints the result as JSON. Mutations happen in place but
+never outlive the run: each one is restored in a `finally`, and a guardian process restores
+it if the run is `kill -9`ed.
+
 ## Install
 
 Requires Linux, WSL or macOS · Python ≥ 3.11 · `tmux` · `git` · [`uv`](https://docs.astral.sh/uv/) ·
