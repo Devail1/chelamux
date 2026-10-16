@@ -13,7 +13,7 @@ import { refreshCostTab } from './usage.js';
 import { resolveWindowId } from './windowid.js';
 import { followUpdate } from './updateflow.js';
 import { memNote, stepPayload, workflowNote } from './concurrencymodel.js';
-import { DISPATCHED_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, groupSidebar, isArchivable, moveGroup, normalizeView, primaryWindow, runLabel, runState } from './sidebarmodel.js';
+import { DISPATCHED_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, groupSidebar, isArchivable, moveGroup, normalizeView, primaryWindow, runDot, runLabel, runState } from './sidebarmodel.js';
 
 // The ONE Archived section at the bottom of the sidebar (CMX-75) — its collapse state
 // rides the collapsed-groups set under this key.
@@ -708,7 +708,9 @@ function _agentRowHtml(a, o = {}) {
         : '';
     return `<div class="agent-row rich${active}${wallCls}${o.cls ? ' ' + o.cls : ''}" data-agent="${attrEsc(a.name)}"${runAttr} title="${attrEsc(rowTitle + wallSuffix)}"
         onclick="chela.selectAgent(this.dataset.agent)">
-        <span class="term-status-dot ${stCls}" title="${attrEsc(o.runId ? 'run' : type)} · ${stWord}"></span>
+        ${o.dot
+        ? `<span class="term-status-dot ${o.dot.cls}" role="img" aria-label="${attrEsc(o.dot.label)}" title="${attrEsc(o.dot.label)}"></span>`
+        : `<span class="term-status-dot ${stCls}" title="${attrEsc(type)} · ${stWord}"></span>`}
         <div class="ar-main">
             <span class="agent-row-name"${key ? ` data-key="${attrEsc(key)}" title="${attrEsc(`window: ${key}`)}"` : ''}>${escHtml(label)}</span>
             <div class="ar-sub">${sub}${_orchBadgeHtml(a)}${o.badge || ''}</div>
@@ -735,10 +737,13 @@ function _runRowHtml(it, extraCls, showPR) {
     const a = primaryWindow(it);
     const st = runState(it, wantsHuman);
     const label = runLabel(it);
+    // CMX-137: the run's own progress icon (◐ working, ◕ judging/awaiting review),
+    // not a human session's dot, and its label names both kind and state.
+    const dot = runDot(it, wantsHuman);
     const wins = [it.agent && `agent ${it.agent.name} · ${it.agent.window_id}`,
         it.judge && `judge ${it.judge.name} · ${it.judge.window_id}`].filter(Boolean).join('\n');
     return _agentRowHtml(a, {
-        label, stWord: st.word, stCls: st.shape, runId: it.run.task_id, itemKey: it.key,
+        label, stWord: st.word, stCls: st.shape, dot, runId: it.run.task_id, itemKey: it.key,
         titleHead: `${label}: ${st.word}`, titleExtra: wins,
         cls: ['run-row', extraCls].filter(Boolean).join(' '),
         badge: showPR ? _prBadgeHtml(it) : '',

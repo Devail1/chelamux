@@ -152,6 +152,21 @@ export function runState(item, wants) {
     return { word: st ? String(st).replace(/_/g, ' ') : 'unknown', shape: 'idle' };
 }
 
+// CMX-137: a dispatched run's status MARK (`.term-status-dot` classes + label): Linear-style
+// ◐ working, ◕ judging AND awaiting review (style.css `.dispatched.*`), so in the collapsed
+// rail a run never reads as your own working session. Done / waiting keep the shared marks.
+export function runDot(item, wants) {
+    const st = runState(item, wants);
+    const review = st.shape === 'idle' && ((item && item.run) || {}).status === 'awaiting_review';
+    return { cls: `dispatched ${review ? 'judging' : st.shape}`, label: `Dispatched run: ${st.word}` };
+}
+
+// The same mark for ONE window (the Wall's minimized bar); null without a run card.
+export function windowRunDot(a, wants) {
+    if (!a || !a.run || !a.run.task_id) return null;
+    return runDot(buildItems([a])[0], () => !!wants);
+}
+
 // The run row's label: `CMX-37 · <Linear title>` (truncation is the CSS's job).
 export function runLabel(item) {
     const run = (item && item.run) || {};
