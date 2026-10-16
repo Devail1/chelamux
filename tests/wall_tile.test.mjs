@@ -400,7 +400,7 @@ test('focusLayout: empty orderedWids -> {}', () => {
 // own report — the tooltip must say so, and ONLY for that source.
 test('stateTitle labels a proxy-derived status, and only that', () => {
     const sb = agent({ claude_running: true, session_status: 'busy', status_source: 'sandbox-proxy' });
-    assert.equal(stateTitle(sb, tileState(sb, false)), 'Working — from the sandbox proxy');
+    assert.equal(stateTitle(sb, tileState(sb, false)), 'Working (from the sandbox proxy)');
     const ordinary = agent({ claude_running: true, session_status: 'busy', status_source: null });
     assert.equal(stateTitle(ordinary, tileState(ordinary, false)), 'Working');
     assert.equal(stateTitle(undefined, tileState(undefined, false)), 'Idle');

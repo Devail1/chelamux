@@ -160,7 +160,7 @@ test('not sandboxed ⇒ Allow typing disabled with the New session → Sandboxed
                                           unsandboxed_offered: true, window_name: 'shell-1' });
     assert.equal(opt(row, 'typing').disabled, true);
     assert.equal(row.querySelector('.ss-mode-reason').textContent,
-        'Not a sandboxed session — start one from New session → Sandboxed');
+        'Not a sandboxed session. Start one from New session → Sandboxed');
 });
 
 test('⭐ view → typing where allowed POSTs /share-mode and the pills follow', async () => {
@@ -337,7 +337,7 @@ test('a live UNSANDBOXED share always shows its pressed mode, never a re-grant b
 
 test('a refused change shows the server\'s reason and leaves the mode as it was', async () => {
     const row = await openSheet('view', { share_typing: true, sandboxed: true, typing_allowed: true, window_name: 'shell-1' });
-    REFUSE = 'Not a sandboxed session — start one from New session → Sandboxed';
+    REFUSE = 'Not a sandboxed session. Start one from New session → Sandboxed';
     opt(row, 'typing').click();
     await settle();
     assert.deepEqual(modePosts, [{ mode: 'typing' }]);
@@ -488,7 +488,7 @@ test('the pane pill carries the mode from its FIRST render, identical to after a
     const want = {
         view: { glyph: '👁', title: '👁 View only' },
         typing: { glyph: '⌨', title: '⌨ Allow typing' },
-        unsandboxed: { glyph: '⚠', title: '⚠ Full access — UNSANDBOXED' },
+        unsandboxed: { glyph: '⚠', title: '⚠ Full access: UNSANDBOXED' },
     };
     for (const [m, w] of Object.entries(want)) {
         terminals._sharedWids.add('@7');

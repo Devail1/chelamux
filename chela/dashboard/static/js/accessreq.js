@@ -49,13 +49,13 @@ export function rowHTML(r, state) {
     const opts = [...new Set([...DURATIONS, dflt])].sort((a, b) => a - b)
         .map(n => `<option value="${n}"${n === dflt ? ' selected' : ''}>${escHtml(durLabel(n))}</option>`).join('');
     const rw = r.kind === 'mount' && r.access === 'rw'
-        ? `<label class="ar-rw"><input type="checkbox" class="ar-rw-in"> allow write (the guest asked for it — read-only otherwise)</label>` : '';
+        ? `<label class="ar-rw"><input type="checkbox" class="ar-rw-in"> allow write (the guest asked for it; read-only otherwise)</label>` : '';
     const off = st.share_typing ? '' : ' disabled';
     return `<div class="ar-row" data-id="${id}">${head}
       <div class="ar-ctl"><select class="ar-dur" aria-label="How long the approval lasts">${opts}</select>${rw}
         <button class="ar-approve" type="button" data-id="${id}"${off}>Approve</button>
         <button class="ar-deny" type="button" data-id="${id}">Deny</button></div>
-      ${st.share_typing ? '' : '<div class="ar-refused">Guest typing is off — turn it on in Settings to approve.</div>'}
+      ${st.share_typing ? '' : '<div class="ar-refused">Guest typing is off. Turn it on in Settings to approve.</div>'}
       <div class="ar-err" hidden></div></div>`;
 }
 
@@ -70,7 +70,7 @@ function _renderPill() {
     btn.hidden = n === 0;
     const txt = btn.querySelector('.ar-pill-text');
     if (txt) txt.textContent = '🙋 ' + n + ' access request' + (n === 1 ? '' : 's');
-    btn.setAttribute('aria-label', n + ' sandboxed-session access request' + (n === 1 ? '' : 's') + ' waiting — tap to decide');
+    btn.setAttribute('aria-label', n + ' sandboxed-session access request' + (n === 1 ? '' : 's') + ' waiting, tap to decide');
 }
 
 export async function tickAccessRequests() {
@@ -105,7 +105,7 @@ function _buildSheet() {
     sheet.className = 'shares-sheet access-req-sheet';
     sheet.innerHTML = `<div class="ss-hd">🙋 Access requests
         <button class="ss-close" type="button" aria-label="Close">&times;</button></div>
-      <div class="ss-sub">A sandboxed guest asked for more access. Nothing changes until you approve. An approved mount restarts that session's container with it — read-only unless you allow write — and a live typing share of it may end. Stopping the share or turning Guest typing off revokes every approval.</div>
+      <div class="ss-sub">A sandboxed guest asked for more access. Nothing changes until you approve. An approved mount restarts that session's container with it (read-only unless you allow write), and a live typing share of it may end. Stopping the share or turning Guest typing off revokes every approval.</div>
       <div class="ss-list">${_rows.map(r => rowHTML(r)).join('') || '<div class="ss-empty">No access requests.</div>'}</div>`;
     backdrop.appendChild(sheet);
     document.body.appendChild(backdrop);

@@ -126,7 +126,7 @@ function _renderNewTaskButton(data) {
 async function toggleDispatchHold() {
     const btn = document.getElementById('dispatch-hold-btn');
     const held = _lastData && _lastData.dispatch_hold;
-    if (!held && !confirm('Pause dispatch — no new task will be claimed until you resume?')) {
+    if (!held && !confirm('Pause dispatch? No new task will be claimed until you resume.')) {
         return;
     }
     if (btn) btn.disabled = true;
@@ -134,10 +134,10 @@ async function toggleDispatchHold() {
         const path = held ? '/api/dispatcher/resume' : '/api/dispatcher/pause';
         const resp = await api(path, { method: 'POST' });
         if (!resp || resp.ok === false) {
-            alert((resp && resp.error) || 'That failed — dispatch state is unchanged.');
+            alert((resp && resp.error) || 'That failed. Dispatch state is unchanged.');
         }
     } catch (e) {
-        alert('Request failed — dispatch state is unchanged.');
+        alert('Request failed. Dispatch state is unchanged.');
     } finally {
         if (btn) btn.disabled = false;
     }

@@ -1,7 +1,7 @@
 # Trust & approval posture
 
 > Written to satisfy Symphony SPEC §1 / §10.5's MUST that an implementation "document its
-> chosen approval, sandbox, and operator-confirmation posture" — see
+> chosen approval, sandbox, and operator-confirmation posture"; see
 > `docs/archive/SYMPHONY_CONFORMANCE_2026-09-13.md` G6. Nothing here is new behavior: every claim
 > below already exists in code or in another doc; this page exists so a conformance
 > reader (or an operator) has one place to point at instead of four.
@@ -13,19 +13,19 @@ and what does its output need before it changes anything real.**
 
 ## 1. Who can trigger a dispatch
 
-- **`markdown` tracker** (`TODO.md`): gated by repo write access — whoever can add a line
+- **`markdown` tracker** (`TODO.md`): gated by repo write access: whoever can add a line
   to the file can queue a dispatch (`chela/sources/markdown.py`).
 - **`gh_issues` tracker**: gated by `tracker.require_label`. It is REQUIRED, and an unset
   value fails closed and loud rather than defaulting to "no gate"
   (`chela/sources/gh_issues.py:20-97`). Applying a label needs repo write/triage
-  permission, so the check is enforced by GitHub, not by convention — before this gate
+  permission, so the check is enforced by GitHub, not by convention; before this gate
   existed, the source dispatched on *every* open issue, so on a public repo anyone who
   could open an issue could run code on the operator's box. `require_label: false` is
   accepted as a recorded, deliberate opt-out, never a silent default. `trusted_authors` is
   optional defence in depth on top of the label. That "no work" and "refusing to look" must
   not be indistinguishable is true for the *operator* today (a `config_error` logs an ERROR
   and surfaces in `chela doctor`); the dispatcher's own `config_error` reconcile path still
-  returns `[]`, so a failed read is indistinguishable from an empty queue there — tracked by
+  returns `[]`, so a failed read is indistinguishable from an empty queue there. Tracked by
   G1 / cmx-363, in flight, not this doc's job to fix.
 
 ## 2. What a dispatched agent can do (execution / sandbox)
@@ -35,7 +35,7 @@ and what does its output need before it changes anything real.**
   mode → the built-in default `claude --permission-mode auto`
   (`chela/dispatcher.py:405-443`). `auto` auto-approves safe operations and gates
   dangerous ones; `bypassPermissions` is a mode an operator can opt into but is never the
-  shipped default — "reckless as an OSS default" (`dispatcher.py:291-297`).
+  shipped default: "reckless as an OSS default" (`dispatcher.py:291-297`).
 - **No ambient MCP servers.** Every dispatched window (coding agent, rework, judge) runs
   with `--strict-mcp-config`, so it never inherits the operator's own interactive
   `~/.claude.json` `mcpServers` (`dispatcher.py:302-312`, `AGENT_BASE_CMD`).
@@ -45,20 +45,20 @@ and what does its output need before it changes anything real.**
   (`dispatcher.py:330-402`).
 - **An agent's pane inherits an allowlisted environment, not the daemon's** (CMX-45).
   A dispatched window (coding agent, rework, judge) is opened inside the daemon's tmux
-  session, and a tmux window inherits the server's *global* environment — on a pm2 install,
+  session, and a tmux window inherits the server's *global* environment; on a pm2 install it is
   the daemon's own. Audited by name on the reference install (2026-10-11): about 60 names
-  in the daemon env and the tmux global table — every `CHELA_*` setting `chela.env` sources
+  in the daemon env and the tmux global table: every `CHELA_*` setting `chela.env` sources
   (dashboard port, collab relay, notify URL, dispatch workflows, …), pm2's process
   description (`name`, `status`, `args`, `env`, `pm_*`, and a key named after the app such
   as `chela-daemon`), Node's IPC markers, the operator's prompt/theme variables and the
   desktop plumbing (`DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`, WSL interop). Before the agent
   command is typed, `_launch_agent` sends one `unset` line into that pane naming **every**
-  inherited name — the daemon's env plus the tmux global and session tables — that is not
+  inherited name (the daemon's env plus the tmux global and session tables) that is not
   on `envutil.AGENT_ENV_ALLOW`:
   - kept: the shell basics (`PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `LC_*`, `TZ`, `TMPDIR`),
     the terminal (`TERM`, `COLORTERM`, `TMUX`, `TMUX_PANE`), session plumbing
-    (`XDG_*`, `DBUS_SESSION_BUS_ADDRESS` — `systemd-run --user` needs them for the memory
-    slice — `DISPLAY`, `WAYLAND_DISPLAY`, `WSL*`), editors, tool switches (`COREPACK_*`,
+    (`XDG_*`, `DBUS_SESSION_BUS_ADDRESS` (`systemd-run --user` needs them for the memory
+    slice), `DISPLAY`, `WAYLAND_DISPLAY`, `WSL*`), editors, tool switches (`COREPACK_*`,
     `UV_*`), and chela's own identity: `CHELA_DIR`, `CHELA_TMUX_SESSION`, `CHELA_WID`
     (exported after the strip). Claude Code's and `gh`'s credentials pass as the
     forwarded secrets (`envutil.FORWARDED_SECRET_VARS`), plus `CLAUDE_CONFIG_DIR` and
@@ -70,7 +70,7 @@ and what does its output need before it changes anything real.**
     knob that forwards a secret to a hook ([CONFIG.md](CONFIG.md)).
 
   Where this sits next to the other strips: `envutil.child_env` (CMX-390/425/21) is what a
-  hook or a suite chela runs *itself* receives — the daemon env minus leaks, secrets and
+  hook or a suite chela runs *itself* receives: the daemon env minus leaks, secrets and
   session markers, everything else passed. `envutil.scrub_tmux_secrets` unsets secrets,
   markers, server hazards (proxies, `TMUX_TMPDIR`) and, since CMX-45, every name that is
   not a valid shell variable (pm2's `chela-daemon`-shaped keys, which bash passes to children
@@ -78,19 +78,19 @@ and what does its output need before it changes anything real.**
   the narrowest of the three and applies to the agent pane only. Not covered: what the
   operator's own shell rc sets when the pane's shell starts, and `chela` subcommands run
   inside the pane, which re-read `$CHELA_DIR/chela.env` at import (so a `chela` process there
-  still sees the operator's settings, including the notify URL — its notify calls are what
+  still sees the operator's settings, including the notify URL; its notify calls are what
   CMX-115's test fence covers). Pinned by `tests/test_agent_env_strip.py`, which replays the
   exact typed lines through a real `bash`: a sentinel set in the daemon env is absent in the
   pane while `CHELA_WID` and `PATH` survive.
 - **A worktree cannot escape into a workspace it doesn't own.** `workspace_escape` refuses
-  to dispatch — loudly, not by silently relocating — when a non-default `CHELA_DIR`
+  to dispatch, loudly and not by silently relocating, when a non-default `CHELA_DIR`
   process's configured `workspace.root` resolves outside that `CHELA_DIR`
   (`chela/workflow.py:250-282`).
-- **A shared memory ceiling bounds the box, not just one job** — `chela/memcap.py`
+- **A shared memory ceiling bounds the box, not just one job**: `chela/memcap.py`
   (CMX-264); see `docs/RESOURCE_ISOLATION.md` for the incident that made a per-job cap
   provably insufficient.
 - **A per-agent sandbox boundary is implemented and measured, but OFF for chelamux's own
-  dispatch — so in practice its agents still run unsandboxed.** `chela/sandbox.py`
+  dispatch, so in practice its agents still run unsandboxed.** `chela/sandbox.py`
   (CMX-369, #518) launches an agent with a chela-owned Claude Code sandbox settings file:
   writes outside the worktree denied except the `uv` cache (so `~/.chela` is out of reach),
   a strict network allowlist (GitHub, PyPI, npm), no unsandboxed-command escape hatch, and
@@ -101,30 +101,30 @@ and what does its output need before it changes anything real.**
   (`sandbox_launch_arg`). The trial on chelamux (2026-09-15) proved the boundary holds but
   was reverted: about 110 tests need a real tmux socket and `api.telegram.org`, which the
   boundary denies, so every sandboxed run parked before `task-finished`. It stays off until
-  those tests are socket-free — `WORKFLOW.md`'s `agent:` block records why. What was
+  those tests are socket-free; `WORKFLOW.md`'s `agent:` block records why. What was
   measured, and what the sandbox does and does not cover, is in
   [SANDBOX_BOUNDARY.md](SANDBOX_BOUNDARY.md). Isolating *shared panes* is a separate, still
-  open blocker on running the orchestrator unattended — see "Shared-pane isolation" in
+  open blocker on running the orchestrator unattended; see "Shared-pane isolation" in
   `docs/ESCALATION_CONTRACT.md`.
 
 ## 3. What a dispatched agent's output needs before it changes anything real (approval)
 
 Three independent layers, each narrower than the last:
 
-**a. CI** — the mechanical baseline every PR must clear regardless of anything below.
+**a. CI**: the mechanical baseline every PR must clear regardless of anything below.
 
-**b. The judge** (`chela/judge.py`) — an adversarial pass CI cannot run. It never merges
+**b. The judge** (`chela/judge.py`), an adversarial pass CI cannot run. It never merges
 and never approves by opinion; "cannot verify" counts as neither pass nor fail. It
 proposes mutations to the guards a PR claims to add, and chela itself applies each one,
 proves the file changed, proves it still parses, re-runs the repo's own suite, and
-restores it — a guard that survives its own corruption is a fact, not a judgment (see the
+restores it, so a guard that survives its own corruption is a fact, not a judgment (see the
 module docstring). Findings that are taste rather than a mechanical fact become a PR
 comment and can never send a run back.
 
-**c. The merge gate** (`chela/contract.py::merge`) — the only function allowed to run
+**c. The merge gate** (`chela/contract.py::merge`), the only function allowed to run
 `gh pr merge`, a pure function of `(run row, live GitHub facts)` with no `--force`:
 
-1. the run exists and is `awaiting_review` — the only clause that reads the run row
+1. the run exists and is `awaiting_review`, the only clause that reads the run row
    rather than live GitHub;
 2. the base branch is the run's own dispatching workflow's declared
    `workspace.base_branch` (`dev` for chelamux itself), and is never
@@ -135,7 +135,7 @@ comment and can never send a run back.
 5. GitHub reports the PR open and `MERGEABLE`;
 6. **if the actor is the auto-launched orchestrator** (`$CHELA_ACTOR ==
    auto-orchestrator`), a human's attended-lease must be live. A human's own `chela merge`
-   carries no actor stamp and needs no lease — the human *is* the attendance
+   carries no actor stamp and needs no lease, because the human *is* the attendance
    (`chela/personas/lease.py`).
 
 Any miss refuses, naming the exact clause. Every merge is logged with its justification
@@ -146,7 +146,7 @@ to the event log.
 / NEVER, and ambiguity between tiers resolves upward: "unknown" is a `cannot_verify`, and a
 `cannot_verify` always goes to a human (`chela/contract.py::escalate`, `chela escalate`).
 Merging to `main`, making the repo public, and executing agent-authored text as a command
-are all in the NEVER tier — no standing grant reaches them.
+are all in the NEVER tier; no standing grant reaches them.
 
 **Two requests reach past the gate, and only a human's tap completes either.**
 `chela merge --override --reason …` (skip the judge clause; every other clause is
@@ -168,7 +168,7 @@ on for themselves.
 
 ## 4. What becomes public
 
-On a public repo, a dispatched brief, its PR, and — for a `gh_issues` tracker — the
+On a public repo, a dispatched brief, its PR, and (for a `gh_issues` tracker) the
 triggering issue's body are all public by construction. The `require_label` gate in §1 is
 what actually stands between a stranger opening an issue and code executing on the
 operator's machine; nothing downstream of dispatch is a substitute for it. See

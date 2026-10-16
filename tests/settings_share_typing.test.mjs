@@ -89,7 +89,7 @@ test('the Guest typing switch sits in the Collaboration tab and is OFF by defaul
     assert.equal(box.closest('.settings-tabpanel').dataset.tab, 'collaboration');
     assert.equal(box.checked, false, 'share_typing must default OFF');
     assert.equal(box.disabled, false);
-    assert.match(document.getElementById('share-typing-source').textContent, /Off — the built-in default/);
+    assert.match(document.getElementById('share-typing-source').textContent, /Off \(the built-in default\)/);
 });
 
 test('the switch reflects share_typing=true from GET', async () => {

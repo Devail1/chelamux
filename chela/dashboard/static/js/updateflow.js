@@ -29,7 +29,7 @@ function _doneText(r) {
     const restarted = (r.restarted || []).slice().sort();
     const what = restarted.length
         ? `Restarted ${restarted.join(', ')}`
-        : 'Done — no running service needed a restart';
+        : 'Done. No running service needed a restart';
     return r.behind_before > 0 ? `Pulled ${r.behind_before} commit(s). ${what}` : what;
 }
 
@@ -38,7 +38,7 @@ function _doneText(r) {
 // `st` = latest /api/update/status (null if unreachable); `ctx` = {run, boot, label, startedAt}.
 function updateOutcome(st, ctx, now) {
     if (st && st.boot && ctx.boot && st.boot !== ctx.boot) {
-        return { state: 'reload', text: 'The dashboard restarted — reloading…' };
+        return { state: 'reload', text: 'The dashboard restarted, reloading…' };
     }
     const r = st && st.last_result;
     if (st && st.applying === false && r && r.run === ctx.run) {
@@ -46,7 +46,7 @@ function updateOutcome(st, ctx, now) {
         return { state: 'failed', text: `Update failed at ${r.step}: ${r.error || 'no detail'}` };
     }
     if (now - ctx.startedAt >= FOLLOW_TIMEOUT_MS) {
-        return { state: 'timeout', text: "Couldn't confirm the restart — check `pm2 ls`." };
+        return { state: 'timeout', text: "Couldn't confirm the restart. Check `pm2 ls`." };
     }
     return { state: 'polling', text: `${ctx.label}…` };
 }

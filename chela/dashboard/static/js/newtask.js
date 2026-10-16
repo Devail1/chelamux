@@ -43,7 +43,7 @@ function _fillBlockers() {
     const kept = new Set([...sel.selectedOptions].map(o => o.value));
     sel.innerHTML = blockerChoices(wf).map(c =>
         `<option value="${attrEsc(c.id)}"${kept.has(c.id) ? ' selected' : ''}>`
-        + `${escHtml(c.id)} — ${escHtml(c.title.slice(0, 80))}</option>`).join('');
+        + `${escHtml(c.id)}: ${escHtml(c.title.slice(0, 80))}</option>`).join('');
 }
 
 function openNewTask() {
@@ -105,7 +105,7 @@ async function submitNewTask() {
             return null;
         }
     } catch (e) {
-        if (err) err.textContent = 'Request failed — nothing was created. ' + String(e);
+        if (err) err.textContent = 'Request failed. Nothing was created. ' + String(e);
         return null;
     } finally {
         if (btn) btn.disabled = false;

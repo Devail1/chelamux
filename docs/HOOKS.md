@@ -1,8 +1,8 @@
-# Hooks — feeding the event log from Claude Code
+# Hooks: feeding the event log from Claude Code
 
 Everything chela knows about a *blocked* agent today, it learned by scraping a tmux pane.
 That is not an aesthetic choice. Claude Code writes an interactive tool's `tool_use`
-record to the transcript **when the human answers it** — measured, not assumed — so at the
+record to the transcript **when the human answers it** (measured, not assumed), so at the
 exact moment an agent is stuck on an `AskUserQuestion` or a permission gate, the
 structured channel is *empty*. Reading characters off a terminal was the only thing left.
 
@@ -12,20 +12,20 @@ truncated button caption, a hook gives you this, while the agent is still waitin
 
 ```json
 {"seq": 4, "type": "hook.permission_request", "wid": "@29",
- "summary": "permission asked — AskUserQuestion: Which storage backend should we use?",
+ "summary": "permission asked (AskUserQuestion): Which storage backend should we use?",
  "payload": {"tool_name": "AskUserQuestion", "permission_mode": "auto",
    "tool_input": {"questions": [{"question": "Which storage backend should we use?",
      "options": [{"label": "SQLite",   "description": "One file, no server, transactional"},
                  {"label": "Postgres", "description": "A server to run, but concurrent writers"}]}]}}}
 ```
 
-## What the endpoint answers — and everything it does not
+## What the endpoint answers, and everything it does not
 
 It **ingests**, and it returns `{}`. One event is the exception, deliberately: a
 `PermissionRequest` for an **`AskUserQuestion`** can come back carrying the human's answer
 (see [Answering a question with zero keypresses](#answering-a-question-with-zero-keypresses)),
 and only ever an answer a human actually tapped. Nothing else in this response decides
-anything — no `permissionDecision`, no `hookSpecificOutput` on any other event — because a
+anything: no `permissionDecision`, no `hookSpecificOutput` on any other event, because a
 decision in that body is chela answering someone's prompts on their behalf, and that is a
 thing you should have to read about, not discover.
 
@@ -46,18 +46,18 @@ That matters because the scrape is lossy in a way that has no fix. Its option pa
 were measured against *one* selector shape; a **multi-question** selector draws a tab
 strip, and an option carrying a **`preview`** re-lays the TUI out side-by-side so the
 option rows no longer start their line. Either one alone parses as "unparseable", and the
-question lands on the phone with **no options at all** — which is exactly what happened
+question lands on the phone with **no options at all**. That is exactly what happened
 live on 2026-07-14, while the log already held the whole payload. The scraper will keep
 meeting shapes it was not measured against; the hook is handed the structure.
 
 The split, then:
 
-* **the hook payload is the CONTENT** — a `pre_tool_use` for an interactive tool
+* **the hook payload is the CONTENT**: a `pre_tool_use` for an interactive tool
   (`AskUserQuestion` / `ExitPlanMode`) with no `post_tool_use` bearing the same
   `tool_use_id` is *pending*. `PreToolUse` and not `PermissionRequest`, because only
-  `PreToolUse` carries a `tool_use_id` — without one there is nothing to pair a resolution
+  `PreToolUse` carries a `tool_use_id`; without one there is nothing to pair a resolution
   against;
-* **the pane is the LIVENESS** — a pending call with no result could equally mean the
+* **the pane is the LIVENESS**: a pending call with no result could equally mean the
   agent *died* at the gate, so nothing is posted for a window whose pane is not showing a
   selector right now. It also stays the whole content source for a **pre-plugin** agent,
   which emits no hooks at all.
@@ -66,8 +66,8 @@ The split, then:
 
 Every gate chela ever answered, it answered by *typing at the terminal*: find the `❯`
 cursor, inject that many arrow presses, wait, send Enter. That substrate cannot be made
-safe for the shapes we actually send. It has already produced a **silent mis-answer** — a
-tap on option 3 selected option 2, because Enter raced the arrow moves (CMX-32) — and a
+safe for the shapes we actually send. It has already produced a **silent mis-answer**: a
+tap on option 3 selected option 2, because Enter raced the arrow moves (CMX-32), and a
 multi-question or `multiSelect` picker has no cursor semantics to inject against at all: an
 answer to "which extras?" is a *set*, and "press Down twice" cannot express one.
 
@@ -84,19 +84,19 @@ against a real 3-question `AskUserQuestion` whose options carried previews:
 ```
 
 The agent's transcript then reads: *Your questions have been answered: "Which store?"=
-"Postgres", "Which extras?"="Metrics,Profiling", "Deploy when?"="Later"* — and **not one
+"Postgres", "Which extras?"="Metrics,Profiling", "Deploy when?"="Later"*. **Not one
 keystroke went near the pane**. It works in every permission mode, `auto` included. So a
 held gate carries real answer buttons for **every** shape: one tap for a single-select,
 `☐`/`☑` toggles plus **✅ Send** for a `multiSelect`, and a multi-question run answered
 question by question.
 
-**A gate is ONE Telegram message.** The mirrored pane is the body — the `❯` cursor, the
-ticked boxes, the tab strip, re-drawn in place after every key — with the answer buttons
+**A gate is ONE Telegram message.** The mirrored pane is the body: the `❯` cursor, the
+ticked boxes, the tab strip, re-drawn in place after every key, with the answer buttons
 above a nine-key D-pad on the same keyboard. Watch the cursor and press `⏎`, or just tap the
 answer. What the pane cannot show is a *comparison*: the TUI draws one option's `preview` at
 a time (the one under the cursor), and it clips a long one. So the message also carries a
-**📖** button that swaps its body for the whole payload — every question, every option's
-`label`, `description` and `preview`, together — and **🎛️** swaps back. It is a toggle on
+**📖** button that swaps its body for the whole payload: every question, every option's
+`label`, `description` and `preview`, together, and **🎛️** swaps back. It is a toggle on
 the one message, and the answer buttons stay put while it is open: expanding to compare must
 never mean collapsing to answer.
 
@@ -105,7 +105,7 @@ The mechanics, and the three things that make them safe to run at a live fleet:
 **The wait is bounded, and it fails OPEN.** The hook runs *synchronously inside the agent's
 process*: the moment this endpoint blocks on a human, a live agent is frozen. So it waits
 at most `CHELA_GATE_WAIT_S` (default 90s) and then gives up and answers nothing. Giving up
-is **not a deny** — the picker is exactly where it was, still on the pane, still answerable
+is **not a deny**: the picker is exactly where it was, still on the pane, still answerable
 in tmux, and the run is no worse off than before the feature existed. (An auto-deny would
 destroy work because a human was slow. Do not "harden" it into one.) `CHELA_GATE_MAX_WAITS`
 caps how many gates may be held at once; past the bound the next one is not held at all.
@@ -113,7 +113,7 @@ caps how many gates may be held at once; past the bound the next one is not held
 **The budget can never outlive the hook that would deliver it.** `PermissionRequest` alone
 declares a long `timeout` (120s) in the plugin manifest; every other event keeps the 2s one,
 because `PreToolUse`/`PostToolUse` are ~78% of the log's volume. That ceiling is *measured*,
-not taken from the docs — a hook that never replies, timed against a 4.5s baseline:
+not taken from the docs: a hook that never replies, timed against a 4.5s baseline:
 
 | declared `timeout` | how long the turn actually blocked |
 |---|---|
@@ -121,32 +121,32 @@ not taken from the docs — a hook that never replies, timed against a 4.5s base
 | 65s | ~66s |
 | 130s | ~133s |
 
-Honoured **verbatim — there is no 60s clamp** — and on expiry Claude Code fails open by
+Honoured **verbatim, with no 60s clamp**, and on expiry Claude Code fails open by
 itself. So a wait longer than the timeout is a wait that can never deliver, and the budget
 is clamped strictly below it.
 
-**A stale answer is refused.** A gate is identified by its `tool_use_id` — which
+**A stale answer is refused.** A gate is identified by its `tool_use_id` (which
 `PermissionRequest` does not carry, so it is correlated to the `PreToolUse` that fired for
-the same call — and every button names it. A tap that lands after the gate resolved, timed
+the same call), and every button names it. A tap that lands after the gate resolved, timed
 out, or belongs to a different question finds no open gate and is **dropped and reported**,
 never applied to whatever is on screen by then. And a gate is only held for a window with a
 **bound Telegram topic**: an agent nobody is watching is never frozen on a human who was
 never shown the question.
 
 **The answers map must be complete.** Measured: Claude Code accepts a *partial* map without
-complaint and silently drops the unanswered question — the agent proceeds believing it
+complaint and silently drops the unanswered question; the agent proceeds believing it
 asked, and never re-asks. So chela holds the answer until every question has one (each tap
 toasts how many are outstanding) and refuses anything less, along with any label the asker
 never offered.
 
 Keystroke injection survives for exactly one case: a **pre-plugin** agent, whose gate no
-hook ever announced. There the old rules still apply — buttons only where their ordinal
+hook ever announced. There the old rules still apply: buttons only where their ordinal
 mapping can be *proven*, the D-pad otherwise, and no 📖 at all: with no payload there is
 nothing to expand into, and a button that opened an empty page would be a lie.
 
 ## Install
 
-chela ships the hooks as a **plugin**, and never by writing your `settings.json` — that
+chela ships the hooks as a **plugin**, and never by writing your `settings.json`. That
 file holds your hand-curated permission rules and chela has no business opening it.
 Plugin hooks *merge* additively with your own (at the lowest precedence, firing last),
 which is exactly right for something that only watches.
@@ -157,8 +157,8 @@ which is exactly right for something that only watches.
 ```
 
 **Not on the default dashboard port?** Then you need your own copy of the manifest. A hook
-`url` is a literal — Claude Code does **not** expand environment variables in it (measured
-on 2.1.207) — so the port is baked in when the plugin is rendered:
+`url` is a literal: Claude Code does **not** expand environment variables in it (measured
+on 2.1.207), so the port is baked in when the plugin is rendered:
 
 ```bash
 chela plugin --dir ~/.chela/plugin      # bakes in the port the dashboard is actually on
@@ -168,18 +168,20 @@ claude --plugin-dir ~/.chela/plugin     # one session
 
 "Actually on" is meant literally, and it is the difference between this feature working
 and doing nothing at all: the dashboard **publishes the port it bound** to
-`$CHELA_DIR/dashboard.port`, and `chela plugin` — a different process, which sees none of
-the dashboard's own environment — renders *that*. When it was left to read
+`$CHELA_DIR/dashboard.port`, and `chela plugin` (a different process, which sees none of
+the dashboard's own environment) renders *that*. When it was left to read
 `CHELA_DASHBOARD_PORT` instead, a dashboard started with `--port 5005` produced a manifest
 aimed at 5001; every hook POSTed into a closed socket, failed open exactly as designed, and
 said nothing. Run `chela doctor` if you suspect it (see [CONFIG.md](CONFIG.md)).
 
 Restart an agent to pick the hooks up. A running one will not.
 
-## The merge gate (`PreToolUse` on `Bash`) — CMX-389
+<a id="the-merge-gate-pretooluse-on-bash--cmx-389"></a>
+
+## The merge gate (`PreToolUse` on `Bash`), CMX-389
 
 `chela merge` refuses unless the judge is clean on the PR's current head, CI is green and the
-PR is mergeable — but nothing stopped a session from simply running `gh pr merge`, and `dev`
+PR is mergeable, but nothing stopped a session from simply running `gh pr merge`, and `dev`
 carries no branch protection. So the plugin carries a **second `PreToolUse` entry**, matcher
 `Bash`, that DENIES (`hookSpecificOutput.permissionDecision: "deny"`, with a reason pointing
 at `chela merge cmx-N`) any command that merges into a repo with a chela workflow:
@@ -193,21 +195,21 @@ at `chela merge cmx-N`) any command that merges into a repo with a chela workflo
 
 Never denied: `gh pr view/diff/checks/list`, `gh pr create`, `git push origin cmx-12`, a heredoc
 body that merely *mentions* `gh pr merge`, any repo without a chela workflow, and `chela merge`
-itself — whose own `gh` calls are subprocesses of chela's Python, never a Claude `Bash` tool call,
+itself, because its own `gh` calls are subprocesses of chela's Python, never a Claude `Bash` tool call,
 so no hook ever sees them.
 
 The command is **parsed**, not substring-matched (`chela/mergegate.py`): `&&`/`||`/`;`/`|`
 chains, `$(…)`, `bash -c "…"`/`eval`, env prefixes and wrappers (`env`, `sudo`, `timeout`…),
 `cd x && …` (tracked, so the repo is resolved where the merge would run), `git -C`, `gh -R` /
-`GH_REPO`. The repo is resolved from `-R`/the PR URL, or from the session `cwd` — a linked
+`GH_REPO`. The repo is resolved from `-R`/the PR URL, or from the session `cwd`. A linked
 `git worktree` (every dispatched agent's checkout) resolves to its main repo through
 `commondir`.
 
 **Why a `command` hook, and why it does not ask the daemon.** The dashboard's http route fails
-OPEN by design — a gate that lived there would vanish with the dashboard. This one runs
+OPEN by design: a gate that lived there would vanish with the dashboard. This one runs
 `python3 -I -S "${CLAUDE_PLUGIN_ROOT}/hooks/mergegate.py"` (stdlib-only, shipped inside the
 plugin, ~25-30 ms end to end including the shell) and decides from the payload plus
-`$CHELA_DIR/mergegate.json` — the registry the dispatcher rewrites on every tick (each
+`$CHELA_DIR/mergegate.json`, the registry the dispatcher rewrites on every tick (each
 workflow's repo dir, GitHub slugs and base branch). It is **not** gated on `$CHELA_WID`: the
 rule binds every Claude session, including an orchestrator a human started by hand.
 
@@ -216,26 +218,26 @@ registry, a repo it cannot resolve, or its own crash (`2>/dev/null || true`) is 
 the undecided case is appended to `$CHELA_DIR/mergegate.log` (every deny is logged there too).
 A gate that wedged unrelated work fleet-wide on a parse error would be worse than one that
 occasionally misses; what it misses, the backstop catches. It enforces discipline on a
-cooperative-but-mistaken session — it is not a sandbox against an adversarial one (a script
+cooperative-but-mistaken session, and it is not a sandbox against an adversarial one (a script
 file, or `curl` to the GitHub API, is out of its sight; see [SANDBOX_BOUNDARY.md](SANDBOX_BOUNDARY.md)).
 
 ⚠️ **This includes the orchestrator's own `git push origin dev`.** Tracker edits pushed straight
-to the base branch from a Claude session are denied too — push them from a plain terminal.
+to the base branch from a Claude session are denied too, so push them from a plain terminal.
 
 **The override.** `chela merge cmx-N --override --reason "<why>"` (or its request-only
 spelling, `chela override request cmx-N --reason "<why>"`) is the one way past the judge, and it
 is the operator's call. Since CMX-79 the request and the merge are **decoupled**:
 
-1. **Request — returns at once.** The command runs the gate minus the judge (base, CI green,
+1. **Request: returns at once.** The command runs the gate minus the judge (base, CI green,
    MERGEABLE), records ONE pending request bound to the PR's exact head SHA
    (`$CHELA_DIR/overrides/<id>.json`, `chela.overrides`), logs
    `orchestrator.merge_override_requested`, and exits 0 printing the request id. It never merges
    and never waits. Asking again for the same head returns the same request.
-2. **Approve — one tap.** The Telegram bridge posts ONE message to the orchestrator's topic
+2. **Approve: one tap.** The Telegram bridge posts ONE message to the orchestrator's topic
    (task, PR link, the judge's state on the head, the reason) with **✅ Approve / ❌ Deny**
    buttons. The dashboard's `/override/<id>` and `chela merge-approve <id>` in a plain terminal
    decide the same request.
-3. **The approval completes the merge by itself** — in the approving process, through the same
+3. **The approval completes the merge by itself**, in the approving process, through the same
    path `chela merge` uses, re-checking live at that moment: the head is still the recorded SHA,
    CI is green, GitHub reports MERGEABLE, the base is the workflow's. It records
    `orchestrator.merge_override` (who approved, the head sha, the judge state it overrode, the
@@ -244,7 +246,7 @@ is the operator's call. Since CMX-79 the request and the merge are **decoupled**
    failing ⇒ no merge; the request is marked `failed` (or `expired`, when the head moved) with
    the reason, and the operator is told (the Telegram message, a push notification, the inbox).
 4. **Expiry.** A request stays pending until it is decided or the PR head moves (the daemon's
-   sweep expires it — a new push invalidates the request). `CHELA_OVERRIDE_WAIT_S` is now the
+   sweep expires it, since a new push invalidates the request). `CHELA_OVERRIDE_WAIT_S` is now the
    safety TTL (default 24 h).
 
 The Telegram message is edited to the outcome: merged `<sha>` / denied / expired / failed
@@ -253,18 +255,18 @@ The Telegram message is edited to the outcome: merged `<sha>` / denied / expired
 **Still human-only.** The orchestrator may request; it can never approve. A session's
 `chela merge-approve`, `curl …/override/…` or `python … overrides.decide(…)` is denied by this
 hook; `chela merge-approve` also refuses in any process carrying `$CHELA_ACTOR` or a Claude
-Code session marker (`CLAUDECODE`) — so it works from a **plain terminal**, not from a `!`
+Code session marker (`CLAUDECODE`), so it works from a **plain terminal**, not from a `!`
 command inside a Claude session. The Telegram button follows the same trust model as every other
 Telegram button (the bound chat; a bot's tap is refused); the dashboard refuses a cross-site POST.
 
-**The backstop.** Anything the hook cannot see — a human in a plain terminal, a merge on
-github.com, a non-Claude process — is caught after the fact: the dispatcher's reconcile, on
+**The backstop.** Anything the hook cannot see (a human in a plain terminal, a merge on
+github.com, a non-Claude process) is caught after the fact: the dispatcher's reconcile, on
 finding a chela PR merged with no clean judge on its merged head and no approved override,
 sets `runs.merged_outside_gate`, logs `orchestrator.merge_outside_gate`, and the inbox pushes
-`⚠️ cmx-N was merged outside chela's gate` — once.
+`⚠️ cmx-N was merged outside chela's gate` (once).
 
 Hooks load at agent **startup**: a running session keeps its old hooks until it restarts.
-(An outer belt for non-Claude actors — GitHub branch protection on the base — is a separate,
+(An outer belt for non-Claude actors, GitHub branch protection on the base, is a separate,
 optional follow-up.)
 
 ## The manifest you render is not the manifest that runs
@@ -272,7 +274,7 @@ optional follow-up.)
 `/plugin install` **copies** the plugin into Claude Code's own cache
 (`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`), and **that copy is what
 every agent loads at startup**. Re-rendering `~/.chela/plugin` changes nothing until you
-reinstall it — and for a day it changed nothing while every check said otherwise: the
+reinstall it. For a day it changed nothing while every check said otherwise: the
 rendered manifest raised the `PermissionRequest` timeout to 120s, the installed one still
 said `2`, so every gate hook was killed after two seconds, no gate was ever *held*, and the
 phone's answer buttons never appeared. `chela doctor` was green throughout, because it read
@@ -281,11 +283,11 @@ the file chela **writes**.
 So both commands now read the copy that runs:
 
 * `chela plugin` renders the manifest, then reads the installed copy back and tells you, by
-  name, if it is stale — with the reinstall commands.
+  name, if it is stale, with the reinstall commands.
 * `chela doctor` compares the **installed** manifest to the one the code renders. A drift is
   an **ERROR** (the feature is dead, not degraded). So is an installed copy it cannot find
   or cannot read: Claude Code's cache is an implementation detail and may change shape
-  between releases, and the only honest answer then is a loud *"I cannot verify this"* — a
+  between releases, and the only honest answer then is a loud *"I cannot verify this"*; a
   silent green here is the very bug being caught, one level up.
 
 The install path is **discovered**, never constructed: Claude Code records it in
@@ -293,13 +295,13 @@ The install path is **discovered**, never constructed: Claude Code records it in
 hardcoded path would quietly check a directory that no longer exists the day `plugin.json`
 is bumped. (If that registry is unreadable, chela falls back to scanning the cache.)
 
-chela does **not** write into that cache. It is Claude Code's — keyed by version and
-recorded in Claude Code's own bookkeeping — and a reinstall would overwrite anything chela
+chela does **not** write into that cache. It is Claude Code's, keyed by version and
+recorded in Claude Code's own bookkeeping, and a reinstall would overwrite anything chela
 put there, leaving Claude Code describing a copy it never installed. Detect and instruct:
 
 ```
 chela plugin                      # re-render (picks up the live port + the current spec)
-/plugin uninstall chela@chela     # in Claude Code — refresh the copy agents read
+/plugin uninstall chela@chela     # in Claude Code: refresh the copy agents read
 /plugin install chela@chela
 ```
 
@@ -317,12 +319,12 @@ running:
 
 (5001 is chela's default port; the rendered manifest carries whatever yours is on.)
 
-No shell script, no process spawn per tool call, no PATH assumption — and no way for a
+No shell script, no process spawn per tool call, no PATH assumption, and no way for a
 chatty `.bashrc` to put stray stdout into the JSON contract a `command` hook has to
 honour. The endpoint appends via [the event log](EVENTS.md) and returns.
 
 **`PreToolUse`, `PostToolUse`, `PermissionRequest` and `PermissionDenied` are the exception**
-(CMX-319) — they ride `command`, gated on `$CHELA_WID`:
+(CMX-319): they ride `command`, gated on `$CHELA_WID`:
 
 ```json
 {"type": "command",
@@ -330,22 +332,22 @@ honour. The endpoint appends via [the event log](EVENTS.md) and returns.
  "timeout": 2}
 ```
 
-`enabledPlugins` in `~/.claude/settings.json` is **user-wide** — every `claude` process on
+`enabledPlugins` in `~/.claude/settings.json` is **user-wide**: every `claude` process on
 the machine loads chela's plugin, including a headless `claude -p` call some unrelated tool
 makes, in some unrelated directory, that no chela daemon will ever watch. `$CHELA_WID` is
 the one signal that is true if and only if chela did the launching (exported into a
-session's shell ahead of every chela-managed launch — `agent_manager.wid_env_prefix`,
-`spawn.py`) — and an `http` hook cannot check it at all: its payload carries none of the
+session's shell ahead of every chela-managed launch: `agent_manager.wid_env_prefix`,
+`spawn.py`), and an `http` hook cannot check it at all: its payload carries none of the
 agent's own environment, and Claude Code does not expand env vars into a hook's `url`
 (measured). Gating therefore needs the `command` transport, the same reason `SessionStart`
 already uses it.
 
-When `$CHELA_WID` is unset the `&&` short-circuits and `curl` never runs — no socket opens,
+When `$CHELA_WID` is unset the `&&` short-circuits and `curl` never runs: no socket opens,
 nothing reaches the daemon, and the event log gains no entry with no window to attribute it
 to. It also means `PermissionRequest`'s 120s gate wait (below) is never opened for a session
 no chela daemon is bound to answer for. The other ten events stay on `http`: each fires at
 most a handful of times per session rather than per tool call, so the same headless-caller
-noise is far smaller, and the fix here targets the two shapes actually measured to matter —
+noise is far smaller, and the fix here targets the two shapes actually measured to matter:
 the ~78% of hook volume that is `PreToolUse`/`PostToolUse`, and the hook that can hold a
 live agent open for a human.
 
@@ -353,22 +355,22 @@ live agent open for a human.
 daemon call, nothing to fail open FROM" for a session it blocks, but never measured the
 side that matters more: `PreToolUse`/`PostToolUse` fired zero extra processes before this
 change (`http` is Claude Code's own in-process client) and now fork/exec a shell for
-**every tool call, in every session, gated or not** — the plugin has no cheaper way to read
+**every tool call, in every session, gated or not**. The plugin has no cheaper way to read
 `$CHELA_WID` than `command`. Measured (`sh -c` timed with `time.perf_counter()`, 200
 iterations, this repo's dev container):
 
 | path | adds over a bare `sh -c true` (~0.52ms) | total |
 |---|---|---|
-| gate **closed** (`$CHELA_WID` unset, `curl` never runs) | ~0ms — the `[ -n ... ]` test itself is free | ~0.5ms |
-| gate **open** (`$CHELA_WID` set, `curl` forks/execs) | ~3.1ms — the `curl` process itself | ~3.6ms |
+| gate **closed** (`$CHELA_WID` unset, `curl` never runs) | ~0ms (the `[ -n ... ]` test itself is free) | ~0.5ms |
+| gate **open** (`$CHELA_WID` set, `curl` forks/execs) | ~3.1ms (the `curl` process itself) | ~3.6ms |
 
 So a session chela did **not** launch now pays a shell fork/exec (~0.5ms) it never paid
-before, per `PreToolUse`/`PostToolUse` — that is the cost of closing the gate. A session
+before, per `PreToolUse`/`PostToolUse`. That is the cost of closing the gate. A session
 chela **did** launch pays that same shell plus a `curl` fork/exec (~3.6ms total) on every
-tool call, TWICE per call (`PreToolUse` and `PostToolUse` each fire it) — a cost the old
+tool call, TWICE per call (`PreToolUse` and `PostToolUse` each fire it), a cost the old
 in-process `http` transport never had at all, since the request happened without spawning
 anything. Absolute numbers will differ by machine; the shape won't: an `http` hook is
-"free" in process-spawn terms, and any `command` hook — gated or not — is not.
+"free" in process-spawn terms, and any `command` hook, gated or not, is not.
 
 **A hook runs synchronously inside a live agent**, so every choice here is made against
 one constraint: *a slow or crashing hook stalls or breaks somebody's session.*
@@ -376,7 +378,7 @@ one constraint: *a slow or crashing hook stalls or breaks somebody's session.*
 * the timeout is short (2s) and the receiver only appends;
 * `hooks.ingest()` and `event_log.append()` both refuse to raise;
 * a malformed body is dropped, a huge one is clipped, and either way the answer is `200`;
-* **the daemon being down fails OPEN** — the connection is refused, Claude Code logs a
+* **the daemon being down fails OPEN**: the connection is refused, Claude Code logs a
   warning and carries on. The event is lost. A lost event is a bug; a wedged agent is an
   outage, and this trade is made deliberately and in that direction.
 
@@ -385,10 +387,10 @@ one constraint: *a slow or crashing hook stalls or breaks somebody's session.*
 A hook payload carries `cwd`, `session_id` and `transcript_path`. It does not carry a tmux
 window, and going back to the pane to find one would reinvent the thing this replaces.
 
-**The key is the session's ORIGIN directory — the directory `claude` was launched in.**
+**The key is the session's ORIGIN directory: the directory `claude` was launched in.**
 ⛔ **It is emphatically not `cwd`.** `cwd` is the session's *current* directory: it moves
 the moment an agent `cd`s, which is completely normal, and the pane's `#{pane_current_path}`
-moves too. Keying on it produced not ambiguity but a **confidently wrong answer** — the
+moves too. Keying on it produced not ambiguity but a **confidently wrong answer**: the
 orchestrator (window `@0`, launched in `~`) `cd`-ed into the chelamux repo to work, and
 every one of its events was then filed against `@1`, the window of a *different* agent who
 genuinely lives there. A per-window timeline built on that key would simply lie.
@@ -398,18 +400,18 @@ The origin directory is immutable on both sides, and three measured facts (Claud
 
 1. a session's transcript lives at `~/.claude/projects/<slug>/<session_id>.jsonl`, and
    `<slug>` is derived from the origin directory **once, at session start**. It does not
-   follow a `cd` — the orchestrator's session still writes to the `~` slug while its
+   follow a `cd`: the orchestrator's session still writes to the `~` slug while its
    payloads report the repo;
-2. **every payload carries `transcript_path`**, so the slug is already in the event — no
+2. **every payload carries `transcript_path`**, so the slug is already in the event: no
    filesystem access, no `/proc` walk, no `pgrep`;
 3. Claude Code **never `chdir`s its own process** (it tracks the working directory
-   internally — which is exactly why the payload `cwd` and the process cwd disagree). So
+   internally, which is exactly why the payload `cwd` and the process cwd disagree). So
    the *process* cwd of a pane's `claude` **is** that pane's origin directory, and encoding
    it yields the same slug.
 
 So the lookup stays a single `tmux list-windows` call (~5 ms, cached ~1 s) plus a couple of
-`/proc` reads and a dict hit — still no `pgrep`, no `capture-pane`, no `claude agents
---json`. The session→slug half is cached for the life of the process — a session's origin
+`/proc` reads and a dict hit; still no `pgrep`, no `capture-pane`, no `claude agents
+--json`. The session→slug half is cached for the life of the process: a session's origin
 never changes. A payload with no `transcript_path` falls back to one glob of
 `~/.claude/projects/*/<session_id>.jsonl`, on a cache miss only.
 
@@ -417,22 +419,22 @@ never changes. A payload with no `transcript_path` falls back to one glob of
 
 A session **resumed from a different directory** breaks fact 1's *other* half: the
 transcript stays in the project dir the session was **born** in, so its slug names a
-directory no pane is sitting in. Origin matching then resolves it to `None` — or, worse, to
+directory no pane is sitting in. Origin matching then resolves it to `None` or, worse, to
 an unrelated agent who genuinely lives in that birth directory.
 
 The pane's own command line settles it outright: **`claude --resume <session-id>` is that
 window claiming that session, by construction**, and it is consulted *before* the slug.
 `chela/sessions.py` owns both signals (and is also what the outbound relay resolves a
-window's transcript through — same question, one answer).
+window's transcript through: same question, one answer).
 
 **Ambiguity resolves to `None`, never to a guess.** Two agents launched in one directory
-cannot be told apart, and an unknown session resolves to `None` — **never** to the window
+cannot be told apart, and an unknown session resolves to `None`, **never** to the window
 whose `cwd` happens to match, because that fallback *is* the bug. An event filed against
 the *wrong* window is worse than one filed against no window; the `session_id`, `cwd` and
 `transcript_path` are in the payload regardless, so nothing is lost but the shortcut.
 
 The same rule binds the **outbound relay**, which resolves through the same module: when a
-window has no hook event and was not resumed, the cwd is all that is left — and if a second
+window has no hook event and was not resumed, the cwd is all that is left, and if a second
 window shares that origin, the newest transcript under it could belong to either, so the
 resolution is `None`, loudly. (This is not exotic. The event log is a bounded ring, so on a
 busy fleet a quiet window's last hook event ages out and resolution drops back to the cwd.)
@@ -440,25 +442,25 @@ A relay that posts one agent's output into another agent's topic is worse than s
 
 And every signal that cannot be **bounded** is refused rather than believed: the event log
 is only read against the claude process's start time, because tmux reuses window ids across
-a server restart. If that start time cannot be read — no `/proc`, or a wrapper deeper than
-`sessions._MAX_DEPTH` — a recycled `wid` would inherit a **dead** agent's session, so the
+a server restart. If that start time cannot be read (no `/proc`, or a wrapper deeper than
+`sessions._MAX_DEPTH`), a recycled `wid` would inherit a **dead** agent's session, so the
 log is refused for that window and `sessions.explain()` says why. Unknown is never a pass.
 
 A **subagent**'s hooks carry its parent's `session_id`, so they resolve to the parent's
 window. That is the right answer rather than a near-miss: the subagent runs inside that
 agent, in that window, and has no window of its own.
 
-> ⚠️ **`hook.*` records written before this fix (CMX-48) have unreliable `wid`s** — any
+> ⚠️ **`hook.*` records written before this fix (CMX-48) have unreliable `wid`s**: any
 > event from an agent that had `cd`-ed away from its origin was filed against whichever
 > window happened to sit in that directory. They are left in `events.jsonl` as written:
 > the log is append-only, and the pane table that produced them is gone, so a rewrite
 > would only be a *different* guess. Their `session_id` and `transcript_path` are intact,
-> so a reader can re-derive the truth — but if you are about to build a per-window UI on
+> so a reader can re-derive the truth, but if you are about to build a per-window UI on
 > the log, drop the old hook lines rather than render them.
 
 ## What actually fires (measured on Claude Code 2.1.207)
 
-`AskUserQuestion` and `ExitPlanMode` are **not** hook events — they are **tools**, and
+`AskUserQuestion` and `ExitPlanMode` are **not** hook events; they are **tools**, and
 arrive as `PreToolUse` / `PermissionRequest` carrying `tool_name` and the full
 `tool_input`. `PermissionRequest` fires for `AskUserQuestion` **in every permission mode,
 `auto` included**: auto does not auto-answer a question, it genuinely blocks on the picker.
@@ -472,14 +474,14 @@ documented rather than quietly missing:
 
 | event | measured behaviour |
 |---|---|
-| `SessionStart` | **Never fires over the `http` transport** — it fires as a `command` hook, and `SessionEnd`/`Stop` fire over http, so this is the transport, not the config. It is therefore the ONE hook chela ships as a `command`, and a command hook's **stdout is injected into the agent's context** — which is not a hazard here, it is the delivery mechanism. See [The room recap](#the-room-recap-sessionstart). |
+| `SessionStart` | **Never fires over the `http` transport**. It fires as a `command` hook, and `SessionEnd`/`Stop` fire over http, so this is the transport, not the config. It is therefore the ONE hook chela ships as a `command`, and a command hook's **stdout is injected into the agent's context**, which is not a hazard here but the delivery mechanism. See [The room recap](#the-room-recap-sessionstart). |
 | `PermissionDenied` | Does not fire when a human denies a gate interactively (neither `Esc` nor picking "No"). It appears to be for rule-based denials. Registered; simply rare. |
 
 ## The room recap (`SessionStart`)
 
 **Hooks are read at agent startup, and an agent's context does not survive its process.**
 Everything a [room](https://chela.pages.dev/docs#rooms)
-ever told an agent — the handoff, the question, the blocker — was injected into a
+ever told an agent (the handoff, the question, the blocker) was injected into a
 *session*, and a dispatched agent is a fresh session every run. Restart it and the shared
 context is gone: the ledger still holds every post, and the only reader who needed them
 has forgotten they exist. `SessionStart` is the one moment we can hand them back.
@@ -493,33 +495,33 @@ The hook is a `curl` into the same endpoint every other hook POSTs to:
 ```
 
 Being a `command` hook buys a second thing (CMX-160): it runs as a child of the agent's own
-`claude` process, so it inherits that process's environment — `$CHELA_WID`, exported into
+`claude` process, so it inherits that process's environment: `$CHELA_WID`, exported into
 the pane's shell ahead of every chela-managed launch. Every hook but SessionStart and
 MessageDisplay rides `http` (Claude Code's own client, which sends only the payload);
-MessageDisplay is also a `command` hook (CMX-303) but carries no `$CHELA_WID` header —
+MessageDisplay is also a `command` hook (CMX-303) but carries no `$CHELA_WID` header, as
 nothing it returns is agent-specific. SessionStart stays the one hook that can just *say*
-which window it is rather than have chela infer it from `/proc` and tmux panes — which also
+which window it is rather than have chela infer it from `/proc` and tmux panes, which also
 makes it the one hook whose window resolution needs no `/proc` at all, macOS included.
 The header is validated (shape, and that it names a currently live window) before it is
 trusted; anything else falls through to the same origin-based inference every other hook
 uses.
 
 Not a `chela` spawn: `chela` is not on an agent's PATH (it is a `uv run` inside the repo),
-so `chela room recap` would be `command not found` in most fleets — and it would fail
+so `chela room recap` would be `command not found` in most fleets, and it would fail
 *invisibly*, because a hook that prints nothing is indistinguishable from an agent with no
 rooms. The daemon already holds the tmux table, `rooms.json` and the log; a curl is a ~5 ms
 spawn against ~90–250 ms of Python that would re-read all three, and **the agent blocks on
 it**. It fails open by construction: `--fail` so an HTTP error body can never be injected
 as context, stderr to `/dev/null`, and `|| true` so a missing curl or a dead daemon exits 0
-having printed nothing at all — which is exactly "no recap".
+having printed nothing at all, which is exactly "no recap".
 
-The daemon replies with `hookSpecificOutput.additionalContext` (honoured for `SessionStart`
-— Claude Code collects `additionalContexts` from its SessionStart hooks), built by
+The daemon replies with `hookSpecificOutput.additionalContext` (honoured for `SessionStart`:
+Claude Code collects `additionalContexts` from its SessionStart hooks), built by
 `rooms.recap()`:
 
 ```
-[chela room] shared context recap — you are @3. Your room(s) below: …
-room "wire" — peers: @5 (cmx-64)
+[chela room] shared context recap, you are @3. Your room(s) below: …
+room "wire", peers: @5 (cmx-64)
   #128 question from @5 (cmx-64) → YOU: does the retry live in the parser or the client?
   #121 status from @5 (cmx-64): pushed the schema migration
 Answer one: chela room post <room> --kind handoff --from @3 --to @N --reply-to <seq> -- "<your answer>"
@@ -527,13 +529,13 @@ Answer one: chela room post <room> --kind handoff --from @3 --to @N --reply-to <
 
 Four rules, and each one is load-bearing:
 
-* **An agent in no room gets NOTHING** — not a header, not "no shared context". The stdout
+* **An agent in no room gets NOTHING**: not a header, not "no shared context". The stdout
   of this hook is the agent's context; most agents are in no room; boilerplate in all of
   them for the benefit of none is a tax on every run in the fleet. The response body is
   empty, so `curl` prints zero bytes.
-* **It is bounded** — the last `RECAP_POSTS` posts per room, one line each, newest-first,
+* **It is bounded**: the last `RECAP_POSTS` posts per room, one line each, newest-first,
   capped at `RECAP_MAX_CHARS`. It rides in every fresh context, forever.
-* **It is sanitised** — those are other agents' words going into a context window, so every
+* **It is sanitised**: those are other agents' words going into a context window, so every
   line goes back through `rooms.sanitize()`, and the recap opens with the `[chela room]`
   header, which makes it unpostable: `rooms.is_relay_text()` refuses a body that starts
   with one (the echo guard, for free).
@@ -541,13 +543,13 @@ Four rules, and each one is load-bearing:
   session's ORIGIN, never `cwd`** (the CMX-48 rule, same as every other hook). A session
   that cannot be correlated either way gets nothing rather than somebody else's rooms.
 
-`chela room recap [--wid @N]` prints exactly what the hook would inject — including
+`chela room recap [--wid @N]` prints exactly what the hook would inject, including
 printing nothing at all.
 
 > ⚠️ **A new hook means the INSTALLED copy is stale.** The plugin manifest is *copied* into
 > Claude Code's cache at install time, keyed by the plugin version, so a fleet installed
 > before this change still runs a manifest with no recap hook in it. `chela doctor` catches
-> exactly that (it compares every declared hook — `type`, `url`, `command`, `timeout` — not
+> exactly that (it compares every declared hook (`type`, `url`, `command`, `timeout`), not
 > merely the first one), and the fix is the usual one: `chela plugin`, then
 > `/plugin uninstall chela@chela` + `/plugin install chela@chela`. Hooks are read at agent
 > **startup**: a running agent keeps the old set until it restarts.
@@ -556,21 +558,21 @@ printing nothing at all.
 
 After a reboot the inbox's orchestrator address is **dangling** (issued by a dead tmux
 server) and it holds its queue until a session says "I am here" with `chela watch`. It is
-tempting to have a `SessionStart` hook say it for you — but a bare `chela watch` there
+tempting to have a `SessionStart` hook say it for you, but a bare `chela watch` there
 registers *every* session it runs in, so the first restarted peer takes the slot from the
 live orchestrator (CMX-394). Use `--if-unclaimed` instead. It registers the calling session
 exactly like `chela watch` only when the recorded pin is:
 
-* **empty** — nobody has registered;
-* **undeliverable** — `inbox.UNDELIVERABLE`: the window runs no claude any more (`gone`), or
+* **empty**: nobody has registered;
+* **undeliverable** (`inbox.UNDELIVERABLE`): the window runs no claude any more (`gone`), or
   the address was issued by a tmux server that has since restarted (`dangling`);
-* **already this session** — a no-op that succeeds.
+* **already this session**: a no-op that succeeds.
 
 Otherwise it changes nothing, exits 0, and prints one line:
-`orchestrator is @N (live) — not claiming`. "Live" is exactly what the inbox delivers to
+`orchestrator is @N (live), not claiming`. "Live" is exactly what the inbox delivers to
 (`inbox.address_state`, so an `unstamped` or env-pinned address counts as live, and an empty
 status map from a `claude agents` hiccup never reads as a death). It takes no window
-argument. This is an operator-side hook in your own `~/.claude/settings.json` — chela does
+argument. This is an operator-side hook in your own `~/.claude/settings.json`; chela does
 not ship it. The line, scoped to sessions started in tmux from your home directory:
 
 ```json
@@ -587,15 +589,15 @@ orchestrator that was live when it checked.
 
 **The explicit form follows the same rule (CMX-138).** A bare `chela watch` run by hand from a
 session that is not the live orchestrator prints the same `not claiming` line plus a hint, and
-`chela watch @N` from such a side session only adds the watch — `@N`'s events go to the current
-orchestrator (`watching @N — events go to the orchestrator @M (live)`), and the pin does not
+`chela watch @N` from such a side session only adds the watch: `@N`'s events go to the current
+orchestrator (`watching @N, events go to the orchestrator @M (live)`), and the pin does not
 move. Taking the role from a live holder is explicit: `chela watch [@N] --take-over` names the
 session it displaced, and the `orchestrator.moved` notice (reason `taken_over`) still fires.
-The recovery path — empty pin, dead window, new tmux epoch — claims exactly as before.
+The recovery path (empty pin, dead window, new tmux epoch) claims exactly as before.
 
 ## Event types in the log
 
-A hook event is namespaced — `hook.pre_tool_use`, `hook.permission_request` — so *an agent
+A hook event is namespaced (`hook.pre_tool_use`, `hook.permission_request`), so *an agent
 told us this* is distinguishable at a glance from chela's own bookkeeping (`run_review`,
 `died`, `daemon_start`). Everything else is [the event log's ordinary record](EVENTS.md):
 `seq`, `boot_id`, `ts`, `wid`, `session_id`, a one-line `summary`, and the payload.
@@ -605,7 +607,7 @@ chela events --type hook.permission_request --follow    # every gate, live, flee
 chela events --wid @3 --type hook.pre_tool_use          # what @3 is doing
 ```
 
-A big payload is **clipped, never dropped** — a `Write` of a 200 KB file carries that file
+A big payload is **clipped, never dropped**: a `Write` of a 200 KB file carries that file
 in `tool_input.content`, and the log is a line-per-event JSONL a human tails. Strings are
 bounded, and a payload past the ceiling degrades to a stub. What the bound is written to
 protect is the per-option `label`/`description` of an `AskUserQuestion` and a Bash

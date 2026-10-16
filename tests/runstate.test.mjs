@@ -53,7 +53,7 @@ test('runCardNote: a closed run with a reason shows the reason, not its last_err
   assert.deepEqual(
     runCardNote({ status: 'closed', close_reason: 'superseded by cmx-403',
                   last_error: 'tmux window disappeared' }),
-    { text: 'Closed — superseded by cmx-403', closed: true });
+    { text: 'Closed: superseded by cmx-403', closed: true });
 });
 
 test('runCardNote: a failed run (or a reason on a non-closed row) keeps its error', () => {

@@ -245,7 +245,7 @@ test('no answer within the bound ends in "couldn\'t confirm", never success and 
     await flush();
 
     const msg = document.getElementById('update-apply-msg');
-    assert.equal(msg.textContent, "Couldn't confirm the restart — check `pm2 ls`.");
+    assert.equal(msg.textContent, "Couldn't confirm the restart. Check `pm2 ls`.");
     assert.match(msg.className, /\berr\b/);
     assert.doesNotMatch(msg.className, /\bok\b/);
     // 180s bound at 2s per poll — bounded, and not given up early.
@@ -263,7 +263,7 @@ test('a restart of THIS dashboard (new boot) reloads the page onto the new code'
 
     assert.equal(reloads, 1, 'the dashboard restarted but the page never reloaded');
     const msg = document.getElementById('update-apply-msg');
-    assert.equal(msg.className + '|' + msg.textContent, 's-savemsg |The dashboard restarted — reloading…');
+    assert.equal(msg.className + '|' + msg.textContent, 's-savemsg |The dashboard restarted, reloading…');
     assert.equal(statusPolls, 2);
 });
 
@@ -433,7 +433,7 @@ test('timeout: 179.9 s still polls, 180 s gives up — and never as success', ()
     assert.deepEqual(flow.updateOutcome(st, CTX, 1000 + 179900),
         { state: 'polling', text: 'Restarting chela-daemon…' });
     assert.deepEqual(flow.updateOutcome(st, CTX, 1000 + 180000),
-        { state: 'timeout', text: "Couldn't confirm the restart — check `pm2 ls`." });
+        { state: 'timeout', text: "Couldn't confirm the restart. Check `pm2 ls`." });
     assert.equal(flow.updateOutcome(null, CTX, 1000 + 180000).state, 'timeout');
 });
 
@@ -446,7 +446,7 @@ test('done needs applying === false AND this run\'s result', () => {
     // A result decided at the bound still wins over the timeout.
     assert.equal(flow.updateOutcome(status({ last_result: done }), CTX, 1000 + 180000).state, 'done');
     assert.equal(flow.updateOutcome(status({ last_result: { ...done, restarted: [] } }), CTX, 1000).text,
-        'Done — no running service needed a restart');
+        'Done. No running service needed a restart');
 });
 
 test('an unknown result (ok missing / not true) is failed, never success', () => {
@@ -460,7 +460,7 @@ test('an unknown result (ok missing / not true) is failed, never success', () =>
 
 test('reload only on a CHANGED boot — a missing boot on either side is not a restart', () => {
     assert.deepEqual(flow.updateOutcome(status({ boot: 'boot-2', applying: true }), CTX, 1000),
-        { state: 'reload', text: 'The dashboard restarted — reloading…' });
+        { state: 'reload', text: 'The dashboard restarted, reloading…' });
     assert.equal(flow.updateOutcome(status({ boot: BOOT, applying: true }), CTX, 1000).state, 'polling');
     assert.equal(flow.updateOutcome(status({ boot: undefined, applying: true }), CTX, 1000).state, 'polling');
     assert.equal(flow.updateOutcome(status({ boot: 'boot-2', applying: true }), { ...CTX, boot: undefined }, 1000).state, 'polling');

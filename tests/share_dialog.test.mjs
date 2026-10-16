@@ -4,7 +4,7 @@
 // Guards (each corrupt→RED, recorded in the PR's self-check experiments):
 //   - "View only" is the default choice, and minting with it POSTs mode:"view";
 //   - "Allow typing" is DISABLED with "Typing is disabled in Settings" when the setting
-//     is off, and with "Not a sandboxed session — start one from New session →
+//     is off, and with "Not a sandboxed session. Start one from New session →
 //     Sandboxed" when the window isn't one; ENABLED with no reason when both hold
 //     (the accepted case, and the negative control for the two disabled ones);
 //   - the UNSANDBOXED override is offered only with the setting on AND a non-sandboxed
@@ -13,7 +13,7 @@
 //     choice is POSTed as `minutes`; a pick above 4 h keeps Share disabled until the
 //     window name is typed a SECOND time; the time left shows on the red banner and in
 //     Active shares;
-//   - the share pill reads 👁 for view only, and the red "UNSANDBOXED — guest can type"
+//   - the share pill reads 👁 for view only, and the red "UNSANDBOXED: guest can type"
 //     banner shows on the pill AND the pane while an override is live — and not otherwise.
 //
 // Run: node --test tests/share_dialog.test.mjs (pytest runs it via
@@ -137,7 +137,7 @@ test('not a sandboxed session ⇒ Allow typing disabled with the New session →
     await open({ share_typing: true, sandboxed: false, typing_allowed: false,
                  unsandboxed_offered: true, window_name: 'shell-1' });
     assert.equal(radio('typing').disabled, true);
-    assert.equal(reasonText(), 'Not a sandboxed session — start one from New session → Sandboxed');
+    assert.equal(reasonText(), 'Not a sandboxed session. Start one from New session → Sandboxed');
 });
 
 test('⭐ setting on + verified sandbox ⇒ Allow typing enabled, no reason, mints mode:"typing"', async () => {
@@ -160,7 +160,7 @@ test('UNSANDBOXED override: Share stays disabled until the window name is typed'
     const r = radio('unsandboxed');
     assert.ok(r, 'the override must be offered: setting on, window not sandboxed');
     assert.match(r.closest('label').textContent,
-        /Full access — UNSANDBOXED: the guest can type into a real shell on this machine/);
+        /Full access, UNSANDBOXED: the guest can type into a real shell on this machine/);
     r.checked = true; r.onchange();
     const share = dialog().querySelector('.sd-share');
     const confirmIn = dialog().querySelector('#sd-confirm-in');
@@ -184,7 +184,7 @@ test('the red UNSANDBOXED banner shows on the pill and the pane while an overrid
     await flush(); await flush();
     const pill = document.getElementById('btn-shares');
     assert.equal(pill.classList.contains('si-unsandboxed'), true);
-    assert.match(pill.textContent, /UNSANDBOXED — guest can type/);
+    assert.match(pill.textContent, /UNSANDBOXED: guest can type/);
     const banner = document.querySelector('.gs-unsafe-banner[data-banner-for="@1"]');
     assert.ok(banner, 'the pane header must carry the banner slot');
     assert.equal(banner.hidden, false, 'the pane banner must show while the override is live');
@@ -264,7 +264,7 @@ test('time left reads "12d 4h left" on the red banner and in Active shares', asy
     await flush(); await flush(); await flush();
     const banner = document.querySelector('.gs-unsafe-banner[data-banner-for="@1"]');
     assert.equal(banner.hidden, false);
-    assert.match(banner.textContent, /UNSANDBOXED — guest can type · 12d 4h left/);
+    assert.match(banner.textContent, /UNSANDBOXED: guest can type · 12d 4h left/);
     const row = document.querySelector('#shares-sheet-backdrop .ss-row[data-wid="@1"]');
     assert.ok(row, 'Active shares must list the share');
     assert.match(row.textContent, /12d 4h left/);

@@ -1,6 +1,6 @@
 ---
 name: telegram-setup
-description: Wire Telegram for chela — create a bot with @BotFather, make a private forum group with Topics, find the chat id, put TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in chela's secrets file, and run the `chela telegram` bridge (one topic per agent window, two-way). Use when the user wants to connect Telegram, drive agents from their phone, or configure the telegram-send skill.
+description: Wire Telegram for chela. Create a bot with @BotFather, make a private forum group with Topics, find the chat id, put TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in chela's secrets file, and run the `chela telegram` bridge (one topic per agent window, two-way). Use when the user wants to connect Telegram, drive agents from their phone, or configure the telegram-send skill.
 ---
 
 # Wire Telegram for chela
@@ -17,7 +17,7 @@ feed the [`telegram-send`](../telegram-send/SKILL.md) skill.
 | `TELEGRAM_TOPIC_ID` | Only for `chela telegram --wid` (single-window mode) and `telegram-send` |
 
 Walk the user through the steps below in order. **Never** paste a real token or id into
-committed code, docs, or examples — everything here uses placeholders.
+committed code, docs, or examples. Everything here uses placeholders.
 
 ## 0. Install the extra
 
@@ -25,7 +25,7 @@ committed code, docs, or examples — everything here uses placeholders.
 uv sync --all-extras          # or name every extra you want: --extra dashboard --extra telegram
 ```
 
-`uv sync --extra telegram` on its own **drops** the dashboard extra — `uv sync` replaces the
+`uv sync --extra telegram` on its own **drops** the dashboard extra, because `uv sync` replaces the
 environment rather than adding to it.
 
 ## 1. Create a bot and get the token
@@ -36,14 +36,14 @@ In Telegram, open a chat with [@BotFather](https://t.me/BotFather):
 2. Give it a display name and a username ending in `bot` (e.g. `my_chela_bot`).
 3. BotFather replies with a token that looks like `123456789:AAExampleTokenReplaceMe`.
 
-That token is `TELEGRAM_BOT_TOKEN`. Treat it like a password — anyone with it controls
+That token is `TELEGRAM_BOT_TOKEN`. Treat it like a password: anyone with it controls
 the bot. If it leaks, `/revoke` in @BotFather to rotate it.
 
 ## 2. Make a private forum group
 
 1. Create a new group **with only you in it**, and turn on **Topics** in the group
    settings (that makes it a forum supergroup).
-2. Add the bot and make it an **admin** with **Manage Topics** — the bridge creates a topic
+2. Add the bot and make it an **admin** with **Manage Topics**; the bridge creates a topic
    per agent window and closes it when the window dies.
 
 ⚠️ **The chat is the security boundary.** The bridge accepts messages from the bound chat
@@ -58,13 +58,13 @@ Post any message in the group, then read it back (swap in your token):
 curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | python3 -m json.tool
 ```
 
-Read `result[].message.chat.id` — a negative number like `-1001234567890`. That is
+Read `result[].message.chat.id`: a negative number like `-1001234567890`. That is
 `TELEGRAM_CHAT_ID`. If `result` is empty, the bot hasn't seen a message yet: post one and
 retry. (`getUpdates` returns nothing while a webhook is set, or while a running
-`chela telegram` is already consuming updates — stop it first.)
+`chela telegram` is already consuming updates, so stop it first.)
 
 For `telegram-send` into a specific topic, post in that topic and read
-`result[].message.message_thread_id` — that is `TELEGRAM_TOPIC_ID`.
+`result[].message.message_thread_id`, which is `TELEGRAM_TOPIC_ID`.
 
 ## 4. Store the secrets
 
@@ -106,13 +106,13 @@ chela doctor                # among the rest: which windows the bridge has bound
 python skills/telegram-send/send.py "chela is wired to Telegram ✅"   # needs TELEGRAM_TOPIC_ID or lands in General
 ```
 
-Then open a topic the bridge created and type into it — the agent should receive it. If a
+Then open a topic the bridge created and type into it; the agent should receive it. If a
 send fails:
 
-- **401 Unauthorized** — bad `TELEGRAM_BOT_TOKEN`.
-- **400 chat not found** — wrong `TELEGRAM_CHAT_ID`, or the bot isn't in the group.
-- **400 not enough rights to create a topic** — the bot isn't an admin with Manage Topics.
-- **400 message thread not found** — wrong or stale `TELEGRAM_TOPIC_ID`.
+- **401 Unauthorized**: bad `TELEGRAM_BOT_TOKEN`.
+- **400 chat not found**: wrong `TELEGRAM_CHAT_ID`, or the bot isn't in the group.
+- **400 not enough rights to create a topic**: the bot isn't an admin with Manage Topics.
+- **400 message thread not found**: wrong or stale `TELEGRAM_TOPIC_ID`.
 
 ## Notes
 

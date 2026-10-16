@@ -169,7 +169,7 @@ function _renderContextData(data) {
             // estimate (install the statusLine hook for exact context %).
             const tips = [];
             if (a.session_name) tips.push(a.session_name);
-            if (a.estimated) tips.push('estimate from transcript — run `chela install-statusline` for exact context %');
+            if (a.estimated) tips.push('estimate from transcript; run `chela install-statusline` for exact context %');
             if (tips.length) label.title = tips.join(' · '); else label.removeAttribute('title');
         } else {
             label.textContent = 'Context: unavailable';

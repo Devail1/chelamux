@@ -97,7 +97,7 @@ export function batteryState(agent) {
 // not Claude's own report — say so, so a reader knows what the pill rests on.
 export function stateTitle(agent, s) {
     const word = s.word.charAt(0).toUpperCase() + s.word.slice(1);
-    return agent && agent.status_source === 'sandbox-proxy' ? word + ' — from the sandbox proxy' : word;
+    return agent && agent.status_source === 'sandbox-proxy' ? word + ' (from the sandbox proxy)' : word;
 }
 
 // ---- action-bar verb ----------------------------------------------------

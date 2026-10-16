@@ -109,13 +109,13 @@ test('the sandboxed pane\'s state pill tooltip says it came from the sandbox pro
     const el = pill(SANDBOXED);
     assert.ok(el, 'setup: the sandboxed pane must render a state pill on the wall');
     assert.equal(el.querySelector('.gs-state-word').textContent, 'working');
-    assert.equal(el.title, 'Working — from the sandbox proxy');
+    assert.equal(el.title, 'Working (from the sandbox proxy)');
 });
 
 test('the sandboxed pane\'s status dot tooltip says it came from the sandbox proxy', () => {
     const el = dot(SANDBOXED);
     assert.ok(el, 'setup: the sandboxed pane must render a status dot');
-    assert.equal(el.title, 'Working — from the sandbox proxy');
+    assert.equal(el.title, 'Working (from the sandbox proxy)');
 });
 
 test('⭐ an ordinary pane\'s pill and dot carry the plain word, no proxy claim', () => {

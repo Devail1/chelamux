@@ -106,8 +106,8 @@ function _paintPill(btn, n, showStale) {
             txt.append(word);
         }
     }
-    btn.setAttribute('aria-label', n === 0 && showStale ? 'couldn’t refresh approvals — tap to review'
-        : n + ' approval request' + (n === 1 ? '' : 's') + ' waiting — tap to review');
+    btn.setAttribute('aria-label', n === 0 && showStale ? 'couldn’t refresh approvals, tap to review'
+        : n + ' approval request' + (n === 1 ? '' : 's') + ' waiting, tap to review');
 }
 
 export function notifyEnabled() {
@@ -175,9 +175,9 @@ function _buildSheet() {
     sheet.className = 'shares-sheet approvals-sheet';
     sheet.innerHTML = `<div class="ss-hd">⚖️ Pending approvals
         <button class="ss-close" type="button" aria-label="Close">&times;</button></div>
-      <div class="ss-sub">Approving merges NOW — after re-checking that the head is unchanged, CI is green and GitHub reports the PR mergeable. It skips only the judge, and is recorded. Deny merges nothing.</div>
+      <div class="ss-sub">Approving merges NOW, after re-checking that the head is unchanged, CI is green and GitHub reports the PR mergeable. It skips only the judge, and is recorded. Deny merges nothing.</div>
       <div class="pa-err ss-err"${_flash ? '' : ' hidden'}>${escHtml(_flash)}</div>
-      <div class="pa-stale ss-err"${_stale ? '' : ' hidden'}>Couldn’t refresh approvals — showing the last known list.</div>
+      <div class="pa-stale ss-err"${_stale ? '' : ' hidden'}>Couldn’t refresh approvals. Showing the last known list.</div>
       <div class="ss-list">${_rows.map(rowHTML).join('') || `<div class="ss-empty">${_stale ? 'The approvals list is unavailable.' : 'Nothing is waiting for approval.'}</div>`}</div>`;
     backdrop.appendChild(sheet);
     document.body.appendChild(backdrop);

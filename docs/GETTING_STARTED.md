@@ -7,14 +7,14 @@ opens a PR on its own. Roughly 10 minutes. For the full reference, see the
 ## 0. Prerequisites
 
 - **Python ≥ 3.11**, **`tmux`**, **`git`**
-- [`uv`](https://docs.astral.sh/uv/) — the package manager chela uses
+- [`uv`](https://docs.astral.sh/uv/), the package manager chela uses
 - the **`claude` CLI** on your `PATH` ([Claude Code](https://claude.com/claude-code))
-- **`gh`** (GitHub CLI), logged in (`gh auth login`) — the daemon uses it to push branches
+- **`gh`** (GitHub CLI), logged in (`gh auth login`); the daemon uses it to push branches
   and open PRs
 
 > **macOS works.** chela is developed on Linux but runs on macOS (a POSIX
 > `/proc` fallback covers the process/window facts). If TUI glyphs render as
-> boxes (tofu), install a symbol font — see [the fonts note below](#fonts-macos).
+> boxes (tofu), install a symbol font (see [the fonts note below](#fonts-macos)).
 
 ## 1. Install
 
@@ -45,7 +45,7 @@ it.
 
 ## 2. Authenticate Claude once
 
-chela never handles credentials — it drives the `claude` CLI inside your tmux
+chela never handles credentials; it drives the `claude` CLI inside your tmux
 windows, so every agent reuses one cached login:
 
 ```bash
@@ -57,7 +57,7 @@ The whole fleet runs as **one Claude account** and shares its rate limits.
 ## 3. See what chela sees
 
 Make a tmux session whose **windows are your agents** (the window name is the
-agent's short, stable key — what `chela peek`/`msg` and the Telegram bindings use):
+agent's short, stable key, which is what `chela peek`/`msg` and the Telegram bindings use):
 
 ```bash
 tmux new-session -d -s chela -n researcher
@@ -71,7 +71,7 @@ uv run chela status            # lists the windows chela can drive
 > **Window names** and how they line up with Remote Control on claude.ai are described in
 > [DASHBOARD.md](DASHBOARD.md#window-names-and-remote-control).
 
-## 4. Start the daemon — this is the engine
+## 4. Start the daemon (this is the engine)
 
 Nothing autonomous happens without it. Schedules don't fire, dispatched TODOs
 never become PRs, completion never wakes the orchestrator. Run it under a process
@@ -86,7 +86,7 @@ uv run chela run               # leave this running
 
 This is the headline feature: a task becomes a git worktree → an agent that implements
 it → a PR, reviewed by an adversarial judge. The queue can be a markdown `TODO.md` (shown
-here, nothing to sign up for), GitHub issues, or a Linear team — for Linear, follow
+here, nothing to sign up for), GitHub issues, or a Linear team. For Linear, follow
 [LINEAR_TRACKER.md](LINEAR_TRACKER.md) instead of copying `TODO.md`.
 
 ```bash
@@ -117,11 +117,11 @@ agent, and pushes and opens the PR for it. Watch it on the dashboard
 (`uv run chela dashboard`, then <http://127.0.0.1:5001>) or with `uv run chela
 dispatch-runs`. **Auto-merge is off by default.** When the judge passes the PR, merge it
 with `uv run chela merge <run>`; the dispatcher then strikes the `- [ ]` line on your base
-branch. What to do when a run stops for a human — retry, reopen, override, close — is in
+branch. What to do when a run stops for a human (retry, reopen, override, close) is in
 [RUNS.md](RUNS.md).
 
 > **Guard discipline is the contract.** Every guard must go **RED** when the thing
-> it protects is broken — the judge corrupts each guard in a throwaway worktree and
+> it protects is broken: the judge corrupts each guard in a throwaway worktree and
 > blocks any PR whose guard survives its own corruption. See
 > [CONTRIBUTING.md](../CONTRIBUTING.md). To see where your own tests stand first, run
 > `uv run chela judge sweep --cwd /path/to/your/repo --base origin/main` on a branch: it lists
@@ -133,12 +133,12 @@ branch. What to do when a run stops for a human — retry, reopen, override, clo
 
 ## 6. Optional polish
 
-- **Exact context / rate-limit numbers** — `uv run chela install-statusline --write`
+- **Exact context / rate-limit numbers**: `uv run chela install-statusline --write`
   installs the statusLine hook the dashboard reads.
-- **Phone push when an agent blocks** — set `CHELA_NOTIFY_URL` (ntfy / Telegram /
+- **Phone push when an agent blocks**: set `CHELA_NOTIFY_URL` (ntfy / Telegram /
   webhook); see [Needs-input notifications](https://chela.pages.dev/docs#needs-input).
-- **Remote access** — the dashboard binds `127.0.0.1` with no built-in auth by
-  design. Put it behind Tailscale or an SSH tunnel — the tailnet is the trust
+- **Remote access**: the dashboard binds `127.0.0.1` with no built-in auth by
+  design. Put it behind Tailscale or an SSH tunnel; the tailnet is the trust
   boundary. See [Remote access & security](https://chela.pages.dev/docs#security).
 
 ## Fonts (macOS)
@@ -147,15 +147,15 @@ The TUI markers (`⏺ ❌ ✅`, the working spinner) and Nerd icons need a font 
 covers those codepoints. If any surface shows boxes, install a symbol font such
 as [Symbola](https://dn-works.com/ufas/) and let the surface's font-fallback pick
 it up. chela wires a coverage fallback on each render surface (dashboard, telegram
-`/screenshot`, collab viewer) — a missing glyph means the underlying font stack
+`/screenshot`, collab viewer), so a missing glyph means the underlying font stack
 lacks it, not chela.
 
 ## Where to go next
 
-- [README](../README.md) — what's new, and the full documentation map
-- [docs/RUNS.md](RUNS.md) — a dispatched run from claim to merge, and every command on the way
-- [docs/DASHBOARD.md](DASHBOARD.md) — the Wall, the sidebar, the Work board and the Usage view
-- [docs/CONFIG.md](CONFIG.md) — the environment, precedence, and PM2 migration
-- [docs/HOOKS.md](HOOKS.md) · [docs/EVENTS.md](EVENTS.md) — how the plugin and event log work
-- [WORKFLOW.md](../WORKFLOW.md) — the dispatch prompt agents run against
-- [CONTRIBUTING.md](../CONTRIBUTING.md) — the dev loop and guard discipline
+- [README](../README.md): what's new, and the full documentation map
+- [docs/RUNS.md](RUNS.md): a dispatched run from claim to merge, and every command on the way
+- [docs/DASHBOARD.md](DASHBOARD.md): the Wall, the sidebar, the Work board and the Usage view
+- [docs/CONFIG.md](CONFIG.md): the environment, precedence, and PM2 migration
+- [docs/HOOKS.md](HOOKS.md) · [docs/EVENTS.md](EVENTS.md): how the plugin and event log work
+- [WORKFLOW.md](../WORKFLOW.md): the dispatch prompt agents run against
+- [CONTRIBUTING.md](../CONTRIBUTING.md): the dev loop and guard discipline

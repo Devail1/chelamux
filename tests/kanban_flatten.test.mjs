@@ -571,7 +571,7 @@ test('renderKanban: a hand-closed run shows "Closed — <reason>", not its stale
     assert.ok(card, 'the hand-closed run never reached the archived column');
     const note = card.querySelector('.kanban-card-closed-note');
     assert.ok(note, 'the hand-closed card has no .kanban-card-closed-note line');
-    assert.equal(note.textContent, 'Closed — superseded by cmx-403');
+    assert.equal(note.textContent, 'Closed: superseded by cmx-403');
     assert.ok(!card.textContent.includes('tmux window disappeared'),
         'the stale last_error still renders on a hand-closed card');
     assert.equal(card.querySelector('.kanban-card-error'), null,
