@@ -114,7 +114,11 @@ const tileBar = () => document.querySelector('#term-stage .term-ctx-bar[data-ctx
 
 test('a wall tile with an estimated reading says so in its context tooltip', async () => {
     CONTEXT = [reading({ estimated: true })];
+    // The boot refresh() already built the wall (CMX-166: its tick no longer waits
+    // behind the rest of the boot), so this render keeps the live tile and the poll is
+    // what brings the new reading in.
     await terminals.renderTerminals();
+    await terminals.termTick();
     await settle();
     assert.ok(tileBar(), 'the wall rendered no context bar for @3');
     assert.equal(tileBar().title, 'Context: 50k/200k (25%~) · estimate; run `chela install-statusline` for exact');

@@ -1325,17 +1325,23 @@ function isDone(a) {
 
 // Single source of the always-visible sidebar agent list. Owns the /api/agents
 // fetch that also primes _agentsCache (schedule dropdown, detail view, etc.).
-async function refreshSidebar() {
+// CMX-166: `onAgents` fires as soon as the agent list is cached, before the archive,
+// layout and Recent sessions reads (the wall needs only the pane list). `ctxRead` is
+// refresh()'s one /api/agents/context read, shared with the wall and checkContext.
+async function refreshSidebar(onAgents, ctxRead) {
     try {
         // Fetch context alongside agents so rows can show ctx% even when the wall
         // (which owns the 4s context poll) isn't the active view. Best-effort:
         // a context failure must not blank the agent list.
         const [agents, ctx] = await Promise.all([
             api('/api/agents'),
-            TERMINALS_ON ? api('/api/agents/context').catch(() => null) : Promise.resolve(null),
+            TERMINALS_ON ? (ctxRead || api('/api/agents/context')).catch(() => null) : Promise.resolve(null),
         ]);
-        setAgentsCache(agents || []);
+        // A non-list reply (an error body) is a failed read: keep the last render.
+        if (!Array.isArray(agents)) throw new Error('/api/agents: not a list');
+        setAgentsCache(agents);
         if (ctx) updateCtxCache(ctx);
+        if (onAgents) onAgents();
         // Awaited BEFORE the render: what another device archived or resumed since the
         // last tick is drawn on this one, not a tick later.
         await Promise.all([refreshArchive(), refreshLayout()]);

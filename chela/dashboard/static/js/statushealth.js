@@ -10,8 +10,8 @@
 // show a marker the moment the feed itself is not answering, so an empty status
 // map and a calm fleet are never confused again.
 //
-// Wiring (main.js, same pattern as resources.js): enterStatusHealth() seeds it once
-// on page load; tickStatusHealth() rides the refresh() loop as a plain poll — the
+// Wiring (main.js, same pattern as resources.js): tickStatusHealth() rides the
+// refresh() loop as a plain poll, and the boot refresh() is its seed (CMX-166) — the
 // feed's own health is not something an SSE delta can push (nothing is listening
 // while it's down).
 // ---------------------------------------------------------------------------
@@ -39,9 +39,5 @@ async function tickStatusHealth() {
     _render(health);
 }
 
-async function enterStatusHealth() {
-    await tickStatusHealth();
-}
-
 // --- Stage 0: ES-module exports ---
-export { enterStatusHealth, tickStatusHealth };
+export { tickStatusHealth };

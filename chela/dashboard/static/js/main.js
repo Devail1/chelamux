@@ -1,5 +1,5 @@
 // --- Stage 0: ES-module imports ---
-import { REFRESH_MS, TERMINALS_ON, currentTab } from './util.js';
+import { REFRESH_MS, TERMINALS_ON, api, currentTab } from './util.js';
 import { refreshSummary } from './header.js';
 import { checkContext } from './agents.js';
 import { refreshSidebar, renderNav, selectView } from './nav.js';
@@ -9,10 +9,9 @@ import './newtask.js';
 import { VIEWS } from './views.js';
 import { findView } from './viewreg.js';
 import { initSSE } from './sse.js';
-import { refreshOrchestratorStatus } from './orchestrator.js';
-import { enterDecisions, tickDecisions } from './decisions.js';
-import { enterResources, tickResources } from './resources.js';
-import { enterStatusHealth, tickStatusHealth } from './statushealth.js';
+import { tickDecisions } from './decisions.js';
+import { tickResources } from './resources.js';
+import { tickStatusHealth } from './statushealth.js';
 import { checkForUpdate } from './version.js';
 import { tickAccessRequests } from './accessreq.js';
 import { tickApprovals } from './approvals.js';
@@ -26,67 +25,71 @@ import { tickApprovals } from './approvals.js';
 // is added or removed.
 // ---------------------------------------------------------------------------
 
+// CMX-166: the first refresh() IS the boot. It runs once, from selectView('terminals')
+// or (terminals off) from the bottom of this file, and seeds what used to be seeded by a
+// second pass of enter*() calls. Measured on a 7-tile wall: that double boot fetched
+// nearly every endpoint twice, and the wall's iframes waited ~1.3 s behind it.
+let _booted = false;
+
 async function refresh() {
-    // CMX-426: a deploy since this page loaded? Offer a reload (never forces one). First
-    // and outside the try: a later poll that throws must not hide a new build.
-    checkForUpdate().catch(() => {});
-    try {
-        await refreshSummary();
+    const boot = !_booted;
+    _booted = true;
+    // Independent lanes, not a chain: one read waiting on another it does not use is
+    // what kept the wall's terminals waiting behind /api/restore, overrides and the
+    // launcher. A lane that throws no longer skips the lanes after it.
+    // ONE /api/agents/context read per tick, handed to its three readers (sidebar rows,
+    // wall tiles, header pills); each fetched its own before.
+    const ctxRead = TERMINALS_ON ? api('/api/agents/context') : null;
+    let paneListKnown;
+    const paneList = new Promise(resolve => { paneListKnown = resolve; });
+    const view = findView(VIEWS, currentTab);
+    // The active view's tick starts as soon as /api/agents is cached (the wall needs
+    // the pane list, nothing else), not after every other read below.
+    const viewTick = paneList.then(() => (view && view.tick ? view.tick(ctxRead) : null));
+    const lanes = [
+        viewTick,
+        refreshSummary(),
         // The sidebar (agent list + WORK badges + the Decisions section) is always
-        // visible, so refresh it on every tick regardless of which canvas view is
-        // active. The badges ride work.js's single /api/dispatcher poll, started
-        // below; Decisions is the fallback poll under its own SSE `log`/
-        // `orchestrator` deltas (sse.js — no longer tab-gated, see decisions.js).
-        await refreshSidebar();
-        await tickDecisions();
-        // Header resources strip — plain poll, no SSE delta (there is nothing
-        // event-driven to push here, unlike Decisions).
-        await tickResources();
-        // Native status feed health marker — same reasoning: no push side, a plain poll.
-        await tickStatusHealth();
-        // 🙋 Sandboxed guests' access requests (CMX-7) — the pill shows on every tab.
-        await tickAccessRequests();
-        // ⚖️ Pending approvals (CMX-103) — the pill shows on every tab; SSE `overrides`
-        // frames refresh it between ticks.
-        await tickApprovals();
-        if (typeof refreshLauncher === 'function') refreshLauncher();
-        const view = findView(VIEWS, currentTab);
-        if (view && view.tick) await view.tick();
-        // checkContext drives both the agent-card bars and the header 5h-RL
-        // pill, so it runs on every view.
-        checkContext();
-    } catch (e) {
-        console.error('Refresh error:', e);
-    }
+        // visible, so it refreshes on every tick regardless of the active view.
+        refreshSidebar(paneListKnown, ctxRead).finally(paneListKnown),
+        // Decisions is the fallback poll under its own SSE `log`/`orchestrator` deltas
+        // (sse.js). Its first tick IS the seed: the cursor starts empty.
+        tickDecisions(),
+        // Header resources strip and native status feed health marker: plain polls.
+        tickResources(),
+        tickStatusHealth(),
+        // 🙋 Sandboxed guests' access requests (CMX-7) and ⚖️ pending approvals
+        // (CMX-103): pills shown on every tab.
+        tickAccessRequests(),
+        tickApprovals(),
+        refreshLauncher(),
+    ];
+    // CMX-426: a deploy since this page loaded? Offer a reload (never forces one). On
+    // boot it waits for the active view's first paint: /api/update/status is the
+    // slowest boot read (~0.8 s) and only contends with the wall for the server.
+    if (boot) viewTick.catch(() => {}).then(() => checkForUpdate().catch(() => {}));
+    else checkForUpdate().catch(() => {});
+    const results = await Promise.allSettled(lanes);
+    for (const r of results) if (r.status === 'rejected') console.error('Refresh error:', r.reason);
+    // checkContext drives both the agent-card bars and the header 5h-RL pill, so it
+    // runs on every view.
+    checkContext(ctxRead).catch(e => console.error('Refresh error:', e));
 }
 
 renderNav();   // the sidebar's view list, from the registry — before anything selects one
 
-// Wall is the flagship default canvas when terminals are enabled.
+// Wall is the flagship default canvas when terminals are enabled. selectView runs the
+// boot refresh() itself; it must not run twice (CMX-166).
 if (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) selectView('terminals');
-
-refresh();
+else refresh();
 setInterval(refresh, REFRESH_MS);
 // The ONE /api/dispatcher poll (board + runs + the always-visible sidebar badges).
 // App-level, not view-level: the badges are on screen from every view.
 startWorkPoll();
 initSSE();
-// Seeds the pane-title toggle (terminals.js) with who owns the decisions inbox
-// right now — without this, every button reads "off" until a takeover fires
-// the SSE `orchestrator` delta.
-refreshOrchestratorStatus();
-// Seeds the sidebar Decisions section (chip + rows) on load — it is always
-// visible now (cmx-107), not gated behind opening a view (the Personas view it
-// used to ride along inside was itself deleted later, CMX-279), so this is
-// the ONLY thing that paints it before the first SSE `log`/`orchestrator` delta
-// or the next refresh() tick.
-enterDecisions();
-// Seeds the header resources strip (CPU/RAM/Disk) on load, same reasoning as
-// enterDecisions() above — otherwise it stays blank until the first refresh().
-enterResources();
-// Seeds the native status feed health marker on load — otherwise a fleet that is
-// ALREADY down on page load stays unmarked until the first refresh() tick.
-enterStatusHealth();
+// The pane-title toggle's orchestrator owner, the sidebar Decisions section, the header
+// resources strip and the status feed health marker are all seeded by the boot
+// refresh() above, in parallel lanes: a separate enter*() call here fetched each twice.
 
 // --- Stage 0: ES-module exports ---
 export { refresh };
