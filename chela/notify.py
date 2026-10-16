@@ -202,15 +202,24 @@ DENIED_COOLDOWN_S = 10 * 60   # at most one push per window per this many second
 DENIED_DETAIL_CHARS = 80
 
 
-def _denied_message(event: dict, names: dict[str, str]) -> str:
-    wid = event.get("wid") or ""
+def denied_detail(event: dict) -> tuple[str, str]:
+    """``(tool, detail)`` of a ``hook.permission_denied`` record — the detail collapsed to one
+    line and clipped to :data:`DENIED_DETAIL_CHARS`, or ``""`` when the tool input has none.
+    Shared with :mod:`chela.inbox` (CMX-155) so the phone and the orchestrator see one cut."""
     payload = event.get("payload") or {}
     tool = str(payload.get("tool_name") or "tool")
     tool_input = payload.get("tool_input")
     detail = hooks._tool_detail(tool, tool_input if isinstance(tool_input, dict) else {})
-    detail = " ".join(detail.split()) or tool
+    detail = " ".join(detail.split())
     if len(detail) > DENIED_DETAIL_CHARS:
         detail = detail[:DENIED_DETAIL_CHARS - 1] + "…"
+    return tool, detail
+
+
+def _denied_message(event: dict, names: dict[str, str]) -> str:
+    wid = event.get("wid") or ""
+    tool, detail = denied_detail(event)
+    detail = detail or tool
     label = f"{wid} {names[wid]}" if names.get(wid) else wid
     return f"{label}: blocked by its permission classifier: {detail}"
 
