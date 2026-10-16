@@ -143,6 +143,14 @@ def window(dead_epoch: str | None, wid: str, *, path: Path | None = None) -> dic
     return rec["windows"].get(wid)
 
 
+def ended(now_epoch: str | None, *, path: Path | None = None) -> list[tuple[str, dict]]:
+    """Every recorded epoch other than ``now_epoch``, most recently seen first, each with
+    its ``windows`` map — what the CMX-152 boot pass walks back through."""
+    epochs = _load(path)["epochs"]
+    ordered = sorted(epochs.items(), key=lambda kv: kv[1].get("last_seen", 0), reverse=True)
+    return [(ep, rec.get("windows") or {}) for ep, rec in ordered if ep != now_epoch]
+
+
 # --- archive: the audit trail for a MANUAL row `chela restore --apply` removed ---------
 #
 # Its own file (`roster-archive.json`), deliberately never a key inside `roster.json` — see
