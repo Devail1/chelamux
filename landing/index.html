@@ -57,9 +57,13 @@
   nav .links a:hover{color:var(--text); text-decoration:none}
 
   /* hero: two columns on desktop (pitch | demo), stacked on a phone */
-  .hero{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.15fr); gap:40px; align-items:center; padding-block:28px 56px}
+  /* the hero band runs wider than the 1080px sections (and the nav with it, so the brand
+     lines up with the pitch): the demo is a fixed 16:10 clip, so only width can grow it to
+     span the pitch column top to bottom (CMX-159) */
+  nav,.hero{max-width:1280px}
+  .hero{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.3fr); gap:44px; align-items:center; padding-block:28px 56px}
   .hero img.banner{width:220px; height:auto; display:block; margin:0 0 6px -6px}
-  .hero h1{font-size:clamp(26px,3.4vw,38px); line-height:1.18; margin:8px 0 14px; letter-spacing:-0.02em}
+  .hero h1{font-size:clamp(26px,3.2vw,38px); line-height:1.18; margin:8px 0 14px; letter-spacing:-0.02em}
   .hero h1 .accent{color:var(--accent)}
   .hero p.sub{font-size:17px; color:var(--text-dim); margin:0 0 22px}
   .hero p.sub strong{color:var(--text)}
@@ -413,20 +417,20 @@ uv run chela status</code></pre>
   </div>
   <div class="features">
     <div class="card">
-      <span class="ic" aria-hidden="true">◷</span>
+      <span class="ic" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
       <h3>Schedule agents</h3>
       <p>Poke an agent on an interval or cron (<code>every 1h</code>, <code>0 */8 * * *</code>)
       or once at a set time. chela types the prompt into its pane when it fires.</p>
     </div>
     <div class="card">
-      <span class="ic" aria-hidden="true">📥</span>
+      <span class="ic" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></span>
       <h3>Closes the loop</h3>
       <p>An orchestrator is just another agent: it can only act when something messages it. chela
       pushes completions, blocks and deaths back into the orchestrator's own session, gated on
       <code>idle</code> so a live agent is never interrupted. <a class="more" href="docs.html#orchestration">How it works →</a></p>
     </div>
     <div class="card">
-      <span class="ic" aria-hidden="true">▦</span>
+      <span class="ic" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg></span>
       <h3>The wall</h3>
       <p>A live grid of every agent's terminal, each pane marked <em>working</em>, <em>needs you</em>,
       <em>PR open</em> or <em>idle</em>, with a context-window bar and 5h / weekly rate-limit
@@ -558,6 +562,7 @@ uv run chela status</code></pre>
     <a href="https://github.com/Devail1/chelamux">GitHub</a>
     <a href="https://github.com/Devail1/chelamux/blob/main/LICENSE">License (AGPL-3.0)</a>
     <a href="https://github.com/Devail1/chelamux/blob/main/CHANGELOG.md">Changelog</a>
+    <a href="https://github.com/Devail1/chelamux/blob/main/NOTICE">Icons: Lucide (ISC)</a>
   </nav>
   <p>chela: a merge gate and control plane for Claude Code agents on tmux</p>
 </footer>

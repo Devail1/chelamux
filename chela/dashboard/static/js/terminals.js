@@ -2478,6 +2478,7 @@ document.addEventListener('load', e => {
     if (!ifr || ifr.tagName !== 'IFRAME' || !ifr.classList.contains('term-frame')) return;
     _wireIframeShortcuts(ifr);
     _reportWatch(ifr);   // register this fresh connection's watched state (CMX-175)
+    _kbPin();            // CMX-154: a pane's terminal (first view, tile switch) fits the box it landed in
 }, true);
 
 // Rebuild the single-mode agent dropdown's <option> list in place, preserving
@@ -3964,10 +3965,29 @@ function _kbFitPane(vv, bar, occluded) {
     if (fit === null) {
         root.classList.remove('kb-fit');
         root.style.removeProperty('--kb-pane-fit-h');
-        return;
+    } else {
+        root.style.setProperty('--kb-pane-fit-h', fit + 'px');
+        root.classList.add('kb-fit');
     }
-    root.style.setProperty('--kb-pane-fit-h', fit + 'px');
-    root.classList.add('kb-fit');
+    _refitPaneTerm();
+}
+
+// CMX-154: make the phone pane's terminal re-fit to the box it now has. Resizing
+// the pane resizes its ttyd iframe, and on a desktop browser that iframe's own
+// `resize` re-fits xterm — but on iPhone Safari the box shrank (keyboard up, pane
+// ended at the keybar) while xterm KEPT its taller row count, so its bottom rows
+// (the rest of a multi-line prompt, Claude's status line) sat clipped below the
+// tile footer until a scroll happened to re-fit it. So we don't rely on the
+// iframe's event: after every fit we call ttyd's own `window.term.fit()` (the
+// handle the font shim in app.py uses too). fit() reads the iframe's computed
+// size synchronously, so it sees the height just applied; it is a no-op when the
+// rows/cols already match. Phone only — desktop keeps ttyd's own resize handling.
+function _refitPaneTerm() {
+    if (!_isMobileTerm()) return;
+    const ifr = document.querySelector('#term-stage.term-single .term-pane iframe.term-frame');
+    let term = null;
+    try { term = ifr && ifr.contentWindow && ifr.contentWindow.term; } catch (e) { return; }
+    if (term && typeof term.fit === 'function') term.fit();
 }
 
 if (window.visualViewport) {
@@ -3986,7 +4006,7 @@ if (typeof ResizeObserver === 'function') {
 }
 
 // --- Stage 0: ES-module exports ---
-export { SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, _refitPaneTerm, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

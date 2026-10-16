@@ -64,7 +64,9 @@ def test_a_new_epoch_resumes_the_ended_epochs_manual_rows_exactly_once(tmp_path)
     run, m, calls, notices = _pass(tmp_path, [_manual(), _manual(stamped="1-old"), revivable])
     out = run()
     assert calls == [([_manual()], [RUN])]
-    assert json.loads(m.read_text()) == {"epoch": NOW}
+    assert json.loads(m.read_text()) == {"epoch": NOW, "owed": [   # CMX-152: carried
+        {"session_id": SID, "cwd": "/home/u/five", "label": "five", "wid": "@3",
+         "store": "session-ids"}]}
     assert out == {"previous": PREV, "epoch": NOW, "resumed": ["five (resumed at @9)"],
                    "not_resumed": []}
     assert notices == [("restore_boot", "tmux restarted — came back: five (resumed at @9); "
