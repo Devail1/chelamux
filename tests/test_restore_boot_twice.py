@@ -71,14 +71,15 @@ def test_a_session_from_two_epochs_is_launched_from_the_newest_only(tmp_path):
     assert r.spawned == [f"claude --resume {S1}"] and r.out["resumed"][0].startswith("new ")
 
 
-def _pass_at_b_then_c(tmp_path, *, live=lambda sid: None, b_windows=None):
-    """A → B: the pass resumes S1 (orchestrator) and S2. Then C, before B was sampled."""
+def _pass_at_b_then_c(tmp_path, *, live=lambda sid: None, b_windows=None, c_cwd=None):
+    """A → B: the pass resumes S1 (orchestrator) and S2. Then C, before B was sampled — and
+    C's gather also holds a B-stamped row of S1 (the window the B pass relaunched)."""
     at_b = _boot(tmp_path, B, {"epoch": A},
                  [_row(A, store="inbox.orchestrator"), _row(A, sid=S2, cwd="/home/u/mmo",
                                                             label="mmo", wid="@2")],
                  [(A, WINS)])
     at_c = _boot(tmp_path, C, at_b.marker,
-                 [_row(B, cwd=None, store="inbox.orchestrator", wid="@11")],
+                 [_row(B, cwd=c_cwd, store="inbox.orchestrator", wid="@11")],
                  [(B, b_windows or {}), (A, WINS)], live=live)
     return at_b, at_c
 
@@ -93,6 +94,23 @@ def test_sessions_the_b_pass_resumed_come_back_at_c_once_each(tmp_path):
                                    "mmo (resumed at @12)"]
     assert [o["session_id"] for o in at_c.marker["owed"]] == [S1, S2]
     assert at_c.notices[0][1].startswith(f"tmux restarted twice; recovered from epoch {A}")
+
+
+def test_a_carried_session_is_not_launched_again_from_a_resumable_gather_row(tmp_path):
+    """The gather row of S1 HAS a cwd, so only the carried-vs-gather dedupe stands between
+    it and a second ``claude --resume S1`` in the same pass (and a second owed entry)."""
+    _, at_c = _pass_at_b_then_c(tmp_path, c_cwd="/home/u/orch")
+    assert at_c.spawned.count(f"claude --resume {S1}") == 1
+    assert at_c.spawned == [f"claude --resume {S1}", f"claude --resume {S2}"]
+    assert at_c.out["not_resumed"] == []
+    assert [o["session_id"] for o in at_c.marker["owed"]] == [S1, S2]
+
+
+def test_everything_owed_already_live_is_quiet_and_claims_no_recovery(tmp_path):
+    """B was sampled (so no walk back) but showed neither owed session; both are live now."""
+    _, at_c = _pass_at_b_then_c(tmp_path, live=lambda sid: "@7", b_windows=WINS)
+    assert at_c.spawned == [] and "recovered_from" not in at_c.out
+    assert [o["session_id"] for o in at_c.marker["owed"]] == [S1, S2]
 
 
 def test_a_carried_session_already_live_now_is_not_relaunched_but_stays_owed(tmp_path):
@@ -121,6 +139,10 @@ def test_a_malformed_owed_list_launches_only_complete_entries(tmp_path, owed):
     r = _boot(tmp_path, C, {"epoch": B, "owed": owed}, [], [(B, WINS)])
     complete = isinstance(owed, list) and owed[0] and owed[0].get("cwd") and owed[0].get("session_id")
     assert r.spawned == ([f"claude --resume {S1}"] if complete else [])
+    assert r.out["not_resumed"] == []              # an incomplete entry is dropped, not tried
+    assert r.marker.get("owed", []) == ([{"session_id": S1, "cwd": "/x", "label": "",
+                                          "wid": "?", "store": restore.CARRIED}]
+                                        if complete else [])
 
 
 def test_roster_ended_lists_the_other_epochs_most_recently_seen_first(tmp_path):
