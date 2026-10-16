@@ -12,6 +12,7 @@ import { refresh } from './main.js';
 import { refreshCostTab } from './usage.js';
 import { resolveWindowId } from './windowid.js';
 import { followUpdate } from './updateflow.js';
+import { memNote, stepPayload, workflowNote } from './concurrencymodel.js';
 import { DISPATCHED_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, groupSidebar, isArchivable, moveGroup, normalizeView, primaryWindow, runLabel, runState } from './sidebarmodel.js';
 
 // The ONE Archived section at the bottom of the sidebar (CMX-75) — its collapse state
@@ -2110,6 +2111,14 @@ function renderSettings(focus) {
         </div>
 
         <div class="settings-tabpanel" data-tab="dispatch">
+        <section class="settings-section" id="settings-concurrency" data-keywords="agents judges at once concurrency parallel memory">
+            <h4>Concurrency</h4>
+            <p class="s-desc">How many agents and judges run at once. Applies on the dispatcher's
+            next tick, no restart. Lowering never stops a running agent or judge: it only holds
+            new claims until the count drops under the limit.</p>
+            <div id="concurrency-rows" class="s-dispatch-rows"><div class="s-desc">Loading…</div></div>
+            <div id="concurrency-msg" class="s-savemsg"></div>
+        </section>
         <section class="settings-section" id="settings-dispatch" data-keywords="judge critic merge workflow concurrency retries">
             <h4>Dispatch</h4>
             <p class="s-desc">Dispatcher, judge, and critic policy. Blank a field to fall back
@@ -2310,6 +2319,7 @@ function renderSettings(focus) {
     _loadFileDropSetting();
     _loadTimingSettings();
     _loadDispatchSettings();
+    _loadConcurrencySettings();
     _loadSettingsStatus();
 }
 
@@ -2923,6 +2933,49 @@ function _renderDispatchRows(knobs) {
         </div>`;
     }).join('');
     if (_settingsQuery) _applySettingsSearch();
+}
+
+// Concurrency rows (CMX-164): "Agents at once" per workflow + "Judges at once". Each
+// stepper click POSTs at once; the server validates (1 to 8) and logs the change.
+function _concurrencyRow(label, value, note, args, resettable) {
+    return `
+        <div class="s-row">
+            <span class="s-rowlabel">${escHtml(label)}</span>
+            <button class="btn" onclick="chela.setConcurrency(${args}, -1)" aria-label="Decrease">−</button>
+            <span class="s-num">${escHtml(String(value))}</span>
+            <button class="btn" onclick="chela.setConcurrency(${args}, 1)" aria-label="Increase">+</button>
+            ${resettable ? `<button class="btn" onclick="chela.setConcurrency(${args}, 0)">Reset</button>` : ''}
+        </div>
+        <div class="s-desc">${escHtml(note)}</div>`;
+}
+
+let _concurrency = null;
+function _renderConcurrency(body) {
+    _concurrency = body;
+    const j = body.judges;
+    document.getElementById('concurrency-rows').innerHTML = body.workflows.map((w, i) => _concurrencyRow(
+        `Agents at once: ${w.name}`, w.effective, workflowNote(body, w), `'agents', ${i}`, w.override != null)).join('')
+        + _concurrencyRow('Judges at once', j.effective, `Source: ${j.source}. ` + memNote(body, j.effective),
+            `'judges', 0`, j.source === 'settings');
+    if (_settingsQuery) _applySettingsSearch();
+}
+
+async function _loadConcurrencySettings() {
+    try { _renderConcurrency(await api('/api/config/concurrency')); }
+    catch (e) { document.getElementById('concurrency-rows').innerHTML = '<div class="s-desc">(unavailable)</div>'; }
+}
+
+async function setConcurrency(kind, idx, delta) {
+    const msg = document.getElementById('concurrency-msg');
+    try {
+        const body = await api('/api/config/concurrency', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(stepPayload(_concurrency, kind, idx, delta)),
+        });
+        if (body.error) { msg.textContent = 'Not saved: ' + body.error; return; }
+        msg.textContent = '';
+        _renderConcurrency(body);
+    } catch (e) { msg.textContent = 'Save failed. Nothing changed.'; }
 }
 
 async function _loadDispatchSettings() {
@@ -3571,4 +3624,4 @@ export { altSwitchKeydown, setAltHeld, openSidebarRow, archiveKeys, rowMenuActio
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _updateFlowDeps, applyUpdate, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
+Object.assign(window.chela, { _updateFlowDeps, applyUpdate, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });

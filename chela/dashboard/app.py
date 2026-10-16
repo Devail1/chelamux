@@ -28,7 +28,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
+from chela import agent_manager, capabilities, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import resources, term_themes
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -3040,6 +3040,63 @@ def api_config_dispatch():
         for key, value in parsed.items():
             config.apply_dispatch(key, value)
     return jsonify({"knobs": config.dispatch_snapshot()})
+
+
+def _concurrency_available_bytes() -> tuple[int | None, str]:
+    """Free memory for the Settings concurrency rows: the memory-slice line's headroom
+    when a slice bound is in force (``memcap.live_bound``), else the box's MemAvailable."""
+    from chela import memcap
+    bound = memcap.live_bound()
+    if bound and bound.get("current_bytes") is not None:
+        return max(0, bound["max_bytes"] - bound["current_bytes"]), bound["unit"]
+    mem = resources._sample_mem()
+    if mem.get("total") is None:
+        return None, "unknown"
+    return mem["total"] - mem["used"], "MemAvailable"
+
+
+def _concurrency_snapshot() -> dict:
+    rows = []
+    for p in _discover_dispatch_workflows(dispatcher.list_runs()):
+        try:
+            file_value = load_workflow(p).get("concurrency", "max", default=1) or 1
+        except Exception:
+            file_value = None
+        override = concurrency.agent_override(p)
+        rows.append({"path": str(p), "name": p.parent.name, "file_value": file_value,
+                     "override": override,
+                     "effective": override if override is not None else file_value})
+    value, source = concurrency.judges_at_once()
+    available, available_source = _concurrency_available_bytes()
+    return {"min": concurrency.MIN, "max": concurrency.MAX, "workflows": rows,
+            "judges": {"effective": value, "source": source},
+            "judge_peak_bytes": concurrency.JUDGE_PEAK_BYTES,
+            "available_bytes": available, "available_source": available_source}
+
+
+@app.route("/api/config/concurrency", methods=["GET", "POST"])
+@require_auth
+def api_config_concurrency():
+    """Settings > "Agents at once" (per workflow) and "Judges at once" (CMX-164).
+
+    POST ``{"workflow": <path>, "value": n}`` or ``{"judges": n}``; an empty value clears
+    back to WORKFLOW.md / the env var. Validated HERE (integer 1 to 8, and a workflow
+    the dispatcher actually knows), not just in the UI. Read by the dispatcher per tick,
+    and every change lands in the event log (who, old -> new).
+    """
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        if "judges" in data:
+            err = concurrency.set_judges(data["judges"], _granted_by())
+        else:
+            known = {str(p.resolve()) for p in _discover_dispatch_workflows(dispatcher.list_runs())}
+            wf = data.get("workflow")
+            if not isinstance(wf, str) or str(Path(wf).resolve()) not in known:
+                return jsonify({"error": "unknown workflow"}), 400
+            err = concurrency.set_agents(wf, data.get("value"), _granted_by())
+        if err:
+            return jsonify({"error": err}), 400
+    return jsonify(_concurrency_snapshot())
 
 
 def _notify_host(url: str) -> str:
