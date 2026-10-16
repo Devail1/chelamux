@@ -463,16 +463,42 @@ def live_worktree_owner(cwd: str | None, runs: list[dict] | None) -> str | None:
     ``cwd``. CMX-125: a re-spawned run's OLD session no longer joins its row by (wid, epoch),
     but the worktree does not move — while the run is not over, only the run gets a window in it.
     """
+    return _worktree_run(cwd, runs, lambda row: not dispatcher.run_is_terminal(row))
+
+
+def relaunching_run(cwd: str | None, runs: list[dict] | None) -> str | None:
+    """CMX-156: the ``task_id`` of the run in ``cwd``'s worktree that the dispatcher will
+    relaunch ON ITS OWN (:func:`chela.dispatcher.run_will_relaunch` — the claim loop's own
+    predicate, e.g. ``failed`` after a tmux restart, "not counted"). Resuming its old session
+    would put two agents on one task in one worktree once that relaunch lands."""
+    return _worktree_run(cwd, runs, dispatcher.run_will_relaunch)
+
+
+def _worktree_run(cwd: str | None, runs: list[dict] | None, owns) -> str | None:
     if not cwd:
         return None
     target = os.path.normpath(cwd)
     for row in runs or []:
         wt = row.get("worktree_path")
-        if not wt or dispatcher.run_is_terminal(row):
+        if not wt or not owns(row):
             continue
         wt = os.path.normpath(wt)
         if target == wt or target.startswith(wt + os.sep):
             return row.get("task_id") or "?"
+    return None
+
+
+def not_offered_reason(cwd: str | None, runs: list[dict] | None) -> str | None:
+    """Why a session in ``cwd`` is not offered for resume because a run still owns that
+    worktree (``None`` when none does) — the one sentence every restore surface prints."""
+    relaunch = relaunching_run(cwd, runs)
+    if relaunch:
+        return (f"the dispatcher will relaunch run {relaunch} itself in this worktree — "
+                "resuming the old session would put two agents on one task")
+    owner = live_worktree_owner(cwd, runs)
+    if owner:
+        return (f"its worktree belongs to run {owner}, still in flight — the dispatcher "
+                "gives that run its one window")
     return None
 
 
@@ -616,9 +642,7 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
             continue
         owner = live_worktree_owner(v.cwd, runs)
         if owner:
-            resumed_by_id[id(v)] = ApplyResult(
-                v, SKIPPED, f"its worktree belongs to run {owner}, still in flight — the "
-                            "dispatcher gives that run its one window")
+            resumed_by_id[id(v)] = ApplyResult(v, SKIPPED, not_offered_reason(v.cwd, runs))
             continue
 
         blocked = resume_blocked(v.session_id)

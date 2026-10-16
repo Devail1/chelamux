@@ -671,3 +671,19 @@ def test_a_failed_close_write_does_not_record_the_canceled_edge(repo, team):
     got = dispatcher.close_run("CMX-7", "not needed")
     assert got["ok"] and got["tracker"] == "failed"
     assert _row("CMX-7")["tracker_edge"] == "in_progress"
+
+
+def test_a_not_counted_failure_is_relaunched_by_the_tick_and_not_offered_by_restore(
+        repo, team, launched):
+    """CMX-156 VERIFY, in an isolated CHELA_DIR: a run failed by a tmux restart ("not
+    counted") is held back from Restore by the SAME predicate the claim loop uses, and the
+    next tick claims it."""
+    from chela import restore
+    team.issues = {"CMX-19": issue(19, "In Progress")}
+    wt = str(repo.parent / "state" / "worktrees" / "CMX-19")
+    _seed(repo, "CMX-19", "failed", attempt=0, worktree_path=wt,
+          last_error="tmux server restarted (attempt not counted)")
+    assert restore.relaunching_run(wt, dispatcher.list_runs()) == "CMX-19"
+    assert dispatcher.tick(repo / "WORKFLOW.md")["dispatched"] == 1
+    assert (_row("CMX-19")["status"], _row("CMX-19")["attempt"], launched) == (
+        "running", 1, ["CMX-19"])

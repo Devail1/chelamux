@@ -255,6 +255,23 @@ test('a dispatcher row with no matching resumable rows still shows the section (
         'the resumable-row count badge counts only resumable rows');
 });
 
+// CMX-156: a row whose run the dispatcher will relaunch itself is shown read-only and
+// OUTSIDE the toggle, saying why; the rest of the dispatcher rows stay behind it.
+test('a will-relaunch dispatcher row shows read-only, unhidden, saying why', () => {
+    const relaunch = { ...DISPATCHER_ROW, wid: '@7', relaunch: 'CMX-137',
+                       dismiss_key: 'row:session-ids|@7|786-1784045825' };
+    nav.renderRecentSessions({ rows: [], dispatcher_rows: [relaunch, DISPATCHER_ROW], hidden: 1 });
+    const shown = document.querySelectorAll('#side-recent .recent-row-dispatcher');
+    assert.equal(shown.length, 1, 'only the will-relaunch row renders before the toggle');
+    assert.equal(shown[0].querySelector('.ar-recap').textContent, '↻ dispatcher will relaunch CMX-137');
+    assert.equal(shown[0].querySelector('.recent-resume'), null);
+    assert.equal(document.querySelector('#side-recent .recent-toggle-dispatcher').textContent,
+        'Show 1 hidden dispatcher session');
+    nav.renderRecentSessions({ rows: [], dispatcher_rows: [DISPATCHER_ROW], hidden: 1 });
+    assert.equal(document.querySelectorAll('#side-recent .recent-row-dispatcher').length, 0,
+        'negative control: a row with no relaunch stays behind the toggle');
+});
+
 test('a bare array (legacy shape) renders with no dispatcher toggle at all', () => {
     nav.renderRecentSessions([ROW]);
 

@@ -2518,8 +2518,14 @@ def api_restore():
                      and restore.live_worktree_owner(v.cwd, runs) is None)
         if _dismiss_key(v, resumable=resumable) in dismissed:
             continue
-        (rows if resumable else dispatcher_rows).append(_shape_restore_row(v, resumable=resumable))
-    return jsonify({"rows": rows, "dispatcher_rows": dispatcher_rows, "hidden": len(dispatcher_rows)})
+        shaped = _shape_restore_row(v, resumable=resumable)
+        relaunch = None if resumable else restore.relaunching_run(v.cwd, runs)
+        if relaunch:
+            # CMX-156: shown read-only, outside the toggle, as "dispatcher will relaunch".
+            shaped["relaunch"] = relaunch
+        (rows if resumable else dispatcher_rows).append(shaped)
+    return jsonify({"rows": rows, "dispatcher_rows": dispatcher_rows,
+                    "hidden": sum(1 for r in dispatcher_rows if "relaunch" not in r)})
 
 
 def _session_ids_from_body() -> list[str] | None:
@@ -2608,7 +2614,13 @@ def api_restore_resume():
                         "error": "this session's working directory no longer exists — "
                                  "nowhere to resume it into"}), 409
 
-    owner = restore.live_worktree_owner(verdict.cwd, dispatcher.list_runs())
+    runs = dispatcher.list_runs()
+    relaunch = restore.relaunching_run(verdict.cwd, runs)
+    if relaunch:
+        return jsonify({"ok": False,
+                        "error": f"the dispatcher will relaunch run {relaunch} itself in this "
+                                 "worktree — resuming here would be two agents on one task"}), 409
+    owner = restore.live_worktree_owner(verdict.cwd, runs)
     if owner:
         return jsonify({"ok": False,
                         "error": f"run {owner} is still in flight in this worktree and has "

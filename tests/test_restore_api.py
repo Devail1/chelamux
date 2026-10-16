@@ -829,3 +829,34 @@ def test_resume_refuses_a_session_in_a_live_runs_worktree(client, monkeypatch):
     resp = _resume(client, store="session-ids", wid="@7", session_id=SID_DEAD, stamped_epoch=OLD)
     assert resp.status_code == 409 and spawned == []
     assert "run CMX-95 is still in flight" in resp.get_json()["error"]
+
+
+# CMX-156: a run the dispatcher will relaunch ITSELF (failed, the tmux restart "not counted")
+# is shown read-only as "dispatcher will relaunch", never offered; a closed run's is offered.
+_NOT_COUNTED = {**_LIVE, "task_id": "CMX-137", "status": "failed", "attempt": 0,
+                "last_error": "tmux server restarted (attempt not counted)"}
+
+
+@pytest.mark.parametrize("run,rows,relaunch,hidden", [
+    (_NOT_COUNTED, 0, "CMX-137", 0),
+    ({**_NOT_COUNTED, "status": "closed"}, 1, None, 0),           # negative control
+    (_LIVE, 0, None, 1),                                          # CMX-125: live, toggle
+])
+def test_a_run_the_dispatcher_will_relaunch_is_shown_not_offered(client, monkeypatch, run, rows,
+                                                                relaunch, hidden):
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual(wid="@7", cwd=WT)])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [run])
+    data = client.get("/api/restore").get_json()
+    assert (len(data["rows"]), data["hidden"]) == (rows, hidden)
+    assert [r.get("relaunch") for r in data["dispatcher_rows"]] == ([] if rows else [relaunch])
+
+
+def test_resume_refuses_a_session_whose_run_the_dispatcher_will_relaunch(client, monkeypatch):
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual(wid="@7", cwd=WT)])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [_NOT_COUNTED])
+    spawned = []
+    monkeypatch.setattr(dash.spawn, "spawn_window", lambda *a, **k: spawned.append(1))
+    resp = _resume(client, store="session-ids", wid="@7", session_id=SID_DEAD, stamped_epoch=OLD)
+    assert resp.status_code == 409 and spawned == []
+    assert resp.get_json()["error"] == ("the dispatcher will relaunch run CMX-137 itself in this "
+                                        "worktree — resuming here would be two agents on one task")

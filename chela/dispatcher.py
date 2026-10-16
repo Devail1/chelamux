@@ -1022,11 +1022,27 @@ def run_is_terminal(row) -> bool:
     """
     if row.get("pr_state") == "merged":
         return True
-    if row.get("status") == "failed" and (row.get("attempt") or 1) >= MAX_ATTEMPTS:
-        return True
-    if row.get("status") == "closed" and row.get("requeue_pending"):
-        return False                     # CMX-65: requeued — the next tick claims it again
-    return row.get("status") in ("done", "closed")
+    # CMX-156: built on the claim loop's own retry predicate, so a row the claim will take
+    # again (a failed retry, a requeued close) can never read as over here.
+    return not (run_will_relaunch(row)
+                or row.get("status") in (*ACTIVE_STATUSES, *REVIEW_STATUSES))
+
+
+def run_will_relaunch(row) -> bool:
+    """CMX-156 — the claim loop's retry predicate: will the dispatcher's next claim take
+    this EXISTING `runs` row again on its own (a fresh attempt in its worktree)? A `failed`
+    row below MAX_ATTEMPTS (a tmux restart's "not counted" failure included) or a
+    requeued `closed` row (CMX-65); never a merged PR, never a row in flight, in review or
+    done. ``chela.restore`` reads the SAME function, so Restore never offers a session the
+    dispatcher is about to relaunch next to it. Reads with ``.get()`` (a plain dict)."""
+    if row.get("pr_state") == "merged":
+        return False                     # it shipped — never a 2nd run
+    status = row.get("status")
+    if status == "closed":
+        return bool(row.get("requeue_pending"))
+    if status in NOT_CLAIMABLE:
+        return False
+    return not (status == "failed" and (row.get("attempt") or 0) >= MAX_ATTEMPTS)
 
 
 def reconcile_trial_ledger(existing_text: str, rows: list[sqlite3.Row]) -> tuple[str, list[str], list[str]]:
@@ -6351,36 +6367,21 @@ def tick(workflow_path: str | Path) -> dict:
                 "SELECT status, attempt, pr_state, requeue_pending FROM runs WHERE task_id=?",
                 (task.id,),
             ).fetchone()
-            # 🗂️🔁 CMX-65: the ONE `closed` row a claim may take — a human ran
-            # `chela close --requeue`. It gets a FRESH attempt (attempt 1, its own
-            # `-r<N>` branch and worktree, see `_spawn`), never the closed run's.
-            requeue = bool(existing and existing["status"] == "closed"
-                           and existing["requeue_pending"])
-            if existing and requeue:
-                if existing["pr_state"] == "merged":
-                    continue                   # it shipped after all — never a 2nd run
-                attempt = 1
-            elif existing:
-                # Fresh tasks only: anything already in flight (claimed/running), parked in
-                # review (awaiting_review / changes_requested / needs_human — each of which
-                # already owns a branch, a worktree and a PR), or already shipped (done) is
-                # excluded. ⛔ A `changes_requested` row claimed here as a fresh task would
-                # fork a NEW worktree off the base branch and abandon the PR under review.
-                # Only `failed` rows are eligible for a retry, and only until MAX_ATTEMPTS.
-                if existing["status"] in NOT_CLAIMABLE:
-                    continue
-                # Belt-and-suspenders out-of-band-merge guard: whatever status this row
-                # reads THIS tick, a `pr_state='merged'` row is never re-dispatched — the
-                # reconcile pass above (1.) should already have flipped it to `done` before
-                # we ever got here, but a surviving stale status (a race, a schema this
-                # tick's reconcile didn't cover) must not fall through to a duplicate spawn.
-                if existing["pr_state"] == "merged":
-                    continue
-                if existing["status"] == "failed" and existing["attempt"] >= MAX_ATTEMPTS:
-                    continue
-                attempt = existing["attempt"] + 1
-            else:
-                attempt = 1
+            existing = dict(existing) if existing else None
+            # Fresh tasks only, unless `run_will_relaunch` (CMX-156 — the ONE retry
+            # predicate, shared with `chela.restore`) says the row is the dispatcher's to
+            # retry: a `failed` row below MAX_ATTEMPTS, or the ONE `closed` row a claim may
+            # take — a human ran `chela close --requeue` (CMX-65). Anything in flight
+            # (claimed/running), parked in review (awaiting_review / changes_requested /
+            # needs_human — each owns a branch, a worktree and a PR), done, or carrying a
+            # merged PR is excluded. ⛔ A `changes_requested` row claimed here as a fresh
+            # task would fork a NEW worktree off the base branch and abandon its PR.
+            if existing and not run_will_relaunch(existing):
+                continue
+            # 🗂️🔁 CMX-65: a requeue gets a FRESH attempt (attempt 1, its own `-r<N>`
+            # branch and worktree, see `_spawn`), never the closed run's.
+            requeue = bool(existing and existing["status"] == "closed")
+            attempt = existing["attempt"] + 1 if existing and not requeue else 1
 
             try:
                 # `requeue` only when set: a plain claim keeps `_spawn`'s 4-arg call shape.

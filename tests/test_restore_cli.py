@@ -25,6 +25,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import sqlite3
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -2075,3 +2076,31 @@ def test_every_mutating_tmux_subcommand_is_pinned_in_the_membership_set(subcmd):
     from conftest import _tmux_violation
 
     assert _tmux_violation(["tmux", subcmd, "-t", "@1"], None) is not None
+
+
+# CMX-156: `chela restore` never prints a relaunch line for a session whose run the
+# dispatcher will relaunch itself; a closed run's session keeps its line.
+@pytest.mark.parametrize("status,shown", [
+    ("failed", "not offered: the dispatcher will relaunch run CMX-137 itself"),
+    ("closed", f"cd {CWD_FIVE} && CHELA_WID=@N claude --resume {SID_DEAD}"),
+])
+def test_chela_restore_does_not_offer_a_session_the_dispatcher_will_relaunch(
+        live_stores, capsys, status, shown):
+    from chela import dispatcher
+    live_stores.setattr(dispatcher, "list_runs", lambda *a, **k: [{
+        "task_id": "CMX-137", "status": status, "attempt": 0, "worktree_path": CWD_FIVE}])
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+    assert _line_with(capsys.readouterr().out, "[session-ids] @5  MANUAL", shown)
+
+
+def test_chela_restore_offers_nothing_when_the_runs_table_is_unreadable(live_stores, capsys):
+    from chela import dispatcher
+
+    def boom(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+    live_stores.setattr(dispatcher, "list_runs", boom)
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+    assert _line_with(capsys.readouterr().out, "[session-ids] @5  MANUAL",
+                      "not offered: the dispatcher's runs table is unreadable")
