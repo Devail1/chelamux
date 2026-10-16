@@ -18,6 +18,7 @@ who owns delivery.
 from __future__ import annotations
 
 import itertools
+import json
 
 import pytest
 
@@ -245,3 +246,63 @@ def test_a_takeover_pushes_an_sse_orchestrator_frame(client, windows, monkeypatc
         f"tells a live client to repaint (got: {frame!r})"
     )
     assert f'"wid": "{PANE_A}"' in frame
+
+
+# --- CMX-139: a pin change from ANY writer reaches the stream -------------------
+#
+# The SSE producer diffs the pin in inbox.json, which every writer goes through —
+# `chela watch`, the SessionStart hook's `--if-unclaimed`, `chela restore --resume`,
+# a take-over, the dashboard. These drive `inbox.register` the way the CLI does
+# (source="watch"), NOT the dashboard route, and assert on the next frame.
+
+def _idle_stream(monkeypatch):
+    """A live `_sse_stream` with every other snapshot quiet, primed past `hello`."""
+    monkeypatch.setattr(dash, "_sse_windows_snapshot", lambda: {})
+    monkeypatch.setattr(dash, "_sse_runs_snapshot", lambda: {})
+    monkeypatch.setattr(dash, "_sse_terms_snapshot", lambda: set())
+    monkeypatch.setattr(dash, "_sse_log_snapshot", lambda: {})
+    monkeypatch.setattr(dash, "_sse_overrides_snapshot", lambda: ())
+    monkeypatch.setattr(dash.time, "sleep", lambda _s: None)
+    ticks = itertools.count(0.0, dash.SSE_KEEPALIVE_INTERVAL + 1.0)
+    monkeypatch.setattr(dash.time, "monotonic", lambda: next(ticks))
+    stream = dash._sse_stream()
+    assert next(stream).startswith("event: hello")
+    return stream
+
+
+def _orch_frame(frame: str) -> dict:
+    head, _, data = frame.partition("\ndata: ")
+    assert head == "event: orchestrator", f"expected an orchestrator frame, got {frame!r}"
+    return json.loads(data)
+
+
+def test_a_cli_registration_pushes_the_new_wid(windows, monkeypatch):
+    stream = _idle_stream(monkeypatch)
+    assert inbox.register(PANE_B, source="watch")["ok"]
+    assert _orch_frame(next(stream)) == {"wid": PANE_B, "epoch": "1-100", "name": "pane-b"}
+
+
+def test_same_wid_under_a_new_epoch_is_a_change(windows, monkeypatch):
+    """The WSL-restart case: tmux renumbered, and the orchestrator re-registered from the
+    CLI as the SAME wid under a new server. A wid-only diff saw nothing."""
+    assert inbox.register(PANE_A, source="watch")["ok"]
+    stream = _idle_stream(monkeypatch)
+    monkeypatch.setattr(epoch, "current", lambda: "2-200")
+    assert inbox.register(PANE_A, source="watch")["ok"]
+    assert _orch_frame(next(stream)) == {"wid": PANE_A, "epoch": "2-200", "name": "pane-a"}
+
+
+def test_same_wid_and_epoch_under_a_new_name_is_a_change(windows, monkeypatch):
+    """The owner chip renders the name: a re-registration that only renamed it must repaint."""
+    assert inbox.register(PANE_A, source="watch")["ok"]
+    stream = _idle_stream(monkeypatch)
+    windows[PANE_A] = "renamed"
+    assert inbox.register(PANE_A, source="watch")["ok"]
+    assert _orch_frame(next(stream))["name"] == "renamed"
+
+
+def test_an_unchanged_pin_pushes_no_orchestrator_frame(windows, monkeypatch):
+    assert inbox.register(PANE_A, source="watch")["ok"]
+    stream = _idle_stream(monkeypatch)
+    assert inbox.register(PANE_A, source="watch")["ok"]   # same wid, epoch and name
+    assert next(stream) == ": keepalive\n\n"

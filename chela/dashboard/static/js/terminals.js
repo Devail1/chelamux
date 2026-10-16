@@ -1323,7 +1323,10 @@ function paneHead(wid, draggable) {
     // untouched, just anchored at a plain button instead of the pill. The
     // pane № moved OUT of the header (CMX-119), and is gone since CMX-85 —
     // the sidebar rows carry the Alt+N numbers.
-    const dot = `<span class="gs-dot-ring" data-wid="${attrEsc(wid)}"><span class="gs-dot term-status-dot" data-status-for="${attrEsc(wid)}" data-wid="${attrEsc(wid)}" title="…"></span></span>`;
+    // CMX-139: born with the ring when this pane ALREADY owns the slot — a pane
+    // (re)built after the status landed must not wait for the next change to show it.
+    const orchRing = orchestratorState().wid === wid ? ' gs-dot-orch' : '';
+    const dot = `<span class="gs-dot-ring${orchRing}" data-wid="${attrEsc(wid)}"><span class="gs-dot term-status-dot" data-status-for="${attrEsc(wid)}" data-wid="${attrEsc(wid)}" title="…"></span></span>`;
     // Wall redesign slice 1 (docs/wall-redesign.md): the header's state pill.
     // CMX-393: the WORD only — the SHAPE is `.gs-dot` at the head's far left,
     // and a glyph in here drew every state twice (`● ● working`). Shape + word
