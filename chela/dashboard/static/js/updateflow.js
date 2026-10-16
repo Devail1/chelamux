@@ -8,6 +8,23 @@ const POLL_MS = 2000;
 // How long a page follows one click; past it, "couldn't confirm" — unknown is never success.
 const FOLLOW_TIMEOUT_MS = 180000;
 
+// What the global banner (version.js, CMX-129) offers for an /api/update/status payload,
+// or null for nothing. Only an affirmative, readable "these services run old code" offers.
+// A missing payload, `ok:false`, or a freshness check that could not answer (`stale_ok`
+// not true) is UNKNOWN: it offers nothing, and it is not "nothing stale" either.
+function staleOffer(st) {
+    if (!st || st.ok !== true || st.stale_ok !== true) return null;
+    const names = Array.isArray(st.stale_services) ? st.stale_services : [];
+    if (!names.length) return null;
+    const one = names.length === 1;
+    return {
+        names,
+        key: names.join(','),
+        text: `${names.length} service${one ? '' : 's'} run${one ? 's' : ''} old code`,
+        label: st.behind > 0 ? 'Update & restart' : 'Restart',
+    };
+}
+
 function _doneText(r) {
     const restarted = (r.restarted || []).slice().sort();
     const what = restarted.length
@@ -58,4 +75,4 @@ async function followUpdate(resp, onStep, {
     }
 }
 
-export { FOLLOW_TIMEOUT_MS, POLL_MS, followUpdate, updateOutcome };
+export { FOLLOW_TIMEOUT_MS, POLL_MS, followUpdate, staleOffer, updateOutcome };
