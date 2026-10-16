@@ -3150,6 +3150,13 @@ def cmd_release(args) -> None:
     (Telegram button, dashboard, ``chela merge-approve <id>``) pushes main + tag + dev.
     """
     from chela import release
+    if getattr(args, "major_tag_only", False):
+        out = release.major_tag_only(args.version, repo=args.repo)
+        if not out.get("ok"):
+            print(f"release --major-tag-only REFUSED: {out.get('error')}")
+            sys.exit(1)
+        print(f"🏷️ {out['major']} → {out['sha'][:12]} on origin")
+        return
     body = ""
     if args.body_file:
         try:
@@ -3172,7 +3179,7 @@ def cmd_release(args) -> None:
     print(f"  tasks ({len(ids)}): {', '.join(ids) or 'none'}")
     print(f"  {release.approve_hint(result['request_id'])}")
     print("  On approval chela pushes main, the tag, then dev (fast-forward only, re-checked "
-          "then). A push to dev expires the request.")
+          "then), then moves the major tag. A push to dev expires the request.")
 
 
 def cmd_override(args) -> None:
@@ -3992,9 +3999,12 @@ def main() -> None:
              "approval — pushes nothing; the approval pushes main + tag + dev",
     )
     p_release.add_argument("version", help="The release version, X.Y.Z")
-    p_release.add_argument("--theme", required=True,
+    p_release.add_argument("--theme", default="",
                            help="One line — titles the commit (Release X.Y.Z — <theme>) "
-                                "and the tag")
+                                "and the tag (required unless --major-tag-only)")
+    p_release.add_argument("--major-tag-only", action="store_true",
+                           help="Only force-move origin's major tag (v0 for 0.17.0) to the "
+                                "already-released vX.Y.Z — operator-only (CMX-158)")
     p_release.add_argument("--body-file", default=None,
                            help="Optional file whose text becomes the release commit's body")
     p_release.add_argument("--repo", default=None,

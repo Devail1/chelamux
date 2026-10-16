@@ -81,8 +81,11 @@ fails the job):
 ```yaml
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: Devail1/chelamux@main     # after your own "install the test deps" step
+      - uses: Devail1/chelamux@v0       # after your own "install the test deps" step
 ```
+
+`@v0` follows every 0.x release (each release moves it). For a fully reproducible job, pin a
+release tag such as `@v0.17.0`, or that release's commit SHA.
 
 The job needs `permissions: pull-requests: write` to comment. The suite is detected
 (pytest / `npm test` / `go test` / `cargo test`) or given as `test-cmd:` / `--test-cmd`.

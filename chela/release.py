@@ -20,7 +20,10 @@ are split the same way an override is (:mod:`chela.overrides`, CMX-79):
   still the commit the release was cut from and ``origin/main`` an ancestor of the release
   commit, then pushes ``release:main``, the tag, ``release:dev`` — in that order, each a
   plain (never forced) push, so a non-fast-forward is refused by git itself. Any failed
-  check ⇒ nothing pushed.
+  check ⇒ nothing pushed. Then, under the same approval, it force-moves the MAJOR tag
+  (``v0`` for ``0.17.0``, :func:`major_tag`) to the release commit — the one forced push,
+  limited to that one tag, so ``uses: Devail1/chelamux@v0`` follows releases (CMX-158). A
+  failed move is reported loudly; the release it follows stays pushed.
 
 ``dev`` moving after the request expires it (:func:`chela.overrides.sweep` →
 :func:`remote_dev_head`), exactly as a new push expires an override. Whatever the outcome,
@@ -84,6 +87,11 @@ def is_release(rec: dict | None) -> bool:
 
 def tag_name(version: str) -> str:
     return f"v{version}"
+
+
+def major_tag(version: str) -> str:
+    """The moving major tag a release also points: ``0.17.0`` → ``v0``, ``1.2.0`` → ``v1``."""
+    return f"v{_version_tuple(version)[0]}"
 
 
 # --- seams (tests replace these; never a live GitHub) -------------------------------------
@@ -464,14 +472,78 @@ def complete(rec: dict, approved_by: str) -> dict:
             return fail(f"pushing {what} failed ({_tail(p, 300)}) — pushed so far: {done}",
                         pushed=pushed)
         pushed.append(what)
+    detail = None
+    err = move_major_tag(git_dir, stored["version"], release_sha)
+    if err:
+        detail = _major_tag_failed(stored, err)
+    else:
+        pushed.append(major_tag(stored["version"]))
     event_log.append("orchestrator.release_pushed",
                      f"release {tag} APPROVED by {approved_by} and pushed ({release_sha[:12]})",
                      payload={"request_id": stored["id"], "tag": tag, "version":
                               stored.get("version"), "release_sha": release_sha,
                               "dev_sha": dev_sha, "approved_by": approved_by,
                               "task_ids": stored.get("task_ids")})
-    return {"ok": True, "state": overrides.RELEASED, "detail": None,
+    return {"ok": True, "state": overrides.RELEASED, "detail": detail,
             "merge_commit_sha": release_sha, "pushed": pushed}
+
+
+def move_major_tag(git_dir, version: str, sha: str) -> str | None:
+    """Force-move origin's major tag to ``sha`` — the release flow's ONLY forced push, and
+    only of that one tag. The error text, or None once it moved."""
+    major = major_tag(version)
+    p = _git(git_dir, "push", "--quiet", "origin", f"+{sha}:refs/tags/{major}", timeout=300)
+    return None if p.returncode == 0 else f"moving {major} failed: {_tail(p, 300)}"
+
+
+def _major_tag_failed(rec: dict, err: str) -> str:
+    """Report a failed major-tag move LOUDLY (log, event, push, inbox); the release itself
+    stays pushed — it is never rolled back for this."""
+    major = major_tag(rec["version"])
+    text = (f"release {rec['tag']} is pushed, but {err} — `@{major}` users still get the "
+            f"previous release; move it by hand: chela release {rec['version']} "
+            "--major-tag-only")
+    log.error(text)
+    event_log.append("orchestrator.release_major_tag_failed", text,
+                     payload={"request_id": rec.get("id"), "tag": rec["tag"], "major": major,
+                              "release_sha": rec.get("release_sha")})
+    try:
+        if notify.enabled():
+            notify.send(text, title=f"chela: {major} NOT moved")
+    except Exception:                                        # noqa: BLE001 — best effort
+        log.debug("major-tag notify failed", exc_info=True)
+    try:
+        from chela import inbox
+        inbox.enqueue("release_major_tag_failed", f"🏷️⚠️ {text}",
+                      {"request_id": rec.get("id"), "tag": rec["tag"], "major": major})
+    except Exception:                                        # noqa: BLE001 — best effort
+        log.debug("major-tag inbox enqueue failed", exc_info=True)
+    return text
+
+
+def major_tag_only(version: str, *, repo: str | Path | None = None, env=None) -> dict:
+    """``chela release X.Y.Z --major-tag-only``: point the major tag at the ALREADY-RELEASED
+    ``vX.Y.Z`` on origin, through :func:`move_major_tag` — for a release that predates the
+    major tag, or a failed move. Human-only, like an approval."""
+    why = overrides.agent_refusal(env)
+    if why:
+        return _refuse(why)
+    version = (version or "").strip().removeprefix("v")
+    if _version_tuple(version) is None:
+        return _refuse(f"{version!r} is not a release version (X.Y.Z)")
+    git_dir = _git_common_dir(Path(repo) if repo else Path.cwd())
+    if git_dir is None:
+        return _refuse("not inside a git repository")
+    tag = tag_name(version)
+    fetch = _git(git_dir, "fetch", "--quiet", "origin", f"refs/tags/{tag}", timeout=300)
+    p = _git(git_dir, "ls-remote", "origin", f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}",
+             timeout=60)
+    refs = dict(reversed(ln.split()) for ln in p.stdout.splitlines() if ln.strip())
+    sha = refs.get(f"refs/tags/{tag}^{{}}") or refs.get(f"refs/tags/{tag}")
+    if fetch.returncode != 0 or p.returncode != 0 or not sha:
+        return _refuse(f"{tag} could not be read on origin — nothing pushed")
+    err = move_major_tag(git_dir, version, sha)
+    return _refuse(err) if err else {"ok": True, "major": major_tag(version), "sha": sha}
 
 
 # --- the sweep's and the relay's reads ----------------------------------------------------
