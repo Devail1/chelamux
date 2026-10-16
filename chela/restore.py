@@ -363,6 +363,7 @@ def apply(verdicts: list[Verdict], *,
 RESUMED = "resumed"                 # MANUAL, `claude --resume` relaunched successfully
 RESUME_FAILED = "resume-failed"     # MANUAL, eligible, but the launch itself failed
 SKIPPED = "skipped"                 # MANUAL, eligible, but a guard refused to launch it
+CARRIED = "restore-boot"            # a session an earlier boot pass resumed (CMX-152)
 
 
 # How `_default_check_resumed` waits for a freshly relaunched session to prove itself
@@ -655,6 +656,8 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
             detail = (f"resumed at {result.wid}, orchestrator re-registered" if ok else
                       f"resumed at {result.wid or '?'}, but re-registering the "
                       "orchestrator failed")
+        elif v.store == CARRIED:        # owed by the boot marker — no store row to remove
+            ok, detail = True, f"resumed at {result.wid or '?'}"
         else:
             ok = remove_session(v.wid, v.session_id, v.stamped_epoch)
             detail = f"resumed at {result.wid or '?'}" + (
@@ -704,8 +707,29 @@ def boot_marker_path() -> Path:
     return config.CHELA_DIR / "restore-boot.json"
 
 
+def _source_epochs(previous: str, ended: list[tuple[str, dict]]) -> list[str]:
+    """CMX-152: ``previous`` — plus, ONLY when the roster recorded ``previous`` with no
+    windows (tmux restarted again before it was sampled), the epochs before it back to and
+    including the first one that recorded any. Never further: that is the lookback bound.
+    ``previous`` unrecorded is unknown, not empty — no walk."""
+    order = [ep for ep, _ in ended]
+    if previous not in order or ended[order.index(previous)][1]:
+        return [previous]
+    i = order.index(previous)
+    for j in range(i + 1, len(ended)):
+        if ended[j][1]:
+            return [previous, *order[i + 1:j + 1]]
+    return [previous]
+
+
+def _write_marker(marker: Path, now_epoch: str, owed: list[dict]) -> None:
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"epoch": now_epoch, **({"owed": owed} if owed else {})}))
+
+
 def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Path,
-              resume_fn=None, notify=None) -> dict | None:
+              resume_fn=None, notify=None, roster_epochs=None,
+              wid_for_session=None) -> dict | None:
     """CMX-125: run the restore pass at most ONCE per tmux epoch (called every daemon tick).
 
     ``marker`` holds the last epoch seen. Unknown epoch → nothing (a boot can reach the daemon
@@ -713,37 +737,74 @@ def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Pa
     FIRST (once, even if a launch crashes), then the MANUAL rows the ENDED epoch stamped
     (``gather()`` → ``(verdicts, runs)``) go through :func:`resume` if ``resume_enabled``, else
     are only reported; one inbox notice says what came back and what did not.
+
+    CMX-152 — tmux restarting twice before the roster samples the relaunched windows:
+    the source epochs are :func:`_source_epochs` (``roster_epochs``, default
+    :func:`chela.roster.ended`), and the marker's ``owed`` list — the sessions the pass for
+    ``previous`` itself resumed — is carried until a roster sample of ``previous`` shows
+    them. An owed session already live now (``wid_for_session``) is never relaunched, and
+    one session is launched at most once per pass, from its newest epoch.
     """
     if not now_epoch:
         return None
     try:
-        previous = json.loads(marker.read_text()).get("epoch")
+        state = json.loads(marker.read_text())
+        previous, owed = state.get("epoch"), state.get("owed")
     except (OSError, ValueError, AttributeError):
-        previous = None
+        previous, owed = None, None
     if previous == now_epoch:
         return None
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps({"epoch": now_epoch}))
     if previous is None:
+        _write_marker(marker, now_epoch, [])
         log.info("restore boot pass: baseline tmux epoch %s recorded", now_epoch)
         return None
+    ended = (roster_epochs or roster.ended)(now_epoch)
+    sampled = {w.get("session_id") for ep, ws in ended if ep == previous for w in ws.values()}
+    owed = [o for o in (owed if isinstance(owed, list) else [])
+            if isinstance(o, dict) and o.get("session_id") and o.get("cwd")
+            and o["session_id"] not in sampled]
+    _write_marker(marker, now_epoch, owed)
+    sources = _source_epochs(previous, ended)
+    live = wid_for_session or sessions.wid_for_session
+    still_live = [o for o in owed if live(o["session_id"])]
+    carried = [Verdict(o["store"] if o.get("store") == "inbox.orchestrator" else CARRIED,
+                       o.get("wid") or "?", previous, "MANUAL", o["session_id"], None,
+                       o["cwd"], o.get("label") or "")
+               for o in owed if o not in still_live]
     verdicts, runs = gather()
-    rows = [v for v in verdicts if v.stamped_epoch == previous and v.verdict == "MANUAL"]
+    newest: dict = {v.session_id: None for v in carried}
+    rows = list(carried)
+    for v in sorted((v for v in verdicts
+                     if v.stamped_epoch in sources and v.verdict == "MANUAL"),
+                    key=lambda v: sources.index(v.stamped_epoch)):
+        if v.manual_command() and newest.setdefault(v.session_id, v.stamped_epoch) != \
+                v.stamped_epoch:
+            continue                     # this session is already owed from a newer epoch
+        rows.append(v)
     if resume_enabled:
         results = (resume_fn or resume)(rows, runs)
     else:
         results = [ApplyResult(v, SKIPPED, "CHELA_RESTORE_RESUME is off — report only")
                    for v in rows]
+    _write_marker(marker, now_epoch, still_live + [
+        {"session_id": r.verdict.session_id, "cwd": r.verdict.cwd, "label": r.verdict.label,
+         "wid": r.verdict.wid, "store": r.verdict.store}
+        for r in results if r.action == RESUMED])
     back = [f"{r.verdict.label or r.verdict.wid} ({r.detail})" for r in results
             if r.action == RESUMED]
     left = [f"{r.verdict.label or r.verdict.wid}: {r.detail or r.action}" for r in results
             if r.action != RESUMED]
     log.info("restore boot pass: tmux epoch %s -> %s, %d resumed, %d not",
              previous, now_epoch, len(back), len(left))
+    out = {"previous": previous, "epoch": now_epoch, "resumed": back, "not_resumed": left}
+    recovered = sources[-1] if len(sources) > 1 else previous if carried else None
+    head = "tmux restarted"
+    if recovered:
+        out["recovered_from"] = recovered
+        head = f"tmux restarted twice; recovered from epoch {recovered}"
     if back or left:
         (notify or inbox.enqueue)(
             "restore_boot",
-            f"tmux restarted — came back: {', '.join(back) or 'none'}; "
-            f"not resumed: {'; '.join(left) or 'none'}",
-            {"previous": previous, "epoch": now_epoch, "resumed": back, "not_resumed": left})
-    return {"previous": previous, "epoch": now_epoch, "resumed": back, "not_resumed": left}
+            f"{head} — came back: {', '.join(back) or 'none'}; "
+            f"not resumed: {'; '.join(left) or 'none'}", out)
+    return out
