@@ -65,14 +65,15 @@
     function clearPending() {
         failures = 0;
         inflight = false;
-        if (timer) { clearTimeout(timer); timer = null; }
+        clearTimeout(timer);
+        timer = null;
         document.documentElement.classList.remove(CLS);
         if (status && status.parentNode) status.parentNode.removeChild(status);
         status = null;
     }
 
     function schedule(ms) {
-        if (timer || inflight || blocked() || hidden()) return;
+        if (timer || inflight) return;   // one attempt at a time
         timer = setTimeout(attempt, ms);
     }
     function attempt() {
@@ -92,9 +93,10 @@
         });
     }
     // Retry now (page came back, network came back, or the user pressed Enter).
+    // attempt() re-checks down/hidden/blocked; schedule() drops it while one is in flight.
     function kick() {
-        if (!down() || inflight || blocked()) return;
-        if (timer) { clearTimeout(timer); timer = null; }
+        clearTimeout(timer);
+        timer = null;
         schedule(0);
     }
 
@@ -118,7 +120,7 @@
     ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'].forEach(function (k) { ChelaWebSocket[k] = NativeWS[k]; });
     window.WebSocket = ChelaWebSocket;
 
-    document.addEventListener('visibilitychange', function () { if (!hidden()) kick(); });
+    document.addEventListener('visibilitychange', kick);
     window.addEventListener('online', kick);
     window.addEventListener('pagehide', function () { leaving = true; });
     window.addEventListener('pageshow', function () { leaving = false; kick(); });

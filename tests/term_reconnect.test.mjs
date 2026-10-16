@@ -293,3 +293,20 @@ test('a close from an older socket is ignored once a newer one is open', async (
     assert.equal(p.reloads.length, 0);
     assert.ok(!p.w.document.documentElement.classList.contains('chela-reconnecting'));
 });
+
+test('a second close while a backoff is pending does not add a second timer', async () => {
+    const p = page({ probe: () => 502 });
+    p.first.close();
+    await p.advance(300);
+    const own = new p.w.WebSocket('ws://localhost:5005/term/%401/ws', ['tty']);   // ttyd's retry
+    own.close();
+    await p.advance(1200);
+    assert.deepEqual(p.probes.map(x => x.at), [500, 1500]);
+});
+
+test('injecting the shim twice wraps WebSocket once', () => {
+    const p = page();
+    const wrapped = p.w.WebSocket;
+    p.w.eval(SHIM);
+    assert.equal(p.w.WebSocket, wrapped);
+});
