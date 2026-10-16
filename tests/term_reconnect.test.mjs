@@ -1,8 +1,10 @@
 // CMX-167: the self-reconnect shim (chela/dashboard/static/term-reconnect.js), run for real in
 // a jsdom page at /term/@1/ with a FAKE WebSocket, a fake clock and a fake ttyd: `connect()`
 // opens a "tty" socket and, on close, shows ttyd's "Press ⏎ to Reconnect" overlay and waits
-// for Enter, as ttyd 1.7.7 does after an `error`. `reload` (the shim's one way to reconnect)
-// is replaced by a spy that re-runs connect, so "a new socket opened" is observable.
+// for Enter, as ttyd 1.7.7 does after an `error`. The shim's real `location.reload()` runs:
+// jsdom reports it as a "navigation" not-implemented error on the virtual console, and the
+// harness answers that by re-running connect (a fresh page), so "a new socket opened" is
+// observable AND a no-op reload goes red. No test replaces __chelaReconnect.reload.
 //
 // Guards (each corrupt→RED, recorded in the PR's self-check experiments):
 //   - close while visible → one new socket after the 0.5 s backoff, no keypress;
@@ -18,15 +20,22 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { JSDOM } from 'jsdom';
+import { JSDOM, VirtualConsole } from 'jsdom';
 
 const SHIM = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..',
     'chela', 'dashboard', 'static', 'term-reconnect.js'), 'utf8');
 const flush = async () => { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); };
 
 function page({ probe = () => 200, frame = null } = {}) {
+    const vc = new VirtualConsole();
+    let onReload = () => { throw new Error('reload before the fake ttyd loaded'); };
+    vc.on('jsdomError', e => {
+        if (/navigation/.test(e.message)) onReload();
+        else throw e;
+    });
     const dom = new JSDOM('<!doctype html><html><head></head><body><div class="xterm"></div></body></html>',
-        { url: 'http://localhost:5005/term/%401/', runScripts: 'outside-only', pretendToBeVisual: true });
+        { url: 'http://localhost:5005/term/%401/', runScripts: 'outside-only', pretendToBeVisual: true,
+          virtualConsole: vc });
     const w = dom.window;
     // fake clock
     let now = 0, seq = 0;
@@ -46,6 +55,7 @@ function page({ probe = () => 200, frame = null } = {}) {
     let vis = 'visible';
     Object.defineProperty(w.document, 'visibilityState', { configurable: true, get: () => vis });
     const setVis = v => { vis = v; w.document.dispatchEvent(new w.Event('visibilitychange')); };
+    const setVisSilently = v => { vis = v; };   // the state changes, no event fires
     if (frame) Object.defineProperty(w, 'frameElement', { configurable: true, get: () => frame(w) });
     // fake WebSocket
     const sockets = [];
@@ -77,9 +87,9 @@ function page({ probe = () => 200, frame = null } = {}) {
         return s;
     };
     const reloads = [];
-    w.__chelaReconnect.reload = () => { reloads.push(now); connect(); };
+    onReload = () => { reloads.push(now); connect(); };   // location.reload() → a fresh ttyd page
     const first = connect(); first.open();
-    return { w, sockets, probes, reloads, advance, setVis, overlay, keyPresses, first, now: () => now };
+    return { w, sockets, probes, reloads, advance, setVis, setVisSilently, overlay, keyPresses, first, now: () => now };
 }
 
 test('a socket closed while visible reconnects after the 0.5 s backoff, with no keypress', async () => {
@@ -92,6 +102,7 @@ test('a socket closed while visible reconnects after the 0.5 s backoff, with no 
     assert.equal(p.sockets.length, 2, 'a new socket opened');
     assert.deepEqual(p.probes.map(x => x.url), ['/term/%401/token']);
     assert.equal(p.probes[0].opts.cache, 'no-store');
+    assert.equal(p.probes[0].opts.credentials, 'same-origin');
     assert.deepEqual(p.keyPresses, [], 'no Enter was synthesized');
 });
 
@@ -110,14 +121,40 @@ test('a socket closed while hidden waits for visibilitychange, then reconnects e
     await p.advance(60000);
     assert.equal(p.reloads.length, 0, 'never while hidden');
     assert.equal(p.probes.length, 0);
-    p.setVis('visible');
+    p.setVis('visible');   // visibilitychange, and nothing else
+    await p.advance(0);
+    assert.deepEqual(p.reloads, [60000], 'reconnects on visibilitychange itself');
     p.w.dispatchEvent(new p.w.Event('pageshow'));
     p.w.dispatchEvent(new p.w.Event('online'));
-    await p.advance(0);
-    assert.equal(p.reloads.length, 1, 'exactly one reconnect');
+    p.setVis('visible');
     await p.advance(30000);
-    assert.equal(p.reloads.length, 1);
+    assert.equal(p.reloads.length, 1, 'exactly one reconnect');
 });
+
+test('becoming visible with no event at all never reconnects: the triggers are load-bearing', async () => {
+    const p = page();
+    p.setVis('hidden');
+    p.first.close();
+    await p.advance(1000);
+    p.setVisSilently('visible');
+    await p.advance(60000);
+    assert.equal(p.reloads.length, 0);
+    assert.equal(p.probes.length, 0);
+});
+
+for (const trigger of ['pageshow', 'online']) {
+    test(`hidden then visible: ${trigger} alone reconnects`, async () => {
+        const p = page();
+        p.setVis('hidden');
+        p.first.close();
+        await p.advance(1000);
+        p.setVisSilently('visible');
+        p.w.dispatchEvent(new p.w.Event(trigger));
+        await p.advance(0);
+        assert.deepEqual(p.reloads, [1000]);
+        assert.equal(p.sockets.length, 2);
+    });
+}
 
 test('online while hidden does nothing; pageshow after pagehide reconnects', async () => {
     const p = page();
@@ -140,15 +177,19 @@ test('two close events in a row leave one reconnect in flight, not two', async (
     const p = page({ probe: () => 200 });
     const slow = new Promise(r => { release = r; });
     const fetch0 = p.w.fetch;
-    p.w.fetch = async (...a) => { await slow; return fetch0(...a); };
+    let started = 0;
+    p.w.fetch = async (...a) => { started++; await slow; return fetch0(...a); };
     p.first.close();
     p.first.dispatchEvent(new p.w.Event('close'));
     await p.advance(500);
+    assert.equal(started, 1, 'one attempt started');
     p.first.dispatchEvent(new p.w.Event('close'));
     p.w.dispatchEvent(new p.w.Event('online'));
     await p.advance(5000);
+    assert.equal(started, 1, 'a second attempt while one is in flight is dropped');
     release();
     await p.advance(5000);
+    assert.equal(started, 1);
     assert.equal(p.reloads.length, 1);
     assert.equal(p.sockets.length, 2);
 });
@@ -310,4 +351,54 @@ test('injecting the shim twice wraps WebSocket once', () => {
     const wrapped = p.w.WebSocket;
     p.w.eval(SHIM);
     assert.equal(p.w.WebSocket, wrapped);
+});
+
+test('ttyd reconnecting by itself while the probe is in flight cancels the reload', async () => {
+    let release;
+    const p = page();
+    const slow = new Promise(r => { release = r; });
+    const fetch0 = p.w.fetch;
+    p.w.fetch = async (...a) => { await slow; return fetch0(...a); };
+    p.first.close();
+    await p.advance(500);
+    const own = new p.w.WebSocket('ws://localhost:5005/term/%401/ws', ['tty']);
+    own.open();
+    release();
+    await p.advance(0);
+    assert.equal(p.reloads.length, 0);
+    own.close();                     // and the next drop is handled from scratch
+    await p.advance(500);
+    assert.equal(p.reloads.length, 1);
+});
+
+test('an older socket opening late does not clear a pending reconnect for the newer one', async () => {
+    const p = page({ probe: () => 502 });
+    const stale = new p.w.WebSocket('ws://localhost:5005/term/%401/ws', ['tty']);
+    const second = new p.w.WebSocket('ws://localhost:5005/term/%401/ws', ['tty']);
+    second.open();
+    second.close();
+    await p.advance(1500);           // two failures: status line up
+    stale.open();
+    assert.ok(p.w.document.documentElement.classList.contains('chela-reconnecting'));
+    assert.ok(p.w.document.querySelector('.chela-reconnect-status'));
+});
+
+test('after a reconnect opens, the next drop starts the backoff over at 0.5 s', async () => {
+    let up = false;
+    const p = page({ probe: () => (up ? 200 : 502) });
+    p.first.close();
+    await p.advance(8500);           // 4 failures
+    up = true;
+    await p.advance(10000);
+    assert.deepEqual(p.reloads, [18500]);
+    p.sockets.at(-1).open();
+    p.sockets.at(-1).close();
+    await p.advance(500);
+    assert.deepEqual(p.reloads, [18500, 19000]);
+});
+
+test('the default reconnect is the document\'s own location.reload', () => {
+    const p = page();
+    p.w.__chelaReconnect.reload();
+    assert.equal(p.reloads.length, 1, 'location.reload() ran');
 });

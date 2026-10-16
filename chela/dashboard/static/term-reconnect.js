@@ -73,12 +73,12 @@
     }
 
     function schedule(ms) {
-        if (timer || inflight) return;   // one attempt at a time
+        if (timer || inflight) return;   // one attempt at a time: the only in-flight gate
         timer = setTimeout(attempt, ms);
     }
     function attempt() {
         timer = null;
-        if (inflight || blocked() || hidden() || !down()) return;   // !down: ttyd is reconnecting itself
+        if (blocked() || hidden() || !down()) return;   // !down: ttyd is reconnecting itself
         inflight = true;
         var url = location.pathname.replace(/\/+$/, '') + '/token';
         fetch(url, { cache: 'no-store', credentials: 'same-origin' }).then(function (r) {

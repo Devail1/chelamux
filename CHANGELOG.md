@@ -10,6 +10,15 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Terminals reconnect by themselves.** A wall tile whose socket dropped (iOS suspending a
+  background tab or a locked screen, a wifi/4G switch) no longer stops at ttyd's "Press ⏎ to
+  Reconnect". While visible it retries after 0.5 s, 1 s, 2 s, 5 s, then every 10 s; while
+  hidden it waits until the page is visible again or the network returns. After repeated
+  failures a quiet "Reconnecting…" line shows, and Enter still retries at once. A frame chela
+  suspended on purpose stays suspended. (CMX-167)
+
 ## [0.17.0] — 2026-10-16
 
 ### Added
