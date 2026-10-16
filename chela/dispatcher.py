@@ -52,7 +52,7 @@ from chela.worktree import (
     disk_usage_bytes,
     ensure_worktree,
     is_inside_root,
-    reap_processes_in,
+    reap_run_worktree,
     remove_worktree,
 )
 
@@ -8334,7 +8334,7 @@ def delete_run(task_id: str) -> dict:
             wf_path = row["workflow_path"] or ""
             repo_dir = Path(wf_path).parent if wf_path else None
             if worktree_path and repo_dir and repo_dir.is_dir():
-                reap_processes_in(Path(worktree_path))   # CMX-151
+                reap_run_worktree(worktree_path, wf_path)   # CMX-151
                 try:
                     wt = subprocess.run(
                         ["git", "worktree", "remove", "--force", worktree_path],

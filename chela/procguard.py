@@ -46,6 +46,8 @@ def _set_pdeathsig(sig: int, parent: int) -> None:
 
 
 def _kill_group(pgid: int) -> None:
+    """``pgid`` is the guardian's pid. It names a group only because the guardian leads a
+    new session; were it not, no such group exists and this is a no-op — never a wider kill."""
     try:
         os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
@@ -75,7 +77,16 @@ def run_contained(argv: list[str], *, timeout: float, cwd: str | None = None,
 
 
 def _kill_own_group(*_) -> None:
-    os.killpg(0, signal.SIGKILL)
+    """SIGKILL the guardian's group, then the guardian. The group is named by the
+    guardian's OWN pid, never ``killpg(0)``: a guardian that somehow shares its launcher's
+    group (no new session) then finds no such group and kills only itself — its child
+    follows by its death signal — instead of taking the launcher's whole group down."""
+    me = os.getpid()
+    try:
+        os.killpg(me, signal.SIGKILL)
+    except ProcessLookupError:
+        pass                        # not a group leader: there is no group of ours to kill
+    os.kill(me, signal.SIGKILL)
 
 
 def _identity(pid: int) -> str | None:

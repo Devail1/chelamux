@@ -35,7 +35,7 @@ from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
 from chela.sources.markdown import OPEN_RE
 from chela.workflow import load_workflow, workflow_error, PROJECT_KEY_RE
-from chela.worktree import reap_processes_in
+from chela.worktree import reap_run_worktree
 
 logging.basicConfig(
     level=logging.INFO,
@@ -5351,7 +5351,7 @@ def _merge_one(row: dict) -> dict:
     repo_cwd = str(repo_dir)
     worktree_path = row.get("worktree_path")
     if worktree_path and Path(worktree_path).exists():
-        reap_processes_in(Path(worktree_path))   # CMX-151: a run's processes die with it
+        reap_run_worktree(worktree_path, row.get("workflow_path"))   # CMX-151: a run's processes die with it
         _best_effort(
             task_id, "worktree-remove",
             ["git", "worktree", "remove", "--force", worktree_path],

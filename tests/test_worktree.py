@@ -16,7 +16,6 @@ import logging
 import signal
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -423,122 +422,202 @@ def test_is_inside_root_treats_an_UNRESOLVABLE_path_as_OUTSIDE(tmp_path, monkeyp
 
 
 # --- reap_processes_in: a run's processes die with its worktree (CMX-151) ---------------
-# Every target is a dummy this test spawned, with its cwd in a tmp worktree — never the
-# operator's processes.
+# ⛔ No test here signals a real process. The unit tests drive a FAKE proc tree (tmp dirs
+# holding `cwd` symlinks, `cmdline` and `stat` files) with a recording kill; the one
+# real-/proc test runs under conftest's `reaper_kills` recorder and kills only the dummies
+# it spawned itself.
 
-_SLEEP = [sys.executable, "-c", "import time; time.sleep(60)"]
+
+def _proc(tmp_path: Path, procs: dict[int, tuple[str, int]]) -> Path:
+    """A fake ``/proc``: ``{pid: (cwd, ppid)}`` → ``<pid>/{cwd,cmdline,stat}``."""
+    root = tmp_path / "proc"
+    for pid, (cwd, ppid) in procs.items():
+        d = root / str(pid)
+        d.mkdir(parents=True)
+        (d / "cwd").symlink_to(cwd)
+        (d / "cmdline").write_bytes(b"node\0--test\0" + str(pid).encode() + b"\0")
+        (d / "stat").write_text(f"{pid} (node) S {ppid} 1 1 0\n")
+    (root / "self").mkdir(parents=True, exist_ok=True)        # non-pid entries are skipped
+    return root
+
+
+def _linked(path: Path) -> Path:
+    path.mkdir(parents=True)
+    (path / ".git").write_text("gitdir: /x/.git/worktrees/w\n")
+    return path
 
 
 @pytest.fixture
-def dummies():
-    procs: list[subprocess.Popen] = []
-
-    def spawn(cwd: Path) -> subprocess.Popen:
-        procs.append(subprocess.Popen(_SLEEP, cwd=str(cwd)))
-        return procs[-1]
-
-    yield spawn
-    for p in procs:
-        p.kill()
-        p.wait()
+def tree(tmp_path):
+    """worktrees root with W (`task-1`), a sibling W prefixes (`task-10`), and a main repo."""
+    root = tmp_path / "worktrees"
+    wt, sib = _linked(root / "task-1"), _linked(root / "task-10")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (wt / "sub").mkdir()
+    return root, wt, sib, repo
 
 
-def _killed(p: subprocess.Popen) -> bool:
-    try:
-        return p.wait(timeout=5) == -signal.SIGKILL
-    except subprocess.TimeoutExpired:
-        return False
+def _recorder():
+    kills: list[tuple[int, int]] = []
+    return kills, lambda pid, sig: kills.append((pid, sig))
 
 
-def test_removing_a_worktree_reaps_only_processes_inside_it(repo, tmp_path, dummies, caplog):
-    """W's process dies; a SIBLING worktree whose name W prefixes (`task-1` vs `task-10`)
-    and the main repo are negative controls and must survive."""
+def test_reap_kills_only_processes_inside_the_worktree(tmp_path, tree, caplog):
+    """Negative controls: the sibling `task-10`, the main repo, an unrelated dir."""
+    root, wt, sib, repo = tree
+    proc = _proc(tmp_path, {101: (str(wt), 1), 102: (str(wt / "sub"), 1),
+                            201: (str(sib), 1), 202: (str(sib / "x"), 1),
+                            301: (str(repo), 1), 302: (str(tmp_path), 1), 303: ("/", 1)})
+    kills, kill = _recorder()
+    with caplog.at_level(logging.WARNING):
+        assert worktree.reap_processes_in(wt, root, proc_root=proc, kill=kill) == [101, 102]
+    assert kills == [(101, signal.SIGKILL), (102, signal.SIGKILL)]
+    assert f"reaped pid 102 (cwd {wt / 'sub'})" in caplog.text and "node --test 102" in caplog.text
+
+
+def test_reap_matches_a_cwd_deleted_under_the_worktree(tmp_path, tree):
+    root, wt, *_ = tree
+    proc = _proc(tmp_path, {7: (f"{wt}/gone (deleted)", 1), 8: (f"{wt}0 (deleted)", 1)})
+    kills, kill = _recorder()
+    assert worktree.reap_processes_in(wt, root, proc_root=proc, kill=kill) == [7]
+
+
+def test_reap_rejects_a_dotdot_cwd_that_only_LOOKS_inside(tmp_path, tree):
+    """`<W>/../task-10` is the sibling — normalized before the containment check."""
+    root, wt, *_ = tree
+    proc = _proc(tmp_path, {9: (f"{wt}/../task-10", 1)})
+    kills, kill = _recorder()
+    assert worktree.reap_processes_in(wt, root, proc_root=proc, kill=kill) == []
+    assert kills == []
+
+
+@pytest.mark.parametrize("which", ["outside-root", "the-root", "main-repo", "plain-dir"])
+def test_reap_refuses_any_target_but_a_linked_worktree_under_the_root(tmp_path, tree, which):
+    """Each refused target has a process inside it — and that process is never killed."""
+    root, wt, sib, repo = tree
+    target = {"outside-root": _linked(tmp_path / "elsewhere" / "task-1"),
+              "the-root": root, "main-repo": root / "clone", "plain-dir": root / "plain"}[which]
+    if which == "the-root":
+        (root / ".git").write_text("gitdir: /x\n")
+    elif which == "main-repo":
+        (target / ".git").mkdir(parents=True)
+    elif which == "plain-dir":
+        target.mkdir()
+    proc = _proc(tmp_path, {11: (str(target), 1), 12: (str(target / "a"), 1)})
+    kills, kill = _recorder()
+    assert worktree.reap_processes_in(target, root, proc_root=proc, kill=kill) == []
+    assert kills == []
+
+
+def test_reap_spares_the_caller_and_its_ancestors(tmp_path, tree, monkeypatch):
+    """A `chela` run from inside the worktree it cleans up must not kill itself or the
+    shell that started it — both have cwd in W; a third process in W still dies."""
+    root, wt, *_ = tree
+    monkeypatch.setattr(worktree.os, "getpid", lambda: 500)
+    proc = _proc(tmp_path, {500: (str(wt), 400), 400: (str(wt), 1), 600: (str(wt), 1)})
+    kills, kill = _recorder()
+    assert worktree.reap_processes_in(wt, root, proc_root=proc, kill=kill) == [600]
+
+
+def test_reap_skips_unreadable_and_vanished_processes_and_carries_on(tmp_path, tree):
+    """No `cwd` link (not ours to read) and a kill that finds the pid gone are skipped,
+    never fatal — the next process is still reaped, and a gone pid is not reported."""
+    root, wt, *_ = tree
+    proc = _proc(tmp_path, {21: (str(wt), 1), 22: (str(wt), 1)})
+    (proc / "20").mkdir()
+
+    def kill(pid, sig):
+        if pid == 21:
+            raise ProcessLookupError(pid)
+        kills.append(pid)
+    kills: list[int] = []
+    assert worktree.reap_processes_in(wt, root, proc_root=proc, kill=kill) == [22]
+    assert kills == [22]
+
+
+def test_reap_defaults_to_the_real_proc_and_the_module_kill_seam(repo, tmp_path, reaper_kills):
+    """Real `/proc`, real dummies, but `_signal_pid` is conftest's recorder: only the dummy
+    inside W is named — never the sibling's or the main repo's (or anything else)."""
     root = tmp_path / "worktrees"
     wt, _ = worktree.ensure_worktree(repo, "task-1", "main", "PROJ", 1, root)
     sib, _ = worktree.ensure_worktree(repo, "task-10", "main", "PROJ", 10, root)
-    (wt / "sub").mkdir()
-    inside, sibling, main = dummies(wt / "sub"), dummies(sib), dummies(repo)
-
-    with caplog.at_level(logging.WARNING):
+    sleep = [sys.executable, "-c", "import time; time.sleep(60)"]
+    procs = [subprocess.Popen(sleep, cwd=str(d)) for d in (wt, sib, repo)]
+    try:
         assert worktree.remove_worktree(repo, wt, root) is True
-
-    assert _killed(inside)
-    assert sibling.poll() is None and main.poll() is None
-    assert f"reaped pid {inside.pid}" in caplog.text and "time.sleep(60)" in caplog.text
-
-
-def test_reap_matches_a_cwd_already_deleted_under_the_worktree(repo, tmp_path, dummies):
-    root = tmp_path / "worktrees"
-    wt, _ = worktree.ensure_worktree(repo, "task-1", "main", "PROJ", 1, root)
-    (wt / "gone").mkdir()
-    p = dummies(wt / "gone")
-    time.sleep(0.2)                      # let it chdir before the dir disappears
-    (wt / "gone").rmdir()                # its cwd now reads "<wt>/gone (deleted)"
-    assert worktree.reap_processes_in(wt) == [p.pid]
-    assert _killed(p)
+        assert reaper_kills == [(procs[0].pid, signal.SIGKILL)]
+    finally:
+        for p in procs:              # only what this test spawned
+            p.kill()
+            p.wait()
 
 
-def test_reap_refuses_anything_but_a_linked_worktree(repo, tmp_path, dummies):
-    """The main checkout (`.git` a directory) and a plain directory (no `.git`) are never
-    reaping targets — a wrongly recorded worktree path cannot reach the operator."""
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    in_repo, in_plain = dummies(repo), dummies(plain)
-    assert worktree.reap_processes_in(repo) == []
-    assert worktree.reap_processes_in(plain) == []
-    assert in_repo.poll() is None and in_plain.poll() is None
+def _wf(tmp_path: Path, root: Path) -> Path:
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text(f"---\nproject_key: CMX\nworkspace:\n  root: {root}\n---\nbody\n")
+    return wf
 
 
-def test_reap_spares_the_caller_and_its_ancestors(repo, tmp_path):
-    """A `chela` run from inside the worktree it cleans up must not kill itself or the
-    shell that started it: an ancestor and the caller, both with cwd in W, survive."""
-    root = tmp_path / "worktrees"
-    wt, _ = worktree.ensure_worktree(repo, "task-1", "main", "PROJ", 1, root)
-    inner = ("from pathlib import Path; from chela import worktree; "
-             f"print(worktree.reap_processes_in(Path({str(wt)!r})))")
-    outer = ("import subprocess, sys; "
-             f"r = subprocess.run([sys.executable, '-c', {inner!r}], capture_output=True, text=True); "
-             "print(r.returncode, r.stdout.strip())")
-    out = subprocess.run([sys.executable, "-c", outer], cwd=str(wt), capture_output=True,
-                         text=True, timeout=30)
-    assert out.returncode == 0 and out.stdout.split() == ["0", "[]"], out.stderr
+def test_reap_run_worktree_takes_the_root_from_the_runs_own_workflow(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(worktree, "reap_processes_in",
+                        lambda wt, root, **kw: (calls.append((wt, root, kw)), [5])[1])
+    wf = _wf(tmp_path, tmp_path / "wts")
+    assert worktree.reap_run_worktree(str(tmp_path / "wts" / "W"), str(wf)) == [5]
+    assert calls == [(tmp_path / "wts" / "W", tmp_path / "wts", {})]
+
+
+@pytest.mark.parametrize("wf_path", [None, "", "missing", "bad"])
+def test_reap_run_worktree_without_a_readable_workflow_reaps_nothing(tmp_path, monkeypatch,
+                                                                      wf_path):
+    """Unknown root is never "in scope": no workflow, a missing one, a malformed one."""
+    calls = []
+    monkeypatch.setattr(worktree, "reap_processes_in", lambda *a, **k: calls.append(a))
+    if wf_path == "missing":
+        wf_path = str(tmp_path / "nope.md")
+    elif wf_path == "bad":
+        (tmp_path / "bad.md").write_text("---\n: : [\n---\n")
+        wf_path = str(tmp_path / "bad.md")
+    assert worktree.reap_run_worktree(str(tmp_path / "W"), wf_path) == []
+    assert calls == []
+
+
+class _Ok:
+    returncode, stdout, stderr = 0, "", ""
 
 
 def test_the_squash_merge_reaps_the_worktree_before_removing_it(monkeypatch, tmp_path):
     from chela import contract
     order: list = []
-
-    class _Ok:
-        returncode, stdout, stderr = 0, "", ""
-
-    monkeypatch.setattr(contract, "reap_processes_in", lambda p: order.append(("reap", p)))
+    monkeypatch.setattr(contract, "reap_run_worktree",
+                        lambda wt, wf: order.append(("reap", wt, wf)))
     monkeypatch.setattr(contract.subprocess, "run",
                         lambda argv, **kw: (order.append(tuple(argv[:3])), _Ok())[1])
-    contract._squash_merge({"task_id": "t1", "worktree_path": str(tmp_path)}, str(tmp_path),
+    contract._squash_merge({"task_id": "t1", "worktree_path": str(tmp_path),
+                            "workflow_path": "/wf.md"}, str(tmp_path),
                            "https://github.com/o/r/pull/7")
-    i = order.index(("reap", tmp_path))
+    i = order.index(("reap", str(tmp_path), "/wf.md"))
     assert order[i + 1] == ("git", "worktree", "remove")
 
 
 def test_deleting_an_in_flight_run_reaps_its_worktree_before_removing_it(monkeypatch, tmp_path):
     from chela import dispatcher
     order: list = []
-
-    class _Ok:
-        returncode, stdout, stderr = 0, "", ""
-
+    wf = str(tmp_path / "WORKFLOW.md")
     (tmp_path / "WORKFLOW.md").write_text("# wf\n")
     with dispatcher._db() as conn:
         conn.execute("INSERT INTO runs (task_id, workflow_path, title, status, started_at, "
                      "attempt, worktree_path) VALUES (?,?,?,?,?,?,?)",
-                     ("cmx151-del", str(tmp_path / "WORKFLOW.md"), "t", "running",
-                      dispatcher._now(), 1, str(tmp_path / "wt")))
+                     ("cmx151-del", wf, "t", "running", dispatcher._now(), 1,
+                      str(tmp_path / "wt")))
         conn.commit()
-    monkeypatch.setattr(dispatcher, "reap_processes_in", lambda p: order.append(("reap", p)))
+    monkeypatch.setattr(dispatcher, "reap_run_worktree",
+                        lambda wt, w: order.append(("reap", wt, w)))
     monkeypatch.setattr(dispatcher.subprocess, "run",
                         lambda argv, **kw: (order.append(tuple(argv[:3])), _Ok())[1])
     assert dispatcher.delete_run("cmx151-del")["ok"] is True
-    assert order[:2] == [("reap", tmp_path / "wt"), ("git", "worktree", "remove")]
+    assert order[:2] == [("reap", str(tmp_path / "wt"), wf), ("git", "worktree", "remove")]
 
 
 def test_the_dashboard_merge_reaps_the_worktree_before_removing_it(monkeypatch, tmp_path):
@@ -546,8 +625,9 @@ def test_the_dashboard_merge_reaps_the_worktree_before_removing_it(monkeypatch, 
     from tests.test_dispatcher_ci import _FakeGh, _check_run, _merge_row
     fake = _FakeGh(rollup=[_check_run("test", conclusion="SUCCESS")])
     monkeypatch.setattr(dash.subprocess, "run", fake.run)
-    monkeypatch.setattr(dash, "reap_processes_in",
-                        lambda p: fake.calls.append(["reap", str(p)]))
-    assert dash._merge_one(_merge_row(tmp_path))["ok"] is True
-    i = fake.calls.index(["reap", str(tmp_path)])
+    monkeypatch.setattr(dash, "reap_run_worktree",
+                        lambda wt, wf: fake.calls.append(["reap", wt, wf]))
+    row = _merge_row(tmp_path)
+    assert dash._merge_one(row)["ok"] is True
+    i = fake.calls.index(["reap", str(tmp_path), row["workflow_path"]])
     assert fake.calls[i + 1][:3] == ["git", "worktree", "remove"]

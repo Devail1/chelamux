@@ -280,57 +280,99 @@ def refuse_if_not_a_worktree(repo_path: Path, wt_path: Path, root: Path) -> None
         )
 
 
-def _ancestors() -> set[int]:
+# CMX-151: the ONE place the reaper delivers a signal. Read at call time, so the test suite
+# swaps it for a recorder (tests/conftest.py) and no test — nor a judge mutation of the
+# reaper — can ever signal a live process.
+_signal_pid = os.kill
+
+
+def _ancestors(proc_root: Path) -> set[int]:
     """This process and every ancestor of it — never a reaping target, even with its cwd
     inside the worktree (a ``chela`` invoked from the worktree it is cleaning up)."""
     pids, pid = set(), os.getpid()
     while pid > 1 and pid not in pids:
         pids.add(pid)
         try:
-            with open(f"/proc/{pid}/stat") as f:
+            with open(proc_root / str(pid) / "stat") as f:
                 pid = int(f.read().rsplit(")", 1)[1].split()[1])
         except (OSError, ValueError, IndexError):
             break
     return pids
 
 
-def reap_processes_in(wt_path: Path) -> list[int]:
+def reap_processes_in(wt_path: Path, root: Path, *, proc_root: Path = Path("/proc"),
+                      kill=None) -> list[int]:
     """SIGKILL every process whose cwd is inside the linked worktree ``wt_path`` (CMX-151).
 
     The backstop for a run's processes outliving the run: eight orphaned ``node --test``
     children of a merged run sat in its removed worktree for 3.5 hours holding ~4 GB.
     Logs each kill (pid + cmdline) and returns the pids killed.
 
-    ⛔ Only a LINKED worktree — its ``.git`` must be a FILE. The main checkout (``.git`` a
-    directory), any ancestor of it, an unregistered leftover: none of them qualify, so a
-    wrongly recorded worktree path (issue #398) can never reach the operator's own
-    processes. Containment is per path COMPONENT (``CMX-1`` never matches ``CMX-10``), and
-    this process and its ancestors are always spared.
+    ⛔ Blast radius is bounded by INDEPENDENT checks, so no single wrong condition can widen
+    it (a mutated reaper once SIGKILLed every process of the user, 2026-10-16):
+
+    * ``wt_path`` must lie strictly UNDER the worktrees ``root`` and be a LINKED worktree
+      (its ``.git`` a FILE) — never the main checkout, an ancestor, an unregistered leftover;
+    * a process qualifies only when its cwd passes a path-component containment check AND a
+      separate string-prefix check against the worktree AND lies under ``root`` —
+      ``CMX-1`` never matches ``CMX-10``;
+    * this process and its ancestors are always spared.
+
+    ``proc_root`` and ``kill`` are the test seams: a fake proc tree and a recording kill.
     """
-    if not (wt_path / ".git").is_file():
+    kill = kill or _signal_pid
+    try:
+        target, wroot = wt_path.resolve(), root.resolve()
+    except OSError:
         return []
-    target = wt_path.resolve()
-    spared = _ancestors()
+    if target == wroot or not target.is_relative_to(wroot):
+        log.warning("not reaping %s: outside the worktrees root %s", target, wroot)
+        return []
+    if not (target / ".git").is_file():
+        return []
+    inside, under_root = str(target) + os.sep, str(wroot) + os.sep
+    spared = _ancestors(proc_root)
     killed: list[int] = []
-    for entry in os.listdir("/proc"):
+    for entry in sorted(os.listdir(proc_root)):
         if not entry.isdigit() or int(entry) in spared:
             continue
         try:
-            cwd = os.readlink(f"/proc/{entry}/cwd")
+            cwd = os.readlink(proc_root / entry / "cwd")
         except OSError:
             continue                            # gone, or not ours to read
-        cwd = cwd.removesuffix(" (deleted)")    # a subdirectory already removed under it
+        # " (deleted)": a subdirectory already removed under it; normpath: `W/../sib` is
+        # the sibling, whatever its prefix says.
+        cwd = os.path.normpath(cwd.removesuffix(" (deleted)"))
         if not Path(cwd).is_relative_to(target):
             continue
+        if not (cwd + os.sep).startswith(inside):
+            continue
+        if not cwd.startswith(under_root):
+            continue
         try:
-            with open(f"/proc/{entry}/cmdline", "rb") as f:
+            with open(proc_root / entry / "cmdline", "rb") as f:
                 cmdline = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
-            os.kill(int(entry), signal.SIGKILL)
+            kill(int(entry), signal.SIGKILL)
         except OSError:
             continue
         log.warning("reaped pid %s (cwd %s) left in worktree %s: %s", entry, cwd, target, cmdline)
         killed.append(int(entry))
     return killed
+
+
+def reap_run_worktree(worktree_path: str, workflow_path: str | None) -> list[int]:
+    """:func:`reap_processes_in` for a run row: the worktrees root comes from the run's own
+    workflow. A workflow that cannot be read reaps NOTHING — unknown is never "in scope"."""
+    from chela.workflow import load_workflow, resolve_workspace_root
+    if not workflow_path:
+        return []
+    try:
+        root = resolve_workspace_root(load_workflow(workflow_path))
+    except Exception as e:                      # noqa: BLE001 — any failure fails closed
+        log.warning("not reaping %s: workflow %s unreadable (%s)", worktree_path,
+                    workflow_path, e)
+        return []
+    return reap_processes_in(Path(worktree_path), root)
 
 
 def remove_worktree(repo_path: Path, wt_path: Path, root: Path) -> bool:
@@ -360,7 +402,7 @@ def remove_worktree(repo_path: Path, wt_path: Path, root: Path) -> bool:
     # that fallback exists precisely for paths git has no record of, which is exactly what
     # a wrongly-recorded main checkout (or any other out-of-root path) looks like from here.
     refuse_if_not_a_worktree(repo_path, wt_path, root)
-    reap_processes_in(wt_path)
+    reap_processes_in(wt_path, root)
     out = subprocess.run(
         ["git", "-C", str(repo_path), "worktree", "remove", "--force", str(wt_path)],
         capture_output=True, text=True,

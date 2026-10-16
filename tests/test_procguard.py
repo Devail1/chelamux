@@ -1,6 +1,8 @@
 """CMX-151: a run's test processes cannot outlive the run.
 
-Every process here is a dummy spawned by the test, in a tmp dir — never the operator's.
+Every process here is a dummy spawned by the test, in a tmp dir, under its own session —
+never the operator's. A test signals only pids it recorded itself, and never ``killpg(0)``:
+the group kills under test are faked.
 """
 from __future__ import annotations
 
@@ -93,6 +95,7 @@ def test_sigkilled_pytest_leaves_no_node_test_process_behind(tmp_path, mode):
     launcher = subprocess.Popen(
         [sys.executable, "-c", _LAUNCHER, mode, node, "--test", str(suite)],
         cwd=str(tmp_path), env=env,
+        start_new_session=True,     # the whole dummy tree lives outside pytest's session
     )
     tree: list[int] = []
     try:
@@ -197,3 +200,39 @@ def test_watch_kills_the_group_once_the_watched_process_is_gone(monkeypatch, see
     monkeypatch.setattr(procguard, "_kill_own_group", lambda: killed.append(True))
     procguard._watch(4242, interval=0)
     assert killed == [True] and next(seq, "done") == "done"     # not one poll early
+
+
+def test_the_guardian_kills_its_group_by_its_OWN_pid_never_killpg_0(monkeypatch):
+    """`killpg(0)` from a guardian that shares its launcher's group would take that group
+    down; naming the group by the guardian's pid cannot."""
+    calls = []
+    monkeypatch.setattr(procguard.os, "getpid", lambda: 4242)
+    monkeypatch.setattr(procguard.os, "killpg", lambda g, s: calls.append(("killpg", g, s)))
+    monkeypatch.setattr(procguard.os, "kill", lambda p, s: calls.append(("kill", p, s)))
+    procguard._kill_own_group()
+    assert calls == [("killpg", 4242, signal.SIGKILL), ("kill", 4242, signal.SIGKILL)]
+
+
+def test_a_guardian_leading_no_group_still_kills_itself(monkeypatch):
+    calls = []
+
+    def killpg(g, s):
+        raise ProcessLookupError(g)
+    monkeypatch.setattr(procguard.os, "getpid", lambda: 4242)
+    monkeypatch.setattr(procguard.os, "killpg", killpg)
+    monkeypatch.setattr(procguard.os, "kill", lambda p, s: calls.append((p, s)))
+    procguard._kill_own_group()
+    assert calls == [(4242, signal.SIGKILL)]
+
+
+def test_kill_group_sigkills_the_named_group_and_ignores_one_already_gone(monkeypatch):
+    calls = []
+
+    def killpg(g, s):
+        calls.append((g, s))
+        if g == 2:
+            raise ProcessLookupError(g)
+    monkeypatch.setattr(procguard.os, "killpg", killpg)
+    procguard._kill_group(4242)
+    procguard._kill_group(2)
+    assert calls == [(4242, signal.SIGKILL), (2, signal.SIGKILL)]
