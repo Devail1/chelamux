@@ -177,7 +177,7 @@ test('a failed submit (network error) KEEPS every typed field and the form open'
     await openForm();
     fill({ title: 'Keep me too', desc: 'typed offline' });
     await submit();
-    assert.match($('#newtask-error').textContent, /Request failed — nothing was created\. TypeError: Failed to fetch/);
+    assert.match($('#newtask-error').textContent, /Request failed\. Nothing was created\. TypeError: Failed to fetch/);
     assertKept({ title: 'Keep me too', desc: 'typed offline' });
 });
 

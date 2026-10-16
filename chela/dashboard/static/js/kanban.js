@@ -421,7 +421,7 @@ async function kanbanMergePR(btn) {
 // Both labels REQUEUE — a plain close from here would leave the task stalled again.
 async function kanbanCloseRun(btn) {
     const taskId = btn.dataset.runId;
-    const reason = (prompt(`Requeue ${taskId} — why? (recorded in its review history; the `
+    const reason = (prompt(`Requeue ${taskId}: why? (recorded in its review history; the `
         + 'old PR is closed and the next tick claims a fresh attempt on a new branch)') || '').trim();
     if (!reason) return;
     const originalLabel = btn.textContent;

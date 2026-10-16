@@ -54,7 +54,7 @@ export const RUN_STATUSES = Object.keys(BADGE_CLASS);
 // Returns null when there is nothing to show.
 export function runCardNote(run) {
     const reason = run && run.status === 'closed' ? String(run.close_reason || '').trim() : '';
-    if (reason) return { text: `Closed — ${reason}`, closed: true };
+    if (reason) return { text: `Closed: ${reason}`, closed: true };
     const err = run && run.last_error ? String(run.last_error) : '';
     return err ? { text: err, closed: false } : null;
 }

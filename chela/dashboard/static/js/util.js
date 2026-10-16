@@ -66,7 +66,7 @@ const _LUCIDE = {
     'search': '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
 };
 function lucideIcon(name, size = 16) {
-    if (!(name in _LUCIDE)) throw new Error(`lucideIcon: unknown icon "${name}" — not in _LUCIDE`);
+    if (!(name in _LUCIDE)) throw new Error(`lucideIcon: unknown icon "${name}" (not in _LUCIDE)`);
     return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" `
         + `stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${_LUCIDE[name]}</svg>`;
 }

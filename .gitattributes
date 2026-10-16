@@ -8,3 +8,9 @@
 # resolves the catch-up merge automatically instead of reporting `cannot_verify` for a
 # reason that has nothing to do with the PR under review.
 CHANGELOG.md merge=union
+
+# CMX-160: `git diff` calls a file binary when EITHER side holds a NUL byte, and the judge's
+# sweep then cannot read its changed lines (CANNOT VERIFY). decisionsmodel.js carried a
+# literal NUL (now the `\0` escape), so its history still diffs as binary without this.
+# `diff` forces a text diff for the dashboard's JS sources, which are always text.
+chela/dashboard/static/js/*.js diff

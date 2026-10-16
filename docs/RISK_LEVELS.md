@@ -1,17 +1,17 @@
 # Task risk levels (CMX-405)
 
 Every dispatched task carries a **risk level**: `high`, `normal` or `low`. The level
-changes **how widely the judge searches** and **how many rework rounds** the run gets —
+changes **how widely the judge searches** and **how many rework rounds** the run gets,
 and nothing else.
 
 ⛔ **What risk never changes:** the judge always runs, it always runs the full suite, every
 experiment it does run is adjudicated exactly as before, and a mutation that **SURVIVES
 blocks the PR at every level**. Risk is never a way to downgrade a proven survivor to a
-note — it only sizes the battery.
+note; it only sizes the battery.
 
 ## Setting it
 
-The level comes **only from the tracker** — never from the agent working the task.
+The level comes **only from the tracker**, never from the agent working the task.
 
 | Tracker | How |
 |---|---|
@@ -31,7 +31,7 @@ inference at claim time, and the run row records why (`risk_reason`: `marker`, `
 `inferred: …`, or `default`). An explicit marker always wins over the inference.
 
 The level is copied onto the run row when the task is claimed, and shown on the Work board
-card, in the task modal, and in the judge's verdict header (`risk: low — 4 experiments`).
+card, in the task modal, and in the judge's verdict header (it opens with `risk: low` and the experiment count).
 
 ## What each level buys
 
@@ -53,7 +53,7 @@ read per call:
 |---|---|---|
 | `judge_experiments_high` / `_normal` / `_low` | `CHELA_JUDGE_EXPERIMENTS_HIGH` / `_NORMAL` / `_LOW` | 12 / 8 / 4 |
 | `max_reworks_high` / `_normal` / `_low` | `CHELA_MAX_REWORKS_HIGH` / `_NORMAL` / `_LOW` | 5 / 4 / 3 |
-| `max_reworks` | `CHELA_MAX_REWORKS` | 5 — the **ceiling** over every level; `0` still disables the rework loop |
+| `max_reworks` | `CHELA_MAX_REWORKS` | 5, the **ceiling** over every level; `0` still disables the rework loop |
 
 A run with no recorded level (claimed before this existed, or adopted with `chela adopt`)
 is `normal`.

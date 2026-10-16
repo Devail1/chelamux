@@ -52,7 +52,7 @@ async function doInitRepo() {
     const lines = [];
     if (res.created.length) lines.push('✓ Created ' + res.created.join(' + '));
     if (res.skipped.length) lines.push('• Skipped (already exist): ' + res.skipped.join(' + '));
-    if (!res.is_git) lines.push('⚠ Not a git repo — the dispatcher needs one to branch & open PRs.');
+    if (!res.is_git) lines.push('⚠ Not a git repo. The dispatcher needs one to branch & open PRs.');
     lines.push('Next: add ' + res.path + '/WORKFLOW.md to CHELA_DISPATCH_WORKFLOWS and restart the'
         + ' daemon, or run:  chela dispatch ' + res.path + '/WORKFLOW.md');
     setMsg('ok', lines.join('\n'));

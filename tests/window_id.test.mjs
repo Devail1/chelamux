@@ -169,11 +169,11 @@ test('the sidebar row shows its window id on its second line and in its tooltip'
 
 // The two tooltip branches, each read back EXACTLY (modulo the on-wall suffix):
 // "<label> · @N" heads the tooltip whether or not an ai_title/recap line follows.
-const tooltip = row => row.title.replace(/ — open on the wall$/, '');
+const tooltip = row => row.title.replace(/ \(open on the wall\)$/, '');
 
 test('a row WITH an ai_title/recap: the tooltip heads with "<label> · @N", then the extras', () => {
     const row = sidebarRow('alpha');
-    assert.equal(tooltip(row), 'alpha · @3\nRefactor the flux capacitor — Tests green, PR open');
+    assert.equal(tooltip(row), 'alpha · @3\nRefactor the flux capacitor, Tests green, PR open');
 });
 
 test('a row WITHOUT extras: the tooltip is exactly "<label> · @N" — even for a very long name', () => {
@@ -248,7 +248,7 @@ test('clicking the footer id copies it and shows a "Copied" toast', async () => 
 
 test('the footer chip\'s own tooltip names its window', () => {
     for (const wid of ['@3', '@32']) {
-        assert.equal(tile(wid).querySelector('.gs-wid').title, `tmux window ${wid} — click to copy`);
+        assert.equal(tile(wid).querySelector('.gs-wid').title, `tmux window ${wid}, click to copy`);
     }
 });
 
@@ -304,7 +304,7 @@ test('a legacy copy that fails says so — never a false "Copied"', async () => 
         await sleep(0);
         const toasts = tile('@32').querySelectorAll('.gs-wid-toast');
         assert.equal(toasts.length, 1, 'a second click must replace, not stack, the toast');
-        assert.equal(toasts[0].textContent, 'Copy failed — @32');
+        assert.equal(toasts[0].textContent, 'Copy failed: @32');
     });
 });
 

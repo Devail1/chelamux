@@ -53,6 +53,11 @@ test('the pill shows only while a request is pending, with the count', async () 
     const pill = document.getElementById('btn-access-req');
     assert.equal(pill.hidden, false);
     assert.match(pill.textContent, /2 access requests/);
+    assert.equal(pill.getAttribute('aria-label'), '2 sandboxed-session access requests waiting, tap to decide');
+    LISTING = { requests: [pending()], share_typing: true };
+    await ar.tickAccessRequests();
+    assert.match(pill.textContent, /🙋 1 access request$/);
+    assert.equal(pill.getAttribute('aria-label'), '1 sandboxed-session access request waiting, tap to decide');
 });
 
 test('a refused request says why and offers no Approve', async () => {

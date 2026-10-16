@@ -59,7 +59,7 @@ function renderCostTable(rows) {
     const list = rows || [];
 
     if (!list.length) {
-        host.innerHTML = '<div class="side-empty">No cost data yet — install the '
+        host.innerHTML = '<div class="side-empty">No cost data yet. Install the '
             + 'statusLine hook (<code>chela install-statusline</code>) so agents report '
             + 'session cost.</div>';
         return;

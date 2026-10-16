@@ -78,7 +78,7 @@ function renderLauncher() {
     const { recent, favorites } = _launcherData;
     let html = _groupLabel('Favorites', true);
     if (favorites.length) html += favorites.map(e => _launchRow(e, true)).join('');
-    else html += '<div class="side-empty">No projects yet — add one with +</div>';
+    else html += '<div class="side-empty">No projects yet. Add one with +</div>';
     if (recent.length) {
         html += _groupLabel('Recent', false);
         html += recent.map(e => _launchRow(e, false)).join('');

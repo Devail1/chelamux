@@ -120,7 +120,7 @@ async function restartStale(doc = document, deps = {}) {
     try {
         resp = await api('/api/update/apply', { method: 'POST' });
     } catch (e) {
-        resp = { ok: false, error: 'request failed — the dashboard may be restarting' };
+        resp = { ok: false, error: 'request failed, the dashboard may be restarting' };
     }
     if (!resp || resp.ok === false || resp.error) {
         _progress = { text: (resp && resp.error) || 'Restart refused.', cls: 'err', done: true };

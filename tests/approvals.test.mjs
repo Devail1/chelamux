@@ -78,10 +78,10 @@ test('the pill shows only while a request is pending, with the count', async () 
     assert.equal(pill.hidden, false);
     assert.match(pill.textContent, /2 pending approvals/);
     // The accessible name carries the count too — a screen reader must not hear only a label.
-    assert.equal(pill.getAttribute('aria-label'), '2 approval requests waiting — tap to review');
+    assert.equal(pill.getAttribute('aria-label'), '2 approval requests waiting, tap to review');
     LISTING = { requests: [req()] };
     await pa.tickApprovals();
-    assert.equal(pill.getAttribute('aria-label'), '1 approval request waiting — tap to review');
+    assert.equal(pill.getAttribute('aria-label'), '1 approval request waiting, tap to review');
 });
 
 test('a row says what, who, why, age and expiry', async () => {

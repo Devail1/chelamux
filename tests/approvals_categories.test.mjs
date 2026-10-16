@@ -190,11 +190,11 @@ test('the badge text and aria-label are exact for 1 and N', async () => {
     LISTING = { requests: [req()] };
     await pa.tickApprovals();
     assert.equal(pill().textContent, '⚖️ 1 pending approval');
-    assert.equal(pill().getAttribute('aria-label'), '1 approval request waiting — tap to review');
+    assert.equal(pill().getAttribute('aria-label'), '1 approval request waiting, tap to review');
     LISTING = { requests: [req(), req({ id: 'override-' + 'b'.repeat(24) }), req({ id: 'override-' + 'c'.repeat(24) })] };
     await pa.tickApprovals();
     assert.equal(pill().textContent, '⚖️ 3 pending approvals');
-    assert.equal(pill().getAttribute('aria-label'), '3 approval requests waiting — tap to review');
+    assert.equal(pill().getAttribute('aria-label'), '3 approval requests waiting, tap to review');
     LISTING = { requests: [] };
     await pa.tickApprovals();
     assert.equal(pill().hidden, true);
@@ -246,6 +246,7 @@ test('a failure with nothing known is "could not refresh", never "Nothing is wai
     const pill = document.getElementById('btn-approvals');
     assert.equal(pill.hidden, false);
     assert.match(pill.textContent, /couldn’t refresh approvals/);
+    assert.equal(pill.getAttribute('aria-label'), 'couldn’t refresh approvals, tap to review');
     await pa.openApprovals();
     assert.ok(!document.getElementById('approvals-backdrop').textContent.includes('Nothing is waiting'));
     assert.equal(document.querySelector('.pa-stale').hidden, false);

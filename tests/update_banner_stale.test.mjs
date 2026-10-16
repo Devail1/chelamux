@@ -167,6 +167,6 @@ test('refused, not started, and never confirmed each end in their own outcome', 
     applyStale(STALE);
     applyPayload = { ok: true, started: true, run: 3, boot: 'b1', detail: 'restarting chela-collab' };
     const res = await restartStale(document, instant([{ ...STALE, applying: true }]));
-    assert.equal(res.text, "Couldn't confirm the restart — check `pm2 ls`.");
+    assert.equal(res.text, "Couldn't confirm the restart. Check `pm2 ls`.");
     assert.match($('update-banner-msg').className, /\berr\b/);
 });

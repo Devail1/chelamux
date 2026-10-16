@@ -189,7 +189,7 @@ onOrchestratorChange(() => _render());
 
 const CHIP_META = {
     ok: { glyph: '●', word: 'live', cls: 'ok' },
-    unregistered: { glyph: '○', word: 'nobody — logged here', cls: 'none' },
+    unregistered: { glyph: '○', word: 'nobody (logged here)', cls: 'none' },
     dangling: { glyph: '✕', word: 'dangling', cls: 'bad' },
     gone: { glyph: '✕', word: 'gone', cls: 'bad' },
     unstamped: { glyph: '◐', word: 'unverified', cls: 'warn' },
@@ -250,7 +250,7 @@ function _reregisterHtml(s) {
     const candidates = _reregisterCandidates();
     if (!candidates.length) {
         return '<div class="decisions-chip-reregister">'
-            + '<span class="decisions-chip-rereg-empty">no live Claude session to re-register — open one, then retry</span>'
+            + '<span class="decisions-chip-rereg-empty">no live Claude session to re-register. Open one, then retry</span>'
             + '</div>';
     }
     const options = candidates.map(a =>
@@ -261,14 +261,14 @@ function _reregisterHtml(s) {
                 aria-label="Session to re-register as orchestrator"
                 title="The live session that should receive the decisions inbox">${options}</select>
         <button type="button" class="decisions-chip-rereg-btn" onclick="chela.reregisterOrchestrator()"${_reregisterInFlight ? ' disabled' : ''}
-                title="Register the selected session as the orchestrator — the same take-over &#39;chela watch&#39; does from a shell">↻ Re-register</button>
+                title="Register the selected session as the orchestrator: the same take-over &#39;chela watch&#39; does from a shell">↻ Re-register</button>
     </div>`;
 }
 
 function _chipHtml() {
     const s = orchestratorState();
     const meta = CHIP_META[s.state] || CHIP_META.unregistered;
-    const who = s.wid ? `${escHtml(s.name || s.wid)} (${escHtml(s.wid)})` : 'nobody — this panel is home';
+    const who = s.wid ? `${escHtml(s.name || s.wid)} (${escHtml(s.wid)})` : 'nobody (this panel is home)';
     const queued = s.queued ? `<span class="decisions-chip-queued">${escHtml(String(s.queued))} queued</span>` : '';
     const why = s.why ? `<span class="decisions-chip-why">${escHtml(s.why)}</span>` : '';
     return `<div class="decisions-chip decisions-chip-${escHtml(meta.cls)}">
