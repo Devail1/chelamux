@@ -11,6 +11,7 @@ import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg
 import { refresh } from './main.js';
 import { refreshCostTab } from './usage.js';
 import { resolveWindowId } from './windowid.js';
+import { followUpdate } from './updateflow.js';
 import { DISPATCHED_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, groupSidebar, isArchivable, moveGroup, normalizeView, primaryWindow, runLabel, runState } from './sidebarmodel.js';
 
 // The ONE Archived section at the bottom of the sidebar (CMX-75) — its collapse state
@@ -1997,7 +1998,7 @@ function renderSettings(focus) {
             <code>chela update</code> from the CLI. A dirty working tree or a branch diverged
             from its upstream refuses rather than clobbering anything.</p>
             <div class="s-row">
-                <button class="btn-accent" id="update-apply-btn" onclick="chela.applyUpdate()" disabled>Update now</button>
+                <button class="btn-accent" id="update-apply-btn" onclick="chela.applyUpdate()" disabled hidden>Update now</button>
             </div>
             <div id="update-apply-msg" class="s-savemsg"></div>
         </section>
@@ -2642,7 +2643,7 @@ function _renderUpdateStatus(upd) {
         const detail = upd && (upd.error || upd.note) ? escHtml(upd.error || upd.note) : 'unavailable';
         row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>Unknown</span>
             <span class="s-status-detail">${detail}</span>`;
-        if (btn) btn.disabled = true;
+        if (btn) { btn.disabled = true; btn.hidden = true; }
         return;
     }
     const behind = upd.behind || 0;
@@ -2652,7 +2653,7 @@ function _renderUpdateStatus(upd) {
     // nor fresh — say so instead of folding it into either.
     const unknownNote = unknown.length
         ? ` · freshness unknown for ${escHtml(unknown.join(', '))}` : '';
-    if (btn) btn.dataset.mode = '';
+    if (btn) { btn.dataset.mode = ''; btn.hidden = false; }
     if (behind > 0) {
         row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>${behind} behind</span>
             <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — ${behind} commit(s) unpulled; running services are still serving what they last loaded</span>`;
@@ -2669,10 +2670,16 @@ function _renderUpdateStatus(upd) {
             btn.textContent = `Restart stale services (${stale.length})`;
             btn.dataset.mode = 'restart';
         }
+    } else if (upd.stale_ok === false) {
+        // CMX-95: which services run old code could not be read — Unknown, never "Up to date".
+        row.innerHTML = `<span class="s-status-badge off"><span class="s-status-dot" aria-hidden="true">○</span>Unknown</span>
+            <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull, but could not read which services run old code (check <code class="s-cmd">pm2 ls</code>)</span>`;
+        if (btn) { btn.disabled = true; btn.hidden = true; }
     } else {
         row.innerHTML = `<span class="s-status-badge on"><span class="s-status-dot" aria-hidden="true">●</span>Up to date</span>
             <span class="s-status-detail">branch ${escHtml(upd.branch || '')} — nothing to pull${unknownNote}</span>`;
-        if (btn) { btn.disabled = true; btn.textContent = 'Update now'; }
+        // CMX-95: nothing to pull and nothing stale — offer no button at all.
+        if (btn) { btn.disabled = true; btn.hidden = true; }
     }
 }
 
@@ -2707,11 +2714,20 @@ async function applyUpdate() {
     // CMX-56: every click ends in a message — the route's own `detail` names what it
     // started ("restarting chela-dashboard", "pulling 3 commit(s)…").
     const what = resp.detail ? resp.detail.charAt(0).toUpperCase() + resp.detail.slice(1) : 'Started';
-    setMsg('ok', `${what}. This dashboard may briefly disconnect if it restarts; `
-        + 'refresh in a few seconds to see the result.');
-    // The pull may restart THIS process — nothing left to poll from here. Leave the
-    // button disabled rather than re-enabling it against a page that's about to reload.
+    setMsg('ok', `${what}…`);
+    // CMX-95: follow it to an outcome, not "refresh in a few seconds" forever (the dashboard
+    // is usually NOT restarted, so nothing would reload). A new `boot` = it was; reload.
+    const step = await followUpdate(resp, s => {
+        if (s.state === 'polling' || s.state === 'reload') setMsg('', s.text);
+    }, _updateFlowDeps);
+    if (step.state === 'reload') return;
+    setMsg(step.state === 'done' ? 'ok' : 'err', step.text);
+    if (step.state === 'done') { _loadSettingsStatus(); return; }
+    if (btn) { btn.disabled = false; btn.textContent = idleLabel; }
 }
+
+// Test seam: tests/settings_update.test.mjs swaps the poll's clock/sleep/fetch.
+const _updateFlowDeps = {};
 
 function _statusRowHtml(it) {
     const on = !!it.on;
@@ -3555,4 +3571,4 @@ export { altSwitchKeydown, setAltHeld, openSidebarRow, archiveKeys, rowMenuActio
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyUpdate, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
+Object.assign(window.chela, { _updateFlowDeps, applyUpdate, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
