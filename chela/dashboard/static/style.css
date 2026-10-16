@@ -2511,6 +2511,24 @@ input[type="text"]:focus, textarea:focus, select:focus {
 
 .kanban-col-head .kanban-col-label { flex: 1 1 auto; min-width: 0; }
 
+/* 🙈 CMX-136 — Hidden columns (Linear-style): empty columns leave the grid and are listed
+   in a narrow panel to the board's right. Desktop: board + panel side by side; the board
+   (its grid sized to the VISIBLE columns) takes the freed width. */
+.kanban-board-wrap { display: flex; gap: 10px; align-items: flex-start; }
+.kanban-board-wrap > .kanban-board { flex: 1 1 auto; min-width: 0; }
+.kanban-board-wrap > .kanban-hidden-panel { flex: 0 0 180px; }
+.kanban-hidden-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px; font-size: 12px; }
+.kanban-hidden-head { cursor: pointer; color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.kanban-hidden-rows { list-style: none; margin: 6px 0 0; padding: 0; }
+.kanban-hidden-row { display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: 6px; cursor: pointer; color: var(--text-dim); outline: 2px solid transparent; }
+.kanban-hidden-row:hover, .kanban-hidden-row:focus-visible { background: var(--bg); color: var(--text); }
+.kanban-hidden-row.kanban-hidden-row-over { outline-color: var(--accent); background: var(--bg); }
+.kanban-hidden-label { flex: 1 1 auto; min-width: 0; color: var(--text); }
+.kanban-hidden-dot { font-size: 9px; }
+.kanban-hidden-row .col-count { border: 1px solid var(--border); border-radius: 10px; padding: 0 6px; font-size: 10px; }
+.kanban-hidden-inline { display: none; color: var(--text-dim); }
+.kanban-col-hide { flex: 0 0 auto; margin-left: 6px; background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--text-dim); font-size: 10px; padding: 0 5px; cursor: pointer; }
+
 /* Accordion caret — hidden by default (desktop grid + swipe carousel have no
    collapse). The mobile Rows layout flips it on. */
 .kanban-col-caret { display: none; }
@@ -3124,6 +3142,12 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
         margin-bottom: 0;
     }
     .kanban-cards { max-height: none; }
+
+    /* Hidden columns at phone width: one "Hidden: Backlog · Review" line above the board. */
+    .kanban-board-wrap { flex-direction: column-reverse; align-items: stretch; }
+    .kanban-board-wrap > .kanban-hidden-panel { flex: none; padding: 6px 8px; }
+    .kanban-hidden-details { display: none; }
+    .kanban-hidden-inline { display: block; }
 
     /* Rows accordion — full-width stacked columns; each head is a tap toggle
        that collapses/expands its cards. Every header + count stays visible. */

@@ -13,6 +13,7 @@
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
+import { columnKey } from '../chela/dashboard/static/js/kanbanlinearmodel.js';
 
 const KANBAN_BODY = `
 <div class="work-pane active" id="work-board" data-seg="board">
@@ -40,7 +41,9 @@ let renderKanban;
 before(async () => {
     ({ modules: { kanban: { renderKanban } } } = await bootDashboardDom({
         body: KANBAN_BODY, extraModules: ['kanban.js'],
-    }));
+    }));    // CMX-136 hides an EMPTY column by default (tests/kanban_hidden_columns.test.mjs). These
+    // tests are about which columns exist, so every one of them is pinned "always show".
+    for (const name of [...LINEAR.map(c => c.name), '<b>QA</b>']) window.chela.kanbanShowCol(columnKey(name));
 });
 
 function _run(overrides = {}) {
