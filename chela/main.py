@@ -2182,7 +2182,7 @@ def cmd_restore(args) -> None:
     try:
         runs = dispatcher.list_runs()
     except Exception:  # noqa: BLE001 — a DB hiccup must never crash a status report
-        runs = []
+        runs = None
     orphans = restore.scan_all(store["watches"], runs, sessionids.entries(), now_epoch)
 
     bindings_reg = BindingRegistry.load()
@@ -2225,8 +2225,13 @@ def cmd_restore(args) -> None:
                         f"(session {v.session_id} is alive there now)")
             else:
                 cmd = v.manual_command()
+                # CMX-156: a session a run still owns is never offered as a relaunch line.
+                held = cmd and (restore.not_offered_reason(v.cwd, runs) if runs is not None
+                                else "the dispatcher's runs table is unreadable — a run may "
+                                     "still own this worktree")
                 line = (f"  [{v.store}] {v.wid}  MANUAL"
-                        + (f"  — {cmd}" if cmd else " (no cwd/session on record)"))
+                        + (f"  — not offered: {held}" if held
+                           else f"  — {cmd}" if cmd else " (no cwd/session on record)"))
             if r is not None:
                 line += f"  => {r.action}" + (f" ({r.detail})" if r.detail else "")
             print(line)

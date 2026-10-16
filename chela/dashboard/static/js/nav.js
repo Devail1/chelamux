@@ -1449,14 +1449,17 @@ function _recentRowHtml(r) {
 // the same single-writer hazard roster.json/telegram-bindings.json have already hit
 // (three times). It is shown ONLY as a fact, behind the toggle below — but, like
 // every row the list shows, it can be dismissed (CMX-11).
+// CMX-156: a row whose run the dispatcher will relaunch itself (`relaunch` = its task id)
+// is shown OUTSIDE the toggle, read-only, saying so: why it has no Resume.
 function _dispatcherRowHtml(r) {
     const label = r.label || r.cwd || r.wid;
+    const sub = r.relaunch ? `↻ dispatcher will relaunch ${r.relaunch}` : (r.cwd || '');
     return `<div class="agent-row recent-row recent-row-dispatcher"
                 title="dispatcher-owned: resuming it would race the dispatcher's own worktree lifecycle">
         <span class="ar-type recent" title="dispatcher-owned session">&#8635;</span>
         <div class="ar-main">
             <div class="ar-top"><span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span></div>
-            <div class="ar-sub"><span class="ar-recap" title="${attrEsc(r.cwd || '')}">${escHtml(r.cwd || '')}</span></div>
+            <div class="ar-sub"><span class="ar-recap" title="${attrEsc(r.cwd || '')}">${escHtml(sub)}</span></div>
         </div>
         ${_dismissButtonHtml(r, label)}
     </div>`;
@@ -1494,13 +1497,15 @@ function _paintRecentSessions() {
     }
     section.hidden = false;
 
-    let html = rows.map(_recentRowHtml).join('');
-    if (dispatcherRows.length) {
+    const hiddenRows = dispatcherRows.filter(r => !r.relaunch);
+    let html = rows.map(_recentRowHtml).join('')
+        + dispatcherRows.filter(r => r.relaunch).map(_dispatcherRowHtml).join('');
+    if (hiddenRows.length) {
         html += `<button class="recent-toggle-dispatcher" aria-expanded="${_recentDispatcherRevealed}"`
             + ` onclick="chela.toggleDispatcherSessions()">`
-            + `${escHtml(dispatcherToggleLabel(dispatcherRows.length, _recentDispatcherRevealed))}</button>`;
+            + `${escHtml(dispatcherToggleLabel(hiddenRows.length, _recentDispatcherRevealed))}</button>`;
         if (_recentDispatcherRevealed) {
-            html += dispatcherRows.map(_dispatcherRowHtml).join('');
+            html += hiddenRows.map(_dispatcherRowHtml).join('');
         }
     }
     host.innerHTML = html;

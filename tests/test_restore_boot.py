@@ -203,3 +203,45 @@ def test_a_tmux_restart_does_not_spend_an_attempt(tmp_path, monkeypatch, stamped
         assert dispatcher.tick(wf.path)["reconciled_failed"] == 1
     run = dispatcher.resolve_run("abc123")
     assert (run["status"], run["attempt"], run["last_error"]) == ("failed", attempt, error)
+
+
+# --- CMX-156: the dispatcher's retry predicate, read by restore -------------------------
+
+NOT_COUNTED = {**RUN, "status": "failed", "attempt": 0,
+               "last_error": "tmux server restarted (attempt not counted)"}
+
+
+@pytest.mark.parametrize("row,will", [
+    (NOT_COUNTED, True), ({**NOT_COUNTED, "attempt": 2}, True),
+    ({**NOT_COUNTED, "attempt": 3}, False), ({**NOT_COUNTED, "pr_state": "merged"}, False),
+    ({"status": "closed", "requeue_pending": 1}, True), ({"status": "closed"}, False),
+    ({"status": "closed", "requeue_pending": 1, "pr_state": "merged"}, False),
+    ({"status": "done"}, False), ({"status": "claimed"}, False), ({"status": "running"}, False),
+    ({"status": "awaiting_review"}, False), ({"status": "changes_requested"}, False),
+    ({"status": "needs_human"}, False),
+])
+def test_run_will_relaunch(row, will):
+    assert dispatcher.run_will_relaunch(row) is will
+
+
+@pytest.mark.parametrize("runs,relaunch,owner", [
+    ([NOT_COUNTED], "CMX-95", "CMX-95"), ([RUN], None, "CMX-95"),
+    ([{**NOT_COUNTED, "status": "closed"}], None, None),
+])
+def test_relaunching_run_vs_live_owner(runs, relaunch, owner):
+    assert restore.relaunching_run("/wt/CMX-95/chela", runs) == relaunch
+    assert restore.live_worktree_owner("/wt/CMX-95", runs) == owner
+
+
+@pytest.mark.parametrize("runs,detail", [
+    ([NOT_COUNTED], "the dispatcher will relaunch run CMX-95 itself in this worktree — "
+                    "resuming the old session would put two agents on one task"),
+    ([RUN], "its worktree belongs to run CMX-95, still in flight — the dispatcher gives "
+            "that run its one window"),
+])
+def test_resume_says_why_it_skipped_a_dispatcher_owned_worktree(runs, detail):
+    spawned = []
+    [r] = restore.resume([_manual(cwd="/wt/CMX-95")], runs, resume_blocked=lambda s: None,
+                         spawn_window=lambda *a, **k: spawned.append(a))
+    assert (spawned, r.action, r.detail) == ([], restore.SKIPPED, detail)
+    assert restore.not_offered_reason("/home/u/five", runs) is None
