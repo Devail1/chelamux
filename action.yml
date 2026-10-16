@@ -1,0 +1,59 @@
+# ⚖️🧹 chela judge sweep as a GitHub Action (CMX-97): mutate the lines a PR changed, run the
+# tests, fail on survivors. Exit: 0 clean · 1 survivors · 2 cannot verify · 3 unknown.
+name: chela judge sweep
+description: Mutate the lines a pull request changed, run your tests, and fail on every mutation they do not catch.
+author: Liav Edry
+branding:
+  icon: check-square
+  color: purple
+inputs:
+  base:
+    description: Git ref or sha to diff against. Default — the pull request's base commit.
+    required: false
+    default: ""
+  test-cmd:
+    description: Suite command. Default — detected (pytest, npm test, go test, cargo test).
+    required: false
+    default: ""
+  comment:
+    description: Post (or update) one PR comment with the result — "true" or "false".
+    required: false
+    default: "true"
+  github-token:
+    description: Token used for the PR comment.
+    required: false
+    default: ${{ github.token }}
+  python:
+    description: Python (>= 3.11) used to install chela into its own venv.
+    required: false
+    default: python3
+outputs:
+  verdict:
+    description: clean | survivors | unknown | cannot_verify | error
+    value: ${{ steps.sweep.outputs.verdict }}
+  survivors:
+    description: Number of surviving mutations.
+    value: ${{ steps.sweep.outputs.survivors }}
+runs:
+  using: composite
+  steps:
+    - name: Install chela
+      shell: bash
+      env:
+        CHELA_PYTHON: ${{ inputs.python }}
+      run: |
+        set -euo pipefail
+        venv="$RUNNER_TEMP/chela-judge-sweep"
+        "$CHELA_PYTHON" -m venv "$venv"
+        "$venv/bin/python" -m pip install --quiet --disable-pip-version-check "$GITHUB_ACTION_PATH"
+        echo "CHELA_SWEEP_BIN=$venv/bin/chela" >> "$GITHUB_ENV"
+    - name: Sweep the changed lines
+      id: sweep
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_TEST_CMD: ${{ inputs.test-cmd }}
+        INPUT_COMMENT: ${{ inputs.comment }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/judge-sweep-action.sh"
