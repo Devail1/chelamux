@@ -3645,7 +3645,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok-green) 22%, transparent);
 }
 .term-status-dot.dispatched.judging {
-    background-image: conic-gradient(var(--ok-green) 0 50%, transparent 0);
+    background-image: conic-gradient(var(--ok-green) 0 75%, transparent 0);
     box-shadow: none; animation: none;
 }
 @media (prefers-reduced-motion: reduce) {
