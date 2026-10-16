@@ -442,8 +442,7 @@ DISPATCH_KNOBS: tuple[DispatchKnob, ...] = (
                  "Judge (adversarial review)", kind="bool", restart_required=True),
     DispatchKnob("judge_max_unknown_retries", "CHELA_JUDGE_MAX_UNKNOWN_RETRIES", 2, int,
                  "Judge cannot-verify retries", floor=0),
-    DispatchKnob("judge_max_concurrent", "CHELA_JUDGE_MAX_CONCURRENT", 1, int,
-                 "Judge max concurrent (per workflow)", floor=1),
+    # (judge_max_concurrent moved to its own Settings row, CMX-164: chela/concurrency.py)
     DispatchKnob("judge_outage_backoff_seconds", "CHELA_JUDGE_OUTAGE_BACKOFF_S", 600.0, float,
                  "Judge classifier-outage backoff", unit="s", floor=0),
     # ⏳⚖️ CMX-431: the judge wall scales with the battery — see `judge_wall_*` below.
@@ -888,10 +887,12 @@ def judge_max_concurrent() -> int:
     not mean "disabled" (that is ``judge_enabled=false``) — it would silently wedge every
     workflow's judge queue forever, indistinguishable from a stuck daemon. Read per call,
     never latched at import: a policy knob an operator turns on a running daemon, and a
-    garbage value degrades to the default rather than crashing the tick. A Dispatch-tab
-    knob (CMX-220) — see DISPATCH_KNOBS above.
+    garbage value degrades to the default rather than crashing the tick. CMX-164: its own
+    "Judges at once" Settings row, where the stored value wins over the env var (see
+    ``chela/concurrency.py``), bounded 1 to 8.
     """
-    return max(1, dispatch_value("judge_max_concurrent"))
+    from chela import concurrency
+    return concurrency.judges_at_once()[0]
 
 
 def judge_outage_backoff_seconds() -> float:
