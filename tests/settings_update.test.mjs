@@ -175,6 +175,21 @@ test('nothing to pull but stale services never renders as "Up to date"', async (
     assert.equal(btn.textContent, 'Restart stale services (2)');
 });
 
+// CMX-160 rewrote this sentence; both number agreements are pinned word for word.
+const staleDetail = () => document.querySelector('#update-status-row .s-status-detail').textContent.replace(/\s+/g, ' ');
+
+test('the stale sentence for two services says "run" and "they"', async () => {
+    await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev', stale_services: ['chela-daemon', 'chela-dashboard'] });
+    assert.equal(staleDetail(), 'branch dev: nothing to pull, but code that chela-daemon, chela-dashboard run changed '
+        + 'after they started (or pm2 restart chela-daemon chela-dashboard)');
+});
+
+test('the stale sentence for one service says "runs" and "it"', async () => {
+    await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev', stale_services: ['chela-daemon'] });
+    assert.equal(staleDetail(), 'branch dev: nothing to pull, but code that chela-daemon runs changed '
+        + 'after it started (or pm2 restart chela-daemon)');
+});
+
 test('a service whose freshness is unknown is named as unknown, not stale and not hidden', async () => {
     await openWith({ ok: true, behind: 0, ahead: 0, branch: 'dev', stale_services: [],
         unknown_services: ['chela-agent-terminals'] });

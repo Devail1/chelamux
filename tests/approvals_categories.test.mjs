@@ -246,6 +246,7 @@ test('a failure with nothing known is "could not refresh", never "Nothing is wai
     const pill = document.getElementById('btn-approvals');
     assert.equal(pill.hidden, false);
     assert.match(pill.textContent, /couldn’t refresh approvals/);
+    assert.equal(pill.getAttribute('aria-label'), 'couldn’t refresh approvals, tap to review');
     await pa.openApprovals();
     assert.ok(!document.getElementById('approvals-backdrop').textContent.includes('Nothing is waiting'));
     assert.equal(document.querySelector('.pa-stale').hidden, false);
