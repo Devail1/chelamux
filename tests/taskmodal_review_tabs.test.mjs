@@ -188,3 +188,20 @@ for (const [why, tracker_url] of [['TODO task (no tracker URL)', undefined], ['n
         assert.equal(q('.task-modal-headline .kanban-card-id').textContent, 'TODO-7');
     });
 }
+
+test('a backlog item (no id at all) renders no key chip, not an empty one', () => {
+    taskmodal.openTaskModal({ title: 'someday', section: 'Ideas', status: 'backlog' });
+    assert.equal(q('.task-modal-headline .kanban-card-id'), null);
+});
+
+test('a round with no stored number is labelled by its position', () => {
+    open({ status: 'awaiting_review', review_history: JSON.stringify([{ verdict: 'reopened' }, { verdict: 'retry' }]) });
+    assert.deepEqual(qa('.task-modal-round-no').map(e => e.textContent), ['Round 2', 'Round 1']);
+});
+
+test('tab / round handlers are no-ops (never throw) once the modal content is gone or the round is unknown', () => {
+    open({ status: 'awaiting_review', review_history: history(1) });
+    assert.doesNotThrow(() => window.chela.taskModalRound(99));
+    document.querySelector('#task-modal-content').innerHTML = '';
+    assert.doesNotThrow(() => window.chela.taskModalTab('review'));
+});
