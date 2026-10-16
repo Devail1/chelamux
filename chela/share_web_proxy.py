@@ -58,7 +58,7 @@ IDLE_TIMEOUT_S = 300.0
 
 # NAT64 well-known prefix: the low 32 bits are an IPv4 address the gateway would reach.
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
-_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
+_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\Z")
 # Hop-by-hop + proxy headers (RFC 9110 §7.6.1) — never forwarded.
 _HOP = {"connection", "keep-alive", "proxy-connection", "proxy-authorization",
         "proxy-authenticate", "te", "trailer", "transfer-encoding", "upgrade"}
