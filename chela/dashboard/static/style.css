@@ -3625,6 +3625,26 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     border-radius: 1px; clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
     background: var(--ok-sky); box-shadow: none;
 }
+/* CMX-137: a DISPATCHED run's progress icons (sidebar, collapsed rail, minimized bar),
+   after Linear's: working = HALF-filled circle (◐), judging / awaiting review = ¾-filled
+   (◕). The SHAPE carries it; Okabe-Ito bluish-green (not violet, which collapses into
+   blue for a red-weak eye) is only a second cue. Same box as every state. Done / waiting
+   keep the shared check / triangle; working keeps the shared pulse, tinted. */
+.term-status-dot.dispatched.working,
+.term-status-dot.dispatched.judging {
+    border-radius: 50%; clip-path: none; background-color: transparent;
+    border: 1.5px solid var(--ok-green);
+}
+.term-status-dot.dispatched.working {
+    background-image: conic-gradient(var(--ok-green) 0 50%, transparent 0);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok-green) 22%, transparent);
+}
+.term-status-dot.dispatched.judging {
+    background-image: conic-gradient(var(--ok-green) 0 75%, transparent 0);
+}
+@media (prefers-reduced-motion: reduce) {
+    .term-status-dot.dispatched.working { animation: none; }
+}
 
 /* Window-type cue (recent/dispatcher rows only — CMX-377 round 2 dropped it
    from the live agent row face; see nav.js's _agentRowHtml comment). A GLYPH,

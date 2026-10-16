@@ -13,7 +13,7 @@ import { refreshCostTab } from './usage.js';
 import { resolveWindowId } from './windowid.js';
 import { followUpdate } from './updateflow.js';
 import { memNote, stepPayload, workflowNote } from './concurrencymodel.js';
-import { DISPATCHED_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, groupSidebar, isArchivable, moveGroup, normalizeView, primaryWindow, runLabel, runState, sidebarWids } from './sidebarmodel.js';
+import { DISPATCHED_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, groupSidebar, isArchivable, moveGroup, normalizeView, primaryWindow, runDot, runLabel, runState, sidebarWids } from './sidebarmodel.js';
 
 // The ONE Archived section at the bottom of the sidebar (CMX-75) — its collapse state
 // rides the collapsed-groups set under this key.
@@ -712,7 +712,9 @@ function _agentRowHtml(a, o = {}) {
         : '';
     return `<div class="agent-row rich${active}${wallCls}${o.cls ? ' ' + o.cls : ''}" data-agent="${attrEsc(a.name)}"${runAttr} title="${attrEsc(rowTitle + wallSuffix)}"
         onclick="chela.selectAgent(this.dataset.agent)">
-        <span class="term-status-dot ${stCls}" title="${attrEsc(o.runId ? 'run' : type)} · ${stWord}"></span>
+        ${o.dot
+        ? `<span class="term-status-dot ${o.dot.cls}" role="img" aria-label="${attrEsc(o.dot.label)}" title="${attrEsc(o.dot.label)}"></span>`
+        : `<span class="term-status-dot ${stCls}" title="${attrEsc(type)} · ${stWord}"></span>`}
         <div class="ar-main">
             <span class="agent-row-name"${key ? ` data-key="${attrEsc(key)}" title="${attrEsc(`window: ${key}`)}"` : ''}>${escHtml(label)}</span>
             <div class="ar-sub">${sub}${_orchBadgeHtml(a)}${o.badge || ''}</div>
@@ -739,10 +741,13 @@ function _runRowHtml(it, extraCls, showPR) {
     const a = primaryWindow(it);
     const st = runState(it, wantsHuman);
     const label = runLabel(it);
+    // CMX-137: the run's own progress icon (◐ working, ◕ judging/awaiting review),
+    // not a human session's dot, and its label names both kind and state.
+    const dot = runDot(it, wantsHuman);
     const wins = [it.agent && `agent ${it.agent.name} · ${it.agent.window_id}`,
         it.judge && `judge ${it.judge.name} · ${it.judge.window_id}`].filter(Boolean).join('\n');
     return _agentRowHtml(a, {
-        label, stWord: st.word, stCls: st.shape, runId: it.run.task_id, itemKey: it.key,
+        label, stWord: st.word, stCls: st.shape, dot, runId: it.run.task_id, itemKey: it.key,
         titleHead: `${label}: ${st.word}`, titleExtra: wins,
         cls: ['run-row', extraCls].filter(Boolean).join(' '),
         badge: showPR ? _prBadgeHtml(it) : '',
@@ -1455,14 +1460,17 @@ function _recentRowHtml(r) {
 // the same single-writer hazard roster.json/telegram-bindings.json have already hit
 // (three times). It is shown ONLY as a fact, behind the toggle below — but, like
 // every row the list shows, it can be dismissed (CMX-11).
+// CMX-156: a row whose run the dispatcher will relaunch itself (`relaunch` = its task id)
+// is shown OUTSIDE the toggle, read-only, saying so: why it has no Resume.
 function _dispatcherRowHtml(r) {
     const label = r.label || r.cwd || r.wid;
+    const sub = r.relaunch ? `↻ dispatcher will relaunch ${r.relaunch}` : (r.cwd || '');
     return `<div class="agent-row recent-row recent-row-dispatcher"
                 title="dispatcher-owned: resuming it would race the dispatcher's own worktree lifecycle">
         <span class="ar-type recent" title="dispatcher-owned session">&#8635;</span>
         <div class="ar-main">
             <div class="ar-top"><span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span></div>
-            <div class="ar-sub"><span class="ar-recap" title="${attrEsc(r.cwd || '')}">${escHtml(r.cwd || '')}</span></div>
+            <div class="ar-sub"><span class="ar-recap" title="${attrEsc(r.cwd || '')}">${escHtml(sub)}</span></div>
         </div>
         ${_dismissButtonHtml(r, label)}
     </div>`;
@@ -1500,13 +1508,15 @@ function _paintRecentSessions() {
     }
     section.hidden = false;
 
-    let html = rows.map(_recentRowHtml).join('');
-    if (dispatcherRows.length) {
+    const hiddenRows = dispatcherRows.filter(r => !r.relaunch);
+    let html = rows.map(_recentRowHtml).join('')
+        + dispatcherRows.filter(r => r.relaunch).map(_dispatcherRowHtml).join('');
+    if (hiddenRows.length) {
         html += `<button class="recent-toggle-dispatcher" aria-expanded="${_recentDispatcherRevealed}"`
             + ` onclick="chela.toggleDispatcherSessions()">`
-            + `${escHtml(dispatcherToggleLabel(dispatcherRows.length, _recentDispatcherRevealed))}</button>`;
+            + `${escHtml(dispatcherToggleLabel(hiddenRows.length, _recentDispatcherRevealed))}</button>`;
         if (_recentDispatcherRevealed) {
-            html += dispatcherRows.map(_dispatcherRowHtml).join('');
+            html += hiddenRows.map(_dispatcherRowHtml).join('');
         }
     }
     host.innerHTML = html;
