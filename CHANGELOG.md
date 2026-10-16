@@ -10,6 +10,13 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Changed
+
+- **The phone's session pills follow the sidebar's order**: group order, Move up / Move
+  down, custom groups and each group's sort, shared by every device. A session the sidebar
+  collapses or filters out keeps its pill at its group's position, and one the sidebar has
+  not drawn yet goes at the end. The header swipe steps in the same order. (CMX-165)
+
 ## [0.17.0] — 2026-10-16
 
 ### Added

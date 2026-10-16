@@ -624,8 +624,14 @@ function _saveCustom(c) { _writeLayout({ custom: { groups: c.groups, assign: c.a
 let _sb = { groups: [], needsYou: [], items: new Map() };
 
 // CMX-165: the window ids in the order the sidebar last drew them (sidebarmodel.sidebarWids
-// over the same model). The phone's pill strip sorts by this, so there is one order.
-function sidebarOrder() { return sidebarWids(_sb); }
+// over the same groupSidebar call). The phone's pill strip sorts by this, so there is one
+// order. The View filters (Status / Environment / Last activity) are lifted for it: a row
+// the sidebar filters out still has a pane, so its pill keeps its group's position.
+let _sbIn = null;   // the agents + groupSidebar options renderSidebarAgents last drew from
+function sidebarOrder() {
+    if (!_sbIn) return [];
+    return sidebarWids(groupSidebar(_sbIn.rows, { ..._sbIn.opts, status: 'all', env: null, activityDays: null }));
+}
 
 // An item's display label: a run reads `CMX-37 · <title>`; a window reads its CMX-62
 // label (manual name > Claude's title > window name).
@@ -897,12 +903,14 @@ function renderSidebarAgents(agents) {
     const archived = _archivedSet();
     const view = _view();
     const custom = _custom();
-    const model = groupSidebar(rows, {
+    const sbOpts = {
         mode: view.groupBy, wants: wantsHuman, orchWid, order: _groupOrder(),
         archived, status: view.status, env: view.env, activityDays: VIEW_ACTIVITY[view.activity],
         now: Date.now(), sort: view.sort, labelOf: _itemLabel, showEmpty: view.showEmpty, custom,
         sessions: _arch.sessions || [],
-    });
+    };
+    const model = groupSidebar(rows, sbOpts);
+    _sbIn = { rows, opts: sbOpts };
     const showArchived = view.status !== 'active';
 
     // A hidden row that came back to life (busy, waiting) or whose window is gone leaves
