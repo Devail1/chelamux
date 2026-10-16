@@ -199,8 +199,8 @@ def test_a_second_release_while_one_is_pending_is_refused(world):
 # --- approve -------------------------------------------------------------------------------
 
 def test_approve_pushes_main_tag_dev_in_order_exactly_once(world, pushes, told):
-    """🔴 GUARD: approve ⇒ exactly three pushes, main → tag → dev, none forced; a second
-    approve pushes nothing more."""
+    """🔴 GUARD: approve ⇒ exactly four pushes, main → tag → dev, none forced, then the
+    major tag v0 — the ONLY forced refspec (CMX-158); a second approve pushes nothing more."""
     out = _prepare(world)
     rid, sha = out["request_id"], out["release_sha"]
     first = overrides.decide(rid, True, "terminal:op")
@@ -208,18 +208,17 @@ def test_approve_pushes_main_tag_dev_in_order_exactly_once(world, pushes, told):
     second = overrides.decide(rid, True, "terminal:op")
     assert second["ok"] is False and second["state"] == overrides.RELEASED
     assert pushes == [f"{sha}:refs/heads/main", "refs/tags/v0.2.0:refs/tags/v0.2.0",
-                      f"{sha}:refs/heads/dev"]
-    assert not any(p.startswith("+") for p in pushes)
+                      f"{sha}:refs/heads/dev", f"+{sha}:refs/tags/v0"]
     assert _remote(world, "main") == _remote(world, "dev") == sha
-    assert _remote(world, "refs/tags/v0.2.0^{commit}") == sha
+    assert _remote(world, "refs/tags/v0.2.0^{commit}") == _remote(world, "refs/tags/v0") == sha
     assert overrides.load(rid)["state"] == overrides.RELEASED
     # CMX-123: the orchestrator hears the release — once, with what was pushed and next.
     (kind, summary, payload), = told
     assert kind == "release_released"
     assert payload["version"] == "0.2.0" and payload["tag"] == "v0.2.0"
-    assert payload["pushed"] == ["main", "v0.2.0", "dev"] and payload["release_sha"] == sha
+    assert payload["pushed"] == ["main", "v0.2.0", "dev", "v0"] and payload["release_sha"] == sha
     assert payload["by"] == "terminal:op" and payload["channel"] == "terminal"
-    assert "pushed main, v0.2.0, dev" in summary
+    assert "pushed main, v0.2.0, dev, v0" in summary
     assert "pyproject.toml" in payload["changed"] and payload["services"] is None
     assert payload["deploy"].startswith("changed: ") and payload["deploy"] in summary
     # its worktree and local branch are gone; the pushed tag stays
@@ -258,7 +257,7 @@ def test_the_dashboard_confirm_page_shows_the_release_and_approves(world, pushes
     assert b"CMX-5, CMX-7" in page.data and out["dev_sha"].encode() in page.data
     ok = client.post(f"/override/{out['request_id']}", data={"decision": "approve"})
     assert ok.status_code == 200 and b"released" in ok.data
-    assert len(pushes) == 3
+    assert len(pushes) == 4
 
 
 # --- dev moved -----------------------------------------------------------------------------
@@ -565,7 +564,7 @@ def test_complete_refuses_an_approved_override_that_is_not_a_release(world, push
     assert res["ok"] is False and "not approved" in res["detail"] and pushes == []
     overrides.set_fields(out["request_id"], kind="release")     # negative control
     assert release.complete(overrides.load(out["request_id"]), "me")["ok"] is True
-    assert len(pushes) == 3
+    assert len(pushes) == 4
 
 
 def test_a_rejected_dev_push_fails_and_reports_what_was_pushed(world, pushes, told):
@@ -1048,7 +1047,7 @@ def test_merge_approve_cli_reports_a_release_as_released(world, pushes, capsys):
     main.cmd_merge_approve(SimpleNamespace(request=out["request_id"], deny=False))
     printed = capsys.readouterr().out
     assert "approved and released" in printed and out["release_sha"][:12] in printed
-    assert len(pushes) == 3
+    assert len(pushes) == 4
 
 
 def test_chela_release_is_wired_into_the_command_line(monkeypatch):
@@ -1062,6 +1061,19 @@ def test_chela_release_is_wired_into_the_command_line(monkeypatch):
     main.main()
     (args,) = seen
     assert (args.version, args.theme, args.body_file) == ("0.2.0", "t", "b.md")
+
+
+def test_major_tag_only_on_the_real_command_line_reaches_the_major_tag_branch(world, monkeypatch):
+    # Real parser, not a hand-built Namespace: a renamed dest must not fall through to prepare().
+    from chela import main
+    calls = []
+    monkeypatch.setattr(release, "major_tag_only", lambda v, repo=None: calls.append(
+        (v, repo)) or {"ok": True, "major": "v0", "sha": "b" * 40})
+    monkeypatch.setattr(release, "prepare", lambda *a, **k: pytest.fail("fell through"))
+    monkeypatch.setattr("sys.argv", ["chela", "release", "0.2.0", "--major-tag-only",
+                                     "--repo", str(world.work)])
+    main.main()
+    assert calls == [("0.2.0", str(world.work))]
 
 
 def test_not_done_for_an_override_says_nothing_was_merged():
@@ -1801,7 +1813,7 @@ def test_an_approved_release_ends_released_and_records_what_was_pushed(world, pu
     out = _prepare(world)
     res = overrides.decide(out["request_id"], True, "terminal:op")
     assert res["state"] == overrides.RELEASED
-    assert overrides.load(out["request_id"])["pushed"] == ["main", "v0.2.0", "dev"]
+    assert overrides.load(out["request_id"])["pushed"] == ["main", "v0.2.0", "dev", "v0"]
 
 
 def test_only_a_release_in_a_final_state_is_cleaned_up(monkeypatch):
@@ -1900,14 +1912,16 @@ def argvs(monkeypatch):
 
 def test_every_push_is_spelled_plain_with_no_force_flag_and_no_plus_refspec(world, argvs):
     """🔴 GUARD: the WHOLE argv of each push is pinned — `--force`, `-f`, `--force-with-lease`,
-    `--mirror`, `--delete`, a `+` refspec or any other added flag changes it ⇒ RED."""
+    `--mirror`, `--delete`, a `+` refspec or any other added flag changes it ⇒ RED. The one
+    forced refspec is the major tag v0's, and only that one ref (CMX-158)."""
     out = _prepare(world)
     sha = out["release_sha"]
     assert overrides.decide(out["request_id"], True, "terminal:op")["state"] == overrides.RELEASED
     assert argvs == [("push", "--quiet", "origin", f"{sha}:refs/heads/main"),
                      ("push", "--quiet", "origin", "refs/tags/v0.2.0:refs/tags/v0.2.0"),
-                     ("push", "--quiet", "origin", f"{sha}:refs/heads/dev")]
-    for argv in argvs:
+                     ("push", "--quiet", "origin", f"{sha}:refs/heads/dev"),
+                     ("push", "--quiet", "origin", f"+{sha}:refs/tags/v0")]
+    for argv in argvs[:3]:
         assert not any(a in ("-f", "--force", "--force-with-lease", "--mirror", "--delete")
                        or a.startswith(("--force", "+")) for a in argv)
 
@@ -2023,7 +2037,8 @@ def test_complete_takes_dev_and_release_shas_from_disk_never_the_callers_copy(wo
     assert res["ok"] is True and res["merge_commit_sha"] == stored["release_sha"], res
     assert pushes == [f"{stored['release_sha']}:refs/heads/main",
                       "refs/tags/v0.2.0:refs/tags/v0.2.0",
-                      f"{stored['release_sha']}:refs/heads/dev"]
+                      f"{stored['release_sha']}:refs/heads/dev",
+                      f"+{stored['release_sha']}:refs/tags/v0"]
     assert "e" * 40 not in " ".join(pushes)
     assert _remote(world, "main") == _remote(world, "dev") == stored["release_sha"]
 
@@ -2048,9 +2063,9 @@ def test_complete_reads_every_field_from_the_stored_request(world, pushes):
         world, git_dir=str(world.tmp / "nowhere"), tag="v9.9.9", version="9.9.9",
         task_ids=["ZZZ-1"], dev_sha="f" * 40, release_sha="e" * 40)
     res = release.complete(lie, "terminal:op")
-    assert res["ok"] is True and res["pushed"] == ["main", "v0.2.0", "dev"], res
+    assert res["ok"] is True and res["pushed"] == ["main", "v0.2.0", "dev", "v0"], res
     assert _remote(world, "refs/tags/v0.2.0^{commit}") == stored["release_sha"]
-    assert _remote(world, "refs/tags/v9.9.9") is None
+    assert _remote(world, "refs/tags/v9.9.9") is None and _remote(world, "refs/tags/v9") is None
     ev, = _events("orchestrator.release_pushed")
     assert ev["payload"] == {"request_id": stored["id"], "tag": "v0.2.0", "version": "0.2.0",
                              "release_sha": stored["release_sha"], "dev_sha": stored["dev_sha"],
@@ -2178,7 +2193,8 @@ def test_complete_pushes_main_tag_dev_in_order_plain_with_300s(world, monkeypatc
     assert [c[1] for c in calls] == [
         ("push", "--quiet", "origin", f"{sha}:refs/heads/main"),
         ("push", "--quiet", "origin", f"refs/tags/{tag}:refs/tags/{tag}"),
-        ("push", "--quiet", "origin", f"{sha}:refs/heads/dev")]
+        ("push", "--quiet", "origin", f"{sha}:refs/heads/dev"),
+        ("push", "--quiet", "origin", f"+{sha}:refs/tags/v0")]
     assert all(c[2] == {"timeout": 300} for c in calls)
     assert len({c[0] for c in calls}) == 1
 
@@ -2274,7 +2290,7 @@ def test_a_release_cleanup_that_raises_never_changes_the_recorded_outcome(
     assert res["ok"] is True and res["state"] == overrides.RELEASED, res
     rec = overrides.load(out["request_id"])
     assert rec["state"] == overrides.RELEASED
-    assert rec["pushed"] == ["main", "v0.2.0", "dev"]
+    assert rec["pushed"] == ["main", "v0.2.0", "dev", "v0"]
     release_sha = rec["release_sha"]
     assert _remote(world, "refs/heads/main") == release_sha
     assert _remote(world, "refs/heads/dev") == release_sha
@@ -2900,3 +2916,157 @@ def test_the_release_tests_pass_under_the_live_state_fence_on_a_real_layout(
     # Control: the same run at the OLD location trips the fence — so the pass above is real.
     old = run(chela_dir / "releases" / "v9.9.9-000000")
     assert old.returncode != 0 and "LiveStateEscape" in old.stdout + old.stderr
+
+
+# --- CMX-158: the moving major tag (`uses: Devail1/chelamux@v0`) ---------------------------
+
+@pytest.mark.parametrize("version, major", [("0.17.0", "v0"), ("1.2.0", "v1"),
+                                            ("12.0.3", "v12"), ("0.2.0", "v0")])
+def test_the_major_tag_is_derived_from_the_version(version, major):
+    assert release.major_tag(version) == major
+
+
+def _next_release_on_dev(world, n: int) -> None:
+    """A new changelog fragment lands on origin's dev, which the last release fast-forwarded."""
+    _g(world.work, "fetch", "-q", "origin")
+    _g(world.work, "checkout", "-q", "-B", "dev", "origin/dev")
+    (world.work / "changelog.d" / f"CMX-{n}.md").write_text(f"### Fixed\n\n- **N.** (CMX-{n})\n")
+    _g(world.work, "add", "-A")
+    _g(world.work, "commit", "-q", "-m", f"work {n}")
+    _g(world.work, "push", "-q", "origin", "dev")
+
+
+def _ls_remote_tags(world) -> dict[str, str]:
+    out = _g(world.tmp, "ls-remote", "--tags", str(world.origin))
+    return {ref: sha for sha, ref in (ln.split() for ln in out.splitlines())}
+
+
+def test_two_releases_move_v0_to_the_second_release_commit(world, argvs):
+    """🔴 GUARD (VERIFY): after each approval origin's v0 is that release's commit — the
+    second release MOVES it — and the forced refspec is v0's alone."""
+    first = _prepare(world)
+    assert overrides.decide(first["request_id"], True, "terminal:op")["ok"] is True
+    assert _ls_remote_tags(world)["refs/tags/v0"] == first["release_sha"]
+    _next_release_on_dev(world, 9)
+    second = release.prepare("0.3.0", "again", repo=world.work)
+    assert second["ok"] is True, second
+    assert overrides.decide(second["request_id"], True, "terminal:op")["ok"] is True
+    tags = _ls_remote_tags(world)
+    assert tags["refs/tags/v0"] == second["release_sha"] != first["release_sha"]
+    assert tags["refs/tags/v0.2.0^{}"] == first["release_sha"]
+    assert tags["refs/tags/v0.3.0^{}"] == second["release_sha"]
+    forced = [a for argv in argvs for a in argv if a.startswith("+")]
+    assert forced == [f"+{first['release_sha']}:refs/tags/v0",
+                      f"+{second['release_sha']}:refs/tags/v0"]
+
+
+def test_a_failed_major_tag_move_is_loud_and_never_rolls_the_release_back(world, pushes,
+                                                                          told, sent):
+    """🔴 GUARD: origin refuses v0 ⇒ the release stays RELEASED (main, v0.2.0, dev pushed and
+    kept), and the failure reaches the log, the event log, the operator and the inbox."""
+    out = _prepare(world)
+    sha = out["release_sha"]
+    hook = world.origin / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nwhile read o n r; do [ \"$r\" = refs/tags/v0 ] && "
+                    "exit 1; done\nexit 0\n")
+    hook.chmod(0o755)
+    sent.clear()
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["ok"] is True and res["state"] == overrides.RELEASED, res
+    assert "moving v0 failed" in res["detail"] and "--major-tag-only" in res["detail"]
+    assert _remote(world, "main") == _remote(world, "dev") == sha
+    assert _remote(world, "refs/tags/v0.2.0^{commit}") == sha
+    assert _remote(world, "refs/tags/v0") is None
+    assert overrides.load(out["request_id"])["pushed"] == ["main", "v0.2.0", "dev"]
+    ev, = _events("orchestrator.release_major_tag_failed")
+    assert ev["payload"]["major"] == "v0" and ev["payload"]["release_sha"] == sha
+    assert [t for _, t in sent] == ["chela: v0 NOT moved"]
+    assert [k for k, *_ in told] == ["release_major_tag_failed", "release_released"]
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("boom"), OSError("down")])
+def test_a_crashing_major_tag_report_still_releases(world, monkeypatch, exc):
+    """The notify / inbox calls are best effort: either raising never changes the outcome."""
+    from chela import inbox
+    out = _prepare(world)
+    monkeypatch.setattr(release, "move_major_tag", lambda *a: "moving v0 failed: x")
+    monkeypatch.setattr(release.notify, "enabled", lambda: True)
+    monkeypatch.setattr(release.notify, "send", lambda *a, **k: (_ for _ in ()).throw(exc))
+    monkeypatch.setattr(inbox, "enqueue", lambda *a, **k: (_ for _ in ()).throw(exc))
+    res = overrides.decide(out["request_id"], True, "terminal:op")
+    assert res["state"] == overrides.RELEASED and "moving v0 failed: x" in res["detail"]
+
+
+def test_major_tag_only_points_v0_at_an_already_released_tag(world, argvs):
+    """🔴 GUARD: the backfill (a release that predates v0) reads vX.Y.Z's COMMIT on origin —
+    the peeled annotated tag, never the tag object — and moves v0 through the same push."""
+    out = _prepare(world)
+    overrides.decide(out["request_id"], True, "terminal:op")
+    _g(world.tmp, "--git-dir", str(world.origin), "tag", "-d", "v0")
+    argvs.clear()
+    res = release.major_tag_only("v0.2.0", repo=world.work, env={})
+    assert res == {"ok": True, "major": "v0", "sha": out["release_sha"]}, res
+    assert _ls_remote_tags(world)["refs/tags/v0"] == out["release_sha"]
+    assert argvs == [("push", "--quiet", "origin", f"+{out['release_sha']}:refs/tags/v0")]
+
+
+@pytest.mark.parametrize("env, version, why", [
+    ({"CLAUDECODE": "1"}, "0.2.0", "Claude Code session"),
+    ({config.ACTOR_ENV: "auto"}, "0.2.0", "may REQUEST"),
+    ({}, "0.9.0", "v0.9.0 could not be read on origin"),
+    ({}, "0.2", "not a release version"),
+])
+def test_major_tag_only_refuses_and_pushes_nothing(world, argvs, env, version, why):
+    out = _prepare(world)
+    overrides.decide(out["request_id"], True, "terminal:op")
+    _g(world.tmp, "--git-dir", str(world.origin), "tag", "-d", "v0")
+    argvs.clear()
+    res = release.major_tag_only(version, repo=world.work, env=env)
+    assert res["ok"] is False and why in res["error"], res
+    assert argvs == [] and _remote(world, "refs/tags/v0") is None
+
+
+def test_major_tag_only_fails_closed_when_origin_cannot_be_read(world, argvs, monkeypatch):
+    out = _prepare(world)
+    overrides.decide(out["request_id"], True, "terminal:op")
+    argvs.clear()
+    real = release._git
+    monkeypatch.setattr(release, "_git", lambda cwd, *a, **k: subprocess.CompletedProcess(
+        a, 128, f"{out['release_sha']} refs/tags/v0.2.0\n", "") if a[0] == "ls-remote"
+        else real(cwd, *a, **k))
+    res = release.major_tag_only("0.2.0", repo=world.work, env={})
+    assert res["ok"] is False and "could not be read" in res["error"]
+    assert _remote(world, "refs/tags/v0") == out["release_sha"]          # untouched
+
+
+def test_major_tag_only_reports_a_refused_push(world):
+    out = _prepare(world)
+    overrides.decide(out["request_id"], True, "terminal:op")
+    _g(world.tmp, "--git-dir", str(world.origin), "tag", "-d", "v0")
+    hook = world.origin / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    res = release.major_tag_only("0.2.0", repo=world.work, env={})
+    assert res["ok"] is False and res["error"].startswith("moving v0 failed")
+
+
+def test_major_tag_only_outside_a_git_repository_refuses(tmp_path):
+    res = release.major_tag_only("0.2.0", repo=tmp_path, env={})
+    assert res["ok"] is False and "not inside a git repository" in res["error"]
+
+
+def test_the_cli_major_tag_only_flag(world, capsys, monkeypatch):
+    from chela import main
+    calls = []
+    monkeypatch.setattr(release, "major_tag_only", lambda v, repo=None: calls.append(
+        (v, repo)) or {"ok": True, "major": "v0", "sha": "a" * 40})
+    args = SimpleNamespace(version="0.2.0", theme="", body_file=None, repo=str(world.work),
+                           major_tag_only=True)
+    main.cmd_release(args)
+    assert calls == [("0.2.0", str(world.work))] and "v0 → aaaaaaaaaaaa" in capsys.readouterr().out
+    assert overrides.all_requests() == []
+    monkeypatch.setattr(release, "major_tag_only", lambda v, repo=None: {
+        "ok": False, "error": "nope"})
+    with pytest.raises(SystemExit) as e:
+        main.cmd_release(args)
+    assert e.value.code == 1 and "REFUSED: nope" in capsys.readouterr().out
