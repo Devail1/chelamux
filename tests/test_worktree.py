@@ -478,9 +478,12 @@ def test_reap_kills_only_processes_inside_the_worktree(tmp_path, tree, caplog):
 
 def test_reap_matches_a_cwd_deleted_under_the_worktree(tmp_path, tree):
     root, wt, *_ = tree
-    proc = _proc(tmp_path, {7: (f"{wt}/gone (deleted)", 1), 8: (f"{wt}0 (deleted)", 1)})
+    """`<W> (deleted)` — W's own directory gone and recreated under the process — is W;
+    `<W>0 (deleted)` is the sibling `task-10`."""
+    proc = _proc(tmp_path, {6: (f"{wt} (deleted)", 1), 7: (f"{wt}/gone (deleted)", 1),
+                            8: (f"{wt}0 (deleted)", 1)})
     kills, kill = _recorder()
-    assert worktree.reap_processes_in(wt, root, proc_root=proc, kill=kill) == [7]
+    assert worktree.reap_processes_in(wt, root, proc_root=proc, kill=kill) == [6, 7]
 
 
 def test_reap_rejects_a_dotdot_cwd_that_only_LOOKS_inside(tmp_path, tree):
