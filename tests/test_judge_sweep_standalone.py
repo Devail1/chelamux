@@ -665,6 +665,59 @@ def test_run_sweep_base_defaults(tmp_path, monkeypatch):
     assert calls == ["origin/dev", "origin/trunk", "mine"]
 
 
+def test_run_sweep_without_a_workflow_or_base_uses_default_base(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(sweep, "default_base", lambda wt: calls.append(wt) or "origin/trunk")
+    monkeypatch.setattr(sweep, "sweep", lambda wt, base, cmd, **kw: calls.append(base) or
+                        sweep.SweepReport())
+    sweep.run_sweep(tmp_path, test_cmd="t")
+    sweep.run_sweep(tmp_path, test_cmd="t", base="mine")
+    assert calls == [tmp_path, "origin/trunk", "mine"]
+
+
+def test_default_base_is_origin_head_else_origin_dev(tmp_path):
+    root = _bare(tmp_path / "r", {"calc.py": BIG})
+    assert sweep.default_base(root) == "origin/dev"
+    _git(root, "update-ref", "refs/remotes/origin/trunk", "main")
+    _git(root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+    assert sweep.default_base(root) == "origin/trunk"
+
+
+@pytest.mark.parametrize("answer", [
+    subprocess.CompletedProcess([], 0, "  \n", ""),         # blank answer
+    subprocess.CompletedProcess([], 1, "origin/x\n", ""),   # failed read: never trusted
+    sweep.GitHung("hung"),
+])
+def test_default_base_argv_and_an_unusable_answer(tmp_path, monkeypatch, answer):
+    seen = []
+
+    def fake(wt, *a):
+        seen.append((wt, a))
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(sweep, "_git", fake)
+    assert sweep.default_base(tmp_path) == "origin/dev"
+    assert seen == [(tmp_path, ("symbolic-ref", "--quiet", "--short",
+                                "refs/remotes/origin/HEAD"))]
+
+
+@pytest.mark.parametrize("with_wf", [True, False])
+def test_the_task_finished_hint_is_shown_only_for_a_chela_managed_run(monkeypatch, capsys,
+                                                                      tmp_path, with_wf):
+    """Standalone there is no `chela task-finished`, so its --sweep-equivalent escape hatch is
+    not offered; with a WORKFLOW.md it is."""
+    if with_wf:
+        (tmp_path / "WORKFLOW.md").write_text("---\n---\n")
+    code, out, _, _ = _run_cli(monkeypatch, capsys,
+                               _fake_result(survivors=[{"key": "a.py:3", "mutation": "m",
+                                                        "status": "x"}]), cwd=tmp_path)
+    assert code == 1
+    assert "Add a test that goes RED under that mutation" in out
+    assert ("`chela task-finished` accepts --sweep-equivalent" in out) is with_wf
+
+
 def test_run_sweep_unreadable_workflow_and_no_suite_are_errors(tmp_path):
     bad = tmp_path / "WORKFLOW.md"
     bad.write_text("no front matter, not a workflow")
