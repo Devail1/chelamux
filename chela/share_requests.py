@@ -75,8 +75,8 @@ MAX_REASON = 1000
 REQUESTS_NAME = "requests.jsonl"
 EXTRA_ROOT = "/extra"
 
-_SID_RE = re.compile(r"^[0-9a-f]{12}$")
-_DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$")
+_SID_RE = re.compile(r"^[0-9a-f]{12}\Z")
+_DOMAIN_RE = re.compile(r"^(?=.{1,253}\Z)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}\Z")
 _NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 # Host paths a mount may never be, sit inside, or contain — whatever a record says.

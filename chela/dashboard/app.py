@@ -2199,7 +2199,7 @@ def api_agents_rediscover():
 # tmux reserves ':' (window index) and '.' (pane index) in target specs, so a
 # window name containing either is unaddressable. Our generated folder names
 # (agent_manager.window_name_for_cwd) never hit this, but validate defensively before shelling out.
-_WINDOW_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_WINDOW_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
 # Only `claude` (optionally with args) may be auto-launched into a fresh window.
 # A plain shell is the no-command default; this keeps the spawn endpoint's reach
 # intentional ("launch claude or a shell") rather than an arbitrary-exec route.
