@@ -30,11 +30,9 @@ const runRows = (status = 'running') => [
         dispatched: true, run: { task_id: 'CMX-7', status, role: 'agent' } },
 ];
 let ROWS = BASE;
-// The select's order: none of the layouts below. @299 and @298 are windows the sidebar has
-// not drawn yet (spawned since its last refresh): /api/agents does not list them. They are
-// in this order in the select, so the tail must read @299, @298 (relative order kept).
-// The run's windows sit between them, judge first, so a run window that falls out of the
-// sidebar order lands in the tail in a place no expected strip below has.
+// The select's order: none of the layouts below. @299, @298: windows the sidebar has not
+// drawn yet (/api/agents does not list them), so the tail must read @299, @298. A run window
+// that falls out of the sidebar order lands between them, where no expected strip has it.
 const OPTIONS = ['@299', '@205', '@204', '@203', '@202', '@201', '@298'];
 const TAIL = ['@299', '@298'];
 
