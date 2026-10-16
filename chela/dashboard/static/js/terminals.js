@@ -1811,7 +1811,7 @@ function _applyTermStatus(agents) {
 // statusline source = exact; transcript source = estimate (dimmed fill, "~"/est).
 let _ctxCache = [];
 function _applyTermContext(ctx) {
-    if (!ctx) return;
+    if (!Array.isArray(ctx)) return;
     _ctxCache = ctx;
     const by = {};
     ctx.forEach(c => { if (c.window_id) by[c.window_id] = c; });
@@ -1971,10 +1971,14 @@ function kbToggle() {
     $('#kb-toggle').setAttribute('aria-expanded', String(!collapsed));
 }
 
-async function renderTerminals() {
+async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read (CMX-166)
     if (!TERMINALS_ON) return;   // terminals disabled — DOM (#term-stage etc.) absent
     let agents = _agentsCache;
-    if (!agents || !agents.length) { agents = await api('/api/agents'); setAgentsCache(agents); }
+    if (!agents || !agents.length) {
+        const fresh = await api('/api/agents');
+        agents = Array.isArray(fresh) ? fresh : [];   // an error body is not a pane list
+        setAgentsCache(agents);
+    }
     const wids = (agents || []).filter(a => a.online !== false && a.window_id).map(a => a.window_id);
 
     // Wall mode tiles 5+ terminals across a 12-col grid — useless at 375px.
@@ -2055,7 +2059,7 @@ async function renderTerminals() {
     renderMinDock();   // single / no-agents → hides the dock; wall already rebuilt it
     _applyTermStatus(_agentsCache);   // colour pane dots (single + wall) from cached state
     _applyTermContext(_ctxCache);     // repaint ctx bars from cache instantly…
-    api('/api/agents/context').then(_applyTermContext).catch(() => {});  // …then refresh
+    (ctxRead || api('/api/agents/context')).then(_applyTermContext).catch(() => {});  // …then refresh
 
     // Fit the wall AFTER the taskbar is at its final rendered height, so the grid
     // leaves exactly the right room above it (dock height feeds _wallFill).

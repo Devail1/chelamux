@@ -177,8 +177,8 @@ function _renderContextData(data) {
     }
 }
 
-async function checkContext() {
-    const data = await api('/api/agents/context');
+async function checkContext(ctxRead) {   // ctxRead: refresh()'s context read (CMX-166)
+    const data = await (ctxRead || api('/api/agents/context'));
     _renderContextData(data);
 }
 

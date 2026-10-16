@@ -5,8 +5,8 @@
 // the same "the panel that shows it samples it" shape as the Cost tab, just
 // with a header-strip instead of a table.
 //
-// Wiring (main.js, same pattern as Decisions): enterResources() seeds it once
-// on page load; tickResources() rides the refresh() loop as a plain poll —
+// Wiring (main.js): tickResources() rides the refresh() loop as a plain poll, and
+// the boot refresh() is its seed (CMX-166) —
 // there is no SSE delta for host resources, so unlike Decisions there is no
 // push side to this.
 //
@@ -63,12 +63,5 @@ async function tickResources() {
     _render(data);
 }
 
-// The one-time page-load seed (main.js) — identical to tickResources today;
-// kept as its own entry point so it mirrors enterDecisions()'s call shape and
-// can grow independent seeding logic later without touching main.js again.
-async function enterResources() {
-    await tickResources();
-}
-
 // --- Stage 0: ES-module exports ---
-export { enterResources, tickResources };
+export { tickResources };
