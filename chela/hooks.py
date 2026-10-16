@@ -324,12 +324,18 @@ def mergegate_command() -> str:
             "2>/dev/null || true")
 
 
-def mergegate_entry() -> dict:
-    return {"matcher": "Bash", "hooks": [{
+def mergegate_entry(matcher: str = "Bash") -> dict:
+    return {"matcher": matcher, "hooks": [{
         "type": "command",
         "command": mergegate_command(),
         "timeout": MERGEGATE_TIMEOUT,
     }]}
+
+
+# CMX-180: the same script on every MCP tool — a GitHub MCP `merge_pull_request` merges
+# past the judge as surely as `gh pr merge` does. It decides from an explicit tool table
+# and allows every MCP tool not in it.
+MERGEGATE_MCP_MATCHER = "mcp__.*"
 
 # Event types are namespaced: `hook.pre_tool_use` says *an agent told us this*, as
 # against `run_review` / `died` / `daemon_start`, which are chela's own bookkeeping.
@@ -422,6 +428,7 @@ def hooks_spec(port: int | None = None) -> dict:
     # The merge gate rides BEHIND the ingestion hook: ingestion still records the call
     # (a denied merge attempt is exactly the event a human wants in the log).
     hooks["PreToolUse"].append(mergegate_entry())
+    hooks["PreToolUse"].append(mergegate_entry(MERGEGATE_MCP_MATCHER))
     return {"hooks": hooks}
 
 
@@ -467,9 +474,10 @@ EXPECTED_HOOKS_FINGERPRINT: dict[str, str] = {
     "0.2.7": "364a0f11ba0f6d65e080c643993646b6013af71b4d6bae29338c67208b65861c",
     "0.2.8": "87e04275ea69f8d12dd33217c8360e3a50edb3385054adcb6191ef197b139b79",
     "0.2.9": "49dcb67abee3d229834c3f07e6d22e8db3b786afc19ec0bbec43364fcb15e78b",
+    "0.2.10": "1b8ca1d0177c69a4f1db00e38fc3a71b0aa8229743c59ad8bb27fa7b816d1b84",
 }
 
-PLUGIN_VERSION = "0.2.9"
+PLUGIN_VERSION = "0.2.10"
 
 
 def plugin_manifest() -> dict:

@@ -34,6 +34,14 @@ into a chela workflow's repo:
   session (``$CHELA_TMUX_SESSION``, else ``chela``), a ``$id``, uses ``-a``, or names no
   target at all (inside a chela pane that is chela's session).
 
+* 🔌 an MCP tool that merges or writes to a protected branch (CMX-180) — the same hook also
+  runs on ``mcp__.*``. Matched by an explicit table of tool names (:data:`MCP_TOOLS`), the
+  repo from the call's own ``owner``/``repo``, never the cwd: ``merge_pull_request``, and
+  ``push_files`` / ``create_or_update_file`` / ``delete_file`` whose ``branch`` is protected
+  (no ``branch`` means the repo's default branch, so it is denied too). Any MCP tool not
+  in the table is allowed, and so is ``update_pull_request_branch``: it writes to the PR's
+  head, which the call does not name, so it is logged as undecided.
+
 It never denies read-only ``gh pr view/diff/checks/list``, ``gh pr create``, or a push of a
 ``cmx-*`` feature branch. ``chela merge`` itself is unaffected: its own ``gh``/``git`` calls
 run as subprocesses of chela's Python, never through a Claude ``Bash`` tool, so no hook
@@ -691,6 +699,54 @@ SHARE_REQUEST_DENY = ("🙋 chela: a sandboxed guest's access request is approve
                       "session. Ask the human to decide it.")
 
 
+# --- MCP tools (CMX-180) -----------------------------------------------------------------
+
+# Tool name (the part after the server's ``mcp__<server>__`` prefix) → what it writes.
+# ``merge``: merges a PR. ``branch``: writes commits to ``tool_input["branch"]``.
+# ``head``: writes to the PR's head branch, which the call does not name. Nothing else is
+# gated: an MCP tool missing from this table is allowed, whatever its name looks like.
+MCP_TOOLS = {
+    "merge_pull_request": "merge",
+    "push_files": "branch",
+    "create_or_update_file": "branch",
+    "delete_file": "branch",
+    "update_pull_request_branch": "head",
+}
+
+
+def mcp_tool(tool_name: str) -> str | None:
+    """``mcp__<server>__<tool>`` → ``<tool>`` (server names may hold ``_``), else None."""
+    if not tool_name.startswith("mcp__"):
+        return None
+    server, sep, tool = tool_name[len("mcp__"):].rpartition("__")
+    return tool if sep and server and tool else None
+
+
+def _decide_mcp(tool: str, tool_input: dict, registry: list[dict] | None, env) -> Decision:
+    kind = MCP_TOOLS.get(tool)
+    if kind is None:
+        return ALLOW
+    owner, repo = tool_input.get("owner"), tool_input.get("repo")
+    if not (isinstance(owner, str) and owner and isinstance(repo, str) and repo):
+        return Decision(undecided=f"MCP `{tool}` names no owner/repo")
+    if registry is None:
+        return Decision(undecided=f"no readable registry at {registry_path(env)}")
+    entry = _match_slug(registry, f"{owner}/{repo}")
+    if entry is None:
+        return ALLOW
+    if kind == "merge":
+        return _deny(f"MCP `{tool}` #{tool_input.get('pullNumber', '?')}", entry)
+    if kind == "head":
+        return Decision(undecided=f"MCP `{tool}` writes to a PR head the call does not name")
+    branch = tool_input.get("branch")
+    if not isinstance(branch, str) or not branch.strip():
+        return _deny(f"MCP `{tool}` with no branch (the repo's default branch)", entry)
+    target = _branch_of(branch.strip())
+    if target in protected(entry):
+        return _deny(f"MCP `{tool}` to protected branch {target!r}", entry)
+    return ALLOW
+
+
 def _decide_segments(command: str, ctx: _Ctx, depth: int = 0) -> Decision:
     if depth > 4:
         return Decision(undecided="nested shell commands too deep to follow")
@@ -748,9 +804,13 @@ def decide(payload: dict, env=None, registry: list[dict] | None | bool = False) 
     """The verdict for one ``PreToolUse`` payload. Pure apart from reading the registry and
     the repo's ``.git`` files. ``registry=False`` means "load it from ``$CHELA_DIR``"."""
     env = dict(os.environ if env is None else env)
+    tool_input = payload.get("tool_input")
+    tool = mcp_tool(str(payload.get("tool_name") or ""))
+    if tool is not None and isinstance(tool_input, dict):
+        reg = load_registry(env) if registry is False else registry
+        return _decide_mcp(tool, tool_input, reg, env)
     if payload.get("tool_name") != "Bash":
         return ALLOW
-    tool_input = payload.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str) or not command.strip():
         return ALLOW
@@ -792,7 +852,8 @@ def main(stdin=None, stdout=None, env=None) -> int:
     except Exception as exc:                     # noqa: BLE001 — never wedge a session
         _log(env, {"ts": time.time(), "decision": "allow", "undecided": f"error: {exc!r}"})
         return 0
-    command = str((payload.get("tool_input") or {}).get("command") or "")[:500]
+    command = str((payload.get("tool_input") or {}).get("command")
+                  or payload.get("tool_name") or "")[:500]
     if decision.deny:
         stdout.write(json.dumps(response(decision)) + "\n")
         _log(env, {"ts": time.time(), "decision": "deny", "reason": decision.reason,
