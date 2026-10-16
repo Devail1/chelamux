@@ -114,9 +114,7 @@ const tileBar = () => document.querySelector('#term-stage .term-ctx-bar[data-ctx
 
 test('a wall tile with an estimated reading says so in its context tooltip', async () => {
     CONTEXT = [reading({ estimated: true })];
-    // The boot refresh() already built the wall (CMX-166: its tick no longer waits
-    // behind the rest of the boot), so this render keeps the live tile and the poll is
-    // what brings the new reading in.
+    // The boot already built the wall (CMX-166), so the poll brings the new reading in.
     await terminals.renderTerminals();
     await terminals.termTick();
     await settle();

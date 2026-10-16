@@ -25,20 +25,15 @@ import { tickApprovals } from './approvals.js';
 // is added or removed.
 // ---------------------------------------------------------------------------
 
-// CMX-166: the first refresh() IS the boot. It runs once, from selectView('terminals')
-// or (terminals off) from the bottom of this file, and seeds what used to be seeded by a
-// second pass of enter*() calls. Measured on a 7-tile wall: that double boot fetched
-// nearly every endpoint twice, and the wall's iframes waited ~1.3 s behind it.
+// CMX-166: the first refresh() IS the boot (once: from selectView, or below when
+// terminals are off) and seeds every view-independent read; there is no second pass.
 let _booted = false;
 
 async function refresh() {
     const boot = !_booted;
     _booted = true;
-    // Independent lanes, not a chain: one read waiting on another it does not use is
-    // what kept the wall's terminals waiting behind /api/restore, overrides and the
-    // launcher. A lane that throws no longer skips the lanes after it.
-    // ONE /api/agents/context read per tick, handed to its three readers (sidebar rows,
-    // wall tiles, header pills); each fetched its own before.
+    // Independent lanes, not a chain (a throw no longer skips the rest), and ONE
+    // /api/agents/context read for its three readers (sidebar, wall tiles, header pills).
     const ctxRead = TERMINALS_ON ? api('/api/agents/context') : null;
     let paneListKnown;
     const paneList = new Promise(resolve => { paneListKnown = resolve; });
@@ -78,8 +73,7 @@ async function refresh() {
 
 renderNav();   // the sidebar's view list, from the registry — before anything selects one
 
-// Wall is the flagship default canvas when terminals are enabled. selectView runs the
-// boot refresh() itself; it must not run twice (CMX-166).
+// Wall is the flagship default canvas when terminals are enabled (selectView refreshes).
 if (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) selectView('terminals');
 else refresh();
 setInterval(refresh, REFRESH_MS);
@@ -87,9 +81,6 @@ setInterval(refresh, REFRESH_MS);
 // App-level, not view-level: the badges are on screen from every view.
 startWorkPoll();
 initSSE();
-// The pane-title toggle's orchestrator owner, the sidebar Decisions section, the header
-// resources strip and the status feed health marker are all seeded by the boot
-// refresh() above, in parallel lanes: a separate enter*() call here fetched each twice.
 
 // --- Stage 0: ES-module exports ---
 export { refresh };
