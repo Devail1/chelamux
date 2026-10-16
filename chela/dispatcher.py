@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, sizegate, sweep
+from chela import concurrency, critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, sizegate, sweep
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -6216,7 +6216,9 @@ def tick(workflow_path: str | Path) -> dict:
             # it: a paused dispatcher is a disabled subsystem, and CMX-53's rule applies.
             return summary
 
-        max_concurrent = wf.get("concurrency", "max", default=1) or 1
+        # CMX-164: a Settings override for THIS workflow wins over WORKFLOW.md, read per
+        # tick. Lowering it stops new claims only; nothing in flight is touched.
+        max_concurrent = concurrency.agents_at_once(wf)
         # ⛔ ONLY claimed/running. `awaiting_review` does NOT hold a slot — that is why a
         # new task is claimed the moment a PR opens — and neither do `changes_requested`
         # (waiting for a slot) or `needs_human` (stopped, and it must never pin the queue

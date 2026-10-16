@@ -119,7 +119,7 @@ def test_registry_has_exactly_the_twelve_settings_inventory_knobs(mods):
     config, _ = mods
     assert {k.key for k in config.DISPATCH_KNOBS} == {
         "dispatch_workflows", "max_reworks", "judge_enabled",
-        "judge_max_unknown_retries", "judge_max_concurrent", "critic_enabled",
+        "judge_max_unknown_retries", "critic_enabled",
         "worktree_disk_budget_bytes", "memory_slice_budget_bytes", "merge_base",
         "gate_wait_seconds", "gate_max_waits", "judge_outage_backoff_seconds",
         # ⚖️🎚️ CMX-405: the per-risk-level rework caps and judge experiment caps.
@@ -143,7 +143,7 @@ def test_exactly_four_knobs_are_restart_required(mods):
     assert restart == {"dispatch_workflows", "judge_enabled", "critic_enabled", "merge_base"}
     hot = {k.key for k in config.DISPATCH_KNOBS if not k.restart_required}
     assert hot == {
-        "max_reworks", "judge_max_unknown_retries", "judge_max_concurrent",
+        "max_reworks", "judge_max_unknown_retries",
         "worktree_disk_budget_bytes", "memory_slice_budget_bytes",
         "gate_wait_seconds", "gate_max_waits", "judge_outage_backoff_seconds",
         "max_reworks_high", "max_reworks_normal", "max_reworks_low",
@@ -162,7 +162,6 @@ def test_named_readers_return_their_own_knobs_stored_value(mods):
     readers = {
         "max_reworks": config.max_reworks,
         "judge_max_unknown_retries": config.judge_max_unknown_retries,
-        "judge_max_concurrent": config.judge_max_concurrent,
         "worktree_disk_budget_bytes": config.worktree_disk_budget_bytes,
         "judge_outage_backoff_seconds": config.judge_outage_backoff_seconds,
         "judge_wall_base_seconds": config.judge_wall_base_seconds,
@@ -174,7 +173,7 @@ def test_named_readers_return_their_own_knobs_stored_value(mods):
         knob = next(k for k in config.DISPATCH_KNOBS if k.key == key)
         assert reader() == knob.default
 
-    distinct = {"max_reworks": 11, "judge_max_unknown_retries": 12, "judge_max_concurrent": 3,
+    distinct = {"max_reworks": 11, "judge_max_unknown_retries": 12,
                 "worktree_disk_budget_bytes": 999_000, "judge_outage_backoff_seconds": 42.0,
                 "judge_wall_base_seconds": 43.0, "judge_wall_per_experiment_seconds": 44.0,
                 "judge_wall_ceiling_seconds": 45.0, "judge_wall_grace_seconds": 46.0}
@@ -232,18 +231,6 @@ def test_gate_max_waits_floor_is_one_not_zero(mods):
     assert err is not None
     assert userconfig.get("gate_max_waits") is None
     assert config.set_dispatch("gate_max_waits", "1") is None
-
-
-def test_judge_max_concurrent_floor_is_one_not_zero(mods):
-    """⚖️ Corrupt (drop this knob's floor=1 in favor of the shared floor=0 default)
-    → RED: 0 does not mean "disabled" here (that's ``judge_enabled=false``) — it would
-    silently wedge every workflow's judge queue forever, indistinguishable from a stuck
-    daemon (see ``config.judge_max_concurrent()``'s own docstring)."""
-    config, userconfig = mods
-    err = config.set_dispatch("judge_max_concurrent", "0")
-    assert err is not None
-    assert userconfig.get("judge_max_concurrent") is None
-    assert config.set_dispatch("judge_max_concurrent", "1") is None
 
 
 def test_judge_max_concurrent_reader_floors_env_zero_too(mods, monkeypatch):
@@ -487,7 +474,7 @@ def test_get_marks_restart_required_rows(mods, client):
     knobs = {k["key"]: k for k in body["knobs"]}
     for key in ("dispatch_workflows", "judge_enabled", "critic_enabled", "merge_base"):
         assert knobs[key]["restart_required"] is True
-    for key in ("max_reworks", "judge_max_unknown_retries", "judge_max_concurrent",
+    for key in ("max_reworks", "judge_max_unknown_retries",
                 "worktree_disk_budget_bytes", "memory_slice_budget_bytes",
                 "gate_wait_seconds", "gate_max_waits"):
         assert knobs[key]["restart_required"] is False
