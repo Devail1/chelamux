@@ -277,7 +277,8 @@ def test_judge_not_started_fires_exactly_once_after_the_threshold(monkeypatch):
     assert inbox.judge_wait_events([run], store, t0 + 1199) == []
     fired = inbox.judge_wait_events([run], store, t0 + 1201)
     assert [e["kind"] for e in fired] == ["run_judge_not_started"]
-    assert "chela judge run T9" in fired[0]["summary"]
+    assert "chela dispatch --hold-status" in fired[0]["summary"]
+    assert "chela judge run" not in fired[0]["summary"]       # CMX-150: needs --experiments
     assert inbox.judge_wait_events([run], store, t0 + 5000) == []     # no repeat
 
 

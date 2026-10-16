@@ -1830,6 +1830,37 @@ def _judge_not_started(run: dict) -> bool:
     return not (judge_sha and judge_sha == run.get("pr_head_sha"))
 
 
+# What starts a judge round is the daemon's dispatch tick, not a command — `chela judge run`
+# is the judge AGENT's own tool (it needs the agent's `--experiments`). The one thing an
+# operator can check in a single command is the queue hold, which stops every new judge.
+# Rendered from this argv so a test can run it through the real CLI parser (CMX-150).
+STALL_CHECK_ARGV = ("chela", "dispatch", "--hold-status")
+# A run only QUEUED behind running judges is silent this many stall bounds (60m by default).
+QUEUED_ALERT_FACTOR = 3
+
+
+def _judges_ahead(run: dict, runs: list[dict]) -> list[dict]:
+    """The other runs holding a judge slot of ``run``'s workflow (the dispatcher's own count,
+    ``judge_state='running'`` per ``workflow_path``), earliest-started first."""
+    wf = run.get("workflow_path")
+    return sorted((r for r in runs
+                   if r.get("judge_state") == judge.J_RUNNING
+                   and r.get("task_id") != run.get("task_id")
+                   and r.get("workflow_path") == wf),
+                  key=lambda r: r.get("judge_started_at") or "")
+
+
+def _queued_wording(run: dict, ahead: list[dict], waited: float) -> str:
+    first = ahead[0]
+    started = _parse_epoch(first.get("judge_started_at"))
+    since = f", judging since {time.strftime('%H:%M', time.localtime(started))}" \
+        if started is not None else ""
+    slots = config.judge_max_concurrent()
+    return (f"⏳ {_label(run)} is queued for the judge behind {first.get('task_id') or '?'}"
+            f"{since}, {slots} slot{'s' if slots != 1 else ''} — waited {human_duration(waited)} "
+            f"in review, it starts when a slot frees — {_ref(run)}")
+
+
 def judge_wait_events(runs: list[dict], store: dict, now: float,
                       windows: dict[str, str] | None = None,
                       now_epoch: str | None = None) -> list[dict]:
@@ -1838,6 +1869,11 @@ def judge_wait_events(runs: list[dict], store: dict, now: float,
     A run sitting in ``awaiting_review`` longer than ``config.judge_not_started_alert_s()``
     with no judge round started on its head ⇒ ONE notice per (run, head). The clock is the
     first tick that saw it waiting (``store["review_wait"]``), so it survives a restart.
+
+    CMX-150: a run waiting only because every judge slot of its workflow is taken is a QUEUE,
+    not a stall. While queued it is silent for ``QUEUED_ALERT_FACTOR`` stall bounds and then
+    says it is queued (behind whom, since when); the stall clock restarts from the last tick
+    that saw it queued, so a slot freeing up gets the full threshold to start its judge.
     """
     prev: dict = store.get("review_wait") or {}
     nxt: dict = {}
@@ -1853,20 +1889,36 @@ def judge_wait_events(runs: list[dict], store: dict, now: float,
         if not isinstance(entry, dict) or entry.get("head") != head:
             entry = None                          # a new head is a new wait
         if not _judge_not_started(run):
-            if entry and entry.get("alerted"):
+            if entry and (entry.get("alerted") or entry.get("queued_alerted")):
                 nxt[task] = entry                 # said once for this head — keep it said
             continue
         entry = entry or {"head": head, "since": now, "alerted": False}
         nxt[task] = entry
         waited = now - entry["since"]
-        if entry["alerted"] or waited < threshold:
+        ahead = _judges_ahead(run, runs)
+        queued = len(ahead) >= config.judge_max_concurrent()
+        if queued:
+            entry["queued_at"] = now
+        if entry["alerted"]:
             continue
-        entry["alerted"] = True
+        if queued:                                # a queue is said once, and a stall after
+            if entry.get("queued_alerted") or waited < QUEUED_ALERT_FACTOR * threshold:
+                continue                          # it still gets its own notice
+            entry["queued_alerted"] = True
+            summary = _queued_wording(run, ahead, waited)
+        else:
+            if now - (entry.get("queued_at") or entry["since"]) < threshold:
+                continue
+            entry["alerted"] = True
+            check = " ".join(STALL_CHECK_ARGV)
+            summary = (f"⏳ {_label(run)} has waited {human_duration(waited)} in review and NO "
+                       f"judge round has started, with no judge running — the daemon starts "
+                       f"one on its next dispatch tick: is the queue held (`{check}`) or the "
+                       f"daemon down? Or review it yourself — {_ref(run)}")
         out.append(_event(
-            "run_judge_not_started",
-            f"⏳ {_label(run)} has waited {human_duration(waited)} in review and NO judge round "
-            f"has started — review it yourself or run `chela judge run {task}` — {_ref(run)}",
-            _run_payload(run, judge_state=run.get("judge_state"), waited_s=int(waited)),
+            "run_judge_not_started", summary,
+            _run_payload(run, judge_state=run.get("judge_state"), waited_s=int(waited),
+                         queued_behind=[r.get("task_id") for r in ahead] if queued else []),
             wid=run_wid(run, windows, now_epoch)))
     store["review_wait"] = nxt
     return out
