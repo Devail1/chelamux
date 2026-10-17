@@ -1993,7 +1993,7 @@ def test_the_sweepable_suffixes_are_exactly_py_js_mjs_and_never_tests(tmp_path):
     assert sweep.PY_SUFFIXES == (".py",) and sweep.JS_SUFFIXES == (".js", ".mjs")
     body = "if a == 1:\n    pass\n"
     keep = ["a.py", "b.js", "c.mjs", "pkg/d.py", "web/e.mjs", "src/tests/f.py"]
-    skip = ["g.cjs", "h.pyi", "i.ts", "j.jsx", "k.mts", "l.md", "m.py.txt", "n.json", "Makefile",
+    skip = ["g.cjs", "h.pyi", "i.d.ts", "j.jsx", "k.mts", "l.md", "m.py.txt", "n.json", "Makefile",
             "x.test.js", "y.test.mjs", "tests/z.py", "tests/z.js", "pkg/test_q.py",
             "pkg/test_q.js", "pkg/r_test.py", "pkg/conftest.py"]
     root = _plain_repo(tmp_path / "r", {}, {n: body for n in keep + skip})

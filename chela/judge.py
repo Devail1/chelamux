@@ -202,6 +202,39 @@ MIN_RAN_RATIO = 0.9
 
 _PY_SUFFIXES = (".py",)
 _JS_SUFFIXES = (".js", ".mjs", ".cjs")
+_TS_SUFFIXES = (".ts", ".tsx")
+
+# CMX-173: PARSE one .ts/.tsx (faster than `tsc --noEmit`) with the repo's own `typescript`,
+# resolved from the file's dir. Exit 0 parses, 1 does not (stderr says why), 3 no `typescript`.
+_TS_PARSE_JS = """
+const path = require("path"), fs = require("fs"), file = process.argv[1];
+let ts;
+try { ts = require(require.resolve("typescript", {paths: [path.dirname(file)]})); }
+catch (e) { process.stderr.write(String(e.message).split("\\n")[0]); process.exit(3); }
+const sf = ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.Latest,
+  false, file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS), d = sf.parseDiagnostics;
+if (d.length) {
+  process.stderr.write(`line ${sf.getLineAndCharacterOfPosition(d[0].start).line + 1}: ` +
+                       ts.flattenDiagnosticMessageText(d[0].messageText, " "));
+  process.exit(1);
+}
+"""
+TS_PARSES, TS_BROKEN, TS_NO_PARSER = "parses", "broken", "no-parser"
+
+
+def ts_parse(path: Path) -> tuple[str, str]:
+    """``(TS_PARSES | TS_BROKEN | TS_NO_PARSER, detail)`` for one .ts/.tsx file."""
+    try:
+        out = subprocess.run(["node", "-e", _TS_PARSE_JS, str(path)], capture_output=True,
+                             text=True, errors="replace", timeout=60, env=envutil.child_env())
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return TS_NO_PARSER, f"node unavailable: {e}"
+    detail = (out.stderr or "").strip()[:200]
+    if out.returncode == 0:
+        return TS_PARSES, ""
+    if out.returncode == 1:
+        return TS_BROKEN, detail
+    return TS_NO_PARSER, f"no `typescript` resolvable from {path.parent}: {detail}"
 
 # pytest ("3 failed, 1108 passed, 2 errors in 41s") and node --test ("# pass 15" /
 # "# fail 0") in one pass — a repo's `judge.test_cmd` may well run both.
@@ -527,6 +560,12 @@ def parse_check(path: Path) -> tuple[bool, str]:
         if out.returncode != 0:
             return False, f"the mutated JS does not parse: {(out.stderr or '').strip()[:200]}"
         return True, "the mutated JS still parses (node --check)"
+    if suffix in _TS_SUFFIXES:
+        status, detail = ts_parse(path)
+        if status == TS_BROKEN:
+            return False, f"the mutated TS does not parse: {detail}"
+        return True, (f"no parse check ran ({detail})" if status == TS_NO_PARSER
+                      else "the mutated TS still parses (typescript's parser)")
     return True, f"no parse check exists for {suffix or 'this file type'} — not parse-verified"
 
 

@@ -62,10 +62,10 @@ uvx --with pytest --from git+https://github.com/Devail1/chelamux chela judge swe
   [1/2] calc.py:8 if-false
   [2/2] calc.py:8 compare-flip
   suite: `python -m pytest -q`, detected (tests/)
-  1 changed file(s) NOT swept: only Python (and .js/.mjs, line-based) is mutated; each is UNKNOWN, not clean
+  1 changed file(s) NOT swept: only Python (and .js/.mjs/.ts/.tsx, line-based) is mutated; each is UNKNOWN, not clean
   [SURVIVED] calc.py:8 if-false: `if x > 100:` → `if False and (x > 100):`
   [SURVIVED] calc.py:8 compare-flip: `if x > 100:` → `if x <= 100:`
-  [UNKNOWN ] tool.ts is not supported: only Python (and .js/.mjs, line-based) is mutated
+  [UNKNOWN ] tool.go is not supported: only Python (and .js/.mjs/.ts/.tsx, line-based) is mutated
 sweep: 2 mutation(s): 0 killed, 2 survived, 0 skipped (1.0s)
 ⚖️ Each SURVIVED line is a changed check no test can tell apart from its corruption. Add a test that goes RED under that mutation, not a weaker assertion.
 ```

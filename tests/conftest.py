@@ -277,7 +277,9 @@ if _PREV_SIGTERM is not signal.SIG_IGN:   # a parent that chose to ignore it kee
 
 # A developer who exported these to debug against live files would otherwise aim the whole
 # suite straight back at production, under the sandbox's nose.
-for _var in ("CHELA_EVENTS_FILE", "CHELA_INBOX_FILE"):
+# The bridge's sender allowlist (CMX-185) too: a developer's own id in the shell would
+# silently drop every stub update the inbound tests feed in.
+for _var in ("CHELA_EVENTS_FILE", "CHELA_INBOX_FILE", "CHELA_TELEGRAM_ALLOWED_USERS"):
     os.environ.pop(_var, None)
 
 # **And the suite must not be able to DISPATCH.** This one is not about reading or writing
