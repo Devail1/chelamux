@@ -192,6 +192,7 @@ at `chela merge cmx-N`) any command that merges into a repo with a chela workflo
 | `gh api -X PUT repos/O/R/pulls/N/merge`, `POST …/merges` into a protected base, `PATCH`/`DELETE …/git/refs/heads/<protected>`, a GraphQL `mergePullRequest` | the same merge, spelled against the API |
 | `git push` to the workflow's base branch or `main`/`master`/… (a `src:dst` refspec, `HEAD` while that branch is checked out, `--all`/`--mirror`) | lands commits on the base with no PR at all |
 | `chela merge-approve`, a request to the dashboard's `/override/`, a `python` call into `chela.overrides.decide` or `chela.release.complete` | a session approving its OWN override or release (CMX-87) |
+| an MCP `merge_pull_request`, or `push_files` / `create_or_update_file` / `delete_file` whose `branch` is protected (or absent, i.e. the default branch) | the GitHub MCP's spelling of the same merge or base write (CMX-180) |
 
 Never denied: `gh pr view/diff/checks/list`, `gh pr create`, `git push origin cmx-12`, a heredoc
 body that merely *mentions* `gh pr merge`, any repo without a chela workflow, and `chela merge`
@@ -204,6 +205,17 @@ chains, `$(…)`, `bash -c "…"`/`eval`, env prefixes and wrappers (`env`, `sud
 `GH_REPO`. The repo is resolved from `-R`/the PR URL, or from the session `cwd`. A linked
 `git worktree` (every dispatched agent's checkout) resolves to its main repo through
 `commondir`.
+
+**The threat model: the gate covers `Bash` and these MCP tools, nothing else.** A third
+`PreToolUse` entry, matcher `mcp__.*`, runs the same script on every MCP call (CMX-180). It
+reads the tool name after `mcp__<server>__` (so `mcp__github__…` and a plugin's
+`mcp__plugin_github_github__…` both match) against an explicit table in
+`chela/mergegate.py` (`MCP_TOOLS`), with no fuzzy matching, and resolves the repo from the
+call's own `owner`/`repo`, never the session cwd. An MCP tool not in the table is allowed.
+`update_pull_request_branch` is allowed but logged as undecided: it writes to the PR's head
+branch, which the call does not name. GitLab's MCP servers are not covered (the registry
+holds GitHub slugs only). Dispatched agents run `--strict-mcp-config`, so this binds the
+sessions where a human installed an MCP server, such as the GitHub plugin.
 
 **Why a `command` hook, and why it does not ask the daemon.** The dashboard's http route fails
 OPEN by design: a gate that lived there would vanish with the dashboard. This one runs
