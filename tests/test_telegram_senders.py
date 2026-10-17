@@ -264,7 +264,7 @@ def test_doctor_reads_the_allowlist_the_way_the_bridge_starts(
 
 def test_doctor_is_silent_with_no_bridge_and_warns_on_empty(doctor_env, monkeypatch):
     from chela.runtime_truth import OK, WARN
-    assert _doctor() == []
+    assert _doctor() == [(OK, "Telegram bridge: not configured (optional)")]
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "1:x")
     [(level, title)] = _doctor()
     assert level == WARN and "allowlist is EMPTY" in title
@@ -419,5 +419,6 @@ def test_a_photo_caption_is_hashed_never_logged(caplog):
 
 
 def test_doctor_treats_a_whitespace_token_as_no_bridge(doctor_env, monkeypatch):
+    from chela.runtime_truth import OK
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "   ")
-    assert _doctor() == []
+    assert _doctor() == [(OK, "Telegram bridge: not configured (optional)")]
