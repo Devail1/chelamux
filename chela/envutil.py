@@ -20,6 +20,9 @@ What is dropped, and why only this:
 * ``NODE_APP_INSTANCE`` and every ``pm_*`` / ``PM2_*`` var — pm2's per-process bookkeeping
   (``pm_id``, ``pm_exec_path``, ``PM2_USAGE``, …). They describe the DAEMON, not the child,
   and a child that reads ``pm_id`` believes it is itself a pm2-managed process.
+* pm2's copy of the app config, :data:`PM2_APP_ENV_KEYS` (CMX-191) — ``args``,
+  ``exec_mode``, ``name``, ``status``, … A ``pm2 start`` from a child reads them over its
+  ecosystem file, so an inherited empty ``args=`` starts every service bare.
 
 Kept on purpose: ``PM2_HOME`` — it is where the pm2 CLI finds its god daemon, and an
 ``after_done`` hook that runs ``pm2 restart`` (the documented deploy pattern) must reach the
@@ -80,6 +83,35 @@ NODE_IPC_ENV_VARS = ("NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE", "NODE
 _PM2_EXACT = ("NODE_APP_INSTANCE",)
 _PM2_PREFIXES = ("pm_", "PM2_")
 _PM2_KEEP = frozenset({"PM2_HOME"})
+
+# 🧹 CMX-191. pm2 exports every primitive key of a process's ``pm2_env`` into its env
+# (``God/ForkMode.js``: ``for (var k in pm2_env) … spawn_env[k] = pm2_env[k]``) — the app
+# config (``args``, ``exec_mode``, ``name``, ``cwd``, …) and pm2's runtime record of it
+# (``status``, ``unique_id``, ``restart_time``, …). A ``pm2 start`` run from a descendant
+# then reads those env vars OVER its ecosystem file: an inherited empty ``args=`` started
+# every chela service with no subcommand on 2026-10-17. An explicit list, from pm2 7.0.4's
+# ``lib/API/schema.json`` plus the runtime keys ``lib/`` assigns — never "every lowercase
+# name": a lowercase var the operator set is theirs.
+PM2_APP_ENV_KEYS = frozenset({
+    # the app config (schema.json)
+    "append_env_to_name", "args", "automation", "autorestart", "autostart", "cron_restart",
+    "cwd", "deep_monitoring", "disable_logs", "disable_source_map_support", "disable_trace",
+    "env", "error_file", "event_loop_inspector", "exec_interpreter", "exec_mode",
+    "execute_command", "exp_backoff_restart_delay", "filter_env", "force", "gid",
+    "ignore_watch", "increment_var", "install_url", "instance_var", "instances", "io",
+    "kill_retry_time", "kill_timeout", "listen_timeout", "log_date_format", "log_file",
+    "log_type", "max_memory_restart", "max_restarts", "merge_logs", "min_uptime", "name",
+    "name_prefix", "namespace", "node_args", "out_file", "pid_file", "pmx", "port",
+    "post_update", "restart_delay", "script", "shutdown_with_message",
+    "source_map_support", "stop_exit_codes", "time", "trace", "treekill", "uid",
+    "username", "v8", "vizion", "wait_ready", "watch", "watch_delay", "watch_options",
+    "windowsHide", "write",
+    # pm2's runtime record of the process
+    "created_at", "exit_code", "km_link", "node_version", "pmx_module",
+    "prev_restart_delay", "restart_time", "status", "unique_id", "unstable_restarts",
+    "version", "versioning", "_km_monitored",
+})
+_PM2_APP_PREFIXES = ("axm_", "vizion")
 
 
 # 🔐 CMX-425. Named outright, whatever shape the pattern below would give it.
@@ -239,9 +271,23 @@ def scrub_tmux_secrets() -> list[str]:
     return names
 
 
+def is_pm2_app_key(key: str) -> bool:
+    """True for a key pm2 copied out of a process's ``pm2_env`` (CMX-191): the app config
+    and runtime keys in :data:`PM2_APP_ENV_KEYS`, ``axm_*``/``vizion*``, and ``pm_*``."""
+    return (key in PM2_APP_ENV_KEYS or key.startswith(_PM2_APP_PREFIXES)
+            or key.startswith("pm_"))
+
+
+def pm2_app_keys(env: Mapping[str, str] | None = None) -> list[str]:
+    """The names in ``env`` (default ``os.environ``) a ``pm2`` command run from it would read
+    over its ecosystem file (:func:`is_pm2_app_key`), sorted. Names only."""
+    src = os.environ if env is None else env
+    return sorted(k for k in src if is_pm2_app_key(k))
+
+
 def is_leaked(key: str) -> bool:
     """True for a var :func:`child_env` drops."""
-    if key in NODE_IPC_ENV_VARS or key in _PM2_EXACT:
+    if key in NODE_IPC_ENV_VARS or key in _PM2_EXACT or is_pm2_app_key(key):
         return True
     return key.startswith(_PM2_PREFIXES) and key not in _PM2_KEEP
 
