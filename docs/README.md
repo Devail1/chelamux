@@ -27,6 +27,7 @@ behind decisions that are otherwise invisible in the code.
 | [DEFEAT_SHAPES.md](DEFEAT_SHAPES.md) + [defeat_shapes/](defeat_shapes/) | The catalogue of ways a guard passes while proving nothing — one file per shape |
 | [OKF.md](OKF.md) | Open Knowledge Format export design |
 | [ORCHESTRATOR_PERSONA.md](ORCHESTRATOR_PERSONA.md) · [PERSONA_PATTERN.md](PERSONA_PATTERN.md) | Giving an agent a stable standing role |
+| [FRONTEND_PORT_PLAN.md](FRONTEND_PORT_PLAN.md) | Porting the whole dashboard to React + TypeScript: inventory, target architecture, the ordered port slices |
 
 ## Design records — context, not instructions
 
