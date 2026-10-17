@@ -4,7 +4,8 @@
     python scripts/demo/gate.py <out-dir>       # writes <out-dir>/scenes.json
 
 Every verdict, refusal, merge line and card on camera is chela's own output — only the
-agent's two beats (``request-push``, the rework commit) are narration. A fresh git repo
+agent's two beats (``request-push``, the rework commit) are narration, and only its dashes
+are swapped (``undash``: frames are visitor-facing, CMX-160). A fresh git repo
 (``shop``) gets a feature with a deliberately weak test, and then:
 
 1. the REAL judge (``judge.self_check``) corrupts the guard, the suite stays green, and the
@@ -26,6 +27,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -80,9 +82,16 @@ def make_repo(root: Path = ROOT) -> Path:
     return repo
 
 
+def undash(text: str) -> str:
+    """chela's own words with no em or en dash, which visitor-facing text must not carry
+    (CMX-160): a heading's dash becomes a colon, any other a comma."""
+    return "\n".join(re.sub(r"\s*[\u2014\u2013]\s*", ": " if line.startswith("#") else ", ", line)
+                     for line in text.split("\n"))
+
+
 def comment(markdown: str) -> str:
     """The comment as posted, minus its long "What to do" tail — off screen in the clip."""
-    return markdown.split("\n### What to do", 1)[0].rstrip()
+    return undash(markdown.split("\n### What to do", 1)[0].rstrip())
 
 
 def verdict_of(report) -> str:
@@ -97,7 +106,7 @@ def run_cli(main, argv: SimpleNamespace) -> str:
     out = io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.suppress(SystemExit):
         main.cmd_merge(argv)
-    return out.getvalue().rstrip()
+    return undash(out.getvalue().rstrip())
 
 
 def scenes(repo: Path) -> list[dict]:
@@ -138,7 +147,7 @@ def scenes(repo: Path) -> list[dict]:
     report, state = judged()
     assert state == "blocked", "the weak test must let the corruption survive"
     verdict(state)
-    out.append({"kind": "comment", "caption": "The judge corrupts the guard itself — "
+    out.append({"kind": "comment", "caption": "The judge corrupts the guard itself, "
                 "and the PR's test stays green",
                 "body": comment(judge.block_body(report, PR, "pytest -q"))})
 
@@ -152,21 +161,21 @@ def scenes(repo: Path) -> list[dict]:
         for p in github:
             stack.enter_context(p)
         merge = SimpleNamespace(run=TASK, reason="", override=False)
-        out.append(term("So the merge is refused — CI is green, but the judge blocked this head",
+        out.append(term("So the merge is refused: CI is green, but the judge blocked this head",
                         orch, "$ chela merge CMX-7", *run_cli(main, merge).splitlines()))
 
         # The alternative ending, from the refused state: ask a human, one tap.
         why = "boundary covered by the checkout e2e suite"
         ask = SimpleNamespace(run=TASK, reason=why, override=True)
-        alt = [term("Or a human overrides it — asked for on the record", orch,
+        alt = [term("Or a human overrides it, asked for on the record", orch,
                     f"$ chela merge CMX-7 --override --reason '{why}'",
                     *run_cli(main, ask).splitlines()[:3])]
         req = overrides.pending()[0]["id"]
         alt.append({"kind": "telegram", "caption": "One tap on Telegram: the gate is "
                     "re-checked live, then it merges",
-                    "text": format_override_message(overrides.load(req) or {})})
+                    "text": undash(format_override_message(overrides.load(req) or {}))})
         overrides.decide(req, True, "@operator", channel="telegram")
-        alt[-1]["after"] = format_override_message(overrides.load(req) or {})
+        alt[-1]["after"] = undash(format_override_message(overrides.load(req) or {}))
 
         # The main ending: the agent pins the boundary; the judge comes back clean.
         (repo / "test_shop.py").write_text(STRONG_TEST)
@@ -183,7 +192,7 @@ def scenes(repo: Path) -> list[dict]:
         out.append({"kind": "comment", "caption": "Re-judged on the new head: the corruption "
                     "now turns the suite red",
                     "body": comment(judge.comment_body(report, PR, "pytest -q"))})
-        out.append(term("Now chela merge merges — and logs why", orch,
+        out.append(term("Now chela merge merges, and logs why", orch,
                         "$ chela merge CMX-7", *run_cli(main, merge).splitlines()))
     return out + alt
 
