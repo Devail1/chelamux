@@ -1,6 +1,6 @@
 # chelamux skills
 
-[Claude Code skills](https://docs.claude.com/en/docs/claude-code/skills) that ship with chelamux: onboarding plus a small curated set of agent-driven workflow habits (planning, elicitation, and session-continuity) that make a multi-agent setup productive.
+[Claude Code skills](https://docs.claude.com/en/docs/claude-code/skills) that ship with chelamux. Only what is specific to chela lives here: onboarding, orchestration, chela's handoff layout and Telegram. For general planning and engineering habits, see [Recommended skills](../docs/GETTING_STARTED.md#recommended-skills).
 
 ## Install
 
@@ -14,7 +14,7 @@ cp -r skills/handoff ~/.claude/skills/
 cp -r skills/handoff <your-project>/.claude/skills/
 ```
 
-Then invoke it in Claude Code with `/handoff`, `/blindspot-pass`, etc.
+Then invoke it in Claude Code with `/handoff`, `/orchestrate`, etc.
 
 ## Setup
 
@@ -27,16 +27,8 @@ Then invoke it in Claude Code with `/handoff`, `/blindspot-pass`, etc.
 
 | Skill | What it does |
 |-------|--------------|
-| **orchestrate** | Act as the orchestrator over a fleet of agents and the dispatcher: observe (`peek`/`read`), queue tracker tasks, review PRs against the judge's verdict, merge only through `chela merge`, deploy, and surface decisions to the human. The operating manual for chela's agent-facing toolkit. |
-
-## Agent workflow
-
-| Skill | What it does |
-|-------|--------------|
-| **handoff** | Generate a structured handoff document so a future Claude session can resume a workstream cold, with no shared context needed. Core to multi-session orchestration. |
-| **blindspot-pass** | Surface the unknowns *before* doing the work: explore the territory, restate the plan, and report the questions you didn't know to ask. |
-| **implementation-plan** | Produce an implementation plan ordered by likelihood-of-change / blast-radius, not chronology, with load-bearing decisions first. |
-| **interview-me** | Elicit requirements one question at a time, highest-impact first, then emit a paste-ready decision record. |
+| **orchestrate** | Act as the orchestrator over a fleet of agents and the dispatcher: observe (`peek`/`read`), file tracker tasks with their blocking edges, review PRs against the judge's verdict, merge only through `chela merge`, deploy, and surface decisions to the human. The operating manual for chela's agent-facing toolkit. |
+| **handoff** | Generate a structured handoff document in chela's memory layout so a future Claude session can resume a workstream cold, with no shared context needed. Core to multi-session orchestration. |
 
 ## Communication
 
@@ -46,6 +38,4 @@ Then invoke it in Claude Code with `/handoff`, `/blindspot-pass`, etc.
 
 ## Credits
 
-`blindspot-pass`, `implementation-plan`, and `interview-me` are derived from Thariq Shihipar's **"A Field Guide to Fable: Finding Your Unknowns."** Full credit to the original work; these are adaptations packaged as Claude Code skills.
-
-`handoff`, `chela-setup`, `telegram-setup`, `orchestrate`, and `telegram-send` are original to this project.
+All five skills are original to this project. The blocking-edges rule in `orchestrate` is adapted from the `to-tickets` skill in Matt Pocock's [`mattpocock/skills`](https://github.com/mattpocock/skills) (MIT).

@@ -141,6 +141,25 @@ branch. What to do when a run stops for a human (retry, reopen, override, close)
   design. Put it behind Tailscale or an SSH tunnel; the tailnet is the trust
   boundary. See [Remote access & security](https://chela.pages.dev/docs#security).
 
+## Recommended skills
+
+chela ships only the skills that are specific to it ([`skills/`](../skills/README.md)). For
+planning and everyday engineering habits, install Matt Pocock's
+[`mattpocock/skills`](https://github.com/mattpocock/skills) (MIT) as a Claude Code plugin
+(follow the install steps in its README). It adds no hooks, so it does not interfere with
+chela's merge gate. The skills that fit chela's flow:
+
+- **`grill-me`** and **`to-spec`** before you file a task: settle the open questions, then
+  turn the answers into a spec that becomes the task's brief.
+- **`tdd`** while an agent implements: the judge blocks any guard that survives its own
+  corruption, so tests written first pay off.
+- **`diagnosing-bugs`** when a run fails for a reason nobody understands yet.
+- **`code-review`** for a second read of a PR before you merge it.
+
+chela itself covers the rest of the loop: a git worktree per task, dispatch, the merge gate
+(`chela merge`), and verification by the judge. You do not need a separate skill pack for
+those.
+
 ## Fonts (macOS)
 
 The TUI markers (`⏺ ❌ ✅`, the working spinner) and Nerd icons need a font that
