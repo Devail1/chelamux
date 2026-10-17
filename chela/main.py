@@ -2116,15 +2116,21 @@ def cmd_doctor(args) -> None:
 
     Exits 1 on an error-level finding — a drift that is breaking something right now (the
     dashboard on a port the plugin does not know about, say), as against a warning, which
-    is a difference that is merely worth knowing about.
+    is a difference that is merely worth knowing about. An ERROR from an optional
+    integration (Telegram, Linear) is printed but does not fail the run: a first install has
+    neither (CMX-92).
     """
     findings = doctor.check()
     for finding in findings:
         print(finding.render())
-    errors = [f for f in findings if f.level == doctor.ERROR]
+    errors = [f for f in findings if f.level == doctor.ERROR and f.required]
+    optional = [f for f in findings if f.level == doctor.ERROR and not f.required]
+    if optional:
+        print(f"\n{len(optional)} optional problem(s) — not needed for a first run.")
     if errors:
         print(f"\n{len(errors)} problem(s) — see above.")
         sys.exit(1)
+    print("\nrequired checks: all pass")
 
 
 def cmd_restore(args) -> None:
