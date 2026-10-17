@@ -216,6 +216,9 @@ call's own `owner`/`repo`, never the session cwd. An MCP tool not in the table i
 branch, which the call does not name. GitLab's MCP servers are not covered (the registry
 holds GitHub slugs only). Dispatched agents run `--strict-mcp-config`, so this binds the
 sessions where a human installed an MCP server, such as the GitHub plugin.
+A dispatched run (`$CHELA_RUN_ID`, exported by the dispatcher at spawn) is also denied any
+`Bash` command that launches another Claude Code session, however wrapped, and that check
+fails CLOSED on a clear `claude` word it cannot parse (CMX-190).
 
 **Why a `command` hook, and why it does not ask the daemon.** The dashboard's http route fails
 OPEN by design: a gate that lived there would vanish with the dashboard. This one runs

@@ -204,6 +204,7 @@ most reasonable default, note the assumption in your PR body, and proceed. Run t
 commands **synchronously** and wait for them — never park work on a prompt for a human. The
 only sanctioned stop is a real blocker (see "If you get stuck" below), stated in your final
 message.
+A classifier or hook denial is final; never relaunch the same action in another mode or wrapper.
 
 ## Done criteria — follow in order
 

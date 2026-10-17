@@ -475,9 +475,10 @@ EXPECTED_HOOKS_FINGERPRINT: dict[str, str] = {
     "0.2.8": "87e04275ea69f8d12dd33217c8360e3a50edb3385054adcb6191ef197b139b79",
     "0.2.9": "49dcb67abee3d229834c3f07e6d22e8db3b786afc19ec0bbec43364fcb15e78b",
     "0.2.10": "1b8ca1d0177c69a4f1db00e38fc3a71b0aa8229743c59ad8bb27fa7b816d1b84",
+    "0.2.11": "25a9355427e7c846b7c5ef77bac5fa395cc3707ce89d2d897920aa2b1bba9b7c",
 }
 
-PLUGIN_VERSION = "0.2.10"
+PLUGIN_VERSION = "0.2.11"
 
 
 def plugin_manifest() -> dict:
