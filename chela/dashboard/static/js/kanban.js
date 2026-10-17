@@ -661,6 +661,10 @@ function _kanbanFlatten(data) {
                 body: t.body,
                 // CMX-5: the Linear issue URL (null for a markdown/gh_issues task).
                 tracker_url: t.tracker_url || null,
+                // CMX-168: the tracker's column for this task (Linear's state name) —
+                // columnOf() places the card by it; without it every open task fell
+                // back to the first `unstarted` column, so Backlog issues sat in Todo.
+                tracker_state: t.tracker_state || null,
                 // CMX-68: a closed run (no requeue) holds this task — see runStallNote.
                 closed_run_stall: t.closed_run_stall || null,
                 workflow_path: wf.path,
