@@ -474,55 +474,9 @@ function _kanbanMergeToast(btn, msg) {
     setTimeout(() => { toast.remove(); }, 15000);
 }
 
-async function kanbanMergeAll(btn) {
-    // N comes from the button's data-count (the value the user saw); the
-    // backend re-derives the eligible set itself so a stale count is harmless.
-    const n = btn.dataset.count || '';
-    if (!confirm(`Squash-merge ${n} mergeable PRs?`)) return;
-    const payload = {};
-    // Pass the active workflow filter unless we're viewing all workflows.
-    if (_kanbanFilter !== 'all') payload.workflow_path = _kanbanFilter;
-    const originalLabel = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Merging…';
-    let resp, data = {};
-    try {
-        resp = await fetch(BASE_PATH + '/api/dispatcher/merge-all', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        try { data = await resp.json(); } catch (_) { data = {}; }
-    } catch (e) {
-        _kanbanToast(`Merge all failed: ${e}`);
-        btn.disabled = false; btn.textContent = originalLabel;
-        return;
-    }
-    if (!resp.ok || !data.ok) {
-        _kanbanToast(`Merge all failed: ${data.error || 'HTTP ' + resp.status}`);
-        btn.disabled = false; btn.textContent = originalLabel;
-        return;
-    }
-    // Single summary toast covering merged / skipped / failed counts, with the
-    // per-task error+reason detail appended so nothing is swallowed.
-    const merged = data.merged || [], skipped = data.skipped || [], failed = data.failed || [];
-    const parts = [`Merged ${merged.length}`];
-    if (skipped.length) parts.push(`skipped ${skipped.length}`);
-    if (failed.length) parts.push(`failed ${failed.length}`);
-    let msg = parts.join(', ');
-    const detail = [
-        ...failed.map(f => `✗ ${f.task_id}: ${f.error}`),
-        ...skipped.map(s => `– ${s.task_id}: ${s.reason}`),
-    ];
-    if (detail.length) msg += '\n' + detail.join('\n');
-    _kanbanToast(msg);
-    // Don't optimistically mutate cards — let the next poll redraw the board.
-    pollWork();
-}
-
 function _kanbanToast(msg) {
-    // Floating summary toast for toolbar-level actions (merge-all) that aren't
-    // anchored to a single card. Click or wait 15s to dismiss.
+    // Floating summary toast for board-level messages that aren't anchored to a
+    // single card. Click or wait 15s to dismiss.
     const toast = document.createElement('div');
     toast.className = 'kanban-toast';
     toast.textContent = msg;
@@ -728,7 +682,7 @@ function _lanesFromBuckets(buckets) {
     return lanes;
 }
 
-function _renderKanbanFilters(workflows, mergeableCount = 0) {
+function _renderKanbanFilters(workflows) {
     const wrap = $('#kanban-filters');
     if (!workflows.length) { wrap.innerHTML = ''; return; }
     // Drop the active filter if its workflow no longer exists in the payload.
@@ -743,14 +697,6 @@ function _renderKanbanFilters(workflows, mergeableCount = 0) {
     let html = chip('all', `All (${workflows.length})`);
     for (const wf of workflows) {
         html += chip(wf, _wfName(wf));
-    }
-    // Batch-merge button: only when there's something mergeable in the active
-    // filter. Reuses .kanban-merge-btn styling; pushed to the toolbar's right
-    // edge via .kanban-merge-all-btn (margin-left:auto).
-    if (mergeableCount > 0) {
-        html += `<button class="kanban-merge-btn kanban-merge-all-btn" type="button"
-                       data-count="${mergeableCount}"
-                       onclick="chela.kanbanMergeAll(this)">Merge all mergeable (${mergeableCount})</button>`;
     }
     wrap.innerHTML = html;
 }
@@ -890,21 +836,7 @@ function renderKanban(data) {
         }));
     }
 
-    // Merge-all count = awaiting_review cards that GitHub reports MERGEABLE in
-    // the active filter. Drives the toolbar button's label + visibility. The status test
-    // is load-bearing since the Review lane shares its cards across four statuses: a
-    // `changes_requested` PR is perfectly MERGEABLE and must never be counted into a
-    // Merge-all — it is the PR a reviewer just REJECTED. A `failed` run has no PR at all
-    // most of the time and the status check excludes it either way. (The server refuses
-    // all of these too; this keeps the count honest.)
-    // ⛔ And a PR whose CI is RED (or pending, or never read) is never counted either — the
-    // server skips it in the batch, and a count that included it would be promising a merge
-    // that cannot happen. `none` (a repo with no CI at all) still counts: no checks is not
-    // the same as failing checks.
-    const mergeableCount = allCards
-        .filter(c => c.status === 'awaiting_review' && c.pr_mergeable === 'MERGEABLE'
-                     && (c.pr_checks === 'passing' || c.pr_checks === 'none')).length;
-    _renderKanbanFilters(workflows, mergeableCount);
+    _renderKanbanFilters(workflows);
     const { visible, hidden } = splitColumns(cols, _kanbanColPrefs);
     _renderKanbanNav(visible);
     _applyKanbanLayout();
@@ -1004,4 +936,4 @@ export { renderKanban };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { kanbanCloseRun, kanbanDeleteClick, kanbanDeleteConfirm, kanbanHiddenToggled, kanbanHideCol, kanbanMergeAll, kanbanMergePR, kanbanMoveCard, kanbanNavTo, kanbanRowDragOver, kanbanRowDrop, kanbanShowCol, kanbanPromoteBacklog, openTaskModalFromCard, setKanbanFilter, setKanbanLayout, toggleKanbanCol });
+Object.assign(window.chela, { kanbanCloseRun, kanbanDeleteClick, kanbanDeleteConfirm, kanbanHiddenToggled, kanbanHideCol, kanbanMergePR, kanbanMoveCard, kanbanNavTo, kanbanRowDragOver, kanbanRowDrop, kanbanShowCol, kanbanPromoteBacklog, openTaskModalFromCard, setKanbanFilter, setKanbanLayout, toggleKanbanCol });

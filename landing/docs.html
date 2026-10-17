@@ -886,7 +886,7 @@ cd chela/collab-relay && npx wrangler deploy
         <tr><td><code>GET /api/summary</code></td><td>Header counts (agents online, schedules)</td></tr>
         <tr><td><code>GET /api/schedules</code> · <code>POST</code> · <code>DELETE/PATCH /&lt;id&gt;</code></td><td>Scheduled tasks CRUD</td></tr>
         <tr><td><code>GET /api/dispatcher</code></td><td>Open tasks + active/awaiting/recent runs per workflow</td></tr>
-        <tr><td><code>POST /api/dispatcher/runs/&lt;id&gt;/merge</code> · <code>/merge-all</code></td><td>Squash-merge PRs + clean up</td></tr>
+        <tr><td><code>POST /api/dispatcher/runs/&lt;id&gt;/merge</code></td><td>Squash-merge a PR + clean up</td></tr>
         <tr><td><code>POST /api/agents/{start,stop,restart,msg,broadcast,trigger}</code></td><td>Agent controls</td></tr>
         <tr><td><code>GET /api/events</code></td><td>Server-Sent Events stream (reactive UI accelerator)</td></tr>
       </tbody>

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>chela: Mission Control</title>
+    <title>chela – Mission Control</title>
     <link rel="icon" href="{{ asset_path('img/favicon.svg') }}" type="image/svg+xml">
     <link rel="stylesheet" href="{{ asset_path('vendor/gridstack.min.css') }}">
     <link rel="stylesheet" href="{{ asset_path('style.css') }}">
@@ -215,14 +215,14 @@
              shows a workflow whose tracker is linear (work.js _renderNewTaskButton). -->
         <button class="btn-accent" id="new-task-btn" style="display:none;"
                 onclick="chela.openNewTask()">+ New task</button>
-        <button class="btn-accent" onclick="chela.openInitRepo()">+ Init a repo</button>
+        <button class="btn-accent" onclick="chela.openInitRepo()"
+                title="Seed a starter WORKFLOW.md + TODO.md into a repo">+ Init a repo</button>
         <!-- CMX-206: `chela dispatch --pause` from the dashboard — no task is claimed
              until Resume. Hidden until the first /api/dispatcher poll lands (see
              _renderDispatchHold in work.js), so it never flashes the wrong state. -->
         <button class="btn-accent" id="dispatch-hold-btn" style="display:none;"
                 onclick="chela.toggleDispatchHold()"></button>
         <span class="work-toolbar-hint" id="dispatch-hold-hint"></span>
-        <span class="work-toolbar-hint">Seed a starter <code>WORKFLOW.md</code> + <code>TODO.md</code> into a repo.</span>
       </div>
 
     <!-- Board (kanban) -->
