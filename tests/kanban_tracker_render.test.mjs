@@ -179,12 +179,44 @@ test('the workflow filter picks the board: a Linear workflow gets its columns, t
         assert.ok(!colLabels().includes('In Review'), `the markdown workflow got Linear columns: ${colLabels()}`);
         assert.deepEqual(cardIds(), ['MD-1']);
 
-        // Control: both on screen, one without states ⇒ chela's lanes, both cards.
+        // CMX-193: both on screen, one without states ⇒ still Linear's columns, both cards;
+        // the markdown run lands by its status (running ⇒ In Progress).
         window.chela.setKanbanFilter('all');
         renderKanban(data);
-        assert.ok(!colLabels().includes('In Review'));
+        assert.deepEqual(colLabels(), ['Backlog', 'Todo', 'In Progress', 'In Review', 'Done']);
         assert.deepEqual(cardIds().sort(), ['CMX-1', 'MD-1']);
     } finally {
         window.chela.setKanbanFilter('all');
+    }
+});
+
+const cardsIn = label => [...colOf(label).querySelectorAll('.kanban-card[data-task-id]')]
+    .map(e => e.dataset.taskId);
+
+test('CMX-193: under "All", a Linear Backlog issue renders in Backlog next to a markdown workflow with no open tasks', () => {
+    const linearWf = { ..._payload().workflows[0], open_tasks: [
+        { id: 'CMX-10', title: 'later', tracker_state: 'Backlog' },
+        { id: 'CMX-11', title: 'now', tracker_state: 'Todo' },
+    ] };
+    const mdWf = { ..._payload({ columns: null }).workflows[0], path: '/y/WORKFLOW.md', project_key: 'LA' };
+    renderKanban({ configured: true, workflows: [linearWf, mdWf] });
+    assert.deepEqual(cardsIn('Backlog'), ['CMX-10']);
+    assert.deepEqual(cardsIn('Todo'), ['CMX-11']);
+});
+
+test('CMX-193: an all-markdown board keeps chela\'s 6 lanes', () => {
+    for (const k of ['backlog', 'todo', 'in_progress', 'review', 'done', 'archived']) window.chela.kanbanShowCol(k);
+    const a = _payload({ columns: null }).workflows[0];
+    renderKanban({ configured: true, workflows: [a, { ...a, path: '/y/WORKFLOW.md' }] });
+    assert.deepEqual(colLabels(), ['Backlog', 'To Do', 'In Progress', 'Review', 'Done', 'Archived']);
+});
+
+test('CMX-193: Done says "latest" when the server capped its runs — on both boards', () => {
+    for (const columns of [LINEAR, null]) {
+        const wf = _payload({ columns }).workflows[0];
+        renderKanban({ configured: true, workflows: [{ ...wf, recent_runs_capped: true }] });
+        assert.ok(colLabels().includes('Done · latest'), `${colLabels()}`);
+        renderKanban({ configured: true, workflows: [{ ...wf, recent_runs_capped: false }] });
+        assert.ok(colLabels().includes('Done') && !colLabels().includes('Done · latest'), `${colLabels()}`);
     }
 });

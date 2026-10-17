@@ -4358,6 +4358,20 @@ def _runs_for_workflow(
     return active, awaiting, recent
 
 
+def _fold_closed_runs(all_runs: list[dict], wf_path: str, open_ids: set[str]
+                      ) -> tuple[list[dict], bool]:
+    """CMX-193: the board's terminal runs (``done``/``closed``/``failed``, newest first,
+    at most 10) with every ``closed`` run of a task that is still OPEN folded away — the
+    task's open card is that task's one card (a requeued run, or a CMX-68 stall the open
+    card already flags). Before this, each such run filled one of the 10 slots AND drew a
+    second card for the same task next to its open one. Also returns whether the cap cut
+    any run off, so the board can say Done is a sample rather than a count."""
+    terminal = [r for r in _workflow_runs(all_runs, wf_path)
+                if r.get("status") in ("done", "closed", "failed")
+                and not (r.get("status") == "closed" and r.get("task_id") in open_ids)]
+    return terminal[:10], len(terminal) > 10
+
+
 def _open_task_group(task, ready_ids: set[str] | None, type_by_state: dict[str, str]) -> str:
     """CMX-94: the Runs segment's section for an open task — ``ready`` (what a claim would
     draw from: Linear's Todo), ``in_progress`` (a ``started``-type state: In Progress / In
@@ -4666,6 +4680,8 @@ def api_dispatcher():
             # run state rides on the card as a badge. None for a tracker without states
             # (markdown, gh_issues) or a failed read: the board keeps chela's own lanes.
             "tracker_columns": None,
+            # CMX-193: True when more terminal runs exist than `recent_runs` carries.
+            "recent_runs_capped": False,
         }
 
         active, awaiting, recent = _runs_for_workflow(all_runs, str(wf_path))
@@ -4810,6 +4826,8 @@ def api_dispatcher():
         # branch so run-discovered workflows still group + label correctly.
         if project_key is None:
             project_key = _project_key_from_runs(active, awaiting, recent)
+        recent, entry["recent_runs_capped"] = _fold_closed_runs(
+            all_runs, str(wf_path), {t["id"] for t in entry["open_tasks"]})
         entry["project_key"] = project_key
 
         # Stamp project_key onto each run dict — task_number already comes from

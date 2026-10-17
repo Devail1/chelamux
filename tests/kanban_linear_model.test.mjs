@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    UNMAPPED_KEY, columnOf, runStateBadges, trackerBoard, trackerColumns,
+    UNMAPPED_KEY, columnOf, runStateBadges, sampledLabel, trackerBoard, trackerColumns,
 } from '../chela/dashboard/static/js/kanbanlinearmodel.js';
 
 
@@ -34,12 +34,30 @@ test('columns are the tracker states, in its order, with Canceled/Duplicate hidd
     }
 });
 
-test('a workflow without tracker states falls back to chela lanes (null)', () => {
+test('only workflows without tracker states fall back to chela lanes (null)', () => {
     assert.equal(trackerColumns([{ path: 'md', tracker_columns: null }]), null);
-    assert.equal(trackerColumns([{ path: 'a', tracker_columns: LINEAR },
-                                 { path: 'md', tracker_columns: null }]), null);
+    assert.equal(trackerColumns([{ path: 'md', tracker_columns: null }, { path: 'gh' }]), null);
+    assert.equal(trackerColumns([{ path: 'md', tracker_columns: [] }]), null);
     // Control: the Linear-only view does get columns.
     assert.ok(trackerColumns([{ path: 'a', tracker_columns: LINEAR }]));
+});
+
+test('CMX-193: a markdown workflow next to a Linear one keeps Linear\'s columns — in either order', () => {
+    for (const wfs of [[{ path: 'a', tracker_columns: LINEAR }, { path: 'md', tracker_columns: null }],
+                       [{ path: 'md' }, { path: 'a', tracker_columns: LINEAR }]]) {
+        assert.deepEqual(trackerColumns(wfs).map(c => c.name), LINEAR.map(c => c.name));
+    }
+    // A markdown card (no tracker_state) lands by its status's state type.
+    const board = trackerBoard(trackerColumns([{ tracker_columns: LINEAR }, {}]),
+                               [{ status: 'open', tracker_state: 'Backlog' }, { status: 'open' },
+                                { status: 'backlog' }]);
+    assert.equal(board.columns.find(c => c.label === 'Backlog').cards.length, 2);
+    assert.equal(board.columns.find(c => c.label === 'Todo').cards.length, 1);
+});
+
+test('CMX-193: a Done column is labelled a sample only when the server capped the runs', () => {
+    assert.equal(sampledLabel('Done', true), 'Done · latest');
+    assert.equal(sampledLabel('Done', false), 'Done');
 });
 
 test('a failed run in In Review renders inside In Review with its failed badge — no failed column', () => {

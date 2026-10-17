@@ -250,6 +250,10 @@ def test_closed_run_travels_ledger_api_and_board_from_one_real_tick(ticking, mon
     # --- Layer 2: the real /api/dispatcher HTTP payload ---------------------------------
     from chela.dashboard import app as dash
 
+    # CMX-193: a closed run of a task still OPEN folds onto its open card, so the task
+    # leaves the tracker first (struck by a human) — its closed run is then its only card.
+    (repo / "TODO.md").write_text("- [x] alpha\n- [ ] beta\n")
+
     client = dash.app.test_client()
     resp = client.get("/api/dispatcher")
     assert resp.status_code == 200
