@@ -904,7 +904,7 @@ def session_slug(session_id: str | None, transcript_path: str | None = None) -> 
 # glob (`chela/sessions.py`): a header is attacker-adjacent input (it rode an HTTP
 # request), so its shape is checked and its claim is checked against a LIVE window before
 # either ever reaches an event record.
-_WID_RE = re.compile(r"^@\d+$")
+_WID_RE = re.compile(r"^@[0-9]+\Z")
 
 
 def _explicit_wid(hint: str | None,

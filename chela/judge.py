@@ -81,6 +81,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
@@ -233,6 +234,11 @@ def _strip_ansi(text: str) -> str:
 MAX_NAMED_FAILURES = 5
 
 SUITE_TAIL_CHARS = 3000
+# 📄 CMX-163: how much of a NON-GREEN suite's output is persisted to its failure log, and how
+# long / how many of those logs a task keeps before they are pruned.
+SUITE_LOG_CHARS = 200_000
+SUITE_LOG_MAX_AGE_DAYS = 30
+SUITE_LOG_MAX_PER_TASK = 20
 
 
 class SuiteResult(NamedTuple):
@@ -244,6 +250,9 @@ class SuiteResult(NamedTuple):
     errors: int
     tail: str
     detail: str = ""
+    # 📄 CMX-163: how it ran — {cmd, cwd, env_diff, started, ended, output} — so a red run
+    # can be written to a failure log. Never part of a verdict.
+    run: dict | None = None
 
     @property
     def green(self) -> bool:
@@ -386,6 +395,10 @@ class Report:
     # ⏳ CMX-141 (self-check): UNRUN experiments — kept OUT of ``outcomes`` — and why.
     unrun: list[Outcome] = field(default_factory=list)
     exhausted: str = ""
+    # 📄 CMX-163: every NON-GREEN infrastructure suite run (the baseline, its coverage run, the
+    # base-branch diagnostic) — and the failure-log paths `judge_run` wrote them to.
+    suite_failures: list[SuiteResult] = field(default_factory=list)
+    suite_logs: list[str] = field(default_factory=list)
 
     @property
     def blocking(self) -> list[Outcome]:
@@ -658,22 +671,44 @@ def run_suite(
     consistency check on a red run (did the suite still RUN?), where being approximate
     costs nothing.
     """
+    run = {"cmd": test_cmd, "cwd": str(cwd), "env_diff": {}, "started": _iso_now(),
+           "output": ""}
     try:
         with tempfile.TemporaryDirectory(prefix="chela-suite-") as scratch:
             env = _suite_env(Path(scratch))
             env.update(extra_env or {})
+            run["env_diff"] = _env_diff(os.environ, env)
             out = subprocess.run(
                 test_cmd, shell=True, cwd=str(cwd), env=env,
                 capture_output=True, text=True, errors="replace", timeout=timeout,
             )
-    except subprocess.TimeoutExpired:
-        return SuiteResult(False, -1, 0, 0, 0, "", f"the suite did not finish in {timeout:.0f}s")
+    except subprocess.TimeoutExpired as e:
+        run.update(ended=_iso_now(), output=_decoded(e.stdout) + _decoded(e.stderr))
+        return SuiteResult(False, -1, 0, 0, 0, "", f"the suite did not finish in {timeout:.0f}s",
+                           run)
     except OSError as e:
-        return SuiteResult(False, -1, 0, 0, 0, "", f"the suite could not be run: {e}")
+        run["ended"] = _iso_now()
+        return SuiteResult(False, -1, 0, 0, 0, "", f"the suite could not be run: {e}", run)
     text = (out.stdout or "") + (out.stderr or "")
     passed, failed, errors = _counts(text)
     tail = text[-SUITE_TAIL_CHARS:] if len(text) > SUITE_TAIL_CHARS else text
-    return SuiteResult(True, out.returncode, passed, failed, errors, tail)
+    run.update(ended=_iso_now(), output=text[-SUITE_LOG_CHARS:])
+    return SuiteResult(True, out.returncode, passed, failed, errors, tail, "", run)
+
+
+def _iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _decoded(out: bytes | str | None) -> str:
+    return out.decode(errors="replace") if isinstance(out, bytes) else (out or "")
+
+
+def _env_diff(operator: Mapping[str, str], suite: Mapping[str, str]) -> dict:
+    """The suite's env vs the operator's: ``{name: value}`` set/changed, ``{name: None}`` removed."""
+    diff: dict = {k: v for k, v in suite.items() if operator.get(k) != v}
+    diff.update({k: None for k in operator if k not in suite})
+    return dict(sorted(diff.items()))
 
 
 def _duration(seconds: float) -> str:
@@ -708,6 +743,7 @@ def _has_pytest_cov(worktree: Path) -> bool:
 
 def run_baseline(
     worktree: Path, test_cmd: str, timeout: float, scratch: Path, *, select_tests: bool = True,
+    failures: list[SuiteResult] | None = None,
 ) -> tuple[SuiteResult, "judge_select.Selector | None", str]:
     """⚡ CMX-407: THE baseline — one full-suite run on the unmutated tree, exactly as before —
     that also records what per-mutation selection needs. Returns ``(baseline, selector, why)``;
@@ -743,6 +779,8 @@ def run_baseline(
     baseline = run_suite(judge_select.extend(test_cmd, args), worktree, timeout, extra_env)
     if not baseline.green and extra_env:
         log.warning("judge: the baseline is red UNDER COVERAGE — re-running it plain")
+        if failures is not None:
+            failures.append(baseline)
         extra_env = {}
         baseline = run_suite(judge_select.extend(test_cmd, [f"--junitxml={junit}"]),
                              worktree, timeout)
@@ -1016,6 +1054,7 @@ def _js_installer(worktree: Path) -> tuple[list[str], str] | None:
 
 def _diagnose_red_baseline(
     worktree: Path, test_cmd: str, base_branch: str, timeout: float,
+    failures: list[SuiteResult] | None = None,
 ) -> str:
     """WHY the baseline is red: this branch's own doing, already broken on ``base_branch``, or
     undeterminable. One sentence, always — never blank.
@@ -1085,6 +1124,8 @@ def _diagnose_red_baseline(
             log.error("judge: could not restore worktree %s to %s after the base_branch "
                       "diagnostic (git exited %d: %s)", worktree, orig_sha, restore.returncode,
                       (restore.stderr or "").strip()[:200])
+    if failures is not None and not base_result.green:
+        failures.append(base_result)
 
     if not base_result.ok:
         return (f"the judge tried `{test_cmd}` against `{ref}` alone and it would not even run "
@@ -1509,11 +1550,13 @@ def _run_experiments(
     baseline_started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="chela-judge-select-") as scratch:
         baseline, selector, report.selection = run_baseline(
-            worktree, test_cmd, timeout, Path(scratch), select_tests=select_tests)
+            worktree, test_cmd, timeout, Path(scratch), select_tests=select_tests,
+            failures=report.suite_failures)
     if heartbeat is not None:
         heartbeat("baseline", seconds=time.monotonic() - baseline_started)
     report.baseline = baseline
     if not baseline.green:
+        report.suite_failures.append(baseline)
         # ⛔ CMX-80: name the CAUSE, not just the exit code. `judge_detail` (this string) is
         # what the dashboard shows, and for three weeks it showed "exited 1" on every PR
         # while the suite itself was saying "jsdom is not installed" one pipe away.
@@ -1524,7 +1567,8 @@ def _run_experiments(
         # judge's box) that used to collapse into the same "exited 1" dead end.
         named = _failing_test_names(baseline.tail)
         which = f" — failing: {', '.join(named)}" if named else ""
-        cause = _diagnose_red_baseline(worktree, test_cmd, base_branch, timeout)
+        cause = _diagnose_red_baseline(worktree, test_cmd, base_branch, timeout,
+                                       report.suite_failures)
         report.cannot_verify = (
             f"the suite is NOT GREEN before any mutation (`{test_cmd}` exited "
             f"{baseline.exit_code}{': ' + why if why else ''}{which}). {cause}. Every "
@@ -2592,6 +2636,15 @@ def judge_run(
         live_head = dispatcher.pr_live_head_sha(pr_url, repo_dir) or row_head
         stale_head = bool(verified_sha and live_head and verified_sha != live_head)
 
+        if report.suite_failures:
+            report.suite_logs = write_suite_logs(
+                task_id, len(load_private(task_id)) + 1, report.suite_failures)
+        if report.suite_logs and report.cannot_verify:
+            # Prepended — `judge_detail` is truncated, and the pointer must survive that.
+            report.cannot_verify = (f"📄 full suite output: "
+                                    f"{', '.join(map(display_path, report.suite_logs))} — "
+                                    + report.cannot_verify)
+            result["cannot_verify"] = report.cannot_verify
         record_private(
             task_id, report, raw if isinstance(raw, dict) else {}, judge_cfg.held_out_fraction,
             sha=verified_sha, stale=stale_head, pr_url=pr_url,
@@ -2807,6 +2860,7 @@ def _record_private(
         "task_id": task_id, "sha": sha or "", "pr_url": pr_url or "",
         "state": report.state, "stale": bool(stale),
         "cannot_verify": report.cannot_verify,
+        "suite_logs": list(report.suite_logs),
         "proposed": proposed,
         "visible": {"total": len(visible),
                     "survived": sum(1 for o in visible if o.verdict == SURVIVED)},
@@ -3063,6 +3117,60 @@ def _safe_task(task_id: str) -> str:
 def judge_log_path(task_id: str) -> Path:
     """``$CHELA_DIR/judge-logs/<task>.log`` — a detached run's stdout/stderr, appended."""
     return judge_logs_dir() / f"{_safe_task(task_id)}.log"
+
+
+def write_suite_logs(task_id: str, round_no: int, failures: list[SuiteResult]) -> list[str]:
+    """📄 CMX-163: persist every non-green suite run of this judge round to
+    ``$CHELA_DIR/judge-logs/<task>/<round>-suite-<n>.log`` — the command, cwd, env diff vs the
+    operator, start/end, exit code and the captured output — then prune. Returns the paths.
+
+    Found by CMX-147: a flaky baseline turned a run ``cannot_verify`` three times and its
+    output survived nowhere but a one-line summary. Never raises — a log that cannot be
+    written must not take a verdict down with it."""
+    paths: list[str] = []
+    try:
+        d = judge_logs_dir() / _safe_task(task_id)
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for n, s in enumerate(failures, 1):
+            run = s.run or {}
+            env = "\n".join(f"  {k}={'<removed>' if v is None else v}"
+                             for k, v in (run.get("env_diff") or {}).items())
+            text = (f"command:   {run.get('cmd', '?')}\ncwd:       {run.get('cwd', '?')}\n"
+                    f"started:   {run.get('started', '?')}\nended:     {run.get('ended', '?')}\n"
+                    f"exit code: {s.exit_code}\nresult:    {_suite_line(s)}\n"
+                    f"env diff vs the operator:\n{env or '  (none)'}\n\n--- output ---\n"
+                    f"{run.get('output') or s.tail}\n")
+            path = d / f"{round_no}-suite-{n}.log"
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(text)
+            paths.append(str(path))
+        prune_suite_logs(judge_logs_dir())
+    except OSError as e:
+        log.warning("judge: %s: could not write the suite failure log: %s", task_id, e)
+    return paths
+
+
+def prune_suite_logs(root: Path, *, now: float | None = None,
+                     max_age_days: float = SUITE_LOG_MAX_AGE_DAYS,
+                     keep: int = SUITE_LOG_MAX_PER_TASK) -> list[Path]:
+    """Across every task under ``root``, delete suite logs older than ``max_age_days`` and
+    all but each task's newest ``keep``. Returns what it removed."""
+    cutoff = (time.time() if now is None else now) - max_age_days * 86400
+    doomed: list[Path] = []
+    for task_dir in (d for d in root.iterdir() if d.is_dir()):
+        logs = sorted(task_dir.glob("*-suite-*.log"), key=lambda f: f.stat().st_mtime,
+                      reverse=True)
+        doomed += [f for i, f in enumerate(logs) if i >= keep or f.stat().st_mtime < cutoff]
+    for f in doomed:
+        f.unlink(missing_ok=True)
+    return doomed
+
+
+def display_path(path: str) -> str:
+    """``~``-relative, so a path in a PUBLIC PR comment never names the operator's home."""
+    home = str(Path.home())
+    return "~" + path[len(home):] if path.startswith(home + os.sep) else path
 
 
 def judge_status_path(task_id: str) -> Path:

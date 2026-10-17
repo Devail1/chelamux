@@ -2,7 +2,7 @@
 // cmx-107 ("always visible", not gated behind opening the Personas tab).
 //
 // decisions_sse.test.mjs proves the SSE `log`-delta repaint path is tab-independent.
-// It does NOT prove main.js's own top-level `enterDecisions()` call (main.js) ever
+// It does NOT prove main.js's boot refresh() (its Decisions lane, CMX-166) ever
 // fires: that suite's `before()` already flushes one microtask turn before each test
 // runs, so a mutation that drops the seed call entirely (e.g. `enterDecisions();` ->
 // `void 0;`) would still leave that suite green — nothing there asserts the section
@@ -120,6 +120,6 @@ test('main.js seeds the Decisions sidebar section on load, with no tab-open and 
     assert.equal(rows.length, 1,
         'the durable log already had a decision logged before page load, but the ' +
         'sidebar Decisions section never rendered it — main.js\'s load-time ' +
-        'enterDecisions() call never ran (or its result was discarded)');
+        'boot refresh() never ran its Decisions lane (or its result was discarded)');
     assert.ok(rows[0].textContent.includes('cmx-9 awaiting review'));
 });

@@ -1010,6 +1010,12 @@ _TERM_FONT_PREF_SHIM = (
 # postMessage to the parent, and draws the peers the parent sends back. So only the
 # non-secret {shared, wid} is injected here (the old relay/prefix/grid injection is
 # gone — the parent derives all of that from the owner-only /share-info).
+def _term_reconnect_shim() -> str:
+    """CMX-167: the self-reconnect shim (static/term-reconnect.js). A plain synchronous tag,
+    injected FIRST, so it wraps ``window.WebSocket`` before ttyd's body script opens its socket."""
+    return '<script src="/' + asset_path("term-reconnect.js") + '"></script>'
+
+
 def _term_upload_shim() -> str:
     """CMX-412: the file drop/paste shim, with the Settings switch read at serve time (the
     route re-checks it per upload, so a pane opened before a switch-off is still refused)."""
@@ -1068,7 +1074,8 @@ def term_http(wid, rest):
     ctype = (resp.headers.get("Content-Type") or "")
     if "text/html" in ctype.lower():
         html = body.decode("utf-8", "replace")
-        shims = (_term_theme_shim() + _TERM_FONT_CSS + _TERM_FONT_PREF_SHIM
+        shims = (_term_reconnect_shim()
+                 + _term_theme_shim() + _TERM_FONT_CSS + _TERM_FONT_PREF_SHIM
                  + _term_presence_shim(wid)
                  + _term_upload_shim()
                  + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM + _TERM_PALETTE_KEY_SHIM
@@ -2199,7 +2206,7 @@ def api_agents_rediscover():
 # tmux reserves ':' (window index) and '.' (pane index) in target specs, so a
 # window name containing either is unaddressable. Our generated folder names
 # (agent_manager.window_name_for_cwd) never hit this, but validate defensively before shelling out.
-_WINDOW_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_WINDOW_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
 # Only `claude` (optionally with args) may be auto-launched into a fresh window.
 # A plain shell is the no-command default; this keeps the spawn endpoint's reach
 # intentional ("launch claude or a shell") rather than an arbitrary-exec route.

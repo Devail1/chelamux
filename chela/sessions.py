@@ -166,7 +166,7 @@ log = logging.getLogger(__name__)
 # from a payload or a command line must not walk the disk, and a GLOB METACHARACTER must
 # not match — `transcript_for_session("*")` would otherwise glob `*/*.jsonl` and hand back
 # some arbitrary agent's transcript.
-SESSION_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{7,63}$")
+SESSION_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{7,63}\Z")
 
 # Where the process facts come from. A module-level Path so a test can point the whole
 # lookup at a fixture tree.

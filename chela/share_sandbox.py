@@ -115,7 +115,7 @@ PROXY_ENV_KEYS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http
                   "all_proxy")
 _NO_PROXY = PROXY_ALIAS
 
-_SID_RE = re.compile(r"^[0-9a-f]{12}$")
+_SID_RE = re.compile(r"^[0-9a-f]{12}\Z")
 
 # Workspace entries a guest could plant for the OPERATOR's next unsandboxed tool to run
 # (git hooks / core.fsmonitor, project Claude hooks + MCP servers, direnv, editor tasks):
