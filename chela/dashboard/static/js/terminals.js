@@ -1971,6 +1971,51 @@ function kbToggle() {
     $('#kb-toggle').setAttribute('aria-expanded', String(!collapsed));
 }
 
+// CMX-169: the single-mode pane a load opens. The last pane viewed on THIS device
+// (localStorage, like pc_term_mode) if it is still online, else the first session in the
+// sidebar's order (the leftmost phone pill), else the first option. The stored wid is
+// paired with its session id and name: a wid a tmux restart handed to another session
+// matches neither, so it is not trusted.
+const LAST_PANE_KEY = 'pc_term_last_wid';
+let _paneDefaulted = '';   // a pane picked before the sidebar had an order (adoptSidebarDefault)
+
+function _rememberPane(wid, agents) {
+    const a = (agents || []).find(x => x.window_id === wid) || {};
+    try { localStorage.setItem(LAST_PANE_KEY, JSON.stringify({ wid, session_id: a.session_id || '', name: a.name || '' })); }
+    catch (e) { /* private mode: nothing is remembered, a load still picks a pane */ }
+}
+
+function _storedPane(wids, agents) {
+    let s;
+    try { s = JSON.parse(localStorage.getItem(LAST_PANE_KEY)); } catch (e) { return ''; }
+    if (!s || !wids.includes(s.wid)) return '';
+    const a = (agents || []).find(x => x.window_id === s.wid) || {};
+    const same = k => Boolean(s[k] && a[k] && s[k] === a[k]);
+    const comparable = (s.session_id && a.session_id) || (s.name && a.name);
+    return !comparable || same('session_id') || same('name') ? s.wid : '';
+}
+
+function _initialPane(wids, agents) {
+    const stored = _storedPane(wids, agents);
+    if (stored) return stored;
+    const order = sidebarOrder();
+    _paneDefaulted = order.length ? '' : (wids[0] || '');
+    return orderByList(wids, order)[0] || '';
+}
+
+// The boot's first render runs before the sidebar has drawn (main.js starts the view tick
+// as soon as /api/agents lands), so its default had no sidebar order to follow. Once the
+// sidebar draws (nav.js calls this), move that default to the leftmost pill, unless a tap
+// or a focus has already picked another pane.
+function adoptSidebarDefault() {
+    const was = _paneDefaulted;
+    _paneDefaulted = '';
+    const sel = $('#term-agent');
+    if (!was || _termMode !== 'single' || !sel || sel.value !== was) return;
+    const first = _mobileWids()[0];
+    if (first && first !== was) { sel.value = first; renderTerminals(); }
+}
+
 async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read (CMX-166)
     if (!TERMINALS_ON) return;   // terminals disabled — DOM (#term-stage etc.) absent
     let agents = _agentsCache;
@@ -2004,7 +2049,7 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
     if (sel.options.length !== wids.length) {
         const prev = sel.value;
         sel.innerHTML = wids.map(w => `<option value="${attrEsc(w)}">${escHtml(_paneTitle(w))}</option>`).join('');
-        if (prev && wids.includes(prev)) sel.value = prev;
+        sel.value = prev && wids.includes(prev) ? prev : _initialPane(wids, agents);
     }
 
     // Order-insensitive: a surgically-appended tile lands at the end of
@@ -2051,6 +2096,7 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
         destroyGrid();
         stage.className = 'term-single';
         const sw = sel.value || wids[0];
+        _rememberPane(sw, agents);   // every single-mode switch lands here: pill, swipe, dropdown, focus
         stage.innerHTML = `<div class="term-pane">${paneHead(sw, false)}${frame(sw)}${_ctxBarHTML(sw, false)}</div>`;
         _renderedWids = [sw];
     }
@@ -2156,6 +2202,10 @@ function startTermFocusTracking() {
 // instead of silently no-op'ing because the wall was already showing.
 function focusPaneByWid(wid) {
     if (!TERMINALS_ON || !wid) return;
+    // An explicit focus beats the stored pane and becomes it: stored first, so a focus that
+    // lands before the pane list (a deep link at boot) is what the first render opens.
+    _paneDefaulted = '';
+    _rememberPane(wid, _agentsCache);
     if (typeof selectView === 'function') selectView('terminals');
     if (_termMode === 'single') {
         const sel = $('#term-agent');
@@ -4024,7 +4074,7 @@ if (typeof ResizeObserver === 'function') {
 }
 
 // --- Stage 0: ES-module exports ---
-export { renderMobileSwitcher, stepAgentMobile, SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, _refitPaneTerm, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { adoptSidebarDefault, renderMobileSwitcher, stepAgentMobile, SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, _refitPaneTerm, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

@@ -1,0 +1,34 @@
+// CMX-169 — WITH NO USABLE STORED PANE, A PHONE'S BOOT OPENS THE LEFTMOST PILL.
+//
+// The boot's first terminals render runs as soon as /api/agents lands, BEFORE the sidebar
+// has drawn (main.js), so it has no sidebar order to follow and opens the first row. Once
+// the sidebar draws, nav.js calls terminals.adoptSidebarDefault(), which moves that default
+// to the first session in the sidebar's order. One boot per file: term_last_pane.test.mjs
+// boots WITH a stored pane, term_last_pane_tap.test.mjs taps a pill before the sidebar draws.
+//
+// Run: node --test tests/term_last_pane_boot.test.mjs  (pytest runs it via tests/test_js_suites.py)
+import { before, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { clickOnclick } from './js_helpers/dashboard_dom.mjs';
+import { KEY, bootPhone, pane, settle, stored } from './js_helpers/term_pane_fixture.mjs';
+
+let nav, chela;
+before(async () => {
+    // A stored pane that is offline: the boot falls through to the sidebar's first.
+    ({ nav, chela } = await bootPhone({ order: ['/srv/code/gamma', '/srv/code/beta', '/srv/code/alpha'], seed: { [KEY]: stored('@299', 's-z', 'z') } }));
+    await settle();
+});
+
+test('the boot opens the first pill in the sidebar order, not the first /api/agents row', () => {
+    assert.deepEqual(chela.sidebarOrder(), ['@203', '@202', '@201']);
+    assert.deepEqual(pane(), { value: '@203', shown: '@203' });
+    assert.equal(JSON.parse(localStorage.getItem(KEY)).wid, '@203');
+});
+
+test('after the boot, a sidebar re-render never moves a pane the user picked', async () => {
+    clickOnclick(document.querySelector('#term-switcher .term-pill[data-wid="@201"]'));
+    await settle();
+    await nav.refreshSidebar();
+    await settle();
+    assert.deepEqual(pane(), { value: '@201', shown: '@201' });
+});
