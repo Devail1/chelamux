@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, sizegate, sweep
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, reviewgate, sizegate, sweep
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -1510,6 +1510,8 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("self_check_partial", "ALTER TABLE runs ADD COLUMN self_check_partial TEXT"),
         # 🔀 CMX-189. JSON {base, behind, allow_behind}: a hand-in let through behind its base.
         ("base_sync", "ALTER TABLE runs ADD COLUMN base_sync TEXT"),
+        # 🔎 CMX-209. JSON {no_review_reason}: a code hand-in let through with no `## Review`.
+        ("review_gate", "ALTER TABLE runs ADD COLUMN review_gate TEXT"),
     ):
         if _column in existing_columns:
             continue  # already migrated — no DDL attempted, nothing to fail
@@ -2934,6 +2936,32 @@ def check_hand_in_size(task_id: str, oversize_reason: str | None = None,
         "into ≤-limit PRs (--split-plan); only if it truly cannot be split, pass --oversize-reason '<why>'.")}
 
 
+def check_review_section(task_id: str, no_review_reason: str | None = None) -> dict:
+    """🔎 CMX-209: the self-review gate — a code PR's body must carry ``## Review`` (see
+    :mod:`chela.reviewgate`). ``{"ok", "record"}``; a prose-only diff needs none, and
+    ``--no-review-reason`` lets the hand-in through with the reason as the record."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"] or not row["workflow_path"]:
+        return {"ok": False, "error": f"no run with a worktree on record for {task_id}"}
+    if (no_review_reason or "").strip():
+        return {"ok": True, "record": {"no_review_reason":
+                                       no_review_reason.strip()[:HANDOFF_MAX_CHARS]}}
+    worktree = row["worktree_path"]
+    try:
+        base = load_workflow(row["workflow_path"]).get("workspace", "base_branch",
+                                                       default="master")
+        if judge._docs_only_diff(Path(worktree), base) is True:
+            return {"ok": True, "record": None}
+        body = reviewgate.read_body(worktree, row["pr_url"], _push_request_path(worktree))
+    except Exception as e:
+        return {"ok": False, "error": f"could not read this PR's body — {e}. Unknown is not "
+                                      "reviewed."}
+    if reviewgate.has_review(body):
+        return {"ok": True, "record": None}
+    return {"ok": False, "error": reviewgate.REFUSAL}
+
+
 def file_split(task_id: str, record: dict, slices: list[dict]) -> dict:
     """📏 CMX-126: file a split's remaining slices as sub-issues of ``task_id`` — chela holds
     the tracker credentials, the agent never does. A failed write REFUSES the hand-in; a rework
@@ -3078,7 +3106,7 @@ def _clean_handoff(value) -> str | None:
 def mark_awaiting_review(
     task_id: str, *, handoff: str | None = None, sweep_equivalents: list[dict] | None = None,
     size_gate: dict | None = None, self_check_partial: dict | None = None,
-    base_sync: dict | None = None,
+    base_sync: dict | None = None, review_gate: dict | None = None,
 ) -> dict:
     """Transition a run from running → awaiting_review and kill its tmux window.
 
@@ -3146,10 +3174,12 @@ def mark_awaiting_review(
                      (json.dumps(self_check_partial) if self_check_partial else None, task_id))
         conn.execute("UPDATE runs SET base_sync=? WHERE task_id=?",
                      (json.dumps(base_sync) if base_sync else None, task_id))
+        conn.execute("UPDATE runs SET review_gate=? WHERE task_id=?",
+                     (json.dumps(review_gate) if review_gate else None, task_id))
         conn.commit()
         note = sizegate.render(size_gate or {})
         for what, text in (("size-gate", note), ("self-check", judge.render_self_check_partial(
-                self_check_partial or {}))):
+                self_check_partial or {})), ("review", reviewgate.render(review_gate or {}))):
             if text and effective_pr_url:
                 ok, detail = _append_pr_body(effective_pr_url, repo_dir, text)
                 if not ok:
@@ -3233,7 +3263,7 @@ def _read_task_finished_size_gate(worktree_path: str | Path,
 def request_task_finished(
     task_id: str, *, handoff: str | None = None, sweep_equivalents: list[dict] | None = None,
     size_gate: dict | None = None, self_check_partial: dict | None = None,
-    base_sync: dict | None = None,
+    base_sync: dict | None = None, review_gate: dict | None = None,
 ) -> dict:
     """Record that a dispatched agent believes its work is done — called by `chela
     task-finished`, IN PLACE OF the direct `mark_awaiting_review` call it used to make.
@@ -3290,6 +3320,8 @@ def request_task_finished(
         request["self_check_partial"] = self_check_partial
     if base_sync:
         request["base_sync"] = base_sync
+    if review_gate:
+        request["review_gate"] = review_gate
     _task_finished_request_path(worktree_path).write_text(
         json.dumps(request), encoding="utf-8",
     )
@@ -5643,6 +5675,8 @@ def tick(workflow_path: str | Path) -> dict:
                     self_check_partial=_read_task_finished_size_gate(
                         row["worktree_path"], "self_check_partial"),
                     base_sync=_read_task_finished_size_gate(row["worktree_path"], "base_sync"),
+                    review_gate=_read_task_finished_size_gate(row["worktree_path"],
+                                                              "review_gate"),
                 )
                 # ⚖️🔀 issue #502 rework round 1 (hazard 3 of the brief): `ok=False` used to
                 # be ONE outcome — unlink the marker and log.warning, no matter why the
@@ -7721,7 +7755,8 @@ def _judge_size_gate(row) -> str:
     notes = []
     for col, render in (("size_gate", sizegate.render),
                         ("self_check_partial", judge.render_self_check_partial),
-                        ("base_sync", basesync.render)):
+                        ("base_sync", basesync.render),
+                        ("review_gate", reviewgate.render)):
         try:
             note = render(json.loads(row[col] or "{}"))
         except (IndexError, KeyError, ValueError, TypeError):

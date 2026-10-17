@@ -2337,6 +2337,12 @@ def cmd_task_finished(args) -> None:
     if not size.get("ok"):
         print(f"task-finished: 📏 {size['error']}")
         sys.exit(1)
+    # 🔎 CMX-209: a code PR's body must carry its self-review — cheap, so before the sweep.
+    review = dispatcher.check_review_section(args.task_id,
+                                             getattr(args, "no_review_reason", None))
+    if not review.get("ok"):
+        print(f"task-finished: 🔎 {review['error']}")
+        sys.exit(1)
 
     partial = None
     if experiments:
@@ -2399,6 +2405,8 @@ def cmd_task_finished(args) -> None:
         kwargs["self_check_partial"] = partial
     if sync.get("record"):
         kwargs["base_sync"] = sync["record"]
+    if review.get("record"):
+        kwargs["review_gate"] = review["record"]
     result = dispatcher.request_task_finished(args.task_id, **kwargs)
     if not result.get("ok"):
         print(f"task-finished: {result.get('error', 'unknown error')}")
@@ -4280,6 +4288,10 @@ def main() -> None:
     p_tf.add_argument(
         "--oversize-reason", metavar="WHY", default=None,
         help="📏 CMX-126: hand in an oversized diff that cannot be split (recorded).",
+    )
+    p_tf.add_argument(
+        "--no-review-reason", metavar="WHY", default=None,
+        help="🔎 CMX-209: hand in a code PR whose body has no `## Review` section (recorded).",
     )
     p_tf.add_argument(
         "--split-plan", metavar="PATH", default=None,
