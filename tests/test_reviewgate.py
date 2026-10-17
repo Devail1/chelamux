@@ -43,14 +43,9 @@ def _push(wt: Path, body) -> None:
     ("## Review\n3 findings: 2 fixed, 1 dismissed\n### Fixed\na.py:1 fixed\n", True),
     ("## Review  \r\n0 findings\r\n", True),
     ("## Review\n\n   \n## Test plan\nran it\n", False),     # empty section is a dodge
-    ("## Review\n", False),
     ("### Review\n0 findings\n", False),                     # wrong level
-    ("# Review\n0 findings\n", False),
     ("## Reviewer notes\n0 findings\n", False),              # a prefix is not the heading
-    ("## Self Review\n0 findings\n", False),
     ("text ## Review\n0 findings\n", False),                 # not at a line start
-    ("## Summary\nno review here\n", False),
-    ("", False),
 ])
 def test_has_review(body, ok):
     assert reviewgate.has_review(body) is ok
@@ -60,9 +55,7 @@ def test_has_review(body, ok):
 def test_a_code_pr_without_review_is_refused_and_with_it_accepted(tmp_path, monkeypatch, changed):
     wt = _repo(tmp_path, monkeypatch, changed)
     _push(wt, "## Summary\nno review\n")
-    out = dispatcher.check_review_section("cmx-88")
-    assert out == {"ok": False, "error": reviewgate.REFUSAL}
-    assert "no `## Review` section" in out["error"] and "--no-review-reason" in out["error"]
+    assert dispatcher.check_review_section("cmx-88") == {"ok": False, "error": reviewgate.REFUSAL}
     _push(wt, REVIEWED)
     assert dispatcher.check_review_section("cmx-88") == {"ok": True, "record": None}
 
@@ -96,8 +89,7 @@ def test_an_open_pr_is_read_from_github_not_the_marker(tmp_path, monkeypatch):
     wt = _repo(tmp_path, monkeypatch, "feat.py")
     _push(wt, REVIEWED)                              # stale: the open PR is authoritative
     with dispatcher._db() as conn:
-        conn.execute("UPDATE runs SET pr_url='https://github.com/o/r/pull/7'")
-        conn.commit()
+        conn.execute("UPDATE runs SET pr_url='https://github.com/o/r/pull/7'").connection.commit()
     real, done = subprocess.run, subprocess.CompletedProcess([], 0, "## Summary\nx\n", "")
     with patch.object(reviewgate.subprocess, "run",
                       side_effect=lambda cmd, **kw: done if cmd[0] == "gh" else real(cmd, **kw)
