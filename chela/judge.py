@@ -801,6 +801,8 @@ def run_baseline(
     """
     if not select_tests:
         return run_suite(test_cmd, worktree, timeout), None, "selection is off (judge.select_tests)"
+    if judge_select.is_vitest(test_cmd):
+        return _vitest_baseline(worktree, test_cmd, timeout, scratch)
     if not judge_select.extendable(test_cmd):
         return (run_suite(test_cmd, worktree, timeout), None,
                 "`judge.test_cmd` is not a single pytest invocation — every mutation runs the "
@@ -836,6 +838,24 @@ def run_baseline(
     selector = judge_select.Selector(worktree, cases, cov or {})
     why = f"per-mutation selection over the baseline's {len(cases)} test(s)"
     return baseline, selector, why + (f"; {cov_note}" if cov_note else "")
+
+
+def _vitest_baseline(
+    worktree: Path, test_cmd: str, timeout: float, scratch: Path,
+) -> tuple[SuiteResult, "judge_select.Selector | None", str]:
+    """⚡ CMX-174: :func:`run_baseline` for ONE Vitest invocation — its universe is the
+    baseline's own JSON report, and each mutation runs only the test files that reach it."""
+    report = scratch / "baseline-vitest.json"
+    baseline = run_suite(judge_select.extend(test_cmd, judge_select.vitest_report_args(report)),
+                         worktree, timeout)
+    if not baseline.green:
+        return baseline, None, ""
+    cases = judge_select.parse_vitest_json(worktree, report)
+    if cases is None:
+        return (baseline, None, "the baseline wrote no readable Vitest JSON report — every "
+                                "mutation runs the full suite")
+    return (baseline, judge_select.Selector(worktree, cases),
+            f"per-mutation Vitest selection over the baseline's {len(cases)} test(s)")
 
 
 def _subset_baseline(sel: "judge_select.Selection") -> SuiteResult:
@@ -1846,6 +1866,9 @@ def _measure(
         outcome = adjudicate(exp, True, reason, parses, parse_detail, baseline, mutated)
         outcome.selection = sel.why if sel is not None else ""
         outcome.plan = sel
+        if sel is not None and sel.untested and outcome.verdict == SURVIVED:
+            # ⚖️ CMX-174: survivor-class, and said as what it is — not one test imports it.
+            outcome.reason = f"UNTESTED — no test file imports {exp.file}. {outcome.reason}"
         return outcome
     subset = run_suite(judge_select.extend(test_cmd, sel.nodes), worktree, timeout)
     outcome = adjudicate(exp, True, reason, parses, parse_detail, _subset_baseline(sel), subset)

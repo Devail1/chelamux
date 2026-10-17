@@ -2817,7 +2817,8 @@ def cmd_judge_sweep(args) -> None:
     skipped = _print_sweep_skipped(result)
     unrun = _print_sweep_unrun(result)
     for r in result["survivors"]:
-        print(f"  [SURVIVED] {r['key']} {r['mutation']}")
+        tag = "UNTESTED" if str(r.get("reason", "")).startswith("UNTESTED") else "SURVIVED"
+        print(f"  [{tag}] {r['key']} {r['mutation']}")
     unsupported = result.get("unsupported", [])
     for f in unsupported:
         print(f"  [UNKNOWN ] {f} — not supported: {sweep.SUPPORTED_NOTE}")
