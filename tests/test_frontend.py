@@ -60,9 +60,11 @@ def test_a_suite_that_cannot_run_fails_under_require_and_skips_otherwise(
         monkeypatch.setenv("CHELA_REQUIRE_JS_TESTS", "1")
     monkeypatch.setattr(sys.modules[__name__], "run_contained",
                         lambda *_a, **_k: pytest.fail("ran a suite that cannot run"))
-    exc = pytest.fail.Exception if required else pytest.skip.Exception
-    with pytest.raises(exc, match=f"{missing} is not installed.*DID NOT RUN"):
+    # Catch both outcomes: a skip escaping a `raises(fail)` would mark this test SKIPPED, not red.
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception),
+                       match=f"{missing} is not installed.*DID NOT RUN") as outcome:
         test_frontend_vitest_suite()
+    assert outcome.type is (pytest.fail.Exception if required else pytest.skip.Exception)
 
 
 @pytest.mark.parametrize("code,worker", [(0, "gw1"), (1, "gw1"), (0, None)])
