@@ -25,11 +25,8 @@ LAUNCH_SET = [
     "action.yml",
     "NOTICE",               # linked from both landing footers (CMX-159)
     "skills/README.md",
-    "skills/blindspot-pass/SKILL.md",
     "skills/chela-setup/SKILL.md",
     "skills/handoff/SKILL.md",
-    "skills/implementation-plan/SKILL.md",
-    "skills/interview-me/SKILL.md",
     "skills/orchestrate/SKILL.md",
     "skills/telegram-send/SKILL.md",
     "skills/telegram-setup/SKILL.md",
