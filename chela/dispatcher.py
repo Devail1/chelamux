@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import time
@@ -7104,6 +7105,15 @@ def _launch_agent(
     subprocess.run(
         ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{target_id}",
          _strip_agent_env_cmd(), "Enter"],
+        check=True, capture_output=True,
+    )
+    # 🪆 CMX-190: stamp the pane as a DISPATCHED run (agent or judge). The plugin's Bash hook
+    # (chela/mergegate.py) reads it to deny a nested `claude` launch; a human's own session
+    # and the orchestrator never carry it.
+    subprocess.run(
+        ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{target_id}",
+         f"export {mergegate.RUN_ENV}={shlex.quote(task_id)} "
+         f"{mergegate.RUN_ROLE_ENV}={shlex.quote(role)}", "Enter"],
         check=True, capture_output=True,
     )
     # Export CHELA_WID first so the worktree agent knows its own window id (self-identity
