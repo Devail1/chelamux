@@ -227,6 +227,10 @@ out. It logs a loud warning at start-up, and `chela doctor` reports
 `telegram.sender_allowlist` as a warning until the list is set. A non-numeric entry (an
 `@username`) is ignored and named by doctor.
 
+The bridge resolves the variable the same way `chela doctor` does: the process environment
+wins, then `chela.env`, then `secrets.env`. So doctor's verdict holds however
+`chela-telegram` was started, with or without `scripts/chela-env.sh`.
+
 ### Secrets stay out of the children chela launches
 
 chela itself reads both files, but nothing it launches gets their secrets: the env handed to

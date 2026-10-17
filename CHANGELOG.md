@@ -10,6 +10,15 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Security
+
+- **The Telegram bridge accepts updates only from allow-listed senders.** Set
+  `CHELA_TELEGRAM_ALLOWED_USERS` (numeric Telegram user ids, in `chela.env` or
+  `secrets.env`). Text, commands, button taps, photos and documents from anyone else in the
+  bound chat are dropped unanswered. Each drop is logged with the sender's id and a hash of
+  the text, at most once a minute per sender. Unset, the bridge keeps the old chat-only
+  behaviour and warns at start-up, and `chela doctor` warns too. (CMX-185)
+
 ### Changed
 
 - **The phone's session pills follow the sidebar's order**: group order, Move up / Move

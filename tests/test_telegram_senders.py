@@ -284,3 +284,140 @@ def test_doctor_names_non_numeric_entries(doctor_env, monkeypatch):
         (WARN, "CHELA_TELEGRAM_ALLOWED_USERS ignores 2 non-numeric entries: @a, x"),
         (OK, "Telegram accepts updates from 1 allow-listed user(s) only"),
     ]
+
+
+# -- the WHOLE registry: every handler, present and future, is behind the gate ---------
+
+class _Tripwire:
+    """A stub whose every attribute read is recorded. Only ``exempt`` (what the gate
+    itself reads to decide and to hash) is answered without a record."""
+
+    def __init__(self, touched, name, exempt=(), **fields):
+        object.__setattr__(self, "_touched", touched)
+        object.__setattr__(self, "_name", name)
+        object.__setattr__(self, "_exempt", dict(exempt, **fields))
+
+    def __getattr__(self, attr):
+        if attr in self._exempt:
+            return self._exempt[attr]
+        self._touched.append(f"{self._name}.{attr}")
+        raise AttributeError(attr)          # whatever a handler does next, it got nothing
+
+
+# Each button handler only acts on its own prefix, so each gets data it would act on.
+_TAP_DATA = {"_on_qa": "qa:nav:esc", "_on_mirror": "m:ent", "_on_new_cb": "n:up",
+             "_on_override": "ov:a:override-x", "_on_key": "k:esc"}
+
+
+def _tripwire_update(user_id, touched, name):
+    user = type("User", (), {"id": user_id})()
+    data = _TAP_DATA.get(name, "k:esc")
+    return _Tripwire(touched, "update", effective_user=user,
+                     callback_query=_Tripwire(touched, "query", data=data),
+                     message=_Tripwire(touched, "message", text="hi", caption=None))
+
+
+def test_every_registered_handler_reads_nothing_of_a_strangers_update():
+    """Walks ``app.handlers`` itself, so a handler added later without ``_gated`` goes red
+    here even if nobody writes a test for it. Behavioural, not ``hasattr(__wrapped__)``: a
+    wrapper that forgot to check the gate still has ``__wrapped__``."""
+    closed = []
+    hs, sender = _handlers(on_topic_closed=closed.append,
+                           decide_override=lambda *a, **k: pytest.fail("decided"),
+                           launch_session=lambda cwd: pytest.fail("launched"),
+                           send_key=lambda *a: pytest.fail("key"),
+                           send_escape=lambda *a: pytest.fail("esc"),
+                           capture=lambda *a, **k: pytest.fail("captured"))
+    assert {"_on_message", "_on_photo", "_on_document", "_on_new", "_on_screenshot",
+            "_on_esc", "_on_qa", "_on_mirror", "_on_new_cb", "_on_override", "_on_key",
+            "_on_topic_closed"} <= set(hs)
+    for name, cb in hs.items():
+        touched: list[str] = []
+        _run(cb, _tripwire_update(STRANGER, touched, name))
+        assert touched == [], f"{name} read a stranger's update: {touched}"
+    assert sender.calls == [] and closed == []
+
+    # positive control: the operator's identical update DOES reach every handler, so the
+    # tripwire above is able to see a handler that runs
+    for name, cb in hs.items():
+        touched = []
+        try:
+            _run(cb, _tripwire_update(OPERATOR, touched, name))
+        except Exception:                   # noqa: BLE001 — the stub is hostile on purpose
+            pass
+        assert touched, f"{name}: the tripwire saw nothing even for the operator"
+
+
+def test_a_strangers_override_approve_tap_decides_nothing_and_is_unanswered():
+    decided = []
+
+    def _decide(request_id, approve, *a, **k):
+        decided.append((request_id, approve))
+        return {"state": "denied", "ok": True}
+
+    hs, _ = _handlers(decide_override=_decide)
+    data = "ov:a:override-abc123"
+    stranger = _run(hs["_on_override"], _Update(STRANGER, query=_Query(data)))
+    assert decided == [] and stranger.callback_query.answers == []
+    operator = _run(hs["_on_override"], _Update(OPERATOR, query=_Query(data)))
+    assert decided == [("override-abc123", True)]
+    assert operator.callback_query.answers
+
+
+def test_explicit_empty_allowlist_is_chat_only_even_with_the_env_set(monkeypatch):
+    """``()`` is an explicit choice, not "unset": only ``None`` falls back to the env."""
+    monkeypatch.setenv(senders.ALLOWED_USERS_VAR, str(OPERATOR))
+    hs, sender = _handlers(allowed_users=())
+    _run(hs["_on_message"], _Update(STRANGER, msg=_Msg("b")))
+    assert sender.calls == [("@3", "b")]
+
+
+def test_the_bridge_reads_an_allowlist_that_lives_only_in_a_file(doctor_env):
+    """Started WITHOUT chela-env.sh (nothing in os.environ), the bridge still loads the
+    allowlist doctor reports — from chela.env, or secrets.env when chela.env lacks it."""
+    for chela_env, secrets_env in ((f"{senders.ALLOWED_USERS_VAR}={OPERATOR}\n", ""),
+                                   ("", f"{senders.ALLOWED_USERS_VAR}={OPERATOR}\n")):
+        (doctor_env / "chela.env").write_text(chela_env)
+        (doctor_env / "secrets.env").write_text(secrets_env)
+        assert senders.allowed_users_from_env() == frozenset({str(OPERATOR)})
+        hs, sender = _handlers(allowed_users=None)
+        _run(hs["_on_message"], _Update(STRANGER, msg=_Msg("b")))
+        _run(hs["_on_message"], _Update(OPERATOR, msg=_Msg("a")))
+        assert sender.calls == [("@3", "a")]
+
+
+def test_the_rejection_rate_limit_is_per_sender(caplog):
+    """A second stranger inside the first one's window is still logged, and the
+    suppressed tally belongs to the sender it was counted for."""
+    now = [1000.0]
+    gate = SenderGate(frozenset({"111"}), clock=lambda: now[0], log_every=60.0)
+    with caplog.at_level(logging.WARNING, logger="chela.telegram.senders"):
+        gate.allows(_Update(222, msg=_Msg("x")))
+        gate.allows(_Update(222, msg=_Msg("x")))
+        gate.allows(_Update(333, msg=_Msg("y")))
+    lines = [r.getMessage() for r in caplog.records]
+    assert len(lines) == 2
+    assert "user 333" in lines[1] and "0 more suppressed" in lines[1]
+    caplog.clear()
+    now[0] += 60.0
+    with caplog.at_level(logging.WARNING, logger="chela.telegram.senders"):
+        gate.allows(_Update(333, msg=_Msg("y")))
+        gate.allows(_Update(222, msg=_Msg("x")))
+    lines = [r.getMessage() for r in caplog.records]
+    assert "user 333" in lines[0] and "0 more suppressed" in lines[0]
+    assert "user 222" in lines[1] and "1 more suppressed" in lines[1]
+
+
+def test_a_photo_caption_is_hashed_never_logged(caplog):
+    gate = SenderGate(frozenset({"111"}))
+    msg = _Msg(photo=[object()])
+    msg.caption = "my private caption"
+    with caplog.at_level(logging.WARNING, logger="chela.telegram.senders"):
+        assert gate.allows(_Update(STRANGER, msg=msg)) is False
+    assert senders.text_hash("my private caption") in caplog.text
+    assert "my private caption" not in caplog.text
+
+
+def test_doctor_treats_a_whitespace_token_as_no_bridge(doctor_env, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "   ")
+    assert _doctor() == []

@@ -44,8 +44,21 @@ def parse_allowed_users(raw: str | None) -> tuple[frozenset[str], list[str]]:
     return frozenset(allowed), bad
 
 
+def bridge_env() -> dict[str, str]:
+    """The variables the bridge starts with, resolved the way ``scripts/chela-env.sh``
+    does it: the environment wins, then ``chela.env``, then ``secrets.env``. The bridge
+    and ``chela doctor`` both read THIS, so doctor can't report an allowlist the bridge
+    never loaded (a service started without chela-env.sh still gets the files' value)."""
+    from chela import config
+    out: dict[str, str] = {}
+    for path in (config.CHELA_DIR / "secrets.env", config.env_file_path()):
+        if path is not None and path.exists():
+            out.update(config.parse_env_file(path))
+    return {**out, **os.environ}
+
+
 def allowed_users_from_env() -> frozenset[str]:
-    return parse_allowed_users(os.environ.get(ALLOWED_USERS_VAR))[0]
+    return parse_allowed_users(bridge_env().get(ALLOWED_USERS_VAR))[0]
 
 
 def _update_text(update) -> str:

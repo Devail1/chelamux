@@ -3235,17 +3235,9 @@ def _closed_run_stalls_report(_declared: None, obs: Observation) -> list[Finding
 # bound group can type into every agent and answer its permission prompts. That is a
 # deliberate upgrade default (nobody is locked out), so doctor is where it must be loud.
 
-def _telegram_env() -> dict[str, str]:
-    """The bridge's own view, resolved the way ``scripts/chela-env.sh`` does it: the
-    environment wins, then ``chela.env``, then ``secrets.env``."""
-    secrets = config.CHELA_DIR / "secrets.env"
-    return {**(config.parse_env_file(secrets) if secrets.exists() else {}),
-            **declared_env(), **os.environ}
-
-
 def _telegram_senders_read() -> Observation:
-    from chela.telegram.senders import ALLOWED_USERS_VAR, parse_allowed_users
-    env = _telegram_env()
+    from chela.telegram.senders import ALLOWED_USERS_VAR, bridge_env, parse_allowed_users
+    env = bridge_env()                             # the bridge's own resolution
     if not (env.get("TELEGRAM_BOT_TOKEN") or "").strip():
         return observed(None)                      # no bridge — nobody to let in
     return observed(parse_allowed_users(env.get(ALLOWED_USERS_VAR)))
