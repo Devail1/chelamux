@@ -642,8 +642,9 @@ _TERM_PASTE_SHIM = (
 # so no ^V reaches the shell, reads the clipboard, and routes it through
 # /api/term/paste (bracketed paste at the tmux layer). It also handles an image
 # on the clipboard — via /api/term/paste-image, like the paste-event shim — so
-# Ctrl+V never regresses image paste. Ctrl+Shift+V / right-click are left to the
-# native path. wid comes from the iframe path (/term/<wid>/), as above.
+# Ctrl+V never regresses image paste. Ctrl+Shift+V is left to the native path;
+# right-click pastes through this shim too (see _TERM_CONTEXTMENU_SHIM). wid comes
+# from the iframe path (/term/<wid>/), as above.
 _TERM_PASTE_KEY_SHIM = (
     "<script>(function(){"
     "var m=location.pathname.match(/\\/term\\/([^\\/]+)/);"
@@ -659,11 +660,7 @@ _TERM_PASTE_KEY_SHIM = (
     "var r=await fetch('/api/term/paste-image',{method:'POST',body:fd,"
     "credentials:'same-origin'});"
     "if(!r.ok)return;var j=await r.json();if(j&&j.path)await pasteText(j.path);}"
-    "async function onKey(e){"
-    "if(!(e.ctrlKey||e.metaKey)||e.shiftKey||e.altKey)return;"
-    "if(e.key!=='v'&&e.key!=='V')return;"
-    "if(!navigator.clipboard)return;"
-    "e.preventDefault();e.stopImmediatePropagation();"
+    "async function pasteClipboard(){"
     "try{"
     "if(navigator.clipboard.read){"
     "var items=await navigator.clipboard.read();"
@@ -676,7 +673,34 @@ _TERM_PASTE_KEY_SHIM = (
     "}else if(navigator.clipboard.readText){"
     "await pasteText(await navigator.clipboard.readText());}"
     "}catch(err){console.error('paste-key',err);}}"
+    # CMX-201: the right-click shim pastes through this same function.
+    "window.__chelaPasteClipboard=function(){"
+    "return navigator.clipboard?pasteClipboard():Promise.resolve();};"
+    "function onKey(e){"
+    "if(!(e.ctrlKey||e.metaKey)||e.shiftKey||e.altKey)return;"
+    "if(e.key!=='v'&&e.key!=='V')return;"
+    "if(!navigator.clipboard)return;"
+    "e.preventDefault();e.stopImmediatePropagation();"
+    "window.__chelaPasteClipboard();}"
     "document.addEventListener('keydown',onKey,true);"
+    "})();</script>"
+)
+
+# Right-click paste shim injected into ttyd's HTML (see term_http), CMX-201.
+# Windows-Terminal style: select = copy (Claude Code's copy-on-select), right-click
+# = paste. The browser's native context menu (Emoji / Paste / Inspect …) is
+# suppressed and the clipboard goes through the Ctrl/Cmd+V shim's own paste path
+# (window.__chelaPasteClipboard: bracketed paste, an image → /api/term/paste-image),
+# never the browser's Paste. Only `contextmenu` is touched — the mousedown/mouseup
+# events xterm.js forwards to tmux / the app (and that selection relies on) are not
+# swallowed, and neither is propagation. Fine pointers only: on a phone a long-press
+# also fires contextmenu, and it must keep doing what it does today.
+_TERM_CONTEXTMENU_SHIM = (
+    "<script>(function(){"
+    "if(!window.matchMedia||!matchMedia('(pointer: fine)').matches)return;"
+    "document.addEventListener('contextmenu',function(e){"
+    "e.preventDefault();"
+    "var p=window.__chelaPasteClipboard;if(typeof p==='function')p();},true);"
     "})();</script>"
 )
 
@@ -1078,7 +1102,8 @@ def term_http(wid, rest):
                  + _term_theme_shim() + _TERM_FONT_CSS + _TERM_FONT_PREF_SHIM
                  + _term_presence_shim(wid)
                  + _term_upload_shim()
-                 + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM + _TERM_PALETTE_KEY_SHIM
+                 + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM + _TERM_CONTEXTMENU_SHIM
+                 + _TERM_PALETTE_KEY_SHIM
                  + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS + _TERM_TOUCH_CSS)
         html = (html.replace("</head>", shims + "</head>", 1)
                 if "</head>" in html else html + shims)
