@@ -10,6 +10,16 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+### Changed
+
+- **The task modal's review timeline moved to the wide column.** The main column now has
+  **Brief | Review (N)** tabs, and the modal opens on Review while a verdict is waiting to be
+  read. Each review round is a collapsible card, newest first and open. A collapsed round
+  shows its verdict, its visible and held-out survivor counts, and its time. The sidebar
+  keeps the details and adds a round list that jumps to a round. On a phone the sidebar
+  stacks above the tabs, so the modal has only one scroll area. On a Linear workflow, the
+  task key in the header links to the Linear issue.
+
 ## [0.17.0] — 2026-10-16
 
 ### Added
