@@ -87,6 +87,8 @@ def test_skills_on_disk_are_exactly_the_kept_set():
     ("docs/x.md", "write an implementation plan", False),
     ("docs/x.md", "my-interview-me-notes", False),
     ("docs/x.md", "blindspot-passes", False),
+    ("docs/x.md", "pre-blindspot-pass", False),
+    ("docs/x.md", "my_interview-me", False),
 ])
 def test_reference_scan(rel, text, hit):
     assert bool(references({rel: text})) is hit
