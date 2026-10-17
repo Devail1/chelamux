@@ -446,10 +446,10 @@ test('timelineSteps: non-object array entries are dropped, valid ones map to {st
     const steps = tm.timelineSteps(raw);
     assert.equal(steps.length, 2, 'the 3 malformed entries must be dropped, not crash or pass through');
     assert.deepEqual(steps[0], {
-        round: 1, at: '2026-07-20T10:00:00+00:00', state: 'changes_requested', detail: 'fix the flaky test',
+        round: 1, at: '2026-07-20T10:00:00+00:00', state: 'changes_requested', detail: 'fix the flaky test', visible: 0, heldOut: 0,
     });
     assert.deepEqual(steps[1], {
-        round: 2, at: '2026-07-20T11:00:00+00:00', state: 'reopened', detail: 'looks good now',
+        round: 2, at: '2026-07-20T11:00:00+00:00', state: 'reopened', detail: 'looks good now', visible: 0, heldOut: 0,
     });
 });
 
