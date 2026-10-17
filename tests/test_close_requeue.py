@@ -179,8 +179,10 @@ def test_doctor_joins_each_closed_run_only_against_its_own_workflows_ready_ids(
     assert [f.title.split(":")[0] for f in findings] == ["CMX-7"], findings
 
 
-def test_the_work_board_flags_the_stall_on_the_open_card_and_the_closed_run(
+def test_the_work_board_flags_the_stall_on_the_open_card_and_folds_the_closed_run(
         repo, team, pr_closes, monkeypatch):
+    """CMX-193: the closed run of a still-open task is folded onto the open card — the
+    task has ONE card, and it carries the stall."""
     from chela.dashboard import app as dash
 
     team.issues = {"CMX-33": issue(33, "In Review")}
@@ -196,8 +198,7 @@ def test_the_work_board_flags_the_stall_on_the_open_card_and_the_closed_run(
     wf = data["workflows"][0]
     card = next(t for t in wf["open_tasks"] if t["id"] == "CMX-33")
     assert card["closed_run_stall"] == dispatcher.CLOSED_RUN_STALL
-    run = next(r for r in wf["recent_runs"] if r["task_id"] == "CMX-33")
-    assert run["closed_run_stall"] == dispatcher.CLOSED_RUN_STALL
+    assert "CMX-33" not in {r["task_id"] for r in wf["recent_runs"]}
 
 
 def test_the_work_board_flags_a_stall_older_than_the_ten_recent_runs(
@@ -248,6 +249,9 @@ def test_the_work_board_never_flags_a_requeued_closed_run(
         assert not t.get("closed_run_stall"), t
     for r in wf["recent_runs"]:
         assert not r.get("closed_run_stall"), r
+    # CMX-193: the requeued run is folded onto its open card — ONE card for the task.
+    ids = [*(t["id"] for t in wf["open_tasks"]), *(r["task_id"] for r in wf["recent_runs"])]
+    assert ids.count("CMX-33") == 1, ids
 
 
 def test_closed_run_stalls_skips_a_requeue_pending_run():

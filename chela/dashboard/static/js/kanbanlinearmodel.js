@@ -39,17 +39,20 @@ const STATUS_FALLBACK = {
 // The id of the pseudo-column a card lands in when NOTHING maps it — never dropped.
 export const UNMAPPED_KEY = 'tr-unmapped';
 
-// The columns for the workflows on screen, or null when any of them has none (a
+// The columns for the workflows on screen, or null when NONE of them has any (every one a
 // markdown/gh_issues tracker, or a failed state read) — the caller then falls back to
 // chela's own lanes. Several Linear workflows: the first one's order, with any state the
-// others add appended once.
+// others add appended once. CMX-193: a workflow WITHOUT states (a markdown one next to a
+// Linear one under "All") adds no columns; its cards land by STATUS_FALLBACK's state
+// types. It used to null the whole board, so every Linear card fell back to chela's lanes
+// and Backlog issues sat in To Do.
 export function trackerColumns(workflows) {
     if (!Array.isArray(workflows) || !workflows.length) return null;
     const out = [];
     const seen = new Set();
     for (const wf of workflows) {
         const cols = wf && wf.tracker_columns;
-        if (!Array.isArray(cols) || !cols.length) return null;
+        if (!Array.isArray(cols)) continue;
         for (const c of cols) {
             if (!c || typeof c.name !== 'string' || !c.name) continue;
             const k = c.name.toLowerCase();
@@ -104,6 +107,12 @@ export function trackerBoard(columns, cards) {
     }
     if (unmapped.length) board.push({ key: UNMAPPED_KEY, label: 'Unmapped', cards: unmapped });
     return { columns: board, hiddenCount };
+}
+
+// CMX-193: the label of a column holding finished runs when the server's cap
+// (`recent_runs_capped`) cut some off — its count is the latest runs, not every one.
+export function sampledLabel(label, capped) {
+    return capped ? `${label} · latest` : label;
 }
 
 // The run-state badges a card carries ON TOP of its status pill — the states that used to

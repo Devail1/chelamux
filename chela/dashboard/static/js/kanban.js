@@ -6,7 +6,7 @@ import { openTaskModal } from './taskmodal.js';
 import { displayTitle, riskChip } from './taskmodalmodel.js';
 import { knInline } from './knowledge.js';
 import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from './kanbanlanemodel.js';
-import { runStateBadges, trackerBoard, trackerColumns } from './kanbanlinearmodel.js';
+import { columnKey, runStateBadges, sampledLabel, trackerBoard, trackerColumns } from './kanbanlinearmodel.js';
 import { hiddenSummary, loadColPrefs, saveColPrefs, splitColumns } from './kanbanhiddenmodel.js';
 import { runCardNote, runCloseAction, runHandoffNote, runStallNote } from './runstate.js';
 
@@ -875,12 +875,19 @@ function renderKanban(data) {
     // is a badge on the card. Otherwise chela's own 6 lanes (kanbanlanemodel.js).
     const shown = (data.workflows || []).filter(wf => _kanbanFilter === 'all' || wf.path === _kanbanFilter);
     const tracker = trackerColumns(shown);
+    // CMX-193: the server sends at most 10 finished runs a workflow — Done is a sample then.
+    const capped = shown.some(wf => wf.recent_runs_capped);
     let cols;
     if (tracker) {
-        cols = trackerBoard(tracker, allCards).columns;
+        const completed = new Set(tracker.filter(c => c.type === 'completed').map(c => columnKey(c.name)));
+        cols = trackerBoard(tracker, allCards).columns
+            .map(c => completed.has(c.key) ? { ...c, label: sampledLabel(c.label, capped) } : c);
     } else {
         const lanes = _lanesFromBuckets(buckets);
-        cols = KANBAN_LANES.map(k => ({ key: k, label: KANBAN_LANE_LABELS[k], cards: apply(lanes[k]) }));
+        cols = KANBAN_LANES.map(k => ({
+            key: k, label: k === 'done' ? sampledLabel(KANBAN_LANE_LABELS[k], capped) : KANBAN_LANE_LABELS[k],
+            cards: apply(lanes[k]),
+        }));
     }
 
     // Merge-all count = awaiting_review cards that GitHub reports MERGEABLE in
