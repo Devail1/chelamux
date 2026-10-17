@@ -253,6 +253,10 @@ def test_closed_run_travels_ledger_api_and_board_from_one_real_tick(ticking, mon
     # CMX-193: a closed run of a task still OPEN folds onto its open card, so the task
     # leaves the tracker first (struck by a human) — its closed run is then its only card.
     (repo / "TODO.md").write_text("- [x] alpha\n- [ ] beta\n")
+    # This board is the fixture's markdown workflow alone. The dashboard also auto-adds
+    # the checkout's own WORKFLOW.md (a Linear one), which would turn it into a mixed
+    # board on Linear's columns, where there is no Archived lane.
+    monkeypatch.setattr(dash, "_repo_root_workflow", lambda: None)
 
     client = dash.app.test_client()
     resp = client.get("/api/dispatcher")
