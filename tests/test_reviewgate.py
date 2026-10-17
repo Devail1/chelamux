@@ -77,10 +77,9 @@ def test_no_review_reason_is_accepted_and_recorded(tmp_path, monkeypatch):
 def test_an_unreadable_body_fails_closed(tmp_path, monkeypatch):
     _repo(tmp_path, monkeypatch, "feat.py")          # code diff, no PR, no push marker
     out = dispatcher.check_review_section("cmx-88")
-    assert out["ok"] is False
+    assert out["ok"] is False and out["error"].endswith("Unknown is not reviewed.")
     assert out["error"].startswith("could not read this PR's body — no PR is open and no "
                                    "`chela request-push` is pending")
-    assert out["error"].endswith("Unknown is not reviewed.")
     assert dispatcher.check_review_section("cmx-1")["error"] == \
         "no run with a worktree on record for cmx-1"
 
@@ -106,8 +105,7 @@ def test_an_open_pr_is_read_from_github_not_the_marker(tmp_path, monkeypatch):
     (subprocess.TimeoutExpired("gh", 30), "`gh pr view` could not run"),
 ])
 def test_gh_that_fails_raises(tmp_path, effect, error):
-    kw = {"return_value": effect} if isinstance(effect, subprocess.CompletedProcess) \
-        else {"side_effect": effect}
+    kw = {"side_effect": effect} if isinstance(effect, BaseException) else {"return_value": effect}
     with patch.object(reviewgate.subprocess, "run", **kw), \
             pytest.raises(RuntimeError, match=error.replace("`", ".")):
         reviewgate.read_body(tmp_path, "u", tmp_path / "m.json")

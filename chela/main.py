@@ -2338,8 +2338,7 @@ def cmd_task_finished(args) -> None:
         print(f"task-finished: 📏 {size['error']}")
         sys.exit(1)
     # 🔎 CMX-209: a code PR's body must carry its self-review — cheap, so before the sweep.
-    review = dispatcher.check_review_section(args.task_id,
-                                             getattr(args, "no_review_reason", None))
+    review = dispatcher.check_review_section(args.task_id, getattr(args, "no_review_reason", None))
     if not review.get("ok"):
         print(f"task-finished: 🔎 {review['error']}")
         sys.exit(1)

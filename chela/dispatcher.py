@@ -2944,13 +2944,11 @@ def check_review_section(task_id: str, no_review_reason: str | None = None) -> d
         row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
     if row is None or not row["worktree_path"] or not row["workflow_path"]:
         return {"ok": False, "error": f"no run with a worktree on record for {task_id}"}
-    if (no_review_reason or "").strip():
-        return {"ok": True, "record": {"no_review_reason":
-                                       no_review_reason.strip()[:HANDOFF_MAX_CHARS]}}
+    if reason := (no_review_reason or "").strip():
+        return {"ok": True, "record": {"no_review_reason": reason[:HANDOFF_MAX_CHARS]}}
     worktree = row["worktree_path"]
     try:
-        base = load_workflow(row["workflow_path"]).get("workspace", "base_branch",
-                                                       default="master")
+        base = load_workflow(row["workflow_path"]).get("workspace", "base_branch", default="master")
         if judge._docs_only_diff(Path(worktree), base) is True:
             return {"ok": True, "record": None}
         body = reviewgate.read_body(worktree, row["pr_url"], _push_request_path(worktree))
