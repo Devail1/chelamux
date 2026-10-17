@@ -195,7 +195,7 @@ def test_non_shell_names_are_scrubbed_from_the_tmux_global_table():
     so the only place to drop it is the tmux server's global table before the window opens."""
     from chela import envutil
 
-    out = "chela-daemon=x\nPATH=/bin\nstatus=online\n"
+    out = "chela-daemon=x\nPATH=/bin\nmy_setting=1\n"
     assert envutil.tmux_scrub_names(out, forward=frozenset()) == ["chela-daemon"]
 
 
@@ -286,3 +286,16 @@ def test_the_suite_itself_cannot_push_a_real_notification(monkeypatch):
         f"send() did not raise the fence's escape (got {type(excinfo.value).__name__}) — "
         "if it returned False instead, the guard derives from Exception and send() ate it"
     )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs a real bash")
+@pytest.mark.parametrize("role", ["coding", "judge"])
+def test_the_agent_pane_is_stamped_as_a_dispatched_run(monkeypatch, tmp_path, role):
+    """🪆 CMX-190: the nested-`claude` gate binds only panes carrying `CHELA_RUN_ID` — the
+    agent AND the judge must inherit it (and its role), exported after the strip."""
+    import chela.dispatcher as dispatcher
+
+    sent = _launch(monkeypatch, dispatcher, tmp_path, role=role)
+    agent_env = _run_in_pane(sent, {"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+    assert agent_env.get("CHELA_RUN_ID") == "t1"
+    assert agent_env.get("CHELA_RUN_ROLE") == role

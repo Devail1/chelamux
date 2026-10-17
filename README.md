@@ -38,6 +38,12 @@ catch broken code.**
   the current head and green CI; `chela merge --override --reason …` asks you instead, and
   one Telegram tap (or the dashboard) completes it, and the override is audited.
 
+<p align="center">
+  <img src="docs/img/chela-demo-gate.gif" alt="The merge gate in one minute: an agent opens a PR; the judge corrupts the guard (if total >= 50 becomes if total > 50) and the PR's test stays green, so chela merge refuses; the agent adds a test that pins the $50 boundary, the judge comes back clean and chela merge merges; or a human asks for an override and one Telegram tap merges it" width="720"><br>
+  <sub>The gate: judge catches a weak test → <code>chela merge</code> refuses → rework → merged (or one tap).
+  Re-record with <code>scripts/demo/record-gate.sh</code>.</sub>
+</p>
+
 And you can watch it all live: a terminal-wall dashboard, a Telegram bridge to every
 session, and schedules that poke long-lived agents (`--every 1h`, cron, or once).
 

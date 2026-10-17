@@ -88,7 +88,8 @@ def test_public_media_and_pages_carry_no_private_strings():
 
 def test_demo_media_exists_at_the_published_paths():
     for rel in ("docs/img/chela-demo-desktop.gif", "docs/img/chela-demo-mobile.gif",
-                "landing/chela-demo-desktop.mp4", "landing/chela-demo-mobile.mp4"):
+                "docs/img/chela-demo-gate.gif", "landing/chela-demo-desktop.mp4",
+                "landing/chela-demo-mobile.mp4", "landing/chela-demo-gate.mp4"):
         p = ROOT / rel
         assert p.is_file(), rel
         if p.suffix == ".gif":
