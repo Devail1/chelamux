@@ -487,15 +487,37 @@ def test_burn_needs_min_gap_and_takes_the_newest_eligible_sample():
     assert usage.burn_rate([(NOW - 3600, 10.0, reset + usage.RESET_TOLERANCE_S + 1)], cur) is None
 
 
-def test_api_usage_labels_chela_windows_by_live_window_name(tmp_path, monkeypatch):
+# "today" is the UTC day (usage.utc_day_start). A test that reads that bucket through
+# /api/usage pins the clock the report reads (_freeze) and stamps its transcript lines
+# from the pinned now (_today_lines) — never from the real time.time(), whose
+# `now - 300` lands on YESTERDAY for the first 5 minutes after UTC midnight (CMX-188).
+_DAY0 = usage.utc_day_start(NOW)
+EDGES_OF_TODAY = pytest.mark.parametrize("now", [_DAY0 + 30, _DAY0 + 43200, _DAY0 + 86370],
+                                         ids=["00:00:30", "12:00:00", "23:59:30"])
+
+
+def _freeze(monkeypatch, now):
+    # The route calls usage.report(names); hand it now= the way the module takes it.
+    real = usage.report
+    monkeypatch.setattr(usage, "report", lambda *a, **kw: real(*a, **{**kw, "now": now}))
+
+
+def _today_lines(root, sid, now):
+    # 3 healthy requests + one "other" session, all in [day0, now] even at 00:00:30.
+    day0 = usage.utc_day_start(now)
+    _write(root, f"-work-chelamux/{sid}.jsonl", _healthy_lines(n=3, start=day0 + 1, step=10))
+    _write(root, "-work-other/99999999-0000.jsonl", [_line(day0 + 25, "o1", "o1", cwd="/x/other")])
+    for p in root.rglob("*.jsonl"):
+        os.utime(p, (now, now))
+
+
+@EDGES_OF_TODAY
+def test_api_usage_labels_chela_windows_by_live_window_name(tmp_path, monkeypatch, now):
     # Wiring: the dashboard's live {session_id: window name} map must reach usage.report.
     sid = "ffffffff-1234-5678-9abc-def012345678"
     root = tmp_path / "projects"
-    _write(root, f"-work-chelamux/{sid}.jsonl", _healthy_lines(n=3, start=int(time.time()) - 300))
-    _write(root, "-work-other/99999999-0000.jsonl",
-           [_line(int(time.time()) - 60, "o1", "o1", cwd="/x/other")])
-    for p in root.rglob("*.jsonl"):
-        os.utime(p, None)
+    _today_lines(root, sid, now)
+    _freeze(monkeypatch, now)
     monkeypatch.setattr(usage, "default_root", lambda: root)
     monkeypatch.setattr(usage, "extra_roots", lambda: [])
     monkeypatch.setattr(usage, "CONTEXT_CACHE_DIR", tmp_path / "ctx")
@@ -692,15 +714,14 @@ def test_api_env_empty_roots_scans_no_extra_root(tmp_path, monkeypatch):
     assert all(not r["cache_broken"] for r in body["windows"]["30m"]["rows"])
 
 
-def test_api_usage_labels_by_window_name_through_live_discovery(tmp_path, monkeypatch):
+@EDGES_OF_TODAY
+def test_api_usage_labels_by_window_name_through_live_discovery(tmp_path, monkeypatch, now):
     # Guard 1 on the production path, nothing in app.py stubbed: discovery's live
     # windows + context's per-window session id -> the row's label is the window name.
     sid = "abcdef01-1234-5678-9abc-def012345678"
     root = tmp_path / "projects"
-    _write(root, f"-work-chelamux/{sid}.jsonl", _healthy_lines(n=3, start=int(time.time()) - 300))
-    _write(root, "-work-other/99999999-0000.jsonl", [_line(int(time.time()) - 60, "o1", "o1", cwd="/x/other")])
-    for p in root.rglob("*.jsonl"):
-        os.utime(p, None)
+    _today_lines(root, sid, now)
+    _freeze(monkeypatch, now)
     monkeypatch.setattr(usage, "default_root", lambda: root)
     monkeypatch.setenv(usage.EXTRA_ROOTS_ENV, "[]")
     monkeypatch.setattr(usage, "CONTEXT_CACHE_DIR", tmp_path / "ctx")
