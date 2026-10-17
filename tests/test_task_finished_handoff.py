@@ -265,3 +265,15 @@ def test_tick_persists_the_markers_self_check_partial_on_the_run(tmp_path, marke
     _, run = _tick_with_marker(tmp_path, marker)
     stored = run["self_check_partial"]
     assert (json.loads(stored) if stored is not None else None) == expected
+
+
+@pytest.mark.parametrize("marker, expected", [
+    ({"task_id": "abc123", "base_sync": {"base": "dev", "behind": 2, "allow_behind": True}},
+     {"base": "dev", "behind": 2, "allow_behind": True}),
+    ({"task_id": "abc123"}, None),
+])
+def test_tick_persists_the_markers_base_sync_on_the_run(tmp_path, marker, expected):
+    """🔀 CMX-189: the daemon records a --allow-behind hand-in from the marker."""
+    _, run = _tick_with_marker(tmp_path, marker)
+    stored = run["base_sync"]
+    assert (json.loads(stored) if stored is not None else None) == expected
