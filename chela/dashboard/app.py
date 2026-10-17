@@ -4358,6 +4358,19 @@ def _runs_for_workflow(
     return active, awaiting, recent
 
 
+def _open_task_group(task, ready_ids: set[str] | None, type_by_state: dict[str, str]) -> str:
+    """CMX-94: the Runs segment's section for an open task — ``ready`` (what a claim would
+    draw from: Linear's Todo), ``in_progress`` (a ``started``-type state: In Progress / In
+    Review) or ``backlog`` (everything else, an unreadable state included). The READY count
+    is the one the operator reads as "to-dos", so a task only lands there on the
+    dispatcher's own positive read (``ready_task_ids``); unknown is never ready."""
+    if ready_ids is not None and task.id in ready_ids:
+        return "ready"
+    if type_by_state.get(task.tracker_state or "") == "started":
+        return "in_progress"
+    return "backlog"
+
+
 def _repo_root_workflow() -> Path | None:
     """Auto-discover a ``WORKFLOW.md`` at the repo root, if present.
 
@@ -4705,11 +4718,12 @@ def api_dispatcher():
                 # Over ALL of this workflow's runs, not `recent` (capped at 10): an older
                 # closed run blocks its task just the same. Joined only against THIS
                 # tracker's ready ids — task ids are per tracker.
+                ready_ids = dispatcher.ready_task_ids(source, open_tasks)
                 stalled_ids = {
                     s["task_id"] for s in dispatcher.closed_run_stalls(
-                        _workflow_runs(all_runs, str(wf_path)),
-                        dispatcher.ready_task_ids(source, open_tasks) or ())
+                        _workflow_runs(all_runs, str(wf_path)), ready_ids or ())
                 }
+                type_by_state = {c["name"]: c["type"] for c in entry["tracker_columns"] or ()}
                 entry["open_tasks"] = []
                 for t in open_tasks:
                     if t.id in in_flight_ids:
@@ -4735,6 +4749,12 @@ def api_dispatcher():
                         "tracker_url": t.url,
                         # 🗂️📐 CMX-23: the tracker state this read saw (Linear's column).
                         "tracker_state": t.tracker_state,
+                        # ⚖️🎚️ CMX-405: the tracker's risk label (or its inferred fallback).
+                        "risk": t.risk,
+                        "risk_reason": t.risk_reason,
+                        # CMX-94: which Runs-segment section the task sits in — see
+                        # `_open_task_group`.
+                        "group": _open_task_group(t, ready_ids, type_by_state),
                         # True when this task has a `depends:` reference not yet
                         # struck done — kept in sync with `dispatcher._ready`, the
                         # claim-time gate, so a card the dispatcher would refuse to
