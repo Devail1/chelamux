@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import concurrency, critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, sizegate, sweep
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, sizegate, sweep
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -1507,6 +1507,8 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # ⏳ CMX-141. JSON {measured, total, exhausted, unrun: [{file, guard}]}: a hand-in
         # whose --self-check-experiments the budget cut short. NULL ⇒ it all ran.
         ("self_check_partial", "ALTER TABLE runs ADD COLUMN self_check_partial TEXT"),
+        # 🔀 CMX-189. JSON {base, behind, allow_behind}: a hand-in let through behind its base.
+        ("base_sync", "ALTER TABLE runs ADD COLUMN base_sync TEXT"),
     ):
         if _column in existing_columns:
             continue  # already migrated — no DDL attempted, nothing to fail
@@ -2868,6 +2870,29 @@ def verify_sweep(task_id: str) -> dict:
     return sweep.run_sweep(row["worktree_path"], workflow_path=row["workflow_path"])
 
 
+def check_base_sync(task_id: str, allow_behind: bool = False) -> dict:
+    """🔀 CMX-189: run FIRST in task-finished. Refuses a branch conflicting with, or (without
+    ``allow_behind``) behind, a fresh ``origin/<base>``; fails CLOSED when git cannot say.
+    ``{"ok", "record"}``; record is None unless ``allow_behind`` let a stale branch through."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"] or not row["workflow_path"]:
+        return {"ok": False, "error": f"no run with a worktree on record for {task_id}"}
+    try:
+        base = load_workflow(row["workflow_path"]).get("workspace", "base_branch",
+                                                       default="master")
+        state = basesync.check(row["worktree_path"], base)
+    except Exception as e:
+        return {"ok": False, "error": f"could not check this branch against its base — {e}. "
+                                      "Unknown is not in sync: fix the remote and re-run."}
+    if state["conflicts"] or (state["behind"] and not allow_behind):
+        return {"ok": False, "error": basesync.refusal(base, state["behind"], state["conflicts"])}
+    if state["behind"]:
+        return {"ok": True, "record": {"base": base, "behind": state["behind"],
+                                       "allow_behind": True}}
+    return {"ok": True, "record": None}
+
+
 def check_hand_in_size(task_id: str, oversize_reason: str | None = None,
                        plan_path: str | None = None) -> dict:
     """📏 CMX-126: the hand-in size gate — run BEFORE the sweep, so an oversized diff is
@@ -3052,6 +3077,7 @@ def _clean_handoff(value) -> str | None:
 def mark_awaiting_review(
     task_id: str, *, handoff: str | None = None, sweep_equivalents: list[dict] | None = None,
     size_gate: dict | None = None, self_check_partial: dict | None = None,
+    base_sync: dict | None = None,
 ) -> dict:
     """Transition a run from running → awaiting_review and kill its tmux window.
 
@@ -3117,6 +3143,8 @@ def mark_awaiting_review(
                      (json.dumps(size_gate) if size_gate else None, task_id))
         conn.execute("UPDATE runs SET self_check_partial=? WHERE task_id=?",
                      (json.dumps(self_check_partial) if self_check_partial else None, task_id))
+        conn.execute("UPDATE runs SET base_sync=? WHERE task_id=?",
+                     (json.dumps(base_sync) if base_sync else None, task_id))
         conn.commit()
         note = sizegate.render(size_gate or {})
         for what, text in (("size-gate", note), ("self-check", judge.render_self_check_partial(
@@ -3204,6 +3232,7 @@ def _read_task_finished_size_gate(worktree_path: str | Path,
 def request_task_finished(
     task_id: str, *, handoff: str | None = None, sweep_equivalents: list[dict] | None = None,
     size_gate: dict | None = None, self_check_partial: dict | None = None,
+    base_sync: dict | None = None,
 ) -> dict:
     """Record that a dispatched agent believes its work is done — called by `chela
     task-finished`, IN PLACE OF the direct `mark_awaiting_review` call it used to make.
@@ -3258,6 +3287,8 @@ def request_task_finished(
         request["size_gate"] = size_gate
     if self_check_partial:
         request["self_check_partial"] = self_check_partial
+    if base_sync:
+        request["base_sync"] = base_sync
     _task_finished_request_path(worktree_path).write_text(
         json.dumps(request), encoding="utf-8",
     )
@@ -5610,6 +5641,7 @@ def tick(workflow_path: str | Path) -> dict:
                     size_gate=_read_task_finished_size_gate(row["worktree_path"]),
                     self_check_partial=_read_task_finished_size_gate(
                         row["worktree_path"], "self_check_partial"),
+                    base_sync=_read_task_finished_size_gate(row["worktree_path"], "base_sync"),
                 )
                 # ⚖️🔀 issue #502 rework round 1 (hazard 3 of the brief): `ok=False` used to
                 # be ONE outcome — unlink the marker and log.warning, no matter why the
@@ -7678,7 +7710,8 @@ def _judge_size_gate(row) -> str:
     the self-check experiments the agent's budget never ran (the judge's to cover)."""
     notes = []
     for col, render in (("size_gate", sizegate.render),
-                        ("self_check_partial", judge.render_self_check_partial)):
+                        ("self_check_partial", judge.render_self_check_partial),
+                        ("base_sync", basesync.render)):
         try:
             note = render(json.loads(row[col] or "{}"))
         except (IndexError, KeyError, ValueError, TypeError):
