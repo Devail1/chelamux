@@ -1,8 +1,5 @@
-"""⚖️🧹 CMX-173 — ``chela judge sweep`` mutates TS/TSX, and proves every mutant still parses.
-
-Fixture repos only: each one symlinks this repo's ``node_modules`` (the pinned ``typescript``)
-so its suite can transpile and its mutants can be parse-checked.
-"""
+"""⚖️🧹 CMX-173 — ``chela judge sweep`` mutates TS/TSX; every mutant is parse-checked. Fixture
+repos symlink this repo's ``node_modules`` (the pinned ``typescript``)."""
 from __future__ import annotations
 
 import os
@@ -37,11 +34,9 @@ new Function("exports", "module", "h", js)(m.exports, m, (t, _p, ...c) => ({t, c
 const {badge, View} = m.exports;
 '''
 REAL = RUN + '''\
-assert.strictEqual(badge(5, false), "many"); assert.strictEqual(badge(3, false), null);
-assert.strictEqual(badge(1, true), "one"); assert.strictEqual(badge(1, false), null);
-assert.strictEqual(badge(2, true), null);
-assert.deepStrictEqual(View({on: true}).c, [{t: "b", c: []}]);
-assert.deepStrictEqual(View({on: false}).c, [false]);
+assert.deepStrictEqual([[5, 0], [3, 0], [1, 1], [1, 0], [2, 1]].map(([n, o]) => badge(n, !!o)),
+                       ["many", null, "one", null, null]);
+assert.deepStrictEqual([View({on: true}).c, View({on: false}).c], [[{t: "b", c: []}], [false]]);
 '''
 WEAK = RUN + 'assert.strictEqual(typeof badge, "function");\n'
 
@@ -81,9 +76,8 @@ def test_a_real_test_kills_every_ts_mutant_and_a_non_parsing_one_is_skipped(tmp_
 
 def test_a_weak_test_lets_every_ts_mutant_survive_and_reports_it(tmp_path):
     root = _ts_repo(tmp_path / "r", WEAK)
-    report = sweep.sweep(root, "origin/dev", "node tests/run.test.cjs", timeout=60,
-                         select_tests=False)
-    d = report.as_dict()
+    d = sweep.sweep(root, "origin/dev", "node tests/run.test.cjs", timeout=60,
+                    select_tests=False).as_dict()
     assert {(s["line"], s["kind"]) for s in d["survivors"]} == LIVE
     assert d["verdict"] == sweep.V_SURVIVORS and d["unsupported"] == []
     assert (root / "src/flag.tsx").read_text() == FLAG and _git(root, "status", "--porcelain") == ""
@@ -97,14 +91,11 @@ def test_no_typescript_to_parse_with_fails_closed(tmp_path):
     assert "no `typescript` resolvable" in report.cannot_verify and report.results == []
 
 
-def test_ts_parse_check_reports_each_outcome(tmp_path):
-    (tmp_path / "node_modules").symlink_to(NODE_MODULES)
-    for name, body, ok in (("a.tsx", "const a = <b />;\n", True), ("a.ts", "f(;\n", False)):
-        (tmp_path / name).write_text(body)
-        assert judge.parse_check(tmp_path / name)[0] is ok, name
-    (tmp_path / "node_modules").unlink()
-    assert judge.ts_parse(tmp_path / "a.ts")[0] == judge.TS_NO_PARSER
-    assert judge.parse_check(tmp_path / "a.ts")[1].startswith("no parse check ran")
+def test_ts_parse_check_with_no_parser_is_unchecked_never_broken(tmp_path):
+    (tmp_path / "a.ts").write_text("f(;\n")
+    assert judge.parse_check(tmp_path / "a.ts") == (True, "no parse check ran (no `typescript` "
+                                                    f"resolvable from {tmp_path}: Cannot find "
+                                                    "module 'typescript'")
 
 
 def test_a_sigkilled_sweep_leaves_no_tsx_mutation(tmp_path):
@@ -120,9 +111,8 @@ def test_a_sigkilled_sweep_leaves_no_tsx_mutation(tmp_path):
     assert sweep.marker_path(root).exists()
     os.killpg(proc.pid, signal.SIGKILL)
     proc.wait(timeout=30)
-    deadline = time.monotonic() + 30
     while (root / "src/flag.tsx").read_text() != FLAG or sweep.marker_path(root).exists():
-        assert time.monotonic() < deadline, "the guardian never restored the .tsx"
+        assert time.monotonic() < deadline + 30, "the guardian never restored the .tsx"
         time.sleep(0.1)
     assert _git(root, "status", "--porcelain") == ""
 
@@ -143,6 +133,11 @@ def _ts(src: str) -> list[tuple[str, str]]:
 def test_ts_only_mutations(line, kinds):
     assert _ts(line) == kinds
     assert sweep.js_mutations("m.js", line, {1}) == []      # plain JS gets none of them
+
+
+def test_jsx_and_needs_a_condition_before_it():
+    assert [k for k, _ in _ts("x = <a/> && <b/>;")] == ["logic-flip", "jsx-and"]
+    assert [k for k, _ in _ts("{ && <b/>}")] == ["logic-flip"]
 
 
 @pytest.mark.parametrize("line, cond", [

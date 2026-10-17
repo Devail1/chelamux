@@ -80,9 +80,9 @@ DEFAULT_MAX_MUTATIONS = 60
 
 # Which mutations the budget reaches first: a dropped branch (the shape the judge finds most)
 # before a flipped return code/value, before a flipped comparison.
-_KIND_RANK = {"if-false": 0, "jsx-and": 0, "ternary-false": 0, "if-true": 1, "ternary-true": 1,
-              "return-code": 2, "returncode": 2, "return-bool": 2, "return-none": 3,
-              "return-value": 3, "compare-flip": 4, "logic-flip": 4}
+_KIND_RANK = {"if-false": 0, "if-true": 1, "return-code": 2, "returncode": 2,
+              "return-none": 3, "return-value": 3, "compare-flip": 4, "jsx-and": 0,
+              "ternary-false": 0, "ternary-true": 1, "return-bool": 2, "logic-flip": 4}
 
 _PY_FLIP = {ast.Eq: ("==", "!="), ast.NotEq: ("!=", "=="), ast.Lt: ("<", ">="),
             ast.GtE: (">=", "<"), ast.Gt: (">", "<="), ast.LtE: ("<=", ">")}
@@ -645,9 +645,9 @@ def _ts_mutations(rel: str, ln: int, line: str, code_end: int) -> list[Mutation]
 
 
 def js_mutations(rel: str, text: str, lines: set[int], *, ts: bool = False) -> list[Mutation]:
-    """Every mechanical mutation of the CHANGED lines of one JS (``ts``: TS/TSX) file.
-    Line-based (no JS parser): a mutation inside something it misread is caught by the parse
-    check (``node --check``; typescript's parser) and reported UNPARSEABLE, never killed."""
+    """Every mechanical mutation of the CHANGED lines of one JS file. Line-based (no JS
+    parser): a mutation inside something it misread is caught by ``node --check`` and
+    reported UNPARSEABLE, never counted as killed."""
     src = text.split("\n")
     muts: list[Mutation] = []
     for ln in sorted(lines):

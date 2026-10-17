@@ -212,13 +212,11 @@ const path = require("path"), fs = require("fs"), file = process.argv[1];
 let ts;
 try { ts = require(require.resolve("typescript", {paths: [path.dirname(file)]})); }
 catch (e) { process.stderr.write(String(e.message).split("\\n")[0]); process.exit(3); }
-const kind = file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
 const sf = ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.Latest,
-                               false, kind);
-const d = sf.parseDiagnostics || [];
+  false, file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS), d = sf.parseDiagnostics;
 if (d.length) {
-  const at = sf.getLineAndCharacterOfPosition(d[0].start);
-  process.stderr.write(`line ${at.line + 1}: ${ts.flattenDiagnosticMessageText(d[0].messageText, " ")}`);
+  process.stderr.write(`line ${sf.getLineAndCharacterOfPosition(d[0].start).line + 1}: ` +
+                       ts.flattenDiagnosticMessageText(d[0].messageText, " "));
   process.exit(1);
 }
 """
