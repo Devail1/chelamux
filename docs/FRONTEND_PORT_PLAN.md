@@ -1,7 +1,7 @@
 # Porting the whole dashboard to React + TypeScript (CMX-212)
 
 Status: **plan**, not a design record. The orchestrator files one Linear issue per block in
-§4. Measured on `dev` at `fcf1d45` (2026-10-17). Line numbers below are from that commit.
+§4. Measured on `dev` at `fcf1d45` (2026-10-17); `app.py` line numbers re-checked after CMX-206 merged.
 
 Liav, 2026-10-17: the whole dashboard view moves to React + TypeScript (Vite) before the next
 release; "the launch is less important than maintainability". CMX-171 (and its slices, ending
@@ -311,7 +311,7 @@ component-private styles. No Tailwind.**
 - **Tokens.** `:root` + the seven `body[data-theme]` palettes (`style.css:34-146`) move
   verbatim into `tokens.css`, imported first by the entry. The theme switch keeps writing
   `body[data-theme]` and `chela_theme` (the iframe theme shim reads that key,
-  `app.py:897`).
+  `app.py:954`).
 - **Dead CSS** is deleted by the slice that deletes the last markup using it, and P35 sweeps
   what is left.
 
@@ -357,8 +357,8 @@ The port keeps what is there, and makes it uniform:
 
 | What | Where | Why |
 |---|---|---|
-| The ttyd page shims: paste, paste-key, contextmenu, palette key, scroll, scrollbar CSS, touch CSS, font CSS + prefs, theme | `app.py:599-1022`, injected by `term_http` at `app.py:1101-1107` | They run inside ttyd's page, not the dashboard. They are strings Flask splices into a third-party document. |
-| `static/term-reconnect.js`, `static/term-upload.js`, `static/term-touch.css` | injected at `app.py:1037-1048` | Same: they live in the ttyd page. |
+| The ttyd page shims: paste, paste-key, contextmenu, OSC 52 clipboard, palette key, scroll, scrollbar CSS, touch CSS, font CSS + prefs, theme | `app.py:599-1079`, injected by `term_http` at `app.py:1158-1165` | They run inside ttyd's page, not the dashboard. They are strings Flask splices into a third-party document. |
+| `static/term-reconnect.js`, `static/term-upload.js`, `static/term-touch.css` | injected at `app.py:1094-1105` | Same: they live in the ttyd page. |
 | `static/collab/` (`e2e.js`, `presence-core.js`, `presence-shim.js`, `presence-owner.js`, `fit.js`) | | The E2E crypto is byte-identical with `chela/e2e.py` and the joiner page and is tested as such. `presence-shim.js` runs in the iframe. `presence-owner.js` runs in the dashboard but stays a plain ES module that the React share code `import()`s with a `.d.ts` beside it. |
 | Gridstack | `static/vendor/gridstack-all.js` | Kept as the layout engine, wrapped by one hook (P33). |
 | The terminal iframe | `_termFrameSrc` (`terminals.js:515`) | Stays an `<iframe src="/term/<wid>/…">`. |
@@ -369,10 +369,10 @@ a test that names it:
 
 | Direction | What crosses | Today |
 |---|---|---|
-| iframe → parent | `window.parent.chela.openPalette()` and `.toggleSettings()` (⌘K and Ctrl+, inside a pane) | `app.py:720-733` |
+| iframe → parent | `window.parent.chela.openPalette()` and `.toggleSettings()` (⌘K and Ctrl+, inside a pane) | `app.py:777-790` |
 | iframe → parent | `postMessage` of normalized pointer coordinates; the parent answers with peers | `collab/presence-shim.js:24-27`, `presence-owner.js` |
 | iframe reads parent | `frameElement`'s `data-suspended-src` attribute and `src === 'about:blank'` (suspended by background-tab teardown) | `term-reconnect.js:42-47`, set at `terminals.js:2290-2333` |
-| iframe reads storage | `chela_theme`, `chela_term_latin`, `chela_term_font`, `chela_term_fontsize` | `app.py:897`, `975-977` |
+| iframe reads storage | `chela_theme`, `chela_term_latin`, `chela_term_font`, `chela_term_fontsize` | `app.py:954`, `1032-1034` |
 | parent → iframe | `contentWindow.term` (font, theme, refit, focus) | `nav.js:3074`, `3132`; `terminals.js:930`, `2237`, `4057` |
 | parent → iframe | `contentDocument` (focus tracking, shortcut wiring) | `terminals.js:2162`, `2512` |
 | parent → iframe | `contentWindow.location.reload()` | `terminals.js:918` |
@@ -384,7 +384,7 @@ anything else is added.
 **One dead entry to drop, not port.** `terminals.js:1133` defines `chelaPresence` for
 `collab/presence.js:124-141` (`window.parent.chelaPresence`), but nothing assigns it to
 `window` (it is not in the `window.chela` list at `terminals.js:4081` either), and `term_http`
-injects `presence-shim.js`, not `presence.js` (`app.py:1051-1060`). P25 confirms that and
+injects `presence-shim.js`, not `presence.js` (`app.py:1108-1117`). P25 confirms that and
 deletes it.
 
 ---
