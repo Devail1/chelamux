@@ -584,6 +584,29 @@ def _process_node_ipc_env_report(_declared: None, obs: Observation) -> list[Find
     )]
 
 
+# 🧹 CMX-191: pm2 exports a process's whole app config (`args`, `exec_mode`, `name`, …) into
+# its env, and a `pm2` command run from a shell that inherited them reads them OVER the
+# ecosystem file — on 2026-10-17 an inherited empty `args=` started every chela service bare.
+# A WARN, not an ERROR: nothing is broken until someone runs pm2 from here. Not a fact of a
+# pm2-managed service itself, whose own env legitimately IS its pm2_env (CMX-313's gate).
+def _process_pm2_app_env_read() -> Observation:
+    return observed(envutil.pm2_app_keys())
+
+
+def _process_pm2_app_env_report(_declared: None, obs: Observation) -> list[Finding]:
+    names: list[str] = obs.value
+    if not names:
+        return [Finding(OK, "this shell carries none of pm2's app-config env keys")]
+    return [Finding(
+        WARN,
+        f"this shell inherited pm2's app config ({', '.join(names)}) — a `pm2 start` "
+        "from here reads it over the ecosystem file",
+        "CMX-191: pm2 exports each process's pm2_env into its children, and an inherited "
+        "empty `args=` started every chela service with no subcommand on 2026-10-17. Run "
+        "pm2 from a clean shell: `env -i HOME=\"$HOME\" PATH=\"$PATH\" pm2 …`.",
+    )]
+
+
 def _in_flight_runs() -> dict[str, dict]:
     """``{task_id: {wid, epoch}}`` for every run that CLAIMS a live tmux window.
 
@@ -3349,6 +3372,17 @@ def facts() -> list[Fact]:
             # not of a pm2-managed service, which legitimately carries its own live
             # NODE_CHANNEL_FD and never runs `node --test`.
             applies=_process_node_ipc_env_applies,
+        ),
+        Fact(
+            name="process.pm2_app_env",
+            declared_by="nothing — chela never sets these; a shell that runs pm2 requires "
+                        "their absence (CMX-191)",
+            owned_by="THIS process's own environment — what a `pm2` command run from it "
+                     "reads over the ecosystem file",
+            declare=lambda: None,
+            read_back=_process_pm2_app_env_read,
+            report=_process_pm2_app_env_report,
+            applies=lambda: not _pm2_manages_this_process(),
         ),
         Fact(
             name="dashboard.port",

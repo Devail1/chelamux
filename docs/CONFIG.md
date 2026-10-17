@@ -57,6 +57,22 @@ falls back to deriving the session from `$TMUX_PANE`, so a leaked pane makes a s
 silently target whatever session that pane was in: a `webterm_*` *mirror*, in the case
 that bit us. `run-chela.sh` strips `TMUX`/`TMUX_PANE` for exactly this reason.
 
+Nor from a shell that descends from a PM2-run service: an agent window chela spawned
+before CMX-191, or one the daemon's tmux server was born under. PM2 exports each process's
+app config into its environment (`args`, `exec_mode`, `name`, `status`, `pm_id`, …), and a
+`pm2 start` reads those env vars **over** the ecosystem file: an inherited empty `args=`
+starts every service with no subcommand, so each prints `chela`'s help and exits.
+`chela doctor` warns (`process.pm2_app_env`) when the current shell carries them. When in
+doubt, run PM2 from a clean environment:
+
+```bash
+env -i HOME="$HOME" PATH="$PATH" pm2 start ~/.chela/ecosystem.config.js
+```
+
+chela now strips those keys from every window and child it spawns
+(`envutil.PM2_APP_ENV_KEYS`), but a window that is already running keeps the env it was
+born with.
+
 ## The dashboard port, and why it is the case that proves the rule
 
 The port is not just config. It is baked into the **Claude Code hooks plugin** as a

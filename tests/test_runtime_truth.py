@@ -36,6 +36,7 @@ from chela import (
     discovery,
     dispatcher,
     doctor,
+    envutil,
     epoch,
     event_log,
     hooks,
@@ -126,6 +127,11 @@ def fleet(tmp_path, monkeypatch, request):
     # it deterministically instead of depending on whether the suite happens to be run from
     # inside a real tmux pane.
     monkeypatch.setattr(runtime_truth, "_process_node_ipc_env_applies", lambda: True)
+    # CMX-191: likewise, this process is not a pm2-managed service and carries none of
+    # pm2's app-config keys, whatever shell the suite happens to be run from.
+    monkeypatch.setattr(runtime_truth, "_pm2_manages_this_process", lambda: False)
+    for k in envutil.pm2_app_keys():
+        monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(epoch, "current", lambda: EPOCH)
     monkeypatch.setattr(runtime_truth, "_in_flight_runs",
                         lambda: {"CMX-66": {"wid": "@1", "epoch": EPOCH}})
@@ -308,6 +314,14 @@ def _break_process_node_ipc_env(tmp_path, monkeypatch):
     monkeypatch.setenv("NODE_CHANNEL_FD", "3")
     monkeypatch.setenv("NODE_CHANNEL_SERIALIZATION_MODE", "json")
     return doctor.ERROR
+
+
+def _break_process_pm2_app_env(tmp_path, monkeypatch):
+    """CMX-191: THIS shell inherited pm2's app config — a `pm2 start` here reads `args=`
+    over the ecosystem file and starts every service bare."""
+    monkeypatch.setenv("args", "")
+    monkeypatch.setenv("exec_mode", "fork_mode")
+    return doctor.WARN
 
 
 def _break_dashboard_port(tmp_path, monkeypatch):
@@ -675,6 +689,7 @@ CORRUPTIONS = {
     "tmux.node_ipc_env": _break_tmux_node_ipc_env,
     "tmux.leaked_env": _break_tmux_leaked_env,
     "process.node_ipc_env": _break_process_node_ipc_env,
+    "process.pm2_app_env": _break_process_pm2_app_env,
     "dashboard.port": _break_dashboard_port,
     "dashboard.update_lock": _break_update_apply_lock,
     "plugin.rendered": _break_plugin_rendered,

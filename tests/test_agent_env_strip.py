@@ -195,7 +195,7 @@ def test_non_shell_names_are_scrubbed_from_the_tmux_global_table():
     so the only place to drop it is the tmux server's global table before the window opens."""
     from chela import envutil
 
-    out = "chela-daemon=x\nPATH=/bin\nstatus=online\n"
+    out = "chela-daemon=x\nPATH=/bin\nmy_setting=1\n"
     assert envutil.tmux_scrub_names(out, forward=frozenset()) == ["chela-daemon"]
 
 

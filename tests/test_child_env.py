@@ -68,9 +68,9 @@ def _assert_clean(env: dict) -> None:
 # --- the helper itself -------------------------------------------------------
 
 def test_child_env_drops_the_leak_and_keeps_everything_else():
-    base = {**_LEAK, **_KEEP, "PATH": "/usr/bin", "HOME": "/home/x", "name": "chela-daemon"}
+    base = {**_LEAK, **_KEEP, "PATH": "/usr/bin", "HOME": "/home/x", "my_setting": "1"}
     env = envutil.child_env(base=base)
-    assert set(env) == {"PM2_HOME", "CHELA_TMUX_SESSION", "PATH", "HOME", "name"}
+    assert set(env) == {"PM2_HOME", "CHELA_TMUX_SESSION", "PATH", "HOME", "my_setting"}
     assert envutil.child_env({"NODE_CHANNEL_FD": "5", "X": "1"}, base=base)["NODE_CHANNEL_FD"] == "5"
 
 
