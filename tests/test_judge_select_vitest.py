@@ -55,6 +55,9 @@ def _repo(root: Path) -> Path:
     for rel, text in FILES.items():
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(text)
+    # CMX-175: the judge parse-checks a TS experiment's file first — this repo's `typescript`.
+    (root / ".gitignore").write_text("node_modules\n")
+    (root / "node_modules").symlink_to(Path(__file__).resolve().parents[1] / "node_modules")
     for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "init"]):
         subprocess.run(["git", "-C", str(root), "-c", "user.email=t@t", "-c", "user.name=t",
                         *args], check=True, capture_output=True)
