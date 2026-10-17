@@ -128,6 +128,36 @@ def test_runs_for_workflow_includes_closed_rows_in_recent():
     assert {r["task_id"] for r in active} == {"d"}  # running never leaks into recent
 
 
+def test_fold_closed_runs_drops_only_a_closed_run_of_an_open_task():
+    # CMX-193: a requeued (closed) run of a task still in `open_tasks` is that task's
+    # second card — folded. Its done / failed runs, and a closed run of a task that is NOT
+    # open, keep their own card.
+    wf = "/x/WORKFLOW.md"
+    runs = [
+        _run(wf, task_id="open1", status="closed", branch="cmx-1"),
+        _run(wf, task_id="open1", status="done", branch="cmx-1"),
+        _run(wf, task_id="open1", status="failed", branch="cmx-1"),
+        _run(wf, task_id="gone", status="closed", branch="cmx-2"),
+        _run("/other/WORKFLOW.md", task_id="x", status="done", branch="cmx-3"),
+    ]
+    recent, capped = dash._fold_closed_runs(runs, wf, {"open1"})
+    assert [(r["task_id"], r["status"]) for r in recent] == [
+        ("open1", "done"), ("open1", "failed"), ("gone", "closed")]
+    assert capped is False
+
+
+@pytest.mark.parametrize("n_done,capped", [(10, False), (11, True)])
+def test_fold_closed_runs_caps_at_ten_and_says_so(n_done, capped):
+    # CMX-193: the folded runs never take a slot — 10 done runs behind 5 requeued closed
+    # ones are all returned — and `capped` is True only when a run was cut off.
+    wf = "/x/WORKFLOW.md"
+    runs = [_run(wf, task_id=f"o{i}", status="closed", branch=f"cmx-{i}") for i in range(5)]
+    runs += [_run(wf, task_id=f"d{i}", status="done", branch=f"cmx-{i}") for i in range(n_done)]
+    recent, got = dash._fold_closed_runs(runs, wf, {f"o{i}" for i in range(5)})
+    assert [r["task_id"] for r in recent] == [f"d{i}" for i in range(10)]
+    assert got is capped
+
+
 def test_api_dispatcher_surfaces_a_closed_run_in_recent_runs(monkeypatch, client, tmp_path):
     """End-to-end (CMX-265 round 4): a closed-not-merged run must reach the
     ``/api/dispatcher`` JSON payload with its OWN status, not be dropped or coerced
@@ -145,6 +175,21 @@ def test_api_dispatcher_surfaces_a_closed_run_in_recent_runs(monkeypatch, client
     recent = data["workflows"][0]["recent_runs"]
     assert [r["task_id"] for r in recent] == ["closed1"]
     assert recent[0]["status"] == "closed"
+    assert data["workflows"][0]["recent_runs_capped"] is False
+
+
+def test_api_dispatcher_flags_recent_runs_capped(monkeypatch, client, tmp_path):
+    """CMX-193: 11 finished runs ⇒ the payload carries 10 and says it was capped, so the
+    board labels Done a sample."""
+    _no_repo_workflow(monkeypatch)
+    monkeypatch.setattr(dash, "DISPATCH_WORKFLOWS", [])
+    wf = str((tmp_path / "WORKFLOW.md").resolve())
+    runs = [_run(wf, task_id=f"d{i}", status="done", branch=f"cmx-{i}", task_number=i)
+            for i in range(11)]
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: runs)
+    entry = client.get("/api/dispatcher").get_json()["workflows"][0]
+    assert len(entry["recent_runs"]) == 10
+    assert entry["recent_runs_capped"] is True
 
 
 # --- /api/dispatcher end to end ---------------------------------------------

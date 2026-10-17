@@ -642,8 +642,9 @@ _TERM_PASTE_SHIM = (
 # so no ^V reaches the shell, reads the clipboard, and routes it through
 # /api/term/paste (bracketed paste at the tmux layer). It also handles an image
 # on the clipboard — via /api/term/paste-image, like the paste-event shim — so
-# Ctrl+V never regresses image paste. Ctrl+Shift+V / right-click are left to the
-# native path. wid comes from the iframe path (/term/<wid>/), as above.
+# Ctrl+V never regresses image paste. Ctrl+Shift+V is left to the native path;
+# right-click pastes through this shim too (see _TERM_CONTEXTMENU_SHIM). wid comes
+# from the iframe path (/term/<wid>/), as above.
 _TERM_PASTE_KEY_SHIM = (
     "<script>(function(){"
     "var m=location.pathname.match(/\\/term\\/([^\\/]+)/);"
@@ -659,11 +660,7 @@ _TERM_PASTE_KEY_SHIM = (
     "var r=await fetch('/api/term/paste-image',{method:'POST',body:fd,"
     "credentials:'same-origin'});"
     "if(!r.ok)return;var j=await r.json();if(j&&j.path)await pasteText(j.path);}"
-    "async function onKey(e){"
-    "if(!(e.ctrlKey||e.metaKey)||e.shiftKey||e.altKey)return;"
-    "if(e.key!=='v'&&e.key!=='V')return;"
-    "if(!navigator.clipboard)return;"
-    "e.preventDefault();e.stopImmediatePropagation();"
+    "async function pasteClipboard(){"
     "try{"
     "if(navigator.clipboard.read){"
     "var items=await navigator.clipboard.read();"
@@ -676,7 +673,34 @@ _TERM_PASTE_KEY_SHIM = (
     "}else if(navigator.clipboard.readText){"
     "await pasteText(await navigator.clipboard.readText());}"
     "}catch(err){console.error('paste-key',err);}}"
+    # CMX-201: the right-click shim pastes through this same function.
+    "window.__chelaPasteClipboard=function(){"
+    "return navigator.clipboard?pasteClipboard():Promise.resolve();};"
+    "function onKey(e){"
+    "if(!(e.ctrlKey||e.metaKey)||e.shiftKey||e.altKey)return;"
+    "if(e.key!=='v'&&e.key!=='V')return;"
+    "if(!navigator.clipboard)return;"
+    "e.preventDefault();e.stopImmediatePropagation();"
+    "window.__chelaPasteClipboard();}"
     "document.addEventListener('keydown',onKey,true);"
+    "})();</script>"
+)
+
+# Right-click paste shim injected into ttyd's HTML (see term_http), CMX-201.
+# Windows-Terminal style: select = copy (Claude Code's copy-on-select), right-click
+# = paste. The browser's native context menu (Emoji / Paste / Inspect …) is
+# suppressed and the clipboard goes through the Ctrl/Cmd+V shim's own paste path
+# (window.__chelaPasteClipboard: bracketed paste, an image → /api/term/paste-image),
+# never the browser's Paste. Only `contextmenu` is touched — the mousedown/mouseup
+# events xterm.js forwards to tmux / the app (and that selection relies on) are not
+# swallowed, and neither is propagation. Fine pointers only: on a phone a long-press
+# also fires contextmenu, and it must keep doing what it does today.
+_TERM_CONTEXTMENU_SHIM = (
+    "<script>(function(){"
+    "if(!window.matchMedia||!matchMedia('(pointer: fine)').matches)return;"
+    "document.addEventListener('contextmenu',function(e){"
+    "e.preventDefault();"
+    "var p=window.__chelaPasteClipboard;if(typeof p==='function')p();},true);"
     "})();</script>"
 )
 
@@ -1078,7 +1102,8 @@ def term_http(wid, rest):
                  + _term_theme_shim() + _TERM_FONT_CSS + _TERM_FONT_PREF_SHIM
                  + _term_presence_shim(wid)
                  + _term_upload_shim()
-                 + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM + _TERM_PALETTE_KEY_SHIM
+                 + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM + _TERM_CONTEXTMENU_SHIM
+                 + _TERM_PALETTE_KEY_SHIM
                  + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS + _TERM_TOUCH_CSS)
         html = (html.replace("</head>", shims + "</head>", 1)
                 if "</head>" in html else html + shims)
@@ -4358,6 +4383,20 @@ def _runs_for_workflow(
     return active, awaiting, recent
 
 
+def _fold_closed_runs(all_runs: list[dict], wf_path: str, open_ids: set[str]
+                      ) -> tuple[list[dict], bool]:
+    """CMX-193: the board's terminal runs (``done``/``closed``/``failed``, newest first,
+    at most 10) with every ``closed`` run of a task that is still OPEN folded away — the
+    task's open card is that task's one card (a requeued run, or a CMX-68 stall the open
+    card already flags). Before this, each such run filled one of the 10 slots AND drew a
+    second card for the same task next to its open one. Also returns whether the cap cut
+    any run off, so the board can say Done is a sample rather than a count."""
+    terminal = [r for r in _workflow_runs(all_runs, wf_path)
+                if r.get("status") in ("done", "closed", "failed")
+                and not (r.get("status") == "closed" and r.get("task_id") in open_ids)]
+    return terminal[:10], len(terminal) > 10
+
+
 def _open_task_group(task, ready_ids: set[str] | None, type_by_state: dict[str, str]) -> str:
     """CMX-94: the Runs segment's section for an open task — ``ready`` (what a claim would
     draw from: Linear's Todo), ``in_progress`` (a ``started``-type state: In Progress / In
@@ -4666,6 +4705,8 @@ def api_dispatcher():
             # run state rides on the card as a badge. None for a tracker without states
             # (markdown, gh_issues) or a failed read: the board keeps chela's own lanes.
             "tracker_columns": None,
+            # CMX-193: True when more terminal runs exist than `recent_runs` carries.
+            "recent_runs_capped": False,
         }
 
         active, awaiting, recent = _runs_for_workflow(all_runs, str(wf_path))
@@ -4810,6 +4851,8 @@ def api_dispatcher():
         # branch so run-discovered workflows still group + label correctly.
         if project_key is None:
             project_key = _project_key_from_runs(active, awaiting, recent)
+        recent, entry["recent_runs_capped"] = _fold_closed_runs(
+            all_runs, str(wf_path), {t["id"] for t in entry["open_tasks"]})
         entry["project_key"] = project_key
 
         # Stamp project_key onto each run dict — task_number already comes from

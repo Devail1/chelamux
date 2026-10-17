@@ -388,6 +388,27 @@ def reaper_kills(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_linear_caches():
+    """CMX-193: the Linear source's per-process caches start empty for every test.
+
+    ``linear._team_states`` caches a team's workflow states for an hour, keyed by team
+    name. A test that filled it for team ``CMX`` handed those states to whichever later
+    test on the same xdist worker built the dashboard payload — and the repo's own
+    ``WORKFLOW.md`` (team ``CMX``, auto-discovered by the dashboard) then grew
+    ``tracker_columns`` there and nowhere else, flipping that test's board to Linear's
+    columns. Green alone, red in CI, depending on test order.
+    """
+    from chela.sources import linear
+
+    caches = (linear._backoff, linear._last_sweep, linear._team_states, linear._reported)
+    for c in caches:
+        c.clear()
+    yield
+    for c in caches:
+        c.clear()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_claude_config(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
 

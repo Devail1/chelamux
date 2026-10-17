@@ -33,6 +33,16 @@ What observes a file, in the order it is checked (all of them, unioned):
 4. a coverage-derived map, when ``pytest-cov`` is installed in the judged tree: one baseline
    run with ``--cov-context=test`` records which test touched which file. Cached per head sha.
 
+⚡ CMX-174: a ``judge.test_cmd`` that is ONE Vitest invocation (``pnpm exec vitest run``)
+selects too. Its universe is the baseline's own JSON report (one case per test, keyed by its
+test FILE), and a mutated ``.ts``/``.tsx`` file selects the test files whose import graph
+reaches it (rule 2, resolving ``./a`` and ``./a.js`` to ``a.ts``). Measured on a 200-file
+fixture: the static graph costs milliseconds, ``vitest related`` ~1.5s (a whole vitest start
+per mutation), and a ``a.ts`` → ``a.test.ts`` naming rule misses every TRANSITIVE importer. A
+TS file NO test reaches is UNTESTED: it still runs the full suite, and survives as UNTESTED.
+Only "no test reaches it" is UNTESTED: a selection that FAILED (say ``observers`` raised)
+runs the full suite untagged — not knowing which tests reach a file is not knowing that none do.
+
 Anything it cannot reason about — an unknown file type, a ``conftest.py`` (which every test
 under it imports implicitly), a ``test_cmd`` that is not a plain pytest invocation, a baseline
 with no readable JUnit report, a file no test observes — returns ``None``: run the FULL suite.
@@ -52,6 +62,9 @@ from pathlib import Path
 
 PY_SUFFIXES = (".py",)
 JS_SUFFIXES = (".js", ".mjs", ".cjs")
+TS_SUFFIXES = (".ts", ".tsx")
+# How a specifier with no (or a `.js`) extension resolves: TS ESM spells `./a.ts` as `./a.js`.
+_JS_RESOLVE = ("", ".js", ".mjs", ".ts", ".tsx", "/index.js", "/index.ts", "/index.tsx")
 
 # A shell command made of more than one command (or redirecting, or substituting) cannot be
 # extended by appending pytest arguments: they would land on whatever runs LAST, not on pytest.
@@ -90,6 +103,24 @@ def extendable(test_cmd: str) -> bool:
         if tok == "-m" and i + 1 < len(tokens) and tokens[i + 1] == "pytest":
             return True
     return False
+
+
+def is_vitest(test_cmd: str) -> bool:
+    """Is ``test_cmd`` ONE Vitest invocation (``vitest run``, ``npx vitest``, ``pnpm exec
+    vitest run``) that test-file filters can be appended to? ``vitest watch``/``--watch`` is not."""
+    if not test_cmd or _SHELL_META.search(test_cmd):
+        return False
+    try:
+        tokens = shlex.split(test_cmd)
+    except ValueError:
+        return False
+    return (any(Path(t).name == "vitest" for t in tokens)
+            and not {"watch", "--watch", "-w", "related"} & set(tokens))
+
+
+def vitest_report_args(report: Path) -> list[str]:
+    """The baseline's extra args: its default output (the counts) AND a JSON report."""
+    return ["--reporter=default", "--reporter=json", f"--outputFile.json={report}"]
 
 
 def extend(test_cmd: str, args: list[str]) -> str:
@@ -148,6 +179,21 @@ def parse_junit(root: Path, junit_path: Path) -> list[Case] | None:
         if m and m.group(1).endswith(JS_SUFFIXES) and (root / m.group(1)).is_file():
             js = Path(m.group(1)).as_posix()
         cases.append(Case(rel, node, passed, js))
+    return cases or None
+
+
+def parse_vitest_json(root: Path, report: Path) -> list[Case] | None:
+    """One :class:`Case` per test in a Vitest JSON report, its ``node`` and ``js`` the test
+    FILE (what a filter selects); ``None`` when it cannot be read or a file is outside ``root``."""
+    try:
+        results = json.loads(report.read_text())["testResults"]
+        cases = []
+        for r in results:
+            rel = Path(r["name"]).resolve().relative_to(root.resolve()).as_posix()
+            cases += [Case(rel, rel, a.get("status") == "passed", rel)
+                      for a in r["assertionResults"]]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
     return cases or None
 
 
@@ -284,7 +330,9 @@ def _resolve_js(root: Path, importer: str, spec: str) -> str | None:
     if not spec.startswith("."):
         return None
     base = (root / importer).parent / spec
-    for cand in (base, base.with_name(base.name + ".js"), base.with_name(base.name + ".mjs")):
+    stem = base.with_suffix("") if base.suffix == ".js" else base
+    for cand in [Path(f"{base}{ext}") for ext in _JS_RESOLVE] + [
+            Path(f"{stem}{ext}") for ext in TS_SUFFIXES]:
         try:
             if cand.is_file():
                 return cand.resolve().relative_to(root.resolve()).as_posix()
@@ -317,6 +365,7 @@ class Selection:
     nodes: list[str]
     expected: int           # baseline-passing cases the nodes cover — the subset's "baseline"
     why: str                # how they were chosen, or why the full suite runs instead
+    untested: bool = False  # CMX-174: a TS file no test reaches — a full-suite survivor is UNTESTED
 
     @property
     def full(self) -> bool:
@@ -358,7 +407,7 @@ class Selector:
                     dep = _resolve_js(self.root, cur, spec)
                     if dep and dep not in seen:
                         seen.add(dep)
-                        if dep.endswith(JS_SUFFIXES):
+                        if dep.endswith(JS_SUFFIXES + TS_SUFFIXES):
                             stack.append(dep)
             self._js_closure[rel] = seen
         return self._js_closure[rel]
@@ -379,7 +428,7 @@ class Selector:
         if rel.endswith(PY_SUFFIXES):
             targets = module_names(rel)
             found |= {t for t in py_tests if _imports_module(self._imports_of(t), targets)}
-        elif rel.endswith(JS_SUFFIXES):
+        elif rel.endswith(JS_SUFFIXES + TS_SUFFIXES):
             found |= {t for t in js_tests if rel in self._closure_of(t)}
         found |= {t for t in py_tests | js_tests if t != rel and names_it(self._read(t), rel)}
         found |= {t for t in self.coverage.get(rel, ()) if t in py_tests}
@@ -387,7 +436,7 @@ class Selector:
 
     def select(self, rel: str) -> Selection:
         rel = Path(rel).as_posix()
-        if not rel.endswith(PY_SUFFIXES + JS_SUFFIXES):
+        if not rel.endswith(PY_SUFFIXES + JS_SUFFIXES + TS_SUFFIXES):
             return Selection([], 0, f"{Path(rel).suffix or 'no-suffix'} is not a file type "
                                     "selection can reason about — full suite")
         if Path(rel).name == "conftest.py":
@@ -400,7 +449,8 @@ class Selector:
         chosen = [c for c in self.cases
                   if (c.file in sources and not c.js) or (c.js and c.js in sources)]
         if not chosen:
-            return Selection([], 0, "no test in the baseline observes it — full suite")
+            return Selection([], 0, "no test in the baseline observes it — full suite",
+                             untested=rel.endswith(TS_SUFFIXES))
         # A whole Python file is one node; a JS suite is its own parametrized case.
         nodes: list[str] = []
         for c in chosen:
