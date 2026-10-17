@@ -1,7 +1,6 @@
-"""🔀 CMX-189: the hand-in base-sync gate. ``chela task-finished`` fetches ``origin/<base>``
-and REFUSES a branch that conflicts with it, or (unless ``--allow-behind``) is behind it, so
-the judge grades what will actually merge. The rule "merge dev before hand-in" lived only in
-messages, and it kept losing (seven CONFLICTING notices in one night, 2026-10-16/17)."""
+"""🔀 CMX-189: the hand-in base-sync gate. ``chela task-finished`` REFUSES a branch that
+conflicts with a fresh ``origin/<base>``, or (unless ``--allow-behind``) is behind it, so the
+judge grades what will actually merge. "Merge dev before hand-in" was prose, and prose lost."""
 from __future__ import annotations
 
 import subprocess
@@ -12,7 +11,6 @@ GIT_TIMEOUT = 60
 
 
 def _git(worktree: str | Path, *argv: str, timeout: int = GIT_TIMEOUT):
-    """Run git in ``worktree``. Raises RuntimeError when git cannot run at all."""
     cmd = ["git", *argv]
     try:
         return subprocess.run(cmd, cwd=str(worktree), capture_output=True, text=True,
@@ -47,8 +45,7 @@ def check(worktree: str | Path, base: str) -> dict:
             if line not in conflicts:
                 conflicts.append(line)
         if not conflicts:
-            raise RuntimeError(f"`git merge-tree` reported a conflict with origin/{base} "
-                               "but named no file")
+            raise RuntimeError(f"`git merge-tree` reported a conflict with origin/{base} but named no file")
     return {"behind": int(count.stdout.strip()), "conflicts": conflicts}
 
 
@@ -65,9 +62,7 @@ def refusal(base: str, behind: int, conflicts: list[str]) -> str:
             f"   Merge origin/{base} in (do NOT rebase — request-push does a plain push):\n"
             f"     git fetch origin {base}\n"
             f"     git merge origin/{base}\n"
-            "     # resolve any conflicts, `git add` them, `git commit`\n"
-            "     # re-run the tests, then `chela request-push` and `chela task-finished` "
-            "again\n"
+            "     # resolve, `git add`, `git commit`, re-run the tests, then task-finished again\n"
             + ("" if conflicts else
                "   A deliberate hand-in on a stale base: pass --allow-behind (recorded).\n"))
 

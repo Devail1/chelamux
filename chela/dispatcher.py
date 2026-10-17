@@ -2871,11 +2871,9 @@ def verify_sweep(task_id: str) -> dict:
 
 
 def check_base_sync(task_id: str, allow_behind: bool = False) -> dict:
-    """🔀 CMX-189: the hand-in base-sync gate — run FIRST, before the size gate, self-check
-    and sweep. Fetches ``origin/<base>`` into the run's own worktree and refuses a branch that
-    conflicts with it, or is behind it without ``allow_behind``. ``{"ok", "record"}``; record
-    is None unless ``allow_behind`` let a stale branch through. Fails CLOSED when git cannot
-    say (an unreachable remote is unknown, never OK)."""
+    """🔀 CMX-189: run FIRST in task-finished. Refuses a branch conflicting with, or (without
+    ``allow_behind``) behind, a fresh ``origin/<base>``; fails CLOSED when git cannot say.
+    ``{"ok", "record"}``; record is None unless ``allow_behind`` let a stale branch through."""
     with _db() as conn:
         row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
     if row is None or not row["worktree_path"] or not row["workflow_path"]:
@@ -2888,8 +2886,7 @@ def check_base_sync(task_id: str, allow_behind: bool = False) -> dict:
         return {"ok": False, "error": f"could not check this branch against its base — {e}. "
                                       "Unknown is not in sync: fix the remote and re-run."}
     if state["conflicts"] or (state["behind"] and not allow_behind):
-        return {"ok": False,
-                "error": basesync.refusal(base, state["behind"], state["conflicts"])}
+        return {"ok": False, "error": basesync.refusal(base, state["behind"], state["conflicts"])}
     if state["behind"]:
         return {"ok": True, "record": {"base": base, "behind": state["behind"],
                                        "allow_behind": True}}

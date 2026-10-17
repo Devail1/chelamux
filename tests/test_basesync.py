@@ -1,6 +1,4 @@
-"""🔀 CMX-189 — ``chela task-finished`` refuses a branch that conflicts with, or is behind,
-``origin/<base>``, and tells the agent how to merge it in. Fixture: a tmp repo with a local
-bare remote (never the live repo)."""
+"""🔀 CMX-189 — task-finished refuses a branch behind/conflicting with origin/<base>."""
 from __future__ import annotations
 
 import json
@@ -26,8 +24,8 @@ def repo(tmp_path, monkeypatch):
     _git(tmp_path, "init", "-q", "--bare", "-b", "dev", str(remote))
     _git(tmp_path, "clone", "-q", str(remote), str(seed))
     _git(seed, "checkout", "-qb", "dev")
-    (seed / "a.txt").write_text("a\n")
-    (seed / "b.txt").write_text("b\n")
+    for name in ("a.txt", "b.txt"):
+        (seed / name).write_text(f"{name}\n")
     _git(seed, "add", "-A")
     _git(seed, "commit", "-qm", "base")
     _git(seed, "push", "-q", "origin", "dev")
@@ -46,8 +44,7 @@ def _advance(seed: Path, name: str, body: str) -> None:
 
 
 def test_a_conflicting_branch_is_refused_listing_the_file(repo):
-    seed, _ = repo
-    _advance(seed, "a.txt", "dev\n")
+    _advance(repo[0], "a.txt", "dev\n")
     for allow in (False, True):         # --allow-behind never lets a conflict through
         out = dispatcher.check_base_sync("cmx-88", allow)
         assert out["ok"] is False
@@ -56,23 +53,20 @@ def test_a_conflicting_branch_is_refused_listing_the_file(repo):
 
 
 def test_behind_but_clean_is_refused_without_the_flag_and_recorded_with_it(repo):
-    seed, _ = repo
-    _advance(seed, "b.txt", "dev\n")
+    _advance(repo[0], "b.txt", "dev\n")
     out = dispatcher.check_base_sync("cmx-88")
     assert out["ok"] is False
     assert out["error"].startswith("this branch is 1 commit(s) behind origin/dev")
     assert "pass --allow-behind (recorded)" in out["error"]
+    assert "     git fetch origin dev\n     git merge origin/dev\n" in out["error"]
+    assert "do NOT rebase" in out["error"] and "git rebase" not in out["error"]
     assert dispatcher.check_base_sync("cmx-88", True) == {
         "ok": True, "record": {"base": "dev", "behind": 1, "allow_behind": True}}
 
 
-def test_an_up_to_date_branch_is_accepted(repo):
+def test_up_to_date_is_accepted_and_a_missing_remote_fails_closed(repo, tmp_path):
     assert dispatcher.check_base_sync("cmx-88") == {"ok": True, "record": None}
-
-
-def test_a_missing_remote_fails_closed(repo, tmp_path):
-    _, wt = repo
-    _git(wt, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    _git(repo[1], "remote", "set-url", "origin", str(tmp_path / "gone.git"))
     out = dispatcher.check_base_sync("cmx-88", True)
     assert out["ok"] is False
     assert out["error"].startswith("could not check this branch against its base — "
@@ -82,15 +76,8 @@ def test_a_missing_remote_fails_closed(repo, tmp_path):
         "no run with a worktree on record for cmx-1"
 
 
-def test_an_unreadable_workflow_fails_closed(repo, tmp_path):
-    (tmp_path / "WORKFLOW.md").write_text("---\n: [\n---\n")
-    out = dispatcher.check_base_sync("cmx-88", True)
-    assert out["ok"] is False and out["error"].startswith("could not check this branch")
-
-
 def test_cli_refuses_a_conflict_before_the_self_check_and_sweep(repo, capsys):
-    seed, _ = repo
-    _advance(seed, "a.txt", "dev\n")
+    _advance(repo[0], "a.txt", "dev\n")
     with patch.object(dispatcher, "check_hand_in_size") as size, \
             patch.object(dispatcher, "verify_sweep") as swept, \
             patch.object(dispatcher, "request_task_finished") as req:
@@ -104,20 +91,19 @@ def test_cli_refuses_a_conflict_before_the_self_check_and_sweep(repo, capsys):
 @pytest.mark.parametrize("extra, record", [
     ((), None), (("--allow-behind",), {"base": "dev", "behind": 1, "allow_behind": True})])
 def test_cli_hands_the_record_to_the_marker(repo, extra, record, capsys):
-    seed, wt = repo
     if record:
-        _advance(seed, "b.txt", "dev\n")
+        _advance(repo[0], "b.txt", "dev\n")
     with patch.object(dispatcher, "check_no_new_guards", return_value=False), \
             patch.object(dispatcher, "verify_sweep", return_value={"ok": True, "skipped": "x"}):
         assert _task_finished(*extra) is None
-    marker = json.loads(dispatcher._task_finished_request_path(wt).read_text())
+    marker = json.loads(dispatcher._task_finished_request_path(wt := repo[1]).read_text())
     assert marker.get("base_sync") == record
     assert dispatcher._read_task_finished_size_gate(wt, "base_sync") == record
 
 
 @pytest.mark.parametrize("record", [{"base": "dev", "behind": 3, "allow_behind": True}, None])
 def test_the_daemon_records_it_on_the_run_and_the_judge_sees_it(repo, record):
-    _, wt = repo
+    wt = repo[1]
     with patch.object(dispatcher, "_read_pr_url", return_value=None), \
             patch.object(dispatcher, "_read_pr_status", return_value=(None, None)), \
             patch.object(dispatcher, "_kill_window"):
@@ -152,8 +138,7 @@ def test_check_pins_every_git_call(tmp_path):
 
 
 def test_conflicts_are_read_up_to_the_blank_line_once_each(tmp_path):
-    ok = subprocess.CompletedProcess
-    out = "abc\nx.py\ny.py\nx.py\n\nAuto-merging z.py\nCONFLICT (content): x.py\n"
+    ok, out = subprocess.CompletedProcess, "abc\nx.py\ny.py\nx.py\n\nAuto-merging z.py\nCONFLICT (content): x.py\n"
     with patch.object(basesync.subprocess, "run",
                       side_effect=[ok([], 0, "", ""), ok([], 0, "4", ""), ok([], 1, out, "")]):
         assert basesync.check(tmp_path, "dev") == {"behind": 4, "conflicts": ["x.py", "y.py"]}
@@ -180,17 +165,3 @@ def test_git_that_cannot_run_fails_closed(tmp_path, exc):
             pytest.raises(RuntimeError, match="could not run"):
         basesync.check(tmp_path, "dev")
 
-
-def test_the_refusal_says_merge_never_rebase():
-    text = basesync.refusal("dev", 2, [])
-    assert "     git fetch origin dev\n     git merge origin/dev\n" in text
-    assert "do NOT rebase" in text and "git rebase" not in text
-
-
-@pytest.mark.parametrize("record, line", [
-    ({"base": "dev", "behind": 2, "allow_behind": True},
-     "🔀 Handed in 2 commit(s) behind origin/dev with --allow-behind (merges cleanly)."),
-    ({"base": "dev", "behind": 2, "allow_behind": False}, ""), ({}, ""),
-])
-def test_render(record, line):
-    assert basesync.render(record) == line

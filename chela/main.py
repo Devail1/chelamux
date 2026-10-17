@@ -2320,8 +2320,7 @@ def cmd_task_finished(args) -> None:
     if experiments and no_new_guards:
         print("task-finished: pass at most one of --self-check-experiments / --no-new-guards")
         sys.exit(2)
-    # 🔀 CMX-189: the base-sync gate runs before anything slow — a stale or conflicting head
-    # would only waste the self-check and sweep, then be graded as something that won't merge.
+    # 🔀 CMX-189: the base-sync gate runs FIRST — before the size gate, self-check and sweep.
     sync = dispatcher.check_base_sync(args.task_id, getattr(args, "allow_behind", False))
     if not sync.get("ok"):
         print(f"task-finished: 🔀 {sync['error']}")
@@ -4269,8 +4268,7 @@ def main() -> None:
     )
     p_tf.add_argument(
         "--allow-behind", action="store_true",
-        help="🔀 CMX-189: hand in a branch that is behind origin/<base> but merges cleanly "
-             "(recorded and shown to the judge). A conflicting branch is always refused.",
+        help="🔀 CMX-189: hand in a branch behind origin/<base> that merges cleanly (recorded).",
     )
     p_tf.add_argument(
         "--oversize-reason", metavar="WHY", default=None,
