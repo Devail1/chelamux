@@ -21,12 +21,12 @@ suite can only observe one value. Here nothing stops the suite from driving both
 it does drive both, but each on an input where the flag is inert. Coverage of the flag "on"
 and "off" looks complete when you list the cells, and it is not.
 
-**The fix:** at the CLI, drive the cell where the flag is the ONLY thing that decides: behind,
-no flag, assert refused (and nothing downstream ran). The general test: for each flag, there
+**Guard form that survives:** at the CLI, drive the cell where the flag is the ONLY thing
+that decides: behind, no flag, assert refused (and nothing downstream ran). The general test: for each flag, there
 must be a pair of CLI cells on the SAME input that differ only in the flag and get different
 answers.
 
-**Seen with:** shape 338 in the same verdict. The daemon's `tick()` forwarded the marker's
-`base_sync` to `mark_awaiting_review`, and the test called `mark_awaiting_review` by hand with
+**Found:** CMX-189 round 1, alongside shape 338 in the same verdict. The daemon's `tick()`
+forwarded the marker's `base_sync` to `mark_awaiting_review`, and the test called `mark_awaiting_review` by hand with
 the marker's value, so `base_sync=None` at the tick call site survived. Fixed by driving
 `tick()` over a marker (`test_tick_persists_the_markers_base_sync_on_the_run`).
