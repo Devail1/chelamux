@@ -2320,6 +2320,11 @@ def cmd_task_finished(args) -> None:
     if experiments and no_new_guards:
         print("task-finished: pass at most one of --self-check-experiments / --no-new-guards")
         sys.exit(2)
+    # 🔀 CMX-189: the base-sync gate runs FIRST — before the size gate, self-check and sweep.
+    sync = dispatcher.check_base_sync(args.task_id, getattr(args, "allow_behind", False))
+    if not sync.get("ok"):
+        print(f"task-finished: 🔀 {sync['error']}")
+        sys.exit(1)
     # 📏 CMX-126: the size gate runs FIRST — an oversized diff is refused before its sweep.
     size = dispatcher.check_hand_in_size(args.task_id, getattr(args, "oversize_reason", None),
                                          getattr(args, "split_plan", None))
@@ -2386,6 +2391,8 @@ def cmd_task_finished(args) -> None:
         kwargs["size_gate"] = size["record"]
     if partial:
         kwargs["self_check_partial"] = partial
+    if sync.get("record"):
+        kwargs["base_sync"] = sync["record"]
     result = dispatcher.request_task_finished(args.task_id, **kwargs)
     if not result.get("ok"):
         print(f"task-finished: {result.get('error', 'unknown error')}")
@@ -4259,6 +4266,10 @@ def main() -> None:
              "the reason. Repeatable. task-finished runs the sweep and refuses while a "
              "survivor is not named here, or a note names a line that did not survive. "
              "Recorded on the run, shown to the judge and in the PR body.",
+    )
+    p_tf.add_argument(
+        "--allow-behind", action="store_true",
+        help="🔀 CMX-189: hand in a branch behind origin/<base> that merges cleanly (recorded).",
     )
     p_tf.add_argument(
         "--oversize-reason", metavar="WHY", default=None,
