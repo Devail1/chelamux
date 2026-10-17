@@ -21,6 +21,11 @@ import pytest
 DEMO = Path(__file__).resolve().parent.parent / "scripts" / "demo"
 
 
+def _em_dashed(values):
+    """The values that carry an em dash (U+2014). An en dash or a hyphen is fine (CMX-213)."""
+    return [v for v in values if "\u2014" in v]
+
+
 def _gate():
     spec = importlib.util.spec_from_file_location("chela_demo_gate", DEMO / "gate.py")
     mod = importlib.util.module_from_spec(spec)
@@ -83,13 +88,13 @@ def test_the_scenes_are_the_real_gates_own_output(tmp_path):
     assert (chela_dir / "scheduler.db").is_file()
     assert any((chela_dir / "overrides").iterdir())
     assert list(operator.rglob("*")) == [operator / ".chela"]   # the operator's: untouched
-    # CMX-211: the frames are visitor-facing, so no string on camera carries an em/en dash,
+    # CMX-211: the frames are visitor-facing, so no string on camera carries an em dash,
     # neither a caption gate.py wrote nor a line of chela's own output it shows.
     on_camera = [v for s in scenes for v in (s["caption"], s.get("title"), s.get("body"),
                                              s.get("text"), s.get("after"), *s.get("lines", []))
                  if v]
     assert len(on_camera) > 30
-    assert [v for v in on_camera if "\u2014" in v or "\u2013" in v] == []
+    assert _em_dashed(on_camera) == []
     assert "Task: CMX-7, Free shipping from $50" in card["text"]   # chela's words, re-punctuated
 
 
@@ -180,7 +185,18 @@ def test_gate_mjs_puts_no_dash_on_camera():
     # may sit in a // comment, never in code that renders.
     code = [line for line in (DEMO / "gate.mjs").read_text().splitlines()
             if not line.lstrip().startswith("//")]
-    assert code and [line for line in code if "\u2014" in line or "\u2013" in line] == []
+    assert code and _em_dashed(code) == []
+
+
+@pytest.mark.parametrize(("value", "caught"), [
+    ("PENDING \u2014 nothing was merged", True),
+    ("no spaces\u2014still an em dash", True),
+    ("chela \u2013 Mission Control", False),     # CMX-213: an en dash is fine on camera
+    ("exit 0\u20131 passed", False),
+    ("a - hyphen", False),
+])
+def test_on_camera_check_rejects_only_the_em_dash(value, caught):
+    assert _em_dashed(["clean", value]) == ([value] if caught else [])
 
 
 def test_comment_drops_only_the_what_to_do_tail():
