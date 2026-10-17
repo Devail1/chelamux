@@ -1,27 +1,23 @@
 // --- Stage 0: ES-module imports ---
-import { $, escHtml, closeModal, shortTime, showModal } from './util.js';
+import { $, attrEsc, escHtml, closeModal, lucideIcon, shortTime, showModal } from './util.js';
 import { _runDisplayId, _runPrCell } from './dispatcher.js';
 import { runStatusBadgeClass } from './runstate.js';
-import { briefHtml, briefSource, displayTitle, riskChip, timelineSteps } from './taskmodalmodel.js';
+import { briefHtml, briefSource, defaultTab, displayTitle, riskChip, timelineSteps, trackerHref } from './taskmodalmodel.js';
 import { knMd, knInline } from './knowledge.js';
 
 // ---------------------------------------------------------------------------
 // The task-detail modal — a Jira-like "issue" view a kanban card click opens
-// (Work-view redesign). LEFT (wide): the task's brief rendered as markdown
-// (reusing knowledge.js's knMd — no new markdown dependency). RIGHT (narrow):
-// the compact details sidebar (workflow / branch / PR / CI / attempts / rework
-// / judge / timestamps / error) followed by the review timeline built from
-// `review_history`.
+// (Work-view redesign). LEFT (wide): tabs — Brief (the task's brief rendered as
+// markdown, reusing knowledge.js's knMd) | Review (N) (one collapsible card per
+// `review_history` round, newest first and open). RIGHT (narrow): the compact
+// details sidebar (workflow / branch / PR / CI / attempts / rework / judge /
+// timestamps / error) and a round list that jumps to a round's card.
 //
-// The timeline lived in the LEFT column for part of 2026-07-25 and was moved
-// back. Worth knowing why, so it doesn't get re-litigated: at the time almost
-// every run predated brief-capture-at-claim, so `_briefPane` rendered a
-// one-line "No brief recorded" note and the wide column was dead space while
-// the markdown-heavy timeline was squeezed into the sidebar. Once the daemon
-// picked up brief capture and real briefs started landing, the wide column had
-// its intended occupant back and the timeline returned to the sidebar. The
-// trade is deliberate: a long verdict is narrower here, but the brief — the
-// thing the ticket is actually about — leads.
+// History, so it doesn't get re-litigated: the timeline sat in the sidebar
+// (2026-07-25) so the brief could lead. CMX-122 (Liav, 2026-10-13): after 13
+// rounds a sidebar of full judge reports was unreadable, so the reports moved
+// to the wide column behind a tab, and the default tab follows the run — Review
+// while a verdict is what needs reading, Brief otherwise (defaultTab()).
 //
 // openTaskModal(item) is intentionally "pure enough": it takes the SAME card
 // object kanban.js already has in hand (from the one /api/dispatcher poll) and
@@ -111,18 +107,88 @@ function _prRow(item) {
     return [link, state, _ciChip(item)].filter(Boolean).join(' ');
 }
 
-function _timelineHtml(item) {
-    const steps = timelineSteps(item.review_history);
+function _verdictChip(s) {
+    return `<span class="badge ${runStatusBadgeClass(s.state)}">${escHtml(_statusLabel(s.state))}</span>`;
+}
+
+function _roundNo(s, i) {
+    return escHtml(String(s.round != null ? s.round : i + 1));
+}
+
+// The Review tab: one <details> per round, NEWEST first, only the newest open. `data-ri`
+// is the round's index in review_history (oldest = 0) — the round list's jump target.
+function _roundsHtml(steps) {
     if (!steps.length) return '<div class="task-modal-empty">No review history yet.</div>';
-    return '<ol class="task-modal-timeline">' + steps.map(s => `
-        <li class="task-modal-timeline-step">
-          <div class="task-modal-timeline-head">
-            <span class="badge ${runStatusBadgeClass(s.state)}">${escHtml(_statusLabel(s.state))}</span>
-            ${s.round != null ? `<span class="ts">round ${escHtml(String(s.round))}</span>` : ''}
+    return steps.map((s, i) => {
+        const survived = s.visible || s.heldOut
+            ? `<span class="ts">${s.visible} survived · ${s.heldOut} held-out</span>` : '';
+        return `
+        <details class="task-modal-round" data-ri="${i}"${i === steps.length - 1 ? ' open' : ''}>
+          <summary class="task-modal-timeline-head">
+            <span class="task-modal-round-no">Round ${_roundNo(s, i)}</span> ${_verdictChip(s)} ${survived}
             ${s.at ? `<span class="ts">${escHtml(shortTime(s.at))}</span>` : ''}
-          </div>
+          </summary>
           ${s.detail ? `<div class="task-modal-timeline-body md">${knMd(s.detail)}</div>` : ''}
-        </li>`).join('') + '</ol>';
+        </details>`;
+    }).reverse().join('');
+}
+
+function _roundListHtml(steps) {
+    return steps.map((s, i) => `<li><button type="button" class="task-modal-roundlink" onclick="chela.taskModalRound(${i})">Round ${_roundNo(s, i)} ${_verdictChip(s)}</button></li>`)
+        .reverse().join('');
+}
+
+// The header's task key: a link to the Linear issue when the tracker handed us its URL
+// (trackerHref), else the plain chip it always was.
+function _keyHtml(item, displayId) {
+    if (!displayId) return '';
+    const href = trackerHref(item);
+    if (!href) return `<span class="kanban-card-id">${escHtml(displayId)}</span>`;
+    return `<a class="kanban-card-id kanban-tracker-link" href="${attrEsc(href)}" target="_blank" rel="noopener noreferrer"
+               title="Open ${attrEsc(displayId)} in Linear">${escHtml(displayId)} ${lucideIcon('external-link', 12)}</a>`;
+}
+
+// Per-task last tab, for this page session only (a module Map — gone on reload, by design).
+const _tabByTask = new Map();
+let _curKey = null;
+const _TABS = ['brief', 'review'];
+
+// `remember`: only a viewer's own choice is kept — never the default the modal opened on,
+// or a run that later moves to awaiting_review would stay pinned to Brief.
+function _selectTab(name, focus, remember = true) {
+    if (remember && _curKey) _tabByTask.set(_curKey, name);
+    for (const t of _TABS) {
+        const tab = $(`#tm-tab-${t}`);
+        const panel = $(`#tm-panel-${t}`);
+        if (!tab || !panel) continue;
+        const on = t === name;
+        tab.setAttribute('aria-selected', String(on));
+        tab.tabIndex = on ? 0 : -1;
+        panel.hidden = !on;
+        if (on && focus) tab.focus();
+    }
+}
+
+// WAI-ARIA tabs: ←/→ move between tabs (wrapping), Home/End jump to the ends.
+function taskModalTabKey(e) {
+    const cur = _TABS.indexOf(e.target && e.target.dataset ? e.target.dataset.tab : '');
+    const next = { ArrowRight: cur + 1, ArrowLeft: cur - 1, Home: 0, End: _TABS.length - 1 }[e.key];
+    if (cur < 0 || next === undefined) return;
+    e.preventDefault();
+    _selectTab(_TABS[(next + _TABS.length) % _TABS.length], true);
+}
+
+function taskModalTab(name) {
+    _selectTab(name, false);
+}
+
+// A round-list click: switch to Review, open that round's card, scroll it into view.
+function taskModalRound(i) {
+    _selectTab('review', false);
+    const card = $(`#tm-panel-review .task-modal-round[data-ri="${i}"]`);
+    if (!card) return;
+    card.open = true;
+    card.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
 
 function _briefPane(item) {
@@ -164,28 +230,37 @@ function openTaskModal(item) {
     // remaining markdown/emoji) instead of leaving literal `**`/backticks.
     const title = knInline(displayTitle(item.title || '(untitled)').slice(0, 300));
     const rows = _sideRows(item);
+    const steps = timelineSteps(item.review_history);
+    _curKey = item.task_id || item.id || null;
 
     const html = `
       <div class="task-modal-head">
         <div class="task-modal-headline">
           ${wf ? `<span class="kanban-wf-chip">${escHtml(wf)}</span>` : ''}
-          ${displayId ? `<span class="kanban-card-id">${escHtml(displayId)}</span>` : ''}
+          ${_keyHtml(item, displayId)}
           <span class="badge ${runStatusBadgeClass(item.status)}">${escHtml(_statusLabel(item.status))}</span>
         </div>
         <h3 class="task-modal-title">${title}</h3>
       </div>
       <div class="task-modal-body">
-        <div class="task-modal-brief md">${_briefPane(item)}</div>
+        <div class="task-modal-main">
+          <div class="task-modal-tabs" role="tablist" aria-label="Task" onkeydown="chela.taskModalTabKey(event)">
+            <button type="button" class="task-modal-tab" role="tab" id="tm-tab-brief" data-tab="brief" aria-controls="tm-panel-brief" onclick="chela.taskModalTab('brief')">Brief</button>
+            <button type="button" class="task-modal-tab" role="tab" id="tm-tab-review" data-tab="review" aria-controls="tm-panel-review" onclick="chela.taskModalTab('review')">Review (${steps.length})</button>
+          </div>
+          <div class="task-modal-brief md" role="tabpanel" id="tm-panel-brief" aria-labelledby="tm-tab-brief">${_briefPane(item)}</div>
+          <div class="task-modal-review" role="tabpanel" id="tm-panel-review" aria-labelledby="tm-tab-review">${_roundsHtml(steps)}</div>
+        </div>
         <div class="task-modal-side">
           <div class="task-modal-sub">Details</div>
           ${rows || '<div class="task-modal-empty">No details recorded.</div>'}
-          <div class="task-modal-sub">Review timeline</div>
-          ${_timelineHtml(item)}
+          ${steps.length ? `<div class="task-modal-rounds"><div class="task-modal-sub">Rounds</div><ol class="task-modal-roundlist">${_roundListHtml(steps)}</ol></div>` : ''}
         </div>
       </div>`;
 
     const content = $('#task-modal-content');
     if (content) content.innerHTML = html;
+    _selectTab(_tabByTask.get(_curKey) || defaultTab(item, steps.length), false, false);
     showModal('modal-task');
     _bindTaskModalDismiss();
 }
@@ -224,4 +299,4 @@ export { openTaskModal, closeTaskModal, _JUDGE_BADGE };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { closeTaskModal, openTaskModal });
+Object.assign(window.chela, { closeTaskModal, openTaskModal, taskModalRound, taskModalTab, taskModalTabKey });

@@ -78,7 +78,37 @@ export function timelineSteps(reviewHistoryJson) {
             at: r.at || null,
             state: r.verdict || 'review',
             detail: typeof r.body === 'string' ? r.body : '',
+            // CMX-122: a round's survivor counts, for its collapsed one-line summary. Visible
+            // = the structured `mutations` the judge stored; held-out ones are never stored,
+            // only COUNTED in the body's `### 🙈 N held-out guard(s)` line (judge._held_out_section).
+            visible: Array.isArray(r.mutations) ? r.mutations.length : 0,
+            heldOut: heldOutCount(r.body),
         }));
+}
+
+export function heldOutCount(body) {
+    const m = typeof body === 'string' && body.match(/^### 🙈 (\d+) held-out guard/m);
+    return m ? Number(m[1]) : 0;
+}
+
+// CMX-122: which tab the modal opens on. Review when the run is waiting on a review
+// (`awaiting_review` / `needs_human`) or its judge returned a blocking verdict — but only
+// when there IS a round to read; an empty Review tab is never the landing page.
+const _REVIEW_STATUSES = new Set(['awaiting_review', 'needs_human']);
+const _BLOCKING_JUDGE = new Set(['blocked', 'blocked_race']);
+
+export function defaultTab(item, nRounds) {
+    if (!item || !nRounds) return 'brief';
+    return _REVIEW_STATUSES.has(item.status) || _BLOCKING_JUDGE.has(item.judge_state) ? 'review' : 'brief';
+}
+
+// CMX-122: the modal header's tracker link — EXACTLY the URL the Linear adapter fetched
+// (`tracker_url`, the same source kanban.js's _kTrackerLink reads, CMX-5/CMX-94), never
+// built from a workspace slug. A markdown/TODO or gh_issues item has none → null (plain
+// key). Only https is linked: the value lands in an href, so `javascript:` renders nothing.
+export function trackerHref(item) {
+    const url = item && item.tracker_url;
+    return typeof url === 'string' && /^https:\/\//i.test(url) ? url : null;
 }
 
 // ⚖️🎚️ CMX-405 — a run's RISK level (chela.sources.RISK_LEVELS), as the word the Work
