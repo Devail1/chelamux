@@ -1997,7 +1997,7 @@ def _read_pr_status(pr_url: str | None, repo_dir: str | None) -> tuple[str | Non
 
     `state` is lowercased to match `pr_state in ('open','merged','closed')`.
     `mergeable` is GitHub's MERGEABLE/CONFLICTING/UNKNOWN, kept uppercase. Both
-    fields are advisory — the UI gates the Merge / Merge-all buttons on them —
+    fields are advisory (the UI gates the Merge button on them),
     so each element is None on any failure, leaving the previous value in place
     rather than erasing it. The two come from one `gh` call to keep the
     phase-0 refresh cheap.
@@ -5361,7 +5361,7 @@ def tick(workflow_path: str | Path) -> dict:
         # Kanban only gates the Merge button on `pr_state === 'open'`, so once
         # we've seen a terminal state there's nothing to recheck. mergeable can
         # flip CONFLICTING/MERGEABLE as sibling PRs land, so refreshing it on
-        # every tick (for still-open PRs) keeps the Merge-all count honest.
+        # every tick (for still-open PRs) keeps the Merge button honest.
         # Runs against rows of any status that carry a pr_url (done cards still
         # surface a Merge button in the UI).
         #

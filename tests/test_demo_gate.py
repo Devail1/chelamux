@@ -51,7 +51,7 @@ def test_the_scenes_are_the_real_gates_own_output(tmp_path):
         "$ chela request-push CMX-7 --pr-title 'CMX-7: free shipping from $50'",
         "→ PR opened: https://github.com/acme/shop/pull/42"]
     assert blocked["body"].startswith(
-        "## ⚖️ THE JUDGE — a guard on this PR SURVIVED DELIBERATE CORRUPTION")
+        "## ⚖️ THE JUDGE: a guard on this PR SURVIVED DELIBERATE CORRUPTION")
     assert "- if total >= 50:\n+ if total > 50:" in blocked["body"]
     assert "STILL GREEN" in blocked["body"] and "KILLED" not in blocked["body"]
     for body in (blocked["body"], clean["body"]):     # the "What to do" tail is cut off
@@ -64,7 +64,7 @@ def test_the_scenes_are_the_real_gates_own_output(tmp_path):
         "+def test_free_shipping_starts_at_exactly_50():", "+    assert shipping(50) == 0.0",
         "+    assert shipping(49.99) == 4.99", "$ chela request-push CMX-7",
         "→ pushed 8d21e7f0c3a9 to PR #42"]
-    assert clean["body"].startswith("## ⚖️ THE JUDGE — every guard held")
+    assert clean["body"].startswith("## ⚖️ THE JUDGE: every guard held")
     assert "| **KILLED** |" in clean["body"] and "SURVIVED" not in clean["body"]
     assert merged["lines"][:2] == ["$ chela merge CMX-7", "✅ Merged CMX-7 → dev (sha c7d93e15f08a)"]
     assert merged["lines"][2].endswith("CI green, judge clean, MERGEABLE")
@@ -76,13 +76,21 @@ def test_the_scenes_are_the_real_gates_own_output(tmp_path):
     assert len(override["lines"]) == 4 and "('blocked' on 3f9c2a1b7d04)" in override["lines"][2]
     assert "Judge: blocked on this head" in card["text"] and "head 3f9c2a1b7d04" in card["text"]
     assert card["text"].endswith(")") and "Approve merges now" in card["text"]
-    assert card["after"].endswith("✅ Approved by @operator — merged a41e0c9d2b7f")
+    assert card["after"].endswith("✅ Approved by @operator, merged a41e0c9d2b7f")
     assert "Approve merges now" not in card["after"]
     # Nothing escaped the demo root: the runs DB and the overrides live in its own CHELA_DIR.
     chela_dir = tmp_path / "root" / "gate" / "home" / ".chela"
     assert (chela_dir / "scheduler.db").is_file()
     assert any((chela_dir / "overrides").iterdir())
     assert list(operator.rglob("*")) == [operator / ".chela"]   # the operator's: untouched
+    # CMX-211: the frames are visitor-facing, so no string on camera carries an em/en dash,
+    # neither a caption gate.py wrote nor a line of chela's own output it shows.
+    on_camera = [v for s in scenes for v in (s["caption"], s.get("title"), s.get("body"),
+                                             s.get("text"), s.get("after"), *s.get("lines", []))
+                 if v]
+    assert len(on_camera) > 30
+    assert [v for v in on_camera if "\u2014" in v or "\u2013" in v] == []
+    assert "Task: CMX-7, Free shipping from $50" in card["text"]   # chela's words, re-punctuated
 
 
 @pytest.mark.parametrize(("swap", "why"), [
@@ -152,6 +160,27 @@ def test_make_repo_rebuilds_its_own_root_from_scratch(tmp_path):
     assert (repo / "test_shop.py").read_text() == gate.WEAK_TEST
     assert subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True,
                           text=True, check=True).stdout == ""
+
+
+@pytest.mark.parametrize(("text", "want"), [
+    ("## THE JUDGE \u2014 every guard held", "## THE JUDGE: every guard held"),
+    ("### head\u2013tail", "### head: tail"),
+    ("PENDING \u2014 nothing was merged", "PENDING, nothing was merged"),
+    ("exit 0\u20131 passed", "exit 0, 1 passed"),
+    ("a #tag \u2014 b", "a #tag, b"),
+    ("## head\nbody \u2014 more\n# h2 \u2014 x", "## head\nbody, more\n# h2: x"),
+    ("no dash - here: (kept)", "no dash - here: (kept)"),
+])
+def test_undash_swaps_only_em_and_en_dashes(text, want):
+    assert _gate().undash(text) == want
+
+
+def test_gate_mjs_puts_no_dash_on_camera():
+    # Its only literal text on the frames is its own chrome (bar title, buttons); a dash
+    # may sit in a // comment, never in code that renders.
+    code = [line for line in (DEMO / "gate.mjs").read_text().splitlines()
+            if not line.lstrip().startswith("//")]
+    assert code and [line for line in code if "\u2014" in line or "\u2013" in line] == []
 
 
 def test_comment_drops_only_the_what_to_do_tail():

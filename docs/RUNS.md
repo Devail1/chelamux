@@ -67,8 +67,9 @@ chela judge sweep --base origin/main --test-cmd "pytest -q"   # add --json for a
 ```
 
 The suite is `--test-cmd`, else the workflow's `judge.test_cmd`, else detected (pytest,
-`npm test`, `go test`, `cargo test`). It mutates changed Python and `.js`/`.mjs` lines only; a
-changed file in another language is UNKNOWN, never a pass. Exit codes: `0` every mutation
+`npm test`, `go test`, `cargo test`). It mutates changed Python, `.js`/`.mjs` and `.ts`/`.tsx`
+lines only (see [TypeScript](#typescript)); a changed file in another language is UNKNOWN,
+never a pass. Exit codes: `0` every mutation
 killed, `1` a survivor, `2` cannot verify (including a partial, budget-cut sweep), `3`
 unknown. Run standalone, it does not provision the repo's environment, so install the
 project's dependencies first.
@@ -76,6 +77,34 @@ project's dependencies first.
 A PR that changes only documentation (`docs/`, `changelog.d/`, top-level `*.md`) is not
 judged — there is nothing to mutate — and is parked once at `needs_human` for a human OK or
 an override.
+
+### TypeScript
+
+The sweep, `chela judge run` and `chela judge self-check` (and so `task-finished
+--self-check-experiments`) treat `.ts` and `.tsx` files the same way.
+
+- **What is mutated.** The sweep gives each changed TS line the JS mutations (an `if` forced
+  false or true, a comparison flipped, `return 0`↔`1`) plus `&&`↔`||`, `return true`↔`false`,
+  a ternary's condition forced each way, and JSX conditional rendering (`{c && <X/>}` →
+  `{false && <X/>}`). `.d.ts`, `*.spec.ts`, `*.test.ts` and `__tests__/` files are not
+  mutated. The judge and the self-check apply whatever experiments were written, TS included.
+- **The parse proof.** Every mutated TS file is parsed with the `typescript` package the repo
+  itself resolves (parsed, not type-checked). A mutant that does not parse is skipped by the
+  sweep and INVALID in the judge; either way it never counts as killed. If no `typescript`
+  (or no `node`) can be found, nothing is measured: the sweep, the judge and the self-check
+  all report cannot verify, never clean.
+- **How tests are selected.** When `judge.test_cmd` is one Vitest invocation (for example
+  `pnpm exec vitest run`), the baseline writes Vitest's JSON report, and each mutation runs
+  only the test files whose imports reach the mutated file, directly or through other modules.
+  A survivor on that subset is re-run on the full suite before it counts. Any other
+  `test_cmd` runs the full suite for every mutation.
+- **What UNTESTED means.** A TS file that no test file imports, directly or transitively, is
+  UNTESTED. Its mutations still run the full suite. If one survives, it is reported as
+  `[UNTESTED]`, and it blocks like any other survivor: nothing tests that code.
+- **Budgets.** The same budgets apply: `judge.sweep_budget_seconds` for the sweep,
+  `judge.self_check_budget_seconds` and `judge.self_check_max_experiments` for the
+  self-check, and the risk level's experiment cap for the judge. A self-check of five TS
+  experiments on a small fixture takes about 4 seconds.
 
 ## Risk and the judge
 
