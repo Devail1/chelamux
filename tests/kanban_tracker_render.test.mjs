@@ -135,19 +135,22 @@ test('the swipe nav strip has one chip per RENDERED column, with that column\'s 
     assert.equal(counts['Todo'], '0');
 });
 
-test('merge-all counts the mergeable awaiting_review cards wherever their Linear column is', () => {
+test('CMX-207: the toolbar has no batch Merge-all button; each mergeable card keeps its own Merge', () => {
     const ready = { status: 'awaiting_review', pr_mergeable: 'MERGEABLE', pr_checks: 'passing',
                     pr_url: 'https://github.com/o/r/pull/4' };
     renderKanban(_payload({ review: [
         _run({ task_id: 'CMX-4', tracker_state: 'In Review', ...ready }),
-        // A human dragged this one back in Linear — still mergeable on GitHub.
         _run({ task_id: 'CMX-5', tracker_state: 'In Progress', ...ready }),
-        // Control: failing checks never count.
+        // Control: failing checks never get a Merge button.
         _run({ task_id: 'CMX-6', tracker_state: 'In Review', ...ready, pr_checks: 'failing' }),
     ] }));
-    const btn = document.querySelector('#kanban-filters .kanban-merge-all-btn');
-    assert.ok(btn, 'no merge-all button for two mergeable cards');
-    assert.equal(btn.dataset.count, '2');
+    const toolbar = document.querySelector('#kanban-filters');
+    assert.equal(toolbar.querySelector('.kanban-merge-btn'), null);
+    assert.doesNotMatch(toolbar.textContent, /merge/i);
+    assert.equal(window.chela.kanbanMergeAll, undefined);
+    const perCard = [...board().querySelectorAll('.kanban-card .kanban-merge-btn')]
+        .map(b => b.dataset.taskId).sort();
+    assert.deepEqual(perCard, ['CMX-4', 'CMX-5']);
 });
 
 test('a tracker state name is escaped into the column header, never parsed as markup', () => {

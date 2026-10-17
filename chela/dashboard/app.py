@@ -5423,11 +5423,9 @@ def _auto_resolve_todo_conflict(
 def _merge_one(row: dict) -> dict:
     """Squash-merge one run's PR, then clean up the local worktree and branch.
 
-    Shared by the single-card merge endpoint and the batch merge-all endpoint.
-    Returns a result dict: on success ``{"ok": True, "merge_commit_sha": ...}``;
+    Used by the single-card merge endpoint. Returns a result dict: on success ``{"ok": True, "merge_commit_sha": ...}``;
     on failure ``{"ok": False, "error": ..., "status": <http-code>}`` where
-    ``status`` is the HTTP code the single-card endpoint should surface (the
-    batch endpoint ignores it and just records the error). Never raises —
+    ``status`` is the HTTP code the endpoint should surface. Never raises:
     gh/subprocess failures are captured into the error string.
 
     Squash — NOT rebase: rebase-merge silently drops the post-PR strike commit
@@ -5486,8 +5484,7 @@ def _merge_one(row: dict) -> dict:
     # Pre-merge: if GitHub reports CONFLICTING, attempt a strictly-guarded
     # auto-resolve of a TODO.md-ONLY bookkeeping conflict in the run's
     # worktree. Anything beyond TODO.md (or an ambiguous strike) aborts to
-    # manual. The batch merge-all path pre-filters to MERGEABLE, so this only
-    # fires for a single-card Merge on a conflicting PR.
+    # manual.
     if _pr_mergeable(pr_number, str(repo_dir)) == "CONFLICTING":
         worktree_path_pre = row.get("worktree_path")
         branch_name_pre = row.get("branch_name")
@@ -5598,68 +5595,6 @@ def api_dispatcher_run_close(task_id: str):
         return jsonify({"ok": False, "error": "a reason is required"}), 400
     result = dispatcher.close_run(task_id, reason, requeue=requeue, by="dashboard")
     return jsonify(result), (200 if result.get("ok") else 409)
-
-
-@app.route("/api/dispatcher/merge-all", methods=["POST"])
-@require_auth
-def api_dispatcher_merge_all():
-    """Batch squash-merge every awaiting_review run whose PR is MERGEABLE.
-
-    Optional ``{workflow_path}`` filter restricts to one workflow — the Kanban
-    passes the active filter unless it's "all". A run is eligible only when
-    ``status == 'awaiting_review'`` AND ``pr_state in ('open', None)`` AND
-    ``pr_mergeable == 'MERGEABLE'`` AND its checks are green (or the repo has no
-    CI at all); anything CONFLICTING / UNKNOWN / non-open, and anything whose CI
-    is red, pending or unread, lands under ``skipped`` and is never merged. Each
-    eligible run goes through the shared ``_merge_one`` helper, so each merge
-    gets the same cleanup — and the same live CI gate — as the single-card button.
-
-    Returns ``{ok, merged: [task_id...], skipped: [{task_id, reason}],
-    failed: [{task_id, error}]}``.
-    """
-    data = request.get_json(silent=True) or {}
-    wf_filter = (data.get("workflow_path") or "").strip()
-    target: str | None = None
-    if wf_filter:
-        resolved = _resolve_dispatch_workflow(wf_filter)
-        if resolved is None:
-            return jsonify({"ok": False, "error": f"unknown workflow: {wf_filter}"}), 400
-        target = str(resolved)
-
-    merged: list = []
-    skipped: list = []
-    failed: list = []
-    for row in dispatcher.list_runs():
-        if row.get("status") != "awaiting_review":
-            continue
-        if target is not None and row.get("workflow_path") != target:
-            continue
-        task_id = row.get("task_id")
-        pr_state = row.get("pr_state")
-        if pr_state not in ("open", None):
-            skipped.append({"task_id": task_id, "reason": f"pr_state={pr_state}"})
-            continue
-        if row.get("pr_mergeable") != "MERGEABLE":
-            skipped.append({"task_id": task_id, "reason": f"mergeable={row.get('pr_mergeable')}"})
-            continue
-        # Cheap pre-filter on the run row's cached check state, so a red PR is SKIPPED
-        # (reported, batch continues) instead of counted as a failure. _merge_one re-reads
-        # the checks from GitHub anyway and is the actual gate — this only keeps the batch's
-        # own report honest. ⛔ Anything that is not a green cache is skipped here, including
-        # a check state nobody has read yet: a batch merge must never be the thing that finds
-        # out what CI thought. A repo with NO CI at all (`none`) is not red and still merges
-        # — no checks is not the same as failing checks — and _merge_one logs that it did.
-        checks = row.get("pr_checks")
-        if checks not in (dispatcher.CI_PASSING, dispatcher.CI_NONE):
-            skipped.append({"task_id": task_id, "reason": f"checks={checks or 'unread'}"})
-            continue
-        result = _merge_one(row)
-        if result.get("ok"):
-            merged.append(task_id)
-        else:
-            failed.append({"task_id": task_id, "error": result.get("error")})
-
-    return jsonify({"ok": True, "merged": merged, "skipped": skipped, "failed": failed})
 
 
 def _allowed_source_files() -> set[str]:
