@@ -134,12 +134,26 @@ def test_shell_pattern(text, caught):
     assert bool(SHELL.search(text)) is caught
 
 
+# The published-copy rule bans the em dash (U+2014) only; an en dash is fine (CMX-213).
+EM_DASH = re.compile("—")
+
+
+@pytest.mark.parametrize(("text", "caught"), [
+    ("scope — note", True),
+    ("scope—note", True),
+    ("scope – note", False),
+    ("pages 3–5", False),
+])
+def test_em_dash_pattern(text, caught):
+    assert bool(EM_DASH.search(text)) is caught
+
+
 @pytest.mark.parametrize("rel", [".claude/skills/VENDORED.md", "CLAUDE.md"])
 def test_text_we_added_has_no_em_dash(rel):
-    assert not re.search("—|\\s–|–\\s", (ROOT / rel).read_text(encoding="utf-8"))
+    assert not EM_DASH.search((ROOT / rel).read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("skill", ["react-best-practices", "composition-patterns"])
 def test_scope_note_has_no_em_dash(skill):
     block = SCOPE.search((SKILLS / skill / "SKILL.md").read_text(encoding="utf-8"))
-    assert block and not re.search("—|\\s–|–\\s", block.group(0))
+    assert block and not EM_DASH.search(block.group(0))
