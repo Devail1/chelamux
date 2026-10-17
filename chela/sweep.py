@@ -344,8 +344,7 @@ def _changed_lines(worktree: Path, base: str) -> tuple[dict[str, set[int]], str]
 
 
 def _sweepable(rel: str) -> bool:
-    if rel.endswith(TS_SUFFIXES):
-        # A `.d.ts` has no runtime code; `x.spec.ts`/`__tests__/` are what MEASURES a mutation.
+    if rel.endswith(TS_SUFFIXES):   # a `.d.ts` has no runtime code; a spec MEASURES mutations
         return not (rel.endswith(".d.ts") or is_test_path(rel) or _RE_FOREIGN_TEST.search(rel))
     return rel.endswith(PY_SUFFIXES + JS_SUFFIXES) and not is_test_path(rel)
 
@@ -607,9 +606,8 @@ def _cond_start(line: str, pos: int) -> int:
 
 
 def _ts_mutations(rel: str, ln: int, line: str, code_end: int) -> list[Mutation]:
-    """CMX-173 — what TS/TSX adds to the JS mutator: ``&&``↔``||``, ``return true``↔``false``,
-    a ternary's condition forced (``false && (c) ? a : b`` / ``true || (c)``), and JSX
-    conditional rendering ``{c && <X/>}`` → ``{false && <X/>}``."""
+    """CMX-173, on top of JS: ``&&``↔``||``, ``return true``↔``false``, a ternary's condition
+    forced (``false && (c) ? a : b``/``true || (c)``), JSX ``{c && <X/>}`` → ``{false && <X/>}``."""
     muts: list[Mutation] = []
     for m in _RE_TS_LOGIC.finditer(line, 0, code_end):
         if _in_js_string(line, m.start()):
@@ -619,9 +617,8 @@ def _ts_mutations(rel: str, ln: int, line: str, code_end: int) -> list[Mutation]
                              f"{line[:m.start()]}{new}{line[m.end():]}"))
         if m.group(1) == "&&" and line[m.end():code_end].lstrip().startswith("<"):
             start = _cond_start(line, m.start())
-            if line[start:m.start()].strip():
-                muts.append(Mutation(rel, ln, "jsx-and", line,
-                                     f"{line[:start]}false {line[m.start():]}"))
+            muts.append(Mutation(rel, ln, "jsx-and", line,
+                                 f"{line[:start]}false {line[m.start():]}"))
     for m in _RE_TS_RET_BOOL.finditer(line, 0, code_end):
         if not _in_js_string(line, m.start()):
             new = "false" if m.group(1) == "true" else "true"

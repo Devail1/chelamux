@@ -204,9 +204,8 @@ _PY_SUFFIXES = (".py",)
 _JS_SUFFIXES = (".js", ".mjs", ".cjs")
 _TS_SUFFIXES = (".ts", ".tsx")
 
-# CMX-173: parse (never type-check — a parse is ~10x faster than `tsc --noEmit`) one .ts/.tsx
-# with the `typescript` package the REPO resolves from the file's directory. Exit 0 parses,
-# 1 does not (first diagnostic on stderr), 3 no `typescript` to parse with.
+# CMX-173: PARSE one .ts/.tsx (faster than `tsc --noEmit`) with the repo's own `typescript`,
+# resolved from the file's dir. Exit 0 parses, 1 does not (stderr says why), 3 no `typescript`.
 _TS_PARSE_JS = """
 const path = require("path"), fs = require("fs"), file = process.argv[1];
 let ts;
@@ -565,9 +564,8 @@ def parse_check(path: Path) -> tuple[bool, str]:
         status, detail = ts_parse(path)
         if status == TS_BROKEN:
             return False, f"the mutated TS does not parse: {detail}"
-        if status == TS_NO_PARSER:
-            return True, f"no parse check ran ({detail})"
-        return True, "the mutated TS still parses (typescript's parser)"
+        return True, (f"no parse check ran ({detail})" if status == TS_NO_PARSER
+                      else "the mutated TS still parses (typescript's parser)")
     return True, f"no parse check exists for {suffix or 'this file type'} — not parse-verified"
 
 

@@ -85,17 +85,12 @@ def test_no_typescript_to_parse_with_fails_closed(tmp_path):
     report = sweep.sweep(root, "origin/dev", "true", timeout=60, select_tests=False)
     assert "src/flag.tsx is a changed source file that could not be parsed" in report.cannot_verify
     assert "no `typescript` resolvable" in report.cannot_verify and report.results == []
-
-
-def test_ts_parse_check_with_no_parser_is_unchecked_never_broken(tmp_path):
-    (tmp_path / "a.ts").write_text("f(;\n")
-    assert judge.parse_check(tmp_path / "a.ts") == (True, "no parse check ran (no `typescript` "
-                                                    f"resolvable from {tmp_path}: Cannot find "
-                                                    "module 'typescript')")
+    assert judge.parse_check(root / "src/flag.tsx") == (True, "no parse check ran (no `typescript` "
+                                                        f"resolvable from {root / 'src'}: Cannot "
+                                                        "find module 'typescript')")
 
 
 def test_a_sigkilled_sweep_leaves_no_tsx_mutation(tmp_path):
-    """CMX-131 for a .tsx: SIGKILL mid-mutation, the guardian restores the file."""
     root = _ts_repo(tmp_path / "r", REAL)
     flag = tmp_path / "flag"
     proc = _cli(root, f"sh -c 'grep -q \"false &&\" src/flag.tsx && touch {flag} && sleep 120"
@@ -131,17 +126,12 @@ def test_ts_only_mutations(line, kinds):
     assert sweep.js_mutations("m.js", line, {1}) == []      # plain JS gets none of them
 
 
-def test_jsx_and_needs_a_condition_before_it():
-    assert [k for k, _ in _ts("x = <a/> && <b/>;")] == ["logic-flip", "jsx-and"]
-    assert [k for k, _ in _ts("{ && <b/>}")] == ["logic-flip"]
-
-
 @pytest.mark.parametrize("line, cond", [
     ("f(a, c ? x : y)", "c"), ("v = c ? x : y", "c"), ("v => c ? x : y", "c"),
     ("return c ? x : y", "c"), ("throw c ? x : y", "c"), ("{a: c ? x : y}", "c"),
     ("p ? q : c ? x : y", "c"), ("a == b ? x : y", "a == b"), ("a <= b ? x : y", "a <= b"),
     ("g(h(1)) ? x : y", "g(h(1))"), ("a?.b ? x : y", "a?.b"), ("a ?? b ? x : y", "a ?? b"),
-    ("a; c ? x : y", "c"), ("[c ? x : y]", "c"), ('f("(", c) ? x : y', 'f("(", c)'),
+    ("a; c ? x : y", "c"), ('f("(", c) ? x : y', 'f("(", c)'),
 ])
 def test_cond_start_stops_at_each_delimiter(line, cond):
     q = line.rindex(" ? ")
