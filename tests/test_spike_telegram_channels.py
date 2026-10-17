@@ -132,6 +132,26 @@ def test_server_main_answers_over_stdio(tmp_path):
     assert proc.stdout.splitlines() == ['{"jsonrpc": "2.0", "id": 1, "result": {}}']
 
 
+def test_server_main_turns_a_socket_line_into_a_channel_notification(tmp_path):
+    env = {"PATH": "/usr/bin:/bin", "SPIKE_CHANNEL_SOCK": "s.sock", "SPIKE_CHANNEL_LOG": "chan.log"}
+    proc = subprocess.Popen([sys.executable, "-I", str(SPIKE / "channel_server.py")], cwd=tmp_path,
+                            env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert drv.wait_for(lambda: (tmp_path / "s.sock").is_socket(), 10)
+        with socket.socket(socket.AF_UNIX) as s:
+            s.connect(str(tmp_path / "s.sock"))
+            s.sendall(b'{"content": "hello", "meta": {"probe_id": "P9"}}\n')
+        log = tmp_path / "chan.log"
+        assert drv.wait_for(lambda: log.exists() and '"pushed"' in log.read_text(), 10)
+        out, _ = proc.communicate("", timeout=10)
+    finally:
+        proc.kill()
+    assert [json.loads(line) for line in out.splitlines()] == [
+        {"jsonrpc": "2.0", "method": "notifications/claude/channel",
+         "params": {"content": "hello", "meta": {"probe_id": "P9"}}}]
+    assert json.loads(log.read_text().splitlines()[-1])["id"] == "P9"
+
+
 def test_driver_entry_point_parses_args():
     proc = subprocess.run([sys.executable, str(SPIKE / "run_spike.py"), "--help"],
                           capture_output=True, text=True, timeout=20)
@@ -145,9 +165,17 @@ def test_launch_names_session_then_windows_and_fails_closed(tmp_path, monkeypatc
     drv.launch(str(tmp_path), "w0", "haiku")
     drv.launch(str(tmp_path), "w1", "haiku")
     assert calls[0][:4] == ("new-session", "-d", "-s", "spike")
+    assert calls[1] == ("send-keys", "-t", "spike:w0", "Enter")  # accepts the dev-channel dialog
     assert calls[2][:3] == ("new-window", "-t", "spike")
+    for call, win in ((calls[0], "w0"), (calls[2], "w1")):
+        assert call[-5:-1] == ("-n", win, "-c", str(tmp_path / win))
+        assert call[-1] == ("env -u CHELA_WID -u CHELA_ACTOR claude --model haiku --strict-mcp-config "
+                            "--mcp-config mcp.json --dangerously-load-development-channels server:tgchan "
+                            "--debug-file debug.txt")
     cfg = json.loads((tmp_path / "w1" / "mcp.json").read_text())
-    assert cfg["mcpServers"]["tgchan"]["env"]["SPIKE_CHANNEL_SOCK"] == "chan.sock"
+    assert cfg == {"mcpServers": {"tgchan": {
+        "command": sys.executable, "args": ["-I", str(SPIKE / "channel_server.py")],
+        "env": {"SPIKE_CHANNEL_SOCK": "chan.sock", "SPIKE_CHANNEL_LOG": "chan.log"}}}}
     answers = iter([None])
     monkeypatch.setattr(drv, "wait_for", lambda pred, timeout, step=0.25: next(answers))
     with pytest.raises(RuntimeError, match="dialog never appeared"):
@@ -157,15 +185,117 @@ def test_launch_names_session_then_windows_and_fails_closed(tmp_path, monkeypatc
         drv.launch(str(tmp_path), "w3", "haiku")
 
 
+def _fake_probe_world(monkeypatch, pane_text, seen, ack):
+    used, timeouts = [], []
+    clock = iter([100.0, 101.5, 103.25])
+    monkeypatch.setattr(drv.time, "time", lambda: next(clock))
+    monkeypatch.setattr(drv, "send_channel", lambda cwd, body, pid: used.append(("channel", cwd, body, pid)))
+    monkeypatch.setattr(drv, "send_tmux", lambda win, body: used.append(("tmux", win, body)))
+    monkeypatch.setattr(drv, "wait_for", lambda pred, timeout, step=0.25: timeouts.append(timeout) or pred())
+    monkeypatch.setattr(drv, "first_row", lambda cwd, needle, kind=None:
+                        ack if (needle, kind) == ("ACK P1", "assistant") else seen if needle == "P1" else None)
+    monkeypatch.setattr(drv, "pane", lambda win: pane_text)
+    return used, timeouts
+
+
+SEEN = {"type": "user", "isMeta": True,
+        "attachment": {"type": "queued_command", "origin": {"kind": "channel", "server": "tgchan"}},
+        "message": {"content": [{"type": "image"}, {"type": "text", "text": "P1"}]}}
+
+
 @pytest.mark.parametrize("transport", ["channel", "tmux"])
-def test_probe_routes_by_transport(monkeypatch, transport):
-    used = []
-    monkeypatch.setattr(drv, "send_channel", lambda cwd, body, pid: used.append("channel"))
-    monkeypatch.setattr(drv, "send_tmux", lambda win, body: used.append("tmux"))
-    monkeypatch.setattr(drv, "first_row", lambda cwd, needle, kind=None: {"type": "user"})
-    monkeypatch.setattr(drv, "pane", lambda win: "❯ ")
-    row = drv.probe("c", "w0", transport, "idle_text", "body", "P1", timeout=1)
-    assert used == [transport] and row["delivered"] and row["acked"]
+def test_probe_reports_every_field(monkeypatch, transport):
+    # P1 sits ABOVE the last prompt too: only the text after the last ❯ counts as stranded.
+    used, timeouts = _fake_probe_world(monkeypatch, "> P1 sent\n❯ P1 still typed",
+                                       SEEN, {"message": {"content": "It is RED. ACK P1"}})
+    row = drv.probe("c", "w0", transport, "photo_caption", "body", "P1", timeout=7)
+    assert used == ([("channel", "c", "body", "P1")] if transport == "channel" else [("tmux", "w0", "body")])
+    assert timeouts == [7, 7]
+    assert row == {"probe": "P1", "transport": transport, "scenario": "photo_caption",
+                   "delivered": True, "acked": True, "seen_s": 1.5, "ack_s": 3.25,
+                   "row_type": "user", "is_meta": True, "attachment_type": "queued_command",
+                   "origin": {"kind": "channel", "server": "tgchan"}, "stranded_on_prompt": True,
+                   "said_red": True, "said_blue": False, "image_block": True}
+
+
+def test_probe_reports_a_lost_message_and_a_clean_prompt(monkeypatch):
+    _fake_probe_world(monkeypatch, "> P1 sent\n❯ ", None, None)
+    row = drv.probe("c", "w0", "tmux", "idle_text", "body", "P1", timeout=1)
+    assert row == {"probe": "P1", "transport": "tmux", "scenario": "idle_text",
+                   "delivered": False, "acked": False, "seen_s": None, "ack_s": None,
+                   "row_type": None, "is_meta": None, "attachment_type": None, "origin": None,
+                   "stranded_on_prompt": False, "said_red": False, "said_blue": False,
+                   "image_block": False}
+
+
+def test_probe_text_row_without_image_says_blue(monkeypatch):
+    seen = {"type": "user", "message": {"content": "P1"}}
+    _fake_probe_world(monkeypatch, "❯ ", seen, {"message": {"content": "Blue. ACK P1"}})
+    row = drv.probe("c", "w0", "channel", "photo_caption", "body", "P1", timeout=1)
+    assert (row["said_blue"], row["said_red"], row["image_block"], row["is_meta"],
+            row["attachment_type"]) == (True, False, False, None, None)
+
+
+def test_send_tmux_second_enter_only_for_a_stranded_paste_after_the_last_prompt(monkeypatch):
+    sent = []
+    monkeypatch.setattr(drv, "tmux", lambda *a, **kw: sent.append(a))
+    monkeypatch.setattr(drv, "pane", lambda w: "[Pasted text #1 +3 lines] earlier\n❯ ")
+    monkeypatch.setattr(drv.time, "sleep", lambda s: None)
+    drv.send_tmux("w0", "a\nb")
+    assert sent[-1] == ("send-keys", "-t", "spike:w0", "Enter") and len(sent) == 3
+
+
+def test_send_channel_writes_one_json_line_and_restores_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    got = []
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as lsn:
+        lsn.bind("chan.sock")
+        lsn.listen(1)
+
+        def accept():
+            conn, _ = lsn.accept()
+            with conn, conn.makefile("r") as fh:
+                got.extend(fh)
+        t = threading.Thread(target=accept, daemon=True)
+        t.start()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        drv.send_channel(str(tmp_path), "hi\nthere", "P7")
+        t.join(5)
+    assert Path.cwd() == elsewhere
+    assert [json.loads(line) for line in got] == [{"content": "hi\nthere", "meta": {"probe_id": "P7"}}]
+
+
+def test_transcript_rows_reads_only_this_cwds_project(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cwd = tmp_path / "w0.x"
+    cwd.mkdir()
+    # Claude Code's project-dir encoding: every non-alphanumeric becomes "-".
+    enc = "".join(c if c.isascii() and c.isalnum() else "-" for c in str(cwd.resolve()))
+    assert "_" in str(cwd.resolve()) and "." in cwd.name  # fixture exercises both
+    proj = tmp_path / ".claude" / "projects" / enc
+    proj.mkdir(parents=True)
+    (proj / "a.jsonl").write_text('{"n": 1}\n\n{"n": 2}\n')
+    other = tmp_path / ".claude" / "projects" / "-elsewhere"
+    other.mkdir()
+    (other / "b.jsonl").write_text('{"n": 3}\n')
+    assert drv.transcript_rows(str(cwd)) == [{"n": 1}, {"n": 2}]
+
+
+def test_scenarios_write_each_transports_own_photo_and_tag_every_probe(tmp_path):
+    rows = list(drv.scenarios(str(tmp_path), "w0", "W0"))
+    assert [(tr, sc, pid) for tr, sc, _, pid in rows] == [
+        (tr, sc, f"W0{tr[0]}{i}") for tr in ("tmux", "channel")
+        for i, sc in enumerate(("idle_text", "multiline", "photo_caption", "imperative"), 1)]
+    for tr, sc, body, pid in rows:
+        assert f"ACK {pid}" in body
+        if sc == "photo_caption":
+            assert f"📎 image: {tmp_path / f'photo-{tr}.png'}" in body
+        if sc == "multiline":
+            assert body.count("\n") == 4
+    assert (tmp_path / "photo-tmux.png").read_bytes() == drv.png((255, 0, 0))
+    assert (tmp_path / "photo-channel.png").read_bytes() == drv.png((0, 0, 255))
 
 
 def test_main_reports_files_busy_probes_and_cross_talk(tmp_path, monkeypatch, capsys):
