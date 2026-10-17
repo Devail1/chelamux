@@ -554,6 +554,15 @@ def _hand_in_size_passes(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hand_in_base_sync_passes(request, monkeypatch):
+    """🔀 CMX-189: the base-sync gate passes unless a module sets ``REAL_BASE_SYNC = True``."""
+    if not getattr(request.module, "REAL_BASE_SYNC", False):
+        from chela import dispatcher
+        monkeypatch.setattr(dispatcher, "check_base_sync",
+                            lambda *a, **k: {"ok": True, "record": None})
+
+
+@pytest.fixture(autouse=True)
 def _no_live_notifications(monkeypatch):
     """The fence for OUTBOUND side effects: no test may push a real notification.
 
