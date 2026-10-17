@@ -99,7 +99,11 @@ agent:
 
 judge:
   test_cmd: CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q
-  suite_timeout_seconds: 900
+  # ⏳ 1500 (was 900), Liav 2026-10-17: the full suite now takes ~13 min (8725 tests,
+  # 789s measured on CMX-174's head) and runs past 900s when 2 judges + 3 agents share the
+  # host, so baseline runs were cut off and reported as NOT GREEN. Revisit once CMX-195
+  # (timeout reported as a timeout) and CMX-196 (per-phase judge timings) land.
+  suite_timeout_seconds: 1500
   # ⏳ CMX-111: `chela judge sweep` (and the sweep inside `task-finished`) is BUDGETED. It
   # measures conditionals first, then return codes/values, then comparison flips, round-robin
   # across files, and stops at whichever budget runs out first. Every mutation it did not
@@ -204,6 +208,7 @@ most reasonable default, note the assumption in your PR body, and proceed. Run t
 commands **synchronously** and wait for them — never park work on a prompt for a human. The
 only sanctioned stop is a real blocker (see "If you get stuck" below), stated in your final
 message.
+A classifier or hook denial is final; never relaunch the same action in another mode or wrapper.
 
 ## Done criteria — follow in order
 
