@@ -236,6 +236,26 @@ def ts_parse(path: Path) -> tuple[str, str]:
         return TS_BROKEN, detail
     return TS_NO_PARSER, f"no `typescript` resolvable from {path.parent}: {detail}"
 
+
+def ts_unparseable(worktree: Path, items: list) -> str:
+    """⚖️ CMX-175: "" when every ``.ts``/``.tsx`` an experiment names parses, unmutated, with
+    the repo's own ``typescript``; else why not. ⛔ With no parser, no TS mutant's parse can be
+    proven, so a red suite might be a syntax error read as a guard firing — the run fails
+    CLOSED, as the sweep does (CMX-173). A held-out experiment's file is never named."""
+    for raw in items:
+        if not isinstance(raw, dict) or not isinstance(raw.get("file"), str):
+            continue
+        rel = raw["file"].strip()
+        if Path(rel).suffix.lower() not in _TS_SUFFIXES or not (worktree / rel).is_file():
+            continue        # not TS, or missing: `apply_mutation` reports it INVALID
+        status, detail = ts_parse(worktree / rel)
+        if status != TS_PARSES:
+            name = "a held-out experiment's file" if raw.get("held_out") is True else rel
+            return (f"{name} is TypeScript and could not be parse-checked before mutating it "
+                    f"({status}: {detail}) — a TS mutant whose parse cannot be proven is not "
+                    "evidence either way. Install the repo's `typescript` (and node).")
+    return ""
+
 # pytest ("3 failed, 1108 passed, 2 errors in 41s") and node --test ("# pass 15" /
 # "# fail 0") in one pass — a repo's `judge.test_cmd` may well run both.
 _RE_PASSED = re.compile(r"(\d+) passed\b")
@@ -243,6 +263,10 @@ _RE_FAILED = re.compile(r"(\d+) failed\b")
 _RE_ERRORS = re.compile(r"(\d+) errors?\b")
 _RE_NODE_PASS = re.compile(r"^# pass (\d+)$", re.M)
 _RE_NODE_FAIL = re.compile(r"^# fail (\d+)$", re.M)
+# ⚡ CMX-175: Vitest's summary counts test FILES on a line of its own above the TESTS
+# ("Test Files  1 failed | 2 passed (3)"); counted too, it inflates `ran` and blunts the
+# collapse check — a test file that no longer loads would still count as having run.
+_RE_VITEST_FILES = re.compile(r"^[ \t]*Test Files\b.*$", re.M)
 
 # ⛔ CMX-177: a count is not a cause. pytest's short summary line ("FAILED path::test - why")
 # and node --test's TAP line ("not ok N - test name") are the only place either format names
@@ -571,6 +595,7 @@ def parse_check(path: Path) -> tuple[bool, str]:
 
 def _counts(text: str) -> tuple[int, int, int]:
     """(passed, failed, errors), summed across pytest's summary and node --test's."""
+    text = _RE_VITEST_FILES.sub("", _strip_ansi(text))
     passed = sum(int(m) for m in _RE_PASSED.findall(text)) + \
         sum(int(m) for m in _RE_NODE_PASS.findall(text))
     failed = sum(int(m) for m in _RE_FAILED.findall(text)) + \
@@ -1604,6 +1629,10 @@ def _run_experiments(
             "judgment), and it did not install what `judge.test_cmd` needs."
         )
         return report
+    ts_problem = ts_unparseable(worktree, items)
+    if ts_problem:
+        report.cannot_verify = ts_problem
+        return report
 
     # THE BASELINE — the suite as the PR actually ships it, before anything is touched.
     baseline_started = time.monotonic()
@@ -2347,6 +2376,10 @@ def _self_check(
         report.cannot_verify = (
             f"the worktree could not be PROVISIONED to run the suite: {env_problem}"
         )
+        return report
+    ts_problem = ts_unparseable(worktree, items)
+    if ts_problem:
+        report.cannot_verify = ts_problem
         return report
 
     with tempfile.TemporaryDirectory(prefix="chela-judge-select-") as scratch:
