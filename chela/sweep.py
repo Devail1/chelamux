@@ -64,6 +64,7 @@ from chela import judge
 RECOVERY_MARKER = ".chela-sweep-recovery.json"
 PY_SUFFIXES = (".py",)
 JS_SUFFIXES = (".js", ".mjs")
+TS_SUFFIXES = (".ts", ".tsx")     # CMX-173: the JS mutator, plus TS/TSX-only mutations
 
 # Per-mutation statuses. KILLED / SURVIVED / INVALID are the judge's own verdicts; the two
 # below are mutations that never reached a suite, and are NEVER counted as killed.
@@ -79,8 +80,9 @@ DEFAULT_MAX_MUTATIONS = 60
 
 # Which mutations the budget reaches first: a dropped branch (the shape the judge finds most)
 # before a flipped return code/value, before a flipped comparison.
-_KIND_RANK = {"if-false": 0, "if-true": 1, "return-code": 2, "returncode": 2,
-              "return-none": 3, "return-value": 3, "compare-flip": 4}
+_KIND_RANK = {"if-false": 0, "jsx-and": 0, "ternary-false": 0, "if-true": 1, "ternary-true": 1,
+              "return-code": 2, "returncode": 2, "return-bool": 2, "return-none": 3,
+              "return-value": 3, "compare-flip": 4, "logic-flip": 4}
 
 _PY_FLIP = {ast.Eq: ("==", "!="), ast.NotEq: ("!=", "=="), ast.Lt: ("<", ">="),
             ast.GtE: (">=", "<"), ast.Gt: (">", "<="), ast.LtE: ("<=", ">")}
@@ -91,16 +93,21 @@ _JS_FLIP = {"===": "!==", "!==": "===", "==": "!=", "!=": "==",
 _RE_JS_CMP = re.compile(r"(?<=\s)(===|!==|==|!=|<=|>=|<|>)(?=\s)")
 _RE_JS_IF = re.compile(r"\bif\s*\(")
 _RE_JS_RET = re.compile(r"\breturn\s+([01])\b")
+_RE_TS_RET_BOOL = re.compile(r"\breturn\s+(true|false)\b")
+_RE_TS_LOGIC = re.compile(r"(?<=\s)(&&|\|\|)(?=\s)")
+# A ternary's `?`: whitespace both sides, so `?.`, `??` and an optional `x?: T` never match.
+_RE_TS_TERNARY = re.compile(r"(?<=\s)\?(?=\s)")
+_RE_TS_LEAD = re.compile(r"(?:return|throw|yield|case)\s+")
 _RE_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 # Source languages the mutators cannot handle (`.cjs` too: the JS mutator claims .js/.mjs).
 UNSUPPORTED_SUFFIXES = frozenset({
-    ".ts", ".tsx", ".mts", ".cts", ".jsx", ".cjs", ".go", ".rs", ".java", ".kt", ".kts",
+    ".mts", ".cts", ".jsx", ".cjs", ".go", ".rs", ".java", ".kt", ".kts",
     ".scala", ".rb", ".php", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".cs", ".swift",
     ".m", ".mm", ".lua", ".ex", ".exs", ".erl", ".hs", ".ml", ".clj", ".dart", ".sh",
     ".bash",
 })
-SUPPORTED_NOTE = "only Python (and .js/.mjs, line-based) is mutated"
+SUPPORTED_NOTE = "only Python (and .js/.mjs/.ts/.tsx, line-based) is mutated"
 
 # Verdicts, in the order they win. The exit code of `chela judge sweep` is EXIT_CODES[verdict].
 V_CLEAN, V_SURVIVORS, V_UNKNOWN = "clean", "survivors", "unknown"
@@ -337,6 +344,9 @@ def _changed_lines(worktree: Path, base: str) -> tuple[dict[str, set[int]], str]
 
 
 def _sweepable(rel: str) -> bool:
+    if rel.endswith(TS_SUFFIXES):
+        # A `.d.ts` has no runtime code; `x.spec.ts`/`__tests__/` are what MEASURES a mutation.
+        return not (rel.endswith(".d.ts") or is_test_path(rel) or _RE_FOREIGN_TEST.search(rel))
     return rel.endswith(PY_SUFFIXES + JS_SUFFIXES) and not is_test_path(rel)
 
 
@@ -344,7 +354,10 @@ _RE_FOREIGN_TEST = re.compile(r"(_test|_spec|Tests?)\.|\.spec\.|(^|/)(__tests__|
 
 
 def _unsupported(rel: str) -> bool:
-    return PurePosixPath(rel).suffix.lower() in UNSUPPORTED_SUFFIXES and not (
+    suffix = PurePosixPath(rel).suffix
+    # `x.TS` is not swept (the TS mutator claims `.ts`/`.tsx` exactly), so it stays UNKNOWN.
+    return (suffix.lower() in UNSUPPORTED_SUFFIXES or (
+        suffix.lower() in TS_SUFFIXES and suffix not in TS_SUFFIXES)) and not (
         is_test_path(rel) or _RE_FOREIGN_TEST.search(rel))
 
 
@@ -568,10 +581,73 @@ def _js_has_else(src: list[str], idx: int, after: int) -> bool:
     return False
 
 
-def js_mutations(rel: str, text: str, lines: set[int]) -> list[Mutation]:
-    """Every mechanical mutation of the CHANGED lines of one JS file. Line-based (no JS
-    parser): a mutation inside something it misread is caught by ``node --check`` and
-    reported UNPARSEABLE, never counted as killed."""
+def _cond_start(line: str, pos: int) -> int:
+    """Where the operand that ends at ``pos`` begins — scanning back to the first unmatched
+    bracket, ``,``/``;``, assignment, ``=>``, ternary ``?``/``:`` or ``return``-like keyword.
+    Line-based: a misread start is caught by the parse check, never counted as killed."""
+    depth = 0
+    i = pos - 1
+    while i >= 0:
+        c = line[i]
+        if _in_js_string(line, i):
+            pass
+        elif c in ")]}":
+            depth += 1
+        elif c in "([{":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and (c in ",;:" or (c == "?" and line[i + 1] not in ".?"
+                                             and line[i - 1] != "?")):
+            break
+        elif depth == 0 and ((c == ">" and line[i - 1] == "=") or (
+                c == "=" and line[i + 1] != "=" and line[i - 1] not in "=!<>")):
+            break
+        i -= 1
+    start = i + 1
+    start += len(line[start:pos]) - len(line[start:pos].lstrip())
+    lead = _RE_TS_LEAD.match(line, start)
+    return lead.end() if lead else start
+
+
+def _ts_mutations(rel: str, ln: int, line: str, code_end: int) -> list[Mutation]:
+    """CMX-173 — what TS/TSX adds to the JS mutator: ``&&``↔``||``, ``return true``↔``false``,
+    a ternary's condition forced (``false && (c) ? a : b`` / ``true || (c)``), and JSX
+    conditional rendering ``{c && <X/>}`` → ``{false && <X/>}``."""
+    muts: list[Mutation] = []
+    for m in _RE_TS_LOGIC.finditer(line, 0, code_end):
+        if _in_js_string(line, m.start()):
+            continue
+        new = "||" if m.group(1) == "&&" else "&&"
+        muts.append(Mutation(rel, ln, "logic-flip", line,
+                             f"{line[:m.start()]}{new}{line[m.end():]}"))
+        if m.group(1) == "&&" and line[m.end():code_end].lstrip().startswith("<"):
+            start = _cond_start(line, m.start())
+            if line[start:m.start()].strip():
+                muts.append(Mutation(rel, ln, "jsx-and", line,
+                                     f"{line[:start]}false {line[m.start():]}"))
+    for m in _RE_TS_RET_BOOL.finditer(line, 0, code_end):
+        if not _in_js_string(line, m.start()):
+            new = "false" if m.group(1) == "true" else "true"
+            muts.append(Mutation(rel, ln, "return-bool", line,
+                                 f"{line[:m.start(1)]}{new}{line[m.end(1):]}"))
+    for m in _RE_TS_TERNARY.finditer(line, 0, code_end):
+        if _in_js_string(line, m.start()):
+            continue
+        start = _cond_start(line, m.start())
+        cond = line[start:m.start()].rstrip()
+        if not cond:
+            continue
+        for kind, forced in (("ternary-false", "false && "), ("ternary-true", "true || ")):
+            muts.append(Mutation(rel, ln, kind, line,
+                                 f"{line[:start]}{forced}({cond}){line[start + len(cond):]}"))
+    return muts
+
+
+def js_mutations(rel: str, text: str, lines: set[int], *, ts: bool = False) -> list[Mutation]:
+    """Every mechanical mutation of the CHANGED lines of one JS (``ts``: TS/TSX) file.
+    Line-based (no JS parser): a mutation inside something it misread is caught by the parse
+    check (``node --check``; typescript's parser) and reported UNPARSEABLE, never killed."""
     src = text.split("\n")
     muts: list[Mutation] = []
     for ln in sorted(lines):
@@ -616,6 +692,8 @@ def js_mutations(rel: str, text: str, lines: set[int]) -> list[Mutation]:
             new = "1" if m.group(1) == "0" else "0"
             muts.append(Mutation(rel, ln, "return-code", line,
                                  f"{line[:m.start(1)]}{new}{line[m.end(1):]}"))
+        if ts:
+            muts.extend(_ts_mutations(rel, ln, line, code_end))
     return muts
 
 
@@ -635,6 +713,14 @@ def collect_mutations(worktree: Path, base: str) -> tuple[list[Mutation], str]:
                 ast.parse(text)
             except (SyntaxError, ValueError) as e:
                 return [], f"{rel} is a changed source file that could not be parsed: {e}"
+        if rel.endswith(TS_SUFFIXES):
+            # ⛔ fail CLOSED: with no parser no mutant can be proven to parse, so none is
+            # measured — the sweep cannot verify, it never reports them clean or skipped.
+            status, detail = judge.ts_parse(worktree / rel)
+            if status != judge.TS_PARSES:
+                return [], f"{rel} is a changed source file that could not be parsed: {detail}"
+            muts.extend(js_mutations(rel, text, changed[rel], ts=True))
+            continue
         gen = py_mutations if rel.endswith(PY_SUFFIXES) else js_mutations
         muts.extend(gen(rel, text, changed[rel]))
     return muts, ""
