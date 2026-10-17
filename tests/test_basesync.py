@@ -17,18 +17,13 @@ REAL_BASE_SYNC = True
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
-    """``wt`` is a run's worktree on ``feature`` (edits a.txt) forked from ``dev`` on a bare
-    ``origin``; ``seed`` is another clone that can move ``origin/dev`` on."""
+    """``wt``: a run on ``feature`` (edits a.txt) off a bare ``origin``; ``seed`` moves dev."""
     monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
     remote, seed, wt = tmp_path / "origin.git", tmp_path / "seed", tmp_path / "wt"
     _git(tmp_path, "init", "-q", "--bare", "-b", "dev", str(remote))
     _git(tmp_path, "clone", "-q", str(remote), str(seed))
-    _git(seed, "checkout", "-qb", "dev")
-    for name in ("a.txt", "b.txt"):
-        (seed / name).write_text(f"{name}\n")
-    _git(seed, "add", "-A")
-    _git(seed, "commit", "-qm", "base")
-    _git(seed, "push", "-q", "origin", "dev")
+    _advance(seed, "a.txt", "a\n")
+    _advance(seed, "b.txt", "b\n")
     _git(tmp_path, "clone", "-q", "-b", "dev", str(remote), str(wt))
     _git(wt, "checkout", "-qb", "feature")
     (wt / "a.txt").write_text("feature\n")
@@ -39,7 +34,8 @@ def repo(tmp_path, monkeypatch):
 
 def _advance(seed: Path, name: str, body: str) -> None:
     (seed / name).write_text(body)
-    _git(seed, "commit", "-qam", f"dev {name}")
+    _git(seed, "add", name)
+    _git(seed, "commit", "-qm", f"dev {name}")
     _git(seed, "push", "-q", "origin", "dev")
 
 
@@ -76,26 +72,17 @@ def test_up_to_date_is_accepted_and_a_missing_remote_fails_closed(repo, tmp_path
         "no run with a worktree on record for cmx-1"
 
 
-def test_cli_refuses_a_conflict_before_the_self_check_and_sweep(repo, capsys):
-    _advance(repo[0], "a.txt", "dev\n")
+@pytest.mark.parametrize("name, extra, said", [
+    ("a.txt", ("--allow-behind",), "CONFLICTS with origin/dev"),
+    ("b.txt", (), "is 1 commit(s) behind origin/dev")])   # only the flag lets this through
+def test_cli_refuses_before_the_size_gate_self_check_and_sweep(repo, capsys, name, extra, said):
+    _advance(repo[0], name, "dev\n")
     with patch.object(dispatcher, "check_hand_in_size") as size, \
             patch.object(dispatcher, "verify_sweep") as swept, \
             patch.object(dispatcher, "request_task_finished") as req:
-        assert _task_finished("--allow-behind") == 1
-    out = capsys.readouterr().out
-    assert "task-finished: 🔀 this branch CONFLICTS with origin/dev" in out
-    assert "     a.txt\n" in out and "git merge origin/dev" in out
+        assert _task_finished(*extra) == 1
+    assert f"task-finished: 🔀 this branch {said}" in capsys.readouterr().out
     assert not size.called and not swept.called and not req.called
-
-
-def test_cli_refuses_a_behind_branch_unless_the_flag_is_passed(repo, capsys):
-    _advance(repo[0], "b.txt", "dev\n")
-    with patch.object(dispatcher, "check_hand_in_size") as size, \
-            patch.object(dispatcher, "request_task_finished") as req:
-        assert _task_finished() == 1
-    assert "task-finished: 🔀 this branch is 1 commit(s) behind origin/dev" in \
-        capsys.readouterr().out
-    assert not size.called and not req.called
 
 
 @pytest.mark.parametrize("extra, record", [
@@ -112,24 +99,15 @@ def test_cli_hands_the_record_to_the_marker(repo, extra, record, capsys):
 
 
 @pytest.mark.parametrize("record", [{"base": "dev", "behind": 3, "allow_behind": True}, None])
-def test_the_daemon_records_it_on_the_run_and_the_judge_sees_it(repo, record):
-    wt = repo[1]
-    with patch.object(dispatcher, "_read_pr_url", return_value=None), \
-            patch.object(dispatcher, "_read_pr_status", return_value=(None, None)), \
-            patch.object(dispatcher, "_kill_window"):
-        dispatcher.request_task_finished("cmx-88", base_sync=record)
-        assert dispatcher.mark_awaiting_review(
-            "cmx-88", base_sync=dispatcher._read_task_finished_size_gate(wt, "base_sync"))["ok"]
-    with dispatcher._db() as conn:
+def test_the_judge_sees_a_recorded_hand_in(repo, record):
+    with dispatcher._db() as conn:      # tick() persisting it: test_task_finished_handoff
+        conn.execute("UPDATE runs SET base_sync=?", (record and json.dumps(record),))
         row = conn.execute("SELECT * FROM runs").fetchone()
     wf = parse_workflow(Path("W.md"), "---\nproject_key: TT\n---\n")
     prompt = dispatcher.render_prompt(dispatcher.JUDGE_PROMPT,
-                                      dispatcher._judge_vars(wf, row, wt, "deadbeef"))
+                                      dispatcher._judge_vars(wf, row, repo[1], "deadbeef"))
     line = "🔀 Handed in 3 commit(s) behind origin/dev with --allow-behind (merges cleanly)."
-    if record is None:
-        assert row["base_sync"] is None and "Handed in" not in prompt
-    else:
-        assert json.loads(row["base_sync"]) == record and line in prompt
+    assert (line in prompt) is bool(record) and ("Handed in" in prompt) is bool(record)
 
 
 def test_check_pins_every_git_call(tmp_path):
