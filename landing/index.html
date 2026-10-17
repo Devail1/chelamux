@@ -77,6 +77,7 @@
   .demo{margin:0}
   .demo video{width:100%; height:auto; display:block; border:1px solid var(--border-strong); border-radius:12px; background:#1e1e1e}
   .demo .demo-mobile{display:none}
+  .gate-demo{margin-top:36px}
   .demo figcaption{margin-top:10px; color:var(--text-dim); font-size:13px; text-align:center}
 
   /* sections: generous vertical rhythm; a hairline rule reinforces the break */
@@ -348,6 +349,10 @@ uv run chela status</code></pre>
         <p><code>chela merge --override --reason …</code> asks you. One Telegram tap (or the dashboard) approves it, re-checks head and CI, and records who approved.</p>
       </li>
     </ol>
+    <figure class="demo gate-demo">
+      <video src="chela-demo-gate.mp4" poster="img/poster-gate.jpg" width="1440" height="900" loop muted playsinline controls preload="none" aria-label="Demo of the gate: an agent opens a PR; the judge corrupts the guard and the PR's test stays green, so chela merge refuses; the agent adds a boundary test, the judge comes back clean and chela merge merges; or one Telegram tap approves an override"></video>
+      <figcaption>The gate on a throwaway repo, run by chela's real judge, merge gate and Telegram card.</figcaption>
+    </figure>
     <p class="more-line">The full lifecycle, every command and the rework rules: <a href="https://github.com/Devail1/chelamux/blob/main/docs/RUNS.md">docs/RUNS.md</a>.</p>
   </div>
 </section>
