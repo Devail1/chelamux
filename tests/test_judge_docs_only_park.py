@@ -200,7 +200,8 @@ def test_docs_only_diff_unknown_without_a_resolvable_base(tmp_path, repo):
 
 
 def test_docs_only_pr_parks_once_in_needs_human_with_one_notice(tmp_path, repo, monkeypatch):
-    sha = _pr(repo, {"docs/guide.md": "# guide\n\nmore\n", "changelog.d/CMX-19.md": "- x\n"})
+    # LICENSE is docs but not PROSE (CMX-208): an all-prose PR takes the prose-only tier.
+    sha = _pr(repo, {"docs/guide.md": "# guide\n\nmore\n", "LICENSE": "MIT-ish\n"})
 
     spawned, launched = _spawn(tmp_path, repo, sha, monkeypatch)
 
@@ -376,3 +377,32 @@ def test_no_test_cmd_is_a_final_unknown(tmp_path, monkeypatch):
     run = dispatcher.resolve_run("abc123")
     assert "test_cmd" in run["judge_detail"]
     assert run["status"] == "needs_human" and run["judge_unknown_final"] == 1
+
+
+
+# --- CMX-208: a PROSE-only PR skips the judge round and is merge-ready ---------------------
+
+
+@pytest.mark.parametrize("files, unreadable, judged", [
+    ({"docs/guide.md": "# more\n", "changelog.d/CMX-208.md": "- x\n"}, False, False),
+    ({"docs/guide.md": "# more\n", "app.py": "VALUE = 2\n"}, False, True),   # one code file
+    ({"docs/guide.md": "# more\n", "WORKFLOW.md": "# wf\n"}, False, True),   # always-human
+    ({"docs/guide.md": "# more\n"}, True, True),                             # unknown diff
+])
+def test_only_a_prose_pr_skips_the_judge(tmp_path, repo, monkeypatch, files, unreadable, judged):
+    sha = _pr(repo, files)
+    if unreadable:
+        monkeypatch.setattr(judge, "_changed_files", lambda *a: None)
+        monkeypatch.setattr(judge, "docs_only_diff", lambda *a: None)
+    spawned, launched = _spawn(tmp_path, repo, sha, monkeypatch)
+    run = dispatcher.resolve_run("abc123")
+    assert (spawned, bool(launched), run["status"], run["judge_sha"]) == \
+        (judged, judged, "awaiting_review", sha)
+    assert run["judge_state"] == (judge.J_RUNNING if judged else "prose_only")
+    if not judged:
+        assert not (tmp_path / "wts" / "judge-abc123").exists()
+        events = _notices()
+        assert [e["kind"] for e in events] == ["run_judge_clean"], events
+        assert "prose-only, merged on green CI" in events[0]["summary"]
+        assert dispatcher.merged_outside_gate(dict(run, pr_head_sha=sha)) is False
+        assert dispatcher.merged_outside_gate(dict(run, judge_state="cannot_verify")) is True

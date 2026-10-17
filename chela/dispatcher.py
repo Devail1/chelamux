@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, sizegate, sweep
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, risktier, sizegate, sweep
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -3710,7 +3710,7 @@ def merged_outside_gate(run: dict) -> bool:
     """
     judge_sha = run.get("judge_sha")
     head = run.get("pr_head_sha")
-    if run.get("judge_state") == judge.J_CLEAN and not (judge_sha and head and judge_sha != head):
+    if run.get("judge_state") in judge.MERGE_READY and not (judge_sha and head and judge_sha != head):
         return False
     for override in merge_overrides(run):
         sha = override.get("head_sha")
@@ -7906,10 +7906,19 @@ def _spawn_judge(
     # CMX-15 came back cannot_verify four times. Park it ONCE for a human instead; ⛔ it is
     # still not mergeable without a clean judge or `chela merge --override`. Only a definite
     # True parks: an unknown (`None`) is judged normally, as a code+docs PR is.
-    if judge.docs_only_diff(worktree, base) is True:
+    # ⚖️🪜 CMX-208: a PROSE-only PR (`chela.risktier`) skips the judge round outright and is
+    # merge-ready like `clean` on this head. Checked first; an unknown file list is not prose.
+    files = judge._changed_files(worktree, base)
+    skip = risktier.classify(files, risktier.always_human(wf))[0] == risktier.PROSE
+    if skip:
+        set_judge_state(task_id, judge.J_PROSE_ONLY, judge.PROSE_ONLY_DETAIL, sha=sha)
+        log.info("judge: %s: prose-only PR on %s — no judge round", task_id, sha[:12])
+    elif judge.docs_only_diff(worktree, base) is True:
+        skip = True
         park_final_unknown(task_id, judge.DOCS_ONLY_PARK_REASON, conn=conn)
         log.warning("judge: %s: docs-only PR on %s — parked for a human, no judge spawned",
                     task_id, sha[:12])
+    if skip:
         try:
             remove_worktree(wf.path.parent, worktree, resolve_workspace_root(wf))
         except Exception as e:  # noqa: BLE001 — a leftover dir costs disk, never the verdict
