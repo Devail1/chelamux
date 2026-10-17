@@ -62,8 +62,8 @@ def _chela(root: Path, tmp_path: Path, *args: str) -> tuple[int, dict]:
     ({"calc.py": BIG}, TEST, 1, "survivors", []),
     ({"calc.py": BIG}, COVERING, 0, "clean", []),
     ({"big.go": "package main\n"}, TEST, 3, "unknown", ["big.go"]),
-    ({"calc.py": BIG, "web/app.ts": "export const a = 1;\n"}, COVERING, 3, "unknown",
-     ["web/app.ts"]),
+    ({"calc.py": BIG, "web/app.jsx": "export const a = 1;\n"}, COVERING, 3, "unknown",
+     ["web/app.jsx"]),
     ({"calc.py": BIG, "lib.rs": "fn a() {}\n"}, TEST, 1, "survivors", ["lib.rs"]),
 ])
 def test_a_bare_repo_with_no_chela_config(tmp_path, branch, test_body, code, verdict,
@@ -118,7 +118,7 @@ def test_the_cmx111_budget_applies_in_standalone_mode(tmp_path, args, code, verd
     ("a.go", True), ("src/A.java", True), ("x.TS", True), ("a.cjs", True), ("a.py", False),
     ("a.js", False), ("README.md", False), ("a_test.go", False), ("FooTest.java", False),
     ("src/a.spec.ts", False), ("__tests__/a.ts", False), ("spec/a.rb", False),
-    ("inspect/a.go", True), ("latest.ts", True),
+    ("inspect/a.go", True), ("latest.rs", True),
 ])
 def test_unsupported_classification(rel, unsupported):
     assert sweep._unsupported(rel) is unsupported
@@ -138,7 +138,7 @@ def test_unsupported_files_is_exactly_the_live_foreign_source_vs_the_merge_base(
     _git(root, "merge", "-q", "--no-edit", "main")
     _git(root, "rm", "-q", "gone.go")
     _git(root, "mv", "old.java", "New.java")
-    (root / "committed.ts").write_text("x\n")
+    (root / "committed.cts").write_text("x\n")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "branch")
     (root / "wt_gone.rs").unlink()
@@ -147,7 +147,7 @@ def test_unsupported_files_is_exactly_the_live_foreign_source_vs_the_merge_base(
     for rel in ("untracked.kt", "ignored.go", "untracked_test.go"):
         (root / rel).write_text("x\n")
     files, err = sweep.unsupported_files(root, "main")
-    assert (files, err) == (["New.java", "committed.ts", "edited.go", "untracked.kt"], "")
+    assert (files, err) == (["New.java", "committed.cts", "edited.go", "untracked.kt"], "")
 
 
 @pytest.mark.parametrize("failing", ["merge-base", "diff", "ls-files"])
@@ -514,7 +514,7 @@ def test_foreign_test_file_patterns_are_never_unknown_source(rel, unsupported):
 
 
 @pytest.mark.parametrize("suffix", [
-    ".ts", ".tsx", ".mts", ".cts", ".jsx", ".cjs", ".go", ".rs", ".java", ".kt", ".kts",
+    ".mts", ".cts", ".jsx", ".cjs", ".go", ".rs", ".java", ".kt", ".kts",
     ".scala", ".rb", ".php", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".cs", ".swift",
     ".m", ".mm", ".lua", ".ex", ".exs", ".erl", ".hs", ".ml", ".clj", ".dart", ".sh",
     ".bash"])

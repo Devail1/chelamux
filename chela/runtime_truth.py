@@ -3229,6 +3229,44 @@ def _closed_run_stalls_report(_declared: None, obs: Observation) -> list[Finding
     return out
 
 
+# --- fact: who may drive the agents from Telegram (CMX-185) ---------------------------
+#
+# With no sender allowlist the bridge keeps its old chat-only gate: every member of the
+# bound group can type into every agent and answer its permission prompts. That is a
+# deliberate upgrade default (nobody is locked out), so doctor is where it must be loud.
+
+def _telegram_senders_read() -> Observation:
+    from chela.telegram.senders import ALLOWED_USERS_VAR, bridge_env, parse_allowed_users
+    env = bridge_env()                             # the bridge's own resolution
+    if not (env.get("TELEGRAM_BOT_TOKEN") or "").strip():
+        return observed(None)                      # no bridge — nobody to let in
+    return observed(parse_allowed_users(env.get(ALLOWED_USERS_VAR)))
+
+
+def _telegram_senders_report(_declared: None, obs: Observation) -> list[Finding]:
+    if obs.value is None:
+        return []
+    allowed, bad = obs.value
+    out = []
+    if bad:
+        out.append(Finding(
+            WARN, f"CHELA_TELEGRAM_ALLOWED_USERS ignores {len(bad)} non-numeric entr"
+                  f"{'y' if len(bad) == 1 else 'ies'}: {', '.join(bad)}",
+            "Only numeric Telegram user ids are allowed (not @usernames).",
+        ))
+    if not allowed:
+        out.append(Finding(
+            WARN, "Telegram sender allowlist is EMPTY — chat-only mode: any member of the "
+                  "bound chat can drive every bound agent",
+            "Set CHELA_TELEGRAM_ALLOWED_USERS to your numeric Telegram user id(s) in "
+            "chela.env or secrets.env, then restart chela-telegram.",
+        ))
+        return out
+    out.append(Finding(
+        OK, f"Telegram accepts updates from {len(allowed)} allow-listed user(s) only"))
+    return out
+
+
 # --- the registry ---------------------------------------------------------------------
 
 def facts() -> list[Fact]:
@@ -3422,6 +3460,14 @@ def facts() -> list[Fact]:
             declare=_agent_commands,
             read_back=_agent_cmd_read,
             report=_agent_cmd_report,
+        ),
+        Fact(
+            name="telegram.sender_allowlist",
+            declared_by="CHELA_TELEGRAM_ALLOWED_USERS (chela.env / secrets.env)",
+            owned_by="the env chela-telegram starts with (chela-env.sh's resolution)",
+            declare=lambda: None,
+            read_back=_telegram_senders_read,
+            report=_telegram_senders_report,
         ),
         Fact(
             name="dispatch.gh_auth",

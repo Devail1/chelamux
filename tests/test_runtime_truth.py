@@ -117,6 +117,9 @@ def fleet(tmp_path, monkeypatch, request):
     # the state a window not born under a poisoned tmux server actually has. Explicit,
     # not assumed: a leak here would make every other test in this file's baseline lie.
     monkeypatch.delenv("NODE_CHANNEL_FD", raising=False)
+    # telegram.sender_allowlist: no bridge is configured, so there is nobody to let in.
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("CHELA_TELEGRAM_ALLOWED_USERS", raising=False)
     monkeypatch.delenv("NODE_CHANNEL_SERIALIZATION_MODE", raising=False)
     # CMX-313: the fact only applies inside a tmux pane (see _process_node_ipc_env_applies)
     # — force it on here, same as _collector_applies above, so the fleet baseline exercises
@@ -656,7 +659,15 @@ def _break_services_current(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_telegram_sender_allowlist(tmp_path, monkeypatch):
+    """The bridge has a token (in secrets.env, where it belongs) and NO sender allowlist —
+    every member of the bound chat can drive every agent (CMX-185)."""
+    (config.CHELA_DIR / "secrets.env").write_text("TELEGRAM_BOT_TOKEN=123:fake\n")
+    return doctor.WARN
+
+
 CORRUPTIONS = {
+    "telegram.sender_allowlist": _break_telegram_sender_allowlist,
     "relay.transcripts": _break_relay_transcripts,
     "env.file": _break_env_file,
     "env.running": _break_env_running,

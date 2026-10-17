@@ -69,6 +69,22 @@ ids don't. Address siblings by `@N`, and re-derive them from `chela status` afte
   Claude session, your own tracker edits included: push them from a plain terminal, or ask
   the operator to.
 
+## Filing tasks: declare the blocking edges
+
+This rule comes from the `to-tickets` skill in Matt Pocock's
+[`mattpocock/skills`](https://github.com/mattpocock/skills) (MIT), adapted to chela's trackers.
+
+- **Every task you file declares what blocks it, as a native tracker link.** On Linear that
+  is a *blocked by* relation (`blockedBy`); in `TODO.md` it is the `<!-- depends: … -->`
+  marker. The dispatcher holds a task while any blocker is open, and it reads only those
+  links: a dependency written in the brief's prose is invisible to it, so the task gets
+  claimed before the work it needs has merged. If nothing blocks a task, file no edge.
+- **A multi-slice task is filed as one issue per slice, chained.** Cut the work into
+  slices that each land as one reviewable PR, file each slice as its own issue with its own
+  four-field brief, and make each slice *blocked by* the one before it. The parent becomes
+  a tracking issue: it lists the slices, carries no brief of its own, and stays out of the
+  claimable states (on Linear, outside `ready_states`) so no agent is ever dispatched on it.
+
 ## Risk and the judge
 
 - A task's **risk level** comes only from the tracker (`<!-- risk: … -->`, or a `risk:*`
