@@ -103,17 +103,26 @@ it if the run is `kill -9`ed.
 
 ## Install
 
-Requires Linux, WSL or macOS · Python ≥ 3.11 · `tmux` · `git` · [`uv`](https://docs.astral.sh/uv/) ·
-the `claude` CLI · `gh` (for the PR flow).
+Requires Linux, WSL or macOS · `git` · `tmux` · [`uv`](https://docs.astral.sh/uv/) (it fetches
+Python ≥ 3.11 itself if you have none) · the `claude` CLI. That is all a first run needs:
+`gh`, Telegram, Linear and pm2 are follow-ups, not prerequisites.
 
 ```bash
-git clone https://github.com/Devail1/chelamux && cd chelamux
-uv sync --all-extras          # core + dashboard + Telegram bridge, in one command
-uv run chela status           # what chela sees
+uv tool install "chelamux[dashboard] @ git+https://github.com/Devail1/chelamux"
+tmux new-session -d -s chela -n researcher     # a window = an agent
+chela run > ~/chela-run.log 2>&1 &             # the daemon (the engine)
+chela dashboard                                # the wall: http://127.0.0.1:5001
 ```
 
-Full walkthrough, clone to a first agent-opened PR:
-[**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md).
+Four commands; on a clean Ubuntu box the wall is up about 15s after the first one.
+`scripts/check_fresh_install.sh` runs
+exactly this block in a clean container, times it and checks that `chela doctor` passes
+(the test suite runs it wherever docker or podman is available). If your shell does not find `chela`, run `uv tool update-shell`.
+
+> **`chela run` is the engine, not a helper.** The scheduler, the dispatcher, the
+> needs-input scan and the decisions inbox all live in its loop. Kill it and nothing *looks*
+> broken (the dashboard still works and agents still run), but the fleet stops doing
+> anything by itself.
 
 chela never touches credentials: it drives the `claude` CLI in your tmux windows (run
 `claude` and `/login` once), so the whole fleet runs as **one Claude account** and shares
@@ -125,21 +134,15 @@ blocked-agent handling, answering from your phone, and the merge gate
 ## First run
 
 ```bash
-tmux new-session -d -s chela -n researcher        # a window = an agent
-uv run chela status                               # what chela sees
-uv run chela schedule add researcher --every 1h --prompt "Run your research cycle."
-uv run chela run                                  # the daemon; leave it running
-uv run chela dashboard                            # http://127.0.0.1:5001
+chela status                                      # what chela sees
+chela schedule add researcher --every 1h --prompt "Run your research cycle."
+chela doctor                                      # required checks vs optional integrations
 ```
 
-> **`chela run` is the engine, not a helper.** The scheduler, the dispatcher, the
-> needs-input scan and the decisions inbox all live in its loop. Kill it and nothing *looks*
-> broken (the dashboard still works and agents still run), but the fleet stops doing
-> anything by itself.
-
 To dispatch work, follow [**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md) (about
-10 minutes, clone to a first agent-opened PR). Prefer an agent to set it up? Copy
-[`skills/chela-setup`](skills/chela-setup/SKILL.md) into `~/.claude/skills/`.
+10 minutes, install to a first agent-opened PR). Prefer an agent to set it up? Copy
+[`skills/chela-setup`](skills/chela-setup/SKILL.md) into `~/.claude/skills/`. Hacking on chela
+itself? Clone it and `uv sync --all-extras` ([CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## What's new in 0.16
 
