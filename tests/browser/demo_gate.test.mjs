@@ -46,6 +46,31 @@ test('each scene kind renders its beats with the script\'s own durations', async
     assert.equal(readdirSync(join(dir, 'gate.frames')).filter((f) => f.endsWith('.png')).length, 12);
 });
 
+test('a comment taller than the window scrolls down to its diff, then holds there', async (t) => {
+    const { browser, why } = await launchChromium();
+    if (!browser) { t.skip(why); return; }
+    await browser.close();
+    const dir = mkdtempSync(join(tmpdir(), 'chela-demo-gate-'));
+    const filler = Array.from({ length: 60 }, (_, i) => `* filler line ${i}`).join('\n');
+    writeFileSync(join(dir, 'scenes.json'), JSON.stringify([
+        { kind: 'comment', caption: 'c', body: `## head\n\n${filler}\n\n\`\`\`diff\n- a\n+ b\n\`\`\`` },
+    ]));
+    const r = run(join(dir, 'scenes.json'), dir);
+    assert.equal(r.status, 0, r.stderr);
+    const list = readFileSync(join(dir, 'gate.frames', 'frames.txt'), 'utf8').trim().split('\n');
+    const durations = list.filter((l) => l.startsWith('duration ')).map((l) => Number(l.slice(9)));
+    const files = list.filter((l) => l.startsWith('file ')).map((l) => l.slice(6, -1));
+    // The top (3 s), at least one 24 px scroll step (0.04 s each), the diff held (6 s).
+    assert.equal(durations[0], 3);
+    assert.equal(durations.at(-1), 6);
+    const steps = durations.slice(1, -1);
+    assert.ok(steps.length > 1 && steps.every((d) => d === 0.04), String(durations));
+    const png = (f) => readFileSync(join(dir, 'gate.frames', f));
+    const held = files.at(-1);             // listed twice (concat), so its step is at(-3)
+    assert.ok(!png(files[0]).equals(png(held)), 'the held frame is scrolled, not the top again');
+    assert.ok(!png(files.at(-3)).equals(png(held)), 'the hold lands on the target, past the last step');
+});
+
 test('ttyLine colours a prompt, a refusal, a success and a diff line, and dims the rest', () => {
     assert.equal(ttyLine('$ chela merge <x>'), '<span class="p">$</span> chela merge &lt;x&gt;');
     assert.equal(ttyLine('merge REFUSED: no'), '<span class="bad">merge REFUSED: no</span>');

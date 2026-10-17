@@ -29,8 +29,14 @@ def _gate():
 
 
 def test_the_scenes_are_the_real_gates_own_output(tmp_path):
+    # The child inherits an OPERATOR's environment: a CHELA_DIR and a HOME that are not the
+    # demo's. Unset, CHELA_DIR would fall back to $HOME/.chela — the very path gate.py sets —
+    # so only a planted one can tell "gate.py set its own" from "gate.py forgot to".
+    operator = tmp_path / "operator"
+    (operator / ".chela").mkdir(parents=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith("CHELA_")}
-    env["CHELA_DEMO_ROOT"] = str(tmp_path / "root")
+    env.update(CHELA_DEMO_ROOT=str(tmp_path / "root"), HOME=str(operator),
+               CHELA_DIR=str(operator / ".chela"))
     proc = subprocess.run([sys.executable, str(DEMO / "gate.py"), str(tmp_path / "out")],
                           env=env, capture_output=True, text=True, timeout=300)
     assert proc.returncode == 0, proc.stderr[-3000:]
@@ -54,6 +60,34 @@ def test_the_scenes_are_the_real_gates_own_output(tmp_path):
     chela_dir = tmp_path / "root" / "gate" / "home" / ".chela"
     assert (chela_dir / "scheduler.db").is_file()
     assert any((chela_dir / "overrides").iterdir())
+    assert list(operator.rglob("*")) == [operator / ".chela"]   # the operator's: untouched
+
+
+def test_main_runs_the_scenes_under_its_own_home_and_chela_dir_only(monkeypatch, tmp_path):
+    operator = tmp_path / "operator"
+    monkeypatch.setenv("CHELA_DEMO_ROOT", str(tmp_path / "root"))
+    for key, value in {"HOME": str(operator), "CHELA_DIR": str(operator / ".chela"),
+                       "CHELA_OVERRIDE_WAIT_S": "1", "CHELA_ACTOR": "orchestrator",
+                       "TELEGRAM_BOT_TOKEN": "123:real", "CHELA_NTFY_TOPIC": "real-topic",
+                       "TMUX": "/tmp/tmux-1000/default,1,0", "TMUX_PANE": "%7"}.items():
+        monkeypatch.setenv(key, value)         # restored after the test, whatever main sets
+    gate = _gate()
+    seen = {}
+
+    def scenes(repo):
+        seen.update(os.environ, repo=repo, chela_dir_exists=Path(os.environ["CHELA_DIR"]).is_dir())
+        return []
+
+    monkeypatch.setattr(gate, "scenes", scenes)
+    assert gate.main([str(tmp_path / "out")]) == 0
+    home = tmp_path / "root" / "gate" / "home"
+    assert seen["HOME"] == str(home)
+    assert seen["CHELA_DIR"] == str(home / ".chela") and seen["chela_dir_exists"]
+    assert seen["CHELA_OVERRIDE_WAIT_S"] == "600"
+    for leak in ("CHELA_ACTOR", "TELEGRAM_BOT_TOKEN", "CHELA_NTFY_TOPIC", "TMUX", "TMUX_PANE"):
+        assert leak not in seen, leak
+    assert seen["repo"] == tmp_path / "root" / "gate" / "shop"
+    assert json.loads((tmp_path / "out" / "scenes.json").read_text()) == []
 
 
 def test_make_repo_never_deletes_a_root_it_did_not_build(tmp_path):
