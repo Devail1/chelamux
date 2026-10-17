@@ -123,9 +123,11 @@ class Finding:
     title: str
     detail: str = ""
     fact: str = ""
+    required: bool = True
 
     def render(self) -> str:
-        line = f"{_SYMBOL.get(self.level, '·')} {self.title}"
+        optional = "" if self.required or self.level == OK else "(optional) "
+        line = f"{_SYMBOL.get(self.level, '·')} {optional}{self.title}"
         return f"{line}\n    {self.detail}" if self.detail else line
 
 
@@ -177,6 +179,9 @@ class Fact:
         machine rather than a broken fleet, and say why at the entry.
     :param applies: skip a fact that is not a fact of THIS install (the test suites are
         not a fact of an installed wheel).
+    :param required: ``False`` for an integration a first run does not need (Telegram,
+        Linear). Its findings still print, but an ERROR among them does not fail
+        ``chela doctor`` (CMX-92).
     """
 
     name: str
@@ -187,6 +192,7 @@ class Fact:
     report: Callable[[Any, Observation], list[Finding]]
     unverifiable_level: str = ERROR
     applies: Callable[[], bool] = lambda: True
+    required: bool = True
 
 
 # --- the engine: the same three steps for every fact, forever -----------------------
@@ -248,7 +254,7 @@ def audit_all() -> list[Finding]:
 
 
 def _stamp(fact: Fact, finding: Finding) -> Finding:
-    return replace(finding, fact=fact.name)
+    return replace(finding, fact=fact.name, required=fact.required)
 
 
 def fact(name: str) -> Fact:
@@ -2269,6 +2275,8 @@ def _linear_issue_cap_read() -> Observation:
 def _linear_issue_cap_report(declared: dict[str, str], obs: Observation) -> list[Finding]:
     from chela.sources import linear
 
+    if not declared:
+        return [Finding(OK, "Linear tracker: not configured (optional)")]
     out: list[Finding] = []
     counts = obs.value or {}
     for team, wf_name in sorted(declared.items()):
@@ -3245,7 +3253,7 @@ def _telegram_senders_read() -> Observation:
 
 def _telegram_senders_report(_declared: None, obs: Observation) -> list[Finding]:
     if obs.value is None:
-        return []
+        return [Finding(OK, "Telegram bridge: not configured (optional)")]
     allowed, bad = obs.value
     out = []
     if bad:
@@ -3468,6 +3476,7 @@ def facts() -> list[Fact]:
             declare=lambda: None,
             read_back=_telegram_senders_read,
             report=_telegram_senders_report,
+            required=False,
         ),
         Fact(
             name="dispatch.gh_auth",
@@ -3509,6 +3518,7 @@ def facts() -> list[Fact]:
             declare=_linear_teams,
             read_back=_linear_issue_cap_read,
             report=_linear_issue_cap_report,
+            required=False,
         ),
         Fact(
             name="dispatch.hold",
