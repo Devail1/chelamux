@@ -30,6 +30,7 @@ ids don't. Address siblings by `@N`, and re-derive them from `chela status` afte
 | `chela events --type T --tail N` | The durable event log, i.e. the record of what actually happened. |
 | `chela escalate "…" --recommend "…"` | Hand a decision to the human, with your recommendation. |
 | `chela dispatch --pause` / `--resume` | **HOLD the queue** while you reorder the tracker: no new claims, judges or rework re-spawns until you release; running agents and judges finish. See the gotcha below. |
+| `chela dispatch --pause --all` / `--resume` | **Quiet the whole fleet** when the operator needs the machine: holds the queue, then Escape + a "start nothing" message to each dispatched agent (message only while it runs a self-check). `--resume` sends them "resume". Use this, never your own keys or signals. |
 
 ## Messaging
 
