@@ -26,6 +26,11 @@ out = next((a.split("=", 1)[1] for a in args if a.startswith("--outputFile.json=
 filters = [a for a in args if not a.startswith("-") and a != "run"]
 files = sorted(p.as_posix() for p in Path("src").rglob("*.test.ts"))
 ran = [f for f in files if not filters or any(x in f for x in filters)]
+d = Path("src/d.ts").read_text()
+if "KILL" in d:         # a guard fires: one of the tests fails, the count holds
+    sys.exit(print(f"Tests  1 failed | {len(ran) - 1} passed ({len(ran)})") or 1)
+if "COLLAPSE" in d:     # the suite stops running: red, and the count collapses
+    sys.exit(print("Tests  0 passed (0)") or 1)
 print(f"Tests  {len(ran)} passed ({len(ran)})")
 if out and not os.environ.get("FAKE_NO_REPORT"):
     Path(out).write_text(json.dumps({"testResults": [
@@ -94,6 +99,32 @@ def test_a_ts_file_no_test_reaches_is_UNTESTED_never_skipped(tmp_path, calls):  
     assert calls[1:] == [CMD]               # it still RAN — on the full suite
 
 
+@pytest.mark.parametrize("marker, verdict", [("KILL", judge.KILLED),
+                                             ("COLLAPSE", judge.INVALID)])
+def test_an_untested_ts_file_that_is_not_a_survivor_keeps_its_own_verdict_and_reason(
+    tmp_path, marker, verdict,
+):
+    """GUARD: UNTESTED is a SURVIVOR label. A KILLED or INVALID outcome on the very same
+    untested file keeps exactly the reason :func:`judge.adjudicate` gave it."""
+    root = _repo(tmp_path / "r")
+    report = _mutate(root, "src/d.ts", "x === 3", f"x === 3 /* {marker} */")
+    [o] = report.outcomes
+    assert o.plan is not None and o.plan.untested     # the precondition: it IS untested
+    assert o.verdict == verdict, o.reason
+    expect = judge.adjudicate(o.experiment, True, "", True, o.parse_detail, o.baseline,
+                             o.mutated)
+    assert o.reason == expect.reason and "UNTESTED" not in o.reason
+
+
+def test_an_unreached_js_file_survives_as_a_plain_survivor_not_UNTESTED(tmp_path):
+    """GUARD: only a TS file is UNTESTED — an unreached ``.js`` survivor keeps its reason."""
+    root = _repo(tmp_path / "r")
+    report = _mutate(root, "src/e.js", "x === 4", "x !== 4")
+    [o] = report.outcomes
+    assert o.verdict == judge.SURVIVED and o.plan is not None and o.plan.full
+    assert "UNTESTED" not in o.reason
+
+
 def test_only_a_ts_file_is_UNTESTED(tmp_path):
     root = _repo(tmp_path / "r")
     sel = js.Selector(root, [js.Case(f, f, True, f) for f in ("src/a.test.ts", "src/c.test.ts")])
@@ -110,6 +141,11 @@ def test_the_vitest_baseline_asks_for_a_json_report_and_reads_its_universe(tmp_p
     assert calls == [f"{CMD} --reporter=default --reporter=json --outputFile.json={report}"]
     assert baseline.green and selector is not None, why
     assert {c.js for c in selector.cases} == {"src/a.test.ts", "src/b.test.ts", "src/c.test.ts"}
+    assert why == "per-mutation Vitest selection over the baseline's 3 test(s)"
+    (root / "src/z.test.ts").write_text("")     # the count is the report's, not a constant
+    _, _, why = judge.run_baseline(root, CMD, 60, tmp_path)
+    assert why == "per-mutation Vitest selection over the baseline's 4 test(s)"
+    (root / "src/z.test.ts").unlink()
 
     monkeypatch.setenv("FAKE_NO_REPORT", "1")
     report.unlink()
@@ -173,8 +209,12 @@ def test_the_sweep_cli_tags_an_untested_survivor(monkeypatch, capsys):
     report = sweep.SweepReport(results=[
         sweep.SweepResult(mut, judge.SURVIVED, "UNTESTED — no test file imports src/d.ts."),
         sweep.SweepResult(sweep.Mutation("src/a.ts", 2, "if-false", "a", "b"), judge.SURVIVED,
-                          "the suite stayed green")])
+                          "the suite stayed green"),
+        # a survivor whose reason merely MENTIONS untested is not tagged UNTESTED
+        sweep.SweepResult(sweep.Mutation("src/c.ts", 3, "if-false", "c", "d"), judge.SURVIVED,
+                          "the suite stayed green — see UNTESTED elsewhere")])
     monkeypatch.setattr(sweep, "run_sweep", lambda cwd, **kw: report.as_dict())
     assert _cli_main("--cwd", ".") == 1
     out = capsys.readouterr().out
     assert "  [UNTESTED] src/d.ts:1 compare-flip" in out and "  [SURVIVED] src/a.ts:2" in out
+    assert "  [SURVIVED] src/c.ts:3" in out and out.count("[UNTESTED]") == 1

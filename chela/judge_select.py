@@ -40,6 +40,8 @@ reaches it (rule 2, resolving ``./a`` and ``./a.js`` to ``a.ts``). Measured on a
 fixture: the static graph costs milliseconds, ``vitest related`` ~1.5s (a whole vitest start
 per mutation), and a ``a.ts`` → ``a.test.ts`` naming rule misses every TRANSITIVE importer. A
 TS file NO test reaches is UNTESTED: it still runs the full suite, and survives as UNTESTED.
+Only "no test reaches it" is UNTESTED: a selection that FAILED (say ``observers`` raised)
+runs the full suite untagged — not knowing which tests reach a file is not knowing that none do.
 
 Anything it cannot reason about — an unknown file type, a ``conftest.py`` (which every test
 under it imports implicitly), a ``test_cmd`` that is not a plain pytest invocation, a baseline
