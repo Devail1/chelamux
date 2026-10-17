@@ -310,6 +310,8 @@ class SuiteResult(NamedTuple):
     # 📄 CMX-163: how it ran — {cmd, cwd, env_diff, started, ended, output} — so a red run
     # can be written to a failure log. Never part of a verdict.
     run: dict | None = None
+    # ⏳ CMX-195: killed at the timeout — it never FINISHED, so it was never red either.
+    timed_out: bool = False
 
     @property
     def green(self) -> bool:
@@ -455,6 +457,8 @@ class Report:
     # 📄 CMX-163: every NON-GREEN infrastructure suite run (the baseline, its coverage run, the
     # base-branch diagnostic) — and the failure-log paths `judge_run` wrote them to.
     suite_failures: list[SuiteResult] = field(default_factory=list)
+    # 🎲 CMX-195: tests that failed the baseline once and passed a re-run of just them.
+    baseline_flakes: list[str] = field(default_factory=list)
     suite_logs: list[str] = field(default_factory=list)
 
     @property
@@ -749,7 +753,7 @@ def run_suite(
     except subprocess.TimeoutExpired as e:
         run.update(ended=_iso_now(), output=_decoded(e.stdout) + _decoded(e.stderr))
         return SuiteResult(False, -1, 0, 0, 0, "", f"the suite did not finish in {timeout:.0f}s",
-                           run)
+                           run, timed_out=True)
     except OSError as e:
         run["ended"] = _iso_now()
         return SuiteResult(False, -1, 0, 0, 0, "", f"the suite could not be run: {e}", run)
@@ -807,7 +811,7 @@ def _has_pytest_cov(worktree: Path) -> bool:
 
 def run_baseline(
     worktree: Path, test_cmd: str, timeout: float, scratch: Path, *, select_tests: bool = True,
-    failures: list[SuiteResult] | None = None,
+    failures: list[SuiteResult] | None = None, flakes: list[str] | None = None,
 ) -> tuple[SuiteResult, "judge_select.Selector | None", str]:
     """⚡ CMX-407: THE baseline — one full-suite run on the unmutated tree, exactly as before —
     that also records what per-mutation selection needs. Returns ``(baseline, selector, why)``;
@@ -843,13 +847,15 @@ def run_baseline(
         cov_args, extra_env = judge_select.coverage_args(cov_file)
         args += cov_args
     baseline = run_suite(judge_select.extend(test_cmd, args), worktree, timeout, extra_env)
-    if not baseline.green and extra_env:
+    if not baseline.green and extra_env and not baseline.timed_out:
         log.warning("judge: the baseline is red UNDER COVERAGE — re-running it plain")
         if failures is not None:
             failures.append(baseline)
         extra_env = {}
         baseline = run_suite(judge_select.extend(test_cmd, [f"--junitxml={junit}"]),
                              worktree, timeout)
+    if not baseline.green:
+        baseline = _rerun_failed_once(worktree, test_cmd, timeout, baseline, failures, flakes)
     if not baseline.green:
         return baseline, None, ""
     if extra_env:
@@ -863,6 +869,29 @@ def run_baseline(
     selector = judge_select.Selector(worktree, cases, cov or {})
     why = f"per-mutation selection over the baseline's {len(cases)} test(s)"
     return baseline, selector, why + (f"; {cov_note}" if cov_note else "")
+
+
+def _rerun_failed_once(
+    worktree: Path, test_cmd: str, timeout: float, baseline: SuiteResult,
+    failures: list[SuiteResult] | None, flakes: list[str] | None,
+) -> SuiteResult:
+    """🎲 CMX-195: a red baseline whose EVERY failure is a named test gets ONE re-run of just
+    those tests. All of them passing ⇒ a flake: recorded in ``flakes`` and the baseline reads
+    green. ⛔ Anything else — a test red twice, an error, an unnamed failure — stays red."""
+    named = _failing_test_names(baseline.tail)
+    if not named or baseline.errors or baseline.failed != len(named) or not baseline.passed:
+        return baseline
+    rerun = run_suite(judge_select.extend(test_cmd, named), worktree, timeout)
+    if not rerun.green or rerun.passed < len(named):
+        if failures is not None:            # the evidence it is red twice, beside the first
+            failures.append(rerun)
+        return baseline
+    if failures is not None:                # the flake's own red run, kept as evidence
+        failures.append(baseline)
+    log.warning("judge: baseline flake(s) — failed once, passed on re-run: %s", ", ".join(named))
+    if flakes is not None:
+        flakes.extend(named)
+    return baseline._replace(exit_code=0, failed=0)
 
 
 def _vitest_baseline(
@@ -1601,13 +1630,15 @@ def _run_experiments(
                 "AUTONOMOUS merge (unknown ≠ safe), but it needs a human's read of the prose "
                 "itself, not a rework round."
             )
-            report.cannot_verify_final = True     # CMX-19: prose stays prose on a re-run
         else:
             report.cannot_verify = (
                 "the judge proposed NO experiments — nothing was corrupted, so nothing was "
                 "proven. ⛔ Unknown is never a pass: this is not a clean bill of health, it is "
                 "an unreviewed PR."
             )
+        # CMX-19/CMX-195: prose stays prose on a re-run, and a judge that proposed nothing
+        # proposes nothing again on the same inputs (CMX-15 ×3 in 2 min) — park it ONCE.
+        report.cannot_verify_final = True
         return report
 
     if len(items) > report.cap:
@@ -1639,10 +1670,23 @@ def _run_experiments(
     with tempfile.TemporaryDirectory(prefix="chela-judge-select-") as scratch:
         baseline, selector, report.selection = run_baseline(
             worktree, test_cmd, timeout, Path(scratch), select_tests=select_tests,
-            failures=report.suite_failures)
+            failures=report.suite_failures, flakes=report.baseline_flakes)
     if heartbeat is not None:
         heartbeat("baseline", seconds=time.monotonic() - baseline_started)
     report.baseline = baseline
+    if baseline.timed_out:
+        report.suite_failures.append(baseline)
+        load = os.getloadavg()[0] if hasattr(os, "getloadavg") else -1.0
+        # ⏳ CMX-195: a suite killed mid-run never FINISHED; it is not red. No base diagnosis:
+        # that is another full run on the same budget, on the same loaded box.
+        report.cannot_verify = (
+            f"⏳ TIMEOUT: {baseline.detail} (killed after "
+            f"{_duration(time.monotonic() - baseline_started)}, `judge.suite_timeout_seconds`) "
+            f"under load {load:.1f} on {os.cpu_count()} CPU(s) "
+            "— not a failure: it never finished, so nothing was measured. A re-run when the "
+            "host is quieter can settle it."
+        )
+        return report
     if not baseline.green:
         report.suite_failures.append(baseline)
         # ⛔ CMX-80: name the CAUSE, not just the exit code. `judge_detail` (this string) is
@@ -2873,6 +2917,13 @@ def judge_run(
                 # still `J_RUNNING` from this call's own launch — either way correct, or about
                 # to be corrected by the trigger on its next tick.
                 result["state"] = J_STALE_HEAD
+            elif report.cannot_verify and (live_run or {}).get("status") in ("done", "closed"):
+                # 🔕 CMX-195: the run finished while this judge worked (adopt-739/740 were
+                # override-merged mid-round). The unknown is recorded above; written to the
+                # row it would reach the inbox as an action item on a run nobody can act on.
+                log.info("judge: %s → CANNOT VERIFY dropped: the run is already %r",
+                         task_id, live_run["status"])
+                result["moot"] = live_run["status"]
             elif report.cannot_verify and report.cannot_verify_final:
                 # ⚖️🧱 CMX-19: an unknown no re-run can change. Recording it as a plain
                 # `cannot_verify` is what made CMX-15's docs-only PR come back FOUR times
@@ -2956,6 +3007,7 @@ def _record_private(
         "state": report.state, "stale": bool(stale),
         "cannot_verify": report.cannot_verify,
         "suite_logs": list(report.suite_logs),
+        "baseline_flakes": list(report.baseline_flakes),
         "proposed": proposed,
         "visible": {"total": len(visible),
                     "survived": sum(1 for o in visible if o.verdict == SURVIVED)},
