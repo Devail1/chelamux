@@ -58,19 +58,15 @@ def _ts_repo(root: Path, test: str) -> Path:
     return root
 
 
-def _statuses(root: Path, test_cmd: str = "node tests/run.test.cjs") -> dict:
-    report = sweep.sweep(root, "origin/dev", test_cmd, timeout=60, select_tests=False)
-    assert report.cannot_verify == ""
-    return {(r.mutation.line, r.mutation.kind): r.status for r in report.results}
-
-
 LIVE = {(2, "if-false"), (2, "compare-flip"), (3, "compare-flip"), (3, "logic-flip"),
         (3, "ternary-false"), (3, "ternary-true"), (5, "logic-flip"), (5, "jsx-and")}
 BROKEN = {(6, "ternary-false"), (6, "ternary-true")}   # `false && (A extends string)` as a TYPE
 
 
 def test_a_real_test_kills_every_ts_mutant_and_a_non_parsing_one_is_skipped(tmp_path):
-    got = _statuses(_ts_repo(tmp_path / "r", REAL))
+    report = sweep.sweep(_ts_repo(tmp_path / "r", REAL), "origin/dev", "node tests/run.test.cjs",
+                         timeout=60, select_tests=False)
+    got = {(r.mutation.line, r.mutation.kind): r.status for r in report.results}
     assert got == {**{k: judge.KILLED for k in LIVE}, **{k: sweep.UNPARSEABLE for k in BROKEN}}
 
 
@@ -95,7 +91,7 @@ def test_ts_parse_check_with_no_parser_is_unchecked_never_broken(tmp_path):
     (tmp_path / "a.ts").write_text("f(;\n")
     assert judge.parse_check(tmp_path / "a.ts") == (True, "no parse check ran (no `typescript` "
                                                     f"resolvable from {tmp_path}: Cannot find "
-                                                    "module 'typescript'")
+                                                    "module 'typescript')")
 
 
 def test_a_sigkilled_sweep_leaves_no_tsx_mutation(tmp_path):

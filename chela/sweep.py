@@ -354,8 +354,7 @@ _RE_FOREIGN_TEST = re.compile(r"(_test|_spec|Tests?)\.|\.spec\.|(^|/)(__tests__|
 
 
 def _unsupported(rel: str) -> bool:
-    suffix = PurePosixPath(rel).suffix
-    # `x.TS` is not swept (the TS mutator claims `.ts`/`.tsx` exactly), so it stays UNKNOWN.
+    suffix = PurePosixPath(rel).suffix      # `x.TS` is not swept, so it stays UNKNOWN
     return (suffix.lower() in UNSUPPORTED_SUFFIXES or (
         suffix.lower() in TS_SUFFIXES and suffix not in TS_SUFFIXES)) and not (
         is_test_path(rel) or _RE_FOREIGN_TEST.search(rel))
@@ -582,9 +581,8 @@ def _js_has_else(src: list[str], idx: int, after: int) -> bool:
 
 
 def _cond_start(line: str, pos: int) -> int:
-    """Where the operand that ends at ``pos`` begins — scanning back to the first unmatched
-    bracket, ``,``/``;``, assignment, ``=>``, ternary ``?``/``:`` or ``return``-like keyword.
-    Line-based: a misread start is caught by the parse check, never counted as killed."""
+    """Where the operand ending at ``pos`` begins: back to an unmatched bracket, ``,;:?``, an
+    assignment, ``=>`` or a ``return``-like keyword. A misread start fails the parse check."""
     depth = 0
     i = pos - 1
     while i >= 0:
@@ -597,10 +595,8 @@ def _cond_start(line: str, pos: int) -> int:
             if depth == 0:
                 break
             depth -= 1
-        elif depth == 0 and (c in ",;:" or (c == "?" and line[i + 1] not in ".?"
-                                             and line[i - 1] != "?")):
-            break
-        elif depth == 0 and ((c == ">" and line[i - 1] == "=") or (
+        elif depth == 0 and (c in ",;:" or (c == "?" and line[i + 1] not in ".?" and line[i - 1]
+                             != "?") or (c == ">" and line[i - 1] == "=") or (
                 c == "=" and line[i + 1] != "=" and line[i - 1] not in "=!<>")):
             break
         i -= 1
@@ -632,15 +628,12 @@ def _ts_mutations(rel: str, ln: int, line: str, code_end: int) -> list[Mutation]
             muts.append(Mutation(rel, ln, "return-bool", line,
                                  f"{line[:m.start(1)]}{new}{line[m.end(1):]}"))
     for m in _RE_TS_TERNARY.finditer(line, 0, code_end):
-        if _in_js_string(line, m.start()):
-            continue
         start = _cond_start(line, m.start())
         cond = line[start:m.start()].rstrip()
-        if not cond:
-            continue
         for kind, forced in (("ternary-false", "false && "), ("ternary-true", "true || ")):
-            muts.append(Mutation(rel, ln, kind, line,
-                                 f"{line[:start]}{forced}({cond}){line[start + len(cond):]}"))
+            if cond and not _in_js_string(line, m.start()):
+                muts.append(Mutation(rel, ln, kind, line,
+                                     f"{line[:start]}{forced}({cond}){line[start + len(cond):]}"))
     return muts
 
 
@@ -714,15 +707,12 @@ def collect_mutations(worktree: Path, base: str) -> tuple[list[Mutation], str]:
             except (SyntaxError, ValueError) as e:
                 return [], f"{rel} is a changed source file that could not be parsed: {e}"
         if rel.endswith(TS_SUFFIXES):
-            # ⛔ fail CLOSED: with no parser no mutant can be proven to parse, so none is
-            # measured — the sweep cannot verify, it never reports them clean or skipped.
+            # ⛔ fail CLOSED: with no parser, no mutant can be proven to parse.
             status, detail = judge.ts_parse(worktree / rel)
             if status != judge.TS_PARSES:
                 return [], f"{rel} is a changed source file that could not be parsed: {detail}"
-            muts.extend(js_mutations(rel, text, changed[rel], ts=True))
-            continue
-        gen = py_mutations if rel.endswith(PY_SUFFIXES) else js_mutations
-        muts.extend(gen(rel, text, changed[rel]))
+        muts.extend(py_mutations(rel, text, changed[rel]) if rel.endswith(PY_SUFFIXES) else
+                    js_mutations(rel, text, changed[rel], ts=rel.endswith(TS_SUFFIXES)))
     return muts, ""
 
 
