@@ -4,7 +4,9 @@
 // duration in frames.txt. So one scene of each kind has an exact, predictable duration
 // list — typing (two characters a frame), the comment hold (no scroll: it fits), the
 // Telegram card, its three-step tap and its edited state — and a renderer that drops or
-// reorders a beat changes it.
+// reorders a beat changes it. Timing alone would pass a renderer that drew the right beats
+// with the wrong words, so each picture's visible text (text.json) is pinned too — with
+// markup in the scene text, which only shows up verbatim if every path escapes it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -32,9 +34,9 @@ test('each scene kind renders its beats with the script\'s own durations', async
     await browser.close();
     const dir = mkdtempSync(join(tmpdir(), 'chela-demo-gate-'));
     writeFileSync(join(dir, 'scenes.json'), JSON.stringify([
-        { kind: 'term', caption: 'c1', title: 'agent', lines: ['$ abcd', 'merge REFUSED: no'] },
-        { kind: 'comment', caption: 'c2', body: '## ⚖️ head\n\n```diff\n- a\n+ b\n```\n* x' },
-        { kind: 'telegram', caption: 'c3', text: 'card', after: 'card\n\n✅ merged' },
+        { kind: 'term', caption: 'c1 <i>', title: 'agent <b>', lines: ['$ abcd', 'merge REFUSED: <no> & x'] },
+        { kind: 'comment', caption: 'c2', body: '## ⚖️ <h>\n\n```diff\n- a <b\n+ b>\n```\n* <x>' },
+        { kind: 'telegram', caption: 'c3', text: 'card <u>1', after: 'card <u>1\n\n✅ merged' },
     ]));
     const r = run(join(dir, 'scenes.json'), dir);
     assert.equal(r.status, 0, r.stderr);
@@ -44,6 +46,18 @@ test('each scene kind renders its beats with the script\'s own durations', async
     const files = list.filter((l) => l.startsWith('file '));
     assert.equal(files.at(-1), files.at(-2), 'the last picture is listed twice so its duration counts');
     assert.equal(readdirSync(join(dir, 'gate.frames')).filter((f) => f.endsWith('.png')).length, 12);
+    const said = JSON.parse(readFileSync(join(dir, 'gate.frames', 'text.json'), 'utf8'));
+    assert.deepEqual(said.map((f) => `file '${f.file}'`), files.slice(0, -1), 'one entry per picture, in order');
+    const term = 'c1 <i>\nagent <b>\n$ ';
+    const comment = 'c2\nchela judge commented on PR #42\n⚖️ <h>\n- a <b\n+ b>\n<x>';
+    const card = 'c3\nchela\ncard <u>1\n✅ Approve\n❌ Deny';
+    assert.deepEqual(said.map((f) => [f.text, f.tap]), [
+        [term, 0], [`${term}ab`, 0], [`${term}abcd`, 0], [`${term}abcd`, 0],
+        [`${term}abcd\nmerge REFUSED: <no> & x\n`, 0],
+        [comment, 0], [comment, 0],
+        [card, 0], [card, 1], [card, 1], [card, 1],
+        ['c3\nchela\ncard <u>1\n\n✅ merged\nedited', 0],
+    ]);
 });
 
 test('a comment taller than the window scrolls down to its diff, then holds there', async (t) => {
@@ -79,6 +93,11 @@ test('ttyLine colours a prompt, a refusal, a success and a diff line, and dims t
         assert.equal(ttyLine(ok), `<span class="ok">${ok}</span>`);
     }
     assert.equal(ttyLine('  Options: $ x'), '<span class="dim">  Options: $ x</span>');
+    // Every branch escapes: a judge diff carries `<`, `>` and `&` onto the screen verbatim.
+    for (const [line, cls] of [['merge REFUSED: <a&b>', 'bad'], ['⛔ <a&b>', 'bad'], ['✅ <a&b>', 'ok'],
+        ['+ <a&b>', 'ok'], ['<a&b>', 'dim']]) {
+        assert.equal(ttyLine(line), `<span class="${cls}">${line.replace('<a&b>', '&lt;a&amp;b&gt;')}</span>`);
+    }
 });
 
 test('markdown renders the judge comment\'s headings, diff fence, bullets, table and footer', () => {
@@ -89,4 +108,8 @@ test('markdown renders the judge comment\'s headings, diff fence, bullets, table
     assert.equal(markdown('_PR: x_'), '<p><i>PR: x</i></p>');
     assert.equal(markdown('| a | b \\| c |\n|---|---|\n| 1 | 2 |'),
         '<table><tr><td>a</td><td>b | c</td></tr><tr><td>1</td><td>2</td></tr></table>');
+    assert.equal(markdown('## <a&b>\n```diff\n+ x >= <y>\n  &z\n```\n* <c>\n<d>\n_<e>_\n| <f> |'),
+        '<h2>&lt;a&amp;b&gt;</h2><pre class="hl"><span class="add">+ x &gt;= &lt;y&gt;</span>\n'
+        + '<span class="">  &amp;z</span></pre><li>&lt;c&gt;</li><p>&lt;d&gt;</p><p><i>&lt;e&gt;</i></p>'
+        + '<table><tr><td>&lt;f&gt;</td></tr></table>');
 });

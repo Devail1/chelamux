@@ -3,7 +3,8 @@
 //   node scripts/demo/gate.mjs <scenes.json> <out-dir>
 //
 // Writes <out-dir>/gate.frames/ — one PNG per distinct picture plus an ffmpeg concat list
-// with each picture's duration. Time is the script's, not the wall clock's: every frame is
+// with each picture's duration, and text.json: what each picture says (its visible text,
+// and whether the tap is on it), so the words on camera can be checked without OCR. Time is the script's, not the wall clock's: every frame is
 // a screenshot taken once the page has settled, so the clip is identical from run to run.
 // The page is self-contained (no network); every line of text on it came out of gate.py.
 import { chromium } from 'playwright';
@@ -94,10 +95,13 @@ async function main(scenesPath, outDir) {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
     await page.setContent(`<style>${CSS}</style><div id="cap"></div><div id="stage"></div>`);
     const list = [];
+    const said = [];
     const shot = async (seconds) => {
         const file = `f${String(list.length / 2).padStart(5, '0')}.png`;
         await page.screenshot({ path: join(dir, file) });
         list.push(`file '${file}'`, `duration ${seconds.toFixed(3)}`);
+        said.push(await page.evaluate((f) => ({ file: f, text: document.body.innerText,
+            tap: document.querySelectorAll('.tap').length }), file));
     };
     const show = (cap, html) => page.evaluate(([c, h]) => {
         document.querySelector('.tap')?.remove();
@@ -152,6 +156,7 @@ async function main(scenesPath, outDir) {
     }
     list.push(list[list.length - 2]);   // concat demuxer: the last file again, so its duration counts
     writeFileSync(join(dir, 'frames.txt'), list.join('\n') + '\n');
+    writeFileSync(join(dir, 'text.json'), JSON.stringify(said, null, 1));
     await browser.close();
     console.log(`gate: ${list.length / 2 | 0} frames → ${dir}`);
 }
