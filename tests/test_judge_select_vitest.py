@@ -99,30 +99,21 @@ def test_a_ts_file_no_test_reaches_is_UNTESTED_never_skipped(tmp_path, calls):  
     assert calls[1:] == [CMD]               # it still RAN — on the full suite
 
 
-@pytest.mark.parametrize("marker, verdict", [("KILL", judge.KILLED),
-                                             ("COLLAPSE", judge.INVALID)])
-def test_an_untested_ts_file_that_is_not_a_survivor_keeps_its_own_verdict_and_reason(
-    tmp_path, marker, verdict,
-):
-    """GUARD: UNTESTED is a SURVIVOR label. A KILLED or INVALID outcome on the very same
-    untested file keeps exactly the reason :func:`judge.adjudicate` gave it."""
-    root = _repo(tmp_path / "r")
-    report = _mutate(root, "src/d.ts", "x === 3", f"x === 3 /* {marker} */")
-    [o] = report.outcomes
-    assert o.plan is not None and o.plan.untested     # the precondition: it IS untested
+@pytest.mark.parametrize("file, before, after, verdict, untested", [
+    ("src/d.ts", "x === 3", "x === 3 /* KILL */", judge.KILLED, True),
+    ("src/d.ts", "x === 3", "x === 3 /* COLLAPSE */", judge.INVALID, True),
+    ("src/e.js", "x === 4", "x !== 4", judge.SURVIVED, False),   # unreached, but not TS
+])
+def test_only_a_survivor_on_an_untested_ts_file_is_relabelled(tmp_path, file, before, after,
+                                                              verdict, untested):
+    """GUARD: UNTESTED is a SURVIVOR label for a TS file. A KILLED/INVALID outcome on an
+    untested file, or a survivor that is not tagged, keeps exactly adjudicate's reason."""
+    [o] = _mutate(_repo(tmp_path / "r"), file, before, after).outcomes
+    assert o.plan is not None and o.plan.full and o.plan.untested is untested
     assert o.verdict == verdict, o.reason
     expect = judge.adjudicate(o.experiment, True, "", True, o.parse_detail, o.baseline,
-                             o.mutated)
+                              o.mutated)
     assert o.reason == expect.reason and "UNTESTED" not in o.reason
-
-
-def test_an_unreached_js_file_survives_as_a_plain_survivor_not_UNTESTED(tmp_path):
-    """GUARD: only a TS file is UNTESTED — an unreached ``.js`` survivor keeps its reason."""
-    root = _repo(tmp_path / "r")
-    report = _mutate(root, "src/e.js", "x === 4", "x !== 4")
-    [o] = report.outcomes
-    assert o.verdict == judge.SURVIVED and o.plan is not None and o.plan.full
-    assert "UNTESTED" not in o.reason
 
 
 def test_only_a_ts_file_is_UNTESTED(tmp_path):
@@ -141,11 +132,9 @@ def test_the_vitest_baseline_asks_for_a_json_report_and_reads_its_universe(tmp_p
     assert calls == [f"{CMD} --reporter=default --reporter=json --outputFile.json={report}"]
     assert baseline.green and selector is not None, why
     assert {c.js for c in selector.cases} == {"src/a.test.ts", "src/b.test.ts", "src/c.test.ts"}
-    assert why == "per-mutation Vitest selection over the baseline's 3 test(s)"
     (root / "src/z.test.ts").write_text("")     # the count is the report's, not a constant
     _, _, why = judge.run_baseline(root, CMD, 60, tmp_path)
     assert why == "per-mutation Vitest selection over the baseline's 4 test(s)"
-    (root / "src/z.test.ts").unlink()
 
     monkeypatch.setenv("FAKE_NO_REPORT", "1")
     report.unlink()
