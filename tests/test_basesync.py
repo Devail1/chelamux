@@ -88,6 +88,16 @@ def test_cli_refuses_a_conflict_before_the_self_check_and_sweep(repo, capsys):
     assert not size.called and not swept.called and not req.called
 
 
+def test_cli_refuses_a_behind_branch_unless_the_flag_is_passed(repo, capsys):
+    _advance(repo[0], "b.txt", "dev\n")
+    with patch.object(dispatcher, "check_hand_in_size") as size, \
+            patch.object(dispatcher, "request_task_finished") as req:
+        assert _task_finished() == 1
+    assert "task-finished: 🔀 this branch is 1 commit(s) behind origin/dev" in \
+        capsys.readouterr().out
+    assert not size.called and not req.called
+
+
 @pytest.mark.parametrize("extra, record", [
     ((), None), (("--allow-behind",), {"base": "dev", "behind": 1, "allow_behind": True})])
 def test_cli_hands_the_record_to_the_marker(repo, extra, record, capsys):
