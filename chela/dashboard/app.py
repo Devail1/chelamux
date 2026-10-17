@@ -704,6 +704,63 @@ _TERM_CONTEXTMENU_SHIM = (
     "})();</script>"
 )
 
+# OSC 52 clipboard shim injected into ttyd's HTML (see term_http), CMX-206.
+# Claude Code's copy-on-select and tmux copy-mode copy by emitting OSC 52
+# (`ESC ] 52 ; <targets> ; <base64> BEL`); tmux (`set-clipboard on`) forwards it to
+# this client, but xterm.js ignores OSC 52 unless a handler is registered — so the
+# selection never reached the PC clipboard and CMX-201's right-click pasted stale
+# text. This registers that handler on ttyd's `window.term` (polled: the theme
+# shim's setter hook may run first, and ttyd assigns the Terminal late) and writes
+# the decoded text with navigator.clipboard.writeText (the iframe is
+# `allow="clipboard-write"`).
+#   * WRITE ONLY. A `?` payload is a READ query; answering it would let any program
+#     in the pane read the operator's clipboard, so it is swallowed unanswered
+#     (`?` is not base64, so the payload check below rejects it).
+#   * Ignored, never written: unknown target letters, malformed base64, invalid
+#     UTF-8, an empty payload (a "clear"), anything over 1 MiB decoded (checked on
+#     the encoded length first, so a huge payload is never decoded).
+#   * A refused writeText (pane not focused, permission denied) fails VISIBLY: a
+#     short toast in the pane, never a silent no-op.
+_TERM_OSC52_SHIM = (
+    "<script>(function(){"
+    "var MAX=1048576;"
+    "function toast(msg){"
+    "try{var d=document.createElement('div');d.className='chela-osc52-toast';"
+    "d.setAttribute('role','status');d.textContent=msg;"
+    "d.style.cssText='position:fixed;right:8px;bottom:8px;z-index:2147483647;"
+    "padding:6px 10px;border-radius:6px;font:12px system-ui,sans-serif;"
+    "background:#b42318;color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.4);"
+    "pointer-events:none';"
+    "document.body.appendChild(d);setTimeout(function(){d.remove();},3000);"
+    "}catch(e){}}"
+    "function decode(data){"
+    "var i=data.indexOf(';');if(i<0)return null;"
+    "var pc=data.slice(0,i),pd=data.slice(i+1);"
+    "if(!/^[cpqs0-7]*$/.test(pc))return null;"
+    "if(pd.length>Math.ceil(MAX/3)*4)return null;"
+    "if(pd.length%4||!/^[A-Za-z0-9+\\/]+={0,2}$/.test(pd))return null;"
+    "try{var b=atob(pd),u=new Uint8Array(b.length);"
+    "if(u.length>MAX)return null;"
+    "for(var k=0;k<b.length;k++)u[k]=b.charCodeAt(k);"
+    "return new TextDecoder('utf-8',{fatal:true}).decode(u);}catch(e){return null;}}"
+    "function onOsc52(data){"
+    "var text=decode(String(data));"
+    "if(text===null)return true;"
+    "var c=navigator.clipboard;"
+    "var p=(c&&c.writeText)?Promise.resolve().then(function(){return c.writeText(text);})"
+    ":Promise.reject(new Error('no clipboard API'));"
+    "p.catch(function(err){console.warn('osc52',err);"
+    "toast('Copy did not reach the clipboard \\u2014 the browser refused it.'+"
+    "' Click into the pane and select again.');});"
+    "return true;}"
+    "window.__chelaOsc52=onOsc52;"
+    "function hook(){var t=window.term;"
+    "if(!t||t.__chelaOsc52||!t.parser||!t.parser.registerOscHandler)return;"
+    "t.__chelaOsc52=true;t.parser.registerOscHandler(52,onOsc52);}"
+    "hook();setInterval(hook,500);"
+    "})();</script>"
+)
+
 # Command-palette key shim injected into ttyd's HTML (see term_http). When focus
 # is inside a pane, keydown fires in the iframe document, so the dashboard's
 # ⌘K / Ctrl+K palette handler never sees it and the fast jump-to is unreachable
@@ -1103,6 +1160,7 @@ def term_http(wid, rest):
                  + _term_presence_shim(wid)
                  + _term_upload_shim()
                  + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM + _TERM_CONTEXTMENU_SHIM
+                 + _TERM_OSC52_SHIM
                  + _TERM_PALETTE_KEY_SHIM
                  + _TERM_SCROLL_SHIM + _TERM_SCROLLBAR_CSS + _TERM_TOUCH_CSS)
         html = (html.replace("</head>", shims + "</head>", 1)
