@@ -373,3 +373,136 @@ def test_kill_session_honours_chela_tmux_session():
                "cwd": "/"}
     assert mergegate.decide(payload, env={"CHELA_TMUX_SESSION": "fleet"}, registry=[]).deny
     assert not mergegate.decide(payload, env={}, registry=[]).deny
+
+
+# --- 🔌 CMX-180: MCP tools that merge or write to a protected branch -----------------------
+
+def _run_mcp_hook(world, tool_name: str, tool_input: dict) -> subprocess.CompletedProcess:
+    """The plugin's OWN rendered `mcp__.*` PreToolUse entry, run as Claude Code would.
+    No MCP server and no GitHub anywhere: the hook only decides, from the payload."""
+    spec = json.loads((world["plugin"] / "hooks" / "hooks.json").read_text())
+    gate, = [e for e in spec["hooks"]["PreToolUse"] if e.get("matcher") == "mcp__.*"]
+    payload = {"hook_event_name": "PreToolUse", "tool_name": tool_name,
+               "tool_input": tool_input, "cwd": str(world["other"]), "session_id": "s1"}
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(world["tmp"]),
+           "CHELA_DIR": str(world["state"]), "CLAUDE_PLUGIN_ROOT": str(world["plugin"])}
+    return subprocess.run(["bash", "-c", gate["hooks"][0]["command"]],
+                          input=json.dumps(payload), capture_output=True, text=True,
+                          env=env, timeout=30)
+
+
+def _mcp_reason(world, tool_name: str, tool_input: dict) -> str | None:
+    proc = _run_mcp_hook(world, tool_name, tool_input)
+    if not _denied(proc):
+        return None
+    return json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+MCP_DENIED = [
+    ("mcp__github__merge_pull_request", {"owner": "o", "repo": "r", "pullNumber": 5}),
+    ("mcp__plugin_github_github__merge_pull_request", {"owner": "O", "repo": "R"}),
+    ("mcp__github__push_files", {"owner": "o", "repo": "r", "branch": "dev", "files": []}),
+    ("mcp__github__push_files", {"owner": "o", "repo": "r", "branch": "main"}),
+    ("mcp__github__push_files", {"owner": "o", "repo": "r", "branch": "refs/heads/dev"}),
+    ("mcp__github__push_files", {"owner": "o", "repo": "r", "branch": " dev "}),
+    ("mcp__github__push_files", {"owner": "o", "repo": "r"}),
+    ("mcp__github__push_files", {"owner": "o", "repo": "r", "branch": ""}),
+    ("mcp__github__create_or_update_file", {"owner": "o", "repo": "r", "branch": "dev"}),
+    ("mcp__github__delete_file", {"owner": "o", "repo": "r", "branch": "master"}),
+]
+
+
+@pytest.mark.parametrize("tool_name,tool_input", MCP_DENIED)
+def test_the_hook_denies_an_mcp_merge_or_base_write(world, tool_name, tool_input):
+    """🔴 GUARD: the GitHub MCP merges past the judge as surely as `gh pr merge` does. The
+    deny names the tool and points at `chela merge` / `--override`, like the Bash path."""
+    reason = _mcp_reason(world, tool_name, tool_input)
+    assert reason is not None, (tool_name, tool_input)
+    assert reason.startswith("⚖️ chela merge gate: MCP `")
+    assert "in o/r — outside chela's gate" in reason
+    assert "`chela merge <run>`" in reason and "--override" in reason
+
+
+MCP_ALLOWED = [
+    # the negative control: the same merge, in a repo with no chela workflow
+    ("mcp__github__merge_pull_request", {"owner": "x", "repo": "y", "pullNumber": 5}),
+    ("mcp__github__push_files", {"owner": "o", "repo": "r", "branch": "cmx-12"}),
+    ("mcp__github__create_or_update_file", {"owner": "o", "repo": "r", "branch": "cmx-1"}),
+    ("mcp__github__push_files", {"owner": "x", "repo": "y", "branch": "main"}),
+    ("mcp__github__get_issue", {"owner": "o", "repo": "r", "issue_number": 1}),
+    # not in the table, however merge-like the name: no fuzzy matching
+    ("mcp__github__merge_pull_request_v2", {"owner": "o", "repo": "r"}),
+    ("mcp__github__create_branch", {"owner": "o", "repo": "r", "branch": "main"}),
+    # not a well-formed `mcp__<server>__<tool>` name
+    ("merge_pull_request", {"owner": "o", "repo": "r"}),
+    ("mcp__merge_pull_request", {"owner": "o", "repo": "r"}),
+    ("mcp____merge_pull_request", {"owner": "o", "repo": "r"}),
+    ("mcp__github__", {"owner": "o", "repo": "r"}),
+]
+
+
+@pytest.mark.parametrize("tool_name,tool_input", MCP_ALLOWED)
+def test_the_hook_allows_every_other_mcp_call(world, tool_name, tool_input):
+    """⭐ Negative control: only the listed shapes, in a chela repo, on a protected branch."""
+    assert _mcp_reason(world, tool_name, tool_input) is None, (tool_name, tool_input)
+
+
+def test_an_mcp_merge_resolves_the_repo_from_its_input_not_the_cwd(world):
+    """The session sits in the CHELA repo; the call names another one → allowed. And the
+    reverse (cwd elsewhere, call names o/r) is denied, by MCP_DENIED above."""
+    payload = {"tool_name": "mcp__github__merge_pull_request",
+               "tool_input": {"owner": "x", "repo": "y"}, "cwd": str(world["chela"])}
+    assert not mergegate.decide(payload, env=world["env"]).deny
+
+
+@pytest.mark.parametrize("tool_name,tool_input,why", [
+    ("mcp__github__merge_pull_request", {"repo": "r"}, "names no owner/repo"),
+    ("mcp__github__merge_pull_request", {"owner": "o", "repo": ""}, "names no owner/repo"),
+    ("mcp__github__push_files", {"owner": 1, "repo": "r", "branch": "dev"},
+     "names no owner/repo"),
+    ("mcp__github__update_pull_request_branch", {"owner": "o", "repo": "r", "pullNumber": 5},
+     "writes to a PR head the call does not name"),
+])
+def test_an_undecidable_mcp_call_fails_open_and_logs_why(world, tool_name, tool_input, why):
+    assert _mcp_reason(world, tool_name, tool_input) is None
+    last = json.loads((world["state"] / mergegate.LOG_NAME).read_text().splitlines()[-1])
+    assert last["decision"] == "allow" and why in last["undecided"]
+    assert last["command"] == tool_name
+
+
+def test_update_pull_request_branch_outside_a_chela_repo_is_a_plain_allow(world):
+    assert _mcp_reason(world, "mcp__github__update_pull_request_branch",
+                       {"owner": "x", "repo": "y"}) is None
+    assert not (world["state"] / mergegate.LOG_NAME).exists()
+
+
+def test_an_mcp_merge_with_no_registry_fails_open_and_logs_why(world):
+    (world["state"] / mergegate.REGISTRY_NAME).unlink()
+    assert _mcp_reason(world, "mcp__github__merge_pull_request",
+                       {"owner": "o", "repo": "r"}) is None
+    assert "no readable registry" in (world["state"] / mergegate.LOG_NAME).read_text()
+
+
+def test_an_mcp_deny_is_logged_with_the_tool_name(world):
+    _run_mcp_hook(world, "mcp__github__merge_pull_request", {"owner": "o", "repo": "r"})
+    last = json.loads((world["state"] / mergegate.LOG_NAME).read_text().splitlines()[-1])
+    assert last["decision"] == "deny" and last["command"] == "mcp__github__merge_pull_request"
+
+
+def test_an_mcp_call_with_a_non_dict_input_is_allowed(world):
+    payload = {"tool_name": "mcp__github__merge_pull_request", "tool_input": "o/r"}
+    assert not mergegate.decide(payload, env=world["env"]).deny
+
+
+def test_the_mcp_gate_is_its_own_entry_behind_the_bash_one():
+    """The Bash entry is unchanged; the MCP entry runs the SAME script on `mcp__.*`, a
+    regex Claude Code matches against every MCP tool name and never against `Bash`."""
+    import re
+    pre = hooks.hooks_spec(port=5001)["hooks"]["PreToolUse"]
+    assert len(pre) == 3 and pre[1]["matcher"] == "Bash"
+    assert pre[2] == {"matcher": "mcp__.*", "hooks": [{
+        "type": "command", "timeout": 5,
+        "command": 'python3 -I -S "${CLAUDE_PLUGIN_ROOT}/hooks/mergegate.py" '
+                   "2>/dev/null || true"}]}
+    assert re.fullmatch(pre[2]["matcher"], "mcp__github__merge_pull_request")
+    assert not re.fullmatch(pre[2]["matcher"], "Bash")
