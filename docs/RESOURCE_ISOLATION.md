@@ -237,6 +237,48 @@ slice) isn't something this measurement can see, so an operator still has to pic
 budget against their own box rather than inherit one baked into chela; the `12G` example
 above is consistent with (well above) this baseline for modest concurrency.
 
+## Every suite run has its own ceiling (CMX-119)
+
+The shared slice bounds the fleet's SUM. It does not stop ONE runaway suite run from eating
+that whole budget. On 2026-10-13 two dispatched agents' `task-finished
+--self-check-experiments` runs were stopped by Claude Code because "the machine was
+critically low on memory". The cause was CMX-115's test branch, whose tests started real PM2
+God Daemons that grew to ~4 GB each, outlived their test (reparented to PID 1) and ignored
+SIGTERM. Three of them held 12 GB.
+
+`chela.judge.run_suite` is the one place every judge battery, `judge sweep`,
+`judge self-check` and `task-finished` suite run goes through. `chela/suite_guard.py` now
+wraps each run in its own `systemd-run --user --scope`:
+
+- `MemoryMax` = `CHELA_SUITE_MEMORY_MAX` (or `suite_memory_max` in `config.json`). The
+  default is 3x the measured peak below (5.1G). `0` turns it off.
+- `MemorySwapMax=0` makes a runaway get killed instead of thrashing swap, and
+  `OOMPolicy=continue` makes the kernel kill the biggest process while the scope's own shell
+  survives to record `memory.events`.
+- The scope joins `chela-agents.slice` when the shared budget is on, so it still counts
+  toward the fleet's sum.
+
+A run whose scope logged an `oom_kill` comes back **CANNOT VERIFY**, with the message
+`suite exceeded 5.1G (its memory ceiling, CMX-119)`. It is never read as a pass or a fail.
+
+⛔ **Verify the guard, not the wrapper's exit.** The scope's first act is to write its own
+`/proc/self/cgroup`. If that does not name `chela-suite-<id>.scope`, the run is refused with
+"the memory ceiling was NOT applied". If no working `systemd --user` session exists (macOS, a
+container), the suite runs unbounded, a warning is logged, and nothing claims a ceiling.
+
+**Leaks are reaped.** A process reparented to PID 1 keeps its cgroup. After each run, chela
+SIGKILLs whatever is left in the scope (`systemctl --user kill --signal=SIGKILL`). That is
+exactly the shape of the 10-13 leak: the daemons ignored SIGTERM.
+
+**Measured 2026-10-17** (with the CMX-115 leak already fixed): one full
+`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` run (8,669 tests, `-n 4 --dist loadfile`) peaked
+at **1,812,647,936 bytes** of cgroup `memory.peak` in 12m13s. `/usr/bin/time -v` reported a
+max RSS of 457,792 KiB, but that is the coordinating process only. The suite is 2.4x the
+0.77 GB measured above, so the old 0.77 GB figure is out of date.
+
+Admission control is CMX-119 slice 2: at most K suite runs at once, judges and agents
+together, as flock slots in `$CHELA_DIR`.
+
 ## Why chela cares (and does not fix all of it)
 
 **chela's supervisor shares a failure domain with the workers it spawns.** The daemon, the

@@ -345,6 +345,11 @@ os.environ.setdefault("CHELA_SEED_CONFIRM_TIMEOUT_SECONDS", "0.05")
 os.environ.setdefault("CHELA_SEED_CONFIRM_POLL_INTERVAL", "0.01")
 os.environ.setdefault("CHELA_SEED_RESEND_SETTLE_SECONDS", "0")
 
+# 🧠 CMX-119: the suite this conftest belongs to already runs inside chela's own memory
+# ceiling (judge.run_suite). Tests that call run_suite for a tiny `true`/`exit 1` must not
+# each pay a systemd scope; tests/test_suite_guard.py turns it back on where it is tested.
+os.environ["CHELA_SUITE_MEMORY_MAX"] = "0"
+
 
 class LiveNotificationEscape(BaseException):
     """A test pushed a REAL notification to the operator's phone.

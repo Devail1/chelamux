@@ -86,7 +86,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import envutil, generated, judge_select, procguard, risktier, toolconfig
+from chela import envutil, generated, judge_select, procguard, risktier, suite_guard, toolconfig
 
 log = logging.getLogger(__name__)
 
@@ -760,15 +760,18 @@ def run_suite(
     run = {"cmd": test_cmd, "cwd": str(cwd), "env_diff": {}, "started": _iso_now(),
            "output": ""}
     try:
-        with tempfile.TemporaryDirectory(prefix="chela-suite-") as scratch:
+        # 🧠 CMX-119: every suite run gets a memory-capped scope of its own.
+        with (suite_guard.bounded(test_cmd) as (cmd, check),
+              tempfile.TemporaryDirectory(prefix="chela-suite-") as scratch):
             env = _suite_env(Path(scratch))
             env.update(extra_env or {})
             run["env_diff"] = _env_diff(os.environ, env)
             # ⛔ CMX-253: the whole tree, not just the shell, dies on a timeout.
             task = _run_ctx.get("task")
             out = procguard.run_shell_group(
-                test_cmd, cwd=str(cwd), env=env, timeout=timeout,
+                cmd, cwd=str(cwd), env=env, timeout=timeout,
                 frozen=(lambda since: frozen_since(task, since)) if task else None)
+            breach = check(out.returncode)
     except subprocess.TimeoutExpired as e:
         run.update(ended=_iso_now(), output=_decoded(e.stdout) + _decoded(e.stderr))
         return SuiteResult(False, -1, 0, 0, 0, "", f"the suite did not finish in {timeout:.0f}s; "
@@ -780,6 +783,8 @@ def run_suite(
     passed, failed, errors = _counts(text)
     tail = text[-SUITE_TAIL_CHARS:] if len(text) > SUITE_TAIL_CHARS else text
     run.update(ended=_iso_now(), output=text[-SUITE_LOG_CHARS:])
+    if breach:
+        return SuiteResult(False, out.returncode, passed, failed, errors, tail, breach, run)
     return SuiteResult(True, out.returncode, passed, failed, errors, tail, "", run)
 
 
