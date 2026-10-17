@@ -2,6 +2,7 @@
 import { $, api, attrEsc, escHtml, shortTime, showModal } from './util.js';
 import { _launcherData } from './launcher.js';
 import { runCardNote, runStatusBadgeClass } from './runstate.js';
+import { riskChip, trackerHref } from './taskmodalmodel.js';
 import { pollWork, postWorkDelete } from './work.js';
 
 // ---------------------------------------------------------------------------
@@ -114,6 +115,13 @@ function _runDisplayId(r) {
     return r.task_id || '';
 }
 
+// CMX-94: on a Linear workflow the id links to its issue — the `tracker_url` the server
+// read from Linear (never built from a workspace slug); no URL ⇒ plain text, as before.
+function _trackerLink(item, inner) {
+    const href = trackerHref(item);
+    return href ? `<a class="run-tracker-link" href="${attrEsc(href)}" target="_blank" rel="noopener noreferrer">${inner}</a>` : inner;
+}
+
 function _runDeleteBtn(r) {
     if (!r.task_id) return '';
     return `<button class="dispatcher-delete-btn" type="button"
@@ -133,7 +141,7 @@ function _openDeleteBtn(t) {
                    title="Delete this row" aria-label="Delete">&times;</button>`;
 }
 
-function _renderRunsTable(runs, label) {
+function _renderRunsTable(runs, label, linear) {
     if (!runs || !runs.length) {
         return `<div style="padding:8px 0; color:var(--text-dim); font-size:11px;">No ${label}.</div>`;
     }
@@ -141,7 +149,7 @@ function _renderRunsTable(runs, label) {
         '<th>Task</th><th>Status</th><th>Tasks</th><th>Branch</th><th>Window</th><th>Started</th><th>Ended</th><th>Attempt</th><th>PR</th><th>Error</th><th></th>' +
         '</tr></thead><tbody>' +
         runs.map(r => '<tr data-task-id="' + attrEsc(r.task_id || '') + '">' +
-            `<td data-label="Task" title="${attrEsc(r.task_id)}"><b>${escHtml((r.title || '').slice(0, 80))}</b><div class="ts">${escHtml(_runDisplayId(r))}</div></td>` +
+            `<td data-label="Task" title="${attrEsc(r.task_id)}"><b>${escHtml((r.title || '').slice(0, 80))}</b><div class="ts">${linear ? _trackerLink(r, escHtml(_runDisplayId(r))) : escHtml(_runDisplayId(r))}</div></td>` +
             _cell('Status', _runStatusBadge(r.status)) +
             _cell('Tasks', _taskProgressChip(r.tasks)) +
             _cell('Branch', escHtml(r.branch_name || '')) +
@@ -176,6 +184,46 @@ function _renderOpenTasks(tasks) {
             _cell('Delete', _openDeleteBtn(t)) +
         '</tr>').join('') +
         '</tbody></table></div>';
+}
+
+// CMX-94: a Linear issue row — its identifier linked to the issue, its Linear state and
+// its risk label. No file:line (a Linear issue has none) and no × — the source-line delete
+// edits a file, and the dashboard does not write to Linear.
+function _renderLinearTasks(tasks) {
+    if (!tasks.length) return '';
+    return '<div class="table-wrap dispatcher-table-wrap"><table class="dispatcher-table"><thead><tr>' +
+        '<th>Issue</th><th>Title</th><th>State</th><th>Risk</th>' +
+        '</tr></thead><tbody>' +
+        tasks.map(t => {
+            const risk = riskChip(t);
+            return '<tr>' +
+                _cell('Issue', _trackerLink(t, `<code style="font-size:11px;">${escHtml(t.id)}</code>`)) +
+                `<td data-label="Title">${escHtml((t.title || '').slice(0, 200))}</td>` +
+                _cell('State', escHtml(t.tracker_state || '') + (t.blocked ? ' · blocked' : '')) +
+                _cell('Risk', risk ? `<span class="kanban-risk-chip ${risk.cls}" title="${attrEsc(risk.reason)}">${escHtml(risk.label)}</span>` : '') +
+            '</tr>';
+        }).join('') +
+        '</tbody></table></div>';
+}
+
+const _SECTION_STYLE = 'font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;';
+
+// Linear's open set is every non-terminal issue (Backlog + Todo + In Progress + In
+// Review), so one flat list read as that many to-dos (Liav, 10-12). Split by the server's
+// `group`: Ready first, then the started states, then Backlog collapsed.
+function _renderLinearOpenTasks(tasks) {
+    const ready = tasks.filter(t => t.group === 'ready');
+    const started = tasks.filter(t => t.group === 'in_progress');
+    const backlog = tasks.filter(t => !ready.includes(t) && !started.includes(t));
+    return `
+        <div class="open-section" style="${_SECTION_STYLE} margin-top:8px;">Ready (Todo) · ${ready.length}</div>
+        ${_renderLinearTasks(ready)}
+        <div class="open-section" style="${_SECTION_STYLE} margin-top:14px;">In progress / In review · ${started.length}</div>
+        ${_renderLinearTasks(started)}
+        <details class="open-backlog" style="margin-top:14px;">
+            <summary class="open-section" style="${_SECTION_STYLE} cursor:pointer;">Backlog · ${backlog.length}</summary>
+            ${_renderLinearTasks(backlog)}
+        </details>`;
 }
 
 // Inline-confirm in a dispatcher row: collapse the row to a single full-width
@@ -237,28 +285,45 @@ function _renderWorkflowCard(wf) {
     const errBanner = wf.error
         ? `<div style="color:var(--red); font-size:11px; padding:4px 0;">Error: ${escHtml(wf.error)}</div>`
         : '';
-    const openCount = (wf.open_tasks || []).length;
-    const activeCount = (wf.active_runs || []).length;
-    const awaitingCount = (wf.awaiting_review_runs || []).length;
-    const recentCount = (wf.recent_runs || []).length;
+    const linear = wf.tracker_kind === 'linear';
+    const open = wf.open_tasks || [];
+    // `needs_human` is the state the operator must act on: it gets its own table above
+    // Active, and leaves whichever bucket the server filed it in (awaiting review today).
+    const needsHumanOf = runs => (runs || []).filter(r => r && r.status === 'needs_human');
+    const without = runs => (runs || []).filter(r => !(r && r.status === 'needs_human'));
+    const needsHuman = [...needsHumanOf(wf.active_runs), ...needsHumanOf(wf.awaiting_review_runs),
+        ...needsHumanOf(wf.recent_runs)];
+    const active = without(wf.active_runs);
+    const awaiting = without(wf.awaiting_review_runs);
+    const recent = without(wf.recent_runs);
+    // On Linear the headline number is READY (Todo), not every non-terminal issue.
+    const readyCount = open.filter(t => t.group === 'ready').length;
+    const openSummary = linear
+        ? `${readyCount} ready`
+        : `${open.length} open task${open.length === 1 ? '' : 's'}`;
+    const openHtml = linear
+        ? _renderLinearOpenTasks(open)
+        : `<div style="${_SECTION_STYLE} margin-top:8px;">Open tasks</div>${_renderOpenTasks(open)}`;
     return `
     <div class="card">
         <h3 style="margin-bottom:6px;">${path}</h3>
         <div style="font-size:11px; color:var(--text-dim); margin-bottom:10px;">
-            ${openCount} open task${openCount === 1 ? '' : 's'} ·
-            ${activeCount} active ·
-            ${awaitingCount} awaiting review ·
-            ${recentCount} recent
+            ${openSummary} ·
+            ${needsHuman.length} needing a human ·
+            ${active.length} active ·
+            ${awaiting.length} awaiting review ·
+            ${recent.length} recent
         </div>
         ${errBanner}
-        <div style="font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; margin-top:8px;">Open tasks</div>
-        ${_renderOpenTasks(wf.open_tasks)}
-        <div style="font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; margin-top:14px;">Active runs</div>
-        ${_renderRunsTable(wf.active_runs, 'active runs')}
-        <div style="font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; margin-top:14px;">Awaiting review</div>
-        ${_renderRunsTable(wf.awaiting_review_runs, 'awaiting review runs')}
-        <div style="font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; margin-top:14px;">Recent runs</div>
-        ${_renderRunsTable(wf.recent_runs, 'recent runs')}
+        ${openHtml}
+        <div style="${_SECTION_STYLE} margin-top:14px;">Needs a human</div>
+        <div data-runs="needs_human">${_renderRunsTable(needsHuman, 'runs needing a human', linear)}</div>
+        <div style="${_SECTION_STYLE} margin-top:14px;">Active runs</div>
+        <div data-runs="active">${_renderRunsTable(active, 'active runs', linear)}</div>
+        <div style="${_SECTION_STYLE} margin-top:14px;">Awaiting review</div>
+        <div data-runs="awaiting">${_renderRunsTable(awaiting, 'awaiting review runs', linear)}</div>
+        <div style="${_SECTION_STYLE} margin-top:14px;">Recent runs</div>
+        <div data-runs="recent">${_renderRunsTable(recent, 'recent runs', linear)}</div>
     </div>`;
 }
 
