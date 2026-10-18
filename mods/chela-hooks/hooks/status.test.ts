@@ -7,10 +7,10 @@ const LINE = 'ctx ▰▰▰▰▱▱▱▱▱▱ 42% · @7'
 
 // The engine beneath the mod, recording every `$.ui.status` text, file read and process run.
 function world(on: any, env: Record<string, string>, o: { usage?: any, base?: string,
-                                                           inbox?: string, runFails?: boolean } = {}) {
+                                                           version?: string, inbox?: string, runFails?: boolean } = {}) {
   const w = { status: [] as (string | undefined)[], runs: [] as any[], reads: [] as string[] }
   mock.env(on, env)
-  on('session.version', () => ({ value: { version: o.base ?? '2.1.302', base: o.base ?? '2.1.302' } }))
+  on('session.version', () => ({ value: { version: o.version ?? o.base ?? '2.1.302', base: o.base ?? '2.1.302' } }))
   on('session.usage', () => ({ value: o.usage ?? STATUS.usage }))
   for (const [k, v] of [['id', STATUS.session_id], ['cwd', STATUS.cwd], ['model', STATUS.model]])
     on(`session.${k}`, () => ({ value: v }))
@@ -93,6 +93,19 @@ test('nothing renders below the version floor', async ($, on) => {
   const w = await turn($, on, () => world(on, ENV, { base: '2.1.300' }))
   expect([w.status, w.runs]).toEqual([[undefined], []])
 })
+
+test('the floor reads the base version, not the full build string', async ($, on) => {
+  const w = await turn($, on, () => world(on, ENV, { version: '2.1.302', base: '2.1.300' }))
+  expect([w.status, w.runs]).toEqual([[undefined], []])
+})
+
+// Every other fixture's percent is a whole number, which rounding leaves unchanged (DEFEAT_SHAPES #181).
+for (const [percent, drawn] of [[41.6, '42%'], [41.4, '41%'], [44.5, '45%']] as const)
+  test(`the context percent ${percent} is drawn rounded as ${drawn}`, async ($, on) => {
+    const w = await turn($, on, () => world(on, ENV,
+      { usage: { ...STATUS.usage, context: { ...STATUS.usage.context, percent } } }))
+    expect(w.status).toEqual([`ctx ▰▰▰▰▱▱▱▱▱▱ ${drawn} · @7`])
+  })
 
 test('the floor is 2.1.301, an unreadable version fails closed; the bar is ten cells', () => {
   for (const v of ['2.1.301', '2.1.302', '2.2.0', '3.0.0', '2.1.301-dev']) expect(atFloor(v)).toBe(true)
