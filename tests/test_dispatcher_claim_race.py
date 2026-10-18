@@ -325,6 +325,34 @@ def test_a_hold_survives_a_restart_of_the_process_that_honours_it(repo, spawns):
     assert spawns.titles == []
 
 
+def test_the_tick_hands_the_fleet_pause_the_live_hold(repo, spawns, monkeypatch, caplog):
+    # CMX-214: the daemon finishes a `--pause --all` — it resumes the fleet once the hold
+    # is gone (TTL or release).
+    from chela import fleet
+    seen = []
+    monkeypatch.setattr(fleet, "tick", lambda held: seen.append(held) or ["fleet said this"])
+    hold.take(reason="cs2", ttl_seconds=600)
+    with caplog.at_level(logging.WARNING):
+        assert dispatcher.tick(repo / "WORKFLOW.md")["held"] is True
+    assert seen[0].reason == "cs2" and "fleet said this" in caplog.text
+    hold.release()
+    dispatcher.tick(repo / "WORKFLOW.md")
+    assert seen[1] is None
+
+
+def test_a_failing_fleet_tick_never_takes_the_dispatch_tick_down(repo, spawns, monkeypatch):
+    from chela import fleet
+
+    def boom(held):
+        raise RuntimeError("fleet broke")
+    monkeypatch.setattr(fleet, "tick", boom)
+    hold.take(reason="cs2", ttl_seconds=600)
+    summary = dispatcher.tick(repo / "WORKFLOW.md")
+    assert summary["held"] is True and spawns.titles == []
+    hold.release()
+    assert dispatcher.tick(repo / "WORKFLOW.md")["dispatched"] == 1
+
+
 # --- the out-of-band-merge guard: a merged task is never re-claimed (CMX-140) ---
 
 

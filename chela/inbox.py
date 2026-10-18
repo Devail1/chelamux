@@ -2290,7 +2290,8 @@ def _selfcheck_round(running: float | None, ceiling: int) -> int | None:
 
 def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: float,
                  uptime: float | None = None, windows: dict[str, str] | None = None,
-                 now_epoch: str | None = None, daemon: str | None = None) -> list[dict]:
+                 now_epoch: str | None = None, daemon: str | None = None,
+                 held=None) -> list[dict]:
     """``run_stuck`` / ``run_marker_unread`` — a running agent that has gone quiet.
 
     * **stuck**: no new commit AND no transcript activity for ``config.stuck_agent_alert_s()``
@@ -2311,6 +2312,10 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
     ``daemon`` is ``daemon_state``'s measured answer; with ``uptime`` it is rendered as
     "daemon up …", "no daemon running" (only when measured down) or "daemon state unknown"
     — never "down" for something nobody looked at.
+
+    CMX-214: while the queue is ``held`` (any ``chela dispatch --pause``), a quiet agent is
+    quiet on purpose — the operator paused it — so no ``run_stuck`` fires, and each held
+    tick restarts its clock: after ``--resume`` the agent gets the full quiet budget again.
     """
     prev: dict = store.get("stuck") or {}
     nxt: dict = {}
@@ -2373,6 +2378,8 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
                                                   else None)), wid=wid))
             nxt[task] = entry
             continue
+        if held:
+            entry["active_at"] = now
         stamps = [t for t in (probe.get("activity"), _parse_epoch(run.get("started_at")),
                               entry.get("active_at")) if t]
         activity = max(stamps) if stamps else None
@@ -3103,7 +3110,8 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
         events += hold_events(store, held, released, now)
         events += conflict_events(runs, store, windows=windows, now_epoch=now_epoch)
         events += stuck_events(runs, store, probes, now, uptime, windows=windows,
-                               now_epoch=now_epoch, daemon=daemon)
+                               now_epoch=now_epoch, daemon=daemon,
+                               held=held is not None and not held.expired(now))
         events += denied_events(denials, runs, store, now, windows=windows, now_epoch=now_epoch)
         store["denied_cursor"] = denied_cursor
 

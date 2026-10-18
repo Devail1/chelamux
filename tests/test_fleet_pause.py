@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import threading
+import time
 
 import pytest
 
@@ -324,3 +325,62 @@ def test_an_unreadable_state_file_names_nobody(fake, body, caplog):
     kept = fleet.path().with_name(fleet.STATE_FILE_NAME + ".resuming")
     assert not fleet.path().exists() and kept.read_text() == body   # kept, for the hand-off
     assert str(kept) in caplog.text
+
+
+def test_ttl_expiry_resumes_the_fleet(fake):
+    assert fleet.tick(None) == []                           # no fleet pause: no-op
+    fake["runs"] = [_run("T1")]
+    hold.take(ttl_seconds=1)
+    fleet.pause_all()
+    fake["calls"].clear()
+    assert fleet.tick(hold.active(now=time.time() + 5)) == [
+        "fleet pause ENDED with the hold — sent 'resume' to 1/1 agent(s)"]
+    assert sends(fake) == [("msg", "@1", "resume: continue your plan")]
+    assert fleet.read() is None and fleet.tick(None) == []
+
+
+def test_a_live_hold_keeps_the_fleet_paused(fake):
+    fake["runs"] = [_run("T1")]
+    held = hold.take(ttl_seconds=600)
+    fleet.pause_all()
+    fake["calls"].clear()
+    assert fleet.tick(held) == [] and sends(fake) == [] and fleet.read() is not None
+
+
+# --- the stall detector respects a pause -----------------------------------------------
+
+def test_a_held_queue_mutes_stuck_until_resume_then_the_clock_restarts(monkeypatch):
+    monkeypatch.setenv("CHELA_STUCK_AGENT_ALERT_S", "1200")
+    store, now = inbox._empty(), 1_000_000.0
+    run = {"task_id": "T1", "status": "running", "window_name": "cmx-1"}
+    probe = {"T1": {"activity": now - 1800, "markers": {}}}   # idle 30 min
+    assert inbox.stuck_events([run], store, probe, now, held=True) == []
+    assert inbox.stuck_events([run], store, probe, now + 600, held=True) == []
+    resumed = now + 600
+    assert inbox.stuck_events([run], store, probe, resumed + 1100) == []
+    kinds = [e["kind"] for e in inbox.stuck_events([run], store, probe, resumed + 1200)]
+    assert kinds == ["run_stuck"]
+
+
+def test_without_a_hold_the_same_idle_agent_is_stuck(monkeypatch):
+    monkeypatch.setenv("CHELA_STUCK_AGENT_ALERT_S", "1200")
+    run = {"task_id": "T1", "status": "running", "window_name": "cmx-1"}
+    probe = {"T1": {"activity": 1_000_000.0 - 1800, "markers": {}}}
+    events = inbox.stuck_events([run], inbox._empty(), probe, 1_000_000.0, held=False)
+    assert [e["kind"] for e in events] == ["run_stuck"]
+
+
+def test_a_resume_another_caller_already_claimed_is_not_reported(fake, monkeypatch):
+    fake["runs"] = [_run("T1")]
+    fleet.pause_all()
+    monkeypatch.setattr(fleet, "resume_all", lambda: None)   # `--resume` won the rename
+    assert fleet.tick(None) == []
+
+
+def test_a_resume_that_did_not_land_is_named_not_counted_as_sent(fake):
+    fake["runs"] = [_run("T1"), _run("T2")]
+    fleet.pause_all()
+    fake["msg_ok"] = False
+    assert fleet.tick(None) == [
+        "fleet pause ENDED with the hold — sent 'resume' to 0/2 agent(s)",
+        "fleet resume did NOT reach T1, T2: send it 'resume' by hand"]

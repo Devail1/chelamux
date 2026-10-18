@@ -505,6 +505,19 @@ def test_hold_expiry_through_the_tick_is_one_notice(monkeypatch):
     assert len(_queued("dispatch_hold_expired")) == 1
 
 
+
+def test_the_tick_tells_the_stall_detector_whether_a_hold_is_live(monkeypatch):
+    """CMX-214: ``stuck_events`` is muted only by a LIVE hold; an expired or absent one
+    never mutes it."""
+    seen = []
+    monkeypatch.setattr(inbox, "stuck_events", lambda *a, **k: seen.append(k["held"]) or [])
+    inbox.tick({}, runs=[])                                       # no hold
+    held = hold.take(ttl_seconds=60, by=ORCH)
+    inbox.tick({}, runs=[])                                       # live
+    monkeypatch.setattr(inbox.time, "time", lambda: held.expires_at + 5)
+    inbox.tick({}, runs=[])                                       # lapsed, not yet swept
+    assert seen == [False, True, False]
+
 # --- 4. CI red on the head --------------------------------------------------------------
 
 _GH_LOG = (
