@@ -1,1 +1,1 @@
-export {};
+export type Y = number;

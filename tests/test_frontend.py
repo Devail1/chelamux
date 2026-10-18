@@ -198,6 +198,7 @@ def test_lint_boundaries_fails_on_exactly_the_imports_each_rule_forbids(tmp_path
         ("entrypoint-boundary-from-app", "app.ts", "features/a/lib/x.ts"),
         ("entrypoint-boundary-from-app", "app.ts", "shared/s/lib/z.ts"),
         ("entrypoint-boundary-across-modules", "features/b/index.ts", "features/a/lib/y.ts"),
+        ("entrypoint-boundary-across-modules", "features/b/types.ts", "features/a/lib/y.ts"),
         ("tests-through-entrypoints", "features/a/tests/a.ts", "features/a/lib/y.ts"),
         ("tests-through-entrypoints", "features/b/tests/b.ts", "features/a/tests/fixture.ts"),
         ("tests-folder-is-private", "features/a/index.ts", "features/a/tests/fixture.ts"),
