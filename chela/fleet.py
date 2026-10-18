@@ -111,9 +111,11 @@ def resume_all() -> dict | None:
     except FileNotFoundError:
         return None
     state = read(claimed)
-    claimed.unlink(missing_ok=True)
     if state is None:
+        # Kept: it is the only record of who was paused, for whoever resumes them by hand.
+        log.warning("fleet pause state kept at %s", claimed)
         return None
+    claimed.unlink(missing_ok=True)
     runs, resumed = _active_runs(), {}
     for task, agent in state["agents"].items():
         if task not in runs:

@@ -106,6 +106,42 @@ def test_a_run_without_a_window_or_a_paused_one_is_not_messaged_again(fake):
     assert set(fleet.read()["agents"]) == {"T1"}
 
 
+def test_re_pausing_keeps_since_and_skips_finishing_but_retries_failed(fake, tmp_path,
+                                                                       monkeypatch):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    fake["runs"] = [_run("T1", worktree=str(wt)), _run("T2")]
+    fake["procs"] = [("task-finished self-check", wt, 1.0, 1)]
+    fake["esc_ok"] = False                                  # T2's Escape does not land
+    first = fleet.pause_all(by="@0")
+    assert {t: a["state"] for t, a in first["agents"].items()} == {
+        "T1": "finishing", "T2": "failed"}
+    fake["procs"], fake["esc_ok"] = [], True                # T1's self-check has ended
+    fake["keys"].clear()
+    fake["msgs"].clear()
+    monkeypatch.setattr(fleet.time, "time", lambda: first["since"] + 600)
+    again = fleet.pause_all(by="@5")
+    assert fake["keys"] == ["@2"]                           # the failed one, retried
+    assert fake["msgs"] == [("chela", "@2", fleet.PAUSE_MESSAGE)]   # T1 not messaged again
+    assert again["agents"]["T1"] == first["agents"]["T1"]   # still owed only one "resume"
+    assert again["agents"]["T2"]["state"] == "interrupted"
+    assert (again["since"], again["by"]) == (first["since"], "@0")
+    assert fleet.read() == again
+
+
+def test_resume_goes_to_the_window_on_the_run_row_now(fake):
+    fake["runs"] = [_run("T1"), _run("T2")]
+    fleet.pause_all()
+    assert fleet.read()["agents"]["T1"]["wid"] == "@1"
+    fake["msgs"].clear()
+    # The rows now name other windows: T1 was respawned into @9, T2 has none at all.
+    fake["runs"] = [_run("T1", wid="@9"), {**_run("T2"), "window_id": ""}]
+    assert fleet.resume_all()["resumed"] == {"T1": True, "T2": False}
+    assert fake["msgs"] == [("chela", "@9", fleet.RESUME_MESSAGE)]
+    assert not fleet.path().exists()
+    assert not fleet.path().with_name(fleet.STATE_FILE_NAME + ".resuming").exists()
+
+
 def test_resume_sends_resume_to_each_frozen_agent_and_releases(fake, capsys):
     fake["runs"] = [_run("T1"), _run("T2")]
     _cli(pause=True, all=True)
@@ -129,3 +165,6 @@ def test_an_unreadable_state_file_names_nobody(fake, body, caplog):
     assert fleet.read() is None
     assert fleet.resume_all() is None and fake["msgs"] == []
     assert "fleet pause state" in caplog.text
+    kept = fleet.path().with_name(fleet.STATE_FILE_NAME + ".resuming")
+    assert not fleet.path().exists() and kept.read_text() == body   # kept, for the hand-off
+    assert str(kept) in caplog.text
