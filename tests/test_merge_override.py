@@ -1192,3 +1192,13 @@ def test_git_lines_is_none_when_git_cannot_run(tmp_path, monkeypatch):
     monkeypatch.setattr(overrides.subprocess, "run", boom)
     assert overrides._git_lines(tmp_path, "status") is None
     assert overrides.deploy_step(tmp_path, "a", "b")["step"] == ""
+
+
+def test_an_override_question_names_the_always_human_path_that_triggered_it(repo, monkeypatch):
+    _seed(repo, judge_state="clean")
+    monkeypatch.setattr(contract, "_read_pr_files", lambda *a: ["docs/x.md", "WORKFLOW.md"])
+    result = _request(reason="config change")
+    assert result["ok"] and result["pending"]
+    assert result["question"] == (f"Override-merge cmx-1 into dev past the judge ('clean' on "
+                                  f"{HEAD[:12]})? It touches ALWAYS-HUMAN path 'WORKFLOW.md'. "
+                                  "Reason: config change")

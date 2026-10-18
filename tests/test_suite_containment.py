@@ -91,8 +91,7 @@ def test_a_timed_out_suite_has_its_whole_tree_killed_and_reports_TIMEOUT(tmp_pat
     assert len(pids.read()) == 2
     assert _gone_soon(pids.read()) == []                   # no descendant alive, by pid
     assert res.timed_out is True and res.ok is False and res.exit_code == -1
-    assert res.detail == ("TIMEOUT — the suite did not finish in 1s; its process tree was "
-                          "killed")
+    assert res.detail == "the suite did not finish in 1s; its process tree was killed"
     assert "started-the-workers" in res.run["output"]     # what it printed is kept
 
 
@@ -222,16 +221,16 @@ def test_run_suite_hands_the_runner_the_suite_env_cwd_and_timeout(tmp_path, monk
 # --- a timed-out mutant is TIMEOUT (unknown), never KILLED and never silently skipped ------
 
 _EXP = judge.Experiment(guard="g", file="f.py", before="a", after="b")
-_TIMED_OUT = judge.SuiteResult(False, -1, 0, 0, 0, "", "TIMEOUT — the suite did not finish "
-                               "in 9s; its process tree was killed", None, timed_out=True)
+_TIMED_OUT = judge.SuiteResult(False, -1, 0, 0, 0, "", "the suite did not finish in 9s; its "
+                               "process tree was killed", None, timed_out=True)
 
 
 def test_adjudicate_calls_a_timed_out_suite_TIMEOUT_unknown():
     base = judge.SuiteResult(True, 0, 5, 0, 0, "")
     out = judge.adjudicate(_EXP, True, "", True, "", base, _TIMED_OUT)
     assert out.verdict == judge.INVALID
-    assert out.reason == ("TIMEOUT (unknown) under the mutation: TIMEOUT — the suite did not "
-                          "finish in 9s; its process tree was killed")
+    assert out.reason == ("TIMEOUT (unknown) under the mutation: the suite did not finish in "
+                          "9s; its process tree was killed")
     crashed = judge.SuiteResult(False, -1, 0, 0, 0, "", "could not be run: boom")
     assert judge.adjudicate(_EXP, True, "", True, "", base, crashed).reason.startswith(
         "the suite could not be run under the mutation: ")
