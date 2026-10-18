@@ -1433,12 +1433,10 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # budget), reset to 0 the moment CI is next seen passing (see the pr_checks refresh
         # in `tick`) — it counts a STREAK, not a lifetime total.
         ("ci_infra_streak", "ALTER TABLE runs ADD COLUMN ci_infra_streak INTEGER DEFAULT 0"),
-        # 🔁 CMX-255. A red CI first re-runs ONLY its failed jobs, once per head sha, before it
-        # may spend a rework round: a flake must not burn one. `ci_rerun_sha` is the sha that
-        # re-run was fired on (the once-per-sha guard; a new push is a new sha, so it resets
-        # itself), `ci_rerun_state` is pending → green | red, `ci_rerun_note` is what it was
-        # ("CI re-run once: <job> failed on <test>"), and `ci_flakes` is the JSON list of
-        # every red that came back green on its re-run — the flaky test ids, kept per run.
+        # 🔁 CMX-255. A red CI re-runs its failed jobs once per head sha (`ci_rerun_sha`; a
+        # new push resets it) before it may spend a rework round. `ci_rerun_state` is
+        # pending → green | red, `ci_rerun_note` says what failed, `ci_flakes` is the JSON
+        # list of reds that came back green on their re-run (the flaky test ids).
         ("ci_rerun_sha", "ALTER TABLE runs ADD COLUMN ci_rerun_sha TEXT"),
         ("ci_rerun_state", "ALTER TABLE runs ADD COLUMN ci_rerun_state TEXT"),
         ("ci_rerun_note", "ALTER TABLE runs ADD COLUMN ci_rerun_note TEXT"),
@@ -2327,13 +2325,9 @@ def _ci_failed_test(log_tail: str) -> str:
 
 
 def _rerun_failed_jobs(repo_dir: str | None, run_ids: tuple[str, ...]) -> bool:
-    """🔁 CMX-255. ``gh run rerun <id> --failed`` for every Actions run behind a red rollup —
-    ONLY the failed jobs, never the green ones.
-
-    True only when GitHub accepted every one. Anything else (no run id to name, gh missing,
-    a timeout, a refusal) is False and the caller treats the red as real, exactly as before
-    this existed: a re-run nobody could start must never park the run in silence.
-    """
+    """🔁 CMX-255. ``gh run rerun <id> --failed`` (only the failed jobs) for every Actions
+    run behind a red rollup. True only when GitHub accepted every one; anything else is
+    False and the red is treated as real: a re-run nobody started must never park the run."""
     if not repo_dir or not run_ids:
         return False
     for run_id in run_ids:
@@ -2353,10 +2347,8 @@ def _rerun_failed_jobs(repo_dir: str | None, run_ids: tuple[str, ...]) -> bool:
 
 
 def _record_ci_flake(conn: sqlite3.Connection, row, sha: str) -> None:
-    """🔁 CMX-255. The re-run of a red came back GREEN on the same sha: the red was a flake.
-    Append it to the run's flake record (``runs.ci_flakes`` — the flaky test id comes from
-    the note written when the re-run fired) and close the re-run. The caller tells the
-    orchestrator, after its commit (:func:`_inbox_ci_flake`)."""
+    """🔁 CMX-255. A red's re-run came back GREEN on the same sha: a flake. Append it to
+    ``runs.ci_flakes`` (the test id comes from the note written when the re-run fired)."""
     try:
         flakes = json.loads(row["ci_flakes"] or "[]")
     except (json.JSONDecodeError, TypeError):
@@ -5450,7 +5442,8 @@ def tick(workflow_path: str | Path) -> dict:
         # which (correctly, and catastrophically) refuses every merge at once.
         pr_rows = conn.execute(
             "SELECT task_id, status, pr_url, workflow_path, pr_head_sha, ci_pending_since, "
-            "ci_rerun_sha, ci_rerun_state, ci_rerun_note, ci_flakes FROM runs WHERE workflow_path=? AND pr_url IS NOT NULL "
+            "ci_rerun_sha, ci_rerun_state, ci_rerun_note, ci_flakes "
+            "FROM runs WHERE workflow_path=? AND pr_url IS NOT NULL "
             "AND (pr_state IS NULL OR pr_state='open')",
             (str(wf.path),),
         ).fetchall()
@@ -6182,13 +6175,10 @@ def tick(workflow_path: str | Path) -> dict:
                     summary["escalated"] += 1
                 continue
 
-            # 🔁 CMX-255. A FLAKE MUST NOT BURN A REWORK ROUND. The first red on a head sha
-            # re-runs ONLY its failed jobs, once, and spends nothing: the run stays where it
-            # is and the next ticks read the re-run back — green records the flake (the
-            # refresh above), red again lands here with `ci_rerun_sha == sha` and is a real
-            # failure, sent back as before. ⛔ `ci_failed_sha` is NOT burned here: the
-            # re-run's red must still be able to fire its verdict. A re-run GitHub would not
-            # start falls straight through to the rework — never a silent park.
+            # 🔁 CMX-255. A FLAKE MUST NOT BURN A REWORK ROUND. The first red on a sha re-runs
+            # its failed jobs once and spends nothing; green records the flake (the refresh
+            # above), red again lands here with `ci_rerun_sha == sha` and is sent back. ⛔
+            # `ci_failed_sha` is NOT burned here, so the re-run's own red can still fire.
             if row["ci_rerun_sha"] != sha:
                 jobs = ", ".join(ci.failing) if ci and ci.failing else "?"
                 note = f"CI re-run once: {jobs} failed on {_ci_failed_test(log_tail)}"

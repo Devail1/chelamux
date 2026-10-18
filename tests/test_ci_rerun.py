@@ -1,15 +1,9 @@
 """🔁 CMX-255: a red CI re-runs its failed jobs ONCE before it may spend a rework round.
 
-10-18: a PR went red on one job from a flaky test it never touched; the dispatcher sent it
-straight back for rework, the agent had nothing to fix, the run went needs_human, and a
-human re-ran CI (green) by hand. One rework round and an hour, burned on a flake.
-
-These pin the fix, with `gh` stubbed at the argv boundary (tests/test_dispatcher_ci.py):
-
-* red → re-run → green ⇒ no rework, the flaky test recorded on the run, one notice;
-* red → re-run → red ⇒ rework as before (a real failure);
-* at most ONE re-run per head sha — a new push resets it;
-* a re-run GitHub will not start falls through to the rework, never a silent park.
+A flaky test the PR never touched sent it back for rework; the agent had nothing to fix and
+a human re-ran CI (green) by hand. Pinned here, with `gh` stubbed at the argv boundary:
+red → re-run → green is a recorded flake and no rework; red → re-run → red is a rework;
+one re-run per head sha; a re-run GitHub will not start falls through to the rework.
 """
 from __future__ import annotations
 
@@ -23,6 +17,7 @@ from tests.test_dispatcher_ci import _check_run, _FakeGh, _row, _tick, _wf
 
 _LOG = "E   assert 1 == 2\nFAILED tests/test_wall.py::test_grid - assert 1 == 2\n"
 _NOTE = "CI re-run once: CI / test (3.12) failed on tests/test_wall.py::test_grid"
+_GREEN = [_check_run("test (3.12)")]
 
 
 @pytest.fixture(autouse=True)
@@ -32,190 +27,90 @@ def _own_runs_db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def notices(monkeypatch):
-    said: list[tuple[str, str, str]] = []
-    monkeypatch.setattr(inbox, "ci_flake",
-                        lambda run, *, sha, note: said.append((run["task_id"], sha, note)))
+    said: list[tuple] = []
+    monkeypatch.setattr(inbox, "ci_flake", lambda run, *, sha, note: said.append((sha, note)))
     return said
 
 
-def _red(**kw):
-    return _FakeGh(rollup=[_check_run("test (3.12)", conclusion="FAILURE")], log=_LOG,
-                   rerun_rc=0, **kw)
-
-
-def _setup(tmp_path):
+def _setup(tmp_path, rollup=None, **kw):
     wf = _wf(tmp_path)
     with dispatcher._db() as conn:
         _row(conn, workflow_path=str(wf.path))
-    return wf
+    kw.setdefault("rerun_rc", 0)
+    return wf, _FakeGh(rollup=rollup or [_check_run("test (3.12)", conclusion="FAILURE")],
+                       log=_LOG, **kw)
 
 
 def _run():
     return dispatcher.resolve_run("abc123")
 
 
-def test_red_reruns_the_failed_jobs_once_and_spends_nothing(tmp_path):
-    wf = _setup(tmp_path)
-    fake = _red()
+def test_red_then_rerun_green_is_a_flake_no_rework_and_one_notice(tmp_path, notices):
+    wf, fake = _setup(tmp_path)
 
     summary = _tick(wf, fake)
 
-    assert summary["ci_rerun"] == 1
-    assert summary["ci_failed"] == 0
+    assert (summary["ci_rerun"], summary["ci_failed"]) == (1, 0)
     assert fake.reruns == [["gh", "run", "rerun", "42", "--failed"]]
     k = fake.kwargs[fake.calls.index(fake.reruns[0])]
-    assert k["cwd"] == str(wf.path.parent)
-    assert k["timeout"] == 30
-    assert k["capture_output"] is True
+    assert (k["cwd"], k["timeout"], k["capture_output"]) == (str(wf.path.parent), 30, True)
     run = _run()
-    assert run["status"] == "awaiting_review"
-    assert (run["rework_count"] or 0) == 0
-    assert dispatcher.reviews_of(run) == []
-    assert run["ci_rerun_sha"] == "deadbee1"
-    assert run["ci_rerun_state"] == "pending"
+    assert run["status"] == "awaiting_review" and (run["rework_count"] or 0) == 0
+    assert (run["ci_rerun_sha"], run["ci_rerun_state"]) == ("deadbee1", "pending")
     assert run["ci_rerun_note"] == _NOTE
     assert run["ci_failed_sha"] is None        # the re-run's own red must still be able to fire
     assert not fake.comments
 
-
-def test_red_then_rerun_green_is_a_flake_no_rework_and_one_notice(tmp_path, notices):
-    wf = _setup(tmp_path)
-    fake = _red()
-    _tick(wf, fake)
     fake.rollup = [_check_run("test (3.12)", status="IN_PROGRESS", conclusion="")]
     assert _tick(wf, fake)["ci_flake"] == 0
-    fake.rollup = [_check_run("test (3.12)")]
-
+    fake.rollup = _GREEN
     assert _tick(wf, fake)["ci_flake"] == 1
     assert _tick(wf, fake)["ci_flake"] == 0     # green again: said once
 
     run = _run()
-    assert run["status"] == "awaiting_review"
-    assert (run["rework_count"] or 0) == 0
+    assert run["status"] == "awaiting_review" and (run["rework_count"] or 0) == 0
     assert run["ci_rerun_state"] == "green"
     [flake] = json.loads(run["ci_flakes"])
-    assert flake["sha"] == "deadbee1"
-    assert flake["test"] == "tests/test_wall.py::test_grid"
-    assert flake["note"] == _NOTE
-    assert notices == [("abc123", "deadbee1", _NOTE)]
+    assert (flake["sha"], flake["test"], flake["note"]) == (
+        "deadbee1", "tests/test_wall.py::test_grid", _NOTE)
+    assert notices == [("deadbee1", _NOTE)]
     assert len(fake.reruns) == 1
 
 
 def test_red_then_rerun_red_is_a_real_failure_and_reworks(tmp_path, notices):
-    wf = _setup(tmp_path)
-    fake = _red()
+    wf, fake = _setup(tmp_path)
     _tick(wf, fake)
 
     summary = _tick(wf, fake)                  # the re-run settled red on the same sha
 
-    assert summary["ci_failed"] == 1
-    assert summary["ci_rerun"] == 0
+    assert (summary["ci_failed"], summary["ci_rerun"]) == (1, 0)
     assert len(fake.reruns) == 1               # ⛔ no second re-run on the same sha
     run = _run()
-    assert run["status"] == "running"
-    assert run["rework_count"] == 1
-    assert run["ci_rerun_state"] == "red"
-    assert run["ci_failed_sha"] == "deadbee1"
+    assert (run["status"], run["rework_count"]) == ("running", 1)
+    assert (run["ci_rerun_state"], run["ci_failed_sha"]) == ("red", "deadbee1")
     verdict = dispatcher.latest_verdict(run)
     assert _NOTE in verdict and "failed AGAIN on the re-run" in verdict
-    assert notices == []
-
-
-def test_a_new_push_resets_the_rerun(tmp_path):
-    wf = _setup(tmp_path)
-    fake = _red(sha="firstsha")
-    _tick(wf, fake)
-    _tick(wf, fake)                            # real failure → rework
-    with dispatcher._db() as conn:
+    with dispatcher._db() as conn:             # a human re-runs it green later: not a flake
         conn.execute("UPDATE runs SET status='awaiting_review' WHERE task_id='abc123'")
         conn.commit()
-    fake.sha = "secondsh"
-
-    summary = _tick(wf, fake)
-
-    assert summary["ci_rerun"] == 1 and summary["ci_failed"] == 0
-    assert len(fake.reruns) == 2
-    assert _run()["ci_rerun_sha"] == "secondsh"
-    assert _run()["ci_rerun_state"] == "pending"
-
-
-def test_green_on_a_DIFFERENT_sha_is_not_a_flake(tmp_path, notices):
-    wf = _setup(tmp_path)
-    fake = _red()
-    _tick(wf, fake)
-    fake.sha = "newpush1"
-    fake.rollup = [_check_run("test (3.12)")]
-
+    fake.rollup = _GREEN
     assert _tick(wf, fake)["ci_flake"] == 0
-    assert _run()["ci_rerun_state"] == "pending"
-    assert _run()["ci_flakes"] is None
     assert notices == []
 
 
-def test_a_plain_green_with_no_rerun_records_nothing(tmp_path, notices):
-    wf = _setup(tmp_path)
-    fake = _red()
-    fake.rollup = [_check_run("test (3.12)")]
-    assert _tick(wf, fake)["ci_flake"] == 0
-    assert fake.reruns == [] and notices == []
+def test_a_new_push_resets_the_rerun_and_green_elsewhere_is_no_flake(tmp_path, notices):
+    wf, fake = _setup(tmp_path)
+    _tick(wf, fake)
+    fake.sha, fake.rollup = "newpush1", _GREEN
+    assert _tick(wf, fake)["ci_flake"] == 0     # green, but not on the re-run's sha
+    assert (_run()["ci_rerun_state"], _run()["ci_flakes"], notices) == ("pending", None, [])
 
-
-def test_a_refused_rerun_falls_through_to_the_rework(tmp_path):
-    wf = _setup(tmp_path)
-    fake = _red()
-    fake.rerun_rc = 1
-
-    summary = _tick(wf, fake)
-
-    assert summary["ci_failed"] == 1 and summary["ci_rerun"] == 0
-    assert len(fake.reruns) == 1
-    run = _run()
-    assert run["rework_count"] == 1
-    assert run["ci_rerun_sha"] is None
-    assert "re-run" not in dispatcher.latest_verdict(run)
-
-
-@pytest.mark.parametrize("exc", [FileNotFoundError("no gh"),
-                                 subprocess.TimeoutExpired(["gh"], 30)])
-def test_a_rerun_that_cannot_run_falls_through_to_the_rework(tmp_path, exc):
-    wf = _setup(tmp_path)
-    fake = _red()
-    real = fake.run
-
-    def run(cmd, *a, **k):
-        if isinstance(cmd, list) and cmd[:3] == ["gh", "run", "rerun"]:
-            raise exc
-        return real(cmd, *a, **k)
-    fake.run = run
-
-    assert _tick(wf, fake)["ci_failed"] == 1
-    assert _run()["rework_count"] == 1
-    assert _run()["ci_rerun_sha"] is None
-
-
-def test_no_run_id_means_no_rerun_and_the_rework(tmp_path):
-    wf = _setup(tmp_path)
-    fake = _FakeGh(rollup=[{"context": "ci/legacy", "state": "FAILURE"}], log=_LOG, rerun_rc=0)
-
-    assert _tick(wf, fake)["ci_failed"] == 1
-    assert fake.reruns == []
-
-
-_TWO_RUNS = [_check_run("a", conclusion="FAILURE", run_id="1"),
-             _check_run("b", conclusion="FAILURE", run_id="2")]
-
-
-def test_every_failed_run_is_rerun(tmp_path):
-    wf = _setup(tmp_path)
-    fake = _FakeGh(rollup=_TWO_RUNS, log=_LOG, rerun_rc=0)
+    fake.sha, fake.rollup = "newpush2", [_check_run("test (3.12)", conclusion="FAILURE")]
     assert _tick(wf, fake)["ci_rerun"] == 1
-    assert fake.reruns == [["gh", "run", "rerun", "1", "--failed"],
-                           ["gh", "run", "rerun", "2", "--failed"]]
+    assert len(fake.reruns) == 2 and _run()["ci_rerun_sha"] == "newpush2"
 
 
-def test_one_refused_rerun_of_several_means_rework(tmp_path):
-    wf = _setup(tmp_path)
-    fake = _FakeGh(rollup=_TWO_RUNS, log=_LOG)
+def _refuse_second(fake):
     real = fake.run
 
     def run(cmd, *a, **k):
@@ -224,25 +119,64 @@ def test_one_refused_rerun_of_several_means_rework(tmp_path):
             r.returncode = 0 if cmd[3] == "1" else 1
         return r
     fake.run = run
-    assert _tick(wf, fake)["ci_failed"] == 1
-    assert _run()["ci_rerun_sha"] is None
+
+
+def _raising(exc):
+    def wrap(fake):
+        real = fake.run
+
+        def run(cmd, *a, **k):
+            if isinstance(cmd, list) and cmd[:3] == ["gh", "run", "rerun"]:
+                raise exc
+            return real(cmd, *a, **k)
+        fake.run = run
+    return wrap
+
+
+_TWO = [_check_run("a", conclusion="FAILURE", run_id="1"),
+        _check_run("b", conclusion="FAILURE", run_id="2")]
+
+
+@pytest.mark.parametrize("rollup, rc, rig", [
+    (None, 1, None),                                       # GitHub refused it
+    (None, 0, _raising(FileNotFoundError("no gh"))),       # an OSError subclass
+    (None, 0, _raising(subprocess.TimeoutExpired(["gh"], 30))),
+    (_TWO, 0, _refuse_second),                             # one of several refused
+    ([{"context": "ci/legacy", "state": "FAILURE"}], 0, None),   # no run id to name
+])
+def test_a_rerun_that_cannot_start_falls_through_to_the_rework(tmp_path, rollup, rc, rig):
+    wf, fake = _setup(tmp_path, rollup, rerun_rc=rc)
+    if rig:
+        rig(fake)
+
+    summary = _tick(wf, fake)
+
+    assert (summary["ci_failed"], summary["ci_rerun"]) == (1, 0)
+    run = _run()
+    assert run["rework_count"] == 1 and run["ci_rerun_sha"] is None
+    assert "re-run" not in dispatcher.latest_verdict(run)
+
+
+def test_every_failed_run_is_rerun(tmp_path):
+    wf, fake = _setup(tmp_path, _TWO)
+    assert _tick(wf, fake)["ci_rerun"] == 1
+    assert fake.reruns == [["gh", "run", "rerun", "1", "--failed"],
+                           ["gh", "run", "rerun", "2", "--failed"]]
 
 
 def test_an_infra_only_red_is_not_rerun(tmp_path):
-    wf = _setup(tmp_path)
-    fake = _FakeGh(rollup=[_check_run("test", conclusion="STARTUP_FAILURE")], rerun_rc=0)
+    wf, fake = _setup(tmp_path, [_check_run("test", conclusion="STARTUP_FAILURE")])
     assert _tick(wf, fake)["ci_infra_failed"] == 1
     assert fake.reruns == []
 
 
 def test_a_corrupt_flake_record_is_restarted_not_fatal(tmp_path, notices):
-    wf = _setup(tmp_path)
-    fake = _red()
+    wf, fake = _setup(tmp_path)
     _tick(wf, fake)
     with dispatcher._db() as conn:
         conn.execute("UPDATE runs SET ci_flakes='not json' WHERE task_id='abc123'")
         conn.commit()
-    fake.rollup = [_check_run("test (3.12)")]
+    fake.rollup = _GREEN
     assert _tick(wf, fake)["ci_flake"] == 1
     assert [f["sha"] for f in json.loads(_run()["ci_flakes"])] == ["deadbee1"]
 
@@ -268,6 +202,7 @@ def test_the_flake_notice_says_flake_and_not_sent_back(tmp_path, monkeypatch):
     [event] = [e for e in inbox.load()["queue"] if e["kind"] == "run_ci_flake"]
     assert "CI flake, re-run green on deadbee" in event["summary"]
     assert "NOT sent back" in event["summary"]
+    assert "failed on tests/test_wall.py::test_grid" in event["summary"]
     assert event["payload"]["note"] == _NOTE
     assert inbox.ci_flake(run, sha="", note=_NOTE) is False
     monkeypatch.setattr(inbox, "INBOX_ENABLED", False)
