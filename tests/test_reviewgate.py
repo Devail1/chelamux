@@ -41,12 +41,11 @@ def _push(wt: Path, body) -> None:
 @pytest.mark.parametrize("body, ok", [
     (REVIEWED, True),
     ("## Review\n3 findings: 2 fixed, 1 dismissed\n### Fixed\na.py:1 fixed\n", True),
-    ("## Review  \r\n0 findings\r\n", True),
-    ("## Review\n\n   \n## Test plan\nran it\n", False),     # empty section is a dodge
-    ("### Review\n0 findings\n", False),                     # wrong level
+    ("## Review\n### Fixed\na.py:1 fixed\n", True), ("## Review  \r\n0 findings\r\n", True),
+    ("## Review\n\n## Review\n0 findings\n", True),      # ANY non-empty section counts
+    ("## Review\n\n   \n## Test plan\nran it\n", False), ("### Review\n0 findings\n", False),
     ("## Reviewer notes\n0 findings\n", False),              # a prefix is not the heading
-    ("text ## Review\n0 findings\n", False),                 # not at a line start
-])
+    ("text ## Review\n0 findings\n", False)])              # not at a line start
 def test_has_review(body, ok):
     assert reviewgate.has_review(body) is ok
 
@@ -72,6 +71,8 @@ def test_no_review_reason_is_accepted_and_recorded(tmp_path, monkeypatch):
     assert dispatcher.check_review_section("cmx-88", "  /code-review unavailable  ") == {
         "ok": True, "record": {"no_review_reason": "/code-review unavailable"}}
     assert dispatcher.check_review_section("cmx-88", "   ")["ok"] is False
+    long = dispatcher.check_review_section("cmx-88", "y" * (dispatcher.HANDOFF_MAX_CHARS + 9))
+    assert long["record"]["no_review_reason"] == "y" * dispatcher.HANDOFF_MAX_CHARS
 
 
 def test_an_unreadable_body_fails_closed(tmp_path, monkeypatch):
@@ -80,20 +81,22 @@ def test_an_unreadable_body_fails_closed(tmp_path, monkeypatch):
     assert out["ok"] is False and out["error"].endswith("Unknown is not reviewed.")
     assert out["error"].startswith("could not read this PR's body — no PR is open and no "
                                    "`chela request-push` is pending")
+    with patch.object(dispatcher.judge, "_docs_only_diff", return_value=None):  # unknown
+        assert dispatcher.check_review_section("cmx-88") == out                    # ≠ prose
     assert dispatcher.check_review_section("cmx-1")["error"] == \
         "no run with a worktree on record for cmx-1"
 
 
 def test_an_open_pr_is_read_from_github_not_the_marker(tmp_path, monkeypatch):
     wt = _repo(tmp_path, monkeypatch, "feat.py")
-    _push(wt, REVIEWED)                              # stale: the open PR is authoritative
+    _push(wt, "## Summary\nx\n")                   # stale: the open PR is authoritative
     with dispatcher._db() as conn:
         conn.execute("UPDATE runs SET pr_url='https://github.com/o/r/pull/7'").connection.commit()
-    real, done = subprocess.run, subprocess.CompletedProcess([], 0, "## Summary\nx\n", "")
+    real, done = subprocess.run, subprocess.CompletedProcess([], 0, REVIEWED, "")
     with patch.object(reviewgate.subprocess, "run",
                       side_effect=lambda cmd, **kw: done if cmd[0] == "gh" else real(cmd, **kw)
                       ) as run:
-        assert dispatcher.check_review_section("cmx-88")["ok"] is False
+        assert dispatcher.check_review_section("cmx-88") == {"ok": True, "record": None}
     assert [c for c in run.call_args_list if c.args[0][0] == "gh"] == [call(
         ["gh", "pr", "view", "https://github.com/o/r/pull/7", "--json", "body", "-q", ".body"],
         cwd=str(wt), capture_output=True, text=True, timeout=30)]
@@ -102,8 +105,7 @@ def test_an_open_pr_is_read_from_github_not_the_marker(tmp_path, monkeypatch):
 @pytest.mark.parametrize("effect, error", [
     (subprocess.CompletedProcess([], 1, "", "no auth"), "`gh pr view u` failed: no auth"),
     (FileNotFoundError("gh"), "`gh pr view` could not run"),
-    (subprocess.TimeoutExpired("gh", 30), "`gh pr view` could not run"),
-])
+    (subprocess.TimeoutExpired("gh", 30), "`gh pr view` could not run")])
 def test_gh_that_fails_raises(tmp_path, effect, error):
     kw = {"side_effect": effect} if isinstance(effect, BaseException) else {"return_value": effect}
     with patch.object(reviewgate.subprocess, "run", **kw), \
@@ -112,11 +114,9 @@ def test_gh_that_fails_raises(tmp_path, effect, error):
 
 
 @pytest.mark.parametrize("marker, error", [
-    (None, "no PR is open and no `chela request-push` is pending"),
+    (None, "no PR is open and no `chela request-push` is pending"), ('["x"]', "no PR body"),
     ("{not json", "no PR is open and no `chela request-push` is pending"),
-    ('{"pr_title": null, "pr_body": null}', "carries no PR body"),
-    ('["x"]', "carries no PR body"),
-])
+    ('{"pr_title": null, "pr_body": null}', "carries no PR body")])
 def test_a_marker_without_a_body_raises(tmp_path, marker, error):
     path = tmp_path / "m.json"
     if marker is not None:
@@ -132,8 +132,7 @@ def test_cli_refuses_before_the_sweep(tmp_path, monkeypatch, capsys):
     with patch.object(dispatcher, "verify_sweep") as swept, \
             patch.object(dispatcher, "request_task_finished") as req:
         assert _task_finished() == 1
-    assert "task-finished: 🔎 this PR's body has no `## Review` section" in \
-        capsys.readouterr().out
+    assert "task-finished: 🔎 this PR's body has no `## Review`" in capsys.readouterr().out
     assert not swept.called and not req.called
 
 
