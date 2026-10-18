@@ -64,6 +64,7 @@ from chela.telegram.reconcile import (
     TopicManager,
     ai_title_for_window,
     blocked_on_human,
+    delete_archived_topics,
     disambiguate_topic_names,
     dispatched_window_ids,
     live_agent_windows,
@@ -72,6 +73,7 @@ from chela.telegram.reconcile import (
     topic_name_for,
 )
 from chela.telegram.relay import BotSender, RegistryRelay, TelegramRelay
+from chela.telegram.topics import TopicLedger
 
 __all__ = [
     "TranscriptMonitor",
@@ -106,6 +108,8 @@ __all__ = [
     "TopicManager",
     "TopicClosedHandler",
     "reconcile_bindings",
+    "delete_archived_topics",
+    "TopicLedger",
     "sync_pinned_titles",
     "ai_title_for_window",
     "blocked_on_human",
