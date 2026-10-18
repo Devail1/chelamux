@@ -63,7 +63,7 @@ def test_an_unclaimed_eslint_survivor_is_advisory_and_the_verdict_is_clean(tmp_p
     assert (o.verdict, o.blocking, report.state) == (judge.SURVIVED, False, judge.J_CLEAN)
     assert "`eslint.config.js` is tool config (`eslint.config.*`)" in o.advisory
     body = judge.comment_body(report, None, TEST_CMD)
-    assert "🧰 advisory" in body and "no test this PR changes names it" in body
+    assert "| **SURVIVED** 🧰 advisory |" in body and "no test this PR changes names it" in body
 
 
 def test_the_same_survivor_blocks_when_a_changed_test_claims_the_file(tmp_path):
@@ -111,12 +111,15 @@ def _survivor(file: str, before: str = "x", after: str = "y") -> judge.Outcome:
     ("package.json", '"eslint src"', '"true"', True),     # inside `scripts`
     ("package.json", '"module"', '"commonjs"', False),    # outside `scripts`
     ("package.json", '"eslint src"', '"eslint src', False),  # breaks the JSON: unproven
-    ("bad/package.json", "x", "y", False),               # not UTF-8: unproven, no crash
+    ("bad/package.json", "x", "y", False),
+    ("arr/package.json", '"eslint src"', '"true"', False),  # not a JSON object               # not UTF-8: unproven, no crash
 ])
 def test_classify_by_file_and_json_key(tmp_path, monkeypatch, file, before, after, advisory):
     monkeypatch.setattr(toolconfig, "changed_tests", lambda *a: {})
     (tmp_path / "package.json").write_text(PKG)
     (tmp_path / "bad").mkdir()
+    (tmp_path / "arr").mkdir()
+    (tmp_path / "arr" / "package.json").write_text('["eslint src"]')
     (tmp_path / "bad" / "package.json").write_bytes(b'{"scripts": "\xff"}')
     o = _survivor(file, before, after)
     toolconfig.classify([o], tmp_path, "dev", toolconfig.DEFAULT_GLOBS)
@@ -141,11 +144,15 @@ def test_a_killed_tool_config_experiment_is_never_advisory(tmp_path, monkeypatch
     assert (o.advisory, o.reason) == ("", "green")
 
 
-def test_changed_tests_is_none_without_a_base_or_a_resolvable_one(tmp_path):
+def test_changed_tests_is_none_without_a_base_or_a_resolvable_one(tmp_path, monkeypatch):
     work = _repo(tmp_path, {"web/tests/a.ts": "x", "web/src/b.ts": "eslint.config.js"})
     (work / "test_untracked.py").write_text("u")
     assert toolconfig.changed_tests(work, "") is None
     assert toolconfig.changed_tests(work, "nope") is None
+    with monkeypatch.context() as m:
+        m.setattr(toolconfig.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired("git", 60)))
+        assert toolconfig.changed_tests(work, "dev") is None
     assert toolconfig.changed_tests(work, "dev") == {"web/tests/a.ts": "x",
                                                      "test_untracked.py": "u"}
 

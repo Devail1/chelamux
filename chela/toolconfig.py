@@ -89,8 +89,6 @@ def changed_tests(worktree: Path, base_branch: str) -> dict[str, str] | None:
     """``{path: text}`` of every test file this branch changes vs ``origin/<base_branch>`` —
     committed, uncommitted or untracked (a self-check runs before the commit). None when git
     cannot say, which keeps every tool-config survivor BLOCKING."""
-    if not base_branch:
-        return None
     base = _git(worktree, "merge-base", f"origin/{base_branch}", "HEAD")
     diff = _git(worktree, "diff", "--name-only", "--no-renames", base.strip()) if base else None
     untracked = _git(worktree, "ls-files", "--others", "--exclude-standard")
