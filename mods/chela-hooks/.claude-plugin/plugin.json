@@ -1,5 +1,13 @@
 {
   "name": "chela-hooks-mod",
-  "version": "0.1.0",
-  "description": "SPIKE (CMX-157): chela's merge gate + event posting as a Claude Code Mod. One test session only — see docs/MODS_SPIKE.md."
+  "version": "0.2.0",
+  "description": "Opt-in chela Mod (Claude Code >= 2.1.301): chela's status line via $.ui.status, plus the CMX-157 hook spike. plugin/ stays the baseline — see mods/chela-hooks/README.md.",
+  "userConfig": {
+    "statusLine": {
+      "type": "boolean",
+      "title": "chela status line",
+      "description": "Show chela's status line (context bar, window id, orchestrator/run marker) and feed the dashboard's context bar.",
+      "default": true
+    }
+  }
 }

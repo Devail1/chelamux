@@ -1992,7 +1992,8 @@ def test_a_cannot_verify_run_is_left_alone_AND_says_so(tmp_path):
     result, run, posted = _judge_run(tmp_path, REAL_GUARD_TEST, {"experiments": []})
 
     assert result["state"] == judge.J_CANNOT_VERIFY
-    assert run["status"] == "awaiting_review"       # neither blocked nor cleared
+    # Neither blocked nor cleared — and, CMX-195, parked ONCE: no experiments is final.
+    assert run["status"] == "needs_human" and run["judge_unknown_final"]
     assert run["judge_state"] == judge.J_CANNOT_VERIFY
     assert "CANNOT VERIFY" in posted[0]
     assert "NOT an approval" in posted[0]

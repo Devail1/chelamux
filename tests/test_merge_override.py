@@ -1403,3 +1403,13 @@ def test_chela_override_list_shows_an_approved_request(repo, told, capsys):
 
     out = capsys.readouterr().out
     assert rid in out and "approved" in out, out
+
+
+def test_an_override_question_names_the_always_human_path_that_triggered_it(repo, monkeypatch):
+    _seed(repo, judge_state="clean")
+    monkeypatch.setattr(contract, "_read_pr_files", lambda *a: ["docs/x.md", "WORKFLOW.md"])
+    result = _request(reason="config change")
+    assert result["ok"] and result["pending"]
+    assert result["question"] == (f"Override-merge cmx-1 into dev past the judge ('clean' on "
+                                  f"{HEAD[:12]})? It touches ALWAYS-HUMAN path 'WORKFLOW.md'. "
+                                  "Reason: config change")

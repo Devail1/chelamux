@@ -944,6 +944,7 @@ def _clean_run(**over):
 JUDGE_KINDS = [
     pytest.param(judge.J_CLEAN, "run_judge_clean", id="clean"),
     pytest.param(judge.J_CANNOT_VERIFY, "run_judge_cannot_verify", id="cannot_verify"),
+    pytest.param(judge.J_PROSE_ONLY, "run_judge_clean", id="prose_only"),   # CMX-208
 ]
 
 @pytest.mark.parametrize("judge_state,kind", JUDGE_KINDS)
