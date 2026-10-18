@@ -1370,3 +1370,36 @@ def test_an_approved_request_is_retried_once_a_minute_at_most(repo, told, naps):
         done, = overrides.retry_approved(now=last + 60.001)
     assert done["state"] == overrides.MERGED
     squash.assert_called_once()
+
+
+def test_the_daemon_tick_retries_an_approved_request(monkeypatch):
+    """🔴 WIRING (production call-site in ``cmd_run``) — every ``retry_approved`` test above
+    calls it directly, so they all stay green if the daemon loop never does (e.g. the call
+    commented out to ``pass``), and an approval deferred on UNKNOWN would then wait forever.
+    This drives ONE real pass of the daemon loop and proves it reaches the retry."""
+    import chela.main as main
+    from tests.test_context import _run_one_daemon_tick
+
+    _run_one_daemon_tick(monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setattr(overrides, "sweep", lambda *a, **kw: calls.append("sweep") or [])
+    monkeypatch.setattr(overrides, "retry_approved",
+                        lambda *a, **kw: calls.append("retry") or [])
+
+    main.cmd_run(SimpleNamespace())
+
+    assert calls == ["sweep", "retry"], "the daemon tick never retried an approved override"
+
+
+def test_chela_override_list_shows_an_approved_request(repo, told, capsys):
+    """An approval deferred on UNKNOWN is still live work, so the default listing (no
+    ``--all``) shows it alongside pending ones."""
+    import chela.main as main
+    _seed(repo)
+    rid = _request()["request_id"]
+    overrides.set_fields(rid, state=overrides.APPROVED, detail="GitHub reports UNKNOWN")
+
+    main.cmd_override(SimpleNamespace(override_cmd="list", all=False))
+
+    out = capsys.readouterr().out
+    assert rid in out and "approved" in out, out
