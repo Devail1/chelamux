@@ -203,6 +203,63 @@ not from `classic.PreToolUse`, so that the denied calls are posted too.
    start-up, and a second parser is the drift the gate's single source of truth exists to
    prevent.
 
+## 8. Status line Mod (CMX-181) and the long soak
+
+CMX-181 shipped item 1 of §7.2: the status line through `$.ui.status`, with the dashboard's
+context cache written through the same `scripts/cache-statusline.sh`
+([`mods/chela-hooks/README.md`](../mods/chela-hooks/README.md)).
+
+### 8.1 Soak: NOT RUN yet
+
+⛔ **The ≥ 2 h side-by-side soak has not been run.** CMX-181 was a dispatched run, and the
+merge gate denies a dispatched run any nested `claude` launch (CMX-190: `$CHELA_RUN_ID` is
+set in its pane). The soak needs exactly that: an interactive session with both layers
+loaded. A gate denial is final, and routing around it would defeat the guard, so the soak
+was left for a session that is not a dispatched run (the orchestrator or a human). **No
+numbers below are measured.** Until the table is filled in, §6's "not covered" list
+still stands for idle periods, compaction and subagents.
+
+**Protocol.** Use the appendix's harness: the recorder on port 5099, the shell plugin
+rendered with `hooks.render_plugin(dir, port=5099)`, and
+`CHELA_MOD_HOOKS_URL=http://127.0.0.1:5099/mod`. Run it in a private tmux socket
+(`tmux -L chelatest-soak`) with `CHELA_WID` set and `CHELA_DIR` pointing at a scratch
+directory, and pass `--debug-file`. Over at least 2 h:
+
+1. a few tool-using turns (Bash, Read, Edit);
+2. **idle ≥ 30 min**, twice;
+3. a `/compact`, then a turn;
+4. a turn that spawns a **subagent** (the Task/Agent tool) that runs tools of its own;
+5. a `--resume` restart, then a turn.
+
+Every 5 min, capture the pane with `tmux capture-pane -pe` and record the status line.
+Afterwards, compare the two recorder streams as in §3. Also check that
+`$CHELA_DIR/context/by-session/<sid>.json` updated after every turn and that
+`statusline-errors.log` is empty.
+
+| Check | Expected | Measured |
+|---|---|---|
+| events in the shell stream missing from the Mod's | 0 | — |
+| Mod-only events (not gate denies) | 0 | — |
+| status line after idle | unchanged, no flicker or blanking | — |
+| status line after `/compact` | context field omitted until the next response, then back | — |
+| subagent turns | the line still shows the main session's window and run | — |
+| cache file after each turn | rewritten, `session_id` of the main session | — |
+
+### 8.2 What the build found (from tests, not the soak)
+
+* **After a compaction the context field is left out until the next response.**
+  `$.session.usage()` has no percent then (its doc says so). The Mod omits the field
+  rather than drawing 0%, and the cache it writes then has no `used_percentage`, so the
+  reader serves no statusLine snapshot and the transcript estimate takes over.
+  `tests/test_mods_status.py` pins that negative control.
+* **`messages_k` is not available from a Mod.** `$.session.usage()` reports the total
+  input tokens but not the uncached split (`current_usage.input_tokens`), so a
+  Mod-written snapshot has no messages segment. Every other field the dashboard reads
+  matches the native statusLine exactly (`tests/test_mods_status.py`).
+* **Event posting had to become opt-in by URL.** The spike defaulted to
+  `127.0.0.1:5001`. With the Mod loaded for its status line in a chela pane, that
+  default would have filed every event twice, once from `plugin/` and once from the Mod.
+
 ## Appendix: reproducing the run
 
 The harness is a recorder that writes one JSONL line per POST, as `shell` for `/hooks/*`
