@@ -153,6 +153,39 @@ def test_a_process_that_escaped_the_group_cannot_wedge_the_drain(tmp_path, pids)
     assert time.monotonic() - t0 < 10
 
 
+def test_a_drain_that_times_out_kills_closes_both_pipes_and_reaps():
+    """The pipes are closed by hand: an escapee holds their other ends open indefinitely, and
+    an fd per timed-out run would otherwise leak until the Popen is collected."""
+    calls = []
+
+    class Pipe:
+        def __init__(self, name):
+            self.name = name
+
+        def close(self):
+            calls.append(f"close {self.name}")
+
+    class Proc:
+        stdout, stderr = Pipe("stdout"), Pipe("stderr")
+
+        def communicate(self, timeout):
+            calls.append(f"communicate {timeout}")
+            raise subprocess.TimeoutExpired("x", timeout)
+
+        def kill(self):
+            calls.append("kill")
+
+        def wait(self):
+            calls.append("wait")
+
+    assert procguard._drain(Proc(), 0.5) == ("", "")
+    assert calls == ["communicate 0.5", "kill", "close stdout", "close stderr", "wait"]
+    Proc.stderr = None                                   # a pipe never opened is skipped
+    calls.clear()
+    procguard._drain(Proc(), 1)
+    assert calls == ["communicate 1", "kill", "close stdout", "wait"]
+
+
 def test_group_alive_reads_each_answer_of_a_signal_0_probe(monkeypatch):
     def probe(err):
         def killpg(pgid, sig):
