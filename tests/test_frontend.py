@@ -4,6 +4,7 @@ skips loudly, or FAILS under ``CHELA_REQUIRE_JS_TESTS``."""
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -95,3 +96,96 @@ def test_vitest_runs_contained_with_its_full_call_pinned(monkeypatch, code, work
     assert kw["watch"] == (4242 if worker else None)
     assert not {"NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE"} & set(kw["env"])
     assert "PATH" in kw["env"]
+
+
+# The frontend job's other gates (depcruise, tsc, eslint) run in CI only over the clean tree,
+# where a weakened rule still passes. Each config is graded here against a throwaway tree with
+# one violation per rule, so a rule that stops biting goes red (DEFEAT_SHAPES 176).
+DEPCRUISE_CONFIG = FRONTEND / ".dependency-cruiser.cjs"
+TSCONFIG = FRONTEND / "tsconfig.json"
+ESLINT_CONFIG = FRONTEND / "eslint.config.js"
+BINS = {"depcruise": "dependency-cruiser/bin/dependency-cruise.mjs",
+        "tsc": "typescript/bin/tsc", "eslint": "eslint/bin/eslint.js"}
+
+
+def _tool(tmp_path, tool, *args, files):
+    node = shutil.which("node")
+    if not node:
+        _did_not_run(f"node is not installed — the {tool} config guard DID NOT RUN")
+    bin_ = FRONTEND / "node_modules" / BINS[tool]
+    if not bin_.is_file():
+        _did_not_run(f"{tool} is not installed in {FRONTEND.relative_to(ROOT)} — its config "
+                     f"guard DID NOT RUN. Run `pnpm install` in {ROOT}.")
+    (tmp_path / "node_modules").symlink_to(FRONTEND / "node_modules")
+    (tmp_path / "tsconfig.json").write_text(f'{{"extends": "{TSCONFIG}", "include": ["src"]}}')
+    for rel, text in files.items():
+        (tmp_path / "src" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src" / rel).write_text(text + "\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("NODE_CHANNEL")}
+    return run_contained([node, str(bin_), *args], timeout=120, cwd=str(tmp_path), env=env)
+
+
+def test_depcruise_flags_exactly_the_imports_each_boundary_rule_forbids(tmp_path):
+    files = {   # every import that is NOT in the expected set below is one the rules must allow
+        "app.ts": "import './features/a/index.ts'; import './features/a/lib/x.ts';\n"
+                  "import './shared/s/index.ts'; import './shared/s/lib/z.ts';",
+        "features/a/index.ts": "import './lib/x.ts'; import './tests/fixture.ts';",
+        "features/a/lib/x.ts": "import './y.ts';",
+        "features/a/lib/y.ts": "export {};",
+        "features/a/tests/fixture.ts": "export {};",
+        "features/a/tests/a.ts": "import '../index.ts'; import './fixture.ts'; import '../lib/y.ts';",
+        "features/b/index.ts": "import '../a/index.ts'; import '../a/lib/y.ts'; import './c1.ts';",
+        "features/b/c1.ts": "import './c2.ts';",
+        "features/b/c2.ts": "import './c1.ts';",
+        "features/b/tests/b.ts": "import '../index.ts'; import '../../a/tests/fixture.ts';",
+        "shared/s/index.ts": "import './lib/z.ts';",
+        "shared/s/lib/z.ts": "export {};",
+    }
+    proc = _tool(tmp_path, "depcruise", "--config", str(DEPCRUISE_CONFIG),
+                 "--output-type", "json", "src", files=files)
+    assert proc.returncode == 0, proc.stderr.decode()[-2000:]
+    got = {(v["rule"]["name"], v["from"].removeprefix("src/"), v["to"].removeprefix("src/"))
+           for v in json.loads(proc.stdout)["summary"]["violations"]}
+    assert got == {
+        ("entrypoint-boundary-from-app", "app.ts", "features/a/lib/x.ts"),
+        ("entrypoint-boundary-from-app", "app.ts", "shared/s/lib/z.ts"),
+        ("entrypoint-boundary-across-modules", "features/b/index.ts", "features/a/lib/y.ts"),
+        ("tests-through-entrypoints", "features/a/tests/a.ts", "features/a/lib/y.ts"),
+        ("tests-through-entrypoints", "features/b/tests/b.ts", "features/a/tests/fixture.ts"),
+        ("tests-folder-is-private", "features/a/index.ts", "features/a/tests/fixture.ts"),
+        ("no-circular", "features/b/c1.ts", "features/b/c2.ts"),
+    }
+
+
+def test_tsc_is_strict_and_still_compiles_allowjs_imports(tmp_path):
+    bad = {"implicit_any.ts": "export function f(x) { return x; }",
+           "null_check.ts": "export const s: string = null;",
+           "index_access.ts": "const a: number[] = []; export const n: number = a[0];"}
+    ok = {"m.js": "export const m = 1;",
+          "ok.tsx": "import { m } from './m.js'; export const k: number = m;\n"
+                    "export const el = <p>{k}</p>;"}
+    proc = _tool(tmp_path, "tsc", "--noEmit", "-p", "tsconfig.json", files={**bad, **ok})
+    out = proc.stdout.decode()
+    assert proc.returncode != 0, out
+    assert {line.split("(")[0] for line in out.splitlines() if ": error TS" in line} \
+        == {f"src/{name}" for name in bad}, out
+
+
+def test_eslint_flags_a_conditional_hook_and_an_explicit_any(tmp_path):
+    files = {"bad.tsx": "import { useState } from 'react';\n"
+                        "export function C({ on }: { on: boolean }) {\n"
+                        "  if (on) { useState(0); }\n  const x: any = 1;\n  return <p>{x}</p>;\n}",
+             "ok.tsx": "export const el = <p>ok</p>;"}
+    proc = _tool(tmp_path, "eslint", "-c", str(ESLINT_CONFIG), "--format", "json", "src",
+                 files=files)
+    got = {Path(f["filePath"]).name: sorted(m["ruleId"] for m in f["messages"])
+           for f in json.loads(proc.stdout)}
+    assert got == {"bad.tsx": ["@typescript-eslint/no-explicit-any", "react-hooks/rules-of-hooks"],
+                   "ok.tsx": []}, proc.stderr.decode()[-2000:]
+
+
+def test_the_frontend_is_a_pnpm_workspace_member_with_exact_pins():
+    assert "  - chela/dashboard/frontend\n" in (ROOT / "pnpm-workspace.yaml").read_text()
+    pkg = json.loads((FRONTEND / "package.json").read_text())
+    pins = {**pkg["dependencies"], **pkg["devDependencies"]}
+    assert [d for d, v in pins.items() if not v[0].isdigit()] == []

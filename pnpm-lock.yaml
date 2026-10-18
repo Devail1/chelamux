@@ -58,7 +58,7 @@ importers:
         specifier: 16.5.0
         version: 16.5.0
       jsdom:
-        specifier: ^29.1.1
+        specifier: 29.1.1
         version: 29.1.1
       typescript:
         specifier: 5.9.3
