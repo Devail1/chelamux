@@ -2010,7 +2010,13 @@ def ci_red(run: dict, *, sha: str, failing: tuple[str, ...] | list[str],
     task = run.get("task_id")
     if not task or not sha:
         return False
-    jobs = ", ".join(failing) or "?"
+    jobs = ", ".join(f for f in (str(f).strip() for f in failing) if f)
+    if not jobs:
+        # ⛔ CMX-256: a red names its job. No name means whoever called this hit a rollup
+        # shape it did not classify — that is PENDING, not a notice saying "job ?".
+        log.warning("ci_red: %s on %s named no failing job — not announced as red",
+                    task, sha[:7])
+        return False
     line = first_failure_line(log_tail)
     rerun = f" — flake? `gh run rerun {run_ids[0]} --failed`" if run_ids else ""
     then = ("sent back for rework" if sent_back
