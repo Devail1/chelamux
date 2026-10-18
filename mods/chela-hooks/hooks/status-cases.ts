@@ -1,12 +1,13 @@
 // Shared by status.test.ts and pytest (tests/test_mods_status.py). `usage` is what
 // `$.session.usage()` answers; `payload` is the statusLine-shaped body the mod pipes to
 // scripts/cache-statusline.sh for it. Plain JSON: pytest parses it after the `=`.
+// The five-hour reset has 750 ms, so a resets_at that rounds instead of flooring shows.
 export const STATUS = {
   "session_id": "0f0f0f0f-0000-4000-8000-000000000001", "cwd": "/repo", "model": "claude-opus-5-5",
   "usage": {
     "startedAt": 0,
     "context": {"tokens": 84000, "window": 200000, "percent": 42},
-    "rateLimits": [{"kind": "five_hour", "percentUsed": 23.5, "resetsAt": "2026-10-17T12:00:00Z"},
+    "rateLimits": [{"kind": "five_hour", "percentUsed": 23.5, "resetsAt": "2026-10-17T12:00:00.750Z"},
                    {"kind": "seven_day", "percentUsed": 7, "resetsAt": "2026-10-20T00:00:00Z"}],
     "cost": {"usd": 1.25}
   },

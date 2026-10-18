@@ -99,17 +99,27 @@ test('the floor reads the base version, not the full build string', async ($, on
   expect([w.status, w.runs]).toEqual([[undefined], []])
 })
 
-// Every other fixture's percent is a whole number, which rounding leaves unchanged (DEFEAT_SHAPES #181).
-for (const [percent, drawn] of [[41.6, '42%'], [41.4, '41%'], [44.5, '45%']] as const)
-  test(`the context percent ${percent} is drawn rounded as ${drawn}`, async ($, on) => {
+// Every other fixture's percent is a whole number, which rounding leaves unchanged (DEFEAT_SHAPES #181),
+// and the bar rounds percent / 10, so each row also sits either side of a half cell (#181b):
+// 45 and 95.4 catch a floored bar, 41.4 a ceiled one, 44.9 a bar that rounds at 44.
+for (const [percent, cells, drawn] of [[41.6, 4, '42%'], [41.4, 4, '41%'], [44.5, 4, '45%'], [44.9, 4, '45%'],
+                                       [45, 5, '45%'], [47.6, 5, '48%'], [95.4, 10, '95%'], [4.9, 0, '5%']] as const)
+  test(`the context percent ${percent} is drawn as ${cells} cells and ${drawn}`, async ($, on) => {
     const w = await turn($, on, () => world(on, ENV,
       { usage: { ...STATUS.usage, context: { ...STATUS.usage.context, percent } } }))
-    expect(w.status).toEqual([`ctx ▰▰▰▰▱▱▱▱▱▱ ${drawn} · @7`])
+    expect(w.status).toEqual([`ctx ${'▰'.repeat(cells)}${'▱'.repeat(10 - cells)} ${drawn} · @7`])
   })
+
+test('a pinned orchestrator window is trimmed before it is compared', async ($, on) => {
+  const w = await turn($, on, () => world(on, { ...ENV, CHELA_ORCHESTRATOR_WID: ' @7\n' }))
+  expect([w.status, w.reads]).toEqual([[`${LINE} · orchestrator`], []])
+})
 
 test('the floor is 2.1.301, an unreadable version fails closed; the bar is ten cells', () => {
   for (const v of ['2.1.301', '2.1.302', '2.2.0', '3.0.0', '2.1.301-dev']) expect(atFloor(v)).toBe(true)
   for (const v of ['2.1.300', '2.0.999', '1.9.400', '', 'x2.1.301', undefined]) expect(atFloor(v)).toBe(false)
   expect([bar(0), bar(42), bar(100), bar(130), bar(-5)]).toEqual(['▱▱▱▱▱▱▱▱▱▱', '▰▰▰▰▱▱▱▱▱▱',
     '▰▰▰▰▰▰▰▰▰▰', '▰▰▰▰▰▰▰▰▰▰', '▱▱▱▱▱▱▱▱▱▱'])
+  // half a cell rounds up, just under it rounds down
+  expect([5, 4.9, 45, 44.9, 95, 94.9].map(p => bar(p).indexOf('▱'))).toEqual([1, 0, 5, 4, -1, 9])
 })
