@@ -185,3 +185,14 @@ card carries a **Requeue** button (**Close & requeue** on a run still in flight)
 `chela dispatch --pause [--reason "…"] [--ttl 30m]` stops new claims, judges and rework
 re-spawns without stopping anything already running. `--resume` releases it, and
 `--hold-status` shows it. A hold expires on its own after `--ttl` (default 30 m, max 4 h).
+
+`chela dispatch --pause --all` also quiets the agents already running, for when you need
+the machine back. It takes the same hold, then presses Escape in each dispatched agent's
+window and sends it one message: start nothing until "resume". An agent inside
+`chela task-finished`, `chela judge sweep` or `chela judge self-check` gets the message but
+no Escape, so it finishes that command (which edits files in its worktree) and then stops.
+Human sessions have no run row and are not touched. A judge already running is not
+suspended; it finishes, and no new one starts. `--resume` sends "resume" to every agent it
+paused. `--hold-status` lists each agent and its state (`interrupted`, `finishing <command>`
+or `failed`). If `--resume` finds the pause record unreadable, it sends nothing and leaves
+the record at `$CHELA_DIR/fleet-pause.json.resuming`, so you can see who to resume by hand.
