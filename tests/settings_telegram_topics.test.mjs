@@ -1,9 +1,9 @@
 // SETTINGS "Telegram topics" (CMX-204), in a REAL DOM: the real nav.js (via main.js)
 // against a mocked /api/config. Same harness as settings_concurrency.test.mjs.
 //
-// Run: node --test tests/settings_telegram_topics.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/settings_telegram_topics.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -12,7 +12,7 @@ const CFG = { file_drop: true, telegram_delete_on_close: false, telegram_archive
 let getResponse, postResponse, posts, confirmAnswer, confirmText;
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>
         <aside class="drawer" id="settings-drawer"><div class="drawer-body" id="drawer-body"></div></aside>
         </body></html>`, { url: 'http://localhost:5005/', pretendToBeVisual: true });
