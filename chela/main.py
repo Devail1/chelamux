@@ -3200,8 +3200,9 @@ def cmd_release(args) -> None:
         print("  Nothing was committed, tagged or pushed.")
         sys.exit(1)
     if result.get("dry_run"):
-        print(f"🏷️ Release {result['tag']} DRY RUN passed — every step ran (notes, bump, "
-              "uv lock, frontend build, release tests); nothing committed, tagged or pushed.")
+        print(f"🏷️ Release {result['tag']} DRY RUN passed — every step before the commit ran "
+              "(notes, bump, uv lock, frontend build, release tests); nothing committed, tagged "
+              "or pushed.")
         print(f"  would commit: {', '.join(result['staged'])}")
         return
     ids = result.get("task_ids") or []

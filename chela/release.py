@@ -124,8 +124,11 @@ def _uv_lock(cwd: Path) -> subprocess.CompletedProcess:
 
 
 def _frontend_build(cwd: Path) -> subprocess.CompletedProcess:
-    """CMX-177: install the lockfile's node packages, then rebuild ``static/app/`` in place."""
+    """CMX-177: install the lockfile's node packages, then rebuild ``static/app/`` in place.
+    A repo with no dashboard frontend (``--repo`` another project) has nothing to build."""
     argv = ["pnpm", "install", "--frozen-lockfile"]
+    if not (cwd / FRONTEND_SRC / "package.json").is_file():
+        return subprocess.CompletedProcess(argv, 0, "no dashboard frontend: nothing to build", "")
     try:
         install = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=600,
                                  env=_uv_env())

@@ -416,6 +416,8 @@ def test_the_frontend_build_installs_the_lockfile_then_builds_in_the_worktree(
     monkeypatch.setattr(release.subprocess, "run", run)
     monkeypatch.setattr(release.frontend_build, "build", lambda out, *, frontend: (
         built.append((out, frontend)), subprocess.CompletedProcess([], 0, "", ""))[1])
+    (tmp_path / "chela/dashboard/frontend").mkdir(parents=True)
+    (tmp_path / "chela/dashboard/frontend/package.json").write_text("{}")
     proc = _REAL_FRONTEND_BUILD(tmp_path)
     [(argv, kw)] = calls
     assert argv == ["pnpm", "install", "--frozen-lockfile"]
@@ -426,6 +428,12 @@ def test_the_frontend_build_installs_the_lockfile_then_builds_in_the_worktree(
                           tmp_path / "chela/dashboard/frontend")] and proc.returncode == 0
     else:
         assert built == [] and proc.returncode == 1
+
+
+def test_a_repo_with_no_frontend_builds_nothing(monkeypatch, tmp_path):
+    monkeypatch.setattr(release.subprocess, "run", lambda *a, **k: pytest.fail("ran pnpm"))
+    monkeypatch.setattr(release.frontend_build, "build", lambda *a, **k: pytest.fail("built"))
+    assert _REAL_FRONTEND_BUILD(tmp_path).returncode == 0
 
 
 @pytest.mark.parametrize("version,why", [("0.1.0", "not newer"), ("0.0.9", "not newer"),
