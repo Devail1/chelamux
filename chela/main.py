@@ -3193,11 +3193,17 @@ def cmd_release(args) -> None:
             print(f"release REFUSED: --body-file unreadable: {e}")
             sys.exit(1)
     result = release.prepare(args.version, args.theme, body=body, repo=args.repo,
-                             actor=os.environ.get(config.ACTOR_ENV) or None)
+                             actor=os.environ.get(config.ACTOR_ENV) or None,
+                             dry_run=getattr(args, "dry_run", False))
     if not result.get("ok"):
         print(f"release REFUSED: {result.get('error', 'unknown error')}")
         print("  Nothing was committed, tagged or pushed.")
         sys.exit(1)
+    if result.get("dry_run"):
+        print(f"🏷️ Release {result['tag']} DRY RUN passed — every step ran (notes, bump, "
+              "uv lock, frontend build, release tests); nothing committed, tagged or pushed.")
+        print(f"  would commit: {', '.join(result['staged'])}")
+        return
     ids = result.get("task_ids") or []
     print(f"⏳ Release {result['tag']} is PENDING approval ({result['request_id']}) — "
           "committed and tagged locally, NOTHING pushed:")
@@ -4037,6 +4043,9 @@ def main() -> None:
                            help="Optional file whose text becomes the release commit's body")
     p_release.add_argument("--repo", default=None,
                            help="The repository to release (default: the current one)")
+    p_release.add_argument("--dry-run", action="store_true",
+                           help="Run every step, then remove it all: no commit, tag, request "
+                                "or push")
 
     # merge-approve — the OPERATOR's half of `chela merge --override`
     p_mapprove = sub.add_parser(

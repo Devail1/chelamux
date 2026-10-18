@@ -874,6 +874,7 @@ _EXPECTED_FRONTEND_JOB: dict = {
         {"name": "Lint", "run": f"{_FRONTEND} lint"},
         {"name": "Module boundaries (dependency-cruiser)", "run": f"{_FRONTEND} lint:boundaries"},
         {"name": "Test", "run": f"{_FRONTEND} test"},
+        {"name": "Committed build is fresh", "run": "python3 chela/dashboard/frontend_build.py"},
     ],
 }
 

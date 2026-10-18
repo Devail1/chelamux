@@ -115,7 +115,10 @@ The orchestrator (or you) runs this; it is safe for an agent because it **pushes
 It fetches `origin`, refuses unless `origin/main` is an ancestor of `origin/dev`, and in its
 own worktree off `origin/dev` (under `$CHELA_DIR/releases/`) runs steps 1–3 below — the
 notes, the version bump, `uv lock` (refused if it changes nothing or the lock does not name
-the new version), and `tests/test_version.py` + `tests/test_release_notes.py`. It then commits
+the new version), the dashboard frontend build (`pnpm install --frozen-lockfile`, then Vite
+into the committed `chela/dashboard/static/app/`, CMX-177, so it needs `node` and `pnpm`), and
+`tests/test_version.py` + `tests/test_release_notes.py`. `--dry-run` runs all of that and then
+removes it: no commit, tag, request or push. Otherwise it commits
 `Release X.Y.Z — <theme>` (the `--body-file` text as the body) and creates the annotated tag
 **locally**, and files an approval request. A failed or dirty step refuses with the reason and
 leaves no commit, tag, branch or worktree behind.
