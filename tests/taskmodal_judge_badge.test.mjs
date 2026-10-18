@@ -2,15 +2,15 @@
 // `_JUDGE_BADGE`). Exported (like dispatcher.js's `_runDisplayId`/`_runPrCell`) so this can
 // pin the severity mapping without driving the full modal DOM.
 //
-// Run: node --test tests/taskmodal_judge_badge.test.mjs (tests/test_js_suites.py runs
+// Run: pnpm exec vitest run tests/taskmodal_judge_badge.test.mjs (tests/test_js_suites.py runs
 // every .test.mjs inside pytest, by discovery).
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 let taskmodal;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM('<!doctype html><html><body></body></html>',
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',

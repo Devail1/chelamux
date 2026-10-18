@@ -7,8 +7,8 @@
 // REAL #sidebar-agents, drive the REAL menu (the button's inline handler, the popover's
 // own click handler) and read the result back off the DOM.
 //
-// Run: node --test tests/sidebar_view.test.mjs  (pytest runs it via tests/test_js_suites.py)
-import { before, beforeEach, test } from 'node:test';
+// Run: pnpm exec vitest run tests/sidebar_view.test.mjs  (pytest runs it via tests/test_js_suites.py)
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, flush } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
@@ -34,7 +34,7 @@ const spawns = [];
 // CMX-75: the archive is SERVER state — this stands in for /api/sidebar/archive.
 const server = fakeArchiveServer(() => util && util._agentsCache);
 
-before(async () => {
+beforeAll(async () => {
     ({ modules: { util, nav, orchestrator: orch } } = await bootDashboardDom({
         body: BODY,
         canvasStub: true,

@@ -4,8 +4,8 @@
 // hellos with backoff, back to live on the host's first frame, and only a long silence
 // ends the share. It also checks that the relay page actually routes those frames into it.
 //
-// Run: node --test tests/relay_restart.test.mjs (pytest runs it via tests/test_js_suites.py).
-import { test } from 'node:test';
+// Run: pnpm exec vitest run tests/relay_restart.test.mjs (pytest runs it via tests/test_js_suites.py).
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

@@ -36,9 +36,9 @@
 // 'sidebar-collapsed' in terminals.js — which is what used to stand in for it — stays
 // green while the fleet reloads on every toggle. It is measured there, not here.
 //
-// Run: node --test tests/sidebar.test.mjs  (pytest runs it via tests/test_js_suites.py;
+// Run: pnpm exec vitest run tests/sidebar.test.mjs  (pytest runs it via tests/test_js_suites.py;
 // it needs `pnpm install` for jsdom — CHELA_REQUIRE_JS_TESTS makes a missing jsdom a FAILURE.)
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -85,7 +85,7 @@ let PHONE = false;
 
 let nav, util, orchestrator;
 
-before(async () => {
+beforeAll(async () => {
     // The dashboard's modules are a cycle (nav ↔ main), so evaluation ORDER is the
     // browser's: main.js is the entry and everything else is pulled in behind it.
     ({ modules: { util, nav, orchestrator } } = await bootDashboardDom({
@@ -377,7 +377,7 @@ test('selecting a view lights its own row and clears the other — via the REAL 
 //
 // CMX-279 rework round 1 (PR #350, judge finding): this also drives
 // nav.js's `_agentDetailBackView()` — TERMINALS_ENABLED is true for this whole
-// file (see before(), above), so the "← Back" link must route to 'terminals'
+// file (see beforeAll(), above), so the "← Back" link must route to 'terminals'
 // (the Wall), never the deleted 'agents' view. tests/dashboard_default_view.test.mjs
 // covers the OTHER branch (TERMINALS_ENABLED false -> 'work') plus the found-agent
 // call site (nav.js:608); this covers the not-found call site (nav.js:560) on the

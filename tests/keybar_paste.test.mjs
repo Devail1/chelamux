@@ -19,8 +19,8 @@
 //   - text/html-only and text/uri-list-only clipboards (what iOS hands over for rich
 //     text and links) deliver their text, not "Empty".
 //
-// Run: node --test tests/keybar_paste.test.mjs (pytest runs it via tests/test_js_suites.py).
-import { before, beforeEach, test } from 'node:test';
+// Run: pnpm exec vitest run tests/keybar_paste.test.mjs (pytest runs it via tests/test_js_suites.py).
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -69,7 +69,7 @@ function setClipboard(value) {
     Object.defineProperty(globalThis.navigator, 'clipboard', { configurable: true, value });
 }
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

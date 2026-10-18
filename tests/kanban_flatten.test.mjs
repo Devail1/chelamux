@@ -12,9 +12,9 @@
 // module-graph-import approach as tests/dispatch_hold.test.mjs — and asserts on the
 // rendered card/column HTML, not a source grep.
 //
-// Run: node --test tests/kanban_flatten.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/kanban_flatten.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -39,7 +39,7 @@ const BODY = `
 
 let renderKanban;
 
-before(async () => {
+beforeAll(async () => {
     // Same module-graph-import approach as tests/dispatch_hold.test.mjs: main.js
     // first so the whole app module graph (kanban.js included) evaluates against
     // a real window, then pull renderKanban out of the same cached instance.

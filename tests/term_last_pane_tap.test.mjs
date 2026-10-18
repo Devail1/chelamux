@@ -4,14 +4,14 @@
 // row, @201) with no sidebar yet. A tap on @202 in that gap is the user's choice: when the
 // sidebar then draws, adoptSidebarDefault() must leave it, not jump to the leftmost pill.
 //
-// Run: node --test tests/term_last_pane_tap.test.mjs  (pytest runs it via tests/test_js_suites.py)
-import { before, test } from 'node:test';
+// Run: pnpm exec vitest run tests/term_last_pane_tap.test.mjs  (pytest runs it via tests/test_js_suites.py)
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { clickOnclick } from './js_helpers/dashboard_dom.mjs';
 import { bootPhone, pane, settle } from './js_helpers/term_pane_fixture.mjs';
 
 let release, chela;
-before(async () => {
+beforeAll(async () => {
     const layoutGate = new Promise(r => { release = r; });
     ({ chela } = await bootPhone({ order: ['/srv/code/gamma', '/srv/code/beta', '/srv/code/alpha'], layoutGate }));
     await settle();

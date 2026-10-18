@@ -9,8 +9,8 @@
 // DOM — plus the pure model (sidebarmodel.js) for the rules the DOM can't reach alone
 // (a waiting row never lands in a group, so the archive rule for it is asserted there).
 //
-// Run: node --test tests/sidebar_groups.test.mjs  (pytest runs it via tests/test_js_suites.py)
-import { before, beforeEach, test } from 'node:test';
+// Run: pnpm exec vitest run tests/sidebar_groups.test.mjs  (pytest runs it via tests/test_js_suites.py)
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, flush } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
@@ -31,7 +31,7 @@ let nav, util;
 // CMX-75: the archive is SERVER state — this stands in for /api/sidebar/archive.
 const server = fakeArchiveServer(() => util && util._agentsCache);
 
-before(async () => {
+beforeAll(async () => {
     ({ modules: { util, nav } } = await bootDashboardDom({
         body: BODY,
         canvasStub: true,

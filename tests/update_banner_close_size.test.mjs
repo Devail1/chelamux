@@ -5,8 +5,8 @@
 // getComputedStyle (jsdom resolves cascade/specificity, not layout geometry). The banner is
 // the one version.js really builds, not a hand-made fixture.
 //
-// Run: node --test tests/update_banner_close_size.test.mjs (tests/test_js_suites.py runs it).
-import { before, test } from 'node:test';
+// Run: pnpm exec vitest run tests/update_banner_close_size.test.mjs (tests/test_js_suites.py runs it).
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -19,7 +19,7 @@ const styleCss = fs.readFileSync(
 
 let win;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><head><style>${styleCss}</style></head><body>
 <button class="icon-btn" id="btn-decisions" aria-label="Decisions inbox">x</button>
 </body></html>`, { url: 'http://localhost:5005/' });

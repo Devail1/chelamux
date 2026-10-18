@@ -19,9 +19,9 @@
 // itself — dead-coding that half of the listener body goes red here even when
 // the sidebar-only guard in sidebar.test.mjs would not catch it.
 //
-// Run: node --test tests/sidebar_agent_detail_orchestrator_wiring.test.mjs
+// Run: pnpm exec vitest run tests/sidebar_agent_detail_orchestrator_wiring.test.mjs
 // (pytest via tests/test_js_suites.py; needs `pnpm install` for jsdom).
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
@@ -46,7 +46,7 @@ const BODY = `
 
 let util, nav, orchestrator;
 
-before(async () => {
+beforeAll(async () => {
     ({ modules: { util, nav, orchestrator } } = await bootDashboardDom({
         body: BODY,
         terminalsEnabled: false,

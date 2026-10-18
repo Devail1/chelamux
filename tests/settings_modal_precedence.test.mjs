@@ -22,9 +22,9 @@
 // with its own hand-typed copy. Sliced from the real file now, same idiom as
 // tests/dashboard_default_view.test.mjs.
 //
-// Run: node --test tests/settings_modal_precedence.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/settings_modal_precedence.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -69,7 +69,7 @@ function flush() {
     return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',

@@ -13,9 +13,9 @@
 // CSS the REAL style.css resolved per viewport by cssForViewport (jsdom alone
 // ignores every @media rule). No module is loaded: this IS the pre-JS paint.
 //
-// Run: node --test tests/dashboard_first_paint.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/dashboard_first_paint.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs jsdom).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

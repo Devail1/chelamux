@@ -6,14 +6,14 @@
 // to the first session in the sidebar's order. One boot per file: term_last_pane.test.mjs
 // boots WITH a stored pane, term_last_pane_tap.test.mjs taps a pill before the sidebar draws.
 //
-// Run: node --test tests/term_last_pane_boot.test.mjs  (pytest runs it via tests/test_js_suites.py)
-import { before, test } from 'node:test';
+// Run: pnpm exec vitest run tests/term_last_pane_boot.test.mjs  (pytest runs it via tests/test_js_suites.py)
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { clickOnclick } from './js_helpers/dashboard_dom.mjs';
 import { KEY, bootPhone, pane, settle, stored } from './js_helpers/term_pane_fixture.mjs';
 
 let nav, chela;
-before(async () => {
+beforeAll(async () => {
     // A stored pane that is offline: the boot falls through to the sidebar's first.
     ({ nav, chela } = await bootPhone({ order: ['/srv/code/gamma', '/srv/code/beta', '/srv/code/alpha'], seed: { [KEY]: stored('@299', 's-z', 'z') } }));
     await settle();

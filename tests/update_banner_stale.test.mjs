@@ -1,14 +1,14 @@
 // CMX-129 (CMX-95 slice D): "N services run old code — Restart" shares ONE banner with
 // CMX-426's Reload. Unknown hides it; dismiss is per stale set; Restart is confirm-gated and
 // POSTs the one existing route, /api/update/apply. Run via tests/test_js_suites.py.
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
 let applyStale, applyVersion, checkForUpdate, restartStale, staleOffer;
 let versionPayload, statusPayload, applyPayload, fetchCalls;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost:5005/' });
     dom.window.CHELA_ASSET_VERSION = 'aaaaaaaaaaaa';
     for (const k of ['window', 'document']) {

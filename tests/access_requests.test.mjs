@@ -7,8 +7,8 @@
 //      for write, and starts unticked. The click posts exactly those defaults.
 //   4. With Guest typing off, Approve is disabled (the server refuses it too).
 //
-// Run: node --test tests/access_requests.test.mjs (pytest runs it via tests/test_js_suites.py).
-import { before, beforeEach, test } from 'node:test';
+// Run: pnpm exec vitest run tests/access_requests.test.mjs (pytest runs it via tests/test_js_suites.py).
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -29,7 +29,7 @@ function fakeFetch(url, opts) {
 const PILL = `<button id="btn-access-req" hidden><span class="ar-pill-text"></span></button>`;
 let ar;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PILL}</body></html>`, { url: 'http://localhost:5005/' });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement', 'Element', 'Node', 'Event']) {
         Object.defineProperty(globalThis, k, { value: dom.window[k], writable: true, configurable: true });

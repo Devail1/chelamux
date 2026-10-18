@@ -24,8 +24,8 @@
 // The real-layout half (last terminal row's bottom ≤ keybar top at 390px) lives in
 // tests/browser/keybar_pane_fit.test.mjs.
 //
-// Run: node --test tests/keybar_pane_fit.test.mjs (pytest runs it via tests/test_js_suites.py).
-import { before, beforeEach, test } from 'node:test';
+// Run: pnpm exec vitest run tests/keybar_pane_fit.test.mjs (pytest runs it via tests/test_js_suites.py).
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
@@ -80,7 +80,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

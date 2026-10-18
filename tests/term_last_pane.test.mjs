@@ -11,8 +11,8 @@
 // The sidebar's order is never /api/agents' order here, so a default that follows the
 // rows fails.
 //
-// Run: node --test tests/term_last_pane.test.mjs  (pytest runs it via tests/test_js_suites.py)
-import { before, beforeEach, test } from 'node:test';
+// Run: pnpm exec vitest run tests/term_last_pane.test.mjs  (pytest runs it via tests/test_js_suites.py)
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { clickOnclick } from './js_helpers/dashboard_dom.mjs';
 import { KEY, bootPhone, pane, sel, settle, shown, stored } from './js_helpers/term_pane_fixture.mjs';
@@ -26,7 +26,7 @@ async function reload() {
     await settle();
 }
 
-before(async () => {
+beforeAll(async () => {
     ({ nav, terminals, chela } = await bootPhone({ order: SIDEBAR, seed: { [KEY]: stored('@203', 's-c', 'c') } }));
     await settle();
     bootPane = pane();

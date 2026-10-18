@@ -7,9 +7,9 @@
 // the terminals panel cut from the REAL templates/index.html, so the ids and the
 // inline onclick wiring asserted on are the ones a browser gets.
 //
-// Run: node --test tests/wall_grid_toolbar.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/wall_grid_toolbar.test.mjs (pytest runs it via
 // tests/test_js_suites.py; it needs `pnpm install` for jsdom).
-import { before, describe, test } from 'node:test';
+import { beforeAll, describe, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootWall } from './wall_grid_toolbar_env.mjs';   // needs `pnpm install` for jsdom
 import { gridRowCollapsed } from '../chela/dashboard/static/js/wallmodel.js';
@@ -34,7 +34,7 @@ const shown = el => !el.closest('[hidden]') && !el.closest('[style*="display: no
 const shownControls = () => [...$('#term-wall-grid').querySelectorAll('button')].filter(shown);
 const storedPreset = () => JSON.parse(localStorage.getItem('pc_wall_preset'));
 
-before(async () => {
+beforeAll(async () => {
     // Liav's default: Focus ON, and NO stored expand/collapse choice.
     await bootWall({ pc_wall_focus: '1', pc_wall_grid_collapsed: null });
 });

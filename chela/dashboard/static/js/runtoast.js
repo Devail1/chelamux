@@ -5,7 +5,7 @@
 // a toast on every such poll, the caller keeps the last-seen status per run and
 // asks runToastKind(prev, next): a toast fires ONLY when the status actually
 // changes INTO a review state. Kept side-effect-free so it unit-tests cleanly
-// (node --test tests/runtoast.test.mjs).
+// (pnpm exec vitest run tests/runtoast.test.mjs).
 
 // Terminal review states that warrant a toast, in payload-status → display form.
 // awaiting_review is the primary signal ("needs review"); done/failed ride along

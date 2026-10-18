@@ -8,9 +8,9 @@
 // tests/sidebar_wall_indicator.test.mjs use — so what's asserted is what RENDERS and
 // what the button ACTUALLY POSTS, not a source grep.
 //
-// Run: node --test tests/sidebar_recent_sessions.test.mjs  (pytest runs it via
+// Run: pnpm exec vitest run tests/sidebar_recent_sessions.test.mjs  (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { after, before, beforeEach, test } from 'node:test';
+import { afterAll, beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -78,7 +78,7 @@ function _json(body) { return Promise.resolve({ ok: true, status: 200, json: () 
 
 let nav, util;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;
@@ -410,4 +410,4 @@ test('Clear all is offered for 2+ rows, confirms, and dismisses every resumable 
         'the dispatcher toggle is not a dismissable row and stays');
 });
 
-after(() => nav._closeRecentUndoToast());   // its auto-close timer would hold the run open
+afterAll(() => nav._closeRecentUndoToast());   // its auto-close timer would hold the run open

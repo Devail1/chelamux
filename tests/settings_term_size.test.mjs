@@ -9,9 +9,9 @@
 // That the in-iframe shim then sets xterm's fontSize to 11 is guarded in
 // tests/test_term_font_atlas.py.
 //
-// Run: node --test tests/settings_term_size.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/settings_term_size.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -27,7 +27,7 @@ if (SETTINGS_START < 0 || SETTINGS_END < 0) throw new Error('index.html markers 
 
 const flush = () => new Promise(r => setTimeout(r, 0));
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><head><style>${CSS}</style></head><body>${HTML.slice(SETTINGS_START, SETTINGS_END)}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
