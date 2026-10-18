@@ -9,9 +9,7 @@ from __future__ import annotations
 from fnmatch import fnmatchcase
 from pathlib import PurePosixPath
 
-PROSE = "prose"
-HUMAN = "human"
-JUDGE = "judge"
+PROSE, HUMAN, JUDGE = "prose", "human", "judge"
 
 _DOCS_SUFFIXES = {".md", ".mdx", ".rst", ".txt", ".jsonl"}
 _MEDIA_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".webm", ".mov"}
