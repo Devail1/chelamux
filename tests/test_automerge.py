@@ -191,6 +191,7 @@ def test_sweep_stamps_a_distinct_actor_not_the_orchestrators(repo):
     with patch.object(contract, "_read_pr_base", return_value="dev"), \
          patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
          patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge", return_value={"ok": True}), \
          patch.object(contract, "merge", wraps=contract.merge) as merge_spy:
         automerge.sweep()
     _, kwargs = merge_spy.call_args
