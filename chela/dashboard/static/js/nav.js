@@ -2644,7 +2644,6 @@ async function _loadFileDropSetting() {
 function _renderTelegramTopics(cfg) {
     const box = document.getElementById('tg-delete-toggle');
     const btn = document.getElementById('tg-cleanup-btn');
-    if (!box || !btn || !cfg) return;
     box.checked = !!cfg.telegram_delete_on_close;
     box.disabled = false;
     const n = cfg.telegram_archived_topics || 0;

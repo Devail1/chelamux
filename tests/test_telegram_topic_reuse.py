@@ -66,11 +66,13 @@ def test_delete_topic_sends_delete_forum_topic():
 def test_reap_closes_by_default_and_deletes_only_when_the_setting_is_on(ledger, delete, expect):
     reg, wire = BindingRegistry(CHAT), _Wire()
     reg.bind("@3", "42")
+    ledger.opened("42", "@3", "/p/app")
     assert _tick(reg, ledger, wire, {}, {}, delete_on_close=delete) is True
     assert wire.calls == [(expect, _thread("42"))]
     assert reg.thread_for_window("@3") is None
     # Closed ⇒ remembered for reuse/cleanup; deleted ⇒ nothing left to remember.
     assert ledger.closed_threads() == ([] if delete else ["42"])
+    assert (ledger.get("42") is None) is delete
 
 
 def test_a_failed_delete_falls_back_to_close(ledger):
@@ -152,7 +154,8 @@ def test_reuse_picks_the_oldest_closed_topic_of_the_folder(ledger):
 
 
 def test_a_resumed_archive_marks_its_topic_open(ledger):
-    reg, wire = BindingRegistry(CHAT), _Wire()
+    # The rename is refused, so only the rebind itself can mark the topic open.
+    reg, wire = BindingRegistry(CHAT), _Wire({"editForumTopic"})
     ledger.closed("55")
     _tick(reg, ledger, wire, {"@8": "coder"}, {"@8": "/p/app"}, rebinds={"@8": "55"})
     assert reg.thread_for_window("@8") == "55" and ledger.closed_threads() == []
