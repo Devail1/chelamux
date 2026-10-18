@@ -9,7 +9,7 @@ import { JSDOM } from 'jsdom';
 
 const CFG = { file_drop: true, telegram_delete_on_close: false, telegram_archived_topics: 3,
     telegram_cleanup_pending: false };
-let getResponse, postResponse, posts, confirmAnswer;
+let getResponse, postResponse, posts, confirmAnswer, confirmText;
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 
 before(async () => {
@@ -23,7 +23,7 @@ before(async () => {
     }
     dom.window.matchMedia = q => ({ media: q, matches: false, addEventListener() {},
         removeEventListener() {}, addListener() {}, removeListener() {} });
-    globalThis.confirm = dom.window.confirm = () => confirmAnswer;
+    globalThis.confirm = dom.window.confirm = text => { confirmText = text; return confirmAnswer; };
     globalThis.fetch = (url, opts) => {
         if (String(url).endsWith('/api/config')) {
             if (opts && opts.method === 'POST') posts.push(JSON.parse(opts.body));
@@ -45,6 +45,7 @@ beforeEach(async () => {
     postResponse = CFG;
     posts = [];
     confirmAnswer = true;
+    confirmText = null;
     window.chela.toggleSettings();
     await flush();
     await flush();
@@ -73,6 +74,19 @@ test('cleanup asks first; a cancel posts nothing', async () => {
     confirmAnswer = false;
     await window.chela.deleteArchivedTopics();
     assert.deepEqual(posts, []);
+    // The confirm must warn that the messages go too and that it cannot be undone.
+    assert.match(confirmText, /deletes their messages too/);
+    assert.match(confirmText, /cannot be undone/);
+});
+
+test('a pending cleanup from an earlier visit renders disabled', async () => {
+    getResponse = { ...CFG, telegram_cleanup_pending: true };
+    document.getElementById('settings-drawer').classList.remove('open');
+    window.chela.toggleSettings();
+    await flush();
+    await flush();
+    assert.equal(btn().textContent, 'Deleting archived topics…');
+    assert.equal(btn().disabled, true);
 });
 
 test('a confirmed cleanup posts the request and shows it pending', async () => {
@@ -80,6 +94,7 @@ test('a confirmed cleanup posts the request and shows it pending', async () => {
     await window.chela.deleteArchivedTopics();
     assert.deepEqual(posts, [{ telegram_cleanup: true }]);
     assert.equal(btn().disabled, true);
+    assert.equal(btn().textContent, 'Deleting archived topics…');
     assert.equal(msg(), 'Requested. The Telegram bridge deletes them on its next tick.');
 });
 

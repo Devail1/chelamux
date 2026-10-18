@@ -145,12 +145,43 @@ def test_another_cwd_or_none_never_reuses(ledger, cwd):
     assert wire.methods() == ["createForumTopic"]
 
 
-def test_reuse_picks_the_oldest_closed_topic_of_the_folder(ledger):
-    for tid in ("300", "100", "200"):
-        ledger.opened(tid, "@1", "/p/app")
+def test_reuse_picks_the_oldest_closed_topic_of_the_folder(tmp_path):
+    # Insertion order (200, 300, 100), id order (100, 200, 300) and creation order
+    # (300, 100, 200) all differ, so dropping, reversing or re-keying the sort reads wrong.
+    clock = itertools.chain([9000, 1000, 5000], itertools.count(10000)).__next__
+    led = TopicLedger(tmp_path / "topics.json", clock=clock)
+    for tid in ("200", "300", "100"):             # created at 9000, 1000, 5000
+        led.opened(tid, "@1", "/p/app")
     for tid in ("100", "200", "300"):
-        ledger.closed(tid)
-    assert ledger.closed_for("/p/app") == ["300", "100", "200"]
+        led.closed(tid)
+    assert led.closed_for("/p/app") == ["300", "100", "200"]
+    # ... and the reconcile reopens that oldest one, not just lists it first.
+    reg, wire = BindingRegistry(CHAT), _Wire()
+    _tick(reg, led, wire, {"@8": "coder"}, {"@8": "/p/app"})
+    assert wire.calls[0] == ("reopenForumTopic", _thread("300"))
+    assert reg.thread_for_window("@8") == "300"
+
+
+def test_reuse_skips_a_closed_topic_that_is_still_bound(ledger):
+    # The ledger and the registry can disagree (a rebind binds a topic the ledger still
+    # has as closed). The registry wins: a bound topic is never handed to a second window.
+    reg, wire = BindingRegistry(CHAT), _Wire()
+    ledger.opened("150", "@4", "/p/app", "a")
+    ledger.closed("150")
+    reg.bind("@4", "150")
+    reg.set_topic_name("@4", "a")
+    _tick(reg, ledger, wire, {"@4": "a", "@8": "a"}, {"@4": "/p/other", "@8": "/p/app"})
+    assert ("reopenForumTopic", _thread("150")) not in wire.calls
+    assert "createForumTopic" in wire.methods()
+    assert reg.thread_for_window("@4") == "150" and reg.thread_for_window("@8") == "201"
+
+
+def test_the_ledger_records_window_cwd_name_and_both_times(ledger):
+    reg, wire = BindingRegistry(CHAT), _Wire()
+    _tick(reg, ledger, wire, {"@3": "coder"}, {"@3": "/p/app"})
+    _tick(reg, ledger, wire, {}, {})
+    assert ledger.get("201") == {"created": 1000, "window": "@3", "cwd": "/p/app",
+                                 "closed": 1001, "name": "coder"}
 
 
 def test_a_resumed_archive_marks_its_topic_open(ledger):
@@ -159,6 +190,7 @@ def test_a_resumed_archive_marks_its_topic_open(ledger):
     ledger.closed("55")
     _tick(reg, ledger, wire, {"@8": "coder"}, {"@8": "/p/app"}, rebinds={"@8": "55"})
     assert reg.thread_for_window("@8") == "55" and ledger.closed_threads() == []
+    assert (ledger.get("55")["window"], ledger.get("55")["cwd"]) == ("@8", "/p/app")
 
 
 # -- the ledger survives a restart ---------------------------------------------------
@@ -252,14 +284,30 @@ def test_the_ledger_is_written_whole_with_no_tmp_left(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["topics.json"]
 
 
+def test_a_crash_mid_save_leaves_the_old_ledger_whole(tmp_path, monkeypatch):
+    path = tmp_path / "topics.json"
+    TopicLedger(path).closed("42")
+    before = path.read_text()
+
+    def _crash(*a):
+        raise OSError("disk gone")
+    monkeypatch.setattr(topics.os, "replace", _crash)
+    with pytest.raises(OSError):
+        TopicLedger(path).closed("43")
+    assert path.read_text() == before
+
+
 def test_settings_route_stores_the_switch_and_the_cleanup_request(monkeypatch, tmp_path):
     import chela.dashboard.app as app_mod
     monkeypatch.setattr(topics, "default_topics_path", lambda: tmp_path / "t.json")
-    TopicLedger().closed("42")
+    led = TopicLedger()
+    led.closed("42")
+    led.opened("43", "@3", "/p")                  # open: not archived, not counted
+    led.closed("44")
     c = app_mod.app.test_client()
     try:
         j = c.get("/api/config").get_json()
-        assert (j["telegram_delete_on_close"], j["telegram_archived_topics"]) == (False, 1)
+        assert (j["telegram_delete_on_close"], j["telegram_archived_topics"]) == (False, 2)
         assert j["telegram_cleanup_pending"] is False
         j = c.post("/api/config", json={"telegram_delete_on_close": True}).get_json()
         assert j["telegram_delete_on_close"] is True
