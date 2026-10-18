@@ -1166,6 +1166,7 @@ def _ev_ci_red():
         extra=[patch.object(dispatcher, "_read_pr_checks", return_value=red),
                patch.object(dispatcher, "_failing_log_tail", return_value=""),
                patch.object(dispatcher, "_ci_infra_by_steps", side_effect=lambda ci, d: ci),
+               patch.object(dispatcher, "_rerun_failed_jobs", return_value=False),  # CMX-255
                patch.object(dispatcher, "request_changes",
                             side_effect=lambda t, b: sent.append(t) or {"ok": True})],
         check=check)

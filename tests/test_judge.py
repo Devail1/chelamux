@@ -3381,7 +3381,8 @@ def test_a_red_pr_is_not_judged_it_is_already_going_back(tmp_path):
     with dispatcher._db() as conn:
         _run_row(conn, tmp_path, workflow_path=str(wf.path), pr_head_sha=None)
 
-    summary = _tick(wf, lambda *a: True, checks=dispatcher.CI_FAILING)
+    with patch.object(dispatcher, "_rerun_failed_jobs", return_value=False):   # CMX-255
+        summary = _tick(wf, lambda *a: True, checks=dispatcher.CI_FAILING)
 
     assert summary["judged"] == 0                   # the CI gate owns this one
     assert summary["ci_failed"] == 1

@@ -277,6 +277,9 @@ CI_POLL_STATUSES = ("awaiting_review", "changes_requested")
 # allowed to give up, but never allowed to go quiet. Six hours is GitHub's own job ceiling,
 # so anything past it is not "still running", it is stuck.
 CI_PENDING_STALE_SECONDS = 6 * 3600
+# 🔁 CMX-255: how long a red that may still be the PRE-re-run one is waited out, when the
+# re-run was never seen unsettled. Past it, the red is taken as the re-run's own.
+CI_RERUN_SETTLE_SECONDS = 15 * 60
 
 # A whole CI log does not fit in a prompt. The tail is where the failure is.
 CI_LOG_TAIL_CHARS = 4000
@@ -1433,6 +1436,16 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # budget), reset to 0 the moment CI is next seen passing (see the pr_checks refresh
         # in `tick`) — it counts a STREAK, not a lifetime total.
         ("ci_infra_streak", "ALTER TABLE runs ADD COLUMN ci_infra_streak INTEGER DEFAULT 0"),
+        # 🔁 CMX-255. A red CI re-runs its failed jobs once per head sha (`ci_rerun_sha`; a
+        # new push resets it) before it may spend a rework round. `ci_rerun_state` is
+        # pending → started (seen unsettled) → green | red, `ci_rerun_at` is when it fired,
+        # `ci_rerun_note` says what failed, `ci_flakes` is the JSON list of reds that came
+        # back green on their re-run (the flaky test ids).
+        ("ci_rerun_sha", "ALTER TABLE runs ADD COLUMN ci_rerun_sha TEXT"),
+        ("ci_rerun_state", "ALTER TABLE runs ADD COLUMN ci_rerun_state TEXT"),
+        ("ci_rerun_note", "ALTER TABLE runs ADD COLUMN ci_rerun_note TEXT"),
+        ("ci_rerun_at", "ALTER TABLE runs ADD COLUMN ci_rerun_at TEXT"),
+        ("ci_flakes", "ALTER TABLE runs ADD COLUMN ci_flakes TEXT"),
         # ⚖️🔒 CMX-389. The merge gate's BACKSTOP: set on the reconcile tick that finds a
         # run's PR MERGED without a clean judge on its merged head and without an audited
         # override (`merged_outside_gate`) — a human in a plain terminal, a non-Claude
@@ -2307,6 +2320,68 @@ def _inbox_forget_ci_edge(task_id: str) -> None:
         inbox.forget_edge(task_id, inbox.CI_RED_ECHO)
     except Exception:  # noqa: BLE001
         log.warning("CI: could not retract the inbox edge for %s", task_id, exc_info=True)
+
+
+# pytest's short-summary line names the test: `FAILED tests/x.py::test_y - AssertionError`.
+_FAILED_TEST_RE = re.compile(r"^(?:FAILED|ERROR) (\S+)")
+
+
+def _ci_failed_test(log_tail: str) -> str:
+    """🔁 CMX-255. The id of the test a red CI failed on — pytest's node id off the first
+    failing line when there is one, else that line itself, else ``?``."""
+    from chela.inbox import first_failure_line
+    line = first_failure_line(log_tail)
+    m = _FAILED_TEST_RE.match(line)
+    return m.group(1) if m else (line or "?")
+
+
+def _rerun_failed_jobs(repo_dir: str | None, run_ids: tuple[str, ...]) -> bool:
+    """🔁 CMX-255. ``gh run rerun <id> --failed`` (only the failed jobs) for every Actions
+    run behind a red rollup. True only when GitHub accepted every one; anything else is
+    False and the red is treated as real: a re-run nobody started must never park the run."""
+    if not repo_dir or not run_ids:
+        return False
+    for run_id in run_ids:
+        try:
+            out = subprocess.run(
+                ["gh", "run", "rerun", run_id, "--failed"],
+                cwd=repo_dir, capture_output=True, text=True, errors="replace", timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log.warning("CI: could not re-run the failed jobs of run %s: %s", run_id, e)
+            return False
+        if out.returncode != 0:
+            log.warning("CI: GitHub refused to re-run the failed jobs of run %s: %s", run_id,
+                        (out.stderr or out.stdout or "").strip()[:200])
+            return False
+    return True
+
+
+def _record_ci_flake(conn: sqlite3.Connection, row, sha: str) -> None:
+    """🔁 CMX-255. A red's re-run came back GREEN on the same sha: a flake. Append it to
+    ``runs.ci_flakes`` (the test id comes from the note written when the re-run fired)."""
+    try:
+        flakes = json.loads(row["ci_flakes"] or "[]")
+    except (json.JSONDecodeError, TypeError):
+        flakes = []
+    note = row["ci_rerun_note"] or ""
+    flakes.append({"sha": sha, "test": note.rpartition(" failed on ")[2] or "?",
+                   "note": note, "at": _now()})
+    conn.execute(
+        "UPDATE runs SET ci_rerun_state='green', ci_flakes=? WHERE task_id=?",
+        (json.dumps(flakes), row["task_id"]),
+    )
+    log.warning("CI flake on %s (%s): re-run green — %s", row["task_id"], sha[:12], note)
+
+
+def _inbox_ci_flake(row, sha: str) -> None:
+    """🔁 CMX-255: "CI flake, re-run green" — once, best-effort, never costs the tick."""
+    from chela import inbox
+    try:
+        inbox.ci_flake(dict(row), sha=sha, note=row["ci_rerun_note"] or "")
+    except Exception:  # noqa: BLE001 — the inbox is advisory
+        log.warning("CI: could not queue the flake notice for %s", row["task_id"],
+                    exc_info=True)
 
 
 def _failing_log_tail(repo_dir: str | None, run_ids: tuple[str, ...]) -> str:
@@ -5167,6 +5242,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "dispatched": 0,
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
+        "ci_rerun": 0, "ci_flake": 0,
         "judged": 0, "judge_lost": 0, "judge_stranded": 0,
         "trial_ledger": 0, "disk_budget_exceeded": False, "window_reaped": 0,
         "blocked": True, "error": error, "held": False, "hold_expired": False,
@@ -5341,6 +5417,8 @@ def tick(workflow_path: str | Path) -> dict:
         "escalated": 0,
         "ci_failed": 0,
         "ci_infra_failed": 0,
+        "ci_rerun": 0,
+        "ci_flake": 0,
         "judged": 0,
         "judge_lost": 0,
         "judge_stranded": 0,
@@ -5378,7 +5456,8 @@ def tick(workflow_path: str | Path) -> dict:
         # a cycle, and the reward for hitting the rate limit is CI_UNKNOWN on everything,
         # which (correctly, and catastrophically) refuses every merge at once.
         pr_rows = conn.execute(
-            "SELECT task_id, status, pr_url, workflow_path, pr_head_sha, ci_pending_since "
+            "SELECT task_id, status, pr_url, workflow_path, pr_head_sha, ci_pending_since, "
+            "ci_rerun_sha, ci_rerun_state, ci_rerun_note, ci_flakes "
             "FROM runs WHERE workflow_path=? AND pr_url IS NOT NULL "
             "AND (pr_state IS NULL OR pr_state='open')",
             (str(wf.path),),
@@ -5420,6 +5499,7 @@ def tick(workflow_path: str | Path) -> dict:
                     )
             reads.append((pr_row, state, mergeable, ci))
 
+        flaked: list[tuple] = []     # (row, sha) re-run green this tick — told after commit
         for pr_row, state, mergeable, ci in reads:
             if ci is not None:
                 # The unsettled clock: started when a pending spell begins, restarted when a
@@ -5442,6 +5522,18 @@ def tick(workflow_path: str | Path) -> dict:
                         "UPDATE runs SET ci_infra_streak=0 WHERE task_id=?",
                         (pr_row["task_id"],),
                     )
+                # 🔁 CMX-255: the re-run of this sha is in flight (seen unsettled), or green
+                # on the SAME sha whose red was re-run ⇒ it was a flake.
+                head = ci.head_sha or pr_row["pr_head_sha"]
+                rerun_live = (pr_row["ci_rerun_state"] in ("pending", "started")
+                              and head and head == pr_row["ci_rerun_sha"])
+                if rerun_live and ci.state == CI_PENDING:
+                    conn.execute("UPDATE runs SET ci_rerun_state='started' WHERE task_id=?",
+                                 (pr_row["task_id"],))
+                if rerun_live and ci.state == CI_PASSING:
+                    _record_ci_flake(conn, pr_row, head)
+                    flaked.append((pr_row, head))
+                    summary["ci_flake"] += 1
             if state is None and mergeable is None:
                 continue
             # COALESCE so a partial read (e.g. mergeable still UNKNOWN right
@@ -5454,6 +5546,8 @@ def tick(workflow_path: str | Path) -> dict:
             )
             summary["pr_state_refreshed"] += 1
         conn.commit()
+        for pr_row, sha in flaked:
+            _inbox_ci_flake(pr_row, sha)
 
         # 1. Reconcile
         live_windows = _tmux_windows()
@@ -6054,6 +6148,13 @@ def tick(workflow_path: str | Path) -> dict:
                 continue
             if row["ci_failed_sha"] == sha:
                 continue        # this red has already been delivered. Each red fires ONCE.
+            # 🔁 CMX-255: a re-run fired but never yet seen unsettled ⇒ this red may still be
+            # the one it replaces. Wait it out (bounded), before the heavy log fetch below.
+            if row["ci_rerun_sha"] == sha and row["ci_rerun_state"] == "pending":
+                fired = _parse_ts(row["ci_rerun_at"])
+                now = _parse_ts(_now())
+                if fired and now and (now - fired).total_seconds() < CI_RERUN_SETTLE_SECONDS:
+                    continue
             wf_dir = str(wf.path.parent)
             # The heavy read (a whole log archive) happens HERE and nowhere else: once, on
             # the transition into red — never on the poll. ⛔ BEFORE the sha is burned: the
@@ -6113,7 +6214,31 @@ def tick(workflow_path: str | Path) -> dict:
                     summary["escalated"] += 1
                 continue
 
+            # 🔁 CMX-255. A FLAKE MUST NOT BURN A REWORK ROUND. The first red on a sha re-runs
+            # its failed jobs once and spends nothing; green records the flake (the refresh
+            # above), red again lands here with `ci_rerun_sha == sha` and is sent back. ⛔
+            # `ci_failed_sha` is NOT burned here, so the re-run's own red can still fire.
+            if row["ci_rerun_sha"] != sha:
+                jobs = ", ".join(ci.failing) if ci and ci.failing else "?"
+                note = f"CI re-run once: {jobs} failed on {_ci_failed_test(log_tail)}"
+                if _rerun_failed_jobs(wf_dir, ci.run_ids if ci else ()):
+                    conn.execute(
+                        "UPDATE runs SET ci_rerun_sha=?, ci_rerun_state='pending', "
+                        "ci_rerun_note=?, ci_rerun_at=? WHERE task_id=?",
+                        (sha, note, _now(), task_id),
+                    )
+                    conn.commit()
+                    summary["ci_rerun"] += 1
+                    log.warning("CI is RED on %s (%s) — %s; waiting on that before any "
+                                "rework", row["pr_url"] or "?", sha[:12], note)
+                    continue
+            elif row["ci_rerun_state"] in ("pending", "started"):
+                conn.execute("UPDATE runs SET ci_rerun_state='red' WHERE task_id=?",
+                             (task_id,))
             body = _ci_verdict_body(ci, log_tail, row["pr_url"])
+            if row["ci_rerun_sha"] == sha:
+                body += (f"\n_{row['ci_rerun_note']} — and it failed AGAIN on the re-run, so "
+                         "this is a real failure, not a flake._\n")
             # ⛔ NOW record the fired sha — after the tail is in hand, before the one step
             # that cannot be taken back. The failure modes are not symmetric: a crash after
             # this line costs at most ONE missed verdict (a human still sees the red PR),
