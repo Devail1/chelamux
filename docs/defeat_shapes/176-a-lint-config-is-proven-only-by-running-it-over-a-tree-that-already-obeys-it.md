@@ -24,6 +24,4 @@ file, and asserts the EXACT set of `(rule, from, to)` violations, or the exact s
 drops a row, and a rule that over-tightens adds one.
 
 **Found:** CMX-176 judge round 1, PR #751. Fixed in `tests/test_frontend.py`
-(`test_depcruise_flags_exactly_the_imports_each_boundary_rule_forbids`,
-`test_tsc_is_strict_and_still_compiles_allowjs_imports`,
-`test_eslint_flags_a_conditional_hook_and_an_explicit_any`).
+(since 176b: the `pnpm`-run gate tests over `tests/fixtures/frontend_gates/`).
