@@ -586,6 +586,15 @@ def _hand_in_base_sync_passes(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hand_in_review_passes(request, monkeypatch):
+    """🔎 CMX-209: the self-review gate passes unless a module sets ``REAL_REVIEW_GATE = True``."""
+    if not getattr(request.module, "REAL_REVIEW_GATE", False):
+        from chela import dispatcher
+        monkeypatch.setattr(dispatcher, "check_review_section",
+                            lambda *a, **k: {"ok": True, "record": None})
+
+
+@pytest.fixture(autouse=True)
 def _no_live_notifications(monkeypatch):
     """The fence for OUTBOUND side effects: no test may push a real notification.
 
