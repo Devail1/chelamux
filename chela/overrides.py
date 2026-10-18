@@ -65,6 +65,7 @@ log = logging.getLogger("chela.overrides")
 
 PENDING = "pending"
 MERGING = "merging"      # approved; the merge is in flight in the approving process
+APPROVED = "approved"    # approved, but GitHub's mergeability stayed UNKNOWN: retried (CMX-205)
 MERGED = "merged"
 DENIED = "denied"
 EXPIRED = "expired"
@@ -519,7 +520,8 @@ def _announce(rec: dict, outcome: str, by: str, channel: str,
         sha = rec.get("merge_commit_sha")
         payload.update(merge_commit_sha=sha, deploy=deploy["step"],
                        changed=deploy["changed"], services=deploy["services"])
-        summary = (f"⚖️ {_what(rec)} MERGED ({str(sha or '?')[:12]}), approved by {via}"
+        merged = "was ALREADY merged" if rec.get("already_merged") else "MERGED"
+        summary = (f"⚖️ {_what(rec)} {merged} ({str(sha or '?')[:12]}), approved by {via}"
                    + (f" — next, {deploy['step']}" if deploy["step"] else ""))
     try:
         from chela import inbox
@@ -530,7 +532,7 @@ def _announce(rec: dict, outcome: str, by: str, channel: str,
 
 
 def _expire(rec: dict, detail: str) -> dict | None:
-    done = _finish(rec["id"], EXPIRED, detail, from_states=(PENDING, MERGING))
+    done = _finish(rec["id"], EXPIRED, detail, from_states=(PENDING, MERGING, APPROVED))
     if done is not None:
         event_log.append("orchestrator.release_expired" if _is_release(done)
                          else "orchestrator.merge_override_expired",
@@ -573,7 +575,7 @@ def decide(request_id: str, approve: bool, by: str, *, channel: str = "terminal"
         if rec is None:
             return {"ok": False, "state": None, "detail": "no such override request"}
         state = rec.get("state")
-        if state != PENDING:
+        if state not in (PENDING, APPROVED):
             return {"ok": False, "state": state,
                     "detail": f"that request is already {state} — nothing changed"}
         expired = (rec.get("deadline") or 0) <= time.time()
@@ -596,7 +598,26 @@ def decide(request_id: str, approve: bool, by: str, *, channel: str = "terminal"
         _cleanup_release(rec)
         _announce(rec, DENIED, by, channel, reason)
         return {"ok": True, "state": DENIED, "detail": rec.get("detail")}
+    return _complete(rec, by, channel)
 
+
+def resume(request_id: str) -> dict | None:
+    """Retry the merge of an APPROVED request (its mergeability was still UNKNOWN when the
+    operator approved it) under that SAME approval — no new human decision. None when the
+    request is not ``approved`` (someone else got there) or is past its deadline."""
+    with _locked(request_id):
+        rec = load(request_id)
+        if (rec is None or rec.get("state") != APPROVED
+                or (rec.get("deadline") or 0) <= time.time()):
+            return None
+        rec["state"] = MERGING
+        _write(rec)
+    return _complete(rec, rec.get("decided_by") or "unknown", rec.get("decided_via") or "")
+
+
+def _complete(rec: dict, by: str, channel: str) -> dict:
+    """The approved half of :func:`decide` / :func:`resume`: ``rec`` is already MERGING."""
+    request_id = rec["id"]
     try:
         if _is_release(rec):
             from chela import release
@@ -614,6 +635,19 @@ def decide(request_id: str, approve: bool, by: str, *, channel: str = "terminal"
     if state == EXPIRED:
         done = _expire(rec, detail or "the PR head moved")
         return {"ok": False, "state": EXPIRED, "detail": (done or rec).get("detail")}
+    if state == APPROVED:
+        # The approval stays good for this head: the sweep retries it, a push expires it.
+        done = _finish(request_id, APPROVED, detail, from_states=(MERGING,),
+                       deferred_at=rec.get("deferred_at") or time.time())
+        if not rec.get("deferred_at"):
+            event_log.append("orchestrator.merge_override_deferred",
+                             f"{_what(rec)} approved by {by}, merge deferred: {detail}",
+                             payload={**_public(done or rec), "approved_by": by})
+            _tell(done or rec, "deferred", f"{detail} chela retries it under this approval; a new push "
+                  "expires it")
+        return {"ok": False, "state": APPROVED, "detail": detail}
+    if outcome.get("already_merged"):
+        extra["already_merged"] = True
     done = _finish(request_id, state, detail, from_states=(MERGING,),
                    merge_commit_sha=outcome.get("merge_commit_sha"), **extra)
     _cleanup_release(done)
@@ -649,7 +683,7 @@ def sweep(now: float | None = None, head_of=None, dev_head_of=None) -> list[dict
             return release.remote_dev_head(rec)
     expired = []
     for rec in all_requests():
-        if rec.get("state") != PENDING:
+        if rec.get("state") not in (PENDING, APPROVED):
             continue
         if (rec.get("deadline") or 0) <= now:
             why = f"not decided within {rec.get('ttl') or 0:.0f}s"
@@ -660,6 +694,8 @@ def sweep(now: float | None = None, head_of=None, dev_head_of=None) -> list[dict
             except Exception:                                # noqa: BLE001 — best effort
                 head = None
             if not head or head == rec.get("head_sha"):
+                if rec.get("state") == APPROVED:
+                    resume(rec["id"])
                 continue
             if _is_release(rec):
                 why = (f"dev moved ({str(rec.get('head_sha'))[:12]} → {head[:12]}) after the "

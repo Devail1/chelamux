@@ -3223,7 +3223,8 @@ def cmd_override(args) -> None:
     overrides.sweep()
     recs = overrides.all_requests()
     if not args.all:
-        recs = [r for r in recs if r.get("state") in (overrides.PENDING, overrides.MERGING)]
+        recs = [r for r in recs if r.get("state") in (overrides.PENDING, overrides.MERGING,
+                                                  overrides.APPROVED)]
     if not recs:
         print("No override request is pending." if not args.all else "No override requests.")
         return
