@@ -4,15 +4,15 @@
 // corruption of the real logic (a guard that survives its own corruption is
 // decoration, not a guard).
 //
-// Run: node --test tests/taskmodal_model.test.mjs (tests/test_js_suites.py
+// Run: pnpm exec vitest run tests/taskmodal_model.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 let tm, knowledge;
 
-before(async () => {
+beforeAll(async () => {
     // taskmodalmodel.js imports knowledge.js's knMd, which imports util.js —
     // util.js reads window/document at MODULE SCOPE (window.location.pathname,
     // document.addEventListener, ...), so those globals must exist before the

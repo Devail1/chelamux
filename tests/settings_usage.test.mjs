@@ -17,9 +17,9 @@
 //   6. The scanned transcript roots are DISPLAYED (read-only) with their source; there
 //      is no editor, no Save, and nothing is ever POSTed.
 //
-// Run: node --test tests/settings_usage.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/settings_usage.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -62,7 +62,7 @@ let fetchCalls = [];
 let usageFailure = null;
 function flush() { return new Promise(r => setTimeout(r, 0)); }
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><head><style>${CSS}</style></head><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',

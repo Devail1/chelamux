@@ -6,9 +6,9 @@
 // /api/dispatcher + pause/resume responses and asserts the DOM the button actually
 // produces — not a source grep.
 //
-// Run: node --test tests/dispatch_hold.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/dispatch_hold.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -44,7 +44,7 @@ function flush() {
 
 let pollWork, toggleDispatchHold;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',

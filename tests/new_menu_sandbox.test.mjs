@@ -9,16 +9,16 @@
 //     it to /api/agents/spawn-sandboxed — the share_sandbox launcher's route, never the
 //     plain /api/agents/spawn a shell window uses (negative control: Shell window does).
 //
-// Run: node --test tests/new_menu_sandbox.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/new_menu_sandbox.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
-import { test, before, beforeEach } from 'node:test';
+import { test, beforeAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, sliceTemplate, flush } from './js_helpers/dashboard_dom.mjs';
 
 let win, doc;
 let calls = [];
 
-before(async () => {
+beforeAll(async () => {
     const body = sliceTemplate('<div class="app">',
         'onclick="chela.hideNewMenu(); chela.newShellWindow()">Shell window</div>\n</div>');
     const fetchImpl = (url, opts) => {

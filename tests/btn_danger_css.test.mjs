@@ -9,9 +9,9 @@
 // off <body> for the theme under test. `:hover` can't be triggered in jsdom, so the hover pair
 // is read straight off the parsed CSSOM rule and resolved the same way.
 //
-// Run: node --test tests/btn_danger_css.test.mjs (tests/test_js_suites.py runs every
+// Run: pnpm exec vitest run tests/btn_danger_css.test.mjs (tests/test_js_suites.py runs every
 // .test.mjs inside pytest; needs `pnpm install` for jsdom).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

@@ -3,9 +3,9 @@
 // 🔴 Seen to go red: with the old inline ternary in dispatcher.js, `needs_human` and
 // `changes_requested` fell through to `badge-priority-low` — the SAME grey an unknown status
 // gets. The one run state that means "a human must look at this" was styled as the least
-// interesting thing on the board. Run: node --test tests/  (pytest runs these too — see
+// interesting thing on the board. Run: pnpm exec vitest run  (pytest runs these too — see
 // tests/test_js_suites.py)
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { runCardNote, runCloseAction, runStallNote, runStatusBadgeClass, RUN_STATUSES, UNKNOWN_BADGE } from '../chela/dashboard/static/js/runstate.js';
 

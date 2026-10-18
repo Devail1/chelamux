@@ -4,8 +4,8 @@
 // it — drop the tickAccessRequests() call from refresh() and the pill stays hidden here.
 // Harness copied from update_banner_wiring.test.mjs.
 //
-// Run: node --test tests/access_requests_wiring.test.mjs (tests/test_js_suites.py runs it).
-import { before, test } from 'node:test';
+// Run: pnpm exec vitest run tests/access_requests_wiring.test.mjs (tests/test_js_suites.py runs it).
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
@@ -78,7 +78,7 @@ class FakeEventSource {
     close() {}
 }
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

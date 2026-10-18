@@ -12,8 +12,8 @@
 //   4. a lane is keyed on `wid`, never on a name (tmux rename is the truth);
 //   5. the firehose is hidden by DEFAULT but never SILENTLY — the count is stated.
 //
-// Run: node --test tests/  (tests/test_js_suites.py runs every .test.mjs inside pytest)
-import { test } from 'node:test';
+// Run: pnpm exec vitest run  (tests/test_js_suites.py runs every .test.mjs inside pytest)
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 
 import {

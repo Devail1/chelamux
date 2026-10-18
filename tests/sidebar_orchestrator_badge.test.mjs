@@ -13,8 +13,8 @@
 // slot set through a REAL /api/orchestrator/{subscribe,release} round trip, and the
 // inbox icon is the REAL index.html markup, clicked through its own onclick attribute.
 //
-// Run: node --test tests/sidebar_orchestrator_badge.test.mjs  (pytest runs it via tests/test_js_suites.py)
-import { before, beforeEach, test } from 'node:test';
+// Run: pnpm exec vitest run tests/sidebar_orchestrator_badge.test.mjs  (pytest runs it via tests/test_js_suites.py)
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, clickOnclick, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
@@ -35,7 +35,7 @@ ${DECISIONS_MENU}
 const ok = body => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
 let nav, util, orchestrator;
 
-before(async () => {
+beforeAll(async () => {
     ({ modules: { util, nav, orchestrator } } = await bootDashboardDom({
         body: BODY,
         canvasStub: true,

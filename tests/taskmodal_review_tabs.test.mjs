@@ -3,9 +3,9 @@
 // (chela/dashboard/static/js/taskmodal.js + taskmodalmodel.js + style.css). Drives the REAL
 // openTaskModal in the REAL dashboard DOM (bootDashboardDom) and reads the DOM back.
 //
-// Run: node --test tests/taskmodal_review_tabs.test.mjs (tests/test_js_suites.py runs every
+// Run: pnpm exec vitest run tests/taskmodal_review_tabs.test.mjs (tests/test_js_suites.py runs every
 // .test.mjs inside pytest, by discovery).
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { bootDashboardDom, clickOnclick } from './js_helpers/dashboard_dom.mjs';
@@ -18,7 +18,7 @@ let taskmodal, tm;
 let scrolled = [];
 let scrollOpts = [];
 
-before(async () => {
+beforeAll(async () => {
     ({ modules: { taskmodal } } = await bootDashboardDom({ body: BODY, extraModules: ['taskmodal.js'] }));
     tm = await import('../chela/dashboard/static/js/taskmodalmodel.js');
     // jsdom has no layout, so no scrollIntoView — record which element was asked to scroll.

@@ -6,16 +6,16 @@
 // about who owns the role) and that a REFUSED subscribe/release never overwrites it
 // with garbage (a 404/409 must leave the last-known-good state alone).
 //
-// Run: node --test tests/orchestrator.test.mjs (tests/test_js_suites.py runs every
+// Run: pnpm exec vitest run tests/orchestrator.test.mjs (tests/test_js_suites.py runs every
 // .test.mjs inside pytest).
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 let orchestrator;
 let RESPONSES;   // path -> response body
 
-before(async () => {
+beforeAll(async () => {
     // orchestrator.js imports util.js, which reads `document`/`window` at module
     // scope (the tab-signal favicon bootstrap) — a minimal jsdom, not a mock.
     const dom = new JSDOM('<!doctype html><html><body></body></html>',

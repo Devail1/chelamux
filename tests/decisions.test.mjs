@@ -15,9 +15,9 @@
 //      queues/logs (run_review, finished, blocked, …), never the tool-call/prompt
 //      noise the Feed filters client-side.
 //
-// Run: node --test tests/decisions.test.mjs (tests/test_js_suites.py runs every
+// Run: pnpm exec vitest run tests/decisions.test.mjs (tests/test_js_suites.py runs every
 // .test.mjs inside pytest; needs `pnpm install` for jsdom).
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -60,7 +60,7 @@ let AGENTS_REJECT;     // CMX-194 round 7: make /api/agents fail, to take _rende
 let AGENTS_SLOW;       // CMX-194 round 8: defer /api/agents by a MACROTASK — see the wiring guard
 let SUBSCRIBE_GATE;    // CMX-194 round 3: a promise that holds the subscribe response open, or null
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'navigator', 'HTMLElement', 'Element', 'Node', 'MouseEvent', 'KeyboardEvent']) {

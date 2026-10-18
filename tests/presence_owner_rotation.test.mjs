@@ -14,9 +14,9 @@
 //     no new socket and make no /share-info round trip;
 //   - a share that stops removes its presence (no ghost avatars, socket closed).
 //
-// Run: node --test tests/presence_owner_rotation.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/presence_owner_rotation.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,7 +78,7 @@ function fakeGridStack() {
 let terminals, util, owner;
 const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setTimeout(r, 0)); };
 
-before(async () => {
+beforeAll(async () => {
     // BASE_PATH is the page path; pointing it at chela/dashboard on disk makes the
     // lazy import(BASE_PATH + '/static/collab/presence-owner.js') in terminals.js load
     // the REAL module (the same instance this test imports below).

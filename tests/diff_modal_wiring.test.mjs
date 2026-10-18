@@ -42,9 +42,9 @@
 // button with no glyph is indistinguishable from a working one by every
 // other assertion here.
 //
-// Run: node --test tests/diff_modal_wiring.test.mjs (tests/test_js_suites.py
+// Run: pnpm exec vitest run tests/diff_modal_wiring.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 import { clickOnclick, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
@@ -120,7 +120,7 @@ function fakeGridStack() {
 
 let terminals, util;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;
@@ -1195,7 +1195,7 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
             // chip just as effectively and leaves that assertion green.
             // getComputedStyle cascades inline styles AND jsdom's own UA
             // `[hidden] { display: none }` rule (it's lifted onto
-            // globalThis in before()), so one display read subsumes the
+            // globalThis in beforeAll()), so one display read subsumes the
             // `hidden`-attribute check above and closes the whole
             // display-family (visibility/opacity/width would still need
             // their own checks, but display:none is the mechanism that
@@ -1228,7 +1228,7 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         // Desktop width, selection = '@2'. Establishes single-pane mode via
         // setTermMode (which fires renderTerminals() without awaiting it
         // internally — one flush() lands after its readiness Promise.all,
-        // same reasoning as before()'s initial render sharing the fake
+        // same reasoning as beforeAll()'s initial render sharing the fake
         // ttyd-ready fixture); every later variant re-renders directly. This
         // first variant's `sel.value` matches what setTermMode already
         // established, so it does NOT force a fresh rebuild on its own
