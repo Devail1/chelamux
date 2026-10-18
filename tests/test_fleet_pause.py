@@ -159,6 +159,24 @@ def test_resume_sends_resume_to_each_frozen_agent_and_releases(fake, capsys):
     assert "T1: 'resume' was NOT delivered" in capsys.readouterr().out
 
 
+def test_resume_messages_while_the_hold_stands_and_counts_only_deliveries(fake, capsys,
+                                                                         monkeypatch):
+    fake["runs"] = [_run("T1"), _run("T2")]
+    _cli(pause=True, all=True)
+    held_at_send = []
+
+    def send(frm, wid, text):
+        held_at_send.append(hold.active() is not None)
+        return wid == "@1"                                  # T2's 'resume' does not land
+    monkeypatch.setattr(messenger, "send_message", send)
+    _cli(resume=True)
+    assert held_at_send == [True, True]     # no tick could claim while agents were resumed
+    assert hold.active() is None
+    out = capsys.readouterr().out
+    assert "sent 'resume' to 1 of 2 interrupted agent(s)" in out
+    assert "T2: 'resume' was NOT delivered" in out and "T1: 'resume' was NOT" not in out
+
+
 @pytest.mark.parametrize("body", ["{not json", '{"agents": []}', "[]"])
 def test_an_unreadable_state_file_names_nobody(fake, body, caplog):
     fleet.path().write_text(body)
