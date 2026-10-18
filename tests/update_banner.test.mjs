@@ -2,8 +2,8 @@
 // version differs from the page's, and NOT when they match (a stable deploy must never
 // nag, or every open page would reload-storm on each poll).
 //
-// Run: node --test tests/update_banner.test.mjs (tests/test_js_suites.py runs it in pytest).
-import { before, test } from 'node:test';
+// Run: pnpm exec vitest run tests/update_banner.test.mjs (tests/test_js_suites.py runs it in pytest).
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM, VirtualConsole } from 'jsdom';
 
@@ -14,7 +14,7 @@ const navigations = [];
 let serverVersion = '';      // what the fake /api/version answers
 let versionFetches = 0;
 
-before(async () => {
+beforeAll(async () => {
     const virtualConsole = new VirtualConsole();
     virtualConsole.on('jsdomError', e => { if (/navigation/i.test(e.message)) navigations.push(e.message); });
     const dom = new JSDOM('<!doctype html><html><body></body></html>',

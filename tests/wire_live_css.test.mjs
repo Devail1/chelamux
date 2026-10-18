@@ -24,9 +24,9 @@
 // renders the plain-tile markup can't catch a regression added to the
 // `.wire-target` rule (and vice versa).
 //
-// Run: node --test tests/wire_live_css.test.mjs  (pytest runs it via
+// Run: pnpm exec vitest run tests/wire_live_css.test.mjs  (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

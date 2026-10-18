@@ -1,8 +1,8 @@
 // CMX-199: the dashboard draws Lucide icons, not emoji. The rule lives here, not in
 // prose: every rendered literal in static/js/*.js and every template's text is scanned,
 // and an emoji outside tests/no_emoji_allowlist.json fails the build. The allowlist is
-// a per-file ratchet the CMX-212 port slices empty. Run: node --test <this file>.
-import { test } from 'node:test';
+// a per-file ratchet the CMX-212 port slices empty. Run: pnpm exec vitest run <this file>.
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

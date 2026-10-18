@@ -14,8 +14,8 @@
 //   - server down → backoff 0.5/1/2/5/10/10 s, a quiet status line, Enter retries at once;
 //   - ttyd's overlay is hidden while a reconnect is pending.
 //
-// Run: node --test tests/term_reconnect.test.mjs (pytest runs it via tests/test_js_suites.py).
-import { test } from 'node:test';
+// Run: pnpm exec vitest run tests/term_reconnect.test.mjs (pytest runs it via tests/test_js_suites.py).
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

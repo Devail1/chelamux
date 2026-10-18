@@ -8,9 +8,9 @@
 //   - Settings search finds it by a keyword-only term ("keyboard") and hides the
 //     unrelated Remote Control row (negative control in the same query).
 //
-// Run: node --test tests/settings_share_typing.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/settings_share_typing.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -28,7 +28,7 @@ let configGet = {};
 let posts = [];
 const flush = () => new Promise(r => setTimeout(r, 0));
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><head><style>${CSS}</style></head><body>${HTML.slice(SETTINGS_START, SETTINGS_END)}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',

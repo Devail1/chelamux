@@ -10,9 +10,9 @@
 //      this file holds the rule for EVERY such selector, including ones no fixture
 //      happens to render.
 //
-// Run: node --test tests/sidebar_phone_css.test.mjs (tests/test_js_suites.py runs
+// Run: pnpm exec vitest run tests/sidebar_phone_css.test.mjs (tests/test_js_suites.py runs
 // every .test.mjs inside pytest, by discovery).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

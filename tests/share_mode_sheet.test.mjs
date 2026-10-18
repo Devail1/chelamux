@@ -12,9 +12,9 @@
 //     pointed at that share (adopt-first, CMX-421 item 8);
 //   - the pane's share pill shows the mode glyph (👁 / ⌨ / ⚠).
 //
-// Run: node --test tests/share_mode_sheet.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/share_mode_sheet.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -84,7 +84,7 @@ let terminals, util;
 const flush = () => new Promise(r => setTimeout(r, 0));
 const settle = async () => { for (let i = 0; i < 4; i++) await flush(); };
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

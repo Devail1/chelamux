@@ -12,9 +12,9 @@
 // REAL DOM (jsdom) and drives the REAL sse.js through a fake EventSource, so either
 // mutation goes red here.
 //
-// Run: node --test tests/orchestrator_ui.test.mjs (tests/test_js_suites.py runs every
+// Run: pnpm exec vitest run tests/orchestrator_ui.test.mjs (tests/test_js_suites.py runs every
 // .test.mjs inside pytest; needs `pnpm install` for jsdom).
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
@@ -79,7 +79,7 @@ class FakeEventSource {
 
 let terminals, orchestrator;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

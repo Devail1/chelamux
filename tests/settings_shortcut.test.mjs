@@ -18,9 +18,9 @@
 //   - MUST STILL PASS: Ctrl+K opens the palette from both wires; Ctrl+V is not
 //     swallowed by the shim (the paste shim owns it).
 //
-// Run: node --test tests/settings_shortcut.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/settings_shortcut.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `npm ci` for jsdom.)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -56,7 +56,7 @@ function shimFromAppPy() {
 
 let dom;
 
-before(async () => {
+beforeAll(async () => {
     dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',

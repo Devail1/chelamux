@@ -18,8 +18,8 @@
 // and its body-slice ran to the first `\n}\n`, so a reformat would have truncated the
 // body to '' — and ''.includes(x) is false, i.e. a grep matching NO TEXT read GREEN.
 //
-// Run: node --test tests/  (tests/test_js_suites.py runs every .test.mjs in pytest)
-import { test } from 'node:test';
+// Run: pnpm exec vitest run  (tests/test_js_suites.py runs every .test.mjs in pytest)
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 
 import { bezierPath, resolveDrop, roomsByWid } from '../chela/dashboard/static/js/wire.js';

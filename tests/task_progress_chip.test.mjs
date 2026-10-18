@@ -12,9 +12,9 @@
 // This file drives BOTH real call sites through a real DOM (renderDispatcher's table,
 // renderKanban's card) and reads the rendered chip back, closing all four at once.
 //
-// Run: node --test tests/task_progress_chip.test.mjs (tests/test_js_suites.py runs every
+// Run: pnpm exec vitest run tests/task_progress_chip.test.mjs (tests/test_js_suites.py runs every
 // .test.mjs inside pytest, by discovery).
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 
@@ -37,7 +37,7 @@ const KANBAN_BODY = `
 let renderDispatcher;
 let renderKanban;
 
-before(async () => {
+beforeAll(async () => {
     ({ modules: { dispatcher: { renderDispatcher }, kanban: { renderKanban } } } =
         await bootDashboardDom({
             body: `${DISPATCHER_BODY}\n${KANBAN_BODY}`,

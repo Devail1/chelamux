@@ -1,6 +1,6 @@
 // CMX-164: Settings > Concurrency steppers (chela/dashboard/static/js/concurrencymodel.js).
-// Run: node --test tests/concurrency_model.test.mjs (tests/test_js_suites.py runs it).
-import { test } from 'node:test';
+// Run: pnpm exec vitest run tests/concurrency_model.test.mjs (tests/test_js_suites.py runs it).
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 
 import { memNote, stepPayload, workflowNote } from '../chela/dashboard/static/js/concurrencymodel.js';

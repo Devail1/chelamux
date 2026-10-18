@@ -26,10 +26,10 @@
 //      the class leaks, and every terminal on the wall stops taking clicks, with no
 //      self-heal (`buildWall` only runs when the fleet changes).
 //
-// Run: node --test tests/wall.test.mjs  (pytest runs it via tests/test_js_suites.py;
+// Run: pnpm exec vitest run tests/wall.test.mjs  (pytest runs it via tests/test_js_suites.py;
 // it needs `pnpm install` for jsdom — CI does that, and CHELA_REQUIRE_JS_TESTS makes a
 // missing jsdom a FAILURE, never a silent pass.)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
@@ -86,7 +86,7 @@ function fakeGridStack() {
 
 let terminals, util, wire;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     // Set the globals BEFORE importing: terminals.js reads localStorage and

@@ -23,9 +23,9 @@
 //      server restart, and the dock state is persisted in localStorage keyed by id. A
 //      wid that is no longer dispatched is disowned — and un-hidden.
 //
-// Run: node --test tests/walldock.test.mjs  (pytest runs it via tests/test_js_suites.py;
+// Run: pnpm exec vitest run tests/walldock.test.mjs  (pytest runs it via tests/test_js_suites.py;
 // it needs `pnpm install` for jsdom — CHELA_REQUIRE_JS_TESTS makes a missing jsdom a FAILURE.)
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
@@ -93,7 +93,7 @@ function fakeGridStack() {
 
 let terminals, util;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

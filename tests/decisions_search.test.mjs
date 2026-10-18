@@ -3,9 +3,9 @@
 // check, each written to go RED under one specific corruption of the real logic
 // (a guard that survives its own corruption is decoration, not a guard).
 //
-// Run: node --test tests/decisions_search.test.mjs (tests/test_js_suites.py runs
+// Run: pnpm exec vitest run tests/decisions_search.test.mjs (tests/test_js_suites.py runs
 // every .test.mjs inside pytest, by discovery).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import {
     filterDecisionEvents, findDispatcherRun, itemFromDecisionPayload, matchesDecisionQuery,

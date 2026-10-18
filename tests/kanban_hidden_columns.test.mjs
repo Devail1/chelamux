@@ -4,9 +4,9 @@
 // viewer); a hidden row is a drop target; a drag freezes the layout. Each test carries its
 // negative control.
 //
-// Run: node --test tests/kanban_hidden_columns.test.mjs (tests/test_js_suites.py runs every
+// Run: pnpm exec vitest run tests/kanban_hidden_columns.test.mjs (tests/test_js_suites.py runs every
 // .test.mjs inside pytest, by discovery).
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, onTestFinished, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, clickOnclick } from './js_helpers/dashboard_dom.mjs';
 import {
@@ -31,8 +31,17 @@ const STATES = [
 
 let renderKanban;
 let reloads = 0;
+// A fresh copy of kanban.js. The query string is computed outside import() so Vite leaves the
+// specifier alone (it rewrites a template-literal import it cannot resolve statically).
+const freshKanban = () => {
+    const url = `../chela/dashboard/static/js/kanban.js?reload=${++reloads}`;
+    return import(/* @vite-ignore */ url).then(m => {
+        assert.notEqual(m.renderKanban, renderKanban, 'the reload returned the cached module');
+        return m;
+    });
+};
 
-before(async () => {
+beforeAll(async () => {
     ({ modules: { kanban: { renderKanban } } } = await bootDashboardDom({
         body: KANBAN_BODY, extraModules: ['kanban.js'],
         // A click's pollWork() never lands: each test paints the board itself.
@@ -134,7 +143,7 @@ test('nothing hidden → no panel; an unconfigured board hides it too', () => {
     assert.equal(panel().style.display, 'none');
 });
 
-test('clicking a hidden row shows it as a column and persists; Hide puts it back', async t => {
+test('clicking a hidden row shows it as a column and persists; Hide puts it back', async () => {
     renderKanban(payload([]));
     clickOnclick(row('In Review'));
     assert.deepEqual(JSON.parse(localStorage.getItem('chela_kanban_colprefs')), { 'tr-in-review': 'show' });
@@ -143,8 +152,8 @@ test('clicking a hidden row shows it as a column and persists; Hide puts it back
     assert.ok(!rowLabels().includes('In Review'));
     // A reload: a fresh copy of the module reads the pin back from storage.
     const saved = { ...window.chela };
-    t.after(() => Object.assign(window.chela, saved));
-    const fresh = await import(`../chela/dashboard/static/js/kanban.js?reload=${++reloads}`);
+    onTestFinished(() => Object.assign(window.chela, saved));
+    const fresh = await freshKanban();
     fresh.renderKanban(payload([]));
     assert.deepEqual(boardCols(), ['In Review'], 'the pin did not survive a reload');
     // Control: Hide clears it.
@@ -161,7 +170,7 @@ test('storage that throws → the default (empty hidden), and a click still work
     const saved = { ...window.chela };
     Object.defineProperty(globalThis, 'localStorage', { value: boom, configurable: true, writable: true });
     try {
-        const fresh = await import(`../chela/dashboard/static/js/kanban.js?reload=${++reloads}`);
+        const fresh = await freshKanban();
         fresh.renderKanban(payload([run({ tracker_state: 'Done' })]));
         assert.deepEqual(boardCols(), ['Done']);
         assert.ok(rowLabels().includes('Todo'));

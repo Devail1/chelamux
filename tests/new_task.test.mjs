@@ -10,8 +10,8 @@
 //   - the ⌘K palette has a "New task" row that opens the form;
 //   - an open Linear card's id is a `CMX-N ↗` link to the issue.
 //
-// Run: node --test tests/new_task.test.mjs (tests/test_js_suites.py runs it by discovery).
-import { before, beforeEach, test } from 'node:test';
+// Run: pnpm exec vitest run tests/new_task.test.mjs (tests/test_js_suites.py runs it by discovery).
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, clickOnclick, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
@@ -61,7 +61,7 @@ function fetchImpl(url, opts) {
 
 const $ = sel => document.querySelector(sel);
 
-before(async () => {
+beforeAll(async () => {
     ({ modules: { work, kanban } } = await bootDashboardDom({
         body: `<div id="panel-work"><div class="work-toolbar">${TOOLBAR_BTN}</div>${BOARD}</div>${MODAL}\n${PALETTE}`,
         fetchImpl, canvasStub: true, extraModules: ['work.js', 'kanban.js'],

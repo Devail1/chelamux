@@ -13,9 +13,9 @@
 // getComputedStyle, the same technique tests/wire_live_css.test.mjs uses for the
 // identical class of bug (a `position` override silently clobbered by cascade).
 //
-// Run: node --test tests/gs_files_pointer_events_css.test.mjs (tests/test_js_suites.py
+// Run: pnpm exec vitest run tests/gs_files_pointer_events_css.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery; needs `pnpm install` for jsdom).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

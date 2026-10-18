@@ -32,9 +32,9 @@
 // subtree under the real style.css, so a regression in either file — a source-constant check on
 // one side, a rule that only exists in a fixture on the other — has nowhere left to hide.
 //
-// Run: node --test tests/decisions_modal_css.test.mjs (tests/test_js_suites.py runs every
+// Run: pnpm exec vitest run tests/decisions_modal_css.test.mjs (tests/test_js_suites.py runs every
 // .test.mjs inside pytest; needs `pnpm install` for jsdom).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

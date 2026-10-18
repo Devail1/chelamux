@@ -9,9 +9,9 @@
 // technique as tests/gs_files_pointer_events_css.test.mjs. jsdom does no layout, so the
 // visual check (390px phone + desktop) was done in a real browser; this pins the rules.
 //
-// Run: node --test tests/recent_undo_toast_css.test.mjs (tests/test_js_suites.py runs
+// Run: pnpm exec vitest run tests/recent_undo_toast_css.test.mjs (tests/test_js_suites.py runs
 // every .test.mjs inside pytest, by discovery; needs `pnpm install` for jsdom).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
