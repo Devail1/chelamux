@@ -277,6 +277,9 @@ CI_POLL_STATUSES = ("awaiting_review", "changes_requested")
 # allowed to give up, but never allowed to go quiet. Six hours is GitHub's own job ceiling,
 # so anything past it is not "still running", it is stuck.
 CI_PENDING_STALE_SECONDS = 6 * 3600
+# 🔁 CMX-255: how long a red that may still be the PRE-re-run one is waited out, when the
+# re-run was never seen unsettled. Past it, the red is taken as the re-run's own.
+CI_RERUN_SETTLE_SECONDS = 15 * 60
 
 # A whole CI log does not fit in a prompt. The tail is where the failure is.
 CI_LOG_TAIL_CHARS = 4000
@@ -1435,11 +1438,13 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("ci_infra_streak", "ALTER TABLE runs ADD COLUMN ci_infra_streak INTEGER DEFAULT 0"),
         # 🔁 CMX-255. A red CI re-runs its failed jobs once per head sha (`ci_rerun_sha`; a
         # new push resets it) before it may spend a rework round. `ci_rerun_state` is
-        # pending → green | red, `ci_rerun_note` says what failed, `ci_flakes` is the JSON
-        # list of reds that came back green on their re-run (the flaky test ids).
+        # pending → started (seen unsettled) → green | red, `ci_rerun_at` is when it fired,
+        # `ci_rerun_note` says what failed, `ci_flakes` is the JSON list of reds that came
+        # back green on their re-run (the flaky test ids).
         ("ci_rerun_sha", "ALTER TABLE runs ADD COLUMN ci_rerun_sha TEXT"),
         ("ci_rerun_state", "ALTER TABLE runs ADD COLUMN ci_rerun_state TEXT"),
         ("ci_rerun_note", "ALTER TABLE runs ADD COLUMN ci_rerun_note TEXT"),
+        ("ci_rerun_at", "ALTER TABLE runs ADD COLUMN ci_rerun_at TEXT"),
         ("ci_flakes", "ALTER TABLE runs ADD COLUMN ci_flakes TEXT"),
         # ⚖️🔒 CMX-389. The merge gate's BACKSTOP: set on the reconcile tick that finds a
         # run's PR MERGED without a clean judge on its merged head and without an audited
@@ -5507,12 +5512,18 @@ def tick(workflow_path: str | Path) -> dict:
                         "UPDATE runs SET ci_infra_streak=0 WHERE task_id=?",
                         (pr_row["task_id"],),
                     )
-                    # 🔁 CMX-255: green on the SAME sha whose red was re-run ⇒ it was a flake.
-                    if (pr_row["ci_rerun_state"] == "pending" and ci.head_sha
-                            and ci.head_sha == pr_row["ci_rerun_sha"]):
-                        _record_ci_flake(conn, pr_row, ci.head_sha)
-                        flaked.append((pr_row, ci.head_sha))
-                        summary["ci_flake"] += 1
+                # 🔁 CMX-255: the re-run of this sha is in flight (seen unsettled), or green
+                # on the SAME sha whose red was re-run ⇒ it was a flake.
+                head = ci.head_sha or pr_row["pr_head_sha"]
+                rerun_live = (pr_row["ci_rerun_state"] in ("pending", "started")
+                              and head and head == pr_row["ci_rerun_sha"])
+                if rerun_live and ci.state == CI_PENDING:
+                    conn.execute("UPDATE runs SET ci_rerun_state='started' WHERE task_id=?",
+                                 (pr_row["task_id"],))
+                if rerun_live and ci.state == CI_PASSING:
+                    _record_ci_flake(conn, pr_row, head)
+                    flaked.append((pr_row, head))
+                    summary["ci_flake"] += 1
             if state is None and mergeable is None:
                 continue
             # COALESCE so a partial read (e.g. mergeable still UNKNOWN right
@@ -6115,6 +6126,13 @@ def tick(workflow_path: str | Path) -> dict:
                 continue
             if row["ci_failed_sha"] == sha:
                 continue        # this red has already been delivered. Each red fires ONCE.
+            # 🔁 CMX-255: a re-run fired but never yet seen unsettled ⇒ this red may still be
+            # the one it replaces. Wait it out (bounded), before the heavy log fetch below.
+            if row["ci_rerun_sha"] == sha and row["ci_rerun_state"] == "pending":
+                fired = _parse_ts(row["ci_rerun_at"])
+                now = _parse_ts(_now())
+                if fired and now and (now - fired).total_seconds() < CI_RERUN_SETTLE_SECONDS:
+                    continue
             wf_dir = str(wf.path.parent)
             # The heavy read (a whole log archive) happens HERE and nowhere else: once, on
             # the transition into red — never on the poll. ⛔ BEFORE the sha is burned: the
@@ -6185,15 +6203,15 @@ def tick(workflow_path: str | Path) -> dict:
                 if _rerun_failed_jobs(wf_dir, ci.run_ids if ci else ()):
                     conn.execute(
                         "UPDATE runs SET ci_rerun_sha=?, ci_rerun_state='pending', "
-                        "ci_rerun_note=? WHERE task_id=?",
-                        (sha, note, task_id),
+                        "ci_rerun_note=?, ci_rerun_at=? WHERE task_id=?",
+                        (sha, note, _now(), task_id),
                     )
                     conn.commit()
                     summary["ci_rerun"] += 1
                     log.warning("CI is RED on %s (%s) — %s; waiting on that before any "
                                 "rework", row["pr_url"] or "?", sha[:12], note)
                     continue
-            elif row["ci_rerun_state"] == "pending":
+            elif row["ci_rerun_state"] in ("pending", "started"):
                 conn.execute("UPDATE runs SET ci_rerun_state='red' WHERE task_id=?",
                              (task_id,))
             body = _ci_verdict_body(ci or CIStatus(CI_FAILING, sha), log_tail, row["pr_url"])

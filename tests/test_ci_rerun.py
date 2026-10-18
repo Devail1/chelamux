@@ -61,7 +61,7 @@ def test_red_then_rerun_green_is_a_flake_no_rework_and_one_notice(tmp_path, noti
     assert run["ci_failed_sha"] is None        # the re-run's own red must still be able to fire
     assert not fake.comments
 
-    fake.rollup = [_check_run("test (3.12)", status="IN_PROGRESS", conclusion="")]
+    fake.rollup = _RUNNING
     assert _tick(wf, fake)["ci_flake"] == 0
     fake.rollup = _GREEN
     assert _tick(wf, fake)["ci_flake"] == 1
@@ -77,9 +77,16 @@ def test_red_then_rerun_green_is_a_flake_no_rework_and_one_notice(tmp_path, noti
     assert len(fake.reruns) == 1
 
 
+_RUNNING = [_check_run("test (3.12)", status="IN_PROGRESS", conclusion="")]
+
+
 def test_red_then_rerun_red_is_a_real_failure_and_reworks(tmp_path, notices):
     wf, fake = _setup(tmp_path)
     _tick(wf, fake)
+    fake.rollup = _RUNNING
+    _tick(wf, fake)                            # the re-run is seen in flight
+    assert _run()["ci_rerun_state"] == "started"
+    fake.rollup = [_check_run("test (3.12)", conclusion="FAILURE")]
 
     summary = _tick(wf, fake)                  # the re-run settled red on the same sha
 
@@ -96,6 +103,22 @@ def test_red_then_rerun_red_is_a_real_failure_and_reworks(tmp_path, notices):
     fake.rollup = _GREEN
     assert _tick(wf, fake)["ci_flake"] == 0
     assert notices == []
+
+
+def test_a_stale_red_right_after_the_rerun_is_waited_out_then_bounded(tmp_path):
+    wf, fake = _setup(tmp_path)
+    _tick(wf, fake)
+
+    summary = _tick(wf, fake)                  # GitHub still shows the OLD red
+
+    assert (summary["ci_failed"], fake.log_fetches) == (0, 1)
+    assert (_run()["status"], _run()["ci_rerun_state"]) == ("awaiting_review", "pending")
+    with dispatcher._db() as conn:             # never seen unsettled, past the settle window
+        conn.execute("UPDATE runs SET ci_rerun_at=? WHERE task_id='abc123'",
+                     ("2026-01-01T00:00:00+00:00",))
+        conn.commit()
+    assert _tick(wf, fake)["ci_failed"] == 1
+    assert (_run()["rework_count"], _run()["ci_rerun_state"]) == (1, "red")
 
 
 def test_a_new_push_resets_the_rerun_and_green_elsewhere_is_no_flake(tmp_path, notices):
