@@ -320,6 +320,8 @@ GH_STUB_DIR.mkdir()
 os.environ["PATH"] = f"{GH_STUB_DIR}{os.pathsep}{os.environ.get('PATH', '')}"
 for _var in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
     os.environ.pop(_var, None)
+# …and no stored login either: even a real `gh` run by absolute path finds no credentials.
+os.environ["GH_CONFIG_DIR"] = str(GH_STUB_DIR / "config")
 
 # Collapse the dispatcher's seed-delivery confirm loop to ~instant. In production it polls a
 # freshly-spawned Claude window for up to 5×8s ≈ 44s, waiting for it to flip "busy" (see
@@ -849,7 +851,8 @@ def _gh_violation(args, env: dict | None) -> str | None:
             or any(w.rstrip("/").endswith(("/merge", "/merges")) for w in words)):
         return None
     prog = words[0]
-    path = (env if env is not None else os.environ).get("PATH")
+    # An explicit env with no PATH execs against the default path, not this process's.
+    path = os.environ.get("PATH") if env is None else env.get("PATH", os.defpath)
     resolved = shutil.which(prog, path=path)
     if resolved is None:
         return None

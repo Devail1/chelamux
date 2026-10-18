@@ -140,7 +140,7 @@ def run_shell_group(cmd: str, *, timeout: float, cwd: str | None = None,
             proc.communicate(timeout=grace)
         except subprocess.TimeoutExpired:
             pass                    # SIGTERM was not enough
-        # The shell exiting is not the group exiting: the rest get the same grace.
+        # The shell exiting is not the group exiting: the rest share the same deadline.
         while _group_alive(proc.pid) and time.monotonic() < deadline:
             time.sleep(0.05)
         _signal_group(proc.pid, signal.SIGKILL)

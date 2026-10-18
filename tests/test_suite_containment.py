@@ -330,3 +330,20 @@ def test_any_gh_a_test_runs_by_name_meets_the_failing_stub():
     assert conftest.GH_FENCE_MESSAGE in out.stderr
     assert os.environ["PATH"].split(os.pathsep)[0] == str(conftest.GH_STUB_DIR)
     assert not {"GH_TOKEN", "GITHUB_TOKEN"} & set(os.environ)
+    assert os.environ["GH_CONFIG_DIR"] == str(conftest.GH_STUB_DIR / "config")
+
+
+def test_an_explicit_env_without_PATH_is_resolved_against_the_default_path(tmp_path,
+                                                                            monkeypatch):
+    """``Popen(env={...})`` with no PATH execs against ``os.defpath`` — so that is where the
+    fence must look, not at this process's PATH (where a test's fake would hide the real)."""
+    fake = tmp_path / "gh"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(conftest, "_REAL_GH_REALPATH", str(fake))
+    monkeypatch.setattr(conftest.os, "defpath", str(tmp_path))
+    assert conftest._gh_violation(["gh", "pr", "merge", "1"], {"HOME": "/x"}) is not None
+    monkeypatch.setattr(conftest.os, "defpath", "/nonexistent-cmx253")
+    assert conftest._gh_violation(["gh", "pr", "merge", "1"], {"HOME": "/x"}) is None
+    assert conftest._gh_violation(["gh", "pr", "merge", "1"], None) is not None
