@@ -110,7 +110,18 @@ def test_leaked_proc_reads_argv_paths_and_skips_unreadable_procs(env):
     set_runs(env, [("CMX-2", "done", "2026-01-01")])
     add_proc(env, 42, ["pytest", str(env.wt / "CMX-2" / "tests")], env.dir)
     (env.proc / "43").mkdir()                                    # no stat: vanished mid-scan
-    assert [f["subject"] for f in ops.rule_leaked_proc(src(env), {})] == ["pid:42"]
+    add_proc(env, 44, ["init"], env.dir, ppid=1)                 # orphan, but not ours
+    add_proc(env, os.getpid(), ["pytest"], env.wt / "CMX-2", ppid=1)   # the scan itself
+    add_proc(env, 45, [], env.wt / "CMX-2", ppid=1)               # a kernel thread: no argv
+    add_proc(env, 99, ["x"], env.wt / "CMX-2")
+    os.rename(env.proc / "99", env.proc / "self")                # /proc/self is not a pid
+    assert [f["subject"] for f in ops.rule_leaked_proc(src(env), {})] == ["pid:42", "pid:45"]
+    assert [f["subject"] for f in ops.rule_hung_test(src(env), {})] == ["pid:42"]
+
+
+def test_without_a_runs_db_an_orphan_is_still_found(env):
+    add_proc(env, 42, ["sleep"], env.wt / "CMX-1", ppid=1)
+    assert [f["evidence"]["run_status"] for f in ops.rule_leaked_proc(src(env), {})] == [None]
 
 
 # --- rule 3: unsettled CI red (CMX-256) ----------------------------------------------------
@@ -133,13 +144,13 @@ def test_ci_red_rule(env, payload, hit):
 
 # --- rule 4: the same flake across judge baselines (CMX-195/257) ----------------------------
 
-def heldout(env, task, at, flakes=(), cannot=""):
+def heldout(env, task, at, flakes=(), cannot="", mtime=None):
     rec = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at)), "task_id": task,
            "baseline_flakes": list(flakes), "cannot_verify": cannot}
     path = env.dir / "judge-heldout" / f"{task}.jsonl"
     with open(path, "a") as fh:
         fh.write(json.dumps(rec) + "\n")
-    os.utime(path, (at, at))
+    os.utime(path, (mtime or at,) * 2)
 
 
 def test_repeat_flake_rule_matches_across_tasks_via_flakes_and_red_baselines(env):
@@ -155,6 +166,8 @@ def test_repeat_flake_near_misses(env):
     heldout(env, "CMX-1", NOW - 30, flakes=["tests/a.py::t"])     # same task again
     heldout(env, "CMX-2", NOW - 25 * 3600, flakes=["tests/a.py::t"])  # older than 24 h
     heldout(env, "CMX-3", NOW - 60, flakes=["tests/z.py::other"])
+    heldout(env, "CMX-4", NOW - 25 * 3600, flakes=["tests/a.py::t"], mtime=NOW)  # old record
+    heldout(env, "CMX-5", NOW - 60, flakes=["tests/a.py::t"], mtime=NOW - 25 * 3600)  # old file
     assert ops.rule_repeat_flake(src(env), {}) == []
 
 
@@ -320,6 +333,40 @@ def test_scheduled_is_read_only_outside_the_ops_dir(env, leaky, monkeypatch):
     assert {p.relative_to(env.dir).as_posix() for p in changed} == {
         "ops/findings.jsonl", "ops/state.json"}
     assert kills == [] and len(leaky.sent) == 1
+
+
+@pytest.mark.parametrize("n, tail", [(3, " — chela ops scan"), (4, " (+1 more) — chela ops scan")])
+def test_the_notice_lists_three_and_counts_the_rest(env, leaky, n, tail):
+    for pid in range(43, 42 + n):
+        add_proc(env, pid, ["sleep"], env.wt / "CMX-1")
+    leaky.run()
+    (kind, summary, payload), = leaky.sent
+    assert summary.endswith(tail) and summary.startswith(f"🔎 ops scan: {n} new finding(s) — ")
+    assert len(payload["findings"]) == n
+
+
+def test_render_says_skipped_and_partial():
+    assert ops.render({"skipped": "paused"}) == "ops scan: skipped — paused"
+    out = ops.render({"findings": [], "partial": True, "rules_done": ["a"], "errors": {"b": "E"}})
+    assert out == "ops scan: 0 finding(s) — PARTIAL (finished: a)\n  rule b raised E"
+
+
+@pytest.mark.parametrize("notify", [True, False])
+def test_the_cli_routes_ops_scan(monkeypatch, capsys, notify):
+    monkeypatch.setattr(sys, "argv", ["chela", "ops", "scan", *(["--notify"] if notify else [])])
+    monkeypatch.setattr(main.ops, "scheduled", lambda: {"skipped": "notify-path"})
+    monkeypatch.setattr(main.ops, "scan", lambda *a: {"skipped": "plain-path"})
+    main.main()
+    assert capsys.readouterr().out == f"ops scan: skipped — {'notify' if notify else 'plain'}-path\n"
+
+
+def test_a_command_after_ops_is_not_routed_to_it(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["chela", "adopt", "346", "--workflow", "W.md"])
+    monkeypatch.setattr(main, "cmd_ops_scan", lambda a: pytest.fail("routed to ops"))
+    seen = []
+    monkeypatch.setattr(main, "cmd_adopt", lambda a: seen.append(a.pr))
+    main.main()
+    assert seen == ["346"]
 
 
 def test_the_cli_without_notify_writes_nothing(env, monkeypatch, capsys):
