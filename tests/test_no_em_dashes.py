@@ -36,6 +36,7 @@ LAUNCH_SET = [
     "docs/HOOKS.md",
     "docs/TRUST_AND_APPROVAL_POSTURE.md",
     "docs/RISK_LEVELS.md",
+    "docs/FRONTEND_PORT_PLAN.md",   # CMX-212: a plan the fleet reads in public
 ]
 
 # An em dash anywhere. En dashes and hyphens are allowed (CMX-213).
