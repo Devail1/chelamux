@@ -836,6 +836,31 @@ def test_merge_gates_on_the_live_risk_tier(repo, judge_state, files, says):
         assert f"(judge {judge_state}, CI green, mergeable)" in event["summary"]
 
 
+@pytest.mark.parametrize("judge_state, added, refused", [
+    ("prose_only", "docs/secret/**", True),   # a workflow-added prose path still needs a human
+    ("clean", "docs/secret/**", True),
+    ("prose_only", "deploy/**", False),       # negative control: the path is not in this PR
+])
+def test_merge_gate_classifies_against_the_workflows_own_always_human_paths(
+        tmp_path, judge_state, added, refused):
+    repo = _repo_declaring(tmp_path / "wfrepo", "dev")
+    (repo / "WORKFLOW.md").write_text(
+        f"---\nproject_key: CMX\nworkspace:\n  base_branch: dev\n"
+        f"merge:\n  always_human:\n    - \"{added}\"\n---\nbody\n")
+    _seed_run(repo, judge_state=judge_state)
+    with patch.object(contract, "_read_pr_files", return_value=["docs/secret/plan.md"]), \
+         patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge", return_value={"ok": True}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is squash.called is (not refused)
+    if refused:
+        _assert_actionable(result)
+        assert "'docs/secret/plan.md', an ALWAYS-HUMAN path" in result["error"]
+        assert result["always_human_path"] == "docs/secret/plan.md"
+
+
 @pytest.mark.parametrize("effect, files", [
     (subprocess.CompletedProcess([], 0, " docs/x.md \n\nWORKFLOW.md\n"), ["docs/x.md", "WORKFLOW.md"]),
     (subprocess.CompletedProcess([], 1, "docs/x.md\n"), None),

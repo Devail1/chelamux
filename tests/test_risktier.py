@@ -30,6 +30,13 @@ def test_each_default_always_human_path_wins_over_prose(path):
     assert risktier.classify(["docs/x.md", path], D) == ("human", path)
 
 
+@pytest.mark.parametrize("files", [["docs/secret/a.md"], ["docs/x.md", "docs/secret/a.md"]])
+def test_an_always_human_path_wins_even_when_it_is_itself_prose(files):
+    assert all(risktier.is_prose(f) for f in files)
+    assert risktier.classify(files, D + ("docs/secret/**",)) == ("human", "docs/secret/a.md")
+    assert risktier.classify(files, D) == ("prose", None)    # negative control: not added
+
+
 @pytest.mark.parametrize("files, tier", [
     (PROSE, "prose"), (["docs/x.md", "app.py"], "judge"), (None, "judge"), ([], "judge"),
 ])
