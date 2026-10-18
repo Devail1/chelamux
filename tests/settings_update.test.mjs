@@ -16,10 +16,10 @@
 //   2. 🔴 COUNTERWEIGHT — up to date leaves the button disabled. Without this, "always
 //      enable the button" would also satisfy property 1.
 //
-// Run: node --test tests/settings_update.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/settings_update.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom — CHELA_REQUIRE_JS_TESTS makes a
 // missing jsdom a FAILURE.)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
@@ -38,7 +38,7 @@ function flush() {
     return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
@@ -439,7 +439,9 @@ test('a failed /api/settings poll re-renders the Update row as Unknown', async (
 
 // --- CMX-95: the state machine on its exact boundaries ------------------------------
 
-const flow = await import('../chela/dashboard/static/js/updateflow.js');
+// Imported after the first beforeAll has installed `window` (util.js reads it at import).
+let flow;
+beforeAll(async () => { flow = await import('../chela/dashboard/static/js/updateflow.js'); });
 const CTX = { run: 4, boot: BOOT, label: 'Restarting chela-daemon', startedAt: 1000 };
 const done = { run: 4, ok: true, step: 'done', error: '', restarted: ['chela-daemon'], behind_before: 0 };
 

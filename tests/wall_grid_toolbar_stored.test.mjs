@@ -6,12 +6,12 @@
 // so this suite is its own process, booted with a choice that CONTRADICTS the
 // default: Focus ON (default: collapsed) but the user last expanded it ('0').
 //
-// Run: node --test tests/wall_grid_toolbar_stored.test.mjs (needs `pnpm install`).
-import { before, test } from 'node:test';
+// Run: pnpm exec vitest run tests/wall_grid_toolbar_stored.test.mjs (needs `pnpm install`).
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootWall } from './wall_grid_toolbar_env.mjs';
 
-before(async () => {
+beforeAll(async () => {
     await bootWall({ pc_wall_focus: '1', pc_wall_grid_collapsed: '0' });
 });
 

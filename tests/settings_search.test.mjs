@@ -20,9 +20,9 @@
 //   - empty state + the live count.
 //   - ⭐ MUST BE ACCEPTED: an empty query leaves the drawer byte-for-byte as rendered.
 //
-// Run: node --test tests/settings_search.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/settings_search.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -52,7 +52,7 @@ function flush() {
     return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><head><style>${CSS}</style></head><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',

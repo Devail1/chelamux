@@ -95,7 +95,9 @@ def test_run_suite_survives_a_leaked_node_channel_fd(monkeypatch):
     with the fd that reproduces the abort actually set in this process's own environment —
     proving `run_suite` (which env's through `_no_color_env`) does not hand it down."""
     monkeypatch.setenv("NODE_CHANNEL_FD", _POISON_FD)
-    result = judge.run_suite("node --test tests/views.test.mjs", ROOT, timeout=60)
+    # CMX-216: the collab suite, since tests/*.test.mjs moved to Vitest.
+    result = judge.run_suite("node --test chela/dashboard/static/collab/fit.test.mjs", ROOT,
+                             timeout=60)
     assert result.ok, "the suite subprocess itself could not even be started/collected"
     assert result.exit_code == 0, (
         f"`node --test` did not survive a leaked NODE_CHANNEL_FD (exit {result.exit_code}): "

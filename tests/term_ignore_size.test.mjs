@@ -21,9 +21,9 @@
 //      and coming back / restoring reports watching:true — WITHOUT reloading the pane
 //      (no iframe src reassignment, no lost scrollback).
 //
-// Run: node --test tests/term_ignore_size.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/term_ignore_size.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
@@ -78,7 +78,7 @@ function fakeGridStack() {
 let terminals, util;
 let visState = 'visible';
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

@@ -15,9 +15,9 @@
 //   - the handler is registered on window.term for OSC 52, also when ttyd assigns
 //     window.term AFTER the shim ran, and only once per Terminal.
 //
-// Run: node --test tests/term_osc52.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/term_osc52.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `npm ci` for jsdom.)
-import { test, afterEach } from 'node:test';
+import { test, afterEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

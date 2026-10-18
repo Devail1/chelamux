@@ -25,9 +25,9 @@
 // and the real renderKanban() paint that only happens once the currentTab gate
 // (work.js:174) lets pollWork() through.
 //
-// Run: node --test tests/dashboard_default_view.test.mjs (pytest via
+// Run: pnpm exec vitest run tests/dashboard_default_view.test.mjs (pytest via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
@@ -59,7 +59,7 @@ const BODY = `
 
 let util, nav;
 
-before(async () => {
+beforeAll(async () => {
     // The genuine terminals-off boot: EXPLICITLY false, not merely unset — see
     // util.js's own `window.TERMINALS_ENABLED !== false`, which defaults TRUE
     // when the bootstrap script is absent (index.html only ever emits `= true`,

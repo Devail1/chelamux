@@ -38,9 +38,9 @@
 //      up inside #primary-menu — it has to stay visible whenever a share is live,
 //      menu open or not.
 //
-// Run: node --test tests/topbarmenu.test.mjs (pytest runs it via tests/test_js_suites.py;
+// Run: pnpm exec vitest run tests/topbarmenu.test.mjs (pytest runs it via tests/test_js_suites.py;
 // it needs `pnpm install` for jsdom — CHELA_REQUIRE_JS_TESTS makes a missing jsdom a FAILURE.)
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -89,7 +89,7 @@ const BODY = `
 
 let nav;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',

@@ -11,8 +11,8 @@
 //     to its own path in order; a refusal on the image path shows an error toast;
 //   - with the Settings switch off (window.__CHELA_FILE_DROP__ = false) nothing is claimed.
 //
-// Run: node --test tests/term_upload.test.mjs (pytest runs it via tests/test_js_suites.py).
-import { test } from 'node:test';
+// Run: pnpm exec vitest run tests/term_upload.test.mjs (pytest runs it via tests/test_js_suites.py).
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

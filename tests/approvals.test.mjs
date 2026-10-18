@@ -15,8 +15,8 @@
 //   8. An armed Approve disarms on its own; a refused decision shows the server's reason
 //      on the sheet; an open sheet re-renders on every tick.
 //
-// Run: node --test tests/approvals.test.mjs (pytest runs it via tests/test_js_suites.py).
-import { before, beforeEach, mock, test } from 'node:test';
+// Run: pnpm exec vitest run tests/approvals.test.mjs (pytest runs it via tests/test_js_suites.py).
+import { beforeAll, beforeEach, vi, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -45,7 +45,7 @@ class FakeNotification {
     constructor(title, opts) { NOTES.push({ title, opts }); }
 }
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PILL}</body></html>`, { url: 'http://localhost:5005/' });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement', 'Element', 'Node', 'Event', 'KeyboardEvent']) {
         Object.defineProperty(globalThis, k, { value: dom.window[k], writable: true, configurable: true });
@@ -194,19 +194,19 @@ test('opting in with permission refused stays off', async () => {
 });
 
 test('an armed Approve disarms on its own — a later single tap only re-arms', async () => {
-    mock.timers.enable({ apis: ['setTimeout'] });
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
     try {
         LISTING = { requests: [req()] };
         await pa.openApprovals();
         const ap = document.querySelector('.pa-approve');
         ap.click();
         assert.match(ap.textContent, /Confirm merge/);
-        mock.timers.tick(6001);
+        vi.advanceTimersByTime(6001);
         assert.equal(ap.textContent, 'Approve');
         assert.equal(ap.classList.contains('pa-armed'), false);
         ap.click();
         assert.equal(POSTS.length, 0, 'a tap after the arm window lapsed approved');
-    } finally { mock.timers.reset(); }
+    } finally { vi.useRealTimers(); }
 });
 
 test('a refused decision shows the server\'s reason, even after the sheet re-renders', async () => {

@@ -13,9 +13,9 @@
 //      owner-only secrets — see api_term_shared in app.py); the sheet has to make
 //      its own per-wid /share-info round trip to have anything to show.
 //
-// Run: node --test tests/share_sheet.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/share_sheet.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -72,7 +72,7 @@ function fakeGridStack() {
 
 let terminals, util;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

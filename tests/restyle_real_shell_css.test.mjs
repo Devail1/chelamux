@@ -21,7 +21,7 @@
 // status tick, and resolves styles against cssForViewport(style.css) — every
 // @supports/@media block evaluated for the viewport and unwrapped, exactly as a
 // browser would apply it.
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -62,7 +62,7 @@ function fakeGridStack() {
 }
 
 let win;
-before(async () => {
+beforeAll(async () => {
     globalThis.GridStack = fakeGridStack();
     // The REAL shell, byte-identical to what Flask serves (terminals enabled).
     const body = sliceTemplate('<div class="app">', '\n  </main>') + '</div>';

@@ -4,9 +4,9 @@
 // issue rendered in Todo (19 there vs Linear's 7). Runs the REAL renderKanban against a
 // real DOM and reads the column each card landed in.
 //
-// Run: node --test tests/kanban_open_tracker_state.test.mjs (tests/test_js_suites.py runs
+// Run: pnpm exec vitest run tests/kanban_open_tracker_state.test.mjs (tests/test_js_suites.py runs
 // every .test.mjs inside pytest, by discovery).
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 
@@ -27,7 +27,7 @@ const STATES = [
 
 let renderKanban;
 
-before(async () => {
+beforeAll(async () => {
     ({ modules: { kanban: { renderKanban } } } = await bootDashboardDom({
         body: KANBAN_BODY, extraModules: ['kanban.js'],
         fetchImpl: () => new Promise(() => {}),

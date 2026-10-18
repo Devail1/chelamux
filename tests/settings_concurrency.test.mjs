@@ -1,9 +1,9 @@
 // SETTINGS "Concurrency" rows (CMX-164), in a REAL DOM: the real nav.js (via main.js)
 // against a mocked /api/config/concurrency. Same harness as settings_dispatch.test.mjs.
 //
-// Run: node --test tests/settings_concurrency.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/settings_concurrency.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -28,7 +28,7 @@ let fetchCalls = [];
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',

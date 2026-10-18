@@ -15,9 +15,9 @@
 //   - running it with Settings already open leaves it open (not a toggle-off);
 //   - MUST STILL PASS: every palette row that existed before is still offered.
 //
-// Run: node --test tests/palette_settings.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/palette_settings.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -37,7 +37,7 @@ const BODY = `
 <input type="search" id="sidebar-jump-input">
 ${HTML.slice(SETTINGS_START, SETTINGS_END)}`;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',

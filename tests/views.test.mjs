@@ -21,8 +21,8 @@
 //      allowed alongside work.js's poll without reopening the one-poller
 //      property this test protects.)
 //
-// Run: node --test tests/  (or `uv run pytest -q` — tests/test_js_suites.py runs every .test.mjs)
-import { test } from 'node:test';
+// Run: pnpm exec vitest run  (or `uv run pytest -q` — tests/test_js_suites.py runs every .test.mjs)
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

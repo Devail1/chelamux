@@ -16,9 +16,9 @@
 // menu placement is checked off openNewMenu's arithmetic, fed the fab's rect and
 // the menu's min/max-width as RESOLVED from style.css at 390px — never typed in.
 //
-// Run: node --test tests/mobile_new_fab.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/mobile_new_fab.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `npm ci` for jsdom).
-import { test, before } from 'node:test';
+import { test, beforeAll } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -31,7 +31,7 @@ const CSS = fs.readFileSync(path.join(here, '..', 'chela', 'dashboard', 'static'
 
 let win, doc, sheet;
 let phone = true;
-before(async () => {
+beforeAll(async () => {
     // The REAL markup from the app shell through the end of #new-menu: the
     // sidebar (with its New session button), both fabs, the scrim and the menu.
     const body = sliceTemplate('<div class="app">',

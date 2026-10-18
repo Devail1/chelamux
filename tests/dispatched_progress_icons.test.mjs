@@ -1,8 +1,8 @@
 // CMX-137: a DISPATCHED run wears Linear-style progress icons (◐ working with the shared
 // pulse ring, ◕ judging / awaiting review; the shared check / triangle for done / waiting),
 // in Okabe-Ito bluish-green; a human session's dot is unchanged. Real DOM: the real
-// renderSidebarAgents and dock, resolved against style.css. Run: node --test <this file>.
-import { before, test } from 'node:test';
+// renderSidebarAgents and dock, resolved against style.css. Run: pnpm exec vitest run <this file>.
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { bootDashboardDom, sliceTemplate, flush } from './js_helpers/dashboard_dom.mjs';
@@ -51,7 +51,7 @@ const fakeGridStack = () => ({ init: () => ({
 }) });
 
 let win, doc, util, terminals, nav, sheet;
-before(async () => {
+beforeAll(async () => {
     globalThis.GridStack = fakeGridStack();
     const body = sliceTemplate('<div class="app">', '\n  </main>') + '</div>';
     const { dom, modules } = await bootDashboardDom({ body, fetchImpl: fakeFetch, canvasStub: true,
