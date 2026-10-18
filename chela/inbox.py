@@ -2038,6 +2038,31 @@ def ci_red(run: dict, *, sha: str, failing: tuple[str, ...] | list[str],
     return True
 
 
+def ci_flake(run: dict, *, sha: str, note: str) -> bool:
+    """🔁 CMX-255 ``run_ci_flake`` — a red CI's one re-run of its failed jobs came back GREEN.
+    Said once per (run, head sha): the dispatcher calls this only on its own ``pending →
+    green`` transition of ``runs.ci_rerun_state``. Nothing was sent back for rework, and the
+    notice says so instead of the ``run_ci_red`` one it replaces."""
+    if not enabled():
+        return False
+    task = run.get("task_id")
+    if not task or not sha:
+        return False
+    try:
+        wid = run_wid(run, None, epoch.current())
+    except Exception:  # noqa: BLE001 — attribution is best-effort
+        wid = None
+    event = _event(
+        "run_ci_flake",
+        f"🟡 {_label(run)} CI flake, re-run green on {sha[:7]} — {note} — NOT sent back "
+        f"for rework — {_ref(run)}",
+        _run_payload(run, ci_sha=sha, note=note), wid=wid)
+    with locked_store() as store:
+        store["queue"].append(event)
+    event_log.from_inbox(event)
+    return True
+
+
 def conflict_events(runs: list[dict], store: dict,
                     windows: dict[str, str] | None = None,
                     now_epoch: str | None = None) -> list[dict]:

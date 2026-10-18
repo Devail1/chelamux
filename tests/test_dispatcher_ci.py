@@ -129,7 +129,7 @@ class _FakeGh:
 
     def __init__(self, rollup=None, sha="deadbee1", log="E   assert 1 == 2\nFAILED test_x\n",
                  gh_missing=False, mergeable="MERGEABLE", on_check_read=None,
-                 jobs_by_run=None, steps_readable=True):
+                 jobs_by_run=None, steps_readable=True, rerun_rc=1):
         self.rollup = rollup if rollup is not None else [_check_run("test (3.12)")]
         self.sha = sha
         self.log = log
@@ -142,6 +142,11 @@ class _FakeGh:
         # test gets "job not found", i.e. `None` (unknown, never infra).
         self.jobs_by_run: dict[str, list[dict]] = jobs_by_run or {}
         self.steps_readable = steps_readable   # False simulates `gh run view --json jobs` failing
+        # 🔁 CMX-255: what `gh run rerun <id> --failed` answers. REFUSED (1) by default, so
+        # every red here takes the pre-CMX-255 path straight to rework — the fall-through a
+        # re-run GitHub will not start must take. tests/test_ci_rerun.py drives the rest.
+        self.rerun_rc = rerun_rc
+        self.reruns: list[list[str]] = []
         self.calls: list[list[str]] = []
         self.kwargs: list[dict] = []
         self.comments: list[str] = []
@@ -186,6 +191,9 @@ class _FakeGh:
                 else:
                     run_id = cmd[3]
                     R.stdout = json.dumps({"jobs": self.jobs_by_run.get(run_id, [])})
+            elif cmd[:3] == ["gh", "run", "rerun"]:
+                self.reruns.append(cmd)
+                R.returncode = self.rerun_rc
             elif cmd[:3] == ["gh", "pr", "comment"]:
                 self.comments.append(k.get("input") or "")
             return R()
