@@ -23,6 +23,24 @@ from chela import judge, judge_select, procguard, sweep
 import conftest  # noqa: E402,I001
 
 
+class Hung(Exception):
+    pass
+
+
+@pytest.fixture(autouse=True)
+def _hang_is_a_failure():
+    """A runner that never returns is a RED test, not a suite timeout: under a mutation that
+    breaks the grace loop the run would otherwise hang until the judge's own timeout."""
+    def hung(*_):
+        raise Hung("the runner did not return within 60s")
+
+    old = signal.signal(signal.SIGALRM, hung)
+    signal.alarm(60)
+    yield
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, old)
+
+
 def _alive(pid: int) -> bool:
     return procguard._identity(pid) is not None
 
@@ -92,9 +110,11 @@ def test_SIGTERM_comes_first_and_the_grace_lets_a_member_exit_cleanly(tmp_path, 
     """The group gets SIGTERM before SIGKILL: a member's TERM handler runs."""
     marker = tmp_path / "termed"
     cmd = _bg(pids("p"), f"trap 'echo x > {marker}; exit 0' TERM; sleep 300 & wait") + "wait"
+    t0 = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired):
-        procguard.run_shell_group(cmd, timeout=0.5, cwd=str(tmp_path), grace=3)
+        procguard.run_shell_group(cmd, timeout=0.5, cwd=str(tmp_path), grace=20)
     assert marker.exists()
+    assert time.monotonic() - t0 < 10        # …and once the group is gone, no more waiting
 
 
 def test_a_suite_that_exits_still_takes_its_background_children_with_it(tmp_path, pids):
