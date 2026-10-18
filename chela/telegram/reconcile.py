@@ -224,6 +224,17 @@ class TopicManager:
         log.warning("reopenForumTopic(%s) failed: %s", thread_id, resp.get("description", resp))
         return False
 
+    def delete_topic(self, thread_id: str | int) -> bool:
+        """Delete forum topic ``thread_id`` AND every message in it (CMX-204, opt-in only).
+        Needs the *Delete Messages* admin right; a failure is logged and ``False``."""
+        resp = self._transport(
+            "deleteForumTopic", {"chat_id": self._chat_id, "message_thread_id": thread_id}
+        )
+        if resp.get("ok"):
+            return True
+        log.warning("deleteForumTopic(%s) failed: %s", thread_id, resp.get("description", resp))
+        return False
+
     def pin_title(
         self, thread_id: str | int, title: str, existing_message_id: str | int | None = None,
     ) -> str | None:
@@ -309,6 +320,8 @@ def reconcile_bindings(
     bind_dispatched: bool = False,
     now_epoch: str | None = None,
     rebinds: dict[str, str] | None = None,
+    ledger=None,
+    delete_on_close: bool = False,
 ) -> bool:
     """Diff the registry against the live fleet; provision + reap. Return changed.
 
@@ -352,6 +365,12 @@ def reconcile_bindings(
       the resumed window is not handed a fresh topic first. Entries are POPPED as they are
       settled (bound, or found unusable); what is left is still waiting for its window to
       come up as an agent. A reopen that fails falls through to a fresh topic.
+    * ``ledger``      — a :class:`~chela.topic_ledger.TopicLedger` (CMX-204): every topic
+      created, closed, reopened or renamed here is recorded in it, and a window that needs
+      a topic first REOPENS a closed one made for the same cwd (:func:`_reopen_for_cwd`)
+      instead of creating one. ``None`` keeps the pre-CMX-204 behaviour.
+    * ``delete_on_close`` — Settings "Telegram: delete a topic when its window closes":
+      the reap deletes the topic instead of closing it, and closes it if the delete fails.
 
     **Provision** every agent window with no binding: create a topic named after
     the agent's project (:func:`topic_name_for`, falling back to the window name)
@@ -423,7 +442,7 @@ def reconcile_bindings(
             continue
         thread = registry.thread_for_window(wid)
         if thread is not None:
-            topic_api.close_topic(thread)
+            _retire_topic(topic_api, ledger, thread, delete_on_close)
         registry.unbind(wid)
         why = "the tmux server restarted; its id was reissued" if dangling else "gone"
         log.info("auto-topics: window %s %s — closed topic %s, unbound", wid, why, thread)
@@ -434,11 +453,8 @@ def reconcile_bindings(
     # anything is created or renamed, and so a topic bound in an earlier, still-
     # unambiguous tick gets the disambiguating suffix retroactively once a sibling
     # shows up (the rename loop below picks that up like any other name change).
-    raw_names = {
-        wid: topic_name_for(cwd_for(wid) if cwd_for is not None else None,
-                             live_windows.get(wid, wid))
-        for wid in agent_ids
-    }
+    cwds = {wid: cwd_for(wid) if cwd_for is not None else None for wid in agent_ids}
+    raw_names = {wid: topic_name_for(cwds[wid], live_windows.get(wid, wid)) for wid in agent_ids}
     desired_names = disambiguate_topic_names(raw_names)
 
     # Rebind (CMX-75): a resumed archive takes back its own topic, reopened. Only once the
@@ -454,6 +470,8 @@ def reconcile_bindings(
         if not topic_api.reopen_topic(thread):
             continue                       # gone / no permission — provisioned fresh below
         registry.bind(wid, thread, now_epoch)
+        if ledger is not None:
+            ledger.opened(thread, wid, cwds[wid])
         log.info("auto-topics: reopened topic %s for resumed %s", thread, wid)
         changed = True
 
@@ -465,11 +483,24 @@ def reconcile_bindings(
         if not _wants_topic(wid):
             continue  # dispatcher-owned and working away quietly — not the forum's problem
         name = desired_names[wid]
+        thread = _reopen_for_cwd(topic_api, ledger, registry, cwds[wid])
+        if thread is not None:
+            # The rename loop below edits the name only if it differs from the old one.
+            old_name = (ledger.get(thread) or {}).get("name")
+            registry.bind(wid, thread, now_epoch)
+            if old_name:
+                registry.set_topic_name(wid, old_name)
+            ledger.opened(thread, wid, cwds[wid])
+            log.info("auto-topics: reopened topic %s of %s for %s", thread, cwds[wid], wid)
+            changed = True
+            continue
         thread = topic_api.create_topic(name)
         if thread is None:
             continue  # create failed (perms?); leave unbound and retry next tick
         registry.bind(wid, thread, now_epoch)
         registry.set_topic_name(wid, name)
+        if ledger is not None:
+            ledger.opened(thread, wid, cwds[wid], name)
         log.info("auto-topics: created topic %s for %s (%s)", thread, wid, name)
         changed = True
 
@@ -489,10 +520,64 @@ def reconcile_bindings(
         if not topic_api.rename_topic(thread, desired):
             continue  # perms/deleted topic; leave it unsynced and retry next tick
         registry.set_topic_name(wid, desired)
+        if ledger is not None:
+            ledger.opened(thread, wid, cwds[wid], desired)
         log.info("auto-topics: renamed topic %s for %s -> %s", thread, wid, desired)
         changed = True
 
     return changed
+
+
+def _retire_topic(topic_api, ledger, thread: str, delete: bool) -> None:
+    """Close a dead window's topic, or delete it when Settings asks (CMX-204). A failed
+    delete (e.g. no *Delete Messages* right) falls back to closing it."""
+    if delete:
+        if topic_api.delete_topic(thread):
+            if ledger is not None:
+                ledger.forget(thread)
+            return
+        log.warning("auto-topics: could not delete topic %s; closing it instead", thread)
+    topic_api.close_topic(thread)
+    if ledger is not None:
+        ledger.closed(thread)
+
+
+def _reopen_for_cwd(topic_api, ledger, registry, cwd: str | None) -> str | None:
+    """Reopen the oldest CLOSED topic chela made for ``cwd``; its thread id, or None.
+
+    The growth this stops is re-creation (CMX-204): every relaunch made a fresh window and
+    so a fresh topic. A closed topic is not bound, so two live windows in one cwd still get
+    two topics, and both come back next time. A reopen that fails (deleted by hand, not
+    found) drops the topic from the ledger, and the caller creates a new one.
+    """
+    if ledger is None:
+        return None
+    free = [t for t in ledger.closed_for(cwd) if registry.window_for_thread(t) is None]
+    if not free:
+        return None
+    if topic_api.reopen_topic(free[0]):
+        return free[0]
+    ledger.forget(free[0])
+    return None
+
+
+GENERAL_THREAD = "1"
+
+
+def delete_archived_topics(ledger, registry, topic_api) -> int:
+    """Settings "Delete archived topics": delete every remembered CLOSED topic (CMX-204).
+
+    Never a topic bound right now, nor General (thread 1). A failed delete stays in the
+    ledger for the next try. Returns how many were deleted.
+    """
+    deleted = 0
+    for thread in ledger.closed_threads():
+        if thread == GENERAL_THREAD or registry.window_for_thread(thread) is not None:
+            continue
+        if topic_api.delete_topic(thread):
+            ledger.forget(thread)
+            deleted += 1
+    return deleted
 
 
 def sync_pinned_titles(
