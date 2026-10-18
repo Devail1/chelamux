@@ -107,9 +107,11 @@ def test_a_member_that_ignores_SIGTERM_is_SIGKILLed_after_the_grace(tmp_path, pi
 
 
 def test_SIGTERM_comes_first_and_the_grace_lets_a_member_exit_cleanly(tmp_path, pids):
-    """The group gets SIGTERM before SIGKILL: a member's TERM handler runs."""
+    """The group gets SIGTERM before SIGKILL, and the grace lasts until the GROUP is gone —
+    not just the shell: a member whose TERM handler takes a second still finishes it."""
     marker = tmp_path / "termed"
-    cmd = _bg(pids("p"), f"trap 'echo x > {marker}; exit 0' TERM; sleep 300 & wait") + "wait"
+    trap = f"trap 'sleep 1; echo x > {marker}; exit 0' TERM; sleep 300 & wait"
+    cmd = _bg(pids("p"), trap) + "wait"
     t0 = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired):
         procguard.run_shell_group(cmd, timeout=0.5, cwd=str(tmp_path), grace=20)
