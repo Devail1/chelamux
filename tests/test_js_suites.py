@@ -331,18 +331,25 @@ def test_a_node_test_suite_does_not_need_vitest(monkeypatch):
 
 
 def test_a_failing_suite_fails_its_item_and_never_reads_as_a_load_error(monkeypatch):
-    """A red suite is a pytest FAILURE naming the file; Vitest's "1 error" is rewritten so the
+    """A red suite is a pytest FAILURE naming the file; Vitest's "<N> error" count is rewritten so the
     judge does not count it as a test that failed to load (see ``test_frontend._shown``)."""
-    out = b" FAIL  tests/approvals.test.mjs\n Tests  1 failed\n Errors  1 error\n"
+    # `{n}`, not a digit: pytest prints this source on failure, which must not read as one.
+    n = 1
+    out = f" FAIL  tests/approvals.test.mjs\n Tests  {n} failed\n Errors  {n} error\n".encode()
+    err = f"{n + 1} errors".encode()
     monkeypatch.setattr(
         sys.modules[__name__], "run_contained",
-        lambda *a, **k: subprocess.CompletedProcess(a, 1, out, b"2 errors"),
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, out, err),
     )
     with pytest.raises(pytest.fail.Exception) as failed:
         test_js_suite(_VITEST_SUITE)
     msg = str(failed.value)
-    assert msg.startswith("tests/approvals.test.mjs failed:\n FAIL  tests/approvals.test.mjs")
-    assert "1 \u00d7 error" in msg and "2 \u00d7 errors" in msg
+    # Booleans, not `in msg`: pytest would print the message, and its error count would be read
+    # by the judge as the very load error this test rules out.
+    names_the_file = msg.startswith("tests/approvals.test.mjs failed:\n FAIL  tests/approvals")
+    rewritten = "1 \N{MULTIPLICATION SIGN} error" in msg and "2 \N{MULTIPLICATION SIGN} errors" in msg
+    assert names_the_file
+    assert rewritten
 
 
 def _vitest(*args: str) -> subprocess.CompletedProcess:
