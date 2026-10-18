@@ -2492,6 +2492,7 @@ def _task_finished_sweep(task_id: str, notes: list[str]) -> list[dict]:
     if skipped:
         print(f"⚠ {skipped} mutation(s) SKIPPED — those lines were never measured; a skip is "
               "unmeasured, not killed.")
+    timeouts = _print_sweep_timeouts(result)
     unrun = _print_sweep_unrun(result)
     survivors = result.get("survivors") or []
     uncovered, stray = sweep.check_equivalents(survivors, equivalents)
@@ -2515,12 +2516,14 @@ def _task_finished_sweep(task_id: str, notes: list[str]) -> list[dict]:
     for e in equivalents:
         e["mutations"] = by_key.get(e["key"], [])
         print(f"  [EQUIVALENT] {e['key']} — {e['why'][:100]}")
-    if unrun:
+    if unrun or timeouts:
         # ⏳ CMX-111: the budget bounds the hand-in, so a partial sweep does not refuse — but
         # it is never reported as a pass: the unrun lines are named, and the judge still runs.
+        # ⏳ CMX-253: a TIMEOUT is unmeasured the same way.
+        unknown = f"{unrun} UNRUN" + (f", {timeouts} TIMEOUT" if timeouts else "")
         print(f"⚠ sweep PARTIAL: {result.get('measured', 0)} of {result.get('mutations', 0)} "
               f"mutation(s) measured — {result.get('killed', 0)} killed, {skipped} skipped "
-              f"(unmeasured), {len(survivors)} survivor(s) declared equivalent; {unrun} UNRUN "
+              f"(unmeasured), {len(survivors)} survivor(s) declared equivalent; {unknown} "
               "= CANNOT VERIFY, not passed — proceeding within the sweep budget.")
         return equivalents
     print(f"✓ sweep: {result.get('mutations', 0)} mutation(s), {result.get('killed', 0)} "
@@ -2849,6 +2852,7 @@ def cmd_judge_sweep(args) -> None:
         print(f"  {note}")
     _print_sweep_full_suite(result)
     skipped = _print_sweep_skipped(result)
+    timeouts = _print_sweep_timeouts(result)
     unrun = _print_sweep_unrun(result)
     for r in result["survivors"]:
         tag = "UNTESTED" if str(r.get("reason", "")).startswith("UNTESTED") else "SURVIVED"
@@ -2861,6 +2865,7 @@ def cmd_judge_sweep(args) -> None:
         sys.exit(2)
     print(f"sweep: {result['mutations']} mutation(s) — {result['killed']} killed, "
           f"{len(result['survivors'])} survived, {skipped} skipped"
+          f"{f', {timeouts} TIMEOUT' if timeouts else ''}"
           f"{f', {unrun} UNRUN' if unrun else ''} ({result['seconds']}s)")
     if verdict == sweep.V_SURVIVORS:
         print("⚖️ Each SURVIVED line is a changed check no test can tell apart from its "
@@ -2874,6 +2879,9 @@ def cmd_judge_sweep(args) -> None:
         print(f"⚠ CANNOT VERIFY — the sweep budget stopped it: {result.get('exhausted', '')}. "
               f"{unrun} mutation(s) never ran. Raise --budget-seconds/--max-mutations (or "
               "judge.sweep_budget_seconds / judge.sweep_max_mutations) to cover them.")
+    elif timeouts:
+        print(f"⚠ CANNOT VERIFY — {timeouts} mutation(s) hit the suite timeout; their "
+              "lines are unknown, not killed.")
     elif verdict == sweep.V_UNKNOWN:
         print(f"⚠ UNKNOWN — {len(unsupported)} changed source file(s) were NOT "
               f"swept ({sweep.SUPPORTED_NOTE}). This is not a pass.")
@@ -2890,6 +2898,16 @@ def _print_sweep_full_suite(result: dict) -> None:
         print(f"  [FULL    ] {r['key']} — ran the full suite: {r['full_suite']}")
     if rows and result.get("selection"):
         print(f"  selection: {result['selection']}")
+
+
+def _print_sweep_timeouts(result: dict) -> int:
+    """⏳ CMX-253: print every mutation whose suite hit its timeout as ``[TIMEOUT ]`` and
+    return how many — its tree was killed, its line is UNKNOWN, never killed or skipped."""
+    rows = result.get("timeout") or []
+    for r in rows:
+        print(f"  [TIMEOUT ] {r['key']} {r['mutation']} — UNKNOWN, not killed: "
+              f"{r['reason'][:120]}")
+    return len(rows)
 
 
 def _print_sweep_unrun(result: dict) -> int:

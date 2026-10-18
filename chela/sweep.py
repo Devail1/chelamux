@@ -71,6 +71,7 @@ TS_SUFFIXES = (".ts", ".tsx")     # CMX-173: the JS mutator, plus TS/TSX-only mu
 UNPARSEABLE = "UNPARSEABLE"   # the mutated file did not parse — skipped, said out loud
 NOT_APPLIED = "NOT_APPLIED"   # the anchor could not be applied/proven — skipped, said out loud
 UNRUN = "UNRUN"               # CMX-111: the budget ran out before it — CANNOT VERIFY, not killed
+TIMEOUT = "TIMEOUT"           # CMX-253: its suite hit the timeout — CANNOT VERIFY, not killed
 
 # ⏳ CMX-111: the defaults a 0/unset/unreadable budget falls back to. The wall-clock budget is
 # checked BEFORE each mutation, so a sweep can overrun it by at most the one mutation already
@@ -221,6 +222,7 @@ class SweepReport:
             "invalid": [r.as_dict() for r in self._with(judge.INVALID)],
             # ⏳ CMX-111: never measured — CANNOT VERIFY for these lines, never killed.
             "unrun": [r.as_dict() for r in self._with(UNRUN)],
+            "timeout": [r.as_dict() for r in self._with(TIMEOUT)],
             "measured": len([r for r in self.results if r.status != UNRUN]),
             "budget": self.budget.as_dict(), "exhausted": self.exhausted,
             "cannot_verify": self.cannot_verify, "recovered": self.recovered,
@@ -242,8 +244,9 @@ def verdict(result: dict) -> str:
         return V_CANNOT_VERIFY
     if result.get("survivors"):
         return V_SURVIVORS
-    if result.get("unrun"):
+    if result.get("unrun") or result.get("timeout"):
         # ⏳ CMX-111: mutations the budget never reached are unmeasured — never a pass.
+        # ⏳ CMX-253: and so is one whose suite hung until the timeout killed it.
         return V_CANNOT_VERIFY
     if result.get("unsupported"):
         return V_UNKNOWN
@@ -1056,7 +1059,9 @@ def _apply_and_measure(worktree: Path, test_cmd: str, mut: Mutation, before: str
     fallback = ""
     if outcome.selected is None:
         fallback = outcome.selection or "no per-mutation selection for this sweep"
-    return SweepResult(mut, outcome.verdict, outcome.reason, outcome.measured_by, fallback)
+    status = TIMEOUT if outcome.mutated is not None and outcome.mutated.timed_out \
+        else outcome.verdict
+    return SweepResult(mut, status, outcome.reason, outcome.measured_by, fallback)
 
 
 # --- `--sweep-equivalent` ---------------------------------------------------------------------
