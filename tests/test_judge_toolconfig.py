@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from unittest.mock import patch
+
 import pytest
 
 from chela import judge, toolconfig
@@ -30,14 +32,15 @@ def _git(cwd: Path, *args: str) -> str:
                           check=True, capture_output=True, text=True).stdout
 
 
-def _repo(tmp_path: Path, pr_files: dict[str, str]) -> Path:
+def _repo(tmp_path: Path, pr_files: dict[str, str], work: Path | None = None) -> Path:
     """origin/dev = a green suite that never reads eslint.config.js; HEAD adds ``pr_files``."""
-    origin, work = tmp_path / "origin.git", tmp_path / "repo"
+    origin, work = tmp_path / "origin.git", work or tmp_path / "repo"
     subprocess.run(["git", "init", "-q", "--bare", "-b", "dev", str(origin)], check=True)
     subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True,
                    capture_output=True)
     for rel, text in {"feature.py": FEATURE, "eslint.config.js": ESLINT, "package.json": PKG,
-                      "test_feature.py": "def test_ok():\n    assert True\n"}.items():
+                      "web/lint.rules.js": ESLINT, "test_feature.py": "def test_ok():\n    assert True\n"}.items():
+        (work / rel).parent.mkdir(parents=True, exist_ok=True)
         (work / rel).write_text(text)
     _git(work, "add", "-A")
     _git(work, "commit", "-qm", "base")
@@ -110,9 +113,11 @@ def _survivor(file: str, before: str = "x", after: str = "y") -> judge.Outcome:
     ("src/.github/workflows/ci.yml", "x", "y", False),     # a path glob is anchored
     ("package.json", '"eslint src"', '"true"', True),     # inside `scripts`
     ("package.json", '"module"', '"commonjs"', False),    # outside `scripts`
+    ("package.json", '"module",\n  "scripts": {\n    "lint": "eslint src"',
+     '"commonjs",\n  "scripts": {\n    "lint": "true"', False),   # `scripts` AND another key
     ("package.json", '"eslint src"', '"eslint src', False),  # breaks the JSON: unproven
     ("bad/package.json", "x", "y", False),
-    ("arr/package.json", '"eslint src"', '"true"', False),  # not a JSON object               # not UTF-8: unproven, no crash
+    ("arr/package.json", '"eslint src"', '"true"', False),  # not a JSON object
 ])
 def test_classify_by_file_and_json_key(tmp_path, monkeypatch, file, before, after, advisory):
     monkeypatch.setattr(toolconfig, "changed_tests", lambda *a: {})
@@ -185,3 +190,70 @@ def test_self_check_runs_code_first_so_a_budget_starves_config(tmp_path, monkeyp
                               budget=sweep.SweepBudget(900.0, 1), base_branch="dev")
     assert [o.experiment.file for o in report.outcomes] == ["feature.py"]
     assert [o.experiment.file for o in report.unrun] == ["eslint.config.js"]
+
+
+# --- END TO END: WORKFLOW.md `judge.tool_config` → the real judge round / self-check ------
+# A custom glob the defaults do NOT cover, so dropping `tool_config=` anywhere on the way
+# (the defaults take over) or the classify call itself turns the verdict BLOCKED.
+
+NESTED = {"guard": "no-console is an error", "file": "web/lint.rules.js",
+          "before": '"no-console": "error"', "after": '"no-console": "off"'}
+CLAIM = {"web/tests/lint.test.ts": "// runs eslint -c lint.rules.js on a failing fixture\n"}
+
+
+def _workflow(tmp_path: Path) -> Path:
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text("---\nproject_key: TEST\ntracker:\n  kind: markdown\n  path: TODO.md\n"
+                  f"workspace:\n  root: {tmp_path / 'wts'}\n  base_branch: dev\n"
+                  f"judge:\n  test_cmd: {json.dumps(TEST_CMD)}\n  suite_timeout_seconds: 120\n"
+                  '  tool_config: ["lint.rules.js"]\n---\n\ndo it: {{task_title}}\n')
+    return wf
+
+
+def _judge_round(tmp_path: Path, monkeypatch, pr_files: dict[str, str]):
+    from chela import dispatcher
+
+    monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
+    wf = _workflow(tmp_path)
+    _repo(tmp_path, pr_files, work=tmp_path / "wts" / "judge-t259")
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, window_name, branch_name,"
+            " worktree_path, started_at, attempt, task_number, pr_url, pr_state, pr_checks,"
+            " pr_head_sha, rework_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("t259", str(wf), "t", "awaiting_review", "w", "b", str(tmp_path), "2026-10-18",
+             1, 1, "https://github.com/o/r/pull/9", "open", dispatcher.CI_PASSING, "cafe", 0))
+        conn.commit()
+    exp = tmp_path / "e.json"
+    exp.write_text(json.dumps({"experiments": [NESTED]}))
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run("t259", exp, cleanup=False)
+    return result
+
+
+def test_judge_round_reads_tool_config_and_an_unclaimed_survivor_is_advisory(tmp_path,
+                                                                             monkeypatch):
+    result = _judge_round(tmp_path, monkeypatch, {"web/lint.rules.js": ESLINT + "// t\n"})
+    [o] = result["outcomes"]
+    assert (result["state"], result["blocking"]) == (judge.J_CLEAN, 0)
+    assert (o["verdict"], o["advisory"]) == (
+        judge.SURVIVED, "`web/lint.rules.js` is tool config (`lint.rules.js`) that CI "
+        "enforces, and no test this PR changes names it")
+
+
+def test_judge_round_blocks_when_a_nested_test_claims_the_file_by_basename(tmp_path,
+                                                                          monkeypatch):
+    result = _judge_round(tmp_path, monkeypatch, CLAIM)
+    [o] = result["outcomes"]
+    assert (result["state"], result["blocking"], o["advisory"]) == (judge.J_BLOCKED, 1, "")
+
+
+@pytest.mark.parametrize("pr_files, state", [
+    ({"web/lint.rules.js": ESLINT + "// t\n"}, judge.J_CLEAN), (CLAIM, judge.J_BLOCKED)])
+def test_self_check_reads_tool_config_and_classifies_end_to_end(tmp_path, pr_files, state):
+    work = _repo(tmp_path, pr_files)
+    (tmp_path / "e.json").write_text(json.dumps({"experiments": [NESTED]}))
+    out = judge.run_self_check(work, tmp_path / "e.json", workflow_path=_workflow(tmp_path))
+    [o] = out["outcomes"]
+    assert (out["state"], o["verdict"], bool(o["advisory"])) == (
+        state, judge.SURVIVED, state == judge.J_CLEAN)
