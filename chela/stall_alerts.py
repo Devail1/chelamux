@@ -138,7 +138,7 @@ def _clean_unmerged(store: dict, runs: list[dict], live_heads: dict[str, str] | 
             continue
         judge_sha = run.get("judge_sha")
         head = _current_head(run, live_heads)
-        if (run.get("judge_state") != judge.J_CLEAN or not judge_sha or not head
+        if (run.get("judge_state") not in judge.MERGE_READY or not judge_sha or not head
                 or judge_sha != head):
             continue                                 # not clean on the head it would merge
         if not entry or entry.get("sha") != judge_sha:

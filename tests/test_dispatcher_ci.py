@@ -1724,3 +1724,133 @@ def test_ci_report_state_does_not_latch_once_conflict_resolves():
         dispatcher.CI_BLOCKED_CONFLICTING
     )
     assert dispatcher.ci_report_state(dispatcher.CI_PASSING, "MERGEABLE") == dispatcher.CI_PASSING
+
+
+# --- ⛔ CMX-256: an unread or unnamed red is PENDING, never a rework ---------------------
+
+def _reopen_mid_tick(new_sha):
+    """Stand-in for `chela reopen` landing between the 0b poll and 1c: the row was
+    `needs_human` when the poll ran (so its checks were not read), and is `awaiting_review`
+    on a NEW head, still carrying the OLD head's `pr_checks='failing'`, by the time 1c looks."""
+    real = dispatcher._read_pr_status
+
+    def _status(pr_url, repo_dir):
+        out = real(pr_url, repo_dir)
+        with dispatcher._db() as conn:
+            conn.execute("UPDATE runs SET status='awaiting_review', pr_head_sha=? "
+                         "WHERE task_id='abc123'", (new_sha,))
+            conn.commit()
+        return out
+    return patch.object(dispatcher, "_read_pr_status", side_effect=_status)
+
+
+def test_a_stale_failing_row_with_no_read_this_tick_is_NOT_sent_back(tmp_path, caplog):
+    """The 10-18 incident: CMX-176 at its rework cap, reopened on a fresh head whose checks
+    were all IN_PROGRESS, was sent to needs_human by a "CI RED — job ?" on that head."""
+    from chela import inbox
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="needs_human",
+             pr_checks=dispatcher.CI_FAILING, pr_head_sha="oldhead1", ci_failed_sha="oldhead1",
+             rework_count=2)
+    fake = _FakeGh(rollup=[_check_run("test (3.11)", status="IN_PROGRESS", conclusion=None),
+                           _check_run("frontend")], sha="5d44118a")
+
+    with _reopen_mid_tick("5d44118a"), \
+            patch.object(inbox, "ci_red", side_effect=AssertionError("no notice")):
+        summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 0 and summary["escalated"] == 0
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "awaiting_review"
+    assert run["ci_failed_sha"] == "oldhead1"      # the new head was never burned
+    assert len(dispatcher.reviews_of(run)) == 0
+    assert fake.log_fetches == 0
+    assert "treated as PENDING" in caplog.text
+    # The next tick reads the new head for real: still running ⇒ pending, not red.
+    _tick(wf, fake)
+    run = dispatcher.resolve_run("abc123")
+    assert run["pr_checks"] == dispatcher.CI_PENDING and run["status"] == "awaiting_review"
+
+
+def test_a_fresh_read_that_disagrees_with_a_failing_row_is_not_a_red(tmp_path):
+    """Negative control on `ci.state`: the row says failing, this tick's read (kept in
+    `ci_now`) says passing — a concurrent writer put the stale value back."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[_check_run("test")])
+    reap = dispatcher._reap_terminal_windows
+
+    def _restale(conn, wf_path):     # runs after 0b wrote `passing`, before 1c reads
+        conn.execute("UPDATE runs SET pr_checks='failing' WHERE task_id='abc123'")
+        conn.commit()
+        return reap(conn, wf_path)
+    # A non-failing read that still carries a job name, so only the STATE can stop it.
+    passing = dispatcher.CIStatus(dispatcher.CI_PASSING, "deadbee1", ("CI / test",), ("42",))
+    with patch.object(dispatcher, "_reap_terminal_windows", side_effect=_restale), \
+            patch.object(dispatcher, "_read_pr_checks", return_value=passing):
+        summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 0
+    assert dispatcher.resolve_run("abc123")["status"] == "awaiting_review"
+
+
+def test_a_failing_read_that_names_no_job_is_PENDING_not_red(tmp_path, caplog):
+    """An empty job list means the classifier met a shape it does not know ⇒ PENDING, stored
+    as pending (so 1c′ can age it out), never a red that sits unhandled on the row."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")])
+
+    with patch.object(dispatcher, "_rollup_state",
+                      return_value=(dispatcher.CI_FAILING, (), ("42",), False, ())):
+        summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 0
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "awaiting_review" and run["ci_failed_sha"] is None
+    assert run["pr_checks"] == dispatcher.CI_PENDING and run["ci_pending_since"]
+    assert "no failing job named" in caplog.text
+    assert fake.log_fetches == 0
+
+
+def test_a_failure_beside_a_running_job_goes_red_naming_it_once_it_settles(tmp_path):
+    """One FAILURE + one IN_PROGRESS is pending (unsettled wins); when the other job lands,
+    the red names the job that FAILED — not the one that passed."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[_check_run("lint", conclusion="FAILURE"),
+                           _check_run("test", status="IN_PROGRESS", conclusion=None)])
+    assert _tick(wf, fake)["ci_failed"] == 0
+
+    fake.rollup = [_check_run("lint", conclusion="FAILURE"), _check_run("test")]
+    assert _tick(wf, fake)["ci_failed"] == 1
+    verdict = dispatcher.latest_verdict(dispatcher.resolve_run("abc123"))
+    assert "CI / lint" in verdict and "CI / test" not in verdict
+
+
+@pytest.mark.parametrize("rollup, expected", [
+    ([_check_run("a", status="IN_PROGRESS", conclusion=None),
+      _check_run("b", status="QUEUED", conclusion=None),
+      _check_run("c", status="PENDING", conclusion=None)], dispatcher.CI_PENDING),
+    ([_check_run("a"), _check_run("b")], dispatcher.CI_PASSING),
+    ([], dispatcher.CI_NONE),
+])
+def test_a_rollup_with_no_failure_never_sends_back(tmp_path, rollup, expected):
+    """All running ⇒ pending; all SUCCESS ⇒ green; a just-pushed head with no checks yet ⇒
+    `none` — none of them is red, none sends the run back or announces anything."""
+    from chela import inbox
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=rollup)
+
+    with patch.object(inbox, "ci_red", side_effect=AssertionError("no notice")):
+        summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 0
+    run = dispatcher.resolve_run("abc123")
+    assert run["pr_checks"] == expected and run["status"] == "awaiting_review"
