@@ -34,6 +34,13 @@ history lives in `git log`.
   collapses or filters out keeps its pill at its group's position, and one the sidebar has
   not drawn yet goes at the end. The header swipe steps in the same order. (CMX-165)
 
+### Added
+
+- **Agents review their own diff before handing in.** `chela task-finished` refuses a code
+  PR whose body has no `## Review` section (prose-only PRs are exempt). An agent that cannot
+  review passes `--no-review-reason "…"`, which is recorded on the run and shown to the judge
+  and on the PR. (CMX-209)
+
 ## [0.17.0] — 2026-10-16
 
 ### Added

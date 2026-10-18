@@ -277,3 +277,8 @@ def test_tick_persists_the_markers_base_sync_on_the_run(tmp_path, marker, expect
     _, run = _tick_with_marker(tmp_path, marker)
     stored = run["base_sync"]
     assert (json.loads(stored) if stored is not None else None) == expected
+
+
+def test_tick_persists_the_markers_review_gate_on_the_run(tmp_path):  # 🔎 CMX-209
+    m = {"task_id": "abc123", "review_gate": {"no_review_reason": "no tool"}}
+    assert json.loads(_tick_with_marker(tmp_path, m)[1]["review_gate"]) == m["review_gate"]
