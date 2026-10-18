@@ -118,6 +118,13 @@ judge:
   # judge re-runs experiments anyway) but task-finished names them. 0 or unset = the default. `chela judge self-check --budget-seconds/--max-experiments`.
   # self_check_budget_seconds: 900  # wall-clock, baseline included (default 900)
   # self_check_max_experiments: 12  # most experiments measured (default 12)
+  # ⚖️🧰 CMX-259: TOOL CONFIG whose guard is the CI job that runs it. A survivor in one of
+  # these is ADVISORY (listed, never blocking) unless a test the PR changes names the file;
+  # their experiments run after code ones. A glob matches the repo-relative path, or the
+  # basename when it has no `/`; `glob:key` scopes a JSON file to one top-level key.
+  # Unset = the list below (chela/toolconfig.py); `[]` = off.
+  # tool_config: ["eslint.config.*", ".dependency-cruiser.*", "tsconfig*.json", "vite.config.*",
+  #               "vitest.config.*", "package.json:scripts", ".github/workflows/*"]
 
 hooks:
   # ⛔ THIS HOOK IS THE JUDGE'S ENVIRONMENT TOO, not just the agent's — `_launch_agent` runs

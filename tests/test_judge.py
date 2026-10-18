@@ -3759,7 +3759,7 @@ def test_run_self_check_forwards_the_ENTIRE_judge_config_in_one_call(tmp_path, m
 
     captured = {}
 
-    def fake_self_check(worktree, test_cmd, raw, *, timeout, select_tests, budget):
+    def fake_self_check(worktree, test_cmd, raw, *, timeout, select_tests, budget, **_):
         captured["budget"] = budget
         captured["test_cmd"] = test_cmd
         captured["timeout"] = timeout
