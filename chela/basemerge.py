@@ -12,7 +12,6 @@ import tempfile
 from pathlib import Path
 
 from chela import judge, judge_select
-from chela.sweep import is_test_path
 from chela.tui_text import sanitize
 
 GIT_TIMEOUT = 60
@@ -39,10 +38,11 @@ def _git(cwd: str | Path, *argv: str, timeout: int = GIT_TIMEOUT) -> str:
 
 
 def targeted_tests(wt: Path, touched: list[str]) -> list[str]:
-    """The PR's own test files, plus every ``tests/**/test_*.py`` that imports a Python
-    source file the PR touches."""
-    tests = {f for f in touched if f.endswith(".py") and is_test_path(f) and (wt / f).is_file()}
-    mods = {m for f in touched if f.endswith(".py") and not is_test_path(f)
+    """The PR's own ``test_*.py`` files, plus every ``tests/**/test_*.py`` that imports any
+    other Python file it touches (a helper under tests/ included; pytest collects neither)."""
+    own = {f for f in touched if Path(f).name.startswith("test_") and f.endswith(".py")}
+    tests = {f for f in own if (wt / f).is_file()}
+    mods = {m for f in set(touched) - own if f.endswith(".py")
             for m in judge_select.module_names(f)}
     for path in sorted((wt / "tests").rglob("test_*.py")):
         rel = path.relative_to(wt).as_posix()
@@ -53,13 +53,9 @@ def targeted_tests(wt: Path, touched: list[str]) -> list[str]:
 
 
 def attempt(repo: str | Path, branch: str, base: str, test_cmd: str) -> dict:
-    """Merge a fresh ``origin/<base>`` into the pushed ``origin/<branch>`` in a scratch
-    worktree; on a clean merge run the targeted tests and, only when they are green, push.
-
-    Returns ``{outcome, base_sha, head_sha, merge_sha, files, detail}``. Raises RuntimeError
-    when it could not be measured (a failed fetch, a merge that failed naming no file): the
-    caller does nothing this tick. ``test_cmd`` empty, or no targeted tests: nothing to run
-    locally, and the PR's CI still gates the pushed merge commit."""
+    """Merge a fresh ``origin/<base>`` into the pushed ``origin/<branch>``; clean ⇒ run the
+    targeted tests (none, or no ``test_cmd``: the PR's CI gates it) and push only when green.
+    ``{outcome, base_sha, head_sha, merge_sha, files, detail}``; RuntimeError = unmeasured."""
     _git(repo, "fetch", "--quiet", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}",
          f"+refs/heads/{branch}:refs/remotes/origin/{branch}", timeout=FETCH_TIMEOUT)
     base_sha = _git(repo, "rev-parse", f"refs/remotes/origin/{base}")
@@ -87,7 +83,9 @@ def attempt(repo: str | Path, branch: str, base: str, test_cmd: str) -> dict:
             cmd = (judge_select.extend(test_cmd, tests) if judge_select.extendable(test_cmd)
                    else test_cmd)
             res = judge.run_suite(cmd, wt, timeout=TEST_TIMEOUT)
-            if not res.ok or res.exit_code != 0 or res.timed_out:
+            if not res.ok:      # never ran: nothing about the code, so not the agent's red
+                raise RuntimeError(f"the targeted tests could not run: {res.detail}")
+            if res.exit_code != 0 or res.timed_out:
                 return {**out, "outcome": RED, "merge_sha": merge_sha, "files": tests,
                         "detail": (res.tail or res.detail)[-1500:]}
         _git(wt, "push", "origin", f"HEAD:refs/heads/{branch}", timeout=FETCH_TIMEOUT)
@@ -103,7 +101,7 @@ def attempt(repo: str | Path, branch: str, base: str, test_cmd: str) -> dict:
 def rework_body(res: dict, base: str) -> str:
     """The verdict a CONFLICT or RED result sends back. Never charged against the cap."""
     sha = res["base_sha"][:12]
-    files = "".join(f"- `{f}`\n" for f in res["files"]) or "- (git named none)\n"
+    files = "".join(f"- `{sanitize(f).replace('`', '')}`\n" for f in res["files"]) or "- (none)\n"
     if res["outcome"] == CONFLICT:
         head = (f"🔀 **Conflict with base after `{sha}` merged: merge origin/{base} and "
                 f"resolve.**\n\nConflicting files:\n{files}")
