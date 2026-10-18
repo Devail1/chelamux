@@ -76,6 +76,85 @@ def run_contained(argv: list[str], *, timeout: float, cwd: str | None = None,
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
+# CMX-253: how long a timed-out suite's group gets between SIGTERM and SIGKILL.
+TERM_GRACE_SECONDS = 5.0
+
+
+def _signal_group(pgid: int, sig: int) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass                        # every member already gone
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True                 # a member exists, it just is not ours to signal
+    return True
+
+
+def _drain(proc: subprocess.Popen, grace: float) -> tuple[str, str]:
+    """Whatever the dead group still had buffered. A process that escaped the group (its
+    own ``setsid``) may hold the pipes open forever, so the read is bounded too."""
+    try:
+        return proc.communicate(timeout=grace)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
+        proc.wait()
+        return "", ""
+
+
+def run_shell_group(cmd: str, *, timeout: float, cwd: str | None = None,
+                    env: dict[str, str] | None = None,
+                    grace: float = TERM_GRACE_SECONDS) -> subprocess.CompletedProcess:
+    """``subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=…)`` for a
+    test suite, whose WHOLE process group dies with the run (CMX-253).
+
+    ``subprocess.run`` kills only the shell on a timeout. ``uv run pytest -n 4`` is a shell,
+    uv, pytest and four xdist workers; on 2026-10-18 two such trees outlived a sweep's
+    1500s timeout and sat idle for 75+ minutes. Here the command leads its own session, so
+    its tree shares one process group: on a timeout the group gets SIGTERM, then SIGKILL
+    after ``grace`` seconds, and the shell is reaped. ``TimeoutExpired`` is re-raised with
+    the output read so far. On every other exit the group is SIGKILLed too, so nothing the
+    suite left in the background survives it either.
+
+    No guardian (:func:`run_contained`): its ``python -m chela.procguard`` would import from
+    the cwd, and the cwd here is a worktree whose ``chela/`` a mutation may have corrupted.
+    """
+    proc = subprocess.Popen(cmd, shell=True, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, errors="replace",
+                            start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _signal_group(proc.pid, signal.SIGTERM)
+        deadline = time.monotonic() + grace
+        try:
+            proc.communicate(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass                    # SIGTERM was not enough
+        # The shell exiting is not the group exiting: the rest share the same deadline.
+        while _group_alive(proc.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        _signal_group(proc.pid, signal.SIGKILL)
+        # A retried communicate() returns ALL the output since the start, none of it lost.
+        out, err = _drain(proc, grace)
+        raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err) from None
+    except BaseException:
+        _signal_group(proc.pid, signal.SIGKILL)
+        _drain(proc, grace)
+        raise
+    _signal_group(proc.pid, signal.SIGKILL)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
 def _kill_own_group(*_) -> None:
     """SIGKILL the guardian's group, then the guardian. The group is named by the
     guardian's OWN pid, never ``killpg(0)``: a guardian that somehow shares its launcher's

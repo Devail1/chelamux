@@ -1155,3 +1155,43 @@ def test_an_unreadable_compare_DEGRADES_it_never_raises_into_reopen(boom, label,
 
     assert touched is None, f"{label}: an unreadable compare is UNKNOWN, never a guess"
     assert detail, "…and must say what went wrong"
+
+
+# --- ⛔ CMX-256: the checks read with the head are stored WITH the head ------------------
+
+def _gh_rollup(sha, rollup):
+    def _run(cmd, *a, **k):
+        if "--json" in cmd:
+            class R:
+                returncode = 0
+                stdout = json.dumps({"headRefOid": sha, "statusCheckRollup": rollup})
+                stderr = ""
+            return R()
+        return _no_gh(cmd, *a, **k)
+    return _run
+
+
+def _node(name, status="COMPLETED", conclusion="SUCCESS"):
+    return {"__typename": "CheckRun", "name": name, "status": status,
+            "conclusion": conclusion, "workflowName": "CI",
+            "detailsUrl": "https://github.com/o/r/actions/runs/42/job/7"}
+
+
+@pytest.mark.parametrize("rollup, checks, pending_since", [
+    ([_node("test (3.11)", "IN_PROGRESS", None), _node("frontend")], "pending", True),
+    ([_node("test (3.11)"), _node("frontend")], "passing", False),
+    ([_node("test (3.11)", conclusion="FAILURE")], "failing", False),
+])
+def test_reopen_replaces_the_old_heads_checks_with_the_new_heads(
+        tmp_path, rollup, checks, pending_since):
+    """The 10-18 incident: reopen moved `pr_head_sha` to a fresh, still-running head but
+    kept the OLD head's `pr_checks='failing'` — a red the CI loop then acted on."""
+    with dispatcher._db() as conn:
+        _row(conn, pr_checks="failing", pr_head_sha="oldhead0000", ci_pending_since=None)
+    with patch.object(dispatcher.subprocess, "run", side_effect=_gh_rollup("5d44118a", rollup)):
+        assert dispatcher.reopen("abc123")["ok"] is True
+
+    run = dispatcher.resolve_run("abc123")
+    assert run["pr_head_sha"] == "5d44118a"
+    assert run["pr_checks"] == checks
+    assert (run["ci_pending_since"] is not None) is pending_since

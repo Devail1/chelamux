@@ -86,7 +86,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import envutil, judge_select, toolconfig
+from chela import envutil, judge_select, procguard, toolconfig
 
 log = logging.getLogger(__name__)
 
@@ -134,6 +134,10 @@ J_STALE_HEAD = "stale_head"
 # moot (its commit cannot change), so this is a record, not a lever, exactly like every
 # other value here.
 J_UNJUDGED_MERGED = "unjudged_merged"
+# ⚖️🪜 CMX-208: every changed file is prose (`chela.risktier`), so no judge round ran.
+J_PROSE_ONLY = "prose_only"
+MERGE_READY = (J_CLEAN, J_PROSE_ONLY)
+PROSE_ONLY_DETAIL = "prose-only: every changed file is docs/changelog/media — no judge round"
 
 # A judge that proposes forty mutations is not being thorough, it is re-running the suite
 # forty times. The cap is enforced OUT LOUD (the report says what was dropped) — a silent
@@ -311,6 +315,7 @@ class SuiteResult(NamedTuple):
     # can be written to a failure log. Never part of a verdict.
     run: dict | None = None
     # ⏳ CMX-195: killed at the timeout — it never FINISHED, so it was never red either.
+    # CMX-253: so under a mutation it is UNKNOWN, never a red that killed it.
     timed_out: bool = False
 
     @property
@@ -752,14 +757,12 @@ def run_suite(
             env = _suite_env(Path(scratch))
             env.update(extra_env or {})
             run["env_diff"] = _env_diff(os.environ, env)
-            out = subprocess.run(
-                test_cmd, shell=True, cwd=str(cwd), env=env,
-                capture_output=True, text=True, errors="replace", timeout=timeout,
-            )
+            # ⛔ CMX-253: the whole tree, not just the shell, dies on a timeout.
+            out = procguard.run_shell_group(test_cmd, cwd=str(cwd), env=env, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         run.update(ended=_iso_now(), output=_decoded(e.stdout) + _decoded(e.stderr))
-        return SuiteResult(False, -1, 0, 0, 0, "", f"the suite did not finish in {timeout:.0f}s",
-                           run, timed_out=True)
+        return SuiteResult(False, -1, 0, 0, 0, "", f"the suite did not finish in {timeout:.0f}s; "
+                           "its process tree was killed", run, timed_out=True)
     except OSError as e:
         run["ended"] = _iso_now()
         return SuiteResult(False, -1, 0, 0, 0, "", f"the suite could not be run: {e}", run)
@@ -963,6 +966,10 @@ def adjudicate(
             "an emptied return).",
             baseline, mutated, parse_detail,
         )
+    if mutated is not None and mutated.timed_out:
+        # ⏳ CMX-253: a hung suite is UNKNOWN — never KILLED, never a pass, said as a TIMEOUT.
+        return Outcome(exp, INVALID, f"TIMEOUT (unknown) under the mutation: {mutated.detail}",
+                       baseline, mutated, parse_detail)
     if mutated is None or not mutated.ok:
         return Outcome(exp, INVALID,
                        f"the suite could not be run under the mutation: "
@@ -1960,8 +1967,9 @@ def _measure(
     subset = run_suite(judge_select.extend(test_cmd, sel.nodes), worktree, timeout)
     outcome = adjudicate(exp, True, reason, parses, parse_detail, _subset_baseline(sel), subset)
     outcome.selected, outcome.selection, outcome.plan = sel.expected, sel.why, sel
-    if outcome.verdict == KILLED or not parses:
+    if outcome.verdict == KILLED or not parses or subset.timed_out:
         # Final. A broken parse is INVALID whatever the suite says — no full run can change it.
+        # ⏳ CMX-253: nor can a hung subset: the full suite holds the same hanging tests.
         return outcome
     if heartbeat is not None:
         # ⏳⚖️ CMX-431: a full-suite run is about to start — it is what the wall must budget.
