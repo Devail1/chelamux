@@ -40,8 +40,7 @@ STORM_WINDOW_S = 3600
 STORM_COUNT = 3
 WHACK_ROUNDS = 3
 OVER_STATUSES = ("done", "closed", "needs_human")
-CI_UNSETTLED = ("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED", "EXPECTED")
-TEST_RUNNERS = ("pytest", "py.test", "node", "vitest")
+TEST_RUNNERS = ("pytest", "py.test", "vitest")
 DETACHED_FLAG = "--detached-child"         # chela judge run --detach's own child
 FLEET_PAUSE_FILE = "fleet-pause.json"     # CMX-214's `--pause --all` state
 
@@ -155,8 +154,14 @@ def _finding(rule: str, subject: str, summary: str, **evidence) -> dict:
 
 
 def _is_test_runner(argv: list[str]) -> bool:
-    return bool(argv) and (Path(argv[0]).name in TEST_RUNNERS
-                           or any(a == "-m" and b == "pytest" for a, b in zip(argv, argv[1:])))
+    """pytest / vitest themselves — a bare ``node`` only when it runs a test (a dev server
+    idles at 0% by design)."""
+    if not argv:
+        return False
+    if Path(argv[0]).name == "node":
+        return any(a == "--test" or "vitest" in a for a in argv[1:])
+    return (Path(argv[0]).name in TEST_RUNNERS
+            or any(a == "-m" and b == "pytest" for a, b in zip(argv, argv[1:])))
 
 
 def rule_hung_test(src: Sources, state: dict) -> list[dict]:
@@ -201,21 +206,18 @@ def rule_leaked_proc(src: Sources, state: dict) -> list[dict]:
 
 
 def rule_ci_red_unsettled(src: Sources, state: dict) -> list[dict]:
-    """CMX-256: a ``run_ci_red`` naming no job, or emitted while the head's checks ran."""
+    """CMX-256: a ``run_ci_red`` naming no job (``job ?``) — the shape an IN_PROGRESS head
+    read as red took. :func:`chela.inbox.ci_red` now refuses that; this catches a regression."""
     out = []
     for e in src.events:
         if e.get("type") != "run_ci_red":
             continue
         pl = e.get("payload") or {}
-        named = [f for f in (str(f).strip() for f in pl.get("failing") or []) if f]
-        pending = [c.get("name") for c in pl.get("checks") or []
-                   if isinstance(c, dict) and str(c.get("status", "")).upper() in CI_UNSETTLED]
-        if named and not pending:
+        if [f for f in (str(f).strip() for f in pl.get("failing") or []) if f not in ("", "?")]:
             continue
-        why = "named no failing job" if not named else f"checks still running: {pending}"
         sha = str(pl.get("ci_sha") or pl.get("pr_head_sha") or "")[:7]
         out.append(_finding("ci_red_unsettled", f"{pl.get('task_id')}@{sha}",
-                            f"run_ci_red for {pl.get('task_id')} on {sha} {why}",
+                            f"run_ci_red for {pl.get('task_id')} on {sha} named no failing job",
                             seq=e.get("seq"), ts=e.get("ts"), task=pl.get("task_id")))
     return out
 
@@ -307,7 +309,8 @@ def scan(src: Sources, state: dict | None = None, budget: float = BUDGET_S,
     worker.start()
     worker.join(budget)
     finished = list(done)
-    return {"ts": src.now, "findings": list(findings), "partial": len(finished) < len(rules),
+    return {"ts": src.now, "partial": len(finished) < len(rules),
+            "findings": [f for f in list(findings) if f["rule"] in finished],
             "rules_done": finished, "errors": dict(errors)}
 
 
@@ -319,11 +322,13 @@ def fleet_paused(chela_dir: Path) -> bool:
 def record(chela_dir: Path, result: dict, state: dict, src: Sources) -> list[dict]:
     """Append the findings to ``ops/findings.jsonl``, update the dedupe state, and return the
     ones to notify: never notified, or last notified ≥ :data:`RENOTIFY_S` ago. A finding that
-    is gone from a rule that COMPLETED is forgotten, so its recurrence is new again."""
+    is gone from a rule that completed WITHOUT raising is forgotten, so its recurrence is new
+    again; a rule that raised proves nothing about what it used to find."""
     notified, now = dict(state.get("notified") or {}), result["ts"]
     keys = {f"{f['rule']}:{f['subject']}" for f in result["findings"]}
+    clean = set(result["rules_done"]) - set(result["errors"])
     for key in list(notified):
-        if key not in keys and key.split(":", 1)[0] in result["rules_done"]:
+        if key not in keys and key.split(":", 1)[0] in clean:
             del notified[key]
     fresh = []
     for f in result["findings"]:
@@ -334,11 +339,14 @@ def record(chela_dir: Path, result: dict, state: dict, src: Sources) -> list[dic
     out = ops_dir(chela_dir)
     out.mkdir(parents=True, exist_ok=True)
     with open(out / "findings.jsonl", "a", encoding="utf-8") as fh:
-        for f in result["findings"]:
-            fh.write(json.dumps(dict(f, ts=now, new=f in fresh)) + "\n")
-    cpu = {f"{p['pid']}:{p['start']}": [now, p["cpu_s"]] for p in src.procs} \
-        if "hung_test" in result["rules_done"] else state.get("cpu") or {}
-    (out / "state.json").write_text(json.dumps({"notified": notified, "cpu": cpu}))
+        for f in fresh:
+            fh.write(json.dumps(dict(f, ts=now)) + "\n")
+    cpu = ({f"{p['pid']}:{p['start']}": [now, p["cpu_s"]] for p in src.procs
+            if _is_test_runner(p["argv"]) and src.worktree_of(p)}
+           if "hung_test" in clean else state.get("cpu") or {})
+    tmp = out / "state.json.tmp"
+    tmp.write_text(json.dumps({"notified": notified, "cpu": cpu}))
+    os.replace(tmp, out / "state.json")
     return fresh
 
 

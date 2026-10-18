@@ -63,6 +63,8 @@ def set_runs(env, rows):
     (["/v/bin/pytest", "-q"], "CMX-1", 1800, 0.0, True),
     (["python3", "-X", "dev", "-m", "pytest"], "judge-CMX-1", 1800, 17.0, True),   # 0.94%
     (["node", "vitest"], "CMX-1", 1800, 19.0, False),                     # 1.06% — busy
+    (["node", "--test", "a.test.mjs"], "CMX-1", 1800, 0.0, True),
+    (["node", "node_modules/vite/bin/vite.js"], "CMX-1", 1800, 0.0, False),  # a dev server
     (["/v/bin/pytest"], "CMX-1", 1150, 0.0, False),                       # <20 min old
     (["uv", "run", "pytest"], "CMX-1", 1800, 0.0, False),                 # the wrapper, not it
     (["/v/bin/pytest"], None, 1800, 0.0, False),                          # not in a worktree
@@ -116,8 +118,8 @@ def test_leaked_proc_reads_argv_paths_and_skips_unreadable_procs(env):
 @pytest.mark.parametrize("payload, hit", [
     ({"failing": ["", " "]}, True),
     ({"failing": []}, True),
-    ({"failing": ["CI / test"], "checks": [{"name": "t", "status": "in_progress"}]}, True),
-    ({"failing": ["CI / test"], "checks": [{"name": "t", "status": "COMPLETED"}]}, False),
+    ({"failing": ["?"]}, True),
+    ({"failing": ["?", "CI / lint"]}, False),
     ({"failing": ["CI / test"]}, False),
 ])
 def test_ci_red_rule(env, payload, hit):
@@ -263,8 +265,26 @@ def test_scheduled_notifies_once_then_renotifies_after_6h(env, leaky):
     leaky.run()
     assert len(leaky.sent) == 2
     lines = [json.loads(x) for x in (env.dir / "ops" / "findings.jsonl").read_text().splitlines()]
-    assert [(f["subject"], f["new"]) for f in lines] == [("pid:42", True), ("pid:42", False),
-                                                          ("pid:42", True)]
+    assert [(f["subject"], f["ts"]) for f in lines] == [("pid:42", NOW), ("pid:42", NOW + 6 * 3600)]
+
+
+def test_a_rule_that_raises_does_not_forget_what_it_found(env, leaky, monkeypatch):
+    leaky.run()
+    with monkeypatch.context() as m:
+        m.setattr(ops.Sources, "runs", property(lambda s: 1 / 0))
+        leaky.clock[0] += 60
+        assert leaky.run()["errors"]["leaked_proc"].startswith("ZeroDivisionError")
+    leaky.clock[0] += 60
+    leaky.run()
+    assert len(leaky.sent) == 1
+
+
+def test_cpu_samples_are_kept_for_test_runs_under_worktrees_only(env, leaky):
+    add_proc(env, 50, ["/v/bin/pytest"], env.wt / "CMX-1", cpu=900.0)
+    add_proc(env, 51, ["/v/bin/pytest"], env.dir, cpu=900.0)
+    leaky.run()
+    cpu = json.loads((env.dir / "ops" / "state.json").read_text())["cpu"]
+    assert cpu == {f"50:{int((UPTIME - 1800) * HZ)}": [NOW, 900.0]}
 
 
 def test_a_resolved_finding_that_recurs_is_new_again(env, leaky):
