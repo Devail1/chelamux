@@ -225,11 +225,15 @@ def _gone_within(pid: int, seconds: float) -> bool:
 # ``…/rpc.sock`` past the 108-byte ``sun_path`` limit — where a spawned God Daemon can't
 # bind, can't be reached by ``pm2 kill``, and runs away to 4-5 GB (CMX-115, measured).
 _ROOT_PREFIX = "cmx115-"
+# 🎲 CMX-195: the roots THIS process made. A `/tmp/cmx115-*` glob also matched a concurrent
+# suite's (another judge, an agent) live `stubborn` stand-in mid-test — a false leak, twice.
+_OWN_ROOTS: list[Path] = []
 
 
 @pytest.fixture
 def short_root():
     root = Path(tempfile.mkdtemp(prefix=_ROOT_PREFIX))
+    _OWN_ROOTS.append(root)
     yield root
     for home in root.glob(f"{PM2_SANDBOX_PREFIX}*"):
         for pid in _pm2_daemons(home):           # never leak one, even on a red run
@@ -358,13 +362,43 @@ def test_a_forked_child_dying_does_not_tear_down_its_parents_sandbox(fake_pm2):
     )
 
 
+def test_a_concurrent_suites_live_daemon_is_not_this_files_leak():
+    """🎲 CMX-195 (CMX-174 r2, CMX-212): the zz scan below globbed EVERY ``/tmp/cmx115-*``
+    and so caught ANOTHER suite's ``stubborn`` stand-in mid-test. A foreign root is not ours;
+    the same daemon under a root we own still is (the control)."""
+    foreign = Path(tempfile.mkdtemp(prefix=_ROOT_PREFIX))   # NOT via `short_root`
+    home = foreign / f"{PM2_SANDBOX_PREFIX}stubborn"
+    home.mkdir()
+    daemon = subprocess.Popen(["bash", "-c", "exec -a 'PM2 vTEST: God Daemon' sleep 60"],
+                              env={**os.environ, "PM2_HOME": str(home)})
+    try:
+        deadline = time.monotonic() + 10
+        while daemon.pid not in _pm2_daemons(home) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert daemon.pid in _pm2_daemons(home), "the stand-in daemon never came up"
+        assert foreign not in _OWN_ROOTS and not _leaked_daemons(_OWN_ROOTS)
+        assert _leaked_daemons([foreign]) == [(str(daemon.pid), [str(home)])]
+    finally:
+        daemon.kill()
+        daemon.wait()
+        shutil.rmtree(foreign, ignore_errors=True)
+
+
+def test_short_root_registers_its_root_as_this_files_own(short_root):
+    assert short_root in _OWN_ROOTS
+
+
 def test_zz_no_pm2_daemon_survives_this_files_tests(tmp_path_factory):
     """Last in the file (pytest runs a file in definition order; ``--dist loadfile`` keeps
     it on one worker): no God Daemon may still be running with its ``PM2_HOME`` under any
     root the tests above created — this worker's ``tmp_path`` base or a ``cmx115-`` root.
     The leak this task exists to stop must not be one its own tests commit."""
-    roots = [str(tmp_path_factory.getbasetemp()),
-             *(str(p) for p in Path(tempfile.gettempdir()).glob(f"{_ROOT_PREFIX}*"))]
+    leaked = _leaked_daemons([tmp_path_factory.getbasetemp(), *_OWN_ROOTS])
+    assert not leaked, f"pm2 God Daemons leaked by this file's tests: {leaked}"
+
+
+def _leaked_daemons(roots: list[Path]) -> list[tuple[str, list[str]]]:
+    roots = [str(r) for r in roots]
     leaked = []
     for proc in Path("/proc").glob("[0-9]*"):
         try:
@@ -377,4 +411,4 @@ def test_zz_no_pm2_daemon_survives_this_files_tests(tmp_path_factory):
                  for e in env if e.startswith(b"PM2_HOME=")]
         if any(h.startswith(r) for h in homes for r in roots):
             leaked.append((proc.name, homes))
-    assert not leaked, f"pm2 God Daemons leaked by this file's tests: {leaked}"
+    return leaked

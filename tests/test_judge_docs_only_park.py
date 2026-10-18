@@ -307,21 +307,23 @@ def test_an_ordinary_cannot_verify_still_announces_without_parking(tmp_path, rep
 TEST_CMD = f'"{sys.executable}" -m pytest -q'
 
 
-def test_zero_experiments_on_docs_only_is_final_but_on_code_is_not(tmp_path, repo):
+def test_zero_experiments_is_final_on_docs_and_on_code_alike(tmp_path, repo):
     sha = _pr(repo, {"docs/guide.md": "# guide\n\nmore\n"})
     wt = _worktree_at(repo, sha, tmp_path)
     report = judge.run_experiments(wt, TEST_CMD, {"experiments": []}, timeout=60,
                                    base_branch="dev")
     assert report.cannot_verify and report.cannot_verify_final is True
 
-    # Negative control: a code PR with no experiments may get some on a re-run — retryable.
+    # ⛔ CMX-195: a code PR with no experiments got none on its re-runs either (CMX-15 ×3 in
+    # 2 min) — parked once too, but worded as the code case, not the docs one.
     _git("branch", "-D", "pr-1", cwd=repo)
     sha2 = _pr(repo, {"app.py": "VALUE = 2\n"})
     wt2 = tmp_path / "wt2"
     _git("worktree", "add", "--detach", str(wt2), sha2, cwd=repo)
     report2 = judge.run_experiments(wt2, TEST_CMD, {"experiments": []}, timeout=60,
                                     base_branch="dev")
-    assert report2.cannot_verify and report2.cannot_verify_final is False
+    assert report2.cannot_verify_final is True
+    assert "NO experiments" in report2.cannot_verify and "DOCS-ONLY" not in report2.cannot_verify
 
 
 @pytest.mark.parametrize("final, status, kinds", [
