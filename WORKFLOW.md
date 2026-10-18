@@ -274,6 +274,14 @@ A classifier or hook denial is final; never relaunch the same action in another 
    corruption instead of hand-editing and eyeballing it. **This is the exact check the judge will
    run — catch your own decoration first, or the PR comes straight back.** ⛔ **Keep the
    experiments JSON file** (do not delete it after step 3) — step 6 needs its path.
+   **(d) 🔎 Review your own diff (CMX-209).** Run Claude Code's `/code-review` on your diff vs
+   `origin/{{base_branch}}` (effort medium). Fix each **Important** finding, or dismiss it with
+   a one-line reason. **Nits**: optional. **Pre-existing** (not introduced by this diff): list,
+   don't fix. Your PR body (step 5) gets a `## Review` section — counts first ("3 findings:
+   2 fixed, 1 dismissed"; "0 findings" said plainly), then one line per finding (`file:line`,
+   verdict, reason). `task-finished` REFUSES a code PR whose body has none (a prose-only PR is
+   exempt). Only if no review can run, pass `--no-review-reason '<why>'` — recorded on the
+   run, shown to the judge and in your PR body.
 4. **Commit in the worktree.** Stage only files you intentionally changed
    (`git add <paths>` — never `git add -A`). Verify with `git status` +
    `git diff --cached --stat` before committing.
