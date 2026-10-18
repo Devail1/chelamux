@@ -367,8 +367,13 @@ def test_merge_refuses_a_pr_that_is_not_open(repo, pr_state):
     squash.assert_not_called()      # ⛔ nothing merged — the open-PR gate held
 
 
-@pytest.mark.parametrize("mergeable", ["CONFLICTING", "UNKNOWN", None])
-def test_merge_requires_MERGEABLE(repo, mergeable):
+@pytest.mark.parametrize("mergeable,slept", [("CONFLICTING", []), ("UNKNOWN", [1, 2, 4, 8, 15]),
+                                              (None, [])])
+def test_merge_requires_MERGEABLE(repo, monkeypatch, mergeable, slept):
+    """CMX-205: only UNKNOWN is re-read — after 1, 2, 4, 8 and 15s (≤30s) — and an UNKNOWN
+    that never resolves still refuses; a conflict or an unreadable status refuses at once."""
+    naps: list = []
+    monkeypatch.setattr(contract, "_sleep", naps.append)
     _seed_run(repo)
     with patch.object(contract, "_read_pr_base", return_value="dev"), \
          patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
@@ -378,6 +383,9 @@ def test_merge_requires_MERGEABLE(repo, mergeable):
     assert result["ok"] is False
     _assert_actionable(result)
     squash.assert_not_called()
+    assert naps == slept
+    assert bool(result.get("mergeable_unknown")) is (mergeable == "UNKNOWN")
+    assert ("CONFLICTING" in result["error"]) is (mergeable == "CONFLICTING")
 
 
 @pytest.mark.parametrize("status", ["running", "changes_requested", "escalated", "done"])

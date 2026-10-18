@@ -1194,6 +1194,217 @@ def test_git_lines_is_none_when_git_cannot_run(tmp_path, monkeypatch):
     assert overrides.deploy_step(tmp_path, "a", "b")["step"] == ""
 
 
+# --- CMX-205: mergeability UNKNOWN is "not computed yet", and MERGED is never a failure ---
+
+@pytest.fixture(autouse=True)
+def naps(monkeypatch):
+    """No test here ever sleeps on the UNKNOWN re-read; the delays are recorded instead."""
+    slept: list = []
+    monkeypatch.setattr(contract, "_sleep", slept.append)
+    return slept
+
+
+@contextmanager
+def _statuses(*answers):
+    """`_github()`, but `gh pr view` answers each (state, mergeable) in turn, the last forever."""
+    seq = list(answers)
+    with _github() as squash, patch.object(
+            dispatcher, "_read_pr_status",
+            side_effect=lambda *_a: seq.pop(0) if len(seq) > 1 else seq[0]) as view:
+        yield squash, view
+
+
+def test_unknown_then_mergeable_merges_on_the_same_approval(repo, told, naps):
+    """🔴 GUARD: UNKNOWN, UNKNOWN, MERGEABLE ⇒ merged after re-reading (1s, then 2s)."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _statuses(("open", "UNKNOWN"), ("open", "UNKNOWN"), ("open", "UNKNOWN"),
+                   ("open", "MERGEABLE")) as (squash, _view):
+        out = overrides.decide(rid, True, "telegram", channel="telegram")
+    assert out["state"] == overrides.MERGED, out
+    squash.assert_called_once()
+    assert naps == [1, 2]
+    assert [k for k, _s, _p in told] == ["override_merged"]
+
+
+def test_unknown_for_the_whole_bound_keeps_the_approval_for_the_same_head(repo, told, naps):
+    """🔴 GUARD: UNKNOWN never reads as MERGEABLE — nothing merges after the ≤30s bound — but
+    the approval is NOT burned: the request is `approved`, the operator is told once, and the
+    next sweep merges it with no new human decision."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _statuses(("open", "UNKNOWN")) as (squash, _view):
+        out = overrides.decide(rid, True, "telegram", channel="telegram")
+        assert overrides.retry_approved() == []              # tried < 60s ago: not yet
+        overrides.sweep(head_of=lambda _t: HEAD)            # never a retry (relay/dashboard)
+        assert overrides.load(rid)["state"] == overrides.APPROVED
+        assert naps == [1, 2, 4, 8, 15]
+        retried, = overrides.retry_approved(now=time.time() + 60)  # still UNKNOWN: quiet
+    squash.assert_not_called()
+    assert out["ok"] is False and out["state"] == overrides.APPROVED, out
+    assert retried["state"] == overrides.APPROVED
+    assert naps == [1, 2, 4, 8, 15] * 2 and sum(naps[:5]) <= 30
+    rec = overrides.load(rid)
+    assert rec["state"] == "approved" and rec["decided_by"] == "telegram"
+    assert "UNKNOWN" in rec["detail"]
+    assert [k for k, _s, _p in told] == ["override_deferred"]
+    assert event_log.read(types=["orchestrator.merge_override_deferred"])["events"]
+    assert not event_log.read(types=["orchestrator.merge_override_failed"])["events"]
+
+    with _statuses(("open", "MERGEABLE")) as (squash, _view):
+        overrides.retry_approved(now=time.time() + 60)
+    squash.assert_called_once()
+    assert squash.call_args.kwargs["match_head"] == HEAD
+    assert overrides.load(rid)["state"] == overrides.MERGED
+    assert [k for k, _s, _p in told] == ["override_deferred", "override_merged"]
+    assert "approved by telegram via telegram" in told[-1][1]
+
+
+def test_a_rerun_of_merge_approve_completes_an_approved_request(repo, told, naps):
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _statuses(("open", "UNKNOWN")):
+        overrides.decide(rid, True, "terminal:op")
+    with _github() as squash:
+        out = overrides.decide(rid, True, "terminal:op")
+    assert out["state"] == overrides.MERGED, out
+    squash.assert_called_once()
+
+
+def test_a_new_push_expires_an_approved_request(repo, told, naps):
+    """🔴 GUARD: the kept approval is for ONE head — a push expires it, nothing merges."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _statuses(("open", "UNKNOWN")):
+        overrides.decide(rid, True, "terminal:op")
+    with _github() as squash:
+        expired = overrides.sweep(head_of=lambda _t: MOVED)
+    squash.assert_not_called()
+    assert [r["id"] for r in expired] == [rid]
+    assert overrides.load(rid)["state"] == overrides.EXPIRED
+
+
+def test_resume_needs_an_approved_request_inside_its_deadline(repo, told, naps):
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _github() as squash:
+        assert overrides.resume(rid) is None                   # pending: a human must decide
+    squash.assert_not_called()
+    assert overrides.load(rid)["state"] == overrides.PENDING
+    with _statuses(("open", "UNKNOWN")):
+        overrides.decide(rid, True, "terminal:op")
+    overrides.set_fields(rid, deadline=time.time() - 1)
+    with _github() as squash:
+        assert overrides.resume(rid) is None
+    squash.assert_not_called()
+
+
+def test_conflicting_fails_at_once_with_todays_wording(repo, told, naps):
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _statuses(("open", "CONFLICTING")) as (squash, _view):
+        out = overrides.decide(rid, True, "terminal:op")
+    squash.assert_not_called()
+    assert out["state"] == overrides.FAILED and naps == []
+    assert "Resolving a conflict is a human's call" in out["detail"]
+
+
+def test_a_merged_pr_reporting_unknown_is_already_merged_never_failed(repo, told, naps):
+    """🔴 GUARD: a MERGED PR reports mergeable UNKNOWN forever — a late approval says
+    "already merged", merges nothing and never announces a failure."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _statuses(("merged", "UNKNOWN")) as (squash, _view):
+        out = overrides.decide(rid, True, "telegram", channel="telegram")
+    squash.assert_not_called()
+    assert out["ok"] is True and out["state"] == overrides.MERGED, out
+    assert out["detail"] == "already merged" and naps == []
+    rec = overrides.load(rid)
+    assert rec["already_merged"] is True and rec["state"] == "merged"
+    (kind, summary, _payload), = told
+    assert kind == "override_merged" and "was ALREADY merged" in summary
+    assert not event_log.read(types=["orchestrator.merge_override_failed"])["events"]
+    assert dispatcher.merge_overrides(dispatcher.resolve_run("t1")) == []
+
+
+def test_chelas_own_merge_record_answers_already_merged_as_its_sha(repo, told, naps):
+    _seed(repo)
+    rid = _request()["request_id"]
+    event_log.append("orchestrator.merge", "merged t1", payload={
+        "task_id": "t1", "pr_url": PR, "merge_commit_sha": "d" * 40})
+    event_log.append("orchestrator.merge", "merged t1 elsewhere", payload={
+        "task_id": "t1", "pr_url": PR + "9", "merge_commit_sha": "e" * 40})
+    with _statuses(("open", "UNKNOWN")) as (squash, _view):
+        out = overrides.decide(rid, True, "terminal:op")
+    squash.assert_not_called()
+    assert out["state"] == overrides.MERGED and out["merge_commit_sha"] == "d" * 40
+    assert out["detail"] == f"already merged as {'d' * 12}" and naps == []
+
+
+def test_the_telegram_card_reads_approved_as_retrying_not_failed():
+    from chela.telegram import overridewatch
+    line = overridewatch._outcome_line({"state": "approved", "decided_by": "op"})
+    assert line == "⏳ Approved by op — GitHub has not computed mergeability yet; retrying"
+
+
+def test_the_sweep_never_expires_a_merge_in_flight(repo, told):
+    """🔴 GUARD: the sweep acts on `pending` and `approved` only — a `merging` request (the
+    approving process is merging it right now) is never expired under it, head moved or not."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    overrides.set_fields(rid, state=overrides.MERGING)
+    assert overrides.sweep(head_of=lambda _t: MOVED) == []
+    assert overrides.load(rid)["state"] == overrides.MERGING and told == []
+
+
+def test_an_approved_request_is_retried_once_a_minute_at_most(repo, told, naps):
+    """The retry interval is the documented 60s, measured from the last attempt."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _statuses(("open", "UNKNOWN")):
+        overrides.decide(rid, True, "terminal:op")
+    last = overrides.load(rid)["finished_at"]
+    with _github() as squash:
+        assert overrides.retry_approved(now=last + 59.9) == []
+        squash.assert_not_called()
+        done, = overrides.retry_approved(now=last + 60.001)
+    assert done["state"] == overrides.MERGED
+    squash.assert_called_once()
+
+
+def test_the_daemon_tick_retries_an_approved_request(monkeypatch):
+    """🔴 WIRING (production call-site in ``cmd_run``) — every ``retry_approved`` test above
+    calls it directly, so they all stay green if the daemon loop never does (e.g. the call
+    commented out to ``pass``), and an approval deferred on UNKNOWN would then wait forever.
+    This drives ONE real pass of the daemon loop and proves it reaches the retry."""
+    import chela.main as main
+    from tests.test_context import _run_one_daemon_tick
+
+    _run_one_daemon_tick(monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setattr(overrides, "sweep", lambda *a, **kw: calls.append("sweep") or [])
+    monkeypatch.setattr(overrides, "retry_approved",
+                        lambda *a, **kw: calls.append("retry") or [])
+
+    main.cmd_run(SimpleNamespace())
+
+    assert calls == ["sweep", "retry"], "the daemon tick never retried an approved override"
+
+
+def test_chela_override_list_shows_an_approved_request(repo, told, capsys):
+    """An approval deferred on UNKNOWN is still live work, so the default listing (no
+    ``--all``) shows it alongside pending ones."""
+    import chela.main as main
+    _seed(repo)
+    rid = _request()["request_id"]
+    overrides.set_fields(rid, state=overrides.APPROVED, detail="GitHub reports UNKNOWN")
+
+    main.cmd_override(SimpleNamespace(override_cmd="list", all=False))
+
+    out = capsys.readouterr().out
+    assert rid in out and "approved" in out, out
+
+
 def test_an_override_question_names_the_always_human_path_that_triggered_it(repo, monkeypatch):
     _seed(repo, judge_state="clean")
     monkeypatch.setattr(contract, "_read_pr_files", lambda *a: ["docs/x.md", "WORKFLOW.md"])
