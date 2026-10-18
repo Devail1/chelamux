@@ -308,9 +308,12 @@ component-private styles. No Tailwind.**
 - **Why not Tailwind.** It would rewrite the look (the opposite of "keep the existing look"),
   add a build dependency, and drop the comments that record why each rule exists (the CMX
   numbers in `style.css`).
-- **Why not shadcn/ui** (asked 10-19). It is built on Tailwind, so it brings the same
-  restyle and build dependency. Consistency comes from our own form kit instead (P04, rule 7
-  in §4), styled through `style.css` and the existing tokens.
+- **Behaviour from Radix Primitives, look from `style.css`** (Liav, 10-19). Hand-rolled
+  dialogs, menus, popovers and form controls drift apart surface by surface. Radix Primitives
+  (`@radix-ui/react-*`) are unstyled and accessible (focus management, keyboard, ARIA,
+  collision-aware placement), so they bring the behaviour without touching the look: our kit
+  in `ui/` wraps them and applies the existing class names and tokens. Not shadcn/ui and not
+  Radix Themes: both are styled systems (shadcn on Tailwind) and would rewrite the look.
 - **Tokens.** `:root` + the seven `body[data-theme]` palettes (`style.css:34-146`) move
   verbatim into `tokens.css`, imported first by the entry. The theme switch keeps writing
   `body[data-theme]` and `chela_theme` (the iframe theme shim reads that key,
@@ -330,9 +333,8 @@ See §5 for CMX-199/200.
 
 The port keeps what is there, and makes it uniform:
 
-- **One `<Dialog>` primitive (P04)** on the native `<dialog>` element: `showModal()` gives the
-  focus trap, `Escape` and an inert background; the wrapper restores focus to the opener and
-  requires a label. It replaces six separate capture-phase `keydown` handlers
+- **One `<Dialog>` primitive (P04)** on Radix Dialog: it gives the focus trap, `Escape`, an
+  inert background and focus return to the opener; the wrapper requires a label. It replaces six separate capture-phase `keydown` handlers
   (`accessreq.js:133`, `approvals.js:212`, `diffpanel.js:105`, `taskmodal.js:284`,
   `terminals.js:906`, `decisions.js:530`) and the `.modal-overlay.active` toggles
   (`util.js:251-252`), keeping their classes for the look.
@@ -415,8 +417,10 @@ deletes it.
    regions in every shared file are disjoint and not adjacent, so git merges them without a
    conflict. Agents merge `origin/dev` before `task-finished` as usual.
 6. Risk uses the tracker's labels (`docs/RISK_LEVELS.md`): `high`, `normal`, `low`.
-7. **Forms and controls use the P04 kit** (`FieldRow`, `TextInput`, `NumberInput`, `Select`,
-   `Toggle`, `Button`, `Badge`, `SectionHeader`). A ported component renders no raw `<input>`,
+7. **Interactive UI uses the P04 kit** (`Dialog`, `Popover`, `Menu`, `Tooltip`, `Tabs`, `Toast`,
+   `FieldRow`, `TextInput`, `NumberInput`, `Select`, `Toggle`, `Button`, `Badge`,
+   `SectionHeader`), built on Radix Primitives (§2.4). A slice that needs a control the kit
+   lacks adds it to `ui/` on the matching Radix primitive, not inline. A ported component renders no raw `<input>`,
    `<select>`, `<textarea>` or `<button>` outside `ui/`, so every label, control and unit
    lines up the same way on every surface. P35 enforces it.
 
@@ -494,20 +498,24 @@ Risk: high (every poll and push). ≈500 lines. Runs alone. At 300: split store+
 ```
 
 ```text
-P04 · CMX-212 port: UI primitives (Dialog, Popover, Toast, Icon, form kit) and lucide-react
-Scope: <Dialog> on native <dialog> (focus trap, Escape, restore focus, required label),
-  <Popover> with the placement logic from nav.js:3138-3196 as a pure placePopover(), <Toast>,
-  icons.ts semantic map over lucide-react, useMediaQuery. Legacy popovers import placePopover.
-  The form kit (rule 7): <FieldRow> is one grid, label | control | unit, with fixed tracks so
-  every control in a section starts at the same x; TextInput, NumberInput (placeholder shows
-  the default; disabled-by-env state), Select, Toggle, Button variants, Badge tones,
-  SectionHeader.
-Files: frontend ui/; nav.js 3138-3196 (deleted); package.json (lucide-react)
+P04 · CMX-212 port: UI kit on Radix Primitives (Dialog, Popover, Menu, Tooltip, Tabs, Toast,
+  form controls) and lucide-react
+Scope: ui/ wraps Radix Primitives with our class names and tokens (§2.4): Dialog (required
+  label), Popover, Menu (DropdownMenu), Tooltip, Tabs, Toast, Select, Toggle (Switch); plus
+  FieldRow, one grid label | control | unit with fixed tracks so every control in a section
+  starts at the same x; TextInput, NumberInput (placeholder shows the default;
+  disabled-by-env state), Button variants, Badge tones, SectionHeader. icons.ts semantic map
+  over lucide-react, useMediaQuery. Legacy popovers keep nav.js placement, moved verbatim to a
+  pure placePopover() in .ts, until their slices port them onto <Popover>.
+Files: frontend ui/; nav.js 3138-3196 (moved to .ts); package.json (lucide-react,
+  @radix-ui/react-* for the primitives above)
 Deletes: nav.js's popover placement
 Blocked by: P03
-Tests: popover_placement → Vitest; RTL tests for Dialog focus return and Escape, Popover flip;
-  two FieldRows with very different label lengths put their controls in the same column
-Risk: normal. ≈550 lines (≈200 of them the form kit). At 300: primitives, then the form kit.
+Tests: popover_placement → Vitest; RTL: Dialog needs a label, returns focus, closes on Escape;
+  each wrapper renders our class names; two FieldRows with very different label lengths put
+  their controls in the same column (negative control: drop the fixed track, RED)
+Risk: normal. ≈500 lines (Radix replaces hand-rolled focus and placement code). At 300:
+  overlays (Dialog, Popover, Menu, Tooltip, Toast), then form controls and FieldRow.
 ```
 
 ### Phase 1, lane A: safety float, readouts, Settings, menus
@@ -907,8 +915,9 @@ P35 adds:
 6. **No dual implementation.** No `.js` and `.ts` module with the same base name; no `LegacyTab`
    adapter; no portal into legacy-built nodes.
 7. **The boundary in §3 is tested row by row.**
-8. **One form kit.** No component outside `ui/` renders a raw `<input>`, `<select>`,
-   `<textarea>` or `<button>`; exemptions sit in an allowlist with a reason each (rule 7, §4).
+8. **One UI kit.** No component outside `ui/` renders a raw `<input>`, `<select>`,
+   `<textarea>`, `<button>` or `<dialog>`, or imports `@radix-ui/*` directly; exemptions sit in
+   an allowlist with a reason each (rule 7, §4).
 
 ---
 
