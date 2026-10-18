@@ -10,8 +10,8 @@
 //   this hook feeds it the same payload and relays its deny reason verbatim. Like the
 //   shell hook it fails OPEN when the gate cannot decide.
 import type { Register } from 'claude-code'
+import { refresh } from './status'
 
-export const DEFAULT_URL = 'http://127.0.0.1:5001'
 const RESERVED = new Set(['tool', 'tool_use_id', 'consent', 'agentId', 'requestMeta'])
 
 type Body = Record<string, unknown>
@@ -21,9 +21,10 @@ type Body = Record<string, unknown>
 let transcript = ''
 
 async function post($: any, event: string, body: Body, extra: Record<string, string> = {}) {
+  // CMX-181: opt-in by URL. In a chela pane plugin/ already posts: a default would file each twice.
   const wid = await $.env.get('CHELA_WID')
-  if (!wid) return
-  const base = (await $.env.get('CHELA_MOD_HOOKS_URL')) || DEFAULT_URL
+  const base = await $.env.get('CHELA_MOD_HOOKS_URL')
+  if (!wid || !base) return
   const headers: Record<string, string> = {
     'Content-Type': 'application/json', 'X-Chela-Mod-T0': String(Date.now()), ...extra,
   }
@@ -56,8 +57,16 @@ async function gate($: any, payload: Body): Promise<string> {
   }
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
   transcript = ''
+  // the status line (status.ts): drawn at start, after every turn and after a compaction
+  on('session.start', ($, e, next) => { void refresh($, options); return next(e) })
+  on('turn.complete', ($, e, next) => { void refresh($, options); return next(e) })
+  on('session.compact', async ($, e, next) => {
+    const done = await next(e)
+    void refresh($, options)
+    return done
+  })
   on('classic.SessionStart', ($, e, next) => { void relay($, e); return next(e) })
   on('classic.SessionEnd', ($, e, next) => { void relay($, e); return next(e) })
   on('classic.Stop', ($, e, next) => { void relay($, e); return next(e) })

@@ -680,10 +680,12 @@ def test_the_workflow_has_exactly_one_job(workflow):
     the same workflow can carry the same gate. Pin the set of job ids itself: a second job
     changes `set(workflow["jobs"])`, so it is a visible, asserted diff here rather than an
     invisible addition three keys up from everything else this file checks.
+
+    CMX-176 added `frontend`; `test_the_frontend_job_mapping_is_pinned_exactly` pins it whole.
     """
-    assert set(workflow["jobs"]) == {"test"}, (
+    assert set(workflow["jobs"]) == {"test", "frontend"}, (
         f"the workflow defines jobs {sorted(workflow['jobs'])!r}, expected exactly "
-        "{'test'} — a second job runs independently of the `test` job's steps and can "
+        "{'test', 'frontend'} — another job runs independently of the `test` job's steps and can "
         "carry its own gate (e.g. a branch-naming check) that fails the workflow run "
         "while jobs.test.steps stays completely untouched, invisible to every other "
         "assertion in this file"
@@ -856,6 +858,28 @@ def test_the_job_mapping_is_pinned_exactly(job):
         "(e.g. gating `strategy.matrix.python-version` on the branch name) changes this "
         "mapping and must be a deliberate, visible diff here, not a silent addition"
     )
+
+
+# CMX-176: the `frontend` job's COMPLETE parsed mapping, pinned for the same reason as
+# `_EXPECTED_JOB` — an unpinned job could carry the branch gate CMX-314 removed.
+_FRONTEND = "pnpm -C chela/dashboard/frontend"
+_EXPECTED_FRONTEND_JOB: dict = {
+    "runs-on": "ubuntu-latest",
+    "steps": [
+        {"uses": "actions/checkout@v4"},
+        {"uses": "actions/setup-node@v4", "with": {"node-version": "20"}},
+        {"name": "Install pnpm", "uses": "pnpm/action-setup@v4"},
+        {"name": "Install (frozen lockfile)", "run": "pnpm install --frozen-lockfile"},
+        {"name": "Typecheck", "run": f"{_FRONTEND} typecheck"},
+        {"name": "Lint", "run": f"{_FRONTEND} lint"},
+        {"name": "Module boundaries (dependency-cruiser)", "run": f"{_FRONTEND} lint:boundaries"},
+        {"name": "Test", "run": f"{_FRONTEND} test"},
+    ],
+}
+
+
+def test_the_frontend_job_mapping_is_pinned_exactly(workflow):
+    assert workflow["jobs"]["frontend"] == _EXPECTED_FRONTEND_JOB
 
 
 # The workflow's trigger block, as PyYAML actually parses it. The bare `on:` key is a YAML

@@ -1482,7 +1482,8 @@ def run_events(runs: list[dict], seen: dict[str, str],
                 f"(check whether this already shipped)"
                 f"{': ' + detail if detail else ''} — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
-        elif status == "awaiting_review" and judge_state in (judge.J_CLEAN, judge.J_CANNOT_VERIFY):
+        elif status == "awaiting_review" and judge_state in (*judge.MERGE_READY,
+                                                             judge.J_CANNOT_VERIFY):
             # The judge settled while `status` sat still. This is the ONLY place either
             # verdict becomes visible to the orchestrator — `comment_body` already posted
             # it to the PR, but a PR comment is not a push, and CMX-195/196 both sat mute
@@ -1501,6 +1502,11 @@ def run_events(runs: list[dict], seen: dict[str, str],
                 out.append(_event(
                     "run_judge_clean",
                     f"⚖️ {label} — every guard held, clean and MERGEABLE — {ref}"
+                    f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+            elif judge_state == judge.J_PROSE_ONLY:
+                out.append(_event(
+                    "run_judge_clean",
+                    f"📄 {label} — prose-only, merged on green CI (no judge round) — {ref}"
                     f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
             elif run.get("judge_retry_after"):
                 # ⚖️🌩️ CMX-379: the judge was reaped for a classifier outage, not for
@@ -2913,7 +2919,7 @@ def _live_judge_heads(runs: list[dict], queue: list[dict]) -> dict[str, str]:
         if not task_id or run.get("status") != "awaiting_review":
             continue
         judge_state = run.get("judge_state") or ""
-        if judge_state in (judge.J_CLEAN, judge.J_CANNOT_VERIFY):
+        if judge_state in (*judge.MERGE_READY, judge.J_CANNOT_VERIFY):
             candidates.add(task_id)
     candidates.discard(None)
     if not candidates:

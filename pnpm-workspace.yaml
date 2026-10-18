@@ -1,0 +1,3 @@
+# CMX-176: so the root `pnpm install --frozen-lockfile` (CI, before_run) installs it too.
+packages:
+  - chela/dashboard/frontend
