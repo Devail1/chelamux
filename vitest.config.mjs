@@ -10,8 +10,9 @@ export default defineConfig({
         // `node --test` gave it (most suites install a jsdom window on globalThis).
         pool: 'forks',
         environment: 'node',
-        // node --test had no per-test timeout; pytest's 120 s per file is the real bound.
-        testTimeout: 60_000,
-        hookTimeout: 60_000,
+        // node --test had no per-test timeout. Well under pytest's 120 s per file, so a hung
+        // test is named by Vitest rather than killed with its file.
+        testTimeout: 30_000,
+        hookTimeout: 30_000,
     },
 });

@@ -35,7 +35,10 @@ let reloads = 0;
 // specifier alone (it rewrites a template-literal import it cannot resolve statically).
 const freshKanban = () => {
     const url = `../chela/dashboard/static/js/kanban.js?reload=${++reloads}`;
-    return import(/* @vite-ignore */ url);
+    return import(/* @vite-ignore */ url).then(m => {
+        assert.notEqual(m.renderKanban, renderKanban, 'the reload returned the cached module');
+        return m;
+    });
 };
 
 beforeAll(async () => {
