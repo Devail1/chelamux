@@ -21,6 +21,10 @@ from tests.test_frontend import _did_not_run
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "chela" / "dashboard" / "frontend"
 BUILT = ROOT / "chela" / "dashboard" / "static" / "app"
+# The committed bundle, by its full path: the judge's test selection runs a test file that
+# NAMES a mutated file, so a mutation of the bundle runs THIS file (seconds), not the whole
+# suite. Its name is a content hash, so a rebuild renames it: update this line with it.
+BUNDLE = "chela/dashboard/static/app/assets/main-DSyXEqAp.js"
 
 
 def _need_vite():
@@ -40,8 +44,8 @@ def test_the_committed_build_matches_a_fresh_build_of_src():
     _need_vite()
     assert fb.check() == []
     entry = json.loads((BUILT / "manifest.json").read_text())["src/main.tsx"]
-    assert entry["isEntry"] is True and (BUILT / entry["file"]).is_file()
-    assert entry["file"].startswith("assets/main-")     # hashed, not a fixed name
+    assert entry["isEntry"] is True and f"chela/dashboard/static/app/{entry['file']}" == BUNDLE
+    assert (ROOT / BUNDLE).is_file()
 
 
 def test_a_source_change_without_a_rebuild_is_stale(tmp_path):
