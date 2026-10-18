@@ -30,6 +30,7 @@ from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
 from chela import agent_manager, capabilities, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import resources, term_themes
+from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
 from chela.sources import get_source
@@ -3023,6 +3024,18 @@ def api_config():
                     return jsonify({"error": "invalid file_drop",
                                     "valid": [True, False]}), 400
                 userconfig.set_(config.FILE_DROP_KEY, enabled)
+        if "telegram_delete_on_close" in data:
+            # CMX-204: read by the Telegram bridge on its next reap. Strict bool, as above.
+            try:
+                enabled = config.cast_strict_bool(data.get("telegram_delete_on_close"))
+            except ValueError:
+                return jsonify({"error": "invalid telegram_delete_on_close",
+                                "valid": [True, False]}), 400
+            userconfig.set_(tg_topics.DELETE_ON_CLOSE_KEY, enabled or None)
+        if data.get("telegram_cleanup") is True:
+            # The bridge holds the bot token and is the ledger's only writer, so the
+            # dashboard just asks: the bridge deletes the archived topics on its next tick.
+            userconfig.set_(tg_topics.CLEANUP_KEY, time.time())
     stored_mode = dispatcher.settings_permission_mode()
     stored_model = dispatcher.settings_agent_model()
     remote_control, rc_source = config.remote_control_setting()
@@ -3063,6 +3076,10 @@ def api_config():
         "file_drop_env_locked": fd_source == "env",
         "file_drop_env": config.FILE_DROP_ENV,
         "upload_max_mb": config.upload_max_bytes() // (1024 * 1024),
+        # CMX-204: Telegram topics. Archived = remembered closed topics the cleanup deletes.
+        "telegram_delete_on_close": userconfig.get(tg_topics.DELETE_ON_CLOSE_KEY) is True,
+        "telegram_archived_topics": len(tg_topics.TopicLedger().closed_threads()),
+        "telegram_cleanup_pending": bool(userconfig.get(tg_topics.CLEANUP_KEY)),
     })
 
 

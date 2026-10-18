@@ -2110,6 +2110,21 @@ function renderSettings(focus) {
             <p class="s-desc" id="file-drop-source"></p>
         </section>
 
+        <section class="settings-section" id="settings-telegram-topics">
+            <h4>Telegram topics</h4>
+            <p class="s-desc">A new window reopens the archived topic of its folder instead of
+            creating another. Applies on the bridge's next tick, no restart.</p>
+            <div class="s-row" data-keywords="telegram topic forum delete archive close cleanup">
+                <label class="s-rowlabel" for="tg-delete-toggle">Telegram: delete a topic when its window closes</label>
+                <input id="tg-delete-toggle" type="checkbox" role="switch" disabled
+                       onchange="chela.setTelegramDelete(this.checked)">
+            </div>
+            <div class="s-row">
+                <button class="btn" id="tg-cleanup-btn" disabled onclick="chela.deleteArchivedTopics()">Delete archived topics</button>
+            </div>
+            <div id="tg-topics-msg" class="s-savemsg"></div>
+        </section>
+
         <section class="settings-section" data-keywords="tailscale ssh tunnel vpn auth security">
             <h4>Remote access</h4>
             <p class="s-desc">Zero built-in auth: the dashboard binds <code>127.0.0.1</code>.
@@ -2621,6 +2636,41 @@ async function _loadFileDropSetting() {
         cfg = await api('/api/config');
     } catch (e) { box.disabled = true; return; }
     _renderFileDrop(cfg);
+    _renderTelegramTopics(cfg);
+}
+
+// Telegram topics (CMX-204): the delete-on-close switch and the one-shot cleanup. The
+// bridge makes the Telegram calls on its next tick; the dashboard only stores the ask.
+function _renderTelegramTopics(cfg) {
+    const box = document.getElementById('tg-delete-toggle');
+    const btn = document.getElementById('tg-cleanup-btn');
+    box.checked = !!cfg.telegram_delete_on_close;
+    box.disabled = false;
+    const n = cfg.telegram_archived_topics || 0;
+    btn.textContent = cfg.telegram_cleanup_pending ? 'Deleting archived topics…' : `Delete archived topics (${n})`;
+    btn.disabled = !n || !!cfg.telegram_cleanup_pending;
+}
+
+async function _postTelegramTopics(payload, okText) {
+    const msg = document.getElementById('tg-topics-msg');
+    try {
+        const cfg = await api('/api/config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!cfg || cfg.error) { msg.textContent = 'Rejected. Unchanged.'; return; }
+        msg.textContent = okText;
+        _renderTelegramTopics(cfg);
+    } catch (e) { msg.textContent = 'Save failed. Unchanged.'; }
+}
+
+function setTelegramDelete(on) {
+    return _postTelegramTopics({ telegram_delete_on_close: !!on }, 'Saved · delete on close ' + (on ? 'on' : 'off'));
+}
+
+function deleteArchivedTopics() {
+    if (!confirm('Delete every archived Telegram topic chela remembers? This deletes their messages too and cannot be undone.')) return;
+    return _postTelegramTopics({ telegram_cleanup: true }, 'Requested. The Telegram bridge deletes them on its next tick.');
 }
 
 async function setFileDrop(on) {
@@ -3654,4 +3704,4 @@ export { sidebarOrder, altSwitchKeydown, setAltHeld, openSidebarRow, archiveKeys
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { sidebarOrder, _updateFlowDeps, applyUpdate, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
+Object.assign(window.chela, { sidebarOrder, _updateFlowDeps, applyUpdate, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, setTelegramDelete, deleteArchivedTopics, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });

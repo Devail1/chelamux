@@ -56,6 +56,7 @@ from chela import (
     spawn,
     ticklock,
     update,
+    userconfig,
     wait,
     workflow,
 )
@@ -1717,8 +1718,19 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
     """
     from chela.discovery import get_window_cwd_by_id
     from chela import telegram as tg
+    from chela import topic_ledger as topics
 
+    ledger = tg.TopicLedger()  # CMX-204: every topic made, so a folder's old one is reused
     while not stop.is_set():
+        try:
+            if userconfig.get(topics.CLEANUP_KEY):
+                # Settings "Delete archived topics": the dashboard only stores the request.
+                # Cleared only once it ran, so a failure retries next tick, not lost.
+                n = tg.delete_archived_topics(ledger, registry, topic_api)
+                userconfig.set_(topics.CLEANUP_KEY, None)
+                log.info("auto-topics: deleted %d archived topic(s) on request", n)
+        except Exception:
+            log.exception("Telegram archived-topic cleanup failed; retrying next tick")
         try:
             live, agents = tg.live_agent_windows()
             # The tmux server issuing window ids right now (CMX-77). A binding — and a run
@@ -1746,6 +1758,8 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
                 bind_dispatched=BIND_DISPATCHED,
                 now_epoch=now_epoch,
                 rebinds=rebinds,
+                ledger=ledger,
+                delete_on_close=userconfig.get(topics.DELETE_ON_CLOSE_KEY) is True,
             )
             if had_rebinds:
                 sidebar_archive.settle_rebinds(rebinds, now_epoch)
