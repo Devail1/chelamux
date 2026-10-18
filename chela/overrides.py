@@ -615,6 +615,22 @@ def resume(request_id: str) -> dict | None:
     return _complete(rec, rec.get("decided_by") or "unknown", rec.get("decided_via") or "")
 
 
+# How often the daemon retries one APPROVED request — each retry is several `gh` calls.
+RETRY_EVERY_S = 60.0
+
+
+def retry_approved(now: float | None = None) -> list[dict]:
+    """Retry each APPROVED request last tried ≥ :data:`RETRY_EVERY_S` ago (:func:`resume`).
+    The DAEMON's call only: a retry can poll GitHub for up to 30s, so it never runs from
+    :func:`sweep`, which the Telegram relay and the dashboard's handlers also call. Run
+    :func:`sweep` first so a moved head or a lapsed TTL expires the request instead."""
+    now = time.time() if now is None else now
+    return [out for rec in all_requests()
+            if rec.get("state") == APPROVED
+            and now - (rec.get("finished_at") or 0) >= RETRY_EVERY_S
+            and (out := resume(rec["id"])) is not None]
+
+
 def _complete(rec: dict, by: str, channel: str) -> dict:
     """The approved half of :func:`decide` / :func:`resume`: ``rec`` is already MERGING."""
     request_id = rec["id"]
@@ -694,8 +710,6 @@ def sweep(now: float | None = None, head_of=None, dev_head_of=None) -> list[dict
             except Exception:                                # noqa: BLE001 — best effort
                 head = None
             if not head or head == rec.get("head_sha"):
-                if rec.get("state") == APPROVED:
-                    resume(rec["id"])
                 continue
             if _is_release(rec):
                 why = (f"dev moved ({str(rec.get('head_sha'))[:12]} → {head[:12]}) after the "

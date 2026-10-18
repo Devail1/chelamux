@@ -1235,9 +1235,14 @@ def test_unknown_for_the_whole_bound_keeps_the_approval_for_the_same_head(repo, 
     rid = _request()["request_id"]
     with _statuses(("open", "UNKNOWN")) as (squash, _view):
         out = overrides.decide(rid, True, "telegram", channel="telegram")
-        overrides.sweep(head_of=lambda _t: HEAD)            # still UNKNOWN: retried, quiet
+        assert overrides.retry_approved() == []              # tried < 60s ago: not yet
+        overrides.sweep(head_of=lambda _t: HEAD)            # never a retry (relay/dashboard)
+        assert overrides.load(rid)["state"] == overrides.APPROVED
+        assert naps == [1, 2, 4, 8, 15]
+        retried, = overrides.retry_approved(now=time.time() + 60)  # still UNKNOWN: quiet
     squash.assert_not_called()
     assert out["ok"] is False and out["state"] == overrides.APPROVED, out
+    assert retried["state"] == overrides.APPROVED
     assert naps == [1, 2, 4, 8, 15] * 2 and sum(naps[:5]) <= 30
     rec = overrides.load(rid)
     assert rec["state"] == "approved" and rec["decided_by"] == "telegram"
@@ -1247,7 +1252,7 @@ def test_unknown_for_the_whole_bound_keeps_the_approval_for_the_same_head(repo, 
     assert not event_log.read(types=["orchestrator.merge_override_failed"])["events"]
 
     with _statuses(("open", "MERGEABLE")) as (squash, _view):
-        overrides.sweep(head_of=lambda _t: HEAD)
+        overrides.retry_approved(now=time.time() + 60)
     squash.assert_called_once()
     assert squash.call_args.kwargs["match_head"] == HEAD
     assert overrides.load(rid)["state"] == overrides.MERGED
@@ -1350,3 +1355,18 @@ def test_the_sweep_never_expires_a_merge_in_flight(repo, told):
     overrides.set_fields(rid, state=overrides.MERGING)
     assert overrides.sweep(head_of=lambda _t: MOVED) == []
     assert overrides.load(rid)["state"] == overrides.MERGING and told == []
+
+
+def test_an_approved_request_is_retried_once_a_minute_at_most(repo, told, naps):
+    """The retry interval is the documented 60s, measured from the last attempt."""
+    _seed(repo)
+    rid = _request()["request_id"]
+    with _statuses(("open", "UNKNOWN")):
+        overrides.decide(rid, True, "terminal:op")
+    last = overrides.load(rid)["finished_at"]
+    with _github() as squash:
+        assert overrides.retry_approved(now=last + 59.9) == []
+        squash.assert_not_called()
+        done, = overrides.retry_approved(now=last + 60.001)
+    assert done["state"] == overrides.MERGED
+    squash.assert_called_once()

@@ -309,6 +309,7 @@ def cmd_run(args) -> None:
             try:
                 from chela import overrides
                 overrides.sweep()
+                overrides.retry_approved()       # CMX-205: daemon-only, may poll ≤30s
             except Exception:
                 log.exception("Override request sweep failed")
 
