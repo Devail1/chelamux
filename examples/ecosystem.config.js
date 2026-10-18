@@ -36,7 +36,12 @@ const app = (name, args) => ({
 
 module.exports = {
   apps: [
-    app('chela-daemon', 'run'),            // scheduler + dispatcher + notifier
+    // scheduler + dispatcher + notifier. CMX-263: a restart must not kill a judge/agent LAUNCH
+    // half-way. PM2's default 1.6s kill_timeout SIGKILLed one between its before_run hook and
+    // its window; the daemon now finishes the launch in progress and starts nothing new, so give
+    // it time (before_run + the 60s ready wait). treekill:false keeps the signal off that hook:
+    // with the default, the restart's SIGINT killed `uv sync` and the launch "failed".
+    { ...app('chela-daemon', 'run'), kill_timeout: 90000, treekill: false },
     app('chela-dashboard', 'dashboard'),   // the web dashboard (binds CHELA_DASHBOARD_PORT)
     app('chela-telegram', 'telegram'),     // the Telegram bridge (needs ~/.chela/secrets.env)
     app('chela-collab', 'collab'),         // live-share host: shares survive a dashboard deploy
