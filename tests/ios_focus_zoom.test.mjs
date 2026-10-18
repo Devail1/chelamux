@@ -23,9 +23,9 @@
 //      stops the focus zoom, but kills pinch-zoom (Android too) — an
 //      accessibility regression. Both viewport metas must leave zoom enabled.
 //
-// Run: node --test tests/ios_focus_zoom.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/ios_focus_zoom.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
-import { test, before } from 'node:test';
+import { test, beforeAll } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -86,7 +86,7 @@ function templateBody() {
 }
 
 let win, doc, sheet;
-before(async () => {
+beforeAll(async () => {
     const { dom } = await bootDashboardDom({ body: templateBody() + JS_BUILT, fetchImpl, canvasStub: true });
     win = dom.window;
     doc = win.document;

@@ -99,9 +99,9 @@
 // itself is a live-browser fact belonging in the PR, not a jsdom guard for a layout
 // question jsdom cannot see.
 //
-// Run: node --test tests/wallnav.test.mjs (pytest runs it via tests/test_js_suites.py;
+// Run: pnpm exec vitest run tests/wallnav.test.mjs (pytest runs it via tests/test_js_suites.py;
 // it needs `pnpm install` for jsdom — CHELA_REQUIRE_JS_TESTS makes a missing jsdom a FAILURE.)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -221,7 +221,7 @@ function fakeGridStack() {
 
 let terminals, util;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;
@@ -1378,7 +1378,7 @@ test('the header dot gains a ring iff its pane owns the decisions inbox, in lock
 // `.gs-dot-orch` must resolve a solid outline, must contain the status dot, and
 // neither it nor any ancestor may carry a clip-path. Put the ring back on the dot
 // and `done`/`waiting` go red here.
-test('CMX-32: the orchestrator ring resolves visible, unclipped, for working, waiting, idle AND done', async (t) => {
+test('CMX-32: the orchestrator ring resolves visible, unclipped, for working, waiting, idle AND done', async () => {
     const owner = '@2';
     const agent = AGENTS[1];
     const orchBtn = tile(owner).querySelector('.gs-orch-btn');
@@ -1393,9 +1393,13 @@ test('CMX-32: the orchestrator ring resolves visible, unclipped, for working, wa
         done: { session_status: 'idle', pr: { url: 'https://github.com/x/y/pull/1', state: 'open' } },
     };
     const css = cssForViewport(CSS, DESKTOP);
+    // Every state runs even after one fails, so a regression names EVERY state it breaks.
+    const broken = [];
+    const eachState = async (state, fn) => {
+        try { await fn(); } catch (e) { broken.push(`${state}: ${e.message}`); }
+    };
     try {
-        // One subtest per state, so a regression names EVERY state it breaks.
-        for (const [state, fields] of Object.entries(CASES)) await t.test(state, async () => {
+        for (const [state, fields] of Object.entries(CASES)) await eachState(state, async () => {
             Object.assign(agent, { session_status: undefined, pr: undefined, needs_human: undefined }, fields);
             await terminals.termTick();
             const dot = tile(owner).querySelector('.gs-dot');
@@ -1422,6 +1426,7 @@ test('CMX-32: the orchestrator ring resolves visible, unclipped, for working, wa
                     'on the ring\'s path — it clips the outline away (CMX-32)');
             }
         });
+        assert.deepEqual(broken, [], 'the orchestrator ring breaks in these states');
     } finally {
         Object.assign(agent, { session_status: undefined, pr: undefined, needs_human: undefined });
         await terminals.termTick();

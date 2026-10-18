@@ -79,21 +79,38 @@ def _wait_for(pred, timeout: float = 10.0) -> bool:
     return pred()
 
 
-@pytest.mark.parametrize("mode", ["contained", "plain", "worker", "worker-unwatched"])
-def test_sigkilled_pytest_leaves_no_node_test_process_behind(tmp_path, mode):
+@pytest.mark.parametrize("mode,runner", [
+    ("contained", "node"), ("plain", "node"), ("worker", "node"), ("worker-unwatched", "node"),
+    ("contained", "vitest"), ("plain", "vitest"),
+])
+def test_sigkilled_pytest_leaves_no_node_test_process_behind(tmp_path, mode, runner):
     """SIGKILL the launcher of a real `node --test` → its whole tree dies within seconds.
     `plain` is the negative control: the same tree under `subprocess.run` DOES survive,
     proving this test can see a leak at all. `worker`: SIGKILL the xdist MASTER while its
-    worker lives on — `watch` kills the tree; `worker-unwatched` is its negative control."""
+    worker lives on — `watch` kills the tree; `worker-unwatched` is its negative control.
+    CMX-216: `vitest` runs the same suite through the repo's Vitest config (pool `forks`), as
+    tests/test_js_suites.py runs the dashboard suites."""
     node = shutil.which("node")
     if not node:
         pytest.skip("node is not installed")
-    suite, pids = tmp_path / "hang.test.mjs", tmp_path / "pids"
-    suite.write_text(_HANG)
+    pids = tmp_path / "pids"
+    if runner == "vitest":
+        vitest = ROOT / "node_modules" / "vitest" / "vitest.mjs"
+        if not vitest.is_file():
+            pytest.skip("vitest is not installed — run `pnpm install`")
+        suite = tmp_path / "tests" / "hang.test.mjs"
+        suite.parent.mkdir()
+        suite.write_text(_HANG.replace("'node:test'", "'vitest'"))
+        cmd = [node, str(vitest), "run", "--config", str(ROOT / "vitest.config.mjs"),
+               "--root", str(tmp_path)]
+    else:
+        suite = tmp_path / "hang.test.mjs"
+        suite.write_text(_HANG)
+        cmd = [node, "--test", str(suite)]
     env = {k: v for k, v in os.environ.items() if not k.startswith("NODE_CHANNEL")}
     env.update(PIDS=str(pids), PYTHONPATH=str(ROOT))
     launcher = subprocess.Popen(
-        [sys.executable, "-c", _LAUNCHER, mode, node, "--test", str(suite)],
+        [sys.executable, "-c", _LAUNCHER, mode, *cmd],
         cwd=str(tmp_path), env=env,
         start_new_session=True,     # the whole dummy tree lives outside pytest's session
     )

@@ -3,9 +3,9 @@
 // function-of-inputs checks, each written to go RED under one specific
 // corruption of the real logic.
 //
-// Run: node --test tests/diffpanel_model.test.mjs (tests/test_js_suites.py
+// Run: pnpm exec vitest run tests/diffpanel_model.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 
 import { patchLineClass, statusMeta, summaryLabel } from '../chela/dashboard/static/js/diffpanelmodel.js';

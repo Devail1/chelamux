@@ -10,8 +10,8 @@
 // #term-switcher. #term-agent's options are deliberately in a DIFFERENT order from every
 // layout below, so a strip that follows the options fails each test.
 //
-// Run: node --test tests/mobile_pills_sidebar_order.test.mjs  (pytest runs it via tests/test_js_suites.py)
-import { before, beforeEach, test } from 'node:test';
+// Run: pnpm exec vitest run tests/mobile_pills_sidebar_order.test.mjs  (pytest runs it via tests/test_js_suites.py)
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
@@ -68,7 +68,7 @@ function fetchImpl(url, opts) {
 }
 
 let nav, terminals, chela;
-before(async () => {
+beforeAll(async () => {
     const booted = await bootDashboardDom({
         body: BODY, phone: true, canvasStub: true, fetchImpl,
         seedLocalStorage: { pc_term_mode: 'single' },

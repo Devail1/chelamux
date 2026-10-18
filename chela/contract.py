@@ -49,11 +49,12 @@ import json
 import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 
-from chela import config, dispatcher, event_log, notify
+from chela import config, dispatcher, event_log, notify, risktier
 from chela.dispatcher import CI_PASSING
-from chela.judge import J_CLEAN
+from chela.judge import J_CLEAN, J_PROSE_ONLY, MERGE_READY
 from chela.personas import lease
 from chela.workflow import load_workflow_cached
 from chela.worktree import reap_run_worktree
@@ -97,6 +98,11 @@ GIT_TIMEOUT = dispatcher.GIT_NET_TIMEOUT_SECONDS
 # head sha, the judge state it overrode, the reason) to the event log and the run's review
 # history BEFORE the merge, and the reason rides in the squash body.
 #
+# CMX-205: GitHub computes `mergeable` lazily after the base moves, answering UNKNOWN for a
+# few seconds. Clause 6 re-reads it after each of these delays (≤30s in all) before refusing.
+MERGEABLE_POLL_DELAYS = (1, 2, 4, 8, 15)
+_sleep = time.sleep
+
 # A run a human might reasonably override is not only `awaiting_review`: a judge that
 # blocked sends the run to `changes_requested`, and one that gave up sends it to
 # `needs_human`. Those are exactly the runs an override exists for (#529).
@@ -158,6 +164,23 @@ def _read_pr_base(pr_url: str | None, repo_dir: str | None) -> str | None:
     if not isinstance(data, dict):
         return None
     return (data.get("baseRefName") or "").strip() or None
+
+
+def _read_pr_files(pr_url: str | None, repo_dir: str | None) -> list[str] | None:
+    """⚖️🪜 CMX-208: every path the PR changes, read live; None (never ``[]``) if unreadable.
+    A rename lists BOTH sides (``previous_filename``), as ``judge._changed_files``'s
+    ``--no-renames`` does: moving an always-human file to ``docs/`` must not hide it."""
+    number = dispatcher._pr_number(pr_url)
+    if not number or not repo_dir:
+        return None
+    try:
+        out = subprocess.run(["gh", "api", "--paginate", f"repos/{{owner}}/{{repo}}/pulls/{number}/files",
+                              "--jq", ".[] | .filename, (.previous_filename // empty)"],
+                             cwd=repo_dir, capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    files = [f.strip() for f in out.stdout.splitlines() if f.strip()]
+    return files if out.returncode == 0 and files else None
 
 
 def _declared_base_branch(workflow_path: str | None) -> str | None:
@@ -301,7 +324,9 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None,
        current head commit (read live) — a stale ``clean`` left on the row by a judge that
        raced a later commit is not evidence about the commit actually being merged;
     5. CI is green per GitHub;
-    6. GitHub reports the PR open and ``MERGEABLE``.
+    6. GitHub reports the PR open and ``MERGEABLE``;
+    7. (CMX-208) the PR's live file list is readable and touches no ALWAYS-HUMAN path, and a
+       ``prose_only`` verdict (accepted like ``clean`` in 4) still matches a prose-only diff.
 
     There is deliberately **no ``--force``**: overriding a gate is an escalation, not an
     autonomous act. ``override=True`` (``chela merge --override --reason``) does NOT merge:
@@ -473,7 +498,7 @@ def _gate(run: dict, *, override: bool, actor: str | None,
 
     # 4. The judge's verdict — clean, or it is not the orchestrator's to merge.
     judge_state = run.get("judge_state")
-    if judge_state != J_CLEAN and not override:
+    if judge_state not in MERGE_READY and not override:
         shown = judge_state or "never ran"
         return _refuse(
             task_id, "escalate", judge_state=judge_state,
@@ -553,7 +578,12 @@ def _gate(run: dict, *, override: bool, actor: str | None,
         )
 
     # 6. Mergeable — GitHub's own verdict on whether the merge is clean, read live.
+    #    UNKNOWN is "not computed yet", never MERGEABLE: re-read it, bounded, then refuse.
+    delays = iter(MERGEABLE_POLL_DELAYS)
     pr_state, mergeable = dispatcher._read_pr_status(pr_url, repo_dir)
+    while mergeable == "UNKNOWN" and (delay := next(delays, None)) is not None:
+        _sleep(delay)
+        pr_state, mergeable = dispatcher._read_pr_status(pr_url, repo_dir)
     if pr_state and pr_state != "open":
         return _refuse(
             task_id, "escalate", pr_state=pr_state,
@@ -566,6 +596,17 @@ def _gate(run: dict, *, override: bool, actor: str | None,
                 "If merged, nothing to do — the task is done",
                 "If closed without merging, reopen it on GitHub and retry `chela merge`",
             ],
+        )
+    if mergeable == "UNKNOWN":
+        return _refuse(
+            task_id, "escalate", pr_mergeable=mergeable, mergeable_unknown=True,
+            error=f"GitHub still reports this PR's mergeability 'UNKNOWN' after "
+                  f"{sum(MERGEABLE_POLL_DELAYS)}s of re-reading (not computed yet — it is "
+                  "never read as MERGEABLE). Refusing to merge for now.",
+            recommendation="Retry `chela merge` in a minute — GitHub recomputes mergeability "
+                            "lazily after the base branch moves.",
+            options=["Retry `chela merge` in a minute",
+                     "If it stays UNKNOWN, check the PR on GitHub"],
         )
     if mergeable != "MERGEABLE":
         return _refuse(
@@ -581,8 +622,32 @@ def _gate(run: dict, *, override: bool, actor: str | None,
                 "If GitHub hasn't finished computing mergeability yet, wait a moment and retry",
             ],
         )
+
+    # 7. ⚖️🪜 CMX-208 — the risk tier of the LIVE file list (unreadable ⇒ refused). The
+    #    override IS the human, so it only carries the always-human trigger into its question.
+    files, wf = _read_pr_files(pr_url, repo_dir), load_workflow_cached(wf_path)
+    tier, trigger = (None, None) if files is None else risktier.classify(
+        files, risktier.always_human(wf.workflow if wf.ok else None))
+    if not override:
+        problem = None
+        if tier is None:
+            problem = "the PR's changed files could not be read, so its risk tier is unknown"
+        elif tier == risktier.HUMAN:
+            problem = f"this PR touches {trigger!r}, an ALWAYS-HUMAN path"
+        elif judge_state == J_PROSE_ONLY and tier != risktier.PROSE:
+            problem = "the PR was stamped prose-only, but its live diff is not prose-only"
+        if problem:
+            return _refuse(
+                task_id, "escalate", risk_tier=tier, always_human_path=trigger,
+                error=f"{problem}. An autonomous merge needs a known, non-human tier. Refusing.",
+                recommendation="Review the diff yourself, then `chela merge --override --reason "
+                                f"\"…\"` — {problem}.",
+                options=["Review the diff yourself, then `chela merge --override --reason \"…\"`",
+                         "Retry `chela merge` once the PR's file list can be read"],
+            )
     return {"ok": True, "base": base, "allowed_base": allowed_base, "judge_state": judge_state,
-            "ci": ci, "mergeable": mergeable, "pr_url": pr_url, "repo_dir": repo_dir}
+            "ci": ci, "mergeable": mergeable, "pr_url": pr_url, "repo_dir": repo_dir,
+            "always_human_path": trigger}
 
 
 def _do_merge(run: dict, gate: dict, *, reason: str, actor: str | None,
@@ -623,7 +688,7 @@ def _do_merge(run: dict, gate: dict, *, reason: str, actor: str | None,
         "orchestrator.merge",
         f"merged {task_id} → {base} "
         + (f"(OVERRIDE approved by {audit['approved_by']}, judge {judge_state or 'never ran'!r}, "
-           "CI green, mergeable)" if audit else "(judge clean, CI green, mergeable)")
+           "CI green, mergeable)" if audit else f"(judge {judge_state}, CI green, mergeable)")
         + (f": {reason.strip()}" if reason.strip() else ""),
         payload=justification,
     )
@@ -688,8 +753,11 @@ def request_override(ident: str, *, reason: str, actor: str | None = None) -> di
                     "request_id": existing["id"], "head_sha": head_sha,
                     "pr_url": gate["pr_url"], "judge_state": judge_state,
                     "question": existing.get("question"), "ttl": existing.get("ttl")}
+    trigger = gate.get("always_human_path")
     question = (f"Override-merge {label} into {gate['base']} past the judge ({shown!r} on "
-                f"{head_sha[:12]})? Reason: {reason}")
+                f"{head_sha[:12]})?"
+                + (f" It touches ALWAYS-HUMAN path {trigger!r}." if trigger else "")
+                + f" Reason: {reason}")
     meta = {"task_id": task_id, "label": label, "title": run.get("title"),
             "pr_url": gate["pr_url"], "base": gate["base"], "head_sha": head_sha,
             "judge_state": judge_state, "judge_sha": run.get("judge_sha"), "reason": reason,
@@ -744,10 +812,20 @@ def complete_override(rec: dict, approved_by: str) -> dict:
     head_sha = rec.get("head_sha")
     if not head_sha:
         return {"ok": False, "state": "failed", "detail": "the request names no head commit"}
+    # CMX-205: a MERGED PR reports mergeable UNKNOWN forever — ask whether it already landed
+    # BEFORE any mergeability clause, so a late approval never announces a failure for it.
+    sha = _own_merge_sha(run["task_id"], run.get("pr_url"))
+    wf = run.get("workflow_path")
+    if sha is not None or (wf and dispatcher._read_pr_status(
+            run.get("pr_url"), str(Path(wf).parent))[0] == "merged"):
+        return {"ok": True, "state": "merged", "already_merged": True,
+                "detail": "already merged" + (f" as {sha[:12]}" if sha else ""),
+                "merge_commit_sha": sha}
     # The approver is the operator, never the orchestrator's stamp — so no lease clause here.
     gate = _gate(run, override=True, actor="", expect_head=head_sha)
     if not gate.get("ok"):
-        state = "expired" if gate.get("head_moved") else "failed"
+        state = ("expired" if gate.get("head_moved")
+                 else "approved" if gate.get("mergeable_unknown") else "failed")
         return {"ok": False, "state": state, "detail": gate.get("error")}
     if gate["base"] != rec.get("base"):
         return {"ok": False, "state": "failed",
@@ -776,6 +854,16 @@ def complete_override(rec: dict, approved_by: str) -> dict:
     return {"ok": True, "state": "merged", "detail": None,
             "merge_commit_sha": result.get("merge_commit_sha"),
             "event_seq": result.get("event_seq")}
+
+
+def _own_merge_sha(task_id: str, pr_url: str | None) -> str | None:
+    """The merge commit chela itself recorded for this run's PR (``orchestrator.merge``), or
+    None when chela never merged it."""
+    for ev in reversed(event_log.read(types=["orchestrator.merge"])["events"]):
+        payload = ev.get("payload") or {}
+        if payload.get("task_id") == task_id and payload.get("pr_url") == pr_url:
+            return payload.get("merge_commit_sha")
+    return None
 
 
 def escalate(summary: str, *, kind: str = "decision", recommendation: str = "",

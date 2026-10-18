@@ -152,6 +152,7 @@ def scenes(repo: Path) -> list[dict]:
                 "body": comment(judge.block_body(report, PR, "pytest -q"))})
 
     github = [patch.object(contract, "_read_pr_base", return_value="dev"),
+              patch.object(contract, "_read_pr_files", return_value=["shop.py", "test_shop.py"]),
               patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")),
               patch.object(dispatcher, "_read_pr_checks",
                            side_effect=lambda *_: CIStatus(CI_PASSING, head_sha=head["sha"])),

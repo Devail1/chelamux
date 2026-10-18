@@ -3,8 +3,8 @@
 // banner logic; this proves the real page runs it — drop the checkForUpdate() call from
 // refresh() and the banner never appears here. Harness copied from decisions_seed.test.mjs.
 //
-// Run: node --test tests/update_banner_wiring.test.mjs (tests/test_js_suites.py runs it).
-import { before, test } from 'node:test';
+// Run: pnpm exec vitest run tests/update_banner_wiring.test.mjs (tests/test_js_suites.py runs it).
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
@@ -71,7 +71,7 @@ class FakeEventSource {
     close() {}
 }
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

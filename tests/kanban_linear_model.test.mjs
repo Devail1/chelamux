@@ -2,9 +2,9 @@
 // kanbanlinearmodel.js). Pure model, no DOM: each test goes RED under one specific
 // corruption of the real logic, and each carries its negative control.
 //
-// Run: node --test tests/kanban_linear_model.test.mjs (tests/test_js_suites.py runs every
+// Run: pnpm exec vitest run tests/kanban_linear_model.test.mjs (tests/test_js_suites.py runs every
 // .test.mjs inside pytest, by discovery).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import {
     UNMAPPED_KEY, columnOf, runStateBadges, sampledLabel, trackerBoard, trackerColumns,

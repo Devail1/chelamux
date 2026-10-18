@@ -15,8 +15,8 @@
 // server (js_helpers/fake_archive.mjs), with the request it is about HELD until the test
 // releases it — the in-between state is where every one of these guards earns its keep.
 //
-// Run: node --test tests/sidebar_archive_guards.test.mjs  (pytest runs it via tests/test_js_suites.py)
-import { after, test } from 'node:test';
+// Run: pnpm exec vitest run tests/sidebar_archive_guards.test.mjs  (pytest runs it via tests/test_js_suites.py)
+import { afterAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { cpSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -39,7 +39,7 @@ const ROWS = [
 ];
 
 const tmp = mkdtempSync(join(tmpdir(), 'chela-cmx78-'));
-after(() => rmSync(tmp, { recursive: true, force: true }));
+afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
 const deferred = () => {
     let resolve;

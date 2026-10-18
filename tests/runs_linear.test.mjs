@@ -1,6 +1,6 @@
 // CMX-94 — the Runs segment (dispatcher.js) on a Linear workflow vs a TODO.md one.
-// Run: node --test tests/runs_linear.test.mjs (tests/test_js_suites.py runs it by discovery).
-import { before, test } from 'node:test';
+// Run: pnpm exec vitest run tests/runs_linear.test.mjs (tests/test_js_suites.py runs it by discovery).
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 
@@ -8,7 +8,7 @@ const BODY = '<div id="dispatcher-empty" style="display:none;"></div><div id="di
 
 const URL = 'https://linear.app/acme/issue/CMX-12/tighten-top-row';
 let renderDispatcher;
-before(async () => {
+beforeAll(async () => {
     ({ modules: { dispatcher: { renderDispatcher } } } =
         await bootDashboardDom({ body: BODY, extraModules: ['dispatcher.js'] }));
 });

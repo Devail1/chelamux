@@ -9,9 +9,9 @@
 // terminals.js in jsdom (same harness as tests/window_id.test.mjs) over three idle
 // windows: a live battery (3/6), one that died before a verdict, and one with none.
 //
-// Run: node --test tests/judge_battery_badge.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/judge_battery_badge.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
@@ -80,7 +80,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

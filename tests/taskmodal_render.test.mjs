@@ -9,9 +9,9 @@
 // independently in tests/kanban_flatten.test.mjs) — kept in its own file so a
 // fix at one call site cannot silently pass for both.
 //
-// Run: node --test tests/taskmodal_render.test.mjs (tests/test_js_suites.py
+// Run: pnpm exec vitest run tests/taskmodal_render.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 
@@ -22,7 +22,7 @@ const BODY = `
 
 let taskmodal;
 
-before(async () => {
+beforeAll(async () => {
     // Browser-faithful import order (main.js is the entry) — same bootstrap as
     // tests/taskmodal_judge_badge.test.mjs.
     ({ modules: { taskmodal } } = await bootDashboardDom({

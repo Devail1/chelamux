@@ -16,9 +16,9 @@
 // Drives the REAL sse.js through a fake EventSource (jsdom has none), same harness as
 // orchestrator_seed.test.mjs / orchestrator_ui.test.mjs.
 //
-// Run: node --test tests/decisions_sse.test.mjs (tests/test_js_suites.py runs every
+// Run: pnpm exec vitest run tests/decisions_sse.test.mjs (tests/test_js_suites.py runs every
 // .test.mjs inside pytest; needs `pnpm install` for jsdom).
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
@@ -81,7 +81,7 @@ class FakeEventSource {
 
 let util;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

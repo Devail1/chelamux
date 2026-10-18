@@ -22,8 +22,8 @@
 //   6. 🔴 A bare Alt keydown is NOT consumed (it must still reach a pane); Alt+N is.
 //      Ctrl/⌘/Shift held with Alt is another chord: no numbers.
 //
-// Run: node --test tests/sidebar_alt_switch.test.mjs  (pytest runs it via tests/test_js_suites.py)
-import { before, beforeEach, test } from 'node:test';
+// Run: pnpm exec vitest run tests/sidebar_alt_switch.test.mjs  (pytest runs it via tests/test_js_suites.py)
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
@@ -40,7 +40,7 @@ const BODY = `
 let nav, util;
 const server = fakeArchiveServer(() => util && util._agentsCache);
 
-before(async () => {
+beforeAll(async () => {
     ({ modules: { util, nav } } = await bootDashboardDom({
         body: BODY,
         canvasStub: true,

@@ -11,9 +11,9 @@
 //    heads. CMX-50: the old assertions staged ONE row per cluster, so a count hardcoded
 //    to `1` passed them; here every countable cluster that CAN hold several holds 2-3.
 //
-// Run: node --test tests/sidebar_run_progress_counts.test.mjs  (pytest runs it via
+// Run: pnpm exec vitest run tests/sidebar_run_progress_counts.test.mjs  (pytest runs it via
 // tests/test_js_suites.py)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 import { buildItems, DISPATCHED_KEY, runState } from '../chela/dashboard/static/js/sidebarmodel.js';
@@ -27,7 +27,7 @@ const BODY = `
 
 let nav, util, orchestrator;
 
-before(async () => {
+beforeAll(async () => {
     ({ modules: { util, nav, orchestrator } } = await bootDashboardDom({
         body: BODY,
         canvasStub: true,

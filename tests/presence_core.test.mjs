@@ -1,8 +1,8 @@
 // Deterministic unit tests for presence-core.js — the pure logic behind cursors +
 // facepile. The cross-viewer coordinate invariant (a cursor lands on the SAME grid
 // cell for differently sized viewers) is proven here mathematically; the full
-// two-browser render is validated separately (MCP). Run: node --test tests/  (or `uv run pytest -q` — tests/test_js_suites.py runs every .test.mjs)
-import { test } from 'node:test';
+// two-browser render is validated separately (MCP). Run: pnpm exec vitest run  (or `uv run pytest -q` — tests/test_js_suites.py runs every .test.mjs)
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import {
   OKABE_ITO, colorForId, textOn, autoName, initials,

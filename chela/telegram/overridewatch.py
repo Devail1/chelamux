@@ -43,6 +43,8 @@ def _outcome_line(rec: dict) -> str | None:
     detail = rec.get("detail") or ""
     if state == overrides.MERGING:
         return f"⏳ Approved by {by} — merging…"
+    if state == overrides.APPROVED:
+        return f"⏳ Approved by {by} — GitHub has not computed mergeability yet; retrying"
     if state == overrides.MERGED:
         return f"✅ Approved by {by} — merged {(rec.get('merge_commit_sha') or '?')[:12]}"
     if state == overrides.DENIED:

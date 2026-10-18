@@ -16,9 +16,9 @@
 //   - the share pill reads 👁 for view only, and the red "UNSANDBOXED: guest can type"
 //     banner shows on the pill AND the pane while an override is live — and not otherwise.
 //
-// Run: node --test tests/share_dialog.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/share_dialog.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -73,7 +73,7 @@ function fakeGridStack() {
 let terminals, util;
 const flush = () => new Promise(r => setTimeout(r, 0));
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

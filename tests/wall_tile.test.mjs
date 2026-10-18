@@ -11,9 +11,9 @@
 // 'waiting'`, i.e. util.js's wantsHuman verbatim, kept local to this file only
 // because util.js cannot load under plain Node (no DOM).
 //
-// Run: node --test tests/wall_tile.test.mjs (tests/test_js_suites.py runs
+// Run: pnpm exec vitest run tests/wall_tile.test.mjs (tests/test_js_suites.py runs
 // every .test.mjs inside pytest, by discovery).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import {
     actionBarKind, actionVerb, costView, ctxLevel, focusLayout, isFinished, prChip, rankOrder, recapView, stateTitle, tileState,

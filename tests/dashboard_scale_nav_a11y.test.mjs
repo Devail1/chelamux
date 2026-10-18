@@ -241,9 +241,9 @@
 // check is a manual visual look at the live dashboard, same discipline as
 // (iv) and the type-scale half of claim 1 above.
 //
-// Run: node --test tests/dashboard_scale_nav_a11y.test.mjs (tests/test_js_suites.py
+// Run: pnpm exec vitest run tests/dashboard_scale_nav_a11y.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

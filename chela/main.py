@@ -35,6 +35,7 @@ from chela import (
     doctor,
     epoch,
     event_log,
+    fleet,
     hold,
     hooks,
     inbox,
@@ -309,6 +310,7 @@ def cmd_run(args) -> None:
             try:
                 from chela import overrides
                 overrides.sweep()
+                overrides.retry_approved()       # CMX-205: daemon-only, may poll ≤30s
             except Exception:
                 log.exception("Override request sweep failed")
 
@@ -1301,6 +1303,15 @@ def cmd_dispatch_hold(args) -> bool:
             mine = inbox.caller_is_orchestrator()
         except Exception:  # noqa: BLE001 — a release must never fail on the inbox
             mine = False
+        # CMX-214: resume a --pause --all fleet first, while the hold still stands.
+        fleet_resumed = fleet.resume_all()
+        if fleet_resumed is not None:
+            sent = fleet_resumed["resumed"]
+            print(f"Fleet RESUMED — sent 'resume' to {sum(sent.values())} of {len(sent)} "
+                  "interrupted agent(s).")
+            for task, ok in sorted(sent.items()):
+                if not ok:
+                    print(f"  ⚠ {task}: 'resume' was NOT delivered — tell it by hand")
         released = hold.release(by=orchestrator.self_wid() or "", orchestrator=mine)
         if released is None:
             print("Dispatch was not held. Nothing to resume.")
@@ -1325,6 +1336,9 @@ def cmd_dispatch_hold(args) -> bool:
                   file=sys.stderr)
             raise SystemExit(1) from None
         _print_hold(held)
+        if getattr(args, "all", False):
+            for line in fleet.status_lines(fleet.pause_all(by=held.by)):
+                print(line)
         return True
 
     if args.hold_status:
@@ -1336,8 +1350,13 @@ def cmd_dispatch_hold(args) -> bool:
                   "releases it and resumes, loudly.")
         else:
             _print_hold(held)
+        for line in fleet.status_lines():
+            print(line)
         return True
 
+    if getattr(args, "all", False):
+        print("error: --all goes with --pause (chela dispatch --pause --all)", file=sys.stderr)
+        raise SystemExit(2)
     return False
 
 
@@ -2478,6 +2497,7 @@ def _task_finished_sweep(task_id: str, notes: list[str]) -> list[dict]:
     if skipped:
         print(f"⚠ {skipped} mutation(s) SKIPPED — those lines were never measured; a skip is "
               "unmeasured, not killed.")
+    timeouts = _print_sweep_timeouts(result)
     unrun = _print_sweep_unrun(result)
     survivors = result.get("survivors") or []
     uncovered, stray = sweep.check_equivalents(survivors, equivalents)
@@ -2501,12 +2521,14 @@ def _task_finished_sweep(task_id: str, notes: list[str]) -> list[dict]:
     for e in equivalents:
         e["mutations"] = by_key.get(e["key"], [])
         print(f"  [EQUIVALENT] {e['key']} — {e['why'][:100]}")
-    if unrun:
+    if unrun or timeouts:
         # ⏳ CMX-111: the budget bounds the hand-in, so a partial sweep does not refuse — but
         # it is never reported as a pass: the unrun lines are named, and the judge still runs.
+        # ⏳ CMX-253: a TIMEOUT is unmeasured the same way.
+        unknown = f"{unrun} UNRUN" + (f", {timeouts} TIMEOUT" if timeouts else "")
         print(f"⚠ sweep PARTIAL: {result.get('measured', 0)} of {result.get('mutations', 0)} "
               f"mutation(s) measured — {result.get('killed', 0)} killed, {skipped} skipped "
-              f"(unmeasured), {len(survivors)} survivor(s) declared equivalent; {unrun} UNRUN "
+              f"(unmeasured), {len(survivors)} survivor(s) declared equivalent; {unknown} "
               "= CANNOT VERIFY, not passed — proceeding within the sweep budget.")
         return equivalents
     print(f"✓ sweep: {result.get('mutations', 0)} mutation(s), {result.get('killed', 0)} "
@@ -2835,6 +2857,7 @@ def cmd_judge_sweep(args) -> None:
         print(f"  {note}")
     _print_sweep_full_suite(result)
     skipped = _print_sweep_skipped(result)
+    timeouts = _print_sweep_timeouts(result)
     unrun = _print_sweep_unrun(result)
     for r in result["survivors"]:
         tag = "UNTESTED" if str(r.get("reason", "")).startswith("UNTESTED") else "SURVIVED"
@@ -2847,6 +2870,7 @@ def cmd_judge_sweep(args) -> None:
         sys.exit(2)
     print(f"sweep: {result['mutations']} mutation(s) — {result['killed']} killed, "
           f"{len(result['survivors'])} survived, {skipped} skipped"
+          f"{f', {timeouts} TIMEOUT' if timeouts else ''}"
           f"{f', {unrun} UNRUN' if unrun else ''} ({result['seconds']}s)")
     if verdict == sweep.V_SURVIVORS:
         print("⚖️ Each SURVIVED line is a changed check no test can tell apart from its "
@@ -2860,6 +2884,9 @@ def cmd_judge_sweep(args) -> None:
         print(f"⚠ CANNOT VERIFY — the sweep budget stopped it: {result.get('exhausted', '')}. "
               f"{unrun} mutation(s) never ran. Raise --budget-seconds/--max-mutations (or "
               "judge.sweep_budget_seconds / judge.sweep_max_mutations) to cover them.")
+    elif timeouts:
+        print(f"⚠ CANNOT VERIFY — {timeouts} mutation(s) hit the suite timeout; their "
+              "lines are unknown, not killed.")
     elif verdict == sweep.V_UNKNOWN:
         print(f"⚠ UNKNOWN — {len(unsupported)} changed source file(s) were NOT "
               f"swept ({sweep.SUPPORTED_NOTE}). This is not a pass.")
@@ -2876,6 +2903,16 @@ def _print_sweep_full_suite(result: dict) -> None:
         print(f"  [FULL    ] {r['key']} — ran the full suite: {r['full_suite']}")
     if rows and result.get("selection"):
         print(f"  selection: {result['selection']}")
+
+
+def _print_sweep_timeouts(result: dict) -> int:
+    """⏳ CMX-253: print every mutation whose suite hit its timeout as ``[TIMEOUT ]`` and
+    return how many — its tree was killed, its line is UNKNOWN, never killed or skipped."""
+    rows = result.get("timeout") or []
+    for r in rows:
+        print(f"  [TIMEOUT ] {r['key']} {r['mutation']} — UNKNOWN, not killed: "
+              f"{r['reason'][:120]}")
+    return len(rows)
 
 
 def _print_sweep_unrun(result: dict) -> int:
@@ -3230,7 +3267,8 @@ def cmd_override(args) -> None:
     overrides.sweep()
     recs = overrides.all_requests()
     if not args.all:
-        recs = [r for r in recs if r.get("state") in (overrides.PENDING, overrides.MERGING)]
+        recs = [r for r in recs if r.get("state") in (overrides.PENDING, overrides.MERGING,
+                                                  overrides.APPROVED)]
     if not recs:
         print("No override request is pending." if not args.all else "No override requests.")
         return
@@ -3769,6 +3807,11 @@ def main() -> None:
              "re-spawns. Agents and judges already running are NOT stopped — they finish "
              "(the output lists them). Reconciliation continues. Take this BEFORE "
              "reordering the tracker.",
+    )
+    p_disp.add_argument(
+        "--all", action="store_true",
+        help="With --pause: also pause every dispatched agent (Escape + 'start nothing "
+             "until resume'; message only while it runs task-finished or a judge sweep).",
     )
     p_disp.add_argument("--resume", action="store_true", help="Release the queue hold")
     p_disp.add_argument(

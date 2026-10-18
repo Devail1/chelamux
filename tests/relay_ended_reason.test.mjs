@@ -7,8 +7,8 @@
 // chela/collab-relay/public/index.html and run it against a stub showEnded — the text
 // asserted is the text the shipped page would render, not a copy of it.
 //
-// Run: node --test tests/relay_ended_reason.test.mjs (pytest runs it via tests/test_js_suites.py).
-import { test } from 'node:test';
+// Run: pnpm exec vitest run tests/relay_ended_reason.test.mjs (pytest runs it via tests/test_js_suites.py).
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

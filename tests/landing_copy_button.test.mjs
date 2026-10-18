@@ -6,9 +6,9 @@
 // (DEFEAT_SHAPES 99) is why: a source-substring check for `btn.hidden = false` stayed green
 // with the reveal dead-coded behind `if (true || …) continue;`.
 //
-// Run: node --test tests/landing_copy_button.test.mjs (tests/test_js_suites.py runs every
+// Run: pnpm exec vitest run tests/landing_copy_button.test.mjs (tests/test_js_suites.py runs every
 // .test.mjs inside pytest, by discovery).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
