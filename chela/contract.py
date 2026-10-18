@@ -161,12 +161,15 @@ def _read_pr_base(pr_url: str | None, repo_dir: str | None) -> str | None:
 
 
 def _read_pr_files(pr_url: str | None, repo_dir: str | None) -> list[str] | None:
-    """⚖️🪜 CMX-208: every path the PR changes, read live; None (never ``[]``) if unreadable."""
+    """⚖️🪜 CMX-208: every path the PR changes, read live; None (never ``[]``) if unreadable.
+    A rename lists BOTH sides (``previous_filename``), as ``judge._changed_files``'s
+    ``--no-renames`` does: moving an always-human file to ``docs/`` must not hide it."""
     number = dispatcher._pr_number(pr_url)
     if not number or not repo_dir:
         return None
     try:
-        out = subprocess.run(["gh", "pr", "diff", number, "--name-only"],
+        out = subprocess.run(["gh", "api", "--paginate", f"repos/{{owner}}/{{repo}}/pulls/{number}/files",
+                              "--jq", ".[] | .filename, (.previous_filename // empty)"],
                              cwd=repo_dir, capture_output=True, text=True, timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):
         return None

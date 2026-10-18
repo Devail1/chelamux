@@ -863,6 +863,9 @@ def test_merge_gate_classifies_against_the_workflows_own_always_human_paths(
 
 @pytest.mark.parametrize("effect, files", [
     (subprocess.CompletedProcess([], 0, " docs/x.md \n\nWORKFLOW.md\n"), ["docs/x.md", "WORKFLOW.md"]),
+    # a rename lists its old path too, so `chela/contract.py` → `docs/x.md` stays visible
+    (subprocess.CompletedProcess([], 0, "docs/x.md\nchela/contract.py\n"),
+     ["docs/x.md", "chela/contract.py"]),
     (subprocess.CompletedProcess([], 1, "docs/x.md\n"), None),
     (subprocess.CompletedProcess([], 0, "\n"), None),
     (FileNotFoundError("gh"), None), (subprocess.TimeoutExpired("gh", 60), None),
@@ -870,7 +873,9 @@ def test_merge_gate_classifies_against_the_workflows_own_always_human_paths(
 def test_read_pr_files_pins_its_argv_and_fails_closed(effect, files):
     with patch.object(contract.subprocess, "run", side_effect=[effect]) as run:
         assert _REAL_READ_PR_FILES("https://github.com/o/r/pull/7", "/r") == files
-    run.assert_called_once_with(["gh", "pr", "diff", "7", "--name-only"], cwd="/r",
-                                capture_output=True, text=True, timeout=60)
+    run.assert_called_once_with(
+        ["gh", "api", "--paginate", "repos/{owner}/{repo}/pulls/7/files",
+         "--jq", ".[] | .filename, (.previous_filename // empty)"],
+        cwd="/r", capture_output=True, text=True, timeout=60)
     assert _REAL_READ_PR_FILES(None, "/r") is None
     assert _REAL_READ_PR_FILES("https://github.com/o/r/pull/7", None) is None

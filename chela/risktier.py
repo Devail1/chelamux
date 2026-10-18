@@ -24,10 +24,12 @@ DEFAULT_ALWAYS_HUMAN = ("WORKFLOW.md", ".github/workflows/**", "plugin/**", "che
 def is_prose(path: str) -> bool:
     p = PurePosixPath(path)
     suffix = p.suffix.lower()
+    if p.name in _INSTRUCTION_PROSE:     # agent instructions at any depth, never prose
+        return False
     if suffix in _MEDIA_SUFFIXES:
         return True
     if len(p.parts) == 1:
-        return suffix == ".md" and p.name not in _INSTRUCTION_PROSE
+        return suffix == ".md"
     if p.parts[0] == "changelog.d":
         return len(p.parts) == 2
     return p.parts[0] == "docs" and suffix in _DOCS_SUFFIXES

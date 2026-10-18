@@ -11,10 +11,11 @@ from chela.workflow import WorkflowDef
 D = risktier.DEFAULT_ALWAYS_HUMAN
 PROSE = ["docs/guide.md", "docs/a/b/page.rst", "docs/judge_eval/x.jsonl", "docs/notes.txt",
          "changelog.d/CMX-208.md", "README.md", "docs/media/demo.MP4", "chela/assets/logo.png",
-         "docs/WORKFLOW.md", "plugin.md"]
+         "plugin.md"]
 NOT_PROSE = ["docs/helper.py", "docs/run", "changelog.d/sub/x.md", "WORKFLOW.md", "CLAUDE.md",
              "AGENTS.md", "chela/README.md", "requirements.txt", "LICENSE", "xdocs/a.md",
-             "app.py", "README.md.py", "chela/contract.pyi"]
+             "app.py", "README.md.py", "chela/contract.pyi", "docs/CLAUDE.md",
+             "docs/sub/AGENTS.md", "docs/WORKFLOW.md", "changelog.d/CLAUDE.md"]
 HUMAN = ["WORKFLOW.md", ".github/workflows/ci.yml", "plugin/hooks/hooks.json",
          "chela/mergegate.py", "chela/contract.py", "chela/risktier.py", "chela/release.py",
          "scripts/release-cut.sh"]
