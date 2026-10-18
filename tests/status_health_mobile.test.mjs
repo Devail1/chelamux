@@ -9,9 +9,9 @@
 // stays a separate, non-shrinking element — only the word may be truncated, so glyph +
 // word (never colour alone) both still render as far as space allows.
 //
-// Run: node --test tests/status_health_mobile.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/status_health_mobile.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

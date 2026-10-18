@@ -16,9 +16,9 @@
 //   4. clicking the footer chip copies the id and shows a "Copied" toast;
 //   5. ⭐ MUST STILL PASS: a window with a very long name still shows its id.
 //
-// Run: node --test tests/window_id.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/window_id.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { resolveWindowId, windowIdQuery } from '../chela/dashboard/static/js/windowid.js';
@@ -79,7 +79,7 @@ function fakeGridStack() {
 
 let terminals, util, nav, clipboard = [];
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

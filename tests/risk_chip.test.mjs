@@ -2,9 +2,9 @@
 // modal. Runs the REAL kanban.js (renderKanban) and taskmodal.js (openTaskModal) against a
 // real DOM and reads the rendered chip back, plus riskChip()'s own mapping.
 //
-// Run: node --test tests/risk_chip.test.mjs (tests/test_js_suites.py runs every .test.mjs
+// Run: pnpm exec vitest run tests/risk_chip.test.mjs (tests/test_js_suites.py runs every .test.mjs
 // inside pytest, by discovery; needs `pnpm install` for jsdom.)
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 
@@ -25,7 +25,7 @@ let renderKanban;
 let taskmodal;
 let riskChip;
 
-before(async () => {
+beforeAll(async () => {
     ({ modules: { kanban: { renderKanban }, taskmodal } } = await bootDashboardDom({
         body: BODY, extraModules: ['kanban.js', 'taskmodal.js'],
     }));

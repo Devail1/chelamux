@@ -25,10 +25,10 @@
 //      not open the overlay — proves the "palette-only" decision is still true,
 //      not just documented as true.
 //
-// Run: node --test tests/shortcuts.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/shortcuts.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom — CHELA_REQUIRE_JS_TESTS makes
 // a missing jsdom a FAILURE.)
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -58,7 +58,7 @@ const BODY = `
 
 let nav;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',

@@ -11,8 +11,8 @@
 // The page boots the real main.js module graph, so the skeleton, GridStack and the timers
 // are stubbed (harness from window_id.test.mjs).
 //
-// Run: node --test tests/em_dash_rewrite_branches.test.mjs (tests/test_js_suites.py runs it).
-import { before, beforeEach, test } from 'node:test';
+// Run: pnpm exec vitest run tests/em_dash_rewrite_branches.test.mjs (tests/test_js_suites.py runs it).
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install`; tests/test_js_suites.py enforces it
 
@@ -61,7 +61,7 @@ function fakeGridStack() {
 
 let agents, nav, terminals, util;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PAGE}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

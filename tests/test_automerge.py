@@ -22,6 +22,11 @@ from chela.personas import lease
 
 
 @pytest.fixture(autouse=True)
+def _code_pr_files(monkeypatch):   # CMX-208: one code file is the judge tier
+    monkeypatch.setattr(contract, "_read_pr_files", lambda *a: ["chela/x.py"])
+
+
+@pytest.fixture(autouse=True)
 def _clean_runs():
     # Wipe on BOTH sides of the test: `runs` lives in the module-global
     # `dispatcher.DB_PATH` (not the per-test `chela_dir`), so a seeded
@@ -83,9 +88,10 @@ def test_candidates_is_exactly_awaiting_review_and_judge_clean(repo):
     _seed_run(repo, "unjudged1", status="awaiting_review", judge_state=None)
     _seed_run(repo, "running1", status="running", judge_state=J_CLEAN)
     _seed_run(repo, "done1", status="done", judge_state=J_CLEAN)
+    _seed_run(repo, "prose1", status="awaiting_review", judge_state="prose_only")  # CMX-208
 
     ids = {run["task_id"] for run in automerge.candidates()}
-    assert ids == {"clean1"}
+    assert ids == {"clean1", "prose1"}
 
 
 # --- candidates(): a clean verdict on a SUPERSEDED commit is never a candidate --------
@@ -191,6 +197,7 @@ def test_sweep_stamps_a_distinct_actor_not_the_orchestrators(repo):
     with patch.object(contract, "_read_pr_base", return_value="dev"), \
          patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
          patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge", return_value={"ok": True}), \
          patch.object(contract, "merge", wraps=contract.merge) as merge_spy:
         automerge.sweep()
     _, kwargs = merge_spy.call_args

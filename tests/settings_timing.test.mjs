@@ -23,9 +23,9 @@
 //      not imply a restart-latched knob takes effect on the next tick like the
 //      rest of the group.
 //
-// Run: node --test tests/settings_timing.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/settings_timing.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -58,7 +58,7 @@ function flush() {
     return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',

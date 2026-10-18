@@ -12,9 +12,9 @@
 // parent's activeElement/hasFocus are pinned per case — the exact states a real
 // Chromium reports (measured with playwright while diagnosing, see the PR).
 //
-// Run: node --test tests/wall_focus_tracking.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/wall_focus_tracking.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
-import { before, beforeEach, test } from 'node:test';
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
@@ -63,7 +63,7 @@ function fakeGridStack() {
 
 let terminals;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

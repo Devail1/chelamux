@@ -30,7 +30,7 @@
 // the real `.app > .sidebar` + `.app > .canvas` structure and reading
 // `getComputedStyle(canvas).gridRow` answers "which rule actually wins,"
 // which is the fact round 2's source-only guard could only approximate.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

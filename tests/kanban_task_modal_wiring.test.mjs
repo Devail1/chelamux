@@ -23,9 +23,9 @@
 // shows up here, not just in a fixture that happens to still agree with
 // today's markup.
 //
-// Run: node --test tests/kanban_task_modal_wiring.test.mjs (tests/test_js_suites.py
+// Run: pnpm exec vitest run tests/kanban_task_modal_wiring.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -44,7 +44,7 @@ const MODAL_TASK_HTML = sliceTemplate(
 
 let renderKanban;
 
-before(async () => {
+beforeAll(async () => {
     ({ modules: { kanban: { renderKanban } } } = await bootDashboardDom({
         body: `${KANBAN_BOARD_HTML}\n${MODAL_TASK_HTML}`,
         extraModules: ['kanban.js'],

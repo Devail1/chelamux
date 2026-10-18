@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, reviewgate, sizegate, sweep
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -2207,6 +2207,12 @@ def _read_pr_checks(pr_url: str | None, repo_dir: str | None) -> CIStatus:
     state, failing, run_ids, infra, plain_failures = _rollup_state(
         rollup if isinstance(rollup, list) else []
     )
+    if state == CI_FAILING and not failing:
+        # ⛔ CMX-256: a red names its job. None named means a shape the classifier did not
+        # recognise — PENDING (re-read next tick, aged out by 1c′), never an unnamed red.
+        log.warning("CI: %s read as failing with no failing job named — treated as PENDING",
+                    pr_url)
+        return CIStatus(CI_PENDING, sha, detail="a red with no failing job named")
     return CIStatus(state, sha, failing, run_ids, infra=infra, plain_failures=plain_failures)
 
 
@@ -3740,7 +3746,7 @@ def merged_outside_gate(run: dict) -> bool:
     """
     judge_sha = run.get("judge_sha")
     head = run.get("pr_head_sha")
-    if run.get("judge_state") == judge.J_CLEAN and not (judge_sha and head and judge_sha != head):
+    if run.get("judge_state") in judge.MERGE_READY and not (judge_sha and head and judge_sha != head):
         return False
     for override in merge_overrides(run):
         sha = override.get("head_sha")
@@ -4372,10 +4378,14 @@ def reopen(ident: str, reason: str = "") -> dict:
         # resurrected out of `done`.
         cur = conn.execute(
             "UPDATE runs SET status='awaiting_review', review_history=?, last_error=NULL, "
-            "pr_head_sha=?, reopen_count=?, first_reopen_head_sha=? "
-            "WHERE task_id=? AND status=?",
-            (json.dumps(reviews), ci.head_sha, new_reopen_count, first_reopen_sha, task_id,
-             from_status),
+            "pr_head_sha=?, pr_checks=?, ci_pending_since=?, reopen_count=?, "
+            "first_reopen_head_sha=? WHERE task_id=? AND status=?",
+            # ⛔ CMX-256: the checks read above is about THIS head — store it with the head.
+            # Moving `pr_head_sha` while keeping the old head's `pr_checks='failing'` is a
+            # red the CI loop could act on before anyone read the new head's checks.
+            (json.dumps(reviews), ci.head_sha, ci.state,
+             _now() if ci.state == CI_PENDING else None, new_reopen_count, first_reopen_sha,
+             task_id, from_status),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -6025,7 +6035,19 @@ def tick(workflow_path: str | Path) -> dict:
         ).fetchall():
             task_id = row["task_id"]
             ci = ci_now.get(task_id)
-            sha = (ci.head_sha if ci else None) or row["pr_head_sha"]
+            # ⛔ CMX-256. Only a red GitHub reported THIS tick, naming a job, is a red. The
+            # row's `pr_checks` is a cache: `chela reopen` (or any write landing between the
+            # 0b poll and here) can leave it saying `failing` about a commit that is no
+            # longer the head, and the fresh head's checks were never read. Acting on that
+            # fired "CI RED … — job ?" at an IN_PROGRESS head and, at the rework cap, sent
+            # the run straight to needs_human. Unread is PENDING: no rework, no notice,
+            # re-read next tick. (An unnamed red never gets here: `_read_pr_checks`.)
+            if ci is None or ci.state != CI_FAILING:
+                log.warning("CI: %s reads `failing` on its row, but this tick's read is %s "
+                            "— treated as PENDING, re-read next tick",
+                            task_id, ci.state if ci else "missing")
+                continue
+            sha = ci.head_sha or row["pr_head_sha"]
             if not sha:
                 log.warning("CI: %s is red but GitHub named no head commit — not firing a "
                             "verdict that could not be fired exactly once", task_id)
@@ -6039,14 +6061,13 @@ def tick(workflow_path: str | Path) -> dict:
             # FETCHING the log (and the fetch is a subprocess reading a stranger's bytes)
             # took the verdict with it — the red was marked delivered and never fired again,
             # and the run sat red in awaiting_review until a human happened to look.
-            log_tail = _failing_log_tail(wf_dir, ci.run_ids if ci else ())
+            log_tail = _failing_log_tail(wf_dir, ci.run_ids)
             # 🚦🏗️ CMX-245 (re-scope of CMX-243). Same "once, on the transition" rule as the
             # log fetch above: a plain FAILURE is only reclassified as infra here, by its
             # job's own steps — never on the poll that produced `ci_now`.
-            if ci is not None:
-                ci = _ci_infra_by_steps(ci, wf_dir)
+            ci = _ci_infra_by_steps(ci, wf_dir)
 
-            if ci is not None and ci.infra:
+            if ci.infra:
                 # NOT evidence about the code — see the module note above :data:`CI_INFRA_
                 # CONCLUSIONS`. Burn the sha first, same crash-safety rule as the real-
                 # failure path below: a crash before this line re-fires the same red every
@@ -6092,7 +6113,7 @@ def tick(workflow_path: str | Path) -> dict:
                     summary["escalated"] += 1
                 continue
 
-            body = _ci_verdict_body(ci or CIStatus(CI_FAILING, sha), log_tail, row["pr_url"])
+            body = _ci_verdict_body(ci, log_tail, row["pr_url"])
             # ⛔ NOW record the fired sha — after the tail is in hand, before the one step
             # that cannot be taken back. The failure modes are not symmetric: a crash after
             # this line costs at most ONE missed verdict (a human still sees the red PR),
@@ -6133,7 +6154,7 @@ def tick(workflow_path: str | Path) -> dict:
             log.warning(
                 "CI is RED on %s (%s) — run %s sent back for rework (round %s, cap %s): %s",
                 row["pr_url"] or "?", sha[:12], task_id, result.get("round"),
-                result.get("max_reworks"), ", ".join(ci.failing) if ci else "?",
+                result.get("max_reworks"), ", ".join(ci.failing),
             )
 
         # 1c′. A CHECK THAT NEVER SETTLES IS NOT A CHECK WE ARE STILL WAITING FOR.
@@ -7939,10 +7960,19 @@ def _spawn_judge(
     # CMX-15 came back cannot_verify four times. Park it ONCE for a human instead; ⛔ it is
     # still not mergeable without a clean judge or `chela merge --override`. Only a definite
     # True parks: an unknown (`None`) is judged normally, as a code+docs PR is.
-    if judge.docs_only_diff(worktree, base) is True:
+    # ⚖️🪜 CMX-208: a PROSE-only PR (`chela.risktier`) skips the judge round outright and is
+    # merge-ready like `clean` on this head. Checked first; an unknown file list is not prose.
+    files = judge._changed_files(worktree, base)
+    skip = risktier.classify(files, risktier.always_human(wf))[0] == risktier.PROSE
+    if skip:
+        set_judge_state(task_id, judge.J_PROSE_ONLY, judge.PROSE_ONLY_DETAIL, sha=sha)
+        log.info("judge: %s: prose-only PR on %s — no judge round", task_id, sha[:12])
+    elif judge.docs_only_diff(worktree, base) is True:
+        skip = True
         park_final_unknown(task_id, judge.DOCS_ONLY_PARK_REASON, conn=conn)
         log.warning("judge: %s: docs-only PR on %s — parked for a human, no judge spawned",
                     task_id, sha[:12])
+    if skip:
         try:
             remove_worktree(wf.path.parent, worktree, resolve_workspace_root(wf))
         except Exception as e:  # noqa: BLE001 — a leftover dir costs disk, never the verdict

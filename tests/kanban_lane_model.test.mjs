@@ -5,9 +5,9 @@
 // real logic (a guard that survives its own corruption is decoration, not a
 // guard).
 //
-// Run: node --test tests/kanban_lane_model.test.mjs (tests/test_js_suites.py
+// Run: pnpm exec vitest run tests/kanban_lane_model.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

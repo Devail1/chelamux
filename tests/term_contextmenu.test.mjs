@@ -13,9 +13,9 @@
 //   - MUST STILL PASS: the right-button mousedown/mouseup xterm.js forwards to tmux
 //     and the app still reach the page, un-prevented.
 //
-// Run: node --test tests/term_contextmenu.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/term_contextmenu.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `npm ci` for jsdom.)
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

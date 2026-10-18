@@ -12,8 +12,8 @@
 // change made on one is asserted off the OTHER page's real DOM after its periodic refresh
 // (refreshSidebar) — never off the page that made it.
 //
-// Run: node --test tests/sidebar_layout_shared.test.mjs  (pytest runs it via tests/test_js_suites.py)
-import { after, before, beforeEach, test } from 'node:test';
+// Run: pnpm exec vitest run tests/sidebar_layout_shared.test.mjs  (pytest runs it via tests/test_js_suites.py)
+import { afterAll, beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { cpSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -56,7 +56,7 @@ function fetchImpl(url, opts) {
 }
 
 const tmp = mkdtempSync(join(tmpdir(), 'chela-cmx82-'));
-after(() => rmSync(tmp, { recursive: true, force: true }));
+afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
 // A device: its own copy of static/js (+ the collab module it imports), its own window.
 async function bootDevice(name) {
@@ -98,7 +98,7 @@ const group = key => [...host().querySelectorAll('.side-group')].find(g => g.dat
 const layoutPosts = () => server.calls.filter(c => c.method === 'POST' && c.path === '/api/sidebar/layout');
 
 let phone, laptop;
-before(async () => {
+beforeAll(async () => {
     phone = await bootDevice('phone');
     laptop = await bootDevice('laptop');
 });

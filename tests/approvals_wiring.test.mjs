@@ -15,8 +15,8 @@
 // runScripts:'dangerously' is ONLY so jsdom compiles inline on* attributes (2, 4) — the
 // page carries no <script> of its own.
 //
-// Run: node --test tests/approvals_wiring.test.mjs (tests/test_js_suites.py runs it).
-import { before, test } from 'node:test';
+// Run: pnpm exec vitest run tests/approvals_wiring.test.mjs (tests/test_js_suites.py runs it).
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
@@ -89,7 +89,7 @@ class FakeEventSource {
 const flush = () => new Promise(resolve => setTimeout(resolve, 5));
 let pillShownByRefresh = false;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true, runScripts: 'dangerously' });
     dom.window.TERMINALS_ENABLED = true;

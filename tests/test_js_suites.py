@@ -1,5 +1,10 @@
 """Every ``*.test.mjs`` in the repo, run under Node inside pytest — BY DISCOVERY.
 
+CMX-216: the dashboard suites directly in ``tests/`` run under **Vitest**
+(``vitest.config.mjs``, one Vitest run per file, pool ``forks``), so a legacy module can
+import a ported ``.ts`` one. ``chela/dashboard/static/collab/`` and ``tests/browser/`` stay
+on ``node --test``. Every fence below applies to both runners.
+
 A test that exists but is never executed is not a test; it is a comment that costs CI
 nothing to ignore. On 2026-07-14 ``tests/views.test.mjs`` had been RED on ``dev`` while
 ``uv run pytest -q`` reported 980 passed — because the wiring was a set of hand-written
@@ -16,9 +21,14 @@ Two fences, because the failure mode here is a check that *silently* does nothin
 
 * :func:`test_js_suites_are_discovered` fails if the glob finds nothing — a discovery
   that quietly matches zero files is this exact bug, one layer down.
+* A Vitest run that finds no file fails (Vitest exits 1 on "No test files found"), and
+  :func:`test_vitest_finds_exactly_the_discovered_dashboard_suites` fails if its include
+  list and this glob disagree.
 * A missing ``node`` SKIPS LOUDLY, naming every suite that did not run. Set
   ``CHELA_REQUIRE_JS_TESTS=1`` (CI does) and a missing ``node`` is a FAILURE instead —
   CI must never report green on a suite it never executed.
+* Same rule for **Vitest** (the root ``package.json`` devDependency). See
+  :func:`_vitest_or_skip`.
 * Same rule for **jsdom**: ``tests/wall.test.mjs`` runs the real dashboard JS in a real
   DOM, and jsdom is the repo's only npm dependency (dev-only; nothing is bundled or
   shipped). No ``pnpm install`` -> the suite cannot run -> loud skip, or a FAILURE under
@@ -32,6 +42,7 @@ Two fences, because the failure mode here is a check that *silently* does nothin
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -41,9 +52,12 @@ from pathlib import Path
 import pytest
 
 from chela.procguard import run_contained
+from test_frontend import _shown
 
 ROOT = Path(__file__).resolve().parent.parent
 _SKIP_DIRS = {"node_modules", "vendor", ".git"}
+VITEST = ROOT / "node_modules" / "vitest" / "vitest.mjs"
+VITEST_CONFIG = ROOT / "vitest.config.mjs"
 
 
 def js_suites() -> list[Path]:
@@ -52,6 +66,11 @@ def js_suites() -> list[Path]:
         p for p in ROOT.rglob("*.test.mjs")
         if not _SKIP_DIRS.intersection(p.relative_to(ROOT).parts)
     )
+
+
+def runs_under_vitest(suite: Path) -> bool:
+    """The dashboard suites, directly in ``tests/``; not collab's, not ``tests/browser/``."""
+    return suite.parent == ROOT / "tests"
 
 
 _SUITES = js_suites()
@@ -98,6 +117,26 @@ def test_js_suites_are_discovered():
     assert _SUITES, f"no *.test.mjs found under {ROOT} — the JS suites are not being run"
 
 
+def _did_not_run(msg: str) -> None:
+    if os.environ.get("CHELA_REQUIRE_JS_TESTS"):
+        pytest.fail(msg + " (CHELA_REQUIRE_JS_TESTS is set: a silent skip is not green)")
+    pytest.skip(msg)
+
+
+def _vitest_or_skip(suite: Path) -> None:
+    """A dashboard suite without Vitest DID NOT RUN — the same rule as a missing ``node``."""
+    if not VITEST.is_file():
+        _did_not_run(f"vitest is not installed — {suite.relative_to(ROOT)} DID NOT RUN. "
+                     f"Run `pnpm install` in {ROOT}.")
+
+
+def _argv(node: str, suite: Path) -> list[str]:
+    if runs_under_vitest(suite):
+        return [node, str(VITEST), "run", "--config", str(VITEST_CONFIG),
+                str(suite.relative_to(ROOT))]
+    return [node, "--test", str(suite)]
+
+
 def _jsdom_or_skip(suite: Path) -> None:
     """A DOM suite without jsdom DID NOT RUN — the same rule as a missing ``node``.
 
@@ -111,11 +150,8 @@ def _jsdom_or_skip(suite: Path) -> None:
         return
     if (ROOT / "node_modules" / "jsdom").is_dir():
         return
-    msg = (f"jsdom is not installed — {suite.relative_to(ROOT)} (the real-DOM suite) "
-           f"DID NOT RUN. Run `pnpm install` in {ROOT}.")
-    if os.environ.get("CHELA_REQUIRE_JS_TESTS"):
-        pytest.fail(msg + " (CHELA_REQUIRE_JS_TESTS is set: a silent skip is not green)")
-    pytest.skip(msg)
+    _did_not_run(f"jsdom is not installed — {suite.relative_to(ROOT)} (the real-DOM suite) "
+                 f"DID NOT RUN. Run `pnpm install` in {ROOT}.")
 
 
 # Printed by tests/browser/fixture.mjs (its DID_NOT_RUN) when no browser could launch.
@@ -125,17 +161,19 @@ _BROWSER_DID_NOT_RUN = "browser suite DID NOT RUN"
 @pytest.mark.parametrize("suite", _SUITES, ids=_IDS)
 def test_js_suite(suite: Path):
     node = _node_or_skip([suite])
+    if runs_under_vitest(suite):
+        _vitest_or_skip(suite)
     _jsdom_or_skip(suite)
-    # CMX-151: contained — node's per-file children die with this run, even if pytest is
-    # SIGKILLed; a plain subprocess.run left 8 of them holding ~4 GB for 3.5 hours.
+    # CMX-151: contained — node's per-file children (Vitest's forks) die with this run, even
+    # if pytest is SIGKILLed; a plain subprocess.run left 8 of them holding ~4 GB for 3.5 hours.
     proc = run_contained(
-        [node, "--test", str(suite)], timeout=120, cwd=str(ROOT), env=_clean_env(),
+        _argv(node, suite), timeout=120, cwd=str(ROOT), env=_clean_env(),
         watch=_xdist_master(),
     )
     if proc.returncode != 0:
         pytest.fail(
             f"{suite.relative_to(ROOT)} failed:\n"
-            f"{proc.stdout.decode()[-4000:]}\n{proc.stderr.decode()[-1000:]}"
+            f"{_shown(proc.stdout, 4000)}\n{_shown(proc.stderr, 1000)}"
         )
     out = proc.stdout.decode()
     if _BROWSER_DID_NOT_RUN in out:
@@ -202,12 +240,23 @@ def test_an_xdist_worker_watches_its_master_and_a_plain_run_watches_nothing(
     assert _xdist_master() == (4242 if expected else None)
 
 
-def test_a_js_suite_runs_contained_with_its_full_call_pinned(monkeypatch):
-    """CMX-151: node runs under ``run_contained`` — argv, cwd, scrubbed env, timeout and the
-    xdist master to watch — never a bare ``subprocess.run`` whose children can outlive it."""
-    suite = ROOT / "tests" / "approvals.test.mjs"
+_VITEST_SUITE = ROOT / "tests" / "approvals.test.mjs"
+_NODE_SUITE = ROOT / "chela" / "dashboard" / "static" / "collab" / "fit.test.mjs"
+
+
+@pytest.mark.parametrize("suite,argv", [
+    (_VITEST_SUITE, lambda vt: ["/opt/node", str(vt), "run", "--config",
+                                str(ROOT / "vitest.config.mjs"), "tests/approvals.test.mjs"]),
+    (_NODE_SUITE, lambda vt: ["/opt/node", "--test", str(_NODE_SUITE)]),
+], ids=["vitest", "node-test"])
+def test_a_js_suite_runs_contained_with_its_full_call_pinned(monkeypatch, suite, argv):
+    """CMX-151: the suite runs under ``run_contained`` — argv, cwd, scrubbed env, timeout and
+    the xdist master to watch — never a bare ``subprocess.run`` whose children can outlive it.
+    CMX-216: a dashboard suite runs through Vitest with the repo config, a collab one under
+    ``node --test``."""
     calls = []
     monkeypatch.setattr(shutil, "which", lambda name: "/opt/node")
+    monkeypatch.setattr(sys.modules[__name__], "VITEST", _NODE_SUITE)    # any file that exists
     monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw3")
     monkeypatch.setenv("NODE_CHANNEL_FD", "9")
     monkeypatch.setattr(os, "getppid", lambda: 4242)
@@ -217,8 +266,110 @@ def test_a_js_suite_runs_contained_with_its_full_call_pinned(monkeypatch):
                             subprocess.CompletedProcess(argv, 0, b"ok", b""))[1],
     )
     test_js_suite(suite)
-    [(argv, kw)] = calls
-    assert argv == ["/opt/node", "--test", str(suite)]
+    [(got, kw)] = calls
+    assert got == argv(_NODE_SUITE)
     assert set(kw) == {"timeout", "cwd", "env", "watch"}
     assert (kw["timeout"], kw["cwd"], kw["watch"]) == (120, str(ROOT), 4242)
     assert "NODE_CHANNEL_FD" not in kw["env"] and kw["env"]["PYTEST_XDIST_WORKER"] == "gw3"
+
+
+@pytest.mark.parametrize("rel,expected", [
+    ("tests/approvals.test.mjs", True),
+    ("tests/browser/dashboard.test.mjs", False),
+    ("chela/dashboard/static/collab/fit.test.mjs", False),
+    ("tests/js_helpers/x.test.mjs", False),
+])
+def test_only_the_suites_directly_in_tests_run_under_vitest(rel, expected):
+    assert runs_under_vitest(ROOT / rel) is expected
+
+
+def test_the_vitest_and_node_test_split_is_the_one_the_plan_names():
+    """CMX-216: 124+ dashboard suites moved to Vitest; collab and tests/browser/ did not."""
+    vitest = [p for p in _SUITES if runs_under_vitest(p)]
+    assert len(vitest) >= 124
+    assert {str(p.relative_to(ROOT).parent) for p in _SUITES if not runs_under_vitest(p)} == {
+        "tests/browser", "chela/dashboard/static/collab"}
+
+
+def test_each_vitest_filter_names_exactly_one_suite():
+    """Vitest's file filter is a substring match: a filter that is part of another suite's
+    path would run that suite too, under this one's pytest item."""
+    paths = [str(p.relative_to(ROOT)) for p in _SUITES]
+    for p in _SUITES:
+        if runs_under_vitest(p):
+            rel = str(p.relative_to(ROOT))
+            assert [q for q in paths if rel in q] == [rel]
+
+
+@pytest.mark.parametrize("required", [True, False], ids=["required-fails", "optional-skips"])
+def test_a_missing_vitest_fails_under_require_and_skips_loudly_otherwise(monkeypatch, required):
+    monkeypatch.setattr(shutil, "which", lambda _: "/opt/node")
+    monkeypatch.setattr(sys.modules[__name__], "VITEST", ROOT / "no-such-vitest.mjs")
+    monkeypatch.delenv("CHELA_REQUIRE_JS_TESTS", raising=False)
+    if required:
+        monkeypatch.setenv("CHELA_REQUIRE_JS_TESTS", "1")
+    monkeypatch.setattr(sys.modules[__name__], "run_contained",
+                        lambda *_a, **_k: pytest.fail("ran a suite that cannot run"))
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception),
+                       match="vitest is not installed.*approvals.test.mjs DID NOT RUN") as out:
+        test_js_suite(_VITEST_SUITE)
+    assert out.type is (pytest.fail.Exception if required else pytest.skip.Exception)
+
+
+def test_a_node_test_suite_does_not_need_vitest(monkeypatch):
+    """The collab suite still runs under ``node --test`` when Vitest is absent."""
+    calls = []
+    monkeypatch.setattr(shutil, "which", lambda _: "/opt/node")
+    monkeypatch.setattr(sys.modules[__name__], "VITEST", ROOT / "no-such-vitest.mjs")
+    monkeypatch.setenv("CHELA_REQUIRE_JS_TESTS", "1")
+    monkeypatch.setattr(
+        sys.modules[__name__], "run_contained",
+        lambda argv, **kw: (calls.append(argv), subprocess.CompletedProcess(argv, 0, b"", b""))[1],
+    )
+    test_js_suite(_NODE_SUITE)
+    assert calls == [["/opt/node", "--test", str(_NODE_SUITE)]]
+
+
+def test_a_failing_suite_fails_its_item_and_never_reads_as_a_load_error(monkeypatch):
+    """A red suite is a pytest FAILURE naming the file; Vitest's "<N> error" count is rewritten so the
+    judge does not count it as a test that failed to load (see ``test_frontend._shown``)."""
+    # `{n}`, not a digit: pytest prints this source on failure, which must not read as one.
+    n = 1
+    out = f" FAIL  tests/approvals.test.mjs\n Tests  {n} failed\n Errors  {n} error\n".encode()
+    err = f"{n + 1} errors".encode()
+    monkeypatch.setattr(
+        sys.modules[__name__], "run_contained",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, out, err),
+    )
+    with pytest.raises(pytest.fail.Exception) as failed:
+        test_js_suite(_VITEST_SUITE)
+    msg = str(failed.value)
+    # Booleans, not `in msg`: pytest would print the message, and its error count would be read
+    # by the judge as the very load error this test rules out.
+    names_the_file = msg.startswith("tests/approvals.test.mjs failed:\n FAIL  tests/approvals")
+    rewritten = "1 \N{MULTIPLICATION SIGN} error" in msg and "2 \N{MULTIPLICATION SIGN} errors" in msg
+    assert names_the_file
+    assert rewritten
+
+
+def _vitest(*args: str) -> subprocess.CompletedProcess:
+    node = _node_or_skip([VITEST_CONFIG])
+    _vitest_or_skip(VITEST_CONFIG)
+    return run_contained([node, str(VITEST), *args, "--config", str(VITEST_CONFIG)],
+                         timeout=120, cwd=str(ROOT), env=_clean_env())
+
+
+def test_vitest_finds_exactly_the_discovered_dashboard_suites():
+    """The config's include list and this file's glob must agree: an include that matches
+    nothing (or drops a suite) is the CMX-65 bug again, one layer down."""
+    proc = _vitest("list", "--filesOnly", "--json")
+    assert proc.returncode == 0, _shown(proc.stdout + proc.stderr, 2000)
+    found = {Path(f["file"]) for f in json.loads(proc.stdout)}
+    assert found == {p for p in _SUITES if runs_under_vitest(p)}
+
+
+def test_a_vitest_run_that_finds_no_file_fails():
+    """A filter that matches no suite must be red, never a green run of nothing."""
+    proc = _vitest("run", "tests/no_such_suite.test.mjs")
+    assert proc.returncode != 0
+    assert "No test files found" in proc.stdout.decode() + proc.stderr.decode()

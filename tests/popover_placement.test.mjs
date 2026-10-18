@@ -14,9 +14,9 @@
 // the REAL onclick attributes. The pixel version of the same claims — a real
 // Chromium at 1920×916, 1440×900 and 390×844 — is tests/browser/dashboard.test.mjs.
 //
-// Run: node --test tests/popover_placement.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/popover_placement.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 
@@ -31,7 +31,7 @@ const BODY = `
 </div>`;
 
 let win, doc;
-before(async () => {
+beforeAll(async () => {
     ({ dom: { window: win } } = await bootDashboardDom({ body: BODY }));
     doc = win.document;
 });

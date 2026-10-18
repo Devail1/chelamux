@@ -8,9 +8,9 @@
 // read through the CSSOM of the REAL style.css (parsed by jsdom), and the pane
 // element's own cascaded box-shadow through getComputedStyle.
 //
-// Run: node --test tests/wall_focus_ring_overlay_css.test.mjs (tests/test_js_suites.py
+// Run: pnpm exec vitest run tests/wall_focus_ring_overlay_css.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery; needs `pnpm install` for jsdom).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

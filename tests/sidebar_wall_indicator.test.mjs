@@ -10,9 +10,9 @@
 // nav.js (renderSidebarAgents into a REAL #sidebar-agents), so the cue is asserted on
 // what RENDERS off the SAME live module state the wall itself uses — not a source grep.
 //
-// Run: node --test tests/sidebar_wall_indicator.test.mjs  (pytest runs it via
+// Run: pnpm exec vitest run tests/sidebar_wall_indicator.test.mjs  (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -72,7 +72,7 @@ function fakeGridStack() {
 
 let terminals, nav, util;
 
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     dom.window.TERMINALS_ENABLED = true;

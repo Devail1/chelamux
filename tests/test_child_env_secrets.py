@@ -211,7 +211,7 @@ def test_suite_run_carries_no_secret(monkeypatch, tmp_path, secret_env):
         seen.append(k)
         return SimpleNamespace(stdout="1 passed\n", stderr="", returncode=0)
 
-    monkeypatch.setattr(judge.subprocess, "run", fake_run)
+    monkeypatch.setattr(judge.procguard, "run_shell_group", fake_run)
     judge.run_suite("true", tmp_path)
     assert len(seen) == 1
     env = _effective(seen[0])

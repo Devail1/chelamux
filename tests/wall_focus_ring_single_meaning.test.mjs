@@ -13,9 +13,9 @@
 // (getComputedStyle); the ::before overlay (which jsdom cannot resolve) through the
 // CSSOM of the REAL style.css, as tests/wall_focus_ring_overlay_css.test.mjs does.
 //
-// Run: node --test tests/wall_focus_ring_single_meaning.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/wall_focus_ring_single_meaning.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

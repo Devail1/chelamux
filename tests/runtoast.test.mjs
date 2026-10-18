@@ -1,8 +1,8 @@
 // Deterministic unit tests for runtoast.js — the pure edge-trigger behind the
 // dispatcher run-state toasts. The DOM render + mute wiring live in sse.js/nav.js
 // and are validated in-browser; the transition logic that keeps the toast from
-// spamming every SSE poll is proven here. Run: node --test tests/  (or `uv run pytest -q` — tests/test_js_suites.py runs every .test.mjs)
-import { test } from 'node:test';
+// spamming every SSE poll is proven here. Run: pnpm exec vitest run  (or `uv run pytest -q` — tests/test_js_suites.py runs every .test.mjs)
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { runToastKind, RUN_TOAST_KINDS } from '../chela/dashboard/static/js/runtoast.js';
 

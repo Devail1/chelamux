@@ -3,7 +3,7 @@
 // runs it too) plus enter*() re-seeds, so almost every boot read ran 2-5×, and refresh()
 // chained summary → sidebar → /api/restore → … → overrides with the wall's tick LAST.
 // Real index.html + main.js graph; each boot is a fresh page from its own static/js copy.
-import { after, test } from 'node:test';
+import { afterAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { cpSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,7 +17,7 @@ const BODY = sliceTemplate('<div class="app">', END, { terminals_enabled: true, 
     .slice(0, -END.length);
 const WIDS = ['@1', '@2', '@3'];
 const AGENTS = WIDS.map((w, i) => ({ name: `agent-${i}`, window_id: w, online: true, session_status: 'idle' }));
-const tmp = mkdtempSync(join(tmpdir(), 'chela-cmx166-')); after(() => rmSync(tmp, { recursive: true, force: true }));
+const tmp = mkdtempSync(join(tmpdir(), 'chela-cmx166-')); afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
 const GRID = new Proxy({ engine: { nodes: [] }, save: () => [], getGridItems: () => [] },
     { get: (t, k) => (k in t ? t[k] : el => el) });   // GridStack: the tile DOM is real

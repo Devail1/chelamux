@@ -8,9 +8,9 @@
 // This file drives the REAL renderKanban through a real DOM and reads the board back.
 // Each test carries its negative control.
 //
-// Run: node --test tests/kanban_tracker_render.test.mjs (tests/test_js_suites.py runs every
+// Run: pnpm exec vitest run tests/kanban_tracker_render.test.mjs (tests/test_js_suites.py runs every
 // .test.mjs inside pytest, by discovery).
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 import { columnKey } from '../chela/dashboard/static/js/kanbanlinearmodel.js';
@@ -38,7 +38,7 @@ const LINEAR = [
 
 let renderKanban;
 
-before(async () => {
+beforeAll(async () => {
     ({ modules: { kanban: { renderKanban } } } = await bootDashboardDom({
         body: KANBAN_BODY, extraModules: ['kanban.js'],
     }));    // CMX-136 hides an EMPTY column by default (tests/kanban_hidden_columns.test.mjs). These

@@ -6,9 +6,9 @@
 // tests/kanban_flatten.test.mjs, and reads the rendered anchors back — not a source grep.
 // The server half (adapter → run row → /api/dispatcher) is tests/test_tracker_url.py.
 //
-// Run: node --test tests/kanban_tracker_link.test.mjs (pytest runs it via
+// Run: pnpm exec vitest run tests/kanban_tracker_link.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom.)
-import { before, test } from 'node:test';
+import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
@@ -25,7 +25,7 @@ const BODY = `
 
 let renderKanban;
 
-before(async () => {
+beforeAll(async () => {
     void JSDOM;
     ({ modules: { kanban: { renderKanban } } } = await bootDashboardDom({
         body: BODY, extraModules: ['kanban.js'],

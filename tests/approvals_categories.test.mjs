@@ -8,8 +8,8 @@
 //   D. rows keep the server's order (oldest first); both kinds render their own fields;
 //   E. a failed fetch keeps what was known — it never turns into "nothing is waiting".
 //
-// Run: node --test tests/approvals_categories.test.mjs (pytest runs it via test_js_suites.py).
-import { before, beforeEach, test } from 'node:test';
+// Run: pnpm exec vitest run tests/approvals_categories.test.mjs (pytest runs it via test_js_suites.py).
+import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -25,7 +25,7 @@ function fakeFetch(url, opts) {
 }
 
 let pa;
-before(async () => {
+beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body><button id="btn-approvals" hidden><span class="pa-pill-text"></span></button></body></html>`,
         { url: 'http://localhost:5005/' });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement', 'Element', 'Node', 'Event', 'KeyboardEvent']) {
