@@ -86,7 +86,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import envutil, judge_select, procguard
+from chela import envutil, judge_select, procguard, toolconfig
 
 log = logging.getLogger(__name__)
 
@@ -398,6 +398,8 @@ class Outcome:
     # FLIPPED between KILLED and SURVIVED. A flaky outcome never blocks — the operator decides.
     rerun_verdict: str = ""
     flaky: bool = False
+    # ⚖️🧰 CMX-259: why this survivor is ADVISORY ("" = it is not) — see chela/toolconfig.py.
+    advisory: str = ""
 
     @property
     def held_out(self) -> bool:
@@ -405,7 +407,7 @@ class Outcome:
 
     @property
     def blocking(self) -> bool:
-        return self.verdict == SURVIVED and not self.flaky
+        return self.verdict == SURVIVED and not self.flaky and not self.advisory
 
     @property
     def measured_by(self) -> str:
@@ -428,7 +430,7 @@ class Outcome:
             "selected": self.selected, "confirmed_full": self.confirmed_full,
             "selection": self.selection, "seconds": round(self.seconds, 1),
             "held_out": self.held_out, "rerun_verdict": self.rerun_verdict,
-            "flaky": self.flaky,
+            "flaky": self.flaky, "advisory": self.advisory,
         }
 
 
@@ -498,6 +500,10 @@ class Report:
     @property
     def flaky(self) -> list[Outcome]:
         return [o for o in self.outcomes if o.flaky]
+
+    @property
+    def advisory(self) -> list[Outcome]:
+        return [o for o in self.outcomes if o.advisory]
 
     @property
     def state(self) -> str:
@@ -1528,10 +1534,14 @@ def run_experiments(
     consistency_sample: int = 0,
     max_experiments: int = MAX_EXPERIMENTS,
     risk: str = "",
+    tool_config: tuple[str, ...] = toolconfig.DEFAULT_GLOBS,
     progress=None,
     heartbeat=None,
 ) -> Report:
     """Execute every proposed experiment IN THIS WORKTREE and adjudicate each one.
+
+    ⚖️🧰 CMX-259: experiments on ``tool_config`` files run LAST, and their unclaimed
+    survivors are advisory — see :mod:`chela.toolconfig`.
 
     ⏱️ CMX-411: ``progress``, when given, is called ``progress(done, total)`` as each
     experiment starts and once more when they are all done — what ``chela doctor`` reads to
@@ -1600,7 +1610,7 @@ def run_experiments(
                               base_branch=base_branch, select_tests=select_tests,
                               consistency_sample=consistency_sample,
                               max_experiments=max_experiments, risk=risk,
-                              progress=progress, heartbeat=heartbeat)
+                              tool_config=tool_config, progress=progress, heartbeat=heartbeat)
     report.battery_seconds = time.monotonic() - started
     log.info("judge: mutation battery took %s (%d experiment(s))",
              _duration(report.battery_seconds), len(report.outcomes))
@@ -1610,7 +1620,7 @@ def run_experiments(
 def _run_experiments(
     worktree: Path, test_cmd: str, raw: dict, *, timeout: float, base_branch: str,
     select_tests: bool, consistency_sample: int, max_experiments: int, risk: str,
-    progress=None, heartbeat=None,
+    tool_config: tuple[str, ...] = toolconfig.DEFAULT_GLOBS, progress=None, heartbeat=None,
 ) -> Report:
     report = Report(risk=risk, cap=max(1, int(max_experiments)))
     items = raw.get("experiments") if isinstance(raw, dict) else None
@@ -1648,6 +1658,7 @@ def _run_experiments(
         report.cannot_verify_final = True
         return report
 
+    items = toolconfig.code_first(items, tool_config)
     if len(items) > report.cap:
         report.dropped = len(items) - report.cap
         items = items[:report.cap]
@@ -1724,6 +1735,7 @@ def _run_experiments(
     if contamination:
         report.cannot_verify = contamination
         return report
+    toolconfig.classify(outcomes, worktree, base_branch, tool_config)
 
     if consistency_sample > 0:
         contamination = _check_consistency(
@@ -1733,7 +1745,9 @@ def _run_experiments(
         if contamination:
             report.cannot_verify = contamination
             return report
-        if report.flaky and not any(o.blocking for o in outcomes):
+        # ⚖️🧰 CMX-259: an ADVISORY survivor could never block, so its flip is not an unknown.
+        if (any(not o.advisory for o in report.flaky)
+                and not any(o.blocking for o in outcomes)):
             # ⚖️🎲 Nothing blocks ONLY because a survivor flipped. That is not a clean bill of
             # health either — it is a guard nobody can say holds. The operator decides.
             report.cannot_verify = (
@@ -2153,6 +2167,17 @@ def _held_out_section(report: Report) -> str:
     ])
 
 
+def _advisory_section(report: Report) -> str:
+    """⚖️🧰 CMX-259: tool-config survivors — listed, never blocking (CI is their guard)."""
+    if not report.advisory:
+        return ""
+    lines = ["### 🧰 advisory — tool config CI enforces; not blocking", ""]
+    for o in report.advisory:
+        lines.append("- a held-out experiment (withheld by design)" if o.held_out
+                     else f"- `{o.experiment.file}`: {o.experiment.guard} — {o.advisory}")
+    return "\n".join([*lines, ""]) + "\n"
+
+
 def _flaky_section(report: Report) -> str:
     """⚖️🎲 CMX-395: experiments whose outcome FLIPPED between two identical runs."""
     if not report.flaky:
@@ -2232,6 +2257,9 @@ def block_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
     flaky = _flaky_section(report)
     if flaky:
         parts.append(flaky)
+    advisory = _advisory_section(report)
+    if advisory:
+        parts.append(advisory)
     parts += [
         "### What to do",
         "",
@@ -2288,8 +2316,8 @@ def comment_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
             *([timing, ""] if timing else []),
             *risk_line(report),
             f"chela corrupted each guard this PR adds and re-ran `{test_cmd}` "
-            f"(baseline: {_suite_line(report.baseline)}). **Every mutation made the suite go "
-            "red** — the guards guard.",
+            f"(baseline: {_suite_line(report.baseline)}). **Every blocking mutation made the "
+            "suite go red** — the guards guard.",
             "",
             "⛔ This is not an approval and it is not a merge: the judge only ever reports "
             "whether the PR's own proof can fail. The merge is still the orchestrator's call.",
@@ -2304,6 +2332,8 @@ def comment_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
             verdict = f"**{o.verdict}**"
             if o.flaky:
                 verdict += f" 🎲 flaky (re-run: {o.rerun_verdict})"
+            if o.advisory:
+                verdict += " 🧰 advisory"
             head.append(
                 f"| {o.experiment.guard[:60]} | `{o.experiment.file}` | {verdict} | {why} "
                 f"| {o.measured_by} |"
@@ -2314,6 +2344,8 @@ def comment_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
                      "comment by design, so a rework cannot tune itself to them."]
     if report.flaky:
         head += ["", _flaky_section(report).rstrip()]
+    if report.advisory:
+        head += ["", _advisory_section(report).rstrip()]
     if report.dropped:
         head += ["", f"⚠️ {report.dropped} further experiment(s) were proposed and **not run** "
                      f"(the cap is {report.cap} — each one re-runs the whole suite)."]
@@ -2352,7 +2384,8 @@ def load_experiments(path: str | Path) -> tuple[dict, str]:
 
 def self_check(
     worktree: Path, test_cmd: str, raw: dict, *, timeout: float = SUITE_TIMEOUT_SECONDS,
-    select_tests: bool = True, budget=None,
+    select_tests: bool = True, budget=None, base_branch: str = "",
+    tool_config: tuple[str, ...] = toolconfig.DEFAULT_GLOBS,
 ) -> Report:
     """Run the judge's own mutation mechanics against YOUR OWN worktree, before you commit.
 
@@ -2388,7 +2421,8 @@ def self_check(
         SELF_CHECK_BUDGET_SECONDS, SELF_CHECK_MAX_EXPERIMENTS)
     started = _now()
     report = _self_check(worktree, test_cmd, raw, timeout=timeout, select_tests=select_tests,
-                         budget=budget, started=started)
+                         budget=budget, started=started, base_branch=base_branch,
+                         tool_config=tool_config)
     report.battery_seconds = _now() - started
     return report
 
@@ -2407,7 +2441,8 @@ def _mark_unrun(report: Report, items: list, why: str) -> None:
 
 def _self_check(
     worktree: Path, test_cmd: str, raw: dict, *, timeout: float, select_tests: bool,
-    budget, started: float,
+    budget, started: float, base_branch: str = "",
+    tool_config: tuple[str, ...] = toolconfig.DEFAULT_GLOBS,
 ) -> Report:
     report = Report()
     items = raw.get("experiments") if isinstance(raw, dict) else None
@@ -2451,6 +2486,8 @@ def _self_check(
         return report
 
     # ⏳ CMX-141: one experiment at a time, so the wall-clock budget is checked before each.
+    # ⚖️🧰 CMX-259: code experiments first — tool-config ones must not starve them.
+    items = toolconfig.code_first(items, tool_config)
     chosen = items[:budget.max_mutations]
     for n, raw_exp in enumerate(chosen):
         if _now() - started >= budget.seconds:
@@ -2464,6 +2501,7 @@ def _self_check(
         if contamination:
             report.cannot_verify = contamination
             return report
+    toolconfig.classify(report.outcomes, worktree, base_branch, tool_config)
     if len(items) > len(chosen):
         why = f"over the {budget.max_mutations}-experiment budget ({len(items)} given)"
         report.exhausted = report.exhausted or why
@@ -2511,6 +2549,8 @@ def run_self_check(
     to = timeout
     select = True
     wf = None
+    base_branch = ""
+    globs = toolconfig.DEFAULT_GLOBS
     if workflow_path:
         from chela import workflow as workflow_mod
 
@@ -2523,6 +2563,9 @@ def run_self_check(
         cmd = cmd or cfg.test_cmd
         to = to if to is not None else cfg.suite_timeout_seconds
         select = cfg.select_tests
+        globs = cfg.tool_config
+        base_branch = wf.get("workspace", "base_branch", default="")
+        base_branch = base_branch if isinstance(base_branch, str) else ""
     if not cmd:
         return {"ok": False, "error": "no suite to run — pass --test-cmd, or --workflow "
                                        "pointing at a WORKFLOW.md with `judge.test_cmd` set"}
@@ -2533,7 +2576,8 @@ def run_self_check(
         keys=("self_check_budget_seconds", "self_check_max_experiments"),
         defaults=(SELF_CHECK_BUDGET_SECONDS, SELF_CHECK_MAX_EXPERIMENTS))
 
-    report = self_check(worktree, cmd, raw, timeout=to, select_tests=select, budget=budget)
+    report = self_check(worktree, cmd, raw, timeout=to, select_tests=select, budget=budget,
+                        base_branch=base_branch, tool_config=globs)
     blocking = report.blocking
     state = report.state
     if state == J_CLEAN and report.unrun:
@@ -2716,16 +2760,16 @@ def judge_run(
                     worktree, test_cmd, raw, timeout=judge_cfg.suite_timeout_seconds,
                     base_branch=base_branch, select_tests=judge_cfg.select_tests,
                     consistency_sample=judge_cfg.consistency_sample,
-                    max_experiments=exp_cap, risk=risk, progress=_progress,
-                    heartbeat=_heartbeat,
+                    max_experiments=exp_cap, risk=risk, tool_config=judge_cfg.tool_config,
+                    progress=_progress, heartbeat=_heartbeat,
                 )
         else:
             report = run_experiments(
                 worktree, test_cmd, raw, timeout=judge_cfg.suite_timeout_seconds,
                 base_branch=base_branch, select_tests=judge_cfg.select_tests,
                 consistency_sample=judge_cfg.consistency_sample,
-                max_experiments=exp_cap, risk=risk, progress=_progress,
-                heartbeat=_heartbeat,
+                max_experiments=exp_cap, risk=risk, tool_config=judge_cfg.tool_config,
+                progress=_progress, heartbeat=_heartbeat,
             )
         report.risk, report.cap = risk, exp_cap
         report.total_seconds = _since(run.get("judge_started_at"))
@@ -3653,6 +3697,7 @@ class JudgeSuiteConfig:
     held_out_fraction: float = HELD_OUT_FRACTION
     consistency_sample: int = CONSISTENCY_SAMPLE
     select_tests: bool = True
+    tool_config: tuple[str, ...] = toolconfig.DEFAULT_GLOBS
 
 
 def judge_select_tests(wf) -> bool:
@@ -3683,6 +3728,7 @@ def judge_suite_config(wf) -> JudgeSuiteConfig:
         select_tests=judge_select_tests(wf),
         held_out_fraction=judge_held_out_fraction(wf),
         consistency_sample=judge_consistency_sample(wf),
+        tool_config=toolconfig.globs_from(wf.get("judge", "tool_config", default=None)),
     )
 
 
