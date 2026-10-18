@@ -83,6 +83,7 @@ const TYPE_CLASS = {
     run_reopened: 'run',
     run_was_closed: 'run',
     run_ci_red: 'run',
+    run_ci_flake: 'run',
     run_pr_conflicting: 'run',
     run_stuck: 'run',
     run_marker_unread: 'run',
