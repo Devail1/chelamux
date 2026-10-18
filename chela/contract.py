@@ -49,6 +49,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from chela import config, dispatcher, event_log, notify, risktier
@@ -97,6 +98,11 @@ GIT_TIMEOUT = dispatcher.GIT_NET_TIMEOUT_SECONDS
 # head sha, the judge state it overrode, the reason) to the event log and the run's review
 # history BEFORE the merge, and the reason rides in the squash body.
 #
+# CMX-205: GitHub computes `mergeable` lazily after the base moves, answering UNKNOWN for a
+# few seconds. Clause 6 re-reads it after each of these delays (≤30s in all) before refusing.
+MERGEABLE_POLL_DELAYS = (1, 2, 4, 8, 15)
+_sleep = time.sleep
+
 # A run a human might reasonably override is not only `awaiting_review`: a judge that
 # blocked sends the run to `changes_requested`, and one that gave up sends it to
 # `needs_human`. Those are exactly the runs an override exists for (#529).
@@ -572,7 +578,12 @@ def _gate(run: dict, *, override: bool, actor: str | None,
         )
 
     # 6. Mergeable — GitHub's own verdict on whether the merge is clean, read live.
+    #    UNKNOWN is "not computed yet", never MERGEABLE: re-read it, bounded, then refuse.
+    delays = iter(MERGEABLE_POLL_DELAYS)
     pr_state, mergeable = dispatcher._read_pr_status(pr_url, repo_dir)
+    while mergeable == "UNKNOWN" and (delay := next(delays, None)) is not None:
+        _sleep(delay)
+        pr_state, mergeable = dispatcher._read_pr_status(pr_url, repo_dir)
     if pr_state and pr_state != "open":
         return _refuse(
             task_id, "escalate", pr_state=pr_state,
@@ -585,6 +596,17 @@ def _gate(run: dict, *, override: bool, actor: str | None,
                 "If merged, nothing to do — the task is done",
                 "If closed without merging, reopen it on GitHub and retry `chela merge`",
             ],
+        )
+    if mergeable == "UNKNOWN":
+        return _refuse(
+            task_id, "escalate", pr_mergeable=mergeable, mergeable_unknown=True,
+            error=f"GitHub still reports this PR's mergeability 'UNKNOWN' after "
+                  f"{sum(MERGEABLE_POLL_DELAYS)}s of re-reading (not computed yet — it is "
+                  "never read as MERGEABLE). Refusing to merge for now.",
+            recommendation="Retry `chela merge` in a minute — GitHub recomputes mergeability "
+                            "lazily after the base branch moves.",
+            options=["Retry `chela merge` in a minute",
+                     "If it stays UNKNOWN, check the PR on GitHub"],
         )
     if mergeable != "MERGEABLE":
         return _refuse(
@@ -790,10 +812,20 @@ def complete_override(rec: dict, approved_by: str) -> dict:
     head_sha = rec.get("head_sha")
     if not head_sha:
         return {"ok": False, "state": "failed", "detail": "the request names no head commit"}
+    # CMX-205: a MERGED PR reports mergeable UNKNOWN forever — ask whether it already landed
+    # BEFORE any mergeability clause, so a late approval never announces a failure for it.
+    sha = _own_merge_sha(run["task_id"], run.get("pr_url"))
+    wf = run.get("workflow_path")
+    if sha is not None or (wf and dispatcher._read_pr_status(
+            run.get("pr_url"), str(Path(wf).parent))[0] == "merged"):
+        return {"ok": True, "state": "merged", "already_merged": True,
+                "detail": "already merged" + (f" as {sha[:12]}" if sha else ""),
+                "merge_commit_sha": sha}
     # The approver is the operator, never the orchestrator's stamp — so no lease clause here.
     gate = _gate(run, override=True, actor="", expect_head=head_sha)
     if not gate.get("ok"):
-        state = "expired" if gate.get("head_moved") else "failed"
+        state = ("expired" if gate.get("head_moved")
+                 else "approved" if gate.get("mergeable_unknown") else "failed")
         return {"ok": False, "state": state, "detail": gate.get("error")}
     if gate["base"] != rec.get("base"):
         return {"ok": False, "state": "failed",
@@ -822,6 +854,16 @@ def complete_override(rec: dict, approved_by: str) -> dict:
     return {"ok": True, "state": "merged", "detail": None,
             "merge_commit_sha": result.get("merge_commit_sha"),
             "event_seq": result.get("event_seq")}
+
+
+def _own_merge_sha(task_id: str, pr_url: str | None) -> str | None:
+    """The merge commit chela itself recorded for this run's PR (``orchestrator.merge``), or
+    None when chela never merged it."""
+    for ev in reversed(event_log.read(types=["orchestrator.merge"])["events"]):
+        payload = ev.get("payload") or {}
+        if payload.get("task_id") == task_id and payload.get("pr_url") == pr_url:
+            return payload.get("merge_commit_sha")
+    return None
 
 
 def escalate(summary: str, *, kind: str = "decision", recommendation: str = "",

@@ -313,6 +313,7 @@ def cmd_run(args) -> None:
             try:
                 from chela import overrides
                 overrides.sweep()
+                overrides.retry_approved()       # CMX-205: daemon-only, may poll ≤30s
             except Exception:
                 log.exception("Override request sweep failed")
 
@@ -3271,7 +3272,8 @@ def cmd_override(args) -> None:
     overrides.sweep()
     recs = overrides.all_requests()
     if not args.all:
-        recs = [r for r in recs if r.get("state") in (overrides.PENDING, overrides.MERGING)]
+        recs = [r for r in recs if r.get("state") in (overrides.PENDING, overrides.MERGING,
+                                                  overrides.APPROVED)]
     if not recs:
         print("No override request is pending." if not args.all else "No override requests.")
         return
