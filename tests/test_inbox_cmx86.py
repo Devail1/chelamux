@@ -1141,3 +1141,19 @@ def test_marker_unread_is_attributed_to_the_runs_window(monkeypatch):
     probe = {"T9": {"activity": now, "markers": {"task-finished": now - 3600}}}
     [e] = inbox.stuck_events([run], inbox._empty(), probe, now, now_epoch="e1")
     assert e["kind"] == "run_marker_unread" and e["wid"] == "@41"
+
+
+@pytest.mark.parametrize("failing", [(), ("",), ("  ",)])
+def test_a_ci_red_that_names_no_job_is_not_announced(failing, caplog):
+    """⛔ CMX-256: a red names its failing job. "CI RED — job ?" means a caller met a
+    rollup shape it did not classify — that is PENDING, never a notice (and never latched,
+    so the real red on this head still gets said)."""
+    run = _run("awaiting_review", pr_head_sha="5d44118")
+    assert inbox.ci_red(run, sha="5d44118", failing=failing, run_ids=("42",), log_tail="",
+                        sent_back=True) is False
+    assert _queued("run_ci_red") == []
+    assert "named no failing job" in caplog.text
+    assert inbox.ci_red(run, sha="5d44118", failing=("", "CI / lint"), run_ids=(),
+                        log_tail="", sent_back=True) is True
+    [event] = _queued("run_ci_red")
+    assert "job CI / lint —" in event["summary"]
