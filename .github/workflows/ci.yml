@@ -118,3 +118,25 @@ jobs:
         env:
           CHELA_REQUIRE_JS_TESTS: "1"
         run: uv run pytest -q
+
+  # CMX-176: the dashboard's React frontend. Its Vitest suite also runs inside Pytest above
+  # (tests/test_frontend.py, so the judge can grade TS).
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm -C chela/dashboard/frontend typecheck
+      - name: Lint
+        run: pnpm -C chela/dashboard/frontend lint
+      - name: Module boundaries (dependency-cruiser)
+        run: pnpm -C chela/dashboard/frontend lint:boundaries
+      - name: Test
+        run: pnpm -C chela/dashboard/frontend test
