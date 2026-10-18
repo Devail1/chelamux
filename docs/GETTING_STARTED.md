@@ -134,7 +134,10 @@ branch. What to do when a run stops for a human (retry, reopen, override, close)
 ## 5. Optional polish
 
 - **Exact context / rate-limit numbers**: `chela install-statusline --write`
-  installs the statusLine hook the dashboard reads.
+  installs the statusLine hook the dashboard reads. This is the default and works on
+  every Claude Code chela supports. On Claude Code 2.1.301 or later you can instead
+  opt in to the [`chela-hooks` Mod](../mods/chela-hooks/README.md), which feeds the same
+  cache and draws chela's status line without editing `settings.json`.
 - **Phone push when an agent blocks**: set `CHELA_NOTIFY_URL` (ntfy / Telegram /
   webhook); see [Needs-input notifications](https://chela.pages.dev/docs#needs-input).
 - **Remote access**: the dashboard binds `127.0.0.1` with no built-in auth by

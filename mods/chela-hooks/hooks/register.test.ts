@@ -104,12 +104,12 @@ test('nothing is posted without $CHELA_WID, and the gate still holds', async ($,
   expect(w.ran).toEqual([])
 })
 
-test('the daemon URL defaults to 127.0.0.1:5001', async ($, on) => {
+test('nothing is posted without $CHELA_MOD_HOOKS_URL (CMX-181: opt-in, never a default)', async ($, on) => {
   const clock = mock.clock(on)
   const w = world(on, { CHELA_WID: '@7' }, () => ({ exitCode: 0, stdout: '', stderr: '' }))
   await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 'x' } as any)
   await clock.settle()
-  expect(w.posts.map(p => p.url)).toEqual(['http://127.0.0.1:5001/hooks/Stop'])
+  expect(w.posts).toEqual([])
 })
 
 test('a dead daemon never fails the tool call', async ($, on) => {
