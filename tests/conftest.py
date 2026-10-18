@@ -300,6 +300,29 @@ os.environ["CHELA_DISPATCH_WORKFLOWS"] = ""
 # table hands the code one (see tests/test_runtime_truth.py).
 os.environ["CHELA_TMUX_SESSION"] = "chela-tests-no-such-session"
 
+# **And GitHub is live state too — the worst kind: a real `gh pr merge` merges a real PR.**
+# CMX-253: a sweep mutant in `overrides.resume` sent a test past its stubs into the merge
+# gate, which ran the REAL `gh` and blocked until the 1500s suite timeout (2026-10-18). Two
+# layers, like pm2's. Structurally, a `gh` that fails loudly at once goes first on PATH and
+# the token env is dropped, for every test and every subprocess a test starts: a read fails
+# closed in milliseconds instead of hanging on the network. In-process, :func:`_no_live_gh`
+# turns a MERGE that would reach that stub or the real `gh` into a test failure — the worst
+# case must never pass quietly as "gh failed, fail closed". A test that wants `gh` puts its
+# own fake earlier on PATH (or stubs the seam).
+_REAL_GH_BIN = shutil.which("gh")
+_REAL_GH_REALPATH = os.path.realpath(_REAL_GH_BIN) if _REAL_GH_BIN else None
+GH_FENCE_MESSAGE = ("chela tests: the real `gh` is fenced off (CMX-253) — stub the seam "
+                    "that calls it, or put a fake `gh` first on PATH")
+GH_STUB_DIR = SANDBOX_CHELA_DIR / "gh-fence"
+GH_STUB_DIR.mkdir()
+(GH_STUB_DIR / "gh").write_text(f"#!/bin/sh\necho '{GH_FENCE_MESSAGE}' >&2\nexit 97\n")
+(GH_STUB_DIR / "gh").chmod(0o755)
+os.environ["PATH"] = f"{GH_STUB_DIR}{os.pathsep}{os.environ.get('PATH', '')}"
+for _var in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+    os.environ.pop(_var, None)
+# …and no stored login either: even a real `gh` run by absolute path finds no credentials.
+os.environ["GH_CONFIG_DIR"] = str(GH_STUB_DIR / "config")
+
 # Collapse the dispatcher's seed-delivery confirm loop to ~instant. In production it polls a
 # freshly-spawned Claude window for up to 5×8s ≈ 44s, waiting for it to flip "busy" (see
 # dispatcher.SEED_CONFIRM_TIMEOUT_SECONDS). No test has a real TUI to flip, so every test
@@ -804,6 +827,51 @@ def _no_live_tmux_mutation(monkeypatch):
             reason = _tmux_violation(list(args), kw.get("env"))
             if reason is not None:
                 raise LiveTmuxMutationEscape(f"test issued a {reason}")
+        return real_init(self, args, *a, **kw)
+
+    monkeypatch.setattr(subprocess.Popen, "__init__", guarded_init)
+
+
+class LiveGhEscape(BaseException):
+    """A test ran the real ``gh`` (or the fence's stub standing in for it). ``BaseException``
+    like :class:`LiveTmuxMutationEscape`: the gh callers fail closed on ``Exception``."""
+
+
+def _gh_violation(args, env: dict | None) -> str | None:
+    """Why this Popen ``args`` would MERGE through the real ``gh`` (``gh pr merge``, or the
+    merge API) — or ``None`` if it would not."""
+    try:
+        words = (os.fsdecode(args).split() if isinstance(args, (str, bytes))
+                 else [os.fsdecode(a) for a in args])
+    except TypeError:
+        return None                        # not a path-like argv
+    if not words or os.path.basename(words[0]) != "gh":
+        return None
+    if not (("pr" in words and "merge" in words)
+            or any(w.rstrip("/").endswith(("/merge", "/merges")) for w in words)):
+        return None
+    prog = words[0]
+    # An explicit env with no PATH execs against the default path, not this process's.
+    path = os.environ.get("PATH") if env is None else env.get("PATH", os.defpath)
+    resolved = shutil.which(prog, path=path)
+    if resolved is None:
+        return None
+    real = os.path.realpath(resolved)
+    if real not in {os.path.realpath(GH_STUB_DIR / "gh"), _REAL_GH_REALPATH}:
+        return None                        # a test's own fake gh
+    return f"{GH_FENCE_MESSAGE}: {args!r}"
+
+
+@pytest.fixture(autouse=True)
+def _no_live_gh(monkeypatch):
+    """The fence: a merge that would run the real ``gh`` fails the test AT ONCE, before the
+    process starts — so a mutant that slips past a stub can never merge."""
+    real_init = subprocess.Popen.__init__
+
+    def guarded_init(self, args, *a, **kw):
+        reason = _gh_violation(args, kw.get("env"))
+        if reason is not None:
+            raise LiveGhEscape(reason)
         return real_init(self, args, *a, **kw)
 
     monkeypatch.setattr(subprocess.Popen, "__init__", guarded_init)

@@ -105,7 +105,7 @@ def test_the_comment_body():
                                                unsupported=["a.go"], not_applied=[{}]))
     assert body.startswith("<!-- chela-judge-sweep -->\n### ⚖️🧹 chela judge sweep — ❌ 2 "
                            "survivor(s)\n\n2 mutation(s) of the lines this PR changed vs `main`: "
-                           "1 killed, 2 survived, 1 skipped, 0 unrun · suite `pytest` · 1.0s\n")
+                           "1 killed, 2 survived, 1 skipped, 0 timeout, 0 unrun · suite `pytest` · 1.0s\n")
     assert body.count("- `calc.py:8` `` if-false: `if x:` → `if False and (x):` ``\n") == 2
     assert "\n- `a.go`\n" in body and "`` x` ``" == sweep_github._code("x`")
     assert "`chela judge sweep` could not run: no suite at all" in sweep_github.render_comment(
