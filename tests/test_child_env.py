@@ -165,7 +165,7 @@ def test_judge_suite_subprocess_gets_the_sanitised_env(monkeypatch, tmp_path, le
         seen.append(k)
         return SimpleNamespace(stdout="1 passed\n", stderr="", returncode=0)
 
-    monkeypatch.setattr(judge.subprocess, "run", fake_run)
+    monkeypatch.setattr(judge.procguard, "run_shell_group", fake_run)
     judge.run_suite("true", tmp_path)
     assert len(seen) == 1
     env = _effective(seen[0])

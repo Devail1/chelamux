@@ -3,7 +3,7 @@
 The judge, `chela judge self-check` and `chela task-finished --self-check-experiments` all
 run a repo's suite through one funnel, :func:`chela.judge.run_suite`. It is spawned from a
 dispatched agent's shell or the daemon's, and both carry the LIVE `CHELA_DIR` plus the
-agent's `CHELA_WID`. These tests read the env handed to `subprocess.run` itself — and run a
+agent's `CHELA_WID`. These tests read the env handed to the suite runner itself — and run a
 real child that reports what it sees — so the isolation is a property of the call site, not
 of whatever conftest the suite under test happens to ship.
 """
@@ -39,7 +39,8 @@ def _live_shell(monkeypatch, tmp_path) -> Path:
 
 
 def test_the_suite_subprocess_gets_a_fresh_chela_dir_and_no_identity(monkeypatch, tmp_path):
-    """🔴 GUARD — the env handed to `subprocess.run`. Corrupt by passing `os.environ` (or
+    """🔴 GUARD — the env handed to the suite runner (`procguard.run_shell_group`). Corrupt
+    by passing `os.environ` (or
     `_no_color_env()` alone) through ⇒ `CHELA_DIR` is the live dir and `CHELA_WID` is there
     ⇒ RED."""
     live = _live_shell(monkeypatch, tmp_path)
@@ -56,7 +57,7 @@ def test_the_suite_subprocess_gets_a_fresh_chela_dir_and_no_identity(monkeypatch
         seen["dir_existed"] = Path(env["CHELA_DIR"]).is_dir()
         return _Done()
 
-    monkeypatch.setattr(judge.subprocess, "run", fake_run)
+    monkeypatch.setattr(judge.procguard, "run_shell_group", fake_run)
     judge.run_suite("pytest -q", tmp_path)
 
     env = seen["env"]

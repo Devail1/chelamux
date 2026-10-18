@@ -47,8 +47,8 @@ def render_comment(result: dict) -> str:
         lines.append(
             f"{result.get('mutations', 0)} mutation(s) of the lines this PR changed vs "
             f"{_code(result.get('base', '?'))}: {result.get('killed', 0)} killed, "
-            f"{len(survivors)} survived, {skipped} skipped, {len(result.get('unrun') or [])} "
-            f"unrun · suite {_code(result.get('test_cmd', '?'))} · {result.get('seconds', 0)}s")
+            f"{len(survivors)} survived, {skipped} skipped, {len(result.get('timeout') or [])} "
+            f"timeout, {len(result.get('unrun') or [])} unrun · suite {_code(result.get('test_cmd', '?'))} · {result.get('seconds', 0)}s")
         if result.get("cannot_verify"):
             lines += ["", f"**Cannot verify:** {_one_line(result['cannot_verify'])}"]
         if survivors:
