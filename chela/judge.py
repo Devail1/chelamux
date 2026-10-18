@@ -134,6 +134,10 @@ J_STALE_HEAD = "stale_head"
 # moot (its commit cannot change), so this is a record, not a lever, exactly like every
 # other value here.
 J_UNJUDGED_MERGED = "unjudged_merged"
+# ⚖️🪜 CMX-208: every changed file is prose (`chela.risktier`), so no judge round ran.
+J_PROSE_ONLY = "prose_only"
+MERGE_READY = (J_CLEAN, J_PROSE_ONLY)
+PROSE_ONLY_DETAIL = "prose-only: every changed file is docs/changelog/media — no judge round"
 
 # A judge that proposes forty mutations is not being thorough, it is re-running the suite
 # forty times. The cap is enforced OUT LOUD (the report says what was dropped) — a silent
