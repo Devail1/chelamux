@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 
 from chela import config, contract, dispatcher
-from chela.judge import J_CLEAN
+from chela.judge import MERGE_READY
 
 log = logging.getLogger("chela.automerge")
 
@@ -71,7 +71,7 @@ def candidates() -> list[dict]:
     them, only who may act on the judge-clean, judge-current ones."""
     return [
         run for run in dispatcher.list_runs()
-        if run.get("status") == "awaiting_review" and run.get("judge_state") == J_CLEAN
+        if run.get("status") == "awaiting_review" and run.get("judge_state") in MERGE_READY
         and not _judge_verdict_is_stale(run)
     ]
 

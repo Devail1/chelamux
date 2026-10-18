@@ -13,6 +13,7 @@ Each refusal below is one clause of ``docs/ESCALATION_CONTRACT.md`` made mechani
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -23,6 +24,8 @@ from chela import config, contract, dispatcher, event_log
 from chela.dispatcher import CI_FAILING, CI_NONE, CI_PASSING, CI_PENDING, CI_UNKNOWN, CIStatus
 from chela.judge import J_BLOCKED, J_BLOCKED_RACE, J_CANNOT_VERIFY, J_RUNNING
 from chela.personas import lease
+
+_REAL_READ_PR_FILES = contract._read_pr_files
 
 
 def test_git_timeout_is_the_shared_network_timeout_not_its_own_constant(monkeypatch):
@@ -53,6 +56,11 @@ def test_git_timeout_is_the_shared_network_timeout_not_its_own_constant(monkeypa
     finally:
         monkeypatch.undo()
         importlib.reload(contract)
+
+
+@pytest.fixture(autouse=True)
+def _code_pr_files(monkeypatch):   # CMX-208: one code file is the judge tier
+    monkeypatch.setattr(contract, "_read_pr_files", lambda *a: ["chela/x.py"])
 
 
 @pytest.fixture(autouse=True)
@@ -798,3 +806,46 @@ def test_control_repo_self_protection_still_forbids_its_own_declared_main(tmp_pa
     assert result["ok"] is False
     assert result["tier"] == "never"
     squash.assert_not_called()
+
+
+
+# --- ⚖️🪜 CMX-208: the risk tier of the LIVE file list ---------------------------------------
+
+@pytest.mark.parametrize("judge_state, files, says", [
+    ("prose_only", ["docs/x.md", "README.md"], None),             # no judge round, merges
+    ("clean", ["chela/x.py"], None),                              # negative control
+    ("prose_only", ["docs/x.md", "chela/x.py"], "not prose-only"),
+    ("clean", ["WORKFLOW.md"], "'WORKFLOW.md', an ALWAYS-HUMAN path"),
+    ("clean", ["docs/x.md", ".github/workflows/ci.yml"], "'.github/workflows/ci.yml'"),
+    ("clean", None, "could not be read"),                         # unknown never reads as OK
+])
+def test_merge_gates_on_the_live_risk_tier(repo, judge_state, files, says):
+    _seed_run(repo, judge_state=judge_state)
+    with patch.object(contract, "_read_pr_files", return_value=files), \
+         patch.object(contract, "_read_pr_base", return_value="dev"), \
+         patch.object(dispatcher, "_read_pr_checks", return_value=CIStatus(CI_PASSING)), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(contract, "_squash_merge", return_value={"ok": True}) as squash:
+        result = contract.merge("t1")
+    assert result["ok"] is squash.called is (says is None)
+    if says:
+        _assert_actionable(result)
+        assert says in result["error"] and "--override" in result["recommendation"]
+    else:
+        event = event_log.read(types=["orchestrator.merge"])["events"][-1]
+        assert f"(judge {judge_state}, CI green, mergeable)" in event["summary"]
+
+
+@pytest.mark.parametrize("effect, files", [
+    (subprocess.CompletedProcess([], 0, " docs/x.md \n\nWORKFLOW.md\n"), ["docs/x.md", "WORKFLOW.md"]),
+    (subprocess.CompletedProcess([], 1, "docs/x.md\n"), None),
+    (subprocess.CompletedProcess([], 0, "\n"), None),
+    (FileNotFoundError("gh"), None), (subprocess.TimeoutExpired("gh", 60), None),
+])
+def test_read_pr_files_pins_its_argv_and_fails_closed(effect, files):
+    with patch.object(contract.subprocess, "run", side_effect=[effect]) as run:
+        assert _REAL_READ_PR_FILES("https://github.com/o/r/pull/7", "/r") == files
+    run.assert_called_once_with(["gh", "pr", "diff", "7", "--name-only"], cwd="/r",
+                                capture_output=True, text=True, timeout=60)
+    assert _REAL_READ_PR_FILES(None, "/r") is None
+    assert _REAL_READ_PR_FILES("https://github.com/o/r/pull/7", None) is None
