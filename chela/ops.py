@@ -27,7 +27,7 @@ import time
 from functools import cached_property
 from pathlib import Path
 
-from chela import config
+from chela import config, fleet
 
 BUDGET_S = 10.0
 INTERVAL_S = 30 * 60
@@ -42,7 +42,7 @@ WHACK_ROUNDS = 3
 OVER_STATUSES = ("done", "closed", "needs_human")
 TEST_RUNNERS = ("pytest", "py.test", "vitest")
 DETACHED_FLAG = "--detached-child"         # chela judge run --detach's own child
-FLEET_PAUSE_FILE = "fleet-pause.json"     # CMX-214's `--pause --all` state
+FLEET_PAUSE_FILE = fleet.STATE_FILE_NAME  # CMX-214's `--pause --all` state
 
 _TEST_ID_RE = re.compile(r"[\w./-]+::[^\s,;]+")
 _JUDGE_FILE_RE = re.compile(r"\*\*File:\*\* `([^`]+)`\s*```diff\n- ([^\n]*)")
