@@ -129,6 +129,9 @@ def _pnpm(cwd, script, *args):
         _did_not_run(f"{FRONTEND.relative_to(ROOT)}/node_modules is missing — the frontend "
                      f"`{script}` gate DID NOT RUN. Run `pnpm install` in {ROOT}.")
     env = {k: v for k, v in os.environ.items() if not k.startswith("NODE_CHANNEL")}
+    # GitHub Actions makes vitest/tsc colour their output; the assertions below match plain text.
+    env.pop("FORCE_COLOR", None)
+    env["NO_COLOR"] = "1"
     proc = run_contained([pnpm, "--silent", "run", script, *args], timeout=180,
                          cwd=str(cwd), env=env)
     # (code, stdout, stderr), never the process: an assert on `proc.returncode` makes pytest
@@ -209,7 +212,8 @@ def test_lint_boundaries_fails_on_exactly_the_imports_each_rule_forbids(tmp_path
 def test_test_fails_on_a_failing_spec_and_still_runs_the_real_ones(tmp_path):
     code, out, _ = _pnpm(_violating_copy(tmp_path, "test"), "test")
     assert code != 0, _shown(out, 4000)
-    assert re.search(r"Tests\s+1 failed \| 2 passed \(3\)", out.decode()), _shown(out, 4000)
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", out.decode())   # CI colours vitest's summary
+    assert re.search(r"Tests\s+1 failed \| 2 passed \(3\)", plain), _shown(out, 4000)
 
 
 def test_the_frontend_is_a_pnpm_workspace_member_with_exact_pins():
