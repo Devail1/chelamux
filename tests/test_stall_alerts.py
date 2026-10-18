@@ -277,6 +277,14 @@ def test_clean_unmerged_fires_once_per_run(sent, owner):
     assert len(_clean(sent)) == 2                    # a second run gets its own push
 
 
+@pytest.mark.parametrize("state, fires", [("prose_only", True), ("cannot_verify", False)])
+def test_a_merge_ready_prose_only_pr_also_alerts_when_unmerged(sent, owner, state, fires):
+    store, runs = inbox._empty(), [_clean_run(judge_state=state)]   # CMX-208
+    _tick(store, T0, owner, runs=runs)
+    _tick(store, T0 + CLEAN_S, owner, runs=runs)
+    assert len(_clean(sent)) == fires
+
+
 def test_clean_unmerged_fires_exactly_at_the_threshold(sent, owner):
     store = inbox._empty()
     runs = [_clean_run()]
