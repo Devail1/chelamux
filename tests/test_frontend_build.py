@@ -40,7 +40,8 @@ def test_the_module_paths_are_the_committed_dirs():
 
 
 def test_the_committed_build_matches_a_fresh_build_of_src():
-    """THE stale-asset check (CI runs it here and as its own frontend-job step)."""
+    """THE stale-asset check (CI runs it here and as its own frontend-job step). It also holds
+    chela/dashboard/frontend/vite.config.ts: any build option that changes the output is stale."""
     _need_vite()
     assert fb.check() == []
     entry = json.loads((BUILT / "manifest.json").read_text())["src/main.tsx"]
