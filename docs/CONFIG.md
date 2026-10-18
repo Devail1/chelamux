@@ -169,6 +169,24 @@ entry must have a test in `tests/test_runtime_truth.py` that **corrupts the owne
 asserts doctor goes red, naming the fact**. A check that has never been seen to go red is
 not a check.
 
+## Letting the orchestrator pause the fleet
+
+`chela dispatch --pause --all` interrupts dispatched agents for you, so an orchestrator
+session does not have to send keys or signals itself (Claude Code's auto-mode classifier
+may deny those). Allow the command in the orchestrator's `.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(chela dispatch --pause:*)",
+      "Bash(chela dispatch --resume:*)",
+      "Bash(chela dispatch --hold-status:*)"
+    ]
+  }
+}
+```
+
 ## `chela doctor`
 
 ```

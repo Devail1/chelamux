@@ -35,6 +35,7 @@ from chela import (
     doctor,
     epoch,
     event_log,
+    fleet,
     hold,
     hooks,
     inbox,
@@ -309,6 +310,7 @@ def cmd_run(args) -> None:
             try:
                 from chela import overrides
                 overrides.sweep()
+                overrides.retry_approved()       # CMX-205: daemon-only, may poll ≤30s
             except Exception:
                 log.exception("Override request sweep failed")
 
@@ -1301,6 +1303,15 @@ def cmd_dispatch_hold(args) -> bool:
             mine = inbox.caller_is_orchestrator()
         except Exception:  # noqa: BLE001 — a release must never fail on the inbox
             mine = False
+        # CMX-214: resume a --pause --all fleet first, while the hold still stands.
+        fleet_resumed = fleet.resume_all()
+        if fleet_resumed is not None:
+            sent = fleet_resumed["resumed"]
+            print(f"Fleet RESUMED — sent 'resume' to {sum(sent.values())} of {len(sent)} "
+                  "interrupted agent(s).")
+            for task, ok in sorted(sent.items()):
+                if not ok:
+                    print(f"  ⚠ {task}: 'resume' was NOT delivered — tell it by hand")
         released = hold.release(by=orchestrator.self_wid() or "", orchestrator=mine)
         if released is None:
             print("Dispatch was not held. Nothing to resume.")
@@ -1325,6 +1336,9 @@ def cmd_dispatch_hold(args) -> bool:
                   file=sys.stderr)
             raise SystemExit(1) from None
         _print_hold(held)
+        if getattr(args, "all", False):
+            for line in fleet.status_lines(fleet.pause_all(by=held.by)):
+                print(line)
         return True
 
     if args.hold_status:
@@ -1336,8 +1350,13 @@ def cmd_dispatch_hold(args) -> bool:
                   "releases it and resumes, loudly.")
         else:
             _print_hold(held)
+        for line in fleet.status_lines():
+            print(line)
         return True
 
+    if getattr(args, "all", False):
+        print("error: --all goes with --pause (chela dispatch --pause --all)", file=sys.stderr)
+        raise SystemExit(2)
     return False
 
 
@@ -3248,7 +3267,8 @@ def cmd_override(args) -> None:
     overrides.sweep()
     recs = overrides.all_requests()
     if not args.all:
-        recs = [r for r in recs if r.get("state") in (overrides.PENDING, overrides.MERGING)]
+        recs = [r for r in recs if r.get("state") in (overrides.PENDING, overrides.MERGING,
+                                                  overrides.APPROVED)]
     if not recs:
         print("No override request is pending." if not args.all else "No override requests.")
         return
@@ -3787,6 +3807,11 @@ def main() -> None:
              "re-spawns. Agents and judges already running are NOT stopped — they finish "
              "(the output lists them). Reconciliation continues. Take this BEFORE "
              "reordering the tracker.",
+    )
+    p_disp.add_argument(
+        "--all", action="store_true",
+        help="With --pause: also pause every dispatched agent (Escape + 'start nothing "
+             "until resume'; message only while it runs task-finished or a judge sweep).",
     )
     p_disp.add_argument("--resume", action="store_true", help="Release the queue hold")
     p_disp.add_argument(
