@@ -73,7 +73,7 @@ from chela.telegram.reconcile import (
     topic_name_for,
 )
 from chela.telegram.relay import BotSender, RegistryRelay, TelegramRelay
-from chela.telegram.topics import TopicLedger
+from chela.topic_ledger import TopicLedger
 
 __all__ = [
     "TranscriptMonitor",

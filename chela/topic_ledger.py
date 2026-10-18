@@ -54,7 +54,10 @@ class TopicLedger:
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps({"topics": self._topics}, indent=2) + "\n")
+        # tmp + replace: a crash mid-write must not truncate the ledger and orphan its topics.
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"topics": self._topics}, indent=2) + "\n")
+        os.replace(tmp, self._path)
 
     def get(self, thread) -> dict | None:
         return self._topics.get(str(thread))

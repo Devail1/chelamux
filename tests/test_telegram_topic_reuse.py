@@ -10,10 +10,10 @@ import itertools
 import pytest
 
 from chela import userconfig
-from chela.telegram import topics
+from chela import topic_ledger as topics
 from chela.telegram.bindings import BindingRegistry
 from chela.telegram.reconcile import TopicManager, delete_archived_topics, reconcile_bindings
-from chela.telegram.topics import TopicLedger
+from chela.topic_ledger import TopicLedger
 
 CHAT = "-100777"
 
@@ -227,6 +227,29 @@ def test_the_loop_runs_a_requested_cleanup_once(monkeypatch):
     _run_one_tick(monkeypatch)
     assert len(seen) == 1 and isinstance(seen[0][0], TopicLedger)
     assert userconfig.get(topics.CLEANUP_KEY) is None
+
+
+def test_a_failed_cleanup_keeps_the_request_and_the_tick_still_reconciles(monkeypatch):
+    from chela import telegram as tg
+    from tests.test_telegram_reconcile import _run_one_tick
+
+    def _boom(*a):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(tg, "delete_archived_topics", _boom)
+    userconfig.set_(topics.CLEANUP_KEY, 123.0)
+    try:
+        seen = _run_one_tick(monkeypatch)
+        assert userconfig.get(topics.CLEANUP_KEY) == 123.0
+        assert "kwargs" in seen                       # reconcile_bindings still ran
+    finally:
+        userconfig.set_(topics.CLEANUP_KEY, None)
+
+
+def test_the_ledger_is_written_whole_with_no_tmp_left(tmp_path):
+    path = tmp_path / "topics.json"
+    TopicLedger(path).closed("42")
+    assert TopicLedger(path).closed_threads() == ["42"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["topics.json"]
 
 
 def test_settings_route_stores_the_switch_and_the_cleanup_request(monkeypatch, tmp_path):

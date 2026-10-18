@@ -365,7 +365,7 @@ def reconcile_bindings(
       the resumed window is not handed a fresh topic first. Entries are POPPED as they are
       settled (bound, or found unusable); what is left is still waiting for its window to
       come up as an agent. A reopen that fails falls through to a fresh topic.
-    * ``ledger``      — a :class:`~chela.telegram.topics.TopicLedger` (CMX-204): every topic
+    * ``ledger``      — a :class:`~chela.topic_ledger.TopicLedger` (CMX-204): every topic
       created, closed, reopened or renamed here is recorded in it, and a window that needs
       a topic first REOPENS a closed one made for the same cwd (:func:`_reopen_for_cwd`)
       instead of creating one. ``None`` keeps the pre-CMX-204 behaviour.
