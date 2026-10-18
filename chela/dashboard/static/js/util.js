@@ -94,8 +94,7 @@ function lucideIcon(name, size = 16) {
     return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" `
         + `stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${_LUCIDE[name]}</svg>`;
 }
-// `icon(meaning)` draws a MEANING from icons.js (e.g. 'judge', 'warning'), not a raw
-// Lucide name, so the choice of shape lives in one table. Unknown meanings throw.
+// `icon(meaning)` draws a MEANING from icons.js ('judge'), not a raw Lucide name.
 function icon(meaning, size = 16) {
     if (!Object.hasOwn(ICONS, meaning)) throw new Error(`icon: unknown meaning "${meaning}" (not in ICONS)`);
     return lucideIcon(ICONS[meaning], size);

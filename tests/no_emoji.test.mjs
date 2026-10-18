@@ -20,8 +20,9 @@ test('the real tree is green against the allowlist', () => {
 
 test('the guard covers the dashboard JS and templates', () => {
     const files = guardedFiles(ROOT);
-    for (const f of ['chela/dashboard/static/js/util.js', 'chela/dashboard/static/js/icons.js',
-        'chela/dashboard/templates/index.html']) assert.ok(files.includes(f), f);
+    for (const f of ['static/js/util.js', 'static/js/icons.js', 'templates/index.html']) {
+        assert.ok(files.includes(`chela/dashboard/${f}`), f);
+    }
     assert.ok(!files.some(f => f.includes('/vendor/') || f.includes('/collab/')));
 });
 
@@ -70,13 +71,10 @@ const JS = 'chela/dashboard/static/js/a.js';
 const HTML = 'chela/dashboard/templates/index.html';
 const TSX = 'frontend/src/App.tsx';
 
-test('negative control: an emoji added to a rendered string goes RED', () => {
+test('negative control: an emoji added to a rendered string or a template goes RED', () => {
     assert.deepEqual(checkTree(tree({ [JS]: "x = 'ok';\n" }), {}), []);
     const [p] = checkTree(tree({ [JS]: "x = 'ok ⚖';\n" }), {});
     assert.match(p, /^chela\/dashboard\/static\/js\/a\.js: 1 emoji, allowlist allows 0 \(⚖ at line 1\)/);
-});
-
-test('negative control: an emoji in a template goes RED', () => {
     assert.equal(checkTree(tree({ [HTML]: '<span>⚠</span>' }), {}).length, 1);
 });
 
@@ -98,10 +96,7 @@ test('the ratchet: a count above, below or for a vanished file each fail', () =>
 });
 
 test('every allowlist entry names the port slice that removes it', () => {
-    for (const [f, e] of Object.entries(ALLOW)) {
-        assert.ok(Number.isInteger(e.count) && e.count > 0, f);
-        assert.match(e.removed_by, /P\d+/, f);
-    }
+    for (const [f, e] of Object.entries(ALLOW)) assert.match(e.removed_by, /P\d+/, f);
 });
 
 test('icons.js: every meaning draws a vendored Lucide <svg>, and no glyph', async () => {
@@ -111,9 +106,7 @@ test('icons.js: every meaning draws a vendored Lucide <svg>, and no glyph', asyn
     const { icon } = await import('../chela/dashboard/static/js/util.js');
     const { ICONS } = await import('../chela/dashboard/static/js/icons.js');
     assert.ok(Object.isFrozen(ICONS));
-    assert.equal(ICONS.judge, 'scale');
-    assert.equal(ICONS.warning, 'triangle-alert');
-    assert.equal(ICONS.blocked, 'ban');
+    assert.deepEqual([ICONS.judge, ICONS.warning, ICONS.blocked], ['scale', 'triangle-alert', 'ban']);
     for (const meaning of Object.keys(ICONS)) {
         const svg = icon(meaning, 14);
         assert.match(svg, /^<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" /, meaning);

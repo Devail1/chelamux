@@ -1,11 +1,7 @@
-// The dashboard's icon vocabulary (CMX-199): a MEANING name -> a Lucide icon name.
-// A meaning is chosen here once, and every surface draws it through `icon()` in
-// util.js. Pure data, no imports, so the React port's icons.ts (CMX-212 P04) takes
-// the same table unchanged and swaps only the renderer (lucide-react).
-//
-// Each entry replaces an emoji the legacy templates used (the glyph is noted, so a
-// conversion can find its meaning). Colour comes from the surface's state class via
-// `currentColor`; the shape still differs per state, so hue is never the only cue.
+// The dashboard's icon vocabulary (CMX-199): a MEANING -> a Lucide icon name, drawn by
+// `icon()` in util.js. Pure data, so the React port's icons.ts (CMX-212 P04) takes it
+// unchanged. Each entry notes the emoji it replaces. Colour comes from the surface's
+// state class via `currentColor`; shape differs per state, so hue is never the only cue.
 const ICONS = Object.freeze({
     judge: 'scale',                 // ⚖ judging, testing, pending approvals
     warning: 'triangle-alert',      // ⚠

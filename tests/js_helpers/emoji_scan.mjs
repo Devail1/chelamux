@@ -12,29 +12,18 @@ import ts from 'typescript';
 // Plain typography (→ · … ≥) and the geometric status dots (○ ● ◆) are not emoji.
 const EMOJI = /[\p{Extended_Pictographic}\u2600-\u27BF\u2387]/gu;
 
-const RENDERED = new Set([
-    ts.SyntaxKind.StringLiteral,
-    ts.SyntaxKind.NoSubstitutionTemplateLiteral,
-    ts.SyntaxKind.TemplateHead,
-    ts.SyntaxKind.TemplateMiddle,
-    ts.SyntaxKind.TemplateTail,
-    ts.SyntaxKind.JsxText,
-]);
+const K = ts.SyntaxKind;
+const RENDERED = new Set([K.StringLiteral, K.NoSubstitutionTemplateLiteral, K.TemplateHead,
+    K.TemplateMiddle, K.TemplateTail, K.JsxText]);
 
-function _hits(text, offset, lineOf) {
-    return [...text.matchAll(EMOJI)].map(m => ({ glyph: m[0], line: lineOf(offset + m.index) }));
-}
-
-function _lineOfIn(src) {
-    return pos => src.slice(0, pos).split('\n').length;
-}
+const _hits = (text, offset, lineOf) =>
+    [...text.matchAll(EMOJI)].map(m => ({ glyph: m[0], line: lineOf(offset + m.index) }));
+const _lineOfIn = src => pos => src.slice(0, pos).split('\n').length;
 
 // -> [{glyph, line}] for every emoji inside a rendered literal of `src`.
 function scanJs(src, fileName = 'x.js') {
-    const kind = /\.tsx$/.test(fileName) ? ts.ScriptKind.TSX
-        : /\.ts$/.test(fileName) ? ts.ScriptKind.TS
-        : /\.jsx$/.test(fileName) ? ts.ScriptKind.JSX : ts.ScriptKind.JS;
-    const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, kind);
+    const kind = { tsx: ts.ScriptKind.TSX, ts: ts.ScriptKind.TS, jsx: ts.ScriptKind.JSX }[fileName.split('.').pop()];
+    const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, kind ?? ts.ScriptKind.JS);
     const out = [];
     const lineOf = _lineOfIn(src);
     const walk = node => {
@@ -48,8 +37,8 @@ function scanJs(src, fileName = 'x.js') {
 // Blank a span but keep its newlines, so later line numbers stay true.
 const _blank = s => s.replace(/[^\n]/g, ' ');
 
-// -> [{glyph, line}] for every emoji in the template's text and attributes. HTML and
-// Jinja comments are skipped; an inline <script> is scanned as JS (its comments skipped).
+// -> [{glyph, line}] in a template's text and attributes, minus HTML/Jinja comments;
+// an inline <script> is scanned as JS.
 function scanHtml(src) {
     const out = [];
     const lineOf = _lineOfIn(src);
@@ -63,18 +52,12 @@ function scanHtml(src) {
     return out.sort((a, b) => a.line - b.line);
 }
 
-function _walk(dir, keep) {
-    if (!existsSync(dir)) return [];
-    return readdirSync(dir).flatMap(name => {
-        const p = join(dir, name);
-        if (statSync(p).isDirectory()) return name === 'node_modules' ? [] : _walk(p, keep);
-        return keep(name) ? [p] : [];
-    });
-}
+const _walk = (dir, keep) => !existsSync(dir) ? [] : readdirSync(dir).flatMap(name => {
+    const p = join(dir, name);
+    return statSync(p).isDirectory() ? (name === 'node_modules' ? [] : _walk(p, keep)) : keep(name) ? [p] : [];
+});
 
-// The files the guard covers, repo-relative. frontend/src is the React port's tree
-// (CMX-171): covered as soon as it exists, its own tests excepted (they may hold
-// emoji as fixtures).
+// Guarded files, repo-relative; frontend/src (CMX-171) once it exists, minus its tests.
 function guardedFiles(root) {
     const top = (sub, re) => {
         const dir = join(root, sub);
@@ -87,18 +70,13 @@ function guardedFiles(root) {
     ].map(p => relative(root, p)).sort();
 }
 
-function scanFile(root, rel) {
-    const src = readFileSync(join(root, rel), 'utf8');
-    return rel.endsWith('.html') ? scanHtml(src) : scanJs(src, rel);
-}
-
-// The ratchet. `allowlist` maps a repo-relative file to the EXACT number of emoji it
-// still carries. Returns one message per problem; [] means the guard is green.
+// The ratchet: `allowlist` maps a file to its EXACT emoji count. [] means green.
 function checkTree(root, allowlist) {
     const problems = [];
     const files = guardedFiles(root);
     for (const rel of files) {
-        const hits = scanFile(root, rel);
+        const src = readFileSync(join(root, rel), 'utf8');
+        const hits = rel.endsWith('.html') ? scanHtml(src) : scanJs(src, rel);
         const allowed = Object.hasOwn(allowlist, rel) ? allowlist[rel].count : 0;
         const where = hits.map(h => `${h.glyph} at line ${h.line}`).join(', ');
         if (hits.length > allowed) {
