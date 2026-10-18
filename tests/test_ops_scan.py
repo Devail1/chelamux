@@ -1,0 +1,349 @@
+"""CMX-260 — `chela ops scan`: one fixture per rule (a match AND a near-miss), the 10 s budget,
+read-only-ness, dedupe, the fleet-pause skip, and the daemon wiring. Fake /proc, fake logs —
+never the live fleet."""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from chela import main, ops
+from tests.test_doctor_notify import _run_daemon_ticks
+
+HZ = os.sysconf("SC_CLK_TCK")
+NOW = 1_800_000_000.0
+UPTIME = 100_000.0
+
+
+@pytest.fixture
+def env(tmp_path):
+    chela_dir, proc = tmp_path / "chela", tmp_path / "proc"
+    (chela_dir / "judge-heldout").mkdir(parents=True)
+    proc.mkdir()
+    (proc / "uptime").write_text(f"{UPTIME} 1.0\n")
+    return SimpleNamespace(dir=chela_dir, proc=proc, wt=chela_dir / "worktrees" / "chelamux")
+
+
+def add_proc(env, pid, argv, cwd, *, ppid=500, age=1800, cpu=0.0):
+    d = env.proc / str(pid)
+    d.mkdir()
+    start = int((UPTIME - age) * HZ)
+    fields = ["S", str(ppid)] + ["0"] * 9 + [str(int(cpu * HZ)), "0"] + ["0"] * 6 + [str(start)]
+    (d / "stat").write_text(f"{pid} (x y) " + " ".join(fields) + " 0 0\n")
+    (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+    os.symlink(str(cwd), d / "cwd")
+
+
+def src(env, **kw):
+    return ops.Sources(env.dir, env.proc, now=NOW, **kw)
+
+
+def write_events(env, events):
+    (env.dir / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+
+
+def set_runs(env, rows):
+    import sqlite3
+    conn = sqlite3.connect(env.dir / "scheduler.db")
+    conn.execute("CREATE TABLE runs (task_id TEXT, status TEXT, started_at TEXT)")
+    conn.executemany("INSERT INTO runs VALUES (?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+
+
+# --- rule 1: hung test run (CMX-205) -------------------------------------------------------
+
+@pytest.mark.parametrize("argv, where, age, cpu, hit", [
+    (["/v/bin/pytest", "-q"], "CMX-1", 1800, 0.0, True),
+    (["python3", "-X", "dev", "-m", "pytest"], "judge-CMX-1", 1800, 17.0, True),   # 0.94%
+    (["node", "vitest"], "CMX-1", 1800, 19.0, False),                     # 1.06% — busy
+    (["/v/bin/pytest"], "CMX-1", 1150, 0.0, False),                       # <20 min old
+    (["uv", "run", "pytest"], "CMX-1", 1800, 0.0, False),                 # the wrapper, not it
+    (["/v/bin/pytest"], None, 1800, 0.0, False),                          # not in a worktree
+])
+def test_hung_test_rule(env, argv, where, age, cpu, hit):
+    add_proc(env, 42, argv, env.wt / where if where else env.dir / "elsewhere", age=age, cpu=cpu)
+    got = ops.rule_hung_test(src(env), {})
+    assert [f["subject"] for f in got] == (["pid:42"] if hit else [])
+
+
+def test_hung_test_measures_since_the_previous_sample(env):
+    """A suite that burned CPU for 14 min then hung: busy over its life, idle since the last
+    scan. The near-miss: the same process still burning since that sample."""
+    add_proc(env, 42, ["/v/bin/pytest"], env.wt / "CMX-1", age=5400, cpu=840.0)
+    start = int((UPTIME - 5400) * HZ)
+    assert ops.rule_hung_test(src(env), {}) == []                 # 15.6% over its life
+    idle = {"cpu": {f"42:{start}": [NOW - 1800, 839.0]}}
+    busy = {"cpu": {f"42:{start}": [NOW - 1800, 600.0]}}
+    assert [f["evidence"]["span_s"] for f in ops.rule_hung_test(src(env), idle)] == [1800]
+    assert ops.rule_hung_test(src(env), busy) == []
+
+
+# --- rule 2: leaked process (CMX-253) ------------------------------------------------------
+
+@pytest.mark.parametrize("where, status, ppid, extra, hit", [
+    ("CMX-1", "done", 500, [], True),
+    ("judge-CMX-1", "needs_human", 500, [], True),
+    ("CMX-1", "closed", 500, [], True),
+    ("CMX-1", "running", 1, [], True),                       # orphaned
+    ("CMX-1", "running", 500, [], False),
+    ("judge-CMX-1", "awaiting_review", 1, ["--detached-child"], False),   # setsid on purpose
+    ("judge-CMX-1", "done", 1, ["--detached-child"], True),
+])
+def test_leaked_proc_rule(env, where, status, ppid, extra, hit):
+    set_runs(env, [("CMX-1", "running", "2026-01-01"), ("CMX-1", status, "2026-01-02")])
+    add_proc(env, 42, ["python3", "x", *extra], env.wt / where, ppid=ppid)
+    got = ops.rule_leaked_proc(src(env), {})
+    assert [(f["subject"], f["evidence"]["task"]) for f in got] == (
+        [("pid:42", "CMX-1")] if hit else [])
+
+
+def test_leaked_proc_reads_argv_paths_and_skips_unreadable_procs(env):
+    set_runs(env, [("CMX-2", "done", "2026-01-01")])
+    add_proc(env, 42, ["pytest", str(env.wt / "CMX-2" / "tests")], env.dir)
+    (env.proc / "43").mkdir()                                    # no stat: vanished mid-scan
+    assert [f["subject"] for f in ops.rule_leaked_proc(src(env), {})] == ["pid:42"]
+
+
+# --- rule 3: unsettled CI red (CMX-256) ----------------------------------------------------
+
+@pytest.mark.parametrize("payload, hit", [
+    ({"failing": ["", " "]}, True),
+    ({"failing": []}, True),
+    ({"failing": ["CI / test"], "checks": [{"name": "t", "status": "in_progress"}]}, True),
+    ({"failing": ["CI / test"], "checks": [{"name": "t", "status": "COMPLETED"}]}, False),
+    ({"failing": ["CI / test"]}, False),
+])
+def test_ci_red_rule(env, payload, hit):
+    write_events(env, [{"seq": 7, "ts": NOW, "type": "run_ci_red",
+                        "payload": dict(payload, task_id="CMX-1", ci_sha="abcdef123")},
+                       {"seq": 8, "type": "run_stuck", "payload": {"failing": []}}])
+    got = ops.rule_ci_red_unsettled(src(env), {})
+    assert [(f["subject"], f["evidence"]["seq"]) for f in got] == (
+        [("CMX-1@abcdef1", 7)] if hit else [])
+
+
+# --- rule 4: the same flake across judge baselines (CMX-195/257) ----------------------------
+
+def heldout(env, task, at, flakes=(), cannot=""):
+    rec = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at)), "task_id": task,
+           "baseline_flakes": list(flakes), "cannot_verify": cannot}
+    path = env.dir / "judge-heldout" / f"{task}.jsonl"
+    with open(path, "a") as fh:
+        fh.write(json.dumps(rec) + "\n")
+    os.utime(path, (at, at))
+
+
+def test_repeat_flake_rule_matches_across_tasks_via_flakes_and_red_baselines(env):
+    heldout(env, "CMX-1", NOW - 3600, flakes=["tests/a.py::t"])
+    heldout(env, "CMX-2", NOW - 60, cannot="(exited 1 — failing: tests/a.py::t, tests/b.py::u[x]).")
+    heldout(env, "CMX-3", NOW - 60, cannot="failing: tests/b.py::u[x]). RED")
+    got = {f["subject"]: sorted(f["evidence"]["tasks"]) for f in ops.rule_repeat_flake(src(env), {})}
+    assert got == {"tests/a.py::t": ["CMX-1", "CMX-2"], "tests/b.py::u[x]": ["CMX-2", "CMX-3"]}
+
+
+def test_repeat_flake_near_misses(env):
+    heldout(env, "CMX-1", NOW - 60, flakes=["tests/a.py::t"])
+    heldout(env, "CMX-1", NOW - 30, flakes=["tests/a.py::t"])     # same task again
+    heldout(env, "CMX-2", NOW - 25 * 3600, flakes=["tests/a.py::t"])  # older than 24 h
+    heldout(env, "CMX-3", NOW - 60, flakes=["tests/z.py::other"])
+    assert ops.rule_repeat_flake(src(env), {}) == []
+
+
+# --- rule 5: judge whack-a-mole (CMX-176/259) ----------------------------------------------
+
+def judge_body(*locs):
+    return "## ⚖️ THE JUDGE\n" + "".join(
+        f"### n\n\n**File:** `{f}`\n\n```diff\n- {line}\n+ x\n```\n" for f, line in locs)
+
+
+@pytest.mark.parametrize("rounds, hit", [
+    ([[("a.py", "x")], [("b.py", "x")], [("c.py", "x")]], True),
+    ([[("a.py", "x")], [("a.py", "y")], [("a.py", "z")]], True),        # moved line, same file
+    ([[("a.py", "x")], [("b.py", "x")], [("a.py", "x"), ("c.py", "q")]], True),
+    ([[("a.py", "x")], [("a.py", "x")], [("b.py", "x")]], False),       # one stubborn guard
+    ([[("a.py", "x")], [("b.py", "x")]], False),                        # only 2 rounds
+])
+def test_whack_a_mole_rule(env, rounds, hit):
+    reviews = [{"round": i, "body": judge_body(*locs)} for i, locs in enumerate(rounds)]
+    reviews.insert(1, {"round": 9, "body": "human review, no survivors"})
+    write_events(env, [{"seq": 3, "type": "run_changes_requested",
+                        "payload": {"task_id": "CMX-1", "reviews": reviews[:1]}},
+                       {"seq": 4, "type": "run_changes_requested",
+                        "payload": {"task_id": "CMX-1", "reviews": reviews}}])
+    got = ops.rule_judge_whack_a_mole(src(env), {})
+    assert [(f["subject"], f["evidence"]["seq"]) for f in got] == ([("CMX-1", 4)] if hit else [])
+
+
+# --- rule 6: notice storm (CMX-250) --------------------------------------------------------
+
+@pytest.mark.parametrize("spec, hit", [
+    ([("run_stuck", "CMX-1", 0), ("run_stuck", "CMX-1", 1700), ("run_stuck", "CMX-1", 3600)], True),
+    ([("run_stuck", "CMX-1", 0), ("run_stuck", "CMX-1", 1700), ("run_stuck", "CMX-1", 3601)], False),
+    ([("run_stuck", "CMX-1", 0), ("run_stuck", "CMX-2", 10), ("run_stuck", "CMX-1", 20)], False),
+    ([("run_stuck", "CMX-1", 0), ("run_ci_red", "CMX-1", 10), ("run_stuck", "CMX-1", 20)], False),
+    ([("daemon_start", "CMX-1", 0), ("daemon_start", "CMX-1", 1), ("daemon_start", "CMX-1", 2)], False),
+])
+def test_notice_storm_rule(env, spec, hit):
+    write_events(env, [{"seq": i, "type": k, "ts": NOW + t, "payload": {"task_id": task}}
+                       for i, (k, task, t) in enumerate(spec)])
+    got = ops.rule_notice_storm(src(env), {})
+    assert [(f["subject"], f["evidence"]["seqs"]) for f in got] == (
+        [("run_stuck:CMX-1", [0, 1, 2])] if hit else [])
+
+
+def test_events_are_read_from_the_tail_only(env, monkeypatch):
+    monkeypatch.setattr(ops, "TAIL_BYTES", 300)
+    old = {"seq": 1, "type": "run_ci_red", "payload": {"task_id": "OLD", "failing": []}}
+    write_events(env, [old] + [{"seq": i, "type": "x", "pad": "p" * 40} for i in range(2, 9)])
+    assert [e["seq"] for e in src(env).events] == [6, 7, 8]       # ~75-byte lines; 1st is cut
+
+
+# --- budget, crash isolation ---------------------------------------------------------------
+
+def test_budget_constants_are_the_documented_ones():
+    assert (ops.BUDGET_S, ops.INTERVAL_S, ops.RENOTIFY_S) == (10.0, 1800, 21600)
+
+
+def test_a_slow_source_yields_a_partial_result_within_the_budget(env):
+    release = threading.Event()
+
+    def fast(s, st):
+        return [ops._finding("fast", "s", "found")]
+
+    def slow(s, st):
+        release.wait(30)
+        return [ops._finding("slow", "s", "late")]
+
+    t0 = time.monotonic()
+    res = ops.scan(src(env), budget=0.5, rules=(fast, slow, fast))
+    release.set()
+    assert time.monotonic() - t0 < 2
+    assert (res["partial"], res["rules_done"], [f["rule"] for f in res["findings"]]) == (
+        True, ["fast"], ["fast"])
+
+
+def test_a_rule_that_raises_is_reported_and_the_rest_still_run(env):
+    def boom(s, st):
+        raise RuntimeError("bad source")
+
+    res = ops.scan(src(env), rules=(boom, ops.rule_notice_storm))
+    assert res["partial"] is False and res["errors"] == {"boom": "RuntimeError: bad source"}
+    assert res["rules_done"] == ["boom", "notice_storm"]
+
+
+# --- scheduled: record, dedupe, pause, read-only --------------------------------------------
+
+@pytest.fixture
+def leaky(env, monkeypatch):
+    set_runs(env, [("CMX-1", "done", "2026-01-01")])
+    add_proc(env, 42, ["sleep"], env.wt / "CMX-1")
+    sent = []
+    monkeypatch.setattr("chela.inbox.enqueue", lambda *a: sent.append(a) or True)
+    monkeypatch.setattr("chela.event_log.log_path", lambda: env.dir / "events.jsonl")
+    clock = [NOW]
+    monkeypatch.setattr(ops.time, "time", lambda: clock[0])
+    return SimpleNamespace(sent=sent, clock=clock,
+                           run=lambda: ops.scheduled(env.dir, env.proc))
+
+
+def test_scheduled_notifies_once_then_renotifies_after_6h(env, leaky):
+    leaky.run()
+    leaky.clock[0] += 6 * 3600 - 1
+    leaky.run()
+    assert [(k, len(p["findings"])) for k, _, p in leaky.sent] == [("ops_findings", 1)]
+    assert "pid 42 under run CMX-1" in leaky.sent[0][1]
+    leaky.clock[0] += 1
+    leaky.run()
+    assert len(leaky.sent) == 2
+    lines = [json.loads(x) for x in (env.dir / "ops" / "findings.jsonl").read_text().splitlines()]
+    assert [(f["subject"], f["new"]) for f in lines] == [("pid:42", True), ("pid:42", False),
+                                                          ("pid:42", True)]
+
+
+def test_a_resolved_finding_that_recurs_is_new_again(env, leaky):
+    leaky.run()
+    os.unlink(env.proc / "42" / "stat")                          # the process is gone
+    leaky.clock[0] += 60
+    leaky.run()
+    add_proc(env, 43, ["sleep"], env.wt / "CMX-1")
+    os.rename(env.proc / "43" / "stat", env.proc / "42" / "stat")
+    leaky.clock[0] += 60
+    leaky.run()
+    assert len(leaky.sent) == 2
+
+
+@pytest.mark.parametrize("pause", ["{}", "not json"])
+def test_scheduled_skips_while_a_fleet_pause_is_active(env, leaky, pause):
+    (env.dir / "fleet-pause.json").write_text(pause)
+    assert leaky.run()["skipped"].startswith("a fleet pause")
+    assert leaky.sent == [] and not (env.dir / "ops").exists()
+
+
+def test_scheduled_is_read_only_outside_the_ops_dir(env, leaky, monkeypatch):
+    def snapshot():
+        return {p: p.stat().st_mtime_ns for p in env.dir.rglob("*") if p.is_file()}
+
+    before = snapshot()
+    kills = []
+    monkeypatch.setattr(os, "kill", lambda *a: kills.append(a))
+    monkeypatch.setattr(os, "killpg", lambda *a: kills.append(a))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: kills.append(a))
+    leaky.run()
+    changed = {p for p, m in snapshot().items() if before.get(p) != m}
+    assert {p.relative_to(env.dir).as_posix() for p in changed} == {
+        "ops/findings.jsonl", "ops/state.json"}
+    assert kills == [] and len(leaky.sent) == 1
+
+
+def test_the_cli_without_notify_writes_nothing(env, monkeypatch, capsys):
+    monkeypatch.setattr(main.config, "CHELA_DIR", env.dir)
+    monkeypatch.setattr("chela.event_log.log_path", lambda: env.dir / "events.jsonl")
+    write_events(env, [{"seq": 5, "type": "run_ci_red", "payload": {"task_id": "T", "failing": []}}])
+    main.cmd_ops_scan(SimpleNamespace(notify=False, json=True))
+    assert [f["subject"] for f in json.loads(capsys.readouterr().out)["findings"]] == ["T@"]
+    assert not (env.dir / "ops").exists()
+
+
+# --- spawning: detached, niced, never doubled; the daemon loop wiring -----------------------
+
+def test_spawn_is_detached_niced_and_not_doubled(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops.config, "CHELA_DIR", tmp_path)
+    monkeypatch.setattr(ops.shutil, "which", lambda name: f"/usr/bin/{name}")
+    calls = []
+    child = SimpleNamespace(poll=lambda: None)
+    monkeypatch.setattr(ops.subprocess, "Popen", lambda argv, **kw: calls.append((argv, kw)) or child)
+    assert ops.spawn() is child and ops.spawn(child) is child
+    (argv, kw), = calls
+    assert argv == ["nice", "-n", "19", "ionice", "-c", "3", sys.executable, "-m",
+                    "chela.main", "ops", "scan", "--notify"]
+    assert (kw["start_new_session"], kw["stdin"], kw["stdout"].name) == (
+        True, subprocess.DEVNULL, str(tmp_path / "ops" / "scan.log"))
+    monkeypatch.setattr(ops.shutil, "which", lambda name: None)
+    assert ops.spawn_argv()[:1] == [sys.executable]
+
+
+def test_the_daemon_spawns_the_scan_once_per_interval_and_survives_its_crash(monkeypatch):
+    _run_daemon_ticks(monkeypatch, n=2)
+    monkeypatch.setattr(main.doctor, "check_and_notify", lambda red: red)
+    spawned, after = [], []
+    monkeypatch.setattr(main.ops, "spawn", lambda prev: spawned.append(prev) or "child")
+    monkeypatch.setattr(main.update, "check_and_notify", lambda b: after.append(b) or b)
+    main.cmd_run(SimpleNamespace())
+    assert spawned == [None]
+
+    def boom(prev):
+        raise RuntimeError("no fork")
+
+    _run_daemon_ticks(monkeypatch, n=1)
+    monkeypatch.setattr(main.ops, "spawn", boom)
+    after.clear()
+    monkeypatch.setattr(main.update, "check_and_notify", lambda b: after.append(b) or b)
+    main.cmd_run(SimpleNamespace())
+    assert after == [0]
