@@ -39,6 +39,7 @@ FLAKE_WINDOW_S = 24 * 3600
 STORM_WINDOW_S = 3600
 STORM_COUNT = 3
 WHACK_ROUNDS = 3
+RUNAWAY_AFTER_S = 2400                     # chelamux's judge.suite_timeout_seconds (CMX-274)
 OVER_STATUSES = ("done", "closed", "needs_human")
 TEST_RUNNERS = ("pytest", "py.test", "vitest")
 DETACHED_FLAG = "--detached-child"         # chela judge run --detach's own child
@@ -187,7 +188,9 @@ def rule_hung_test(src: Sources, state: dict) -> list[dict]:
 
 def rule_leaked_proc(src: Sources, state: dict) -> list[dict]:
     """CMX-253: a process under a run/judge worktree whose run is over, or that was orphaned.
-    A ``--detached-child`` judge is setsid'd ON PURPOSE, so ppid 1 alone is not a leak there."""
+    A ``--detached-child`` judge is setsid'd ON PURPOSE, so ppid 1 alone is not a leak there.
+    CMX-274: also a test run under a RUNNING agent older than :data:`RUNAWAY_AFTER_S` — a
+    runaway the hand-in reaper has not reached yet (2 xdist workers pinned for 1h38m)."""
     out = []
     for p in src.procs:
         wt = src.worktree_of(p)
@@ -195,8 +198,12 @@ def rule_leaked_proc(src: Sources, state: dict) -> list[dict]:
             continue
         status = src.runs.get(wt[0])
         orphan = p["ppid"] == 1 and DETACHED_FLAG not in p["argv"]
-        if status in OVER_STATUSES or orphan:
-            why = f"its run is {status}" if status in OVER_STATUSES else "it is orphaned (ppid 1)"
+        runaway = (wt[1] == "run" and status == "running" and _is_test_runner(p["argv"])
+                   and p["age_s"] > RUNAWAY_AFTER_S)
+        if status in OVER_STATUSES or orphan or runaway:
+            why = (f"its run is {status}" if status in OVER_STATUSES
+                   else "it is orphaned (ppid 1)" if orphan
+                   else f"a test run {p['age_s'] / 60:.0f}m old, past the suite timeout")
             out.append(_finding(
                 "leaked_proc", f"pid:{p['pid']}",
                 f"pid {p['pid']} under {wt[1]} {wt[0]} is alive but {why}",
