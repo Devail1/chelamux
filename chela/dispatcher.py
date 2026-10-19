@@ -291,6 +291,9 @@ CI_POLL_STATUSES = ("awaiting_review", "changes_requested")
 # allowed to give up, but never allowed to go quiet. Six hours is GitHub's own job ceiling,
 # so anything past it is not "still running", it is stuck.
 CI_PENDING_STALE_SECONDS = 6 * 3600
+# 🔀 CMX-264: at most this many conflict reworks per run are free; past it a conflict round is
+# charged like any other, so a run that cannot resolve its conflict still reaches the cap.
+MAX_FREE_CONFLICT_REWORKS = 3
 # 🔁 CMX-255: how long a red that may still be the PRE-re-run one is waited out, when the
 # re-run was never seen unsettled. Past it, the red is taken as the re-run's own.
 CI_RERUN_SETTLE_SECONDS = 15 * 60
@@ -2423,7 +2426,7 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
     try:
         res = basemerge.attempt(repo, row["branch_name"], base,
                                 wf.get("judge", "test_cmd", default="") or "")
-    except RuntimeError as e:
+    except (RuntimeError, OSError) as e:
         log.warning("Task %s: PR conflicts with origin/%s but the base merge could not be "
                     "tried (%s) — retried next tick", task_id, base, e)
         return "none"
@@ -2432,19 +2435,20 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
         conn.commit()
         if res["outcome"] == basemerge.CURRENT:
             return "none"
-        tests = len(res["files"])
+        tests = (f"{len(res['files'])} targeted test file(s) green" if res["files"]
+                 else "no targeted tests ran; CI gates it")
         _post_pr_comment(row["pr_url"], repo,
                          f"🔀 Base merged automatically: origin/{base} `{res['base_sha'][:12]}` "
-                         f"→ merge commit `{res['merge_sha'][:12]}` ({tests} targeted test "
-                         "file(s) green). A local checkout of this branch needs "
-                         "`git pull --ff-only` before its next commit.")
+                         f"→ merge commit `{res['merge_sha'][:12]}` ({tests}). A local checkout "
+                         "of this branch needs `git pull --ff-only` before its next commit.")
         log.warning("Task %s: base merged automatically (origin/%s %s → %s)", task_id, base,
                     res["base_sha"][:12], res["merge_sha"][:12])
         return "merged"
     # Burn the sha and grant the free round BEFORE the verdict, so 1d (below) never sees this
     # round as charged; both are undone if the verdict is not written.
-    conn.execute("UPDATE runs SET conflict_sha=?, conflict_reworks=COALESCE(conflict_reworks, "
-                 "0) + 1 WHERE task_id=?", (head, task_id))
+    conn.execute("UPDATE runs SET conflict_sha=?, conflict_reworks=MIN(COALESCE("
+                 "conflict_reworks, 0) + 1, ?) WHERE task_id=?",
+                 (head, MAX_FREE_CONFLICT_REWORKS, task_id))
     conn.commit()
     try:
         result = request_changes(task_id, basemerge.rework_body(res, base))

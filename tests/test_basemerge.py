@@ -354,3 +354,30 @@ def test_the_cap_reads_a_row_that_has_no_conflict_column_as_zero_free_rounds():
     base = {"risk": "normal", "rework_count": 1, "retry_count": 0}
     assert dispatcher.effective_rework_cap(row) == dispatcher.effective_rework_cap(base) == \
         dispatcher.effective_rework_cap({**base, "conflict_reworks": 2}) - 2
+
+
+def test_past_three_free_conflict_rounds_a_conflict_is_charged_and_escalates(tmp_path, tried):
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING", rework_count=7, conflict_reworks=3)
+    assert dispatcher.effective_rework_cap(dispatcher.resolve_run("abc123")) == 7
+    summary = _tick(wf, fake)
+    run = dispatcher.resolve_run("abc123")
+    assert (summary["escalated"], run["conflict_reworks"]) == (1, 3)
+    assert run["status"] != "running"
+
+
+def test_an_attempt_that_raises_oserror_writes_nothing(tmp_path, monkeypatch):
+    def boom(*a):
+        raise PermissionError("scratch dir")
+    monkeypatch.setattr(basemerge, "attempt", boom)
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING")
+    assert _tick(wf, fake)["base_conflict"] == 0
+    assert dispatcher.resolve_run("abc123")["conflict_sha"] is None
+
+
+def test_a_clean_merge_with_no_targeted_tests_says_so(tmp_path, tried):
+    _, answer = tried
+    answer["res"] = _result("merged", files=[])
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING")
+    _tick(wf, fake)
+    assert any("(no targeted tests ran; CI gates it)" in c for c in fake.comments)
+    assert not any("0 targeted" in c for c in fake.comments)
