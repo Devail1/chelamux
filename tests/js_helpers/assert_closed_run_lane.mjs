@@ -33,7 +33,8 @@ const BODY = `
 </div>`;
 
 const { modules: { kanban: { renderKanban } } } = await bootDashboardDom({
-    body: BODY, extraModules: ['kanban.js'],
+    // Plain `node` (test_dispatcher_worktree_gc.py), so no .tsx: the legacy graph alone.
+    body: BODY, extraModules: ['kanban.js'], islands: false,
 });
 
 try {

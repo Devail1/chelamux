@@ -6,6 +6,9 @@ import { defineConfig } from 'vitest/config';
 // tests/test_frontend_build.py fails while it differs from a fresh build of src/.
 export default defineConfig(({ mode }) => ({
   plugins: [react()],
+  // CMX-215: chunk and asset URLs relative to the entry's own (versioned) URL, so a dashboard
+  // behind a path prefix resolves them and they inherit static/v/<ASSET_VERSION>/ (CMX-426).
+  base: './',
   build: {
     outDir: '../static/app',
     emptyOutDir: true,
