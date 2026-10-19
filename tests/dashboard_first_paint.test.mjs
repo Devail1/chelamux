@@ -29,7 +29,7 @@ const DASH = path.join(here, '..', 'chela', 'dashboard');
 const CSS = fs.readFileSync(path.join(DASH, 'static', 'style.css'), 'utf8');
 const NAV_JS = fs.readFileSync(path.join(DASH, 'static', 'js', 'nav.js'), 'utf8');
 
-const TOOLBAR = sliceTemplate('<div class="term-toolbar">', '<div id="term-switcher"',
+const TOOLBAR = sliceTemplate('<div class="term-toolbar">', '<div id="term-stage"',
     { terminals_enabled: true, wall_tile_dispatched: false });
 
 function toolbarDom(vp) {

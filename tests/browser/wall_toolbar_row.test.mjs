@@ -10,8 +10,9 @@
 //     the Wall leaves between two panes.
 //  4. ⭐ Expanded, the row still shows every one of its controls, unclipped,
 //     without changing height.
-//  5. Phone: the row stays an empty strip, so the agent pills (CMX-386/404) sit
-//     exactly where they did.
+//  5. Phone: the row stays an empty strip, and with no pill strip under it
+//     (CMX-202: the sidebar is the phone's switcher) the pane starts where the
+//     pills did and gets their height back.
 //
 // Harness: tests/browser/fixture.mjs — never a live dashboard or daemon.
 import { after, before, describe, test } from 'node:test';
@@ -31,7 +32,7 @@ function setup(fn) {
 async function stable(page) {
     await page.evaluate(() => { window.__cmx414Sig = null; });
     await page.waitForFunction(() => {
-        const sig = [...document.querySelectorAll('.term-toolbar, .term-toolbar button, #term-stage, #term-stage .grid-stack-item, #term-switcher')]
+        const sig = [...document.querySelectorAll('.term-toolbar, .term-toolbar button, #term-stage, #term-stage .grid-stack-item, #term-stage .term-pane')]
             .map(e => { const r = e.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(Math.round).join(','); })
             .join('|');
         const now = performance.now();
@@ -73,7 +74,7 @@ const geometry = page => page.evaluate(() => {
     for (const a of panes) for (const b of panes) {
         if (b.top > a.bottom - 1 && Math.abs(a.left - b.left) < 2) gaps.push(b.top - a.bottom);
     }
-    const sw = document.getElementById('term-switcher');
+    const single = document.querySelector('#term-stage.term-single .term-pane');
     const canvas = document.getElementById('canvas');
     return {
         head: rect(document.querySelector('.sidebar-head')),
@@ -83,7 +84,8 @@ const geometry = page => page.evaluate(() => {
         expanded: document.getElementById('term-grid-toggle').getAttribute('aria-expanded'),
         firstPaneTop: panes.length ? Math.min(...panes.map(p => p.top)) : null,
         paneGap: gaps.length ? Math.min(...gaps) : null,
-        switcherTop: sw.getClientRects().length ? sw.getBoundingClientRect().top : null,
+        pillStrip: document.querySelectorAll('#term-switcher, .term-switcher, .term-pill').length,
+        singlePane: single ? rect(single) : null,
         canvasPadTop: parseFloat(getComputedStyle(canvas).paddingTop),
         paneBottom: panes.length ? Math.max(...panes.map(p => p.bottom)) : null,
         canvasContentBottom: canvas.getBoundingClientRect().bottom - parseFloat(getComputedStyle(canvas).paddingBottom),
@@ -203,11 +205,18 @@ describe('CMX-414 390×844: the phone layout is unchanged', { skip: why }, () =>
         assert.ok(g.newFabShown, 'the phone "+" (CMX-386) is gone');
     });
 
-    test('the pill switcher sits where it always has: the empty row\'s 12px under the canvas padding', () => {
+    test('CMX-202: no pill strip is rendered above the pane', () => {
         ready();
-        assert.ok(g.switcherTop !== null, 'the pill switcher is not rendered');
-        assert.ok(Math.abs(g.switcherTop - (g.canvasPadTop + 12)) <= 0.5,
-            `pills at ${g.switcherTop}px, expected ${g.canvasPadTop + 12}px`);
+        assert.equal(g.pillStrip, 0, 'the phone still renders a session pill strip');
+    });
+
+    test('CMX-202: the pane starts where the pills did (the empty row\'s 12px under the canvas padding) and gets their 38px back', () => {
+        ready();
+        assert.ok(g.singlePane, 'the phone did not render its single pane');
+        assert.ok(Math.abs(g.singlePane.top - (g.canvasPadTop + 12)) <= 0.5,
+            `pane at ${g.singlePane.top}px, expected ${g.canvasPadTop + 12}px`);
+        // 100dvh minus the pane header, keybar and context bar: no --term-switcher-h.
+        assert.equal(g.singlePane.height, 844 - 32 - 47 - 30, 'the pane did not get the strip\'s height back');
     });
 });
 
