@@ -42,7 +42,7 @@ const PAGE = `
   <button id="term-mode-single"></button><button id="term-mode-wall"></button>
   <select id="term-agent"></select>
   <span id="term-wall-grid"><span id="term-grid-presets"></span><button id="term-lock-btn"></button></span>
-  <button id="term-new-shell"></button><div id="term-switcher"></div><div id="term-stage"></div>
+  <button id="term-new-shell"></button><div id="term-stage"></div>
   <div id="term-min-dock"></div>
   <div id="term-bar" class="kb-collapsed"><button class="kb-toggle" id="kb-toggle"></button><div class="kb-body" id="kb-body"></div></div>
 </div>

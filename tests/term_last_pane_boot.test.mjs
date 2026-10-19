@@ -1,10 +1,10 @@
-// CMX-169 — WITH NO USABLE STORED PANE, A PHONE'S BOOT OPENS THE LEFTMOST PILL.
+// CMX-169 - WITH NO USABLE STORED PANE, A PHONE'S BOOT OPENS THE TOP SIDEBAR ROW.
 //
 // The boot's first terminals render runs as soon as /api/agents lands, BEFORE the sidebar
 // has drawn (main.js), so it has no sidebar order to follow and opens the first row. Once
 // the sidebar draws, nav.js calls terminals.adoptSidebarDefault(), which moves that default
 // to the first session in the sidebar's order. One boot per file: term_last_pane.test.mjs
-// boots WITH a stored pane, term_last_pane_tap.test.mjs taps a pill before the sidebar draws.
+// boots WITH a stored pane, term_last_pane_tap.test.mjs swipes before the sidebar draws.
 //
 // Run: pnpm exec vitest run tests/term_last_pane_boot.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { beforeAll, test } from 'vitest';
@@ -19,14 +19,14 @@ beforeAll(async () => {
     await settle();
 });
 
-test('the boot opens the first pill in the sidebar order, not the first /api/agents row', () => {
+test('the boot opens the first session in the sidebar order, not the first /api/agents row', () => {
     assert.deepEqual(chela.sidebarOrder(), ['@203', '@202', '@201']);
     assert.deepEqual(pane(), { value: '@203', shown: '@203' });
     assert.equal(JSON.parse(localStorage.getItem(KEY)).wid, '@203');
 });
 
 test('after the boot, a sidebar re-render never moves a pane the user picked', async () => {
-    clickOnclick(document.querySelector('#term-switcher .term-pill[data-wid="@201"]'));
+    clickOnclick(document.querySelector('#sidebar-agents .agent-row[data-item="w:@201"]'));
     await settle();
     await nav.refreshSidebar();
     await settle();

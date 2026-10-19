@@ -61,7 +61,7 @@ Keep auto-names as zero-friction default; add optional persistent display name v
 | Server shared-flag | `app.py`: `POST /api/term/<wid>/share`, per-wid shim inject, report via `/api/agents` or `/api/term/shared`, explicit grid restore on un-share |
 | Collab-aware iframe src | `terminals.js`: `_termSrc(wid)` helper across `frame()`/`_wallTileHTML`/`_swapToFrame`; surgical single-pane reload |
 | Presence → parent | `presence.js`: `window.parent.chelaPresence()`; suppress in-iframe pills when hooked; hello card standalone; name/color from localStorage |
-| Facepile + badges | `terminals.js chelaPresence()`; badges in `renderMinDock()` + `renderMobileSwitcher()` |
+| Facepile + badges | `terminals.js chelaPresence()`; badges in `renderMinDock()` |
 | Palette action | `nav.js _paletteItems()` per-session Share/Stop |
 | Identity setting | `nav.js renderSettings()`; `presence.js` reads `chela_collab_name` + storage listener |
 | Joiner chrome (P2) | `app.py` `/watch/<wid>` minimal template |

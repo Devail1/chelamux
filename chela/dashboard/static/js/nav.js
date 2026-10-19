@@ -4,7 +4,7 @@ import { onOrchestratorChange, orchestratorState } from './orchestrator.js';
 import { refreshSummary } from './header.js';
 import { checkContext } from './agents.js';
 import { showAddSchedule } from './schedules.js';
-import { _displayLabel, adoptSidebarDefault, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, isWallVisible, minimizePane, renderMobileSwitcher, setTermMode, shareBtnClick } from './terminals.js';
+import { _displayLabel, adoptSidebarDefault, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals.js';
 import { _launcherData, launchProject, refreshLauncher } from './launcher.js';
 import { VIEWS } from './views.js';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg.js';
@@ -950,8 +950,7 @@ function renderSidebarAgents(agents) {
     }
     host.innerHTML = html;
     _paintAltNums();   // CMX-85: a re-render while Alt is held keeps its numbers
-    adoptSidebarDefault();    // CMX-169: a boot's default pane moves to the leftmost pill
-    renderMobileSwitcher();   // CMX-165: the phone's pills follow this order (no-op on desktop)
+    adoptSidebarDefault();    // CMX-169: a boot's default pane moves to the top sidebar row
 }
 
 // --- The group menu (CMX-35) -------------------------------------------------
