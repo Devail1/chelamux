@@ -185,8 +185,12 @@ def message_display_response(body: dict) -> dict:
     ⛔ Bold, not colour: colour is impossible on this path at all. ``systemMessage`` does
     preserve full SGR, but renders on its own line prefixed ``<Event> says:`` — the
     presentation CMX-285 moved away from precisely to get the marker INLINE.
+
+    CMX-182: a body carrying ``chela_timestamp_owner: "mod"`` gets ``{}``. That is the
+    opt-in Mod (``mods/chela-hooks``) saying it draws the time in its own band above the
+    prompt, so the reply is not stamped in both places.
     """
-    if body.get("index") != 0:
+    if body.get("index") != 0 or body.get("chela_timestamp_owner") == "mod":
         return {}
     delta = body.get("delta")
     delta = delta if isinstance(delta, str) else ""

@@ -3,9 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "DEV ONLY (CMX-171). The dashboard's React islands, built by Vite. Users never need Node: the built output is what ships, never this toolchain. Not wired into the dashboard page yet.",
+  "description": "DEV ONLY (CMX-171). The dashboard's React islands, built by Vite. Users never need Node: `pnpm build` writes the COMMITTED output in ../static/app (CMX-177), which is what ships, never this toolchain. Not wired into the dashboard page yet.",
   "license": "AGPL-3.0-or-later",
   "scripts": {
+    "build": "vite build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "lint:boundaries": "depcruise src",
