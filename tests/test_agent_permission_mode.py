@@ -23,6 +23,7 @@ from unittest.mock import patch
 import pytest
 
 from chela.sources import Task
+from chela.judge import judge_worktree_path
 from chela.workflow import WorkflowDef
 
 
@@ -39,9 +40,10 @@ def mods(tmp_path, monkeypatch):
     return config, userconfig, dispatcher
 
 
-def _wf(**agent) -> WorkflowDef:
+def _wf(root: Path | None = None, **agent) -> WorkflowDef:
     return WorkflowDef(path=Path("/nowhere/WORKFLOW.md"),
-                       config={"project_key": "CMX", "agent": agent},
+                       config={"project_key": "CMX", "agent": agent,
+                               **({"workspace": {"root": str(root)}} if root else {})},
                        prompt_template="")
 
 
@@ -215,7 +217,7 @@ def test_spawn_judge_sends_no_remote_control_even_when_enabled(mods, tmp_path, m
     own launch through `_spawn_judge` -> `_launch_agent`."""
     config, _, dispatcher = mods
     monkeypatch.setattr(config, "remote_control_enabled", lambda: True)
-    wf = _wf()
+    wf = _wf(tmp_path / "wts")
     conn = _conn(dispatcher)
     conn.execute(
         "INSERT INTO runs (task_id, workflow_path, title, status, branch_name, "
@@ -224,6 +226,9 @@ def test_spawn_judge_sends_no_remote_control_even_when_enabled(mods, tmp_path, m
     )
     conn.commit()
     row = conn.execute("SELECT * FROM runs WHERE task_id=?", ("abc123",)).fetchone()
+    # 🎲 CMX-257: the judge slot (worktree + lock) is THIS test's — never the shared
+    # `~/.chela/worktrees/default` a concurrent suite's judge lock can be holding.
+    assert judge_worktree_path(wf, "abc123").is_relative_to(tmp_path.resolve())
     wt = tmp_path / "judge-abc123"
     with patch.object(dispatcher, "detached_worktree", return_value=(wt, True)), \
          patch.object(dispatcher.subprocess, "run") as run, \
@@ -240,7 +245,7 @@ def test_spawn_judge_sends_a_strict_mcp_config_command_to_tmux(mods, tmp_path):
     """🔴 End to end through `_spawn_judge`: same isolation, the judge's own launch.
     Corrupt (revert AGENT_BASE_CMD to plain "claude") → RED."""
     _, _, dispatcher = mods
-    wf = _wf()
+    wf = _wf(tmp_path / "wts")
     conn = _conn(dispatcher)
     conn.execute(
         "INSERT INTO runs (task_id, workflow_path, title, status, branch_name, "
@@ -249,6 +254,9 @@ def test_spawn_judge_sends_a_strict_mcp_config_command_to_tmux(mods, tmp_path):
     )
     conn.commit()
     row = conn.execute("SELECT * FROM runs WHERE task_id=?", ("abc123",)).fetchone()
+    # 🎲 CMX-257: the judge slot (worktree + lock) is THIS test's — never the shared
+    # `~/.chela/worktrees/default` a concurrent suite's judge lock can be holding.
+    assert judge_worktree_path(wf, "abc123").is_relative_to(tmp_path.resolve())
     wt = tmp_path / "judge-abc123"
     with patch.object(dispatcher, "detached_worktree", return_value=(wt, True)), \
          patch.object(dispatcher.subprocess, "run") as run, \
