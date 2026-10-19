@@ -6,13 +6,21 @@ import { defineConfig } from 'vitest/config';
 // tests/test_frontend_build.py fails while it differs from a fresh build of src/.
 export default defineConfig(({ mode }) => ({
   plugins: [react()],
+  // CMX-276: legacy modules import the model's build, `../app/sidebarmodel.js`, so plain `node`
+  // can load them. Bundled (CMX-215), that import is the source: never the outDir it empties.
+  resolve: {
+    alias: [{ find: /^\.\.\/app\/sidebarmodel\.js$/, replacement: '/src/features/sidebar/model.ts' }],
+  },
+  // CMX-215: chunk and asset URLs relative to the entry's own (versioned) URL, so a dashboard
+  // behind a path prefix resolves them and they inherit static/v/<ASSET_VERSION>/ (CMX-426).
+  base: './',
   build: {
     outDir: '../static/app',
     emptyOutDir: true,
     manifest: 'manifest.json',
     rollupOptions: {
-      // CMX-276: the sidebar model is a second entry at a FIXED name, so the legacy modules
-      // (not in the Vite graph yet, CMX-212 P01) import it: `../app/sidebarmodel.js`.
+      // CMX-276: the sidebar model is a second entry at a FIXED name, so a legacy module run by
+      // plain `node` (no Vite) imports it: `../app/sidebarmodel.js`.
       input: { main: 'src/main.tsx', sidebarmodel: 'src/features/sidebar/model.ts' },
       preserveEntrySignatures: 'strict',
       output: { entryFileNames: c => (c.name === 'sidebarmodel' ? '[name].js' : 'assets/[name]-[hash].js') },

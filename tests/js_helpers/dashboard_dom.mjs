@@ -33,14 +33,21 @@ import { renderTemplateIfs } from './template_ifs.mjs';
 const HELPERS_DIR = dirname(fileURLToPath(import.meta.url));
 const DASHBOARD_ROOT = join(HELPERS_DIR, '..', '..', 'chela', 'dashboard');
 const TEMPLATE_HTML = readFileSync(join(DASHBOARD_ROOT, 'templates', 'index.html'), 'utf8');
+// CMX-215: the page's one module script is the Vite build of this entry (the islands, then the
+// legacy main.js graph), named by the manifest Flask reads (app.py app_entry). Vitest compiles
+// the .tsx, so the boot below runs that entry's source, in that order.
+const MANIFEST = JSON.parse(readFileSync(join(DASHBOARD_ROOT, 'static', 'app', 'manifest.json'), 'utf8'));
+export const ENTRY_URL = new URL(
+    `../../chela/dashboard/frontend/${Object.keys(MANIFEST).find(k => MANIFEST[k].name === 'main')}`, import.meta.url).href;
+const DEFAULT_JS_ROOT = new URL('../../chela/dashboard/static/js/', import.meta.url).href;
 
 /** Pull a fragment out of the REAL index.html between two literal markers
  * (inclusive of both). Throws — loudly, at fixture-build time, not as a
  * quiet empty string — if either marker has moved, exactly like
  * tests/dashboard_default_view.test.mjs's original inline version did. */
 export function sliceTemplate(startMarker, endMarker, ctx) {
-    // CMX-178: a slice never carries the page's <script> tags, so the islands' entry is off.
-    const html = ctx ? renderTemplateIfs(TEMPLATE_HTML, { island_src: false, ...ctx }) : TEMPLATE_HTML;
+    // CMX-178: a slice never carries the page's <script> tags, so the build's entry is off.
+    const html = ctx ? renderTemplateIfs(TEMPLATE_HTML, { app_src: false, ...ctx }) : TEMPLATE_HTML;
     const start = html.indexOf(startMarker);
     if (start < 0) {
         throw new Error(`sliceTemplate: start marker not found in templates/index.html: ${JSON.stringify(startMarker)}`);
@@ -91,10 +98,10 @@ export function flush() {
 }
 
 /**
- * Boot the real dashboard module graph (main.js as the entry — nav.js/main.js
- * is a cycle, so anything imported first would see its own `let`s in their
- * TDZ) against a real jsdom `window`, wired the same way every hand-rolled
- * copy of this bootstrap did it.
+ * Boot the real dashboard module graph against a real jsdom `window`, wired the
+ * same way every hand-rolled copy of this bootstrap did it. The entry is what
+ * Flask serves (ENTRY_URL: the islands, then main.js — nav.js/main.js is a
+ * cycle, so anything imported first would see its own `let`s in their TDZ).
  *
  * @param {string} body - inner HTML for `<body>`. Pass a fixture, or a real
  *   fragment from `sliceTemplate()`.
@@ -120,6 +127,9 @@ export function flush() {
  *   import from (nav.js imports `../app/sidebarmodel.js`: a copy carries `app/` too). Defaults to the repo's. A suite that needs TWO independent pages (two
  *   devices — tests/sidebar_layout_shared.test.mjs) boots each from its own copy, so
  *   each gets its own module instances; it switches between them with activateDom().
+ *   A copy boots its own main.js after mountIslands() (the islands import the repo's).
+ * @param {boolean} [islands=true] - boot through ENTRY_URL. false boots the legacy main.js
+ *   alone: ONLY for a caller run by plain `node` (no Vitest), which cannot compile the .tsx.
  * @returns {Promise<{dom: JSDOM, chela: object, modules: Record<string,object>}>}
  */
 export async function bootDashboardDom({
@@ -130,7 +140,8 @@ export async function bootDashboardDom({
     fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) }),
     seedLocalStorage,
     extraModules = [],
-    jsRoot = new URL('../../chela/dashboard/static/js/', import.meta.url).href,
+    jsRoot = DEFAULT_JS_ROOT,
+    islands = true,
 } = {}) {
     const dom = new JSDOM(`<!doctype html><html><body>${body}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
@@ -154,8 +165,15 @@ export async function bootDashboardDom({
     globalThis.setInterval = () => 0;   // main.js arms poll timers a test has no use for
     globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = terminalsEnabled;
 
-    await mountIslands(dom.window);
-    await import(new URL('main.js', jsRoot).href);
+    if (islands && jsRoot === DEFAULT_JS_ROOT) {
+        await import(ENTRY_URL);
+        // A second boot in one suite meets the entry cached: its islands mounted on the FIRST
+        // page only, so this page mounts its own (CMX-276).
+        if (!dom.window.chelaBridge) await mountIslands(dom.window);
+    } else {
+        if (islands) await mountIslands(dom.window);
+        await import(new URL('main.js', jsRoot).href);
+    }
     const modules = {};
     for (const path of extraModules) {
         const name = path.replace(/\.js$/, '');

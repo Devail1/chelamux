@@ -11,15 +11,18 @@ The dashboard is a Flask API (`chela/dashboard/app.py`) serving one page,
 
 | | Where | Built? |
 |---|---|---|
-| **Legacy** | `chela/dashboard/static/js/*.js`, plain ES modules, entry `main.js` | No. Served as written |
+| **Legacy** | `chela/dashboard/static/js/*.js`, plain ES modules, entry `main.js` | Vite, bundled with React (CMX-215) |
 | **React** | `chela/dashboard/frontend/src/`, TypeScript + React 19 | Vite, into `static/app/` |
+
+Both reach the browser as ONE bundle: the build's entry `src/main.tsx` imports the islands,
+then `../../static/js/main.js`, so a legacy module can `import` a `.ts` one directly.
 
 The React side is a Vite single-page build, **not** Next.js: no server components, no
 `"use client"`, no file routing, no `next/*`. Tests are Vitest + React Testing Library in
 jsdom. The toolchain is dev-only and pinned exactly (`frontend/package.json`); users never
 need Node, because the build output in `chela/dashboard/static/app/` is **committed**
-(CMX-177). `tests/test_frontend_build.py` fails while it differs from a fresh build of `src/`,
-so after any change under `src/`:
+(CMX-177). `tests/test_frontend_build.py` fails while it differs from a fresh build, so after
+any change under `src/` **or `static/js/`** (and the `static/collab/` modules it imports):
 
 ```bash
 pnpm -C chela/dashboard/frontend build    # then commit static/app/ with your change
@@ -27,6 +30,10 @@ pnpm -C chela/dashboard/frontend build    # then commit static/app/ with your ch
 
 The bundle's name is a content hash, so a rebuild renames it: update `BUNDLE` in
 `tests/test_frontend_build.py` to the new name.
+
+What each test suite runs: the `tests/browser/` Playwright suites load the **committed
+bundle** (what Flask serves), so they see a legacy edit only after the rebuild; the jsdom
+suites (`tests/js_helpers/dashboard_dom.mjs`) boot `src/main.tsx`'s source, compiled by Vitest.
 
 The CI gates, each also run inside pytest by `tests/test_frontend.py`: `pnpm typecheck`
 (strict `tsc`), `pnpm lint` (typescript-eslint strict + react-hooks), `pnpm lint:boundaries`
@@ -45,14 +52,15 @@ The page is still the legacy page. React takes it over one region at a time: an 
 a React root rendered into an element `index.html` already has. Legacy keeps owning
 everything else and keeps working untouched.
 
-How the page loads them: `app.py`'s `island_entry()` reads the build's
+How the page loads them: `app.py`'s `app_entry()` reads the build's
 `static/app/manifest.json` once at import and finds the entry `src/main.tsx` compiled to
-(`app/assets/main-<hash>.js`). `index()` renders it as a versioned
-`<script type="module">` **before** legacy `main.js`. Module scripts run in document order,
-so the state bridge below exists before any legacy module publishes to it. A missing or
-unreadable manifest logs a warning and drops the islands; the legacy page still loads.
+(`app/assets/main-<hash>.js`). `index()` renders it as the page's one versioned
+`<script type="module">`. `main.tsx` imports `islands.tsx` **before** legacy `main.js`, and
+imports run in order, so the state bridge below exists before any legacy module publishes to
+it. There is no unbundled fallback: a missing or unreadable manifest logs an error and the
+page loads with no JS.
 
-`src/main.tsx` installs the bridge and mounts every island:
+`src/islands.tsx` installs the bridge and mounts every island (`pnpm dev` loads it alone):
 
 ```tsx
 mountIsland('version-island', VersionBadge, {});
@@ -81,8 +89,8 @@ same value notifies nobody, so always publish a NEW array or object, never one m
 dependency, and it renders a consistent value even during concurrent rendering. A library
 (zustand) would add selectors and middleware nobody needs for two values; Redux is ruled out.
 
-Legacy is not in the Vite graph yet (CMX-212 P01), so it reaches the stores through
-`window.chelaBridge`:
+Legacy is in the Vite graph since CMX-215, but it still reaches the stores through
+`window.chelaBridge` until P03 (`FRONTEND_PORT_PLAN.md`) turns these into imports:
 
 ```js
 publish('agents', rows);                  // util.js: a no-op when the islands did not load
@@ -100,10 +108,11 @@ call `publish('<name>', value)` wherever legacy changes it.
 
 ### A model legacy still imports
 
-Until the legacy modules join the Vite graph (CMX-212 P01), a ported pure model that legacy
-code still calls is built as a second entry at a FIXED name: `src/features/sidebar/model.ts`
-becomes `static/app/sidebarmodel.js` (`vite.config.ts`), and `nav.js` / `terminals.js` import
-`../app/sidebarmodel.js`. The island's bundle imports the same file, so the page has one copy.
+Until P03 turns legacy imports into source imports, a ported pure model that legacy code still
+calls is built as a second entry at a FIXED name: `src/features/sidebar/model.ts` becomes
+`static/app/sidebarmodel.js` (`vite.config.ts`), and `nav.js` / `terminals.js` import
+`../app/sidebarmodel.js`, which plain `node` can load. In the bundle (P01), an alias resolves
+that import to the `.ts` source, so the page imports the one built copy.
 A node suite imports the `.ts` source (Vitest compiles it), and a suite that copies `static/js`
 to boot a second page copies `static/app` with it.
 
@@ -125,7 +134,7 @@ from a meaning to a Lucide icon.
    importing `../index.ts`. Stub the network with `vi.stubGlobal('fetch', …)`. Cover every
    branch, including what a failed read renders: unknown must never render as a value.
 3. For a new island: give it an element in `templates/index.html` and one `mountIsland` line
-   in `src/main.tsx`. Delete the legacy code it replaces in the same PR.
+   in `src/islands.tsx`. Delete the legacy code it replaces in the same PR.
 4. `pnpm -C chela/dashboard/frontend typecheck lint lint:boundaries test`, then `build`, and
    commit `static/app/` with the source.
 5. A UI that must render on the real page gets a browser test in `tests/browser/` too:

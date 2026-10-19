@@ -1,14 +1,5 @@
-// The build's entry (CMX-177), loaded by index.html through the manifest (CMX-178) BEFORE the
-// legacy main.js, so window.chelaBridge exists by the time a legacy module publishes to it.
-import { mountSidebar } from './features/sidebar/index.ts';
-import { VersionBadge } from './features/version/index.ts';
-import { installBridge } from './shared/bridge/index.ts';
-import { mountIsland } from './shared/islands/index.tsx';
-
-export function boot(win: Window = window) {
-  const bridge = installBridge(win);
-  mountIsland('version-island', VersionBadge, {}, win.document);
-  mountSidebar(win, bridge);
-}
-
-boot();
+// The page's ONE module script (CMX-215, CMX-212 P01): index.html loads this build entry
+// through the manifest. Imports run in order, so the islands install window.chelaBridge
+// BEFORE the legacy module graph (static/js/main.js, bundled with it) publishes to it.
+import './islands.tsx';
+import '../../static/js/main.js';

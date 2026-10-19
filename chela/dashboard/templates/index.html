@@ -868,13 +868,9 @@
 {% if terminals_enabled %}<script>window.TERMINALS_ENABLED = true;</script>{% endif %}
 {% if wall_tile_dispatched %}<script>window.WALL_TILE_DISPATCHED = true;</script>{% endif %}
 <script src="{{ asset_path('vendor/gridstack-all.js') }}"></script>
-<!-- CMX-178: the React islands (docs/FRONTEND.md), before main.js: module scripts run in
-     document order, so window.chelaBridge exists before a legacy module publishes to it. -->
-{% if island_src %}<script type="module" src="{{ island_src }}"></script>{% endif %}
-<!-- Stage 0: one ES-module entry. main.js imports the rest through the module
-     graph (util → feature renderers → nav → sse → main bootstrap). No build step.
-     terminals.js/launcher.js load via the graph and stay inert when terminals
-     are off (TERMINALS_ON-guarded). -->
-<script type="module" src="{{ asset_path('js/main.js') }}"></script>
+<!-- CMX-215: the page's one module script, the Vite build (docs/FRONTEND.md): the React
+     islands, then the legacy static/js graph from main.js, bundled together. Module scripts
+     run after parsing, so the inline globals and gridstack above exist by then. -->
+{% if app_src %}<script type="module" src="{{ app_src }}"></script>{% endif %}
 </body>
 </html>

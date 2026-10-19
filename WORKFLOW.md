@@ -112,6 +112,10 @@ judge:
   # reach is listed as UNRUN — CANNOT VERIFY, never counted as killed, never a pass.
   # 0 or unset = the default. `chela judge sweep --budget-seconds/--max-mutations` override.
   # sweep_budget_seconds: 900   # wall-clock, baseline included (default 900)
+  # ⏳ 2400, Liav 2026-10-19: the full-suite baseline alone now takes ~16 min (9,500+ tests
+  # under fleet load), so a 900s budget measured 0 mutations (CMX-215's hand-in: 0/196).
+  # Stopgap until CMX-283's fast test tier; matches suite_timeout_seconds.
+  sweep_budget_seconds: 2400
   # sweep_max_mutations: 60     # most mutations measured (default 60)
   # ⏳ CMX-141: `chela judge self-check` (and `task-finished --self-check-experiments`) is
   # budgeted the same way: experiments run in file order, each measured with per-mutation test
@@ -119,6 +123,8 @@ judge:
   # not reach are UNRUN — CANNOT VERIFY, never killed. They do NOT refuse the hand-in (the
   # judge re-runs experiments anyway) but task-finished names them. 0 or unset = the default. `chela judge self-check --budget-seconds/--max-experiments`.
   # self_check_budget_seconds: 900  # wall-clock, baseline included (default 900)
+  # ⏳ 2400, Liav 2026-10-19: same reason (CMX-215's self-check measured 0/8 at 900s).
+  self_check_budget_seconds: 2400
   # self_check_max_experiments: 12  # most experiments measured (default 12)
   # ⚖️🧰 CMX-259: TOOL CONFIG whose guard is the CI job that runs it. A survivor in one of
   # these is ADVISORY (listed, never blocking) unless a test the PR changes names the file;
