@@ -2558,6 +2558,7 @@ def _budgeted(tmp_path, monkeypatch, muts, *, budget, tick: float = 0.0,
     monkeypatch.setattr(sweep, "_now", lambda: clock[0])
     monkeypatch.setattr(sweep, "collect_mutations", lambda wt, base: (list(muts), ""))
     monkeypatch.setattr(sweep, "unsupported_files", lambda wt, base: ([], ""))  # CMX-97
+    monkeypatch.setattr(sweep, "generated_files", lambda wt, base: ([], ""))  # CMX-284
     monkeypatch.setattr(sweep.judge, "provision_suite_env", lambda wt: "")
     monkeypatch.setattr(sweep.judge, "run_baseline", lambda *a, **kw: (
         SimpleNamespace(green=True, detail="", tail="", exit_code=0), None, ""))
