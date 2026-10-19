@@ -434,6 +434,16 @@ def test_the_daemon_spawns_the_scan_once_per_interval_and_survives_its_crash(mon
     main.cmd_run(SimpleNamespace())
     assert spawned == [None]
 
+    # Due every tick: the second spawn must be handed the FIRST tick's child, or a scan
+    # still running is doubled (spawn() only refuses to double the child it is given).
+    _run_daemon_ticks(monkeypatch, n=3)
+    monkeypatch.setattr(main.ops, "INTERVAL_S", 0)
+    spawned.clear()
+    children = iter(["child-1", "child-2", "child-3"])
+    monkeypatch.setattr(main.ops, "spawn", lambda prev: spawned.append(prev) or next(children))
+    main.cmd_run(SimpleNamespace())
+    assert spawned == [None, "child-1", "child-2"]
+
     def boom(prev):
         raise RuntimeError("no fork")
 
