@@ -13,6 +13,7 @@ they assert the state paths land in a scratch dir, and — the part a future "si
 refactor cannot quietly undo — that the guard **fails** when code does reach the real dir.
 Delete conftest's isolation and this file goes red.
 """
+import ast
 import io
 import os
 import pwd
@@ -292,3 +293,31 @@ def test_a_test_whose_config_chela_dir_is_the_real_one_is_refused_at_setup(tmp_p
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0, out
     assert "LiveChelaDirEscape" in out and "1 passed" not in out, out
+
+
+def _imports_tests_conftest(src: str) -> bool:
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ImportFrom) and node.level == 0:
+            if node.module == "tests.conftest" or (
+                    node.module == "tests" and any(a.name == "conftest" for a in node.names)):
+                return True
+        if isinstance(node, ast.Import) and any(a.name == "tests.conftest" for a in node.names):
+            return True
+    return False
+
+
+def test_no_test_imports_conftest_as_tests_conftest():
+    """🔴 GUARD — ``tests.conftest`` is a SECOND copy of the conftest: importing it re-runs
+    the module, so a new sandbox's gh fence lands first on PATH and PM2_HOME moves for the
+    rest of that xdist worker. CMX-273's ``from tests.conftest import …`` reded CI on every
+    branch whose file split put it before ``test_suite_containment``. Corrupt the scan
+    (never return True) ⇒ the bad-spelling probes below pass ⇒ RED."""
+    for bad in ("from tests.conftest import X", "import tests.conftest",
+                "from tests import conftest", "def f():\n    from tests.conftest import X\n"):
+        assert _imports_tests_conftest(bad), bad
+    assert not _imports_tests_conftest("from conftest import X\nimport conftest\n"
+                                       "# tests.conftest is the wrong spelling\n")
+    root = Path(__file__).resolve().parent
+    offenders = [p.name for p in sorted(root.rglob("*.py"))
+                 if _imports_tests_conftest(p.read_text(encoding="utf-8"))]
+    assert offenders == []

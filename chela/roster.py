@@ -118,10 +118,23 @@ def record(live: dict, agents, now_epoch: str | None,
         rec = {"first_seen": now, "last_seen": now, "windows": {}}
         epochs[now_epoch] = rec
     rec["last_seen"] = now
-    rec["windows"] = {
+    windows = {
         wid: {"name": live.get(wid) or "", "cwd": cwd_for(wid), "session_id": session_for(wid)}
         for wid in sorted(agents)
     }
+    # CMX-275: a window this epoch's previous sample had and this one does not was CLOSED
+    # while its server lived (UI close, `chela kill`, `/exit`) — a dead server has no epoch
+    # to record under, and a shutdown's own teardown is filtered by `closed()`. Kept per
+    # session so a restore never revives it; a session seen alive again is un-closed.
+    closed = rec.get("closed") if isinstance(rec.get("closed"), dict) else {}
+    for wid, w in (rec.get("windows") or {}).items():
+        if wid not in windows and w.get("session_id"):
+            closed[w["session_id"]] = {"wid": wid, "name": w.get("name") or "",
+                                       "cwd": w.get("cwd"), "closed_at": now}
+    for w in windows.values():
+        closed.pop(w["session_id"], None)
+    rec["windows"] = windows
+    rec["closed"] = closed
     _prune(epochs)
     _save(data, path)
     return rec
@@ -149,6 +162,26 @@ def ended(now_epoch: str | None, *, path: Path | None = None) -> list[tuple[str,
     epochs = _load(path)["epochs"]
     ordered = sorted(epochs.items(), key=lambda kv: kv[1].get("last_seen", 0), reverse=True)
     return [(ep, rec.get("windows") or {}) for ep, rec in ordered if ep != now_epoch]
+
+
+# A window that vanished in a server's last minute may be the shutdown tearing panes down
+# one by one, not the user: only a close the server outlived by this long counts as one.
+_CLOSE_SETTLE_S = 60.0
+
+
+def closed(epochs, *, path: Path | None = None) -> dict[str, dict]:
+    """``{session_id: {wid, name, cwd, closed_at, epoch}}`` — every session the user closed
+    while one of ``epochs`` was the running server (CMX-275), newest epoch first on a tie.
+    A close within :data:`_CLOSE_SETTLE_S` of the epoch's ``last_seen`` is left out, so a
+    crash's own teardown errs toward resuming."""
+    recs = _load(path)["epochs"]
+    out: dict[str, dict] = {}
+    for ep in epochs:
+        rec = recs.get(ep) or {}
+        for sid, info in (rec.get("closed") or {}).items():
+            if rec.get("last_seen", 0) - info.get("closed_at", 0) >= _CLOSE_SETTLE_S:
+                out.setdefault(sid, {**info, "epoch": ep})
+    return out
 
 
 # --- archive: the audit trail for a MANUAL row `chela restore --apply` removed ---------
