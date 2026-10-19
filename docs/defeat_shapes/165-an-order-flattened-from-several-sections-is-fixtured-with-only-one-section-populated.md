@@ -32,4 +32,4 @@ row from the drawn sidebar, asserting its pill keeps its group's position.
 
 **Found:** CMX-165 rework round 1, PR #715. `chela/dashboard/static/js/sidebarmodel.js`
 `sidebarWids()` / `orderByList()`, `nav.js` `sidebarOrder()`; fixed in
-`tests/mobile_pills_sidebar_order.test.mjs`.
+`tests/mobile_swipe_sidebar_order.test.mjs` (the pill strip it guarded was removed in CMX-202; the swipe keeps the order).

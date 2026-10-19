@@ -45,6 +45,7 @@ from chela import (
     messenger,
     notify,
     okf,
+    ops,
     orchestrator,
     rc_rename,
     restore,
@@ -255,6 +256,9 @@ def cmd_run(args) -> None:
     # doctor.check_and_notify, same shape as waiting_seen above.
     last_doctor_check = 0.0
     doctor_red_seen: set[tuple[str, str]] = set()
+    # CMX-260: the ops scan is a detached child — the loop only ever starts it.
+    last_ops_scan = 0.0
+    ops_child = None
     # Held in memory, exactly like `waiting_seen`: it is the PREVIOUS status snapshot
     # the inbox edge-triggers against. Starting empty means a fresh daemon baselines
     # silently on its first tick instead of announcing every already-idle agent. (A
@@ -420,6 +424,15 @@ def cmd_run(args) -> None:
                 except Exception:
                     log.exception("Doctor red-finding check failed")
                 last_doctor_check = now
+
+            # 🔎 Ops scan (CMX-260): spawned niced and detached, never waited on — a slow or
+            # crashing scan cannot touch this tick.
+            if now - last_ops_scan >= ops.INTERVAL_S:
+                try:
+                    ops_child = ops.spawn(ops_child)
+                except Exception:
+                    log.exception("Ops scan spawn failed")
+                last_ops_scan = now
 
             # Self-update: informs by default (CMX-142 part 1) — `chela update` is a
             # human-run act, and `update.check_and_notify` never pulls. `CHELA_AUTO_UPDATE`
@@ -3010,6 +3023,16 @@ def cmd_judge_show(args) -> None:
                     print(f"                + {line}")
 
 
+def cmd_ops_scan(args) -> None:
+    """``chela ops scan`` (CMX-260). Without ``--notify`` it writes nothing at all."""
+    if args.notify:
+        result = ops.scheduled()
+    else:
+        result = ops.scan(ops.Sources(config.CHELA_DIR, events_path=event_log.log_path()),
+                          ops.load_state(config.CHELA_DIR))
+    print(json.dumps(result, indent=2) if args.json else ops.render(result))
+
+
 def cmd_judge_ack_blocked_race(args) -> None:
     """🧊 CMX-336: acknowledge a `J_BLOCKED_RACE` row that can never resolve the ordinary
     way (the PR is merged or closed, so nothing will ever push a new head past the judged
@@ -3251,11 +3274,18 @@ def cmd_release(args) -> None:
             print(f"release REFUSED: --body-file unreadable: {e}")
             sys.exit(1)
     result = release.prepare(args.version, args.theme, body=body, repo=args.repo,
-                             actor=os.environ.get(config.ACTOR_ENV) or None)
+                             actor=os.environ.get(config.ACTOR_ENV) or None,
+                             dry_run=getattr(args, "dry_run", False))
     if not result.get("ok"):
         print(f"release REFUSED: {result.get('error', 'unknown error')}")
         print("  Nothing was committed, tagged or pushed.")
         sys.exit(1)
+    if result.get("dry_run"):
+        print(f"🏷️ Release {result['tag']} DRY RUN passed — every step before the commit ran "
+              "(notes, bump, uv lock, frontend build, release tests); nothing committed, tagged "
+              "or pushed.")
+        print(f"  would commit: {', '.join(result['staged'])}")
+        return
     ids = result.get("task_ids") or []
     print(f"⏳ Release {result['tag']} is PENDING approval ({result['request_id']}) — "
           "committed and tagged locally, NOTHING pushed:")
@@ -4010,6 +4040,16 @@ def main() -> None:
         help="Also print every held-out experiment in full (operator-only — never paste "
              "this into a PR or a rework prompt)",
     )
+    p_ops = sub.add_parser("ops", help="🔎 Fleet operations checks")
+    ops_sub = p_ops.add_subparsers(dest="ops_cmd", required=True)
+    p_oscan = ops_sub.add_parser(
+        "scan", help="A read-only, rule-based anomaly scan of the fleet (each rule is a real "
+                     "incident): hung test runs, leaked processes, flakes, notice storms")
+    p_oscan.add_argument("--json", action="store_true", help="Machine-readable output")
+    p_oscan.add_argument(
+        "--notify", action="store_true",
+        help="What the daemon runs: also append to $CHELA_DIR/ops/findings.jsonl and queue "
+             "ONE inbox notice for new findings")
     p_jack = judge_sub.add_parser(
         "ack-blocked-race",
         help="🧊 Acknowledge a blocked_race verdict that can never resolve on its own "
@@ -4101,6 +4141,9 @@ def main() -> None:
                            help="Optional file whose text becomes the release commit's body")
     p_release.add_argument("--repo", default=None,
                            help="The repository to release (default: the current one)")
+    p_release.add_argument("--dry-run", action="store_true",
+                           help="Run every step, then remove it all: no commit, tag, request "
+                                "or push")
 
     # merge-approve — the OPERATOR's half of `chela merge --override`
     p_mapprove = sub.add_parser(
@@ -4512,6 +4555,8 @@ def main() -> None:
             cmd_judge_show(args)
         else:
             p_judge.print_help()
+    elif args.command == "ops":
+        cmd_ops_scan(args)
     elif args.command == "adopt":
         cmd_adopt(args)
     elif args.command == "merge":

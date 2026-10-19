@@ -918,6 +918,25 @@ P35 adds:
 8. **One UI kit.** No component outside `ui/` renders a raw `<input>`, `<select>`,
    `<textarea>`, `<button>` or `<dialog>`, or imports `@radix-ui/*` directly; exemptions sit in
    an allowlist with a reason each (rule 7, §4).
+9. **Every decision in §7 holds** on the built page; P35 checks each row and names its test.
+
+## 7. UX decisions made during the port
+
+Liav's calls from using the dashboard. Each lives in its slice's issue too; this table is the
+copy that survives a re-split. A slice that touches a row's surface keeps the row true, and P35
+verifies all of them before the release.
+
+| Date | Surface | Decision | Slice |
+|---|---|---|---|
+| 10-19 | UI kit | Behaviour from Radix Primitives, look from `style.css`; no shadcn/ui, no Radix Themes, no Tailwind (§2.4) | P04 · CMX-218 |
+| 10-19 | Forms | One `FieldRow` grid (label, control, unit): every control in a section starts at the same x | P04 · CMX-218 |
+| 10-19 | Work board | A column has a normal max width (about 360-420px); one visible column does not stretch across the screen; many columns scroll sideways | P12 · CMX-233 |
+| 10-19 | Tile footer | The footer (window id, model, context %) shows in every pane mode: normal, maximized, phone-full | P27 · CMX-242 |
+| 10-19 | Tile context bar | The bottom-edge context-% bar stays visible on the focused pane: the highlight border never covers it | P27 · CMX-242 |
+| 10-19 | Minimized tray | One row with a fixed height that scrolls sideways; label shows the count; fade on the hidden side; wheel scrolls it | P28 · CMX-243 |
+| 10-19 | Phone wall | No session pill strip above the terminal; the sidebar is the session switcher | CMX-202 (deleted it; no slice re-adds it) |
+| 10-18 | Sidebar | One Archived control | CMX-172 |
+| 10-16 | Icons | Lucide via `icons.ts`, never emoji; no em dash in UI strings | all (§5) |
 
 ---
 
