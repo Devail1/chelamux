@@ -32,6 +32,8 @@ def _isolated(tmp_path, monkeypatch):
     "chela/dashboard/static/app/index.html",
     "chela/dashboard/static/app/assets/index-abc123.js",
     "./chela/dashboard/static/app/assets/x.css",
+    "chela/dashboard/static/./app/x.js",
+    "chela/dashboard/frontend/../static/app/x.js",
     "uv.lock",
     "chela/dashboard/frontend/pnpm-lock.yaml",
     "vendor.min.js",
@@ -113,8 +115,10 @@ def test_a_judge_round_names_the_skipped_count_in_its_notes(tmp_path):
     root = _plain_repo(tmp_path / "r", {}, {BUNDLE_PATH: BUNDLE})
     report = judge.run_experiments(root, "false", {"experiments": [_exp(BUNDLE_PATH)]},
                                    timeout=10, base_branch="dev")
-    # Every experiment was on the bundle, so nothing ran — never a pass.
-    assert "proposed NO experiments" in report.cannot_verify
+    # Every experiment was on the bundle, so nothing ran — never a pass, and said as such.
+    assert report.cannot_verify.startswith(
+        "every one of the judge's 1 experiment(s) targeted a GENERATED file")
+    assert report.cannot_verify_final is True
     assert report.outcomes == []
     assert report.notes[-1] == {"title": "Generated files not mutated",
                                 "body": generated.note(1)}

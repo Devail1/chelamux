@@ -14,6 +14,7 @@ so at any depth, the root included.
 from __future__ import annotations
 
 import fnmatch
+import posixpath
 
 PATTERNS = (
     "chela/dashboard/static/app/**",
@@ -30,7 +31,7 @@ def _matches(rel: str, pattern: str) -> bool:
 
 
 def is_generated(rel: str) -> bool:
-    rel = rel.strip().removeprefix("./")
+    rel = posixpath.normpath(rel.strip())     # `./x`, `a/./b`, `a/../a/b` — one spelling
     return any(_matches(rel, p) for p in PATTERNS)
 
 

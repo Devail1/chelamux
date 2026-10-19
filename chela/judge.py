@@ -1651,6 +1651,14 @@ def _run_experiments(
         if skipped:
             report.notes.append({"title": "Generated files not mutated",
                                  "body": generated.note(skipped)})
+        if skipped and not items:
+            report.cannot_verify = (
+                f"every one of the judge's {skipped} experiment(s) targeted a GENERATED file, "
+                "so none ran — nothing was proven. ⛔ Unknown is never a pass: the guards "
+                "live in the source those files are built from."
+            )
+            report.cannot_verify_final = True
+            return report
 
     if not isinstance(items, list) or not items:
         if _docs_only_diff(worktree, base_branch):
