@@ -47,7 +47,9 @@ module.exports = {
     { name: 'no-circular', comment: '(4) No cycles.', severity: 'error', from: {}, to: { circular: true } },
   ],
   options: {
-    doNotFollow: { path: 'node_modules' },
+    // CMX-215: main.tsx imports the legacy graph (../static/js), whose import cycles predate
+    // these rules and leave with the port (FRONTEND_PORT_PLAN.md); the rules hold src/ only.
+    doNotFollow: { path: ['node_modules', '^\\.\\./static/'] },
     // Type-only imports cross boundaries too (`import type`, which verbatimModuleSyntax makes common).
     tsPreCompilationDeps: true,
     tsConfig: { fileName: 'tsconfig.json' },
