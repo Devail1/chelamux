@@ -32,6 +32,7 @@ import shlex
 import subprocess
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from chela import agent_manager, config, discovery, envutil, rc_rename, sessionids
 
@@ -180,50 +181,37 @@ def _add_remote_control(command: str, name: str) -> str:
     return f"{command[:m.end()]} --remote-control {shlex.quote(name)}{rest}"
 
 
-# The arguments that make a hand-typed ``claude`` keep its argv untouched in the shell
-# wrapper (:func:`_rc_shell_function`): it already names its own Remote Control, or it is a
-# non-interactive run (``-p``/``--print``, help, version) that must never surface as a
-# Remote Control session in the Claude desktop app.
-_RC_SKIP_ARGS = ("--remote-control", "--remote-control=*", "-p", "--print",
-                 "-h", "--help", "-v", "--version")
+# CMX-84's ``claude`` wrapper, shipped as a file the fresh shell sources (CMX-269) — typed
+# inline it echoed ~400 chars into every new window, twice.
+RC_SHELL_FILE = Path(__file__).with_name("shell") / "claude-rc.sh"
 
 
-def _rc_shell_function(target: str, name: str) -> str:
-    """One shell line defining ``claude`` so a HAND-TYPED launch gets Remote Control (CMX-84).
+def _setup_line(wid: str | None, name: str, rc: bool) -> str | None:
+    """The ONE line typed into a fresh shell before anything else, or None if it needs none.
 
-    :func:`_add_remote_control` only ever sees the command chela itself sends. A human who
-    opens "+ New shell" and types ``claude`` runs a command chela never saw — so it never
-    showed up in the Claude desktop app. This wrapper, defined in the fresh shell the same
-    way ``export CHELA_WID=…`` is, applies the same rule at the moment the human runs it:
-
-    * a first argument that is not a flag (a prompt, a subcommand such as ``mcp``) leaves
-      the argv untouched — :func:`_add_remote_control`'s positional rule, since the flag's
-      OPTIONAL value would otherwise swallow it;
-    * any of :data:`_RC_SKIP_ARGS` leaves it untouched — already its own
-      ``--remote-control``, or a non-interactive form;
-    * otherwise ``--remote-control <window name>`` goes right after ``claude``, and the
-      window is marked with :data:`chela.rc_rename.PUSHED_OPTION` exactly as
-      :func:`chela.rc_rename.mark_launched` does, so a later rename pushes ``/rename``.
-
-    The name is the window's LIVE name (``#W``) read at launch — the window may have been
-    renamed since it opened — falling back to ``name`` when tmux cannot answer. The real
-    binary is reached through ``command claude``, so the wrapper never recurses; ksh-style
-    ``function claude {`` (bash and zsh both take it) so a user's own ``claude`` alias is
-    neither clobbered nor a syntax error at definition time.
+    Exports ``CHELA_WID`` (when tmux gave an id) and, with ``rc``, sources
+    :data:`RC_SHELL_FILE` so a ``claude`` the human types later gets Remote Control too
+    (CMX-84 — a "New shell" window, or after the first session exits). The leading space
+    keeps it out of history (bash ``HISTCONTROL=ignorespace``, zsh ``HIST_IGNORE_SPACE``) and
+    the trailing ``clear`` wipes its echo, so the window opens on a clean prompt.
     """
-    t = shlex.quote(target)
-    skip = "|".join(_RC_SKIP_ARGS)
-    return (
-        "function claude { local _chela_a _chela_n; "
-        'case "${1:-}" in ""|-*) ;; *) command claude "$@"; return;; esac; '
-        'for _chela_a in "$@"; do case "$_chela_a" in '
-        f'{skip}) command claude "$@"; return;; esac; done; '
-        f"_chela_n=$(command tmux display-message -p -t {t} '#W' 2>/dev/null); "
-        f'[ -n "$_chela_n" ] || _chela_n={shlex.quote(name)}; '
-        f"command tmux set-window-option -t {t} {rc_rename.PUSHED_OPTION} "
-        '"$_chela_n" >/dev/null 2>&1; '
-        'command claude --remote-control "$_chela_n" "$@"; }'
-    )
+    parts = []
+    if wid:
+        parts.append(f"export CHELA_WID={wid}")
+    if rc:
+        parts.append(f". {shlex.quote(str(RC_SHELL_FILE))} {shlex.quote(name)}")
+    if not parts:
+        return None
+    return " " + "; ".join(parts + ["clear"])
+
+
+def _clear_history(target: str) -> None:
+    """Drop ``target``'s scrollback so the setup line's echo is not kept there either."""
+    try:
+        subprocess.run(["tmux", "clear-history", "-t", target],
+                       capture_output=True, text=True, timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.warning("clear-history on %s failed: %s", target, e)
 
 
 def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
@@ -260,8 +248,8 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
       dashboard launcher, Telegram ``/new``, a resumed session), so it is reachable
       from claude.ai too, under the chela window name — and mark the window so later
       renames are pushed with ``/rename`` (:func:`chela.rc_rename.mark_launched`);
-    * when that setting is on, define a ``claude`` shell function in the fresh shell
-      (:func:`_rc_shell_function`, CMX-84) so a ``claude`` the human types there by hand —
+    * when that setting is on, source :data:`RC_SHELL_FILE` in the fresh shell (CMX-84,
+      on the same single :func:`_setup_line` as the export, CMX-269) so a ``claude`` the human types there by hand —
       a "New shell" window, or after the first session exits — gets the same flag and mark;
     * ``send-keys`` the (possibly session-pinned, possibly remote-control-flagged)
       command — we start a shell and *send* the command rather than running it as the
@@ -317,13 +305,12 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
     # `new-window -n` already disables automatic-rename; assert both explicitly so the
     # invariant can't drift out from under a claude launched into the window.
     agent_manager.lock_window_name(wid if have_wid else target)
-    if have_wid:
-        _send(target, f"export CHELA_WID={wid}")
-    if config.remote_control_enabled():
-        # CMX-84: a `claude` the human types into this shell later gets Remote Control
-        # too — not only the `command` chela sends below. Defined before that command,
-        # which then runs through it untouched (it already carries --remote-control).
-        _send(target, _rc_shell_function(wid if have_wid else target, name))
+    # CMX-84: with Remote Control on, the wrapper is defined BEFORE `command`, which then
+    # runs through it untouched (it already carries --remote-control).
+    setup = _setup_line(wid if have_wid else None, name, config.remote_control_enabled())
+    if setup:
+        _send(target, setup)
+        _clear_history(target)
     if command:
         to_send = command
         if have_wid:
