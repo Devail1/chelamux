@@ -11,6 +11,7 @@
 //   shell hook it fails OPEN when the gate cannot decide.
 import type { Register } from 'claude-code'
 import { refresh } from './status'
+import { band, onDisplay } from './timestamps'
 
 const RESERVED = new Set(['tool', 'tool_use_id', 'consent', 'agentId', 'requestMeta'])
 
@@ -67,6 +68,9 @@ export const register: Register = (on, options) => {
     void refresh($, options)
     return done
   })
+  // the turn-timestamp band (timestamps.tsx), and its handshake with the plugin/ hook
+  on('classic.MessageDisplay', ($, e, next) => onDisplay($, e, next))
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => band($, e, next))
   on('classic.SessionStart', ($, e, next) => { void relay($, e); return next(e) })
   on('classic.SessionEnd', ($, e, next) => { void relay($, e); return next(e) })
   on('classic.Stop', ($, e, next) => { void relay($, e); return next(e) })

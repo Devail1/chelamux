@@ -209,6 +209,11 @@ CMX-181 shipped item 1 of §7.2: the status line through `$.ui.status`, with the
 context cache written through the same `scripts/cache-statusline.sh`
 ([`mods/chela-hooks/README.md`](../mods/chela-hooks/README.md)).
 
+CMX-182 shipped item 2: the terminal-wall timestamps as a band above the prompt. While it
+is on, the Mod marks each `MessageDisplay` payload and the daemon stops writing the
+`displayContent` marker, so a reply shows its time in one place
+([`mods/chela-hooks/README.md`](../mods/chela-hooks/README.md#turn-timestamps-cmx-182)).
+
 ### 8.1 Soak: NOT RUN yet
 
 ⛔ **The ≥ 2 h side-by-side soak has not been run.** CMX-181 was a dispatched run, and the
