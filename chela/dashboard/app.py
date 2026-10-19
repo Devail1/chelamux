@@ -172,6 +172,29 @@ def asset_path(path: str) -> str:
     return f"static/v/{ASSET_VERSION}/{path}"
 
 
+# CMX-178: the React islands' built entry, named by the Vite manifest (CMX-177) because its
+# file name is a content hash. Read once, like ASSET_VERSION: a build only lands with a deploy.
+_APP_MANIFEST = _STATIC_DIR / "app" / "manifest.json"
+
+
+def island_entry(manifest: Path = _APP_MANIFEST) -> str | None:
+    """The built entry's path under ``static/`` (``app/assets/main-<hash>.js``), or None when
+    the manifest cannot be read or names no entry: the page then loads without its islands
+    and the legacy modules run as before."""
+    try:
+        file = json.loads(manifest.read_text())["src/main.tsx"]["file"]
+    except (OSError, ValueError, LookupError, TypeError) as e:
+        log.warning("no React islands: %s unreadable (%s)", manifest, e)
+        return None
+    if not isinstance(file, str) or not file:
+        log.warning("no React islands: %s names no entry file", manifest)
+        return None
+    return f"app/{file}"
+
+
+ISLAND_ENTRY = island_entry()
+
+
 @app.route("/static/v/<ver>/<path:filename>")
 def static_versioned(ver, filename):
     resp = send_from_directory(app.static_folder, filename)
@@ -203,6 +226,7 @@ def index():
         wall_tile_dispatched=config.WALL_TILE_DISPATCHED,
         asset_version=ASSET_VERSION,
         asset_path=asset_path,
+        island_src=asset_path(ISLAND_ENTRY) if ISLAND_ENTRY else None,
     ))
     # The HTML names the versioned assets, so it must be revalidated on every load.
     resp.headers["Cache-Control"] = "no-cache"

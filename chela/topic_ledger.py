@@ -2,13 +2,15 @@
 
 The Bot API cannot list a group's topics, so once a binding was dropped its thread id
 lived only in the bridge log. This ledger keeps ``{thread_id: {window, name, cwd,
-created, closed}}`` in ``$CHELA_DIR/telegram-topics.json``. Only the bridge writes it;
+created, closed, session_id}}`` in ``$CHELA_DIR/telegram-topics.json``. Only the bridge writes it;
 the dashboard reads it for a count.
 
 Two uses: auto-topics REOPENS a closed topic made for the same cwd instead of creating
 a new one (:func:`chela.telegram.reconcile.reconcile_bindings`), which bounds the list
 at one topic per concurrently-open window per folder; and Settings can delete every
-closed one in one go (:func:`chela.telegram.reconcile.delete_archived_topics`).
+closed one in one go (:func:`chela.telegram.reconcile.delete_archived_topics`). A third
+(CMX-267): a human REOPENING a closed topic resumes the Claude session it was closed on
+(:class:`chela.telegram.reconcile.TopicReopenedHandler`), from the ``session_id`` kept here.
 
 A missing or corrupt file reads as empty: the worst case is today's behaviour (a fresh
 topic is created), never a reopen of the wrong one.
@@ -70,11 +72,13 @@ class TopicLedger:
             entry["name"] = name
         self._save()
 
-    def closed(self, thread) -> None:
+    def closed(self, thread, session_id: str | None = None) -> None:
         """Record ``thread`` as closed. A topic made before the ledger existed is added
-        with no cwd: never reused, but the cleanup can still find it."""
+        with no cwd: never reused, but the cleanup can still find it. ``session_id`` is the
+        Claude session its window was running (None = unknown), what a reopen resumes."""
         entry = self._topics.setdefault(str(thread), {"created": None, "cwd": None})
         entry["closed"] = self._clock()
+        entry["session_id"] = session_id
         self._save()
 
     def forget(self, thread) -> None:
