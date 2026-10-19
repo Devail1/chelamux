@@ -6601,6 +6601,8 @@ def tick(workflow_path: str | Path) -> dict:
                     continue     # ⚖️🌩️ CMX-379: sitting out a classifier outage
                 if shutting_down():
                     break        # 🔁⚖️ CMX-263: a restart is waiting — launch nothing new
+                if _stamp_prose_only(wf, row):
+                    continue     # ⚖️🪜 CMX-265: a prose-only PR never needs a judge slot
                 if judging >= judge_max_concurrent():
                     break        # it waits a tick; each judge re-runs a whole test suite
                 if _spawn_judge(wf, row, row["pr_head_sha"], conn, tasks_by_id.get(row["task_id"])):
@@ -8263,6 +8265,35 @@ def _spawn_judge(
     conn.execute("UPDATE runs SET judge_launch_owner=NULL WHERE task_id=?", (task_id,))
     conn.commit()
     log.info("judge: %s: judging %s on %s in %s", task_id, row["pr_url"] or "?", sha[:12], worktree)
+    return True
+
+
+def _stamp_prose_only(wf: WorkflowDef, row: sqlite3.Row) -> bool:
+    """⚖️🪜 CMX-265: stamp ``prose_only`` on a PROSE PR's head BEFORE the judge slot gate.
+
+    Seen 2026-10-19: a docs-only PR sat an hour "queued for the judge" behind two running
+    judges, because the CMX-208 check lived in :func:`_spawn_judge`, past the slot gate and a
+    worktree checkout. It needs neither: the head commit is diffed in the repo itself. An
+    unreadable file list is not prose — the row queues for a judge as before.
+
+    Never on a row whose judge is RUNNING or still alive (CMX-429): that judge's verdict would
+    land over the stamp, and an interrupted launch's worktree is `_spawn_judge`'s to reuse.
+    """
+    sha = row["pr_head_sha"]
+    if not sha or row["judge_state"] == judge.J_RUNNING:
+        return False     # an empty head would diff the dispatcher's own checkout
+    if judge.live_judge_run(row["task_id"], judge.judge_worktree_path(wf, row["task_id"])):
+        return False
+    base = wf.get("workspace", "base_branch", default="master")
+    try:
+        files = judge._changed_files(wf.path.parent, base, sha)
+    except (OSError, ValueError) as e:   # git missing, a NUL in the sha: queue, never abort the tick
+        log.warning("judge: %s: could not read the PR's files: %s", row["task_id"], e)
+        return False
+    if risktier.classify(files, risktier.always_human(wf))[0] != risktier.PROSE:
+        return False
+    set_judge_state(row["task_id"], judge.J_PROSE_ONLY, judge.PROSE_ONLY_DETAIL, sha=sha)
+    log.info("judge: %s: prose-only PR on %s — no judge round", row["task_id"], sha[:12])
     return True
 
 
