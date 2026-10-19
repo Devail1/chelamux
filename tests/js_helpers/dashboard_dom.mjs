@@ -75,6 +75,9 @@ export function activateDom(dom) {
  * (window) gets its own bridge and root. A suite that hand-rolls its jsdom boot calls this
  * before it imports main.js / nav.js. */
 export async function mountIslands(win) {
+    // A page with no sidebar has no island to mount, and skips the .tsx import: a helper run
+    // by plain `node` (assert_closed_run_lane.mjs), not Vitest, cannot load .tsx.
+    if (!win.document.getElementById('sidebar-agents')) return;
     const { createBridge } = await import('../../chela/dashboard/frontend/src/shared/bridge/index.ts');
     const { mountSidebar } = await import('../../chela/dashboard/frontend/src/features/sidebar/index.ts');
     win.chelaBridge = createBridge();
