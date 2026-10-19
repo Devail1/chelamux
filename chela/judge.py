@@ -1337,10 +1337,11 @@ def _is_docs_path(name: str) -> bool:
     return p.suffix.lower() in _DOCS_ROOT_SUFFIXES or p.name in _PROSE_BASENAMES
 
 
-def _changed_files(worktree: Path, base_branch: str) -> list[str] | None:
+def _changed_files(worktree: Path, base_branch: str, head: str = "HEAD") -> list[str] | None:
     """Every path this PR touches vs ``origin/<base_branch>``, or ``None`` when git cannot
     say. ``--no-renames``: a rename lists BOTH sides, so ``chela/x.py`` → ``docs/x.md``
-    reports the code path it removed instead of hiding behind the prose one it added."""
+    reports the code path it removed instead of hiding behind the prose one it added.
+    ``head`` (CMX-265) lets a caller with no checkout of the PR name its commit instead."""
     if not base_branch:
         return None
     ref = f"origin/{base_branch}"
@@ -1353,7 +1354,7 @@ def _changed_files(worktree: Path, base_branch: str) -> list[str] | None:
     base_sha = resolved.stdout.strip()
     diff = subprocess.run(
         ["git", "-C", str(worktree), "diff", "--name-only", "--no-renames",
-         f"{base_sha}...HEAD"],
+         f"{base_sha}...{head}"],
         capture_output=True, text=True, errors="replace",
     )
     if diff.returncode != 0:
