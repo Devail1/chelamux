@@ -33,6 +33,7 @@ from pathlib import Path
 import pytest
 
 from chela import (
+    agent_manager,
     capabilities,
     config,
     discovery,
@@ -97,6 +98,9 @@ def fleet(tmp_path, monkeypatch, request):
     # agents.native_status_feed: `claude agents --json` answers fine — the suite stubs the
     # seam instead of shelling out for real (the real call costs up to 30s, see CMX-179).
     monkeypatch.setattr(runtime_truth, "_native_status_probe", lambda: (True, "0.8s"))
+    # plugin.hooks_attributed (CMX-203): the same feed, as the live-session map — empty,
+    # so a hook-blind session a corruption plants is closed unless it says otherwise.
+    monkeypatch.setattr(runtime_truth, "_live_sessions", lambda: {})
     monkeypatch.setattr(config, "DISPATCH_WORKFLOWS", [repo / "WORKFLOW.md"])
     capabilities.publish(capabilities.effective())
 
@@ -528,8 +532,10 @@ def _break_hooks_attributed(tmp_path, monkeypatch):
     """A hook DID reach the log, but `wid_for_session` landed None — two agents sharing one
     cwd (CMX-190), or the window closed before the POST arrived. The record is the exact
     shape `chela/hooks.py:ingest` writes: `wid=None`, `session_id` kept."""
-    event_log.append("hook.pre_tool_use", "Bash: ls", {}, wid=None,
-                     session_id="1969180e-dead-beef-cafe-000000000000")
+    sid = "1969180e-dead-beef-cafe-000000000000"
+    event_log.append("hook.pre_tool_use", "Bash: ls", {}, wid=None, session_id=sid)
+    # CMX-203: and the session is still LIVE — a closed one is no longer worth a warning.
+    monkeypatch.setattr(runtime_truth, "_live_sessions", lambda: {sid: "window ? agent"})
     return doctor.WARN
 
 
@@ -2278,3 +2284,95 @@ def test_blocked_race_ack_for_a_DIFFERENT_sha_does_not_clear_the_row(tmp_path, m
         "an acknowledgement recorded for a DIFFERENT judge_sha cleared the current "
         "verdict — one ack must not permanently mute a run"
     )
+
+
+# --- plugin.hooks_attributed: only LIVE hook-blind sessions warn (CMX-203) -------------
+
+_LIVE_SID = "ff3314ed-0000-4000-8000-000000000001"
+_CLOSED_SIDS = ("aaaaaaaa-0000-4000-8000-000000000002", "bbbbbbbb-0000-4000-8000-000000000003")
+
+
+def _attributed(monkeypatch, live):
+    for sid in (*_CLOSED_SIDS, _LIVE_SID):
+        event_log.append("hook.pre_tool_use", "Bash: ls", {}, wid=None, session_id=sid)
+    monkeypatch.setattr(runtime_truth, "_live_sessions", lambda: live)
+    return runtime_truth.audit(runtime_truth.fact("plugin.hooks_attributed"))
+
+
+def test_hooks_attributed_lists_only_the_live_session(fleet, monkeypatch):
+    [f] = _attributed(monkeypatch, {_LIVE_SID: "@16 openmmo-claude", "cccccccc-x": "@2 x"})
+    assert f.level == doctor.WARN
+    assert "1 hook.* event(s) unattributable — 1 LIVE hook-blind session(s)" in f.title
+    assert "@16 openmmo-claude (ff3314ed)" in f.title
+    assert "(2 closed session(s) ignored)" in f.title
+    for sid in _CLOSED_SIDS:
+        assert sid[:8] not in f.title and sid not in f.detail
+    assert f.detail.endswith(f"Sessions: {_LIVE_SID}")
+
+
+def test_hooks_attributed_all_closed_is_ok(fleet, monkeypatch):
+    [f] = _attributed(monkeypatch, {"cccccccc-x": "@2 x"})
+    assert f.level == doctor.OK
+    assert "no live hook-blind sessions" in f.title
+    assert "(3 closed session(s) ignored)" in f.title
+
+
+def test_hooks_attributed_unreadable_feed_is_unknown_not_ok(fleet, monkeypatch):
+    [f] = _attributed(monkeypatch, None)
+    assert f.level == doctor.WARN
+    assert f.title.startswith("UNKNOWN whether 3 hook-blind session(s)")
+    assert _LIVE_SID in f.detail and _CLOSED_SIDS[0] in f.detail
+
+
+def test_hooks_attributed_no_orphans_never_asks_the_feed(fleet, monkeypatch):
+    def boom():
+        raise AssertionError("the feed was asked with nothing to judge")
+    monkeypatch.setattr(runtime_truth, "_live_sessions", boom)
+    [f] = runtime_truth.audit(runtime_truth.fact("plugin.hooks_attributed"))
+    assert f.level == doctor.OK and "no live hook-blind sessions" in f.title
+
+
+def _feed(monkeypatch, *, which="/usr/bin/claude", ok=True, panes=None):
+    status_map = {
+        "by_pid": {101: "busy", 102: "idle"},
+        "session_by_pid": {101: "sid-in-window", 102: "sid-rootless"},
+        "name_by_pid": {101: "cmx-66"},
+    }
+    calls = []
+    monkeypatch.setattr(runtime_truth.shutil, "which", lambda b: calls.append(b) or which)
+    monkeypatch.setattr(agent_manager, "session_status_map",
+                        lambda force=False: calls.append(force) or status_map)
+    monkeypatch.setattr(agent_manager, "native_status_health", lambda: {"ok": ok})
+    if panes is None:
+        panes = lambda force=False: {  # noqa: E731
+            "@1": sessions.Pane(wid="@1", claude_pid=101),
+            "@2": sessions.Pane(wid="@2", claude_pid=None)}
+    monkeypatch.setattr(sessions, "panes", panes)
+    return calls
+
+
+def test_live_sessions_names_each_by_window_and_name(monkeypatch):
+    calls = _feed(monkeypatch)
+    assert runtime_truth._live_sessions() == {
+        "sid-in-window": "@1 cmx-66", "sid-rootless": "window ? pid 102"}
+    # the cached map, not a forced cold call — doctor already paid for one this run
+    assert calls == ["claude", False]
+
+
+def test_live_sessions_no_claude_is_unknown(monkeypatch):
+    calls = _feed(monkeypatch, which=None)
+    assert runtime_truth._live_sessions() is None
+    assert calls == ["claude"]
+
+
+def test_live_sessions_unhealthy_feed_is_unknown(monkeypatch):
+    _feed(monkeypatch, ok=False)
+    assert runtime_truth._live_sessions() is None
+
+
+def test_live_sessions_unreadable_window_table_still_names_sessions(monkeypatch):
+    def broken(force=False):
+        raise RuntimeError("tmux is gone")
+    _feed(monkeypatch, panes=broken)
+    assert runtime_truth._live_sessions() == {
+        "sid-in-window": "window ? cmx-66", "sid-rootless": "window ? pid 102"}
