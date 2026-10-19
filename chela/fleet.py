@@ -6,16 +6,20 @@ message: start nothing until "resume". Only run rows are touched, never a human 
 agent inside a command that mutates its worktree gets the message but NO Escape, so it
 finishes that command first. The state is ``$CHELA_DIR/fleet-pause.json``; ``--resume``
 claims it by an atomic rename, so two callers never both send "resume".
+
+A running judge is FROZEN instead (SIGSTOP to its agent's and run's trees, SIGCONT on resume),
+recorded first in its ledger so neither the watchdog nor the suite deadline counts frozen time.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import signal
 import time
 from pathlib import Path
 
-from chela import config, inbox, messenger
+from chela import config, inbox, judge, messenger, procguard
 from chela.hold import human_duration
 
 log = logging.getLogger(__name__)
@@ -93,9 +97,59 @@ def pause_all(by: str = "") -> dict:
         what = _mutating(run, procs)
         state["agents"][task] = {"wid": wid, "state": _pause(wid, what),
                                  **({"finishing": what} if what else {})}
-    config.CHELA_DIR.mkdir(parents=True, exist_ok=True)
-    path().write_text(json.dumps(state) + "\n", encoding="utf-8")
+    try:
+        _freeze_judges(state)
+    finally:                                       # every tree it stopped is on record
+        config.CHELA_DIR.mkdir(parents=True, exist_ok=True)
+        path().write_text(json.dumps(state) + "\n", encoding="utf-8")
     return state
+
+
+def _signal(pids: list[int], sig: int) -> list[int]:
+    """The pids ``sig`` reached; one that is gone is skipped, never fatal."""
+    sent = []
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            continue
+        sent.append(pid)
+    return sent
+
+
+def _freeze_judges(state: dict) -> None:
+    """SIGSTOP every running judge's tree (one already frozen is left as it is)."""
+    from chela import agent_manager, dispatcher
+
+    judges = state.setdefault("judges", {})
+    for run in dispatcher.list_runs():
+        task = run.get("task_id")
+        if not task or run.get("judge_state") != judge.J_RUNNING or task in judges:
+            continue
+        wid = run.get("judge_window_id")      # never "": tmux reads that as the ACTIVE pane
+        roots = [agent_manager.claude_pid(wid) if wid else None,
+                 (judge.live_judge_run(task) or {}).get("pid")]
+        pids = procguard.process_tree([p for p in roots if isinstance(p, int)])
+        if not pids:
+            continue
+        now = time.time()
+        rnd, rec = run.get("judge_started_at"), judge.read_freeze(task)
+        old = rec["intervals"] if rec.get("round") == rnd else []
+        judge.write_freeze(task, {"round": rnd, "intervals": [*old, [now, None]]})  # then stop
+        judges[task] = {"pids": _signal(pids, signal.SIGSTOP), "frozen_at": now}
+
+
+def _thaw_judges(state: dict) -> dict[str, bool]:
+    """Close each freeze's record, THEN SIGCONT: every frozen judge (a tree left in T leaks)."""
+    thawed = {}
+    for task, frozen in state.get("judges", {}).items():
+        rec = judge.read_freeze(task)
+        if rec.get("intervals") and rec["intervals"][-1][1] is None:
+            rec["intervals"][-1][1] = time.time()
+            judge.write_freeze(task, rec)
+        pids = frozen.get("pids") or []
+        thawed[task] = _signal(pids, signal.SIGCONT) == pids
+    return thawed
 
 
 def tick(held) -> list[str]:
@@ -112,6 +166,9 @@ def tick(held) -> list[str]:
              f"{len(sent) - len(failed)}/{len(sent)} agent(s)"]
     if failed:
         lines.append(f"fleet resume did NOT reach {', '.join(failed)}: send it 'resume' by hand")
+    lines += [f"fleet resume: judge {task} thawed" if ok else
+              f"fleet resume: judge {task} NOT fully thawed: check its tree for state T"
+              for task, ok in sorted(resumed["thawed"].items())]
     return lines
 
 
@@ -132,6 +189,7 @@ def resume_all() -> dict | None:
         # Kept: it is the only record of who was paused, for whoever resumes them by hand.
         log.warning("fleet pause state kept at %s", claimed)
         return None
+    thawed = _thaw_judges(state)                   # before the record of who is frozen goes
     claimed.unlink(missing_ok=True)
     runs, resumed = _active_runs(), {}
     for task, agent in state["agents"].items():
@@ -139,7 +197,7 @@ def resume_all() -> dict | None:
             continue
         wid = inbox.run_wid(runs[task])
         resumed[task] = bool(wid) and messenger.send_message(SENDER, wid, RESUME_MESSAGE)
-    return {"since": state.get("since"), "resumed": resumed}
+    return {"since": state.get("since"), "resumed": resumed, "thawed": thawed}
 
 
 def status_lines(state: dict | None = None) -> list[str]:
@@ -153,4 +211,7 @@ def status_lines(state: dict | None = None) -> list[str]:
     for task, agent in sorted(state["agents"].items()):
         what = f" {agent['finishing']}" if agent.get("finishing") else ""
         lines.append(f"  agent {task} @ {agent.get('wid')}: {agent.get('state')}{what}")
+    for task, frozen in sorted(state.get("judges", {}).items()):
+        lines.append(f"  judge {task}: suspended {human_duration(time.time() - frozen['frozen_at'])}"
+                     f" (SIGSTOP, {len(frozen.get('pids') or [])} process(es))")
     return lines
