@@ -2703,11 +2703,13 @@ def judge_run(
     dispatcher.mark_judge_run_started(task_id)
     # ⏳⚖️ CMX-431: `progress_at` is when the run last demonstrably MOVED, `phase` where it
     # is, `baseline_seconds`/`confirmations` what its wall must budget — the daemon's
-    # watchdog (`dispatcher.judge_overdue`) reads all four.
+    # watchdog (`dispatcher.judge_overdue`) reads all four, plus `suite_timeout_seconds`.
     status = {**owner_identity(os.getpid()), "task_id": task_id,
               "run_started_at": run_started, "detached": detached, "done": 0, "total": None,
               "progress_at": run_started, "phase": "setup", "baseline_seconds": None,
               "confirmations": 0,
+              # ⏳⚖️ CMX-271: the stall window never undercuts this run's own suite timeout.
+              "suite_timeout_seconds": judge_cfg.suite_timeout_seconds,
               # ⚖️ CMX-40: what the judge pane / `chela peek` show live — the
               # window the badge belongs on, the running tally, and the current label.
               "window": judge_window_name(run.get("branch_name") or ""),
