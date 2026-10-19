@@ -167,6 +167,76 @@ def test_make_repo_rebuilds_its_own_root_from_scratch(tmp_path):
                           text=True, check=True).stdout == ""
 
 
+def test_make_repo_turns_off_git_auto_maintenance_in_the_demo_repo(tmp_path):
+    # CMX-254: a detached `git maintenance run --auto` left by `git commit` races the next
+    # rebuild's rmtree over `.git/maintenance.lock`. Repo config, so later git calls obey too.
+    repo = _gate().make_repo(tmp_path / "gate")
+
+    def get(key):
+        return subprocess.run(["git", "config", "--get", key], cwd=repo, capture_output=True,
+                              text=True, check=True).stdout.strip()
+    assert get("maintenance.auto") == "false"
+    assert get("gc.auto") == "0"
+
+
+def test_make_repo_rebuilds_while_a_lock_vanishes_under_it(tmp_path, monkeypatch):
+    # The CI flake, made deterministic: maintenance drops its lock between rmtree listing the
+    # directory and unlinking the entry, so the unlink hits ENOENT. The rebuild must go on.
+    gate = _gate()
+    root = tmp_path / "gate"
+    lock = gate.make_repo(root) / ".git" / "maintenance.lock"
+    lock.write_text("")
+    real, hit = os.unlink, []
+
+    def racing_unlink(path, *a, **kw):
+        if os.fspath(path).endswith("maintenance.lock"):
+            real(path, *a, **kw)
+            hit.append(path)
+        return real(path, *a, **kw)
+    with monkeypatch.context() as m:
+        m.setattr(os, "unlink", racing_unlink)
+        repo = gate.make_repo(root)
+    assert hit, "the race never fired"
+    assert (repo / "test_shop.py").read_text() == gate.WEAK_TEST
+    assert not lock.exists()
+
+
+def test_make_repo_hands_rmtree_the_vanished_entry_hook(tmp_path, monkeypatch):
+    # The race above can only go red on 3.11: 3.13's rmtree swallows an unlink ENOENT itself,
+    # so there a bare `shutil.rmtree(root)` passes it too. Stand in an rmtree with 3.11's
+    # contract (a vanished entry goes to the hook, or raises without one) on every interpreter.
+    gate = _gate()
+    root = tmp_path / "gate"
+    gate.make_repo(root)
+    real, hooks = gate.shutil.rmtree, []
+
+    def rmtree_3_11(path, **kw):
+        real(path)
+        err = FileNotFoundError(2, "No such file or directory", f"{path}/shop/.git/maintenance.lock")
+        hooks.append(sorted(kw))
+        if not kw:
+            raise err
+        if "onexc" in kw:
+            kw["onexc"](os.unlink, err.filename, err)
+        else:
+            kw["onerror"](os.unlink, err.filename, (type(err), err, None))
+    monkeypatch.setattr(gate.shutil, "rmtree", rmtree_3_11)
+    repo = gate.make_repo(root)
+    assert hooks == [["onexc" if sys.version_info >= (3, 12) else "onerror"]]
+    assert (repo / "test_shop.py").read_text() == gate.WEAK_TEST
+
+
+@pytest.mark.parametrize("shape", ["onexc", "onerror"])
+def test_already_gone_swallows_only_a_vanished_entry(shape):
+    gate = _gate()
+
+    def hand(err):
+        return err if shape == "onexc" else (type(err), err, None)
+    assert gate._already_gone(os.unlink, "x", hand(FileNotFoundError("gone"))) is None
+    with pytest.raises(PermissionError, match="denied"):
+        gate._already_gone(os.unlink, "x", hand(PermissionError("denied")))
+
+
 @pytest.mark.parametrize(("text", "want"), [
     ("## THE JUDGE \u2014 every guard held", "## THE JUDGE: every guard held"),
     ("### head\u2013tail", "### head: tail"),

@@ -62,20 +62,34 @@ EXPERIMENT = {"guard": "orders of exactly $50 ship free", "file": "shop.py",
               "before": "if total >= 50:", "after": "if total > 50:"}
 
 
+def _already_gone(func, path, exc) -> None:
+    """``rmtree``'s error hook: an entry that vanished mid-delete is already what we want.
+    ``git commit`` can leave a detached auto-maintenance child that drops its own
+    ``.git/maintenance.lock`` while we walk the tree, and 3.11's rmtree raises on that
+    (CMX-254). ``exc`` is an exception (``onexc``, 3.12+) or an exc_info tuple (``onerror``)."""
+    err = exc[1] if isinstance(exc, tuple) else exc
+    if not isinstance(err, FileNotFoundError):
+        raise err
+
+
 def make_repo(root: Path = ROOT) -> Path:
     """A fresh ``shop`` repo under ``root``, which is only ever deleted when it carries the
     marker this function wrote — a mistyped CHELA_DEMO_ROOT can never rmtree real data."""
     if root.exists():
         if not (root / MARKER).exists():
             raise SystemExit(f"gate.py: refusing to reuse {root} — it is not a demo root")
-        shutil.rmtree(root)
+        shutil.rmtree(root, **({"onexc": _already_gone} if sys.version_info >= (3, 12)
+                               else {"onerror": _already_gone}))
     repo = root / "shop"
     repo.mkdir(parents=True)
     (root / MARKER).write_text("")
     (repo / "WORKFLOW.md").write_text("---\nproject_key: CMX\nworkspace:\n  base_branch: dev\n---\n")
     (repo / "shop.py").write_text(CODE)
     (repo / "test_shop.py").write_text(WEAK_TEST)
-    for argv in (["init", "-q", "-b", "dev"], ["add", "."], ["commit", "-qm", "free shipping"]):
+    # No auto-maintenance/gc in the demo repo, so no git leaves a detached child behind to
+    # race the next rebuild's rmtree; it is repo config, so the judge's own git calls obey too.
+    for argv in (["init", "-q", "-b", "dev"], ["config", "maintenance.auto", "false"],
+                 ["config", "gc.auto", "0"], ["add", "."], ["commit", "-qm", "free shipping"]):
         subprocess.run(["git", *argv], cwd=repo, check=True, env={
             **os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_AUTHOR_NAME": "demo", "GIT_AUTHOR_EMAIL": "demo@example.com",
             "GIT_COMMITTER_NAME": "demo", "GIT_COMMITTER_EMAIL": "demo@example.com"})
