@@ -62,7 +62,7 @@ def tmux_spawn(monkeypatch, tmp_path):
 
 
 def _launched(sent: list[str]) -> list[str]:
-    return [t for t in sent if not t.startswith("export CHELA_WID=")]
+    return [t for t in sent if not t.startswith(" export CHELA_WID=")]
 
 
 def test_spawn_without_command_launches_the_default_agent_not_a_shell(tmux_spawn, tmp_path,
