@@ -160,10 +160,10 @@ def run_shell_group(cmd: str, *, timeout: float, cwd: str | None = None,
     proc = subprocess.Popen(cmd, shell=True, cwd=cwd, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, errors="replace",
                             start_new_session=True)
-    start = time.time()
+    start, wall_start = time.monotonic(), time.time()   # the ledger is wall-clock
 
     def remaining() -> float:
-        return start + timeout + (frozen(start) if frozen else 0.0) - time.time()
+        return start + timeout + (frozen(wall_start) if frozen else 0.0) - time.monotonic()
 
     try:
         while True:

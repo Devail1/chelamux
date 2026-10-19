@@ -115,3 +115,29 @@ def test_a_reap_wakes_a_stopped_tree_after_the_sigterm(tmp_path, monkeypatch):
     assert judge.stop_judge_run(tmp_path) is True
     assert sent == [("pg", 20, signal.SIGTERM), (20, signal.SIGTERM), (21, signal.SIGTERM),
                     (20, signal.SIGCONT), (21, signal.SIGCONT)]
+
+
+def test_judge_run_credits_its_own_tasks_freeze_to_the_suite_deadline(tmp_path, monkeypatch):
+    """WIRING, on a real judge run: every suite it runs is handed THIS task's freeze ledger,
+    and the registration is gone once the run ends. Seen to go red: drop judge_run's
+    `_run_ctx["task"] = task_id` (the judge's battery found that mutant surviving)."""
+    from tests.test_judge import REAL_GUARD_TEST, _exp, _run_row, _workflow_repo
+
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    repo = _workflow_repo(tmp_path, "abc123", REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, "abc123", judge_state=judge.J_RUNNING, judge_sha="cafe1234")
+    judge.write_freeze("abc123", {"intervals": [[100.0, 142.0]]})
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text('{"experiments": [%s]}' % __import__("json").dumps(_exp()))
+    credits, real = [], procguard.run_shell_group
+
+    def spy(cmd, **kw):
+        credits.append(kw["frozen"](0.0) if kw.get("frozen") else None)
+        return real(cmd, **kw)
+
+    monkeypatch.setattr(procguard, "run_shell_group", spy)
+    monkeypatch.setattr(dispatcher, "_post_pr_comment", lambda *a, **k: (True, ""))
+    judge.judge_run("abc123", exp_file, cleanup=True)
+    assert credits and credits == [42.0] * len(credits)
+    assert "task" not in judge._run_ctx

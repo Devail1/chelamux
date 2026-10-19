@@ -2703,7 +2703,6 @@ def judge_run(
     # ⏱️ CMX-411: THE RUN'S OWN START MARKER. The watchdog's wall measures the battery from
     # here, not from when the judge agent was spawned — its design time is not the run's.
     run_started = time.time()
-    _run_ctx["task"] = task_id                       # ⏸️ CMX-214: whose freeze run_suite credits
     dispatcher.mark_judge_run_started(task_id)
     # ⏳⚖️ CMX-431: `progress_at` is when the run last demonstrably MOVED, `phase` where it
     # is, `baseline_seconds`/`confirmations` what its wall must budget — the daemon's
@@ -2745,6 +2744,7 @@ def judge_run(
     # blows up — a `run_experiments`/`request_changes`/`set_judge_state` exception must not
     # leak the directory forever. `finally`, not a happy-path call at the bottom.
     try:
+        _run_ctx["task"] = task_id                   # ⏸️ CMX-214: whose freeze run_suite credits
         raw, err = load_experiments(experiments_path)
         base_branch = wf.get("workspace", "base_branch", default="master")
         base_branch = base_branch if isinstance(base_branch, str) else ""
