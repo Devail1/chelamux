@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -128,6 +128,20 @@ RECONCILE_MERGE_STATUSES_WITH_RUNNING = (*RECONCILE_MERGE_STATUSES, "running")
 # Readiness poll (see _wait_for_ready) — how long to wait for the agent TUI to
 # accept input before sending the prompt, and how often to re-check.
 READY_TIMEOUT_SECONDS = 60
+
+# 🔁 CMX-263: the daemon's "a shutdown signal arrived" check (`set_shutdown_check`). Once it
+# reads True a tick launches nothing new — no judge, no rework, no claim — so a restart waits
+# only for the launch already in progress (PM2's `kill_timeout` must cover that one).
+_shutdown_check = lambda: False  # noqa: E731
+
+
+def set_shutdown_check(check) -> None:
+    global _shutdown_check
+    _shutdown_check = check
+
+
+def shutting_down() -> bool:
+    return bool(_shutdown_check())
 READY_POLL_INTERVAL = 1.0
 
 # Reconcile watchdog (see tick) — a `running` row stuck at an idle, empty
@@ -1362,6 +1376,13 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # `set_judge_state`, so a non-NULL value always means "the CURRENT `cannot_verify`
         # is a classifier outage" (the inbox reads it that way too).
         ("judge_retry_after", "ALTER TABLE runs ADD COLUMN judge_retry_after TEXT"),
+        # 🔁⚖️ CMX-263. Who is LAUNCHING this run's judge right now: the launching process's
+        # `judge.owner_identity` as JSON. `_spawn_judge` writes it in the same UPDATE that
+        # sets `running`, and clears it once `_launch_agent` returns (`set_judge_state` clears
+        # it too). Non-NULL on a `running` row means the launch never finished: in flight in a
+        # live process, or interrupted when its daemon died (`pm2 restart` mid-launch) — then
+        # the trigger relaunches it as the same round (`_judge_launch_interrupted`).
+        ("judge_launch_owner", "ALTER TABLE runs ADD COLUMN judge_launch_owner TEXT"),
         # 🤫 CMX-97. The judge's OWN tmux window — `_spawn_judge` calls `_launch_agent` with
         # `judge_window=True` (the run's `window_id` must stay the RUN's window, not a
         # judge that will be gone in twenty minutes; see `_launch_agent`'s docstring), which
@@ -4918,14 +4939,15 @@ def set_judge_state(task_id: str, state: str, detail: str = "", *, sha: str | No
         if sha:
             conn.execute(
                 "UPDATE runs SET judge_state=?, judge_detail=?, judge_sha=?, "
-                "judge_no_verdict=?, judge_retry_after=NULL, judge_unknown_final=0 "
-                "WHERE task_id=?",
+                "judge_no_verdict=?, judge_retry_after=NULL, judge_unknown_final=0, "
+                "judge_launch_owner=NULL WHERE task_id=?",
                 (state, (detail or "")[:2000], sha, int(no_verdict), task_id),
             )
         else:
             conn.execute(
                 "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=?, "
-                "judge_retry_after=NULL, judge_unknown_final=0 WHERE task_id=?",
+                "judge_retry_after=NULL, judge_unknown_final=0, judge_launch_owner=NULL "
+                "WHERE task_id=?",
                 (state, (detail or "")[:2000], int(no_verdict), task_id),
             )
         conn.commit()
@@ -6434,6 +6456,13 @@ def tick(workflow_path: str | Path) -> dict:
                 f" ({expired.reason})" if expired.reason else "",
             )
         held = hold.active()
+        # CMX-214: the fleet pause rides the hold — resumed when the hold is gone. Never
+        # takes the tick down.
+        try:
+            for line in fleet.tick(held):
+                log.warning("%s", line)
+        except Exception:  # noqa: BLE001
+            log.exception("fleet pause tick failed")
         if held:
             summary["held"] = True
             summary["hold"] = held.as_dict()
@@ -6480,13 +6509,18 @@ def tick(workflow_path: str | Path) -> dict:
         # operator who paused the queue (or whose WORKFLOW.md does not parse) has not asked
         # for new agents. It resumes when they do — nothing is lost, the PR simply waits.
         if judge.judge_enabled(wf):
-            judging = conn.execute(
-                "SELECT COUNT(*) FROM runs WHERE workflow_path=? AND judge_state=?",
+            # 🔁⚖️ CMX-263: an interrupted launch holds no slot — it is relaunched below.
+            judging = sum(1 for r in conn.execute(
+                "SELECT * FROM runs WHERE workflow_path=? AND judge_state=?",
                 (str(wf.path), judge.J_RUNNING),
-            ).fetchone()[0]
+            ).fetchall() if not _judge_launch_interrupted(r))
             for row in _judge_candidates(conn, wf):
+                if _judge_launch_owner(row) is not None and not _judge_launch_interrupted(row):
+                    continue     # 🔁⚖️ CMX-263: a launch still in flight in another process
                 if _judge_backoff_pending(row):
                     continue     # ⚖️🌩️ CMX-379: sitting out a classifier outage
+                if shutting_down():
+                    break        # 🔁⚖️ CMX-263: a restart is waiting — launch nothing new
                 if judging >= judge_max_concurrent():
                     break        # it waits a tick; each judge re-runs a whole test suite
                 if _spawn_judge(wf, row, row["pr_head_sha"], conn, tasks_by_id.get(row["task_id"])):
@@ -6512,7 +6546,7 @@ def tick(workflow_path: str | Path) -> dict:
             "ORDER BY COALESCE(started_at, '')",
             (str(wf.path),),
         ).fetchall():
-            if active >= max_concurrent:
+            if active >= max_concurrent or shutting_down():
                 continue                     # waits its turn — it does not jump the queue
             # ⛔🏃‍♂️💀 issue #491: no `pr_state == "merged"` check belongs here. `pr_state`
             # was already refreshed in phase 0 of THIS SAME tick, and step 1's reconcile
@@ -6572,7 +6606,7 @@ def tick(workflow_path: str | Path) -> dict:
                  if (active < max_concurrent and not over_budget) else [])
 
         for task in queue:
-            if active >= max_concurrent:
+            if active >= max_concurrent or shutting_down():
                 break
             existing = conn.execute(
                 "SELECT status, attempt, pr_state, requeue_pending FROM runs WHERE task_id=?",
@@ -8104,6 +8138,10 @@ def _spawn_judge(
             log.warning("judge: %s: could not remove %s: %s", task_id, worktree, e)
         return False
 
+    # 🔁⚖️ CMX-263: from here to the clear below, a dead launcher means an interrupted launch.
+    conn.execute("UPDATE runs SET judge_launch_owner=? WHERE task_id=?",
+                 (json.dumps(judge.owner_identity(os.getpid())), task_id))
+    conn.commit()
     try:
         prompt = render_prompt(
             wf.get("agent", "judge_prompt", default=None) or JUDGE_PROMPT,
@@ -8129,9 +8167,17 @@ def _spawn_judge(
             role="judge",
         )
     except Exception as e:
+        if shutting_down():
+            # 🔁⚖️ CMX-263: the restart killed the launch (its hook took the same signal), not
+            # the PR. The marker stays, so the next daemon relaunches this round — no unknown.
+            log.warning("judge: %s: launch interrupted by daemon shutdown (%s) — the next "
+                        "daemon relaunches it", task_id, e)
+            return False
         log.exception("judge: %s: the judge agent failed to launch", task_id)
         set_judge_state(task_id, judge.J_CANNOT_VERIFY, f"the judge agent failed to launch: {e}")
         return False
+    conn.execute("UPDATE runs SET judge_launch_owner=NULL WHERE task_id=?", (task_id,))
+    conn.commit()
     log.info("judge: %s: judging %s on %s in %s", task_id, row["pr_url"] or "?", sha[:12], worktree)
     return True
 
@@ -8151,11 +8197,36 @@ def _judge_candidates(conn: sqlite3.Connection, wf: WorkflowDef) -> list[sqlite3
         "  judge_sha IS NULL OR judge_sha != pr_head_sha"
         "  OR (judge_state=? AND COALESCE(judge_cannot_verify_tries, 0) < ?"
         "      AND COALESCE(judge_unknown_final, 0) = 0)"
+        "  OR (judge_state=? AND judge_launch_owner IS NOT NULL)"
         ")"
         .format(",".join("?" * len(JUDGE_TRIGGER_CHECKS))),
         (str(wf.path), *JUDGE_TRIGGER_CHECKS,
-         judge.J_CANNOT_VERIFY, judge_max_unknown_retries()),
+         judge.J_CANNOT_VERIFY, judge_max_unknown_retries(), judge.J_RUNNING),
     ).fetchall()
+
+
+def _judge_launch_interrupted(row: sqlite3.Row) -> bool:
+    """🔁⚖️ CMX-263: is this ``running`` row a judge LAUNCH whose launcher is gone?
+
+    Measured 2026-10-18: ``pm2 restart chela-daemon`` landed between ``before_run`` and the
+    agent's window, and the new daemon's watchdog wrote "the judge's window disappeared"
+    CANNOT VERIFY. A launcher that is not alive (or is THIS process, which never runs the
+    trigger mid-launch) left an interrupted launch; a live other process is still launching.
+    An unreadable marker is not an interrupted launch — the watchdog handles it as before.
+    """
+    owner = _judge_launch_owner(row)
+    if row["judge_state"] != judge.J_RUNNING or owner is None:
+        return False
+    return owner.get("pid") == os.getpid() or not judge._judge_lock_owner_alive(owner)
+
+
+def _judge_launch_owner(row: sqlite3.Row) -> dict | None:
+    """The parsed ``judge_launch_owner`` marker, or ``None`` when unset or unreadable."""
+    try:
+        owner = json.loads(row["judge_launch_owner"] or "null")
+    except (TypeError, ValueError):
+        return None
+    return owner if isinstance(owner, dict) else None
 
 
 def _judge_backoff_pending(row: sqlite3.Row) -> bool:
@@ -8287,6 +8358,16 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         "SELECT * FROM runs WHERE workflow_path=? AND judge_state=?",
         (str(wf.path), judge.J_RUNNING),
     ).fetchall():
+        launch_started = _parse_ts(row["judge_started_at"])
+        if _judge_launch_owner(row) is not None and not (
+            launch_started is not None and now is not None
+            and (now - launch_started).total_seconds() >= JUDGE_TIMEOUT_SECONDS
+        ):
+            # 🔁⚖️ CMX-263: a launch that never finished is not a judge that died — it is
+            # still launching elsewhere, or the trigger relaunches it as the same round.
+            # Bounded by the flat wall, so a hung launcher or a relaunch that never comes
+            # (the PR closed, CI went red) is still reaped as before.
+            continue
         window = judge.judge_window_name(row["branch_name"] or "")
         # 👻⚖️ CMX-429: ask the RUN, not the agent's window. Since CMX-411 the agent stops
         # right after `--detach`, so "window gone" is normal while its run is still going —
@@ -8383,7 +8464,7 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
         # covers it, since `login_expired` only reaps here while `timed_out` is False.
         conn.execute(
             "UPDATE runs SET judge_state=?, judge_detail=?, judge_no_verdict=?, "
-            "judge_retry_after=? WHERE task_id=?",
+            "judge_retry_after=?, judge_launch_owner=NULL WHERE task_id=?",
             (judge.J_CANNOT_VERIFY, reason, int(not timed_out), retry_after, row["task_id"]),
         )
         conn.commit()

@@ -98,6 +98,23 @@ def pause_all(by: str = "") -> dict:
     return state
 
 
+def tick(held) -> list[str]:
+    """The daemon's half, once per dispatch tick: with the hold gone (its TTL lapsed, or
+    any surface released it), resume the fleet. Returns what it did, for the log."""
+    if held or read() is None:
+        return []
+    resumed = resume_all()
+    if resumed is None:
+        return []
+    sent = resumed["resumed"]
+    failed = sorted(task for task, ok in sent.items() if not ok)
+    lines = [f"fleet pause ENDED with the hold — sent 'resume' to "
+             f"{len(sent) - len(failed)}/{len(sent)} agent(s)"]
+    if failed:
+        lines.append(f"fleet resume did NOT reach {', '.join(failed)}: send it 'resume' by hand")
+    return lines
+
+
 def resume_all() -> dict | None:
     """Send "resume" to every agent this pause stopped; returns ``{"since", "resumed":
     {task_id: delivered}}`` or None when no fleet pause was in force.

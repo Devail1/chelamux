@@ -277,6 +277,8 @@ def cmd_run(args) -> None:
     # CMX-83: {window_id: folder} seen moved last tick — the rename waits one tick.
     folder_moves: dict[str, str] = {}
     stop = GracefulShutdown("chela daemon").install()
+    # CMX-263: a signal mid-tick lets the launch in progress finish, then launches nothing new.
+    dispatcher.set_shutdown_check(lambda: stop.stopping)
 
     while not stop.stopping:
         # CMX-95: a restart of this daemon waits for the tick in progress, never more.
@@ -499,6 +501,7 @@ def cmd_run(args) -> None:
         stop.wait(config.scheduler_poll_interval())
 
     capabilities.clear()   # nothing is providing these any more; don't let doctor say so
+    dispatcher.set_shutdown_check(lambda: False)   # CMX-263: never outlive this loop's flag
     stop.log_exit()
 
 
@@ -1413,6 +1416,7 @@ def cmd_dispatch(args) -> None:
         return
     log.info("Dispatcher starting (workflow=%s, interval=%ds)", args.workflow, interval)
     stop = GracefulShutdown("chela dispatcher").install()
+    dispatcher.set_shutdown_check(lambda: stop.stopping)
     while not stop.stopping:
         try:
             summary = dispatcher.tick(args.workflow)
@@ -1429,6 +1433,7 @@ def cmd_dispatch(args) -> None:
             log.exception("Could not refresh the poll interval; keeping %ds", interval)
         stop.wait(interval)
 
+    dispatcher.set_shutdown_check(lambda: False)
     stop.log_exit()
 
 
