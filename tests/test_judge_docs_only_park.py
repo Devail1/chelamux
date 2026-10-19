@@ -24,7 +24,7 @@ from unittest.mock import patch
 
 import pytest
 
-from chela import dispatcher, inbox, judge
+from chela import dispatcher, inbox, judge, workflow
 from chela.workflow import WorkflowDef
 
 
@@ -367,8 +367,15 @@ def test_no_test_cmd_is_a_final_unknown(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
     repo, head_sha = _git_workflow_repo(tmp_path, "abc123", REAL_GUARD_TEST)
     wf_md = repo / "WORKFLOW.md"
+    # 🎲 CMX-257: drop the `test_cmd:` KEY only. Matching the substring anywhere also dropped
+    # `workspace.root` — its value is this test's tmp_path, `…/test_no_test_cmd_is_a_final_un0`
+    # — so the judge fell back to the shared `~/.chela/worktrees/default/judge-abc123` and
+    # refused to start whenever a concurrent suite's judge held that slot's lock.
     wf_md.write_text("\n".join(line for line in wf_md.read_text().splitlines()
-                               if "test_cmd" not in line) + "\n")
+                               if not line.lstrip().startswith("test_cmd:")) + "\n")
+    wf = workflow.load_workflow(wf_md)
+    assert not judge.judge_suite_config(wf).test_cmd
+    assert judge.judge_worktree_path(wf, "abc123").is_relative_to(tmp_path.resolve())
     with dispatcher._db() as conn:
         judge_run_row(conn, repo, "abc123", pr_head_sha=head_sha)
     monkeypatch.setattr(dispatcher, "pr_live_head_sha", lambda *a, **k: None)
