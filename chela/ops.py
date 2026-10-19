@@ -120,6 +120,8 @@ class Sources:
 
     @cached_property
     def procs(self) -> list[dict]:
+        """Every readable process, in pid order: a /proc listing comes back in whatever order
+        the filesystem keeps, and the rules emit findings in this list's order (CMX-285)."""
         hz = os.sysconf("SC_CLK_TCK")
         uptime = float((self.proc_root / "uptime").read_text().split()[0])
         out = []
@@ -137,7 +139,7 @@ class Sources:
                         "argv": [a.decode(errors="replace") for a in argv if a],
                         "start": int(rest[19]), "cpu_s": (int(rest[11]) + int(rest[12])) / hz,
                         "age_s": uptime - int(rest[19]) / hz})
-        return out
+        return sorted(out, key=lambda p: p["pid"])
 
     def worktree_dir(self, proc: dict) -> Path | None:
         """The worktree the process's cwd or argv is under."""
