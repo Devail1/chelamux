@@ -140,3 +140,7 @@ jobs:
         run: pnpm -C chela/dashboard/frontend lint:boundaries
       - name: Test
         run: pnpm -C chela/dashboard/frontend test
+      # CMX-177: the build output is COMMITTED (users never need Node). Red when it differs from
+      # a fresh build of src/ — a source change without a rebuild. Also runs inside Pytest above.
+      - name: Committed build is fresh
+        run: python3 chela/dashboard/frontend_build.py
