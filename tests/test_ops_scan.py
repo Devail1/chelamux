@@ -34,7 +34,9 @@ def add_proc(env, pid, argv, cwd, *, ppid=500, age=1800, cpu=0.0):
     d = env.proc / str(pid)
     d.mkdir()
     start = int((UPTIME - age) * HZ)
-    fields = ["S", str(ppid)] + ["0"] * 9 + [str(int(cpu * HZ)), "0"] + ["0"] * 6 + [str(start)]
+    ticks = int(cpu * HZ)                            # split: CPU time is utime + stime
+    fields = (["S", str(ppid)] + ["0"] * 9 + [str(ticks // 2), str(ticks - ticks // 2)]
+              + ["0"] * 6 + [str(start)])
     (d / "stat").write_text(f"{pid} (x y) " + " ".join(fields) + " 0 0\n")
     (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
     os.symlink(str(cwd), d / "cwd")
@@ -126,6 +128,12 @@ def test_without_a_runs_db_an_orphan_is_still_found(env):
 
 # --- rule 3: unsettled CI red (CMX-256) ----------------------------------------------------
 
+def test_ci_red_rule_falls_back_to_the_pr_head_sha(env):
+    write_events(env, [{"seq": 7, "type": "run_ci_red",
+                        "payload": {"task_id": "CMX-1", "failing": [], "pr_head_sha": "9876543210"}}])
+    assert [f["subject"] for f in ops.rule_ci_red_unsettled(src(env), {})] == ["CMX-1@9876543"]
+
+
 @pytest.mark.parametrize("payload, hit", [
     ({"failing": ["", " "]}, True),
     ({"failing": []}, True),
@@ -204,6 +212,7 @@ def test_whack_a_mole_rule(env, rounds, hit):
     ([("run_stuck", "CMX-1", 0), ("run_stuck", "CMX-2", 10), ("run_stuck", "CMX-1", 20)], False),
     ([("run_stuck", "CMX-1", 0), ("run_ci_red", "CMX-1", 10), ("run_stuck", "CMX-1", 20)], False),
     ([("daemon_start", "CMX-1", 0), ("daemon_start", "CMX-1", 1), ("daemon_start", "CMX-1", 2)], False),
+    ([("run_stuck", "CMX-1", t) for t in (0, 10, 20, 30, 40)], True),   # one finding per burst
 ])
 def test_notice_storm_rule(env, spec, hit):
     write_events(env, [{"seq": i, "type": k, "ts": NOW + t, "payload": {"task_id": task}}
@@ -300,6 +309,20 @@ def test_cpu_samples_are_kept_for_test_runs_under_worktrees_only(env, leaky):
     assert cpu == {f"50:{int((UPTIME - 1800) * HZ)}": [NOW, 900.0]}
 
 
+@pytest.mark.parametrize("done, errors, kept", [
+    (["hung_test"], {"hung_test": "OSError: x"}, True),    # it raised: proves nothing
+    ([], {}, True),                                         # the budget never reached it
+    (["hung_test"], {}, False),                             # it ran clean: resampled
+])
+def test_cpu_samples_are_resampled_only_by_a_clean_hung_test(env, done, errors, kept):
+    add_proc(env, 50, ["/v/bin/pytest"], env.wt / "CMX-1", cpu=900.0)
+    old = {"cpu": {"50:1": [NOW - 60, 1.0]}}
+    result = {"ts": NOW, "findings": [], "rules_done": done, "errors": errors}
+    ops.record(env.dir, result, old, src(env))
+    cpu = json.loads((env.dir / "ops" / "state.json").read_text())["cpu"]
+    assert cpu == (old["cpu"] if kept else {f"50:{int((UPTIME - 1800) * HZ)}": [NOW, 900.0]})
+
+
 def test_a_resolved_finding_that_recurs_is_new_again(env, leaky):
     leaky.run()
     os.unlink(env.proc / "42" / "stat")                          # the process is gone
@@ -312,9 +335,12 @@ def test_a_resolved_finding_that_recurs_is_new_again(env, leaky):
     assert len(leaky.sent) == 2
 
 
-@pytest.mark.parametrize("pause", ["{}", "not json"])
+@pytest.mark.parametrize("pause", ["{}", "not json", None])
 def test_scheduled_skips_while_a_fleet_pause_is_active(env, leaky, pause):
-    (env.dir / "fleet-pause.json").write_text(pause)
+    if pause is None:                                   # a dangling symlink still means paused
+        os.symlink(env.dir / "nowhere", env.dir / "fleet-pause.json")
+    else:
+        (env.dir / "fleet-pause.json").write_text(pause)
     assert leaky.run()["skipped"].startswith("a fleet pause")
     assert leaky.sent == [] and not (env.dir / "ops").exists()
 
@@ -388,6 +414,9 @@ def test_spawn_is_detached_niced_and_not_doubled(monkeypatch, tmp_path):
     monkeypatch.setattr(ops.subprocess, "Popen", lambda argv, **kw: calls.append((argv, kw)) or child)
     assert ops.spawn() is child and ops.spawn(child) is child
     (argv, kw), = calls
+    done, fresh = SimpleNamespace(poll=lambda: 0), SimpleNamespace(poll=lambda: None)
+    monkeypatch.setattr(ops.subprocess, "Popen", lambda argv, **kw: calls.append(argv) or fresh)
+    assert ops.spawn(done) is fresh and len(calls) == 2      # a FINISHED scan is replaced
     assert argv == ["nice", "-n", "19", "ionice", "-c", "3", sys.executable, "-m",
                     "chela.main", "ops", "scan", "--notify"]
     assert (kw["start_new_session"], kw["stdin"], kw["stdout"].name) == (
