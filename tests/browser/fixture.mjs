@@ -51,11 +51,12 @@ export const ASSET_VERSION = 'f1x7ure0000a';
 // blocks (js_helpers/template_ifs.mjs) plus the CMX-426 asset expressions; anything else is a loud error rather than a
 // silently mis-rendered shell.
 export function renderShell() {
-    const flags = { terminals_enabled: true, wall_tile_dispatched: false, island_src: true };
-    // CMX-178: app.py's island_src, from the committed Vite manifest as Flask reads it.
+    const flags = { terminals_enabled: true, wall_tile_dispatched: false, app_src: true };
+    // CMX-215: app.py's app_src, the page's one module script (the built bundle), from the
+    // committed Vite manifest as Flask reads it.
     const entry = JSON.parse(readFileSync(join(STATIC, 'app', 'manifest.json'), 'utf8'))['src/main.tsx'].file;
     const html = readFileSync(TEMPLATE, 'utf8')
-        .replace(/\{\{\s*island_src\s*\}\}/g, `static/v/${ASSET_VERSION}/app/${entry}`)
+        .replace(/\{\{\s*app_src\s*\}\}/g, `static/v/${ASSET_VERSION}/app/${entry}`)
         .replace(/\{\{\s*asset_path\('([^']+)'\)\s*\}\}/g, (_, rel) => `static/v/${ASSET_VERSION}/${rel}`)
         .replace(/\{\{\s*asset_version\|tojson\s*\}\}/g, JSON.stringify(ASSET_VERSION));
     const rendered = renderTemplateIfs(html, flags);
