@@ -73,6 +73,7 @@ Legacy code owns the fetches until the component reading their result is ported.
 |---|---|---|
 | `agents` | `util.js` `setAgentsCache()` | the `/api/agents` rows |
 | `sidebarLayout` | `nav.js` `_setLayout()` / `_writeLayout()` | `{order, custom, view, loaded}` (CMX-82) |
+| `sidebar` | `nav.js` `renderSidebarAgents()` (and Alt held, the active row) | `SidebarState`: what the sidebar island draws (CMX-276) |
 
 A store is a value plus listeners (`createStore`: `get`, `set`, `subscribe`; `set` with the
 same value notifies nobody, so always publish a NEW array or object, never one mutated in place). React reads it with `useStore(store)`, a one-line
@@ -96,6 +97,25 @@ const agents = useStore(installBridge(window).agents);   // the page's one bridg
 
 To add a store: add it to `Bridge` and `createBridge()` in `src/shared/bridge/index.ts`, and
 call `publish('<name>', value)` wherever legacy changes it.
+
+### A model legacy still imports
+
+Until the legacy modules join the Vite graph (CMX-212 P01), a ported pure model that legacy
+code still calls is built as a second entry at a FIXED name: `src/features/sidebar/model.ts`
+becomes `static/app/sidebarmodel.js` (`vite.config.ts`), and `nav.js` / `terminals.js` import
+`../app/sidebarmodel.js`. The island's bundle imports the same file, so the page has one copy.
+A node suite imports the `.ts` source (Vitest compiles it), and a suite that copies `static/js`
+to boot a second page copies `static/app` with it.
+
+### The sidebar island
+
+`#sidebar-agents` is the sidebar island's (`src/features/sidebar`, CMX-276). It repaints
+synchronously (`flushSync`) on every publish of the `sidebar` store, because legacy code reads
+the rows straight back (Alt+N, jump to the orchestrator). Its clicks call the legacy handlers on
+`window.chela`, looked up at call time. `tests/js_helpers/dashboard_dom.mjs` mounts it (from
+`src/`) for every suite that boots the page; a suite with its own jsdom boot calls
+`mountIslands(window)` before it imports `main.js`. Icons come from `src/shared/icons`, a map
+from a meaning to a Lucide icon.
 
 ## Adding a component, with its test
 

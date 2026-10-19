@@ -1,8 +1,17 @@
 {
+  "src/features/sidebar/model.ts": {
+    "file": "sidebarmodel.js",
+    "name": "sidebarmodel",
+    "src": "src/features/sidebar/model.ts",
+    "isEntry": true
+  },
   "src/main.tsx": {
-    "file": "assets/main-OTQf67ej.js",
+    "file": "assets/main-8jFEHOgy.js",
     "name": "main",
     "src": "src/main.tsx",
-    "isEntry": true
+    "isEntry": true,
+    "imports": [
+      "src/features/sidebar/model.ts"
+    ]
   }
 }

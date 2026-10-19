@@ -4,6 +4,7 @@
 // tearing). Legacy code is not in the Vite graph yet (CMX-212 P01), so it reaches the same
 // stores through window.chelaBridge: `.get()` to read, `.set()` to publish.
 import { useSyncExternalStore } from 'react';
+import type { SidebarState } from '../../features/sidebar/model.ts';
 
 export interface Store<T> {
   get(): T;
@@ -48,6 +49,8 @@ export interface SidebarLayout {
 export interface Bridge {
   agents: Store<Agent[]>;
   sidebarLayout: Store<SidebarLayout>;
+  /** nav.js `renderSidebarAgents()`: what the sidebar island draws (CMX-276). */
+  sidebar: Store<SidebarState | null>;
 }
 
 declare global {
@@ -60,6 +63,7 @@ export function createBridge(): Bridge {
   return {
     agents: createStore<Agent[]>([]),
     sidebarLayout: createStore<SidebarLayout>({ order: [], custom: null, view: null, loaded: false }),
+    sidebar: createStore<SidebarState | null>(null),
   };
 }
 

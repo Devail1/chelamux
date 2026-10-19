@@ -61,7 +61,7 @@ afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 // A device: its own copy of static/js (+ the collab module it imports), its own window.
 async function bootDevice(name) {
     const root = join(tmp, name);
-    for (const d of ['js', 'collab']) cpSync(join(STATIC, d), join(root, d), { recursive: true });
+    for (const d of ['js', 'collab', 'app']) cpSync(join(STATIC, d), join(root, d), { recursive: true });
     const { dom, modules } = await bootDashboardDom({
         body: BODY, canvasStub: true, terminalsEnabled: false, fetchImpl,
         jsRoot: pathToFileURL(join(root, 'js') + '/').href,

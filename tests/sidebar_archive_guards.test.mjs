@@ -72,7 +72,7 @@ async function boot({ hidden = [], sessions = [], hold = [], seedLocalStorage, o
         return gate ? gate.promise.then(answer) : Promise.resolve(answer());
     }
     const root = join(tmp, `page-${_n++}`);
-    for (const d of ['js', 'collab']) cpSync(join(STATIC, d), join(root, d), { recursive: true });
+    for (const d of ['js', 'collab', 'app']) cpSync(join(STATIC, d), join(root, d), { recursive: true });
     const { dom, modules } = await bootDashboardDom({
         body: BODY, canvasStub: true, terminalsEnabled: false, fetchImpl, seedLocalStorage,
         jsRoot: pathToFileURL(join(root, 'js') + '/').href,
@@ -128,6 +128,26 @@ test('nothing is pruned before the first archive answer — then the prune runs'
     await settle();
     assert.deepEqual(page.posts('/api/sidebar/unarchive').map(c => c.body.keys), [['run:CMX-9']],
         'once the archive is known, the gone row is pruned (the setup can prune at all)');
+});
+
+// CMX-276: an EMPTY agent list (a failed or transient read) draws "No agents" and nothing
+// else: no prune of the hidden rows, no drop of the custom-group assignments.
+test('an empty agent list prunes nothing and drops no custom assignment; a real list does both', async () => {
+    const page = (await boot({ hidden: ['run:CMX-9'],
+        override: (method, path) => (path === '/api/agents' ? [] : undefined) })).use();
+    page.server.st.layout = { order: [], view: {}, custom: { groups: [{ id: 'g', name: 'G' }], assign: { 'w:@999': 'g' } } };
+    await page.nav.refreshLayout();
+    const sentBefore = page.sent.length;
+    page.nav.renderSidebarAgents([]);
+    await settle();
+    assert.equal(host().textContent, 'No agents');
+    assert.deepEqual(page.posts('/api/sidebar/unarchive'), [], 'an empty list pruned the archive');
+    assert.deepEqual(page.sent.slice(sentBefore).filter(c => c.method === 'POST'), [], 'an empty list wrote something');
+    // control: the same page with a real list prunes the gone run and drops the gone window
+    page.nav.renderSidebarAgents(ROWS);
+    await settle();
+    assert.deepEqual(page.posts('/api/sidebar/unarchive').map(c => c.body.keys), [['run:CMX-9']]);
+    assert.deepEqual(page.server.st.layout.custom.assign, {});
 });
 
 test('a prune in flight is never sent twice, and the next one goes once it lands', async () => {

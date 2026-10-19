@@ -69,6 +69,18 @@ export function activateDom(dom) {
     }
 }
 
+/** CMX-276: what the page's React islands do before legacy main.js runs (index.html loads
+ * them first): a bridge on `win`, and the sidebar island drawing its #sidebar-agents. From
+ * src/, so a mutation of the TypeScript reaches every suite that boots the page. Each page
+ * (window) gets its own bridge and root. A suite that hand-rolls its jsdom boot calls this
+ * before it imports main.js / nav.js. */
+export async function mountIslands(win) {
+    const { createBridge } = await import('../../chela/dashboard/frontend/src/shared/bridge/index.ts');
+    const { mountSidebar } = await import('../../chela/dashboard/frontend/src/features/sidebar/index.ts');
+    win.chelaBridge = createBridge();
+    mountSidebar(win, win.chelaBridge);
+}
+
 /** Flush one microtask turn — e.g. a fetch().then(json).then(render) chain
  * queued by a poll that fires unawaited on boot — without advancing a timer. */
 export function flush() {
@@ -102,7 +114,7 @@ export function flush() {
  *   `chela/dashboard/static/js/`, e.g. `'kanban.js'`) to import AFTER
  *   main.js and return, keyed by their filename minus `.js`.
  * @param {string} [jsRoot] - a URL (ending in `/`) of the `static/js/` directory to
- *   import from. Defaults to the repo's. A suite that needs TWO independent pages (two
+ *   import from (nav.js imports `../app/sidebarmodel.js`: a copy carries `app/` too). Defaults to the repo's. A suite that needs TWO independent pages (two
  *   devices — tests/sidebar_layout_shared.test.mjs) boots each from its own copy, so
  *   each gets its own module instances; it switches between them with activateDom().
  * @returns {Promise<{dom: JSDOM, chela: object, modules: Record<string,object>}>}
@@ -139,6 +151,7 @@ export async function bootDashboardDom({
     globalThis.setInterval = () => 0;   // main.js arms poll timers a test has no use for
     globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = terminalsEnabled;
 
+    await mountIslands(dom.window);
     await import(new URL('main.js', jsRoot).href);
     const modules = {};
     for (const path of extraModules) {
@@ -146,6 +159,14 @@ export async function bootDashboardDom({
         modules[name] = await import(new URL(path, jsRoot).href);
     }
     return { dom, chela: globalThis.window.chela, modules };
+}
+
+/** CMX-276: click an element a React island rendered (it has no `onclick` attribute: React
+ * listens at its root), with a REAL bubbling click, as a user's lands. */
+export function clickIsland(el) {
+    if (!el) throw new Error('clickIsland: element is missing');
+    if (el.disabled) throw new Error('clickIsland: element is DISABLED — a real click would not reach the handler');
+    el.dispatchEvent(new el.ownerDocument.defaultView.MouseEvent('click', { bubbles: true, cancelable: true }));
 }
 
 /** Compile a REAL rendered element's `onclick="..."` attribute and run it

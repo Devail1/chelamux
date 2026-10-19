@@ -1,7 +1,7 @@
 // --- Stage 0: ES-module imports ---
 import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, staticUrl, updateTabSignal, wantsHuman } from './util.js';
 import { altSwitchKeydown, openPalette, renderSidebarAgents, selectView, setAltHeld, sidebarOrder, updateCtxCache } from './nav.js';
-import { orderByList } from './sidebarmodel.js';
+import { orderByList, windowRunDot } from '../app/sidebarmodel.js';   // CMX-276: the TS model's build
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
 import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, stateTitle, tileState } from './wallmodel.js';
@@ -9,7 +9,6 @@ import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChi
 // "Files" chip below (_ctxBarHTML) and the #modal-diff close button in index.html.
 import './diffpanel.js';
 import { windowIdQuery } from './windowid.js';
-import { windowRunDot } from './sidebarmodel.js';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)

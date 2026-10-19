@@ -15,6 +15,7 @@
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { mountIslands } from './js_helpers/dashboard_dom.mjs';
 
 const PANEL = `
 <div class="panel" id="panel-terminals">
@@ -96,6 +97,7 @@ beforeAll(async () => {
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
 
+    await mountIslands(dom.window);   // CMX-276: the sidebar island draws #sidebar-agents
     await import('../chela/dashboard/static/js/main.js');
     util = await import('../chela/dashboard/static/js/util.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');

@@ -1164,9 +1164,10 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
    orange), done = check (dim — deliberately NOT coloured; a checkmark's
    silhouette alone is the signal, and it would otherwise be the only shape
    here to double as a second colour cue), idle = hollow ring (dim outline).
-   Shape is reinforcement on top of the `.ar-state`/`.gs-state` WORD that
-   already carries the non-hue signal elsewhere (dashboard_scale_nav_a11y's
-   GUARD 3) — never the only cue. */
+   Shape is reinforcement on top of the WORD that carries the non-hue signal:
+   the pane's `.gs-state` pill, and on a sidebar row (CMX-121) the dot's own
+   aria-label and the row's tooltip (dashboard_scale_nav_a11y's GUARD 3) —
+   never the only cue. */
 .term-status-dot {
     flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box;
     display: inline-block; background: var(--text-dim); border: none; box-shadow: none;
@@ -3550,10 +3551,12 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 .group-head:hover .group-more, .group-more:focus-visible { opacity: 1; }
 .group-rows { display: flex; flex-direction: column; gap: 1px; margin-top: 2px; }
 
-/* ---- Rows: a status SHAPE, then ONE line — the title, ellipsised — with the
-   state word small and dim at the right. ctx% and the @window id stay in the
-   row's .ar-sub (CMX-230 / CMX-417) but only surface on hover, or when the
-   context is running hot; the relative time lives in the tooltip. */
+/* ---- Rows (CMX-121, drawn by the React sidebar island since CMX-276): a status
+   SHAPE, then ONE line. The TITLE has the width: it grows first and the metadata
+   (.ar-meta: icon chips for orchestrator / PR / judging, context % from 50%)
+   shrinks long before it does. No state word on the face: the dot's shape carries
+   it, its aria-label and the row's tooltip say it. The @window id (CMX-417) only
+   shows on hover; the relative time lives in the tooltip. */
 .agent-row.rich { align-items: center; gap: 9px; padding: 6px 8px 6px 10px; }
 #sidebar-agents { gap: 1px; }
 /* 10px status dot — matches the collapsed rail (body.sidebar-collapsed .agent-row.rich
@@ -3561,20 +3564,21 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
    base still holds for the wall pane dots and term pills. */
 .agent-row.rich .term-status-dot { flex: 0 0 auto; width: 10px; height: 10px; }
 .agent-row.rich.active::before { height: 16px; }
-.agent-row.rich .ar-main { flex-direction: row; align-items: baseline; gap: 8px; }
-.agent-row.rich .agent-row-name { flex: 1 1 auto; min-width: 0; font-size: 12.5px; }
-.agent-row.rich .ar-sub { flex: 0 0 auto; font-size: 10.5px; gap: 0; opacity: 0.85; }
-.agent-row.rich .ar-state { font-weight: 500; text-transform: none; }
-.agent-row.rich .ar-more { display: none; white-space: nowrap; }
-.agent-row.rich .ar-ctx-part.hot,
+/* longhands, so the shrink weights read the same in every engine (and in jsdom's cascade) */
+.agent-row.rich .agent-row-name { flex-grow: 1; flex-shrink: 1; flex-basis: auto; min-width: 0; font-size: 12.5px; }
+.agent-row.rich .ar-meta {
+    flex-grow: 0; flex-shrink: 1000; flex-basis: auto; min-width: 0; overflow: hidden; display: inline-flex; align-items: center; gap: 6px;
+    font-size: 10.5px; color: var(--text-dim); white-space: nowrap;
+}
+.agent-row.rich .ar-meta:empty { display: none; }
+.agent-row.rich .ar-meta > [data-meta] { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; }
+.agent-row.rich .ar-meta-text { font-variant-numeric: tabular-nums; }
+.agent-row.rich .ar-more { display: none; }
 .agent-row.rich:hover .ar-more,
 .agent-row.rich:focus-within .ar-more { display: inline; }
-.agent-row.rich .ar-ago { display: none; }
-/* An idle row is the common case — its word stays out of the way. */
-.agent-row.rich .ar-state.idle { opacity: 0.7; }
 .agent-row.rich.archived { opacity: 0.55; }
-/* CMX-85: the Alt fast-switch number, shown only while Alt is held (nav.js
-   _paintAltNums inserts it, Alt up removes it) — like the Claude desktop app's
+/* CMX-85: the Alt fast-switch number, shown only while Alt is held (the React
+   sidebar island draws it, CMX-276), like the Claude desktop app's
    Ctrl-held numbers. Over the row's right edge, so the row never reflows. */
 .agent-row .ar-altnum {
     position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
@@ -3636,18 +3640,15 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 /* A dispatched run's PR badge (View ▸ Show PR status): `#N`, its state as a word in the
    tooltip and as a border style — not hue alone. */
 .agent-row.rich .ar-pr {
-    margin-left: 6px; padding: 0 5px; border: 1px solid var(--border); border-radius: 999px;
+    padding: 0 5px; border: 1px solid var(--border); border-radius: 999px;
     font-size: 10px; font-variant-numeric: tabular-nums; color: var(--text-dim);
 }
 .agent-row.rich .ar-pr.draft { border-style: dashed; }
 .agent-row.rich .ar-pr.merged { border-color: var(--accent); color: var(--text); }
 .agent-row.rich .ar-pr.closed { text-decoration: line-through; }
-/* CMX-76: the orchestrator's row badge — the word "orchestrator", outlined like the PR
-   badge (no hue cue: the operator is red-weak). */
-.agent-row.rich .ar-orch {
-    margin-left: 6px; padding: 0 5px; border: 1px solid var(--border); border-radius: 999px;
-    font-size: 10px; color: var(--text-dim); white-space: nowrap;
-}
+/* CMX-76: the orchestrator's row badge, a crown since CMX-121 (its tooltip and accessible
+   name say "Orchestrator"; no hue cue: the operator is red-weak). */
+.agent-row.rich .ar-orch { color: var(--text); }
 /* Show empty groups: a folder header with no matching session keeps its `+`. */
 .side-group.empty .group-rows { display: none; }
 .side-group.flat { margin-top: 4px; }
@@ -3817,6 +3818,9 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     body.sidebar-collapsed .group-head,
     body.sidebar-collapsed .triage-head,
     body.sidebar-collapsed .agent-row .ar-main,
+    body.sidebar-collapsed .agent-row.rich .agent-row-name,
+    body.sidebar-collapsed .agent-row.rich .ar-meta,
+    body.sidebar-collapsed .agent-row .row-unarchive,
     body.sidebar-collapsed .agent-row .recent-resume,
     body.sidebar-collapsed .agent-row .recent-dismiss,
     body.sidebar-collapsed .agent-row .row-more,

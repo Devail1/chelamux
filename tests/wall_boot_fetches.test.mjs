@@ -40,7 +40,7 @@ function makeFetch(log, { hold = () => false, fail = () => false, agents = AGENT
 let _n = 0;
 async function boot(fetchOpts = {}) {
     const root = join(tmp, `page-${_n++}`);
-    for (const d of ['js', 'collab']) cpSync(join(STATIC, d), join(root, d), { recursive: true });
+    for (const d of ['js', 'collab', 'app']) cpSync(join(STATIC, d), join(root, d), { recursive: true });
     const log = [];
     globalThis.GridStack = { init: () => GRID };
     const { modules } = await bootDashboardDom({
