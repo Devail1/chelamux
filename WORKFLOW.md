@@ -103,7 +103,9 @@ judge:
   # 789s measured on CMX-174's head) and runs past 900s when 2 judges + 3 agents share the
   # host, so baseline runs were cut off and reported as NOT GREEN. Revisit once CMX-195
   # (timeout reported as a timeout) and CMX-196 (per-phase judge timings) land.
-  suite_timeout_seconds: 1500
+  # ⏳ 2400 (was 1500), Liav 2026-10-19: ~9270 tests; a clean full run took 1850s at load
+  # 12-20 on 20 cores (CMX-182's task-finished baseline), so 1500 cut it off twice.
+  suite_timeout_seconds: 2400
   # ⏳ CMX-111: `chela judge sweep` (and the sweep inside `task-finished`) is BUDGETED. It
   # measures conditionals first, then return codes/values, then comparison flips, round-robin
   # across files, and stops at whichever budget runs out first. Every mutation it did not
