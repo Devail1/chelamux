@@ -53,10 +53,10 @@ def test_every_script_and_stylesheet_in_the_page_is_versioned(client):
     module = [a["src"] for t, a in refs if t == "script" and a.get("type") == "module" and "src" in a]
     styles = [a["href"] for t, a in refs
               if t == "link" and "stylesheet" in (a.get("rel") or "").split()]
-    # The page as it ships: gridstack + the React islands' entry (CMX-178) + main.js,
-    # gridstack.css + style.css. A count that drops means a tag stopped being recognised —
-    # not that it stopped needing a version.
-    assert module == [_prefix() + dash.ISLAND_ENTRY, _prefix() + "js/main.js"]
+    # The page as it ships: gridstack + the Vite bundle (CMX-215: the islands and the legacy
+    # main.js graph, one module script), gridstack.css + style.css. A count that drops means a
+    # tag stopped being recognised — not that it stopped needing a version.
+    assert module == [_prefix() + dash.APP_ENTRY]
     assert len(scripts) >= 2 and len(styles) >= 2
     assert _prefix() + "style.css" in styles
     for url in scripts + styles:
@@ -178,21 +178,32 @@ def test_running_version_covers_both_static_and_templates(tmp_path):
 
 
 def test_cache_headers(client):
+    """CMX-215: the page's JS is the hashed bundle the manifest names. Its versioned URL is
+    immutable, an older deploy's URL for it revalidates, and the HTML naming it always does."""
     assert client.get("/").headers["Cache-Control"] == "no-cache"
-    r = client.get("/" + _prefix() + "js/main.js")
+    r = client.get("/" + _prefix() + dash.APP_ENTRY)
     assert r.status_code == 200
     assert r.headers["Cache-Control"] == "public, max-age=31536000, immutable"
-    assert b"refresh" in r.get_data()
+    assert b"CHELA_ASSET_VERSION" in r.get_data(), "the bundle lacks the legacy graph (util.js)"
     r.close()
-    old = client.get("/static/v/000000000000/js/main.js")
+    old = client.get("/static/v/000000000000/" + dash.APP_ENTRY)
     assert old.status_code == 200
     assert old.headers["Cache-Control"] == "no-cache"
     old.close()
     # Unversioned URLs keep working.
-    plain = client.get("/static/js/main.js")
+    plain = client.get("/static/" + dash.APP_ENTRY)
     assert plain.status_code == 200
     plain.close()
     assert client.get("/api/version").headers["Cache-Control"] == "no-cache"
+
+
+def test_the_bundle_installs_the_islands_bridge_before_the_legacy_graph_runs():
+    """Rollup lays modules out in evaluation order: the islands (bridge + mounts) must come
+    before util.js, the first legacy module, or legacy publishes to no bridge."""
+    bundle = (STATIC / dash.APP_ENTRY).read_text(encoding="utf-8")
+    islands, legacy = bundle.find("version-island"), bundle.find("CHELA_ASSET_VERSION")
+    assert islands >= 0 and legacy >= 0
+    assert islands < legacy
 
 
 def test_versioned_route_does_not_escape_static(client):

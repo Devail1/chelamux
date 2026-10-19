@@ -1,8 +1,8 @@
 // CMX-178: the state the legacy modules and the React islands share, until a ported component
 // owns its own fetch. A store is a value plus listeners, read in React through
 // useSyncExternalStore (React's own primitive for an outside store, so no dependency and no
-// tearing). Legacy code is not in the Vite graph yet (CMX-212 P01), so it reaches the same
-// stores through window.chelaBridge: `.get()` to read, `.set()` to publish.
+// tearing). Legacy code reaches the same stores through window.chelaBridge (`.get()` to read,
+// `.set()` to publish) until CMX-212 P03 turns that into imports; it is bundled since P01.
 import { useSyncExternalStore } from 'react';
 
 export interface Store<T> {
