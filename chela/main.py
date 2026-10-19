@@ -2245,10 +2245,18 @@ def cmd_restore(args) -> None:
     bindings_reg = BindingRegistry.load()
     bindings = {wid: bindings_reg.epoch_for(wid) for wid in bindings_reg.windows()}
     verdicts = restore.plan(store, bindings, sessionids.entries(), now_epoch)
+    closed = restore.closed_before_crash(now_epoch)
 
     if now_epoch is None:
         print("⚠ CANNOT VERIFY — tmux is unreachable right now, so no stamped row can be "
               "proven dangling (or current). This is not a clean bill of health.")
+
+    if closed:
+        print(f"{len(closed)} session(s) skipped because the user closed them before the "
+              "crash — never resumed:\n")
+        for sid, info in closed.items():
+            print(f"  {info.get('name') or info.get('wid') or '?'}  {sid}  {restore.closed_note(info)}")
+        print()
 
     if not orphans and not verdicts:
         print("restore: nothing orphaned — every stamped row matches the running tmux epoch.")
@@ -2269,7 +2277,7 @@ def cmd_restore(args) -> None:
     elif retire_flag and verdicts:
         results = restore.retire_empty(verdicts)
     elif resume_flag and verdicts:
-        results = restore.resume(verdicts, runs)
+        results = restore.resume(verdicts, runs, closed=closed)
     else:
         results = []
 
@@ -2283,7 +2291,9 @@ def cmd_restore(args) -> None:
             else:
                 cmd = v.manual_command()
                 # CMX-156: a session a run still owns is never offered as a relaunch line.
-                held = cmd and (restore.not_offered_reason(v.cwd, runs) if runs is not None
+                held = cmd and (restore.closed_note(closed[v.session_id])
+                                if v.session_id in closed
+                                else restore.not_offered_reason(v.cwd, runs) if runs is not None
                                 else "the dispatcher's runs table is unreadable — a run may "
                                      "still own this worktree")
                 line = (f"  [{v.store}] {v.wid}  MANUAL"

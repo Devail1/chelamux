@@ -510,6 +510,7 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
            record_resume_failure=None,
            clear_resume_failure=None,
            kill_window=None,
+           closed=None,
            **apply_kwargs) -> list[ApplyResult]:
     """CMX-350/issue #468: actually relaunch a MANUAL row's dead agent — the one write path
     in this module that starts a NEW process rather than editing a JSON store.
@@ -621,6 +622,9 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
     resumed_sessions: set[tuple[str, str | None]] = set()
     resumed_by_id: dict[int, ApplyResult] = {}
     for v in eligible:
+        if v.session_id in (closed or {}):      # CMX-275: the user closed it — never revive
+            resumed_by_id[id(v)] = ApplyResult(v, SKIPPED, closed_note(closed[v.session_id]))
+            continue
         if not sessions.SESSION_RE.match(v.session_id or ""):
             resumed_by_id[id(v)] = ApplyResult(
                 v, SKIPPED, "session id does not look like a session id — refusing to "
@@ -751,9 +755,27 @@ def _write_marker(marker: Path, now_epoch: str, owed: list[dict]) -> None:
     marker.write_text(json.dumps({"epoch": now_epoch, **({"owed": owed} if owed else {})}))
 
 
+def closed_before_crash(now_epoch: str | None, *, roster_epochs=None,
+                        closed_lookup=None) -> dict[str, dict]:
+    """CMX-275: the sessions the user closed in the epoch(s) the last crash ended — the same
+    source epochs :func:`boot_pass` reads — so ``chela restore`` names them as skipped."""
+    if not now_epoch:
+        return {}
+    ended = (roster_epochs or roster.ended)(now_epoch)
+    if not ended:
+        return {}
+    return (closed_lookup or roster.closed)(_source_epochs(ended[0][0], ended))
+
+
+def closed_note(info: dict) -> str:
+    """Why a session the user closed is not resumed — the one sentence every surface prints."""
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(info.get("closed_at") or 0))
+    return f"closed by the user at {when} (was {info.get('wid') or '?'})"
+
+
 def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Path,
               resume_fn=None, notify=None, roster_epochs=None,
-              wid_for_session=None) -> dict | None:
+              wid_for_session=None, closed_lookup=None) -> dict | None:
     """CMX-125: run the restore pass at most ONCE per tmux epoch (called every daemon tick).
 
     ``marker`` holds the last epoch seen. Unknown epoch → nothing (a boot can reach the daemon
@@ -768,6 +790,10 @@ def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Pa
     ``previous`` itself resumed — is carried until a roster sample of ``previous`` shows
     them. An owed session already live now (``wid_for_session``) is never relaunched, and
     one session is launched at most once per pass, from its newest epoch.
+
+    CMX-275: a session the roster saw CLOSED in a source epoch (:func:`chela.roster.closed`,
+    ``closed_lookup``) is never resumed — owed or gathered — and drops out of ``owed``; the
+    notice names it under ``skipped_closed``.
     """
     if not now_epoch:
         return None
@@ -789,17 +815,27 @@ def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Pa
             and o["session_id"] not in sampled]
     _write_marker(marker, now_epoch, owed)
     sources = _source_epochs(previous, ended)
+    closed = (closed_lookup or roster.closed)(sources)
     live = wid_for_session or sessions.wid_for_session
     still_live = [o for o in owed if live(o["session_id"])]
-    carried = [Verdict(o["store"] if o.get("store") == "inbox.orchestrator" else CARRIED,
-                       o.get("wid") or "?", previous, "MANUAL", o["session_id"], None,
-                       o["cwd"], o.get("label") or "")
-               for o in owed if o not in still_live]
+    skipped_closed: dict = {}            # named once, however many rows carry the session
+
+    def not_closed(v: Verdict) -> bool:
+        if v.session_id not in closed:
+            return True
+        skipped_closed.setdefault(
+            v.session_id, f"{v.label or v.wid}: {closed_note(closed[v.session_id])}")
+        return False
+
+    carried = [v for v in (Verdict(o["store"] if o.get("store") == "inbox.orchestrator"
+                                   else CARRIED, o.get("wid") or "?", previous, "MANUAL",
+                                   o["session_id"], None, o["cwd"], o.get("label") or "")
+                           for o in owed if o not in still_live) if not_closed(v)]
     verdicts, runs = gather()
     newest: dict = {v.session_id: None for v in carried}
     rows = list(carried)
-    for v in sorted((v for v in verdicts
-                     if v.stamped_epoch in sources and v.verdict == "MANUAL"),
+    for v in sorted((v for v in verdicts if v.stamped_epoch in sources
+                     and v.verdict == "MANUAL" and not_closed(v)),
                     key=lambda v: sources.index(v.stamped_epoch)):
         if v.manual_command() and newest.setdefault(v.session_id, v.stamped_epoch) != \
                 v.stamped_epoch:
@@ -820,15 +856,19 @@ def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Pa
             if r.action != RESUMED]
     log.info("restore boot pass: tmux epoch %s -> %s, %d resumed, %d not",
              previous, now_epoch, len(back), len(left))
-    out = {"previous": previous, "epoch": now_epoch, "resumed": back, "not_resumed": left}
+    out = {"previous": previous, "epoch": now_epoch, "resumed": back, "not_resumed": left,
+           **({"skipped_closed": list(skipped_closed.values())} if skipped_closed else {})}
     recovered = sources[-1] if len(sources) > 1 else previous if carried else None
     head = "tmux restarted"
     if recovered:
         out["recovered_from"] = recovered
         head = f"tmux restarted twice; recovered from epoch {recovered}"
-    if back or left:
+    if back or left or skipped_closed:
         (notify or inbox.enqueue)(
             "restore_boot",
             f"{head} — came back: {', '.join(back) or 'none'}; "
-            f"not resumed: {'; '.join(left) or 'none'}", out)
+            f"not resumed: {'; '.join(left) or 'none'}"
+            + (f"; skipped, closed: {'; '.join(skipped_closed.values())}"
+               if skipped_closed else ""),
+            out)
     return out
