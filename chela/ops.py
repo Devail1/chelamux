@@ -137,7 +137,7 @@ class Sources:
                         "argv": [a.decode(errors="replace") for a in argv if a],
                         "start": int(rest[19]), "cpu_s": (int(rest[11]) + int(rest[12])) / hz,
                         "age_s": uptime - int(rest[19]) / hz})
-        return out
+        return sorted(out, key=lambda p: p["pid"])   # iterdir order is the filesystem's
 
     def worktree_dir(self, proc: dict) -> Path | None:
         """The worktree the process's cwd or argv is under."""
