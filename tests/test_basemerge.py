@@ -329,7 +329,8 @@ def test_the_inbox_cap_counts_the_free_conflict_rounds():
         inbox._effective_rework_cap({"rework_count": 1}) + 2
 
 
-@pytest.mark.parametrize("row", [{"status": "running"}, {"branch_name": ""}])
+@pytest.mark.parametrize("row", [{"status": "running", "pr_head_sha": "deadbee1"},
+                                 {"branch_name": ""}])
 def test_only_an_awaiting_review_run_with_a_branch_is_tried(tmp_path, tried, row):
     calls, _ = tried
     wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING", **row)
