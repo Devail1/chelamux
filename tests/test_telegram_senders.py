@@ -323,6 +323,7 @@ def test_every_registered_handler_reads_nothing_of_a_strangers_update():
     wrapper that forgot to check the gate still has ``__wrapped__``."""
     closed = []
     hs, sender = _handlers(on_topic_closed=closed.append,
+                           on_topic_reopened=lambda t: pytest.fail("reopened"),
                            decide_override=lambda *a, **k: pytest.fail("decided"),
                            launch_session=lambda cwd: pytest.fail("launched"),
                            send_key=lambda *a: pytest.fail("key"),
@@ -330,7 +331,7 @@ def test_every_registered_handler_reads_nothing_of_a_strangers_update():
                            capture=lambda *a, **k: pytest.fail("captured"))
     assert {"_on_message", "_on_photo", "_on_document", "_on_new", "_on_screenshot",
             "_on_esc", "_on_qa", "_on_mirror", "_on_new_cb", "_on_override", "_on_key",
-            "_on_topic_closed"} <= set(hs)
+            "_on_topic_closed", "_on_topic_reopened"} <= set(hs)
     for name, cb in hs.items():
         touched: list[str] = []
         _run(cb, _tripwire_update(STRANGER, touched, name))

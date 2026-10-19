@@ -1694,7 +1694,7 @@ def _override_loop(relay, interval: int, stop) -> None:
         stop.wait(interval)
 
 
-def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
+def _reconcile_loop(registry, topic_api, interval: int, stop, ledger=None) -> None:
     """Auto-topics: reconcile the registry against the live fleet, until stopped.
 
     Each tick diffs live agent windows against the persisted bindings
@@ -1725,7 +1725,9 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
     from chela import telegram as tg
     from chela import topic_ledger as topics
 
-    ledger = tg.TopicLedger()  # CMX-204: every topic made, so a folder's old one is reused
+    # CMX-204: every topic made, so a folder's old one is reused. Passed in when the
+    # inbound close/reopen handlers write it too: one instance, or each clobbers the other.
+    ledger = ledger if ledger is not None else tg.TopicLedger()
     while not stop.is_set():
         try:
             if userconfig.get(topics.CLEANUP_KEY):
@@ -1765,6 +1767,7 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
                 rebinds=rebinds,
                 ledger=ledger,
                 delete_on_close=userconfig.get(topics.DELETE_ON_CLOSE_KEY) is True,
+                session_for=tg.window_session_id,
             )
             if had_rebinds:
                 sidebar_archive.settle_rebinds(rebinds, now_epoch)
@@ -1778,6 +1781,25 @@ def _reconcile_loop(registry, topic_api, interval: int, stop) -> None:
         except Exception:
             log.exception("Telegram auto-topics reconcile failed")
         stop.wait(interval)
+
+
+def _topic_reopened_handler(registry, ledger, topic_api):
+    """The production :class:`~chela.telegram.TopicReopenedHandler` (CMX-267): resumes through
+    :func:`chela.spawn.spawn_window`, the one window-creation path ``chela spawn`` and
+    Telegram ``/new`` share, so env, Remote Control and ``CHELA_WID`` are identical."""
+    from chela import sessionids, sessions, spawn
+    from chela.telegram import TopicReopenedHandler
+
+    return TopicReopenedHandler(
+        registry, ledger,
+        spawn=spawn.spawn_window,
+        session_exists=lambda sid: sessions.transcript_for_session(sid) is not None,
+        session_live=sessions.wid_for_session,
+        self_reopened=topic_api.reopened_by_chela,
+        pin_session=sessionids.set_session_id,
+        now_epoch=epoch.current,
+        on_change=registry.save,
+    )
 
 
 def _build_bindings_registry(args, chat: str):
@@ -2040,14 +2062,20 @@ def cmd_telegram(args) -> None:
         return
 
     try:
-        from chela.telegram import RegistryRouter, TopicClosedHandler, build_application
+        from chela.telegram import (
+            RegistryRouter, TopicClosedHandler, TopicLedger, build_application,
+            window_session_id,
+        )
         router = RegistryRouter(registry)
         # Topic-closed → unbind only (never kill the agent), and persist the drop.
-        on_topic_closed = (
-            TopicClosedHandler(registry, on_change=registry.save).handle
-            if auto_topics
-            else None
-        )
+        # Topic-reopened → resume the session it was closed on (CMX-267).
+        on_topic_closed = on_topic_reopened = ledger = None
+        if auto_topics:
+            ledger = TopicLedger()
+            on_topic_closed = TopicClosedHandler(
+                registry, on_change=registry.save, ledger=ledger,
+                session_for=window_session_id).handle
+            on_topic_reopened = _topic_reopened_handler(registry, ledger, topic_api).handle
         # The mirror's D-pad (CMX-52): a tap sends its key, then asks the pane watcher to
         # re-draw the mirrored dialog IN PLACE, so the ❯ cursor moves in the chat. The
         # watcher owns that message's id and its de-dup signature, so the re-render must
@@ -2057,6 +2085,7 @@ def cmd_telegram(args) -> None:
         application = build_application(
             token, router,
             on_topic_closed=on_topic_closed,
+            on_topic_reopened=on_topic_reopened,
             refresh_mirror=gate_watcher.refresh_mirror,
             toggle_mirror=gate_watcher.toggle_mirror,
             refresh_overrides=override_relay.tick,
@@ -2086,7 +2115,7 @@ def cmd_telegram(args) -> None:
     if topic_api is not None:
         threading.Thread(
             target=_reconcile_loop,
-            args=(registry, topic_api, reconcile_interval, stop),
+            args=(registry, topic_api, reconcile_interval, stop, ledger),
             daemon=True,
         ).start()
         log.info("auto-topics reconcile every %ds", reconcile_interval)
