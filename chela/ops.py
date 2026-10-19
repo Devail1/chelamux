@@ -123,9 +123,11 @@ class Sources:
         hz = os.sysconf("SC_CLK_TCK")
         uptime = float((self.proc_root / "uptime").read_text().split()[0])
         out = []
-        for entry in self.proc_root.iterdir():
-            if not entry.name.isdigit() or int(entry.name) == os.getpid():
+        pids = sorted(int(e.name) for e in self.proc_root.iterdir() if e.name.isdigit())
+        for pid in pids:                          # iterdir order is the filesystem's, not ours
+            if pid == os.getpid():
                 continue
+            entry = self.proc_root / str(pid)
             try:
                 stat = (entry / "stat").read_text()
                 argv = (entry / "cmdline").read_bytes().split(b"\0")
@@ -133,7 +135,7 @@ class Sources:
             except OSError:
                 continue                          # gone, or not ours to read
             rest = stat[stat.rindex(")") + 2:].split()
-            out.append({"pid": int(entry.name), "ppid": int(rest[1]), "cwd": cwd,
+            out.append({"pid": pid, "ppid": int(rest[1]), "cwd": cwd,
                         "argv": [a.decode(errors="replace") for a in argv if a],
                         "start": int(rest[19]), "cpu_s": (int(rest[11]) + int(rest[12])) / hz,
                         "age_s": uptime - int(rest[19]) / hz})
