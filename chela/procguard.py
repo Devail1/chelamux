@@ -111,9 +111,37 @@ def _drain(proc: subprocess.Popen, grace: float) -> tuple[str, str]:
         return "", ""
 
 
+def _ppids() -> dict[int, int]:
+    out = {}
+    for d in os.listdir("/proc"):
+        try:
+            with open(f"/proc/{d}/stat") as f:
+                out[int(d)] = int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue                # not a pid, or it exited mid-scan
+    return out
+
+
+def process_tree(roots: list[int]) -> list[int]:
+    """``roots`` and every descendant, parents first (CMX-214: a judge freezes as a tree).
+    By parentage, not by group: a suite leads its own session, so a group misses it."""
+    children: dict[int, list[int]] = {}
+    for pid, ppid in _ppids().items():
+        children.setdefault(ppid, []).append(pid)
+    seen: list[int] = []
+    todo = list(roots)
+    while todo:
+        pid = todo.pop(0)
+        if pid not in seen:
+            seen.append(pid)
+            todo.extend(sorted(children.get(pid, ())))
+    return seen
+
+
 def run_shell_group(cmd: str, *, timeout: float, cwd: str | None = None,
                     env: dict[str, str] | None = None,
-                    grace: float = TERM_GRACE_SECONDS) -> subprocess.CompletedProcess:
+                    grace: float = TERM_GRACE_SECONDS,
+                    frozen=None) -> subprocess.CompletedProcess:
     """``subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=…)`` for a
     test suite, whose WHOLE process group dies with the run (CMX-253).
 
@@ -127,12 +155,24 @@ def run_shell_group(cmd: str, *, timeout: float, cwd: str | None = None,
 
     No guardian (:func:`run_contained`): its ``python -m chela.procguard`` would import from
     the cwd, and the cwd here is a worktree whose ``chela/`` a mutation may have corrupted.
+    ``frozen(since)`` (CMX-214): seconds SIGSTOPped since ``since``; the deadline moves by it.
     """
     proc = subprocess.Popen(cmd, shell=True, cwd=cwd, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, errors="replace",
                             start_new_session=True)
+    start, wall_start = time.monotonic(), time.time()   # the ledger is wall-clock
+
+    def remaining() -> float:
+        return start + timeout + (frozen(wall_start) if frozen else 0.0) - time.monotonic()
+
     try:
-        out, err = proc.communicate(timeout=timeout)
+        while True:
+            try:
+                out, err = proc.communicate(timeout=max(remaining(), 0.0))
+                break
+            except subprocess.TimeoutExpired:
+                if remaining() <= 0:
+                    raise
     except subprocess.TimeoutExpired:
         _signal_group(proc.pid, signal.SIGTERM)
         deadline = time.monotonic() + grace
