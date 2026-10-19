@@ -124,7 +124,6 @@ const PANEL = `
     <button id="term-lock-btn" onclick="chela.toggleWallLock(this)"></button>
   </span>
   <button id="term-new-shell"></button>
-  <div id="term-switcher"></div>
   <div id="term-stage"></div>
   <div id="term-min-dock"></div>
   <div id="sidebar-agents"></div>

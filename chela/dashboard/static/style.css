@@ -631,7 +631,7 @@ body {
    the pane-header-v2 comment above already flags for this pair of classes). */
 .gs-min-btn svg, .gs-max-btn svg { vertical-align: middle; }
 /* Mobile single-pane fullscreen toggle (paneHead, terminals.js) — same
-   base-hide/mobile-reveal shape as `.term-switcher`/`.term-keybar` below
+   base-hide/mobile-reveal shape as `.term-keybar` below
    (not the specificity-trap shape the comment above warns about: this is a
    *different* selector, not `.gs-min-btn`/`.gs-max-btn` themselves). Belt and
    suspenders: paneHead() only ever renders this button when
@@ -3242,21 +3242,21 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
        above/below the pane on a phone. CMX-130's 70vh was a rough guess
        tuned against the old collapsible #term-bar and left dead space below
        the pane once the v2 fixed keybar replaced it (this fixes that).
-       --gs-head-h / --term-switcher-h below are the two new measured
-       constants: --gs-head-h is the mobile .gs-head row itself (2px+2px
-       padding around the title+subtitle label — two lines now the ai-title
-       subtitle is shown again, above); --term-switcher-h is the agent-pill
-       strip's own footprint (28px pill row + 2px padding-bottom + 8px
-       margin-bottom). --term-keybar-h (47px, below) and --term-ctx-bar-h
+       --gs-head-h below is a measured constant: the mobile .gs-head row
+       itself (2px+2px padding around the title+subtitle label: two lines now
+       the ai-title subtitle is shown again, above). CMX-202 dropped the
+       agent-pill strip above the pane (and its 38px --term-switcher-h): the
+       sidebar is the phone's session switcher, so the pane gets that height
+       back. --term-keybar-h (47px, below) and --term-ctx-bar-h
        (30px, :root) already existed. Subtracting the keybar's footprint AND
        env(safe-area-inset-bottom) separately still matters (CMX-130): the
        keybar's own bottom padding is `calc(6px + env(safe-area-inset-bottom))`,
        so on a home-indicator phone the bar is 47px + inset tall — subtracting
        only the 47px would leave the inset's worth of the pane's bottom row
        (input box + "auto mode on") still under the bar. */
-    :root { --gs-head-h: 32px; --term-switcher-h: 38px; }
+    :root { --gs-head-h: 32px; }
     .term-single .term-pane {
-        height: calc(100dvh - var(--gs-head-h) - var(--term-switcher-h) - var(--term-keybar-h, 0px) - var(--term-ctx-bar-h) - env(safe-area-inset-bottom) - var(--kb-occluded, 0px));
+        height: calc(100dvh - var(--gs-head-h) - var(--term-keybar-h, 0px) - var(--term-ctx-bar-h) - env(safe-area-inset-bottom) - var(--kb-occluded, 0px));
     }
     /* NB: the pane is DELIBERATELY left inset by .content's horizontal padding
        (no width reclaim). That side gutter is what lets a touch-drag beside the
@@ -4380,47 +4380,10 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     .launch-menu { max-width: calc(100vw - 16px); }
 }
 
-/* ---- Mobile agent switcher (pill strip) ----
-   Replaces the dropdown on phones with a scrollable row of tappable agent pills
-   (status dot + label, active highlighted). Desktop never shows it. */
-.term-switcher { display: none; }
-
 @media (max-width: 768px) {
-    /* Dropdown is replaced by the pill strip; the empty toolbar above collapses. */
+    /* The dropdown never shows on a phone: the sidebar is the session
+       switcher (CMX-202), and the pane header names the open session. */
     #term-agent { display: none !important; }
-
-    /* The terminals toolbar (.term-toolbar) has no visible control on a phone,
-       but it still renders as an EMPTY row whose 12px bottom margin sets where
-       the agent pills sit. A `display: none` here used to say otherwise — it
-       never applied (the row's inline style beat it), and CMX-414 moving that
-       style into the stylesheet would have switched it on and shifted the
-       pills (CMX-386/404) up 12px. Dropped: phone geometry is unchanged. */
-
-    /* Scrollable agent-pill strip. (Starting a share moved to the primary menu
-       in the sidebar foot, so the row no longer carries its own 🔗 trigger.) */
-    .term-switcher {
-        display: flex;
-        gap: 6px;
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-        scrollbar-width: none;
-        margin-bottom: 8px;
-        padding-bottom: 2px;
-    }
-    .term-switcher::-webkit-scrollbar { display: none; }
-
-    .term-pill {
-        flex: 0 0 auto;
-        display: inline-flex; align-items: center; gap: 6px;
-        max-width: 168px;
-        background: var(--surface); border: 1px solid var(--border); color: var(--text-dim);
-        border-radius: 16px; padding: 7px 13px; font-size: 12px; line-height: 1;
-        cursor: pointer; white-space: nowrap;
-    }
-    .term-pill .term-pill-label { overflow: hidden; text-overflow: ellipsis; }
-    .term-pill.active { border-color: var(--accent); color: var(--text); background: var(--bg); }
-    /* The status dot inside a pill keeps its colour from _colorTermDots. */
-    .term-pill .term-status-dot { flex: 0 0 auto; }
 }
 
 /* ---- Mobile keybar v2 (Moshi-style accessory row) ----
@@ -4435,7 +4398,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     #term-bar { display: none !important; }
 
     /* CMX-130: the pane header is back — a prior pass hid it outright reasoning
-       the agent name/status already live in the switcher pills, but losing it
+       the agent name/status already lived in the switcher pills, but losing it
        also loses the only place the header's dot/menu (Share/Orchestrator/Pin)
        live on phones. Keep it, just shorter (tighter padding/font) than the
        desktop bar. See CMX-133 below for what happens to the window-control
@@ -4460,14 +4423,12 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 
     /* term-mobile-full: body class toggled by chela.termMobileFull (bound to
        .gs-mobile-full-btn above). Hides the INFORMATIONAL chrome around the
-       single pane — the agent-pill switcher above it and the pane's own
-       context bar — so the pane's height rule (below) can claim nearly the
+       single pane, the pane's own context bar, so the pane's height rule (below) can claim nearly the
        whole screen. Two things deliberately stay: the compact .gs-head (with
        its collapse toggle + × kill — the only way back OUT of fullscreen), and
        the keybar (Liav, 2026-07-25), because it is not clutter but the mobile
        INPUT METHOD: Esc/Tab/Ctrl/arrows/Paste are unreachable without it, and
        fullscreen is exactly when you're working in the terminal. */
-    body.term-mobile-full .term-switcher,
     body.term-mobile-full .term-ctx-bar { display: none !important; }
     /* True overlay, not just a tall box: the pane normally sits inside
        .canvas's own top padding (CMX-377: clearance for the floating

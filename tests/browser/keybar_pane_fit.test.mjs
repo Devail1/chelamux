@@ -119,7 +119,7 @@ async function settle(page) {
 // hold for both; the calc-only layout fails the second.
 const VARIANTS = [
     { name: 'as-built', css: '', tag: '' },
-    { name: 'unlisted chrome (+40px above the pane)', css: '#term-switcher { padding-top: 40px !important; }', tag: '-extra-chrome' },
+    { name: 'unlisted chrome (+40px above the pane)', css: '.term-toolbar { padding-top: 40px !important; }', tag: '-extra-chrome' },
 ];
 
 for (const v of VARIANTS) describe(`CMX-102 [${v.name}]: phone keyboard open — the pane ends at the keybar, its last row visible`, { skip: why }, () => {
@@ -188,8 +188,9 @@ for (const v of VARIANTS) describe(`CMX-102 [${v.name}]: phone keyboard open —
         assert.ok(!closed.kbFit && !reclosed.kbFit, 'html.kb-fit must be absent with the keyboard closed');
         assert.equal(reclosed.paneBottom, closed.paneBottom, 'closing the keyboard restores the closed layout');
         // Closed = the CSS calc(), byte-for-byte what shipped before CMX-102: 100dvh minus
-        // the listed chrome (32 + 38 + 47 + 30; no safe-area inset in headless Chromium).
-        assert.equal(closed.paneHeight, H - 32 - 38 - 47 - 30, 'the closed pane height is the unchanged calc()');
+        // the listed chrome (32 + 47 + 30; no safe-area inset in headless Chromium). CMX-202
+        // dropped the pill strip's 38px from that list.
+        assert.equal(closed.paneHeight, H - 32 - 47 - 30, 'the closed pane height is the calc()');
         assert.deepEqual(errors, []);
     });
 });
