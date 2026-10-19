@@ -235,7 +235,10 @@ def test_god_daemon_whose_home_is_gone_or_unreadable_is_a_leak(env, pm2):
 
 
 def test_the_owner_marker_name_is_conftests():
-    from tests.conftest import PM2_SANDBOX_OWNER_FILE
+    # ``conftest``, not ``tests.conftest`` (see tests/test_isolation.py): the latter runs
+    # conftest a SECOND time, which re-mints the sandbox dirs and repoints PM2_HOME for every
+    # later test in this worker.
+    from conftest import PM2_SANDBOX_OWNER_FILE
     assert ops.DAEMON_OWNER_FILE == PM2_SANDBOX_OWNER_FILE == "chela-tests-owner.pid"
 
 

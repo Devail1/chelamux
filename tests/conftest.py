@@ -62,6 +62,14 @@ from pathlib import Path
 
 import pytest
 
+# tests/ has no __init__.py, so pytest imports this file as the top-level ``conftest``.
+# ``import tests.conftest`` would run it a SECOND time — re-minting every sandbox dir below
+# and repointing PM2_HOME for the rest of that xdist worker, which then fails whichever
+# isolation test `--dist loadfile` happens to put after it (CMX-274's CI). Refuse it here,
+# in the importing test, on every worker.
+if __name__ != "conftest":
+    raise ImportError(f"import ``conftest``, not {__name__!r} — a second copy re-mints the sandbox")
+
 os.environ.setdefault("CHELA_ENV_FILE", "")
 
 # The live state this suite must never touch — captured BEFORE the redirect below, so an
