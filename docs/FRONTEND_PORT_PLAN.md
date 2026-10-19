@@ -932,7 +932,9 @@ verifies all of them before the release.
 | 10-19 | Forms | One `FieldRow` grid (label, control, unit): every control in a section starts at the same x | P04 · CMX-218 |
 | 10-19 | Work board | A column has a normal max width (about 360-420px); one visible column does not stretch across the screen; many columns scroll sideways | P12 · CMX-233 |
 | 10-19 | Tile footer | The footer (window id, model, context %) shows in every pane mode: normal, maximized, phone-full | P27 · CMX-242 |
+| 10-19 | Tile context bar | The bottom-edge context-% bar stays visible on the focused pane: the highlight border never covers it | P27 · CMX-242 |
 | 10-19 | Minimized tray | One row with a fixed height that scrolls sideways; label shows the count; fade on the hidden side; wheel scrolls it | P28 · CMX-243 |
+| 10-19 | Phone wall | No session pill strip above the terminal; the sidebar is the session switcher | CMX-202 (deleted it; no slice re-adds it) |
 | 10-18 | Sidebar | One Archived control | CMX-172 |
 | 10-16 | Icons | Lucide via `icons.ts`, never emoji; no em dash in UI strings | all (§5) |
 
