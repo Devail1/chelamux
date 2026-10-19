@@ -15,6 +15,8 @@
 //
 // Guards (each corrupt→RED): first view and tile switch with no resize event, the keyboard
 // opening after load or after a switch, and ⭐ the last row ≤ the tile FOOTER's top.
+// A tile switch goes through the sidebar (CMX-202 removed the phone's pill strip): open the
+// drawer, tap another session's row.
 //
 // Harness: tests/browser/fixture.mjs. Local: `pnpm run test:browser`.
 // Screenshots for a PR: CMX154_SHOTS=<dir> pnpm exec node --test tests/browser/first_view_fit.test.mjs
@@ -134,6 +136,19 @@ async function openPhone(kbAtLoad, kbAtBoot = 0) {
     return { context, page, errors };
 }
 
+// Switch panes the phone's way: the ☰ drawer, then a row other than the open session's.
+async function switchViaSidebar(page) {
+    await page.click('#btn-menu-mobile');
+    const other = await page.evaluate(() => {
+        const open = document.getElementById('term-agent').value;
+        const row = [...document.querySelectorAll('#sidebar-agents .agent-row[data-item^="w:"]')]
+            .find(r => r.dataset.item !== 'w:' + open);
+        return row ? row.dataset.item : null;
+    });
+    assert.ok(other, 'the sidebar lists no other session to switch to');
+    await page.click(`#sidebar-agents .agent-row[data-item="${other}"]`);
+}
+
 function assertFullyVisible(m, what, { scrolls = false } = {}) {
     assert.ok(m.rows > 7, `${what}: the terminal must still show rows (got ${m.rows})`);
     assert.match(m.text[6], /Opus 5\.5/, `${what}: the last row is Claude's status line`);
@@ -154,7 +169,7 @@ describe('CMX-154: phone — the terminal fits its tile on first view and on a t
             await shot(page, 'cmx154-390-first-view-keyboard-open.png', KB);
             await page.evaluate(kb => { window.__setKeyboard(0); window.__kbAtBoot = kb; }, KB);
             await settle(page);
-            await page.click('.term-pill:not(.active)');
+            await switchViaSidebar(page);
             await framed(page);
             switched = await measure(page);
         });
@@ -166,7 +181,7 @@ describe('CMX-154: phone — the terminal fits its tile on first view and on a t
         });
         test('⭐ tile switch: the new pane\'s terminal fits its tile too', () => {
             ready();
-            assert.notEqual(switched.wid, first.wid, 'the pill tap switched panes');
+            assert.notEqual(switched.wid, first.wid, 'the sidebar tap switched panes');
             assertFullyVisible(switched, 'after a tile switch');
             assert.deepEqual(errors, []);
         });
@@ -184,7 +199,7 @@ describe('CMX-154: phone — the terminal fits its tile on first view and on a t
             // Tile switch with the keyboard down, then the keyboard opens on the NEW pane.
             await page.evaluate(() => window.__setKeyboard(0));
             await settle(page);
-            await page.click('.term-pill:not(.active)');
+            await switchViaSidebar(page);
             await framed(page);
             await page.evaluate(kb => window.__setKeyboard(kb), KB);
             await settle(page);
@@ -194,7 +209,7 @@ describe('CMX-154: phone — the terminal fits its tile on first view and on a t
 
         test('keyboard closed: the unchanged calc() layout, last row visible', () => {
             ready();
-            assert.equal(closed.paneHeight, H - 32 - 38 - 47 - 30, 'the closed pane height is the unchanged calc()');
+            assert.equal(closed.paneHeight, H - 32 - 47 - 30, 'the closed pane height is the calc(), with no pill strip');
             // The closed layout is CMX-102's calc(), deliberately untouched — it leaves the
             // phone scroller a few px of slack, so only row visibility is asserted here.
             assertFullyVisible(closed, 'keyboard closed', { scrolls: true });

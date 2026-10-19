@@ -1488,8 +1488,8 @@ function termMaxFor(btn) {
 //
 // Desktop's min/max window controls don't apply to a forced single pane (no
 // dock, no other tiles to overlay) — this is the ONE mobile equivalent: grow
-// the pane to the full 100dvh and hide the surrounding chrome (agent-pill
-// switcher, keybar, context bar) so the terminal gets the whole screen. A
+// the pane to the full 100dvh and hide the surrounding chrome (keybar,
+// context bar) so the terminal gets the whole screen. A
 // transient body class, not persisted (pc_wall_* is layout state; this is a
 // per-visit view toggle, and it's cheap to rebuild the same way every time) —
 // style.css (.term-mobile-full) does the actual hiding/resizing, scoped
@@ -1743,7 +1743,7 @@ function _statusDot(wid) {
 
 // CMX-377: the dot's class vocabulary is working/waiting/idle/done — tileState()'s
 // own cls names ('needs-you'/'pr-open'/'unknown') are remapped onto it so the pane header's
-// dot, the taskbar dock chips and the mobile switcher pills all share the EXACT
+// dot and the taskbar dock chips share the EXACT
 // same shape/colour rules as the sidebar row (style.css's `.term-status-dot.*`) —
 // 'unknown' (claude_running but no resolved session_status) reads as the idle
 // shape rather than inventing a fifth silhouette the brief never asked for.
@@ -1973,7 +1973,7 @@ function kbToggle() {
 
 // CMX-169: the single-mode pane a load opens. The last pane viewed on THIS device
 // (localStorage, like pc_term_mode) if it is still online, else the first session in the
-// sidebar's order (the leftmost phone pill), else the first option. The stored wid is
+// sidebar's order (the top sidebar row), else the first option. The stored wid is
 // paired with its session id and name: a wid a tmux restart handed to another session
 // matches neither, so it is not trusted.
 const LAST_PANE_KEY = 'pc_term_last_wid';
@@ -2005,7 +2005,7 @@ function _initialPane(wids, agents) {
 
 // The boot's first render runs before the sidebar has drawn (main.js starts the view tick
 // as soon as /api/agents lands), so its default had no sidebar order to follow. Once the
-// sidebar draws (nav.js calls this), move that default to the leftmost pill, unless a tap
+// sidebar draws (nav.js calls this), move that default to the top sidebar row, unless a tap
 // or a focus has already picked another pane.
 function adoptSidebarDefault() {
     const was = _paneDefaulted;
@@ -2096,7 +2096,7 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
         destroyGrid();
         stage.className = 'term-single';
         const sw = sel.value || wids[0];
-        _rememberPane(sw, agents);   // every single-mode switch lands here: pill, swipe, dropdown, focus
+        _rememberPane(sw, agents);   // every single-mode switch lands here: sidebar tap, swipe, dropdown, focus
         stage.innerHTML = `<div class="term-pane">${paneHead(sw, false)}${frame(sw)}${_ctxBarHTML(sw, false)}</div>`;
         _renderedWids = [sw];
     }
@@ -2111,7 +2111,6 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
     // leaves exactly the right room above it (dock height feeds _wallFill).
     _refitWallForDock();
 
-    renderMobileSwitcher();   // phone single-mode agent pills (no-op on desktop)
     _kbPin();                 // CMX-102: a freshly built pane re-fits to the keybar if the keyboard is up
     _bindHeaderSwipe();       // header swipe → prev/next agent (idempotent)
     _bindFocusPromote();      // click a strip pane's header to promote it while Focus is on (idempotent)
@@ -2468,7 +2467,6 @@ function _refreshPaneLabels() {
             if (o.textContent !== lbl) o.textContent = lbl;
         });
     }
-    renderMobileSwitcher();   // reflect renames / added / dropped agents in the pills
 }
 
 // ---- Fast switch (Alt+1..9) + palette-first (Ctrl/⌘+K) ---------------------
@@ -3803,54 +3801,27 @@ function _applyWallFocus(agents) {
     if (gsEl) gsEl.classList.add('wall-focus-on');
 }
 
-// ---- Mobile agent switcher -------------------------------------------------
+// ---- Mobile session switching ----------------------------------------------
 //
-// On phones the wall is forced to single mode (one full-width pane); the desktop
-// dropdown is a poor touch target, so we render a horizontally-scrollable strip
-// of agent pills above the pane instead (status dot + label, active highlighted).
-// Tapping a pill switches the pane; the live ttyd terminal is a same-origin
-// iframe that swallows its own touches, so direct swipe-on-terminal can't be
-// caught — we instead allow a swipe on the pane HEADER (parent DOM) to step
-// prev/next. The dropdown (#term-agent) stays in the DOM as the value holder; the
-// strip reads/writes sel.value and calls renderTerminals(), so it reuses the
+// On phones the wall is forced to single mode (one full-width pane). The sidebar
+// (☰) is the session switcher (CMX-202 dropped the pill strip that sat above the
+// pane); the pane header names the open session. The live ttyd terminal is a
+// same-origin iframe that swallows its own touches, so direct swipe-on-terminal
+// can't be caught; we instead allow a swipe on the pane HEADER (parent DOM) to
+// step prev/next. The dropdown (#term-agent) stays in the DOM as the value
+// holder; a switch writes sel.value and calls renderTerminals(), so it reuses the
 // exact single-mode switch path with no new state.
 
 function _isMobileTerm() {
     return window.matchMedia('(max-width: 768px)').matches;
 }
 
-// CMX-165: the pills (and the header swipe) go in the SIDEBAR's order (nav.js
-// sidebarOrder: group order, custom moves, each group's sort), not #term-agent's option
-// order. A session the sidebar has not drawn yet goes at the end; none is dropped.
+// CMX-165: the header swipe (and the boot's default pane) go in the SIDEBAR's order
+// (nav.js sidebarOrder: group order, custom moves, each group's sort), not #term-agent's
+// option order. A session the sidebar has not drawn yet goes at the end; none is dropped.
 function _mobileWids() {
     const sel = $('#term-agent');
     return orderByList(sel ? Array.from(sel.options).map(o => o.value) : [], sidebarOrder());
-}
-
-// Build/refresh the pill strip. Hidden unless mobile + single mode with panes.
-function renderMobileSwitcher() {
-    const host = document.getElementById('term-switcher');
-    if (!host) return;
-    const sel = $('#term-agent');
-    const wids = _mobileWids();
-    const show = TERMINALS_ON && _isMobileTerm() && _termMode === 'single' && wids.length > 0;
-    if (!show) { host.style.display = 'none'; host.innerHTML = ''; return; }
-    host.style.display = 'flex';
-    const active = sel.value || wids[0];
-    // Pills only: starting a share moved to the topbar overflow menu ("Share current
-    // session" → shareCurrentAgent), so the row no longer carries its own 🔗 button.
-    host.innerHTML = wids.map(w => {
-        const cls = 'term-pill' + (w === active ? ' active' : '');
-        return `<button class="${cls}" data-wid="${attrEsc(w)}" onclick="chela.switchAgentMobile('${_jsStr(w)}')">
-          ${_statusDot(w)}<span class="term-pill-label">${escHtml(_paneTitle(w))}</span>
-        </button>`;
-    }).join('');
-    _colorTermDots(_agentsCache);   // tint the just-built pill dots
-    // Centre the active pill without scrolling the page (no scrollIntoView).
-    const activeEl = host.querySelector('.term-pill.active');
-    if (activeEl) {
-        host.scrollLeft = activeEl.offsetLeft - (host.clientWidth - activeEl.clientWidth) / 2;
-    }
 }
 
 // Share the CURRENT terminal session (the active agent, #term-agent's value — the
@@ -3934,11 +3905,6 @@ function _bindFocusPromote() {
     });
     _focusPromoteBound = true;
 }
-
-// Keep the strip in sync when the viewport crosses the mobile breakpoint.
-window.addEventListener('resize', () => {
-    if (TERMINALS_ON && currentTab === 'terminals') renderMobileSwitcher();
-});
 
 // ---- Mobile keybar v2: sticky-Ctrl modifier -------------------------------
 //
@@ -4074,8 +4040,8 @@ if (typeof ResizeObserver === 'function') {
 }
 
 // --- Stage 0: ES-module exports ---
-export { adoptSidebarDefault, renderMobileSwitcher, stepAgentMobile, SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, _refitPaneTerm, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { adoptSidebarDefault, stepAgentMobile, SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, _refitPaneTerm, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, copyWindowId, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, switchAgentMobile, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, termScrollToggle, toggleDockChip, toggleGridRow, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, copyWindowId, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, termScrollToggle, toggleDockChip, toggleGridRow, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });
