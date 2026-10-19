@@ -30,9 +30,11 @@ def env(tmp_path):
     return SimpleNamespace(dir=chela_dir, proc=proc, wt=chela_dir / "worktrees" / "chelamux")
 
 
-def add_proc(env, pid, argv, cwd, *, ppid=500, age=1800, cpu=0.0):
+def add_proc(env, pid, argv, cwd, *, ppid=500, age=1800, cpu=0.0, environ=None):
     d = env.proc / str(pid)
     d.mkdir()
+    if environ is not None:
+        (d / "environ").write_bytes(b"\0".join(e.encode() for e in environ) + b"\0")
     start = int((UPTIME - age) * HZ)
     ticks = int(cpu * HZ)                            # split: CPU time is utime + stime
     fields = (["S", str(ppid)] + ["0"] * 9 + [str(ticks // 2), str(ticks - ticks // 2)]
@@ -108,17 +110,26 @@ def test_leaked_proc_rule(env, where, status, ppid, extra, hit):
         [("pid:42", "CMX-1")] if hit else [])
 
 
-@pytest.mark.parametrize("where, status, argv, age, hit", [
-    ("CMX-1", "running", ["/v/bin/pytest", "-q"], 2401, True),      # CMX-274: a runaway
-    ("CMX-1", "running", ["python", "-m", "pytest"], 5880, True),
-    ("CMX-1", "running", ["/v/bin/pytest", "-q"], 2400, False),     # exactly the timeout
-    ("CMX-1", "running", ["python3", "x"], 9000, False),            # not a test run
-    ("CMX-1", "awaiting_review", ["/v/bin/pytest"], 9000, False),   # not a running agent
-    ("judge-CMX-1", "running", ["/v/bin/pytest"], 9000, False),     # the judge has its own
+WF_2400 = "judge:\n  suite_timeout_seconds: 2400\n"
+
+
+@pytest.mark.parametrize("where, status, argv, workflow, age, hit", [
+    ("CMX-1", "running", ["/v/bin/pytest", "-q"], WF_2400, 2401, True),   # CMX-274: a runaway
+    ("CMX-1", "running", ["python", "-m", "pytest"], WF_2400, 5880, True),
+    ("CMX-1", "running", ["/v/bin/pytest", "-q"], WF_2400, 2400, False),  # exactly the timeout
+    ("CMX-1", "running", ["/v/bin/pytest", "-q"], WF_2400, 901, False),   # the workflow's, not 900
+    ("CMX-1", "running", ["/v/bin/pytest", "-q"], None, 901, True),       # the 900 s default
+    ("CMX-1", "running", ["/v/bin/pytest", "-q"], None, 900, False),
+    ("CMX-1", "running", ["python3", "x"], None, 9000, False),            # not a test run
+    ("CMX-1", "awaiting_review", ["/v/bin/pytest"], None, 9000, False),   # not a running agent
+    ("judge-CMX-1", "running", ["/v/bin/pytest"], None, 9000, False),     # the judge has its own
 ])
 def test_leaked_proc_flags_a_test_run_under_a_running_agent_past_the_suite_timeout(
-        env, where, status, argv, age, hit):
+        env, where, status, argv, workflow, age, hit):
     set_runs(env, [("CMX-1", status, "2026-01-01")])
+    (env.wt / where).mkdir(parents=True, exist_ok=True)
+    if workflow:
+        (env.wt / where / "WORKFLOW.md").write_text(f"---\nproject_key: CMX\n{workflow}---\n")
     add_proc(env, 42, argv, env.wt / where, age=age)
     got = ops.rule_leaked_proc(src(env), {})
     assert [f["summary"] for f in got] == (
@@ -142,6 +153,128 @@ def test_leaked_proc_reads_argv_paths_and_skips_unreadable_procs(env):
 def test_without_a_runs_db_an_orphan_is_still_found(env):
     add_proc(env, 42, ["sleep"], env.wt / "CMX-1", ppid=1)
     assert [f["evidence"]["run_status"] for f in ops.rule_leaked_proc(src(env), {})] == [None]
+
+
+# --- rule 2b: a self-daemonizing PM2 God Daemon is ppid 1 by design (CMX-273) -------------
+
+GOD = "PM2 v7.0.4: God Daemon (/tmp/chela-tests-pm2-x)"
+
+
+@pytest.fixture
+def pm2(env, tmp_path):
+    home = tmp_path / "chela-tests-pm2-x"
+    home.mkdir()
+    return home
+
+
+def god(env, home, *, pid=42, argv=None, where="CMX-1", age=120, environ=None):
+    add_proc(env, pid, argv or [GOD], env.wt / where, ppid=1, age=age,
+             environ=[f"PM2_HOME={home}", "PATH=/bin"] if environ is None else environ)
+
+
+def leaks(env):
+    return sorted((f["subject"], f["summary"]) for f in ops.rule_leaked_proc(src(env), {}))
+
+
+def test_god_daemon_with_a_live_pytest_of_its_run_sharing_its_home_is_not_a_leak(env, pm2):
+    god(env, pm2)
+    add_proc(env, 50, ["/v/bin/pytest"], env.wt / "CMX-1",
+             environ=["junk", f"PM2_HOME={pm2}"])
+    assert leaks(env) == []
+
+
+def test_god_daemon_after_its_pytest_is_gone_is_a_leak(env, pm2):
+    god(env, pm2)
+    assert leaks(env) == [("pid:42", "pid 42 under run CMX-1 is alive but no live process "
+                                     f"of its run shares its PM2_HOME {pm2}")]
+
+
+@pytest.mark.parametrize("sharer", [
+    dict(pid=50, where="CMX-2"),                               # another run's pytest
+    dict(pid=50, ppid=42),                                     # the daemon's own child
+    dict(pid=50, ppid=51),                                     # ...and grandchild (below)
+    dict(pid=50, argv=[GOD.replace("-x)", "-y)")]),            # another God Daemon
+    dict(pid=50, home="/tmp/chela-tests-pm2-other"),          # a different home
+    dict(pid=50, home=None),                                   # no readable environ
+])
+def test_god_daemon_sharers_that_do_not_count(env, pm2, sharer):
+    god(env, pm2)
+    home = sharer.pop("home", pm2)
+    add_proc(env, sharer.pop("pid"), sharer.pop("argv", ["/v/bin/pytest"]),
+             env.wt / sharer.pop("where", "CMX-1"), ppid=sharer.pop("ppid", 500),
+             environ=None if home is None else [f"PM2_HOME={home}"])
+    if not (env.proc / "51").exists():
+        add_proc(env, 51, ["node", "app.js"], env.wt / "CMX-2", ppid=42)   # another run's cwd
+    assert [s for s, _ in leaks(env)] == ["pid:42"]
+
+
+@pytest.mark.parametrize("marker, age, hit", [
+    ("50\n", 120, False), ("50", 119, True),                 # pid 50 reused AFTER the daemon
+    ("51", 120, True), ("x", 120, True)])
+def test_god_daemon_owner_marker_names_its_live_pytest(env, pm2, marker, age, hit):
+    """An xdist worker sets PM2_HOME after start-up, so only conftest's marker links them."""
+    god(env, pm2)
+    add_proc(env, 50, ["/v/bin/pytest"], env.wt / "CMX-1", age=age,
+             environ=["PM2_HOME=/tmp/elsewhere"])
+    (pm2 / "chela-tests-owner.pid").write_text(marker)
+    assert [s for s, _ in leaks(env)] == (["pid:42"] if hit else [])
+
+
+def test_god_daemon_whose_home_is_gone_or_unreadable_is_a_leak(env, pm2):
+    add_proc(env, 50, ["/v/bin/pytest"], env.wt / "CMX-1", environ=[f"PM2_HOME={pm2}"])
+    god(env, pm2.parent / "chela-tests-pm2-gone", pid=42)
+    god(env, pm2, pid=43, environ=["PATH=/bin"])
+    add_proc(env, 44, [GOD], env.wt / "CMX-1", ppid=1, age=120)        # no environ file
+    assert leaks(env) == [
+        ("pid:42", f"pid 42 under run CMX-1 is alive but its PM2_HOME "
+                   f"{pm2.parent / 'chela-tests-pm2-gone'} is gone"),
+        ("pid:43", "pid 43 under run CMX-1 is alive but it is orphaned (ppid 1) and its "
+                   "environ has no PM2_HOME"),
+        ("pid:44", "pid 44 under run CMX-1 is alive but it is orphaned (ppid 1) and its "
+                   "environ is unreadable")]
+
+
+def test_the_owner_marker_name_is_conftests():
+    from tests.conftest import PM2_SANDBOX_OWNER_FILE
+    assert ops.DAEMON_OWNER_FILE == PM2_SANDBOX_OWNER_FILE == "chela-tests-owner.pid"
+
+
+@pytest.mark.parametrize("workflow, age, hit", [
+    (None, 899, False), (None, 901, True),                               # the 900 s default
+    ("judge:\n  suite_timeout_seconds: 2400\n", 2399, False),
+    ("judge:\n  suite_timeout_seconds: 2400\n", 2401, True),
+    ("judge: [unterminated\n", 901, True),                               # unparseable
+])
+def test_god_daemon_older_than_its_runs_suite_timeout_is_a_leak(env, pm2, workflow, age, hit):
+    (env.wt / "CMX-1").mkdir(parents=True)
+    if workflow:
+        (env.wt / "CMX-1" / "WORKFLOW.md").write_text(f"---\nproject_key: CMX\n{workflow}---\n")
+    god(env, pm2, age=age)
+    add_proc(env, 50, ["/v/bin/pytest"], env.wt / "CMX-1", environ=[f"PM2_HOME={pm2}"])
+    got = leaks(env)
+    assert got == ([("pid:42", "pid 42 under run CMX-1 is alive but it is older than the "
+                     f"suite timeout ({2400 if workflow and 'suite' in workflow else 900}s)")]
+                   if hit else [])
+
+
+@pytest.mark.parametrize("argv, hit", [
+    ([GOD], False),
+    (["node", GOD], True),                                     # the marker must be argv[0]
+    (["PM2 v7.0.4: God Daemon"], True),                        # no " (" — not the title
+])
+def test_only_a_god_daemon_title_is_exempt_from_ppid_1(env, pm2, argv, hit):
+    god(env, pm2, argv=argv)
+    add_proc(env, 50, ["/v/bin/pytest"], env.wt / "CMX-1", environ=[f"PM2_HOME={pm2}"])
+    assert leaks(env) == ([("pid:42", "pid 42 under run CMX-1 is alive but it is orphaned "
+                                      "(ppid 1)")] if hit else [])
+
+
+def test_god_daemon_of_a_finished_run_is_a_leak_even_while_owned(env, pm2):
+    set_runs(env, [("CMX-1", "done", "2026-01-01")])
+    god(env, pm2)
+    add_proc(env, 50, ["/v/bin/pytest"], env.wt / "CMX-1", environ=[f"PM2_HOME={pm2}"])
+    assert leaks(env) == [("pid:42", "pid 42 under run CMX-1 is alive but its run is done"),
+                          ("pid:50", "pid 50 under run CMX-1 is alive but its run is done")]
 
 
 # --- rule 3: unsettled CI red (CMX-256) ----------------------------------------------------

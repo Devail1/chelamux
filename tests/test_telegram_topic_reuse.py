@@ -181,7 +181,7 @@ def test_the_ledger_records_window_cwd_name_and_both_times(ledger):
     _tick(reg, ledger, wire, {"@3": "coder"}, {"@3": "/p/app"})
     _tick(reg, ledger, wire, {}, {})
     assert ledger.get("201") == {"created": 1000, "window": "@3", "cwd": "/p/app",
-                                 "closed": 1001, "name": "coder"}
+                                 "closed": 1001, "name": "coder", "session_id": None}
 
 
 def test_a_resumed_archive_marks_its_topic_open(ledger):

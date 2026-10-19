@@ -24,7 +24,7 @@ BUILT = ROOT / "chela" / "dashboard" / "static" / "app"
 # The committed bundle, by its full path: the judge's test selection runs a test file that
 # NAMES a mutated file, so a mutation of the bundle runs THIS file (seconds), not the whole
 # suite. Its name is a content hash, so a rebuild renames it: update this line with it.
-BUNDLE = "chela/dashboard/static/app/assets/main-DSyXEqAp.js"
+BUNDLE = "chela/dashboard/static/app/assets/main-OTQf67ej.js"
 
 
 def _need_vite():
@@ -57,8 +57,8 @@ def test_a_source_change_without_a_rebuild_is_stale(tmp_path):
     shutil.copytree(FRONTEND, tree, ignore=shutil.ignore_patterns("node_modules"))
     (tree / "node_modules").symlink_to(FRONTEND / "node_modules")
     assert fb.check(frontend=tree) == []
-    hello = tree / "src/features/hello/lib/Hello.tsx"
-    hello.write_text(hello.read_text().replace("Hello, ", "Hi, "))
+    badge = tree / "src/features/version/lib/VersionBadge.tsx"
+    badge.write_text(badge.read_text().replace("build {version}", "v{version}"))
     got = fb.check(frontend=tree)
     assert "manifest.json" in got and len([p for p in got if p.startswith("assets/main-")]) == 2
 

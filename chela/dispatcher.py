@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -333,6 +334,11 @@ JUDGE_TIMEOUT_SECONDS = 60 * 60
 # ⏳⚖️ CMX-431: a full-suite confirmation (CMX-407) is budgeted at this multiple of the run's
 # OWN baseline — the same suite, on the same box, a moment earlier — with headroom for load.
 JUDGE_FULL_SUITE_MARGIN = 1.5
+
+# ⏳⚖️ CMX-271: while a suite may be running, the stall window is never shorter than the
+# run's own `judge.suite_timeout_seconds` plus this — so a mutation that hangs a test is
+# stopped by the SUITE's timeout (a KILLED verdict) before the watchdog calls the run stuck.
+JUDGE_SUITE_TIMEOUT_GRACE_SECONDS = 120.0
 
 # --- agent launch command ---------------------------------------------------
 #
@@ -8379,6 +8385,24 @@ def _judge_full_suite_budget(status: dict | None) -> float:
     return baseline * JUDGE_FULL_SUITE_MARGIN
 
 
+def judge_stall_seconds(status: dict | None) -> float:
+    """⏳⚖️ CMX-431/CMX-271: how long a run past its wall may go without progress before it
+    is stuck — the per-experiment budget, or one full-suite run if that is longer.
+
+    ⏳ CMX-271: also never shorter than the run's own ``suite_timeout_seconds`` + grace, in
+    every phase — ``phase`` is not proof no suite runs (``finishing`` is written before the
+    consistency stage re-runs suites). Measured 2026-10-19 on PR #775: a mutation hung a
+    test, and with a ~19 min baseline the 1.5× budget reaped the judge at ~29 min, before
+    its 40-min suite timeout could record the mutation as KILLED. A status without a finite
+    value (a run older than this, or garbage) keeps the budget alone.
+    """
+    stall = max(judge_wall_per_experiment_seconds(), _judge_full_suite_budget(status))
+    suite_timeout = _num((status or {}).get("suite_timeout_seconds"))
+    if suite_timeout is not None and math.isfinite(suite_timeout):
+        stall = max(stall, suite_timeout + JUDGE_SUITE_TIMEOUT_GRACE_SECONDS)
+    return stall
+
+
 def judge_wall_seconds(status: dict | None) -> float:
     """⏳⚖️ CMX-431. The wall of a judge RUN, from its live status (``judge.judge_status_path``):
 
@@ -8417,7 +8441,7 @@ def judge_overdue(elapsed: float, status: dict | None, now: float) -> str | None
     * Inside its wall (:func:`judge_wall_seconds`) — plus the grace, once every experiment
       is done (:func:`judge_run_completed`) — a run is never reaped.
     * Past it, a run whose progress (``progress_at``) has not advanced for the stall window
-      (the per-experiment budget, or one full-suite run if that is longer) is stuck — and
+      (:func:`judge_stall_seconds`) is stuck — and
       ONLY then is it called "stuck, not thinking". A run with no progress record at all
       (an older run, or one still before its first write) is judged as before: past the
       wall, stuck.
@@ -8441,7 +8465,7 @@ def judge_overdue(elapsed: float, status: dict | None, now: float) -> str | None
     else:
         where = "before its first experiment"
     progress_at = _num(status.get("progress_at"))
-    stall = max(judge_wall_per_experiment_seconds(), _judge_full_suite_budget(status))
+    stall = judge_stall_seconds(status)
     if progress_at is None:
         return f"the judge did not finish in {int(wall) // 60}min — it is stuck, not thinking"
     since = max(0.0, now - progress_at)

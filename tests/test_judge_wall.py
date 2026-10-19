@@ -129,6 +129,66 @@ def test_a_small_low_risk_battery_behaves_as_today():
                                              "stuck, not thinking")
 
 
+# --- ⏳ CMX-271: the stall window never undercuts the run's own suite timeout ----------------
+
+def _hung(since_progress, **over):
+    """PR #775's shape: a ~19-min baseline, a 40-min suite timeout, experiment 1/6 running."""
+    return _st(**{"total": 6, "done": 1, "baseline": 1140.0, "since_progress": since_progress,
+                  "suite_timeout_seconds": 2400, "phase": "battery", **over})
+
+
+def test_a_hanging_mutation_is_not_reaped_before_its_suite_times_out():
+    """GUARD: 30 min with no progress mid-experiment is past the 1140 × 1.5 = 28.5-min
+    budget, but inside the 40-min suite timeout + 2-min grace — NOT reaped, so the suite's
+    own timeout can record the mutation KILLED. Seen to go red: the suite_timeout term
+    dropped from `judge_stall_seconds` (PR #775 was reaped at 29 min this way)."""
+    assert dispatcher.judge_stall_seconds(_hung(30 * MIN)) == 2520.0
+    assert dispatcher.judge_overdue(100 * MIN, _hung(30 * MIN), NOW) is None
+
+
+def test_past_the_suite_timeout_and_its_grace_the_run_is_stuck():
+    """⭐ COUNTERWEIGHT: the window is bounded — 2400 + 120 + 1 s of silence is stuck."""
+    reason = dispatcher.judge_overdue(100 * MIN, _hung(2400 + 120 + 1), NOW)
+    assert reason is not None and "stuck, not thinking" in reason
+    assert "experiment 1/6" in reason
+
+
+@pytest.mark.parametrize("phase", ["setup", "battery", "consistency", "finishing", None])
+def test_every_phase_waits_out_the_suite_timeout(phase):
+    """The baseline (setup), the battery and the consistency re-run all run the suite under
+    the same timeout — and `finishing` is written BEFORE the consistency stage starts its
+    suites, so it is no proof none is running. No phase (an older writer) is the same."""
+    assert dispatcher.judge_stall_seconds(_hung(30 * MIN, phase=phase)) == 2520.0
+
+
+@pytest.mark.parametrize("value", [None, "2400", True, [2400], float("inf"), float("nan"),
+                                   0, -2400])
+def test_an_unreadable_suite_timeout_keeps_the_baseline_budget(value):
+    """Unknown never widens the window: a status with no usable `suite_timeout_seconds`
+    (a run older than CMX-271, a garbage, non-finite or non-positive value — `inf` would
+    mean never stuck) keeps the baseline-derived 1710 s, so
+    30 min of silence past the wall is still reaped as stuck."""
+    st = _hung(30 * MIN, suite_timeout_seconds=value)
+    assert dispatcher.judge_stall_seconds(st) == 1710.0
+    assert "stuck, not thinking" in dispatcher.judge_overdue(100 * MIN, st, NOW)
+
+
+def test_the_watchdog_waits_out_a_hanging_mutations_suite_timeout(tmp_path, monkeypatch):
+    """GUARD (wiring): the watchdog itself reads the run's `suite_timeout_seconds`. Seen to
+    go red: `judge_overdue` stops consulting `judge_stall_seconds`."""
+    wf = _judging_run(tmp_path, monkeypatch, run_started_ago=100 * MIN,
+                      status=_hung(30 * MIN))
+    assert _watch(wf)[:2] == (0, judge.J_RUNNING)
+
+
+def test_doctor_does_not_warn_about_a_hanging_mutation_inside_its_suite_timeout():
+    """`chela doctor` applies the same rule as the watchdog."""
+    r = {"task_id": "T", "pid": 1, "elapsed": 100 * MIN, "detached": True, "log": None,
+         **_hung(None), "progress_at": time.time() - 30 * MIN}
+    [f] = runtime_truth._judge_runs_report(None, runtime_truth.observed([r]))
+    assert f.level == runtime_truth.OK
+
+
 # --- the watchdog, end to end on a fake progress json ----------------------------------------
 
 def _iso(delta_seconds: float) -> str:
@@ -272,6 +332,9 @@ def test_judge_run_writes_progress_time_and_baseline_to_its_status(tmp_path, mon
                for s in seen), seen
     assert all(s["progress_at"] >= s["run_started_at"] for s in seen), seen
     assert seen[-1]["phase"] == "finishing" and seen[0]["phase"] == "battery"
+    # ⏳ CMX-271: the run's suite timeout, read from its WORKFLOW.md (120 there, not the
+    # 900 default). Seen to go red: the field dropped from the status json.
+    assert all(s["suite_timeout_seconds"] == 120.0 for s in seen), seen
 
 
 def test_judge_run_counts_each_confirmation_into_its_status(tmp_path, monkeypatch):

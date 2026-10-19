@@ -347,6 +347,7 @@ def build_application(
     router,
     *,
     on_topic_closed=None,
+    on_topic_reopened=None,
     capture=None,
     send_escape=None,
     send_key=None,
@@ -446,6 +447,11 @@ def build_application(
     wires :meth:`chela.telegram.reconcile.TopicClosedHandler.handle` here to
     unbind (never kill) a window when its topic is closed from Telegram. Left
     ``None`` (single-topic / manual bindings), no such handler is registered.
+
+    ``on_topic_reopened`` (optional, CMX-267) is a callable ``(thread_id) -> str | None``
+    run on ``StatusUpdate.FORUM_TOPIC_REOPENED`` in the bound chat — in production
+    :meth:`chela.telegram.reconcile.TopicReopenedHandler.handle`, which resumes the
+    topic's Claude session; the line it returns is posted in that topic.
 
     ``allowed_users`` (CMX-185) — the Telegram user ids allowed to drive the agents;
     ``None`` reads ``CHELA_TELEGRAM_ALLOWED_USERS``. EVERY handler below is wrapped in
@@ -1168,12 +1174,37 @@ def build_application(
             # The closed topic's own thread id rides on the service message.
             thread_id = getattr(msg, "message_thread_id", None)
             try:
-                on_topic_closed(thread_id)
+                # Off the event loop: the close now also resolves the session id (CMX-267).
+                await asyncio.to_thread(on_topic_closed, thread_id)
             except Exception:  # never let a bad unbind wedge the update queue
                 log.exception("topic-closed handling failed")
 
         application.add_handler(
             MessageHandler(filters.StatusUpdate.FORUM_TOPIC_CLOSED, _gated(_on_topic_closed))
+        )
+
+    if on_topic_reopened is not None:
+        async def _on_topic_reopened(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
+            msg = update.message
+            if msg is None or not _new_chat_ok(update):
+                return  # spawns a session: the bound chat only
+            if getattr(getattr(msg, "from_user", None), "is_bot", False):
+                return  # chela's own reopen (CMX-204 / CMX-75) already has its window
+            thread_id = getattr(msg, "message_thread_id", None)
+            try:
+                reply = await asyncio.to_thread(on_topic_reopened, thread_id)
+            except Exception:  # never let a failed resume wedge the update queue
+                log.exception("topic-reopened handling failed")
+                reply = "❌ Couldn't bring this topic's session back — see the chela-telegram log"
+            if reply:
+                try:
+                    await context.bot.send_message(chat_id=msg.chat_id, text=reply,
+                                                   message_thread_id=thread_id)
+                except Exception:  # noqa: BLE001 — the resume itself already happened
+                    log.exception("could not post the topic-reopened line")
+
+        application.add_handler(
+            MessageHandler(filters.StatusUpdate.FORUM_TOPIC_REOPENED, _gated(_on_topic_reopened))
         )
 
     return application
