@@ -201,6 +201,31 @@ def test_make_repo_rebuilds_while_a_lock_vanishes_under_it(tmp_path, monkeypatch
     assert not lock.exists()
 
 
+def test_make_repo_hands_rmtree_the_vanished_entry_hook(tmp_path, monkeypatch):
+    # The race above can only go red on 3.11: 3.13's rmtree swallows an unlink ENOENT itself,
+    # so there a bare `shutil.rmtree(root)` passes it too. Stand in an rmtree with 3.11's
+    # contract (a vanished entry goes to the hook, or raises without one) on every interpreter.
+    gate = _gate()
+    root = tmp_path / "gate"
+    gate.make_repo(root)
+    real, hooks = gate.shutil.rmtree, []
+
+    def rmtree_3_11(path, **kw):
+        real(path)
+        err = FileNotFoundError(2, "No such file or directory", f"{path}/shop/.git/maintenance.lock")
+        hooks.append(sorted(kw))
+        if not kw:
+            raise err
+        if "onexc" in kw:
+            kw["onexc"](os.unlink, err.filename, err)
+        else:
+            kw["onerror"](os.unlink, err.filename, (type(err), err, None))
+    monkeypatch.setattr(gate.shutil, "rmtree", rmtree_3_11)
+    repo = gate.make_repo(root)
+    assert hooks == [["onexc" if sys.version_info >= (3, 12) else "onerror"]]
+    assert (repo / "test_shop.py").read_text() == gate.WEAK_TEST
+
+
 @pytest.mark.parametrize("shape", ["onexc", "onerror"])
 def test_already_gone_swallows_only_a_vanished_entry(shape):
     gate = _gate()
