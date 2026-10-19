@@ -329,7 +329,11 @@ test('Status All draws the Archived section at the bottom: closed sessions and h
   let done!: () => void;
   acts.unarchiveRow.mockImplementation(() => new Promise<void>(r => { done = r; }));
   const btn = hidden?.querySelector<HTMLButtonElement>('.row-unarchive') as HTMLButtonElement;
-  fireEvent.click(btn);
+  // two clicks in one batch, before React re-renders the button disabled: still one resume
+  act(() => {
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
   expect(acts.selectAgent).not.toHaveBeenCalled();   // the click stops at the button
   fireEvent.click(btn);
   expect(acts.unarchiveRow.mock.calls).toEqual([[null, `w:${a.window_id}`]]);
