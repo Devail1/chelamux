@@ -39,7 +39,8 @@ const TEMPLATE_HTML = readFileSync(join(DASHBOARD_ROOT, 'templates', 'index.html
  * quiet empty string — if either marker has moved, exactly like
  * tests/dashboard_default_view.test.mjs's original inline version did. */
 export function sliceTemplate(startMarker, endMarker, ctx) {
-    const html = ctx ? renderTemplateIfs(TEMPLATE_HTML, ctx) : TEMPLATE_HTML;
+    // CMX-178: a slice never carries the page's <script> tags, so the islands' entry is off.
+    const html = ctx ? renderTemplateIfs(TEMPLATE_HTML, { island_src: false, ...ctx }) : TEMPLATE_HTML;
     const start = html.indexOf(startMarker);
     if (start < 0) {
         throw new Error(`sliceTemplate: start marker not found in templates/index.html: ${JSON.stringify(startMarker)}`);

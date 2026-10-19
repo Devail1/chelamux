@@ -331,10 +331,17 @@ function humanSchedule(type, value) {
 // --- Stage 0: setters for cross-module mutable state (imported bindings are read-only) ---
 function setCurrentTab(v) { currentTab = v; }
 function setMsgTarget(v) { msgTargetAgent = v; }
-function setAgentsCache(v) { _agentsCache = v; }
+function setAgentsCache(v) { _agentsCache = v; publish('agents', v); }
+
+// CMX-178: hand a value legacy still owns to the React islands' store of that name
+// (frontend/src/shared/bridge; docs/FRONTEND.md). No bridge (the build did not load) is a no-op.
+function publish(name, value) {
+    const store = window.chelaBridge && window.chelaBridge[name];
+    if (store) store.set(value);
+}
 
 // --- Stage 0: ES-module exports ---
-export { $, $$, ASSET_VERSION, BASE_PATH, REFRESH_MS, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, currentTab, escHtml, humanSchedule, icon, lucideIcon, msgTargetAgent, relativeTime, setAgentsCache, setCurrentTab, setMsgTarget, shortTime, showModal, staticUrl, updateTabSignal, wantsHuman };
+export { $, $$, ASSET_VERSION, BASE_PATH, REFRESH_MS, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, currentTab, escHtml, humanSchedule, icon, lucideIcon, msgTargetAgent, publish, relativeTime, setAgentsCache, setCurrentTab, setMsgTarget, shortTime, showModal, staticUrl, updateTabSignal, wantsHuman };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

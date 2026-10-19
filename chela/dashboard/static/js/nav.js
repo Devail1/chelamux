@@ -1,5 +1,5 @@
 // --- Stage 0: ES-module imports ---
-import { $, $$, TERMINALS_ON, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, setCurrentTab, shortTime, updateTabSignal, wantsHuman } from './util.js';
+import { $, $$, TERMINALS_ON, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, currentTab, escHtml, lucideIcon, publish, setAgentsCache, setCurrentTab, shortTime, updateTabSignal, wantsHuman } from './util.js';
 import { onOrchestratorChange, orchestratorState } from './orchestrator.js';
 import { refreshSummary } from './header.js';
 import { checkContext } from './agents.js';
@@ -439,11 +439,18 @@ function _setLayout(l) {
         view: o.view && typeof o.view === 'object' && !Array.isArray(o.view) ? o.view : null,
         loaded: true,
     };
+    _publishLayout();
+}
+// CMX-178: the React islands read the layout through the bridge (all of it but `gen`).
+function _publishLayout() {
+    const { order, custom, view, loaded } = _layout;
+    publish('sidebarLayout', { order, custom, view, loaded });
 }
 // Write the named fields: kept here at once (the next render shows them), sent to the
 // server only once the layout has loaded.
 function _writeLayout(fields) {
     _layout = { ..._layout, ...fields, gen: _layout.gen + 1 };
+    _publishLayout();
     if (!_layout.loaded) return;
     const gen = _layout.gen;
     _postJson('/api/sidebar/layout', fields)
