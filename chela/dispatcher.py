@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -6456,6 +6456,13 @@ def tick(workflow_path: str | Path) -> dict:
                 f" ({expired.reason})" if expired.reason else "",
             )
         held = hold.active()
+        # CMX-214: the fleet pause rides the hold — resumed when the hold is gone. Never
+        # takes the tick down.
+        try:
+            for line in fleet.tick(held):
+                log.warning("%s", line)
+        except Exception:  # noqa: BLE001
+            log.exception("fleet pause tick failed")
         if held:
             summary["held"] = True
             summary["hold"] = held.as_dict()
