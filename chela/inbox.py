@@ -1663,7 +1663,8 @@ def _cap_fields(run: dict) -> dict:
     """The three columns the dispatcher's cap check reads, tolerantly — this is fed a runs
     snapshot (or a hand-built dict in a test), not a ``sqlite3.Row``."""
     return {"rework_count": run.get("rework_count") or 0,
-            "retry_count": run.get("retry_count") or 0, "risk": run.get("risk")}
+            "retry_count": run.get("retry_count") or 0, "risk": run.get("risk"),
+            "conflict_reworks": run.get("conflict_reworks") or 0}
 
 
 def _effective_rework_cap(run: dict) -> int:

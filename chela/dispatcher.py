@@ -1467,6 +1467,11 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("ci_rerun_note", "ALTER TABLE runs ADD COLUMN ci_rerun_note TEXT"),
         ("ci_rerun_at", "ALTER TABLE runs ADD COLUMN ci_rerun_at TEXT"),
         ("ci_flakes", "ALTER TABLE runs ADD COLUMN ci_flakes TEXT"),
+        # 🔀 CMX-262. `conflict_sha` is the head sha whose CONFLICTING was already handled
+        # (once per sha); `conflict_reworks` counts the conflict reworks, each one a round
+        # that is NOT charged against the cap (see `effective_rework_cap`).
+        ("conflict_sha", "ALTER TABLE runs ADD COLUMN conflict_sha TEXT"),
+        ("conflict_reworks", "ALTER TABLE runs ADD COLUMN conflict_reworks INTEGER DEFAULT 0"),
         # ⚖️🔒 CMX-389. The merge gate's BACKSTOP: set on the reconcile tick that finds a
         # run's PR MERGED without a clean judge on its merged head and without an audited
         # override (`merged_outside_gate`) — a human in a plain terminal, a non-Claude
@@ -2403,6 +2408,57 @@ def _inbox_ci_flake(row, sha: str) -> None:
     except Exception:  # noqa: BLE001 — the inbox is advisory
         log.warning("CI: could not queue the flake notice for %s", row["task_id"],
                     exc_info=True)
+
+
+def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head: str) -> str:
+    """🔀 CMX-262. Merge ``origin/<base>`` into a CONFLICTING PR's branch in a scratch
+    worktree (:func:`chela.basemerge.attempt`): clean and green ⇒ pushed, recorded on the PR
+    ("base merged automatically"), and the judge grades the new head as usual. A conflict or
+    a red merge ⇒ a rework that is NOT charged against the cap. Returns ``merged``,
+    ``rework``, or ``none`` (nothing could be measured, or nothing to do)."""
+    from chela import basemerge
+    task_id = row["task_id"]
+    base = wf.get("workspace", "base_branch", default="master")
+    repo = str(wf.path.parent)
+    try:
+        res = basemerge.attempt(repo, row["branch_name"], base,
+                                wf.get("judge", "test_cmd", default="") or "")
+    except RuntimeError as e:
+        log.warning("Task %s: PR conflicts with origin/%s but the base merge could not be "
+                    "tried (%s) — retried next tick", task_id, base, e)
+        return "none"
+    if res["outcome"] in (basemerge.MERGED, basemerge.CURRENT):
+        conn.execute("UPDATE runs SET conflict_sha=? WHERE task_id=?", (head, task_id))
+        conn.commit()
+        if res["outcome"] == basemerge.CURRENT:
+            return "none"
+        tests = len(res["files"])
+        _post_pr_comment(row["pr_url"], repo,
+                         f"🔀 Base merged automatically: origin/{base} `{res['base_sha'][:12]}` "
+                         f"→ merge commit `{res['merge_sha'][:12]}` ({tests} targeted test "
+                         "file(s) green). A local checkout of this branch needs "
+                         "`git pull --ff-only` before its next commit.")
+        log.warning("Task %s: base merged automatically (origin/%s %s → %s)", task_id, base,
+                    res["base_sha"][:12], res["merge_sha"][:12])
+        return "merged"
+    # Burn the sha and grant the free round BEFORE the verdict, so 1d (below) never sees this
+    # round as charged; both are undone if the verdict is not written.
+    conn.execute("UPDATE runs SET conflict_sha=?, conflict_reworks=COALESCE(conflict_reworks, "
+                 "0) + 1 WHERE task_id=?", (head, task_id))
+    conn.commit()
+    try:
+        result = request_changes(task_id, basemerge.rework_body(res, base))
+    except sqlite3.Error as e:
+        result = {"ok": False, "error": str(e)}
+    if not result.get("ok"):
+        conn.execute("UPDATE runs SET conflict_sha=?, conflict_reworks=? WHERE task_id=?",
+                     (row["conflict_sha"], row["conflict_reworks"] or 0, task_id))
+        conn.commit()
+        log.warning("Task %s: conflict rework not written: %s", task_id, result.get("error"))
+        return "none"
+    log.warning("Task %s: PR conflicts with origin/%s (%s) — sent back, not charged: %s",
+                task_id, base, res["outcome"], ", ".join(res["files"]))
+    return "rework"
 
 
 def _failing_log_tail(repo_dir: str | None, run_ids: tuple[str, ...]) -> str:
@@ -5264,7 +5320,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "dispatched": 0,
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
-        "ci_rerun": 0, "ci_flake": 0,
+        "ci_rerun": 0, "ci_flake": 0, "base_merged": 0, "base_conflict": 0,
         "judged": 0, "judge_lost": 0, "judge_stranded": 0,
         "trial_ledger": 0, "disk_budget_exceeded": False, "window_reaped": 0,
         "blocked": True, "error": error, "held": False, "hold_expired": False,
@@ -5441,6 +5497,8 @@ def tick(workflow_path: str | Path) -> dict:
         "ci_infra_failed": 0,
         "ci_rerun": 0,
         "ci_flake": 0,
+        "base_merged": 0,
+        "base_conflict": 0,
         "judged": 0,
         "judge_lost": 0,
         "judge_stranded": 0,
@@ -5479,7 +5537,7 @@ def tick(workflow_path: str | Path) -> dict:
         # which (correctly, and catastrophically) refuses every merge at once.
         pr_rows = conn.execute(
             "SELECT task_id, status, pr_url, workflow_path, pr_head_sha, ci_pending_since, "
-            "ci_rerun_sha, ci_rerun_state, ci_rerun_note, ci_flakes "
+            "ci_rerun_sha, ci_rerun_state, ci_rerun_note, ci_flakes, pr_mergeable "
             "FROM runs WHERE workflow_path=? AND pr_url IS NOT NULL "
             "AND (pr_state IS NULL OR pr_state='open')",
             (str(wf.path),),
@@ -5522,6 +5580,7 @@ def tick(workflow_path: str | Path) -> dict:
             reads.append((pr_row, state, mergeable, ci))
 
         flaked: list[tuple] = []     # (row, sha) re-run green this tick — told after commit
+        conflicted: list[str] = []   # 🔀 CMX-262: CONFLICTING on this tick AND the last one
         for pr_row, state, mergeable, ci in reads:
             if ci is not None:
                 # The unsettled clock: started when a pending spell begins, restarted when a
@@ -5556,6 +5615,8 @@ def tick(workflow_path: str | Path) -> dict:
                     _record_ci_flake(conn, pr_row, head)
                     flaked.append((pr_row, head))
                     summary["ci_flake"] += 1
+            if mergeable == "CONFLICTING" and pr_row["pr_mergeable"] == "CONFLICTING":
+                conflicted.append(pr_row["task_id"])
             if state is None and mergeable is None:
                 continue
             # COALESCE so a partial read (e.g. mergeable still UNKNOWN right
@@ -6304,6 +6365,21 @@ def tick(workflow_path: str | Path) -> dict:
                 result.get("max_reworks"), ", ".join(ci.failing),
             )
 
+        # 1c″. 🔀 CMX-262: A PR THAT CONFLICTS WITH ITS BASE IS MERGED FORWARD, OR SENT BACK.
+        # Only once GitHub has said CONFLICTING on two ticks running (its transient states
+        # pass), once per head sha. ABOVE 1d for the same reason as 1c.
+        for task_id in conflicted:
+            row = conn.execute(
+                "SELECT * FROM runs WHERE task_id=? AND status='awaiting_review'", (task_id,),
+            ).fetchone()
+            ci = ci_now.get(task_id)
+            head = (ci.head_sha if ci else None) or (row["pr_head_sha"] if row else None)
+            if row is None or not row["branch_name"] or not head or row["conflict_sha"] == head:
+                continue
+            outcome = _resolve_base_conflict(conn, wf, row, head)
+            if outcome in ("merged", "rework"):
+                summary["base_merged" if outcome == "merged" else "base_conflict"] += 1
+
         # 1c′. A CHECK THAT NEVER SETTLES IS NOT A CHECK WE ARE STILL WAITING FOR.
         #
         # `pending` is the state with no exit of its own: no verdict fires on it (correctly —
@@ -6927,7 +7003,11 @@ def effective_rework_cap(row) -> int:
     """🔁🚪 CMX-237. THIS run's rework budget INCLUDING human-granted rounds: its risk cap
     plus every ``chela retry`` grant. The grant is never folded into :func:`_rework_cap`
     itself, so a run with no grant escalates at EXACTLY its risk cap."""
-    return _rework_cap(row) + (row["retry_count"] or 0)
+    try:
+        free = row["conflict_reworks"] or 0     # 🔀 CMX-262: conflict rounds are free
+    except (IndexError, KeyError):
+        free = 0
+    return _rework_cap(row) + (row["retry_count"] or 0) + free
 
 
 def rework_cap_reached(row) -> bool:
