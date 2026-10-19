@@ -75,7 +75,7 @@ Legacy code owns the fetches until the component reading their result is ported.
 | `sidebarLayout` | `nav.js` `_setLayout()` / `_writeLayout()` | `{order, custom, view, loaded}` (CMX-82) |
 
 A store is a value plus listeners (`createStore`: `get`, `set`, `subscribe`; `set` with the
-same value notifies nobody). React reads it with `useStore(store)`, a one-line
+same value notifies nobody, so always publish a NEW array or object, never one mutated in place). React reads it with `useStore(store)`, a one-line
 `useSyncExternalStore`. That is React's own primitive for an external store: it adds no
 dependency, and it renders a consistent value even during concurrent rendering. A library
 (zustand) would add selectors and middleware nobody needs for two values; Redux is ruled out.

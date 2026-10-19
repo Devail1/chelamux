@@ -41,6 +41,14 @@ test('setAgentsCache publishes the very list it caches to the agents store', () 
     assert.equal(sets.sidebarLayout.length, 0);
 });
 
+test('a non-array agents value (a failed fetch\'s body) publishes an empty list, never the body', () => {
+    const body = { error: 'boom' };
+    util.setAgentsCache(body);
+    assert.equal(util._agentsCache, body);
+    util.setAgentsCache(null);
+    assert.deepEqual(sets.agents, [[], []]);
+});
+
 test('with no bridge (the build did not load) publishing is a no-op and the cache still updates', () => {
     delete window.chelaBridge;
     const rows = [{ window_id: '@10' }];

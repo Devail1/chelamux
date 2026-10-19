@@ -331,7 +331,8 @@ function humanSchedule(type, value) {
 // --- Stage 0: setters for cross-module mutable state (imported bindings are read-only) ---
 function setCurrentTab(v) { currentTab = v; }
 function setMsgTarget(v) { msgTargetAgent = v; }
-function setAgentsCache(v) { _agentsCache = v; publish('agents', v); }
+// The bridge's agents store is typed Agent[]: a failed fetch's non-array body publishes [].
+function setAgentsCache(v) { _agentsCache = v; publish('agents', Array.isArray(v) ? v : []); }
 
 // CMX-178: hand a value legacy still owns to the React islands' store of that name
 // (frontend/src/shared/bridge; docs/FRONTEND.md). No bridge (the build did not load) is a no-op.
