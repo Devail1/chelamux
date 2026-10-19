@@ -258,6 +258,7 @@ class _Bot:
 
 
 def _reopen_cb(on_topic_reopened):
+    pytest.importorskip("telegram")   # CI syncs without the telegram extra
     from chela.telegram.inbound import TopicRouter, build_application
 
     app = build_application("123:fake-token", TopicRouter("777", "@3", "4", sender=None),
