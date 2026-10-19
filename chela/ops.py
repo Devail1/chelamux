@@ -42,6 +42,8 @@ WHACK_ROUNDS = 3
 OVER_STATUSES = ("done", "closed", "needs_human")
 TEST_RUNNERS = ("pytest", "py.test", "vitest")
 DETACHED_FLAG = "--detached-child"         # chela judge run --detach's own child
+DAEMON_MARKERS = ("God Daemon (",)         # argv[0] of a self-daemonizing proc: ppid 1 by design
+DAEMON_OWNER_FILE = "chela-tests-owner.pid"  # tests/conftest.py: the pytest that owns a PM2_HOME
 FLEET_PAUSE_FILE = fleet.STATE_FILE_NAME  # CMX-214's `--pause --all` state
 
 _TEST_ID_RE = re.compile(r"[\w./-]+::[^\s,;]+")
@@ -85,6 +87,7 @@ class Sources:
         self.events_path = events_path or self.chela_dir / "events.jsonl"
         self.now = time.time() if now is None else now
         self.worktrees = self.chela_dir / "worktrees"
+        self._environ: dict[int, dict[str, str] | None] = {}
 
     @cached_property
     def events(self) -> list[dict]:
@@ -136,17 +139,47 @@ class Sources:
                         "age_s": uptime - int(rest[19]) / hz})
         return out
 
-    def worktree_of(self, proc: dict) -> tuple[str, str] | None:
-        """``(task, "run"|"judge")`` when the process's cwd or argv is under a worktree."""
+    def worktree_dir(self, proc: dict) -> Path | None:
+        """The worktree the process's cwd or argv is under."""
         for path in (proc["cwd"], *proc["argv"]):
             try:
                 parts = Path(path).relative_to(self.worktrees).parts
             except ValueError:
                 continue
             if len(parts) >= 2:
-                name = parts[1]
-                return (name[6:], "judge") if name.startswith("judge-") else (name, "run")
+                return self.worktrees / parts[0] / parts[1]
         return None
+
+    def worktree_of(self, proc: dict) -> tuple[str, str] | None:
+        """``(task, "run"|"judge")`` when the process's cwd or argv is under a worktree."""
+        wt = self.worktree_dir(proc)
+        if wt is None:
+            return None
+        return (wt.name[6:], "judge") if wt.name.startswith("judge-") else (wt.name, "run")
+
+    def environ(self, pid: int) -> dict[str, str] | None:
+        """The process's START-UP environment (a later ``os.environ`` write never shows in
+        ``/proc``); None when unreadable."""
+        if pid not in self._environ:
+            try:
+                raw = (self.proc_root / str(pid) / "environ").read_bytes()
+            except OSError:
+                self._environ[pid] = None
+            else:
+                self._environ[pid] = dict(kv.decode(errors="replace").split("=", 1)
+                                          for kv in raw.split(b"\0") if b"=" in kv)
+        return self._environ[pid]
+
+    def suite_timeout(self, proc: dict) -> float:
+        """``judge.suite_timeout_seconds`` from the process's worktree WORKFLOW.md, else the
+        judge's default."""
+        from chela import judge, workflow
+
+        try:
+            return judge.judge_suite_timeout(
+                workflow.load_workflow(self.worktree_dir(proc) / "WORKFLOW.md"))
+        except Exception:  # noqa: BLE001 — unreadable or unparseable: the default
+            return float(judge.SUITE_TIMEOUT_SECONDS)
 
 
 def _finding(rule: str, subject: str, summary: str, **evidence) -> dict:
@@ -185,9 +218,53 @@ def rule_hung_test(src: Sources, state: dict) -> list[dict]:
     return out
 
 
+def _is_daemon(argv: list[str]) -> bool:
+    return bool(argv) and any(m in argv[0] for m in DAEMON_MARKERS)
+
+
+def _daemon_leak(src: Sources, p: dict, wt: tuple[str, str]) -> str | None:
+    """CMX-273: why a self-daemonizing process (re-parented to 1 by design) is leaked anyway,
+    or None while a live process of its run still owns its ``PM2_HOME``: one that has it in
+    its environ, or the pytest the home's :data:`DAEMON_OWNER_FILE` names (a ``PM2_HOME`` that
+    conftest set after start-up is invisible in that pytest's ``/proc`` environ)."""
+    env = src.environ(p["pid"])
+    home = (env or {}).get("PM2_HOME")
+    if not home:
+        return ("it is orphaned (ppid 1) and its "
+                + ("environ is unreadable" if env is None else "environ has no PM2_HOME"))
+    if not os.path.isdir(home):
+        return f"its PM2_HOME {home} is gone"
+    limit = src.suite_timeout(p)
+    if p["age_s"] > limit:
+        return f"it is older than the suite timeout ({limit:.0f}s)"
+    try:
+        owner = int((Path(home) / DAEMON_OWNER_FILE).read_text().strip())
+    except (OSError, ValueError):
+        owner = None
+    ppid = {q["pid"]: q["ppid"] for q in src.procs}
+
+    def descends(pid: int) -> bool:
+        seen = set()
+        while pid not in seen and pid in ppid:
+            seen.add(pid)
+            pid = ppid[pid]
+            if pid == p["pid"]:
+                return True
+        return False
+
+    for q in src.procs:
+        if _is_daemon(q["argv"]) or src.worktree_of(q) != wt or descends(q["pid"]):
+            continue                              # a daemon, another run, or its own child
+        if ((q["pid"] == owner and q["start"] <= p["start"])    # a reused pid starts later
+                or (src.environ(q["pid"]) or {}).get("PM2_HOME") == home):
+            return None
+    return f"no live process of its run shares its PM2_HOME {home}"
+
+
 def rule_leaked_proc(src: Sources, state: dict) -> list[dict]:
     """CMX-253: a process under a run/judge worktree whose run is over, or that was orphaned.
-    A ``--detached-child`` judge is setsid'd ON PURPOSE, so ppid 1 alone is not a leak there."""
+    A ``--detached-child`` judge is setsid'd ON PURPOSE, so ppid 1 alone is not a leak there;
+    nor for a self-daemonizing process (:func:`_daemon_leak`)."""
     out = []
     for p in src.procs:
         wt = src.worktree_of(p)
@@ -195,8 +272,12 @@ def rule_leaked_proc(src: Sources, state: dict) -> list[dict]:
             continue
         status = src.runs.get(wt[0])
         orphan = p["ppid"] == 1 and DETACHED_FLAG not in p["argv"]
+        why = "it is orphaned (ppid 1)"
+        if orphan and _is_daemon(p["argv"]):
+            why = _daemon_leak(src, p, wt)
+            orphan = why is not None
         if status in OVER_STATUSES or orphan:
-            why = f"its run is {status}" if status in OVER_STATUSES else "it is orphaned (ppid 1)"
+            why = f"its run is {status}" if status in OVER_STATUSES else why
             out.append(_finding(
                 "leaked_proc", f"pid:{p['pid']}",
                 f"pid {p['pid']} under {wt[1]} {wt[0]} is alive but {why}",
