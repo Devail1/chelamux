@@ -27,6 +27,7 @@ CHANGELOG = ("# Changelog\n\n## [Unreleased]\n\n## [0.1.0] — 2026-01-01\n\n###
 
 _REAL_RELEASE_TESTS = release._release_tests
 _REAL_UV_LOCK = release._uv_lock
+_REAL_FRONTEND_BUILD = release._frontend_build
 _REAL_GH_RELEASE_URL = release._gh_release_url
 
 
@@ -61,6 +62,7 @@ def _quiet(monkeypatch):
     monkeypatch.setattr(release.notify, "enabled", lambda: False)
     monkeypatch.setattr(release, "_uv_lock", _lock_to())
     monkeypatch.setattr(release, "_release_tests", _ok)
+    monkeypatch.setattr(release, "_frontend_build", _ok)
     monkeypatch.setattr(release, "_gh_release_url", lambda rec: None)
     release._dev_head_cache.clear()
 
@@ -354,6 +356,84 @@ def test_a_step_that_leaves_a_stray_file_refuses_as_dirty(world, monkeypatch):
         return _ok()
     monkeypatch.setattr(release, "_release_tests", dirty)
     _assert_refused_and_clean(world, _prepare(world), why="dirty")
+
+
+def _builds_into(seen: list):
+    """A fake frontend build: records the worktree and writes one built file into it."""
+    def fake(wt: Path) -> subprocess.CompletedProcess:
+        seen.append(wt)
+        (wt / "chela/dashboard/static/app").mkdir(parents=True, exist_ok=True)
+        (wt / "chela/dashboard/static/app/main-abc.js").write_text("built")
+        return _ok()
+    return fake
+
+
+def test_the_release_builds_the_frontend_and_commits_its_output(world, monkeypatch):
+    """🔴 GUARD (CMX-177): `chela release` runs the frontend build in its worktree, and the
+    rebuilt static/app/ is part of the release commit, never a dirty step."""
+    seen: list = []
+    monkeypatch.setattr(release, "_frontend_build", _builds_into(seen))
+    out = _prepare(world)
+    assert out["ok"] is True and [p.name[:7] for p in seen] == ["v0.2.0-"], out
+    assert _g(world.work, "show", f"{out['release_sha']}:chela/dashboard/static/app/main-abc.js") == "built"
+
+
+def test_the_dry_run_runs_the_build_then_leaves_no_commit_tag_request_or_push(
+        world, pushes, monkeypatch, capsys):
+    """🔴 GUARD (CMX-177): `chela release --dry-run` runs every step, frontend build included,
+    reports what it would commit, and leaves nothing: no tag, branch, worktree or request."""
+    from chela import main
+    seen: list = []
+    monkeypatch.setattr(release, "_frontend_build", _builds_into(seen))
+    main.cmd_release(SimpleNamespace(version="0.2.0", theme="t", body_file=None,
+                                     repo=str(world.work), dry_run=True))
+    printed = capsys.readouterr().out
+    assert len(seen) == 1 and "DRY RUN passed" in printed and "frontend build" in printed
+    assert "chela/dashboard/static/app/main-abc.js" in printed and "pyproject.toml" in printed
+    assert pushes == [] and overrides.all_requests() == []
+    assert _local(world, "refs/tags/v0.2.0") is None
+    assert _local(world, "refs/heads/chela-release/v0.2.0") is None
+    assert _release_worktrees(world) == []
+
+
+def test_a_failed_frontend_build_refuses(world, monkeypatch):
+    monkeypatch.setattr(release, "_frontend_build", lambda wt: subprocess.CompletedProcess(
+        [], 1, "", "vite exploded"))
+    _assert_refused_and_clean(world, _prepare(world), why="frontend build failed: vite exploded")
+
+
+@pytest.mark.parametrize("install", [0, 1, "raise"])
+def test_the_frontend_build_installs_the_lockfile_then_builds_in_the_worktree(
+        monkeypatch, tmp_path, install):
+    calls, built = [], []
+    monkeypatch.setenv("VIRTUAL_ENV", "/caller/venv")
+
+    def run(argv, **kw):
+        calls.append((argv, kw))
+        if install == "raise":
+            raise FileNotFoundError("no pnpm")
+        return subprocess.CompletedProcess(argv, install, "", "install failed")
+    monkeypatch.setattr(release.subprocess, "run", run)
+    monkeypatch.setattr(release.frontend_build, "build", lambda out, *, frontend: (
+        built.append((out, frontend)), subprocess.CompletedProcess([], 0, "", ""))[1])
+    (tmp_path / "chela/dashboard/frontend").mkdir(parents=True)
+    (tmp_path / "chela/dashboard/frontend/package.json").write_text("{}")
+    proc = _REAL_FRONTEND_BUILD(tmp_path)
+    [(argv, kw)] = calls
+    assert argv == ["pnpm", "install", "--frozen-lockfile"]
+    assert (kw["cwd"], kw["timeout"], kw["capture_output"], kw["text"]) == (tmp_path, 600, True, True)
+    assert "VIRTUAL_ENV" not in kw["env"] and "PATH" in kw["env"]
+    if install == 0:
+        assert built == [(tmp_path / "chela/dashboard/static/app",
+                          tmp_path / "chela/dashboard/frontend")] and proc.returncode == 0
+    else:
+        assert built == [] and proc.returncode == 1
+
+
+def test_a_repo_with_no_frontend_builds_nothing(monkeypatch, tmp_path):
+    monkeypatch.setattr(release.subprocess, "run", lambda *a, **k: pytest.fail("ran pnpm"))
+    monkeypatch.setattr(release.frontend_build, "build", lambda *a, **k: pytest.fail("built"))
+    assert _REAL_FRONTEND_BUILD(tmp_path).returncode == 0
 
 
 @pytest.mark.parametrize("version,why", [("0.1.0", "not newer"), ("0.0.9", "not newer"),
@@ -2692,8 +2772,9 @@ def test_release_tests_are_the_documented_pair():
         Path(__file__).resolve().parent.parent / "CONTRIBUTING.md").read_text().replace("\n", " ")
 
 
-def test_release_paths_are_the_documented_four():
-    assert release.RELEASE_PATHS == ("CHANGELOG.md", "pyproject.toml", "uv.lock", "changelog.d")
+def test_release_paths_are_the_documented_five():
+    assert release.RELEASE_PATHS == ("CHANGELOG.md", "pyproject.toml", "uv.lock", "changelog.d",
+                                     "chela/dashboard/static/app")
 
 
 @pytest.mark.parametrize("path,inside", [

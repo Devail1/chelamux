@@ -14,3 +14,7 @@ CHANGELOG.md merge=union
 # literal NUL (now the `\0` escape), so its history still diffs as binary without this.
 # `diff` forces a text diff for the dashboard's JS sources, which are always text.
 chela/dashboard/static/js/*.js diff
+
+# CMX-177: the committed frontend build is compared BYTE for byte with a fresh one, so git
+# must never rewrite its line endings (core.autocrlf would make every file read as stale).
+chela/dashboard/static/app/** -text
