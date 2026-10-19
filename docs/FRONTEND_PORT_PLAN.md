@@ -937,6 +937,8 @@ verifies all of them before the release.
 | 10-19 | Minimized tray | One row with a fixed height that scrolls sideways; label shows the count; fade on the hidden side; wheel scrolls it | P28 · CMX-243 |
 | 10-19 | Phone wall | No session pill strip above the terminal; the sidebar is the session switcher | CMX-202 (deleted it; no slice re-adds it) |
 | 10-18 | Sidebar | One Archived control | CMX-172 |
+| 10-19 | Sidebar | The Dispatched group is always last, after every human folder group | CMX-172 |
+| 10-19 | Sidebar | Recent sessions never lists a live session (match by session id, not window address); judge and dispatched sessions sit under the dispatcher toggle with no Resume | CMX-172 |
 | 10-16 | Icons | Lucide via `icons.ts`, never emoji; no em dash in UI strings | all (§5) |
 
 ---
