@@ -26,6 +26,7 @@ from unittest.mock import patch
 import pytest
 
 from chela.sources import Task
+from chela.judge import judge_worktree_path
 from chela.workflow import WorkflowDef
 
 
@@ -45,7 +46,8 @@ def mods(tmp_path, monkeypatch):
 def _wf(tmp_path: Path | None = None, **agent) -> WorkflowDef:
     return WorkflowDef(
         path=(tmp_path or Path("/nowhere")) / "WORKFLOW.md",
-        config={"project_key": "CMX", "agent": agent},
+        config={"project_key": "CMX", "agent": agent,
+                **({"workspace": {"root": str(tmp_path / "wts")}} if tmp_path else {})},
         prompt_template="go {{workspace_path}}",
     )
 
@@ -240,6 +242,9 @@ def test_spawn_judge_launches_on_the_judge_model_not_the_coding_model(mods, tmp_
     )
     conn.commit()
     row = conn.execute("SELECT * FROM runs WHERE task_id=?", ("abc123",)).fetchone()
+    # 🎲 CMX-257: the judge slot (worktree + lock) is THIS test's — never the shared
+    # `~/.chela/worktrees/default` a concurrent suite's judge lock can be holding.
+    assert judge_worktree_path(wf, "abc123").is_relative_to(tmp_path.resolve())
     wt = tmp_path / "judge-abc123"
     with patch.object(dispatcher, "detached_worktree", return_value=(wt, True)), \
          patch.object(dispatcher.subprocess, "run") as run, \

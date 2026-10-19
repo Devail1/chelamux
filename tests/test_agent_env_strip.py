@@ -23,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from chela.judge import judge_worktree_path
 from chela.workflow import WorkflowDef
 
 SENTINEL = "CHELA_CMX45_SENTINEL"
@@ -35,7 +36,8 @@ _REAL_RUN = subprocess.run
 def _wf(tmp_path):
     return WorkflowDef(
         path=tmp_path / "WORKFLOW.md",
-        config={"project_key": "CMX", "agent": {}},
+        config={"project_key": "CMX", "agent": {},
+                "workspace": {"root": str(tmp_path / "wts")}},
         prompt_template="go {{workspace_path}}",
     )
 
@@ -241,6 +243,9 @@ def test_spawn_judge_strips_notify_url_too(monkeypatch, tmp_path):
 
     monkeypatch.setattr(dispatcher, "detached_worktree",
                          lambda *_a, **_k: (tmp_path / "judge-abc123", True))
+    # 🎲 CMX-257: the judge slot (worktree + lock) is THIS test's — never the shared
+    # `~/.chela/worktrees/default` a concurrent suite's judge lock can be holding.
+    assert judge_worktree_path(wf, "abc123").is_relative_to(tmp_path.resolve())
     assert dispatcher._spawn_judge(wf, row, "deadbeef", conn) is True
 
     unset_idx = next(i for i, line in enumerate(sent) if line.startswith("unset"))

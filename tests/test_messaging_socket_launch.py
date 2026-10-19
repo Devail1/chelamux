@@ -13,13 +13,15 @@ from __future__ import annotations
 import sqlite3
 from types import SimpleNamespace
 
+from chela.judge import judge_worktree_path
 from chela.workflow import WorkflowDef
 
 
 def _wf(tmp_path):
     return WorkflowDef(
         path=tmp_path / "WORKFLOW.md",
-        config={"project_key": "CMX", "agent": {}},
+        config={"project_key": "CMX", "agent": {},
+                "workspace": {"root": str(tmp_path / "wts")}},
         prompt_template="go {{workspace_path}}",
     )
 
@@ -111,6 +113,9 @@ def test_spawn_judge_also_carries_the_messaging_socket_flag(monkeypatch, tmp_pat
 
     monkeypatch.setattr(dispatcher, "detached_worktree",
                          lambda *_a, **_k: (tmp_path / "judge-abc123", True))
+    # 🎲 CMX-257: the judge slot (worktree + lock) is THIS test's — never the shared
+    # `~/.chela/worktrees/default` a concurrent suite's judge lock can be holding.
+    assert judge_worktree_path(wf, "abc123").is_relative_to(tmp_path.resolve())
     assert dispatcher._spawn_judge(wf, row, "deadbeef", conn) is True
 
     claude_line = next(line for line in sent if line.startswith("claude"))

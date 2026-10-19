@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -1224,7 +1226,7 @@ def test_peer_transport_warns_on_a_stale_socket_file_nothing_is_listening_on(
 
 
 def test_peer_transport_flags_windows_reachable_only_via_the_legacy_default_path(
-        fleet, monkeypatch):
+        fleet, monkeypatch, request):
     """The three-way ask: a `default` window works TODAY, but only by reading OUR OWN
     XDG_RUNTIME_DIR as a stand-in for the target's — it is exactly the window that
     still needs a relaunch to pick up a chela-owned path, and a binary
@@ -1232,9 +1234,15 @@ def test_peer_transport_flags_windows_reachable_only_via_the_legacy_default_path
     Doctor must name it."""
     peer_sock = messenger.deterministic_peer_socket_path("@1")
     peer_sock.unlink()
-    runtime_dir = fleet / "xdg-runtime"
+    # 🎲 CMX-257: NOT under `fleet` (tmp_path). An xdist tmp_path is ~80 bytes before this
+    # suffix, so `…/popen-gw12/test_peer_transport_flags_wind0/xdg-runtime/cc-socks/1.sock`
+    # is 108 bytes — past the AF_UNIX sun_path limit, `bind` raised `OSError: AF_UNIX path
+    # too long` on any worker gw10+ once the basetemp counter reached 4 digits.
+    runtime_dir = Path(tempfile.mkdtemp(prefix="cmx257-", dir="/tmp"))
+    request.addfinalizer(lambda: shutil.rmtree(runtime_dir, ignore_errors=True))
     (runtime_dir / "cc-socks").mkdir(parents=True)
     legacy_sock = runtime_dir / "cc-socks" / "1.sock"
+    assert len(os.fsencode(legacy_sock)) <= 64, legacy_sock  # independent of tmp_path depth
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(legacy_sock))
     listener.listen(1)
