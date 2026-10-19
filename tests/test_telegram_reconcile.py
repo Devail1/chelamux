@@ -1136,7 +1136,7 @@ class _OneTick:
 
 
 def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=False,
-                  roster_raises=None, cwds=None):
+                  roster_raises=None, cwds=None, ledger=None):
     """Run ONE tick of the real ``chela.main._reconcile_loop``; return its kwargs."""
     from chela import discovery, main, roster
     from chela import telegram as tg
@@ -1181,7 +1181,7 @@ def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=
                         lambda wid: (cwds or {}).get(wid))
 
     stop = _OneTick()
-    main._reconcile_loop(BindingRegistry("777"), _StubTopicApi(), 7, stop)
+    main._reconcile_loop(BindingRegistry("777"), _StubTopicApi(), 7, stop, ledger)
     seen["stop"] = stop
     return seen
 
@@ -1197,6 +1197,17 @@ def test_the_reconcile_loop_actually_wires_the_dispatched_feature(monkeypatch):
     assert kwargs["gate_for"] is tg.blocked_on_human   # ...and NOT pending_gate alone (D1)
     assert kwargs["bind_dispatched"] is False
     assert seen["stop"].waited == [7]
+
+
+def test_the_reconcile_loop_shares_the_bridges_ledger_and_records_sessions(monkeypatch):
+    # CMX-267: one ledger for the loop AND the inbound close/reopen handlers, and the reap
+    # records the closing window's session id so a reopen can resume it.
+    from chela import telegram as tg
+
+    shared = object()
+    kwargs = _run_one_tick(monkeypatch, ledger=shared)["kwargs"]
+    assert kwargs["ledger"] is shared
+    assert kwargs["session_for"] is tg.window_session_id
 
 
 def test_the_reconcile_loop_actually_writes_the_roster_snapshot(monkeypatch):

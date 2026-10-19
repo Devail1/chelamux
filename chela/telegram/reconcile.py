@@ -14,7 +14,9 @@ tick and:
 
 A third path — the human **closing a topic** from Telegram — is handled by
 :class:`TopicClosedHandler`: it ``unbind``s only and deliberately does **NOT**
-kill the agent (Liav's default, differing from ccbot on purpose).
+kill the agent (Liav's default, differing from ccbot on purpose). A fourth — the human
+**reopening** a closed topic — is :class:`TopicReopenedHandler` (CMX-267): it resumes
+the Claude session the topic was closed on, the way ccbot does.
 
 The whole thing is **idempotent**: it matches by ``window_id`` (never by name, so a
 window rename can't orphan its topic) and skips any window that already has a
@@ -53,6 +55,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections import Counter
 from typing import Callable
 
@@ -144,9 +147,12 @@ class TopicManager:
     wire as the outbound relay, so no new dependency is pulled in.
     """
 
-    def __init__(self, token: str, chat_id: str | int, *, transport: Transport | None = None):
+    def __init__(self, token: str, chat_id: str | int, *, transport: Transport | None = None,
+                 clock=time.monotonic):
         self._chat_id = str(chat_id)
         self._transport = transport or _urllib_transport(token)
+        self._clock = clock
+        self._reopened: dict[str, float] = {}   # thread -> when chela itself reopened it
 
     def create_topic(self, name: str) -> str | None:
         """Create a forum topic named ``name``; return its ``message_thread_id``.
@@ -203,6 +209,7 @@ class TopicManager:
         swallowed — the binding is still dropped, since the window is gone either
         way; a stale-open topic is a lesser evil than a wedged reconcile loop.
         """
+        self._reopened.pop(str(thread_id), None)   # a reopen after this close is not ours
         resp = self._transport(
             "closeForumTopic", {"chat_id": self._chat_id, "message_thread_id": thread_id}
         )
@@ -216,13 +223,26 @@ class TopicManager:
         resumed, and its conversation comes back with it). ``True`` when the topic is
         open now — ``TOPIC_NOT_MODIFIED`` (it already was) included. A failure is logged
         and ``False``: the caller then provisions a fresh topic as for any new window."""
+        # Marked BEFORE the call: its FORUM_TOPIC_REOPENED update may be handled first.
+        self._reopened[str(thread_id)] = self._clock()
         resp = self._transport(
             "reopenForumTopic", {"chat_id": self._chat_id, "message_thread_id": thread_id}
         )
-        if resp.get("ok") or _is_not_modified(resp):
+        if resp.get("ok"):
+            return True
+        # No service message follows either of these, so no mark may linger to swallow
+        # the human's own reopen of this topic.
+        self._reopened.pop(str(thread_id), None)
+        if _is_not_modified(resp):
             return True
         log.warning("reopenForumTopic(%s) failed: %s", thread_id, resp.get("description", resp))
         return False
+
+    def reopened_by_chela(self, thread_id: str | int | None, within: float = 30.0) -> bool:
+        """True once if chela itself reopened ``thread_id`` in the last ``within`` seconds,
+        so its own reopen (CMX-204 / CMX-75) never reads as a human's (CMX-267)."""
+        at = self._reopened.pop(str(thread_id), None)
+        return at is not None and self._clock() - at < within
 
     def delete_topic(self, thread_id: str | int) -> bool:
         """Delete forum topic ``thread_id`` AND every message in it (CMX-204, opt-in only).
@@ -322,6 +342,7 @@ def reconcile_bindings(
     rebinds: dict[str, str] | None = None,
     ledger=None,
     delete_on_close: bool = False,
+    session_for: Callable[[str], str | None] | None = None,
 ) -> bool:
     """Diff the registry against the live fleet; provision + reap. Return changed.
 
@@ -371,6 +392,9 @@ def reconcile_bindings(
       instead of creating one. ``None`` keeps the pre-CMX-204 behaviour.
     * ``delete_on_close`` — Settings "Telegram: delete a topic when its window closes":
       the reap deletes the topic instead of closing it, and closes it if the delete fails.
+    * ``session_for`` — ``window_id -> Claude session id | None`` (in production
+      :func:`window_session_id`): recorded in the ledger when a reap closes the window's
+      topic, so a human reopening it resumes that session (CMX-267).
 
     **Provision** every agent window with no binding: create a topic named after
     the agent's project (:func:`topic_name_for`, falling back to the window name)
@@ -442,7 +466,8 @@ def reconcile_bindings(
             continue
         thread = registry.thread_for_window(wid)
         if thread is not None:
-            _retire_topic(topic_api, ledger, thread, delete_on_close)
+            sid = session_for(wid) if session_for is not None and ledger is not None else None
+            _retire_topic(topic_api, ledger, thread, delete_on_close, sid)
         registry.unbind(wid)
         why = "the tmux server restarted; its id was reissued" if dangling else "gone"
         log.info("auto-topics: window %s %s — closed topic %s, unbound", wid, why, thread)
@@ -528,7 +553,8 @@ def reconcile_bindings(
     return changed
 
 
-def _retire_topic(topic_api, ledger, thread: str, delete: bool) -> None:
+def _retire_topic(topic_api, ledger, thread: str, delete: bool,
+                  session_id: str | None = None) -> None:
     """Close a dead window's topic, or delete it when Settings asks (CMX-204). A failed
     delete (e.g. no *Delete Messages* right) falls back to closing it."""
     if delete:
@@ -539,7 +565,7 @@ def _retire_topic(topic_api, ledger, thread: str, delete: bool) -> None:
         log.warning("auto-topics: could not delete topic %s; closing it instead", thread)
     topic_api.close_topic(thread)
     if ledger is not None:
-        ledger.closed(thread)
+        ledger.closed(thread, session_id)
 
 
 def _reopen_for_cwd(topic_api, ledger, registry, cwd: str | None) -> str | None:
@@ -870,11 +896,17 @@ class TopicClosedHandler:
     window here, we don't). ``on_change`` (typically ``registry.save``) fires only
     after an actual unbind so the drop is persisted. Unknown/unbound threads are a
     no-op. Pure — driven directly in tests with a thread id, no PTB needed.
+
+    With a ``ledger`` the close is recorded there with the window's Claude session id
+    (``session_for``, CMX-267), so reopening the topic later resumes that session.
     """
 
-    def __init__(self, registry, on_change: Callable[[], None] | None = None):
+    def __init__(self, registry, on_change: Callable[[], None] | None = None,
+                 ledger=None, session_for: Callable[[str], str | None] | None = None):
         self._registry = registry
         self._on_change = on_change
+        self._ledger = ledger
+        self._session_for = session_for
 
     def handle(self, thread_id: str | int | None) -> bool:
         """Unbind the window bound to ``thread_id``. Return True if one was."""
@@ -883,7 +915,111 @@ class TopicClosedHandler:
             log.debug("topic-closed for unbound thread %s; ignoring", thread_id)
             return False
         self._registry.unbind(window_id)
+        if self._ledger is not None:
+            sid = self._session_for(window_id) if self._session_for is not None else None
+            self._ledger.closed(thread_id, sid)
         log.info("topic %s closed — unbound %s (agent left running)", thread_id, window_id)
         if self._on_change is not None:
             self._on_change()
         return True
+
+
+def window_session_id(wid: str) -> str | None:
+    """The Claude session ``wid`` runs (live) or last ran (its epoch-checked pin), else None."""
+    from chela import sessionids, sessions
+
+    try:
+        return sessions.session_of_window(wid) or sessionids.session_id_for(wid)
+    except Exception:  # noqa: BLE001 — unknown is a fresh session on reopen, never a crash
+        log.debug("session id of %s unreadable", wid, exc_info=True)
+        return None
+
+
+class TopicReopenedHandler:
+    """A human REOPENED a closed topic: bring its Claude session back (CMX-267, as ccbot).
+
+    Looks the thread up in the :class:`~chela.topic_ledger.TopicLedger`, spawns a window in
+    the recorded cwd running ``claude --resume <session id>`` through ``spawn`` (in
+    production :func:`chela.spawn.spawn_window`, the ``chela spawn`` path), binds the topic
+    to it and marks the ledger entry open. :meth:`handle` returns the one line to post in
+    the topic — every fallback says something — or None when there is nothing to do:
+
+    * the thread is already bound, or ``self_reopened`` says chela reopened it itself
+      (CMX-204's folder reuse, CMX-75's unarchive) — that reopen already has its window;
+    * no ledger entry / no cwd ⇒ say so, spawn nothing; the cwd is gone ⇒ say so;
+    * no session id, or its transcript is gone (``session_exists``) ⇒ a fresh ``claude``;
+    * the session is still running in a live window (``session_live``) — a human closed
+      the topic, which leaves the agent running ⇒ bind the topic back to that window, or,
+      when it has another topic by now, say where it is rather than resume it twice.
+    """
+
+    def __init__(self, registry, ledger, *, spawn, session_exists: Callable[[str], bool],
+                 session_live: Callable[[str], str | None] | None = None,
+                 self_reopened: Callable[[str], bool] | None = None,
+                 pin_session: Callable[[str, str], None] | None = None,
+                 now_epoch: Callable[[], str | None] = lambda: None,
+                 on_change: Callable[[], None] | None = None,
+                 isdir: Callable[[str], bool] = os.path.isdir):
+        self._registry = registry
+        self._ledger = ledger
+        self._spawn = spawn
+        self._session_exists = session_exists
+        self._session_live = session_live
+        self._self_reopened = self_reopened
+        self._pin_session = pin_session
+        self._now_epoch = now_epoch
+        self._on_change = on_change
+        self._isdir = isdir
+
+    def handle(self, thread_id: str | int | None) -> str | None:
+        from chela.agent_manager import DEFAULT_LAUNCH_CMD
+        from chela.sessions import SESSION_RE
+
+        if thread_id is None:
+            return None
+        # The mark is consumed FIRST, even for a bound thread: left behind, it would
+        # swallow the human's next reopen of that topic.
+        if self._self_reopened is not None and self._self_reopened(str(thread_id)):
+            return None
+        if self._registry.window_for_thread(thread_id) is not None:
+            return None
+        entry = self._ledger.get(thread_id) or {}
+        cwd = entry.get("cwd")
+        if not cwd:
+            return "chela has no record of this topic's folder, so there is nothing to resume."
+        if not self._isdir(cwd):
+            return f"{cwd} no longer exists, so there is nothing to resume."
+        name = entry.get("name") or os.path.basename(cwd)
+        sid = entry.get("session_id")
+        if not (isinstance(sid, str) and SESSION_RE.match(sid)):
+            sid, why = None, "no session was recorded for this topic"
+        elif not self._session_exists(sid):
+            sid, why = None, f"session {sid}'s transcript is gone"
+        if sid and self._session_live is not None:
+            live = self._session_live(sid)
+            if live and self._registry.thread_for_window(live) is not None:
+                return f"{name} is still running in {live}; not resuming it twice."
+            if live:
+                self._bind(thread_id, live, cwd)
+                return f"Rebound {name} ({live}) to this topic; it was still running."
+        command = f"claude --resume {sid}" if sid else DEFAULT_LAUNCH_CMD
+        result = self._spawn(cwd, command=command, name=name)
+        if not result.ok or not result.wid:
+            return f"Couldn't start a session in {cwd}: {result.error or 'no window id'}"
+        self._bind(thread_id, result.wid, cwd)
+        log.info("topic %s reopened — %s in %s (session %s)", thread_id, result.wid, cwd, sid)
+        if not sid:
+            return f"Started a fresh session as {result.name} in {cwd} ({why})."
+        if self._pin_session is not None:
+            try:
+                self._pin_session(result.wid, sid)
+            except Exception:  # noqa: BLE001 — the resume happened; the pin is best-effort
+                log.warning("reopen: pinning session %s to %s failed", sid, result.wid,
+                            exc_info=True)
+        return f"Resumed {result.name} in {cwd}"
+
+    def _bind(self, thread_id, wid: str, cwd: str) -> None:
+        self._registry.bind(wid, str(thread_id), self._now_epoch())
+        self._ledger.opened(thread_id, wid, cwd)
+        if self._on_change is not None:
+            self._on_change()
