@@ -3389,6 +3389,12 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 }
 .sidebar-foot .res-strip { min-width: 0; }
 .sidebar-foot #btn-primary-menu { margin-left: auto; flex: 0 0 auto; }
+/* CMX-178: the version island (React). Muted and shrinkable: it gives way before the menu. */
+.sidebar-foot #version-island { min-width: 0; overflow: hidden; }
+.version-badge {
+    display: block; font-size: 10.5px; color: var(--muted, #7d8590); font-variant-numeric: tabular-nums;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 /* The head's right end: the Decisions inbox (CMX-393, moved up from the foot). */
 .sidebar-head-actions {
     margin-left: auto; flex: 0 0 auto; display: flex; align-items: center; gap: 2px;
@@ -3798,6 +3804,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     body.sidebar-collapsed .sidebar-foot #btn-primary-menu { margin-left: 0; }
     body.sidebar-collapsed .sidebar-head .brand span { display: none; }
     body.sidebar-collapsed #resources-strip { display: none; }
+    body.sidebar-collapsed #version-island { display: none; }
     /* CMX-404: inside this desktop block, like every other rail rule. The class is
        persisted per browser, so an unscoped hide leaked into the phone drawer and
        took the New session + Jump row with it. */

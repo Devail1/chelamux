@@ -53,9 +53,10 @@ def test_every_script_and_stylesheet_in_the_page_is_versioned(client):
     module = [a["src"] for t, a in refs if t == "script" and a.get("type") == "module" and "src" in a]
     styles = [a["href"] for t, a in refs
               if t == "link" and "stylesheet" in (a.get("rel") or "").split()]
-    # The page as it ships: gridstack + main.js, gridstack.css + style.css. A count that
-    # drops means a tag stopped being recognised — not that it stopped needing a version.
-    assert module == [_prefix() + "js/main.js"]
+    # The page as it ships: gridstack + the React islands' entry (CMX-178) + main.js,
+    # gridstack.css + style.css. A count that drops means a tag stopped being recognised —
+    # not that it stopped needing a version.
+    assert module == [_prefix() + dash.ISLAND_ENTRY, _prefix() + "js/main.js"]
     assert len(scripts) >= 2 and len(styles) >= 2
     assert _prefix() + "style.css" in styles
     for url in scripts + styles:
