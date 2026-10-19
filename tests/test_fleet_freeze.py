@@ -59,6 +59,16 @@ def test_a_pid_gone_mid_freeze_is_skipped_and_reported_not_fully_thawed(world, m
     assert fleet.tick(None)[-1] == "fleet resume: judge T1 NOT fully thawed: check its tree for state T"
 
 
+@pytest.mark.parametrize("rnd,kept", [("r1", [[100.0, 150.0]]), ("r0", [])])
+def test_a_second_freeze_keeps_the_rounds_earlier_intervals(world, rnd, kept):
+    """Same round ⇒ the earlier (closed) interval keeps its credit; another round's is dropped."""
+    judge.write_freeze("T1", {"round": rnd, "intervals": [[100.0, 150.0]]})
+    fleet.pause_all()
+    rec = judge.read_freeze("T1")
+    assert rec["round"] == "r1" and rec["intervals"][:-1] == kept
+    assert rec["intervals"][-1][1] is None
+
+
 def _freeze(intervals):
     judge.write_freeze("abc123", {"round": dispatcher.resolve_run("abc123")["judge_started_at"],
                                   "intervals": intervals})
