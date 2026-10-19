@@ -1,13 +1,18 @@
-"""🔀 CMX-262 against a real bare origin + clone: clean + green ⇒ pushed; else nothing pushed."""
+"""🔀 CMX-262 against a real bare origin + clone: clean + green ⇒ pushed; else nothing pushed.
+
+CMX-264: the tick wiring runs with `basemerge.attempt` stubbed, through the same gh stub as
+tests/test_dispatcher_ci.py."""
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from chela import basemerge, judge
+from chela import basemerge, dispatcher, judge
+from tests.test_dispatcher_ci import _FakeGh, _row, _tick, _wf
 
 PYTEST = f"{sys.executable} -m pytest -q -p no:cacheprovider"
 MOD = "def f():\n    return 1\n\n\ndef g():\n    return 2\n"
@@ -179,3 +184,200 @@ def test_the_rework_bodies_name_the_base_sha_and_the_files():
     red = basemerge.rework_body({**res, "outcome": "red"}, "dev")
     assert "targeted tests go red" in red and "\n````\nx ``` y\n````\n" in red
     assert "- (none)" in basemerge.rework_body({**res, "files": [], "outcome": "red"}, "dev")
+
+
+# --- the tick wiring --------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _own_runs_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
+
+
+def _result(outcome, files=("mod.py",)):
+    return {"outcome": outcome, "base_sha": "b" * 40, "head_sha": "deadbee1",
+            "merge_sha": "m" * 40 if outcome == "merged" else None, "files": list(files),
+            "detail": ""}
+
+
+@pytest.fixture
+def tried(monkeypatch):
+    calls, answer = [], {"res": _result("conflict")}
+    monkeypatch.setattr(basemerge, "attempt", lambda *a: calls.append(a) or answer["res"])
+    return calls, answer
+
+
+class _Gh(_FakeGh):
+    """`gh pr view --json state,mergeable` answers ``self.mergeable`` (the base stub: MERGEABLE)."""
+
+    def run(self, cmd, *a, **k):
+        r = super().run(cmd, *a, **k)
+        if isinstance(cmd, list) and cmd[:3] == ["gh", "pr", "view"] and "state,mergeable" in cmd:
+            r.stdout = json.dumps({"state": "OPEN", "mergeable": self.mergeable})
+        return r
+
+
+def _setup(tmp_path, **row):
+    wf = _wf(tmp_path, judge={"test_cmd": "pytest -q", "enabled": False})
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), **row)
+    return wf, _Gh(mergeable="CONFLICTING")
+
+
+def test_conflicting_on_two_ticks_tries_once_per_head_and_reworks_free(tmp_path, tried):
+    calls, _ = tried
+    wf, fake = _setup(tmp_path, rework_count=4)        # the normal-risk cap is spent
+
+    assert _tick(wf, fake)["base_conflict"] == 0       # one read may be transient
+    assert calls == []
+    summary = _tick(wf, fake)
+
+    assert calls == [(str(tmp_path), "test-1", "dev", "pytest -q")]
+    assert (summary["base_conflict"], summary["escalated"], summary["reworked"]) == (1, 0, 1)
+    run = dispatcher.resolve_run("abc123")
+    assert (run["status"], run["rework_count"], run["conflict_reworks"]) == ("running", 5, 1)
+    assert run["conflict_sha"] == "deadbee1"
+    assert "Conflict with base after `bbbbbbbbbbbb` merged" in dispatcher.latest_verdict(run)
+    assert dispatcher.effective_rework_cap(run) == 5
+
+
+def test_a_conflict_already_handled_on_this_head_is_not_retried(tmp_path, tried):
+    calls, _ = tried
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING", conflict_sha="deadbee1")
+    _tick(wf, fake)
+    assert calls == []
+
+
+def test_a_mergeable_read_resets_the_two_tick_wait(tmp_path, tried):
+    calls, _ = tried
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING")
+    fake.mergeable = "MERGEABLE"
+    _tick(wf, fake)
+    fake.mergeable = "CONFLICTING"
+    _tick(wf, fake)
+    assert calls == []
+
+
+def test_a_clean_merge_is_recorded_on_the_pr_and_not_sent_back(tmp_path, tried):
+    calls, answer = tried
+    answer["res"] = _result("merged", files=["tests/test_mod.py"])
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING")
+
+    summary = _tick(wf, fake)
+
+    assert (summary["base_merged"], summary["base_conflict"], len(calls)) == (1, 0, 1)
+    run = dispatcher.resolve_run("abc123")
+    assert (run["status"], run["rework_count"], run["conflict_reworks"]) == (
+        "awaiting_review", 0, 0)
+    assert run["conflict_sha"] == "deadbee1"
+    assert any("Base merged automatically: origin/dev `bbbbbbbbbbbb` → merge commit "
+               "`mmmmmmmmmmmm` (1 targeted test" in c for c in fake.comments)
+
+
+def test_a_red_merge_reworks_free(tmp_path, tried):
+    _, answer = tried
+    answer["res"] = _result("red", files=["tests/test_mod.py"])
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING")
+    assert _tick(wf, fake)["base_conflict"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert run["conflict_reworks"] == 1 and "targeted tests go red" in \
+        dispatcher.latest_verdict(run)
+
+
+def test_current_burns_the_sha_without_a_comment_or_rework(tmp_path, tried):
+    _, answer = tried
+    answer["res"] = _result("current")
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING")
+    summary = _tick(wf, fake)
+    run = dispatcher.resolve_run("abc123")
+    assert (summary["base_merged"], summary["base_conflict"]) == (0, 0)
+    assert (run["conflict_sha"], run["status"]) == ("deadbee1", "awaiting_review")
+    assert not any("Base merged" in c for c in fake.comments)
+
+
+def test_an_attempt_that_cannot_measure_writes_nothing_and_retries(tmp_path, monkeypatch):
+    calls = []
+
+    def boom(*a):
+        calls.append(a)
+        raise RuntimeError("fetch failed")
+    monkeypatch.setattr(basemerge, "attempt", boom)
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING")
+    _tick(wf, fake)
+    _tick(wf, fake)
+    run = dispatcher.resolve_run("abc123")
+    assert len(calls) == 2 and run["conflict_sha"] is None and run["status"] == "awaiting_review"
+
+
+@pytest.mark.parametrize("refusal", [{"ok": False, "error": "moved"}, "db"])
+def test_an_unwritten_verdict_undoes_the_burn_and_the_free_round(tmp_path, tried,
+                                                                monkeypatch, refusal):
+    def refuse(*a, **k):
+        if refusal == "db":
+            raise dispatcher.sqlite3.OperationalError("locked")
+        return refusal
+    monkeypatch.setattr(dispatcher, "request_changes", refuse)
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING", conflict_reworks=2,
+                      conflict_sha="old")
+    assert _tick(wf, fake)["base_conflict"] == 0
+    run = dispatcher.resolve_run("abc123")
+    assert (run["conflict_sha"], run["conflict_reworks"]) == ("old", 2)
+
+
+def test_the_inbox_cap_counts_the_free_conflict_rounds():
+    from chela import inbox
+    assert inbox._effective_rework_cap({"rework_count": 1, "conflict_reworks": 2}) == \
+        inbox._effective_rework_cap({"rework_count": 1}) + 2
+
+
+@pytest.mark.parametrize("row", [{"status": "running", "pr_head_sha": "deadbee1"},
+                                 {"branch_name": ""}])
+def test_only_an_awaiting_review_run_with_a_branch_is_tried(tmp_path, tried, row):
+    calls, _ = tried
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING", **row)
+    _tick(wf, fake)
+    assert calls == []
+
+
+def test_a_conflict_with_no_head_sha_known_is_not_tried(tmp_path, tried):
+    calls, _ = tried
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING")
+    fake.sha = ""
+    _tick(wf, fake)
+    assert calls == []
+
+
+def test_the_cap_reads_a_row_that_has_no_conflict_column_as_zero_free_rounds():
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT 'normal' AS risk, 1 AS rework_count, 0 AS retry_count").fetchone()
+    base = {"risk": "normal", "rework_count": 1, "retry_count": 0}
+    assert dispatcher.effective_rework_cap(row) == dispatcher.effective_rework_cap(base) == \
+        dispatcher.effective_rework_cap({**base, "conflict_reworks": 2}) - 2
+
+
+def test_past_three_free_conflict_rounds_a_conflict_is_charged_and_escalates(tmp_path, tried):
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING", rework_count=7, conflict_reworks=3)
+    assert dispatcher.effective_rework_cap(dispatcher.resolve_run("abc123")) == 7
+    summary = _tick(wf, fake)
+    run = dispatcher.resolve_run("abc123")
+    assert (summary["escalated"], run["conflict_reworks"]) == (1, 3)
+    assert run["status"] != "running"
+
+
+def test_an_attempt_that_raises_oserror_writes_nothing(tmp_path, monkeypatch):
+    def boom(*a):
+        raise PermissionError("scratch dir")
+    monkeypatch.setattr(basemerge, "attempt", boom)
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING")
+    assert _tick(wf, fake)["base_conflict"] == 0
+    assert dispatcher.resolve_run("abc123")["conflict_sha"] is None
+
+
+def test_a_clean_merge_with_no_targeted_tests_says_so(tmp_path, tried):
+    _, answer = tried
+    answer["res"] = _result("merged", files=[])
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING")
+    _tick(wf, fake)
+    assert any("(no targeted tests ran; CI gates it)" in c for c in fake.comments)
+    assert not any("0 targeted" in c for c in fake.comments)
