@@ -366,3 +366,33 @@ def test_the_daemon_shares_one_ledger_between_the_loop_and_both_handlers(monkeyp
     assert isinstance(reopened, TopicReopenedHandler)
     assert closed._ledger is reopened._ledger is loops[0].args[4]
     assert closed._session_for is tg.window_session_id
+
+
+def test_a_reopen_with_no_thread_id_does_nothing_at_all(ledger):
+    # A non-forum service message carries no thread: nothing to look up, nothing to say.
+    reg, spawn = BindingRegistry("777"), _Spawn()
+    ledger.opened("None", "@3", "/p/app")
+    ledger.closed("None", SID)            # even a ledger row keyed "None" is never reached
+    asked: list = []
+    h, _, _ = _handler(reg, ledger, spawn, self_reopened=lambda t: asked.append(t) or False)
+    assert h.handle(None) is None
+    assert spawn.calls == [] and asked == []
+
+
+def test_window_session_id_prefers_the_live_session_then_the_pin(monkeypatch):
+    from chela import sessionids, sessions
+    from chela.telegram.reconcile import window_session_id
+
+    live = {"@3": "live-sid"}
+    pins = {"@3": "old-pin", "@4": "pin-sid"}
+    monkeypatch.setattr(sessions, "session_of_window", live.get)
+    monkeypatch.setattr(sessionids, "session_id_for", pins.get)
+    assert window_session_id("@3") == "live-sid"
+    assert window_session_id("@4") == "pin-sid"        # dead window: its pin
+    assert window_session_id("@5") is None
+
+    def _boom(_wid):
+        raise RuntimeError("tmux unreachable")
+
+    monkeypatch.setattr(sessions, "session_of_window", _boom)
+    assert window_session_id("@4") is None              # unknown, never a crash
