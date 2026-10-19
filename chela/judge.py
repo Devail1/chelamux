@@ -758,7 +758,10 @@ def run_suite(
             env.update(extra_env or {})
             run["env_diff"] = _env_diff(os.environ, env)
             # ⛔ CMX-253: the whole tree, not just the shell, dies on a timeout.
-            out = procguard.run_shell_group(test_cmd, cwd=str(cwd), env=env, timeout=timeout)
+            task = _run_ctx.get("task")
+            out = procguard.run_shell_group(
+                test_cmd, cwd=str(cwd), env=env, timeout=timeout,
+                frozen=(lambda since: frozen_since(task, since)) if task else None)
     except subprocess.TimeoutExpired as e:
         run.update(ended=_iso_now(), output=_decoded(e.stdout) + _decoded(e.stderr))
         return SuiteResult(False, -1, 0, 0, 0, "", f"the suite did not finish in {timeout:.0f}s; "
@@ -2699,6 +2702,7 @@ def judge_run(
     # ⏱️ CMX-411: THE RUN'S OWN START MARKER. The watchdog's wall measures the battery from
     # here, not from when the judge agent was spawned — its design time is not the run's.
     run_started = time.time()
+    _run_ctx["task"] = task_id                       # ⏸️ CMX-214: whose freeze run_suite credits
     dispatcher.mark_judge_run_started(task_id)
     # ⏳⚖️ CMX-431: `progress_at` is when the run last demonstrably MOVED, `phase` where it
     # is, `baseline_seconds`/`confirmations` what its wall must budget — the daemon's
@@ -2996,6 +3000,7 @@ def judge_run(
 
         return result
     finally:
+        _run_ctx.pop("task", None)
         _release_judge_slot(worktree)
         _clear_run_status(task_id)
         if cleanup:
@@ -3390,6 +3395,41 @@ def _write_run_status(task_id: str, status: dict) -> None:
         log.debug("judge: could not write the run status for %s", task_id, exc_info=True)
 
 
+# ⏸️⚖️ CMX-214: the freeze ledger, ``{"round": judge_started_at, "intervals": [[frozen_at,
+# thawed_at | None], ...]}``, written by :mod:`chela.fleet` BEFORE its SIGSTOP and its SIGCONT:
+# a judge is never stopped without a record, and a thawed run already reads its credit.
+
+_run_ctx: dict = {}                    # "task": the task THIS process's judge_run is judging
+
+
+def freeze_path(task_id: str) -> Path:
+    return judge_logs_dir() / f"{_safe_task(task_id)}.freeze"
+
+
+def read_freeze(task_id: str) -> dict:
+    try:
+        rec = json.loads(freeze_path(task_id).read_text())
+    except (OSError, ValueError):
+        return {}
+    return rec if isinstance(rec, dict) and isinstance(rec.get("intervals"), list) else {}
+
+
+def write_freeze(task_id: str, rec: dict) -> None:
+    path = freeze_path(task_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".freeze.tmp")
+    tmp.write_text(json.dumps(rec))
+    tmp.replace(path)
+
+
+def frozen_since(task_id: str, since: float, now: float | None = None,
+                 rec: dict | None = None) -> float:
+    """Seconds ``task_id``'s judge spent frozen after ``since`` (an open freeze counts to now)."""
+    now = time.time() if now is None else now
+    return sum(max(0.0, (now if b is None else b) - max(a, since))
+               for a, b in (read_freeze(task_id) if rec is None else rec).get("intervals", []))
+
+
 def _clear_run_status(task_id: str) -> None:
     path = judge_status_path(task_id)
     existing = _read_judge_lock(path)
@@ -3600,10 +3640,18 @@ def stop_judge_run(worktree: Path) -> bool:
     pid = lock.get("pid")
     if not isinstance(pid, int) or pid == os.getpid():
         return False
+    tree = procguard.process_tree([pid])
     try:
         os.killpg(pid, signal.SIGTERM)
     except OSError:
         return False
+    # ⏸️ CMX-214: a STOPPED tree (the suite is outside the group) is woken to take its SIGTERM.
+    for sig in (signal.SIGTERM, signal.SIGCONT):
+        for p in tree:
+            try:
+                os.kill(p, sig)
+            except OSError:
+                pass
     return True
 
 
