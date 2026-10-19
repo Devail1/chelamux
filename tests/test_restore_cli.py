@@ -2104,3 +2104,46 @@ def test_chela_restore_offers_nothing_when_the_runs_table_is_unreadable(live_sto
         _drive(["restore"])
     assert _line_with(capsys.readouterr().out, "[session-ids] @5  MANUAL",
                       "not offered: the dispatcher's runs table is unreadable")
+
+
+# --- CMX-275: a session the user closed before the crash is named, never resumed --------
+
+SID_CLOSED = "e4c15b05-1111-2222-3333-444444444444"
+
+
+def _close_in_roster(chela_dir, sid, wid, name):
+    roster_file = chela_dir / "roster.json"
+    data = json.loads(roster_file.read_text())
+    data["epochs"][OLD]["closed"] = {sid: {"wid": wid, "name": name, "cwd": "/home/liav/site",
+                                           "closed_at": 1000.0}}
+    data["epochs"][OLD]["last_seen"] = 2000.0       # the server outlived the close
+    roster_file.write_text(json.dumps(data))
+
+
+def test_chela_restore_names_a_session_skipped_because_the_user_closed_it(
+        live_stores, tmp_path, capsys, monkeypatch):
+    import time
+    monkeypatch.setattr(restore_mod.time, "localtime", time.gmtime)
+    _close_in_roster(tmp_path / "chela", SID_CLOSED, "@32", "site")
+
+    with pytest.raises(SystemExit):
+        _drive(["restore"])
+
+    out = capsys.readouterr().out
+    assert "1 session(s) skipped because the user closed them before the crash" in out
+    assert _line_with(out, SID_CLOSED) == (
+        f"  site  {SID_CLOSED}  closed by the user at 1970-01-01 00:16 (was @32)")
+
+
+def test_chela_restore_resume_never_relaunches_a_closed_session(
+        resume_enabled, tmp_path, capsys):
+    """The roster join still offers SID_DEAD (@5) a relaunch command; the closed record wins."""
+    spawned, _ = resume_enabled
+    _close_in_roster(tmp_path / "chela", SID_DEAD, "@5", "agent-5")
+
+    with pytest.raises(SystemExit):
+        _drive(["restore", "--resume"])
+
+    assert not any(SID_DEAD in (cmd or "") for _cwd, cmd in spawned)
+    line = _line_with(capsys.readouterr().out, "[session-ids]", "@5", "MANUAL")
+    assert "not offered: closed by the user at " in line and "=> skipped" in line
