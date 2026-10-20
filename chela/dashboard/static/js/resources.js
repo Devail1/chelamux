@@ -5,7 +5,7 @@
 // the same "the panel that shows it samples it" shape as the Cost tab, just
 // with a header-strip instead of a table.
 //
-// Wiring (main.js): tickResources() rides the refresh() loop as a plain poll, and
+// Wiring: tickResources() rides the refresh() loop as a plain poll, and
 // the boot refresh() is its seed (CMX-166) —
 // there is no SSE delta for host resources, so unlike Decisions there is no
 // push side to this.
@@ -15,8 +15,9 @@
 // number; the % text is always the primary signal, colour (resourcesmodel.js
 // level()) is decoration on top, never the sole cue (Liav is red-weak).
 // ---------------------------------------------------------------------------
-import { $, api } from './util.js';
-import { humanBytes, level } from './resourcesmodel.js';
+import { $, api } from './util';
+import { humanBytes, level } from './resourcesmodel';
+import { registerLane } from '../../frontend/src/shared/scheduler';
 
 const METRICS = [
     { id: 'res-cpu', label: 'CPU', pctKey: 'cpu_pct' },
@@ -62,6 +63,8 @@ async function tickResources() {
     }
     _render(data);
 }
+
+registerLane('resources', () => tickResources());
 
 // --- Stage 0: ES-module exports ---
 export { tickResources };

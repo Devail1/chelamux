@@ -9,8 +9,8 @@
 // ⛔ A failed submit KEEPS every field: the error shows under the form and the typed
 // brief stays where it was. Only a success clears the form.
 // ---------------------------------------------------------------------------
-import { $, BASE_PATH, closeModal, escHtml, attrEsc, showModal } from './util.js';
-import { lastWorkData, pollWork } from './work.js';
+import { $, BASE_PATH, closeModal, escHtml, attrEsc, showModal } from './util';
+import { lastWorkData, pollWork } from './work';
 
 // The workflows chela can create issues in — those whose tracker is linear.
 export function linearWorkflows(data) {

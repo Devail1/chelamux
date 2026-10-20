@@ -1,7 +1,8 @@
 // --- Stage 0: ES-module imports ---
-import { $, TERMINALS_ON, _agentsCache, api, attrEsc, escHtml, setAgentsCache } from './util.js';
-import { _jsStr, focusPaneByWid } from './terminals.js';
-import { refreshSidebar, renderSidebarAgents, selectView } from './nav.js';
+import { $, TERMINALS_ON, _agentsCache, api, attrEsc, escHtml, setAgentsCache } from './util';
+import { _jsStr, focusPaneByWid } from './terminals';
+import { refreshSidebar, renderSidebarAgents, selectView } from './nav';
+import { registerLane } from '../../frontend/src/shared/scheduler';
 
 // ---------------------------------------------------------------------------
 // Launcher: Recent + Favorites click-to-launch (the "+" launch menu)
@@ -194,6 +195,8 @@ function hideFavAdd() {
     const m = document.getElementById('fav-add-menu');
     if (m) m.style.display = 'none';
 }
+
+registerLane('launcher', () => refreshLauncher());
 
 // --- Stage 0: ES-module exports ---
 export { _isFav, _launcherData, launchProject, refreshLauncher };

@@ -5,10 +5,10 @@
 // dashboard test that calls a render function directly with hand-picked
 // arguments proves the function's OWN logic, but not the boundary a user's
 // browser actually crosses — a real click, on a real DOM built from the real
-// `index.html`, running the real `main.js` module graph. Getting that
+// `index.html`, running the real legacy module graph. Getting that
 // boundary right meant ~20 lines of jsdom plumbing (globalThis property
 // defines — see the `navigator`-is-getter-only note below — matchMedia/canvas
-// stubs, a fetch stub, the browser-faithful `main.js`-first import order) that
+// stubs, a fetch stub, the browser-faithful import order) that
 // had drifted into 8+ near-but-not-quite-identical copies across
 // tests/*.test.mjs before this file existed (verified via
 // `grep -rc 'new JSDOM(' tests/`). Each copy was a chance to get one line
@@ -24,9 +24,10 @@
 //     for callers that want their fixture to be the shipped markup instead of
 //     a hand-typed copy that can silently drift from it — the other half of
 //     the same "boundary a user reaches" gap (see tests/kanban_task_modal_wiring.test.mjs).
-import { readFileSync } from 'node:fs';
+import { cpSync, readFileSync, symlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 import { renderTemplateIfs } from './template_ifs.mjs';
 
@@ -34,12 +35,30 @@ const HELPERS_DIR = dirname(fileURLToPath(import.meta.url));
 const DASHBOARD_ROOT = join(HELPERS_DIR, '..', '..', 'chela', 'dashboard');
 const TEMPLATE_HTML = readFileSync(join(DASHBOARD_ROOT, 'templates', 'index.html'), 'utf8');
 // CMX-215: the page's one module script is the Vite build of this entry (the islands, then the
-// legacy main.js graph), named by the manifest Flask reads (app.py app_entry). Vitest compiles
+// legacy graph booted by boot.ts), named by the manifest Flask reads (app.py app_entry). Vitest compiles
 // the .tsx, so the boot below runs that entry's source, in that order.
 const MANIFEST = JSON.parse(readFileSync(join(DASHBOARD_ROOT, 'static', 'app', 'manifest.json'), 'utf8'));
 export const ENTRY_URL = new URL(
     `../../chela/dashboard/frontend/${Object.keys(MANIFEST).find(k => MANIFEST[k].name === 'main')}`, import.meta.url).href;
 const DEFAULT_JS_ROOT = new URL('../../chela/dashboard/static/js/', import.meta.url).href;
+
+/** CMX-217: index.html's boot config block (frontend/src/shared/api readBoot), for a fixture
+ * page. Fields left out take readBoot's defaults, as on a page without the block. */
+export function bootBlock(cfg = {}) {
+    return `<script type="application/json" id="chela-boot">${JSON.stringify(cfg)}</script>`;
+}
+
+/** A private copy of the dashboard's front end under `dir` (static/js + static/collab +
+ * frontend/src, laid out as in the repo so their relative imports resolve), for a suite that
+ * needs pages with their own module instances. Returns the copy's `jsRoot` for
+ * bootDashboardDom. node_modules is linked, not copied: React is the same either way. */
+export function copyDashboard(dir) {
+    for (const d of ['static/js', 'static/collab', 'frontend/src']) {
+        cpSync(join(DASHBOARD_ROOT, d), join(dir, d), { recursive: true });
+    }
+    symlinkSync(join(DASHBOARD_ROOT, 'frontend', 'node_modules'), join(dir, 'frontend', 'node_modules'), 'dir');
+    return pathToFileURL(join(dir, 'static', 'js') + '/').href;
+}
 
 /** Pull a fragment out of the REAL index.html between two literal markers
  * (inclusive of both). Throws — loudly, at fixture-build time, not as a
@@ -76,14 +95,13 @@ export function activateDom(dom) {
     }
 }
 
-/** CMX-276: what the page's React islands do before legacy main.js runs (index.html loads
+/** CMX-276: what the page's React islands do before the legacy graph boots (index.html loads
  * them first): a bridge on `win`, and the sidebar island drawing its #sidebar-agents. From
  * src/, so a mutation of the TypeScript reaches every suite that boots the page. Each page
  * (window) gets its own bridge and root. A suite that hand-rolls its jsdom boot calls this
- * before it imports main.js / nav.js. */
+ * before it imports boot.ts / nav.js. */
 export async function mountIslands(win) {
-    // A page with no sidebar has no island to mount, and skips the .tsx import: a helper run
-    // by plain `node` (assert_closed_run_lane.mjs), not Vitest, cannot load .tsx.
+    // A page with no sidebar has no island to mount.
     if (!win.document.getElementById('sidebar-agents')) return;
     const { createBridge } = await import('../../chela/dashboard/frontend/src/shared/bridge/index.ts');
     const { mountSidebar } = await import('../../chela/dashboard/frontend/src/features/sidebar/index.ts');
@@ -100,14 +118,16 @@ export function flush() {
 /**
  * Boot the real dashboard module graph against a real jsdom `window`, wired the
  * same way every hand-rolled copy of this bootstrap did it. The entry is what
- * Flask serves (ENTRY_URL: the islands, then main.js — nav.js/main.js is a
- * cycle, so anything imported first would see its own `let`s in their TDZ).
+ * Flask serves (ENTRY_URL: the islands, then boot.ts, which imports the legacy graph in the
+ * order its import cycles need).
  *
  * @param {string} body - inner HTML for `<body>`. Pass a fixture, or a real
  *   fragment from `sliceTemplate()`.
- * @param {boolean} [terminalsEnabled=true] - `window.TERMINALS_ENABLED`, read
- *   by util.js as `!== false` (so EXPLICITLY false is required to reproduce a
- *   terminals-off deployment — merely leaving it unset defaults true).
+ * @param {boolean} [terminalsEnabled=true] - the boot block's `terminalsEnabled`
+ *   (bootBlock), what Flask renders from CHELA_TERMINALS_ENABLED.
+ * @param {object} [boot] - more boot block fields (`assetVersion`, `wallTileDispatched`).
+ * @param {Function} [EventSource] - the page's `EventSource` (jsdom has none, so by default
+ *   the boot opens no stream).
  * @param {boolean|() => boolean} [phone=false] - matchMedia's
  *   `(max-width: 768px)` answer. Pass a function (not a plain boolean) if a
  *   test needs to flip phone/desktop mode AFTER boot without a re-import —
@@ -122,14 +142,13 @@ export function flush() {
  *   time, not on demand.
  * @param {string[]} [extraModules] - dashboard module paths (relative to
  *   `chela/dashboard/static/js/`, e.g. `'kanban.js'`) to import AFTER
- *   main.js and return, keyed by their filename minus `.js`.
+ *   the boot and return, keyed by their filename minus `.js`.
  * @param {string} [jsRoot] - a URL (ending in `/`) of the `static/js/` directory to
- *   import from (nav.js imports `../app/sidebarmodel.js`: a copy carries `app/` too). Defaults to the repo's. A suite that needs TWO independent pages (two
- *   devices — tests/sidebar_layout_shared.test.mjs) boots each from its own copy, so
- *   each gets its own module instances; it switches between them with activateDom().
- *   A copy boots its own main.js after mountIslands() (the islands import the repo's).
- * @param {boolean} [islands=true] - boot through ENTRY_URL. false boots the legacy main.js
- *   alone: ONLY for a caller run by plain `node` (no Vitest), which cannot compile the .tsx.
+ *   import from. Defaults to the repo's. A suite that needs TWO independent pages (two
+ *   devices — tests/sidebar_layout_shared.test.mjs) boots each from its own copy
+ *   (copyDashboard), so each gets its own module instances; it switches between them with
+ *   activateDom(). A copy boots its own frontend/src/boot.ts after mountIslands() (the
+ *   islands import the repo's).
  * @returns {Promise<{dom: JSDOM, chela: object, modules: Record<string,object>}>}
  */
 export async function bootDashboardDom({
@@ -141,9 +160,11 @@ export async function bootDashboardDom({
     seedLocalStorage,
     extraModules = [],
     jsRoot = DEFAULT_JS_ROOT,
-    islands = true,
+    boot = {},
+    EventSource,
 } = {}) {
-    const dom = new JSDOM(`<!doctype html><html><body>${body}</body></html>`,
+    const dom = new JSDOM(
+        `<!doctype html><html><body>${bootBlock({ terminalsEnabled, ...boot })}${body}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     activateDom(dom);
     const phoneMatches = typeof phone === 'function' ? phone : () => phone;
@@ -162,17 +183,17 @@ export async function bootDashboardDom({
     }
     globalThis.fetch = fetchImpl;
     globalThis.window.chela = globalThis.window.chela || {};
-    globalThis.setInterval = () => 0;   // main.js arms poll timers a test has no use for
-    globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = terminalsEnabled;
+    if (EventSource) dom.window.EventSource = EventSource;
+    globalThis.setInterval = () => 0;   // the boot arms poll timers a test has no use for
 
-    if (islands && jsRoot === DEFAULT_JS_ROOT) {
+    if (jsRoot === DEFAULT_JS_ROOT) {
         await import(ENTRY_URL);
         // A second boot in one suite meets the entry cached: its islands mounted on the FIRST
         // page only, so this page mounts its own (CMX-276).
         if (!dom.window.chelaBridge) await mountIslands(dom.window);
     } else {
-        if (islands) await mountIslands(dom.window);
-        await import(new URL('main.js', jsRoot).href);
+        await mountIslands(dom.window);
+        await import(new URL('../../frontend/src/boot.ts', jsRoot).href);
     }
     const modules = {};
     for (const path of extraModules) {

@@ -89,8 +89,7 @@ beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
     // Set the globals BEFORE importing: terminals.js reads localStorage and
-    // window.TERMINALS_ENABLED at module scope, exactly as the browser does.
-    dom.window.TERMINALS_ENABLED = true;
+    // the boot config at module scope, exactly as the browser does.
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
         'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
         'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
@@ -118,7 +117,7 @@ beforeAll(async () => {
     // their TDZ when main's bootstrap runs — a browser-faithful import, not a mock.
     // main.js also arms the app's poll timers, which a test has no use for.
     globalThis.setInterval = () => 0;
-    await import('../chela/dashboard/static/js/main.js');
+    await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
     wire = await import('../chela/dashboard/static/js/wire.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');

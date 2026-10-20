@@ -1,6 +1,6 @@
 // Settings > Concurrency (CMX-164): the pure half of the "Agents at once" / "Judges at
 // once" steppers. No DOM, so tests/concurrency_model.test.mjs can pin it directly.
-import { humanBytes } from './resourcesmodel.js';
+import { humanBytes } from './resourcesmodel';
 
 // The POST body for one stepper click. delta 0 is "Reset" (clear the override); any
 // other delta steps the effective value, clamped to the server's bounds.

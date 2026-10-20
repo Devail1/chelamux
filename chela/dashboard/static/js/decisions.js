@@ -20,9 +20,9 @@
 // (orchestrator.js) — a decision is never lost here even when the
 // chip reads "nobody": that IS this panel being the fallback home.
 //
-// Wiring (cmx-107, unchanged by CMX-171): main.js seeds it ONCE on page load
+// Wiring (cmx-107, unchanged by CMX-171): the boot seeds it ONCE on page load
 // (`enterDecisions()`, unconditional — no tab-open/popover-open needed) and
-// keeps it live off the SSE `log`/`orchestrator` deltas (sse.js) continuously,
+// keeps it live off the SSE `log`/`orchestrator` deltas (onEvent) continuously,
 // plus a `tickDecisions()` fallback poll each refresh() tick — the same pattern
 // refreshSidebar() uses for Sessions. Nothing here is gated on `currentTab`.
 // The header dot (`#decisions-dot`) mirrors the same state, so the state is
@@ -59,15 +59,17 @@
 //      last_error — see chela/inbox.py), but visibly marked partial rather
 //      than rendering "No brief recorded" as if the run genuinely had none.
 // ---------------------------------------------------------------------------
-import { $, _agentsCache, api, escHtml, setAgentsCache } from './util.js';
-import { CLASSES, classOf, drainLog } from './feedmodel.js';
+import { $, _agentsCache, api, escHtml, setAgentsCache } from './util';
+import { onEvent } from '../../frontend/src/shared/events';
+import { registerLane } from '../../frontend/src/shared/scheduler';
+import { CLASSES, classOf, drainLog } from './feedmodel';
 import {
     filterDecisionEvents, findDispatcherRun, formatUnreadCount, itemFromDecisionPayload,
     maxSeq, partialItemFromDecisionPayload, seedLastSeen, unreadCount, unreadUrgency,
-} from './decisionsmodel.js';
+} from './decisionsmodel';
 import {
     onOrchestratorChange, orchestratorState, orchestratorSubscribe, refreshOrchestratorStatus,
-} from './orchestrator.js';
+} from './orchestrator';
 
 const LAST_SEEN_KEY = 'chela.decisions.lastSeen';
 
@@ -164,24 +166,26 @@ async function _refreshLog(reset = false) {
     await _render();
 }
 
-// The one-time page-load seed (main.js) — a fresh read of both the owner and
+// The one-time page-load seed — a fresh read of both the owner and
 // the log, from scratch (reset=true). Nothing else calls this with reset=true.
 async function enterDecisions() {
     await Promise.all([refreshOrchestratorStatus(), _refreshLog(true)]);
 }
 
-// The fallback poll under the SSE deltas — runs every refresh() tick (main.js),
-// unconditionally, regardless of which nav tab is on screen.
+// The fallback poll under the SSE deltas — runs every refresh() tick, unconditionally,
+// regardless of which nav tab is on screen. Its first tick IS the seed: the cursor starts empty.
 async function tickDecisions() {
     await Promise.all([refreshOrchestratorStatus(), _refreshLog()]);
 }
+registerLane('decisions', () => tickDecisions());
 
 // The SSE `log` delta: the log's seq moved, so fetch from our own cursor (the
-// frame itself carries no events). Fired for every frame, tab-independent —
-// this section is always on screen (sse.js).
+// frame itself carries no events). Fired for every frame, tab-independent:
+// this section is always on screen (cmx-107), so no `currentTab` gate.
 function onDecisionsLogDelta() {
     _refreshLog();
 }
+onEvent('log', () => onDecisionsLogDelta());
 
 onOrchestratorChange(() => _render());
 
@@ -227,7 +231,7 @@ function _reregisterCandidates() {
 }
 
 // _reregisterCandidates() above reads _agentsCache but never populates it —
-// sse.js:32 blanks the cache on ANY window spawn/kill and only refetches
+// util.js blanks the cache on ANY window spawn/kill and terminals.js only refetches
 // while the agents/terminals tab is active, so on any other tab an empty
 // cache silently persists until the next refresh() tick (REFRESH_MS=30000).
 // An empty cache is indistinguishable from "no live sessions", which is
@@ -352,8 +356,8 @@ function _rowHtml(e) {
 // world, and opens the SAME task-detail modal a Kanban card opens
 // (taskmodal.js's openTaskModal). Reached via window.chela rather than a
 // static import: taskmodal.js sits inside the Work module cluster
-// (dispatcher.js → work.js → kanban.js/schedules.js → nav.js → main.js), and
-// main.js starts its own `setInterval` refresh loop at import time — pulling
+// (dispatcher.js → work.js → kanban.js/schedules.js → nav.js), and work.js
+// owns the app's /api/dispatcher poll — pulling
 // that whole graph into this popover's otherwise-light module set would drag
 // a second poll loop in with it for no reason. window.chela is the exact
 // seam index.html's inline onclick handlers already reach through for the

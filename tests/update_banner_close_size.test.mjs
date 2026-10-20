@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
+import { bootBlock } from './js_helpers/dashboard_dom.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const styleCss = fs.readFileSync(
@@ -21,10 +22,10 @@ let win;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><head><style>${styleCss}</style></head><body>
+${bootBlock({ assetVersion: 'aaaaaaaaaaaa' })}
 <button class="icon-btn" id="btn-decisions" aria-label="Decisions inbox">x</button>
 </body></html>`, { url: 'http://localhost:5005/' });
     win = dom.window;
-    win.CHELA_ASSET_VERSION = 'aaaaaaaaaaaa';
     for (const k of ['window', 'document']) {
         Object.defineProperty(globalThis, k, { value: win[k], writable: true, configurable: true });
     }

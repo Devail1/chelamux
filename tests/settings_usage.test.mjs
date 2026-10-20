@@ -91,8 +91,7 @@ beforeAll(async () => {
     };
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
-    globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = true;
-    await import('../chela/dashboard/static/js/main.js');
+    await import('../chela/dashboard/frontend/src/boot.ts');
 });
 
 beforeEach(() => {

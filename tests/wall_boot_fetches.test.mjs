@@ -2,17 +2,15 @@
 // not START until ~1.7 s (each loads in ~50 ms): main.js booted refresh() twice (selectView
 // runs it too) plus enter*() re-seeds, so almost every boot read ran 2-5×, and refresh()
 // chained summary → sidebar → /api/restore → … → overrides with the wall's tick LAST.
-// Real index.html + main.js graph; each boot is a fresh page from its own static/js copy.
+// Real index.html + the legacy graph; each boot is a fresh page from its own copy (copyDashboard).
 import { afterAll, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { bootDashboardDom, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { join } from 'node:path';
+import { bootDashboardDom, copyDashboard, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
-const STATIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static');
-const END = '<script>window.CHELA_ASSET_VERSION';
+const END = '<script type="application/json" id="chela-boot">';
 const BODY = sliceTemplate('<div class="app">', END, { terminals_enabled: true, wall_tile_dispatched: false })
     .slice(0, -END.length);
 const WIDS = ['@1', '@2', '@3'];
@@ -39,17 +37,16 @@ function makeFetch(log, { hold = () => false, fail = () => false, agents = AGENT
 
 let _n = 0;
 async function boot(fetchOpts = {}) {
-    const root = join(tmp, `page-${_n++}`);
-    for (const d of ['js', 'collab', 'app']) cpSync(join(STATIC, d), join(root, d), { recursive: true });
+    const jsRoot = copyDashboard(join(tmp, `page-${_n++}`));
     const log = [];
     globalThis.GridStack = { init: () => GRID };
     const { modules } = await bootDashboardDom({
         body: BODY, canvasStub: true, fetchImpl: makeFetch(log, fetchOpts),
-        jsRoot: pathToFileURL(join(root, 'js') + '/').href,
-        extraModules: ['main.js', 'util.js', 'nav.js', 'terminals.js'],
+        jsRoot, extraModules: ['util.js', 'nav.js', 'terminals.js'],
     });
+    const scheduler = await import(new URL('../../frontend/src/shared/scheduler/index.ts', jsRoot).href);
     for (let i = 0; i < 30; i++) await flush();
-    return { log, ...modules };
+    return { log, scheduler, ...modules };
 }
 
 const frames = () => [...document.querySelectorAll('#term-stage iframe.term-frame')];
@@ -94,11 +91,11 @@ test('a boot read that FAILS does not stop the others: the wall and the sidebar 
 
 test('/api/update/status waits for the wall on boot, and is asked at once on a later tick', async () => {
     let framesAtCheck = null;
-    const { log, main } = await boot({ onFetch: p => { if (p === '/api/update/status') framesAtCheck = frames().length; } });
+    const { log, scheduler } = await boot({ onFetch: p => { if (p === '/api/update/status') framesAtCheck = frames().length; } });
     assert.equal(framesAtCheck, WIDS.length, `the boot update check ran with ${framesAtCheck} terminals on the wall`);
     globalThis.fetch = makeFetch(log, { hold: p => p === '/api/agents' });   // this tick's wall never runs
     const before = n(log, '/api/update/status');
-    main.refresh();
+    scheduler.refresh();
     for (let i = 0; i < 5; i++) await flush();
     assert.equal(n(log, '/api/update/status'), before + 1, 'a later tick held its update check behind the wall');
 });

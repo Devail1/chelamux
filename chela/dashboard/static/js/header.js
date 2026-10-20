@@ -1,5 +1,6 @@
 // --- Stage 0: ES-module imports ---
-import { $, api, relativeTime } from './util.js';
+import { $, api, relativeTime } from './util';
+import { registerLane } from '../../frontend/src/shared/scheduler';
 
 // ---------------------------------------------------------------------------
 // Render: Header summary
@@ -30,6 +31,8 @@ async function refreshSummary() {
     $('#hdr-updated').textContent = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 }
 
+
+registerLane('summary', () => refreshSummary());
 
 // --- Stage 0: ES-module exports ---
 export { refreshSummary };

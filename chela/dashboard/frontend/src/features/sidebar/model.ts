@@ -18,9 +18,8 @@
 // `badge` slot stays the renderer's to fill (the PR badge, CMX-67's judge progress).
 //
 // CMX-276: moved from static/js/sidebarmodel.js to TypeScript, no behaviour change except
-// orderGroups (the Dispatched group is always last). Legacy code imports the build of this
-// file, static/app/sidebarmodel.js (vite.config.ts), until it joins the Vite graph (P01).
-
+// orderGroups (the Dispatched group is always last). Legacy nav.js / terminals.js import it
+// directly: they are bundled with it (CMX-217).
 
 /** A run card (app.py `_run_cards`): the run a window belongs to. */
 export interface RunCard {

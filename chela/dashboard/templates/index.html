@@ -864,13 +864,12 @@
   </div>
 </div>
 
-<script>window.CHELA_ASSET_VERSION = {{ asset_version|tojson }};</script>
-{% if terminals_enabled %}<script>window.TERMINALS_ENABLED = true;</script>{% endif %}
-{% if wall_tile_dispatched %}<script>window.WALL_TILE_DISPATCHED = true;</script>{% endif %}
+<!-- CMX-217: the boot config the bundle reads (frontend/src/shared/api readBoot). -->
+<script type="application/json" id="chela-boot">{{ boot|tojson }}</script>
 <script src="{{ asset_path('vendor/gridstack-all.js') }}"></script>
 <!-- CMX-215: the page's one module script, the Vite build (docs/FRONTEND.md): the React
-     islands, then the legacy static/js graph from main.js, bundled together. Module scripts
-     run after parsing, so the inline globals and gridstack above exist by then. -->
+     islands, then the legacy static/js graph (frontend/src/boot.ts), bundled together. Module
+     scripts run after parsing, so the boot block and gridstack above exist by then. -->
 {% if app_src %}<script type="module" src="{{ app_src }}"></script>{% endif %}
 </body>
 </html>

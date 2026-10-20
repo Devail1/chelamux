@@ -1,14 +1,15 @@
 // --- Stage 0: ES-module imports ---
-import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, staticUrl, updateTabSignal, wantsHuman } from './util.js';
-import { altSwitchKeydown, openPalette, renderSidebarAgents, selectView, setAltHeld, sidebarOrder, updateCtxCache } from './nav.js';
-import { orderByList, windowRunDot } from '../app/sidebarmodel.js';   // CMX-276: the TS model's build
-import { applyRoomAccents, bezierPath, resolveDrop } from './wire.js';
-import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator.js';
-import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, stateTitle, tileState } from './wallmodel.js';
+import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, staticUrl, updateTabSignal, wantsHuman } from './util';
+import { altSwitchKeydown, openPalette, renderSidebarAgents, selectView, setAltHeld, sidebarOrder, updateCtxCache } from './nav';
+import { orderByList, windowRunDot } from '../../frontend/src/features/sidebar/model';
+import { applyRoomAccents, bezierPath, resolveDrop } from './wire';
+import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator';
+import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, stateTitle, tileState } from './wallmodel';
 // Side-effect only: registers window.chela.openDiffModal/closeDiffModal for the
 // "Files" chip below (_ctxBarHTML) and the #modal-diff close button in index.html.
-import './diffpanel.js';
-import { windowIdQuery } from './windowid.js';
+import './diffpanel';
+import { windowIdQuery } from './windowid';
+import { onEvent } from '../../frontend/src/shared/events';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -1209,7 +1210,7 @@ function _shareBtnHTML(wid) {
 // releases it (falls back to the decisions panel — chela/dashboard/static/js/
 // decisions.js). `.on` reflects the LIVE owner, kept current across every pane
 // via onOrchestratorChange (fired on our own clicks, other panes' clicks, and
-// the SSE `orchestrator` delta — sse.js).
+// the SSE `orchestrator` delta, orchestrator.js).
 function _orchBtnHTML(wid) {
     const on = orchestratorState().wid === wid;
     const title = on
@@ -2002,7 +2003,7 @@ function _initialPane(wids, agents) {
     return orderByList(wids, order)[0] || '';
 }
 
-// The boot's first render runs before the sidebar has drawn (main.js starts the view tick
+// The boot's first render runs before the sidebar has drawn (the scheduler starts the view tick
 // as soon as /api/agents lands), so its default had no sidebar order to follow. Once the
 // sidebar draws (nav.js calls this), move that default to the top sidebar row, unless a tap
 // or a focus has already picked another pane.
@@ -4037,6 +4038,40 @@ if (typeof ResizeObserver === 'function') {
     const _kbBar = document.getElementById('term-keybar');
     if (_kbBar) new ResizeObserver(() => _kbPin()).observe(_kbBar);
 }
+
+// --- SSE: the window set and terminal readiness (CMX-217: moved here from sse.js) ----------
+// The window set changed (util.js has already invalidated the agent cache). Reconcile by
+// stable window id, not the payload names: refetch the live agent set, drop tiles for
+// vanished wids, and absorb new ones surgically (wall appends a tile, single refreshes the
+// dropdown; neither reloads a live iframe). Diffing by wid makes a pure rename a no-op. The
+// frame fires on spawn/kill with the Wall inactive too; the guard skips it then.
+onEvent('windows', () => {
+    if (!TERMINALS_ON || currentTab !== 'terminals') return;
+    api('/api/agents').then(agents => {
+        setAgentsCache(agents);
+        const live = (agents || []).filter(a => a.online !== false && a.window_id)
+            .map(a => a.window_id);
+        const liveSet = new Set(live);
+        _renderedWids.filter(w => !liveSet.has(w)).forEach(dropTerminalPane);
+        _absorbFreshTerminals(live);
+        _refreshPaneLabels();   // a rename may have changed only the label
+    }).catch(() => { /* transient: the 4s termTick will catch up */ });
+});
+
+// A terminal just got its ttyd port: swap its placeholder for the iframe now. The ~1.5s
+// ready poll stays the reliable default, so this is purely an accelerator. d.ready carries
+// window ids (@N), the same value as each placeholder's data-pending.
+onEvent('term-ready', d => {
+    if (!TERMINALS_ON || currentTab !== 'terminals') return;
+    const stage = $('#term-stage');
+    (d && d.ready || []).forEach(wid => {
+        if (stage.querySelector('.term-pending[data-pending="' + _cssEsc(wid) + '"]')) {
+            _stopReadyPoll(wid);
+            _termReady.add(wid);
+            _swapToFrame(wid);
+        }
+    });
+});
 
 // --- Stage 0: ES-module exports ---
 export { adoptSidebarDefault, stepAgentMobile, SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, _refitPaneTerm, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };

@@ -1,20 +1,23 @@
 // --- Stage 0: ES-module imports ---
-import { $, $$, TERMINALS_ON, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, currentTab, escHtml, lucideIcon, publish, setAgentsCache, setCurrentTab, shortTime, updateTabSignal, wantsHuman } from './util.js';
-import { onOrchestratorChange, orchestratorState } from './orchestrator.js';
-import { refreshSummary } from './header.js';
-import { checkContext } from './agents.js';
-import { showAddSchedule } from './schedules.js';
-import { _displayLabel, adoptSidebarDefault, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals.js';
-import { _launcherData, launchProject, refreshLauncher } from './launcher.js';
-import { VIEWS } from './views.js';
-import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg.js';
-import { refresh } from './main.js';
-import { refreshCostTab } from './usage.js';
-import { resolveWindowId } from './windowid.js';
-import { followUpdate } from './updateflow.js';
-import { memNote, stepPayload, workflowNote } from './concurrencymodel.js';
-// CMX-276: the sidebar model is TypeScript now; this is its build (frontend/vite.config.ts).
-import { ARCHIVED_SECTION_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_STATUS, VIEW_ACTIVITY, isArchivable, moveGroup, normalizeView, sidebarModel, sidebarOrder as modelSidebarOrder } from '../app/sidebarmodel.js';
+import { $, $$, TERMINALS_ON, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, currentTab, escHtml, lucideIcon, publish, setAgentsCache, setCurrentTab, shortTime, updateTabSignal, wantsHuman } from './util';
+import { onOrchestratorChange, orchestratorState } from './orchestrator';
+import { refreshSummary } from './header';
+import { checkContext } from './agents';
+import { showAddSchedule } from './schedules';
+import { _displayLabel, adoptSidebarDefault, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals';
+import { _launcherData, launchProject, refreshLauncher } from './launcher';
+import { VIEWS } from './views';
+import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg';
+import { refresh, registerLane } from '../../frontend/src/shared/scheduler';
+import { refreshCostTab } from './usage';
+import { resolveWindowId } from './windowid';
+import { followUpdate } from './updateflow';
+import { memNote, stepPayload, workflowNote } from './concurrencymodel';
+import { ARCHIVED_SECTION_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_STATUS, VIEW_ACTIVITY, isArchivable, moveGroup, normalizeView, sidebarModel, sidebarOrder as modelSidebarOrder } from '../../frontend/src/features/sidebar/model';
+
+// The sidebar (agent list + WORK badges) is always visible, so it refreshes on every tick
+// whatever the view; its /api/agents read is what lets the view's tick start (CMX-166).
+registerLane('sidebar', t => refreshSidebar(t.paneListKnown, t.context).finally(t.paneListKnown));
 
 // ---------------------------------------------------------------------------
 // Sidebar + canvas navigation (replaces the old tab bar)
@@ -22,7 +25,7 @@ import { ARCHIVED_SECTION_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_STATUS, VIEW_
 // The canvas is a set of .panel elements (one per view) kept from the tab
 // layout, so every existing renderer (renderKanban -> #kanban-board,
 // renderTerminals -> the wall, ...) works unchanged. `currentTab` (declared in
-// util.js) is still the active-view variable, so main.js and sse.js keep
+// util.js) is still the active-view variable, so the scheduler and SSE handlers keep
 // dispatching on it; only the *chrome* that sets it changed from a tab bar to
 // this sidebar.
 //
@@ -2902,7 +2905,7 @@ function setTermSize(v) {
     applyTermPrefsToIframes();
 }
 
-// Mute / unmute the dispatcher run-state review toasts (sse.js reads this key).
+// Mute / unmute the dispatcher run-state review toasts (work.js reads this key).
 function setRunToastsMuted(v) {
     if (v === 'muted') localStorage.setItem('chela_mute_run_toasts', '1');
     else localStorage.removeItem('chela_mute_run_toasts');

@@ -33,7 +33,7 @@ beforeAll(async () => {
     // Browser-faithful import order (main.js is the entry; nav <-> main is a cycle —
     // import anything else first and nav.js's `let`s are in their TDZ, same as
     // tests/wallnav.test.mjs).
-    await import('../chela/dashboard/static/js/main.js');
+    await import('../chela/dashboard/frontend/src/boot.ts');
     taskmodal = await import('../chela/dashboard/static/js/taskmodal.js');
 });
 
