@@ -119,7 +119,7 @@ beforeAll(async () => {
     globalThis.setInterval = () => 0;
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
-    wire = await import('../chela/dashboard/static/js/wire.js');
+    wire = await import('../chela/dashboard/static/js/wire.ts');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
@@ -184,7 +184,7 @@ test('a room change is identity-preserving — the live iframes are NOT recreate
     for (const wid of ['@1', '@2']) {
         const content = document.querySelector(`.grid-stack-item[gs-id="${wid}"] .grid-stack-item-content`);
         assert.ok(content.classList.contains('in-room'), `${wid} was painted into the room`);
-        assert.match(content.querySelector('.gs-room').textContent, /🔌 wire-shell-shell-ab12cd/);
+        assert.equal(content.querySelector('.gs-room .gs-room-name').textContent, 'wire-shell-shell-ab12cd');
     }
     // …and it reloaded nothing: same NODES, same src, no src ASSIGNMENT, same grid.
     assert.equal(grid(), gridEl, 'the stage was not re-innerHTML-ed');
@@ -214,12 +214,13 @@ test('a third agent joining, and everyone leaving, still reloads nothing', async
     after.forEach((f, i) => assert.equal(f, before[i], 'the SAME iframe node, never rebuilt'));
     const c2 = document.querySelector('.grid-stack-item[gs-id="@2"] .grid-stack-item-content');
     assert.equal(c2.classList.contains('in-room'), false, 'the accent really did clear');
+    assert.equal(c2.style.getPropertyValue('--room-accent'), '', 'and so did its colour');
     assert.equal(c2.querySelector('.gs-room').hidden, true);
 });
 
 // --- 1b. what the accent SAYS (it is read by a red-weak user) --------------------
 
-test('the accent is never hue-only: the badge carries the room NAME and a glyph', async () => {
+test('the accent is never hue-only: the badge carries the room NAME and a plug icon', async () => {
     ROOMS = roomed('ops', ['@1', '@2']);
     await terminals.termTick();
     const contents = ['@1', '@2'].map(w =>
@@ -227,13 +228,55 @@ test('the accent is never hue-only: the badge carries the room NAME and a glyph'
     for (const content of contents) {
         const badge = content.querySelector('.gs-room');
         assert.equal(badge.hidden, false);
-        assert.match(badge.textContent, /🔌 ops/);                      // the NON-HUE cue
+        assert.equal(badge.querySelector('.gs-room-name').textContent, 'ops');   // the NON-HUE cue
+        // ...beside the plug icon (CMX-236: Lucide, not the 🔌 emoji), which a room update
+        // leaves in place: the patch writes the name, never the badge's whole content.
+        const plug = badge.querySelector(':scope > svg');
+        assert.ok(plug && plug.innerHTML.includes('M12 22v-5'), 'the badge lost its plug icon');
         assert.equal(badge.getAttribute('data-room'), 'ops');
         assert.ok(content.style.getPropertyValue('--room-accent'), 'colour is the SECOND signal');
     }
     // Both tiles wear the same accent — that is what "wired together" looks like.
     assert.equal(contents[0].style.getPropertyValue('--room-accent'),
         contents[1].style.getPropertyValue('--room-accent'));
+});
+
+test('a tile in two rooms names the first and counts the rest; leaving clears the name', async () => {
+    ROOMS = {
+        rooms: {
+            ops: { created: 1, members: { '@1': { name: '@1' }, '@2': { name: '@2' } } },
+            alpha: { created: 2, members: { '@1': { name: '@1' } } },
+        },
+        pending: [],
+    };
+    await terminals.termTick();
+    const badge = wid => document.querySelector(`.grid-stack-item[gs-id="${wid}"] .gs-room`);
+    // Rooms sort by name, so @1's first room is alpha; @2 is in one room, so no count.
+    assert.equal(badge('@1').querySelector('.gs-room-name').textContent, 'alpha +1');
+    assert.equal(badge('@1').getAttribute('data-room'), 'alpha');
+    assert.equal(badge('@1').getAttribute('title'), 'In room alpha, ops, click to leave alpha');
+    assert.equal(badge('@2').querySelector('.gs-room-name').textContent, 'ops');
+
+    ROOMS = { rooms: {}, pending: [] };
+    await terminals.termTick();
+    assert.equal(badge('@1').querySelector('.gs-room-name').textContent, '', 'a left room keeps no name');
+    assert.equal(badge('@1').hasAttribute('data-room'), false, 'nor a room a click would leave');
+    assert.ok(badge('@1').querySelector(':scope > svg'), 'the plug icon is markup, never cleared');
+});
+
+test('a tile with no badge, or a badge with no name slot, is accented without a crash', () => {
+    // Single-pane mode draws a header with no badge (terminals.js paneHead), so the patch
+    // must accent what it finds and skip the rest, never throw half-way through the stage.
+    const stage = document.createElement('div');
+    stage.innerHTML = '<div class="grid-stack-item" gs-id="@1"><div class="grid-stack-item-content"></div></div>'
+        + '<div class="grid-stack-item" gs-id="@2"><div class="grid-stack-item-content">'
+        + '<button class="gs-room" hidden></button></div></div>';
+    assert.equal(wire.applyRoomAccents(stage, roomed('ops', ['@1', '@2'])), 2);
+    for (const wid of ['@1', '@2']) {
+        const c = stage.querySelector(`[gs-id="${wid}"] .grid-stack-item-content`);
+        assert.ok(c.classList.contains('in-room'), `${wid} is accented`);
+    }
+    assert.equal(stage.querySelector('.gs-room').hidden, true, 'a badge it cannot name stays hidden');
 });
 
 test('a member whose window is GONE is simply not painted — no tile, no crash', async () => {

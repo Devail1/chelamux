@@ -64,7 +64,7 @@ function guardedFiles(root) {
         return existsSync(dir) ? readdirSync(dir).filter(n => re.test(n)).map(n => join(dir, n)) : [];
     };
     return [
-        ...top('chela/dashboard/static/js', /\.js$/),
+        ...top('chela/dashboard/static/js', /\.[jt]s$/),   // CMX-236: .ts converted in place
         ...top('chela/dashboard/templates', /\.html$/),
         ..._walk(join(root, 'frontend/src'), n => /\.[jt]sx?$/.test(n) && !/\.test\./.test(n)),
     ].map(p => relative(root, p)).sort();

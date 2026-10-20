@@ -122,9 +122,18 @@ def test_the_guard_catches_the_original_defect():
     assert not _offending_rules(".x { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); }")
 
 
+def _scanned_js():
+    # CMX-236: modules converted to TypeScript in place (static/js/*.ts) style tiles too.
+    return sorted([*(STATIC / "js").rglob("*.js"), *(STATIC / "js").rglob("*.ts")])
+
+
+def test_the_inline_style_scan_reaches_modules_converted_to_typescript():
+    assert STATIC / "js" / "wire.ts" in _scanned_js()
+
+
 def test_no_inline_js_style_pairs_an_accent_fill_with_white():
     bad = []
-    for js in sorted((STATIC / "js").rglob("*.js")):
+    for js in _scanned_js():
         for i, line in enumerate(js.read_text().splitlines(), 1):
             if re.search(r"background(?:-color)?\s*:\s*var\(--accent\)", line) and re.search(
                 r"(?<![-\w])color\s*:\s*" + WHITE, line

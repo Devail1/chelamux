@@ -1,11 +1,11 @@
-// THE WALL TILE MODEL — pure status-card math (wallmodel.js), the Wall
+// THE WALL TILE MODEL — pure status-card math (wallmodel.ts), the Wall
 // redesign's slice 1 (docs/wall-redesign.md, "the redesigned tile"). No DOM,
 // no fetch: every property here is a straight function-of-inputs check, each
 // written to go RED under one specific corruption of the real logic (a guard
 // that survives its own corruption is decoration, not a guard).
 //
-// wallmodel.js's functions take `wants` (= util.js's wantsHuman(agent)) as an
-// explicit parameter rather than computing it themselves (see wallmodel.js's
+// wallmodel.ts's functions take `wants` (= util.js's wantsHuman(agent)) as an
+// explicit parameter rather than computing it themselves (see wallmodel.ts's
 // header comment for why) — these tests compute it the same way terminals.js
 // does at the real call site: `needs_human === true || session_status ===
 // 'waiting'`, i.e. util.js's wantsHuman verbatim, kept local to this file only
@@ -17,7 +17,7 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import {
     actionBarKind, actionVerb, costView, ctxLevel, focusLayout, isFinished, prChip, rankOrder, recapView, stateTitle, tileState,
-} from '../chela/dashboard/static/js/wallmodel.js';
+} from '../chela/dashboard/static/js/wallmodel.ts';
 
 const agent = (over = {}) => ({
     window_id: '@1', name: 'w1', session_status: null, needs_human: false,
@@ -36,8 +36,8 @@ test('tileState: wantsHuman OUTRANKS session_status — a busy AND blocked pane 
     // Edit gate blocks the pane. Checking session_status === 'busy' BEFORE
     // `wants` would misclassify this as "working" and hide the gate.
     assert.equal(tileState(a, wantsHuman(a)).cls, 'needs-you');
-    assert.equal(tileState(a, wantsHuman(a)).word, 'needs you');
-    assert.equal(tileState(a, wantsHuman(a)).glyph, '◆');
+    // CMX-236: the word and class ARE the state; no unread glyph rides along.
+    assert.deepEqual(tileState(a, wantsHuman(a)), { word: 'needs you', cls: 'needs-you' });
 });
 
 test('tileState: waiting (session_status) also reads as needs-you', () => {
@@ -47,12 +47,12 @@ test('tileState: waiting (session_status) also reads as needs-you', () => {
 
 test('tileState: busy and not blocked reads as working', () => {
     const a = agent({ session_status: 'busy' });
-    assert.deepEqual(tileState(a, wantsHuman(a)), { glyph: '●', word: 'working', cls: 'working' });
+    assert.deepEqual(tileState(a, wantsHuman(a)), { word: 'working', cls: 'working' });
 });
 
 test('tileState: idle with an open PR and not busy/blocked reads as PR open (CMX-53: not "done")', () => {
     const a = agent({ session_status: 'idle', pr: { url: 'https://x/1', number: 14, state: 'open' } });
-    assert.deepEqual(tileState(a, wantsHuman(a)), { glyph: '✓', word: 'PR open', cls: 'pr-open' });
+    assert.deepEqual(tileState(a, wantsHuman(a)), { word: 'PR open', cls: 'pr-open' });
 });
 
 test('tileState: idle with no PR is plain idle, not PR open', () => {
@@ -69,7 +69,7 @@ test('tileState: claude running but session_status unresolved reads as unknown, 
     const a = agent({ session_status: null, claude_running: true });
     // 🔴 GUARD: falling through to the idle branch here is exactly the bug —
     // a confidently wrong "idle" reads identically to a real idle claude.
-    assert.deepEqual(tileState(a, wantsHuman(a)), { glyph: '?', word: 'unknown', cls: 'unknown' });
+    assert.deepEqual(tileState(a, wantsHuman(a)), { word: 'unknown', cls: 'unknown' });
 });
 
 test('tileState: no claude running at all (never resolved) is plain idle, not unknown', () => {
@@ -268,7 +268,7 @@ test('rankOrder: needs-you (0) -> busy/working (1) -> idle (2) -> done (3), acro
 });
 
 test('rankOrder: wantsHuman OUTRANKS busy — a gated-but-busy pane ranks with needs-you, not working', () => {
-    // Mirrors tileState's load-bearing precedence (wallmodel.js's header
+    // Mirrors tileState's load-bearing precedence (wallmodel.ts's header
     // comment): a dispatched pane sitting at a permission gate still reports
     // session_status 'busy'. Checking 'busy' before `wants` would misrank a
     // blocked pane as merely "working" and bury it behind calmer panes.
@@ -407,4 +407,23 @@ test('stateTitle labels a proxy-derived status, and only that', () => {
     // Any OTHER source is not the proxy — the label is for that one source, not "has a source".
     const other = agent({ claude_running: true, session_status: 'busy', status_source: 'hooks' });
     assert.equal(stateTitle(other, tileState(other, false)), 'Working');
+});
+
+// --- CMX-236: the sweep's survivors on the TypeScript conversion ------------------
+
+test('actionBarKind: a question is an Answer bar, a pane-probed gate an Approve bar', () => {
+    const q = agent({ session_status: 'waiting' });
+    assert.deepEqual(actionBarKind(q, wantsHuman(q)), { kind: 'answer', label: 'Answer' });
+    const gate = agent({ session_status: 'busy', needs_human: true });
+    assert.deepEqual(actionBarKind(gate, wantsHuman(gate)), { kind: 'approve', label: 'Approve' });
+});
+
+test('focusLayout: the named focus pane is the large one, not merely the first', () => {
+    const layout = focusLayout(['@a', '@b', '@c'], '@b', 12);
+    assert.deepEqual(layout['@b'], { x: 0, y: 0, w: 8, h: 12 });
+    assert.equal(layout['@a'].x, 8);
+});
+
+test('prChip: a PR with no repository carries an empty one, never a falsy non-string', () => {
+    assert.equal(prChip({ url: 'https://x/1', number: 1, state: 'open' }).repository, '');
 });

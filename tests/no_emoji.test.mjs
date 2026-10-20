@@ -20,7 +20,7 @@ test('the real tree is green against the allowlist', () => {
 
 test('the guard covers the dashboard JS and templates', () => {
     const files = guardedFiles(ROOT);
-    for (const f of ['static/js/util.js', 'static/js/icons.js', 'templates/index.html']) {
+    for (const f of ['static/js/util.js', 'static/js/icons.js', 'static/js/wire.ts', 'templates/index.html']) {
         assert.ok(files.includes(`chela/dashboard/${f}`), f);
     }
     assert.ok(!files.some(f => f.includes('/vendor/') || f.includes('/collab/')));

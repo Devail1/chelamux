@@ -3,7 +3,7 @@
 Claude Code keeps re-writing a session's ``pr-link`` record after its PR merged, so the
 record's presence alone put "✓ PR ready for review" + ``⚑ #613`` on a dead PR.
 ``chela.pr_status`` resolves open/merged/closed/unknown (+ draft) and ``/api/agents``
-ships it on ``pr``; the client (wallmodel.js, tests/wall_tile.test.mjs) gates the bar on
+ships it on ``pr``; the client (wallmodel.ts, tests/wall_tile.test.mjs) gates the bar on
 a confirmed open, non-draft state.
 """
 from __future__ import annotations

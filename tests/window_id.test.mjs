@@ -21,7 +21,7 @@
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { resolveWindowId, windowIdQuery } from '../chela/dashboard/static/js/windowid.js';
+import { resolveWindowId, windowIdQuery } from '../chela/dashboard/static/js/windowid.ts';
 import { mountIslands } from './js_helpers/dashboard_dom.mjs';
 
 const LONG = 'a-very-long-session-name-that-goes-on-and-on-well-past-any-pane-width-' + 'x'.repeat(80);

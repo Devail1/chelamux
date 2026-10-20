@@ -346,6 +346,35 @@ def test_repeat_flake_near_misses(env):
     assert ops.rule_repeat_flake(src(env), {}) == []
 
 
+def test_repeat_flake_names_a_quarantine_candidate_after_two_prs_ci_flakes(env):
+    import sqlite3
+    from datetime import datetime, timezone
+
+    def at(ago):
+        return datetime.fromtimestamp(NOW - ago, timezone.utc).isoformat()
+    t, u = "tests/a.py::t", "tests/b.py::u"
+    flakes = {"CMX-1": [{"test": t, "at": at(3600)}, {"test": u, "at": at(60)},
+                        {"test": "?", "at": at(60)}],
+              "CMX-2": [{"test": t, "at": at(48 * 3600)}, {"test": "?", "at": at(60)}],
+              "CMX-3": [{"test": u, "at": at(49 * 3600)}, {"test": u, "at": "garbage"}],
+              "CMX-4": "not json"}
+    conn = sqlite3.connect(env.dir / "scheduler.db")
+    conn.execute("CREATE TABLE runs (task_id TEXT, status TEXT, started_at TEXT, ci_flakes TEXT)")
+    conn.executemany("INSERT INTO runs VALUES (?, 'done', '', ?)",
+                     [(k, v if isinstance(v, str) else json.dumps(v)) for k, v in flakes.items()])
+    conn.commit()
+    conn.close()
+    got = [(f["subject"], f["summary"], sorted(f["evidence"]["tasks"]))
+           for f in ops.rule_repeat_flake(src(env), {})]
+    assert got == [(f"ci:{t}", f"quarantine candidate: {t} — CI flake on 2 PRs in 48h: "
+                    "CMX-1, CMX-2", ["CMX-1", "CMX-2"])]
+
+
+def test_repeat_flake_survives_a_runs_table_without_ci_flakes(env):
+    set_runs(env, [("CMX-1", "done", "")])
+    assert ops.rule_repeat_flake(src(env), {}) == []
+
+
 # --- rule 5: judge whack-a-mole (CMX-176/259) ----------------------------------------------
 
 def judge_body(*locs):
