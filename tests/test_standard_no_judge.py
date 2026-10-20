@@ -398,10 +398,12 @@ def test_a_red_suite_fails_the_hand_in(tmp_path):
     assert result["steps"][-1]["detail"] == "exit 2\ntail-2"
 
 
-def test_a_suite_that_could_not_run_fails_the_hand_in(tmp_path):
+@pytest.mark.parametrize("exit_code", [-1, 0])
+def test_a_suite_that_could_not_run_fails_the_hand_in(tmp_path, exit_code):
+    """`ok=False` is "it never ran": not a pass, whatever exit code came with it."""
     _std_run(tmp_path, None, "pytest -q")
     with patch.object(judge, "run_suite", return_value=judge.SuiteResult(
-            False, -1, 0, 0, 0, "", "the suite did not finish in 77s")):
+            False, exit_code, 0, 0, 0, "", "the suite did not finish in 77s")):
         result = dispatcher.verify_standard_hand_in("t1")
     assert result["ok"] is False
     assert result["steps"][-1] == {"name": "suite", "cmd": "pytest -q", "passed": False,
