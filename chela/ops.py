@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from functools import cached_property
 from pathlib import Path
 
@@ -36,6 +37,7 @@ TAIL_BYTES = 2 * 1024 * 1024
 HUNG_AFTER_S = 20 * 60
 HUNG_CPU = 0.01
 FLAKE_WINDOW_S = 24 * 3600
+QUARANTINE_WINDOW_S = 48 * 3600
 STORM_WINDOW_S = 3600
 STORM_COUNT = 3
 WHACK_ROUNDS = 3
@@ -117,6 +119,30 @@ class Sources:
         finally:
             conn.close()
         return {task: status for task, status in rows}
+
+    @cached_property
+    def ci_flakes(self) -> list[tuple[str, dict]]:
+        """CMX-282: ``(task id, flake)`` for every CMX-255 flake record — a red re-run GREEN
+        on the same sha, so a failure the code did not cause."""
+        db = self.chela_dir / "scheduler.db"
+        if not db.exists():
+            return []
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        try:
+            rows = conn.execute("SELECT task_id, ci_flakes FROM runs "
+                                "WHERE ci_flakes IS NOT NULL").fetchall()
+        except sqlite3.OperationalError:          # a runs table older than CMX-255
+            return []
+        finally:
+            conn.close()
+        out = []
+        for task, raw in rows:
+            try:
+                flakes = json.loads(raw)
+            except ValueError:
+                continue
+            out += [(task, f) for f in flakes if isinstance(f, dict) and "::" in str(f.get("test"))]
+        return out
 
     @cached_property
     def procs(self) -> list[dict]:
@@ -326,9 +352,23 @@ def rule_repeat_flake(src: Sources, state: dict) -> list[dict]:
         ids |= {m.rstrip(".,;)") for m in _TEST_ID_RE.findall(rec.get("cannot_verify") or "")}
         for tid in ids:
             seen.setdefault(tid, {})[str(rec.get("task_id"))] = at
-    return [_finding("repeat_flake", tid, f"{tid} failed judge baselines of {len(tasks)} "
-                     f"tasks in 24h: {', '.join(sorted(tasks))}", test=tid, tasks=tasks)
-            for tid, tasks in sorted(seen.items()) if len(tasks) >= 2]
+    out = [_finding("repeat_flake", tid, f"{tid} failed judge baselines of {len(tasks)} "
+                    f"tasks in 24h: {', '.join(sorted(tasks))}", test=tid, tasks=tasks)
+           for tid, tasks in sorted(seen.items()) if len(tasks) >= 2]
+    # CMX-282: the same test red-then-green-on-re-run on ≥2 PRs' heads within 48 h ⇒ file
+    # it and register it in tests/flaky.toml the same day.
+    ci: dict[str, dict[str, float]] = {}
+    for task, flake in src.ci_flakes:
+        try:                                      # the dispatcher's `_now()` isoformat
+            at = datetime.fromisoformat(str(flake.get("at"))).timestamp()
+        except ValueError:
+            continue
+        if at >= src.now - QUARANTINE_WINDOW_S:
+            ci.setdefault(str(flake["test"]), {})[str(task)] = at
+    return out + [_finding("repeat_flake", f"ci:{tid}", f"quarantine candidate: {tid} — CI "
+                           f"flake on {len(tasks)} PRs in 48h: {', '.join(sorted(tasks))}",
+                           test=tid, tasks=tasks)
+                  for tid, tasks in sorted(ci.items()) if len(tasks) >= 2]
 
 
 def rule_judge_whack_a_mole(src: Sources, state: dict) -> list[dict]:

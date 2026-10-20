@@ -1,0 +1,11 @@
+# 🧪 CMX-282 — the known-flake quarantine registry (see chela/flaky.py).
+#
+# A CI red whose EVERY failed test is listed here (unexpired, its issue still open) is
+# re-run instead of sent back for rework. The test is NOT skipped: it still runs and
+# reports. tests/test_flaky_registry.py fails CI on an expired entry, or one whose issue is
+# missing (or, where the tracker is readable, Done/Canceled) — fix the test, then delete it.
+
+[[flaky]]
+test = "tests/test_suite_containment.py::test_any_gh_a_test_runs_by_name_meets_the_failing_stub"
+issue = "CMX-281"
+expires = "2026-11-19"
