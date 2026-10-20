@@ -28,6 +28,7 @@ behind decisions that are otherwise invisible in the code.
 | [OKF.md](OKF.md) | Open Knowledge Format export design |
 | [ORCHESTRATOR_PERSONA.md](ORCHESTRATOR_PERSONA.md) · [PERSONA_PATTERN.md](PERSONA_PATTERN.md) | Giving an agent a stable standing role |
 | [FRONTEND_PORT_PLAN.md](FRONTEND_PORT_PLAN.md) | Porting the whole dashboard to React + TypeScript: inventory, target architecture, the ordered port slices |
+| [TEST_ARCHITECTURE_PLAN.md](TEST_ARCHITECTURE_PLAN.md) | The test suite's flakes, hermeticity and speed: what was measured, two tiers, fakes, a leak guard, the ordered slices |
 
 ## Design records — context, not instructions
 

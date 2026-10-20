@@ -10,6 +10,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from chela import generated
+
 MAX_PR_LINES = 300
 SIZE_EXCLUDE = ("docs/*", "*.md", "changelog.d/*", "*.png", "*.jpg", "*.gif", "*.svg",
                 "*.mp4", "*.webm")
@@ -30,7 +32,8 @@ def settings(wf) -> tuple[int, tuple[str, ...]]:
 
 def measure(worktree: str | Path, base: str, exclude) -> int:
     """Changed lines (added + deleted) on this branch since it forked from ``origin/<base>``,
-    skipping paths matching ``exclude`` and binary files. Raises RuntimeError when git cannot
+    skipping paths matching ``exclude``, generated files (:mod:`chela.generated`) and binary
+    files. Raises RuntimeError when git cannot
     say — an unknown size must never read as a small one."""
     argv = ["git", "diff", "--numstat", f"origin/{base}...HEAD"]
     try:
@@ -43,7 +46,8 @@ def measure(worktree: str | Path, base: str, exclude) -> int:
     total = 0
     for row in proc.stdout.splitlines():
         added, deleted, path = row.split("\t", 2)
-        if added == "-" or any(fnmatch.fnmatch(path, p) for p in exclude):
+        if added == "-" or generated.is_generated(path) or any(  # 🏭 CMX-284
+                fnmatch.fnmatch(path, p) for p in exclude):
             continue
         total += int(added) + int(deleted)
     return total

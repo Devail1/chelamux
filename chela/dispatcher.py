@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, generated, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -7894,6 +7894,8 @@ that SURVIVES **blocks this PR at every risk level** — it is never downgraded 
    - **WIRING** (`"kind": "wiring"`): the smallest edit that makes the feature NEVER RUN —
      revert the production call-site. If the suite is still green, the tests never exercise
      what actually runs.
+   - 🏭 **Never mutate a GENERATED file** ({{generated_paths}}): it is rebuilt from source
+     and CI checks it is fresh. chela drops such an experiment unrun — mutate its source.
 3. Write `{{experiments_path}}` — JSON, exactly this shape:
 
 ```json
@@ -7984,6 +7986,8 @@ def judge_prompt_vars(
         # mechanical sweep it says no outcome can change under. Agent-authored, so shown
         # as claims to TEST, never as findings. "" ⇒ none (the line renders empty).
         "sweep_equivalents": sweep_equivalents,
+        # 🏭 CMX-284: the paths `chela judge run` drops experiments on.
+        "generated_paths": ", ".join(f"`{p}`" for p in generated.PATTERNS),
     }
 
 
@@ -8525,15 +8529,27 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
             _epoch_dt(live_run.get("run_started_at")) if live_run else None
         )
         started = run_started or _parse_ts(row["judge_started_at"])
+        # ⏸️⚖️ CMX-214: a frozen judge is left alone (10-18/19: three were reaped as "stuck"),
+        # and once thawed its wall skips the frozen time and its progress clock restarts.
+        freeze = judge.read_freeze(row["task_id"])
+        if not freeze.get("intervals") or freeze.get("round") != row["judge_started_at"]:
+            freeze = {}
+        if freeze and freeze["intervals"][-1][1] is None:
+            log.info("judge watchdog: %s: frozen by a fleet pause — holding", row["task_id"])
+            continue
         # ⏳⚖️ CMX-431: once the run has started, its wall scales with its battery and only a
         # run whose progress STOPPED is reaped past it (see `judge_overdue`). Before that the
         # agent is bounded by the flat JUDGE_TIMEOUT_SECONDS from its spawn, as always.
         timeout_reason = None
         if started is not None and now is not None:
-            elapsed = (now - started).total_seconds()
+            elapsed = (now - started).total_seconds() - judge.frozen_since(
+                row["task_id"], started.timestamp(), rec=freeze)
             if run_started is not None:
-                timeout_reason = judge_overdue(
-                    elapsed, _judge_run_status(row["task_id"]), now.timestamp())
+                status = _judge_run_status(row["task_id"])
+                if status and freeze:
+                    status["progress_at"] = max(_num(status.get("progress_at")) or 0.0,
+                                                freeze["intervals"][-1][1])
+                timeout_reason = judge_overdue(elapsed, status, now.timestamp())
             elif elapsed >= JUDGE_TIMEOUT_SECONDS:
                 timeout_reason = (f"the judge did not finish in {JUDGE_TIMEOUT_SECONDS // 60}"
                                   "min — it is stuck, not thinking")
