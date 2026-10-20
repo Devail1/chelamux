@@ -214,6 +214,11 @@ is on, the Mod marks each `MessageDisplay` payload and the daemon stops writing 
 `displayContent` marker, so a reply shows its time in one place
 ([`mods/chela-hooks/README.md`](../mods/chela-hooks/README.md#turn-timestamps-cmx-182)).
 
+CMX-183 shipped item 3: a "needs you" band above the prompt in the orchestrator session
+(pending approvals, access requests and `needs_human` runs), polled from the daemon's
+`GET /api/needs-you`
+([`mods/chela-hooks/README.md`](../mods/chela-hooks/README.md#needs-you-cmx-183)).
+
 ### 8.1 Soak: NOT RUN yet
 
 ⛔ **The ≥ 2 h side-by-side soak has not been run.** CMX-181 was a dispatched run, and the
