@@ -9,7 +9,7 @@
 // Run: pnpm exec vitest run tests/term_last_pane_boot.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { clickOnclick } from './js_helpers/dashboard_dom.mjs';
+import { clickIsland } from './js_helpers/dashboard_dom.mjs';
 import { KEY, bootPhone, pane, settle, stored } from './js_helpers/term_pane_fixture.mjs';
 
 let nav, chela;
@@ -26,7 +26,7 @@ test('the boot opens the first session in the sidebar order, not the first /api/
 });
 
 test('after the boot, a sidebar re-render never moves a pane the user picked', async () => {
-    clickOnclick(document.querySelector('#sidebar-agents .agent-row[data-item="w:@201"]'));
+    clickIsland(document.querySelector('#sidebar-agents .agent-row[data-item="w:@201"]'));
     await settle();
     await nav.refreshSidebar();
     await settle();

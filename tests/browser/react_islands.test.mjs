@@ -80,3 +80,33 @@ test('the version island renders the real version beside the legacy sidebar and 
     assert.deepEqual(errors, []);
     await page.close();
 });
+
+// CMX-276 (CMX-121): on the real page, at the default sidebar width, a row's TITLE keeps its
+// room and the metadata gives way first; with a short title the metadata shows in full.
+test('a sidebar row gives its title the width before its metadata', { skip: why }, async () => {
+    if (failed) throw failed;
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    const errors = [];
+    page.on('pageerror', e => errors.push(String(e)));
+    await page.goto(`${base}/`);
+    await page.waitForFunction(() => window.chelaBridge?.sidebarLayout.get().loaded === true, null, { timeout: 15_000 });
+    const measure = title => page.evaluate(t => {
+        const a = { name: 'w', window_id: '@1', cwd: '/srv/code/alpha', session_status: 'busy' };
+        window.chelaBridge.sidebar.set({
+            agents: [a], wants: () => false, orchWid: '@1', order: [], archived: [], sessions: [],
+            view: { status: 'active', env: ['interactive'], activity: 'all', groupBy: 'folder', sort: 'name', showEmpty: false, showPR: true },
+            custom: { groups: [], assign: {} }, labels: { '@1': t }, now: Date.now(), collapsed: [],
+            ctx: { '@1': 91 }, onWall: [], active: null, altHeld: false,
+        });
+        const box = sel => document.querySelector(`#sidebar-agents .agent-row ${sel}`).getBoundingClientRect();
+        return { name: box('.agent-row-name').width, meta: box('.ar-meta').width, crown: box('.ar-orch').width };
+    }, title);
+    const long = await measure('A very long session title that would never fit in a sidebar row at all');
+    assert.ok(long.name >= 150, `the title got ${long.name}px at the default width`);
+    assert.ok(long.meta < 20, `the metadata kept ${long.meta}px beside a title that needs the room`);
+    const short = await measure('Hi');
+    assert.ok(short.crown >= 10, `with a short title the crown shows (${short.crown}px)`);
+    assert.ok(short.meta > long.meta, 'the metadata has room once the title does not need it');
+    assert.deepEqual(errors, []);
+    await page.close();
+});

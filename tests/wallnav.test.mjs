@@ -108,6 +108,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 import { cssForViewport, shapeSignature, DESKTOP } from './js_helpers/css_viewport.mjs';
+import { mountIslands } from './js_helpers/dashboard_dom.mjs';
 
 const CSS = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
@@ -249,6 +250,7 @@ beforeAll(async () => {
     // Browser-faithful import order (main.js is the entry; nav <-> main is a cycle —
     // import anything else first and nav.js's `let`s are in their TDZ).
     globalThis.setInterval = () => 0;
+    await mountIslands(dom.window);   // CMX-276: the sidebar island draws #sidebar-agents
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');

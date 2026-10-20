@@ -531,6 +531,33 @@ test('the expanded status dot is the SAME size as the collapsed rail', () => {
     assert.equal(_prop(exp, 'height'), _prop(col, 'height'), 'the status-dot height differs from the collapsed rail');
 });
 
+// Every element the collapsed rail hides, checked one selector at a time: these share
+// multi-selector `display: none` rules, so dropping or misspelling ONE member of a
+// list leaves the rest of the rule (and any one-member test) green.
+const _RAIL_HIDDEN = [
+    '#resources-strip', '#version-island', '.sidebar-quick',
+    '.side-head', '.side-empty', '.side-badges', '.side-item-label', '.group-head',
+    '.triage-head', '.agent-row .ar-main', '.agent-row.rich .agent-row-name',
+    '.agent-row.rich .ar-meta', '.agent-row .row-unarchive', '.agent-row .recent-resume',
+    '.agent-row .recent-dismiss', '.agent-row .row-more', '.side-archived-toggle',
+];
+function _displayNoneSelectors(css) {
+    const hidden = new Set();
+    const bare = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const [, sel, body] of bare.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        if (!/(?:^|;)\s*display\s*:\s*none\s*(?:;|$)/.test(body.trim())) continue;
+        for (const s of sel.split(',')) hidden.add(s.trim().replace(/\s+/g, ' '));
+    }
+    return hidden;
+}
+test('the collapsed rail hides each of its row/section elements', () => {
+    const hidden = _displayNoneSelectors(CSS);
+    for (const s of _RAIL_HIDDEN) {
+        assert.ok(hidden.has(`body.sidebar-collapsed ${s}`),
+            `the collapsed rail no longer hides ${s} (no display:none rule for body.sidebar-collapsed ${s})`);
+    }
+});
+
 // --- 2. 🔴 one control, two behaviours — and the desktop state survives a reload --
 
 test('the desktop rail RESTORES itself from the last session', () => {
@@ -719,18 +746,23 @@ test('the sidebar is two sections — Launch folded into the launch menu', () =>
 // A waiting agent is also rendered inside `.side-triage` (the "Needs you" cluster,
 // see renderSidebarAgents), not the plain project-grouped rows — rowFor() finds it
 // either way since `_agentRowHtml` is the same template for both.
-test('CMX-230: the sidebar row\'s .ar-state renders the real status word, not blank — colour is not the only cue', () => {
+// CMX-121 (in the CMX-276 port): the word left the row FACE (the dot's shape carries the
+// state); it is the dot's accessible name, so it is still never colour alone.
+const stateOf = row => row.querySelector('.term-status-dot').getAttribute('aria-label');
+
+test('CMX-230: the sidebar row\'s dot names the real status word, not blank — colour is not the only cue', () => {
     nav.renderSidebarAgents([
         agent('working-one', { session_status: 'busy' }),
         agent('idle-one', { session_status: 'idle' }),
         agent('waiting-one', { session_status: 'waiting' }),
     ]);
-    assert.equal(rowFor('working-one').querySelector('.ar-state').textContent, 'working',
-        '.ar-state must carry the real status word, not an empty span the colour class alone would leave');
-    assert.equal(rowFor('idle-one').querySelector('.ar-state').textContent, 'idle');
-    assert.equal(rowFor('waiting-one').querySelector('.ar-state').textContent, 'waiting',
-        '.ar-state must carry the real status word for the waiting/yellow row too — leaving it blank for ' +
+    assert.equal(stateOf(rowFor('working-one')), 'Session: working',
+        'the dot must carry the real status word, not the colour class alone');
+    assert.equal(stateOf(rowFor('idle-one')), 'Session: idle');
+    assert.equal(stateOf(rowFor('waiting-one')), 'Session: waiting',
+        'the dot must carry the real status word for the waiting/yellow row too — leaving it blank for ' +
         'exactly this state is unreadable to a red-weak viewer who needs the word most');
+    assert.ok(!rowFor('working-one').textContent.includes('working'), 'the row face carries no status word');
 });
 
 test('CMX-230: the sidebar row\'s .ar-ctx renders the real percentage number, not blank — colour is not the only cue', () => {
@@ -754,8 +786,8 @@ test('CMX-230: the sidebar row\'s .ar-ctx renders the real percentage number, no
 test('CMX-359: a `done` agent renders the word "done" on its row — colour is not the only cue', () => {
     nav.renderSidebarAgents([agent('finished-one', { session_status: 'idle', done: true })]);
     const row = rowFor('finished-one');
-    assert.equal(row.querySelector('.ar-state').textContent, 'done',
-        '.ar-state must carry the real "done" word, not fall back to "idle" — a red-weak viewer needs the word, not the dot colour');
+    assert.equal(stateOf(row), 'Session: done',
+        'the dot must carry the real "done" word, not fall back to "idle" — a red-weak viewer needs the word, not the dot colour');
     assert.ok(row.querySelector('.term-status-dot').classList.contains('done'),
         'the status dot must carry the done CSS class too, so its colour matches the word');
 });
@@ -767,8 +799,8 @@ test('CMX-359: an idle agent with no `done` evidence still reads plain "idle" �
         agent('untouched-one', { session_status: 'idle' }),          // done: undefined
         agent('untouched-two', { session_status: 'idle', done: false }),
     ]);
-    assert.equal(rowFor('untouched-one').querySelector('.ar-state').textContent, 'idle');
-    assert.equal(rowFor('untouched-two').querySelector('.ar-state').textContent, 'idle');
+    assert.equal(stateOf(rowFor('untouched-one')), 'Session: idle');
+    assert.equal(stateOf(rowFor('untouched-two')), 'Session: idle');
 });
 
 // CMX-35 retired the "Finished" cluster: the sidebar groups by FOLDER now (the desktop
@@ -784,7 +816,7 @@ test('CMX-35: a `done` agent stays in its folder group — no Finished cluster, 
     const group = document.querySelector('#sidebar-agents .side-group[data-g="/home/x/proj"]');
     assert.ok(group, 'no folder group for /home/x/proj');
     assert.ok(group.querySelector('.agent-row[data-agent="done-agent"]'), 'the done row is not in its folder group');
-    assert.equal(group.querySelector('.agent-row[data-agent="done-agent"] .ar-state').textContent, 'done');
+    assert.equal(stateOf(group.querySelector('.agent-row[data-agent="done-agent"]')), 'Session: done');
     assert.equal(document.querySelectorAll('#sidebar-agents .agent-row[data-agent="done-agent"]').length, 1,
         'the done agent rendered more than once');
 });

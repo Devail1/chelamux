@@ -83,6 +83,7 @@ Legacy code owns the fetches until the component reading their result is ported.
 |---|---|---|
 | `agents` | `util.js` `setAgentsCache()` | the `/api/agents` rows |
 | `sidebarLayout` | `nav.js` `_setLayout()` / `_writeLayout()` | `{order, custom, view, loaded}` (CMX-82) |
+| `sidebar` | `nav.js` `renderSidebarAgents()` (and Alt held, the active row) | `SidebarState`: what the sidebar island draws (CMX-276) |
 
 A store is a value plus listeners (`createStore`: `get`, `set`, `subscribe`; `set` with the
 same value notifies nobody, so always publish a NEW array or object, never one mutated in place). React reads it with `useStore(store)`, a one-line
@@ -108,6 +109,17 @@ const agents = useStore(installBridge(window).agents);   // the page's one bridg
 
 To add a store: add it to `Bridge` and `createBridge()` in `src/shared/bridge/index.ts`, and
 call `publish('<name>', value)` wherever legacy changes it.
+
+### The sidebar island
+
+`#sidebar-agents` is the sidebar island's (`src/features/sidebar`, CMX-276). It repaints
+synchronously (`flushSync`) on every publish of the `sidebar` store, because legacy code reads
+the rows straight back (Alt+N, jump to the orchestrator). Its clicks call the legacy handlers on
+`window.chela`, looked up at call time. Legacy `nav.js` / `terminals.js` import its pure
+model, `src/features/sidebar/model.ts`, as source. `tests/js_helpers/dashboard_dom.mjs` mounts it (from
+`src/`) for every suite that boots the page; a suite with its own jsdom boot calls
+`mountIslands(window)` before it imports `src/boot.ts`. Icons come from `src/shared/icons`, a map
+from a meaning to a Lucide icon.
 
 ## Polls, pushes and the boot config
 
