@@ -20,5 +20,7 @@ export default defineConfig(({ mode }) => ({
   server: {
     proxy: { '/api': loadEnv(mode, '.', 'CHELA_DEV_').CHELA_DEV_API ?? 'http://127.0.0.1:5001' },
   },
-  test: { environment: 'jsdom' },
+  // CMX-218: Vitest stubs CSS imports to '' unless included; the UI kit's layout tests read
+  // style.css (`?raw`) to check the rules the page actually ships.
+  test: { environment: 'jsdom', css: { include: [/static\/style\.css/] } },
 }));
