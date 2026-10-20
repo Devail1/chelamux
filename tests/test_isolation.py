@@ -202,10 +202,11 @@ def test_a_test_db_skips_fsync(tmp_path):
 def test_a_read_only_open_still_reads(tmp_path):
     """⭐ ``mode=ro`` (ops.py, judge_select.py) still opens and reads under the pragma."""
     db = tmp_path / "ro.db"
-    with sqlite3.connect(db) as conn:
-        conn.execute("CREATE TABLE t (x)")
-        conn.execute("INSERT INTO t VALUES (7)")
-    conn.close()
+    rw = sqlite3.connect(db)
+    rw.execute("CREATE TABLE t (x)")
+    rw.execute("INSERT INTO t VALUES (7)")
+    rw.commit()
+    rw.close()
     ro = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     assert ro.execute("SELECT x FROM t").fetchall() == [(7,)]
     assert ro.execute("PRAGMA synchronous").fetchone() == (0,)
