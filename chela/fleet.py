@@ -145,7 +145,8 @@ def _thaw_judges(state: dict) -> dict[str, bool]:
     for task, frozen in state.get("judges", {}).items():
         rec = judge.read_freeze(task)
         if rec.get("intervals") and rec["intervals"][-1][1] is None:
-            rec["intervals"][-1][1], rec["retry"] = time.time(), 1   # one model-call retry
+            rec["intervals"][-1][1] = time.time()
+            rec["retry"] = 1                     # CMX-214: one model-call retry per thaw
             judge.write_freeze(task, rec)
         pids = frozen.get("pids") or []
         thawed[task] = _signal(pids, signal.SIGCONT) == pids

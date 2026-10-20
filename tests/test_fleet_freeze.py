@@ -211,6 +211,23 @@ def test_a_retry_that_cannot_be_sent_reaps_as_before_and_spends_the_token(thawed
     assert judge.read_freeze("abc123")["retry"] == 0
 
 
+def test_spending_the_token_keeps_a_pause_that_landed_since(thawed, monkeypatch):
+    """The watchdog's `freeze` snapshot is stale by the time it spends the token: a pause
+    that opened an interval in between must survive the write."""
+    wf, sent, co, ledger, _ = thawed
+    ledger(1)
+    real = dispatcher._judge_model_call_failed
+
+    def pause_lands(wf, row):
+        rec = judge.read_freeze("abc123")
+        judge.write_freeze("abc123", {**rec, "intervals": [*rec["intervals"], [3.0, None]]})
+        return real(wf, row)
+
+    monkeypatch.setattr(dispatcher, "_judge_model_call_failed", pause_lands)
+    co._watchdog(wf, "idle")
+    assert judge.read_freeze("abc123")["intervals"][-1] == [3.0, None]
+
+
 def test_an_api_error_reads_as_a_failed_model_call(tmp_path, projects, monkeypatch):  # noqa: F811
     from tests import test_judge_classifier_outage as co
     wf = co._wf(tmp_path)

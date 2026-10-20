@@ -8599,8 +8599,9 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
                 and _judge_model_call_failed(wf, row)):
             # ⏸️⚖️ CMX-214: a model call the freeze cut off is not an outage. ONE is forgiven
             # per thaw: the token is spent BEFORE the send, so a second failure reaps as
-            # before, and a send that fails falls through to the arms below.
-            judge.write_freeze(row["task_id"], {**freeze, "retry": 0})
+            # before, and a send that fails falls through to the arms below. Re-read, not
+            # `freeze`: a pause that landed since must keep its open interval.
+            judge.write_freeze(row["task_id"], {**judge.read_freeze(row["task_id"]), "retry": 0})
             if _send_seed(row["judge_window_id"], JUDGE_RETRY_MESSAGE, row["task_id"]):
                 log.warning("judge watchdog: %s: a model call failed after a fleet pause — "
                             "told it to retry", row["task_id"])
