@@ -406,7 +406,7 @@ body {
    so mobile's forced single mode at <768px is untouched). The WORD here plus
    the `.gs-dot` SHAPE carry the state (Liav is red-weak); the Okabe-Ito
    colour below is decoration on top, never the sole signal. `tileState`
-   (wallmodel.js) is the one source of the word/class pair; this file only
+   (wallmodel.ts) is the one source of the word/class pair; this file only
    paints it.
    CMX-393: a SOFT pill with the WORD only (the mockup's) — a tint of the
    state colour behind it, no border and no glyph. The shape lives once, on
@@ -1156,7 +1156,7 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
    4 shapes, AND used the wrong shape per state — see the per-state comments
    below). Every one of these elements wears the SAME `.term-status-dot
    <state>` pair; _colorTermDots (terminals.js) computes `<state>` from the
-   SAME tileState() (wallmodel.js) the pane's `.gs-state` word pill already
+   SAME tileState() (wallmodel.ts) the pane's `.gs-state` word pill already
    used, so the dot and the pill can never disagree, and nav.js's sidebar row
    computes the same four class names off its own status predicates. Exact
    spec (Liav-approved mockup 2026-09-28, `renderVals()`'s palette): working =

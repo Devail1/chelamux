@@ -1034,7 +1034,7 @@ test('the header dot is painted by live status (working vs idle carry different 
 // Round 1's _colorTermDots only ever assigned three classes (busy/waiting/idle →
 // working/waiting/idle) — the pane header dot could never become 'done' at all, no
 // matter how finished the pane was, because the function it was painted by didn't
-// know that state existed. tileState() (wallmodel.js) is the one source that DOES —
+// know that state existed. tileState() (wallmodel.ts) is the one source that DOES —
 // it is what the pane's OWN `.gs-state` pill already draws from — so _colorTermDots
 // now reads it too. Drives a real termTick() with a finished (idle + open PR) agent
 // and reads the dot's class back, the same technique test 12 uses for working/idle.

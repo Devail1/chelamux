@@ -268,7 +268,7 @@ test('rankOrder: needs-you (0) -> busy/working (1) -> idle (2) -> done (3), acro
 });
 
 test('rankOrder: wantsHuman OUTRANKS busy — a gated-but-busy pane ranks with needs-you, not working', () => {
-    // Mirrors tileState's load-bearing precedence (wallmodel.js's header
+    // Mirrors tileState's load-bearing precedence (wallmodel.ts's header
     // comment): a dispatched pane sitting at a permission gate still reports
     // session_status 'busy'. Checking 'busy' before `wants` would misrank a
     // blocked pane as merely "working" and bury it behind calmer panes.

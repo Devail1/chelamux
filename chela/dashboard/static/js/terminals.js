@@ -44,7 +44,7 @@ let _wallAuto = localStorage.getItem('pc_wall_auto') === '1';
 // (toggle-on, preset change while auto, or a fresh buildWall).
 let _autoOrderSig = '';
 // Focus layout toggle (default OFF): one pane large, the rest a right-side
-// strip (wallmodel.js's focusLayout). Mutually exclusive with auto-arrange —
+// strip (wallmodel.ts's focusLayout). Mutually exclusive with auto-arrange —
 // both toggles OWN the layout, so turning one on turns the other off (see
 // toggleWallFocus / toggleWallAuto). Manual layout (pc_wall_layout) is just
 // as sacred here as it is for auto: this mode never writes it, and toggling
@@ -1754,7 +1754,7 @@ const _TILE_CLS_TO_DOT = { 'needs-you': 'waiting', working: 'working', 'pr-open'
                            testing: 'working', died: 'waiting' };
 
 // Colour the live status marks (pane headers + taskbar chips) from /api/agents.
-// Reuses tileState() (wallmodel.js) — the SAME source _applyWallTileFrame's
+// Reuses tileState() (wallmodel.ts) — the SAME source _applyWallTileFrame's
 // `.gs-state` word pill draws from — so a pane's dot and its state pill can
 // never disagree about which of the four states it's in.
 function _colorTermDots(agents) {
@@ -1843,7 +1843,7 @@ function _applyTermContext(ctx) {
         }
         const pct = c.used_pct;
         fill.style.width = Math.min(100, pct) + '%';
-        // Routed through wallmodel.js's ctxLevel — the SAME thresholds this
+        // Routed through wallmodel.ts's ctxLevel — the SAME thresholds this
         // slice's guard tests pin (tests/wall_tile.test.mjs), so the pure
         // logic under test is what actually drives the rendered fill/chip,
         // not a second copy of the 60/80 thresholds living only here.
@@ -2640,7 +2640,7 @@ function _actionBarHTML(wid) {
     return `<div class="term-action-bar" data-action-for="${attrEsc(wid)}" hidden></div>`;
 }
 
-// The action bar's inner markup for a given {kind, label} (wallmodel.js
+// The action bar's inner markup for a given {kind, label} (wallmodel.ts
 // actionBarKind). 'review' links straight to the PR (no key to send);
 // 'answer'/'approve' send Enter via the existing /api/term/key path — Enter
 // accepts Claude's own highlighted default choice at a permission gate and
@@ -3103,7 +3103,7 @@ function _buildGridPicker() {
 // ---- Collapsible layout toolbar (CMX-397) ----------------------------------
 // The row of presets + lock/auto/focus collapses to ONE control: the glyph of
 // the CURRENT layout or mode plus a chevron. It rests collapsed while Focus is
-// on (wallmodel.js's gridRowCollapsed), unless the user's explicit choice —
+// on (wallmodel.ts's gridRowCollapsed), unless the user's explicit choice —
 // a click on that control — is on record in GRID_ROW_KEY. Choosing a preset or
 // mode, clicking outside, or Esc collapses it again WITHOUT rewriting that
 // choice: those are transient, only the toggle is a stated preference.
@@ -3252,7 +3252,7 @@ function toggleWallAuto(btn) {
 }
 
 // Focus layout toggle: one pane large (_focusWid), the rest a right-side
-// strip (wallmodel.js's focusLayout). Turning ON picks a focus pane
+// strip (wallmodel.ts's focusLayout). Turning ON picks a focus pane
 // (_pickFocusWid: the user's click-focused pane, else the first wantsHuman
 // pane, else the first tiled pane) and applies immediately, same "don't wait
 // for the next poll" contract as auto-arrange. Turning OFF restores
@@ -3652,7 +3652,7 @@ function applyGridLayout(cols, rows, btn) {
 }
 
 // Wall redesign slice 2: rank the panes currently ON THE WALL by attention
-// (rankOrder, wallmodel.js) and apply that order via the shared fill engine —
+// (rankOrder, wallmodel.ts) and apply that order via the shared fill engine —
 // no-op unless auto-arrange is on. Compares the new order against the last
 // one actually applied (_autoOrderSig) so a 4s poll with no attention-state
 // change never touches GridStack (no thrash, no wasted reflow). Deliberately
@@ -3749,7 +3749,7 @@ function _clearFocusClasses() {
 // GridStack directly instead of going through _fillNodesByOrder: that shared
 // engine only expresses "flow N panes in an order across a fixed cols×rows
 // grid," not focusLayout's fixed 8-vs-4-column split with one pane pinned
-// large — so this computes the {wid:{x,y,w,h}} map itself (wallmodel.js's
+// large — so this computes the {wid:{x,y,w,h}} map itself (wallmodel.ts's
 // focusLayout, PURE) and applies it in one batch, same GridStack idiom every
 // other fill here uses.
 function _applyWallFocus(agents) {
