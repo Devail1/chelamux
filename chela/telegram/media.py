@@ -25,6 +25,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from chela.messenger import PendingDraft
+
 log = logging.getLogger(__name__)
 
 # The Telegram Bot API caps bot downloads (getFile) at 20 MB; a larger file
@@ -48,8 +50,16 @@ INBOUND_IMAGE_MARKER = "📎 image:"
 
 # (chat_id, thread_id) -> window_id | None — the router's chat/topic gate.
 Resolve = Callable[[object, object], "str | None"]
-# (window_id, text) -> ok — the tmux sender (chela.messenger.send_tmux).
+# (window_id, text) -> ok — the tmux sender (chela.messenger.deliver_prompt).
 Deliver = Callable[[str, str], bool]
+# (window_id, text) -> "submitted" | "unsubmitted" | "failed" (chela.messenger.deliver_image).
+DeliverImage = Callable[[str, str], str]
+
+# Both delivery paths raise PendingDraft rather than append to a stranded prompt.
+PENDING_DRAFT_TEXT = (
+    "⚠️ Not sent: the agent's prompt still holds an unsubmitted message, and this one "
+    "would be merged into it. Submit or clear it (/screenshot), then resend."
+)
 
 
 def _format_size(num_bytes: int) -> str:
@@ -183,7 +193,7 @@ async def receive_photo(
     thread_id,
     *,
     resolve: Resolve,
-    deliver: Deliver,
+    deliver: DeliverImage,
     docs_dir,
     clock: Callable[[], float] = time.time,
 ) -> None:
@@ -192,7 +202,8 @@ async def receive_photo(
     Gates on ``resolve`` (wrong chat / unbound topic → stay silent, exactly like
     the text path), picks the largest :class:`PhotoSize`, saves it under
     ``docs_dir`` as ``.jpg``, then delivers ``📎 image: <path>`` (with any caption
-    prepended) so Claude Code can ``Read`` it by path.
+    prepended) so Claude Code can ``Read`` it by path. "Sent" is claimed only once
+    ``deliver`` verified the submit (CMX-117).
     """
     window_id = resolve(chat_id, thread_id)
     if window_id is None:  # wrong chat / unbound topic — stay silent
@@ -215,8 +226,19 @@ async def receive_photo(
     caption = (getattr(msg, "caption", None) or "").strip()
     line = f"{INBOUND_IMAGE_MARKER} {saved}"
     text = f"{caption}\n\n{line}" if caption else line
-    if deliver(window_id, text):
+    try:
+        status = deliver(window_id, text)
+    except PendingDraft:
+        await _reply(msg, PENDING_DRAFT_TEXT)
+        return
+    if status == "submitted":
         await _reply(msg, f"📎 Image sent to the agent: {saved.name}")
+    elif status == "unsubmitted":
+        await _reply(
+            msg,
+            f"⚠️ Image delivered but not submitted: {saved.name} is sitting on the "
+            "agent's prompt. Open /screenshot and tap Enter to submit it.",
+        )
     else:
         await _reply(msg, "❌ Couldn't deliver the image to the agent.")
 
@@ -257,7 +279,12 @@ async def receive_document(
         return
     caption = (getattr(msg, "caption", None) or "").strip()
     text = f"{caption}\n\n📎 file: {saved}" if caption else f"📎 file: {saved}"
-    if deliver(window_id, text):
+    try:
+        ok = deliver(window_id, text)
+    except PendingDraft:
+        await _reply(msg, PENDING_DRAFT_TEXT)
+        return
+    if ok:
         await _reply(msg, f"📎 File sent to the agent: {getattr(doc, 'file_name', None) or saved.name}")
     else:
         await _reply(msg, "❌ Couldn't deliver the file to the agent.")
