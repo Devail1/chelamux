@@ -138,14 +138,16 @@ def test_per_pid_ps_fallback_resolves_a_claude_root(no_proc, monkeypatch):
     def sh(argv):
         calls.append(list(argv))
         if argv[:3] == ["ps", "-o", "comm="]:
-            return {"700": "/usr/local/bin/claude\n", "900": "-zsh\n"}[argv[-1]]
-        if argv[:3] == ["ps", "-o", "args="]:
-            return {"900": "-zsh\n"}[argv[-1]]
+            return {"700": "/usr/local/bin/claude\n", "710": "node\n",
+                    "900": "-zsh\n"}[argv[-1]]
+        if argv[:3] == ["ps", "-o", "args="]:      # 710: comm misses, argv[0] names it
+            return {"710": "/usr/local/bin/claude --resume x\n", "900": "-zsh\n"}[argv[-1]]
         return ""                                       # pgrep / children: none
     monkeypatch.setattr(sessions, "_sh", sh)
     assert sessions._direct_claude_pid(700) == 700
     assert sessions._claude_pid(700) == 700
     assert not any(c[0] == "pgrep" for c in calls), calls
+    assert sessions._direct_claude_pid(710) == 710
     assert sessions._direct_claude_pid(900) is None
 
 
