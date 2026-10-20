@@ -2834,6 +2834,9 @@ def cmd_judge(args) -> None:
         # re-judges the new head on its own.
         print(f"⚖️ {result['task_id']}: {result.get('error')} — no rework round was spent "
               "and nothing on the run row was changed; a fresh judge covers the new head.")
+    elif state == judge.J_CANCELLED:
+        # ⏹️⚖️ CMX-286: the daemon stopped this round — its run was sent back or its head moved.
+        print(f"⚖️ {result['task_id']}: {result.get('error')} — no verdict was published.")
     else:
         print(f"⚖️ {result['task_id']}: every guard held. The run stays awaiting_review — "
               "the judge never merges.")

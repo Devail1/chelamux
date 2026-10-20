@@ -136,6 +136,9 @@ J_STALE_HEAD = "stale_head"
 J_UNJUDGED_MERGED = "unjudged_merged"
 # ⚖️🪜 CMX-208: every changed file is prose (`chela.risktier`), so no judge round ran.
 J_PROSE_ONLY = "prose_only"
+# ⏹️⚖️ CMX-286: the daemon STOPPED this round's live judge — its run was sent back, or its PR
+# head moved, so no verdict it could reach would be usable. Not a verdict: no inbox notice.
+J_CANCELLED = "cancelled"
 MERGE_READY = (J_CLEAN, J_PROSE_ONLY)
 PROSE_ONLY_DETAIL = "prose-only: every changed file is docs/changelog/media — no judge round"
 
@@ -2852,6 +2855,12 @@ def judge_run(
         # FALSE `SURVIVED` findings were published to the PR and escalated by the inbox as
         # urgent. A staleness check must not take its reference from the thing it is
         # checking.
+        if (live_run or {}).get("judge_state") == J_CANCELLED:
+            # ⏹️⚖️ CMX-286: the daemon cancelled this round (sent back / head moved) — a
+            # verdict now would be the unusable notice the cancel exists to prevent.
+            log.info("judge: %s: round cancelled under the run — no verdict", task_id)
+            return {"ok": False, "task_id": task_id, "state": J_CANCELLED,
+                    "error": f"the round was cancelled: {live_run.get('judge_detail')}"}
         row_head = (live_run or {}).get("pr_head_sha")
         live_head = dispatcher.pr_live_head_sha(pr_url, repo_dir) or row_head
         stale_head = bool(verified_sha and live_head and verified_sha != live_head)
@@ -2935,6 +2944,7 @@ def judge_run(
             verdict = dispatcher.request_changes(
                 task_id, body, post_comment=False,
                 mutations=[o.experiment.as_dict() for o in report.visible_blocking],
+                judge_state=J_BLOCKED,
             )
             if not verdict.get("ok"):
                 # ⚖️🧊 CMX-239: The CAS refused it: the row moved under us (a human merged it,
@@ -3678,6 +3688,32 @@ def stop_judge_run(worktree: Path) -> bool:
             except OSError:
                 pass
     return True
+
+
+def cancel_judge_run(task_id: str, worktree: Path) -> list[int]:
+    """⏹️⚖️ CMX-286: stop ``task_id``'s live DETACHED run — its run left review, so it holds a
+    judge slot for a verdict nobody can use. TERMs the run's whole tree (the suite leads its
+    own session, so a group signal misses it); a tree a fleet pause FROZE is closed on the
+    freeze ledger and SIGCONT'd first, or the TERM would sit pending. Returns the pids
+    signalled — none for a foreground run (its window kill reaches it) or this process."""
+    live = live_judge_run(task_id, worktree)
+    pid = (live or {}).get("pid")
+    if not live or not live.get("detached") or not isinstance(pid, int) or pid == os.getpid():
+        return []
+    tree = procguard.process_tree([pid])
+    rec = read_freeze(task_id)
+    sigs: tuple[int, ...] = (signal.SIGTERM,)
+    if rec.get("intervals") and rec["intervals"][-1][1] is None:
+        rec["intervals"][-1][1] = time.time()
+        write_freeze(task_id, rec)
+        sigs = (signal.SIGCONT, signal.SIGTERM)
+    for sig in sigs:
+        for p in tree:
+            try:
+                os.kill(p, sig)
+            except OSError:
+                pass
+    return tree
 
 
 def _cleanup(wf, task_id: str, branch: str, judge_epoch: str | None) -> None:
