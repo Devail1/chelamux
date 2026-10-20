@@ -3323,8 +3323,16 @@ def mark_awaiting_review(
         pr_url = row["pr_url"] or _read_pr_url(window_name, repo_dir)
         effective_pr_url = pr_url
         pr_state, pr_mergeable = _read_pr_status(effective_pr_url, repo_dir)
+        # ⚖️🔀 CMX-280: `pr_head_sha=NULL` — the head is UNKNOWN until tick step 0b reads it.
+        # A `running` row's checks are never polled, so the column still holds the head from
+        # BEFORE this round's push; kept, it equals the old round's `judge_sha`, and the
+        # same tick's 1e′ escalated a rework of a spent `cannot_verify` on the OLD head's
+        # verdict and try count (CMX-251, 10-19) — the new head was never judged. NULL
+        # matches neither the judge trigger nor 1e′ until the next tick's poll fills it in
+        # (an unreadable poll just retries, like any CI UNKNOWN); the merge gate is not
+        # affected — `contract.merge` compares the verdict to the head GitHub reports.
         conn.execute(
-            "UPDATE runs SET status='awaiting_review', ended_at=?, "
+            "UPDATE runs SET status='awaiting_review', ended_at=?, pr_head_sha=NULL, "
             "pr_url=COALESCE(?, pr_url), pr_state=COALESCE(?, pr_state), "
             "pr_mergeable=COALESCE(?, pr_mergeable) WHERE task_id=?",
             (_now(), pr_url, pr_state, pr_mergeable, task_id),
