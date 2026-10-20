@@ -227,7 +227,8 @@ async def receive_photo(
     line = f"{INBOUND_IMAGE_MARKER} {saved}"
     text = f"{caption}\n\n{line}" if caption else line
     try:
-        status = deliver(window_id, text)
+        # Off the loop: the verify polls for seconds, which would stall every topic.
+        status = await asyncio.to_thread(deliver, window_id, text)
     except PendingDraft:
         await _reply(msg, PENDING_DRAFT_TEXT)
         return

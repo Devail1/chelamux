@@ -226,3 +226,15 @@ def test_turn_carrying_the_inbound_marker_is_not_echoed(texts):
 def test_terminal_pasted_image_without_the_marker_still_relays():
     sent = _relayed(["ok, see this … [Image #47]"])
     assert sent[-1] == "PHOTO" and "see this" in sent[0]
+
+
+def test_photo_verify_runs_off_the_event_loop(tmp_path):
+    import threading
+    seen = []
+
+    def deliver(_wid, _text):
+        seen.append(threading.current_thread() is threading.main_thread())
+        return "submitted"
+    asyncio.run(media.receive_photo(_Msg(), 1, 2, resolve=lambda c, t: "@3", deliver=deliver,
+                                    docs_dir=tmp_path, clock=lambda: 1000))
+    assert seen == [False]
