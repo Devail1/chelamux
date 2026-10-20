@@ -531,6 +531,33 @@ test('the expanded status dot is the SAME size as the collapsed rail', () => {
     assert.equal(_prop(exp, 'height'), _prop(col, 'height'), 'the status-dot height differs from the collapsed rail');
 });
 
+// Every element the collapsed rail hides, checked one selector at a time: these share
+// multi-selector `display: none` rules, so dropping or misspelling ONE member of a
+// list leaves the rest of the rule (and any one-member test) green.
+const _RAIL_HIDDEN = [
+    '#resources-strip', '#version-island', '.sidebar-quick',
+    '.side-head', '.side-empty', '.side-badges', '.side-item-label', '.group-head',
+    '.triage-head', '.agent-row .ar-main', '.agent-row.rich .agent-row-name',
+    '.agent-row.rich .ar-meta', '.agent-row .row-unarchive', '.agent-row .recent-resume',
+    '.agent-row .recent-dismiss', '.agent-row .row-more', '.side-archived-toggle',
+];
+function _displayNoneSelectors(css) {
+    const hidden = new Set();
+    const bare = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const [, sel, body] of bare.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        if (!/(?:^|;)\s*display\s*:\s*none\s*(?:;|$)/.test(body.trim())) continue;
+        for (const s of sel.split(',')) hidden.add(s.trim().replace(/\s+/g, ' '));
+    }
+    return hidden;
+}
+test('the collapsed rail hides each of its row/section elements', () => {
+    const hidden = _displayNoneSelectors(CSS);
+    for (const s of _RAIL_HIDDEN) {
+        assert.ok(hidden.has(`body.sidebar-collapsed ${s}`),
+            `the collapsed rail no longer hides ${s} (no display:none rule for body.sidebar-collapsed ${s})`);
+    }
+});
+
 // --- 2. 🔴 one control, two behaviours — and the desktop state survives a reload --
 
 test('the desktop rail RESTORES itself from the last session', () => {
