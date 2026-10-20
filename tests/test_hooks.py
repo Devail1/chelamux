@@ -419,7 +419,8 @@ def test_the_slug_is_resolved_once_and_cached(monkeypatch):
 # The other hooks carry only the payload — none of the agent's env reaches the daemon.
 # SessionStart is a `command` hook and so inherits the process env, letting the agent
 # short-circuit inference entirely via an `X-Chela-Wid` header. Still not trusted blind:
-# malformed, empty, or naming a window that is not live right now must fall through to the SAME inference as if no header had ever been sent.
+# malformed, empty, or naming a window that is not live right now must fall through to
+# the SAME inference as if no header had ever been sent.
 
 def test_explicit_wid_short_circuits_correlation_that_would_otherwise_fail(monkeypatch):
     """The header is checked FIRST — it wins even where the origin-based inference below

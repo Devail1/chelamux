@@ -176,9 +176,9 @@ def recap_command(port: int | None = None, host: str = "127.0.0.1") -> str:
 # CMX-319: `PreToolUse`/`PostToolUse` alone are ~78% of the log's volume (see the module
 # docstring), and `PermissionRequest` is the hook that can hold a live agent for up to
 # :data:`GATE_TIMEOUT` seconds — the two shapes named in the bug report this fixes. Moved
-# off `http` onto the same gated-`command` shape as :func:`recap_command`: the daemon-side logic is unchanged (still the SAME
-# route, still ingest-then-maybe-answer), only the transport gains the `$CHELA_WID` check
-# an `http` hook cannot express. `PermissionDenied` rides along for symmetry with
+# off `http` onto the same gated-`command` shape as :func:`recap_command`: the daemon-side
+# logic is unchanged (still the SAME route, still ingest-then-maybe-answer), only the
+# transport gains the `$CHELA_WID` check an `http` hook cannot express. `PermissionDenied` rides along for symmetry with
 # `PermissionRequest` — both are rare, but a hook a headless caller can still trip is not a
 # hook that is gated.
 #
