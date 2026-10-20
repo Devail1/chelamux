@@ -214,6 +214,7 @@ test('a third agent joining, and everyone leaving, still reloads nothing', async
     after.forEach((f, i) => assert.equal(f, before[i], 'the SAME iframe node, never rebuilt'));
     const c2 = document.querySelector('.grid-stack-item[gs-id="@2"] .grid-stack-item-content');
     assert.equal(c2.classList.contains('in-room'), false, 'the accent really did clear');
+    assert.equal(c2.style.getPropertyValue('--room-accent'), '', 'and so did its colour');
     assert.equal(c2.querySelector('.gs-room').hidden, true);
 });
 
@@ -261,6 +262,21 @@ test('a tile in two rooms names the first and counts the rest; leaving clears th
     assert.equal(badge('@1').querySelector('.gs-room-name').textContent, '', 'a left room keeps no name');
     assert.equal(badge('@1').hasAttribute('data-room'), false, 'nor a room a click would leave');
     assert.ok(badge('@1').querySelector(':scope > svg'), 'the plug icon is markup, never cleared');
+});
+
+test('a tile with no badge, or a badge with no name slot, is accented without a crash', () => {
+    // Single-pane mode draws a header with no badge (terminals.js paneHead), so the patch
+    // must accent what it finds and skip the rest, never throw half-way through the stage.
+    const stage = document.createElement('div');
+    stage.innerHTML = '<div class="grid-stack-item" gs-id="@1"><div class="grid-stack-item-content"></div></div>'
+        + '<div class="grid-stack-item" gs-id="@2"><div class="grid-stack-item-content">'
+        + '<button class="gs-room" hidden></button></div></div>';
+    assert.equal(wire.applyRoomAccents(stage, roomed('ops', ['@1', '@2'])), 2);
+    for (const wid of ['@1', '@2']) {
+        const c = stage.querySelector(`[gs-id="${wid}"] .grid-stack-item-content`);
+        assert.ok(c.classList.contains('in-room'), `${wid} is accented`);
+    }
+    assert.equal(stage.querySelector('.gs-room').hidden, true, 'a badge it cannot name stays hidden');
 });
 
 test('a member whose window is GONE is simply not painted — no tile, no crash', async () => {

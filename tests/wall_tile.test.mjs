@@ -408,3 +408,22 @@ test('stateTitle labels a proxy-derived status, and only that', () => {
     const other = agent({ claude_running: true, session_status: 'busy', status_source: 'hooks' });
     assert.equal(stateTitle(other, tileState(other, false)), 'Working');
 });
+
+// --- CMX-236: the sweep's survivors on the TypeScript conversion ------------------
+
+test('actionBarKind: a question is an Answer bar, a pane-probed gate an Approve bar', () => {
+    const q = agent({ session_status: 'waiting' });
+    assert.deepEqual(actionBarKind(q, wantsHuman(q)), { kind: 'answer', label: 'Answer' });
+    const gate = agent({ session_status: 'busy', needs_human: true });
+    assert.deepEqual(actionBarKind(gate, wantsHuman(gate)), { kind: 'approve', label: 'Approve' });
+});
+
+test('focusLayout: the named focus pane is the large one, not merely the first', () => {
+    const layout = focusLayout(['@a', '@b', '@c'], '@b', 12);
+    assert.deepEqual(layout['@b'], { x: 0, y: 0, w: 8, h: 12 });
+    assert.equal(layout['@a'].x, 8);
+});
+
+test('prChip: a PR with no repository carries an empty one, never a falsy non-string', () => {
+    assert.equal(prChip({ url: 'https://x/1', number: 1, state: 'open' }).repository, '');
+});
