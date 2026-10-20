@@ -94,8 +94,13 @@ agent:
 # tests vs base_branch) unless the agent passes `--oversize-reason`. `size_exclude` = fnmatch
 # globs that do not count (default: docs/*, *.md, changelog.d/*, images, video).
 # hand_in:
-#   max_pr_lines: 300
+#   max_pr_lines: 300   (the code default; this workflow sets 800 below, Liav 2026-10-20)
 #   size_exclude: ["docs/*", "*.md", "changelog.d/*", "*.png", "*.jpg", "*.gif", "*.svg", "*.mp4", "*.webm"]
+# Liav 2026-10-20: 800, not 300. Every PR pays ~3 h of fixed pipeline cost (hand-in check +
+# judge), so per line shipped, 300-1200-line PRs were 2-3x cheaper than <300 ones on the
+# 42 merged dispatched PRs, despite more rework rounds. Core / risk:high briefs still ask ≤300.
+hand_in:
+  max_pr_lines: 800
 
 judge:
   test_cmd: CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q
@@ -335,8 +340,10 @@ A classifier or hook denial is final; never relaunch the same action in another 
      treats it as a claim to test, so a wrong one comes straight back. A note for a line
      that did not survive is refused.
    - **📏 CMX-126: `task-finished` measures your diff first** (code + tests vs `dev`; docs,
-     media and changelog excluded) and REFUSES it over `hand_in.max_pr_lines` (300) before
-     any sweep runs. Split it into ≤300-line PRs. Only a diff that truly cannot be split
+     media and changelog excluded) and REFUSES it over `hand_in.max_pr_lines` (800) before
+     any sweep runs. Product/UI work (dashboard, port slices) may use up to 800 lines; work on
+     chela's core (dispatcher, judge, merge gate, workflow, sources) and any `risk:high` task
+     stays at ≤300 lines, as its brief says. Only a diff that truly cannot be split
      may pass `--oversize-reason '<why>'` — recorded on the run, shown to the judge and in
      your PR body.
    - **Optional: `--handoff "<note>"`** — a short note for your reviewer (what changed, what
