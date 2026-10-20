@@ -87,6 +87,10 @@ def test_red_only_on_registered_is_rerun_then_judged_not_sent_back(tmp_path, mon
     assert notices == [("tests/a.py::t[x] (CMX-9)", True)]
     assert _candidates(wf) == ["abc123"]
     assert _tick(wf, fake)["ci_known_flake"] == 0                 # delivered once
+    fake.rollup = [_check_run("test (3.12)")]                     # a human's re-run, green:
+    assert _tick(wf, fake)["ci_flake"] == 0                       # not CMX-255's flake
+    assert _run()["ci_rerun_state"] == "known_flake" and notices[1:] == []
+    fake.rollup = _RED
     fake.sha = "newpush1"                                         # a new head is not judged
     _tick(wf, fake)
     assert _candidates(wf) == []
@@ -114,6 +118,63 @@ def test_a_new_head_gets_its_own_known_flake_reruns(tmp_path, monkeypatch, notic
     assert (run["rework_count"], run["ci_failed_sha"], json.loads(run["ci_known_flake"])["sha"]
             ) == (0, "newpush1", "newpush1")
     assert len(notices) == 2 and _candidates(wf) == ["abc123"]
+
+
+def _backdate_rerun(seconds):
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET ci_rerun_at=? WHERE task_id='abc123'",
+                     ((dt.datetime.now(dt.timezone.utc)
+                       - dt.timedelta(seconds=seconds)).isoformat(),))
+        conn.commit()
+
+
+def test_the_stale_red_a_known_flake_rerun_replaces_is_waited_out(tmp_path, monkeypatch,
+                                                                  notices):
+    """⛔ A known-flake re-run re-arms CMX-255's `pending` and stamps a FRESH `ci_rerun_at`:
+    the red read right after it is the one it replaces, so it is neither re-run again nor
+    spent — until the settle window has passed on THIS re-run's clock, not the first one's."""
+    wf, fake, _ = _setup(tmp_path, monkeypatch, _FLAKE, states={"CMX-9": None})
+    _tick(wf, fake)
+    _backdate_rerun(dispatcher.CI_RERUN_SETTLE_SECONDS + 60)   # CMX-255's re-run is old
+    assert _red_again(wf, fake)["ci_rerun"] == 1               # the known-flake re-run
+    assert (_run()["ci_rerun_state"], _run()["ci_flake_reruns"]) == ("pending", 1)
+
+    stale = _tick(wf, fake)                                    # still red, nothing seen run
+
+    assert (stale["ci_rerun"], stale["ci_known_flake"], stale["ci_failed"]) == (0, 0, 0)
+    assert len(fake.reruns) == 2
+    run = _run()
+    assert (run["ci_rerun_state"], run["ci_flake_reruns"], run["rework_count"]) == (
+        "pending", 1, 0)
+
+    _backdate_rerun(dispatcher.CI_RERUN_SETTLE_SECONDS + 60)   # settled: that red is real
+    assert _tick(wf, fake)["ci_rerun"] == 1
+    assert (len(fake.reruns), _run()["ci_flake_reruns"]) == (3, 2)
+
+
+@pytest.mark.parametrize("seen_running", [True, False])
+def test_a_green_known_flake_rerun_is_recorded_as_a_flake(tmp_path, monkeypatch, notices,
+                                                          seen_running):
+    """⛔ Green on the same sha after a known-flake re-run is CMX-255's flake — recorded on
+    `ci_flakes` (so `repeat_flake` can see it) and said once — not a known-flake red."""
+    wf, fake, _ = _setup(tmp_path, monkeypatch, _FLAKE, states={"CMX-9": None})
+    _tick(wf, fake)
+    _red_again(wf, fake)
+    if seen_running:
+        fake.rollup = _RUNNING
+        _tick(wf, fake)
+    fake.rollup = [_check_run("test (3.12)")]
+
+    summary = _tick(wf, fake)
+
+    assert (summary["ci_flake"], summary["ci_known_flake"], summary["ci_failed"]) == (1, 0, 0)
+    run = _run()
+    assert (run["ci_rerun_state"], run["rework_count"], run["ci_known_flake"]) == (
+        "green", 0, None)
+    [flake] = json.loads(run["ci_flakes"])
+    assert (flake["sha"], flake["test"]) == ("deadbee1", "tests/a.py::t[x]")
+    assert len(notices) == 1 and notices[0][1] is False
+    assert notices[0][0].endswith(" failed on tests/a.py::t[x]")
 
 
 @pytest.mark.parametrize("log, expires, states", [

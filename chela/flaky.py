@@ -6,6 +6,10 @@ stays red only on those tests the run is NOT sent back: it proceeds to the judge
 ``ci_known_flake`` recorded. The flaky test is never skipped — it still runs and reports;
 only the dispatcher's reaction to its red changes. Anything else is a real red.
 
+The registry is read from the ORCHESTRATOR's checkout (``wf.path.parent``), never the PR's
+head: a PR cannot quarantine its own red. A known-flake head goes to the judge on a red CI,
+but ``chela merge`` still needs green: someone re-runs CI (or overrides) before it merges.
+
 The registry must not become a hiding place: every entry names its issue and an expiry, and
 :func:`problems` (asserted by ``tests/test_ci_known_flake.py``, so by CI) refuses one that
 is malformed, expired, or whose issue is Done/Canceled or missing.
