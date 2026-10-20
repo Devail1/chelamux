@@ -5,6 +5,7 @@ import os
 import shutil
 import signal
 import subprocess
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -286,18 +287,72 @@ def refuse_if_not_a_worktree(repo_path: Path, wt_path: Path, root: Path) -> None
 _signal_pid = os.kill
 
 
-def _ancestors(proc_root: Path) -> set[int]:
-    """This process and every ancestor of it — never a reaping target, even with its cwd
-    inside the worktree (a ``chela`` invoked from the worktree it is cleaning up)."""
-    pids, pid = set(), os.getpid()
+def _stat(proc_root: Path, pid: int) -> tuple[str, str, int] | None:
+    """``(comm, state, ppid)`` from ``<proc_root>/<pid>/stat``; None once it is gone."""
+    try:
+        with open(proc_root / str(pid) / "stat") as f:
+            head, rest = f.read().rsplit(")", 1)
+        fields = rest.split()
+        return head.split("(", 1)[1], fields[0], int(fields[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _ancestors(proc_root: Path, pid: int | None = None) -> set[int]:
+    """``pid`` (default: this process) and every ancestor of it — never a reaping target,
+    even with its cwd inside the worktree (a ``chela`` invoked from the worktree it is
+    cleaning up)."""
+    pids, pid = set(), os.getpid() if pid is None else pid
     while pid > 1 and pid not in pids:
         pids.add(pid)
-        try:
-            with open(proc_root / str(pid) / "stat") as f:
-                pid = int(f.read().rsplit(")", 1)[1].split()[1])
-        except (OSError, ValueError, IndexError):
+        st = _stat(proc_root, pid)
+        if st is None:
             break
+        pid = st[2]
     return pids
+
+
+def _scope(wt_path: Path, root: Path) -> tuple[Path, Path] | None:
+    """``(worktree, root)`` resolved — None unless ``wt_path`` is a LINKED worktree (its
+    ``.git`` a FILE) strictly under the worktrees ``root``."""
+    try:
+        target, wroot = wt_path.resolve(), root.resolve()
+    except OSError:
+        return None
+    if target == wroot or not target.is_relative_to(wroot):
+        log.warning("not reaping %s: outside the worktrees root %s", target, wroot)
+        return None
+    if not (target / ".git").is_file():
+        return None
+    return target, wroot
+
+
+def _procs_in(target: Path, wroot: Path, proc_root: Path, spared: set[int]):
+    """Yield ``(pid, cwd, cmdline)`` for each process, not in ``spared``, whose cwd is inside
+    ``target`` by a path-component check AND a string-prefix check AND lies under ``wroot``."""
+    inside, under_root = str(target) + os.sep, str(wroot) + os.sep
+    for entry in sorted(os.listdir(proc_root)):
+        if not entry.isdigit() or int(entry) in spared:
+            continue
+        try:
+            cwd = os.readlink(proc_root / entry / "cwd")
+        except OSError:
+            continue                            # gone, or not ours to read
+        # " (deleted)": a subdirectory already removed under it; normpath: `W/../sib` is
+        # the sibling, whatever its prefix says.
+        cwd = os.path.normpath(cwd.removesuffix(" (deleted)"))
+        if not Path(cwd).is_relative_to(target):
+            continue
+        if not (cwd + os.sep).startswith(inside):
+            continue
+        if not cwd.startswith(under_root):
+            continue
+        try:
+            with open(proc_root / entry / "cmdline", "rb") as f:
+                cmdline = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+        except OSError:
+            continue
+        yield int(entry), cwd, cmdline
 
 
 def reap_processes_in(wt_path: Path, root: Path, *, proc_root: Path = Path("/proc"),
@@ -321,48 +376,87 @@ def reap_processes_in(wt_path: Path, root: Path, *, proc_root: Path = Path("/pro
     ``proc_root`` and ``kill`` are the test seams: a fake proc tree and a recording kill.
     """
     kill = kill or _signal_pid
-    try:
-        target, wroot = wt_path.resolve(), root.resolve()
-    except OSError:
+    scope = _scope(wt_path, root)
+    if scope is None:
         return []
-    if target == wroot or not target.is_relative_to(wroot):
-        log.warning("not reaping %s: outside the worktrees root %s", target, wroot)
-        return []
-    if not (target / ".git").is_file():
-        return []
-    inside, under_root = str(target) + os.sep, str(wroot) + os.sep
-    spared = _ancestors(proc_root)
     killed: list[int] = []
-    for entry in sorted(os.listdir(proc_root)):
-        if not entry.isdigit() or int(entry) in spared:
-            continue
+    for pid, cwd, cmdline in _procs_in(*scope, proc_root, _ancestors(proc_root)):
         try:
-            cwd = os.readlink(proc_root / entry / "cwd")
-        except OSError:
-            continue                            # gone, or not ours to read
-        # " (deleted)": a subdirectory already removed under it; normpath: `W/../sib` is
-        # the sibling, whatever its prefix says.
-        cwd = os.path.normpath(cwd.removesuffix(" (deleted)"))
-        if not Path(cwd).is_relative_to(target):
-            continue
-        if not (cwd + os.sep).startswith(inside):
-            continue
-        if not cwd.startswith(under_root):
-            continue
-        try:
-            with open(proc_root / entry / "cmdline", "rb") as f:
-                cmdline = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
-            kill(int(entry), signal.SIGKILL)
+            kill(pid, signal.SIGKILL)
         except OSError:
             continue
-        log.warning("reaped pid %s (cwd %s) left in worktree %s: %s", entry, cwd, target, cmdline)
-        killed.append(int(entry))
+        log.warning("reaped pid %s (cwd %s) left in worktree %s: %s", pid, cwd, scope[0], cmdline)
+        killed.append(pid)
     return killed
 
 
-def reap_run_worktree(worktree_path: str, workflow_path: str | None) -> list[int]:
-    """:func:`reap_processes_in` for a run row: the worktrees root comes from the run's own
-    workflow. A workflow that cannot be read reaps NOTHING — unknown is never "in scope"."""
+# CMX-274: the agent's own Claude Code process (`comm` as /proc reports it). It and its
+# ancestors — the window's shell — are spared by :func:`reap_strays_in`.
+AGENT_COMMS = frozenset({"claude"})
+STRAY_GRACE_SECONDS = 5.0
+_STRAY_POLL_SECONDS = 0.25
+
+
+def _alive(proc_root: Path, pid: int) -> bool:
+    st = _stat(proc_root, pid)
+    return st is not None and st[1] != "Z"
+
+
+def reap_strays_in(wt_path: Path, root: Path, *, proc_root: Path = Path("/proc"), kill=None,
+                   grace: float = STRAY_GRACE_SECONDS, sleep=time.sleep) -> list[int]:
+    """Stop what a run's agent left running in its worktree when its turn ends (CMX-274).
+
+    A dispatched agent's Bash call timed out (or was backgrounded) and its ``pytest -x``
+    tree outlived it with ppid 1, two xdist workers at 100% CPU for 1h38m. Unlike
+    :func:`reap_processes_in` the worktree STAYS (a rework reuses it), so this is graceful:
+    each process gets SIGCONT (a paused one acts on nothing until resumed), then SIGTERM,
+    then SIGKILL if still alive after ``grace`` seconds. Same blast-radius checks, plus the
+    agent's own ``claude`` (:data:`AGENT_COMMS`) and its ancestors are spared. Logs each pid
+    + cmdline; returns the pids signalled. ``sleep`` joins the test seams.
+    """
+    kill = kill or _signal_pid
+    scope = _scope(wt_path, root)
+    if scope is None:
+        return []
+    spared = _ancestors(proc_root)
+    found = list(_procs_in(*scope, proc_root, spared))
+    for pid, _cwd, _cmd in found:
+        st = _stat(proc_root, pid)
+        if st is not None and st[0] in AGENT_COMMS:
+            spared |= _ancestors(proc_root, pid)
+    signalled: list[int] = []
+    for pid, cwd, cmdline in found:
+        if pid in spared:
+            continue
+        try:
+            kill(pid, signal.SIGCONT)
+            kill(pid, signal.SIGTERM)
+        except OSError:
+            continue
+        log.warning("reaping pid %s (cwd %s) left in worktree %s: %s", pid, cwd, scope[0], cmdline)
+        signalled.append(pid)
+    waited = 0.0
+    while waited < grace and any(_alive(proc_root, pid) for pid in signalled):
+        sleep(_STRAY_POLL_SECONDS)
+        waited += _STRAY_POLL_SECONDS
+    # A pid that exited in the grace may be recycled: KILL only one still in the worktree.
+    still = {pid for pid, _cwd, _cmd in _procs_in(*scope, proc_root, spared)}
+    for pid in signalled:
+        if pid not in still or not _alive(proc_root, pid):
+            continue
+        try:
+            kill(pid, signal.SIGKILL)
+        except OSError:
+            continue
+        log.warning("pid %s outlived SIGTERM by %ss: SIGKILLed", pid, grace)
+    return signalled
+
+
+def reap_run_worktree(worktree_path: str, workflow_path: str | None, *,
+                      graceful: bool = False) -> list[int]:
+    """:func:`reap_processes_in` for a run row (:func:`reap_strays_in` when ``graceful``):
+    the worktrees root comes from the run's own workflow. A workflow that cannot be read
+    reaps NOTHING — unknown is never "in scope"."""
     from chela.workflow import load_workflow, resolve_workspace_root
     if not workflow_path:
         return []
@@ -372,7 +466,8 @@ def reap_run_worktree(worktree_path: str, workflow_path: str | None) -> list[int
         log.warning("not reaping %s: workflow %s unreadable (%s)", worktree_path,
                     workflow_path, e)
         return []
-    return reap_processes_in(Path(worktree_path), root)
+    reaper = reap_strays_in if graceful else reap_processes_in
+    return reaper(Path(worktree_path), root)
 
 
 def remove_worktree(repo_path: Path, wt_path: Path, root: Path) -> bool:

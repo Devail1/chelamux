@@ -237,7 +237,9 @@ A classifier or hook denial is final; never relaunch the same action in another 
    mirror the style of the existing `skills/chela-setup`, `skills/orchestrate`, and
    `skills/telegram-send` skills.
 2. **Validate — this repo's CI gates on ruff.** Run `uv run ruff check chela tests`
-   (MUST pass — pytest-green is NOT sufficient) and `uv run pytest -q`; fix what you broke.
+   (MUST pass — pytest-green is NOT sufficient) and `timeout 2400 uv run pytest -q`; fix what
+   you broke. ⏳ CMX-274: always run the suite under `timeout <judge.suite_timeout_seconds>`
+   — a Bash call that times out or is backgrounded otherwise leaves pytest running for hours.
    ⛔ **Before writing "pre-existing on {{base_branch}}" or "reproduces on unmodified
    {{base_branch}}" anywhere — in a PR body, a comment, your own reasoning — confirm it on
    a checkout you did not create, not by re-reading this window's own red output.** This

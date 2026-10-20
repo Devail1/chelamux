@@ -55,6 +55,7 @@ from chela.worktree import (
     ensure_worktree,
     is_inside_root,
     reap_run_worktree,
+    reap_strays_in,
     remove_worktree,
 )
 
@@ -2837,6 +2838,15 @@ def _kill_window(window_name: str) -> None:
     )
 
 
+def _end_agent(window_name: str | None, row) -> None:
+    """Kill a run's agent window, then reap what its tool calls left running in its worktree
+    (CMX-274: a timed-out Bash call's pytest tree outlives the call AND the window)."""
+    if window_name:
+        _kill_window(window_name)
+    if row["worktree_path"]:
+        reap_run_worktree(row["worktree_path"], row["workflow_path"], graceful=True)
+
+
 def _kill_windows_named(window_name: str) -> None:
     """Kill every existing tmux window in TMUX_SESSION whose name == window_name.
 
@@ -3388,8 +3398,7 @@ def mark_awaiting_review(
             if not ok:
                 log.warning("Task %s: sweep-equivalent notes not added to the PR body — %s",
                             task_id, detail)
-        if window_name:
-            _kill_window(window_name)
+        _end_agent(window_name, row)
         return {
             "ok": True,
             "task_id": task_id,
@@ -3835,8 +3844,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
                 (_now(), text, json.dumps(reviews), task_id),
             )
         conn.commit()
-        if window_name:
-            _kill_window(window_name)
+        _end_agent(window_name, fresh)
     repo_dir = str(Path(wf_path).parent) if wf_path else None
     posted, detail = _post_pr_comment(pr_url, repo_dir, text)
     if head_moved:
@@ -4947,6 +4955,7 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
     if run.get("window_name") and live_wid:
         _kill_windows_named(run["window_name"])
         window_killed = True
+    _end_agent(None, run)
 
     wf_path = run.get("workflow_path")
     repo_dir = str(Path(wf_path).parent) if wf_path else None
@@ -5736,8 +5745,7 @@ def tick(workflow_path: str | Path) -> dict:
                 # the very tick it lands. The tracker strike happens in 1b, after
                 # this transition is durable — if it fails, this row stays `done`
                 # and the strike is simply retried on the next tick.
-                if row["window_name"]:
-                    _kill_window(row["window_name"])
+                _end_agent(row["window_name"], row)
                 # ⚖️🕳️ CMX-358 (#480): a merge can land while a judge was never even
                 # SCHEDULED for this row — `judge_state` is still the initial `''`
                 # sentinel, indistinguishable from "not yet judged". Stamp a distinct
@@ -5821,8 +5829,7 @@ def tick(workflow_path: str | Path) -> dict:
                 # matters: it does not fire `hooks.after_done` (see above) and it renders
                 # in its own `archived` board lane, never Review or Done — kanban.js's
                 # STATUS_CHIPS['closed'] pill + kanbanlanemodel.js's STATUS_LANE map.
-                if row["window_name"]:
-                    _kill_window(row["window_name"])
+                _end_agent(row["window_name"], row)
                 conn.execute(
                     "UPDATE runs SET status='closed' WHERE task_id=?", (row["task_id"],)
                 )
@@ -5975,8 +5982,7 @@ def tick(workflow_path: str | Path) -> dict:
                 wf_path = row["workflow_path"]
                 pr_url = row["pr_url"] or _read_pr_url(
                     row["window_name"], str(Path(wf_path).parent) if wf_path else None)
-                if row["window_name"]:
-                    _kill_window(row["window_name"])
+                _end_agent(row["window_name"], row)
                 conn.execute(
                     "UPDATE runs SET status='done', pr_url=COALESCE(?, pr_url) WHERE task_id=?",
                     (pr_url, row["task_id"]),
@@ -6005,8 +6011,7 @@ def tick(workflow_path: str | Path) -> dict:
                 if pr_state != "merged" and effective_pr_url:
                     pr_state, _mergeable = _read_pr_status(effective_pr_url, repo_dir)
                 if pr_state == "merged":
-                    if row["window_name"]:
-                        _kill_window(row["window_name"])
+                    _end_agent(row["window_name"], row)
                     conn.execute(
                         "UPDATE runs SET status='done', ended_at=?, pr_url=COALESCE(?, pr_url), "
                         "pr_state=COALESCE(?, pr_state) WHERE task_id=?",
@@ -7374,6 +7379,10 @@ def _launch_agent(
 
     Returns the window target (the ``@id``, or the bare name if the id was unreadable).
     """
+    # CMX-274: a respawn starts clean of the last round's strays — before the hooks, which
+    # may start something of their own in the worktree.
+    if not judge_window:
+        reap_strays_in(Path(worktree), resolve_workspace_root(wf))
     if fresh_worktree:
         after_create = wf.get("hooks", "after_create")
         if after_create:
@@ -7673,6 +7682,7 @@ def _escalate(conn: sqlite3.Connection, row: sqlite3.Row, reason: str, *,
         (_now(), text, row["task_id"]),
     )
     conn.commit()
+    _end_agent(None, row)                   # CMX-274: its strays, not its worktree
     log.warning(
         "Task %s → needs_human: %s (branch %s and worktree %s preserved; slot freed)",
         row["task_id"], text, row["branch_name"], row["worktree_path"],

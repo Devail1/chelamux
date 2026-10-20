@@ -268,7 +268,9 @@ def _daemon_leak(src: Sources, p: dict, wt: tuple[str, str]) -> str | None:
 def rule_leaked_proc(src: Sources, state: dict) -> list[dict]:
     """CMX-253: a process under a run/judge worktree whose run is over, or that was orphaned.
     A ``--detached-child`` judge is setsid'd ON PURPOSE, so ppid 1 alone is not a leak there;
-    nor for a self-daemonizing process (:func:`_daemon_leak`)."""
+    nor for a self-daemonizing process (:func:`_daemon_leak`).
+    CMX-274: also a test run under a RUNNING agent older than its suite timeout — a runaway
+    the hand-in reaper has not reached yet (2 xdist workers pinned for 1h38m)."""
     out = []
     for p in src.procs:
         wt = src.worktree_of(p)
@@ -280,8 +282,11 @@ def rule_leaked_proc(src: Sources, state: dict) -> list[dict]:
         if orphan and _is_daemon(p["argv"]):
             why = _daemon_leak(src, p, wt)
             orphan = why is not None
-        if status in OVER_STATUSES or orphan:
-            why = f"its run is {status}" if status in OVER_STATUSES else why
+        runaway = (wt[1] == "run" and status == "running" and _is_test_runner(p["argv"])
+                   and p["age_s"] > src.suite_timeout(p))
+        if status in OVER_STATUSES or orphan or runaway:
+            why = (f"its run is {status}" if status in OVER_STATUSES else why if orphan
+                   else f"a test run {p['age_s'] / 60:.0f}m old, past the suite timeout")
             out.append(_finding(
                 "leaked_proc", f"pid:{p['pid']}",
                 f"pid {p['pid']} under {wt[1]} {wt[0]} is alive but {why}",

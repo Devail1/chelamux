@@ -110,6 +110,33 @@ def test_leaked_proc_rule(env, where, status, ppid, extra, hit):
         [("pid:42", "CMX-1")] if hit else [])
 
 
+WF_2400 = "judge:\n  suite_timeout_seconds: 2400\n"
+
+
+@pytest.mark.parametrize("where, status, argv, workflow, age, hit", [
+    ("CMX-1", "running", ["/v/bin/pytest", "-q"], WF_2400, 2401, True),   # CMX-274: a runaway
+    ("CMX-1", "running", ["python", "-m", "pytest"], WF_2400, 5880, True),
+    ("CMX-1", "running", ["/v/bin/pytest", "-q"], WF_2400, 2400, False),  # exactly the timeout
+    ("CMX-1", "running", ["/v/bin/pytest", "-q"], WF_2400, 901, False),   # the workflow's, not 900
+    ("CMX-1", "running", ["/v/bin/pytest", "-q"], None, 901, True),       # the 900 s default
+    ("CMX-1", "running", ["/v/bin/pytest", "-q"], None, 900, False),
+    ("CMX-1", "running", ["python3", "x"], None, 9000, False),            # not a test run
+    ("CMX-1", "awaiting_review", ["/v/bin/pytest"], None, 9000, False),   # not a running agent
+    ("judge-CMX-1", "running", ["/v/bin/pytest"], None, 9000, False),     # the judge has its own
+])
+def test_leaked_proc_flags_a_test_run_under_a_running_agent_past_the_suite_timeout(
+        env, where, status, argv, workflow, age, hit):
+    set_runs(env, [("CMX-1", status, "2026-01-01")])
+    (env.wt / where).mkdir(parents=True, exist_ok=True)
+    if workflow:
+        (env.wt / where / "WORKFLOW.md").write_text(f"---\nproject_key: CMX\n{workflow}---\n")
+    add_proc(env, 42, argv, env.wt / where, age=age)
+    got = ops.rule_leaked_proc(src(env), {})
+    assert [f["summary"] for f in got] == (
+        [f"pid 42 under run CMX-1 is alive but a test run {age / 60:.0f}m old, past the "
+         "suite timeout"] if hit else [])
+
+
 def test_leaked_proc_reads_argv_paths_and_skips_unreadable_procs(env):
     set_runs(env, [("CMX-2", "done", "2026-01-01")])
     add_proc(env, 42, ["pytest", str(env.wt / "CMX-2" / "tests")], env.dir)
