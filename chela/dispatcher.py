@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, generated, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -1483,6 +1483,13 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("ci_rerun_note", "ALTER TABLE runs ADD COLUMN ci_rerun_note TEXT"),
         ("ci_rerun_at", "ALTER TABLE runs ADD COLUMN ci_rerun_at TEXT"),
         ("ci_flakes", "ALTER TABLE runs ADD COLUMN ci_flakes TEXT"),
+        # 🧪 CMX-282. `ci_flake_reruns` counts the extra re-runs of a red that failed ONLY on
+        # registered flaky tests (`tests/flaky.toml`, ≤ flaky.FLAKE_RERUNS per sha); still red,
+        # `ci_known_flake` is the JSON `{sha, tests: [{test, issue}]}` and `ci_known_flake_sha`
+        # lets the judge take that head as CI-passing-with-known-flake.
+        ("ci_flake_reruns", "ALTER TABLE runs ADD COLUMN ci_flake_reruns INTEGER DEFAULT 0"),
+        ("ci_known_flake", "ALTER TABLE runs ADD COLUMN ci_known_flake TEXT"),
+        ("ci_known_flake_sha", "ALTER TABLE runs ADD COLUMN ci_known_flake_sha TEXT"),
         # 🔀 CMX-262. `conflict_sha` is the head sha whose CONFLICTING was already handled
         # (once per sha); `conflict_reworks` counts the conflict reworks, each one a round
         # that is NOT charged against the cap (see `effective_rework_cap`).
@@ -2427,6 +2434,25 @@ def _record_ci_flake(conn: sqlite3.Connection, row, sha: str) -> None:
         (json.dumps(flakes), row["task_id"]),
     )
     log.warning("CI flake on %s (%s): re-run green — %s", row["task_id"], sha[:12], note)
+
+
+def _record_known_flake(conn: sqlite3.Connection, row, sha: str, known: list[dict]) -> None:
+    """🧪 CMX-282: red ONLY on registered flaky tests after every re-run. Burn the sha (this
+    red is delivered), record ``ci_known_flake`` and say so, naming the issues."""
+    from chela import inbox
+    conn.execute(
+        "UPDATE runs SET ci_failed_sha=?, ci_rerun_state='known_flake', ci_known_flake=?, "
+        "ci_known_flake_sha=? WHERE task_id=?",
+        (sha, json.dumps({"sha": sha, "tests": known}), sha, row["task_id"]))
+    conn.commit()
+    note = ", ".join(f"{k['test']} ({k['issue']})" for k in known)
+    log.warning("CI on %s (%s) is red only on known flakes — %s; to the judge, not rework",
+                row["task_id"], sha[:12], note)
+    try:
+        inbox.ci_flake(dict(row), sha=sha, note=note, known=True)
+    except Exception:  # noqa: BLE001 — the inbox is advisory
+        log.warning("CI: could not queue the known-flake notice for %s", row["task_id"],
+                    exc_info=True)
 
 
 def _inbox_ci_flake(row, sha: str) -> None:
@@ -5371,7 +5397,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "dispatched": 0,
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
-        "ci_rerun": 0, "ci_flake": 0, "base_merged": 0, "base_conflict": 0,
+        "ci_rerun": 0, "ci_flake": 0, "ci_known_flake": 0, "base_merged": 0, "base_conflict": 0,
         "judged": 0, "judge_cancelled": 0, "judge_lost": 0, "judge_stranded": 0,
         "trial_ledger": 0, "disk_budget_exceeded": False, "window_reaped": 0,
         "blocked": True, "error": error, "held": False, "hold_expired": False,
@@ -5548,6 +5574,7 @@ def tick(workflow_path: str | Path) -> dict:
         "ci_infra_failed": 0,
         "ci_rerun": 0,
         "ci_flake": 0,
+        "ci_known_flake": 0,
         "base_merged": 0,
         "base_conflict": 0,
         "judged": 0,
@@ -6355,7 +6382,7 @@ def tick(workflow_path: str | Path) -> dict:
                 if _rerun_failed_jobs(wf_dir, ci.run_ids if ci else ()):
                     conn.execute(
                         "UPDATE runs SET ci_rerun_sha=?, ci_rerun_state='pending', "
-                        "ci_rerun_note=?, ci_rerun_at=? WHERE task_id=?",
+                        "ci_rerun_note=?, ci_rerun_at=?, ci_flake_reruns=0 WHERE task_id=?",
                         (sha, note, _now(), task_id),
                     )
                     conn.commit()
@@ -6363,9 +6390,27 @@ def tick(workflow_path: str | Path) -> dict:
                     log.warning("CI is RED on %s (%s) — %s; waiting on that before any "
                                 "rework", row["pr_url"] or "?", sha[:12], note)
                     continue
-            elif row["ci_rerun_state"] in ("pending", "started"):
-                conn.execute("UPDATE runs SET ci_rerun_state='red' WHERE task_id=?",
-                             (task_id,))
+            else:
+                # 🧪 CMX-282: red again, but ONLY on registered flaky tests ⇒ re-run up to
+                # FLAKE_RERUNS more times, then proceed to the judge — never a rework round.
+                # Only ONE failed Actions run: the log tail is `run_ids[0]`'s alone.
+                known = flaky.classify(wf, log_tail) if len(ci.run_ids) == 1 else None
+                if (known and (row["ci_flake_reruns"] or 0) < flaky.FLAKE_RERUNS
+                        and _rerun_failed_jobs(wf_dir, ci.run_ids)):
+                    conn.execute(
+                        "UPDATE runs SET ci_rerun_state='pending', ci_rerun_at=?, "
+                        "ci_flake_reruns=COALESCE(ci_flake_reruns, 0) + 1 WHERE task_id=?",
+                        (_now(), task_id))
+                    conn.commit()
+                    summary["ci_rerun"] += 1
+                    continue
+                if known:
+                    _record_known_flake(conn, row, sha, known)
+                    summary["ci_known_flake"] += 1
+                    continue
+                if row["ci_rerun_state"] in ("pending", "started"):
+                    conn.execute("UPDATE runs SET ci_rerun_state='red' WHERE task_id=?",
+                                 (task_id,))
             body = _ci_verdict_body(ci, log_tail, row["pr_url"])
             if row["ci_rerun_sha"] == sha:
                 body += (f"\n_{row['ci_rerun_note']} — and it failed AGAIN on the re-run, so "
@@ -8374,7 +8419,7 @@ def _judge_candidates(conn: sqlite3.Connection, wf: WorkflowDef) -> list[sqlite3
     return conn.execute(
         "SELECT * FROM runs WHERE workflow_path=? AND status='awaiting_review' "
         "AND pr_state='open' AND pr_head_sha IS NOT NULL "
-        "AND pr_checks IN ({}) AND ("
+        "AND (pr_checks IN ({}) OR (pr_checks=? AND ci_known_flake_sha=pr_head_sha)) AND ("
         "  judge_sha IS NULL OR judge_sha != pr_head_sha"
         "  OR (judge_state=? AND COALESCE(judge_cannot_verify_tries, 0) < ?"
         "      AND COALESCE(judge_unknown_final, 0) = 0)"
@@ -8382,7 +8427,7 @@ def _judge_candidates(conn: sqlite3.Connection, wf: WorkflowDef) -> list[sqlite3
         "  OR judge_state=?"
         ")"
         .format(",".join("?" * len(JUDGE_TRIGGER_CHECKS))),
-        (str(wf.path), *JUDGE_TRIGGER_CHECKS,
+        (str(wf.path), *JUDGE_TRIGGER_CHECKS, CI_FAILING,
          judge.J_CANNOT_VERIFY, judge_max_unknown_retries(), judge.J_RUNNING,
          judge.J_CANCELLED),
     ).fetchall()
