@@ -14,6 +14,9 @@ after(() => browser && browser.close());
 
 const MANIFEST = JSON.parse(readFileSync(new URL('../../chela/dashboard/static/app/manifest.json', import.meta.url), 'utf8'));
 const BUNDLE = `/static/v/${ASSET_VERSION}/app/${MANIFEST['src/main.tsx'].file}`;
+// CMX-276: plus the chunks the manifest says it imports (the sidebar model, which plain-node
+// legacy suites load by its fixed name), and nothing else.
+const IMPORTS = (MANIFEST['src/main.tsx'].imports ?? []).map(k => `/static/v/${ASSET_VERSION}/app/${MANIFEST[k].file}`);
 
 test('the bundle is the only module the page loads, and both legacy and the islands boot from it', { skip: why }, async () => {
     const { context, page, misses, errors } = await openDashboard(browser, { width: 1440, height: 900 });
@@ -24,7 +27,7 @@ test('the bundle is the only module the page loads, and both legacy and the isla
             .map(e => new URL(e.name).pathname).filter(p => p.endsWith('.js')));
         // collab/ is not the legacy graph: terminals.js imports it at runtime by URL (staticUrl),
         // the same files the ttyd presence shim loads in each pane.
-        assert.deepEqual(scripts.filter(p => p.includes('/app/')), [BUNDLE]);
+        assert.deepEqual(scripts.filter(p => p.includes('/app/')).sort(), [BUNDLE, ...IMPORTS].sort());
         assert.deepEqual(scripts.filter(p => p.includes('/js/')), [], 'an unbundled legacy module was fetched');
         assert.equal(await page.evaluate(() => typeof window.chela?.closeModal), 'function');
         assert.deepEqual(errors, []);

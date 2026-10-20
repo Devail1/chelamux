@@ -39,7 +39,7 @@ const TEMPLATE_HTML = readFileSync(join(DASHBOARD_ROOT, 'templates', 'index.html
 // the .tsx, so the boot below runs that entry's source, in that order.
 const MANIFEST = JSON.parse(readFileSync(join(DASHBOARD_ROOT, 'static', 'app', 'manifest.json'), 'utf8'));
 export const ENTRY_URL = new URL(
-    `../../chela/dashboard/frontend/${Object.keys(MANIFEST).find(k => MANIFEST[k].isEntry)}`, import.meta.url).href;
+    `../../chela/dashboard/frontend/${Object.keys(MANIFEST).find(k => MANIFEST[k].name === 'main')}`, import.meta.url).href;
 const DEFAULT_JS_ROOT = new URL('../../chela/dashboard/static/js/', import.meta.url).href;
 
 /** CMX-217: index.html's boot config block (frontend/src/shared/api readBoot), for a fixture
@@ -95,6 +95,20 @@ export function activateDom(dom) {
     }
 }
 
+/** CMX-276: what the page's React islands do before the legacy graph boots (index.html loads
+ * them first): a bridge on `win`, and the sidebar island drawing its #sidebar-agents. From
+ * src/, so a mutation of the TypeScript reaches every suite that boots the page. Each page
+ * (window) gets its own bridge and root. A suite that hand-rolls its jsdom boot calls this
+ * before it imports boot.ts / nav.js. */
+export async function mountIslands(win) {
+    // A page with no sidebar has no island to mount.
+    if (!win.document.getElementById('sidebar-agents')) return;
+    const { createBridge } = await import('../../chela/dashboard/frontend/src/shared/bridge/index.ts');
+    const { mountSidebar } = await import('../../chela/dashboard/frontend/src/features/sidebar/index.ts');
+    win.chelaBridge = createBridge();
+    mountSidebar(win, win.chelaBridge);
+}
+
 /** Flush one microtask turn — e.g. a fetch().then(json).then(render) chain
  * queued by a poll that fires unawaited on boot — without advancing a timer. */
 export function flush() {
@@ -133,7 +147,8 @@ export function flush() {
  *   import from. Defaults to the repo's. A suite that needs TWO independent pages (two
  *   devices — tests/sidebar_layout_shared.test.mjs) boots each from its own copy
  *   (copyDashboard), so each gets its own module instances; it switches between them with
- *   activateDom(). A copy boots its own frontend/src/boot.ts, without the islands.
+ *   activateDom(). A copy boots its own frontend/src/boot.ts after mountIslands() (the
+ *   islands import the repo's).
  * @returns {Promise<{dom: JSDOM, chela: object, modules: Record<string,object>}>}
  */
 export async function bootDashboardDom({
@@ -171,13 +186,29 @@ export async function bootDashboardDom({
     if (EventSource) dom.window.EventSource = EventSource;
     globalThis.setInterval = () => 0;   // the boot arms poll timers a test has no use for
 
-    await import(jsRoot === DEFAULT_JS_ROOT ? ENTRY_URL : new URL('../../frontend/src/boot.ts', jsRoot).href);
+    if (jsRoot === DEFAULT_JS_ROOT) {
+        await import(ENTRY_URL);
+        // A second boot in one suite meets the entry cached: its islands mounted on the FIRST
+        // page only, so this page mounts its own (CMX-276).
+        if (!dom.window.chelaBridge) await mountIslands(dom.window);
+    } else {
+        await mountIslands(dom.window);
+        await import(new URL('../../frontend/src/boot.ts', jsRoot).href);
+    }
     const modules = {};
     for (const path of extraModules) {
         const name = path.replace(/\.js$/, '');
         modules[name] = await import(new URL(path, jsRoot).href);
     }
     return { dom, chela: globalThis.window.chela, modules };
+}
+
+/** CMX-276: click an element a React island rendered (it has no `onclick` attribute: React
+ * listens at its root), with a REAL bubbling click, as a user's lands. */
+export function clickIsland(el) {
+    if (!el) throw new Error('clickIsland: element is missing');
+    if (el.disabled) throw new Error('clickIsland: element is DISABLED — a real click would not reach the handler');
+    el.dispatchEvent(new el.ownerDocument.defaultView.MouseEvent('click', { bubbles: true, cancelable: true }));
 }
 
 /** Compile a REAL rendered element's `onclick="..."` attribute and run it

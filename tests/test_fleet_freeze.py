@@ -9,6 +9,7 @@ import time
 import pytest
 
 from chela import agent_manager, dispatcher, fleet, judge, procguard
+from tests.test_judge_classifier_outage import projects  # noqa: F401, F811
 from tests.test_judge_wall import MIN, _judging_run, _own_runs_db, _st, _watch  # noqa: F401
 
 TREE = {10: 1, 11: 10, 12: 11, 20: 1, 21: 20, 99: 1}     # claude 10, run 20, 99 unrelated
@@ -48,6 +49,7 @@ def test_freeze_stops_every_pid_of_the_tree_after_its_record_and_resume_thaws(wo
     assert fleet.resume_all()["thawed"] == {"T1": True}
     assert world == [(p, signal.SIGCONT, False) for p in (10, 20, 11, 21, 12)]   # closed first
     assert judge.frozen_since("T1", 0.0) < 5.0
+    assert judge.read_freeze("T1")["retry"] == 1                # one model-call retry granted
     rec = {"intervals": [[100.0, 150.0], [200.0, None]]}    # clipped at since; open = to now
     assert judge.frozen_since("x", 120.0, now=230.0, rec=rec) == 60.0
 
@@ -151,3 +153,103 @@ def test_judge_run_credits_its_own_tasks_freeze_to_the_suite_deadline(tmp_path, 
     judge.judge_run("abc123", exp_file, cleanup=True)
     assert credits and credits == [42.0] * len(credits)
     assert "task" not in judge._run_ctx
+
+
+# --- after a thaw, ONE failed model call is retried, never a CANNOT VERIFY -------------------
+
+@pytest.fixture
+def thawed(tmp_path, projects, monkeypatch):  # noqa: F811
+    """A live, idle judge whose transcript ends on the 09-28 classifier outage (a failed
+    model call), with `_send_seed` spied. Returns (wf, sent, co, set_ledger)."""
+    from tests import test_judge_classifier_outage as co
+    sent, ok = [], [True]
+    monkeypatch.setattr(judge, "judge_logs_dir", lambda: tmp_path / "judge-logs")
+    monkeypatch.setattr(dispatcher, "_send_seed", lambda *a: sent.append(a) or ok[0])
+    wf = co._wf(tmp_path)
+    with dispatcher._db() as conn:
+        co._run_row(conn, tmp_path, workflow_path=str(wf.path))
+    co._spawn(wf)
+    co._write_transcript(projects, wf)
+
+    def ledger(retry, rnd=None):
+        rnd = rnd or dispatcher.resolve_run("abc123")["judge_started_at"]
+        judge.write_freeze("abc123", {"round": rnd, "intervals": [[1.0, 2.0]], "retry": retry})
+    return wf, sent, co, ledger, ok
+
+
+def test_one_failed_model_call_after_a_thaw_is_retried_then_a_second_reaps(thawed):
+    wf, sent, co, ledger, _ = thawed
+    ledger(1)
+    assert co._watchdog(wf, "idle")[0] == 0                    # retried, not reaped
+    assert sent == [(co.JUDGE_WID, dispatcher.JUDGE_RETRY_MESSAGE, "abc123")]
+    assert dispatcher.JUDGE_RETRY_MESSAGE.startswith("resume: a fleet pause froze you mid-call")
+    assert judge.read_freeze("abc123")["retry"] == 0           # the token is spent
+    assert co._state() == (judge.J_RUNNING, 0, 0)              # the round goes on
+    assert co._watchdog(wf, "idle")[0] == 1                    # only ONE is forgiven
+    assert co._state()[0] == judge.J_CANNOT_VERIFY and len(sent) == 1
+
+
+@pytest.mark.parametrize("retry,rnd,status", [
+    (0, None, "idle"),                 # no token: never thawed, or already spent
+    (1, "an-older-round", "idle"),     # another round's ledger grants nothing
+    (1, None, "busy"),                 # a busy judge may be retrying on its own
+])
+def test_no_retry_without_this_rounds_token_on_an_idle_judge(thawed, retry, rnd, status):
+    wf, sent, co, ledger, _ = thawed
+    ledger(retry, rnd)
+    co._watchdog(wf, status)
+    assert sent == []
+    assert judge.read_freeze("abc123")["retry"] == retry
+
+
+def test_a_retry_that_cannot_be_sent_reaps_as_before_and_spends_the_token(thawed):
+    wf, sent, co, ledger, ok = thawed
+    ok[0] = False
+    ledger(1)
+    assert co._watchdog(wf, "idle")[0] == 1
+    assert len(sent) == 1 and co._state()[0] == judge.J_CANNOT_VERIFY
+    assert judge.read_freeze("abc123")["retry"] == 0
+
+
+def test_spending_the_token_keeps_a_pause_that_landed_since(thawed, monkeypatch):
+    """The watchdog's `freeze` snapshot is stale by the time it spends the token: a pause
+    that opened an interval in between must survive the write."""
+    wf, sent, co, ledger, _ = thawed
+    ledger(1)
+    real = dispatcher._judge_model_call_failed
+
+    def pause_lands(wf, row):
+        rec = judge.read_freeze("abc123")
+        judge.write_freeze("abc123", {**rec, "intervals": [*rec["intervals"], [3.0, None]]})
+        return real(wf, row)
+
+    monkeypatch.setattr(dispatcher, "_judge_model_call_failed", pause_lands)
+    co._watchdog(wf, "idle")
+    assert judge.read_freeze("abc123")["intervals"][-1] == [3.0, None]
+
+
+def test_an_api_error_reads_as_a_failed_model_call(tmp_path, projects, monkeypatch):  # noqa: F811
+    from tests import test_judge_classifier_outage as co
+    wf = co._wf(tmp_path)
+    with dispatcher._db() as conn:
+        co._run_row(conn, tmp_path, workflow_path=str(wf.path))
+    co._spawn(wf)
+    row = dispatcher.resolve_run("abc123")
+    status = ["idle"]
+    monkeypatch.setattr(dispatcher, "_agent_status",
+                        lambda wid: status[0] if wid == co.JUDGE_WID else None)
+    assert dispatcher._judge_model_call_failed(wf, row) is False      # no transcript yet
+    co._write_transcript(projects, wf, co._judge_run_record())
+    assert dispatcher._judge_model_call_failed(wf, row) is False      # a successful tail
+    err = {"type": "assistant", "isApiErrorMessage": True}
+    co._write_transcript(projects, wf, [*co._judge_run_record(), err])
+    assert dispatcher._judge_model_call_failed(wf, row) is True
+    status[0] = "busy"
+    assert dispatcher._judge_model_call_failed(wf, row) is False      # busy: not stuck
+    status[0] = "idle"
+    co._write_transcript(projects, wf, [*co._judge_run_record(), err,
+                                        {"type": "user", "message": {"content": "go on"}}])
+    assert dispatcher._judge_model_call_failed(wf, row) is False      # recovered after it
+    co._write_transcript(projects, wf, [*co._judge_run_record(),
+                                        {**err, "isApiErrorMessage": "yes"}])
+    assert dispatcher._judge_model_call_failed(wf, row) is False      # only a literal True

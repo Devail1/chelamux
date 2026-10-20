@@ -186,11 +186,12 @@ test('a row blocked on you is lifted to Needs you, and it leads the swipe', asyn
     assert.deepEqual(swipe(), ['@203', '@201', '@202', ...TAIL]);
 });
 
-test("a dispatched run's windows sit at its group's position, its agent window before its judge", async () => {
+// CMX-276: Dispatched is always the LAST group, whatever the stored order says.
+test("a dispatched run's windows sit at its group's position (last), its agent window before its judge", async () => {
     useRows([...BASE, ...runRows()]);
     await setLayout({ order: ['/srv/code/beta', '~dispatched', '/srv/code/alpha', '/srv/code/gamma'] });
-    assert.deepEqual(groupKeys(), ['/srv/code/beta', '~dispatched', '/srv/code/alpha', '/srv/code/gamma']);
-    assert.deepEqual(swipe(), ['@202', '@204', '@205', '@201', '@203', ...TAIL]);
+    assert.deepEqual(groupKeys(), ['/srv/code/beta', '/srv/code/alpha', '/srv/code/gamma', '~dispatched']);
+    assert.deepEqual(swipe(), ['@202', '@201', '@203', '@204', '@205', ...TAIL]);
 });
 
 test('a session the View filters out of the sidebar keeps its swipe slot at its group position', async () => {
@@ -200,13 +201,14 @@ test('a session the View filters out of the sidebar keeps its swipe slot at its 
         view: { groupBy: 'folder', env: ['interactive'] },   // Environment: Dispatched agents off
     });
     assert.deepEqual(groupKeys(), ['/srv/code/beta', '/srv/code/alpha', '/srv/code/gamma'], 'the run is not drawn');
-    assert.deepEqual(swipe(), ['@202', '@204', '@205', '@201', '@203', ...TAIL]);
+    assert.deepEqual(swipe(), ['@202', '@201', '@203', '@204', '@205', ...TAIL]);
 });
 
 test('an archived run keeps its windows, at the Archived section (the bottom), not its old group', async () => {
     useRows([...BASE, ...runRows('done')]);
     await setLayout({ order: ['~dispatched', '/srv/code/alpha', '/srv/code/beta', '/srv/code/gamma'] });
-    assert.deepEqual(swipe(), ['@204', '@205', '@201', '@202', '@203', ...TAIL]);
+    assert.deepEqual(groupKeys(), ['/srv/code/alpha', '/srv/code/beta', '/srv/code/gamma', '~dispatched']);
+    assert.deepEqual(swipe(), ['@201', '@202', '@203', '@204', '@205', ...TAIL]);
     server.handle('/api/sidebar/archive', { method: 'POST', body: JSON.stringify({ keys: ['run:CMX-7'] }) });
     await nav.refreshSidebar();
     await settle();
