@@ -22,7 +22,7 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 
-import { bezierPath, resolveDrop, roomsByWid } from '../chela/dashboard/static/js/wire.js';
+import { applyRoomAccents, bezierPath, resolveDrop, roomsByWid } from '../chela/dashboard/static/js/wire.ts';
 
 const STATUS = (...pairs) => ({
     rooms: Object.fromEntries(pairs.map(([room, wids]) => [room, {
@@ -82,4 +82,10 @@ test('rooms are indexed by wid — which is what the Wall has', () => {
 test('an empty payload leaves every tile roomless (and does not throw)', () => {
     assert.deepEqual(roomsByWid({ rooms: {} }), {});
     assert.deepEqual(roomsByWid(null), {});
+});
+
+test('no stage, no patch: applyRoomAccents finds 0 tiles and touches nothing', () => {
+    const status = { rooms: { ops: { members: { '@1': {} } } } };
+    assert.equal(applyRoomAccents(null, status), 0);
+    assert.equal(applyRoomAccents(undefined, status), 0);
 });
