@@ -16,7 +16,7 @@
 // fetch, exactly like refreshSidebar() already joins agents + context to paint
 // the ctx% chip. One convention for "what project is this agent", not two.
 // ---------------------------------------------------------------------------
-import { $, $$, _agentProject, api, escHtml } from './util.js';
+import { $, $$, _agentProject, api, escHtml } from './util';
 
 // The selected window is UI state, not fetch state — persisted per browser
 // like work.js's segment, so a reload lands you back on the period you had

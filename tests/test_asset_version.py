@@ -7,6 +7,7 @@ and the cache headers match (HTML revalidates, a versioned asset is immutable).
 """
 from __future__ import annotations
 
+import json
 import re
 import shutil
 from html.parser import HTMLParser
@@ -67,9 +68,12 @@ def test_every_script_and_stylesheet_in_the_page_is_versioned(client):
     assert len(static_refs) >= len(scripts) + len(styles)
     for url in static_refs:
         assert url.startswith(_prefix()), f"{url!r} names a static file without the version"
-    # The page must tell its JS which version it is, or the reload banner can never compare.
+    # The page must tell its JS which version it is, or the reload banner can never compare
+    # (CMX-217: the #chela-boot JSON block, frontend/src/shared/api readBoot).
     html = client.get("/").get_data(as_text=True)
-    assert f"window.CHELA_ASSET_VERSION = \"{dash.ASSET_VERSION}\"" in html
+    m = re.search(r'<script type="application/json" id="chela-boot">(.*?)</script>', html)
+    assert m, "the page has no boot block"
+    assert json.loads(m.group(1))["assetVersion"] == dash.ASSET_VERSION
 
 
 def test_every_versioned_page_asset_is_served(client):
@@ -184,7 +188,7 @@ def test_cache_headers(client):
     r = client.get("/" + _prefix() + dash.APP_ENTRY)
     assert r.status_code == 200
     assert r.headers["Cache-Control"] == "public, max-age=31536000, immutable"
-    assert b"CHELA_ASSET_VERSION" in r.get_data(), "the bundle lacks the legacy graph (util.js)"
+    assert b"lucideIcon: unknown icon" in r.get_data(), "the bundle lacks the legacy graph (util.js)"
     r.close()
     old = client.get("/static/v/000000000000/" + dash.APP_ENTRY)
     assert old.status_code == 200
@@ -201,7 +205,7 @@ def test_the_bundle_installs_the_islands_bridge_before_the_legacy_graph_runs():
     """Rollup lays modules out in evaluation order: the islands (bridge + mounts) must come
     before util.js, the first legacy module, or legacy publishes to no bridge."""
     bundle = (STATIC / dash.APP_ENTRY).read_text(encoding="utf-8")
-    islands, legacy = bundle.find("version-island"), bundle.find("CHELA_ASSET_VERSION")
+    islands, legacy = bundle.find("version-island"), bundle.find("lucideIcon: unknown icon")
     assert islands >= 0 and legacy >= 0
     assert islands < legacy
 

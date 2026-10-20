@@ -26,7 +26,7 @@
 // "these two tiles are wired together" is readable with no colour vision at all.
 // ---------------------------------------------------------------------------
 
-import { colorForId } from '../collab/presence-core.js';
+import { colorForId } from '../collab/presence-core';
 
 // The port a wire leaves from / the socket it lands on.
 export const PORT_GLYPH = '○';

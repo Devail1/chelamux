@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, generated, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -7904,6 +7904,8 @@ that SURVIVES **blocks this PR at every risk level** — it is never downgraded 
    - **WIRING** (`"kind": "wiring"`): the smallest edit that makes the feature NEVER RUN —
      revert the production call-site. If the suite is still green, the tests never exercise
      what actually runs.
+   - 🏭 **Never mutate a GENERATED file** ({{generated_paths}}): it is rebuilt from source
+     and CI checks it is fresh. chela drops such an experiment unrun — mutate its source.
 3. Write `{{experiments_path}}` — JSON, exactly this shape:
 
 ```json
@@ -7994,6 +7996,8 @@ def judge_prompt_vars(
         # mechanical sweep it says no outcome can change under. Agent-authored, so shown
         # as claims to TEST, never as findings. "" ⇒ none (the line renders empty).
         "sweep_equivalents": sweep_equivalents,
+        # 🏭 CMX-284: the paths `chela judge run` drops experiments on.
+        "generated_paths": ", ".join(f"`{p}`" for p in generated.PATTERNS),
     }
 
 

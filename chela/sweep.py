@@ -59,7 +59,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from chela import judge
+from chela import generated, judge
 
 RECOVERY_MARKER = ".chela-sweep-recovery.json"
 PY_SUFFIXES = (".py",)
@@ -347,6 +347,8 @@ def _changed_lines(worktree: Path, base: str) -> tuple[dict[str, set[int]], str]
 
 
 def _sweepable(rel: str) -> bool:
+    if generated.is_generated(rel):     # 🏭 CMX-284: rebuilt from source — never mutated
+        return False
     if rel.endswith(TS_SUFFIXES):   # a `.d.ts` has no runtime code; a spec MEASURES mutations
         return not (rel.endswith(".d.ts") or is_test_path(rel) or _RE_FOREIGN_TEST.search(rel))
     return rel.endswith(PY_SUFFIXES + JS_SUFFIXES) and not is_test_path(rel)
@@ -357,7 +359,7 @@ _RE_FOREIGN_TEST = re.compile(r"(_test|_spec|Tests?)\.|\.spec\.|(^|/)(__tests__|
 
 def _unsupported(rel: str) -> bool:
     suffix = PurePosixPath(rel).suffix      # `x.TS` is not swept, so it stays UNKNOWN
-    return (suffix.lower() in UNSUPPORTED_SUFFIXES or (
+    return not generated.is_generated(rel) and (suffix.lower() in UNSUPPORTED_SUFFIXES or (
         suffix.lower() in TS_SUFFIXES and suffix not in TS_SUFFIXES)) and not (
         is_test_path(rel) or _RE_FOREIGN_TEST.search(rel))
 
@@ -365,6 +367,16 @@ def _unsupported(rel: str) -> bool:
 def unsupported_files(worktree: Path, base: str) -> tuple[list[str], str]:
     """Changed (or untracked, not deleted) files vs ``base`` the mutators cannot handle, as
     ``(files, error)`` — a git failure is an error, never "no such files"."""
+    return _changed_names(worktree, base, _unsupported)
+
+
+def generated_files(worktree: Path, base: str) -> tuple[list[str], str]:
+    """🏭 CMX-284: changed (or untracked, not deleted) GENERATED files vs ``base`` — never
+    swept, but counted out loud."""
+    return _changed_names(worktree, base, generated.is_generated)
+
+
+def _changed_names(worktree: Path, base: str, keep) -> tuple[list[str], str]:
     mb = _git(worktree, "merge-base", base, "HEAD")
     if mb.returncode != 0 or not mb.stdout.strip():
         return [], (f"`{base}` does not resolve to a merge base with HEAD in {worktree} — "
@@ -377,7 +389,7 @@ def unsupported_files(worktree: Path, base: str) -> tuple[list[str], str]:
     if untracked.returncode != 0:
         return [], f"git ls-files failed: {(untracked.stderr or '').strip()[:200]}"
     found = {n for n in (names.stdout + "\0" + untracked.stdout).split("\0")
-             if n and _unsupported(n)}
+             if n and keep(n)}
     return sorted(found), ""
 
 
@@ -947,6 +959,12 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
     if err:
         report.cannot_verify = err
         return report
+    skipped, err = generated_files(worktree, base)
+    if err:
+        report.cannot_verify = err
+        return report
+    if skipped:
+        report.notes.append(generated.note(len(skipped)))
     if report.unsupported:
         report.notes.append(f"{len(report.unsupported)} changed file(s) NOT swept — "
                             f"{SUPPORTED_NOTE}; each is UNKNOWN, not clean")

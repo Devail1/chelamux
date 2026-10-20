@@ -272,18 +272,22 @@ def test_closed_run_travels_ledger_api_and_board_from_one_real_tick(ticking, mon
     node = shutil.which("node")
     if not node:
         pytest.skip("node not available for the JS board-render layer")
-    if not (ROOT / "node_modules" / "jsdom").is_dir():
-        msg = "jsdom is not installed — the JS board-render layer DID NOT RUN. Run `pnpm install`."
+    if not (ROOT / "node_modules" / "jsdom").is_dir() or not (ROOT / "node_modules" / "vitest").is_dir():
+        msg = ("jsdom or vitest is not installed — the JS board-render layer DID NOT RUN. "
+               "Run `pnpm install`.")
         if os.environ.get("CHELA_REQUIRE_JS_TESTS"):
             pytest.fail(msg + " (CHELA_REQUIRE_JS_TESTS is set: a silent skip is not green)")
         pytest.skip(msg)
 
     payload_path = tmp_path / "api_dispatcher_payload.json"
     payload_path.write_text(json.dumps(data))
+    # CMX-217: through Vitest, which compiles the TypeScript the legacy graph imports.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("NODE_CHANNEL")}
+    env.update(CLOSED_RUN_PAYLOAD=str(payload_path), CLOSED_RUN_TASK=alpha)
     proc = subprocess.run(
-        [node, str(ROOT / "tests" / "js_helpers" / "assert_closed_run_lane.mjs"),
-         str(payload_path), alpha],
-        capture_output=True, timeout=60, cwd=str(ROOT),
+        [node, str(ROOT / "node_modules" / "vitest" / "vitest.mjs"), "run", "--config",
+         str(ROOT / "tests" / "js_helpers" / "closed_run_lane.config.mjs")],
+        capture_output=True, timeout=120, cwd=str(ROOT), env=env,
     )
     if proc.returncode != 0:
         pytest.fail(

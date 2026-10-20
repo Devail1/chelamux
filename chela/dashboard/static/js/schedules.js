@@ -1,5 +1,5 @@
 // --- Stage 0: ES-module imports ---
-import { $, _agentsCache, api, attrEsc, closeModal, escHtml, humanSchedule, relativeTime, shortTime, showModal } from './util.js';
+import { $, _agentsCache, api, attrEsc, closeModal, escHtml, humanSchedule, relativeTime, shortTime, showModal } from './util';
 
 // ---------------------------------------------------------------------------
 // Render: Schedules

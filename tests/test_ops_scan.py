@@ -150,6 +150,20 @@ def test_leaked_proc_reads_argv_paths_and_skips_unreadable_procs(env):
     assert [f["subject"] for f in ops.rule_hung_test(src(env), {})] == ["pid:42"]
 
 
+def test_procs_come_back_in_pid_order_whatever_the_listing_order(env, monkeypatch):
+    """CMX-285: /proc listing order is the filesystem's. Fed in reverse — which is also the
+    lexical order of "10" < "9" — the findings still come back by numeric pid."""
+    for pid in (9, 10, 11):
+        add_proc(env, pid, ["pytest"], env.wt / "CMX-2", ppid=1, age=5400)
+    listing = [env.proc / n for n in ("uptime", "11", "10", "9")]
+    real = type(env.proc).iterdir
+    monkeypatch.setattr(type(env.proc), "iterdir",
+                        lambda self: iter(listing) if self == env.proc else real(self))
+    want = ["pid:9", "pid:10", "pid:11"]
+    assert [f["subject"] for f in ops.rule_leaked_proc(src(env), {})] == want
+    assert [f["subject"] for f in ops.rule_hung_test(src(env), {})] == want
+
+
 def test_without_a_runs_db_an_orphan_is_still_found(env):
     add_proc(env, 42, ["sleep"], env.wt / "CMX-1", ppid=1)
     assert [f["evidence"]["run_status"] for f in ops.rule_leaked_proc(src(env), {})] == [None]

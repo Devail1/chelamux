@@ -1,6 +1,6 @@
 // --- Stage 0: ES-module imports ---
-import { $, api, closeModal, msgTargetAgent, setMsgTarget, showModal } from './util.js';
-import { refresh } from './main.js';
+import { $, api, closeModal, msgTargetAgent, setMsgTarget, showModal } from './util';
+import { refresh, registerLane } from '../../frontend/src/shared/scheduler';
 
 // ---------------------------------------------------------------------------
 // Agent actions + context readouts — shared by the agent-detail drill-in
@@ -181,6 +181,9 @@ async function checkContext(ctxRead) {   // ctxRead: refresh()'s context read (C
     const data = await (ctxRead || api('/api/agents/context'));
     _renderContextData(data);
 }
+
+// The agent-card bars and the header 5h-RL pill, on every view, once the tick's reads settle.
+registerLane('context', t => checkContext(t.context), 'settled');
 
 // --- Stage 0: ES-module exports ---
 export { checkContext };

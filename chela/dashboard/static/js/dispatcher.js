@@ -1,9 +1,9 @@
 // --- Stage 0: ES-module imports ---
-import { $, api, attrEsc, escHtml, shortTime, showModal } from './util.js';
-import { _launcherData } from './launcher.js';
-import { runCardNote, runStatusBadgeClass } from './runstate.js';
-import { riskChip, trackerHref } from './taskmodalmodel.js';
-import { pollWork, postWorkDelete } from './work.js';
+import { $, api, attrEsc, escHtml, shortTime, showModal } from './util';
+import { _launcherData } from './launcher';
+import { runCardNote, runStatusBadgeClass } from './runstate';
+import { riskChip, trackerHref } from './taskmodalmodel';
+import { pollWork, postWorkDelete } from './work';
 
 // ---------------------------------------------------------------------------
 // Render: the Runs segment of WORK (the per-workflow dispatch tables)

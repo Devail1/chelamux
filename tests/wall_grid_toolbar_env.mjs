@@ -41,7 +41,6 @@ export async function bootWall(storage) {
         // preset click must reach chela.applyGridLayout the way a browser's does.
         // The panel carries no <script>, so nothing else is evaluated.
         { url: 'http://localhost:5005/', pretendToBeVisual: true, runScripts: 'dangerously' });
-    dom.window.TERMINALS_ENABLED = true;
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
         'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
         'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
@@ -65,7 +64,7 @@ export async function bootWall(storage) {
     });
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
-    await import('../chela/dashboard/static/js/main.js');
+    await import('../chela/dashboard/frontend/src/boot.ts');
     const util = await import('../chela/dashboard/static/js/util.js');
     const terminals = await import('../chela/dashboard/static/js/terminals.js');
     util.setCurrentTab('terminals');

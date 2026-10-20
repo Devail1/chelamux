@@ -8,7 +8,8 @@
 // 60 min unless another duration is picked, and a mount is read-only unless the guest
 // asked for write AND "allow write" is ticked. A request the server refuses (a secrets
 // directory, $HOME, /mnt/*…) shows the reason and has no Approve button.
-import { api, attrEsc, escHtml } from './util.js';
+import { api, attrEsc, escHtml } from './util';
+import { registerLane } from '../../frontend/src/shared/scheduler';
 
 const DURATIONS = [15, 60, 240, 1440];
 let _rows = [];
@@ -145,6 +146,9 @@ export function closeAccessRequests() {
     if (bd) bd.remove();
     document.removeEventListener('keydown', _key, true);
 }
+
+// CMX-7: sandboxed guests' access requests, a pill on every view.
+registerLane('accessRequests', () => tickAccessRequests());
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

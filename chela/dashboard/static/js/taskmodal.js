@@ -1,9 +1,9 @@
 // --- Stage 0: ES-module imports ---
-import { $, attrEsc, escHtml, closeModal, lucideIcon, shortTime, showModal } from './util.js';
-import { _runDisplayId, _runPrCell } from './dispatcher.js';
-import { runStatusBadgeClass } from './runstate.js';
-import { briefHtml, briefSource, defaultTab, displayTitle, riskChip, timelineSteps, trackerHref } from './taskmodalmodel.js';
-import { knMd, knInline } from './knowledge.js';
+import { $, attrEsc, escHtml, closeModal, lucideIcon, shortTime, showModal } from './util';
+import { _runDisplayId, _runPrCell } from './dispatcher';
+import { runStatusBadgeClass } from './runstate';
+import { briefHtml, briefSource, defaultTab, displayTitle, riskChip, timelineSteps, trackerHref } from './taskmodalmodel';
+import { knMd, knInline } from './knowledge';
 
 // ---------------------------------------------------------------------------
 // The task-detail modal — a Jira-like "issue" view a kanban card click opens
