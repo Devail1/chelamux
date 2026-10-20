@@ -12,7 +12,7 @@
 import { beforeAll, describe, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootWall } from './wall_grid_toolbar_env.mjs';   // needs `pnpm install` for jsdom
-import { gridRowCollapsed } from '../chela/dashboard/static/js/wallmodel.js';
+import { gridRowCollapsed } from '../chela/dashboard/static/js/wallmodel.ts';
 
 describe('gridRowCollapsed: the toolbar\'s resting state', () => {
     test('no stored choice: collapsed exactly when Focus is on', () => {

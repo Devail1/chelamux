@@ -22,7 +22,7 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 
-import { bezierPath, resolveDrop, roomsByWid } from '../chela/dashboard/static/js/wire.js';
+import { bezierPath, resolveDrop, roomsByWid } from '../chela/dashboard/static/js/wire.ts';
 
 const STATUS = (...pairs) => ({
     rooms: Object.fromEntries(pairs.map(([room, wids]) => [room, {

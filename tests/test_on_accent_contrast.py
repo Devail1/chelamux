@@ -124,7 +124,7 @@ def test_the_guard_catches_the_original_defect():
 
 def test_no_inline_js_style_pairs_an_accent_fill_with_white():
     bad = []
-    for js in sorted((STATIC / "js").rglob("*.js")):
+    for js in sorted([*(STATIC / "js").rglob("*.js"), *(STATIC / "js").rglob("*.ts")]):
         for i, line in enumerate(js.read_text().splitlines(), 1):
             if re.search(r"background(?:-color)?\s*:\s*var\(--accent\)", line) and re.search(
                 r"(?<![-\w])color\s*:\s*" + WHITE, line

@@ -1,5 +1,5 @@
 // --- Stage 0: ES-module imports ---
-import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, staticUrl, updateTabSignal, wantsHuman } from './util';
+import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, icon, lucideIcon, setAgentsCache, staticUrl, updateTabSignal, wantsHuman } from './util';
 import { altSwitchKeydown, openPalette, renderSidebarAgents, selectView, setAltHeld, sidebarOrder, updateCtxCache } from './nav';
 import { orderByList } from './sidebarmodel';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire';
@@ -1307,7 +1307,7 @@ function paneHead(wid, draggable) {
              title="Wire this agent to another: drag onto a peer"
              aria-label="Wire this agent to another"><span class="ov-ic">${lucideIcon('link-2', 14)}</span><span>Wire to…</span></button>` : '';
     const roomBadge = draggable
-        ? `<button class="gs-room" onclick="chela.wireRoomClick(this, '${j}')" hidden></button>` : '';
+        ? `<button class="gs-room" onclick="chela.wireRoomClick(this, '${j}')" hidden>${icon('wired', 11)}<span class="gs-room-name"></span></button>` : '';
     // CMX-119: pane header v2 — split the CMX-117 combined badge back apart
     // now that every pane has a bottom bar to hold its numbers. `.gs-dot` is a
     // plain status-by-SHAPE indicator (filled = working, hollow = idle, filled

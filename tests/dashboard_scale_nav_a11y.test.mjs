@@ -250,7 +250,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
-import { tileState } from '../chela/dashboard/static/js/wallmodel.js';
+import { tileState } from '../chela/dashboard/static/js/wallmodel.ts';
 import { navViews } from '../chela/dashboard/static/js/viewreg.js';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
 import { cssForViewport, resolveVars } from './js_helpers/css_viewport.mjs';
@@ -541,12 +541,13 @@ test('full-space Wall (CMX-377): .grid-stack resolves ZERO padding and ZERO marg
 // --- GUARD 3: non-hue cue, per real state family — deleting the glyph/word
 // span (or the text it carries) and leaving only the colour class must fail.
 
-// 3a. The wall's .gs-state pill: tileState() (wallmodel.js, pure) is the ONE
+// 3a. The wall's .gs-state pill: tileState() (wallmodel.ts, pure) is the ONE
 // source both the initial paneHead markup and every live repaint
-// (_applyWallTileFrame) draw from — see terminals.js below. Every state it can
-// report must carry a non-empty glyph AND a non-empty word; blanking either
-// for any one state (idle/working/needs-you/done/unknown) fails here.
-test('non-hue cue — wall .gs-state pill: every tileState() result carries a glyph AND a word', () => {
+// (_applyWallTileFrame) draw from — see terminals.js below. The pill draws only
+// the WORD (CMX-393: the shape is `.gs-dot`; CMX-236 dropped the never-drawn
+// glyph), so every state must carry a non-empty word, and no two states the same
+// one; blanking or merging any (idle/working/needs-you/done/unknown) fails here.
+test('non-hue cue — wall .gs-state pill: every tileState() result carries its own word', () => {
     const cases = [
         { label: 'idle', agent: null, wants: false },
         { label: 'working', agent: { session_status: 'busy' }, wants: false },
@@ -554,11 +555,12 @@ test('non-hue cue — wall .gs-state pill: every tileState() result carries a gl
         { label: 'done', agent: { session_status: 'idle', pr: { url: 'https://x', state: 'open' } }, wants: false },
         { label: 'unknown', agent: { claude_running: true, session_status: null }, wants: false },
     ];
-    for (const c of cases) {
+    const words = cases.map(c => {
         const s = tileState(c.agent, c.wants);
-        assert.ok(s.glyph && s.glyph.trim(), `${c.label}: tileState() glyph is empty — colour would be the only cue`);
         assert.ok(s.word && s.word.trim(), `${c.label}: tileState() word is empty — colour would be the only cue`);
-    }
+        return s.word;
+    });
+    assert.equal(new Set(words).size, cases.length, `two states share a word, so only colour tells them apart: ${words}`);
 });
 
 test('non-hue cue — wall .gs-state pill: both the initial paint AND every live repaint set the word text node', () => {

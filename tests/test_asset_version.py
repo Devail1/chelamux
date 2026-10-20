@@ -106,7 +106,8 @@ _DYN_IMPORT = re.compile(r"\bimport\(\s*([^)]*)\)")
 
 
 def _js_files():
-    return [p for d in JS_DIRS for p in sorted(d.glob("*.js"))]
+    # CMX-236: modules converted to TypeScript in place (static/js/*.ts) import the same way.
+    return [p for d in JS_DIRS for p in sorted([*d.glob("*.js"), *d.glob("*.ts")])]
 
 
 def test_every_module_import_inherits_the_version():

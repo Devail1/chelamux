@@ -168,6 +168,8 @@ def test_typecheck_is_strict_over_src_and_the_config_files_and_still_compiles_al
     tree = _violating_copy(tmp_path, "typecheck")
     with (tree / "vite.config.ts").open("a") as f:     # `include` must reach the root .ts too
         f.write("export const notANumber: number = 'x';\n")
+    # ...and a legacy module converted to TypeScript in place (CMX-236: static/js/*.ts)
+    (tree.parent / "static" / "js" / "converted.ts").write_text("export const n: number = 'x';\n")
     code, out, _ = _pnpm(tree, "typecheck", "--pretty", "false")
     assert code != 0, _shown(out, 4000)
     assert {line.split("(")[0] for line in out.decode().splitlines() if ": error TS" in line} == {
@@ -176,6 +178,7 @@ def test_typecheck_is_strict_over_src_and_the_config_files_and_still_compiles_al
         "src/gates/index_access.ts",    # noUncheckedIndexedAccess
         "src/gates/type_import.ts",     # verbatimModuleSyntax
         "vite.config.ts",
+        "../static/js/converted.ts",
     }, _shown(out, 4000)    # ...and src/gates/ok.tsx, which imports m.js (allowJs) and a .ts path, compiles
 
 

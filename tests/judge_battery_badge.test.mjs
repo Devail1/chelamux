@@ -15,7 +15,7 @@ import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
-import { batteryState, tileState } from '../chela/dashboard/static/js/wallmodel.js';
+import { batteryState, tileState } from '../chela/dashboard/static/js/wallmodel.ts';
 
 // `current` carries a guard text no surface may print: the dashboard draws the LABEL
 // (counts + elapsed) only — the experiment running now may be a held-out one (CMX-395),
