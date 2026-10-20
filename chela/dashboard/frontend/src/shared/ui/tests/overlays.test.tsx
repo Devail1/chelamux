@@ -53,7 +53,8 @@ test('focus moves into the Dialog, Escape closes it, and focus returns to the op
   await act(async () => {});
   expect(dialog.contains(document.activeElement)).toBe(true);
   fireEvent.keyDown(must(document.activeElement), { key: 'Escape' });
-  await act(async () => {});
+  // Radix moves focus out on the next macrotask.
+  await act(() => new Promise((r) => setTimeout(r, 0)));
   expect(onOpenChange.mock.calls).toEqual([[false]]);
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(document.activeElement).toBe(opener);

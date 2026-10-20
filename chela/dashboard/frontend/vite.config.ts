@@ -19,6 +19,9 @@ export default defineConfig(({ mode }) => ({
   // /api to a running dashboard: CHELA_DEV_API, default the dashboard's default port.
   server: {
     proxy: { '/api': loadEnv(mode, '.', 'CHELA_DEV_').CHELA_DEV_API ?? 'http://127.0.0.1:5001' },
+    // CMX-218: tests read ../static/style.css, outside this package; outside the pnpm
+    // workspace (a copied tree) Vite would deny it. Tests only: `pnpm dev` keeps strict fs.
+    ...(mode === 'test' ? { fs: { strict: false } } : {}),
   },
   // CMX-218: Vitest stubs CSS imports to '' unless included; the UI kit's layout tests read
   // style.css (`?raw`) to check the rules the page actually ships.
