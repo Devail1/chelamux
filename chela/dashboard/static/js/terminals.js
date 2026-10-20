@@ -1,7 +1,7 @@
 // --- Stage 0: ES-module imports ---
 import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, staticUrl, updateTabSignal, wantsHuman } from './util';
 import { altSwitchKeydown, openPalette, renderSidebarAgents, selectView, setAltHeld, sidebarOrder, updateCtxCache } from './nav';
-import { orderByList } from './sidebarmodel';
+import { orderByList, windowRunDot } from '../../frontend/src/features/sidebar/model';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator';
 import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, stateTitle, tileState } from './wallmodel';
@@ -10,7 +10,6 @@ import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChi
 import './diffpanel';
 import { windowIdQuery } from './windowid';
 import { onEvent } from '../../frontend/src/shared/events';
-import { windowRunDot } from './sidebarmodel';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)

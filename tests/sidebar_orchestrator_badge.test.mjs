@@ -95,10 +95,12 @@ test('CMX-76: the orchestrator\'s row has the badge — a word with an accessibl
     // the listener re-rendered off the subscribe — no renderSidebarAgents call from here
     assert.deepEqual(badged(), ['orch'], 'exactly the orchestrator\'s row must carry the badge');
     const b = rowFor('orch').querySelector('.ar-orch');
-    assert.equal(b.textContent.trim(), 'orchestrator', 'the badge must be a WORD, not a colour-only cue');
-    assert.equal(b.getAttribute('aria-label'), 'Orchestrator');
-    // in the row's badge slot, next to the state word
-    assert.ok(b.closest('.ar-sub'), 'the badge is not in the row\'s .ar-sub badge slot');
+    // CMX-121: a crown icon whose tooltip and accessible name say it: never a colour-only cue
+    assert.ok(b.querySelector('svg.lucide-crown'), 'the badge is not the crown icon');
+    assert.equal(b.title, 'Orchestrator: holds the decisions inbox');
+    assert.equal(b.getAttribute('aria-label'), 'Orchestrator: holds the decisions inbox');
+    // in the row's metadata, after the title
+    assert.ok(b.closest('.ar-meta'), 'the badge is not in the row\'s .ar-meta');
     // the slot moves with the role
     await setOrchestrator('@3');
     assert.deepEqual(badged(), ['proj']);

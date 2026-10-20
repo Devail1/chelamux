@@ -95,8 +95,9 @@ test('sidebar: a human session keeps its own glyph: no `dispatched`, no run labe
         const dot = humanDot(name);
         assert.ok(dot, `no row dot for ${name}`);
         assert.deepEqual(classes(dot), [cls, 'term-status-dot'].sort(), `${name}: ${dot.className}`);
-        assert.equal(dot.getAttribute('aria-label'), null, name);
-        assert.equal(dot.getAttribute('title'), `claude · ${cls}`, name);
+        // CMX-276: a human row's dot names its state too (CMX-121 took the word off the row face)
+        assert.equal(dot.getAttribute('aria-label'), `Session: ${cls}`, name);
+        assert.equal(dot.getAttribute('title'), `Session: ${cls}`, name);
     }
 });
 
@@ -220,7 +221,7 @@ test('minimized bar: a state change drops the old state: the pulse ring stops wh
 });
 
 test('model: windowRunDot is null without a run card; an unknown run status keeps the plain idle ring', async () => {
-    const { windowRunDot, runDot, buildItems } = await import('../chela/dashboard/static/js/sidebarmodel.js');
+    const { windowRunDot, runDot, buildItems } = await import('../chela/dashboard/frontend/src/features/sidebar/model.ts');
     assert.equal(windowRunDot(null, false), null);
     assert.equal(windowRunDot({ name: 'h', window_id: '@1', dispatched: true }, false), null);
     assert.equal(windowRunDot({ name: 'h', window_id: '@1', run: { status: 'running' } }, false), null);

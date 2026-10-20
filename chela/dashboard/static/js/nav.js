@@ -13,15 +13,11 @@ import { refreshCostTab } from './usage';
 import { resolveWindowId } from './windowid';
 import { followUpdate } from './updateflow';
 import { memNote, stepPayload, workflowNote } from './concurrencymodel';
-import { DISPATCHED_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, groupSidebar, isArchivable, moveGroup, normalizeView, primaryWindow, runDot, runLabel, runState, sidebarWids } from './sidebarmodel';
+import { ARCHIVED_SECTION_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_STATUS, VIEW_ACTIVITY, isArchivable, moveGroup, normalizeView, sidebarModel, sidebarOrder as modelSidebarOrder } from '../../frontend/src/features/sidebar/model';
 
 // The sidebar (agent list + WORK badges) is always visible, so it refreshes on every tick
 // whatever the view; its /api/agents read is what lets the view's tick start (CMX-166).
 registerLane('sidebar', t => refreshSidebar(t.paneListKnown, t.context).finally(t.paneListKnown));
-
-// The ONE Archived section at the bottom of the sidebar (CMX-75) — its collapse state
-// rides the collapsed-groups set under this key.
-const ARCHIVED_SECTION_KEY = '~archived';
 
 // ---------------------------------------------------------------------------
 // Sidebar + canvas navigation (replaces the old tab bar)
@@ -41,6 +37,7 @@ const ARCHIVED_SECTION_KEY = '~archived';
 // ---------------------------------------------------------------------------
 
 let _detailAgent = null;    // window name focused in the agent-detail view
+let _activeRow = null;      // the sidebar row lit as the current view (_syncSidebarActive)
 
 // --- Sidebar: one control, two behaviours ----------------------------------
 // PHONE (≤768px): the 264px sidebar is off-canvas (see the @media block in
@@ -207,24 +204,13 @@ function _altRows() {
         .slice(0, 9);
 }
 
+// The island draws the numbers while Alt is held (CMX-276), on the same rows.
 let _altHeld = false;
-function _paintAltNums() {
-    const host = document.getElementById('sidebar-agents');
-    if (host) host.querySelectorAll('.ar-altnum').forEach(el => el.remove());
-    if (!_altHeld) return;
-    _altRows().forEach((row, i) => {
-        const b = document.createElement('span');
-        b.className = 'ar-altnum';
-        b.setAttribute('aria-hidden', 'true');
-        b.textContent = String(i + 1);
-        row.appendChild(b);
-    });
-}
 function setAltHeld(on) {
     on = !!on;
     if (on === _altHeld) return;
     _altHeld = on;
-    _paintAltNums();
+    _publishSidebar({ altHeld: on });
 }
 
 // Alt+1..9's row number (1..9), or 0. Keyed on e.code (the physical key,
@@ -308,7 +294,8 @@ function _syncSidebarActive(view, agentName) {
     // real data-view when `view` is 'agent-detail'.
     const navView = view === 'agent-detail' ? null : view;
     $$('.side-item').forEach(el => el.classList.toggle('active', el.dataset.view === navView));
-    $$('.agent-row').forEach(el => el.classList.toggle('active', el.dataset.agent === agentName));
+    _activeRow = agentName || null;
+    _publishSidebar({ active: _activeRow });
 }
 
 // --- Window type (per-row cue) ---------------------------------------------
@@ -634,212 +621,20 @@ function _saveCustom(c) { _writeLayout({ custom: { groups: c.groups, assign: c.a
 // what is on screen, so they read the same grouping the screen was drawn from).
 let _sb = { groups: [], needsYou: [], items: new Map() };
 
-// CMX-165: the window ids in the order the sidebar last drew them (sidebarmodel.sidebarWids
-// over the same groupSidebar call). The phone's pill strip sorts by this, so there is one
-// order. The View filters (Status / Environment / Last activity) are lifted for it: a row
-// the sidebar filters out still has a pane, so its pill keeps its group's position.
-let _sbIn = null;   // the agents + groupSidebar options renderSidebarAgents last drew from
-function sidebarOrder() {
-    if (!_sbIn) return [];
-    return sidebarWids(groupSidebar(_sbIn.rows, { ..._sbIn.opts, status: 'all', env: null, activityDays: null }));
+// CMX-276: the sidebar's rows are the React island's (frontend/src/features/sidebar). This
+// is what it draws, published to the bridge on every render: the rows, the layout, and the
+// page state still owned here (labels, the wall, the active row, Alt held). null until the
+// first render.
+let _sbState = null;
+function _publishSidebar(patch) {
+    if (!_sbState) return;
+    _sbState = { ..._sbState, ...patch };
+    publish('sidebar', _sbState);
 }
 
-// An item's display label: a run reads `CMX-37 · <title>`; a window reads its CMX-62
-// label (manual name > Claude's title > window name).
-function _itemLabel(it) {
-    return it.kind === 'run' ? runLabel(it) : _agentLabel(it.agent);
-}
-
-// One sidebar row. `a` is the window the row opens; `o` overrides what a plain window
-// row would show — a run row passes its own label, state and tooltip, and a `badge`
-// slot (empty here) is where later parts hang a PR / judge-progress badge (CMX-66/67).
-//
-// The row face is the desktop's: a status SHAPE, then ONE line — the title, truncated
-// with an ellipsis — and the state word kept small and dim at the right. ctx% and the
-// window id stay in the row (.ar-sub, CMX-230/CMX-417) but only show on hover, or when
-// the context is running hot; the relative time moved into the tooltip.
-function _agentRowHtml(a, o = {}) {
-    const dot = agentDotColor(a);
-    const active = a.name === _detailAgent ? ' active' : '';
-    // `done` (issue #475): a REGULAR session that is idle AND has an assistant
-    // turn since you last spoke — computed server-side (inbox.is_done) from the
-    // transcript, not guessed here. `a.done` is only ever true when `dot` is
-    // already 'grey' (app.py gates it on session_status !== 'busy' && !needs_human),
-    // so this never fights the working/waiting colours.
-    const done = isDone(a);
-    const stWord = o.stWord || (done ? 'done' : (_AGENT_STATUS_WORD[dot] || 'idle'));
-    const stCls = o.stCls || (done ? 'done' : (_SIDEBAR_DOT_CLASS[dot] || 'idle'));
-    const label = o.label || _agentLabel(a);
-
-    // Open-on-wall cue: a click on this row RESTORES a hidden pane vs merely
-    // FOCUSES one already visible — worth knowing before you click. True only when
-    // the pane is both rendered (on the wall, not just known to /api/agents) and not
-    // minimized to the dock.
-    const onWall = TERMINALS_ON && !!a.window_id
-        && _renderedWids.includes(a.window_id) && !_minimized.has(a.window_id);
-    const wallCls = onWall ? ' on-wall' : '';
-
-    const c = a.window_id ? _ctxByWid[a.window_id] : null;
-    let ctxChip = '';
-    let ctxHot = false;
-    if (c && c.used_pct != null) {
-        const p = Math.round(c.used_pct);
-        const cls = p > 80 ? 'danger' : p > 60 ? 'warn' : '';
-        ctxHot = !!cls;
-        ctxChip = `<span class="ar-ctx ${cls}" title="context ${p}%">${p}%</span>`;
-    }
-
-    // CMX-377: the row's relative time. recap_ts is the only per-agent timestamp the
-    // API carries. Absent (no recap yet) -> no time shown, not a fabricated one.
-    let age = '';
-    if (a.recap_ts) age = ageStr((Date.now() - new Date(a.recap_ts)) / 1000).replace(' ago', '');
-    const ago = age ? `<span class="ar-ago">${escHtml(age)}</span>` : '';
-
-    // "<state> · <ctx%> ctx · @N" — .ar-state and .ar-ctx keep their exact markup
-    // (tests/dashboard_scale_nav_a11y.test.mjs's non-hue-cue GUARD 3b/GUARD 4), and the
-    // text reads the same as before; the ctx and id parts are wrapped only so the CSS
-    // can keep them off the one-line row face until hover. CMX-417: the tmux window id
-    // is the `@N` that `chela peek`, inbox notices and peer messages use.
-    const sub = `<span class="ar-state ${stCls}">${stWord}</span>`
-        + (ctxChip ? `<span class="ar-more ar-ctx-part${ctxHot ? ' hot' : ''}"> · ${ctxChip} ctx</span>` : '')
-        + (a.window_id ? `<span class="ar-more"> · <span class="ar-wid">${escHtml(a.window_id)}</span></span>` : '');
-
-    const type = _agentType(a);
-    // CMX-146's ai_title / the away_summary recap ride the row's tooltip.
-    const extra = [a.ai_title, a.recap].filter(Boolean).join(', ');
-    // CMX-62: when Claude's title leads the row, the short window NAME (the key
-    // `chela peek/msg` and the bindings use) is the secondary label — on hover.
-    const key = !o.label && label !== a.name ? a.name : '';
-    const head = o.titleHead || [label + (key ? ` (${key})` : ''), a.window_id].filter(Boolean).join(' · ');
-    const tail = [o.titleExtra || extra, age ? `${age} ago` : ''].filter(Boolean).join('\n');
-    const rowTitle = tail ? `${head}\n${tail}` : head;
-
-    const wallSuffix = onWall ? ' (open on the wall)' : '';
-    // A row's menu (right-click, or its ⋯ on touch): a run's opens its agent or judge
-    // pane, under Custom groups every row can be moved to a custom group (CMX-66), and
-    // every row has its own Archive (CMX-81). Keyed on the row's item key — the window
-    // id / run id, never the label.
-    const hasMenu = !!o.itemKey;
-    const runAttr = (o.runId ? ` data-run="${attrEsc(o.runId)}"` : '')
-        + (o.itemKey ? ` data-item="${attrEsc(o.itemKey)}"` : '')
-        + (hasMenu ? ' oncontextmenu="chela.openRowMenu(event, this.dataset.item)"' : '');
-    const menuName = o.runId ? 'Run menu' : 'Row menu';
-    const more = hasMenu
-        ? `<button class="row-more" title="${menuName}" aria-label="${menuName}" onclick="event.stopPropagation(); chela.openRowMenu(event, this.closest('.agent-row').dataset.item)">${lucideIcon('ellipsis', 14)}</button>`
-        : '';
-    return `<div class="agent-row rich${active}${wallCls}${o.cls ? ' ' + o.cls : ''}" data-agent="${attrEsc(a.name)}"${runAttr} title="${attrEsc(rowTitle + wallSuffix)}"
-        onclick="chela.selectAgent(this.dataset.agent)">
-        ${o.dot
-        ? `<span class="term-status-dot ${o.dot.cls}" role="img" aria-label="${attrEsc(o.dot.label)}" title="${attrEsc(o.dot.label)}"></span>`
-        : `<span class="term-status-dot ${stCls}" title="${attrEsc(type)} · ${stWord}"></span>`}
-        <div class="ar-main">
-            <span class="agent-row-name"${key ? ` data-key="${attrEsc(key)}" title="${attrEsc(`window: ${key}`)}"` : ''}>${escHtml(label)}</span>
-            <div class="ar-sub">${sub}${_orchBadgeHtml(a)}${o.badge || ''}</div>
-        </div>
-        ${ago}${more}
-    </div>`;
-}
-
-// CMX-76: the orchestrator's row carries a small "orchestrator" badge in the row's badge
-// slot (where a run hangs its PR badge). Since CMX-72 it is a plain row in its folder
-// group and its title is Claude's auto-title, which drifts — so this is what marks it.
-// The SAME fact _agentRole reads (orchestratorState().wid, the decisions-inbox slot).
-// A WORD, not a colour: the operator is red-weak.
-function _orchBadgeHtml(a) {
-    if (_agentRole(a) !== 'orchestrator') return '';
-    return '<span class="ar-orch" title="Orchestrator: holds the decisions inbox" aria-label="Orchestrator">orchestrator</span>';
-}
-
-// A dispatched RUN's one row (CMX-35): its agent window and its judge window are ONE
-// row, labelled `CMX-37 · <title>`, showing the RUN's state (working / judging /
-// rework / awaiting review / needs human). A click opens the agent pane (the judge's
-// once the agent has finished); the row menu also offers the judge pane.
-function _runRowHtml(it, extraCls, showPR) {
-    const a = primaryWindow(it);
-    const st = runState(it, wantsHuman);
-    const label = runLabel(it);
-    // CMX-137: the run's own progress icon (◐ working, ◕ judging/awaiting review),
-    // not a human session's dot, and its label names both kind and state.
-    const dot = runDot(it, wantsHuman);
-    const wins = [it.agent && `agent ${it.agent.name} · ${it.agent.window_id}`,
-        it.judge && `judge ${it.judge.name} · ${it.judge.window_id}`].filter(Boolean).join('\n');
-    return _agentRowHtml(a, {
-        label, stWord: st.word, stCls: st.shape, dot, runId: it.run.task_id, itemKey: it.key,
-        titleHead: `${label}: ${st.word}`, titleExtra: wins,
-        cls: ['run-row', extraCls].filter(Boolean).join(' '),
-        badge: showPR ? _prBadgeHtml(it) : '',
-    });
-}
-
-// The PR badge on a dispatched run's row (View ▸ Show PR status, CMX-66): `#N` from the
-// run's own pr_url, with its state (open / draft / merged / closed) when a window's
-// transcript names the same PR (app.py's `a.pr`, already state-resolved). No PR yet → none.
-const _PR_NUM_RE = /\/pull\/(\d+)/;
-function _prBadgeHtml(it) {
-    const url = it.run && it.run.pr_url;
-    const m = url ? _PR_NUM_RE.exec(String(url)) : null;
-    if (!m) return '';
-    const pr = it.windows.map(w => w && w.pr).find(p => p && p.url === url) || null;
-    const state = pr ? (pr.draft && pr.state === 'open' ? 'draft' : pr.state) : '';
-    const known = ['open', 'draft', 'merged', 'closed'].includes(state);
-    const title = `PR #${m[1]}${known ? ` · ${state}` : ''}`;
-    return `<span class="ar-pr${known ? ' ' + state : ''}" data-pr="${attrEsc(m[1])}" title="${attrEsc(title)}">#${escHtml(m[1])}</span>`;
-}
-
-function _itemRowHtml(it, archived, showPR = true) {
-    const cls = archived ? 'archived' : '';
-    if (it.kind === 'session') return _sessionRowHtml(it);
-    if (it.kind === 'run') return _runRowHtml(it, cls, showPR);
-    return _agentRowHtml(it.agent, { itemKey: it.key, ...(cls ? { cls } : {}) });
-}
-
-// The Unarchive button an archived row carries (CMX-75). On a closed session it RESUMES
-// it; on a hidden row it shows it again.
-function _unarchiveBtn(key, resume) {
-    const what = resume ? 'Unarchive: resume this session in a new window' : 'Unarchive';
-    return `<button class="row-unarchive" data-item="${attrEsc(key)}" title="${attrEsc(what)}" aria-label="${attrEsc(what)}"
-        onclick="event.stopPropagation(); chela.unarchiveRow(this, this.dataset.item)">Unarchive</button>`;
-}
-
-// A CLOSED session's row (CMX-75): no window to open — only its resume record. Its name,
-// the folder it resumes in, and Unarchive.
-function _sessionRowHtml(it) {
-    const r = it.record || {};
-    const label = r.name || r.session_id || it.key;
-    const folder = String(r.cwd || '').replace(/\/+$/, '').split('/').pop() || r.cwd || '';
-    const when = r.archived_at ? ageStr(Date.now() / 1000 - r.archived_at) : '';
-    const title = [`${label}: archived (closed)`, r.cwd, when && `archived ${when}`].filter(Boolean).join('\n');
-    return `<div class="agent-row rich archived session-row" data-item="${attrEsc(it.key)}" title="${attrEsc(title)}">
-        <span class="term-status-dot idle" title="archived"></span>
-        <div class="ar-main">
-            <span class="agent-row-name">${escHtml(label)}</span>
-            <div class="ar-sub"><span class="ar-state idle">archived</span>${folder ? `<span class="ar-more"> · ${escHtml(folder)}</span>` : ''}</div>
-        </div>
-        ${_unarchiveBtn(it.key, true)}
-    </div>`;
-}
-
-// The ONE "Archived (N)" section at the BOTTOM of the sidebar (CMX-75, like the desktop):
-// collapsed by default, every archived row in it — never inside a folder group. Under
-// Status ▸ Archived it is the whole list, so it is shown open.
-function _archivedSectionHtml(rows, collapsed, forceOpen, showPR) {
-    const isColl = !forceOpen && !collapsed.has(`${ARCHIVED_SECTION_KEY}:open`);
-    const n = rows.length;
-    const body = rows.map(it => {
-        if (it.kind === 'session') return _sessionRowHtml(it);
-        const html = _itemRowHtml(it, true, showPR);
-        // a hidden live row: the same row, plus its Unarchive
-        return html.replace(/<\/div>\s*$/, `${_unarchiveBtn(it.key, false)}</div>`);
-    }).join('');
-    return `<div class="side-group side-archived${isColl ? ' collapsed' : ''}" data-g="${ARCHIVED_SECTION_KEY}">
-        <div class="group-head" data-g="${ARCHIVED_SECTION_KEY}" aria-expanded="${isColl ? 'false' : 'true'}"
-             onclick="chela.toggleArchivedSection()">
-            <span class="group-name">Archived</span><span class="group-count archived-count" title="${n} archived">${n}</span>
-            <span class="group-caret">${lucideIcon('chevron-right', 12)}</span>
-        </div>
-        <div class="group-rows">${body}</div>
-    </div>`;
-}
+// CMX-165: the window ids in the order the sidebar last drew them (sidebarmodel.sidebarOrder
+// over the same state). The View filters are lifted for it.
+function sidebarOrder() { return modelSidebarOrder(_sbState); }
 
 // The section is COLLAPSED by default, so what is persisted is that it was OPENED.
 function toggleArchivedSection() {
@@ -859,108 +654,46 @@ async function unarchiveRow(btn, key) {
     return res;
 }
 
-// A folder group's header — the desktop's quiet header: dim small folder name, a `>`
-// chevron, and at the right a ⋯ (the group menu, for touch: there is no right-click on
-// a phone) and a `+` (a new session in THIS folder). Right-click opens the same menu.
-function _groupHtml(g, collapsed, showPR) {
-    if (g.flat) {
-        // Group by ▸ None: one flat list, no header.
-        const flatRows = g.items.map(it => _itemRowHtml(it, false, showPR)).join('');
-        return `<div class="side-group flat" data-g="${attrEsc(g.key)}"><div class="group-rows">${flatRows}</div></div>`;
-    }
-    const isColl = collapsed.has(g.key);
-    const n = g.items.length;
-    const count = g.key === DISPATCHED_KEY ? `<span class="group-count" title="${n} run${n === 1 ? '' : 's'}">${n}</span>` : '';
-    const add = g.cwd
-        ? `<button class="group-add" data-g="${attrEsc(g.key)}" title="New session in ${attrEsc(g.label)}" aria-label="New session in ${attrEsc(g.label)}"
-             onclick="event.stopPropagation(); chela.groupNewSession(this.dataset.g)">${lucideIcon('plus', 14)}</button>`
-        : '';
-    const rows = g.items.map(it => _itemRowHtml(it, false, showPR)).join('');
-    const empty = !g.items.length ? ' empty' : '';
-    return `<div class="side-group${isColl ? ' collapsed' : ''}${empty}" data-g="${attrEsc(g.key)}">
-        <div class="group-head" data-g="${attrEsc(g.key)}" aria-expanded="${isColl ? 'false' : 'true'}"
-             onclick="chela.toggleGroup(this.dataset.g)" oncontextmenu="chela.openGroupMenu(event, this.dataset.g)">
-            <span class="group-name" title="${attrEsc(g.cwd || g.label)}">${escHtml(g.label)}</span>${count}
-            <span class="group-caret">${lucideIcon('chevron-right', 12)}</span>
-            <span class="group-actions">
-                <button class="group-more" data-g="${attrEsc(g.key)}" title="Group menu" aria-label="${attrEsc(g.label)} menu"
-                    onclick="event.stopPropagation(); chela.openGroupMenu(event, this.dataset.g)">${lucideIcon('ellipsis', 14)}</button>${add}
-            </span>
-        </div>
-        <div class="group-rows">${rows}</div>
-    </div>`;
-}
-
 function renderSidebarAgents(agents) {
     // Keep the tab title/favicon in lockstep with the agent list.
     updateTabSignal(agents);
-    const host = document.getElementById('sidebar-agents');
-    if (!host) return;
+    if (!document.getElementById('sidebar-agents')) return;
     const rows = agents || [];
+
+    const custom = _custom();
+    const labels = {};
+    for (const a of rows) if (a && a.window_id) labels[a.window_id] = _agentLabel(a);
+    const ctx = {};
+    for (const [wid, c] of Object.entries(_ctxByWid)) if (c && c.used_pct != null) ctx[wid] = c.used_pct;
+    _sbState = {
+        agents: rows, wants: wantsHuman, orchWid: orchestratorState().wid, view: _view(),
+        order: _groupOrder(), custom, archived: [..._archivedSet()], sessions: _arch.sessions || [],
+        labels, now: Date.now(), collapsed: [..._collapsedGroups()], ctx,
+        onWall: TERMINALS_ON ? _renderedWids.filter(w => !_minimized.has(w)) : [],
+        active: _activeRow, altHeld: _altHeld,
+    };
     if (!rows.length) {
-        host.innerHTML = '<div class="side-empty">No agents</div>';
+        // The island says "No agents". Nothing else runs off an empty list: one empty read
+        // must not unarchive every hidden row, nor drop every custom-group assignment.
+        publish('sidebar', _sbState);
         return;
     }
-
-    // CMX-35: grouped by PROJECT FOLDER, like the desktop app (sidebarmodel.js). One
-    // cluster sits above the folders, because it is about YOU, not a folder: Needs you —
-    // rows blocked on a human. The orchestrator is not pinned (CMX-72): it sits in its
-    // folder group like any other session. Each row shows in exactly one place. A dispatched run is ONE row, in the "Dispatched" group.
-    //
-    // CMX-66: the VIEW menu (the sliders button on the Sessions header) picks what shows
-    // (Status / Environment / Last activity), how it groups (Date / Folder / State /
-    // Custom groups / None) and how each group sorts — shared by every device (CMX-82, /api/sidebar/layout).
-    const orchWid = orchestratorState().wid;
-    const archived = _archivedSet();
-    const view = _view();
-    const custom = _custom();
-    const sbOpts = {
-        mode: view.groupBy, wants: wantsHuman, orchWid, order: _groupOrder(),
-        archived, status: view.status, env: view.env, activityDays: VIEW_ACTIVITY[view.activity],
-        now: Date.now(), sort: view.sort, labelOf: _itemLabel, showEmpty: view.showEmpty, custom,
-        sessions: _arch.sessions || [],
-    };
-    const model = groupSidebar(rows, sbOpts);
-    _sbIn = { rows, opts: sbOpts };
-    const showArchived = view.status !== 'active';
-
-    // A hidden row that came back to life (busy, waiting) or whose window is gone leaves
-    // the archive (server-side — every device sees it come back).
-    _pruneHidden(model.hidden);
     // A custom-group assignment for a WINDOW that is gone is dropped (a recycled @N must
     // not inherit it); a run's (`run:CMX-N`) is kept — a run outlives its windows. Before
     // the layout's first answer this stays in the page (_writeLayout sends nothing yet).
     const liveKeys = new Set(rows.filter(Boolean).map(a => `w:${a.window_id || a.name}`));
     const goneW = Object.keys(custom.assign).filter(k => k.startsWith('w:') && !liveKeys.has(k));
     if (goneW.length) { goneW.forEach(k => delete custom.assign[k]); _saveCustom(custom); }
-
+    const model = sidebarModel(_sbState);
+    // A hidden row that came back to life (busy, waiting) or whose window is gone leaves
+    // the archive (server-side — every device sees it come back).
+    _pruneHidden(model.hidden);
     const items = new Map();
     for (const it of [...model.needsYou, ...model.groups.flatMap(g => g.items), ...model.archived]) {
         items.set(it.key, it);
     }
     _sb = { ...model, items };
-
-    let html = '';
-    if (model.needsYou.length) {
-        html += `<div class="side-triage side-needs-you">
-            <div class="triage-head">Needs you <span class="triage-count">${model.needsYou.length}</span></div>
-            ${model.needsYou.map(it => _itemRowHtml(it, false, view.showPR)).join('')}
-        </div>`;
-    }
-    const collapsed = _collapsedGroups();
-    for (const g of model.groups) html += _groupHtml(g, collapsed, view.showPR);
-    // CMX-75: every archived row in ONE section at the bottom — Status All / Archived.
-    if (showArchived && model.archived.length) {
-        html += _archivedSectionHtml(model.archived, collapsed, view.status === 'archived', view.showPR);
-    }
-    if (!html) html = '<div class="side-empty">No sessions match this view</div>';
-    if (model.archived.length || showArchived) {
-        const n = model.archived.length;
-        html += `<button class="side-archived-toggle" onclick="chela.toggleShowArchived()">${
-            showArchived ? 'Hide archived' : `Show archived (${n})`}</button>`;
-    }
-    host.innerHTML = html;
-    _paintAltNums();   // CMX-85: a re-render while Alt is held keeps its numbers
+    publish('sidebar', _sbState);
     adoptSidebarDefault();    // CMX-169: a boot's default pane moves to the top sidebar row
 }
 
@@ -1343,14 +1076,6 @@ const _AGENT_STATUS_WORD = { green: 'working', yellow: 'waiting', grey: 'idle' }
 // Status colour → the pane dot's CSS state class, so the sidebar dot pulses
 // identically to the wall's .term-status-dot (working/waiting/idle).
 const _SIDEBAR_DOT_CLASS = { green: 'working', yellow: 'waiting', grey: 'idle' };
-
-// The fourth sidebar state (issue #475): idle, but the agent said something
-// since you last spoke. `a.done` is the server's word (inbox.is_done), not
-// re-derived here — the wid-keyed transcript resolution it needs (CMX-191) can
-// only be done server-side.
-function isDone(a) {
-    return !!(a && a.done);
-}
 
 // Single source of the always-visible sidebar agent list. Owns the /api/agents
 // fetch that also primes _agentsCache (schedule dropdown, detail view, etc.).
