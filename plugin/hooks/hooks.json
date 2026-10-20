@@ -112,17 +112,6 @@
         ]
       }
     ],
-    "MessageDisplay": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ -n \"${CHELA_WID:-}\" ] && curl -s --fail --max-time 1 -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:5001/hooks/MessageDisplay 2>/dev/null || true",
-            "timeout": 2
-          }
-        ]
-      }
-    ],
     "SubagentStart": [
       {
         "hooks": [
